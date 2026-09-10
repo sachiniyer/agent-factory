@@ -2,6 +2,7 @@ package bugreport
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -48,6 +49,32 @@ func TestScrubLogComposesANSIShellAndURITransforms(t *testing.T) {
 	got := r.scrubLog(input)
 	if strings.Contains(got, "ConfidentialClient") || strings.Contains(got, "urgent") {
 		t.Fatalf("composed ANSI, shell, and URI transforms leaked a sibling path: %q", got)
+	}
+}
+
+func TestScrubbersComposeGoQuotedAndANSITransforms(t *testing.T) {
+	r := &redactor{}
+	r.noteRepoRoot(siblingLeakRepo)
+	value := "\x1b[31m" + siblingLeakRepo + "\x1b[0m"
+	input := "recover_error=" + strconv.Quote(value)
+	want := "recover_error=" + strconv.Quote("\x1b[31m[repo:1]\x1b[0m")
+
+	for _, scrubber := range []struct {
+		name  string
+		scrub func(string) string
+	}{
+		{name: "log", scrub: r.scrubLog},
+		{name: "diagnostic", scrub: r.scrubDiagnostic},
+	} {
+		t.Run(scrubber.name, func(t *testing.T) {
+			got := scrubber.scrub(input)
+			if strings.Contains(got, "ConfidentialClient") {
+				t.Fatalf("Go-quoted ANSI text leaked its registered path: %s", got)
+			}
+			if got != want {
+				t.Errorf("scrubber output = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
