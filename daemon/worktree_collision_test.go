@@ -577,6 +577,21 @@ func TestArchivedRestoreAdmissionUsesWorktreeActualBranch(t *testing.T) {
 		"the cached archived branch must not decide admission after a manual checkout")
 }
 
+func TestArchivedRestoreRefusesLiveLaneSharingRetainedWorktree(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "archived", "shared-target")
+	live := registerCollisionLane(t, manager, repoID, repoPath, archived.GetWorktreePath(), "live-here", archived.GetBranch(), session.Ready)
+	require.NoError(t, appendInstanceData(repoID, live.ToInstanceData()))
+
+	release, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true)
+	if release != nil {
+		release()
+	}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), live.Title)
+	assert.Contains(t, err.Error(), archived.GetWorktreePath())
+}
+
 func TestLostRecoveryRefusesLiveBranchPeer(t *testing.T) {
 	for _, automatic := range []bool{false, true} {
 		t.Run(map[bool]string{false: "manual", true: "automatic"}[automatic], func(t *testing.T) {
@@ -656,10 +671,7 @@ func TestArchivedRestoreAdmissionSerializesWithInPlaceCreate(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "restoring", "restoring")
 	branch := archived.GetBranch()
-	targetPath := filepath.Join(t.TempDir(), "in-place-target")
-	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-q", "-b", "target-staging", targetPath, "HEAD").CombinedOutput()
-	require.NoError(t, err, string(out))
-	out, err = exec.Command("git", "-C", targetPath, "checkout", "-q", "--ignore-other-worktrees", "-B", branch, branch).CombinedOutput()
+	out, err := exec.Command("git", "-C", repoPath, "checkout", "-q", "--ignore-other-worktrees", "-B", branch, branch).CombinedOutput()
 	require.NoError(t, err, string(out))
 
 	releaseRestore, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true)
@@ -677,7 +689,7 @@ func TestArchivedRestoreAdmissionSerializesWithInPlaceCreate(t *testing.T) {
 	})
 	t.Cleanup(restoreFactory)
 	done := startCreateCall(&controlServer{manager: manager}, CreateSessionRequest{
-		Title: "incoming-here", RepoPath: targetPath, Program: "claude", InPlace: true,
+		Title: "incoming-here", RepoPath: repoPath, Program: "claude", InPlace: true,
 	})
 
 	select {
