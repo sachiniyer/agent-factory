@@ -399,20 +399,26 @@ func (s *Supervisor) adopt(home, agent, name string, candidate *tmux.TmuxSession
 		return nil, true
 	}
 	// Read the generation before tracking so we can detect a replacement pane
-	// that arrives in the verification-to-track window (TOCTOU).
-	gen, _, genErr := tmux.SessionGenerationMarker(exec, sName)
+	// that arrives in the verification-to-track window (TOCTOU). An error or
+	// absent marker (present=false) on either read is treated as unknown — fail
+	// closed rather than tracking a pane whose generation cannot be confirmed.
+	// This matches the home-marker check above, which also refuses on
+	// unreadable evidence ("do not reuse what you cannot prove you own").
+	gen, genPresent, genErr := tmux.SessionGenerationMarker(exec, sName)
+	if genErr != nil || !genPresent {
+		// Cannot read the generation marker — ownership unverifiable, fail closed.
+		return nil, false
+	}
 	if !s.track(agent, name, candidate) {
 		return nil, false
 	}
 	// Re-verify the generation. If the session was replaced between the marker
 	// read and the track call, the generation will have changed — another home's
 	// pane now sits behind the same name. Forget the entry and fail closed.
-	if genErr == nil {
-		gen2, _, genErr2 := tmux.SessionGenerationMarker(cmd.MakeExecutor(), sName)
-		if genErr2 == nil && gen2 != gen {
-			s.forget(agent, name, candidate)
-			return nil, false
-		}
+	gen2, gen2Present, genErr2 := tmux.SessionGenerationMarker(cmd.MakeExecutor(), sName)
+	if genErr2 != nil || !gen2Present || gen2 != gen {
+		s.forget(agent, name, candidate)
+		return nil, false
 	}
 	return candidate, false
 }
