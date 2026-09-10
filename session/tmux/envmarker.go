@@ -95,6 +95,56 @@ func SessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string,
 	return sessionHomeMarker(cmdExec, sanitizedName)
 }
 
+// SessionGenerationMarker reads a tmux session's AF_SESSION_GEN generation
+// marker with the same three-valued contract as SessionHomeMarker: (gen, true,
+// nil) when tmux answered and the session carries one, ("", false, nil) when
+// tmux answered and it carries none (a pre-generation pane or tmux < 3.2), and a
+// non-nil error when tmux did not answer — ownership remains UNKNOWN.
+//
+// Used by adopt to bind the verified generation identity through the
+// verification-to-track window: if the session is replaced between the marker
+// read and the track call, the generation will differ and adoption fails closed.
+func SessionGenerationMarker(cmdExec cmd.Executor, sanitizedName string) (generation string, present bool, err error) {
+	ctx, cancel := tmuxTimeoutContext()
+	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), EnvMarkerGeneration)
+	markerTimedOut := ctx.Err() != nil
+	cancel()
+	if markerErr == nil {
+		line := strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r")
+		if line == "-"+EnvMarkerGeneration {
+			return "", false, nil
+		}
+		if strings.ContainsAny(line, "\r\n") {
+			return "", false, fmt.Errorf("read %s generation marker for tmux session %s: malformed multiline response", EnvMarkerGeneration, sanitizedName)
+		}
+		gen, ok := strings.CutPrefix(line, EnvMarkerGeneration+"=")
+		if !ok {
+			return "", false, fmt.Errorf("read %s generation marker for tmux session %s: malformed response %q", EnvMarkerGeneration, sanitizedName, line)
+		}
+		return gen, true, nil
+	}
+	if markerTimedOut {
+		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+	}
+	if !missingSessionEnvMarker(markerErr) {
+		return "", false, fmt.Errorf("read %s generation marker for tmux session %s: %w", EnvMarkerGeneration, sanitizedName, markerErr)
+	}
+	// The targeted result identified an absent variable. Confirm the session
+	// answered at all by querying the full environment without consuming it.
+	allCtx, allCancel := tmuxTimeoutContext()
+	_, allErr := outputTmuxBoundedWith(allCtx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName))
+	allTimedOut := allCtx.Err() != nil
+	allCancel()
+	if allErr == nil {
+		return "", false, nil
+	}
+	if allTimedOut {
+		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+	}
+	return "", false, fmt.Errorf("read %s generation marker for tmux session %s: targeted query: %v; environment query: %w",
+		EnvMarkerGeneration, sanitizedName, markerErr, allErr)
+}
+
 // sessionHomeMarker reads the AF_HOME ancestry marker from a tmux session's
 // environment (stamped via `new-session -e` at creation). A false present value
 // means tmux answered and the session carries no marker — created by a pre-marker
