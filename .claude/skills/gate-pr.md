@@ -707,8 +707,10 @@ all. Absence shows up two ways, and **neither is a pass**:
   concatenation, and a test fails if any of the four regains it.
 
 Auto Gate does not auto-merge an unreviewed head, and since #3819 it does not
-publish a green decision on one either. Silence blocks it, and a fresh
-reviewer-unavailable response blocks it too, with the unmet item
+publish a green decision on one either. Silence blocks it — and, since #4091,
+blocks the manual path too, where its exit is `@codex review` on this head (a
+fresh covering verdict clears it). A fresh reviewer-unavailable response blocks
+it as well, with the unmet item
 
 > awaiting maintainer review — post `## Review — approve` on this head
 
