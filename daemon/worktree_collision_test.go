@@ -139,6 +139,34 @@ func TestReserveCreateInPlaceRefusesDetachedWorktreeOwnedByLiveLane(t *testing.T
 	assert.Contains(t, err.Error(), "detached HEAD")
 }
 
+func TestReserveCreateInPlaceFindsLiveHolderUnderHistoricalRepoKey(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	branchOut, err := exec.Command("git", "-C", repoPath, "symbolic-ref", "--short", "HEAD").CombinedOutput()
+	require.NoError(t, err, string(branchOut))
+	branch := strings.TrimSpace(string(branchOut))
+	live := registerCollisionLane(t, manager, repoID, repoPath, repoPath, "historical-holder", branch, session.Ready)
+	historicalRepoID := config.RepoIDFromRoot(filepath.Join(t.TempDir(), "pre-rename-repo"))
+	require.NotEqual(t, repoID, historicalRepoID)
+	manager.mu.Lock()
+	delete(manager.instances, daemonInstanceKey(repoID, live.Title))
+	manager.instances[daemonInstanceKey(historicalRepoID, live.Title)] = live
+	manager.mu.Unlock()
+
+	_, _, release, renamed, err := manager.reserveCreate(CreateSessionRequest{
+		RepoPath: repoPath,
+		Title:    "incoming-here",
+		Program:  "claude",
+		InPlace:  true,
+	})
+	if release != nil {
+		release()
+	}
+	require.Error(t, err)
+	assert.Nil(t, renamed)
+	assert.Contains(t, err.Error(), live.Title,
+		"the canonical holder path remains authoritative after a repository-key rename")
+}
+
 func TestConcurrentInPlaceCreatesReserveBranchAdmission(t *testing.T) {
 	manager, _, _ := newStatusTestManager(t)
 	parent, _, firstPath := setupBareCloneWorktree3358(t)
@@ -320,6 +348,30 @@ func TestSkippedPersistedRepoCannotClearConfirmedWarning(t *testing.T) {
 	assert.Contains(t, inst.WorktreeWarning(), confirmed)
 	assert.Contains(t, inst.WorktreeWarning(), "persisted peer was skipped",
 		"a skipped required observation is unknown and cannot prove a prior collision was repaired")
+}
+
+func TestPersistedInventoryGapClearsWarningForArchivedLane(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "archived", Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	require.True(t, inst.ReconcileWorktreeInspection("DANGER: stale live-worktree warning", nil))
+	inst.SetStatusForTest(session.Archived)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
+	manager.setWorktreeInventoryLocked(worktreeInventoryState{incompleteRepo: map[string]error{
+		repoID: errors.New("persisted peer was skipped"),
+	}})
+	manager.mu.Unlock()
+	manager.worktreeInspector = func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection {
+		return nil
+	}
+
+	manager.refreshWorktreeIntegrityWarnings()
+
+	assert.Empty(t, inst.WorktreeWarning(),
+		"an archived lane is positively outside live-worktree inspection, so another row's inventory gap must not keep its warning")
 }
 
 func TestPartialWorktreeScanCannotClearConfirmedWarning(t *testing.T) {
@@ -625,7 +677,9 @@ func TestArchivedRestoreIgnoresStaleRelocationAliasForBranchAdmission(t *testing
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	require.True(t, ok)
 	staleAlias := t.TempDir()
-	worktree, err := archived.GetGitWorktree()
+	worktree, err := sessiongit.NewGitWorktreeFromStorage(
+		repoPath, selectedPath, archived.Title, selectedBranch, "", false, true,
+	)
 	require.NoError(t, err)
 	require.NoError(t, worktree.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
 		State:         sessiongit.RelocationRecoveryMoveUnknown,
@@ -635,6 +689,7 @@ func TestArchivedRestoreIgnoresStaleRelocationAliasForBranchAdmission(t *testing
 		Inode:         uint64(stat.Ino),
 		FileType:      uint32(stat.Mode & syscall.S_IFMT),
 	}))
+	archived.SetGitWorktreeForTest(worktree)
 
 	peerPath := t.TempDir()
 	peer := registerCollisionLane(t, manager, repoID, repoPath, peerPath, "live-branch-peer", selectedBranch, session.Ready)

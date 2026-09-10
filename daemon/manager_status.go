@@ -467,8 +467,6 @@ func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
 				fmt.Errorf("worktree safety inspector returned no result for live local lane %q", row.Title),
 				inventoryState.incompleteFor(entry.repoID),
 			)
-		} else {
-			update.Incomplete = inventoryState.incompleteFor(entry.repoID)
 		}
 		updates[index] = update
 	}

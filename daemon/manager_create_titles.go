@@ -120,7 +120,7 @@ func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, na
 		if archivedWorktreeHoldsBranch(archived, holder) {
 			continue
 		}
-		if lane := m.liveLaneHoldingWorktreeLocked(repoID, holder, diskData); lane != "" {
+		if lane := m.liveLaneHoldingWorktreeLocked(holder, diskData); lane != "" {
 			return liveHeldBranchRefusal(title, branch, lane, holder)
 		}
 		return fmt.Errorf("cannot create session %q: branch %q is checked out by the worktree at %s — not only by the archived session %q holding that name — and the new session would derive that same branch. Moving another worktree's branch aside is not af's call, so freeing the archived name would not free the branch and the create would fail at `git worktree add` — release that branch yourself, or create this session under a different name",
@@ -165,7 +165,7 @@ func (m *Manager) refuseNonReusableTitleConflictLocked(repoID, repoPath, title s
 // the target worktree's observed branch and path. Only a positively identified
 // live lane refuses, and AF never renames, detaches, resets, or moves either
 // worktree on this path.
-func (m *Manager) refuseLiveHeldBranchLocked(repoID, repoPath, workspace, title string, namespace runtimeNameNamespace, inPlace bool, diskData []session.InstanceData) error {
+func (m *Manager) refuseLiveHeldBranchLocked(repoPath, workspace, title string, namespace runtimeNameNamespace, inPlace bool, diskData []session.InstanceData) error {
 	if namespace != runtimeNamespaceLocalTmux {
 		return nil
 	}
@@ -182,7 +182,7 @@ func (m *Manager) refuseLiveHeldBranchLocked(repoID, repoPath, workspace, title 
 		holders = m.worktreeHeldBranchesLocked(repoPath, false)[branch]
 	}
 	for _, holder := range holders {
-		lane := m.liveLaneHoldingWorktreeLocked(repoID, holder, diskData)
+		lane := m.liveLaneHoldingWorktreeLocked(holder, diskData)
 		if lane == "" {
 			continue
 		}
@@ -222,9 +222,6 @@ func inPlaceBranchHolders(repoPath, workspace string) (string, []string, error) 
 		if target.Branch != "" {
 			return "", nil, fmt.Errorf("worktree %s is reported as both detached and on branch %q", config.ShellQuotePath(workspace), target.Branch)
 		}
-		// Detached HEAD releases branch correlation, not workspace ownership.
-		// A second --here lane would still share the same files and index, and no
-		// Git checkout occurs for Git's ordinary worktree guard to refuse.
 		return "", []string{target.Path}, nil
 	}
 	if target.Branch == "" {
@@ -244,7 +241,7 @@ func sameCreateWorktreePath(left, right string) bool {
 	return left != "" && left == pathutil.ResolveForCompare(right)
 }
 
-func (m *Manager) liveLaneHoldingWorktreeLocked(repoID, holder string, diskData []session.InstanceData) string {
+func (m *Manager) liveLaneHoldingWorktreeLocked(holder string, diskData []session.InstanceData) string {
 	target := pathutil.ResolveForCompare(holder)
 	if target == "" {
 		return ""
@@ -262,9 +259,8 @@ func (m *Manager) liveLaneHoldingWorktreeLocked(repoID, holder string, diskData 
 		seen[key] = struct{}{}
 		lanes = append(lanes, title)
 	}
-	for key, candidate := range m.instances {
-		candidateRepoID, _ := splitDaemonInstanceKey(key)
-		if candidateRepoID != repoID || candidate == nil || candidate.IsArchived() || pathutil.ResolveForCompare(candidate.GetWorktreePath()) != target {
+	for _, candidate := range m.instances {
+		if candidate == nil || candidate.IsArchived() || pathutil.ResolveForCompare(candidate.GetWorktreePath()) != target {
 			continue
 		}
 		add(candidate.Title, candidate.ID)
@@ -312,32 +308,6 @@ func (m *Manager) worktreeAdmissionLockForRepo(repoID string) *sync.Mutex {
 	if lock == nil {
 		lock = &sync.Mutex{}
 		m.worktreeAdmissionLocks[repoID] = lock
-	}
-	return lock
-}
-
-// startLockForRepo returns the per-repo lock serializing session/tab creation
-// against other mutations of that repo, lazily creating it.
-//
-// LOCK CONTRACT (#2106): it takes m.mu, so it must NEVER be called with m.mu
-// already held — sync.Mutex is not reentrant and the goroutine would deadlock on
-// the manager lock, stalling every other operation behind it. That rules out
-// calling it, m.persistInstance, or m.persistInstanceErr from any `...Locked`
-// helper or other code running under m.mu; persist from there with the lock-free
-// persistInstanceData instead, which takes only the instances.json file lock.
-//
-// Acquiring the returned lock while holding m.mu is likewise forbidden: the
-// established order is repoStartLock BEFORE m.mu (CreateSession holds the start
-// lock across its body and takes m.mu under it), so the reverse closes an ABBA
-// cycle — the #2006 lock-inversion class.
-func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	lock := m.repoStartLocks[repoID]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.repoStartLocks[repoID] = lock
 	}
 	return lock
 }

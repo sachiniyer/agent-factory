@@ -46,11 +46,41 @@ func terminateGitCommandTree(cmd *exec.Cmd, waitErr error) {
 		// in the process group whose id is the original leader PID. Kill that
 		// group on every failed wait, including a nonzero Git exit whose primary
 		// error remains ExitError after WaitDelay expires.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		killAndReapGitProcessGroup(cmd.Process.Pid)
 		return
 	}
 	reapGitDescendants(cmd.Process.Pid)
 	_ = cmd.Process.Kill()
+}
+
+// killAndReapGitProcessGroup handles the post-WaitDelay case, where Wait has
+// already collected Git before revealing that a descendant retained its output
+// pipe. If AF is PID 1 or a child subreaper, those descendants are adopted by
+// AF when Git exits; killing them without wait(2) would turn every probe into a
+// permanent zombie. wait4 with a negative pid is scoped to this command's
+// isolated process group, so it cannot steal an unrelated exec.Cmd child.
+func killAndReapGitProcessGroup(pgid int) {
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	deadline := time.Now().Add(gitDescendantReapWait)
+	for {
+		for {
+			var status syscall.WaitStatus
+			pid, err := syscall.Wait4(-pgid, &status, syscall.WNOHANG, nil)
+			if errors.Is(err, syscall.EINTR) {
+				continue
+			}
+			if pid <= 0 {
+				break
+			}
+		}
+		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func reapGitDescendants(rootPID int) {

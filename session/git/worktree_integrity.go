@@ -72,6 +72,27 @@ func InspectWorktreeIntegrityContext(ctx context.Context, worktreePath string) (
 	return result, nil
 }
 
+// WorktreeBranchAtPath observes the structurally attached branch at one
+// checkout even while `git worktree list` still records its pre-move pathname.
+// This is the recoverable interval after a filesystem move succeeded but
+// `git worktree repair` did not. A symbolic full name keeps the legal branch
+// `(detached)` distinct from Git's detached-HEAD marker.
+func WorktreeBranchAtPath(worktreePath string) (branch string, detached bool, err error) {
+	ref, err := runIntegrityGit(context.Background(), worktreePath, "rev-parse", "--verify", "--symbolic-full-name", "HEAD")
+	if err != nil {
+		return "", false, err
+	}
+	ref = strings.TrimSpace(ref)
+	if ref == "HEAD" {
+		return "", true, nil
+	}
+	const headsPrefix = "refs/heads/"
+	if !strings.HasPrefix(ref, headsPrefix) || strings.TrimPrefix(ref, headsPrefix) == "" {
+		return "", false, fmt.Errorf("git HEAD in %s resolved to unexpected ref %q; worktree safety is unknown", worktreePath, ref)
+	}
+	return strings.TrimPrefix(ref, headsPrefix), false, nil
+}
+
 func parseIntegrityStatus(output string) (WorktreeIntegrity, error) {
 	var result WorktreeIntegrity
 	branchObserved := false

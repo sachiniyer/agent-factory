@@ -74,9 +74,20 @@ func (m *Manager) reserveLocalRestoreBranch(
 	}
 	m.mu.Lock()
 	current := m.instances[daemonInstanceKey(repoID, title)]
+	if lanes := m.liveLanesHoldingWorktreeExceptLocked(repoID, worktreePath, instance, diskData); len(lanes) > 0 {
+		m.mu.Unlock()
+		release()
+		lane := lanes[0]
+		handoff := shellsuggest.PositionalCommand("af", []string{"sessions", "handoff", "--to", "<agent>"}, lane)
+		if branch == "" {
+			return nil, fmt.Errorf("cannot restore session %q: its detached HEAD worktree at %s is already used by live lane %q. Restoring could move the checkout out from under that lane or start another agent in its files and index, so continue there with `%s`; af did not rename, detach, reset, or move either worktree",
+				title, config.ShellQuotePath(worktreePath), lane, handoff)
+		}
+		return nil, fmt.Errorf("cannot restore session %q: its worktree at %s is already used by live lane %q. Restoring could move the checkout out from under that lane or start another agent in its files and index, so continue there with `%s`; af did not rename, detach, reset, or move either worktree",
+			title, config.ShellQuotePath(worktreePath), lane, handoff)
+	}
 	for _, binding := range fresh {
-		matchesRestoreTarget := sameWorktreePath(binding.Path, worktreePath)
-		if !matchesRestoreTarget && (branch == "" || binding.Branch != branch) {
+		if sameWorktreePath(binding.Path, worktreePath) || branch == "" || binding.Branch != branch {
 			continue
 		}
 		if lanes := m.liveLanesHoldingWorktreeExceptLocked(repoID, binding.Path, instance, diskData); len(lanes) > 0 {
@@ -84,10 +95,6 @@ func (m *Manager) reserveLocalRestoreBranch(
 			release()
 			lane := lanes[0]
 			handoff := shellsuggest.PositionalCommand("af", []string{"sessions", "handoff", "--to", "<agent>"}, lane)
-			if branch == "" {
-				return nil, fmt.Errorf("cannot restore session %q: its detached HEAD worktree at %s is already used by live lane %q. Restoring could move the checkout out from under that lane or start another agent in its files and index, so continue there with `%s`; af did not rename, detach, reset, or move either worktree",
-					title, config.ShellQuotePath(binding.Path), lane, handoff)
-			}
 			return nil, fmt.Errorf("cannot restore session %q: branch %q is already checked out by live lane %q at %s. Restoring would bind two live worktrees to one branch, so continue in that workspace with `%s` or release the branch yourself; af did not rename, detach, reset, or move either worktree",
 				title, branch, lane, config.ShellQuotePath(binding.Path), handoff)
 		}
@@ -162,7 +169,22 @@ func restoreCandidateBranch(
 		}
 	}
 	if _, statErr := os.Stat(worktreePath); statErr == nil {
-		return "", false, fmt.Errorf("worktree %s exists but is absent from Git's registration, so its active branch is unknown", config.ShellQuotePath(worktreePath))
+		// A bounded relocation can move the directory before `git worktree
+		// repair` completes. In that state the repository-wide listing still
+		// names the now-absent old path, but the selected directory's own .git
+		// link remains authoritative. Probe that exact identity-qualified path;
+		// never borrow branch metadata from the unselected recovery alternate.
+		branch, detached, directErr := sessiongit.WorktreeBranchAtPath(worktreePath)
+		switch {
+		case directErr != nil:
+			return "", false, fmt.Errorf("worktree %s exists but its active branch could not be established directly: %w", config.ShellQuotePath(worktreePath), directErr)
+		case branch != "":
+			return branch, true, nil
+		case detached:
+			return "", true, nil
+		default:
+			return "", false, fmt.Errorf("worktree %s has neither an attached branch nor a detached-HEAD marker; worktree safety is unknown", config.ShellQuotePath(worktreePath))
+		}
 	} else if !os.IsNotExist(statErr) {
 		return "", false, fmt.Errorf("worktree %s could not be identified: %w", config.ShellQuotePath(worktreePath), statErr)
 	}

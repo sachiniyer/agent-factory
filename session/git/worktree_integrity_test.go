@@ -162,6 +162,46 @@ exit 2
 	assert.False(t, got.HeadMovedWithoutReflog)
 }
 
+func TestWorktreeBranchAtPathReadsMovedUnrepairedCheckout(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", "-q", repo).Run())
+	integrityGit(t, repo, "commit", "-q", "--allow-empty", "-m", "base")
+	oldPath := filepath.Join(filepath.Dir(repo), "old")
+	newPath := filepath.Join(filepath.Dir(repo), "new")
+	integrityGit(t, repo, "worktree", "add", "-q", "-b", "topic", oldPath)
+	require.NoError(t, os.Rename(oldPath, newPath),
+		"leave Git's registration at the old path, matching an interrupted repair")
+
+	branch, detached, err := WorktreeBranchAtPath(newPath)
+	require.NoError(t, err)
+	assert.Equal(t, "topic", branch)
+	assert.False(t, detached)
+	bindings, err := WorktreeBranchBindings(repo)
+	require.NoError(t, err)
+	for _, binding := range bindings {
+		assert.NotEqual(t, newPath, binding.Path,
+			"precondition: the repository-wide listing still names the old path")
+	}
+}
+
+func TestWorktreeBranchAtPathDistinguishesLegalDetachedName(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", "-q", repo).Run())
+	integrityGit(t, repo, "commit", "-q", "--allow-empty", "-m", "base")
+	integrityGit(t, repo, "branch", "-m", "(detached)")
+
+	branch, detached, err := WorktreeBranchAtPath(repo)
+	require.NoError(t, err)
+	assert.Equal(t, "(detached)", branch)
+	assert.False(t, detached)
+
+	integrityGit(t, repo, "checkout", "-q", "--detach")
+	branch, detached, err = WorktreeBranchAtPath(repo)
+	require.NoError(t, err)
+	assert.Empty(t, branch)
+	assert.True(t, detached)
+}
+
 func TestParseIntegrityStatusRejectsMissingBranchObservation(t *testing.T) {
 	_, err := parseIntegrityStatus("# branch.oid 0123456789012345678901234567890123456789\n")
 	require.Error(t, err, "missing branch metadata is unknown, not a detached checkout")
