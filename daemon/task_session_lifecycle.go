@@ -223,7 +223,9 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 	if verb == task.OnCompleteKeep {
 		return
 	}
-	go m.runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb, hooksDone, adoptedAt)
+	m.launchBackgroundMutation(func(stop <-chan struct{}) {
+		m.runTaskSessionLifecycleUntil(stop, repoID, sessionID, title, taskID, verb, hooksDone, adoptedAt)
+	})
 }
 
 // taskSessionLifecycle resolves the on_complete verb for one task in a repo.
@@ -330,6 +332,10 @@ var testHookTaskLifecycleGuardPassed = func() {}
 // original's place — the resolver only falls back to {Title, RepoID} when ID is
 // empty.
 func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb string, hooksDone <-chan struct{}, adoptedAt uint64) {
+	m.runTaskSessionLifecycleUntil(nil, repoID, sessionID, title, taskID, verb, hooksDone, adoptedAt)
+}
+
+func (m *Manager) runTaskSessionLifecycleUntil(stop <-chan struct{}, repoID, sessionID, title, taskID, verb string, hooksDone <-chan struct{}, adoptedAt uint64) {
 	// post_worktree_commands can still be running: the agent's readiness and the
 	// hook run are deliberately concurrent (task.WaitForReady does not charge a
 	// slow build hook against the startup budget), so a short task can finish while
@@ -341,13 +347,22 @@ func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb
 	// on hooks to release a slot. On timeout the session is left in place and says
 	// why, which is the recoverable outcome.
 	if hooksDone != nil {
+		timer := time.NewTimer(taskLifecycleHookWait)
+		defer timer.Stop()
 		select {
 		case <-hooksDone:
-		case <-time.After(taskLifecycleHookWait):
+		case <-stop:
+			return
+		case <-timer.C:
 			m.warn().Printf("task %s: post-worktree hooks for session %q have run for over %s; leaving the session in place rather than tearing down a worktree they may still be writing to",
 				taskID, title, taskLifecycleHookWait)
 			return
 		}
+	}
+	select {
+	case <-stop:
+		return
+	default:
 	}
 	// The fence is shut by the guard and reopened as soon as the operation it
 	// covers is over, whichever way that went. Reopening is unconditional because

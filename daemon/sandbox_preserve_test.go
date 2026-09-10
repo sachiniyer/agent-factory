@@ -136,8 +136,43 @@ func TestRestoreSession_ReachableSandboxIsNotReplacedWhenThePushFails(t *testing
 		t.Fatalf("recover calls = %d, want 0: nothing may be replaced when the push did not land", got)
 	}
 	requireSandboxSurvived(t, reap, "its push failed, so it holds the only copy of this session's work")
+	// #2917 says the refusal must name the command that RELEASES it. This
+	// instance has no branch (registerStartedRemote records none, and the push
+	// that would have is the one that just failed), and --force-reap refuses an
+	// empty persisted branch via requireDurableSandboxBranch — see
+	// TestRestoreSession_ForcedAnsweredDeadBranchRefusalLowersTheFence. So the
+	// command that actually ends this state is kill/recreate, and naming
+	// --force-reap here sent the operator to a flag that refuses immediately
+	// (#4164). The branch-present case still names --force-reap; see below.
+	if strings.Contains(err.Error(), "--force-reap") {
+		t.Fatalf("the refusal named --force-reap for a session with no recorded branch, which that flag "+
+			"refuses outright: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sessions kill") {
+		t.Fatalf("the refusal must name a command that can actually end the state (#2917/#4164), got: %v", err)
+	}
+}
+
+// TestRestoreSession_PushFailureWithADurableBranchStillNamesForceReap is the
+// other half of #4164's off-ramp selection: when the branch IS recorded,
+// --force-reap can execute, so it remains the right thing to advertise. Without
+// this the change above could be "fixed" by naming kill unconditionally, which
+// would send operators to the destructive path when a recoverable one exists.
+func TestRestoreSession_PushFailureWithADurableBranchStillNamesForceReap(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	srv := newSandboxProbeServer(t, "af/session-branch")
+	srv.archiveFails.Store(true)
+	inst, _, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "push-fails-branched", srv.url, session.Lost)
+	inst.Branch = "af/already-durable"
+
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "push-fails-branched", RepoID: repoID})
+
+	if err == nil {
+		t.Fatal("a restore whose pre-reap push failed reported success")
+	}
+	requireSandboxSurvived(t, reap, "its push failed, so it holds the only copy of this session's work")
 	if !strings.Contains(err.Error(), "--force-reap") {
-		t.Fatalf("the refusal must name the command that releases it (#2917), got: %v", err)
+		t.Fatalf("with a recorded branch --force-reap can execute and must stay the advertised off-ramp, got: %v", err)
 	}
 }
 

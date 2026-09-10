@@ -327,7 +327,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 				recovery.State == sessiongit.RelocationRecoveryCleanupFinalizing)
 		var lateCleanup <-chan error
 		teardownErr, lateCleanup = ghostCleanup(data, req.Title, func(data *session.InstanceData) error {
-			return m.persistGhostCleanupStall(repoID, data)
+			return m.persistLateGhostCleanupCheckpoint(repoID, data)
 		})
 		settledDescriptorGhostCleanup = descriptorCleanup && teardownErr == nil && lateCleanup == nil
 		if session.TeardownStateUnknown(teardownErr) {

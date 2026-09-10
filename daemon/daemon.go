@@ -203,7 +203,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("another agent-factory daemon bound the control socket first; exiting")
 		return nil
 	}
+	controlClosed := false
 	defer func() {
+		if controlClosed {
+			return
+		}
 		if err := closeControl(); err != nil {
 			log.WarningLog.Printf("failed to close daemon control socket: %v", err)
 		}
@@ -215,10 +219,16 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// point, so no extra spawn race applies. A bind failure is logged but never
 	// fatal: HTTP is auxiliary — the gob control plane every existing client
 	// depends on must not regress if the HTTP socket cannot bind.
-	if closeHTTP, err := startHTTPServer(manager, scheduler, watchers); err != nil {
+	var closeHTTP func() error
+	httpClosed := false
+	if closeCandidate, err := startHTTPServer(manager, scheduler, watchers); err != nil {
 		log.WarningLog.Printf("failed to start daemon HTTP server: %v", err)
 	} else {
+		closeHTTP = closeCandidate
 		defer func() {
+			if httpClosed {
+				return
+			}
 			if err := closeHTTP(); err != nil {
 				log.WarningLog.Printf("failed to close daemon HTTP server: %v", err)
 			}
@@ -398,17 +408,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("quiescing for a daemon-owned upgrade hand-off")
 	}
 
-	// Stop the goroutines so we don't race.
-	close(stopCh)
-	wg.Wait()
-	// The poll loop is out, so no further root-agent create can be launched; wait
-	// for one that already is (#3721). JOINED, never cancelled — a create torn
-	// down mid-provision is the half-created session the always-ensure loop has no
-	// way to reconcile — and BEFORE the final SaveInstances below, so a create
-	// that lands late is persisted rather than overwritten by a save that predates
-	// it. This is also what the poll goroutine's own wg.Wait did while the create
-	// still ran on it.
-	manager.waitRootAgentCreatesForShutdown()
+	drainDaemon(manager, closeHTTP, closeControl, &httpClosed, &controlClosed, stopCh, wg)
 
 	if homeGone {
 		// Skip the final save: the home directory was deleted out from under
@@ -418,7 +418,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		return nil
 	}
 
-	if err := manager.SaveInstances(); err != nil {
+	if err := manager.SaveInstancesForShutdown(); err != nil {
 		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
 	}
 	return nil
@@ -734,6 +734,18 @@ var (
 // only escalate to SIGKILL if the daemon does not exit within stopDaemonGrace,
 // matching the SIGTERM-first pattern in signalAndWait (#571).
 func StopDaemon() (bool, error) {
+	return stopDaemonUntil(time.Time{})
+}
+
+// stopDaemonUntil applies an optional caller deadline to the graceful-exit
+// poll. When that earlier deadline expires after SIGTERM, it returns without
+// escalating to SIGKILL; a deadline-bounded EnsureDaemon caller will stop the
+// launch path rather than start a replacement while the old process may still
+// be releasing its singleton lock.
+func stopDaemonUntil(deadline time.Time) (bool, error) {
+	if admissionDeadlineExpired(deadline) {
+		return false, daemonAdmissionDeadlineError()
+	}
 	pidDir, err := config.GetConfigDir()
 	if err != nil {
 		return false, fmt.Errorf("failed to get config directory: %w", err)
@@ -790,25 +802,29 @@ func StopDaemon() (bool, error) {
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		if errIsProcessGone(err) {
 			log.InfoLog.Printf("daemon process (PID: %d) exited before SIGTERM landed; cleaning up", pid)
-			cleanupDaemonRuntimeFiles(pidFile)
+			cleanupDaemonRuntimeFiles(pidFile, deadline)
 			return true, nil
 		}
 		return false, fmt.Errorf("failed to signal daemon process: %w", err)
 	}
 
 	// Poll for graceful exit.
-	gracefulDeadline := time.Now().Add(stopDaemonGrace)
+	gracefulDeadline := admissionBoundedDeadline(deadline, stopDaemonGrace)
 	exited := false
 	for time.Now().Before(gracefulDeadline) {
 		if !pidLooksAlive(pid) {
 			exited = true
 			break
 		}
-		time.Sleep(stopDaemonPoll)
+		if !waitUntilAdmissionDeadline(gracefulDeadline, stopDaemonPoll) {
+			break
+		}
 	}
 
 	if exited {
 		log.InfoLog.Printf("daemon process (PID: %d) exited gracefully after SIGTERM", pid)
+	} else if admissionDeadlineExpired(deadline) {
+		return true, daemonAdmissionDeadlineError()
 	} else {
 		log.WarningLog.Printf("daemon process (PID: %d) did not exit within %s of SIGTERM; escalating to SIGKILL", pid, stopDaemonGrace)
 		if err := proc.Signal(syscall.SIGKILL); err != nil && !errIsProcessGone(err) {
@@ -816,39 +832,9 @@ func StopDaemon() (bool, error) {
 		}
 	}
 
-	cleanupDaemonRuntimeFiles(pidFile)
+	cleanupDaemonRuntimeFiles(pidFile, deadline)
 	log.InfoLog.Printf("daemon process (PID: %d) stopped successfully", pid)
 	return true, nil
-}
-
-// cleanupDaemonRuntimeFiles removes the PID file and (best-effort) the control
-// socket left behind by a stopped daemon. The PID file is tolerated as
-// already-gone because the daemon's own SIGTERM handler removes it via
-// removeDaemonPIDFile() before exiting — so on the SIGTERM-success path we
-// race with the daemon's own cleanup.
-//
-// A NEW daemon can also start during StopDaemon's signal/poll window (the
-// autostart unit racing `af daemon install`, or an upgrade respawn) and bind
-// the control socket before this cleanup runs. Removing the socket then would
-// unlink the live daemon's socket file: the daemon keeps serving the
-// unreachable inode, pings against the path fail, and the next EnsureDaemon
-// spawns yet another daemon while the first leaks (#767). So if anything
-// ANSWERS on the socket, the runtime files belong to a live daemon — leave
-// them all in place. The daemon we just stopped cannot answer: its listener
-// died with the process. The worst false positive (a ping answered by a
-// process still mid-SIGKILL) merely leaves a stale socket behind, which the
-// next spawn's bind path replaces.
-func cleanupDaemonRuntimeFiles(pidFile string) {
-	if err := pingDaemon(); err == nil {
-		log.InfoLog.Printf("a live daemon answered on the control socket after stop; leaving its runtime files in place")
-		return
-	}
-	if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
-		log.WarningLog.Printf("failed to remove daemon PID file: %v", err)
-	}
-	if socketPath, socketErr := DaemonSocketPath(); socketErr == nil {
-		_ = os.Remove(socketPath)
-	}
 }
 
 // isAgentFactoryDaemon checks whether the process at pid looks like an agent-factory daemon:

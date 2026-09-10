@@ -12,6 +12,7 @@ import {
   canManageTabs,
   documentTitle,
   refreshIdleReasonAges,
+  retryActionForSession,
   isActionableSession,
   isKillableSession,
   supportsTabManagement,
@@ -22,7 +23,7 @@ import {
   canMutateTabRoster,
 } from "./ui.js";
 import type { AppState } from "./ui.js";
-import { Liveness, type SessionData } from "./types.js";
+import { InFlightOp, Liveness, type SessionData } from "./types.js";
 
 function sess(over: Partial<SessionData> = {}): SessionData {
   return { id: "a", title: "s", branch: "b", ...over };
@@ -100,6 +101,53 @@ test("kill addressability is independent and fails closed", () => {
     false,
     "an id-less teardown capability fails closed",
   );
+});
+
+test("Retry names an ambiguous handoff separately from a usage-limit retry", () => {
+  assert.deepEqual(
+    retryActionForSession(sess({
+      liveness: Liveness.Running,
+      pending_account_swap: {
+        manual: true,
+        replacement_panes_started: true,
+        mission_delivery_status: "could-not-confirm",
+      },
+    })),
+    {
+      kind: "handoff",
+      label: "Retry handoff",
+      title: "Retry the handoff after inspecting the pane",
+    },
+  );
+  assert.deepEqual(
+    retryActionForSession(sess({
+      liveness: Liveness.Running,
+      in_flight_op: InFlightOp.Replacing,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "sent-unverified",
+    })),
+    {
+      kind: "handoff",
+      label: "Retry handoff",
+      title: "Retry the handoff after inspecting the pane",
+    },
+  );
+  assert.equal(
+    retryActionForSession(sess({
+      liveness: Liveness.Running,
+      in_flight_op: InFlightOp.Replacing,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "could-not-confirm",
+      startup_state_unknown: true,
+    })),
+    null,
+    "an unknown replacement runtime has no pane the operator can safely inspect",
+  );
+  assert.deepEqual(
+    retryActionForSession(sess({ liveness: Liveness.LimitReached })),
+    { kind: "limit", label: "Retry limit", title: "Retry after the usage limit" },
+  );
+  assert.equal(retryActionForSession(sess({ liveness: Liveness.Ready })), null);
 });
 
 test("an unrelated status/title snapshot on the selected session keeps the SAME sig", () => {

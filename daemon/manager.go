@@ -273,22 +273,27 @@ type Manager struct {
 	// restart-to-apply; only a read that failed at daemon start heals mid-run,
 	// by being read successfully for the first time.
 	rootAgentLayers atomic.Pointer[rootAgentSnapshot]
-	// rootHealFailures/rootHealNextAttempt pace healRootAgentLayers on the
-	// shared ensure backoff (rootEnsureBackoffFor, on the injectable nowFunc
-	// clock): while every retried read keeps failing the pass backs off to
-	// rootEnsureBackoffMax instead of re-reading broken files every poll tick.
+	// rootHealFailures/rootHealNextAttempt pace the personal-config, reconcile,
+	// and legacy root_agents retries on the shared ensure backoff
+	// (rootEnsureBackoffFor, injectable nowFunc). The registry arm paces on
+	// its OWN clock, rootHealRegistryNextAttempt — NOT the shared one a legacy
+	// narrowing resets to now: its two-strike discipline (#3315) needs two
+	// reads SPACED by a cadence (the personal absence streak carries its own
+	// spacing, rootHealAbsenceLastStrike, for the same reason). Guarded by
+	// m.mu, like rootEnsureStates.
+	//
 	// rootHealRegistryStreak/rootHealRegistryProjects and
-	// rootHealAbsenceStreaks carry the two-strike counters for
-	// absence-classified observations (the applyHomeCheck discipline):
-	// registry recovery publishes on the second consecutive MATCHING
-	// present-and-listable snapshot, and an ENOENT personal config heals to
-	// "removed" on the second consecutive dir-present observation. All
-	// guarded by m.mu, like rootEnsureStates.
-	rootHealFailures         int
-	rootHealNextAttempt      time.Time
-	rootHealRegistryStreak   int
-	rootHealRegistryProjects []config.Project
-	rootHealAbsenceStreaks   map[string]int
+	// rootHealAbsenceStreaks are the two-strike counters: registry recovery
+	// publishes on the second consecutive MATCHING present-and-listable
+	// snapshot, and an ENOENT personal config heals to "removed" on the
+	// second consecutive dir-present observation.
+	rootHealFailures            int
+	rootHealNextAttempt         time.Time
+	rootHealRegistryFailures    int
+	rootHealRegistryNextAttempt time.Time
+	rootHealRegistryStreak      int
+	rootHealRegistryProjects    []config.Project
+	rootHealAbsenceStreaks      map[string]int
 	// rootHealAbsenceLastStrike stamps each project's most recent ENOENT
 	// strike. The two-strike release requires the strikes to be SPACED by at
 	// least one backoff base regardless of what the shared retry clock does —
@@ -375,6 +380,15 @@ type Manager struct {
 	// seams. Launchers must return before waiting so every Add precedes Wait;
 	// the production kill path never waits for these retrying workers.
 	lateGhostCleanupWG sync.WaitGroup
+	// backgroundMutationWG owns detached writers spawned by otherwise-synchronous
+	// control/poll paths: conversation capture, task on-complete teardown, and
+	// late ghost cleanup. backgroundMutationMu makes launch-vs-shutdown admission
+	// atomic, so the terminal checkpoint can close the gate and join every writer
+	// without racing a WaitGroup.Add.
+	backgroundMutationMu       sync.Mutex
+	backgroundMutationWG       sync.WaitGroup
+	backgroundMutationStop     chan struct{}
+	backgroundMutationsStopped bool
 	// restoresInFlight identifies the subset of killsInFlight entries admitted
 	// by a manual restore. DeleteProject treats these as early blockers because
 	// an archived row has not necessarily changed lifecycle state yet. Keeping
@@ -709,6 +723,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		killsInFlight:             make(map[string]struct{}),
 		killRetries:               make(map[string]*session.CleanupRetry),
 		ghostCleanupStalls:        make(map[string]string),
+		backgroundMutationStop:    make(chan struct{}),
 		restoresInFlight:          make(map[string]struct{}),
 		lostRestoreStates:         make(map[string]*lostRestoreState),
 		limitResumeStates:         make(map[string]*limitResumeState),
@@ -775,8 +790,9 @@ func (m *Manager) restoreInstances() error {
 	// running over an intact tree — #3658 keeps it alive on purpose, so a restart
 	// or an auto-upgrade does not kill an operator's build mid-pnpm. Adopt it
 	// here, before the instances are published, so the restored session reports
-	// hooks in flight exactly as a first run does. Adoption reports; it never
-	// re-runs the hook and never stops it (#3682).
+	// hooks in flight through completion of the remaining list. The session
+	// adopter excludes terminal/tombstoned and external worktrees, and retires
+	// terminal journals before any resume can be scheduled.
 	//
 	// Restore only, not the refresh poll: the poll runs on a timer and would turn
 	// this into a manager round trip per tick, while a survivor by definition
@@ -809,22 +825,6 @@ func (m *Manager) Ready() bool {
 	default:
 		return false
 	}
-}
-
-func (m *Manager) RefreshInstances() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.refreshLocked()
-}
-
-func (m *Manager) InstancesSnapshot() []*session.Instance {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return daemonInstances(m.instances)
-}
-
-func (m *Manager) SaveInstances() error {
-	return m.storage.SaveInstances(m.InstancesSnapshot())
 }
 
 // dockerReapProtectedSlugs returns the af.session label slugs of every session

@@ -83,8 +83,10 @@ size. Tasks and Config keep their phone layouts.
 
 While the terminal owns the keyboard, one bottom row provides Ctrl, Alt, Esc,
 Tab, **^C** and **Arrows**, with 44px targets. Arrows replaces that row with arrow
-keys and More keys. Tap Ctrl or Alt then type a character; double tap to lock (shown
-by ▸ and an outline), then tap again to release. Keys retain terminal focus and
+keys and More keys. Tap Ctrl or Alt to modify the next key, including the bar’s own
+keys; double tap to lock (shown
+by ▸ and an outline), then tap again to release. IME composition is sent unchanged
+and leaves armed modifiers for the next key. Keys retain terminal focus and
 the terminal resizes above the soft keyboard. With that keyboard closed, the
 terminal occupies at least 85% of the visual viewport at the verified phone widths.
 
@@ -150,8 +152,13 @@ without attaching. `Enter` attaches the selected session. The pane's accent bord
 marks the pane you are driving. See the [keyboard reference](#keyboard-reference)
 for tab and view navigation.
 
-The pane header's **Retry limit** appears for a session waiting on a usage limit and
-requests another attempt. Open the pane header’s **Actions** menu (shown as **…**
+The pane header's **Retry limit** appears for a session waiting on a usage limit
+and requests another attempt. If an agent or account handoff could not confirm
+mission delivery, inspect the pane first; the same place shows **Retry handoff**
+as the explicit override while automatic redelivery stays suppressed. If that retry
+delivers the mission while its final disk settlement remains pending, the web
+keeps a confirmed-mutation warning on screen because the mission has already
+landed and must not be retried. Open the pane header’s **Actions** menu (shown as **…**
 on a phone) for **Handoff**, which appears when the session supports swapping
 agents in place. Choose **New agent** in its modal and confirm **Hand off** to stop
 the current agent and continue with the replacement. A limit-blocked local

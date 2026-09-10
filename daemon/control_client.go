@@ -20,6 +20,12 @@ import (
 
 var ensureDaemonMu sync.Mutex
 
+// ErrAccountHandoffUnsupported is returned before a handoff mutation is sent
+// when the responding daemon does not affirm the account-aware protocol. The
+// daemon, not the client, owns admission against live account-pin state; an
+// older daemon cannot safely make that decision and must not receive the call.
+var ErrAccountHandoffUnsupported = errors.New("daemon does not serve the version-bound account-aware handoff endpoint (likely an older daemon — upgrade it); the handoff was not sent")
+
 // daemonStartingErrText is the wire-visible text of the warm-up error. net/rpc
 // flattens server-side errors into plain strings, so clients cannot errors.Is
 // against a sentinel value; IsDaemonStartingErr matches this text instead.
@@ -106,7 +112,7 @@ func DaemonSocketPath() (string, error) {
 
 // EnsureDaemon starts the daemon if the control socket is not already serving.
 func EnsureDaemon() error {
-	return ensureDaemonWithLauncher(launchDaemonProcessFn)
+	return ensureDaemonWithLauncherUntil(launchDaemonProcessFn, time.Time{})
 }
 
 var launchDaemonProcessAtFn = launchDaemonProcessAt
@@ -117,21 +123,30 @@ var launchDaemonProcessAtFn = launchDaemonProcessAt
 // still-running old process for os.Executable can resolve to a deleted inode,
 // while execPath is the freshly written binary path the new daemon must run.
 func EnsureDaemonFromPath(execPath string) error {
-	return ensureDaemonWithPolicy(func() error {
+	return ensureDaemonWithPolicyUntil(func() error {
 		return launchDaemonProcessAtFn(execPath)
-	}, false)
+	}, false, time.Time{})
 }
 
 func ensureDaemonWithLauncher(launch func() error) error {
-	return ensureDaemonWithPolicy(launch, true)
+	return ensureDaemonWithLauncherUntil(launch, time.Time{})
 }
 
-func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
-	ensureDaemonMu.Lock()
+func ensureDaemonWithLauncherUntil(launch func() error, deadline time.Time) error {
+	return ensureDaemonWithPolicyUntil(launch, true, deadline)
+}
+
+func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline time.Time) error {
+	if !lockEnsureDaemonUntil(deadline) {
+		return daemonAdmissionDeadlineError()
+	}
 	defer ensureDaemonMu.Unlock()
 
-	if err := pingDaemon(); err == nil {
+	if err := pingDaemonUntil(deadline); err == nil {
 		return nil
+	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
 	}
 	// #2212 R1: before spawning a daemon, defer to an in-progress upgrade rather
 	// than racing its recovery actor with a rival daemon. A client defers to BOTH
@@ -142,10 +157,13 @@ func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
 	// bounded, so a bad journal can never wedge this launch path (which fronts
 	// every af invocation).
 	if homeDir, ok := configHomeDir(); ok {
-		switch decision, gateErr := checkUpgradeGate(homeDir, false); decision {
+		switch decision, gateErr := checkUpgradeGateUntil(homeDir, false, deadline); decision {
 		case upgradeGateInProgress, upgradeGateRestoringPrevious:
 			return gateErr
 		}
+	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
 	}
 	if preferUnit {
 		configDir, configErr := config.GetConfigDir()
@@ -157,15 +175,15 @@ func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
 			case ownerErr != nil:
 				log.WarningLog.Printf("could not determine daemon supervision owner; using ad-hoc launch: %v", ownerErr)
 			case owner == OwnerUnit:
-				return ensureDaemonThroughUnit(launch)
+				return ensureDaemonThroughUnitUntil(launch, deadline)
 			}
 		}
 	}
-	return ensureDaemonAdHoc(launch)
+	return ensureDaemonAdHocUntil(launch, deadline)
 }
 
-func ensureDaemonThroughUnit(launch func() error) error {
-	unitDeadline := time.Now().Add(ensureUnitStartTimeout)
+func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error {
+	unitDeadline := admissionBoundedDeadline(deadline, ensureUnitStartTimeout)
 
 	unitErr := runEnsureUnitStartCommand(unitDeadline)
 	if unitErr == nil {
@@ -174,8 +192,11 @@ func ensureDaemonThroughUnit(launch func() error) error {
 			return nil
 		}
 	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
+	}
 	log.WarningLog.Printf("failed to start daemon through its installed service; falling back to an ad-hoc daemon: %v", unitErr)
-	if err := ensureDaemonAdHoc(launch); err != nil {
+	if err := ensureDaemonAdHocUntil(launch, deadline); err != nil {
 		return fmt.Errorf("installed daemon service failed: %v; ad-hoc fallback failed: %w", unitErr, err)
 	}
 	// The ad-hoc fallback brought up a reachable daemon. EnsureDaemon's contract is
@@ -189,7 +210,10 @@ func ensureDaemonThroughUnit(launch func() error) error {
 	return nil
 }
 
-func ensureDaemonAdHoc(launch func() error) error {
+func ensureDaemonAdHocUntil(launch func() error, deadline time.Time) error {
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
+	}
 	// A previous daemon version may have a PID file but no control socket. Stop
 	// it before launching the control-plane daemon so we do not run duplicate
 	// scheduler and session-monitor loops. StopDaemon is also how an
@@ -201,8 +225,11 @@ func ensureDaemonAdHoc(launch func() error) error {
 	// once the previous one is gone. A spurious spawn that races a still-live
 	// holder can never become a second daemon: the child fails fast on the
 	// exclusive startup lock (see RunDaemon / acquireHomeLock).
-	if _, err := StopDaemon(); err != nil {
+	if _, err := stopDaemonUntil(deadline); err != nil {
 		log.WarningLog.Printf("failed to stop stale daemon before launch: %v", err)
+	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
 	}
 
 	// No auth-posture pre-flight here any more (#2168 Phase 0). This used to load
@@ -222,19 +249,24 @@ func ensureDaemonAdHoc(launch func() error) error {
 	if err := launch(); err != nil {
 		return err
 	}
+	if admissionDeadlineExpired(deadline) {
+		return daemonAdmissionDeadlineError()
+	}
 
-	return waitForDaemonReady(time.Now().Add(daemonReadyTimeout))
+	return waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout))
 }
 
 func waitForDaemonReady(deadline time.Time) error {
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if err := pingDaemon(); err == nil {
+		if err := pingDaemonUntil(deadline); err == nil {
 			return nil
 		} else {
 			lastErr = err
 		}
-		time.Sleep(50 * time.Millisecond)
+		if !waitUntilAdmissionDeadline(deadline, 50*time.Millisecond) {
+			break
+		}
 	}
 	if lastErr == nil {
 		lastErr = errors.New("readiness deadline elapsed before the daemon could be probed")
@@ -247,6 +279,11 @@ func pingDaemon() error {
 	return err
 }
 
+func pingDaemonUntil(deadline time.Time) error {
+	var resp PingResponse
+	return callDaemonNoEnsureBefore("Ping", PingRequest{}, &resp, deadline, true)
+}
+
 // pingDaemonResponse pings the daemon and returns its full reply, so callers
 // that need the reported version (`af doctor`'s skew check) read it from the
 // same probe that establishes liveness. Never ensures a daemon: doctor is
@@ -257,43 +294,58 @@ func pingDaemonResponse() (PingResponse, error) {
 	return resp, err
 }
 
-// daemonAdmissionRetryWait bounds how long RPC clients wait for a transient
-// lifecycle admission refusal before surfacing it. It mirrors
-// daemonReadyTimeout, the wait callers already tolerated pre-#829 when
-// EnsureDaemon polled for the socket: a local restore or probation release
-// completes inside this window so calls just work, while a stuck transition
-// fails fast with its actionable message instead of hanging the caller.
-// daemonAdmissionRetryPoll is the retry cadence.
-const (
-	daemonAdmissionRetryWait = daemonReadyTimeout
-	daemonAdmissionRetryPoll = 100 * time.Millisecond
-)
-
-func callDaemon(method string, req any, resp any) error {
-	if err := EnsureDaemon(); err != nil {
-		return err
-	}
-	err := callDaemonNoEnsure(method, req, resp)
-	// A warming daemon rejects state-dependent RPCs until restore completes;
-	// an upgrade candidate rejects mutations until its validator releases
-	// probation. Both are alive and retryable, so callers share one bounded
-	// retry rather than growing per-call-site lifecycle logic.
-	deadline := time.Now().Add(daemonAdmissionRetryWait)
-	for IsDaemonAdmissionRetryable(err) && time.Now().Before(deadline) {
-		time.Sleep(daemonAdmissionRetryPoll)
-		err = callDaemonNoEnsure(method, req, resp)
-	}
-	return err
+func callDaemonNoEnsure(method string, req any, resp any) error {
+	return callDaemonNoEnsureUntil(method, req, resp, time.Time{})
 }
 
-func callDaemonNoEnsure(method string, req any, resp any) error {
+type daemonCallAttempt struct {
+	err            error
+	requestStarted bool
+}
+
+// callDaemonNoEnsureUntil bounds only the retry dial. Once a daemon accepts the
+// RPC, handler execution keeps its historical method-specific lifetime: session
+// creation and other legitimate operations may outlive the admission window.
+func callDaemonNoEnsureUntil(method string, req any, resp any, deadline time.Time) error {
+	return callDaemonNoEnsureAttemptBefore(method, req, resp, deadline, false).err
+}
+
+func callDaemonNoEnsureBefore(method string, req any, resp any, deadline time.Time, boundRPC bool) error {
+	return callDaemonNoEnsureAttemptBefore(method, req, resp, deadline, boundRPC).err
+}
+
+// callDaemonNoEnsureAttemptUntil retains whether net/rpc started the request.
+// A failed dial proves that the handler never ran and is therefore the only
+// transport failure callDaemon may replay. Once Client.Call starts, a lost
+// response is ambiguous: the handler may already have committed its mutation.
+func callDaemonNoEnsureAttemptUntil(method string, req any, resp any, deadline time.Time) daemonCallAttempt {
+	return callDaemonNoEnsureAttemptBefore(method, req, resp, deadline, false)
+}
+
+func callDaemonNoEnsureAttemptBefore(method string, req any, resp any, deadline time.Time, boundRPC bool) daemonCallAttempt {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
-		return err
+		return daemonCallAttempt{err: err}
 	}
-	conn, err := net.DialTimeout("unix", socketPath, daemonDialTimeout)
+	dialTimeout := daemonDialTimeout
+	if !deadline.IsZero() {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return daemonCallAttempt{err: daemonAdmissionDeadlineError()}
+		}
+		if remaining < dialTimeout {
+			dialTimeout = remaining
+		}
+	}
+	conn, err := net.DialTimeout("unix", socketPath, dialTimeout)
 	if err != nil {
-		return err
+		return daemonCallAttempt{err: err}
+	}
+	if boundRPC && !deadline.IsZero() {
+		if err := conn.SetDeadline(deadline); err != nil {
+			_ = conn.Close()
+			return daemonCallAttempt{err: err}
+		}
 	}
 	client := rpc.NewClient(conn)
 	defer client.Close()
@@ -304,9 +356,9 @@ func callDaemonNoEnsure(method string, req any, resp any) error {
 		// new CLI does not read "failed" and retry a durable task change into a
 		// duplicate. Skew-only; see committedFromLegacyRPCError.
 		if committed := committedFromLegacyRPCError(err); committed != nil {
-			return committed
+			return daemonCallAttempt{err: committed, requestStarted: true}
 		}
-		return err
+		return daemonCallAttempt{err: err, requestStarted: true}
 	}
 	// A committed mutation answers OK and reports itself in the response
 	// envelope: net/rpc reduces a concrete error to rpc.ServerError and keeps
@@ -317,10 +369,13 @@ func callDaemonNoEnsure(method string, req any, resp any) error {
 		CommittedOutcome() (bool, string)
 	}); ok {
 		if committed, warning := carrier.CommittedOutcome(); committed {
-			return &rpcMutationCommittedError{err: errors.New(warning)}
+			return daemonCallAttempt{
+				err:            &rpcMutationCommittedError{err: errors.New(warning)},
+				requestStarted: true,
+			}
 		}
 	}
-	return nil
+	return daemonCallAttempt{requestStarted: true}
 }
 
 // committedPrefixes are the wire strings a pre-#3036 daemon uses to mark a
@@ -679,10 +734,19 @@ func ResumeFromLimit(req ResumeFromLimitRequest) error {
 // deliver a mission brief to the incoming agent.
 func HandoffSession(req HandoffSessionRequest) (HandoffSessionResponse, error) {
 	var resp HandoffSessionResponse
-	if err := callDaemon("HandoffSession", req, &resp); err != nil {
+	err := callDaemon(AccountAwareHandoffMethod, req, &resp)
+	if isRPCMethodMissing(err) {
+		return HandoffSessionResponse{}, ErrAccountHandoffUnsupported
+	}
+	if err != nil && !isMutationCommitted(err) {
 		return HandoffSessionResponse{}, err
 	}
-	return resp, nil
+	requestedAccount := strings.TrimSpace(req.Account)
+	if requestedAccount != "" && resp.ToAccount != requestedAccount {
+		mismatch := &rpcMutationCommittedError{err: fmt.Errorf("daemon did not honor the requested account %q (likely an older daemon — upgrade it); the runtime was already restarted, but the resulting credential identity is unknown because the source account label may have carried across agent namespaces", requestedAccount)}
+		return resp, errors.Join(err, mismatch)
+	}
+	return resp, err
 }
 
 // RestoreSession asks the daemon to restore an archived, Lost, or Dead session.
