@@ -468,7 +468,7 @@ test("a newer bootless Snapshot clears the cached daemon identity without releas
     "a later known daemon cannot still be running a request pinned to daemon-a");
 });
 
-test("a confirmed later archive releases an uncertain restore for the same session", async () => {
+test("a later archive cannot release an uncertain restore queued before its operation lock", async () => {
   const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
   await assert.rejects(pending.run("session", async () => {
     throw new ApiError(0, "lost reply");
@@ -481,8 +481,19 @@ test("a confirmed later archive releases an uncertain restore for the same sessi
 
   const archiveSucceeded = pending.captureArchiveSuccess("session");
   archiveSucceeded();
+  assert.equal(pending.has("session"), true,
+    "the original restore may acquire its operation lock after this archive completes");
+});
+
+test("a later archive releases a restore whose HTTP outcome already confirmed success", async () => {
+  const pending = new PendingRestores(() => {});
+  await pending.run("session", async () => {}, true);
+  assert.equal(pending.has("session"), true);
+
+  const archiveSucceeded = pending.captureArchiveSuccess("session");
+  archiveSucceeded();
   assert.equal(pending.has("session"), false,
-    "a successful later archive serialized after the restore and supersedes its fence");
+    "the successful restore released its operation lock before the later archive began");
 });
 
 test("an older archive response cannot release a newer restore ticket", async () => {

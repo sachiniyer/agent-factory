@@ -13810,7 +13810,7 @@ var PendingRestores = class {
   captureArchiveSuccess(id) {
     const ticket = this.tickets.get(id);
     return () => {
-      if (!ticket || this.tickets.get(id) !== ticket) return;
+      if (!ticket || this.tickets.get(id) !== ticket || !ticket.settled) return;
       this.release(id, ticket);
       this.changed(new Set(this.tickets.keys()));
     };

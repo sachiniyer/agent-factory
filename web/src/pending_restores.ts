@@ -75,10 +75,10 @@ export class PendingRestores {
   captureArchiveSuccess(id: string): () => void {
     const ticket = this.tickets.get(id);
     return () => {
-      if (!ticket || this.tickets.get(id) !== ticket) return;
-      // The user can archive only the restored row projected after this ticket.
-      // A successful ArchiveSession then acquired the same operation lock and
-      // is positive evidence that this restore no longer owns the lifecycle.
+      if (!ticket || this.tickets.get(id) !== ticket || !ticket.settled) return;
+      // A known-successful restore released its operation lock before this later
+      // archive began. A transport-uncertain restore may instead still be queued
+      // after its initial validation, so archive completion cannot order it.
       this.release(id, ticket);
       this.changed(new Set(this.tickets.keys()));
     };
