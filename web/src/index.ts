@@ -430,7 +430,6 @@ async function connect(candidate: string): Promise<void> {
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
   connectionGeneration++;
-  pendingRestores.reset();
   optimisticSessions.reset(sessions);
   resolvingRoute = true;
   store.set({
@@ -1028,7 +1027,7 @@ function openConfirm(
         const outcome = committed
           ? (optimisticSessions.succeed(mutation) ? "confirmed" : "stale")
           : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
-        if (committed) captureArchiveSuccess?.();
+        if (committed || outcome === "confirmed") captureArchiveSuccess?.();
         if (outcome === "stale") return;
         applySessions(optimisticSessions.project());
         requestResync();

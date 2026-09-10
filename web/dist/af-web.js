@@ -17497,7 +17497,6 @@ async function connect(candidate) {
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
   connectionGeneration++;
-  pendingRestores.reset();
   optimisticSessions.reset(sessions);
   resolvingRoute = true;
   store.set({
@@ -17916,7 +17915,7 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
       if (mutation) {
         const committed = isMutationCommittedError(e);
         const outcome = committed ? optimisticSessions.succeed(mutation) ? "confirmed" : "stale" : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
-        if (committed) captureArchiveSuccess?.();
+        if (committed || outcome === "confirmed") captureArchiveSuccess?.();
         if (outcome === "stale") return;
         applySessions(optimisticSessions.project());
         requestResync();

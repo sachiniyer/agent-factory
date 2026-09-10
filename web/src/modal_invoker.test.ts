@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
+import { PendingRestores } from "./pending_restores.js";
 
 // Exercise the real handlers without starting a daemon or browser. The DOM stub
 // models the important transition: optimistic removal disconnects the action and
@@ -82,8 +83,12 @@ for (const operation of ["kill", "archive"]) {
   });
 }
 
-for (const optimisticConfirmed of [true, false]) {
-  test(`committed archive releases its restore fence when optimistic outcome is ${optimisticConfirmed ? "confirmed" : "stale"}`, async () => {
+for (const [name, committed, optimisticConfirmed] of [
+  ["committed archive releases its restore fence when optimistic outcome is confirmed", true, true],
+  ["committed archive releases its restore fence when optimistic outcome is stale", true, false],
+  ["event-confirmed archive releases its restore fence after an uncertain response", false, true],
+] as const) {
+  test(name, async () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
     const names = new Set(["openModal", "closeModal", "openConfirm"]);
@@ -105,8 +110,15 @@ for (const optimisticConfirmed of [true, false]) {
       },
       isArchived: () => false, isOffBoxWorkspace: () => false,
       optimisticSessions: {
-        begin: () => ({}), project: () => [], succeed: () => optimisticConfirmed,
-        reject: () => assert.fail("committed errors do not reject optimistic state"),
+        begin: () => ({}), project: () => [],
+        succeed: () => {
+          assert.equal(committed, true);
+          return optimisticConfirmed;
+        },
+        reject: () => {
+          assert.equal(committed, false);
+          return optimisticConfirmed ? "confirmed" : "uncertain";
+        },
       },
       pendingRestores: {
         has: () => false,
@@ -114,7 +126,7 @@ for (const optimisticConfirmed of [true, false]) {
       },
       applySessions() {}, archiveSession: () => Promise.reject(new Error("committed warning")),
       killSession: () => assert.fail("wrong action"), restoreSession: () => assert.fail("wrong action"),
-      isMutationCommittedError: () => true, isMutationOutcomeUncertain: () => false,
+      isMutationCommittedError: () => committed, isMutationOutcomeUncertain: () => !committed,
       requestResync() {}, errorText: (error: Error) => error.message, surfaceMutationError() {},
     };
     const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null;\n${handlers}`, {
@@ -125,7 +137,7 @@ for (const optimisticConfirmed of [true, false]) {
     app.openConfirm("archive", session, { sessionId: session.id, actionLabel: null, header: false });
     confirms!.onConfirm();
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(releases, 1, "the committed archive supersedes the restore fence");
+    assert.equal(releases, 1, "the confirmed archive supersedes the restore fence");
   });
 }
 
@@ -184,4 +196,51 @@ test("a definitive restore refusal refreshes daemon identity before enabling ret
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(busy, [true, false]);
   assert.deepEqual(errors, ["stale daemon identity"]);
+});
+
+test("reconnect retains a completed restore through its pre-response initial Snapshot", async () => {
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
+  const connect = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "connect");
+  assert.ok(connect && ts.isFunctionDeclaration(connect));
+
+  const rows = [{ id: "session", restoreEligible: true }];
+  const pending = new PendingRestores(() => {});
+  pending.observe(rows, { kind: "snapshot", generation: pending.beginSnapshot() });
+  let finishRestore!: () => void;
+  const restore = pending.run("session", () => new Promise<void>(resolve => { finishRestore = resolve; }), true)!;
+  let finishTasks!: (tasks: never[]) => void;
+  const tasks = new Promise<never[]>(resolve => { finishTasks = resolve; });
+  const context = {
+    connectionGate: { begin: () => ({ isCurrent: () => true }) },
+    pendingRestores: pending,
+    store: { set() {}, get: () => ({ selectedId: null }) },
+    fetchSessionSnapshot: async () => ({ sessions: rows }),
+    shouldForgetToken: () => false, clearToken() {}, describeError: () => "",
+    storeToken() {}, listTasks: () => tasks,
+    fetchRegisteredProjects: async () => ({ projects: [], error: "" }),
+    errorText: () => "", connectionAttemptMayCommit: () => true,
+    reconcileProject: () => "", loadProjectChoice: () => null,
+    optimisticSessions: { reset() {} }, pickSelection: () => null,
+    applySessions: (_sessions: unknown, evidence: Parameters<PendingRestores["observe"]>[1]) => {
+      pending.observe(rows, evidence);
+    },
+    resolveRoute() {}, clearLoginRoute() {}, startStream() {}, requestResync() {},
+  };
+  const code = ts.transpileModule(
+    `let token = null, connectionGeneration = 0, resolvingRoute = false, pendingRestoreResync = false;\n${connect.getText(ast)}`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } },
+  ).outputText;
+  runInNewContext(code, context);
+  const app = context as typeof context & { connect(candidate: string): Promise<void> };
+
+  const reconnect = app.connect("");
+  await new Promise(resolve => setImmediate(resolve));
+  finishRestore();
+  await restore;
+  assert.equal(pending.has("session"), true, "the in-flight reconnect still owns its restore fence");
+  finishTasks([]);
+  await reconnect;
+  assert.equal(pending.has("session"), true,
+    "a Snapshot issued before success cannot release the ticket when reconnect commits it later");
 });
