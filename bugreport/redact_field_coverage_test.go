@@ -88,6 +88,7 @@ var verbatimInstanceFields = map[string]string{
 
 	"BackendType":  "bounded backend discriminator (\"local\", \"remote\", \"\")",
 	"CurrentAgent": "agent enum name (tmux.SupportedPrograms), not user text",
+	"LimitAgent":   "agent enum name (tmux.SupportedPrograms), constrained on live writes and persisted restore; the account label beside it is redacted",
 
 	"Branch":                 "the username segment collapses via scrub; the branch SUFFIX is deliberately retained — see TestScrubRedactsUsernameEndingInNonWordChar, which asserts \"[user]/fix-login-bug\"",
 	"Worktree.BranchName":    "same branch-name policy as Branch above",
@@ -99,10 +100,12 @@ var verbatimInstanceFields = map[string]string{
 	// report with `systemctl --user list-units 'af-hook-*'` (#3650).
 	"Worktree.HookScopeUnitPrefix": "systemd unit prefix derived from the minted instance id, or a SHA-256 digest of the worktree path — never the path or any user text (#3650)",
 
-	"IdleReason":               "bounded IdleReason enum (#3168)",
-	"LastPromptDeliveryStatus": "bounded PromptDeliveryStatus enum (#3162)",
-	"LifecycleAction":          "bounded LifecycleAction enum (\"archive\"/\"restore\")",
-	"RootRecreateContext":      "bounded RootRecreateContext enum (#2629)",
+	"IdleReason":                               "bounded IdleReason enum (#3168)",
+	"LastPromptDeliveryStatus":                 "bounded PromptDeliveryStatus enum (#3162)",
+	"HandoffDeliveryStatus":                    "bounded PromptDeliveryStatus enum for mission-scoped retry evidence (#4018)",
+	"PendingAccountSwap.MissionDeliveryStatus": "bounded PromptDeliveryStatus enum tied to a pending handoff mission",
+	"LifecycleAction":                          "bounded LifecycleAction enum (\"archive\"/\"restore\")",
+	"RootRecreateContext":                      "bounded RootRecreateContext enum (#2629)",
 
 	"ModelChange.Before": "model identifier reported by the agent, not user text",
 	"ModelChange.After":  "model identifier reported by the agent, not user text",

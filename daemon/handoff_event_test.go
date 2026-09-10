@@ -167,8 +167,7 @@ func TestHandoffSession_UndeliveredMissionStillAnnouncesTheSwap(t *testing.T) {
 // re-Snapshot afterwards.
 func TestResumePendingHandoffs_PublishesSettlement(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	sendErr := errors.New("paste transport failed")
-	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), sendErr: sendErr}
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), deliveryStatus: session.PromptNotDelivered}
 	const title = "handoff-recovered"
 	inst := registerHandoffSubject(t, manager, repoID, repoPath, title, backend)
 
@@ -183,7 +182,7 @@ func TestResumePendingHandoffs_PublishesSettlement(t *testing.T) {
 	id, ch := manager.events.subscribe()
 	defer manager.events.unsubscribe(id)
 
-	backend.setSendErr(nil)
+	backend.setDeliveryStatus(session.PromptDelivered)
 	manager.ResumePendingHandoffs()
 
 	if got := inst.GetInFlightOp(); got != session.OpNone {

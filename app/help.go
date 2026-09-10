@@ -345,7 +345,7 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 			{helpKey(keys.KeySearch), "Search sessions"},
 			{helpKey(keys.KeyArchive), "Archive locally · sandboxes publish work first"},
 			{helpKey(keys.KeyRestore), "Restore · reconnect or recover; absent sandboxes use last push"},
-			{helpKey(keys.KeyLimitRetry), "Resume after a usage limit"},
+			{helpKey(keys.KeyLimitRetry), "Retry a usage limit or inspected handoff"},
 			{navKeys, "Select a session"},
 			{helpKey(keys.KeyEnter), "Type in the pane · all keys go to that pane"},
 			{helpKey(keys.KeyExitInteractive), "Return to navigation"},

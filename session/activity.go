@@ -61,12 +61,28 @@ const (
 // mid-create session as idle — releasing a concurrency slot it should hold, and
 // telling `sessions watch` a session is ready before it ever started.
 func ClassifyActivity(data InstanceData) (Activity, string) {
+	// Storage may carry StartupStateUnknown solely as a rollback fence for an
+	// ambiguous handoff. Current readers understand its mission-scoped evidence
+	// and must classify the real state; an older binary ignores the additive
+	// original field and deliberately remains inert.
+	data = data.RestoreHandoffRollbackFence()
+	data = data.RestoreAccountSwapRollbackFence()
+	data = data.restoreMissingHandoffMissionEvidence()
+	data = data.restoreMissingAccountSwapMissionEvidence()
 	// A committed kill is terminal even while its teardown or an older operation
 	// marker remains visible. UserKilled means finish-this-kill, never resume work;
 	// treating a stale pending mission/op as active would keep watch and task slots
 	// alive for a run that can no longer continue.
 	if data.UserKilled {
 		return ActivityTerminal, "session was killed and its teardown is pending"
+	}
+	// A pending account swap is a durable replacement transaction, including its
+	// preflight/replacement and mission-delivery phases. It must hold the activity
+	// slot until recovery settles it. Storage projects StartupStateUnknown solely
+	// to fence an older binary; RestoreAccountSwapRollbackFence above removes that
+	// compatibility value before this current-reader decision.
+	if data.PendingAccountSwap != nil {
+		return ActivityPending, ""
 	}
 	// A failed create whose runtime identity could not be confirmed is a settled
 	// blocked outcome, not an idle LiveReady session. It wins even over a stale
@@ -230,12 +246,16 @@ func (i *Instance) lifecycleViewLocked() LifecycleView {
 // resolved liveness (NewInstance sets it, FromInstanceData rolls a legacy record
 // forward at load), so ClassifyActivity's LivenessUnset fallback never applies.
 func (v LifecycleView) Activity() Activity {
-	activity, _ := ClassifyActivity(InstanceData{
+	data := InstanceData{
 		Liveness:            v.Liveness,
 		InFlightOp:          v.InFlightOp,
 		UserKilled:          v.UserKilled,
 		StartupStateUnknown: v.StartupStateUnknown,
-	})
+	}
+	if v.PendingAccountSwap {
+		data.PendingAccountSwap = &AccountSwapData{}
+	}
+	activity, _ := ClassifyActivity(data)
 	return activity
 }
 

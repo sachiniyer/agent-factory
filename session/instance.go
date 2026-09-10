@@ -110,7 +110,11 @@ type Instance struct {
 	// carried in the daemon snapshot so the badge survives a restart; PR3's
 	// auto-resume scheduler reads it. Mutex-protected.
 	limitResetAt time.Time
-	// limitAccount attributes the current limit after Account changes; empty means ambient.
+	// limitAgent and limitAccount attribute the current limit after Program or
+	// Account changes. Account labels are scoped to an agent, so neither field
+	// alone identifies the provider identity that produced the wall.
+	limitAgent string
+	// Empty means the agent's ambient identity.
 	limitAccount string
 	// accountLimitObservations keep named identity walls after liveness clears.
 	accountLimitObservations []AccountLimitObservationData
@@ -167,11 +171,10 @@ type Instance struct {
 	// Prompt is the initial prompt to pass to the instance on startup
 	Prompt string
 	// pendingHandoffMission is a rendered takeover brief whose delivery has not
-	// been durably confirmed. It is separate from Prompt: Prompt is the user's
-	// durable goal, while this value includes one handoff's generated context and
-	// must be cleared once that exact delivery lands. Persisting it closes the
-	// daemon-crash window between a runtime swap and readiness.
+	// been durably confirmed. Its status is mission-scoped: session-wide prompt
+	// evidence can be overwritten by unrelated work and cannot authorize replay.
 	pendingHandoffMission string
+	handoffDeliveryStatus PromptDeliveryStatus
 	// inPlace is true when the instance was created with `--here`: on first
 	// start it attaches to the repo's existing working tree at its current
 	// branch (external worktree) instead of creating a fresh worktree+branch.
@@ -277,6 +280,13 @@ type Instance struct {
 	tabRosterGeneration uint64
 	// gitWorktree is the git worktree for the instance.
 	gitWorktree *git.GitWorktree
+	// hookCreatePersistencePending bridges daemon create ownership across local
+	// worktree provisioning. Guarded by mu.
+	hookCreatePersistencePending bool
+	// hookCreatePersistenceWorktree is the worktree whose progress lease was
+	// armed. Teardown may clear gitWorktree before the create transaction settles,
+	// so release must use this captured owner rather than a later lookup.
+	hookCreatePersistenceWorktree *git.GitWorktree
 
 	// agentSrv is the cached per-instance AgentServer (#1592 Phase 2 PR5). Cached
 	// rather than reconstructed per call because its data plane holds stateful
@@ -353,7 +363,7 @@ func (i *Instance) tmuxLocked() *tmux.TmuxSession {
 // lock and work outside it — and that is safe only because the daemon's
 // per-instance op-lock serializes start/teardown against every other mutation.
 // That discipline lives in the daemon, not in this type: prefer the locking
-// accessors (TabTmuxByID, ToInstanceData), and if you read tmux/Conversation off
+// accessors (ToInstanceData), and if you read tmux/Conversation off
 // a snapshot, know that is what you are leaning on.
 func (i *Instance) GetTabs() []*Tab {
 	i.mu.RLock()
@@ -401,31 +411,9 @@ func (i *Instance) tabTmuxTargetAtLocked(idx int) (id string, ts *tmux.TmuxSessi
 	return tab.ID, tab.tmux, true
 }
 
-// TabTmuxByID resolves a tab's stable id (#1738) DIRECTLY to the tmux session it
-// currently backs, under a SINGLE lock acquisition. It is the atomic primitive the
-// id-addressed data plane binds on: resolving an id to an ordinal and then that
-// ordinal to a tmux session takes i.mu twice, and a concurrent close/reorder
-// between the two makes the second lookup land on a DIFFERENT tab — exactly the
-// misroute the stable id exists to prevent (#1779). Resolving both under one lock
-// closes that window.
-//
-// The two return values answer two DIFFERENT questions, and callers must not
-// conflate them:
-//
-//   - exists=false — the id names no tab at all: it was closed, or never minted.
-//     This is the "gone" the id-addressed plane refuses on.
-//   - exists=true, ts=nil — the tab is real but has no local PTY right now: the
-//     instance has not started, or it is a remote runtime with no local tmux. NOT
-//     gone; a caller must not report it as such, since a not-yet-started tab may
-//     still come up and a client should keep addressing it.
-func (i *Instance) TabTmuxByID(id string) (ts *tmux.TmuxSession, exists bool) {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.tabTmuxByIDLocked(id)
-}
-
-// tabTmuxByIDLocked is TabTmuxByID for callers coupling the resolved target to
-// another lock-protected operation. Callers must hold i.mu.
+// tabTmuxByIDLocked resolves a tab's stable id (#1738) to the tmux session it
+// currently backs, for callers coupling the resolved target to another
+// lock-protected operation. Callers must hold i.mu.
 func (i *Instance) tabTmuxByIDLocked(id string) (ts *tmux.TmuxSession, exists bool) {
 	if id == "" {
 		return nil, false
@@ -444,7 +432,7 @@ func (i *Instance) tabTmuxByIDLocked(id string) (ts *tmux.TmuxSession, exists bo
 
 // TabTargetByID resolves a tab's stable id (#1738) DIRECTLY to what the web-tab
 // proxy addresses it by — its kind, and the target URL a TabKindWeb tab stores —
-// under a SINGLE lock acquisition. It is TabTmuxByID's counterpart for the iframe
+// under a SINGLE lock acquisition. It is the tmux resolver's counterpart for the iframe
 // plane, and exists for the same reason: id→ordinal followed by ordinal→tab takes
 // i.mu TWICE, and a concurrent close between the two lands the second lookup on a
 // DIFFERENT tab.
@@ -480,7 +468,7 @@ func (i *Instance) TabTargetByID(id string) (kind TabKind, url string, exists bo
 // client can never make the client's captured position refer to a different tab.
 // An empty id never matches (a legacy/absent id is not addressable by id).
 //
-// Prefer a single-lock primitive (TabTmuxByID, TabTargetByID) where one exists
+// Prefer a single-lock primitive (TabTargetByID) where one exists
 // for what the caller actually needs: an ordinal handed back to a SECOND lookup
 // reopens the close/reorder window this resolution is meant to close.
 func (i *Instance) TabIndexByID(id string) (int, bool) {

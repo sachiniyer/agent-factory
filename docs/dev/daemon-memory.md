@@ -384,13 +384,75 @@ the daemon's books. Because that scope carries no dependency edge to the unit,
 the scope itself survives a daemon restart or auto-upgrade. With
 [#4010](https://github.com/sachiniyer/agent-factory/issues/4010) fixed by
 [PR #4012](https://github.com/sachiniyer/agent-factory/pull/4012), a hook can also
-keep writing output after its runner exits. The survival guarantee is for the
-**entry already in flight**, not the whole list: `runPostWorktreeHooks` runs
-entries sequentially and creates one scope per entry, so a daemon exit mid-list
-means later entries are never spawned; `AdoptRunningHooks` observes the survivor
-but does not rerun the entries that were never spawned.
-[#4014](https://github.com/sachiniyer/agent-factory/issues/4014) tracks resuming
-or reporting an incomplete run.
+keep writing output after its runner exits. The daemon persists the original
+command list and per-entry start/exit receipts alongside the scope identity and
+owning session ID. Receipt paths recorded through another spelling of the same
+AF home are accepted after bounded parent-directory identity checks and rebased
+under the current journal directory; foreign parents and symlinked receipt
+directories are refused. Only that managed session may adopt the journal; external
+`--here` worktrees never adopt or stop another session's hooks.
+On restart it leaves the in-flight entry alone, waits until its scope and any
+pending launcher are gone, verifies registration and the checkout's
+bidirectional `.git` linkage to the owning repository, then resumes the entries
+that never started, in order and each in its own unbound scope with its own
+hooklog file. A branch change or detached HEAD in that verified worktree is
+logged and allowed, since a hook may have changed it. Entries already started are never replayed, including failed entries (the normal runner
+also continues after failure). A launch failure is recorded as a terminal claim
+before advancing, so it cannot become a pending hole on restart. If that claim
+cannot be persisted, the runner stops before launching any later entry. The session reports hooks in flight until the
+remaining list finishes. The snapshot preserves the original commands and
+explicit environment pass-through names across configuration edits; environment
+values come from the restarted daemon. Completed or deliberately cancelled
+lists are not resumed. Restore marks tombstoned and archived sessions' journals
+finished before considering any resume. Safe kill/archive teardown reclaims
+finished journals and receipts after proving all hook writers gone. Cancellation
+during a transient journal read keeps the watcher pending until it can record
+`finished` or prove the journal absent/invalid. The teardown join remains bounded;
+read or terminal-marker failures refuse checkout mutation until storage recovers.
+Publication and standalone pruning use the existing two-second identity-probe
+budget to acquire the journal lock. Startup pruning and publication share one
+acquisition; a timeout reports that another process holds the journal lock and
+the hooks could not start. A busy teardown journal lock schedules eight
+background retries with exponential backoff
+(100 ms to 2 s), using the original journal identity even if archive moves the
+worktree. If retirement was interrupted after renaming the journal, the next
+sweep reclaims that non-resumable artifact even while its owner remains active,
+after the grace, lease, and batched liveness checks. Retired artifacts do not
+consume the completed-history quota. Creation also sweeps completed journals with deleted or archived
+owners: it keeps
+the newest 20 eligible journals for up to 14 days, with a five-second grace
+period. Unpublished receipt directories are removed on publication failure;
+unreferenced directories left by a crash are pruned after the same grace period.
+An undecodable journal conservatively protects unreferenced receipts for that
+pass, with one warning per daemon process; independently valid old journals
+continue to be pruned. The bad journal is left in place so a later pass cannot
+forget its unknown references.
+Transient journal reads (including receipt-directory and completion-marker
+checks), registration checks, or occupant probes are retried with duplicate
+warnings suppressed; hooks remain in flight until storage and verification recover and the
+remaining list finishes. A conclusive missing or replaced checkout leaves the
+journal pending for normal worktree recovery rather than executing commands in
+its replacement. Unresolved relocation recovery blocks adoption without
+finishing the journal, even when the recorded occupant still matches.
+Terminal journals with deleted or archived owners and missing exit receipts
+are reclaimed after the grace period once no scope or launcher remains, even
+if a daemon exit interrupted the retry. Unfinished journals left by a create
+that crashed before persisting its session row are also reclaimed when no row
+owns their session ID, their scope and launcher are absent in both batch checks,
+and the journal and receipt activity are older than the grace period. New
+local runs acquire a file-lock lease before publishing their journal, under the
+publication lock, and hold it until the entire hook runner finishes. Pruning
+never waits for or removes a leased journal, even during a long gap before a
+launch or between entries while the session row is not yet committed. A daemon
+exit releases the lease automatically; scope/launcher checks still protect its
+surviving command. This preserves the create path's existing startup/publication
+and failure-cleanup ordering without a heartbeat or PID-reuse check. Young
+journals, live scopes, and unfinished journals with any stored owner are
+excluded; completed journals with live owners remain protected;
+unreadable session state or scope probes prevent pruning. Scope checks use at
+most two batched probes per sweep, including the final deletion check, so a
+manager outage cannot hold the journal lock for one timeout per candidate. Older runs without a
+progress record or a recorded owning session ID retain survivor observation only.
 
 Both repository-controlled `post_worktree_commands` (`session/git/hooks.go`)
 and operator-controlled `on_archive_command` (`daemon/archive_hook.go`) now use
