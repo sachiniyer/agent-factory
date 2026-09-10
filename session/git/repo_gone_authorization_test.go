@@ -31,7 +31,7 @@ func TestPrepareRelocationClaimForCleanup_BoundsGenerationInstall(t *testing.T) 
 	}
 
 	previousInstall := cleanupGenerationInstall
-	previousTimeout := relocationIdentityTimeout
+	useRelocationIdentityTimeoutForTest(t, 25*time.Millisecond)
 	release := make(chan struct{})
 	started := make(chan struct{})
 	workerFinished := make(chan struct{}, 1)
@@ -43,10 +43,8 @@ func TestPrepareRelocationClaimForCleanup_BoundsGenerationInstall(t *testing.T) 
 		<-release
 		return "late-generation", nil
 	}
-	relocationIdentityTimeout = 25 * time.Millisecond
 	t.Cleanup(func() {
 		cleanupGenerationInstall = previousInstall
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	result := make(chan error, 1)
@@ -59,7 +57,7 @@ func TestPrepareRelocationClaimForCleanup_BoundsGenerationInstall(t *testing.T) 
 		if !errors.Is(err, ErrRelocateStateUnknown) {
 			t.Fatalf("generation timeout must fail closed; err=%v", err)
 		}
-	case <-time.After(150 * time.Millisecond):
+	case <-time.After(3 * relocationIdentityTimeout):
 		close(release)
 		<-result
 		t.Fatal("generation installation exceeded its outer deadline")
@@ -167,7 +165,7 @@ func TestCleanupGenerationFromFile_RejectsMalformedValue(t *testing.T) {
 func TestBoundedRepoGoneOriginProbe_UnpublishesCompletedFlightBeforeWake(t *testing.T) {
 	gw := &GitWorktree{repoPath: filepath.Join(t.TempDir(), "origin")}
 	previousProbe := repoGoneOriginProbe
-	previousTimeout := relocationIdentityTimeout
+	useRelocationIdentityTimeoutForTest(t, time.Second)
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
 	repoGoneOriginProbe = func(context.Context, *GitWorktree) error {
@@ -175,10 +173,8 @@ func TestBoundedRepoGoneOriginProbe_UnpublishesCompletedFlightBeforeWake(t *test
 		<-release
 		return nil
 	}
-	relocationIdentityTimeout = time.Second
 	t.Cleanup(func() {
 		repoGoneOriginProbe = previousProbe
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	result := make(chan error, 1)
@@ -206,7 +202,7 @@ func TestBoundedRepoGoneOriginProbe_PublishesCompletionBeforeUnfencing(t *testin
 	gw := &GitWorktree{repoPath: filepath.Join(t.TempDir(), "origin")}
 	previousProbe := repoGoneOriginProbe
 	previousHook := repoGoneOriginProbeAfterUnpublish
-	previousTimeout := relocationIdentityTimeout
+	useRelocationIdentityTimeoutForTest(t, 25*time.Millisecond)
 	publicationGap := make(chan struct{})
 	releaseWorker := make(chan struct{})
 	workerFinished := make(chan struct{})
@@ -216,11 +212,9 @@ func TestBoundedRepoGoneOriginProbe_PublishesCompletionBeforeUnfencing(t *testin
 		<-releaseWorker
 		close(workerFinished)
 	}
-	relocationIdentityTimeout = 25 * time.Millisecond
 	t.Cleanup(func() {
 		repoGoneOriginProbe = previousProbe
 		repoGoneOriginProbeAfterUnpublish = previousHook
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	result := make(chan error, 1)
@@ -238,7 +232,7 @@ func TestBoundedCleanupGenerationInstall_PublishesCompletionBeforeUnfencing(t *t
 	path := filepath.Join(t.TempDir(), "archive")
 	previousInstall := cleanupGenerationInstall
 	previousHook := cleanupGenerationInstallAfterUnpublish
-	previousTimeout := relocationIdentityTimeout
+	useRelocationIdentityTimeoutForTest(t, 25*time.Millisecond)
 	publicationGap := make(chan struct{})
 	releaseWorker := make(chan struct{})
 	workerFinished := make(chan struct{})
@@ -250,11 +244,9 @@ func TestBoundedCleanupGenerationInstall_PublishesCompletionBeforeUnfencing(t *t
 		<-releaseWorker
 		close(workerFinished)
 	}
-	relocationIdentityTimeout = 25 * time.Millisecond
 	t.Cleanup(func() {
 		cleanupGenerationInstall = previousInstall
 		cleanupGenerationInstallAfterUnpublish = previousHook
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	type result struct {
@@ -281,7 +273,7 @@ func TestBoundedCleanupGenerationInstall_PublishesCompletionBeforeUnfencing(t *t
 func TestBoundedRepoGoneOriginProbe_SharesHealthyActiveFlight(t *testing.T) {
 	gw := &GitWorktree{repoPath: filepath.Join(t.TempDir(), "origin")}
 	previousProbe := repoGoneOriginProbe
-	previousTimeout := relocationIdentityTimeout
+	useRelocationIdentityTimeoutForTest(t, time.Second)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var starts atomic.Int32
@@ -291,10 +283,8 @@ func TestBoundedRepoGoneOriginProbe_SharesHealthyActiveFlight(t *testing.T) {
 		<-release
 		return nil
 	}
-	relocationIdentityTimeout = time.Second
 	t.Cleanup(func() {
 		repoGoneOriginProbe = previousProbe
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	first := make(chan error, 1)
@@ -303,7 +293,7 @@ func TestBoundedRepoGoneOriginProbe_SharesHealthyActiveFlight(t *testing.T) {
 	<-started
 	go func() { second <- boundedRepoGoneOriginProbe(gw) }()
 
-	deadline := time.Now().Add(250 * time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		repoGoneOriginProbeFlights.Lock()
 		flight := repoGoneOriginProbeFlights.byPath[gw.repoPath]

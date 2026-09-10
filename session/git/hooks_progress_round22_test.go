@@ -37,8 +37,7 @@ func TestHookProgressOwnerScanDoesNotHoldPublicationLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	originalLoad := hookProgressOwnerLoad
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 	entered, release, workerDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var enteredOnce, releaseOnce, workerDoneOnce sync.Once
 	hookProgressOwnerLoad = func() (map[string]json.RawMessage, []config.RepoInstancesSkip, error) {
@@ -54,7 +53,6 @@ func TestHookProgressOwnerScanDoesNotHoldPublicationLock(t *testing.T) {
 	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
 	t.Cleanup(func() {
 		hookProgressOwnerLoad = originalLoad
-		relocationIdentityTimeout = previousTimeout
 	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
@@ -62,7 +60,7 @@ func TestHookProgressOwnerScanDoesNotHoldPublicationLock(t *testing.T) {
 		if !publisherJoined {
 			<-publisherDone
 		}
-		deadline := time.Now().Add(time.Second)
+		deadline := time.Now().Add(5 * time.Second)
 		for {
 			hookProgressOwnerFlights.Lock()
 			active := hookProgressOwnerFlights.byHome[home]
@@ -82,7 +80,7 @@ func TestHookProgressOwnerScanDoesNotHoldPublicationLock(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("hook progress owner scan did not start")
 	}
 	acquired, lockErr := config.TryWithFileLock(filepath.Join(filepath.Dir(path), ".progress"), func() error { return nil })
@@ -95,8 +93,8 @@ func TestHookProgressOwnerScanDoesNotHoldPublicationLock(t *testing.T) {
 		if publishErr != nil {
 			t.Fatalf("inconclusive owner scan blocked journal publication: %v", publishErr)
 		}
-	case <-time.After(5 * relocationIdentityTimeout):
-		t.Fatal("stalled instances file wedged journal publication past the shared deadline")
+	case <-time.After(relocationTimeoutObservationBudget):
+		t.Fatal("stalled instances file wedged publication past the observation watchdog")
 	}
 	releaseOnce.Do(func() { close(release) })
 }

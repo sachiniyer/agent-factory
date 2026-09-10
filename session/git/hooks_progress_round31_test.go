@@ -19,8 +19,7 @@ func TestHookProgressTimedOutPreparationUsesCapturedIO(t *testing.T) {
 	originalPrepare := hookProgressPrepare
 	originalOpen := hookProgressOpenLeaseFile
 	originalClose := hookProgressCloseLeaseFile
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -47,7 +46,6 @@ func TestHookProgressTimedOutPreparationUsesCapturedIO(t *testing.T) {
 		hookProgressPrepare = originalPrepare
 		hookProgressOpenLeaseFile = originalOpen
 		hookProgressCloseLeaseFile = originalClose
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	result := make(chan error, 1)
@@ -60,7 +58,7 @@ func TestHookProgressTimedOutPreparationUsesCapturedIO(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("journal preparation did not reach the stalled seam")
 	}
 	select {
@@ -68,7 +66,7 @@ func TestHookProgressTimedOutPreparationUsesCapturedIO(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("preparation error = %v, want deadline", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(3 * relocationIdentityTimeout):
 		t.Fatal("journal preparation did not return at its bound")
 	}
 

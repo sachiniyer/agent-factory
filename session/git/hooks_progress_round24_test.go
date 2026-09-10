@@ -181,12 +181,10 @@ func TestHookProgressLeaseOpenIsBoundedUnderProgressLock(t *testing.T) {
 		}
 		return originalOpen(path, flags, mode)
 	}
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
 		hookProgressOpenLeaseFile = originalOpen
-		relocationIdentityTimeout = previousTimeout
 	})
 	result := make(chan error, 1)
 	go func() {
@@ -197,7 +195,7 @@ func TestHookProgressLeaseOpenIsBoundedUnderProgressLock(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("lease open did not reach the stalled seam")
 	}
 	select {

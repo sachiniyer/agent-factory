@@ -184,15 +184,13 @@ func TestTerminalHookAbandonmentSharesRestoreBudget(t *testing.T) {
 	originalBatchReadFinished := hookProgressBatchReadFinished
 	batchReadFinished := make(chan struct{}, len(candidates))
 	hookProgressBatchReadFinished = func() { batchReadFinished <- struct{}{} }
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 80 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 80*time.Millisecond)
 	// Registered BEFORE the draining cleanup below, so LIFO runs it AFTER.
 	// A t.Fatal in that drain calls runtime.Goexit and skips the rest of
 	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
 	t.Cleanup(func() {
 		hookProgressReadFile = originalRead
 		hookProgressBatchReadFinished = originalBatchReadFinished
-		relocationIdentityTimeout = previousTimeout
 	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
@@ -252,14 +250,12 @@ func TestHookProgressPruneBoundsReceiptMetadata(t *testing.T) {
 		}
 		return originalLstat(path)
 	}
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 60 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 60*time.Millisecond)
 	// Registered BEFORE the draining cleanup below, so LIFO runs it AFTER.
 	// A t.Fatal in that drain calls runtime.Goexit and skips the rest of
 	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
 	t.Cleanup(func() {
 		boundedLstatPath = originalLstat
-		relocationIdentityTimeout = previousTimeout
 	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })

@@ -119,8 +119,7 @@ func TestAdoptRunningHooksSharesOneJournalReadBudget(t *testing.T) {
 		}
 		return originalRead(path)
 	}
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 80 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 80*time.Millisecond)
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
 		for _, candidate := range candidates {
@@ -130,7 +129,6 @@ func TestAdoptRunningHooksSharesOneJournalReadBudget(t *testing.T) {
 			}
 		}
 		hookProgressReadFile = originalRead
-		relocationIdentityTimeout = previousTimeout
 	})
 	worktrees := make([]*GitWorktree, 0, len(candidates))
 	for _, candidate := range candidates {

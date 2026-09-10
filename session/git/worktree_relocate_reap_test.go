@@ -345,9 +345,7 @@ func TestReportRelocationResidue_UnreadableProbeIsNotAssumedClear(t *testing.T) 
 // teardown with its result established and nothing able to finalize it — the
 // exact class #1917 bounded the rest of this path for.
 func TestReportRelocationResidue_BoundsTheProbe(t *testing.T) {
-	prevTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { relocationIdentityTimeout = prevTimeout })
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 
 	dir := t.TempDir()
 	vacated := filepath.Join(dir, "stalled")
