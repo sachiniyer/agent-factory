@@ -430,7 +430,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		return
 	}
 	if inst.Capabilities().Workspace == session.WorkspaceLocalWorktree && inst.GetWorktreePath() != "" {
-		releaseBranch, err := m.reserveLocalRestoreBranch(repoID, inst.Title, inst, false)
+		releaseBranch, err := m.reserveLocalRestoreBranch(repoID, inst.Title, inst, false, inst.GetWorktreePath())
 		if err != nil {
 			m.mu.Lock()
 			st.nextAttempt = time.Now().Add(lostRestoreBackoff(max(st.consecutiveFailures+1, 1)))

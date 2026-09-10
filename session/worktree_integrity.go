@@ -15,6 +15,7 @@ import (
 const (
 	maxConcurrentWorktreeInspections = 4
 	maxNamedWorktreeSiblings         = 5
+	maxWorktreeCohortFailureDetails  = 5
 )
 
 // SessionWorktreeInspection is the read-only integrity result for one live,
@@ -224,6 +225,7 @@ func observeWorktreeCohorts(
 			errs[repoKey] = err
 			continue
 		}
+		var failures boundedWorktreeCohortFailures
 		byPath := make(map[string]sessiongit.WorktreeBranchBinding, len(bindings))
 		for _, binding := range bindings {
 			byPath[pathutil.ResolveForCompare(binding.Path)] = binding
@@ -235,15 +237,41 @@ func observeWorktreeCohorts(
 			binding, ok := byPath[pathutil.ResolveForCompare(rows[index].Worktree.WorktreePath)]
 			switch {
 			case !ok:
-				errs[repoKey] = errors.Join(errs[repoKey], fmt.Errorf("worktree %q is absent from the repository-wide branch snapshot", rows[index].Worktree.WorktreePath))
+				failures.add(fmt.Errorf("worktree %q is absent from the repository-wide branch snapshot", rows[index].Worktree.WorktreePath))
 			case !resolveAmbiguousBranchHead(&inspections[index].Evidence, binding):
-				errs[repoKey] = errors.Join(errs[repoKey], fmt.Errorf("worktree %q changed before repository-wide branch correlation", rows[index].Worktree.WorktreePath))
+				failures.add(fmt.Errorf("worktree %q changed before repository-wide branch correlation", rows[index].Worktree.WorktreePath))
 			case binding.HeadSHA != inspections[index].Evidence.HeadSHA:
-				errs[repoKey] = errors.Join(errs[repoKey], fmt.Errorf("worktree %q changed before repository-wide branch correlation", rows[index].Worktree.WorktreePath))
+				failures.add(fmt.Errorf("worktree %q changed before repository-wide branch correlation", rows[index].Worktree.WorktreePath))
 			}
+		}
+		if err := failures.err(); err != nil {
+			errs[repoKey] = err
 		}
 	}
 	return errs
+}
+
+type boundedWorktreeCohortFailures struct {
+	total   int
+	details []string
+}
+
+func (f *boundedWorktreeCohortFailures) add(err error) {
+	f.total++
+	if len(f.details) < maxWorktreeCohortFailureDetails {
+		f.details = append(f.details, err.Error())
+	}
+}
+
+func (f boundedWorktreeCohortFailures) err() error {
+	if f.total == 0 {
+		return nil
+	}
+	details := append([]string(nil), f.details...)
+	if omitted := f.total - len(details); omitted > 0 {
+		details = append(details, fmt.Sprintf("and %d more worktree correlation failure(s)", omitted))
+	}
+	return errors.New(strings.Join(details, "; "))
 }
 
 func resolveAmbiguousBranchHead(evidence *sessiongit.WorktreeIntegrity, binding sessiongit.WorktreeBranchBinding) bool {

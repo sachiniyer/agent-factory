@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -219,6 +220,53 @@ printf '%%s\n' '# branch.oid %s' "# branch.head $branch"
 		"a clean correlation must be rejected when a peer's Git observation changed after its local probe")
 	require.Error(t, got[1].CorrelationErr,
 		"the common repository snapshot invalidates every result in the correlated cohort")
+}
+
+func TestInspectSessionWorktreesBoundsCohortCorrelationFailures(t *testing.T) {
+	binDir := t.TempDir()
+	repo := t.TempDir()
+	oid := strings.Repeat("1", 40)
+	fakeGit := filepath.Join(binDir, "git")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$3" = "worktree" ]; then
+	printf 'worktree %%s\0HEAD %s\0branch refs/heads/main\0\0' "$2"
+	exit 0
+fi
+if [ "$3" = "log" ]; then
+	printf '%s\n'
+	exit 0
+fi
+if [ "$3" = "status" ]; then
+	printf '# branch.oid %s\n# branch.head main\n'
+	exit 0
+fi
+exit 2
+`, oid, oid, oid)
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o700))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	const extraFailures = 4
+	rows := make([]InstanceData, 0, maxWorktreeCohortFailureDetails+extraFailures)
+	for index := 0; index < cap(rows); index++ {
+		path := filepath.Join(repo, fmt.Sprintf("missing-worktree-%02d", index))
+		require.NoError(t, os.Mkdir(path, 0o755))
+		rows = append(rows, InstanceData{
+			ID: fmt.Sprintf("lane-%02d", index), Title: fmt.Sprintf("lane-%02d", index),
+			Liveness: LiveReady, BackendType: "local",
+			Worktree: GitWorktreeData{RepoPath: repo, WorktreePath: path},
+		})
+	}
+
+	got := InspectSessionWorktrees(rows)
+	require.Len(t, got, len(rows))
+	require.Error(t, got[0].CorrelationErr)
+	detail := got[0].CorrelationErr.Error()
+	for index := 0; index < maxWorktreeCohortFailureDetails; index++ {
+		assert.Contains(t, detail, rows[index].Worktree.WorktreePath)
+	}
+	assert.NotContains(t, detail, rows[len(rows)-1].Worktree.WorktreePath,
+		"one lane's warning must not embed every repository failure")
+	assert.Contains(t, detail, fmt.Sprintf("and %d more", extraFailures))
 }
 
 func TestInspectSessionWorktreesSkipsOnlyPositivelyInapplicableRows(t *testing.T) {

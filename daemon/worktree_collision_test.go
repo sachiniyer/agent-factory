@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -588,7 +589,7 @@ func TestArchivedRestoreAdmissionUsesWorktreeActualBranch(t *testing.T) {
 	live := registerCollisionLane(t, manager, repoID, repoPath, livePath, "live-holder", actualBranch, session.Ready)
 	require.NoError(t, appendInstanceData(repoID, live.ToInstanceData()))
 
-	release, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true)
+	release, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true, archived.GetWorktreePath())
 	if release != nil {
 		release()
 	}
@@ -605,13 +606,54 @@ func TestArchivedRestoreRefusesLiveLaneSharingRetainedWorktree(t *testing.T) {
 	live := registerCollisionLane(t, manager, repoID, repoPath, archived.GetWorktreePath(), "live-here", archived.GetBranch(), session.Ready)
 	require.NoError(t, appendInstanceData(repoID, live.ToInstanceData()))
 
-	release, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true)
+	release, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true, archived.GetWorktreePath())
 	if release != nil {
 		release()
 	}
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), live.Title)
 	assert.Contains(t, err.Error(), archived.GetWorktreePath())
+}
+
+func TestArchivedRestoreIgnoresStaleRelocationAliasForBranchAdmission(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "archived", "stale-alias")
+	selectedPath := archived.GetWorktreePath()
+	selectedBranch := archived.GetBranch()
+	info, err := os.Stat(selectedPath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	staleAlias := t.TempDir()
+	worktree, err := archived.GetGitWorktree()
+	require.NoError(t, err)
+	require.NoError(t, worktree.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryMoveUnknown,
+		AlternatePath: staleAlias,
+		IdentityKnown: true,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+
+	peerPath := t.TempDir()
+	peer := registerCollisionLane(t, manager, repoID, repoPath, peerPath, "live-branch-peer", selectedBranch, session.Ready)
+	require.NoError(t, appendInstanceData(repoID, peer.ToInstanceData()))
+
+	originalBindings := worktreeBranchBindings
+	worktreeBranchBindings = func(string) ([]sessiongit.WorktreeBranchBinding, error) {
+		return []sessiongit.WorktreeBranchBinding{
+			{Path: staleAlias, Branch: "replacement-branch", HeadSHA: strings.Repeat("1", 40)},
+			{Path: selectedPath, Branch: selectedBranch, HeadSHA: strings.Repeat("2", 40)},
+			{Path: peerPath, Branch: selectedBranch, HeadSHA: strings.Repeat("2", 40)},
+		}, nil
+	}
+	t.Cleanup(func() { worktreeBranchBindings = originalBindings })
+
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: archived.Title, RepoID: repoID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), peer.Title,
+		"a stale, replaced alternate must not select the branch used to admit the identity-qualified restore source")
 }
 
 func TestDetachedArchivedRestoreRefusesLiveLaneSharingRetainedWorktree(t *testing.T) {
@@ -622,7 +664,7 @@ func TestDetachedArchivedRestoreRefusesLiveLaneSharingRetainedWorktree(t *testin
 	live := registerCollisionLane(t, manager, repoID, repoPath, archived.GetWorktreePath(), "live-here", "HEAD", session.Ready)
 	require.NoError(t, appendInstanceData(repoID, live.ToInstanceData()))
 
-	release, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true)
+	release, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true, archived.GetWorktreePath())
 	if release != nil {
 		release()
 	}
@@ -640,7 +682,7 @@ func TestDetachedArchivedRestoreHoldsWorktreeAdmission(t *testing.T) {
 		require.NoError(t, err, string(out))
 	}
 
-	releaseFirst, err := manager.reserveLocalRestoreBranch(repoID, first.Title, first, true)
+	releaseFirst, err := manager.reserveLocalRestoreBranch(repoID, first.Title, first, true, first.GetWorktreePath())
 	require.NoError(t, err)
 	released := false
 	t.Cleanup(func() {
@@ -650,7 +692,7 @@ func TestDetachedArchivedRestoreHoldsWorktreeAdmission(t *testing.T) {
 	})
 	done := make(chan error, 1)
 	go func() {
-		release, reserveErr := manager.reserveLocalRestoreBranch(repoID, second.Title, second, true)
+		release, reserveErr := manager.reserveLocalRestoreBranch(repoID, second.Title, second, true, second.GetWorktreePath())
 		if release != nil {
 			release()
 		}
@@ -703,7 +745,7 @@ func TestArchivedRestoreAdmissionSerializesMultiplyBoundPeers(t *testing.T) {
 	out, err := exec.Command("git", "-C", second.GetWorktreePath(), "checkout", "-q", "--ignore-other-worktrees", "-B", branch, branch).CombinedOutput()
 	require.NoError(t, err, string(out))
 
-	releaseFirst, err := manager.reserveLocalRestoreBranch(repoID, first.Title, first, true)
+	releaseFirst, err := manager.reserveLocalRestoreBranch(repoID, first.Title, first, true, first.GetWorktreePath())
 	require.NoError(t, err)
 	releasedFirst := false
 	t.Cleanup(func() {
@@ -718,7 +760,7 @@ func TestArchivedRestoreAdmissionSerializesMultiplyBoundPeers(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		release, reserveErr := manager.reserveLocalRestoreBranch(repoID, second.Title, second, true)
+		release, reserveErr := manager.reserveLocalRestoreBranch(repoID, second.Title, second, true, second.GetWorktreePath())
 		done <- result{release: release, err: reserveErr}
 	}()
 	select {
@@ -748,7 +790,7 @@ func TestArchivedRestoreAdmissionSerializesWithInPlaceCreate(t *testing.T) {
 	out, err := exec.Command("git", "-C", repoPath, "checkout", "-q", "--ignore-other-worktrees", "-B", branch, branch).CombinedOutput()
 	require.NoError(t, err, string(out))
 
-	releaseRestore, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true)
+	releaseRestore, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true, archived.GetWorktreePath())
 	require.NoError(t, err)
 	releasedRestore := false
 	t.Cleanup(func() {

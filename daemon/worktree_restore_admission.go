@@ -22,16 +22,19 @@ import (
 // uses its recorded branch as the candidate Git will bind. The shared
 // per-repository worktree-admission lock is held from the final Git observation
 // through the live transition, so restores and creates cannot both pass while
-// both still look archived or not yet published.
+// both still look archived or not yet published. admissionWorktreePath is the
+// one source this restore will use. An archived caller passes the path selected
+// by its identity-qualified relocation claim; the unselected recovery alternate
+// is deliberately not branch authority.
 func (m *Manager) reserveLocalRestoreBranch(
 	repoID, title string,
 	instance *session.Instance,
 	requireRegistered bool,
-	relocationAliases ...string,
+	admissionWorktreePath string,
 ) (func(), error) {
 	row := instance.ToInstanceData()
 	repoPath := strings.TrimSpace(row.Worktree.RepoPath)
-	worktreePath := strings.TrimSpace(row.Worktree.WorktreePath)
+	worktreePath := strings.TrimSpace(admissionWorktreePath)
 	if repoPath == "" || worktreePath == "" {
 		return nil, fmt.Errorf("cannot restore session %q: its repository or worktree identity is missing, so af cannot verify branch ownership", title)
 	}
@@ -40,7 +43,7 @@ func (m *Manager) reserveLocalRestoreBranch(
 	if err != nil {
 		return nil, fmt.Errorf("cannot restore session %q: could not inspect worktree branch bindings; nothing was moved: %w", title, err)
 	}
-	branch, registered, err := restoreCandidateBranch(row, initial, relocationAliases...)
+	branch, registered, err := restoreCandidateBranch(row, initial, worktreePath)
 	if err != nil {
 		return nil, fmt.Errorf("cannot restore session %q: %w", title, err)
 	}
@@ -55,7 +58,7 @@ func (m *Manager) reserveLocalRestoreBranch(
 		release()
 		return nil, fmt.Errorf("cannot restore session %q: could not revalidate worktree branch bindings; nothing was moved: %w", title, err)
 	}
-	freshBranch, freshRegistered, err := restoreCandidateBranch(row, fresh, relocationAliases...)
+	freshBranch, freshRegistered, err := restoreCandidateBranch(row, fresh, worktreePath)
 	if err != nil || freshBranch != branch || freshRegistered != registered {
 		release()
 		if err != nil {
@@ -72,11 +75,8 @@ func (m *Manager) reserveLocalRestoreBranch(
 	m.mu.Lock()
 	current := m.instances[daemonInstanceKey(repoID, title)]
 	for _, binding := range fresh {
-		matchesRestoreTarget := sameWorktreePath(binding.Path, row.Worktree.WorktreePath)
-		for _, alias := range relocationAliases {
-			matchesRestoreTarget = matchesRestoreTarget || sameWorktreePath(binding.Path, alias)
-		}
-		if (branch == "" && !matchesRestoreTarget) || (branch != "" && binding.Branch != branch) {
+		matchesRestoreTarget := sameWorktreePath(binding.Path, worktreePath)
+		if !matchesRestoreTarget && (branch == "" || binding.Branch != branch) {
 			continue
 		}
 		if lanes := m.liveLanesHoldingWorktreeExceptLocked(repoID, binding.Path, instance, diskData); len(lanes) > 0 {
@@ -145,34 +145,26 @@ func (m *Manager) liveLanesHoldingWorktreeExceptLocked(repoID, holder string, re
 func restoreCandidateBranch(
 	row session.InstanceData,
 	bindings []sessiongit.WorktreeBranchBinding,
-	relocationAliases ...string,
+	worktreePath string,
 ) (branch string, registered bool, err error) {
-	paths := append([]string{row.Worktree.WorktreePath}, relocationAliases...)
 	for _, binding := range bindings {
-		matched := false
-		for _, candidate := range paths {
-			if sameWorktreePath(binding.Path, candidate) {
-				matched = true
-				break
-			}
-		}
-		if matched {
+		if sameWorktreePath(binding.Path, worktreePath) {
 			switch {
 			case binding.HeadSHA == "":
-				return "", true, fmt.Errorf("worktree %s has no observed HEAD, so its active branch is unknown", config.ShellQuotePath(row.Worktree.WorktreePath))
+				return "", true, fmt.Errorf("worktree %s has no observed HEAD, so its active branch is unknown", config.ShellQuotePath(worktreePath))
 			case binding.Branch != "":
 				return binding.Branch, true, nil
 			case binding.Detached:
 				return "", true, nil
 			default:
-				return "", true, fmt.Errorf("worktree %s has neither a branch nor a detached-HEAD marker, so its active branch is unknown", config.ShellQuotePath(row.Worktree.WorktreePath))
+				return "", true, fmt.Errorf("worktree %s has neither a branch nor a detached-HEAD marker, so its active branch is unknown", config.ShellQuotePath(worktreePath))
 			}
 		}
 	}
-	if _, statErr := os.Stat(row.Worktree.WorktreePath); statErr == nil {
-		return "", false, fmt.Errorf("worktree %s exists but is absent from Git's registration, so its active branch is unknown", config.ShellQuotePath(row.Worktree.WorktreePath))
+	if _, statErr := os.Stat(worktreePath); statErr == nil {
+		return "", false, fmt.Errorf("worktree %s exists but is absent from Git's registration, so its active branch is unknown", config.ShellQuotePath(worktreePath))
 	} else if !os.IsNotExist(statErr) {
-		return "", false, fmt.Errorf("worktree %s could not be identified: %w", config.ShellQuotePath(row.Worktree.WorktreePath), statErr)
+		return "", false, fmt.Errorf("worktree %s could not be identified: %w", config.ShellQuotePath(worktreePath), statErr)
 	}
 	branch = strings.TrimSpace(row.Worktree.BranchName)
 	if branch == "" {

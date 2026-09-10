@@ -221,7 +221,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// intentionally after the repo-gone authorization above: cleanup recovery for
 	// a vanished origin must retain its established durable semantics.
 	releaseBranch, err := m.reserveLocalRestoreBranch(
-		repoID, req.Title, instance, true, relocationClaim.Path, relocationClaim.AlternatePath,
+		repoID, req.Title, instance, true, relocationClaim.Path,
 	)
 	if err != nil {
 		return "", err

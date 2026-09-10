@@ -276,7 +276,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// settled, killable row once, at the end, when that is true.
 	fenceRaised = true
 	if instance.Capabilities().Workspace == session.WorkspaceLocalWorktree && instance.GetWorktreePath() != "" {
-		releaseBranch, err := m.reserveLocalRestoreBranch(repoID, title, instance, false)
+		releaseBranch, err := m.reserveLocalRestoreBranch(repoID, title, instance, false, instance.GetWorktreePath())
 		if err != nil {
 			return "", err
 		}
