@@ -349,11 +349,30 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 				return "", err
 			}
 			m.warn().Printf("restore of %q: --force-reap given, replacing its reachable sandbox without pushing; anything it has not pushed is discarded", title)
+			// The sandbox is being replaced: end the push-failure episode so that a
+			// later failure against the new sandbox earns a fresh budget rather than
+			// inheriting the old one's escalation — the same reset the non-forced arm
+			// applies after a successful preserve push.
+			m.resetPreserveBudget(repoID, instance)
+			// A force-replace also ends any in-progress Recover episode: the old
+			// sandbox is gone, so prior Recover failures are stale. Without this
+			// reset, d8e4e08f's give-up assignment (consecutiveFailures =
+			// lostRestoreMaxAttempts) survives the replacement, and the first
+			// Recover failure against the brand-new sandbox counts as attempt
+			// maxAttempts+1 and triggers immediate give-up. The successful-push
+			// arm at line 365 deliberately does NOT clear this — a push-success
+			// is not a replacement, and zeroing consecutiveFailures there would
+			// erase a legitimate Recover-flap count mid-episode.
+			m.resetRecoverBudget(repoID, instance)
 			break
 		}
 		if err := m.preserveSandboxBeforeReap(repoID, key, instance, forceReapSuggestionFor(instance)); err != nil {
 			return "", err
 		}
+		// The push landed: reset the push-failure episode budget so that a later
+		// blip earns a fresh counter rather than inheriting this episode's
+		// escalation — the same reset the automatic probeAnsweredDead path applies.
+		m.resetPreserveBudget(repoID, instance)
 	}
 
 	// Settle predecessor evidence at the exact ConfirmLive edge: late enough that
