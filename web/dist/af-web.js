@@ -6562,12 +6562,14 @@ async function af(method, body, token2) {
   }
   return env?.data;
 }
-async function fetchSnapshot(token2) {
+async function fetchSessionSnapshot(token2) {
   const resp = await af("Snapshot", { repo_id: "" }, token2);
-  return resp.instances ?? [];
-}
-function probeToken(token2) {
-  return fetchSnapshot(token2);
+  return {
+    sessions: resp.instances ?? [],
+    operationLockTimeoutMs: resp.operation_lock_timeout_ms,
+    operationClockMs: resp.operation_clock_ms,
+    daemonBootId: resp.boot_id
+  };
 }
 async function probeAuthRequired() {
   let resp;
@@ -6632,8 +6634,13 @@ async function archiveSession(id, title, token2) {
     throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
 }
-async function restoreSession(id, title, token2) {
-  const result = await af("RestoreSession", { id, title, repo_id: "" }, token2);
+async function restoreSession(id, title, token2, expectedDaemonBootId) {
+  const result = await af("RestoreSession", {
+    id,
+    title,
+    repo_id: "",
+    expected_daemon_boot_id: expectedDaemonBootId
+  }, token2);
   if (result.warning) {
     throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
@@ -11439,13 +11446,42 @@ function confirmModal(opts) {
       body: "Restore the worktree and agent. Sandboxes push work before replacement; restore refuses if preservation is uncertain."
     }
   }[opts.action];
-  const { handle, body } = modalChrome({
-    title: copy.title,
-    confirmLabel: copy.confirmLabel,
+  const { handle, body, confirmBtn } = modalChrome({
+    title: opts.immediateRestore ? `Restore ${opts.sessionTitle}` : copy.title,
+    confirmLabel: opts.immediateRestore ? "Retry restore" : copy.confirmLabel,
     confirmClass: copy.confirmClass,
     onCancel: opts.onCancel
   });
   body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
+  const card = handle.el.firstElementChild;
+  if (opts.immediateRestore) {
+    const progress = h("p", { class: "af-modal-text", role: "status", id: "af-restore-progress" }, "Restoring session\u2026");
+    body.append(progress);
+    card.tabIndex = -1;
+    card.setAttribute("aria-describedby", progress.id);
+    let isBusy = false;
+    card.addEventListener("keydown", (event) => {
+      if (isBusy && event.key === "Tab") {
+        event.preventDefault();
+        event.stopPropagation();
+        card.focus();
+      }
+    });
+    const setBusy = handle.setBusy;
+    handle.setBusy = (busy) => {
+      isBusy = busy;
+      if (busy && card.isConnected) card.focus();
+      setBusy(busy);
+      card.setAttribute("aria-busy", String(busy));
+      progress.textContent = busy ? "Restoring session\u2026" : "";
+      confirmBtn.textContent = busy ? "Restoring\u2026" : "Retry restore";
+    };
+    const setError = handle.setError;
+    handle.setError = (message) => {
+      setError(message);
+      if (message && card.isConnected) confirmBtn.focus();
+    };
+  }
   let acknowledgment;
   if (opts.action === "kill" && opts.isRoot) {
     body.append(h(
@@ -11456,7 +11492,6 @@ function confirmModal(opts) {
     acknowledgment = h("input", { type: "checkbox", class: "af-config-check", required: true });
     body.append(h("label", { class: "af-modal-text" }, acknowledgment, " I understand that deleting this root session interrupts task delivery."));
   }
-  const card = handle.el.firstElementChild;
   asForm(card, () => {
     if (acknowledgment && !acknowledgment.checked) {
       handle.setError("Acknowledge the interruption to root task delivery before deleting this session.");
@@ -13741,6 +13776,236 @@ var SplitView = class {
   }
 };
 
+// src/pending_restores.ts
+var RESTORE_ADMISSION_MARGIN_MS = 1e3;
+var RESTORE_RECONCILE_RETRY_MIN_MS = 2e3;
+var RESTORE_RECONCILE_RETRY_MAX_MS = 1e4;
+var LEGACY_OPERATION_LOCK_TIMEOUT_MS = 3e4;
+var PendingRestores = class {
+  constructor(changed, retainOnError = () => false, committedOnError = () => false, now = () => globalThis.performance.now(), requestReconcile = () => {
+  }, schedule = (callback, delayMs) => {
+    const timer = globalThis.setTimeout(callback, delayMs);
+    if (typeof timer === "object") timer.unref();
+    return timer;
+  }, cancel = (timer) => globalThis.clearTimeout(timer)) {
+    this.changed = changed;
+    this.retainOnError = retainOnError;
+    this.committedOnError = committedOnError;
+    this.now = now;
+    this.requestReconcile = requestReconcile;
+    this.schedule = schedule;
+    this.cancel = cancel;
+  }
+  tickets = /* @__PURE__ */ new Map();
+  snapshotGeneration = 0;
+  rows = null;
+  operationLockTimeoutMs = null;
+  operationClockMs = null;
+  daemonBootId = null;
+  daemonBootGeneration = -1;
+  has(id) {
+    return this.tickets.has(id);
+  }
+  /** Capture the current fence so a later archive response cannot clear its successor. */
+  captureArchiveSuccess(id) {
+    const ticket = this.tickets.get(id);
+    return () => {
+      if (!ticket || this.tickets.get(id) !== ticket || !ticket.settled) return;
+      this.release(id, ticket);
+      this.changed(new Set(this.tickets.keys()));
+    };
+  }
+  /** Resolve after an authoritative Snapshot releases this refusal's fence. */
+  waitForRefusalResync(id) {
+    const ticket = this.tickets.get(id);
+    if (!ticket) return Promise.resolve();
+    return new Promise((resolve) => {
+      ticket.refusalWaiters.push(resolve);
+    });
+  }
+  run(id, request, restoreEligible) {
+    if (this.has(id)) return null;
+    const ticket = {
+      settled: false,
+      uncertain: false,
+      succeededAt: null,
+      refusedAt: null,
+      refusalWaiters: [],
+      uncertainAt: this.snapshotGeneration,
+      uncertainSince: 0,
+      admissionClockStartedAt: null,
+      timer: null,
+      retryDelayMs: RESTORE_RECONCILE_RETRY_MIN_MS,
+      reconcileGeneration: 0,
+      restoreEligible,
+      daemonBootId: this.daemonBootId
+    };
+    this.tickets.set(id, ticket);
+    this.changed(new Set(this.tickets.keys()));
+    return (async () => {
+      try {
+        const result = await request(ticket.daemonBootId);
+        if (this.tickets.get(id) === ticket) {
+          ticket.settled = true;
+          ticket.succeededAt = this.snapshotGeneration;
+          if (this.rows) this.observe(this.rows);
+          if (this.tickets.get(id) === ticket) this.reconcile(id, ticket);
+        }
+        return result;
+      } catch (error) {
+        if (this.tickets.get(id) === ticket) {
+          if (this.retainOnError(error)) {
+            ticket.uncertain = true;
+            ticket.uncertainAt = this.snapshotGeneration;
+            ticket.uncertainSince = this.now();
+            ticket.admissionClockStartedAt = null;
+            ticket.retryDelayMs = RESTORE_RECONCILE_RETRY_MIN_MS;
+            this.armUncertainTimer(id, ticket);
+            if (this.committedOnError(error)) {
+              ticket.settled = true;
+              ticket.succeededAt = this.snapshotGeneration;
+            }
+            if (this.rows) this.observe(this.rows);
+          } else {
+            ticket.refusedAt = this.snapshotGeneration;
+            this.reconcile(id, ticket);
+          }
+        }
+        throw error;
+      }
+    })();
+  }
+  /** Stamp issuance, not arrival: a pre-success Snapshot cannot prove completion. */
+  beginSnapshot() {
+    return ++this.snapshotGeneration;
+  }
+  observe(rows, evidence) {
+    this.rows = rows;
+    if (evidence?.kind === "snapshot") {
+      const daemonBootId = typeof evidence.daemonBootId === "string" && evidence.daemonBootId !== "" ? evidence.daemonBootId : null;
+      if (evidence.generation > this.daemonBootGeneration) {
+        this.daemonBootId = daemonBootId;
+        this.daemonBootGeneration = evidence.generation;
+      }
+      const operationLockTimeoutMs = typeof evidence.operationLockTimeoutMs === "number" && evidence.operationLockTimeoutMs >= 0 ? evidence.operationLockTimeoutMs : LEGACY_OPERATION_LOCK_TIMEOUT_MS;
+      const operationClockMs = typeof evidence.operationClockMs === "number" && Number.isFinite(evidence.operationClockMs) && evidence.operationClockMs >= 0 ? evidence.operationClockMs : null;
+      const clockSupportChanged = this.operationClockMs === null !== (operationClockMs === null);
+      const clockReset = this.operationClockMs !== null && operationClockMs !== null && operationClockMs < this.operationClockMs;
+      if (this.operationLockTimeoutMs !== operationLockTimeoutMs || clockSupportChanged || clockReset) {
+        for (const ticket of this.tickets.values()) {
+          this.cancelTimer(ticket);
+          ticket.admissionClockStartedAt = null;
+        }
+      }
+      this.operationLockTimeoutMs = operationLockTimeoutMs;
+      this.operationClockMs = operationClockMs;
+    }
+    const eligibility = new Map(rows.map((row) => [row.id, row.restoreEligible]));
+    let changed = false;
+    for (const [id, ticket] of this.tickets) {
+      if (this.daemonBootId !== null && ticket.daemonBootId !== null && ticket.daemonBootId !== this.daemonBootId) {
+        this.release(id, ticket);
+        changed = true;
+        continue;
+      }
+      const authoritative = evidence?.kind === "updated" || evidence?.kind === "restored" || evidence?.kind === "snapshot";
+      const observedAfterSuccess = ticket.succeededAt !== null && evidence?.kind === "snapshot" && evidence.generation > ticket.succeededAt;
+      const observedAfterRefusal = ticket.refusedAt !== null && evidence?.kind === "snapshot" && evidence.generation > ticket.refusedAt;
+      const causalUncertainSnapshot = evidence?.kind === "snapshot" && evidence.generation > ticket.uncertainAt;
+      if (causalUncertainSnapshot && this.operationLockTimeoutMs !== null && this.operationClockMs !== null) {
+        if (ticket.admissionClockStartedAt === null || this.operationClockMs < ticket.admissionClockStartedAt) {
+          ticket.admissionClockStartedAt = this.operationClockMs;
+        }
+      }
+      const uncertainCompleted = ticket.uncertain && authoritative && causalUncertainSnapshot && !eligibility.has(id);
+      if (observedAfterRefusal || ticket.settled && (observedAfterSuccess || !eligibility.has(id)) || uncertainCompleted) {
+        this.release(id, ticket);
+        changed = true;
+      }
+    }
+    if (evidence?.kind === "snapshot") {
+      for (const [id, ticket] of this.tickets) this.armTimerForState(id, ticket);
+    }
+    if (changed) this.changed(new Set(this.tickets.keys()));
+  }
+  reset() {
+    for (const [id, ticket] of this.tickets) {
+      this.cancelTimer(ticket);
+      ticket.reconcileGeneration++;
+      ticket.retryDelayMs = RESTORE_RECONCILE_RETRY_MIN_MS;
+      if (ticket.settled) this.tickets.delete(id);
+    }
+    this.rows = null;
+    this.changed(new Set(this.tickets.keys()));
+  }
+  armTimerForState(id, ticket) {
+    if (ticket.uncertain) this.armUncertainTimer(id, ticket);
+    else if (ticket.settled || ticket.refusedAt !== null) this.armRetryTimer(id, ticket);
+  }
+  armUncertainTimer(id, ticket) {
+    if (!ticket.uncertain || ticket.timer !== null || this.operationLockTimeoutMs === null) return;
+    let remaining;
+    if (this.operationClockMs !== null && ticket.admissionClockStartedAt === null) {
+      remaining = 0;
+    } else {
+      remaining = this.operationClockMs === null ? ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS - this.now() : ticket.admissionClockStartedAt + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS - this.operationClockMs;
+      if (remaining <= 0) {
+        this.armRetryTimer(id, ticket);
+        return;
+      }
+    }
+    ticket.timer = this.schedule(() => {
+      ticket.timer = null;
+      if (this.tickets.get(id) !== ticket || !ticket.uncertain) return;
+      this.reconcile(id, ticket);
+    }, Math.max(0, remaining));
+  }
+  armRetryTimer(id, ticket) {
+    if (!this.needsReconcile(ticket) || ticket.timer !== null) return;
+    const delay2 = ticket.retryDelayMs;
+    ticket.retryDelayMs = Math.min(ticket.retryDelayMs * 2, RESTORE_RECONCILE_RETRY_MAX_MS);
+    ticket.timer = this.schedule(() => {
+      ticket.timer = null;
+      if (this.tickets.get(id) !== ticket || !this.needsReconcile(ticket)) return;
+      this.reconcile(id, ticket);
+    }, delay2);
+  }
+  reconcile(id, ticket) {
+    const generation = ++ticket.reconcileGeneration;
+    const finish = () => {
+      if (this.tickets.get(id) !== ticket || ticket.reconcileGeneration !== generation) return;
+      if (!this.needsReconcile(ticket)) return;
+      this.armRetryTimer(id, ticket);
+    };
+    try {
+      const result = this.requestReconcile();
+      if (result && typeof result.then === "function") {
+        void result.then(finish, finish);
+      } else {
+        finish();
+      }
+    } catch {
+      finish();
+    }
+  }
+  needsReconcile(ticket) {
+    return ticket.uncertain || ticket.settled || ticket.refusedAt !== null;
+  }
+  cancelTimer(ticket) {
+    if (ticket.timer === null) return;
+    this.cancel(ticket.timer);
+    ticket.timer = null;
+  }
+  release(id, ticket) {
+    this.cancelTimer(ticket);
+    if (this.tickets.get(id) !== ticket) return;
+    this.tickets.delete(id);
+    const waiters = ticket.refusalWaiters;
+    ticket.refusalWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+};
+
 // src/optimistic.ts
 var OptimisticSessions = class {
   authoritative = [];
@@ -13755,6 +14020,10 @@ var OptimisticSessions = class {
     this.pending.clear();
     this.sessionEvents.clear();
     this.authoritative = sessions;
+  }
+  /** Daemon-owned rows, without pending local mutation feedback. */
+  authoritativeRows() {
+    return this.authoritative;
   }
   /** Captured before fetching, so an older snapshot cannot undo an RPC or event. */
   snapshotFence() {
@@ -15044,6 +15313,9 @@ function isKillableSession(s) {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
 }
 var TAB_PINNED_NOTICE = "Agent tab stays first \xB7 drag to a pane to split";
+function restoreRequiresConfirmation(session) {
+  return session.backend_type !== void 0 && session.backend_type !== "" && session.backend_type !== "local";
+}
 var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
 function isOffBoxWorkspace(s) {
   return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
@@ -15575,6 +15847,7 @@ var AppShell = class {
   // drag carrying the same MIME, which then falls through to the drop's own checks).
   dragFromIndex = null;
   // Last-applied state, for cheap change detection between updates.
+  pendingRestores;
   lastSessions = null;
   lastSelectedId = null;
   lastLive = null;
@@ -15643,6 +15916,8 @@ var AppShell = class {
   }
   /** Applies the latest state, touching only what changed. */
   update(state, prioritizeTerminal = false) {
+    const restoresChanged = this.pendingRestores !== state.pendingRestores;
+    this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
     if (this.lastKb !== kb) {
@@ -15718,7 +15993,7 @@ var AppShell = class {
     this.lastSelectedId = state.selectedId;
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged) {
       if (!this.railPainted && prioritizeTerminal) {
         this.pendingInitialRail = state;
         if (this.initialRailFrame === null) {
@@ -15820,7 +16095,7 @@ var AppShell = class {
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [],
       sessionKey,
-      (s) => JSON.stringify([s, s.id === state.selectedId]),
+      (s) => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true]),
       (s, previous) => {
         const key = sessionKey(s);
         const oldMenu = this.railMenus.get(key);
@@ -15907,6 +16182,7 @@ var AppShell = class {
         }
       });
       this.patchLifecycleButton(lifecycleBtn, lifecycleSession.lifecycle_action, lifecycleSession.title, surface2);
+      lifecycleBtn.disabled = lifecycleSession.lifecycle_action === "restore" && this.pendingRestores?.has(session.id) === true;
       if (surface2 === "rail" && selected) {
         this.lifecycleBtn = lifecycleBtn;
         this.lifecycleAction = lifecycleSession.lifecycle_action;
@@ -16847,7 +17123,8 @@ var AppShell = class {
       managed.title,
       managed.lifecycle_action ?? null,
       managed.can_kill === true,
-      managed.is_root === true
+      managed.is_root === true,
+      this.pendingRestores?.has(managed.id) === true
     ]);
     if (sig !== this.headActionSig) {
       host.replaceChildren(...this.sessionActionButtons(managed, "head"));
@@ -17094,12 +17371,22 @@ var store = new Store({
   statusFilter: loadFilter()
 });
 var token = null;
+var connectionGeneration = 0;
+var pendingRestoreResync = false;
 var stream = null;
 var optimisticSessions = new OptimisticSessions();
+var pendingRestores = new PendingRestores(
+  (ids) => store.set({ pendingRestores: ids }),
+  (e) => isMutationCommittedError(e) || isMutationOutcomeUncertain(e),
+  isMutationCommittedError,
+  () => globalThis.performance.now(),
+  requestPendingRestoreResync
+);
 var connectionGate = createLatestRequestGate();
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var loadCreateAccounts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
 var resyncTimer = null;
+var resyncCompletions = [];
 var sessionEventGeneration = 0;
 var resyncRequestGeneration = 0;
 var taskResyncTimer = null;
@@ -17192,10 +17479,19 @@ function rerender() {
 }
 async function connect(candidate) {
   const attempt = connectionGate.begin();
+  pendingRestores.reset();
+  const restoreSnapshot = pendingRestores.beginSnapshot();
   store.set({ connecting: true, loginError: null, loginCondition: void 0 });
   let sessions;
+  let operationLockTimeoutMs;
+  let operationClockMs;
+  let daemonBootId;
   try {
-    sessions = await probeToken(candidate);
+    const snapshot = await fetchSessionSnapshot(candidate);
+    sessions = snapshot.sessions;
+    operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
+    operationClockMs = snapshot.operationClockMs;
+    daemonBootId = snapshot.daemonBootId;
   } catch (e) {
     if (!attempt.isCurrent()) return;
     if (shouldForgetToken(e)) {
@@ -17215,6 +17511,7 @@ async function connect(candidate) {
   const { projects: registeredProjects, error: projectsError } = projectResult;
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  connectionGeneration++;
   optimisticSessions.reset(sessions);
   resolvingRoute = true;
   store.set({
@@ -17236,10 +17533,21 @@ async function connect(candidate) {
     projectsError,
     registeredProjects
   });
+  applySessions(sessions, {
+    kind: "snapshot",
+    generation: restoreSnapshot,
+    operationLockTimeoutMs,
+    operationClockMs,
+    daemonBootId
+  }, sessions);
   resolvingRoute = false;
   resolveRoute();
   clearLoginRoute();
   startStream(candidate);
+  if (pendingRestoreResync) {
+    pendingRestoreResync = false;
+    requestResync();
+  }
 }
 async function fetchRegisteredProjects(tok) {
   try {
@@ -17252,6 +17560,8 @@ async function fetchRegisteredProjects(tok) {
 function disconnect(loginError = null, authRequired = store.get().authRequired) {
   store.set({ loginCondition: loginError ? "expired" : void 0 });
   connectionGate.invalidate();
+  connectionGeneration++;
+  pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
   closeModal();
@@ -17547,7 +17857,9 @@ function newSession() {
   );
 }
 function openConfirm(action, session, invoker = captureModalInvoker()) {
+  if (action === "restore" && pendingRestores.has(session.id)) return;
   const target = { id: session.id, title: session.title };
+  const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
   const hasRootAcknowledgment = action === "kill" && session.is_root === true;
   const refreshRootConsent = (latest) => {
     if (action === "kill" && latest?.is_root === true && !hasRootAcknowledgment) {
@@ -17564,76 +17876,114 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
     stopModalProjectionWatch = store.subscribe(refresh);
     refresh();
   };
+  const onConfirm = () => {
+    const tok = token;
+    if (tok === null || !modal) {
+      return;
+    }
+    const latest = store.get().sessions.find((s) => s.id === target.id);
+    if (action === "kill" && !latest) {
+      modal.setError("This session is no longer available to delete.");
+      return;
+    }
+    if (refreshRootConsent(latest)) return;
+    if (action === "restore" && pendingRestores.has(target.id)) return;
+    const m = modal;
+    const requestGeneration = action === "restore" ? connectionGeneration : 0;
+    const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
+    const captureArchiveSuccess = action === "archive" ? pendingRestores.captureArchiveSuccess(target.id) : null;
+    if (action !== "restore" && !mutation) return;
+    m.setBusy(true);
+    if (mutation) {
+      closeModal();
+      applySessions(optimisticSessions.project());
+    }
+    const run = action === "kill" ? killSession(target.id, target.title, tok) : action === "archive" ? archiveSession(target.id, target.title, tok) : pendingRestores.run(
+      target.id,
+      (daemonBootId) => restoreSession(
+        target.id,
+        target.title,
+        tok,
+        daemonBootId ?? void 0
+      ),
+      isActionableSession(session) && session.lifecycle_action === "restore"
+    );
+    if (!run) return;
+    void run.then(() => {
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+        return;
+      }
+      if (mutation) {
+        captureArchiveSuccess?.();
+        if (!optimisticSessions.succeed(mutation)) return;
+        applySessions(optimisticSessions.project());
+        requestResync();
+      } else {
+        if (modal === m) closeModal();
+      }
+    }).catch((e) => {
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+        if (token !== null && store.get().phase === "app") requestResync();
+        else pendingRestoreResync = true;
+        return;
+      }
+      if (mutation) {
+        const committed = isMutationCommittedError(e);
+        const outcome = committed ? optimisticSessions.succeed(mutation) ? "confirmed" : "stale" : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
+        if (committed || outcome === "confirmed") captureArchiveSuccess?.();
+        if (outcome === "stale") return;
+        applySessions(optimisticSessions.project());
+        requestResync();
+        if (outcome !== "reverted") {
+          surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`) : e, outcome);
+          return;
+        }
+        m.setBusy(false);
+        m.setError(errorText(e));
+        if (!modal) mountConfirmation(m);
+        else surfaceMutationError(e);
+        return;
+      }
+      if (isMutationCommittedError(e)) {
+        if (modal === m) closeModal();
+        requestResync();
+        surfaceMutationError(e, "confirmed");
+        return;
+      }
+      if (isMutationOutcomeUncertain(e)) {
+        if (modal === m) closeModal();
+        requestResync();
+        surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
+        return;
+      }
+      const showRefusal = () => {
+        m.setBusy(false);
+        m.setError(errorText(e));
+        if (immediateRestore && modal !== m) surfaceMutationError(e);
+      };
+      if (action === "restore") {
+        void pendingRestores.waitForRefusalResync(target.id).then(() => {
+          if (requestGeneration !== connectionGeneration || token !== tok) return;
+          showRefusal();
+        });
+      } else showRefusal();
+    });
+  };
   mountConfirmation(
     confirmModal({
       action,
       sessionTitle: target.title,
+      immediateRestore,
       isRoot: hasRootAcknowledgment,
       archived: isArchived(session),
       offBox: isOffBoxWorkspace(session),
       externalWorktree: session.worktree?.external_worktree === true,
       branchCreatedByUs: session.worktree?.branch_created_by_us === true,
-      onConfirm: () => {
-        const tok = token;
-        if (tok === null || !modal) {
-          return;
-        }
-        const latest = store.get().sessions.find((s) => s.id === target.id);
-        if (action === "kill" && !latest) {
-          modal.setError("This session is no longer available to delete.");
-          return;
-        }
-        if (refreshRootConsent(latest)) return;
-        const m = modal;
-        const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
-        if (action !== "restore" && !mutation) return;
-        m.setBusy(true);
-        if (mutation) {
-          closeModal();
-          applySessions(optimisticSessions.project());
-        }
-        const run = action === "kill" ? killSession(target.id, target.title, tok) : action === "archive" ? archiveSession(target.id, target.title, tok) : restoreSession(target.id, target.title, tok);
-        void run.then(() => {
-          if (mutation) {
-            if (!optimisticSessions.succeed(mutation)) return;
-            applySessions(optimisticSessions.project());
-            requestResync();
-          } else if (modal === m) closeModal();
-        }).catch((e) => {
-          if (mutation) {
-            const outcome = isMutationCommittedError(e) ? optimisticSessions.succeed(mutation) ? "confirmed" : "stale" : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
-            if (outcome === "stale") return;
-            applySessions(optimisticSessions.project());
-            requestResync();
-            if (outcome !== "reverted") {
-              surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`) : e, outcome);
-              return;
-            }
-            m.setBusy(false);
-            m.setError(errorText(e));
-            if (!modal) mountConfirmation(m);
-            else surfaceMutationError(e);
-            return;
-          }
-          if (isMutationCommittedError(e)) {
-            if (modal === m) closeModal();
-            requestResync();
-            surfaceMutationError(e, "confirmed");
-            return;
-          }
-          if (isMutationOutcomeUncertain(e)) {
-            if (modal === m) closeModal();
-            requestResync();
-            surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
-            return;
-          }
-          m.setBusy(false);
-          m.setError(errorText(e));
-        });
-      },
+      onConfirm,
       onCancel: closeModal
     })
   );
+  if (immediateRestore) onConfirm();
 }
 function openDeleteProject(root2, label) {
   openModal(
@@ -17708,11 +18058,25 @@ function openTab(index) {
 }
 function guardedTabRebind(selId, run, resolve, verb) {
   const gen = splitView.layoutGeneration();
-  void run().then((sessions) => {
-    if (sessions === null) return;
+  void run().then((snapshot) => {
+    if (snapshot === null) return;
+    const {
+      sessions,
+      authoritative,
+      generation,
+      operationLockTimeoutMs,
+      operationClockMs,
+      daemonBootId
+    } = snapshot;
     const targetIdx = resolve(sessions);
     const currentGen = splitView.layoutGeneration();
-    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+    applySessions(sessions, {
+      kind: "snapshot",
+      generation,
+      operationLockTimeoutMs,
+      operationClockMs,
+      daemonBootId
+    }, authoritative);
     const pinnedSessionAlive = selId === "" || sessions.some((s) => s.id === selId);
     const outcome = rebindTargetAfterAwait({
       pinnedGen: gen,
@@ -17828,9 +18192,15 @@ function renameSessionTab(id, name, editedSessionId) {
   }
   clearTabError();
   const selId = sel.id ?? "";
-  void renameTab(selId, sel.title, target.name, name, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)).then((sessions) => {
-    if (sessions === null) return;
-    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+  void renameTab(selId, sel.title, target.name, name, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)).then((snapshot) => {
+    if (snapshot === null) return;
+    applySessions(snapshot.sessions, {
+      kind: "snapshot",
+      generation: snapshot.generation,
+      operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+      operationClockMs: snapshot.operationClockMs,
+      daemonBootId: snapshot.daemonBootId
+    }, snapshot.authoritative);
   }).catch((e) => surfaceTabError(e));
 }
 function reorderSessionTab(from, to) {
@@ -17846,9 +18216,15 @@ function reorderSessionTab(from, to) {
   }
   clearTabError();
   const selId = sel.id ?? "";
-  void reorderTab(selId, sel.title, target.name, to, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)).then((sessions) => {
-    if (sessions === null) return;
-    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+  void reorderTab(selId, sel.title, target.name, to, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)).then((snapshot) => {
+    if (snapshot === null) return;
+    applySessions(snapshot.sessions, {
+      kind: "snapshot",
+      generation: snapshot.generation,
+      operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+      operationClockMs: snapshot.operationClockMs,
+      daemonBootId: snapshot.daemonBootId
+    }, snapshot.authoritative);
   }).catch((e) => surfaceTabError(e));
 }
 function surfaceMutationError(error, kind = "failed") {
@@ -18344,6 +18720,7 @@ function stopStream() {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
   }
+  rejectResyncCompletions(new Error("Snapshot resync superseded by disconnect"));
   if (taskResyncTimer !== null) {
     window.clearTimeout(taskResyncTimer);
     taskResyncTimer = null;
@@ -18367,12 +18744,13 @@ function onEvent(ev) {
   }
   sessionEventGeneration += 1;
   const needsResync = optimisticSessions.event(ev);
-  applySessions(optimisticSessions.project());
-  if (needsResync) {
+  const evidence = ev.data?.id ? { kind: ev.type === "session.restored" ? "restored" : "updated", id: ev.data.id } : void 0;
+  applySessions(optimisticSessions.project(), evidence);
+  if (needsResync || ev.type === "session.restored") {
     requestResync();
   }
 }
-function applySessions(sessions) {
+function applySessions(sessions, evidence, authoritative = optimisticSessions.authoritativeRows()) {
   const prevSel = store.get().selectedId;
   const selectedProject = reconcileProject(
     sessions,
@@ -18391,11 +18769,37 @@ function applySessions(sessions) {
   const settled = selectedId === prevSel ? store.get().activeTab : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
+  if (evidence) pendingRestores.observe(authoritative.map((s) => ({
+    id: s.id,
+    restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
+    restoreSettled: isActionableSession(s) && s.lifecycle_action === "archive"
+  })), evidence);
 }
 async function fetchProjectedSnapshot(tok) {
   if (token !== tok) return null;
   try {
-    return await optimisticSessions.refresh(() => fetchSnapshot(tok));
+    let generation = 0;
+    let authoritative = [];
+    let operationLockTimeoutMs;
+    let operationClockMs;
+    let daemonBootId;
+    const sessions = await optimisticSessions.refresh(async () => {
+      generation = pendingRestores.beginSnapshot();
+      const snapshot = await fetchSessionSnapshot(tok);
+      authoritative = snapshot.sessions;
+      operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
+      operationClockMs = snapshot.operationClockMs;
+      daemonBootId = snapshot.daemonBootId;
+      return authoritative;
+    });
+    return sessions === null ? null : {
+      sessions,
+      authoritative,
+      generation,
+      operationLockTimeoutMs,
+      operationClockMs,
+      daemonBootId
+    };
   } catch (error) {
     requestResync();
     throw error;
@@ -18410,11 +18814,14 @@ function requestResync() {
     resyncTimer = null;
     const tok = token;
     if (tok === null) {
+      rejectResyncCompletions(new Error("Snapshot resync lost its connection"));
       return;
     }
     const eventGeneration = sessionEventGeneration;
     const mutationFence = optimisticSessions.snapshotFence();
-    void fetchSnapshot(tok).then((sessions) => {
+    const restoreSnapshot = pendingRestores.beginSnapshot();
+    void fetchSessionSnapshot(tok).then((snapshot) => {
+      const sessions = snapshot.sessions;
       if (requestGeneration !== resyncRequestGeneration || token !== tok) {
         return;
       }
@@ -18426,13 +18833,42 @@ function requestResync() {
         requestResync();
         return;
       }
-      applySessions(optimisticSessions.project());
+      applySessions(optimisticSessions.project(), {
+        kind: "snapshot",
+        generation: restoreSnapshot,
+        operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+        operationClockMs: snapshot.operationClockMs,
+        daemonBootId: snapshot.daemonBootId
+      }, sessions);
       root?.setAttribute("data-af-resync-settled", "");
+      resolveResyncCompletions();
     }).catch((error) => {
       if (requestGeneration !== resyncRequestGeneration || token !== tok) return;
       if (shouldForgetToken(error)) disconnect(describeError(error), true);
+      rejectResyncCompletions(error);
     });
   }, 150);
+}
+function resolveResyncCompletions() {
+  const completions = resyncCompletions;
+  resyncCompletions = [];
+  for (const completion of completions) completion.resolve();
+}
+function rejectResyncCompletions(error) {
+  const completions = resyncCompletions;
+  resyncCompletions = [];
+  for (const completion of completions) completion.reject(error);
+}
+function requestPendingRestoreResync() {
+  if (token === null || store.get().phase !== "app") {
+    pendingRestoreResync = true;
+    return Promise.resolve();
+  }
+  const completion = new Promise((resolve, reject) => {
+    resyncCompletions.push({ resolve, reject });
+  });
+  requestResync();
+  return completion;
 }
 function isNativeControl(el2) {
   if (!el2) {

@@ -92,7 +92,9 @@ func TestHTTP_Snapshot_ReadRoute(t *testing.T) {
 	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 
+	clockBefore := operationClockMilliseconds()
 	rec := doHTTP(&controlServer{manager: m}, http.MethodPost, "/v1/Snapshot", `{"repo_id":""}`)
+	clockAfter := operationClockMilliseconds()
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	env := decodeEnvelope(t, rec)
@@ -100,6 +102,28 @@ func TestHTTP_Snapshot_ReadRoute(t *testing.T) {
 	var resp SnapshotResponse
 	dataInto(t, env, &resp)
 	require.Empty(t, resp.Instances)
+	require.Equal(t, m.lifecycle.snapshot().bootID, resp.BootID,
+		"Snapshot must identify the daemon process that owns in-flight requests")
+	require.Equal(t, opLockTimeout.Milliseconds(), resp.OperationLockTimeoutMS,
+		"the browser must receive the daemon's live admission bound")
+	require.GreaterOrEqual(t, resp.OperationClockMS, clockBefore,
+		"the browser must receive a daemon-monotonic admission reading")
+	require.LessOrEqual(t, resp.OperationClockMS, clockAfter,
+		"the projected clock must be sampled during the Snapshot")
+}
+
+func TestHTTP_RestoreSessionRejectsDifferentDaemonBootIDBeforeAdmission(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	rec := doHTTP(&controlServer{manager: m}, http.MethodPost, "/v1/RestoreSession",
+		`{"id":"session","title":"worker","repo_id":"","expected_daemon_boot_id":"previous-daemon"}`)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	env := decodeEnvelope(t, rec)
+	require.NotNil(t, env.Error)
+	require.Contains(t, env.Error.Message, "daemon process changed before restore admission")
 }
 
 // The fixed browser palettes retired the last consumer of this renderer RPC.
@@ -514,9 +538,33 @@ func TestWriteHTTPEnvelope_SuppressesCanceledBrokenPipe(t *testing.T) {
 	assert.Empty(t, warnings.String())
 }
 
+// maskSnapshotOperationClock preserves every response byte except the volatile
+// monotonic reading independently sampled by each Snapshot call.
+func maskSnapshotOperationClock(t *testing.T, body string) string {
+	t.Helper()
+	const field = `"operation_clock_ms":`
+	start := strings.Index(body, field)
+	require.NotEqual(t, -1, start, "Snapshot envelope must carry its operation clock")
+	numberStart := start + len(field)
+	for numberStart < len(body) && strings.ContainsRune(" \t\r\n", rune(body[numberStart])) {
+		numberStart++
+	}
+	valueEnd := numberStart
+	if valueEnd < len(body) && body[valueEnd] == '-' {
+		valueEnd++
+	}
+	digitStart := valueEnd
+	for valueEnd < len(body) && body[valueEnd] >= '0' && body[valueEnd] <= '9' {
+		valueEnd++
+	}
+	require.Greater(t, valueEnd, digitStart, "Snapshot operation clock must be numeric")
+	return body[:numberStart] + "<operation-clock>" + body[valueEnd:]
+}
+
 // TestHTTP_SuccessBodyUsesSharedEnvelopeWriter pins that the HTTP success body is
 // produced by the SAME apiproto.WriteEnvelope the CLI's --json path uses, so the
-// two surfaces are byte-for-byte identical and can never drift.
+// two surfaces are byte-for-byte identical apart from independently sampled
+// volatile values and can never otherwise drift.
 func TestHTTP_SuccessBodyUsesSharedEnvelopeWriter(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	m, err := NewManager(config.DefaultConfig())
@@ -531,7 +579,8 @@ func TestHTTP_SuccessBodyUsesSharedEnvelopeWriter(t *testing.T) {
 	var want bytes.Buffer
 	require.NoError(t, apiproto.WriteEnvelope(&want, apiproto.Success(resp)))
 
-	require.Equal(t, want.String(), rec.Body.String(),
+	require.Equal(t, maskSnapshotOperationClock(t, want.String()),
+		maskSnapshotOperationClock(t, rec.Body.String()),
 		"HTTP body must be the shared envelope writer's bytes (identical to CLI --json)")
 }
 

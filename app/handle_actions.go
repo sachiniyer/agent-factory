@@ -395,20 +395,21 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 	if selected.IsTearingDown() {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is being deleted", selected.Title))
 	}
+	// OpRestoring is intentionally projected without a lifecycle action, but
+	// the restore verb still explains why a repeated request is fenced.
+	if selected.GetInFlightOp() == session.OpRestoring {
+		return m, m.handleNotice(fmt.Errorf("session '%s' is already being restored", selected.Title))
+	}
 	lifecycleAction := selected.LifecycleAction()
 	if lifecycleAction == session.LifecycleActionNone {
 		return m, nil
 	}
-	title := selected.Title
 	target := captureSessionActionTarget(selected, m.repoID)
 
 	// Only a resting (Archived/Lost/Dead) row can be restored; on a live row `r`
 	// does nothing (archive is on `a`).
 	if lifecycleAction != session.LifecycleActionRestore {
 		return m, nil
-	}
-	if selected.GetInFlightOp() == session.OpRestoring {
-		return m, m.handleNotice(fmt.Errorf("session '%s' is already being restored", title))
 	}
 	_ = selected.Transition(session.MarkRestoring())
 	return m, m.restoreInstanceCmd(target)

@@ -285,9 +285,25 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
  * (never null — an empty daemon yields []); throws ApiError on transport/auth
  * failure so callers share one error path.
  */
-export async function fetchSnapshot(token: string): Promise<SessionData[]> {
+export interface SessionSnapshot {
+  sessions: SessionData[];
+  operationLockTimeoutMs?: number;
+  operationClockMs?: number;
+  daemonBootId?: string;
+}
+
+export async function fetchSessionSnapshot(token: string): Promise<SessionSnapshot> {
   const resp = await af<SnapshotResponse>("Snapshot", { repo_id: "" }, token);
-  return resp.instances ?? [];
+  return {
+    sessions: resp.instances ?? [],
+    operationLockTimeoutMs: resp.operation_lock_timeout_ms,
+    operationClockMs: resp.operation_clock_ms,
+    daemonBootId: resp.boot_id,
+  };
+}
+
+export async function fetchSnapshot(token: string): Promise<SessionData[]> {
+  return (await fetchSessionSnapshot(token)).sessions;
 }
 
 /**
@@ -490,8 +506,15 @@ export async function archiveSession(id: string, title: string, token: string): 
  *  repo_id stays empty because the web is an all-project client; the daemon's
  *  id-first resolver supplies the canonical repo and title. The
  *  session.restored event triggers a rail resync. */
-export async function restoreSession(id: string, title: string, token: string): Promise<void> {
-  const result = await af<{ warning?: string }>("RestoreSession", { id, title, repo_id: "" }, token);
+export async function restoreSession(
+  id: string,
+  title: string,
+  token: string,
+  expectedDaemonBootId?: string,
+): Promise<void> {
+  const result = await af<{ warning?: string }>("RestoreSession", {
+    id, title, repo_id: "", expected_daemon_boot_id: expectedDaemonBootId,
+  }, token);
   if (result.warning) {
     throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
