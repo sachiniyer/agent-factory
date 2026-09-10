@@ -515,6 +515,14 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 			attempts := st.preserveFailureAttempts
 			if attempts >= lostRestoreMaxAttempts {
 				st.nextAttempt = time.Time{}
+				// Mark the Recover budget terminal too. The preserve give-up leaves
+				// st non-nil, so a subsequent manual Recover failure reaches
+				// recordLostRestoreFailure with st != nil and skips the
+				// daemon-restart seeding branch that would otherwise correct
+				// consecutiveFailures. Without this assignment, lostRestoreFailed
+				// restarts at attempt 1 and logs "retrying in …" while
+				// LostRestoreGaveUp is already suppressing every automatic retry.
+				st.consecutiveFailures = lostRestoreMaxAttempts
 				m.mu.Unlock()
 				inst.SetLostRestoreFailure(attempts, err)
 				m.err().Printf("restore of lost session %q (repo %s): giving up after %d preserve-push failures: %v", inst.Title, repoID, attempts, err)
