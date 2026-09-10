@@ -11,7 +11,13 @@ import (
 	"time"
 )
 
-const relocationIdentityTestTimeoutScale = 20
+const (
+	relocationIdentityTestTimeoutScale = 20
+	// This is a test-infrastructure watchdog, not the functional deadline under
+	// test. Keep it independent and generous so a regression reports at the
+	// focused assertion instead of consuming the package-level timeout.
+	relocationTimeoutObservationBudget = 10 * time.Second
+)
 
 // useRelocationIdentityTimeoutForTest preserves a real deadline while giving
 // filesystem and scheduler work enough headroom on a contended runner. The

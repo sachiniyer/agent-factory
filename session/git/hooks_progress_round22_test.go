@@ -87,10 +87,14 @@ func TestHookProgressOwnerScanDoesNotHoldPublicationLock(t *testing.T) {
 	if lockErr != nil || !acquired {
 		t.Fatalf("owner scan retained the publication lock: acquired=%v err=%v", acquired, lockErr)
 	}
-	publishErr := <-publisherDone
-	publisherJoined = true
-	if publishErr != nil {
-		t.Fatalf("inconclusive owner scan blocked journal publication: %v", publishErr)
+	select {
+	case publishErr := <-publisherDone:
+		publisherJoined = true
+		if publishErr != nil {
+			t.Fatalf("inconclusive owner scan blocked journal publication: %v", publishErr)
+		}
+	case <-time.After(relocationTimeoutObservationBudget):
+		t.Fatal("stalled instances file wedged publication past the observation watchdog")
 	}
 	releaseOnce.Do(func() { close(release) })
 }

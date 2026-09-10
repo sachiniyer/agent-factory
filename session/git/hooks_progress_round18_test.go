@@ -187,8 +187,13 @@ func TestHookProgressPreviousJournalReadDoesNotWedgePublicationLock(t *testing.T
 	case <-time.After(5 * time.Second):
 		t.Fatal("previous journal read did not reach the storage seam")
 	}
-	if err := <-result; err != nil {
-		t.Fatalf("bounded optional read prevented publication: %v", err)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("bounded optional read prevented publication: %v", err)
+		}
+	case <-time.After(relocationTimeoutObservationBudget):
+		t.Fatal("stalled previous-journal read wedged publication past the observation watchdog")
 	}
 	releaseOnce.Do(func() { close(release) })
 	waitForBoundedReadFlightToDrain(t, path)
