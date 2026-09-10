@@ -116,6 +116,28 @@ func TestReserveCreateInPlaceRefusesActualBranchHeldByLiveLane(t *testing.T) {
 		"an in-place admission must not derive its branch from the requested title")
 }
 
+func TestReserveCreateInPlaceRefusesDetachedWorktreeOwnedByLiveLane(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	out, err := exec.Command("git", "-C", repoPath, "checkout", "-q", "--detach").CombinedOutput()
+	require.NoError(t, err, string(out))
+	live := registerCollisionLane(t, manager, repoID, repoPath, repoPath, "live-detached", "HEAD", session.Ready)
+	require.NoError(t, appendInstanceData(repoID, live.ToInstanceData()))
+
+	_, _, release, renamed, err := manager.reserveCreate(CreateSessionRequest{
+		RepoPath: repoPath,
+		Title:    "incoming-detached",
+		Program:  "claude",
+		InPlace:  true,
+	})
+	if release != nil {
+		release()
+	}
+	require.Error(t, err, "--here must refuse a second live lane even when the shared target is detached")
+	assert.Nil(t, renamed)
+	assert.Contains(t, err.Error(), live.Title)
+	assert.Contains(t, err.Error(), "detached HEAD")
+}
+
 func TestConcurrentInPlaceCreatesReserveBranchAdmission(t *testing.T) {
 	manager, _, _ := newStatusTestManager(t)
 	parent, _, firstPath := setupBareCloneWorktree3358(t)
@@ -590,6 +612,58 @@ func TestArchivedRestoreRefusesLiveLaneSharingRetainedWorktree(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), live.Title)
 	assert.Contains(t, err.Error(), archived.GetWorktreePath())
+}
+
+func TestDetachedArchivedRestoreRefusesLiveLaneSharingRetainedWorktree(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "archived", "detached-shared-target")
+	out, err := exec.Command("git", "-C", archived.GetWorktreePath(), "checkout", "-q", "--detach").CombinedOutput()
+	require.NoError(t, err, string(out))
+	live := registerCollisionLane(t, manager, repoID, repoPath, archived.GetWorktreePath(), "live-here", "HEAD", session.Ready)
+	require.NoError(t, appendInstanceData(repoID, live.ToInstanceData()))
+
+	release, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true)
+	if release != nil {
+		release()
+	}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), live.Title)
+	assert.Contains(t, err.Error(), "detached HEAD")
+}
+
+func TestDetachedArchivedRestoreHoldsWorktreeAdmission(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	first, _ := seedArchivedSession(t, manager, repoID, repoPath, "first", "detached-first")
+	second, _ := seedArchivedSession(t, manager, repoID, repoPath, "second", "detached-second")
+	for _, instance := range []*session.Instance{first, second} {
+		out, err := exec.Command("git", "-C", instance.GetWorktreePath(), "checkout", "-q", "--detach").CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+
+	releaseFirst, err := manager.reserveLocalRestoreBranch(repoID, first.Title, first, true)
+	require.NoError(t, err)
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			releaseFirst()
+		}
+	})
+	done := make(chan error, 1)
+	go func() {
+		release, reserveErr := manager.reserveLocalRestoreBranch(repoID, second.Title, second, true)
+		if release != nil {
+			release()
+		}
+		done <- reserveErr
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("detached restore did not hold shared worktree admission: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseFirst()
+	released = true
+	require.NoError(t, <-done)
 }
 
 func TestLostRecoveryRefusesLiveBranchPeer(t *testing.T) {
