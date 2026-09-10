@@ -413,3 +413,45 @@ func TestAccessTokenFromQuery(t *testing.T) {
 		t.Errorf("AccessTokenFromQuery(empty) = %q, want empty", got)
 	}
 }
+
+// TestRedactAccessTokenURLLeavesUnmatchedOpaqueEncoded is the #4161 secondary
+// half: url.URL.String prints Opaque verbatim and there is no RawOpaque to
+// re-escape from, so writing the DECODED opaque back unconditionally rewrote
+// every opaque URL that carried no credential at all.
+func TestRedactAccessTokenURLLeavesUnmatchedOpaqueEncoded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"encoded at-sign survives", "mailto:user%40host.example"},
+		{"encoded slash and space survive", "af:a%2Fb%20c"},
+		{"unencoded opaque untouched", "mailto:plain@host.example"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RedactAccessTokenURL(tc.raw); got != tc.raw {
+				t.Errorf("RedactAccessTokenURL(%q) = %q, want it returned unchanged: "+
+					"no credential matched, so the opaque must keep its original escaping", tc.raw, got)
+			}
+		})
+	}
+}
+
+// TestRedactAccessTokenURLStillRedactsOpaque pins that the fidelity fix above
+// did not cost the redaction it guards.
+func TestRedactAccessTokenURLStillRedactsOpaque(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"percent-encoded key", "mailto:%61ccess_token=component-sekrit"},
+		{"literal key", "mailto:access_token=component-sekrit"},
+		{"malformed escape redacts whole field", "mailto:%zz-component-sekrit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactAccessTokenURL(tc.raw)
+			if strings.Contains(got, "sekrit") {
+				t.Errorf("RedactAccessTokenURL(%q) = %q, must not contain the secret", tc.raw, got)
+			}
+		})
+	}
+}
