@@ -581,3 +581,67 @@ func TestLoginJoinsAPaneThisSupervisorDidNotSpawn(t *testing.T) {
 		t.Fatal("the adopted pane survived the successor's shutdown")
 	}
 }
+
+// TestLoginDoesNotAdoptAnotherHomesPane is the cross-home half of the
+// daemon-restart case above. The login-pane name is derived from {agent, name}
+// and carries no home component, and two agent-factory homes for one OS user
+// share one tmux server, so two homes with the same {agent, name} target one tmux
+// session name. Home B's Start must NOT adopt home A's in-flight pane: reusing it
+// would silently no-op home B's login (the foreign flow keeps writing to home A's
+// account dir) while reporting Reused, and home B's Stop/Reap could then kill a
+// pane it does not own — the cross-home hazard CleanupSessions is hardened
+// against at session/tmux/cleanup.go:658-702. adopt verifies the pane's AF_HOME
+// marker names THIS home before reusing it, so a foreign pane is left alone and
+// home B falls through to its own flow (here failing: the home-blind name is
+// already taken by home A, so it reports a failure rather than a silent reuse).
+func TestLoginDoesNotAdoptAnotherHomesPane(t *testing.T) {
+	testguard.IsolateTmux(t)
+	homeA := testguard.SocketTempDir(t)
+	homeB := testguard.SocketTempDir(t)
+	binDir := t.TempDir()
+	writeBlockingAgentFixture(t, binDir, "codex")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Home A starts and holds an in-flight login pane on the shared tmux server.
+	// The AF_HOME marker it stamps is homeA, resolved from the env at spawn time.
+	t.Setenv("AGENT_FACTORY_HOME", homeA)
+	abandoned := New()
+	t.Cleanup(abandoned.Stop)
+	homeAFirst, err := abandoned.Start(context.Background(), Request{Home: homeA, Agent: "codex", Name: "work"})
+	if err != nil {
+		t.Fatalf("start home A's login pane: %v", err)
+	}
+	if homeAFirst.Reused {
+		t.Fatal("home A's first login reported it reused a pane")
+	}
+
+	// Home B is a DIFFERENT agent-factory home on the SAME tmux server, asking
+	// for the same {agent, name}. adopt must refuse home A's pane rather than
+	// reuse it; the home-blind name is already taken, so home B's own Start then
+	// fails instead of silently reporting Reused against the foreign flow.
+	t.Setenv("AGENT_FACTORY_HOME", homeB)
+	successor := New()
+	t.Cleanup(successor.Stop)
+	homeBSecond, err := successor.Start(context.Background(), Request{Home: homeB, Agent: "codex", Name: "work"})
+	if err == nil {
+		t.Fatal("home B adopted home A's pane instead of refusing it; got a successful login against another home's flow")
+	}
+	if homeBSecond.Reused {
+		t.Fatal("home B reported it reused home A's login pane")
+	}
+
+	// Harm (a): home A's pane must still be live and untouched — home B neither
+	// adopted it into its own supervisor nor killed it.
+	if !abandoned.Live("codex", "work") {
+		t.Fatal("home A's login pane is not live after home B's start")
+	}
+
+	// Harm (b): home B's shutdown must not kill home A's pane. Before the fix
+	// adopt had recorded home A's pane into home B's supervisor map, so Stop
+	// would kill-session it; with the marker check, home B's map is empty and its
+	// Stop touches nothing.
+	successor.Stop()
+	if !abandoned.Live("codex", "work") {
+		t.Fatal("home B's Stop killed home A's login pane — a pane home B never owned")
+	}
+}
