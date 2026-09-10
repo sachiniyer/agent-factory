@@ -604,7 +604,7 @@ export function deletionConfirmationBody(opts: DeletionWorkspace): string {
 /** A session-lifecycle confirm modal (kill, archive, or restore). Kill is
  *  destructive; archive/restore are the reversible pair (#1932). */
 export function confirmModal(
-  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; isRoot?: boolean; archived: boolean; offBox: boolean; externalWorktree: boolean; branchCreatedByUs: boolean; onConfirm: () => void; onCancel: () => void },
+  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; immediateRestore?: boolean; isRoot?: boolean; archived: boolean; offBox: boolean; externalWorktree: boolean; branchCreatedByUs: boolean; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
   // Restore is the reverse of archive (#1932): non-destructive, so it reads as a
   // primary (not danger) confirm, mirroring archive's own class. The web routes it
@@ -632,14 +632,46 @@ export function confirmModal(
     },
   }[opts.action];
 
-  const { handle, body } = modalChrome({
-    title: copy.title,
-    confirmLabel: copy.confirmLabel,
+  const { handle, body, confirmBtn } = modalChrome({
+    title: opts.immediateRestore ? `Restore ${opts.sessionTitle}` : copy.title,
+    confirmLabel: opts.immediateRestore ? "Retry restore" : copy.confirmLabel,
     confirmClass: copy.confirmClass,
     onCancel: opts.onCancel,
   });
 
   body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
+  const card = handle.el.firstElementChild as HTMLElement;
+  if (opts.immediateRestore) {
+    // Mount directly in progress state; the action is already authorized by the
+    // Restore gesture. A refused attempt keeps the existing inline retry surface.
+    const progress = h("p", { class: "af-modal-text", role: "status", id: "af-restore-progress" }, "Restoring session…");
+    body.append(progress);
+    card.tabIndex = -1;
+    card.setAttribute("aria-describedby", progress.id);
+    let isBusy = false;
+    card.addEventListener("keydown", event => {
+      if (isBusy && event.key === "Tab") {
+        event.preventDefault();
+        event.stopPropagation();
+        card.focus();
+      }
+    });
+    const setBusy = handle.setBusy;
+    handle.setBusy = (busy) => {
+      isBusy = busy;
+      // Move off a retry control before disabling it, including subsequent attempts.
+      if (busy && card.isConnected) card.focus();
+      setBusy(busy);
+      card.setAttribute("aria-busy", String(busy));
+      progress.textContent = busy ? "Restoring session…" : "";
+      confirmBtn.textContent = busy ? "Restoring…" : "Retry restore";
+    };
+    const setError = handle.setError;
+    handle.setError = (message) => {
+      setError(message);
+      if (message && card.isConnected) confirmBtn.focus();
+    };
+  }
 
   let acknowledgment: HTMLInputElement | undefined;
   if (opts.action === "kill" && opts.isRoot) {
@@ -648,8 +680,6 @@ export function confirmModal(
     acknowledgment = h("input", { type: "checkbox", class: "af-config-check", required: true });
     body.append(h("label", { class: "af-modal-text" }, acknowledgment, " I understand that deleting this root session interrupts task delivery."));
   }
-
-  const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {
     if (acknowledgment && !acknowledgment.checked) {
       handle.setError("Acknowledge the interruption to root task delivery before deleting this session.");

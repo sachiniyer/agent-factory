@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 
 import {
   canManageTabs,
+  restoreRequiresConfirmation,
   documentTitle,
   refreshIdleReasonAges,
   retryActionForSession,
@@ -491,4 +492,13 @@ test("the tab-bar sig changes when WHICH kind is creatable changes (#3060)", () 
     "premise: creation is available in both, so the reason cannot distinguish them",
   );
   assert.notEqual(tabBarSig(shellOnly), tabBarSig(vscodeOnly), "the bar must rebuild when the menu's kinds change");
+});
+
+test("restore skips confirmation only for known local backends (#4017)", () => {
+  for (const backend_type of [undefined, "", "local"]) {
+    assert.equal(restoreRequiresConfirmation(sess({ backend_type })), false);
+  }
+  for (const backend_type of ["docker", "ssh", "sandbox", "remote", "future-backend"]) {
+    assert.equal(restoreRequiresConfirmation(sess({ backend_type })), true);
+  }
 });

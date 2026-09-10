@@ -29,7 +29,7 @@ import {
   deleteProject,
   registerProject,
   errorText,
-  fetchSnapshot,
+  fetchSessionSnapshot,
   killSession,
   getConfig,
   isMutationCommittedError,
@@ -48,7 +48,6 @@ import {
   startAccountLogin,
   loadToken,
   probeAuthRequired,
-  probeToken,
   removeTask,
   renameTab,
   reorderTab,
@@ -91,6 +90,7 @@ import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
+import { PendingRestores, type RestoreEvidence } from "./pending_restores.js";
 import { CreateSelectionIntent, OptimisticSessions } from "./optimistic.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
@@ -114,6 +114,7 @@ import {
   renderLogin,
   sessionTabs,
   canManageTabs,
+  restoreRequiresConfirmation,
   isOffBoxWorkspace,
   canMutateTabRoster,
   canCreateTabKind,
@@ -184,8 +185,17 @@ const store = new Store<AppState>({
 // `token === null`, never `!token`, or a tokenless client's create/kill/archive/
 // restore/retry/attach would be silently skipped because `!"" === true`.
 let token: string | null = null;
+let connectionGeneration = 0;
+let pendingRestoreResync = false;
 let stream: EventStream | null = null;
 const optimisticSessions = new OptimisticSessions();
+const pendingRestores = new PendingRestores(
+  ids => store.set({ pendingRestores: ids }),
+  e => isMutationCommittedError(e) || isMutationOutcomeUncertain(e),
+  isMutationCommittedError,
+  () => globalThis.performance.now(),
+  requestPendingRestoreResync,
+);
 const connectionGate = createLatestRequestGate();
 
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
@@ -207,6 +217,7 @@ const loadCreateAccounts = (repoPath: string): Promise<AccountsResponse> =>
 // Debounces the re-Snapshot that archived/restored events and reconnects trigger,
 // so a burst of events collapses into a single authoritative refetch.
 let resyncTimer: number | null = null;
+let resyncCompletions: Array<{ resolve: () => void; reject: (error: unknown) => void }> = [];
 // Snapshot and events are two asynchronous projections of the same session state.
 // Fence them independently so a Snapshot requested before a session event cannot
 // resolve afterwards and rewind the event's newer roster (#2330).
@@ -369,10 +380,19 @@ function rerender(): void {
  *  token only when the daemon REJECTED it (shouldForgetToken). */
 async function connect(candidate: string): Promise<void> {
   const attempt = connectionGate.begin();
+  pendingRestores.reset();
+  const restoreSnapshot = pendingRestores.beginSnapshot();
   store.set({ connecting: true, loginError: null, loginCondition: undefined });
   let sessions: SessionData[];
+  let operationLockTimeoutMs: number | undefined;
+  let operationClockMs: number | undefined;
+  let daemonBootId: string | undefined;
   try {
-    sessions = await probeToken(candidate);
+    const snapshot = await fetchSessionSnapshot(candidate);
+    sessions = snapshot.sessions;
+    operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
+    operationClockMs = snapshot.operationClockMs;
+    daemonBootId = snapshot.daemonBootId;
   } catch (e) {
     if (!attempt.isCurrent()) return;
     // A rejected credential is forgotten so the next load prompts cleanly instead of
@@ -409,6 +429,7 @@ async function connect(candidate: string): Promise<void> {
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  connectionGeneration++;
   optimisticSessions.reset(sessions);
   resolvingRoute = true;
   store.set({
@@ -430,10 +451,18 @@ async function connect(candidate: string): Promise<void> {
     projectsError,
     registeredProjects,
   });
+  applySessions(sessions, {
+    kind: "snapshot", generation: restoreSnapshot,
+    operationLockTimeoutMs, operationClockMs, daemonBootId,
+  }, sessions);
   resolvingRoute = false;
   resolveRoute();
   clearLoginRoute();
   startStream(candidate);
+  if (pendingRestoreResync) {
+    pendingRestoreResync = false;
+    requestResync();
+  }
 }
 
 /** Fetches the daemon's registered-project roots for the #2456 union, degrading to
@@ -457,6 +486,8 @@ async function fetchRegisteredProjects(tok: string): Promise<{ projects: string[
 function disconnect(loginError: string | null = null, authRequired = store.get().authRequired): void {
   store.set({ loginCondition: loginError ? "expired" : undefined });
   connectionGate.invalidate();
+  connectionGeneration++;
+  pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
   closeModal();
@@ -909,7 +940,9 @@ function openConfirm(
   action: "kill" | "archive" | "restore", session: ActionableSession | KillableSession,
   invoker: ModalInvoker = captureModalInvoker(),
 ): void {
+  if (action === "restore" && pendingRestores.has(session.id)) return;
   const target = { id: session.id, title: session.title };
+  const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
   const hasRootAcknowledgment = action === "kill" && session.is_root === true;
   const refreshRootConsent = (latest: SessionData | undefined): boolean => {
     // Consent may get stronger while this dialog is open, never weaker. Keeping
@@ -928,89 +961,133 @@ function openConfirm(
     stopModalProjectionWatch = store.subscribe(refresh);
     refresh();
   };
+  const onConfirm = () => {
+    const tok = token;
+    // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+    if (tok === null || !modal) {
+      return;
+    }
+    const latest = store.get().sessions.find(s => s.id === target.id);
+    if (action === "kill" && !latest) {
+      modal.setError("This session is no longer available to delete.");
+      return;
+    }
+    // A queued submit can still come from a replaced generic form. Re-read
+    // the projection at the point of mutation even though the watch refreshes
+    // the visible dialog as soon as the root identity changes.
+    if (refreshRootConsent(latest)) return;
+    if (action === "restore" && pendingRestores.has(target.id)) return;
+    const m = modal;
+    const requestGeneration = action === "restore" ? connectionGeneration : 0;
+    const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
+    const captureArchiveSuccess = action === "archive"
+      ? pendingRestores.captureArchiveSuccess(target.id) : null;
+    if (action !== "restore" && !mutation) return;
+    m.setBusy(true);
+    if (mutation) {
+      closeModal();
+      applySessions(optimisticSessions.project());
+    }
+    const run =
+      action === "kill"
+        ? killSession(target.id, target.title, tok)
+        : action === "archive"
+          ? archiveSession(target.id, target.title, tok)
+          : pendingRestores.run(target.id, daemonBootId => restoreSession(
+            target.id, target.title, tok, daemonBootId ?? undefined,
+          ),
+            isActionableSession(session) && session.lifecycle_action === "restore");
+    if (!run) return;
+    void run.then(() => {
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+        // PendingRestores owns the reconnect-aware confirming Snapshot. Suppress
+        // only the old connection's modal work here.
+        return;
+      }
+      if (mutation) {
+        captureArchiveSuccess?.();
+        if (!optimisticSessions.succeed(mutation)) return;
+        applySessions(optimisticSessions.project());
+        requestResync();
+      } else {
+        if (modal === m) closeModal();
+        // PendingRestores starts and awaits the confirming Snapshot before it
+        // schedules another reconciliation attempt.
+      }
+    }).catch((e) => {
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+        // The request survived reconnect; refresh the current connection without
+        // publishing the old connection's modal or error into it.
+        if (token !== null && store.get().phase === "app") requestResync();
+        else pendingRestoreResync = true;
+        return;
+      }
+      if (mutation) {
+        const committed = isMutationCommittedError(e);
+        const outcome = committed
+          ? (optimisticSessions.succeed(mutation) ? "confirmed" : "stale")
+          : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
+        if (committed || outcome === "confirmed") captureArchiveSuccess?.();
+        if (outcome === "stale") return;
+        applySessions(optimisticSessions.project());
+        requestResync();
+        if (outcome !== "reverted") {
+          surfaceMutationError(outcome === "uncertain"
+            ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`)
+            : e, outcome);
+          return;
+        }
+        m.setBusy(false);
+        m.setError(errorText(e));
+        if (!modal) mountConfirmation(m);
+        else surfaceMutationError(e);
+        return;
+      }
+      if (isMutationCommittedError(e)) {
+        if (modal === m) closeModal();
+        requestResync();
+        surfaceMutationError(e, "confirmed");
+        return;
+      }
+      if (isMutationOutcomeUncertain(e)) {
+        if (modal === m) closeModal();
+        requestResync();
+        surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
+        return;
+      }
+      const showRefusal = () => {
+        m.setBusy(false);
+        m.setError(errorText(e));
+        if (immediateRestore && modal !== m) surfaceMutationError(e);
+      };
+      // A definitive guarded refusal may come from a replacement daemon. Keep
+      // every restore entry point fenced until an accepted Snapshot refreshes
+      // the boot id used by the request. Failed probes retry through the ledger's
+      // reconciliation backoff. The UI still belongs to the same connection only
+      // if both ownership guards survive that wait.
+      if (action === "restore") {
+        void pendingRestores.waitForRefusalResync(target.id).then(() => {
+          if (requestGeneration !== connectionGeneration || token !== tok) return;
+          showRefusal();
+        });
+      } else showRefusal();
+    });
+  };
   mountConfirmation(
     confirmModal({
       action,
       sessionTitle: target.title,
+      immediateRestore,
       isRoot: hasRootAcknowledgment,
       archived: isArchived(session),
       offBox: isOffBoxWorkspace(session),
       externalWorktree: session.worktree?.external_worktree === true,
       branchCreatedByUs: session.worktree?.branch_created_by_us === true,
-      onConfirm: () => {
-        const tok = token;
-        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
-        if (tok === null || !modal) {
-          return;
-        }
-        const latest = store.get().sessions.find(s => s.id === target.id);
-        if (action === "kill" && !latest) {
-          modal.setError("This session is no longer available to delete.");
-          return;
-        }
-        // A queued submit can still come from a replaced generic form. Re-read
-        // the projection at the point of mutation even though the watch refreshes
-        // the visible dialog as soon as the root identity changes.
-        if (refreshRootConsent(latest)) return;
-        const m = modal;
-        const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
-        if (action !== "restore" && !mutation) return;
-        m.setBusy(true);
-        if (mutation) {
-          closeModal();
-          applySessions(optimisticSessions.project());
-        }
-        const run =
-          action === "kill"
-            ? killSession(target.id, target.title, tok)
-            : action === "archive"
-              ? archiveSession(target.id, target.title, tok)
-              : restoreSession(target.id, target.title, tok);
-        void run.then(() => {
-          if (mutation) {
-            if (!optimisticSessions.succeed(mutation)) return;
-            applySessions(optimisticSessions.project());
-            requestResync();
-          } else if (modal === m) closeModal();
-        }).catch((e) => {
-          if (mutation) {
-            const outcome = isMutationCommittedError(e)
-              ? (optimisticSessions.succeed(mutation) ? "confirmed" : "stale")
-              : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
-            if (outcome === "stale") return;
-            applySessions(optimisticSessions.project());
-            requestResync();
-            if (outcome !== "reverted") {
-              surfaceMutationError(outcome === "uncertain"
-                ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`)
-                : e, outcome);
-              return;
-            }
-            m.setBusy(false);
-            m.setError(errorText(e));
-            if (!modal) mountConfirmation(m);
-            else surfaceMutationError(e);
-            return;
-          }
-          if (isMutationCommittedError(e)) {
-            if (modal === m) closeModal();
-            requestResync();
-            surfaceMutationError(e, "confirmed");
-            return;
-          }
-          if (isMutationOutcomeUncertain(e)) {
-            if (modal === m) closeModal();
-            requestResync();
-            surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
-            return;
-          }
-          m.setBusy(false);
-          m.setError(errorText(e));
-        });
-      },
+      onConfirm,
       onCancel: closeModal,
     }),
   );
+  if (immediateRestore) onConfirm();
 }
 
 /** Opens the delete-project confirm for a project row (#1735). On confirm it
@@ -1145,15 +1222,19 @@ function openTab(index: number): void {
  *  surface on the pane header's status line. */
 function guardedTabRebind(
   selId: string,
-  run: () => Promise<SessionData[] | null>,
+  run: () => Promise<AcceptedSessionSnapshot | null>,
   resolve: (sessions: SessionData[]) => number,
   verb: TabRebindVerb,
 ): void {
   // Pinned BEFORE the RPC is issued, exactly where closeSessionTab captured `gen`.
   const gen = splitView.layoutGeneration();
   void run()
-    .then((sessions) => {
-      if (sessions === null) return;
+    .then((snapshot) => {
+      if (snapshot === null) return;
+      const {
+        sessions, authoritative, generation,
+        operationLockTimeoutMs, operationClockMs, daemonBootId,
+      } = snapshot;
       const targetIdx = resolve(sessions);
       // Read the generation BEFORE committing the roster. The guard asks whether the
       // USER formed a newer intent during the await, and this commit's own rerender is
@@ -1167,7 +1248,9 @@ function guardedTabRebind(
       // holds. selectedId is read AFTER the set so it reflects any session switch the
       // user made during the await (pickSelection keeps their newer choice) — the one
       // input that deliberately does read the committed state.
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+      applySessions(sessions, {
+        kind: "snapshot", generation, operationLockTimeoutMs, operationClockMs, daemonBootId,
+      }, authoritative);
       // Whether the session this gesture was aimed at survived the round trip. A
       // session killed by another client mid-flight ALSO moves the selection
       // (pickSelection lands elsewhere) and ALSO takes the target with it, so without
@@ -1410,9 +1493,14 @@ function renameSessionTab(id: string, name: string, editedSessionId: string): vo
   // which is the documented fallback for a roster that has no ids to key on (#1929).
   void renameTab(selId, sel.title, target.name, name, tabRealId(target), tok)
     .then(() => fetchProjectedSnapshot(tok))
-    .then((sessions) => {
-      if (sessions === null) return;
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+    .then((snapshot) => {
+      if (snapshot === null) return;
+      applySessions(snapshot.sessions, {
+        kind: "snapshot", generation: snapshot.generation,
+        operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+        operationClockMs: snapshot.operationClockMs,
+        daemonBootId: snapshot.daemonBootId,
+      }, snapshot.authoritative);
     })
     .catch((e) => surfaceTabError(e));
 }
@@ -1452,9 +1540,14 @@ function reorderSessionTab(from: number, to: number): void {
   // whole point (#1929). See renameSessionTab for why tabRealId and not tabIdentity.
   void reorderTab(selId, sel.title, target.name, to, tabRealId(target), tok)
     .then(() => fetchProjectedSnapshot(tok))
-    .then((sessions) => {
-      if (sessions === null) return;
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+    .then((snapshot) => {
+      if (snapshot === null) return;
+      applySessions(snapshot.sessions, {
+        kind: "snapshot", generation: snapshot.generation,
+        operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+        operationClockMs: snapshot.operationClockMs,
+        daemonBootId: snapshot.daemonBootId,
+      }, snapshot.authoritative);
     })
     .catch((e) => surfaceTabError(e));
 }
@@ -2254,6 +2347,7 @@ function stopStream(): void {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
   }
+  rejectResyncCompletions(new Error("Snapshot resync superseded by disconnect"));
   if (taskResyncTimer !== null) {
     window.clearTimeout(taskResyncTimer);
     taskResyncTimer = null;
@@ -2298,8 +2392,10 @@ function onEvent(ev: WireEvent): void {
   }
   sessionEventGeneration += 1;
   const needsResync = optimisticSessions.event(ev);
-  applySessions(optimisticSessions.project());
-  if (needsResync) {
+  const evidence: RestoreEvidence | undefined = ev.data?.id
+    ? { kind: ev.type === "session.restored" ? "restored" : "updated", id: ev.data.id } : undefined;
+  applySessions(optimisticSessions.project(), evidence);
+  if (needsResync || ev.type === "session.restored") {
     requestResync();
   }
 }
@@ -2310,7 +2406,8 @@ function onEvent(ev: WireEvent): void {
  *  so a tab closed/created out-of-band by another client can't leave the visible
  *  tab or the streamed tab pointing past the end; if the selection changed (e.g.
  *  the selected session was killed), the active tab resets to the agent tab. */
-function applySessions(sessions: SessionData[]): void {
+function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
+  authoritative: ReadonlyArray<SessionData> = optimisticSessions.authoritativeRows()): void {
   const prevSel = store.get().selectedId;
   // Reconcile the project scope against the new session set (redesign PR2): a project
   // that vanished (its last session gone) falls back gracefully to the persisted/
@@ -2340,14 +2437,45 @@ function applySessions(sessions: SessionData[]): void {
       : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
+  // Evidence distinguishes causal completion from delayed updates/cache repaints.
+  if (evidence) pendingRestores.observe(authoritative.map(s => ({
+    id: s.id, restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
+    restoreSettled: isActionableSession(s) && s.lifecycle_action === "archive",
+  })), evidence);
 }
 
 /** Tab mutations also fetch full snapshots. Fold those through the same ledger
  * so their next event cannot restore the pre-tab roster or erase local feedback. */
-async function fetchProjectedSnapshot(tok: string): Promise<SessionData[] | null> {
+interface AcceptedSessionSnapshot {
+  sessions: SessionData[];
+  authoritative: SessionData[];
+  generation: number;
+  operationLockTimeoutMs?: number;
+  operationClockMs?: number;
+  daemonBootId?: string;
+}
+async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnapshot | null> {
   if (token !== tok) return null;
   try {
-    return await optimisticSessions.refresh(() => fetchSnapshot(tok));
+    let generation = 0;
+    let authoritative: SessionData[] = [];
+    let operationLockTimeoutMs: number | undefined;
+    let operationClockMs: number | undefined;
+    let daemonBootId: string | undefined;
+    const sessions = await optimisticSessions.refresh(async () => {
+      // refresh may retry after an intervening event. Carry the issuance stamp
+      // and raw rows from the accepted attempt together to the commit site.
+      generation = pendingRestores.beginSnapshot();
+      const snapshot = await fetchSessionSnapshot(tok);
+      authoritative = snapshot.sessions;
+      operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
+      operationClockMs = snapshot.operationClockMs;
+      daemonBootId = snapshot.daemonBootId;
+      return authoritative;
+    });
+    return sessions === null ? null : {
+      sessions, authoritative, generation, operationLockTimeoutMs, operationClockMs, daemonBootId,
+    };
   } catch (error) {
     // The gesture cannot safely rebind without its post-mutation roster. Keep
     // ordinary background reconciliation alive after its bounded retries fail.
@@ -2372,12 +2500,15 @@ function requestResync(): void {
     const tok = token;
     // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
     if (tok === null) {
+      rejectResyncCompletions(new Error("Snapshot resync lost its connection"));
       return;
     }
     const eventGeneration = sessionEventGeneration;
     const mutationFence = optimisticSessions.snapshotFence();
-    void fetchSnapshot(tok)
-      .then((sessions) => {
+    const restoreSnapshot = pendingRestores.beginSnapshot();
+    void fetchSessionSnapshot(tok)
+      .then((snapshot) => {
+        const sessions = snapshot.sessions;
         // A stop/reconnect or a newer resync owns the result now.
         if (requestGeneration !== resyncRequestGeneration || token !== tok) {
           return;
@@ -2394,20 +2525,49 @@ function requestResync(): void {
           requestResync();
           return;
         }
-        applySessions(optimisticSessions.project());
+        applySessions(optimisticSessions.project(), {
+          kind: "snapshot", generation: restoreSnapshot,
+          operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+          operationClockMs: snapshot.operationClockMs,
+          daemonBootId: snapshot.daemonBootId,
+        }, sessions);
         // A successful HTTP response is not necessarily authoritative: either fence
         // above can discard it and schedule a replacement. Stamp the stable app root
         // only after the winning response reaches the store, giving black-box clients
         // an application-level settlement signal instead of a network-timing guess
         // (#3081). stopStream clears it before a new stream owns the connection.
         root?.setAttribute("data-af-resync-settled", "");
+        resolveResyncCompletions();
       })
       .catch((error) => {
         if (requestGeneration !== resyncRequestGeneration || token !== tok) return;
         if (shouldForgetToken(error)) disconnect(describeError(error), true);
         // Transport failures retain state; the events stream owns reconnection.
+        rejectResyncCompletions(error);
       });
   }, 150);
+}
+
+function resolveResyncCompletions(): void {
+  const completions = resyncCompletions;
+  resyncCompletions = [];
+  for (const completion of completions) completion.resolve();
+}
+
+function rejectResyncCompletions(error: unknown): void {
+  const completions = resyncCompletions;
+  resyncCompletions = [];
+  for (const completion of completions) completion.reject(error);
+}
+
+function requestPendingRestoreResync(): Promise<void> {
+  if (token === null || store.get().phase !== "app") {
+    pendingRestoreResync = true;
+    return Promise.resolve();
+  }
+  const completion = new Promise<void>((resolve, reject) => { resyncCompletions.push({ resolve, reject }); });
+  requestResync();
+  return completion;
 }
 
 // --- keyboard navigation ---------------------------------------------------

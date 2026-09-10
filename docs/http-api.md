@@ -162,9 +162,12 @@ legitimately sends fields the daemon has never heard of. Fields are additive and
 never renamed, so ignoring an unknown one is always safe, whereas rejecting it
 would turn every version skew into a hard failure.
 
-The bundled web UI does not send the header and is decoded strictly. It is always
-served by the daemon it talks to, so it cannot be newer than that daemon and has no
-skew to tolerate.
+The bundled web UI does not send the header and is decoded strictly. Its service
+worker and an already-open tab can outlive a daemon restart, so request fields that
+need legacy support are emitted conditionally. In particular,
+`RestoreSession.expected_daemon_boot_id` is sent only after a Snapshot supplies a
+`boot_id`; a current daemon refuses a mismatch before restore admission, while a
+legacy Snapshot keeps the older request shape.
 
 Setting the header by hand is supported but simply opts you out of typo checking —
 it is not an authentication or trust boundary.

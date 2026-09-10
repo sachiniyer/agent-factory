@@ -130,7 +130,7 @@ func opIsTeardown(op InFlightOp) bool {
 // API unambiguously, so it also exposes nothing. A startup-unknown row must not
 // reuse its unconfirmed runtime binding, while a replacing row is inside one
 // transactional handoff and cannot admit a competing lifecycle mutation. A row
-// already tearing down (OpKilling/OpArchiving) is inside the teardown fence, so
+// already mutating (including OpRestoring) is inside its operation fence, so
 // it offers no verb either — the action it would show (Archive on a live row,
 // Restore on the archived result) is precisely the mutation the fence exists to
 // refuse. A kill tombstone likewise admits no competing archive/restore action:
@@ -144,7 +144,7 @@ func opIsTeardown(op InFlightOp) bool {
 // (CanKill): a retained tombstone or startup-unknown row must remain removable
 // without becoming attachable, archivable, or restorable.
 func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap bool) LifecycleAction {
-	if id == "" || op == OpCreating || op == OpReplacing || op == OpRespawning ||
+	if id == "" || op == OpCreating || op == OpReplacing || op == OpRespawning || op == OpRestoring ||
 		opIsTeardown(op) || startupStateUnknown || userKilled || pendingAccountSwap {
 		return LifecycleActionNone
 	}

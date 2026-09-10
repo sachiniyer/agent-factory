@@ -5546,12 +5546,7 @@ test("restore (#1932): the selected rail row's Restore action brings an archived
   ).toHaveCount(1);
   await clickRailAction(page, SESSION_B, "Restore session");
 
-  // Restore is a confirm (mirroring kill/archive), so it inherits their busy/error
-  // surface; the primary button POSTs RestoreSession.
-  const restoreModal = page.locator(".af-modal-card");
-  await expect(restoreModal).toBeVisible();
-  await expect(restoreModal).toContainText("Restore");
-  await restoreModal.locator("button.af-primary").click();
+  // A safe local restore starts immediately; the modal only reports progress/errors.
 
   // The daemon's session.restored event resyncs the rail: B rejoins the LIVE group,
   // no longer archived — the end-to-end proof the archived session returned to active.
@@ -10940,14 +10935,16 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await expect(row(p, SESSION_B)).toHaveClass(/af-row-selected/);
   await openDrawer();
   await openRailActions(p, SESSION_B);
+  // Observe immediate local restore intent without changing the shared archived
+  // fixture; the earlier restore round-trip test exercises the real daemon.
+  await p.route("**/v1/RestoreSession", route => route.fulfill({ json: { data: {} } }));
   const restore = railAction(p, SESSION_B, "Restore session");
   await expect(restore).toBeVisible();
   await restore.click();
   await expectDrawerClosed();
-  await expect(modal).toContainText(`Restore ${SESSION_B}?`);
-  await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect.poll(() => lifecyclePosts.length).toBe(1);
+  expect(lifecyclePosts[0]).toMatch(/\/v1\/RestoreSession$/);
   await expect(modal).toBeHidden();
-  expect(lifecyclePosts, "cancelling Restore must not post a lifecycle mutation").toEqual([]);
 
   // The escape hatch remains location-based by design: the scrim's action IS drawer
   // dismissal. Tap its exposed right edge (the left side sits behind the drawer).

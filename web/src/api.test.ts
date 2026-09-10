@@ -15,6 +15,7 @@ import {
   type CreateSessionInput,
   createTab,
   errorText,
+  fetchSessionSnapshot,
   fetchPreviewOrigin,
   handoffSession,
   isMutationCommittedError,
@@ -74,6 +75,28 @@ function stubFetch(): Captured {
 
 afterEach(() => {
   delete (globalThis as { fetch?: unknown }).fetch;
+});
+
+test("Snapshot carries daemon identity and lifecycle admission timing with its rows", async () => {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        instances: [{ id: "session" }],
+        operation_lock_timeout_ms: 30_000,
+        operation_clock_ms: 12_345,
+        boot_id: "daemon-a",
+      },
+      error: null,
+    }),
+  }) as unknown as Response;
+  const snapshot = await fetchSessionSnapshot("tok");
+  assert.equal(snapshot.sessions[0]?.id, "session");
+  assert.equal(snapshot.operationLockTimeoutMs, 30_000);
+  assert.equal(snapshot.operationClockMs, 12_345);
+  assert.equal(snapshot.daemonBootId, "daemon-a");
 });
 
 // The backend-on-create contract (#1933). The daemon already accepted `backend`;
@@ -339,14 +362,23 @@ test("archiveSession posts the stable id alongside the title", async () => {
 // Restore is retained intent too: the confirmation may outlive the row it names,
 // so it sends the same stable session id as archive/kill and cannot retarget a
 // same-title replacement before the user confirms.
-test("restoreSession posts the stable id alongside the title", async () => {
+test("restoreSession pins the stable session and daemon identities", async () => {
   const cap = stubFetch();
-  await restoreSession("id-repoB", "feature", "tok");
+  await restoreSession("id-repoB", "feature", "tok", "daemon-a");
   assert.equal(cap.url, "/v1/RestoreSession", "must hit the same route af sessions restore / the TUI `r` use");
   assert.equal(cap.auth, "Bearer tok");
   assert.equal(cap.body.id, "id-repoB", "id must be sent so title reuse cannot redirect the restore");
   assert.equal(cap.body.title, "feature");
   assert.equal(cap.body.repo_id, "", "web is an all-repos client; repo_id stays empty, as it does for archive/kill");
+  assert.equal(cap.body.expected_daemon_boot_id, "daemon-a",
+    "a restarted daemon must refuse the stale request before restore admission");
+});
+
+test("restoreSession omits the daemon pin when an older Snapshot supplied none", async () => {
+  const cap = stubFetch();
+  await restoreSession("id-repoB", "feature", "tok");
+  assert.equal("expected_daemon_boot_id" in cap.body, false,
+    "legacy daemons must receive the request body they already understand");
 });
 
 test("createTab / closeTab post the stable id alongside the title", async () => {
@@ -1236,7 +1268,7 @@ test("create refusal provenance distinguishes daemon rejection from lost or gate
   }
   (globalThis as { fetch: unknown }).fetch = async () => { throw new TypeError("response lost"); };
   await assert.rejects(createSession(createInput(), "tok"), error =>
-    error instanceof ApiError && !error.daemonRejected);
+    error instanceof ApiError && !error.daemonRejected && isMutationOutcomeUncertain(error));
 });
 
 
