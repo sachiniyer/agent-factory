@@ -133,25 +133,6 @@ type InstanceOptions struct {
 // cannot produce a different answer between the guard and provisioning.
 var backendFactory = defaultBackendFactoryForKind
 
-// defaultBackendFactory resolves the session's runtime from the requested
-// backend kind (the `--backend` flag / repo `backend` config, or ForceRemote for
-// the legacy hook path) and provisions it, returning the whole ProvisionResult.
-// It is the production path behind the backendFactory test seam; a test that
-// replaces backendFactory injects a FakeBackend directly and never reaches here.
-//
-// The full ProvisionResult flows to NewInstance (#1592 Phase 4): the local
-// runtime provisions in-process (nil Endpoint, nil Teardown — the local path is
-// unchanged), while the off-box runtimes (docker/ssh/hook) return the
-// agent-server's authed endpoint + a sandbox-reap teardown, which NewInstance
-// threads into the instance's remote agent-server client and Kill path.
-func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResult, error) {
-	kind, err := resolveBackendKind(opts, absPath)
-	if err != nil {
-		return ProvisionResult{}, err
-	}
-	return defaultBackendFactoryForKind(opts, absPath, kind)
-}
-
 func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind BackendKind) (ProvisionResult, error) {
 	rt, err := ResolveRuntime(kind)
 	if err != nil {
