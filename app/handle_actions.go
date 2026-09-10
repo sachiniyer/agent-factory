@@ -483,13 +483,11 @@ type limitRetriedMsg struct {
 	err    error
 }
 
-// handleLimitRetry is the usage-limit manual-retry verb (#1146, `c`): on a
-// session blocked at a usage-limit wall it asks the daemon to re-spawn (if the
-// agent exited) and re-deliver the pending prompt, un-stalling the work. It is a
-// no-op with an explanatory message on any non-limit row. The daemon RPC re-
-// delivers a prompt (SendPromptCommand sleeps to let control sequences drain, and
-// a respawn can take a beat), so it runs OFF the event loop like the kill/archive
-// cmds rather than freezing the TUI.
+// handleLimitRetry is the explicit retry verb (#1146, `c`). It resumes a usage-
+// limited session or, after the operator inspects its pane, retries an account
+// or agent handoff whose first mission submission could not be confirmed. The
+// daemon RPC may re-spawn and delivers a prompt, so it runs off the event loop
+// like the kill/archive commands rather than freezing the TUI.
 func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
 	if selected == nil {
@@ -498,7 +496,8 @@ func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 	if selected.IsTearingDown() {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is being deleted", selected.Title))
 	}
-	if !selected.LimitReached() {
+	if !selected.LimitReached() && !selected.CanRetryPendingManualAccountSwapDelivery() &&
+		!selected.CanRetryPendingHandoffMissionDelivery() {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is not blocked on a usage limit", selected.Title))
 	}
 	target := captureSessionActionTarget(selected, m.repoID)
@@ -512,7 +511,9 @@ func (m *home) resumeFromLimitCmd(target sessionActionTarget) tea.Cmd {
 	resume := resumeFromLimitThroughDaemon
 	return func() tea.Msg {
 		if err := resume(target.resumeFromLimitRequest()); err != nil {
-			log.ErrorLog.Printf("could not resume limited session %q: %v", target.title, err)
+			if !apiclient.IsMutationCommitted(err) {
+				log.ErrorLog.Printf("could not resume limited session %q: %v", target.title, err)
+			}
 			return limitRetriedMsg{target: target, err: err}
 		}
 		return limitRetriedMsg{target: target}
@@ -522,13 +523,19 @@ func (m *home) resumeFromLimitCmd(target sessionActionTarget) tea.Cmd {
 // handleLimitRetried finalizes an async usage-limit retry. On success the daemon
 // has already cleared the limit + set Running and persisted; clear the local row
 // optimistically for instant feedback (the badge disappears without waiting for
-// the next snapshot reconcile). On failure the error lands in the error box.
+// the next snapshot reconcile). A committed settlement warning clears the row
+// too and remains visible as a completion message; a clean failure lands in the
+// error box.
 func (m *home) handleLimitRetried(msg limitRetriedMsg) (tea.Model, tea.Cmd) {
-	if msg.err != nil {
+	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
+	if msg.err != nil && !committedWarning {
 		return m, m.handleError(fmt.Errorf("failed to resume session '%s': %w", msg.target.title, msg.err))
 	}
 	if inst := m.resolveSessionActionTarget(msg.target); inst != nil {
 		inst.ClearLimitReached()
+	}
+	if committedWarning {
+		return m, m.showTransientMessage(fmt.Sprintf("Retry for '%s' completed, with warning: %v", msg.target.title, msg.err))
 	}
 	return m, nil
 }

@@ -152,8 +152,13 @@ without attaching. `Enter` attaches the selected session. The pane's accent bord
 marks the pane you are driving. See the [keyboard reference](#keyboard-reference)
 for tab and view navigation.
 
-The pane header's **Retry limit** appears for a session waiting on a usage limit and
-requests another attempt. Open the pane header’s **Actions** menu (shown as **…**
+The pane header's **Retry limit** appears for a session waiting on a usage limit
+and requests another attempt. If an agent or account handoff could not confirm
+mission delivery, inspect the pane first; the same place shows **Retry handoff**
+as the explicit override while automatic redelivery stays suppressed. If that retry
+delivers the mission while its final disk settlement remains pending, the web
+keeps a confirmed-mutation warning on screen because the mission has already
+landed and must not be retried. Open the pane header’s **Actions** menu (shown as **…**
 on a phone) for **Handoff**, which appears when the session supports swapping
 agents in place. Choose **New agent** in its modal and confirm **Hand off** to stop
 the current agent and continue with the replacement. A limit-blocked local
