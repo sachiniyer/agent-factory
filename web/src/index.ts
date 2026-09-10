@@ -90,7 +90,7 @@ import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
-import { PendingRestores } from "./pending_restores.js";
+import { PendingRestores, type RestoreEvidence } from "./pending_restores.js";
 import { CreateSelectionIntent, OptimisticSessions } from "./optimistic.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
@@ -1024,9 +1024,11 @@ function openConfirm(
         return;
       }
       if (mutation) {
-        const outcome = isMutationCommittedError(e)
+        const committed = isMutationCommittedError(e);
+        const outcome = committed
           ? (optimisticSessions.succeed(mutation) ? "confirmed" : "stale")
           : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
+        if (committed) captureArchiveSuccess?.();
         if (outcome === "stale") return;
         applySessions(optimisticSessions.project());
         requestResync();
@@ -1208,7 +1210,7 @@ function openTab(index: number): void {
  *  surface on the pane header's status line. */
 function guardedTabRebind(
   selId: string,
-  run: () => Promise<SessionData[] | null>,
+  run: () => Promise<AcceptedSessionSnapshot | null>,
   resolve: (sessions: SessionData[]) => number,
   verb: TabRebindVerb,
 ): void {
@@ -2390,7 +2392,8 @@ function onEvent(ev: WireEvent): void {
  *  so a tab closed/created out-of-band by another client can't leave the visible
  *  tab or the streamed tab pointing past the end; if the selection changed (e.g.
  *  the selected session was killed), the active tab resets to the agent tab. */
-function applySessions(sessions: SessionData[]): void {
+function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
+  authoritative: ReadonlyArray<SessionData> = optimisticSessions.authoritativeRows()): void {
   const prevSel = store.get().selectedId;
   // Reconcile the project scope against the new session set (redesign PR2): a project
   // that vanished (its last session gone) falls back gracefully to the persisted/
@@ -2424,7 +2427,6 @@ function applySessions(sessions: SessionData[]): void {
   if (evidence) pendingRestores.observe(authoritative.map(s => ({
     id: s.id, restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
     restoreSettled: isActionableSession(s) && s.lifecycle_action === "archive",
-    operationLockHeld: s.operation_lock_held,
   })), evidence);
 }
 

@@ -2,7 +2,6 @@ type RestoreRow = {
   id?: string;
   restoreEligible: boolean;
   restoreSettled?: boolean;
-  operationLockHeld?: boolean;
 };
 export type RestoreEvidence =
   | {
@@ -114,6 +113,7 @@ export class PendingRestores {
         const result = await request(ticket.daemonBootId);
         if (this.tickets.get(id) === ticket) {
           ticket.settled = true;
+          ticket.succeededAt = this.snapshotGeneration;
           // Events can advance the row before the HTTP response arrives.
           if (this.rows) this.observe(this.rows);
           if (this.tickets.get(id) === ticket) this.reconcile(id, ticket);
@@ -155,8 +155,9 @@ export class PendingRestores {
     if (evidence?.kind === "snapshot") {
       const daemonBootId = typeof evidence.daemonBootId === "string" && evidence.daemonBootId !== ""
         ? evidence.daemonBootId : null;
-      if (daemonBootId !== null && evidence.generation > this.daemonBootGeneration) {
-        daemonRestarted = this.daemonBootId !== null && daemonBootId !== this.daemonBootId;
+      if (evidence.generation > this.daemonBootGeneration) {
+        daemonRestarted = daemonBootId !== null && this.daemonBootId !== null &&
+          daemonBootId !== this.daemonBootId;
         this.daemonBootId = daemonBootId;
         this.daemonBootGeneration = evidence.generation;
       }

@@ -891,18 +891,17 @@ func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 	}
 	sort.Strings(keys)
 	type snapshotEntry struct {
-		instance      *session.Instance
-		pending       session.InstanceData
-		operationLock *sync.Mutex
+		instance *session.Instance
+		pending  session.InstanceData
 	}
 	entries := make([]snapshotEntry, 0, len(keys))
 	for _, key := range keys {
 		if inst := m.instances[key]; inst != nil {
-			entries = append(entries, snapshotEntry{instance: inst, operationLock: m.instanceOpLocks[key]})
+			entries = append(entries, snapshotEntry{instance: inst})
 			continue
 		}
 		if pending, ok := m.pendingCreates[key]; ok {
-			entries = append(entries, snapshotEntry{pending: pending, operationLock: m.instanceOpLocks[key]})
+			entries = append(entries, snapshotEntry{pending: pending})
 		}
 	}
 	m.mu.Unlock()
@@ -913,7 +912,6 @@ func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 		if entry.instance != nil {
 			projected = entry.instance.ToInstanceData()
 		}
-		projected.OperationLockHeld = snapshotOperationLockHeld(entry.operationLock)
 		data = append(data, projected)
 	}
 	return data

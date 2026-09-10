@@ -83,18 +83,6 @@ func TestManagerSnapshot_CarriesTransientOperationState(t *testing.T) {
 	if data[0].Status != session.Deleting {
 		t.Fatalf("snapshot legacy status = %v, want Deleting", data[0].Status)
 	}
-	if data[0].OperationLockHeld == nil || *data[0].OperationLockHeld {
-		t.Fatalf("snapshot operation-lock held = %v, want explicit false", data[0].OperationLockHeld)
-	}
-
-	opLock := m.opLockFor(daemonInstanceKey(repo.ID, "worker"))
-	opLock.Lock()
-	data = m.Snapshot(repo.ID)
-	if data[0].OperationLockHeld == nil || !*data[0].OperationLockHeld {
-		opLock.Unlock()
-		t.Fatalf("snapshot operation-lock held = %v, want true", data[0].OperationLockHeld)
-	}
-	opLock.Unlock()
 }
 
 func equalStrings(a, b []string) bool {

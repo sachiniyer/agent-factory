@@ -48,10 +48,6 @@ type InstanceData struct {
 	// at disk write/load boundaries: in-flight operations are process-local and
 	// must not be resurrected after a daemon restart.
 	InFlightOp InFlightOp `json:"in_flight_op,omitempty"`
-	// OperationLockHeld is projection-only evidence that this row's daemon
-	// operation lock was owned when Snapshot read it. A pointer distinguishes an
-	// explicit false from an older daemon that does not project the field.
-	OperationLockHeld *bool `json:"operation_lock_held,omitempty"`
 	// LifecycleAction is a projection-only capability shared by the TUI and web
 	// (#2234): "archive", "restore", or omitted when the row has no safe
 	// lifecycle target (creating or id-less). It is derived from live state by
@@ -412,7 +408,6 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.Status = composeStatus(lv, OpNone)
 	d.Liveness = lv
 	d.InFlightOp = OpNone
-	d.OperationLockHeld = nil
 	d.LifecycleAction = LifecycleActionNone
 	d.CanKill = false
 	d.CanHandoff = false
