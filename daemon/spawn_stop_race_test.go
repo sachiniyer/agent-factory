@@ -126,6 +126,48 @@ func TestCleanupDaemonRuntimeFiles_SkipsLiveDaemonFiles(t *testing.T) {
 	}
 }
 
+// TestCleanupDaemonRuntimeFiles_LapsedDeadlineKeepsLiveDaemonFiles is the
+// #4163 regression: the same live daemon as above, but reached with an
+// admission deadline that has already elapsed.
+//
+// callDaemon stamps every CLI/TUI RPC with a 5s admission deadline and threads
+// it down to this cleanup, and pingDaemonUntil returns
+// daemonAdmissionDeadlineError BEFORE dialing once that budget is spent. The
+// pre-fix code read that as "nothing answered" and unlinked the socket of a
+// daemon that was answering fine — #767, reintroduced. A lapsed deadline means
+// af did not look, so it must leave the files alone.
+//
+// The two tests above pass time.Time{}, so neither exercises this path; that
+// is why the regression shipped.
+func TestCleanupDaemonRuntimeFiles_LapsedDeadlineKeepsLiveDaemonFiles(t *testing.T) {
+	tmpHome := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
+
+	startTestControlServer(t)
+
+	pidFile := filepath.Join(tmpHome, "daemon.pid")
+	if err := os.WriteFile(pidFile, []byte("12345"), 0600); err != nil {
+		t.Fatalf("write PID file: %v", err)
+	}
+
+	// Already elapsed, exactly as a CLI RPC that spent its budget arrives here.
+	cleanupDaemonRuntimeFiles(pidFile, time.Now().Add(-time.Second))
+
+	socketPath, err := DaemonSocketPath()
+	if err != nil {
+		t.Fatalf("DaemonSocketPath: %v", err)
+	}
+	if _, err := os.Stat(socketPath); err != nil {
+		t.Fatalf("cleanup unlinked a LIVE daemon's socket because the admission deadline had lapsed (#4163): %v", err)
+	}
+	if _, err := os.Stat(pidFile); err != nil {
+		t.Fatalf("cleanup removed the PID file of a live daemon because the admission deadline had lapsed (#4163): %v", err)
+	}
+	if err := pingDaemon(); err != nil {
+		t.Fatalf("live daemon stopped answering after cleanup: %v", err)
+	}
+}
+
 // TestCleanupDaemonRuntimeFiles_RemovesDeadFiles is the companion negative
 // case: when nothing answers on the socket path (a stale file from a killed
 // daemon), cleanup must still remove both runtime files — the #767 guard must

@@ -837,36 +837,6 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 	return true, nil
 }
 
-// cleanupDaemonRuntimeFiles removes the PID file and (best-effort) the control
-// socket left behind by a stopped daemon. The PID file is tolerated as
-// already-gone because the daemon's own SIGTERM handler removes it via
-// removeDaemonPIDFile() before exiting — so on the SIGTERM-success path we
-// race with the daemon's own cleanup.
-//
-// A NEW daemon can also start during StopDaemon's signal/poll window (the
-// autostart unit racing `af daemon install`, or an upgrade respawn) and bind
-// the control socket before this cleanup runs. Removing the socket then would
-// unlink the live daemon's socket file: the daemon keeps serving the
-// unreachable inode, pings against the path fail, and the next EnsureDaemon
-// spawns yet another daemon while the first leaks (#767). So if anything
-// ANSWERS on the socket, the runtime files belong to a live daemon — leave
-// them all in place. The daemon we just stopped cannot answer: its listener
-// died with the process. The worst false positive (a ping answered by a
-// process still mid-SIGKILL) merely leaves a stale socket behind, which the
-// next spawn's bind path replaces.
-func cleanupDaemonRuntimeFiles(pidFile string, deadline time.Time) {
-	if err := pingDaemonUntil(deadline); err == nil {
-		log.InfoLog.Printf("a live daemon answered on the control socket after stop; leaving its runtime files in place")
-		return
-	}
-	if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
-		log.WarningLog.Printf("failed to remove daemon PID file: %v", err)
-	}
-	if socketPath, socketErr := DaemonSocketPath(); socketErr == nil {
-		_ = os.Remove(socketPath)
-	}
-}
-
 // isAgentFactoryDaemon checks whether the process at pid looks like an agent-factory daemon:
 // its argv must carry the --daemon flag as a discrete argument AND its executable must be an
 // agent-factory binary ("af" or "agent-factory"). It reads the process argv with argument
