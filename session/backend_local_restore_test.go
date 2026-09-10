@@ -136,7 +136,15 @@ func TestLocalBackendSwapAgentResetsBrokerCapture(t *testing.T) {
 	server.brokers = map[string]*ptyBroker{"agent": broker}
 
 	plan := AgentSwapPlan{target: tmux.ProgramGemini, program: tmux.ProgramGemini}
+	captured := false
+	plan = plan.WithPostStopCapture(func() error {
+		require.True(t, killed, "capture must wait until the outgoing runtime stops")
+		require.Empty(t, ptyFactory.cmds, "capture must precede replacement launch")
+		captured = true
+		return nil
+	})
 	require.NoError(t, backend.SwapAgent(inst, plan))
+	require.True(t, captured)
 	require.Equal(t, 1, channel.stops, "handoff must stop the capture bound to the outgoing pane")
 	require.Equal(t, 2, channel.starts, "the attached subscriber must resume on the incoming pane without reconnecting")
 }

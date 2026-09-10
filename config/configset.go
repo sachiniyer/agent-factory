@@ -632,7 +632,24 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	case w.clear:
 		updated, _ = deleteTOMLScalar(updated, w.section, w.leaf)
 	default:
-		updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
+		// If the target table is already opened at the root by a top-level
+		// dotted key (program_overrides.codex = …) rather than a [section]
+		// header, TOML forbids re-opening it with a header, so a NEW leaf
+		// has to join the table in the same dotted form. Without this guard
+		// the insert appends a [section] block over the dotted table and the
+		// pre-write parse gate refuses bytes that were valid before the edit
+		// (mirroring the migrate guard in migrate.go). section == "" targets
+		// the root block and is left untouched. When the leaf already exists
+		// as a dotted key we skip the rerouting: setTOMLScalar's own
+		// dottedKeyRe and tomlScalarLineMatches handle updates — including
+		// keys written with whitespace or quotes around the dot — and calling
+		// in with section="" would disable that syntax-aware matching.
+		if w.section != "" && tomlRootDottedTable(updated, w.section) &&
+			!tomlRootDottedLeafExists(updated, w.section, w.leaf) {
+			updated = insertTOMLDottedLeaf(updated, w.section, w.leaf, w.encoded)
+		} else {
+			updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
+		}
 	}
 	// If this file already carries the flat compatibility spelling, keep it in
 	// sync inside the same lock. A rolled-back binary ignores the new table, so
@@ -713,7 +730,17 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 			return nil, fmt.Errorf("failed to edit %s in %s: %w", w.key, prettyPath, err)
 		}
 	} else {
-		updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
+		// See apply: a table opened at the root by a dotted key cannot be
+		// re-opened with a [section] header, so a NEW leaf must join it in
+		// the dotted form the migrate path uses. Skip the rerouting when the
+		// leaf already exists: setTOMLScalar's own dottedKeyRe handles
+		// updates even when the existing key uses whitespace or quoting.
+		if w.section != "" && tomlRootDottedTable(updated, w.section) &&
+			!tomlRootDottedLeafExists(updated, w.section, w.leaf) {
+			updated = insertTOMLDottedLeaf(updated, w.section, w.leaf, w.encoded)
+		} else {
+			updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
+		}
 	}
 	resulting, err := parseProjectConfig([]byte(updated), path)
 	if err != nil {

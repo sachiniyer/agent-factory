@@ -244,8 +244,18 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 	}
 
 	// The session is absent and, because deliveries to this target serialize on
-	// the per-target lock, no other in-daemon delivery is creating it. Create it
-	// now and deliver the prompt as its initial prompt.
+	// the per-target lock, no other in-daemon delivery is creating it. Gate the
+	// auto-create path: req.Program flows directly into CreateSession here,
+	// bypassing controlServer.createSession and its gate, so a raw RPC/HTTP
+	// caller can reach provisioning with an unsupported program through this
+	// handler. Apply the same program validation before the create fires.
+	// Internal callers (root-agent ensure loop, task delivery) pass TaskRepoID
+	// or TaskOrigin and do NOT set Program; the check is a no-op for them (empty
+	// program is allowed). Only an external JSON-settable Program is rejected.
+	if err := validateCreateProgram(req.Program); err != nil {
+		return "", session.PromptCouldNotConfirm, err
+	}
+	// Create it now and deliver the prompt as its initial prompt.
 	created, err := m.CreateSession(context.Background(), CreateSessionRequest{
 		Title:      req.Title,
 		RepoPath:   req.RepoPath,

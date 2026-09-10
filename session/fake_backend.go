@@ -126,8 +126,10 @@ func (b *FakeBackend) PrepareAgentSwap(_ *Instance, target string) (AgentSwapPla
 	}
 	return plan, nil
 }
-func (b *FakeBackend) SwapAgent(*Instance, AgentSwapPlan) error { return nil }
-func (b *FakeBackend) Type() string                             { return "local" }
+func (b *FakeBackend) SwapAgent(_ *Instance, plan AgentSwapPlan) error {
+	return plan.CaptureAfterStop()
+}
+func (b *FakeBackend) Type() string { return "local" }
 
 // Capabilities reports local full parity by default so the fake stands in for a
 // local session (#1592 Phase 1). Test doubles that impersonate a remote backend

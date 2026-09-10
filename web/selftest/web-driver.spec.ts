@@ -1482,6 +1482,14 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
       synth("probe-lost", 3, "process-exited"),
       synth("probe-dead", 4, "process-exited"),
       synth("probe-limit", 6, "usage-limit"),
+      {
+        ...synth("probe-handoff-retry", 1),
+        pending_account_swap: {
+          manual: true,
+          replacement_panes_started: true,
+          mission_delivery_status: "could-not-confirm",
+        },
+      },
     );
     if (snap) {
       snap.instances = list;
@@ -1536,6 +1544,12 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   // ordinary waiting row withdraws it. The rail move must not displace this path.
   await row(p, "probe-limit").click();
   const retry = p.locator(".af-term-head").getByRole("button", { name: "Retry limit", exact: true });
+  await expect(retry).toBeVisible();
+  await row(p, "probe-handoff-retry").click();
+  const handoffRetry = p.locator(".af-term-head").getByRole("button", { name: "Retry handoff", exact: true });
+  await expect(handoffRetry).toBeVisible();
+  await expect(handoffRetry).toHaveAttribute("title", "Retry the handoff after inspecting the pane");
+  await row(p, "probe-limit").click();
   await expect(retry).toBeVisible();
   const selectedActions = row(p, "probe-limit").locator(".af-row-actions");
   const waitingActions = row(p, "probe-needs-you").locator(".af-row-actions");
@@ -9746,6 +9760,13 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     // it also keeps this test independent of whatever the specs above renamed.
     af("sessions", "tab-create", SESSION_ORDER, "--command", "sleep 300", "--name", VICTIM);
     await expect(tabByLabel(win, VICTIM)).toHaveCount(1, { timeout: 15_000 });
+    // Start the outage from a fresh, accepted roster containing the victim.
+    // Its create event can paint the tab before an older startup Snapshot has
+    // drained; that old four-tab roster would clamp this pane to its neighbour
+    // during the gap and stop exercising an atomic close+recreate altogether.
+    await openAfterInitialResync(win, () => win.reload().then(() => {}));
+    await row(win, SESSION_ORDER).click();
+    await expect(tabByLabel(win, VICTIM)).toHaveCount(1);
     const roster = await tabLabels(win);
     // The bar WHILE the edit is open: the input REPLACES the edited tab's button, so
     // that tab draws no label until the edit is settled.
@@ -9799,6 +9820,8 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     ).toHaveAttribute("data-live", "reconnecting");
     af("sessions", "tab-delete", SESSION_ORDER, "--name", VICTIM);
     af("sessions", "tab-create", SESSION_ORDER, "--command", "sleep 300", "--name", VICTIM);
+    await expect(editedPane, "the offline fixture must retain the old binding until reconnect")
+      .toHaveAttribute("data-tab-id", editedPaneID!);
 
     // Unblocked: the next retry opens, and an open re-Snapshots. THAT single roster change
     // carries both. Waited on explicitly, because committing before it lands would make

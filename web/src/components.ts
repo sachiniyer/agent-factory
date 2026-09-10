@@ -115,7 +115,7 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   const retry = action("Retry limit", "", opts.retry);
   retry.title = "Retry after the usage limit";
   const handoff = action("Handoff", "", opts.handoff);
-  handoff.title = "Continue with another agent";
+  handoff.title = "Continue this session under another agent or account";
   const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
   copy.title = "Copy link";
   copy.setAttribute("aria-label", "Copy link");
