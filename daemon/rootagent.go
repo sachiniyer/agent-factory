@@ -146,7 +146,9 @@ type rootEnsureState struct {
 	programDriftResolvedProfile   config.RootAgent
 	programDriftConfiguredProgram string
 	programDriftNextConfigCheck   time.Time
-	// Test seam between the latch's two runtime-evidence validations.
+	// Test seam immediately before the latch tentatively claims its manager-owned
+	// dedupe bits. Runtime evidence is committed separately under the instance
+	// lifecycle lock.
 	programDriftBeforeLatchForTest func()
 	// Claude transcript verification is advisory while the root is live. Keep
 	// its filesystem work and any persistent inspection warning off the hot

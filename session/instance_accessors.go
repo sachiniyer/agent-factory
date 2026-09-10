@@ -578,6 +578,25 @@ func (i *Instance) RuntimeProgramEvidenceCurrent(evidence RuntimeProgramEvidence
 	return evidence.generation == i.runtimeEvidenceGeneration.Load()
 }
 
+// CommitRuntimeProgramEvidence runs commit only while evidence still describes
+// this instance's current runtime generation. The read lock is the commit
+// boundary: every lifecycle or runtime replacement that invalidates evidence
+// owns i.mu for writing, so either that invalidation lands first and commit is
+// refused, or it waits until commit returns.
+//
+// commit must not call methods that acquire i.mu. It is intended for a small
+// external side effect whose truth depends on this evidence, such as emitting a
+// diagnostic about the runtime command.
+func (i *Instance) CommitRuntimeProgramEvidence(evidence RuntimeProgramEvidence, commit func()) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if evidence.generation != i.runtimeEvidenceGeneration.Load() {
+		return false
+	}
+	commit()
+	return true
+}
+
 // setRuntimeProgram records a command only after a launch boundary positively
 // established the replacement runtime. The surrounding lifecycle transition
 // owns UpdatedAt and the durable checkpoint; touching here would count one

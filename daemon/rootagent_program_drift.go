@@ -137,9 +137,10 @@ func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, s
 
 // latchAdoptedRootProgramDrift commits a warning only while every fact it rests
 // on is still current. Manager state is checked and tentatively written under
-// m.mu. Runtime evidence is checked on both sides of that write; its monotonic
-// generation advances independently, so an overlapping lifecycle/runtime
-// replacement forces a rollback before the tentative latch becomes visible.
+// m.mu, then the instance owns the final evidence-to-warning boundary: every
+// lifecycle/runtime invalidation either lands before that boundary and forces a
+// rollback, or waits until the warning has been emitted. The two locks are never
+// nested, preserving the daemon's manager/instance lock order.
 func (m *Manager) latchAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, configuredProgram string, inst *session.Instance, evidence session.RuntimeProgramEvidence) {
 	runningProgram := evidence.Program()
 	status := inst.GetStatus()
@@ -163,15 +164,24 @@ func (m *Manager) latchAdoptedRootProgramDrift(repoID, key, workspace string, st
 	st.programDriftLogged = true
 	st.programDriftLoggedRepoID = repoID
 	m.rootProgramDriftLogged[repoID] = true
-	if !inst.RuntimeProgramEvidenceCurrent(evidence) {
+	m.mu.Unlock()
+
+	if inst.CommitRuntimeProgramEvidence(evidence, func() {
+		m.logAdoptedRootProgramDrift(workspace, configuredProgram, runningProgram)
+	}) {
+		return
+	}
+
+	// The latch was deliberately visible while the instance acquired its
+	// evidence lock, so a sibling ensure pass could not race in and emit the same
+	// warning. No sibling can replace it until this rollback clears both bits.
+	m.mu.Lock()
+	if st.programDriftLogged && st.programDriftLoggedRepoID == repoID {
 		st.programDriftLogged = false
 		st.programDriftLoggedRepoID = ""
 		delete(m.rootProgramDriftLogged, repoID)
-		m.mu.Unlock()
-		return
 	}
 	m.mu.Unlock()
-	m.logAdoptedRootProgramDrift(workspace, configuredProgram, runningProgram)
 }
 
 // invalidateRootProgramDriftResolutions is the ApplyConfig rebuild hook for the
