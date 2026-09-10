@@ -147,9 +147,14 @@ func TestConcurrentInPlaceCreatesReserveBranchAdmission(t *testing.T) {
 	require.Eventually(t, func() bool {
 		manager.mu.Lock()
 		defer manager.mu.Unlock()
-		return len(manager.pendingCreates) == 2
+		return len(manager.pendingCreates) == 1
 	}, time.Second, 5*time.Millisecond,
-		"the second create must pass the pre-lock check and wait behind the first under the shared repo admission lock")
+		"the first create must publish while the second waits at pre-mutation branch admission")
+	select {
+	case result := <-secondDone:
+		t.Fatalf("second create did not wait for the first branch-admission reservation: %v", result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
 
 	unblock()
 	first := waitForCreateResult(t, firstDone)
@@ -645,6 +650,79 @@ func TestArchivedRestoreAdmissionSerializesMultiplyBoundPeers(t *testing.T) {
 	require.Error(t, got.err)
 	assert.Contains(t, got.err.Error(), first.Title,
 		"the waiter must revalidate after the reservation and see the first lane become live")
+}
+
+func TestArchivedRestoreAdmissionSerializesWithInPlaceCreate(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "restoring", "restoring")
+	branch := archived.GetBranch()
+	targetPath := filepath.Join(t.TempDir(), "in-place-target")
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-q", "-b", "target-staging", targetPath, "HEAD").CombinedOutput()
+	require.NoError(t, err, string(out))
+	out, err = exec.Command("git", "-C", targetPath, "checkout", "-q", "--ignore-other-worktrees", "-B", branch, branch).CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	releaseRestore, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true)
+	require.NoError(t, err)
+	releasedRestore := false
+	t.Cleanup(func() {
+		if !releasedRestore {
+			releaseRestore()
+		}
+	})
+	backend := session.NewFakeBackend()
+	backend.CompleteStart()
+	restoreFactory := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
+		return inPlaceWorktreeFakeBackend{readyFakeBackend{backend}}, nil
+	})
+	t.Cleanup(restoreFactory)
+	done := startCreateCall(&controlServer{manager: manager}, CreateSessionRequest{
+		Title: "incoming-here", RepoPath: targetPath, Program: "claude", InPlace: true,
+	})
+
+	select {
+	case result := <-done:
+		t.Fatalf("in-place create passed while an archived restore held branch admission: %v", result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	archived.SetStatusForTest(session.Ready)
+	require.NoError(t, persistInstanceData(repoID, archived.ToInstanceData()))
+	releaseRestore()
+	releasedRestore = true
+	result := waitForCreateResult(t, done)
+	require.Error(t, result.err)
+	assert.Contains(t, result.err.Error(), archived.Title,
+		"the create must revalidate after the shared admission reservation and name the restored holder")
+}
+
+func TestInPlaceArchivedTitleReuseHasNoPostRenameAdmissionFailure(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "reuse", "reuse")
+	originalBindings := worktreeBranchBindings
+	bindingsCalls := 0
+	worktreeBranchBindings = func(path string) ([]sessiongit.WorktreeBranchBinding, error) {
+		bindingsCalls++
+		if bindingsCalls > 1 {
+			return nil, errors.New("later binding probe failed")
+		}
+		return originalBindings(path)
+	}
+	t.Cleanup(func() { worktreeBranchBindings = originalBindings })
+	backend := session.NewFakeBackend()
+	backend.CompleteStart()
+	restoreFactory := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
+		return inPlaceWorktreeFakeBackend{readyFakeBackend{backend}}, nil
+	})
+	t.Cleanup(restoreFactory)
+
+	result := waitForCreateResult(t, startCreateCall(&controlServer{manager: manager}, CreateSessionRequest{
+		Title: "reuse", RepoPath: repoPath, Program: "claude", InPlace: true,
+	}))
+	require.NoError(t, result.err,
+		"branch admission must be complete before the archived rename, with no fallible recheck after mutation")
+	assert.Equal(t, "reuse", result.resp.Instance.Title)
+	assert.Equal(t, "reuse (archived)", archived.Title)
+	assert.Equal(t, 1, bindingsCalls)
 }
 
 func registerCollisionLane(t *testing.T, manager *Manager, repoID, repoPath, worktreePath, title, branch string, status session.Status) *session.Instance {
