@@ -45,9 +45,9 @@ func TestHandleHandoff_OpensPickerWithoutDispatching(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	called := false
-	restore := SetHandoffRunnerForTest(func(daemon.HandoffSessionRequest) (string, error) {
+	restore := SetHandoffRunnerForTest(func(daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
 		called = true
-		return "", nil
+		return daemon.HandoffSessionResponse{}, nil
 	})
 	defer restore()
 
@@ -90,9 +90,9 @@ func TestHandleHandoff_RefusesReservedRootBeforePicker(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	called := false
-	restore := SetHandoffRunnerForTest(func(daemon.HandoffSessionRequest) (string, error) {
+	restore := SetHandoffRunnerForTest(func(daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
 		called = true
-		return "", nil
+		return daemon.HandoffSessionResponse{}, nil
 	})
 	defer restore()
 
@@ -143,9 +143,9 @@ func TestHandleStateSelectHandoffAgent_ConfirmsThenSwapsTheChosenAgent(t *testin
 	h.sidebar.SetSelectedInstance(0)
 
 	var gotRequest daemon.HandoffSessionRequest
-	restore := SetHandoffRunnerForTest(func(req daemon.HandoffSessionRequest) (string, error) {
+	restore := SetHandoffRunnerForTest(func(req daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
 		gotRequest = req
-		return tmux.ProgramClaude, nil
+		return daemon.HandoffSessionResponse{From: tmux.ProgramClaude, To: req.To}, nil
 	})
 	defer restore()
 
@@ -328,9 +328,9 @@ func TestHandleStateSelectHandoffAgent_CancelDoesNotSwap(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	called := false
-	restore := SetHandoffRunnerForTest(func(daemon.HandoffSessionRequest) (string, error) {
+	restore := SetHandoffRunnerForTest(func(daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
 		called = true
-		return "", nil
+		return daemon.HandoffSessionResponse{}, nil
 	})
 	defer restore()
 

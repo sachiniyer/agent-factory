@@ -34,13 +34,22 @@ func RedactAccessTokenURL(raw string) string {
 		// An unparseable URL cannot be safely separated from its credential.
 		return "[url redacted]"
 	}
-	if !redactAccessTokenQuery(parsed) {
-		// URL.Query discards malformed query pairs, so a structured miss says
-		// nothing about the raw text. The text pass reads the whole string
-		// rather than trusting a partially parsed query.
-		return RedactAccessTokenText(raw)
-	}
+	found := redactAccessTokenQuery(parsed)
+	// Run the percent-decoding component sweep regardless of the query result.
+	// url.URL's string fields (Fragment/Path/Host/User) are url.Parse's
+	// percent-DECODED forms, so this is the only pass that can see a key the raw
+	// text carries percent-encoded (%61ccess_token= / access%5Ftoken=). Gating
+	// it on the query match left such keys unreachable when the query carried no
+	// access_token: the literal-needle text fallback does not decode, so a
+	// component-only percent-encoded key survived the redaction boundary.
 	redactAccessTokenComponents(parsed)
+	if !found {
+		// The raw query may still hold a literal access_token= in a pair that
+		// url.Query discarded, so a structured miss says nothing about the raw
+		// text. Scan the SERIALIZED url rather than raw so component tokens the
+		// sweep already redacted are not re-read from the un-decoded string.
+		return RedactAccessTokenText(parsed.String())
+	}
 	return parsed.String()
 }
 
@@ -51,10 +60,27 @@ func RedactAccessTokenURL(raw string) string {
 func redactAccessTokenQuery(u *url.URL) bool {
 	q := u.Query()
 	found := false
-	for key := range q {
+	for key, values := range q {
 		if strings.EqualFold(key, AccessTokenQueryParam) {
 			q.Set(key, accessTokenRedaction)
 			found = true
+			continue
+		}
+		// A VALUE can carry a token too: a nested or callback URL arrives
+		// percent-encoded (next=%2Fws%3Faccess_token%3DTOK), so RawQuery holds
+		// no literal access_token= for the text fallback to find, and the
+		// component sweep never looks at RawQuery. url.Query() has ALREADY
+		// decoded these values, so the plaintext token is in hand here — the
+		// pre-fix code simply never read it, and the same payload that was
+		// redacted in a fragment or path survived in a query (#4161). Scanning
+		// the decoded value is what closes that, and Encode() re-escapes the
+		// replacement on the way out.
+		for i, value := range values {
+			redacted := RedactAccessTokenText(value)
+			if redacted != value {
+				values[i] = redacted
+				found = true
+			}
 		}
 	}
 	if !found {
@@ -77,7 +103,27 @@ func redactAccessTokenQuery(u *url.URL) bool {
 // query pass: '&' does not end a value, so the scan would swallow every
 // parameter behind the one it just redacted.
 func redactAccessTokenComponents(u *url.URL) {
-	u.Opaque = RedactAccessTokenText(u.Opaque)
+	// u.Opaque is "encoded opaque data" (net/url/url.go:376) — unlike Path,
+	// Fragment, and User, url.Parse does NOT percent-decode it.  We must decode
+	// before scanning so that %61ccess_token= is matched; if the escape sequence
+	// is malformed we must not emit the raw opaque value, so fall back to
+	// redacting the whole field rather than leaving a credential in place.
+	// Write back ONLY when the scan actually redacted something. url.URL.String
+	// prints Opaque verbatim — there is no RawOpaque to re-escape from, unlike
+	// the Path/RawPath pair below — so storing the decoded form unconditionally
+	// rewrote every opaque URL that passed through, credential or not:
+	// mailto:user%40host.example became mailto:user@host.example, and
+	// af:a%2Fb%20c became af:a/b c, which is no longer a valid URL (#4161).
+	// Leaving the original encoded bytes in place when nothing matched keeps
+	// this a redactor rather than a normalizer.
+	if decoded, err := url.PathUnescape(u.Opaque); err != nil {
+		u.Opaque = accessTokenRedaction
+	} else if redacted := RedactAccessTokenText(decoded); redacted != decoded {
+		// A redacted opaque is necessarily rewritten, so its remaining escapes
+		// are not preserved; the credential is gone, which is what matters on a
+		// diagnostic surface.
+		u.Opaque = redacted
+	}
 	u.Host = RedactAccessTokenText(u.Host)
 	if path := RedactAccessTokenText(u.Path); path != u.Path {
 		// RawPath is honoured only while it still encodes Path, and a rewritten

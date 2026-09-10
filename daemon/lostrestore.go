@@ -144,6 +144,21 @@ type lostRestoreState struct {
 	// actual Recover failures. An unanswered liveness check did not attempt a
 	// restore and must not inflate the restore failure/escalation diagnostics.
 	remoteUnknownAttempts int
+	// preserveFailureAttempts bounds repeated pre-reap preserve-push failures in
+	// the probeAnsweredDead arm, on its OWN budget. It is deliberately separate
+	// from remoteUnknownAttempts (which backs off the probeUnknown
+	// can't-license-replacement refusal — that one has no give-up by design, since
+	// the conservative hold IS the safety property) and from consecutiveFailures
+	// (the Recover-flap budget), so a push-failure episode neither precharges nor
+	// burns the Recover budget. A persistent, actionable push failure — revoked
+	// origin auth, an archive endpoint that durably rejects this repo — escalates
+	// to #3347's give-up contract after lostRestoreMaxAttempts: a durable
+	// LostRestoreFailure, an ERROR line, and — via canAutoRestoreLostSession —
+	// release of the #1892 watch-task slot. #3347 applied that contract to the
+	// Recover branch it rewrote but left this pre-#3347 arm (written by #2967 with
+	// the old retry-forever contract) unrevisited, so a persistent push failure
+	// retried forever at the backoff cap while the slot stayed held.
+	preserveFailureAttempts int
 	// vanishedWorktreesLogged dedupes the high-visibility #1303 diagnostic to
 	// one ERROR per distinct missing worktree path during a Lost episode.
 	vanishedWorktreesLogged map[string]struct{}
@@ -468,7 +483,17 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// never pushed is still there — and recovery re-clones from origin, which
 		// would destroy it. Push first, and refuse to replace anything if that push
 		// does not land, exactly as ArchiveSandbox refuses via AbortArchiveToLost.
-		if err := m.preserveSandboxBeforeReap(repoID, key, inst, forceReapSuggestionFor(inst)); err != nil {
+		//
+		// Off-ramp selection: if no archive has ever landed (empty branch), --force-reap
+		// cannot execute — requireDurableSandboxBranch rejects an empty persisted
+		// branch, making that suggestion a dead end at give-up. The kill/recreate
+		// path is the only one that can actually clear the terminal state, so name it
+		// instead. A session with a non-empty branch keeps --force-reap as its off-ramp.
+		preserveSuggestion := forceReapSuggestionFor(inst)
+		if inst.GetBranch() == "" {
+			preserveSuggestion = killSuggestionFor(inst)
+		}
+		if err := m.preserveSandboxBeforeReap(repoID, key, inst, preserveSuggestion); err != nil {
 			m.mu.Lock()
 			// Its OWN dedupe flag. remoteUnknownLogged is set by the unknown arm and
 			// never reset, so sharing it meant a sandbox that first went unreachable and
@@ -477,8 +502,36 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 			// surfaced the real reason it was not recovering.
 			logIt := !st.preserveFailureLogged
 			st.preserveFailureLogged = true
-			st.remoteUnknownAttempts++
-			st.nextAttempt = time.Now().Add(lostRestoreBackoff(st.remoteUnknownAttempts))
+			// Its OWN bounded budget — neither remoteUnknownAttempts (the probeUnknown
+			// safety-probe exemption, ceiling-less by design because the conservative
+			// hold is the point) nor consecutiveFailures (the Recover-flap budget) — so
+			// push-failure episodes do not precharge or burn the Recover budget. A
+			// persistent, actionable push failure escalates to #3347's give-up here:
+			// a durable LostRestoreFailure, an ERROR line, and — via
+			// canAutoRestoreLostSession — release of the #1892 watch-task slot, the
+			// "release capacity at terminal give-up" contract #3347 applied to the
+			// Recover branch but never reached this pre-#3347 arm.
+			st.preserveFailureAttempts++
+			attempts := st.preserveFailureAttempts
+			if attempts >= lostRestoreMaxAttempts {
+				st.nextAttempt = time.Time{}
+				// Mark the Recover budget terminal too. The preserve give-up leaves
+				// st non-nil, so a subsequent manual Recover failure reaches
+				// recordLostRestoreFailure with st != nil and skips the
+				// daemon-restart seeding branch that would otherwise correct
+				// consecutiveFailures. Without this assignment, lostRestoreFailed
+				// restarts at attempt 1 and logs "retrying in …" while
+				// LostRestoreGaveUp is already suppressing every automatic retry.
+				st.consecutiveFailures = lostRestoreMaxAttempts
+				m.mu.Unlock()
+				inst.SetLostRestoreFailure(attempts, err)
+				m.err().Printf("restore of lost session %q (repo %s): giving up after %d preserve-push failures: %v", inst.Title, repoID, attempts, err)
+				if persistErr := m.persistSettlement(repoID, key, inst); persistErr != nil {
+					m.warn().Printf("restore of lost session %q gave up in memory but its terminal state is not yet durable: %v", inst.Title, persistErr)
+				}
+				return
+			}
+			st.nextAttempt = time.Now().Add(lostRestoreBackoff(attempts))
 			m.mu.Unlock()
 			if logIt {
 				m.warn().Printf("%v", err)
@@ -486,6 +539,10 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 			return
 		}
 		m.mu.Lock()
+		// The push landed, so this push-failure episode is over: a later blip earns
+		// a fresh budget rather than inheriting this one's escalation, the same
+		// episode separation lostRestoreFailed gives the Recover branch.
+		st.preserveFailureAttempts = 0
 		st.remoteUnknownAttempts = 0
 		st.nextAttempt = time.Time{}
 		m.mu.Unlock()
@@ -616,6 +673,40 @@ func (m *Manager) observationsSinceSpawnLocked(repoID string, inst *session.Inst
 // (#1917 round 6), sustained rather than single-shot (#3412). Caller holds m.mu.
 func (m *Manager) confirmedAliveSinceSpawnLocked(repoID string, inst *session.Instance, st *lostRestoreState) bool {
 	return m.observationsSinceSpawnLocked(repoID, inst, st) >= lostRestoreConfirmObservations
+}
+
+// resetPreserveBudget clears the push-failure episode counter for the session
+// identified by repoID and inst after a successful preserve. This mirrors what
+// the automatic probeAnsweredDead path does in-line, so that the manual restore
+// path also resets the budget when its own preserveSandboxBeforeReap lands — a
+// successful push ends the episode regardless of which path ran it.
+func (m *Manager) resetPreserveBudget(repoID string, inst *session.Instance) {
+	stateKey := stableSessionKey(repoID, inst)
+	m.mu.Lock()
+	if st := m.lostRestoreStates[stateKey]; st != nil {
+		st.preserveFailureAttempts = 0
+		st.remoteUnknownAttempts = 0
+		st.nextAttempt = time.Time{}
+	}
+	m.mu.Unlock()
+}
+
+// resetRecoverBudget clears the Recover-flap episode counter for the session
+// identified by repoID and inst. Call this when the sandbox is replaced (force-
+// reap): the old sandbox is gone, so any prior Recover failures are stale and
+// the new sandbox earns a fresh budget. Do NOT call this on a plain successful
+// preserve push — that does not replace the sandbox, and zeroing
+// consecutiveFailures there would erase a legitimate Recover-flap count from a
+// running episode. The symmetric probeAlive paths that settle the session
+// (RestoreLostSessions) instead delete the whole lostRestoreStates entry, so
+// they do not use this helper either.
+func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
+	stateKey := stableSessionKey(repoID, inst)
+	m.mu.Lock()
+	if st := m.lostRestoreStates[stateKey]; st != nil {
+		st.consecutiveFailures = 0
+	}
+	m.mu.Unlock()
 }
 
 // lostRestoreFailed records a failed restore attempt, backing off until the

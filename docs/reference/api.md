@@ -29,8 +29,8 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/RestoreArchived` | `title`, `repo_id`, `id` | Restore an archived session: move its worktree back next to the repo and re-spawn the agent. |
 | `POST` | `/v1/RestoreSession` | `title`, `repo_id`, `id`, `force_reap` | Restore an archived, Lost, or Dead session. |
 | `POST` | `/v1/SendPrompt` | `title`, `repo_id`, `prompt`, `id` | Send a prompt to an existing session's agent. |
-| `POST` | `/v1/ResumeFromLimit` | `title`, `repo_id`, `id` | Resume a usage-limit-blocked session: re-spawn if needed, re-deliver the pending prompt, clear the limit. |
-| `POST` | `/v1/HandoffSession` | `title`, `repo_id`, `id`, `to`, `brief` | Continue a session under a different agent, in place: swap its agent program, keep its worktree and branch, and deliver a mission brief to the new agent. |
+| `POST` | `/v1/ResumeFromLimit` | `title`, `repo_id`, `id` | Resume a usage-limit-blocked session, or explicitly retry an inspected handoff whose mission delivery was ambiguous. |
+| `POST` | `/v1/HandoffSession` | `title`, `repo_id`, `id`, `to`, `account`, `brief` | Continue a session in place under a different agent (to), another account for the same agent (account), or both (to and account). Keep its worktree and branch, and deliver a mission brief with the goal and existing work to the replacement conversation. Omit to to keep the current agent. |
 | `POST` | `/v1/DeleteProject` | `repo_path`, `repo_id` | Delete a project (a repo's session grouping): archive its live sessions (restorable), tear down in-place ones, and drop its root_agents opt-in — the real git repo is untouched. |
 | `POST` | `/v1/RegisterProject` | `path` | Register a git checkout as a durable, sessionless project by path (expand ~, resolve the git root, validate, persist to the registry) — resolved on the daemon's filesystem, idempotent for a known checkout. |
 | `POST` | `/v1/ListProjects` | — | List every durable project in the daemon's registry (id, last-known root, path_exists) — the read a web/TUI client unions with its derived project list. |

@@ -303,6 +303,8 @@ type Backend interface {
 	// would launch. It runs before the outgoing process is touched; SwapAgent must
 	// consume this plan rather than resolving configuration again after teardown.
 	PrepareAgentSwap(instance *Instance, target string) (AgentSwapPlan, error)
+	// SwapAgent must call plan.CaptureAfterStop after confirmed teardown and
+	// before starting the replacement, so its work cannot enter the ledger tip.
 	SwapAgent(instance *Instance, plan AgentSwapPlan) error
 
 	// Type returns the persisted backend identifier (local, docker, ssh, or
@@ -333,6 +335,7 @@ type AgentSwapPlan struct {
 	program             string
 	conversation        AgentConversationData
 	conversationCapture ConversationCaptureSnapshot
+	afterStop           func() error
 }
 
 // ConversationCapture returns the provider-store before-image frozen by

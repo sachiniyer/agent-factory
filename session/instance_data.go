@@ -52,12 +52,14 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		PendingAccountSwap:       cloneAccountSwapData(i.pendingAccountSwap),
 		Prompt:                   i.Prompt,
 		PendingHandoffMission:    i.pendingHandoffMission,
+		HandoffDeliveryStatus:    i.handoffDeliveryStatus,
 		UserKilled:               i.userKilled,
 		StartupStateUnknown:      i.startupStateUnknown,
 		RootRecreateContext:      i.rootRecreateContext,
 	}
 	data.IdleReason = IdleReasonFor(data)
 	data.RuntimeCleanupStateUnknown = i.runtimeCleanupStateUnknown
+	data.archivePushCompleted = i.archivePushCompleted
 
 	if i.backend != nil {
 		data.BackendType = i.backend.Type()
@@ -87,6 +89,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// in-memory field lingers after ClearLimitReached but is never serialized.
 	if i.liveness == LiveLimitReached {
 		data.LimitResetAt = i.limitResetAt
+		data.LimitAgent = i.limitAgent
 		data.LimitAccount = i.limitAccount
 	}
 
@@ -261,7 +264,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 	}
+	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
+	data = data.restoreMissingHandoffMissionEvidence()
+	data = data.restoreMissingAccountSwapMissionEvidence()
 	id := data.ID
 	if id == "" {
 		// Legacy records predate stable session identity. Materialized instances
@@ -277,6 +283,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// status; the daemon finishes its teardown rather than restoring it.
 	liveness := livenessFromData(data)
 	limitAccount, accountLimitObservations := AccountLimitEvidenceFromData(data)
+	limitAgent := limitAgentFromData(data, limitAccount, accountLimitObservations)
 	// Resolve the in-flight-op axis from the snapshot payload, falling back to
 	// the legacy status for old daemons/records. A persisted record is always
 	// settled (disk writers scrub this field and SaveInstances skips
@@ -316,6 +323,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// finished run from an interrupted one.
 		taskRunActive:            data.TaskRunActive,
 		limitResetAt:             data.LimitResetAt,
+		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,
 		accountLimitObservations: accountLimitObservations,
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
@@ -334,6 +342,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
 		Prompt:                   data.Prompt,
 		pendingHandoffMission:    data.PendingHandoffMission,
+		handoffDeliveryStatus:    data.HandoffDeliveryStatus,
 		userKilled:               data.UserKilled,
 		startupStateUnknown:      data.StartupStateUnknown,
 		// Survives the restart on purpose (#2629): a root that came back amnesiac
@@ -461,6 +470,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			// prefix — a legacy record, or one whose hooks never entered a scope —
 			// leaves the sweep disabled, which is the pre-#3650 behaviour.
 			gw.SetHookScopeSessionID(id)
+			// Relocation recovery is a pending fence, not terminal state: the
+			// adoption seam checks gw.HasUnresolvedRelocation without finishing
+			// its journal. A later recovery pass may establish the owning path.
+			gw.SetHookResumeDisabled(data.UserKilled || liveness == LiveArchived)
 			gw.SetHookScopeUnitPrefix(data.Worktree.HookScopeUnitPrefix)
 			instance.gitWorktree = gw
 		}

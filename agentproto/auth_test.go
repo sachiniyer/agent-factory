@@ -77,6 +77,33 @@ func TestRedactAccessTokenURL(t *testing.T) {
 			wantAbsent:  []string{"sekrit"},
 			wantPresent: []string{"redacted"},
 		},
+		{
+			// #4161: a nested/callback URL arrives percent-encoded, so RawQuery
+			// carries no literal access_token= for the text fallback and the
+			// component sweep never reads RawQuery. The identical payload was
+			// already redacted in a fragment and in a path; only the query leaked.
+			name:        "token inside a percent-encoded query value",
+			raw:         "https://af.host/open?next=%2Fws%3Faccess_token%3Dsekrit",
+			wantAbsent:  []string{"sekrit"},
+			wantPresent: []string{"af.host", "/open", "next=", "REDACTED"},
+		},
+		{
+			// The neighbouring parameter must survive: redacting a value must not
+			// coarsen into dropping or rewriting the rest of the query.
+			name:        "percent-encoded query value redacted, neighbour kept",
+			raw:         "https://af.host/o?keep=hello&next=%2Fws%3Faccess_token%3Dsekrit",
+			wantAbsent:  []string{"sekrit"},
+			wantPresent: []string{"keep=hello", "REDACTED"},
+		},
+		{
+			// The unencoded spelling already worked, via the literal-needle text
+			// fallback rather than the value scan. Pin it so a future refactor of
+			// either path cannot silently drop the one it does not touch.
+			name:        "token inside a plain nested query value",
+			raw:         "https://af.host/open?next=/ws?access_token=sekrit",
+			wantAbsent:  []string{"sekrit"},
+			wantPresent: []string{"af.host", "REDACTED"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := RedactAccessTokenURL(tc.raw)
@@ -111,9 +138,8 @@ func TestRedactAccessTokenURLRedactsEveryKeyCase(t *testing.T) {
 // The set of components is closed, so sweeping it is a claim the next added
 // field cannot quietly falsify, unlike "the separators we thought of".
 func TestRedactAccessTokenURLRedactsEveryComponent(t *testing.T) {
-	// Every case also carries a query token, so the structured pass matches and
-	// the whole-string text fallback never runs. That is the path the component
-	// token has to survive redaction on.
+	// Every case here carries a query token, exercising the query-match branch
+	// where the component sweep always ran (the path that always worked).
 	for _, tc := range []struct {
 		component string
 		raw       string
@@ -131,6 +157,49 @@ func TestRedactAccessTokenURLRedactsEveryComponent(t *testing.T) {
 					t.Errorf("RedactAccessTokenURL(%q) = %q, %s token %q survived",
 						tc.raw, got, tc.component, secret)
 				}
+			}
+		})
+	}
+}
+
+// TestRedactAccessTokenURLRedactsPercentEncodedComponentKey is the regression
+// guard for the leak that motivated un-gating the component sweep. When a
+// URL's only access_token lives in a component (fragment / path / userinfo) and
+// its key is percent-encoded (%61ccess_token=), the literal-needle text pass
+// cannot see the decoded key — only the component sweep, which reads url.URL's
+// percent-DECODED fields, can. The sweep used to be gated behind
+// redactAccessTokenQuery, so a component-only percent-encoded key took the
+// early return and survived the redaction boundary verbatim. These cases
+// deliberately carry NO query access_token so they exercise the no-query
+// branch where the sweep was previously skipped; the last case carries one to
+// guard the query-match branch still redacts the encoded component.
+func TestRedactAccessTokenURLRedactsPercentEncodedComponentKey(t *testing.T) {
+	cases := []struct {
+		component string
+		raw       string
+	}{
+		{"fragment", "http://box:8080/callback#%61ccess_token=component-sekrit"},
+		{"path", "http://box:8080/%61ccess_token=component-sekrit"},
+		{"userinfo", "http://user:%61ccess_token=component-sekrit@box:8080/"},
+		{"fragment-with-query-token", "http://box:8080/callback?access_token=q#%61ccess_token=component-sekrit"},
+		// Opaque URLs: url.Parse does NOT decode u.Opaque, so the literal-needle
+		// scan misses %61ccess_token=.  The fix decodes before scanning.
+		{"opaque", "mailto:%61ccess_token=component-sekrit"},
+		{"opaque-literal", "mailto:access_token=component-sekrit"},
+		// Malformed escape in opaque: url.PathUnescape returns an error, so the
+		// fail-closed branch must redact the whole opaque rather than emitting it.
+		{"opaque-malformed-escape", "mailto:%zz-component-sekrit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.component, func(t *testing.T) {
+			got := RedactAccessTokenURL(tc.raw)
+			if strings.Contains(got, "component-sekrit") || strings.Contains(got, "q-sekrit") {
+				t.Errorf("RedactAccessTokenURL(%q) = %q; %s token survived",
+					tc.raw, got, tc.component)
+			}
+			if !strings.Contains(got, accessTokenRedaction) {
+				t.Errorf("RedactAccessTokenURL(%q) = %q; want redaction marker",
+					tc.raw, got)
 			}
 		})
 	}
@@ -342,5 +411,47 @@ func TestAccessTokenFromQuery(t *testing.T) {
 	}
 	if got := AccessTokenFromQuery(url.Values{}); got != "" {
 		t.Errorf("AccessTokenFromQuery(empty) = %q, want empty", got)
+	}
+}
+
+// TestRedactAccessTokenURLLeavesUnmatchedOpaqueEncoded is the #4161 secondary
+// half: url.URL.String prints Opaque verbatim and there is no RawOpaque to
+// re-escape from, so writing the DECODED opaque back unconditionally rewrote
+// every opaque URL that carried no credential at all.
+func TestRedactAccessTokenURLLeavesUnmatchedOpaqueEncoded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"encoded at-sign survives", "mailto:user%40host.example"},
+		{"encoded slash and space survive", "af:a%2Fb%20c"},
+		{"unencoded opaque untouched", "mailto:plain@host.example"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RedactAccessTokenURL(tc.raw); got != tc.raw {
+				t.Errorf("RedactAccessTokenURL(%q) = %q, want it returned unchanged: "+
+					"no credential matched, so the opaque must keep its original escaping", tc.raw, got)
+			}
+		})
+	}
+}
+
+// TestRedactAccessTokenURLStillRedactsOpaque pins that the fidelity fix above
+// did not cost the redaction it guards.
+func TestRedactAccessTokenURLStillRedactsOpaque(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"percent-encoded key", "mailto:%61ccess_token=component-sekrit"},
+		{"literal key", "mailto:access_token=component-sekrit"},
+		{"malformed escape redacts whole field", "mailto:%zz-component-sekrit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactAccessTokenURL(tc.raw)
+			if strings.Contains(got, "sekrit") {
+				t.Errorf("RedactAccessTokenURL(%q) = %q, must not contain the secret", tc.raw, got)
+			}
+		})
 	}
 }

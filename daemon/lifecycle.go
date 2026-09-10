@@ -143,11 +143,11 @@ func (l *daemonLifecycle) markReady() error {
 	return nil
 }
 
-// markQuiescing moves a ready daemon into the upgrade hand-off: it stops admitting
-// new mutations and reports DaemonPhaseQuiescing. The activation trigger calls it
-// AFTER AuthorizeActivation and BEFORE the daemon exits to free the socket for the
-// validated candidate, so no mutation races the hand-off window and a daemon stuck
-// mid-hand-off is visible rather than reporting ready. Idempotent.
+// markQuiescing moves a daemon into terminal quiescence: it stops admitting new
+// mutations and reports DaemonPhaseQuiescing. Upgrade activation calls it after
+// authorization; ordinary shutdown calls it before draining the control planes.
+// A daemon stuck in either drain is therefore visible rather than reporting ready.
+// Idempotent.
 func (l *daemonLifecycle) markQuiescing() {
 	l.mu.Lock()
 	defer l.mu.Unlock()

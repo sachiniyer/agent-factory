@@ -601,6 +601,28 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 // Returns whether anything changed.
 func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.InstanceData) bool {
 	changed := false
+	// A combined agent+account handoff replaces the process behind the same row
+	// and tmux address. Reconcile every source CurrentAgentName consults before
+	// later action predicates choose which agent's accounts to load.
+	if inst.ReconcileAgentRuntimeSnapshot(d) {
+		changed = true
+	}
+	// Account identity and its pending delivery obligation can change while the
+	// row stays Running/Ready. Mirror them before action predicates are evaluated,
+	// so Retry addresses the daemon's transaction instead of stale local state.
+	if inst.ReconcileAccountHandoffSnapshot(d.Account, d.AccountAutoSelected, d.PendingAccountSwap) {
+		changed = true
+	}
+	if inst.ReconcilePendingHandoffSnapshot(d.PendingHandoffMission, d.HandoffDeliveryStatus) {
+		changed = true
+	}
+	// Startup-unknown is a fail-closed, monotonic outcome for this live runtime.
+	// Marking it locally also clears the stale started binding, matching a cold
+	// materialization of the same snapshot.
+	if d.StartupStateUnknown && !inst.StartupStateUnknown() {
+		inst.MarkStartupStateUnknown()
+		changed = true
+	}
 	// Mirror the daemon's authoritative LIVENESS onto the row (#960 PR 5, #1195):
 	// the daemon poll computes Running/Ready/Lost/Archived/LimitReached (the #935
 	// liveness) and the TUI renders it. Applied UNCONDITIONALLY — daemon liveness
