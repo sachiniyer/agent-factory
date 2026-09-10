@@ -77,6 +77,33 @@ func TestRedactAccessTokenURL(t *testing.T) {
 			wantAbsent:  []string{"sekrit"},
 			wantPresent: []string{"redacted"},
 		},
+		{
+			// #4161: a nested/callback URL arrives percent-encoded, so RawQuery
+			// carries no literal access_token= for the text fallback and the
+			// component sweep never reads RawQuery. The identical payload was
+			// already redacted in a fragment and in a path; only the query leaked.
+			name:        "token inside a percent-encoded query value",
+			raw:         "https://af.host/open?next=%2Fws%3Faccess_token%3Dsekrit",
+			wantAbsent:  []string{"sekrit"},
+			wantPresent: []string{"af.host", "/open", "next=", "REDACTED"},
+		},
+		{
+			// The neighbouring parameter must survive: redacting a value must not
+			// coarsen into dropping or rewriting the rest of the query.
+			name:        "percent-encoded query value redacted, neighbour kept",
+			raw:         "https://af.host/o?keep=hello&next=%2Fws%3Faccess_token%3Dsekrit",
+			wantAbsent:  []string{"sekrit"},
+			wantPresent: []string{"keep=hello", "REDACTED"},
+		},
+		{
+			// The unencoded spelling already worked, via the literal-needle text
+			// fallback rather than the value scan. Pin it so a future refactor of
+			// either path cannot silently drop the one it does not touch.
+			name:        "token inside a plain nested query value",
+			raw:         "https://af.host/open?next=/ws?access_token=sekrit",
+			wantAbsent:  []string{"sekrit"},
+			wantPresent: []string{"af.host", "REDACTED"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := RedactAccessTokenURL(tc.raw)

@@ -60,10 +60,27 @@ func RedactAccessTokenURL(raw string) string {
 func redactAccessTokenQuery(u *url.URL) bool {
 	q := u.Query()
 	found := false
-	for key := range q {
+	for key, values := range q {
 		if strings.EqualFold(key, AccessTokenQueryParam) {
 			q.Set(key, accessTokenRedaction)
 			found = true
+			continue
+		}
+		// A VALUE can carry a token too: a nested or callback URL arrives
+		// percent-encoded (next=%2Fws%3Faccess_token%3DTOK), so RawQuery holds
+		// no literal access_token= for the text fallback to find, and the
+		// component sweep never looks at RawQuery. url.Query() has ALREADY
+		// decoded these values, so the plaintext token is in hand here — the
+		// pre-fix code simply never read it, and the same payload that was
+		// redacted in a fragment or path survived in a query (#4161). Scanning
+		// the decoded value is what closes that, and Encode() re-escapes the
+		// replacement on the way out.
+		for i, value := range values {
+			redacted := RedactAccessTokenText(value)
+			if redacted != value {
+				values[i] = redacted
+				found = true
+			}
 		}
 	}
 	if !found {
