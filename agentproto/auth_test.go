@@ -42,16 +42,16 @@ func TestRedactAccessTokenURL(t *testing.T) {
 			wantPresent: []string{"box:8080", "access_token=REDACTED"},
 		},
 		{
-			name:        "semicolon separator redacts ambiguous suffix",
+			name:        "semicolon separator preserves neighbouring parameter",
 			raw:         "http://box:8080/stream?view=2;access_token=sekrit;mode=full",
-			wantAbsent:  []string{"sekrit", "mode=full"},
-			wantPresent: []string{"box:8080", "view=2", "access_token=REDACTED"},
+			wantAbsent:  []string{"access_token=sekrit"},
+			wantPresent: []string{"box:8080", "view=2", "access_token=REDACTED", "mode=full"},
 		},
 		{
-			name:        "semicolon inside token value",
+			name:        "semicolon after empty token preserves neighbouring field",
 			raw:         "http://box:8080/stream?access_token=;sekrit",
-			wantAbsent:  []string{";sekrit"},
-			wantPresent: []string{"box:8080", "access_token=REDACTED"},
+			wantAbsent:  []string{"access_token=;"},
+			wantPresent: []string{"box:8080", "access_token=REDACTED", ";sekrit"},
 		},
 		{
 			name:        "fragment token redacted",
@@ -167,10 +167,11 @@ func TestRedactAccessTokenURLRedactsEveryComponent(t *testing.T) {
 // URL's only access_token lives in a component (fragment / path / userinfo) and
 // its key is percent-encoded (%61ccess_token=), the literal-needle text pass
 // cannot see the decoded key — only the component sweep, which reads url.URL's
-// percent-DECODED fields, can. The sweep used to be gated behind
-// redactAccessTokenQuery, so a component-only percent-encoded key took the
-// early return and survived the redaction boundary verbatim. These cases
-// deliberately carry NO query access_token so they exercise the no-query
+// percent-DECODED fields, can. Nested encoding is included because one parser
+// decode can leave another encoded key in the component. The sweep used to be
+// gated behind redactAccessTokenQuery, so a component-only percent-encoded key
+// took the early return and survived the redaction boundary verbatim. These
+// cases deliberately carry NO query access_token so they exercise the no-query
 // branch where the sweep was previously skipped; the last case carries one to
 // guard the query-match branch still redacts the encoded component.
 func TestRedactAccessTokenURLRedactsPercentEncodedComponentKey(t *testing.T) {
@@ -179,12 +180,16 @@ func TestRedactAccessTokenURLRedactsPercentEncodedComponentKey(t *testing.T) {
 		raw       string
 	}{
 		{"fragment", "http://box:8080/callback#%61ccess_token=component-sekrit"},
+		{"fragment-double-encoded", "http://box:8080/callback#%2561ccess%255Ftoken=component-sekrit"},
 		{"path", "http://box:8080/%61ccess_token=component-sekrit"},
+		{"path-double-encoded", "http://box:8080/%2561ccess%255Ftoken=component-sekrit"},
 		{"userinfo", "http://user:%61ccess_token=component-sekrit@box:8080/"},
+		{"userinfo-double-encoded", "http://user:%2561ccess%255Ftoken=component-sekrit@box:8080/"},
 		{"fragment-with-query-token", "http://box:8080/callback?access_token=q#%61ccess_token=component-sekrit"},
 		// Opaque URLs: url.Parse does NOT decode u.Opaque, so the literal-needle
 		// scan misses %61ccess_token=.  The fix decodes before scanning.
 		{"opaque", "mailto:%61ccess_token=component-sekrit"},
+		{"opaque-double-encoded", "mailto:%2561ccess%255Ftoken=component-sekrit"},
 		{"opaque-literal", "mailto:access_token=component-sekrit"},
 		// Malformed escape in opaque: url.PathUnescape returns an error, so the
 		// fail-closed branch must redact the whole opaque rather than emitting it.
