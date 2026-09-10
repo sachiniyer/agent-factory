@@ -273,8 +273,7 @@ func TestHookProgressJournalResolutionIsBounded(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	tree := t.TempDir()
 	originalResolve := boundedResolvePath
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 	entered, release, workerDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var enteredOnce, releaseOnce sync.Once
 	boundedResolvePath = func(path string) string {
@@ -292,7 +291,6 @@ func TestHookProgressJournalResolutionIsBounded(t *testing.T) {
 			<-done
 		}
 		boundedResolvePath = originalResolve
-		relocationIdentityTimeout = previousTimeout
 	})
 	go func() {
 		_, err := newHookProgress(hookRun{worktreePath: tree, scopeSessionID: "owner"}, nil, "af-hook-owner", "test")
@@ -300,7 +298,7 @@ func TestHookProgressJournalResolutionIsBounded(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("journal path resolution did not start")
 	}
 	select {

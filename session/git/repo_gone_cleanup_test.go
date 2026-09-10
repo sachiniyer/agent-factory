@@ -505,10 +505,9 @@ func TestValidateRelocationCleanupAdmission_RepoRecheckDeadlineRetainsAuthorizat
 	gw, claim, _ := repoGoneCleanupClaim(t)
 	gw.PreserveRelocationClaim(claim)
 	previousProbe := repoGoneOriginProbe
-	previousTimeout := relocationIdentityTimeout
+	useRelocationIdentityTimeoutForTest(t, 25*time.Millisecond)
 	probeStarted := make(chan struct{})
 	probeFinished := make(chan struct{})
-	relocationIdentityTimeout = 25 * time.Millisecond
 	repoGoneOriginProbe = func(ctx context.Context, _ *GitWorktree) error {
 		defer close(probeFinished)
 		close(probeStarted)
@@ -517,7 +516,6 @@ func TestValidateRelocationCleanupAdmission_RepoRecheckDeadlineRetainsAuthorizat
 	}
 	t.Cleanup(func() {
 		repoGoneOriginProbe = previousProbe
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	done := make(chan error, 1)
@@ -591,9 +589,7 @@ func TestValidateRelocationCleanupAdmission_DeadlineCancelsOriginProbeProcess(t 
 				t.Fatalf("write blocking git probe: %v", err)
 			}
 			t.Setenv("PATH", binDir)
-			previousTimeout := relocationIdentityTimeout
-			relocationIdentityTimeout = 25 * time.Millisecond
-			t.Cleanup(func() { relocationIdentityTimeout = previousTimeout })
+			useRelocationIdentityTimeoutForTest(t, 25*time.Millisecond)
 
 			// No deadline is attached to this call, so nothing can cancel the
 			// stand-in while it starts up and records its pid.
@@ -662,7 +658,7 @@ func TestValidateRelocationCleanupAdmission_DeadlineReusesOriginProbeFence(t *te
 	gw, claim, _ := repoGoneCleanupClaim(t)
 	gw.PreserveRelocationClaim(claim)
 	previousProbe := repoGoneOriginProbe
-	previousTimeout := relocationIdentityTimeout
+	useRelocationIdentityTimeoutForTest(t, 25*time.Millisecond)
 	started := make(chan struct{}, 2)
 	finished := make(chan struct{}, 2)
 	release := make(chan struct{})
@@ -672,10 +668,8 @@ func TestValidateRelocationCleanupAdmission_DeadlineReusesOriginProbeFence(t *te
 		<-release
 		return errors.New("probe released")
 	}
-	relocationIdentityTimeout = 25 * time.Millisecond
 	t.Cleanup(func() {
 		repoGoneOriginProbe = previousProbe
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	if err := boundedRepoGoneOriginProbe(gw); !errors.Is(err, context.DeadlineExceeded) {

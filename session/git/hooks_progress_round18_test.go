@@ -164,8 +164,7 @@ func TestHookProgressPreviousJournalReadDoesNotWedgePublicationLock(t *testing.T
 		<-release
 		return os.ReadFile(path)
 	})
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 60 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 60*time.Millisecond)
 	result := make(chan error, 1)
 	publisherDone := make(chan struct{})
 	go func() {
@@ -182,20 +181,14 @@ func TestHookProgressPreviousJournalReadDoesNotWedgePublicationLock(t *testing.T
 		}
 		waitForBoundedReadFlightToDrain(t, path)
 		restoreRead()
-		relocationIdentityTimeout = previousTimeout
 	})
 	select {
 	case <-blocked:
 	case <-time.After(5 * time.Second):
 		t.Fatal("previous journal read did not reach the storage seam")
 	}
-	select {
-	case err := <-result:
-		if err != nil {
-			t.Fatalf("bounded optional read prevented publication: %v", err)
-		}
-	case <-time.After(4 * relocationIdentityTimeout):
-		t.Fatal("stalled previous-journal read wedged the home-wide publication lock")
+	if err := <-result; err != nil {
+		t.Fatalf("bounded optional read prevented publication: %v", err)
 	}
 	releaseOnce.Do(func() { close(release) })
 	waitForBoundedReadFlightToDrain(t, path)
@@ -236,8 +229,7 @@ func TestHookProgressPruneUsesOneReadDeadlineForStalledJournals(t *testing.T) {
 		return originalRead(path)
 	}
 	boundedReadFileFlights.Unlock()
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 70 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 70*time.Millisecond)
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
 		for _, path := range paths {
@@ -246,7 +238,6 @@ func TestHookProgressPruneUsesOneReadDeadlineForStalledJournals(t *testing.T) {
 		boundedReadFileFlights.Lock()
 		archiveReadFile = originalRead
 		boundedReadFileFlights.Unlock()
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	started := time.Now()

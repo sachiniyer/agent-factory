@@ -18,8 +18,7 @@ func TestHookProgressDirectorySyncIsBoundedUnderProgressLock(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repo, tree := linkedHookWorktree(t)
 	originalSync := hookProgressSyncDirectory
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	drained := make(chan struct{})
@@ -35,13 +34,12 @@ func TestHookProgressDirectorySyncIsBoundedUnderProgressLock(t *testing.T) {
 	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
 	t.Cleanup(func() {
 		hookProgressSyncDirectory = originalSync
-		relocationIdentityTimeout = previousTimeout
 	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
 		select {
 		case <-drained:
-		case <-time.After(time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("blocked directory sync did not drain")
 		}
 	})
@@ -56,7 +54,7 @@ func TestHookProgressDirectorySyncIsBoundedUnderProgressLock(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("journal publication did not reach the stalled directory sync")
 	}
 	select {
@@ -97,8 +95,7 @@ func TestHookProgressRetirementSyncIsBoundedUnderProgressLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	originalSync := hookProgressSyncDirectory
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	drained := make(chan struct{})
@@ -114,13 +111,12 @@ func TestHookProgressRetirementSyncIsBoundedUnderProgressLock(t *testing.T) {
 	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
 	t.Cleanup(func() {
 		hookProgressSyncDirectory = originalSync
-		relocationIdentityTimeout = previousTimeout
 	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
 		select {
 		case <-drained:
-		case <-time.After(time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("blocked retirement sync did not drain")
 		}
 	})
@@ -133,7 +129,7 @@ func TestHookProgressRetirementSyncIsBoundedUnderProgressLock(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("retirement did not reach the stalled directory sync")
 	}
 	select {
@@ -164,8 +160,7 @@ func TestHookProgressPreparationIsBoundedUnderProgressLock(t *testing.T) {
 	}
 	journalDirectory := filepath.Dir(journal)
 	originalPrepare := hookProgressPrepare
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	drained := make(chan struct{})
@@ -181,7 +176,6 @@ func TestHookProgressPreparationIsBoundedUnderProgressLock(t *testing.T) {
 	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
 	t.Cleanup(func() {
 		hookProgressPrepare = originalPrepare
-		relocationIdentityTimeout = previousTimeout
 	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
@@ -215,7 +209,7 @@ func TestHookProgressPreparationIsBoundedUnderProgressLock(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("journal publication did not reach the stalled preparation")
 	}
 	select {

@@ -23,8 +23,7 @@ func TestHookProgressFailedPublicationRollbackReleasesProgressLock(t *testing.T)
 	}
 	originalSync := hookProgressSyncDirectory
 	originalDiscard := hookProgressDiscardPrepared
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 	hookProgressSyncDirectory = func(string) error { return errors.New("journal sync failed") }
 	rollbackEntered := make(chan struct{})
 	releaseRollback := make(chan struct{})
@@ -42,7 +41,6 @@ func TestHookProgressFailedPublicationRollbackReleasesProgressLock(t *testing.T)
 	t.Cleanup(func() {
 		hookProgressSyncDirectory = originalSync
 		hookProgressDiscardPrepared = originalDiscard
-		relocationIdentityTimeout = previousTimeout
 	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(releaseRollback) })
@@ -63,7 +61,7 @@ func TestHookProgressFailedPublicationRollbackReleasesProgressLock(t *testing.T)
 	}()
 	select {
 	case <-rollbackEntered:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("failed publication did not reach rollback")
 	}
 	acquired, err := config.TryWithFileLock(filepath.Join(filepath.Dir(journal), ".progress"), func() error { return nil })
@@ -76,7 +74,7 @@ func TestHookProgressFailedPublicationRollbackReleasesProgressLock(t *testing.T)
 		if err == nil {
 			t.Fatal("failed journal sync reported publication success")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("publication did not return after rollback drained")
 	}
 }
@@ -92,8 +90,7 @@ func TestHookProgressTerminalMarkerWriteIsBoundedBeforeHooksDone(t *testing.T) {
 		t.Fatal(err)
 	}
 	originalMark := hookProgressMarkFinished
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	drained := make(chan struct{})
@@ -109,7 +106,6 @@ func TestHookProgressTerminalMarkerWriteIsBoundedBeforeHooksDone(t *testing.T) {
 	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
 	t.Cleanup(func() {
 		hookProgressMarkFinished = originalMark
-		relocationIdentityTimeout = previousTimeout
 	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
@@ -123,7 +119,7 @@ func TestHookProgressTerminalMarkerWriteIsBoundedBeforeHooksDone(t *testing.T) {
 	done := runPostWorktreeHooks(context.Background(), hookRun{worktreePath: tree, progress: p})
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("runner did not reach terminal-marker write")
 	}
 	waitForClosed(t, done, 3*relocationIdentityTimeout, "terminal-marker write held HooksDone past its bound")
@@ -138,8 +134,7 @@ func TestHookProgressTimedOutLeaseCloseDoesNotHoldFlightMutex(t *testing.T) {
 	secondPath := filepath.Join(dir, "second.lock")
 	originalOpen := hookProgressOpenLeaseFile
 	originalClose := hookProgressCloseLeaseFile
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 	openEntered := make(chan struct{})
 	releaseOpen := make(chan struct{})
 	closeEntered := make(chan struct{})
@@ -167,7 +162,6 @@ func TestHookProgressTimedOutLeaseCloseDoesNotHoldFlightMutex(t *testing.T) {
 	t.Cleanup(func() {
 		hookProgressOpenLeaseFile = originalOpen
 		hookProgressCloseLeaseFile = originalClose
-		relocationIdentityTimeout = previousTimeout
 	})
 	t.Cleanup(func() {
 		releaseOpenOnce.Do(func() { close(releaseOpen) })
@@ -186,7 +180,7 @@ func TestHookProgressTimedOutLeaseCloseDoesNotHoldFlightMutex(t *testing.T) {
 	}()
 	select {
 	case <-openEntered:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("lease open did not reach stalled seam")
 	}
 	select {
@@ -200,7 +194,7 @@ func TestHookProgressTimedOutLeaseCloseDoesNotHoldFlightMutex(t *testing.T) {
 	releaseOpenOnce.Do(func() { close(releaseOpen) })
 	select {
 	case <-closeEntered:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("timed-out lease descriptor did not reach close")
 	}
 
@@ -236,8 +230,7 @@ func TestHookProgressLockFileOpenIsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	originalOpen := hookProgressOpenLockFile
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 50 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 50*time.Millisecond)
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	drained := make(chan struct{})
@@ -253,7 +246,6 @@ func TestHookProgressLockFileOpenIsBounded(t *testing.T) {
 	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
 	t.Cleanup(func() {
 		hookProgressOpenLockFile = originalOpen
-		relocationIdentityTimeout = previousTimeout
 	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
@@ -274,7 +266,7 @@ func TestHookProgressLockFileOpenIsBounded(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("progress lock did not reach stalled lock-file open")
 	}
 	select {

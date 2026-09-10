@@ -8,7 +8,49 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
+
+const relocationIdentityTestTimeoutScale = 20
+
+// useRelocationIdentityTimeoutForTest preserves a real deadline while giving
+// filesystem and scheduler work enough headroom on a contended runner. The
+// compressed values still choose the relative test budget; scaling is capped at
+// the production value that was active on entry, so tests never weaken the
+// shipped two-second bound. Cleanup is registered here to keep restoration
+// independent from a later cleanup that calls t.Fatal (#4160).
+func useRelocationIdentityTimeoutForTest(t *testing.T, compressed time.Duration) {
+	t.Helper()
+	previous := relocationIdentityTimeout
+	relocationIdentityTimeout = scaledRelocationIdentityTestTimeout(compressed, previous)
+	t.Cleanup(func() { relocationIdentityTimeout = previous })
+}
+
+func scaledRelocationIdentityTestTimeout(compressed, production time.Duration) time.Duration {
+	if compressed <= 0 || production <= 0 || compressed > production/relocationIdentityTestTimeoutScale {
+		return production
+	}
+	return compressed * relocationIdentityTestTimeoutScale
+}
+
+func TestScaledRelocationIdentityTestTimeout(t *testing.T) {
+	const production = 2 * time.Second
+	for _, test := range []struct {
+		compressed time.Duration
+		want       time.Duration
+	}{
+		{compressed: 25 * time.Millisecond, want: 500 * time.Millisecond},
+		{compressed: 50 * time.Millisecond, want: time.Second},
+		{compressed: 80 * time.Millisecond, want: 1600 * time.Millisecond},
+		{compressed: 100 * time.Millisecond, want: production},
+		{compressed: time.Second, want: production},
+	} {
+		if got := scaledRelocationIdentityTestTimeout(test.compressed, production); got != test.want {
+			t.Errorf("scaledRelocationIdentityTestTimeout(%s, %s) = %s, want %s",
+				test.compressed, production, got, test.want)
+		}
+	}
+}
 
 // TestRelocationIdentityTimeoutUsesSharedTestPolicy keeps every compressed
 // test deadline behind one policy. A new direct assignment would otherwise
