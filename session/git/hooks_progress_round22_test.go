@@ -49,6 +49,13 @@ func TestHookProgressOwnerScanDoesNotHoldPublicationLock(t *testing.T) {
 	}
 	publisherDone := make(chan error, 1)
 	publisherJoined := false
+	// Registered BEFORE the draining cleanup below, so LIFO runs it AFTER.
+	// A t.Fatal in that drain calls runtime.Goexit and skips the rest of
+	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
+	t.Cleanup(func() {
+		hookProgressOwnerLoad = originalLoad
+		relocationIdentityTimeout = previousTimeout
+	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
 		<-workerDone
@@ -68,8 +75,6 @@ func TestHookProgressOwnerScanDoesNotHoldPublicationLock(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		hookProgressOwnerLoad = originalLoad
-		relocationIdentityTimeout = previousTimeout
 	})
 	go func() {
 		_, publishErr := newHookProgress(hookRun{worktreePath: tree, scopeSessionID: "owner"}, nil, "af-hook-owner", "test")

@@ -30,6 +30,13 @@ func TestHookProgressDirectorySyncIsBoundedUnderProgressLock(t *testing.T) {
 		drainOnce.Do(func() { close(drained) })
 		return originalSync(path)
 	}
+	// Registered BEFORE the draining cleanup below, so LIFO runs it AFTER.
+	// A t.Fatal in that drain calls runtime.Goexit and skips the rest of
+	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
+	t.Cleanup(func() {
+		hookProgressSyncDirectory = originalSync
+		relocationIdentityTimeout = previousTimeout
+	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
 		select {
@@ -37,8 +44,6 @@ func TestHookProgressDirectorySyncIsBoundedUnderProgressLock(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("blocked directory sync did not drain")
 		}
-		hookProgressSyncDirectory = originalSync
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	result := make(chan error, 1)
@@ -104,6 +109,13 @@ func TestHookProgressRetirementSyncIsBoundedUnderProgressLock(t *testing.T) {
 		drainOnce.Do(func() { close(drained) })
 		return originalSync(path)
 	}
+	// Registered BEFORE the draining cleanup below, so LIFO runs it AFTER.
+	// A t.Fatal in that drain calls runtime.Goexit and skips the rest of
+	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
+	t.Cleanup(func() {
+		hookProgressSyncDirectory = originalSync
+		relocationIdentityTimeout = previousTimeout
+	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
 		select {
@@ -111,8 +123,6 @@ func TestHookProgressRetirementSyncIsBoundedUnderProgressLock(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("blocked retirement sync did not drain")
 		}
-		hookProgressSyncDirectory = originalSync
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	result := make(chan error, 1)
@@ -166,6 +176,13 @@ func TestHookProgressPreparationIsBoundedUnderProgressLock(t *testing.T) {
 		defer close(drained)
 		return originalPrepare(run, commands, prefix, generation, path, identity, resumeDisabled, io)
 	}
+	// Registered BEFORE the draining cleanup below, so LIFO runs it AFTER.
+	// A t.Fatal in that drain calls runtime.Goexit and skips the rest of
+	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
+	t.Cleanup(func() {
+		hookProgressPrepare = originalPrepare
+		relocationIdentityTimeout = previousTimeout
+	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
 		select {
@@ -186,8 +203,6 @@ func TestHookProgressPreparationIsBoundedUnderProgressLock(t *testing.T) {
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		hookProgressPrepare = originalPrepare
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	result := make(chan error, 1)

@@ -36,6 +36,14 @@ func TestHookProgressFailedPublicationRollbackReleasesProgressLock(t *testing.T)
 		originalDiscard(prepared, path, renamed)
 		close(rollbackDrained)
 	}
+	// Registered BEFORE the draining cleanup below, so LIFO runs it AFTER.
+	// A t.Fatal in that drain calls runtime.Goexit and skips the rest of
+	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
+	t.Cleanup(func() {
+		hookProgressSyncDirectory = originalSync
+		hookProgressDiscardPrepared = originalDiscard
+		relocationIdentityTimeout = previousTimeout
+	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(releaseRollback) })
 		select {
@@ -43,9 +51,6 @@ func TestHookProgressFailedPublicationRollbackReleasesProgressLock(t *testing.T)
 		case <-time.After(5 * time.Second):
 			t.Fatal("publication rollback did not drain")
 		}
-		hookProgressSyncDirectory = originalSync
-		hookProgressDiscardPrepared = originalDiscard
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	result := make(chan error, 1)
@@ -99,6 +104,13 @@ func TestHookProgressTerminalMarkerWriteIsBoundedBeforeHooksDone(t *testing.T) {
 		defer close(drained)
 		return originalMark(path, data, mode)
 	}
+	// Registered BEFORE the draining cleanup below, so LIFO runs it AFTER.
+	// A t.Fatal in that drain calls runtime.Goexit and skips the rest of
+	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
+	t.Cleanup(func() {
+		hookProgressMarkFinished = originalMark
+		relocationIdentityTimeout = previousTimeout
+	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
 		select {
@@ -106,8 +118,6 @@ func TestHookProgressTerminalMarkerWriteIsBoundedBeforeHooksDone(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("terminal-marker write did not drain")
 		}
-		hookProgressMarkFinished = originalMark
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	done := runPostWorktreeHooks(context.Background(), hookRun{worktreePath: tree, progress: p})
@@ -151,6 +161,14 @@ func TestHookProgressTimedOutLeaseCloseDoesNotHoldFlightMutex(t *testing.T) {
 		}
 		return originalClose(file)
 	}
+	// Registered BEFORE the draining cleanup below, so LIFO runs it AFTER.
+	// A t.Fatal in that drain calls runtime.Goexit and skips the rest of
+	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
+	t.Cleanup(func() {
+		hookProgressOpenLeaseFile = originalOpen
+		hookProgressCloseLeaseFile = originalClose
+		relocationIdentityTimeout = previousTimeout
+	})
 	t.Cleanup(func() {
 		releaseOpenOnce.Do(func() { close(releaseOpen) })
 		releaseCloseOnce.Do(func() { close(releaseClose) })
@@ -159,9 +177,6 @@ func TestHookProgressTimedOutLeaseCloseDoesNotHoldFlightMutex(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("timed-out lease close did not drain")
 		}
-		hookProgressOpenLeaseFile = originalOpen
-		hookProgressCloseLeaseFile = originalClose
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	firstResult := make(chan error, 1)
@@ -233,6 +248,13 @@ func TestHookProgressLockFileOpenIsBounded(t *testing.T) {
 		defer close(drained)
 		return originalOpen(path, flags, mode)
 	}
+	// Registered BEFORE the draining cleanup below, so LIFO runs it AFTER.
+	// A t.Fatal in that drain calls runtime.Goexit and skips the rest of
+	// ITS OWN body, but cannot skip a separately registered cleanup (#4160).
+	t.Cleanup(func() {
+		hookProgressOpenLockFile = originalOpen
+		relocationIdentityTimeout = previousTimeout
+	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
 		select {
@@ -240,8 +262,6 @@ func TestHookProgressLockFileOpenIsBounded(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("lock-file open did not drain")
 		}
-		hookProgressOpenLockFile = originalOpen
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	callbackRan := false
