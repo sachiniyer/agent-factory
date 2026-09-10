@@ -141,7 +141,8 @@ for (const [name, committed, optimisticConfirmed] of [
   });
 }
 
-test("a definitive restore refusal refreshes daemon identity before enabling retry", async () => {
+for (const connectionReplaced of [false, true]) {
+test(`a definitive restore refusal waits for resync without leaking into a replaced connection=${connectionReplaced}`, async () => {
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
   const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
   const names = new Set(["openModal", "closeModal", "openConfirm"]);
@@ -152,6 +153,7 @@ test("a definitive restore refusal refreshes daemon identity before enabling ret
   const card = { focus() {}, isConnected: true, getClientRects: () => [{}], matches: () => false };
   const busy: boolean[] = [];
   const errors: Array<string | null> = [];
+  let releases = 0;
   let finishResync!: () => void;
   const resync = new Promise<void>(resolve => { finishResync = resolve; });
   let resyncs = 0;
@@ -171,6 +173,7 @@ test("a definitive restore refusal refreshes daemon identity before enabling ret
     optimisticSessions: { begin: () => null },
     pendingRestores: {
       has: () => false, captureArchiveSuccess: () => null,
+      captureRefusalRelease: () => () => { releases++; },
       run: (_id: string, request: (daemonBootId: string) => Promise<unknown>) => request("daemon-a"),
     },
     restoreSession: (_id: string, _title: string, _token: string, daemonBootId: string) => {
@@ -192,11 +195,15 @@ test("a definitive restore refusal refreshes daemon identity before enabling ret
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(resyncs, 1, "a refusal must refresh the cached daemon identity");
   assert.deepEqual(busy, [true], "retry stays disabled until that Snapshot finishes");
+  assert.equal(releases, 0, "the row action stays fenced while Snapshot is in flight");
+  if (connectionReplaced) context.connectionGeneration++;
   finishResync();
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(busy, [true, false]);
-  assert.deepEqual(errors, ["stale daemon identity"]);
+  assert.equal(releases, 1, "the completed resync releases the captured refusal fence");
+  assert.deepEqual(busy, connectionReplaced ? [true] : [true, false]);
+  assert.deepEqual(errors, connectionReplaced ? [] : ["stale daemon identity"]);
 });
+}
 
 test("reconnect retains a completed restore through its pre-response initial Snapshot", async () => {
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");

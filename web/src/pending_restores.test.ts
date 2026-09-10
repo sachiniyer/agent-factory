@@ -84,13 +84,16 @@ test("two Restore clicks send one request until a post-response Snapshot release
   assert.equal(failureModals, 0);
 });
 
-test("definitive restore refusal releases only its session fence", async () => {
+test("definitive restore refusal keeps only its session fenced for refusal resync", async () => {
   const pending = new PendingRestores(() => {}, isMutationOutcomeUncertain);
   let release!: () => void;
   const other = pending.run("other", () => new Promise<void>(resolve => { release = resolve; }), true);
   await assert.rejects(pending.run("failed", async () => { throw new ApiError(409, "refused", "", true); }, true)!, /refused/);
-  assert.equal(pending.has("failed"), false);
+  assert.equal(pending.has("failed"), true, "the action stays fenced until its refusal resync finishes");
   assert.equal(pending.has("other"), true);
+  pending.captureRefusalRelease("failed")();
+  assert.equal(pending.has("failed"), false, "the completed refusal resync releases its captured fence");
+  assert.equal(pending.has("other"), true, "a refusal resync cannot release another session's fence");
   release();
   await other;
 });

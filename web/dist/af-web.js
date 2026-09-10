@@ -13815,6 +13815,15 @@ var PendingRestores = class {
       this.changed(new Set(this.tickets.keys()));
     };
   }
+  /** Capture a definitive refusal so only its fence is released after resync. */
+  captureRefusalRelease(id) {
+    const ticket = this.tickets.get(id);
+    return () => {
+      if (!ticket || this.tickets.get(id) !== ticket) return;
+      this.release(id, ticket);
+      this.changed(new Set(this.tickets.keys()));
+    };
+  }
   run(id, request, restoreEligible) {
     if (this.has(id)) return null;
     const ticket = {
@@ -13857,8 +13866,6 @@ var PendingRestores = class {
             }
             if (this.rows) this.observe(this.rows);
           } else {
-            this.release(id, ticket);
-            this.changed(new Set(this.tickets.keys()));
           }
         }
         throw error;
@@ -17946,8 +17953,15 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
         m.setError(errorText(e));
         if (immediateRestore && modal !== m) surfaceMutationError(e);
       };
-      if (action === "restore") void requestPendingRestoreResync().then(showRefusal);
-      else showRefusal();
+      if (action === "restore") {
+        const releaseRefusal = pendingRestores.captureRefusalRelease(target.id);
+        const finishRefusal = () => {
+          releaseRefusal();
+          if (requestGeneration !== connectionGeneration || token !== tok) return;
+          showRefusal();
+        };
+        void requestPendingRestoreResync().then(finishRefusal, finishRefusal);
+      } else showRefusal();
     });
   };
   mountConfirmation(

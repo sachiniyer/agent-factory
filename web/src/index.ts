@@ -1061,9 +1061,18 @@ function openConfirm(
         if (immediateRestore && modal !== m) surfaceMutationError(e);
       };
       // A definitive guarded refusal may come from a replacement daemon. Keep
-      // Retry disabled until Snapshot refreshes the boot id used by the request.
-      if (action === "restore") void requestPendingRestoreResync().then(showRefusal);
-      else showRefusal();
+      // every restore entry point fenced until Snapshot refreshes the boot id
+      // used by the request. The UI still belongs to the same connection only
+      // if both ownership guards survive that await.
+      if (action === "restore") {
+        const releaseRefusal = pendingRestores.captureRefusalRelease(target.id);
+        const finishRefusal = () => {
+          releaseRefusal();
+          if (requestGeneration !== connectionGeneration || token !== tok) return;
+          showRefusal();
+        };
+        void requestPendingRestoreResync().then(finishRefusal, finishRefusal);
+      } else showRefusal();
     });
   };
   mountConfirmation(

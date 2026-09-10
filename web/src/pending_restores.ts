@@ -84,6 +84,16 @@ export class PendingRestores {
     };
   }
 
+  /** Capture a definitive refusal so only its fence is released after resync. */
+  captureRefusalRelease(id: string): () => void {
+    const ticket = this.tickets.get(id);
+    return () => {
+      if (!ticket || this.tickets.get(id) !== ticket) return;
+      this.release(id, ticket);
+      this.changed(new Set(this.tickets.keys()));
+    };
+  }
+
   run<T>(
     id: string,
     request: (daemonBootId: string | null) => Promise<T>,
@@ -135,8 +145,9 @@ export class PendingRestores {
             }
             if (this.rows) this.observe(this.rows);
           } else {
-            this.release(id, ticket);
-            this.changed(new Set(this.tickets.keys()));
+            // A guarded refusal can identify a replacement daemon. Keep its
+            // action fenced until the caller's Snapshot refreshes that identity;
+            // captureRefusalRelease ties the later release to this exact ticket.
           }
         }
         throw error;
