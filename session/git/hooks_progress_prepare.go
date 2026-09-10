@@ -195,7 +195,7 @@ func prepareHookProgress(run hookRun, commands []string, prefix, generation, pat
 		}
 	}()
 	if run.leaseProgress {
-		prepared.progress.lease, err = newHookProgressLeaseWithIO(dir, io)
+		prepared.progress.lease, err = newHookProgressLease(dir, io)
 		if err != nil {
 			return nil, err
 		}

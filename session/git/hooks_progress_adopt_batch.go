@@ -20,10 +20,6 @@ var hookProgressBatchReadFinished = func() {}
 // across the batch. A read that misses the budget is installed as a pending
 // watcher before restore publishes the worktree; the watcher retries under the
 // worktree's lifecycle context without delaying unrelated restored sessions.
-func adoptHookProgressBatch(worktrees []*GitWorktree) map[*GitWorktree]bool {
-	return reconcileHookProgressBatch(worktrees, nil)
-}
-
 func reconcileHookProgressBatch(worktrees, terminal []*GitWorktree) map[*GitWorktree]bool {
 	adopted := make(map[*GitWorktree]bool, len(worktrees))
 	total := len(worktrees) + len(terminal)

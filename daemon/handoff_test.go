@@ -118,12 +118,6 @@ func (b *handoffBackend) SendPromptCommandWithStatus(
 	return session.PromptDelivered, nil
 }
 
-func (b *handoffBackend) setSendErr(err error) {
-	b.mu.Lock()
-	b.sendErr = err
-	b.mu.Unlock()
-}
-
 func (b *handoffBackend) setDeliveryStatus(status session.PromptDeliveryStatus) {
 	b.mu.Lock()
 	b.deliveryStatus = status
