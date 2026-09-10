@@ -366,7 +366,17 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			m.resetRecoverBudget(repoID, instance)
 			break
 		}
-		if err := m.preserveSandboxBeforeReap(repoID, key, instance, forceReapSuggestionFor(instance)); err != nil {
+		// Same off-ramp selection the automatic loop makes (lostrestore.go): with
+		// no branch recorded, --force-reap cannot execute — the forced arm above
+		// calls requireDurableSandboxBranch, which refuses an empty persisted
+		// branch — so advertising it here sends the operator to a flag that
+		// refuses immediately. Name the kill/recreate path, which can actually
+		// end the state. A session with a branch keeps --force-reap (#4164).
+		preserveSuggestion := forceReapSuggestionFor(instance)
+		if instance.GetBranch() == "" {
+			preserveSuggestion = killSuggestionFor(instance)
+		}
+		if err := m.preserveSandboxBeforeReap(repoID, key, instance, preserveSuggestion); err != nil {
 			return "", err
 		}
 		// The push landed: reset the push-failure episode budget so that a later
