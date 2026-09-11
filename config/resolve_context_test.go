@@ -136,3 +136,41 @@ func TestRootAgentInspectionSnapshotRejectsSamePathCheckoutReplacement(t *testin
 		"a path-derived repository ID cannot prove that a checkout at the same location is unchanged")
 	require.Nil(t, resolved, "documents from different checkout generations must not be combined")
 }
+
+func TestRootAgentInspectionSnapshotRejectsCheckoutReplacementDuringCommandRead(t *testing.T) {
+	_, repoRoot, project := registeredTestProject(t)
+	_, err := SetProjectConfigValue(project.ID, "root_agent", `{"enabled":true,"program":"codex"}`)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	snapshot, err := ResolveRootAgentInspectionSnapshotWithConfigContext(ctx, DefaultConfig(), repoRoot, false)
+	require.NoError(t, err)
+	repo, err := RepoFromPath(repoRoot)
+	require.NoError(t, err)
+	commandReadEntered := make(chan struct{})
+	resumeCommandRead := make(chan struct{})
+	rootAgentInspectionBeforeCommandReadForTest = func() {
+		close(commandReadEntered)
+		<-resumeCommandRead
+	}
+	t.Cleanup(func() { rootAgentInspectionBeforeCommandReadForTest = nil })
+	resolved := make(chan error, 1)
+	go func() {
+		_, resolveErr := snapshot.ResolveConfigForRepoContext(ctx, repo)
+		resolved <- resolveErr
+	}()
+	<-commandReadEntered
+
+	originalPath := repoRoot + ".original"
+	require.NoError(t, os.Rename(repoRoot, originalPath))
+	require.NoError(t, exec.Command("git", "init", repoRoot).Run())
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, InRepoConfigDirName), 0o755))
+	require.NoError(t, os.WriteFile(InRepoTomlConfigPath(repoRoot),
+		[]byte("[program_overrides]\ncodex = '/replacement/codex'\n"), 0o600))
+	close(resumeCommandRead)
+
+	err = <-resolved
+	require.ErrorIs(t, err, ErrRootAgentInspectionIdentityChanged,
+		"checkout identity must remain stable across the command-layer read")
+}

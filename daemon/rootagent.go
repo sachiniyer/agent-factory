@@ -137,13 +137,8 @@ type rootEnsureState struct {
 	// before the refresh. The key fields also identify a failed attempt so its
 	// retry delay applies only while those same resolution inputs remain current;
 	// programDriftResolved alone says the cached command is valid.
-	programDriftResolving      bool
-	programDriftResolvingEpoch uint64
-	// programDriftResolverDone is non-nil after the caller's wait budget expires
-	// while the synchronous config reader is still alive. The resolving bit stays
-	// set until this exact worker exits: os.ReadFile cannot be canceled, so a time
-	// backoff alone would merely reduce the rate of stranded readers.
-	programDriftResolverDone      <-chan struct{}
+	programDriftResolving         bool
+	programDriftResolvingEpoch    uint64
 	programDriftResolved          bool
 	programDriftResolvedEpoch     uint64
 	programDriftResolvedRepoID    string
@@ -151,6 +146,10 @@ type rootEnsureState struct {
 	programDriftResolvedProfile   config.RootAgent
 	programDriftConfiguredProgram string
 	programDriftNextConfigCheck   time.Time
+	// A config result can finish against runtime evidence invalidated while the
+	// read was in flight. Retry that cached result against fresh evidence on the
+	// next sweep without admitting another filesystem reader.
+	programDriftLatchPending bool
 	// Test seam immediately before the latch tentatively claims its manager-owned
 	// dedupe bits. Runtime evidence is committed separately under the instance
 	// lifecycle lock.

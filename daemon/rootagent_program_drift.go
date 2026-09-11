@@ -14,14 +14,13 @@ var resolveRootProgramConfigForInspection = config.ResolveConfigForRepoInspectio
 // checkAdoptedRootProgramDrift compares a live adopted root with the command
 // its frozen profile produces. Bare agent names and the empty/default form need
 // repository config resolution, so that work is single-flighted off the
-// one-second ensure sweep. The daemon bounds its wait but owns the synchronous
-// reader's lifetime: if an uncancellable file read outlives the budget, no
-// replacement worker can start until that reader exits. The result is cached by
+// one-second ensure sweep. The resolving bit belongs to the asynchronous
+// reader's actual lifetime: if an uncancellable file read stalls, no replacement
+// worker can start until that reader exits. The result is cached by
 // repository, workspace, profile, and ApplyConfig epoch, then the complete
 // read-only repository config resolution is periodically rerun because
-// checked-in and personal files can
-// change without advancing that epoch. A cached command is never compared until
-// that refresh succeeds.
+// checked-in and personal files can change without advancing that epoch. A
+// cached command is never compared until that refresh succeeds.
 func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, workspace string, st *rootEnsureState, profile config.RootAgent, inst *session.Instance) {
 	evidence := inst.ObserveRuntimeProgram()
 	runningProgram := evidence.Program()
@@ -39,34 +38,31 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 		return
 	}
 	resolutionEpoch := m.rootProgramDriftConfigEpoch
-	if st.programDriftResolving && st.programDriftResolverDone != nil {
-		select {
-		case <-st.programDriftResolverDone:
-			st.programDriftResolving = false
-			st.programDriftResolvingEpoch = 0
-			st.programDriftResolverDone = nil
-			st.programDriftNextConfigCheck = time.Now().Add(rootProgramDriftConfigInspectionInterval)
-		default:
-			m.mu.Unlock()
-			return
-		}
-	}
 	inputsMatch := rootProgramDriftResolutionInputsMatch(st, resolutionEpoch, repoID, workspace, profile)
+	cacheMatches := rootProgramDriftCacheMatches(st, resolutionEpoch, repoID, workspace, profile)
+	if cacheMatches && st.programDriftLatchPending && !st.programDriftResolving {
+		configuredProgram := st.programDriftConfiguredProgram
+		st.programDriftLatchPending = false
+		m.mu.Unlock()
+		m.latchOrRetryAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
+			resolutionEpoch, configuredProgram, inst, evidence)
+		return
+	}
 	if st.programDriftResolving || (inputsMatch && time.Now().Before(st.programDriftNextConfigCheck)) {
 		m.mu.Unlock()
 		return
 	}
-	if rootProgramDriftCacheMatches(st, resolutionEpoch, repoID, workspace, profile) {
+	if cacheMatches {
 		configuredProgram := st.programDriftConfiguredProgram
 		if !RootAgentProfileNeedsRepoConfig(profile) {
 			m.mu.Unlock()
-			m.latchAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
+			m.latchOrRetryAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
 				resolutionEpoch, configuredProgram, inst, evidence)
 			return
 		}
 		st.programDriftResolving = true
 		st.programDriftResolvingEpoch = resolutionEpoch
-		st.programDriftResolverDone = nil
+		st.programDriftLatchPending = false
 		global := m.Config()
 		m.mu.Unlock()
 		go m.resolveAndFinishAdoptedRootProgram(repo, repoID, key, workspace, st, profile,
@@ -75,7 +71,7 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 	}
 	st.programDriftResolving = true
 	st.programDriftResolvingEpoch = resolutionEpoch
-	st.programDriftResolverDone = nil
+	st.programDriftLatchPending = false
 	st.programDriftResolved = false
 	st.programDriftResolvedEpoch = resolutionEpoch
 	st.programDriftResolvedRepoID = repoID
@@ -115,48 +111,12 @@ func (m *Manager) resolveAndFinishAdoptedRootProgram(
 	inst *session.Instance,
 	evidence session.RuntimeProgramEvidence,
 ) {
-	type result struct {
-		configuredProgram string
-		err               error
+	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
+		return resolveRootProgramConfigForInspection(repo, global)
 	}
-	resultCh := make(chan result, 1)
-	workerDone := make(chan struct{})
-	go func() {
-		defer close(workerDone)
-		resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
-			return resolveRootProgramConfigForInspection(repo, global)
-		}
-		configuredProgram, err := rootAgentProgramForResolvedRepo(repo, profile, resolve)
-		resultCh <- result{configuredProgram: configuredProgram, err: err}
-	}()
-	timer := time.NewTimer(rootRepoProbeBudget)
-	defer timer.Stop()
-	select {
-	case outcome := <-resultCh:
-		m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
-			resolutionEpoch, outcome.configuredProgram, outcome.err, inst, evidence)
-	case <-timer.C:
-		// Prefer a completed read when the timer and result become ready together.
-		select {
-		case outcome := <-resultCh:
-			m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
-				resolutionEpoch, outcome.configuredProgram, outcome.err, inst, evidence)
-		default:
-			m.keepAdoptedRootProgramResolutionSingleFlight(st, resolutionEpoch, workerDone)
-		}
-	}
-}
-
-// keepAdoptedRootProgramResolutionSingleFlight records the lifetime of a
-// synchronous reader after the caller's wait budget expires. The ensure sweep
-// observes this channel under m.mu and cannot start another reader until it
-// closes, regardless of elapsed backoff time.
-func (m *Manager) keepAdoptedRootProgramResolutionSingleFlight(st *rootEnsureState, resolutionEpoch uint64, workerDone <-chan struct{}) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if st.programDriftResolving && st.programDriftResolvingEpoch == resolutionEpoch {
-		st.programDriftResolverDone = workerDone
-	}
+	configuredProgram, err := rootAgentProgramForResolvedRepo(repo, profile, resolve)
+	m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
+		resolutionEpoch, configuredProgram, err, inst, evidence)
 }
 
 func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, configuredProgram string, resolveErr error, inst *session.Instance, evidence session.RuntimeProgramEvidence) {
@@ -167,15 +127,15 @@ func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, s
 	}
 	st.programDriftResolving = false
 	st.programDriftResolvingEpoch = 0
-	st.programDriftResolverDone = nil
+	st.programDriftLatchPending = false
 	if resolutionEpoch != m.rootProgramDriftConfigEpoch {
 		m.mu.Unlock()
 		return
 	}
 	if resolveErr != nil {
-		// A reader that returned an error before the wait budget expired is safe to
-		// retry on the ordinary cadence. Readers still alive at the deadline take
-		// the retained single-flight path above and never reach this completion.
+		// A reader that returned an error has exited and is safe to retry on the
+		// ordinary cadence. A reader still parked in the filesystem cannot reach
+		// this completion and continues to own the single-flight bit.
 		st.programDriftNextConfigCheck = time.Now().Add(rootProgramDriftConfigInspectionInterval)
 		m.mu.Unlock()
 		return
@@ -191,8 +151,23 @@ func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, s
 		st.programDriftNextConfigCheck = time.Now().Add(rootProgramDriftConfigInspectionInterval)
 	}
 	m.mu.Unlock()
-	m.latchAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
+	m.latchOrRetryAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
 		resolutionEpoch, configuredProgram, inst, evidence)
+}
+
+func (m *Manager) latchOrRetryAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, configuredProgram string, inst *session.Instance, evidence session.RuntimeProgramEvidence) {
+	if !m.latchAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
+		resolutionEpoch, configuredProgram, inst, evidence) {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rootProgramDriftCacheMatches(st, resolutionEpoch, repoID, workspace, profile) &&
+		st.programDriftConfiguredProgram == configuredProgram &&
+		!(st.programDriftLogged && st.programDriftLoggedRepoID == repoID) &&
+		!m.rootProgramDriftLogged[repoID] && m.instances[key] == inst {
+		st.programDriftLatchPending = true
+	}
 }
 
 // latchAdoptedRootProgramDrift commits a warning only while every fact it rests
@@ -202,22 +177,28 @@ func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, s
 // instance order already used by daemon lifecycle bookkeeping, so config apply
 // and runtime invalidation either land first and suppress the warning, or wait
 // until the warning has been emitted.
-func (m *Manager) latchAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, configuredProgram string, inst *session.Instance, evidence session.RuntimeProgramEvidence) {
+func (m *Manager) latchAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, configuredProgram string, inst *session.Instance, evidence session.RuntimeProgramEvidence) bool {
 	runningProgram := evidence.Program()
 	status := inst.GetStatus()
-	if status == session.Dead || status == session.Lost || status == session.Archived ||
-		strings.TrimSpace(runningProgram) == "" || configuredProgram == runningProgram {
-		return
+	if status == session.Dead || status == session.Lost || status == session.Archived {
+		return false
 	}
 
 	m.mu.Lock()
 	if !rootProgramDriftCacheMatches(st, resolutionEpoch, repoID, workspace, profile) ||
 		st.programDriftConfiguredProgram != configuredProgram ||
 		(st.programDriftLogged && st.programDriftLoggedRepoID == repoID) ||
-		m.rootProgramDriftLogged[repoID] || m.instances[key] != inst ||
-		!inst.RuntimeProgramEvidenceCurrent(evidence) {
+		m.rootProgramDriftLogged[repoID] || m.instances[key] != inst {
 		m.mu.Unlock()
-		return
+		return false
+	}
+	if !inst.RuntimeProgramEvidenceCurrent(evidence) {
+		m.mu.Unlock()
+		return true
+	}
+	if strings.TrimSpace(runningProgram) == "" || configuredProgram == runningProgram {
+		m.mu.Unlock()
+		return false
 	}
 	if st.programDriftBeforeLatchForTest != nil {
 		st.programDriftBeforeLatchForTest()
@@ -229,9 +210,10 @@ func (m *Manager) latchAdoptedRootProgramDrift(repoID, key, workspace string, st
 		m.logAdoptedRootProgramDrift(workspace, configuredProgram, runningProgram)
 	}) {
 		m.mu.Unlock()
-		return
+		return false
 	}
 	m.mu.Unlock()
+	return true
 }
 
 // invalidateRootProgramDriftResolutions is the ApplyConfig rebuild hook for the
@@ -261,6 +243,7 @@ func (m *Manager) applyLiveConfigAndInvalidateRootProgramDrift(newCfg *config.Co
 		st.programDriftResolvedProfile = config.RootAgent{}
 		st.programDriftConfiguredProgram = ""
 		st.programDriftNextConfigCheck = time.Time{}
+		st.programDriftLatchPending = false
 	}
 }
 

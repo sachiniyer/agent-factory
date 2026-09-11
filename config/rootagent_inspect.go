@@ -110,6 +110,8 @@ type RootAgentInspectionSnapshot struct {
 	checkoutID       string
 }
 
+var rootAgentInspectionBeforeCommandReadForTest func()
+
 // ErrRootAgentInspectionIdentityChanged means two repository observations
 // could not be combined because the checkout resolved to different identities.
 var ErrRootAgentInspectionIdentityChanged = errors.New("repository identity changed during root-agent inspection")
@@ -129,29 +131,48 @@ func (s *RootAgentInspectionSnapshot) ResolveConfigForRepoContext(ctx context.Co
 	if s == nil {
 		return nil, fmt.Errorf("root-agent inspection snapshot is required")
 	}
+	if err := s.verifyCheckoutIdentity(ctx, repo); err != nil {
+		return nil, err
+	}
+	if rootAgentInspectionBeforeCommandReadForTest != nil {
+		rootAgentInspectionBeforeCommandReadForTest()
+	}
+	resolved, err := resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx, repo, s.global, s.personalDocument)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.verifyCheckoutIdentity(ctx, repo); err != nil {
+		return nil, err
+	}
+	return resolved, nil
+}
+
+// verifyCheckoutIdentity brackets the command-layer read. A check only before
+// that read cannot prove which checkout supplied files opened during it.
+func (s *RootAgentInspectionSnapshot) verifyCheckoutIdentity(ctx context.Context, repo *RepoContext) error {
 	if s.repositoryID != "" && (repo == nil || repo.ID != s.repositoryID) {
 		commandRepoID := "unresolved"
 		if repo != nil && repo.ID != "" {
 			commandRepoID = repo.ID
 		}
-		return nil, fmt.Errorf("%w: profile repository %s, command repository %s; rerun the inspection",
+		return fmt.Errorf("%w: profile repository %s, command repository %s; rerun the inspection",
 			ErrRootAgentInspectionIdentityChanged, s.repositoryID, commandRepoID)
 	}
 	if s.checkoutID != "" {
 		if repo == nil {
-			return nil, fmt.Errorf("%w: the profile checkout was registered but the command repository is unresolved; rerun the inspection",
+			return fmt.Errorf("%w: the profile checkout was registered but the command repository is unresolved; rerun the inspection",
 				ErrRootAgentInspectionIdentityChanged)
 		}
 		checkoutID, found, err := checkoutIDForWorkspaceContext(ctx, repo.WorkspacePath())
 		if err != nil {
-			return nil, fmt.Errorf("verify root-agent inspection checkout identity: %w", err)
+			return fmt.Errorf("verify root-agent inspection checkout identity: %w", err)
 		}
 		if !found || checkoutID != s.checkoutID {
-			return nil, fmt.Errorf("%w: the checkout at %s no longer carries the registered identity captured with the profile; rerun the inspection",
+			return fmt.Errorf("%w: the checkout at %s no longer carries the registered identity captured with the profile; rerun the inspection",
 				ErrRootAgentInspectionIdentityChanged, repo.WorkspacePath())
 		}
 	}
-	return resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx, repo, s.global, s.personalDocument)
+	return nil
 }
 
 // ResolveRootAgentInspectionSnapshotWithConfigContext is the bounded,

@@ -623,13 +623,13 @@ func TestAdoptedRootProgramDriftRevalidatesRuntimeBeforeLatching(t *testing.T) {
 	}
 	root := findRootInstance(t, manager, repoPath)
 	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "claude"))
+	root.SetStatusForTest(session.Running)
 	st := &rootEnsureState{programDriftResolving: true}
 	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
 	evidence := root.ObserveRuntimeProgram()
-	if err := root.Transition(session.BeginHandoff()); err != nil {
+	if err := root.Transition(session.ObserveLiveness(session.LiveReady)); err != nil {
 		t.Fatal(err)
 	}
-	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "codex"))
 	manager.finishAdoptedRootProgramDrift(repo.ID, key, repoPath, st,
 		config.RootAgent{Enabled: true, Program: "codex"}, 0, "codex", nil, root, evidence)
 	if strings.Contains(warnings.String(), "root agent program drift") {
@@ -640,6 +640,25 @@ func TestAdoptedRootProgramDriftRevalidatesRuntimeBeforeLatching(t *testing.T) {
 	manager.mu.Unlock()
 	if logged {
 		t.Fatal("stale runtime evidence permanently latched the repository drift bit")
+	}
+	if !st.programDriftLatchPending {
+		t.Fatal("rejected latch did not preserve the cached command for fresh runtime evidence")
+	}
+
+	previousResolve := resolveRootProgramConfigForInspection
+	resolveCalls := 0
+	resolveRootProgramConfigForInspection = func(*config.RepoContext, *config.Config) (*config.ResolvedConfig, error) {
+		resolveCalls++
+		return nil, fmt.Errorf("cached latch retry unexpectedly started a config reader")
+	}
+	t.Cleanup(func() { resolveRootProgramConfigForInspection = previousResolve })
+	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st,
+		config.RootAgent{Enabled: true, Program: "codex"}, root)
+	if resolveCalls != 0 {
+		t.Fatalf("cached latch retry started %d config reader(s), want zero", resolveCalls)
+	}
+	if !strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("cached command was not retried against fresh runtime evidence:\n%s", warnings.String())
 	}
 }
 

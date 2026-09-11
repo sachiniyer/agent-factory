@@ -127,7 +127,7 @@ func TestAdoptedRootProgramDriftSkipsUserKilledRuntime(t *testing.T) {
 	}
 }
 
-func TestTimedOutAdoptedRootProgramInspectionStaysSingleFlightUntilReaderExits(t *testing.T) {
+func TestSlowAdoptedRootProgramInspectionStaysSingleFlightAndConsumesResult(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
 	previousInterval := rootProgramDriftConfigInspectionInterval
@@ -143,7 +143,9 @@ func TestTimedOutAdoptedRootProgramInspectionStaysSingleFlightUntilReaderExits(t
 		resolveStarted <- struct{}{}
 		<-readerRelease
 		readerDone <- struct{}{}
-		return &config.ResolvedConfig{Config: *config.DefaultConfig()}, nil
+		resolved := config.DefaultConfig()
+		resolved.ProgramOverrides = map[string]string{"codex": "/resolved/codex"}
+		return &config.ResolvedConfig{Config: *resolved}, nil
 	}
 	t.Cleanup(func() {
 		rootProgramDriftConfigInspectionInterval = previousInterval
@@ -163,7 +165,7 @@ func TestTimedOutAdoptedRootProgramInspectionStaysSingleFlightUntilReaderExits(t
 		t.Fatalf("create pre-existing root: %v", err)
 	}
 	root := findRootInstance(t, manager, repoPath)
-	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "codex"))
+	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "/resolved/codex"))
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
 		t.Fatal(err)
@@ -178,8 +180,11 @@ func TestTimedOutAdoptedRootProgramInspectionStaysSingleFlightUntilReaderExits(t
 	case <-time.After(5 * time.Second):
 		t.Fatal("first drift inspection did not start")
 	}
-	waitForRootProgramResolutionParked(t, manager, st)
+	// The old caller budget is deliberately exceeded. The slow reader remains
+	// the one in-flight resolution; elapsed time must neither discard its result
+	// nor admit a replacement reader.
 	time.Sleep(2 * rootProgramDriftConfigInspectionInterval)
+	time.Sleep(rootRepoProbeBudget)
 	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root)
 	select {
 	case <-resolveStarted:
@@ -194,19 +199,12 @@ func TestTimedOutAdoptedRootProgramInspectionStaysSingleFlightUntilReaderExits(t
 	case <-time.After(5 * time.Second):
 		t.Fatal("released reader did not exit")
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root)
-		manager.mu.Lock()
-		resolving := st.programDriftResolving
-		manager.mu.Unlock()
-		if !resolving {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("completed reader did not release the single-flight state")
-		}
-		time.Sleep(10 * time.Millisecond)
+	waitForRootProgramResolutionIdle(t, manager, st)
+	manager.mu.Lock()
+	configured := st.programDriftConfiguredProgram
+	manager.mu.Unlock()
+	if configured != "/resolved/codex" {
+		t.Fatalf("completed slow inspection was discarded: configured command = %q", configured)
 	}
 
 	time.Sleep(2 * rootProgramDriftConfigInspectionInterval)
@@ -217,21 +215,4 @@ func TestTimedOutAdoptedRootProgramInspectionStaysSingleFlightUntilReaderExits(t
 		t.Fatal("a completed reader did not permit the next inspection")
 	}
 	waitForRootProgramResolutionIdle(t, manager, st)
-}
-
-func waitForRootProgramResolutionParked(t *testing.T, manager *Manager, st *rootEnsureState) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		manager.mu.Lock()
-		parked := st.programDriftResolving && st.programDriftResolverDone != nil
-		manager.mu.Unlock()
-		if parked {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for root program resolution to retain its reader")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
