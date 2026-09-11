@@ -80,3 +80,32 @@ func TestResolveConfigForRepoInspectionRequiresCompletePersonalLookup(t *testing
 	require.Error(t, err, "command inspection must not cache a lower-precedence command when personal lookup fails")
 	require.Contains(t, err.Error(), "exit status 7")
 }
+
+func TestRootAgentInspectionSnapshotKeepsProfileAndOverridesOnOneGeneration(t *testing.T) {
+	_, repoRoot, project := registeredTestProject(t)
+	_, err := SetProjectConfigValue(project.ID, "root_agent", `{"enabled":true,"program":"codex"}`)
+	require.NoError(t, err)
+	_, err = SetProjectConfigValue(project.ID, "program_overrides.codex", "/old/codex")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	snapshot, err := ResolveRootAgentInspectionSnapshotWithConfigContext(ctx, DefaultConfig(), repoRoot, false)
+	require.NoError(t, err)
+
+	// Replace both fields after the root profile was resolved. The related
+	// command resolution must keep using the personal document captured above.
+	_, err = SetProjectConfigValue(project.ID, "root_agent", `{"enabled":true,"program":"claude"}`)
+	require.NoError(t, err)
+	_, err = SetProjectConfigValue(project.ID, "program_overrides.codex", "/new/codex")
+	require.NoError(t, err)
+
+	repo, err := RepoFromPath(repoRoot)
+	require.NoError(t, err)
+	resolved, err := snapshot.ResolveConfigForRepoContext(ctx, repo)
+	require.NoError(t, err)
+	profile, ok := snapshot.ResolvedRootAgent().Value.(RootAgent)
+	require.True(t, ok)
+	require.Equal(t, "codex", profile.Program)
+	require.Equal(t, "/old/codex", ResolveProgram(&resolved.Config, profile.Program))
+}

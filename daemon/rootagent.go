@@ -888,7 +888,7 @@ func rootAgentCreateProgramFromResolvedConfig(cfg *config.Config) string {
 func rootAgentProgramForResolvedRepo(repo *config.RepoContext, ra config.RootAgent, resolve func(*config.RepoContext) (*config.ResolvedConfig, error)) (string, error) {
 	requested := strings.TrimSpace(ra.Program)
 	if requested != "" && !tmux.IsSupportedProgram(requested) {
-		return ra.Program, nil
+		return rootAgentProgramFromResolvedConfig(ra, nil)
 	}
 	if repo == nil {
 		return "", fmt.Errorf("repo context is required to resolve root-agent program %q", requested)
@@ -896,6 +896,17 @@ func rootAgentProgramForResolvedRepo(repo *config.RepoContext, ra config.RootAge
 	resolved, err := resolve(repo)
 	if err != nil {
 		return "", err
+	}
+	return rootAgentProgramFromResolvedConfig(ra, resolved)
+}
+
+func rootAgentProgramFromResolvedConfig(ra config.RootAgent, resolved *config.ResolvedConfig) (string, error) {
+	requested := strings.TrimSpace(ra.Program)
+	if requested != "" && !tmux.IsSupportedProgram(requested) {
+		return ra.Program, nil
+	}
+	if resolved == nil {
+		return "", fmt.Errorf("resolved repository config is required to interpret root-agent program %q", requested)
 	}
 	if requested != "" {
 		return config.ResolveProgram(&resolved.Config, requested), nil
@@ -907,6 +918,13 @@ func rootAgentProgramForResolvedRepo(repo *config.RepoContext, ra config.RootAge
 	// stale immediately even though it runs exactly what AF launched.
 	program := rootAgentCreateProgramFromResolvedConfig(&resolved.Config)
 	return config.ResolveProgram(&resolved.Config, program), nil
+}
+
+// RootAgentProgramForProfileResolvedConfig interprets a profile through an
+// already-resolved repository-config snapshot. Read-only diagnostics use it to
+// keep the profile and its program_overrides on one source generation.
+func RootAgentProgramForProfileResolvedConfig(ra config.RootAgent, resolved *config.ResolvedConfig) (string, error) {
+	return rootAgentProgramFromResolvedConfig(ra, resolved)
 }
 
 // RootAgentProfileNeedsRepoConfig reports whether interpreting a root profile

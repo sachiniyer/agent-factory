@@ -196,7 +196,7 @@ func TestRootAgentProgramInspectionBoundsCommandConfigLoads(t *testing.T) {
 	previousTimeout := rootAgentProgramProbeTimeout
 	previousInspect := inspectRootAgentProgram
 	rootAgentProgramProbeTimeout = 500 * time.Millisecond
-	inspectRootAgentProgram = func(ctx context.Context, _ *config.RepoContext, _ config.RootAgent, _ *config.Config) (string, error) {
+	inspectRootAgentProgram = func(ctx context.Context, _ *config.RepoContext, _ config.RootAgent, _ rootAgentProgramInspection) (string, error) {
 		<-ctx.Done()
 		return "", ctx.Err()
 	}
@@ -232,11 +232,11 @@ func TestRootAgentProgramInspectionBudgetsEachRootIndependently(t *testing.T) {
 	previousResolve := resolveRootAgentForInspection
 	previousInspect := inspectRootAgentProgram
 	rootAgentProgramProbeTimeout = 100 * time.Millisecond
-	resolveRootAgentForInspection = func(_ context.Context, _ *config.Config, path string, _ bool) (config.ResolvedValue, error) {
-		return config.ResolvedValue{Value: config.RootAgent{Enabled: true, Program: "/" + filepath.Base(path)}}, nil
+	resolveRootAgentForInspection = func(_ context.Context, _ *config.Config, path string, _ bool) (rootAgentProgramInspection, error) {
+		return rootAgentProgramInspection{resolved: config.ResolvedValue{Value: config.RootAgent{Enabled: true, Program: "/" + filepath.Base(path)}}}, nil
 	}
 	secondInspected := false
-	inspectRootAgentProgram = func(ctx context.Context, _ *config.RepoContext, profile config.RootAgent, _ *config.Config) (string, error) {
+	inspectRootAgentProgram = func(ctx context.Context, _ *config.RepoContext, profile config.RootAgent, _ rootAgentProgramInspection) (string, error) {
 		if profile.Program == "/first" {
 			<-ctx.Done()
 			return "", ctx.Err()

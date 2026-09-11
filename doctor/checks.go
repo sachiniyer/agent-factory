@@ -19,10 +19,33 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
+type rootAgentProgramInspection struct {
+	resolved      config.ResolvedValue
+	resolveConfig func(context.Context, *config.RepoContext) (*config.ResolvedConfig, error)
+}
+
 var (
 	rootAgentProgramProbeTimeout  = binaryProbeTimeout
-	resolveRootAgentForInspection = config.ResolveRootAgentForInspectionWithConfigContext
-	inspectRootAgentProgram       = daemon.RootAgentProgramForProfileInspectionContext
+	resolveRootAgentForInspection = func(ctx context.Context, global *config.Config, projectSelector string, strictProjectLookup bool) (rootAgentProgramInspection, error) {
+		snapshot, err := config.ResolveRootAgentInspectionSnapshotWithConfigContext(ctx, global, projectSelector, strictProjectLookup)
+		if err != nil {
+			return rootAgentProgramInspection{}, err
+		}
+		return rootAgentProgramInspection{
+			resolved:      snapshot.ResolvedRootAgent(),
+			resolveConfig: snapshot.ResolveConfigForRepoContext,
+		}, nil
+	}
+	inspectRootAgentProgram = func(ctx context.Context, repo *config.RepoContext, profile config.RootAgent, inspection rootAgentProgramInspection) (string, error) {
+		if !daemon.RootAgentProfileNeedsRepoConfig(profile) {
+			return daemon.RootAgentProgramForProfileResolvedConfig(profile, nil)
+		}
+		resolved, err := inspection.resolveConfig(ctx, repo)
+		if err != nil {
+			return "", err
+		}
+		return daemon.RootAgentProgramForProfileResolvedConfig(profile, resolved)
+	}
 )
 
 func selfPID() int { return os.Getpid() }
@@ -280,7 +303,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		// mount is an unknown answer about that root, not permission to spend the
 		// probe budget of every healthy root that follows it in the inventory.
 		probeCtx, cancel := context.WithTimeout(context.Background(), rootAgentProgramProbeTimeout)
-		resolved, resolveErr := resolveRootAgentForInspection(probeCtx, cfg, identityPath, false)
+		inspection, resolveErr := resolveRootAgentForInspection(probeCtx, cfg, identityPath, false)
 		if resolveErr != nil {
 			cancel()
 			unresolved++
@@ -290,6 +313,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			report.markIncomplete("root agent program")
 			continue
 		}
+		resolved := inspection.resolved
 		if config.RootAgentValueFailsClosed(resolved) {
 			cancel()
 			unresolved++
@@ -347,7 +371,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 				continue
 			}
 		}
-		configuredProgram, programErr := inspectRootAgentProgram(probeCtx, commandRepo, profile, cfg)
+		configuredProgram, programErr := inspectRootAgentProgram(probeCtx, commandRepo, profile, inspection)
 		cancel()
 		if programErr != nil {
 			unresolved++

@@ -169,8 +169,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// branch_prefix rides along in the swapped config, but its runtime consumers
 	// read frozen m.cfg so an unrelated apply cannot advance that generation behind
 	// the next-start notice.
-	m.live.Store(newCfg)
-	m.invalidateRootProgramDriftResolutions()
+	m.applyLiveConfigAndInvalidateRootProgramDrift(newCfg)
 
 	// limit_patterns snapshots at construction, so the swap alone would be a silent
 	// no-op — rebuild the detector in place.

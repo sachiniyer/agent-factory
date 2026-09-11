@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -132,21 +131,25 @@ func TestFailedAdoptedRootProgramInspectionBacksOffWhileReaderStaysBlocked(t *te
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
 	previousInterval := rootProgramDriftConfigInspectionInterval
+	previousBudget := rootRepoProbeBudget
 	previousResolve := resolveRootProgramConfigForInspection
 	rootProgramDriftConfigInspectionInterval = 30 * time.Second
+	rootRepoProbeBudget = 100 * time.Millisecond
 	readerRelease := make(chan struct{})
 	readerDone := make(chan struct{}, 2)
 	resolveStarted := make(chan struct{}, 2)
-	resolveRootProgramConfigForInspection = func(*config.RepoContext, *config.Config) (*config.ResolvedConfig, error) {
+	resolveRootProgramConfigForInspection = func(ctx context.Context, _ *config.RepoContext, _ *config.Config) (*config.ResolvedConfig, error) {
 		resolveStarted <- struct{}{}
 		go func() {
 			<-readerRelease
 			readerDone <- struct{}{}
 		}()
-		return nil, errors.New("inspection deadline exceeded")
+		<-ctx.Done()
+		return nil, ctx.Err()
 	}
 	t.Cleanup(func() {
 		rootProgramDriftConfigInspectionInterval = previousInterval
+		rootRepoProbeBudget = previousBudget
 		resolveRootProgramConfigForInspection = previousResolve
 		close(readerRelease)
 	})

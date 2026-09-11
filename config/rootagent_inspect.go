@@ -89,14 +89,55 @@ func ResolveRootAgentForInspectionWithConfig(global *Config, projectSelector str
 // path above, every repository probe shares the caller's deadline and an
 // unanswered legacy lookup is returned as an error rather than read as absent.
 func ResolveRootAgentForInspectionWithConfigContext(ctx context.Context, global *Config, projectSelector string, strictProjectLookup bool) (ResolvedValue, error) {
+	snapshot, err := ResolveRootAgentInspectionSnapshotWithConfigContext(ctx, global, projectSelector, strictProjectLookup)
+	if err != nil {
+		return ResolvedValue{}, err
+	}
+	return snapshot.ResolvedRootAgent(), nil
+}
+
+// RootAgentInspectionSnapshot binds a resolved root-agent profile to the exact
+// personal-project config document read while producing it. Diagnostics that
+// subsequently resolve program_overrides through ResolveConfigForRepoContext
+// therefore cannot mix the profile from one atomic file generation with the
+// command map from another.
+type RootAgentInspectionSnapshot struct {
+	resolved         ResolvedValue
+	global           *Config
+	personalDocument *sourceDocument
+}
+
+// ResolvedRootAgent returns the profile and provenance captured by the snapshot.
+func (s *RootAgentInspectionSnapshot) ResolvedRootAgent() ResolvedValue {
+	if s == nil {
+		return ResolvedValue{}
+	}
+	return s.resolved
+}
+
+// ResolveConfigForRepoContext resolves command-bearing repository config while
+// reusing this snapshot's global and personal-project documents. Checked-in and
+// legacy-repo sources are read once here; neither participates in root_agent.
+func (s *RootAgentInspectionSnapshot) ResolveConfigForRepoContext(ctx context.Context, repo *RepoContext) (*ResolvedConfig, error) {
+	if s == nil {
+		return nil, fmt.Errorf("root-agent inspection snapshot is required")
+	}
+	return resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx, repo, s.global, s.personalDocument)
+}
+
+// ResolveRootAgentInspectionSnapshotWithConfigContext is the bounded,
+// read-only root-agent inspection form for a decision that also needs effective
+// repository config. Both results share one global and personal-project file
+// generation.
+func ResolveRootAgentInspectionSnapshotWithConfigContext(ctx context.Context, global *Config, projectSelector string, strictProjectLookup bool) (*RootAgentInspectionSnapshot, error) {
 	if global == nil {
-		return ResolvedValue{}, fmt.Errorf("cannot resolve root_agent without a global config snapshot")
+		return nil, fmt.Errorf("cannot resolve root_agent without a global config snapshot")
 	}
 	if ctx == nil {
-		return ResolvedValue{}, fmt.Errorf("context is required for bounded root_agent inspection")
+		return nil, fmt.Errorf("context is required for bounded root_agent inspection")
 	}
 	if err := ctx.Err(); err != nil {
-		return ResolvedValue{}, fmt.Errorf("inspect root_agent profile: %w", err)
+		return nil, fmt.Errorf("inspect root_agent profile: %w", err)
 	}
 	type result struct {
 		assembly rootAgentInspectionAssembly
@@ -110,19 +151,27 @@ func ResolveRootAgentForInspectionWithConfigContext(ctx context.Context, global 
 	select {
 	case outcome := <-done:
 		if outcome.err != nil {
-			return ResolvedValue{}, outcome.err
+			return nil, outcome.err
 		}
-		return resolveRootAgentInspectionAssembly(outcome.assembly, projectSelector != ""), nil
+		return rootAgentInspectionSnapshotFromAssembly(global, outcome.assembly, projectSelector != ""), nil
 	case <-ctx.Done():
 		select {
 		case outcome := <-done:
 			if outcome.err != nil {
-				return ResolvedValue{}, outcome.err
+				return nil, outcome.err
 			}
-			return resolveRootAgentInspectionAssembly(outcome.assembly, projectSelector != ""), nil
+			return rootAgentInspectionSnapshotFromAssembly(global, outcome.assembly, projectSelector != ""), nil
 		default:
-			return ResolvedValue{}, fmt.Errorf("inspect root_agent profile: %w", ctx.Err())
+			return nil, fmt.Errorf("inspect root_agent profile: %w", ctx.Err())
 		}
+	}
+}
+
+func rootAgentInspectionSnapshotFromAssembly(global *Config, assembly rootAgentInspectionAssembly, projectSelected bool) *RootAgentInspectionSnapshot {
+	return &RootAgentInspectionSnapshot{
+		resolved:         resolveRootAgentInspectionAssembly(assembly, projectSelected),
+		global:           global,
+		personalDocument: assembly.personalDocument,
 	}
 }
 
@@ -144,6 +193,9 @@ func resolveRootAgentInspectionAssembly(assembly rootAgentInspectionAssembly, pr
 type rootAgentInspectionAssembly struct {
 	inputs RootAgentInputs
 	locs   rootAgentLocations
+	// personalDocument is the exact personal config layer that supplied inputs.
+	// A related effective-config resolve reuses it rather than reopening the file.
+	personalDocument *sourceDocument
 	// ignoredGlobal/ignoredReason render the global layer as present but
 	// inapplicable, without failing the trace.
 	ignoredGlobal *RootAgentCandidate
@@ -198,9 +250,11 @@ func assembleRootAgentInspectionInputsFromConfigContext(ctx context.Context, glo
 }
 
 func assembleRootAgentInspectionInputsFromConfigWithContext(ctx context.Context, global *Config, projectSelector string, strictProjectLookup, bounded bool) (rootAgentInspectionAssembly, error) {
+	personalDocument := emptyProjectPersonalDocument()
 	out := rootAgentInspectionAssembly{
-		locs:   rootAgentLocations{globalPath: global.source.path},
-		inputs: RootAgentInputs{Global: GlobalRootAgentLayer(global)},
+		locs:             rootAgentLocations{globalPath: global.source.path},
+		inputs:           RootAgentInputs{Global: GlobalRootAgentLayer(global)},
+		personalDocument: &personalDocument,
 	}
 	if out.locs.globalPath == "" {
 		if path, err := globalConfigTomlPath(); err == nil {
@@ -290,6 +344,11 @@ func assembleRootAgentInspectionInputsFromConfigWithContext(ctx context.Context,
 				out.personalUnreadable = true
 				return out, nil
 			}
+			personalDocument, err := projectPersonalDocumentFromLoaded(project, pc)
+			if err != nil {
+				return rootAgentInspectionAssembly{}, err
+			}
+			out.personalDocument = &personalDocument
 			if layer := pc.RootAgentLayer(); layer != nil {
 				out.inputs.Personal = layer
 				if path, err := ProjectConfigTomlPath(project.ID); err == nil {

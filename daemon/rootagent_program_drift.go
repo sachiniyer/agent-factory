@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -9,7 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-var resolveRootProgramConfigForInspection = config.ResolveConfigForRepoInspectionWithGlobal
+var resolveRootProgramConfigForInspection = config.ResolveConfigForRepoInspectionWithGlobalContext
 
 // checkAdoptedRootProgramDrift compares a live adopted root with the command
 // its frozen profile produces. Bare agent names and the empty/default form need
@@ -98,8 +99,10 @@ func (m *Manager) resolveAndFinishAdoptedRootProgram(
 	inst *session.Instance,
 	evidence session.RuntimeProgramEvidence,
 ) {
+	ctx, cancel := context.WithTimeout(context.Background(), rootRepoProbeBudget)
+	defer cancel()
 	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
-		return resolveRootProgramConfigForInspection(repo, global)
+		return resolveRootProgramConfigForInspection(ctx, repo, global)
 	}
 	configuredProgram, err := rootAgentProgramForResolvedRepo(repo, profile, resolve)
 	m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
@@ -136,11 +139,12 @@ func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, s
 }
 
 // latchAdoptedRootProgramDrift commits a warning only while every fact it rests
-// on is still current. Manager state is checked and tentatively written under
-// m.mu, then the instance owns the final evidence-to-warning boundary: every
-// lifecycle/runtime invalidation either lands before that boundary and forces a
-// rollback, or waits until the warning has been emitted. The two locks are never
-// nested, preserving the daemon's manager/instance lock order.
+// on is still current. Manager state and the config epoch are checked while
+// m.mu excludes ApplyConfig's live-config/epoch commit; the instance then owns
+// the final evidence-to-warning boundary. The locks follow the manager-before-
+// instance order already used by daemon lifecycle bookkeeping, so config apply
+// and runtime invalidation either land first and suppress the warning, or wait
+// until the warning has been emitted.
 func (m *Manager) latchAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, configuredProgram string, inst *session.Instance, evidence session.RuntimeProgramEvidence) {
 	runningProgram := evidence.Program()
 	status := inst.GetStatus()
@@ -161,25 +165,14 @@ func (m *Manager) latchAdoptedRootProgramDrift(repoID, key, workspace string, st
 	if st.programDriftBeforeLatchForTest != nil {
 		st.programDriftBeforeLatchForTest()
 	}
-	st.programDriftLogged = true
-	st.programDriftLoggedRepoID = repoID
-	m.rootProgramDriftLogged[repoID] = true
-	m.mu.Unlock()
-
 	if inst.CommitRuntimeProgramEvidence(evidence, func() {
+		st.programDriftLogged = true
+		st.programDriftLoggedRepoID = repoID
+		m.rootProgramDriftLogged[repoID] = true
 		m.logAdoptedRootProgramDrift(workspace, configuredProgram, runningProgram)
 	}) {
+		m.mu.Unlock()
 		return
-	}
-
-	// The latch was deliberately visible while the instance acquired its
-	// evidence lock, so a sibling ensure pass could not race in and emit the same
-	// warning. No sibling can replace it until this rollback clears both bits.
-	m.mu.Lock()
-	if st.programDriftLogged && st.programDriftLoggedRepoID == repoID {
-		st.programDriftLogged = false
-		st.programDriftLoggedRepoID = ""
-		delete(m.rootProgramDriftLogged, repoID)
 	}
 	m.mu.Unlock()
 }
@@ -191,9 +184,13 @@ func (m *Manager) latchAdoptedRootProgramDrift(repoID, key, workspace string, st
 // above. The epoch also rejects an older asynchronous resolver that finishes
 // after invalidation, so it cannot repopulate the cache with a superseded global
 // snapshot.
-func (m *Manager) invalidateRootProgramDriftResolutions() {
+func (m *Manager) applyLiveConfigAndInvalidateRootProgramDrift(newCfg *config.Config) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// The live snapshot and its drift-cache epoch are one publication. A warning
+	// commit holding m.mu therefore observes either the complete old generation
+	// or the complete new one, never new config with an old cache epoch.
+	m.live.Store(newCfg)
 	m.rootProgramDriftConfigEpoch++
 	for _, st := range m.rootEnsureStates {
 		st.programDriftResolving = false
