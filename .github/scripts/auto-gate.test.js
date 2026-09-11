@@ -5645,23 +5645,139 @@ for (const state of ["action_required", "queued", "in_progress"]) {
 
 // Execute the actual resolver workflow body so an empty successful result cannot
 // be turned into a failure by its consumer again.
-async function runRecoveryResolver(github) {
+async function runRecoveryResolver(github, { core = fakeCore(), outputs = {} } = {}) {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
   const match = workflow.match(/- name: Evaluate gate[\s\S]*?script: \|\n([\s\S]*?)(?=\n      # A keep)/);
   assert.ok(match);
   const script = match[1].split("\n").map((line) => line.replace(/^ {12}/, "")).join("\n");
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-  const outputs = {};
   const helper = { ...autoGate, resolveTargets: (args) => autoGate.resolveTargets({ ...args,
     headPollAttempts: 3, headPollDelayMs: 0, sleep: async () => {},
   }) };
   const requireStub = (id) => id === "fs" ? { existsSync: () => true }
     : id === "path" ? path : helper;
   await new AsyncFunction("github", "context", "core", "require", "process", script)(
-    github, recoveryContext(), { ...fakeCore(), setOutput: (key, value) => { outputs[key] = value; } },
+    github, recoveryContext(), { ...core, setOutput: (key, value) => { outputs[key] = value; } },
     requireStub, { env: { GITHUB_WORKSPACE: "/workspace", PR_NUMBER: "1465" } },
   );
   return outputs;
+}
+
+// #4210 round six. Nothing but this successor revisits an accepted update, and it
+// runs under workflow_dispatch, whose payload names no event heads: the workflow
+// catch has no aggregate to turn red. Each of its exits — setFailed and return
+// for a retry-exhausted read, rethrow for anything else — therefore ended the
+// lane as a red run on master with nothing on the PR, and a parked successor
+// stayed parked. Drive the real workflow body to whichever exit each failure
+// reaches and require the rerun command on the PR and in the failure.
+async function runFailingRecoveryResolver(github) {
+  const outputs = {};
+  const failures = [];
+  const core = { ...fakeCore(), setFailed: (message) => failures.push(String(message)) };
+  const thrown = await runRecoveryResolver(github, { core, outputs }).then(() => null, (error) => error);
+  return { outputs, failures, thrown };
+}
+
+const RECOVERY_RERUN = new RegExp("gh workflow run auto-gate\\.yml --repo sachiniyer/agent-factory --ref master " +
+  `-f pr_number=1465 -f previous_head_sha=${HEAD_SHA}`);
+
+// Every read on the recovery path, in the order a parked successor reaches them.
+const RECOVERY_READ_SITES = {
+  "initial PR read": { pullRead: 1 },
+  "stale-head poll read": { pullRead: 2, stale: true },
+  "eligibility read before the PR Validation listing": { pullRead: 2 },
+  "PR Validation run listing": { listing: "pr.yml" },
+  "eligibility read before approval": { pullRead: 3 },
+  "parked-run listing": { listing: "repository" },
+  "post-recovery PR read": { pullRead: 4 },
+};
+const RECOVERY_READ_FAULTS = {
+  // Retryable, so retryRead exhausts and marks it: the catch's return exit.
+  exhausted: { attempts: 3, fault: () => Object.assign(new Error("fetch failed"), { status: 502 }) },
+  // Not retryable, so it escapes unmarked: the catch's rethrow exit.
+  refused: { attempts: 1, fault: () => Object.assign(new Error("Resource not accessible by integration"), { status: 403 }) },
+};
+
+for (const [site, { pullRead, listing, stale }] of Object.entries(RECOVERY_READ_SITES)) {
+  for (const [kind, { attempts, fault }] of Object.entries(RECOVERY_READ_FAULTS)) {
+    test(`#4210-r6: a ${kind} ${site} still publishes the rerun command`, async () => {
+      const github = fakeGateGithub({ headSha: stale ? HEAD_SHA : OTHER_SHA, runsByHeadSha: {
+        [OTHER_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request", conclusion: "action_required" }],
+      } });
+      let faults = 0;
+      let pullReads = 0;
+      const graphql = github.graphql;
+      github.graphql = async (query, variables) => {
+        // From that read onward, so a retryable fault is exhausted where it lands.
+        if (pullRead && variables?.number === 1465 && ++pullReads >= pullRead) {
+          faults += 1;
+          throw fault();
+        }
+        return graphql(query, variables);
+      };
+      const listRuns = github.rest.actions.listWorkflowRunsForRepo;
+      github.rest.actions.listWorkflowRunsForRepo = async (options) => {
+        if (listing && (listing === "pr.yml") === (options.workflow_id === "pr.yml")) {
+          faults += 1;
+          throw fault();
+        }
+        return listRuns(options);
+      };
+
+      const { outputs, failures, thrown } = await runFailingRecoveryResolver(github);
+
+      assert.equal(faults, attempts, `the fault must land on the ${site}`);
+      if (kind === "exhausted") {
+        assert.equal(thrown, null, "a read failure takes the setFailed-and-return exit");
+        assert.equal(failures.length, 1);
+        assert.match(failures[0], RECOVERY_RERUN);
+      } else {
+        assert.ok(thrown, "anything else takes the rethrow exit");
+        assert.deepEqual(failures, []);
+        assert.match(thrown.message, RECOVERY_RERUN);
+      }
+      assert.deepEqual(JSON.parse(outputs.targets), []);
+      assert.deepEqual(JSON.parse(outputs.aggregate_heads), [], "a dispatch payload names no head to turn red");
+      assert.equal(github.recoveryComments.length, 1, "the PR is the only place a human will look");
+      assert.equal(github.recoveryComments[0].issue_number, 1465);
+      assert.match(github.recoveryComments[0].body, RECOVERY_RERUN);
+      if (!stale && pullRead !== 1) assert.match(github.recoveryComments[0].body, new RegExp(`head: ${OTHER_SHA}`));
+    });
+  }
+}
+
+// The resolver's own refusals already carried the command, but only into a red
+// run on master; they reach the PR through the same exit as the reads above.
+const UNCONFIRMED_RECOVERIES = {
+  "the head never moves past the initiating SHA": () => fakeGateGithub(),
+  "PR Validation cannot be dispatched": () => fakeGateGithub({ headSha: OTHER_SHA,
+    workflowDispatchErrorsByWorkflow: { "pr.yml": new Error("dispatch refused") } }),
+  "a parked run cannot be approved": () => fakeGateGithub({ headSha: OTHER_SHA, approveRunError: new Error("approval refused"),
+    runsByHeadSha: { [OTHER_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request", conclusion: "action_required" }] } }),
+};
+for (const [name, fixture] of Object.entries(UNCONFIRMED_RECOVERIES)) {
+  for (const publicationFails of [false, true]) {
+    test(`#4210-r6: ${name} reaches the PR (publication fails=${publicationFails})`, async () => {
+      const github = fixture();
+      let publications = 0;
+      github.rest.issues.createComment = async (options) => {
+        publications += 1;
+        if (publicationFails) throw new Error("comment unavailable");
+        github.recoveryComments.push(options);
+      };
+      const { outputs, failures, thrown } = await runFailingRecoveryResolver(github);
+      assert.ok(thrown);
+      assert.deepEqual(failures, []);
+      assert.match(thrown.message, RECOVERY_RERUN, "the command survives a failed publication");
+      assert.deepEqual(JSON.parse(outputs.targets), []);
+      assert.equal(publications, 1);
+      if (publicationFails) {
+        assert.match(thrown.message, /recovery publication also failed: .*comment unavailable/);
+      } else {
+        assert.match(github.recoveryComments[0].body, RECOVERY_RERUN);
+      }
+    });
+  }
 }
 
 for (const [name, state] of Object.entries({ closed: { state: "CLOSED" }, merged: { merged: true }, retargeted: { baseRefName: "other" } })) {

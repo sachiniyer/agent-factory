@@ -137,6 +137,16 @@ must not be superseded by an unfenced recovery failure. Publication failures
 retain the original command in the workflow error. The workflow still fails;
 ordinary merge refusals remain successful waiting states.
 
+The successor reports its own failures on the PR the same way. Nothing else is
+guaranteed to revisit the head the gate pushed while its runs sit parked, and
+the successor runs under `workflow_dispatch`, whose payload names no head the
+resolver workflow could turn red. Every failure in its recovery goes through one catch: a
+retry-exhausted read, a refused read, and a recovery it could not confirm alike.
+That catch posts the rerun command on the PR, with the observed successor head
+when it has one, and keeps the command in the workflow error. Before this, an
+exhausted run listing or PR read ended as a red run on master whose message had
+no command, and even the resolver's own refusals never reached the PR.
+
 The first version of this fix reproduced the class of failure it was meant to
 remove: its caller could report recovery as handled while the promised work
 never happened. A stale successor target and a swallowed dispatch error are now

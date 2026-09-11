@@ -1836,15 +1836,10 @@ async function processAggregateHead({
         // Report on the PR before invalidating: an invalidation failure must
         // not suppress the only visible recovery instructions. This lane owns
         // only the initiating head, so it never writes a successor aggregate.
-        try {
-          await github.rest.issues.createComment({
-            ...context.repo, issue_number: prNumber,
-            body: `## Auto Gate recovery failed\n\n${message}` +
-              (error.autoGateRecoveryHeadSha ? `\n\nObserved post-update head: ${error.autoGateRecoveryHeadSha}` : ""),
-          });
-        } catch (publicationError) {
-          publicationErrors.push(publicationError);
-        }
+        const publicationError = await publishRecoveryFailure({
+          github, context, prNumber, message, observedHeadSha: error.autoGateRecoveryHeadSha,
+        });
+        if (publicationError) publicationErrors.push(publicationError);
       }
       let invalidated;
       try {
@@ -2297,6 +2292,32 @@ async function listParkedRuns({ github, context, headSha, subject = null }) {
 const VALIDATION_WORKFLOW = "pr.yml";
 const GATE_WORKFLOW = "auto-gate.yml";
 
+// Reruns the successor of an accepted update, whichever lane failed to finish
+// it. Safe to repeat: the resolver re-reads the PR and approves only what is
+// still parked.
+function gateRecoveryCommand({ context, ref, prNumber, previousHeadSha }) {
+  const { owner, repo } = context.repo;
+  return `gh workflow run ${GATE_WORKFLOW} --repo ${owner}/${repo} --ref ${ref} ` +
+    `-f pr_number=${prNumber} -f previous_head_sha=${previousHeadSha}`;
+}
+
+// A recovery failure belongs on the PR conversation, which follows the PR
+// across head changes; a red run on master is not where anyone looks for a PR
+// that never merges. Returns a publication error instead of throwing it, so the
+// caller keeps the command in its own failure either way.
+async function publishRecoveryFailure({ github, context, prNumber, message, observedHeadSha }) {
+  try {
+    await github.rest.issues.createComment({
+      ...context.repo, issue_number: prNumber,
+      body: `## Auto Gate recovery failed\n\n${message}` +
+        (observedHeadSha ? `\n\nObserved post-update head: ${observedHeadSha}` : ""),
+    });
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
+
 // Make sure PR Validation will validate the head the gate just created.
 //
 // GitHub does create a `pull_request` run for a bot-authored merge commit — parked
@@ -2548,9 +2569,9 @@ async function merge({
     // "current" can be stale in the successor just as it was in this run.
     // Single-shot: a dispatch accepted before a transport error must not be
     // replayed. If scheduling fails, report a concrete recovery command.
-    const recoveryCommand =
-      `gh workflow run ${GATE_WORKFLOW} --repo ${owner}/${repo} --ref ${gate.baseRefName} ` +
-      `-f pr_number=${prNumber} -f previous_head_sha=${gate.headSha}`;
+    const recoveryCommand = gateRecoveryCommand({
+      context, ref: gate.baseRefName, prNumber, previousHeadSha: gate.headSha,
+    });
     try {
       await github.rest.actions.createWorkflowDispatch({
         owner,
@@ -3380,55 +3401,15 @@ async function resolveTargets({
 
   const sourceSha = payload.check_suite?.head_sha || payload.workflow_run?.head_sha || payload.sha;
   const targets = [];
-  recoveryTargets: for (const number of [...new Set(numbers.filter(Boolean))]) {
-    let pr = await getPullRequest({ github, context, number });
-    if (previousHead) {
-      const eligible = (current) => current.state === "OPEN" && !current.merged && current.baseRefName === "master";
-      let recovered = false;
-      // Head visibility and run visibility are separate transitions. Reuse the
-      // existing validation recovery after each observed head, then recheck it
-      // before publishing. Eligibility is checked on every read and before the
-      // shared recovery helper approves or dispatches anything.
-      for (let attempt = 0; attempt < headPollAttempts; attempt += 1) {
-        if (!eligible(pr)) {
-          core.notice(`PR #${number} is no longer eligible for Auto Gate recovery; nothing to do`);
-          continue recoveryTargets;
-        }
-        const observed = normalizeHeadSha(pr.headRefOid);
-        if (observed && observed !== previousHead) {
-          const validation = await ensureValidationRun({
-            github, context, core, headSha: observed, headRefName: pr.headRefName,
-            delayMs: headPollDelayMs, sleep,
-            canRecover: async () => {
-              pr = await getPullRequest({ github, context, number });
-              return eligible(pr) && normalizeHeadSha(pr.headRefOid) === observed;
-            },
-          });
-          if (!validation.cancelled && !validation.dispatched && (!validation.found || !validation.approved)) {
-            throw new Error(`Auto Gate validation recovery failed for PR #${number} on ${observed}; ` +
-              `run gh workflow run ${GATE_WORKFLOW} --repo ${context.repo.owner}/${context.repo.repo} --ref master ` +
-              `-f pr_number=${number} -f previous_head_sha=${previousHead}`);
-          }
-          pr = await getPullRequest({ github, context, number });
-          if (!eligible(pr)) continue recoveryTargets;
-          if (!validation.cancelled && normalizeHeadSha(pr.headRefOid) === observed) {
-            recovered = true;
-            break;
-          }
-        }
-        if (attempt < headPollAttempts - 1) {
-          await sleep(headPollDelayMs);
-          pr = await getPullRequest({ github, context, number });
-        }
-      }
-      if (!recovered) {
-        const { owner, repo } = context.repo;
-        throw new Error(
-          `Auto Gate recovery for PR #${number} still exposes initiating head ${previousHead} or has not settled; no stale target was published. ` +
-          `Run gh workflow run ${GATE_WORKFLOW} --repo ${owner}/${repo} --ref master ` +
-          `-f pr_number=${number} -f previous_head_sha=${previousHead}`,
-        );
-      }
+  for (const number of [...new Set(numbers.filter(Boolean))]) {
+    const pr = previousHead
+      ? await recoverSuccessorHead({
+        github, context, core, number, previousHead, headPollAttempts, headPollDelayMs, sleep,
+      })
+      : await getPullRequest({ github, context, number });
+    // Recovery answers null for a PR that is no longer eligible: nothing to do.
+    if (!pr) {
+      continue;
     }
     if (
       sourceSha &&
@@ -3443,6 +3424,82 @@ async function resolveTargets({
     });
   }
   return targets;
+}
+
+// Automated recovery for an accepted update-branch (#4209): wait for a head
+// other than the initiating one, make sure PR Validation will run on it, and
+// return the PR once that head is still current — or null once the PR is no
+// longer eligible, which is a successful no-op.
+//
+// Nothing else is guaranteed to revisit that head: its runs can sit parked until
+// this lane or a human approves them. And this lane runs under
+// workflow_dispatch, whose payload names no head its caller could turn red. So
+// every failure here — a retry-exhausted read, a refused one, or recovery that
+// could not be confirmed — leaves through the ONE catch below, which puts the
+// rerun command on the PR as well as in the error.
+async function recoverSuccessorHead({
+  github, context, core, number, previousHead, headPollAttempts, headPollDelayMs, sleep,
+}) {
+  const eligible = (current) => current.state === "OPEN" && !current.merged && current.baseRefName === "master";
+  let observedHead = null;
+  try {
+    let pr = await getPullRequest({ github, context, number });
+    // Head visibility and run visibility are separate transitions. Reuse the
+    // existing validation recovery after each observed head, then recheck it
+    // before publishing. Eligibility is checked on every read and before the
+    // shared recovery helper approves or dispatches anything.
+    for (let attempt = 0; attempt < headPollAttempts; attempt += 1) {
+      if (!eligible(pr)) {
+        core.notice(`PR #${number} is no longer eligible for Auto Gate recovery; nothing to do`);
+        return null;
+      }
+      const observed = normalizeHeadSha(pr.headRefOid);
+      if (observed && observed !== previousHead) {
+        observedHead = observed;
+        const validation = await ensureValidationRun({
+          github, context, core, headSha: observed, headRefName: pr.headRefName,
+          delayMs: headPollDelayMs, sleep,
+          canRecover: async () => {
+            pr = await getPullRequest({ github, context, number });
+            return eligible(pr) && normalizeHeadSha(pr.headRefOid) === observed;
+          },
+        });
+        if (!validation.cancelled && !validation.dispatched && (!validation.found || !validation.approved)) {
+          throw new Error(validation.found
+            ? `not every parked run on ${observed} could be approved`
+            : `no PR Validation run appeared on ${observed} and none could be dispatched`);
+        }
+        pr = await getPullRequest({ github, context, number });
+        if (!eligible(pr)) {
+          return null;
+        }
+        if (!validation.cancelled && normalizeHeadSha(pr.headRefOid) === observed) {
+          return pr;
+        }
+      }
+      if (attempt < headPollAttempts - 1) {
+        await sleep(headPollDelayMs);
+        pr = await getPullRequest({ github, context, number });
+      }
+    }
+    throw new Error(
+      `PR #${number} still exposes initiating head ${previousHead} or has not settled; no stale target was published`,
+    );
+  } catch (error) {
+    const message = `Auto Gate recovery failed for PR #${number}: ${formatError(error)}. Run ` +
+      gateRecoveryCommand({ context, ref: "master", prNumber: number, previousHeadSha: previousHead });
+    const publicationError = await publishRecoveryFailure({
+      github, context, prNumber: number, message, observedHeadSha: observedHead,
+    });
+    const failure = new Error(
+      publicationError ? `${message}; recovery publication also failed: ${formatError(publicationError)}` : message,
+      { cause: error },
+    );
+    // Keep the classification, so the workflow catch takes the exit it always
+    // would have. Either exit now carries the command.
+    failure.autoGateReadFailure = isReadFailure(error);
+    throw failure;
+  }
 }
 
 async function listOpenMasterPullRequestsForHead({ github, context, headSha }) {
