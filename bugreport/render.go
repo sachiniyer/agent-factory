@@ -1,6 +1,7 @@
 package bugreport
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -106,13 +107,9 @@ func writeIndentedJSON(sb *strings.Builder, v any) {
 
 // indentRaw re-indents an already-valid JSON payload for readable embedding.
 func indentRaw(raw json.RawMessage) []byte {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	var out bytes.Buffer
+	if err := json.Indent(&out, raw, "", "  "); err != nil {
 		return raw
 	}
-	out, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return raw
-	}
-	return out
+	return out.Bytes()
 }
