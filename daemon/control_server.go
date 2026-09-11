@@ -349,7 +349,14 @@ func (s *controlServer) CreateSession(req CreateSessionRequest, resp *CreateSess
 	return s.createSession(context.Background(), req, resp)
 }
 
-func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequest, resp *CreateSessionResponse) error {
+func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequest, resp *CreateSessionResponse) (retErr error) {
+	managerDelegated := false
+	defer func() {
+		if !managerDelegated {
+			retErr = taskPreflightError(req.TaskOrigin, req.TaskID, req.TaskRepoID, retErr)
+		}
+	}()
+
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
@@ -366,6 +373,7 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	if err := validateCreateProgram(req.Program); err != nil {
 		return err
 	}
+	managerDelegated = true
 	data, err := s.manager.CreateSession(ctx, req)
 	// A committed retained create (#3233) lands in the envelope with the
 	// retained projection in Instance; a genuine failure returns unchanged.
@@ -727,10 +735,18 @@ func validateRPCRepoID(repoID string) error {
 	return nil
 }
 
-func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPromptResponse) error {
+func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPromptResponse) (retErr error) {
+	managerDelegated := false
+	defer func() {
+		if !managerDelegated {
+			retErr = taskPreflightError(req.TaskOrigin, "", req.TaskRepoID, retErr)
+		}
+	}()
+
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	managerDelegated = true
 	status, deliveryStatus, err := s.manager.DeliverPromptWithStatus(req)
 	if err != nil {
 		return err

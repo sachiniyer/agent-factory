@@ -484,11 +484,11 @@ func TestReserveCreate_TaskConflictBeforeReservationIsNotAttempted(t *testing.T)
 	assert.Contains(t, err.Error(), notDeliveredMarker, "the classification must survive net/rpc flattening")
 }
 
-// TestTaskCreatePreReservationError_PreservesConcurrencyClassification ensures
+// TestTaskPreflightError_PreservesConcurrencyClassification ensures
 // the shared boundary helper does not absorb the task-cap sentinel. The watcher
 // has a dedicated branch that refunds and parks that event.
-func TestTaskCreatePreReservationError_PreservesConcurrencyClassification(t *testing.T) {
-	err := taskCreatePreReservationError(CreateSessionRequest{TaskOrigin: true}, errAtConcurrencyLimit)
+func TestTaskPreflightError_PreservesConcurrencyClassification(t *testing.T) {
+	err := taskPreflightError(true, "", "", errAtConcurrencyLimit)
 	require.ErrorIs(t, err, errAtConcurrencyLimit)
 	assert.False(t, isNotAttemptedErr(err))
 	assert.NotContains(t, err.Error(), notDeliveredMarker)

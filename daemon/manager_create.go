@@ -31,7 +31,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	reservationBoundaryDelegated := false
 	defer func() {
 		if !reservationBoundaryDelegated {
-			retErr = taskCreatePreReservationError(req, retErr)
+			retErr = taskPreflightError(req.TaskOrigin, req.TaskID, req.TaskRepoID, retErr)
 		}
 	}()
 
@@ -580,7 +580,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (_ *config.RepoContext
 	reservationCommitted := false
 	defer func() {
 		if !reservationCommitted {
-			retErr = taskCreatePreReservationError(req, retErr)
+			retErr = taskPreflightError(req.TaskOrigin, req.TaskID, req.TaskRepoID, retErr)
 		}
 	}()
 
