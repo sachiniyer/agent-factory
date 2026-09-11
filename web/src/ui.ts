@@ -1116,11 +1116,14 @@ export class AppShell {
     // Run after every owner-specific media listener. That guarantees the app-controls
     // disclosure has finished its own close/reflow before an open picker is restored.
     this.phone.addEventListener("change", this.schedulePhoneSync);
+    // A view action updates the store and reparents this panel synchronously. Capture
+    // while the phone disclosure still owns the carried session actions, so its
+    // user-dismissal notification cannot be lost before the event bubbles back.
     this.appControls.panel.addEventListener("click", event => {
       const target = (event.target as HTMLElement).closest("button, a");
       if (this.el.classList.contains("af-session-first") && target &&
         !target.closest(".af-theme-toggle")) this.appControls.dismiss();
-    });
+    }, true);
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");
     const newBtn = h(

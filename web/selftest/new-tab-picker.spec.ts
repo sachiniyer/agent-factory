@@ -374,3 +374,25 @@ for (const key of ["Enter", "Space"]) {
     await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
   });
 }
+
+test("phone keyboard panel action dismisses carried desktop Session actions", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 844 });
+  const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+  const session = snapshot.data.instances.find((s: { title: string }) =>
+    s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
+  await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+  await expect(page.locator(".af-term-title")).toHaveText(session.title);
+  const sessionActions = page.getByRole("button", { name: "Session actions", exact: true, includeHidden: true });
+  await sessionActions.click();
+  await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
+  await page.setViewportSize({ width: 390, height: 844 });
+  const controls = page.getByRole("button", { name: "More app controls", exact: true });
+  await controls.focus();
+  await page.keyboard.press("Enter");
+  await expect(controls).toHaveAttribute("aria-expanded", "true");
+  const tasks = page.getByRole("tab", { name: "Tasks", exact: true });
+  await tasks.focus();
+  await page.keyboard.press("Enter");
+  await expect(controls).toHaveAttribute("aria-expanded", "false");
+  await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+});
