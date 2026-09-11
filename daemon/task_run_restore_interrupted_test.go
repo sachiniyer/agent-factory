@@ -318,6 +318,41 @@ func TestRestoredTaskRuntimePreservesLaterWatcherSupervisionStatus(t *testing.T)
 	assert.Contains(t, logs.warnings.String(), "the task row does not identify this run")
 }
 
+func TestRestoredTaskRuntimeDoesNotClaimRecreatedTaskID(t *testing.T) {
+	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	oldTask := enabledCronTask("dead0010", repoPath)
+	require.NoError(t, task.AddTask(oldTask))
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	oldSession, err := session.NewInstance(session.InstanceOptions{
+		Title: "prior-incarnation", Path: repoPath, Program: "claude", TaskID: oldTask.ID,
+		CreatedAt: runAt, TaskRunAt: runAt, TaskRunSequence: 1,
+	})
+	require.NoError(t, err)
+	oldSession.SetStartedForTest(true)
+	oldSession.SetStatusForTest(session.Running)
+	key := daemonInstanceKey(repoID, oldSession.Title)
+	seedDiskInstance(t, repoID, oldSession.Title, repoPath)
+	manager.mu.Lock()
+	manager.instances[key] = oldSession
+	manager.mu.Unlock()
+
+	require.NoError(t, task.RemoveTask(oldTask.ID, task.ProjectExpectation{}))
+	replacement := enabledCronTask(oldTask.ID, repoPath)
+	replacement.Name = "replacement"
+	require.NoError(t, task.AddTask(replacement))
+
+	require.NoError(t, oldSession.Transition(session.ObserveLiveness(session.LiveLost)))
+	require.NoError(t, oldSession.Transition(session.MarkRestoring()))
+	require.NoError(t, manager.prepareRuntimeReplacement(repoID, key, oldSession))
+
+	got, err := task.GetTask(replacement.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.LastRunStatus,
+		"a surviving session from the removed task must not write an outcome onto its replacement")
+	assert.Empty(t, got.LastRunSessionID)
+	assert.Contains(t, logs.warnings.String(), "the task row does not identify this run")
+}
+
 func TestRestoredLegacyTaskRuntimeDoesNotClaimPersistedUnloadedSuccessor(t *testing.T) {
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	tsk := enabledCronTask("dead0008", repoPath)

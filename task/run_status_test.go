@@ -27,3 +27,23 @@ func TestTaskRunOutcomeClosesIdentifiedRunAfterArmingStatusClears(t *testing.T) 
 	assert.Equal(t, "interrupted: agent runtime lost", got.LastRunStatus)
 	assert.Equal(t, "session-a", got.LastRunSessionID)
 }
+
+func TestTaskRunPublicationDoesNotOverwriteWatcherTerminationAfterAdmission(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
+
+	// Session creation admitted this run against the blank row, then blocked in
+	// provisioning long enough for the watch process to terminate.
+	admitted, err := GetTask("w1")
+	require.NoError(t, err)
+	_, err = UpdateTaskStatus("w1", nil, "errored: watcher exited")
+	require.NoError(t, err)
+
+	_, applied, err := BeginTaskRun("w1", "session-a", admitted.LastRunSequence+1, runAt, RunStatusStarted)
+	require.NoError(t, err)
+	assert.False(t, applied,
+		"publication admitted before watcher termination must not overwrite that later terminal observation")
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	assert.Equal(t, "errored: watcher exited", got.LastRunStatus)
+}
