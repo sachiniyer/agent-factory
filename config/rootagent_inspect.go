@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -66,14 +67,192 @@ func ResolveRootAgentForInspection(projectSelector string, strictProjectLookup b
 	if err != nil {
 		return ResolvedValue{}, err
 	}
-	if assembly.failClosed != "" {
-		return rootAgentFailClosedValue(assembly), nil
+	return resolveRootAgentInspectionAssembly(assembly, projectSelector != ""), nil
+}
+
+// ResolveRootAgentForInspectionWithConfig is the read-only diagnostic form of
+// ResolveRootAgentForInspection. The caller supplies the already-loaded global
+// snapshot, avoiding LoadConfig's create/migrate behavior while preserving the
+// same legacy and personal layer resolution used by --explain.
+func ResolveRootAgentForInspectionWithConfig(global *Config, projectSelector string, strictProjectLookup bool) (ResolvedValue, error) {
+	if global == nil {
+		return ResolvedValue{}, fmt.Errorf("cannot resolve root_agent without a global config snapshot")
 	}
-	resolved := rootAgentResolvedValue(ResolveRootAgent(assembly.inputs), assembly.locs, projectSelector != "")
+	assembly, err := assembleRootAgentInspectionInputsFromConfig(global, projectSelector, strictProjectLookup)
+	if err != nil {
+		return ResolvedValue{}, err
+	}
+	return resolveRootAgentInspectionAssembly(assembly, projectSelector != ""), nil
+}
+
+// ResolveRootAgentForInspectionWithConfigContext is the bounded diagnostic
+// form used by non-interactive inspections. Unlike the human-invoked explain
+// path above, every repository probe shares the caller's deadline and an
+// unanswered legacy lookup is returned as an error rather than read as absent.
+func ResolveRootAgentForInspectionWithConfigContext(ctx context.Context, global *Config, projectSelector string, strictProjectLookup bool) (ResolvedValue, error) {
+	snapshot, err := ResolveRootAgentInspectionSnapshotWithConfigContext(ctx, global, projectSelector, strictProjectLookup)
+	if err != nil {
+		return ResolvedValue{}, err
+	}
+	return snapshot.ResolvedRootAgent(), nil
+}
+
+// RootAgentInspectionSnapshot binds a resolved root-agent profile to the exact
+// personal-project config document read while producing it. Diagnostics that
+// subsequently resolve program_overrides through ResolveConfigForRepoContext
+// therefore cannot mix the profile from one atomic file generation with the
+// command map from another.
+type RootAgentInspectionSnapshot struct {
+	resolved         ResolvedValue
+	global           *Config
+	personalDocument *sourceDocument
+	repositoryID     string
+	checkoutID       string
+	// Test-only scheduling seam scoped to this snapshot so parallel inspections
+	// cannot observe a package-global hook.
+	beforeCommandReadForTest func()
+}
+
+// ErrRootAgentInspectionIdentityChanged means two repository observations
+// could not be combined because the checkout resolved to different identities.
+var ErrRootAgentInspectionIdentityChanged = errors.New("repository identity changed during root-agent inspection")
+
+// ResolvedRootAgent returns the profile and provenance captured by the snapshot.
+func (s *RootAgentInspectionSnapshot) ResolvedRootAgent() ResolvedValue {
+	if s == nil {
+		return ResolvedValue{}
+	}
+	return s.resolved
+}
+
+// ResolveRootAgentForRepoContext returns the captured profile only after the
+// repository that will consume it proves it is still the checkout whose
+// personal document the snapshot contains. This is the profile-only twin of
+// ResolveConfigForRepoContext: callers that make a verdict without reading
+// command layers still must not apply a removed checkout's profile to its
+// same-path replacement.
+func (s *RootAgentInspectionSnapshot) ResolveRootAgentForRepoContext(ctx context.Context, repo *RepoContext) (ResolvedValue, error) {
+	if s == nil {
+		return ResolvedValue{}, fmt.Errorf("root-agent inspection snapshot is required")
+	}
+	if err := s.verifyCheckoutIdentity(ctx, repo); err != nil {
+		return ResolvedValue{}, err
+	}
+	return s.resolved, nil
+}
+
+// ResolveConfigForRepoContext resolves command-bearing repository config while
+// reusing this snapshot's global and personal-project documents. Checked-in and
+// legacy-repo sources are read once here; neither participates in root_agent.
+func (s *RootAgentInspectionSnapshot) ResolveConfigForRepoContext(ctx context.Context, repo *RepoContext) (*ResolvedConfig, error) {
+	if s == nil {
+		return nil, fmt.Errorf("root-agent inspection snapshot is required")
+	}
+	if err := s.verifyCheckoutIdentity(ctx, repo); err != nil {
+		return nil, err
+	}
+	if s.beforeCommandReadForTest != nil {
+		s.beforeCommandReadForTest()
+	}
+	resolved, err := resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx, repo, s.global, s.personalDocument)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.verifyCheckoutIdentity(ctx, repo); err != nil {
+		return nil, err
+	}
+	return resolved, nil
+}
+
+// verifyCheckoutIdentity brackets the command-layer read. A check only before
+// that read cannot prove which checkout supplied files opened during it.
+func (s *RootAgentInspectionSnapshot) verifyCheckoutIdentity(ctx context.Context, repo *RepoContext) error {
+	if s.repositoryID != "" && (repo == nil || repo.ID != s.repositoryID) {
+		commandRepoID := "unresolved"
+		if repo != nil && repo.ID != "" {
+			commandRepoID = repo.ID
+		}
+		return fmt.Errorf("%w: profile repository %s, command repository %s; rerun the inspection",
+			ErrRootAgentInspectionIdentityChanged, s.repositoryID, commandRepoID)
+	}
+	if s.checkoutID != "" {
+		if repo == nil {
+			return fmt.Errorf("%w: the profile checkout was registered but the command repository is unresolved; rerun the inspection",
+				ErrRootAgentInspectionIdentityChanged)
+		}
+		checkoutID, found, err := checkoutIDForWorkspaceContext(ctx, repo.WorkspacePath())
+		if err != nil {
+			return fmt.Errorf("verify root-agent inspection checkout identity: %w", err)
+		}
+		if !found || checkoutID != s.checkoutID {
+			return fmt.Errorf("%w: the checkout at %s no longer carries the registered identity captured with the profile; rerun the inspection",
+				ErrRootAgentInspectionIdentityChanged, repo.WorkspacePath())
+		}
+	}
+	return nil
+}
+
+// ResolveRootAgentInspectionSnapshotWithConfigContext is the bounded,
+// read-only root-agent inspection form for a decision that also needs effective
+// repository config. Both results share one global and personal-project file
+// generation.
+func ResolveRootAgentInspectionSnapshotWithConfigContext(ctx context.Context, global *Config, projectSelector string, strictProjectLookup bool) (*RootAgentInspectionSnapshot, error) {
+	if global == nil {
+		return nil, fmt.Errorf("cannot resolve root_agent without a global config snapshot")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("context is required for bounded root_agent inspection")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("inspect root_agent profile: %w", err)
+	}
+	type result struct {
+		assembly rootAgentInspectionAssembly
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		assembly, err := assembleRootAgentInspectionInputsFromConfigContext(ctx, global, projectSelector, strictProjectLookup)
+		done <- result{assembly: assembly, err: err}
+	}()
+	select {
+	case outcome := <-done:
+		if outcome.err != nil {
+			return nil, outcome.err
+		}
+		return rootAgentInspectionSnapshotFromAssembly(global, outcome.assembly, projectSelector != ""), nil
+	case <-ctx.Done():
+		select {
+		case outcome := <-done:
+			if outcome.err != nil {
+				return nil, outcome.err
+			}
+			return rootAgentInspectionSnapshotFromAssembly(global, outcome.assembly, projectSelector != ""), nil
+		default:
+			return nil, fmt.Errorf("inspect root_agent profile: %w", ctx.Err())
+		}
+	}
+}
+
+func rootAgentInspectionSnapshotFromAssembly(global *Config, assembly rootAgentInspectionAssembly, projectSelected bool) *RootAgentInspectionSnapshot {
+	return &RootAgentInspectionSnapshot{
+		resolved:         resolveRootAgentInspectionAssembly(assembly, projectSelected),
+		global:           global,
+		personalDocument: assembly.personalDocument,
+		repositoryID:     assembly.repositoryID,
+		checkoutID:       assembly.checkoutID,
+	}
+}
+
+func resolveRootAgentInspectionAssembly(assembly rootAgentInspectionAssembly, projectSelected bool) ResolvedValue {
+	if assembly.failClosed != "" {
+		return rootAgentFailClosedValue(assembly)
+	}
+	resolved := rootAgentResolvedValue(ResolveRootAgent(assembly.inputs), assembly.locs, projectSelected)
 	if assembly.ignoredGlobal != nil {
 		markRootAgentGlobalIneligible(&resolved, *assembly.ignoredGlobal, assembly.ignoredReason, assembly.locs)
 	}
-	return resolved, nil
+	return resolved
 }
 
 // rootAgentInspectionAssembly is what assembleRootAgentInspectionInputs hands
@@ -83,6 +262,17 @@ func ResolveRootAgentForInspection(projectSelector string, strictProjectLookup b
 type rootAgentInspectionAssembly struct {
 	inputs RootAgentInputs
 	locs   rootAgentLocations
+	// repositoryID is the identity that selected the legacy and personal layers.
+	// A related command resolve must prove it still addresses this repository
+	// before these documents can be combined with checked-in config.
+	repositoryID string
+	// checkoutID is the durable registered-checkout marker captured with the
+	// personal document. Unlike repositoryID, it changes when another clone
+	// replaces a checkout at the same canonical path.
+	checkoutID string
+	// personalDocument is the exact personal config layer that supplied inputs.
+	// A related effective-config resolve reuses it rather than reopening the file.
+	personalDocument *sourceDocument
 	// ignoredGlobal/ignoredReason render the global layer as present but
 	// inapplicable, without failing the trace.
 	ignoredGlobal *RootAgentCandidate
@@ -125,9 +315,23 @@ func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLook
 	if err != nil {
 		return rootAgentInspectionAssembly{}, err
 	}
+	return assembleRootAgentInspectionInputsFromConfig(global, projectSelector, strictProjectLookup)
+}
+
+func assembleRootAgentInspectionInputsFromConfig(global *Config, projectSelector string, strictProjectLookup bool) (rootAgentInspectionAssembly, error) {
+	return assembleRootAgentInspectionInputsFromConfigWithContext(context.Background(), global, projectSelector, strictProjectLookup, false)
+}
+
+func assembleRootAgentInspectionInputsFromConfigContext(ctx context.Context, global *Config, projectSelector string, strictProjectLookup bool) (rootAgentInspectionAssembly, error) {
+	return assembleRootAgentInspectionInputsFromConfigWithContext(ctx, global, projectSelector, strictProjectLookup, true)
+}
+
+func assembleRootAgentInspectionInputsFromConfigWithContext(ctx context.Context, global *Config, projectSelector string, strictProjectLookup, bounded bool) (rootAgentInspectionAssembly, error) {
+	personalDocument := emptyProjectPersonalDocument()
 	out := rootAgentInspectionAssembly{
-		locs:   rootAgentLocations{globalPath: global.source.path},
-		inputs: RootAgentInputs{Global: GlobalRootAgentLayer(global)},
+		locs:             rootAgentLocations{globalPath: global.source.path},
+		inputs:           RootAgentInputs{Global: GlobalRootAgentLayer(global)},
+		personalDocument: &personalDocument,
 	}
 	if out.locs.globalPath == "" {
 		if path, err := globalConfigTomlPath(); err == nil {
@@ -140,18 +344,40 @@ func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLook
 		if err != nil {
 			return rootAgentInspectionAssembly{}, fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
 		}
-		repo, err := RepoFromPath(abs)
+		repo, err := RepoFromPathContext(ctx, abs)
 		if err != nil {
 			return rootAgentInspectionAssembly{}, fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
 		}
-		legacy, key := LegacyRootAgentForRepo(global, repo.ID)
+		out.repositoryID = repo.ID
+		var legacy *RootAgentConfig
+		var key string
+		if bounded {
+			legacy, key, err = LegacyRootAgentForRepoContext(ctx, global, repo.ID)
+			if err != nil {
+				return rootAgentInspectionAssembly{}, err
+			}
+		} else {
+			legacy, key = LegacyRootAgentForRepo(global, repo.ID)
+		}
 		if legacy != nil {
 			out.inputs.Legacy = legacy
 			out.locs.legacyKey = key
 		}
-		project, found, err := projectForRepo(repo)
+		var project Project
+		var found bool
+		if bounded {
+			project, found, err = projectForRepoContext(ctx, repo)
+			if err == nil && !found && ctx.Err() != nil {
+				err = fmt.Errorf("could not inspect the registered project before the repository probe deadline: %w", ctx.Err())
+			}
+		} else {
+			project, found, err = projectForRepo(repo)
+		}
 		if err != nil {
-			if strictProjectLookup {
+			if bounded && ctx.Err() != nil {
+				return rootAgentInspectionAssembly{}, err
+			}
+			if strictProjectLookup || !isProjectRegistryReadError(err) {
 				return rootAgentInspectionAssembly{}, err
 			}
 			// Fail CLOSED, like the daemon (#3247): an unlistable registry means
@@ -181,6 +407,7 @@ func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLook
 			}
 		}
 		if found {
+			out.checkoutID = project.CheckoutID
 			pc, err := LoadProjectConfig(project.ID)
 			if err != nil {
 				// Fail CLOSED, like the daemon (#3241) — and explain rather than
@@ -196,6 +423,11 @@ func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLook
 				out.personalUnreadable = true
 				return out, nil
 			}
+			personalDocument, err := projectPersonalDocumentFromLoaded(project, pc)
+			if err != nil {
+				return rootAgentInspectionAssembly{}, err
+			}
+			out.personalDocument = &personalDocument
 			if layer := pc.RootAgentLayer(); layer != nil {
 				out.inputs.Personal = layer
 				if path, err := ProjectConfigTomlPath(project.ID); err == nil {
@@ -266,6 +498,21 @@ func rootAgentFailClosedValue(assembly rootAgentInspectionAssembly) ResolvedValu
 // because no config source decided it.
 func RootAgentValueFailsClosed(rv ResolvedValue) bool {
 	return rv.Key == "root_agent" && len(rv.Origins) == 0
+}
+
+// RootAgentFailClosedReason returns the cause carried by a fail-closed
+// root-agent inspection. The renderer repeats the same cause on every affected
+// candidate; diagnostics use the first one rather than re-deriving the marker.
+func RootAgentFailClosedReason(rv ResolvedValue) string {
+	if !RootAgentValueFailsClosed(rv) {
+		return ""
+	}
+	for _, candidate := range rv.Candidates {
+		if candidate.Reason != "" {
+			return candidate.Reason
+		}
+	}
+	return "the root-agent profile failed closed for an unknown reason"
 }
 
 // ProjectFailClosedRootAgentLeaf projects one leaf of a fail-closed

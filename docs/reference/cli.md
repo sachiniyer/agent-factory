@@ -860,6 +860,8 @@ Settable keys:
   session_env_passthrough    compact JSON array of exact environment variable names
   root_agents                compact JSON object keyed by repository path
   root_agent                 compact JSON object with enabled and optional program
+  root_agent.enabled         true | false
+  root_agent.program         full command string for the singleton root agent
   keys                       compact JSON object of TUI action-to-key rebinds
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
@@ -912,7 +914,7 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command); a global-only key
 is rejected with the location it actually belongs to. Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
@@ -921,6 +923,8 @@ Examples:
   af config set auto_update false
   af config set appearance dark
   af config set session_env_passthrough '["HTTP_PROXY","NO_PROXY"]'
+  af config set root_agent.enabled true --project .
+  af config set root_agent.program "codex --profile work" --project .
   af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo

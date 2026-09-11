@@ -40,6 +40,6 @@ func (b *LocalBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPl
 		capture = beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, captureWorkingDir)
 	}
 	return AgentSwapPlan{
-		target: target, program: program, conversation: conversation, conversationCapture: capture,
+		target: target, baseProgram: resolved, program: program, conversation: conversation, conversationCapture: capture,
 	}, nil
 }
