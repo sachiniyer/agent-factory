@@ -4980,6 +4980,75 @@ test("#4204: a fresh attestation restores the gate after gated content changes",
   assert.match(result.notes.join("\n"), new RegExp(`play-tested commit ${HEAD_SHA}`));
 });
 
+// PR #4205 review: timestamps have only second precision. The newer ID must
+// win in both safety directions, independently of the comments API's order.
+for (const latestSha of [HEAD_SHA, OTHER_SHA]) {
+  for (const reverse of [false, true]) {
+    test(`#4205: same-second attestation IDs select ${latestSha === HEAD_SHA ? "fresh" : "stale"} evidence (reverse=${reverse})`, async () => {
+      const comments = [
+        { ...playTestComment(latestSha === HEAD_SHA ? OTHER_SHA : HEAD_SHA), id: 9 },
+        { ...playTestComment(latestSha), id: 10 },
+      ];
+      if (reverse) comments.reverse();
+      const result = await evaluateGate(playTestFixture({
+        issueComments: [codexVerdict(HEAD_SHA), ...comments],
+        treesByOid: {
+          [OTHER_SHA]: tuiTree(PLAY_TEST_TREE),
+          [HEAD_SHA]: tuiTree({ "session/tmux/envmarker.go": "2".repeat(40) }),
+        },
+      }));
+      assert.equal(result.shouldMerge, latestSha === HEAD_SHA, result.summary);
+      if (latestSha === HEAD_SHA) {
+        assert.match(result.notes.join("\n"), new RegExp(`play-tested commit ${HEAD_SHA}`));
+      } else {
+        assert.match(result.reasons.join("\n"), /gated paths changed/);
+      }
+    });
+  }
+}
+
+for (const failure of ["commit unavailable", "tree unavailable", "tree incomplete"]) {
+  for (const author of ["detail-app", "sachiniyer"]) {
+    test(`#4205: ${failure} remains ${author === "detail-app" ? "advisory for manual" : "blocking for automatic"} merge`, async () => {
+      const github = fakeGateGithub(playTestFixture({ author }));
+      if (failure === "commit unavailable") {
+        github.rest.repos.getCommit = async () => { throw new Error("attested commit unavailable"); };
+      } else if (failure === "tree unavailable") {
+        github.rest.git.getTree = async () => { throw new Error("attested tree unavailable"); };
+      } else {
+        github.rest.git.getTree = async () => ({ data: { truncated: true, tree: [] } });
+      }
+      const result = await autoGate.evaluate({
+        github, context: fakeContext(), core: fakeCore(), prNumber: 1465, setOutputs: false,
+      });
+      assert.equal(result.shouldMerge, false);
+      if (author === "detail-app") {
+        assert.equal(result.manualMergeRequired, true);
+        assert.deepEqual(result.manualMergeBlockers, []);
+        assert.match(result.summary, /^PASS:/);
+        assert.match(result.reasons.join("\n"), /play-tested attestation could not be verified:.*(?:unavailable|incomplete)/);
+        assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
+      } else {
+        assert.match(result.summary, /^BLOCKED:/);
+        assert.match(result.reasons.join("\n"), /auto-gate evaluation error:.*(?:unavailable|incomplete)/);
+      }
+    });
+  }
+}
+
+test("#4205: advisory play-test read failures do not waive a manual verdict blocker", async () => {
+  const result = await evaluateGate(playTestFixture({
+    author: "detail-app",
+    issueComments: [playTestComment(OTHER_SHA)],
+    treesByOid: { [OTHER_SHA]: new Error("attested tree unavailable") },
+  }));
+  assert.equal(result.shouldMerge, false);
+  assert.equal(result.manualMergeRequired, true);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.manualMergeBlockers.map((blocker) => blocker.reason).join("\n"), /Codex has not reviewed head/);
+  assert.match(result.reasons.join("\n"), /play-tested attestation could not be verified:.*unavailable/);
+});
+
 // The TUI path gate asks whether a user could SEE the change, and answered it by
 // prefix alone — so a diff whose only file under app/, ui/ or session/tmux/ was
 // a `_test.go` file demanded a play-test of nothing (#3607). #3601 paid for one.

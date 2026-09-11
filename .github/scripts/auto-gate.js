@@ -827,7 +827,19 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   if (touchesTui && !labels.has("play-tested")) {
     reasons.push("PR touches visible TUI/pane paths and is missing the play-tested label");
   } else if (touchesTui) {
-    const playTest = await evaluatePlayTest({ github, context, pr, comments: codex.comments, subject });
+    let playTest;
+    try {
+      playTest = await evaluatePlayTest({ github, context, pr, comments: codex.comments, subject });
+    } catch (error) {
+      // TUI evidence is advisory for authors the gate never auto-merges. Keep
+      // unreadable snapshots advisory too, without swallowing review/check
+      // failures or relaxing snapshot verification on the automatic path.
+      if (ALLOWED_AUTHORS.has(pr.author)) throw error;
+      playTest = {
+        ok: false,
+        message: `play-tested attestation could not be verified: ${error.message || String(error)}`,
+      };
+    }
     if (playTest.ok) notes.push(playTest.message);
     else reasons.push(playTest.message);
   } else {
@@ -3626,7 +3638,11 @@ async function evaluatePlayTest({ github, context, pr, comments, subject }) {
       )?.[1].toLowerCase(),
     }))
     .filter(({ comment, sha }) => sha && reviewArtifactTime(comment) > 0)
-    .sort((a, b) => reviewArtifactTime(b.comment) - reviewArtifactTime(a.comment));
+    // GitHub timestamps have second precision; IDs order comments within a
+    // second, regardless of pagination/API order. Time still takes precedence
+    // so editing an older attestation can supersede a newer comment.
+    .sort((a, b) => reviewArtifactTime(b.comment) - reviewArtifactTime(a.comment) ||
+      Number(b.comment.id || 0) - Number(a.comment.id || 0));
   const testedSha = attestations[0]?.sha;
   const remedy = `post a maintainer comment beginning "Play-tested commit: ${pr.headRefOid}" after play-testing that commit`;
   if (!testedSha) {
