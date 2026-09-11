@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -136,7 +137,8 @@ func runIntegrityGit(parent context.Context, worktreePath string, args ...string
 	ctx, cancel := context.WithTimeout(parent, worktreeIntegrityTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", worktreePath}, args...)...)
-	cmd.Env = append(repoGoneGitCommandEnvironment(), "GIT_OPTIONAL_LOCKS=0", "GIT_PAGER=cat")
+	cmd.Env = append(repositoryPathEnvironment(os.Environ()),
+		"GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_OPTIONAL_LOCKS=0", "GIT_PAGER=cat")
 	isolateGitCommandTree(cmd)
 	cmd.WaitDelay = gitWaitDelay
 	output, err := cmd.Output()
