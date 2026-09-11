@@ -1354,6 +1354,10 @@ structural keys config cannot touch — are listed last. Contextual pane
 actions such as pane_prev/pane_next are included; their default arrow keys
 apply only while a workspace pane has focus.
 
+Every default key removed by a user rebind is named in SOURCE with its taker.
+The affected row keeps any remaining keys; when none remain, it shows an em
+dash instead. JSON appends the same key/taker pairs in suppressed_by.
+
 Key values use config spellings you can paste into [keys]. With --json,
 bindings are wrapped in {data,error}; keys/default keep those spellings.
 

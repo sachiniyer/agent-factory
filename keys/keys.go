@@ -364,11 +364,11 @@ var GlobalKeyBindings map[KeyName]key.Binding
 func init() {
 	// Defaults must always build; a panic here means the specs table itself
 	// is inconsistent, which no config can cause.
-	strings, bindings, err := buildMaps(nil)
+	built, err := buildMaps(nil)
 	if err != nil {
 		panic(fmt.Sprintf("keys: default binding table is invalid: %v", err))
 	}
-	GlobalKeyStringsMap, GlobalKeyBindings = strings, bindings
+	GlobalKeyStringsMap, GlobalKeyBindings = built.strings, built.bindings
 }
 
 // ValidateOverrides checks a [keys] override table (action name → key list)
@@ -377,13 +377,8 @@ func init() {
 // bad keymap fails at config load with the file named — never as a dead key
 // at runtime.
 func ValidateOverrides(overrides map[string][]string) error {
-	_, _, err := buildMaps(overrides)
-	if err != nil {
-		if _, configured := overrides["new_remote"]; configured {
-			return fmt.Errorf("%w; new_remote is a compatibility binding: it opens the creation form with the backend field focused; it no longer forces remote creation", err)
-		}
-	}
-	return err
+	_, err := buildMaps(overrides)
+	return decorateValidationError(overrides, err)
 }
 
 // ApplyOverrides rebuilds the global binding maps with the given [keys]
@@ -392,11 +387,11 @@ func ValidateOverrides(overrides map[string][]string) error {
 // and menu labels are regenerated from the effective keys, so rebinds are
 // reflected everywhere the binding is displayed.
 func ApplyOverrides(overrides map[string][]string) error {
-	stringsMap, bindings, err := buildMaps(overrides)
+	built, err := buildMaps(overrides)
 	if err != nil {
 		return err
 	}
-	GlobalKeyStringsMap, GlobalKeyBindings = stringsMap, bindings
+	GlobalKeyStringsMap, GlobalKeyBindings = built.strings, built.bindings
 	return nil
 }
 
@@ -414,6 +409,17 @@ type BindingInfo struct {
 	Default []string `json:"default"`
 	// Rebound reports whether an override replaced the default.
 	Rebound bool `json:"rebound"`
+	// SuppressedBy has one entry for every inactive default key, whether or not
+	// other keys remain active, and attributes each to every user-rebound action
+	// that took it. The CLI appends it to JSON only when non-empty.
+	SuppressedBy []SuppressedKey `json:"-"`
+}
+
+// SuppressedKey is one default key removed from an action's active binding set,
+// together with the user-rebound actions that claim it.
+type SuppressedKey struct {
+	Key     string   `json:"key"`
+	TakenBy []string `json:"taken_by"`
 }
 
 // EffectiveBindings returns every action's effective binding with the given
@@ -422,29 +428,20 @@ type BindingInfo struct {
 // overrides are validated first, so a broken table reports the same error
 // the TUI would refuse to start with.
 func EffectiveBindings(overrides map[string][]string) ([]BindingInfo, error) {
-	if err := ValidateOverrides(overrides); err != nil {
-		return nil, err
-	}
-	byConfigKey := specsByConfigKey()
-	normalizedOverrides, err := normalizeOverrides(overrides, byConfigKey)
+	built, err := buildMaps(overrides)
 	if err != nil {
-		return nil, err
+		return nil, decorateValidationError(overrides, err)
 	}
-	var rebindable, fixed []BindingInfo
-	for _, sp := range specs {
-		info := BindingInfo{Action: sp.configKey, Desc: sp.desc, Keys: displayKeys(sp.keys, false), Default: displayKeys(sp.keys, false)}
-		if sp.configKey != "" {
-			if o, ok := normalizedOverrides[sp.configKey]; ok {
-				info.Keys = displayKeys(o, false)
-				info.Rebound = true
-			}
-			rebindable = append(rebindable, info)
-			continue
+	return built.infos, nil
+}
+
+func decorateValidationError(overrides map[string][]string, err error) error {
+	if err != nil {
+		if _, configured := overrides["new_remote"]; configured {
+			return fmt.Errorf("%w; new_remote is a compatibility binding: it opens the creation form with the backend field focused; it no longer forces remote creation", err)
 		}
-		fixed = append(fixed, info)
 	}
-	sort.Slice(rebindable, func(i, j int) bool { return rebindable[i].Action < rebindable[j].Action })
-	return append(rebindable, fixed...), nil
+	return err
 }
 
 // RebindableActions returns the sorted [keys] table names of every action
@@ -471,8 +468,14 @@ type keyClaim struct {
 	dispatch   bool
 }
 
-// buildMaps generates the strings and bindings maps from specs with
-// overrides applied, validating as it goes.
+type builtMaps struct {
+	strings  map[string]KeyName
+	bindings map[KeyName]key.Binding
+	infos    []BindingInfo
+}
+
+// buildMaps resolves one effective table from specs and overrides, then derives
+// both the runtime maps and the introspection rows from that same active set.
 //
 // Conflict resolution distinguishes provenance so an UPGRADE never breaks boot
 // (#1461): a USER binding ([keys] override) of a key SUPPRESSES any DEFAULT
@@ -481,11 +484,11 @@ type keyClaim struct {
 // bindings on one key, or two DEFAULTS (a specs-table bug), are still a real
 // conflict, except for the sanctioned pane/tree contextual overlap. A suppressed
 // default simply loses that key (the user can rebind the action via [keys]).
-func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]key.Binding, error) {
+func buildMaps(overrides map[string][]string) (builtMaps, error) {
 	byConfigKey := specsByConfigKey()
 	normalizedOverrides, err := normalizeOverrides(overrides, byConfigKey)
 	if err != nil {
-		return nil, nil, err
+		return builtMaps{}, err
 	}
 
 	// Effective keys per spec, and whether an override replaced the default,
@@ -514,7 +517,7 @@ func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]k
 	// suppressed[name][key] marks a default claim dropped because a user binding
 	// took the key. Iterate keys in sorted order so a table with multiple genuine
 	// conflicts reports the same one deterministically.
-	suppressed := map[KeyName]map[string]bool{}
+	suppressed := map[KeyName]map[string][]string{}
 	keyStrings := make([]string, 0, len(claims))
 	for k := range claims {
 		keyStrings = append(keyStrings, k)
@@ -531,31 +534,43 @@ func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]k
 				if a.overridden != b.overridden {
 					continue // user-vs-default: the default yields (suppressed below)
 				}
-				return nil, nil, fmt.Errorf("keys: %q is bound to both %q and %q; each key can trigger only one action", k, a.action, b.action)
+				return builtMaps{}, fmt.Errorf("keys: %q is bound to both %q and %q; each key can trigger only one action", k, a.action, b.action)
 			}
 		}
 		for _, c := range cs {
-			if c.overridden || !overrideSuppressesDefault(k, c, cs) {
+			if c.overridden {
+				continue
+			}
+			takers := defaultSuppressors(c, cs)
+			if len(takers) == 0 {
 				continue
 			}
 			if suppressed[c.name] == nil {
-				suppressed[c.name] = map[string]bool{}
+				suppressed[c.name] = map[string][]string{}
 			}
-			suppressed[c.name][k] = true
+			suppressed[c.name][k] = takers
 		}
 	}
 
 	stringsMap := make(map[string]KeyName, 64)
 	bindings := make(map[KeyName]key.Binding, len(specs))
+	var rebindable, fixed []BindingInfo
 	for i, sp := range specs {
 		effective := effectiveKeys[i]
 		active := effective
+		var suppressedBy []SuppressedKey
 		if sup := suppressed[sp.name]; len(sup) > 0 {
 			active = make([]string, 0, len(effective))
 			for _, k := range effective {
-				if !sup[k] {
+				takers, dropped := sup[k]
+				if !dropped {
 					active = append(active, k)
+					continue
 				}
+				suppressedBy = append(suppressedBy, SuppressedKey{
+					Key:     displayKeys([]string{k}, false)[0],
+					TakenBy: append([]string(nil), takers...),
+				})
 			}
 		}
 
@@ -573,15 +588,35 @@ func buildMaps(overrides map[string][]string) (map[string]KeyName, map[KeyName]k
 			key.WithKeys(active...),
 			key.WithHelp(label, sp.desc),
 		)
+
+		info := BindingInfo{
+			Action:       sp.configKey,
+			Desc:         sp.desc,
+			Keys:         displayKeys(active, false),
+			Default:      displayKeys(sp.keys, false),
+			Rebound:      overridden[i],
+			SuppressedBy: suppressedBy,
+		}
+		if sp.configKey != "" {
+			rebindable = append(rebindable, info)
+		} else {
+			fixed = append(fixed, info)
+		}
 	}
-	return stringsMap, bindings, nil
+	sort.Slice(rebindable, func(i, j int) bool { return rebindable[i].Action < rebindable[j].Action })
+	return builtMaps{
+		strings:  stringsMap,
+		bindings: bindings,
+		infos:    append(rebindable, fixed...),
+	}, nil
 }
 
-// overrideSuppressesDefault reports whether the default claim c on key k must
-// yield: some OTHER action bound k via a [keys] override and is not a sanctioned
-// contextual overlap with c. When true, c loses k rather than the config being
+// defaultSuppressors reports the OTHER actions that make the default claim c
+// yield: each bound the same key via a [keys] override and is not a sanctioned
+// contextual overlap with c. The default loses the key rather than config being
 // rejected (#1461).
-func overrideSuppressesDefault(k string, c keyClaim, cs []keyClaim) bool {
+func defaultSuppressors(c keyClaim, cs []keyClaim) []string {
+	var takers []string
 	for _, o := range cs {
 		if !o.overridden || o.name == c.name {
 			continue
@@ -589,9 +624,9 @@ func overrideSuppressesDefault(k string, c keyClaim, cs []keyClaim) bool {
 		if contextualKeyOverlapAllowed(c.name, o.name) {
 			continue
 		}
-		return true
+		takers = append(takers, o.action)
 	}
-	return false
+	return takers
 }
 
 func ownerAction(sp spec) string {

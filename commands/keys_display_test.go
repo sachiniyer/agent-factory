@@ -90,6 +90,189 @@ func TestKeysDisplayConfigRoundTrip(t *testing.T) {
 	}
 }
 
+type suppressedKeyJSON struct {
+	Key     string   `json:"key"`
+	TakenBy []string `json:"taken_by"`
+}
+
+type keysDisplayJSONRow struct {
+	Action       string              `json:"action"`
+	Description  string              `json:"description"`
+	Keys         []string            `json:"keys"`
+	Default      []string            `json:"default"`
+	SuppressedBy []suppressedKeyJSON `json:"suppressed_by"`
+}
+
+func runKeysDisplay(t *testing.T, jsonOutput bool) string {
+	t.Helper()
+	var out bytes.Buffer
+	keysCmd.SetOut(&out)
+	defer keysCmd.SetOut(nil)
+	if err := keysCmd.Flags().Set("json", fmt.Sprint(jsonOutput)); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = keysCmd.Flags().Set("json", "false") }()
+	if err := keysCmd.RunE(keysCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	return out.String()
+}
+
+func decodeKeysDisplayJSON(t *testing.T, output string) []keysDisplayJSONRow {
+	t.Helper()
+	var envelope struct {
+		Data  []keysDisplayJSONRow `json:"data"`
+		Error json.RawMessage      `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatalf("af keys --json must return an envelope: %v\n%s", err, output)
+	}
+	if string(envelope.Error) != "null" {
+		t.Fatalf("af keys --json error = %s, want null", envelope.Error)
+	}
+	return envelope.Data
+}
+
+func normalizedKeysDisplayLine(output, firstField string) string {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == firstField {
+			return strings.Join(fields, " ")
+		}
+	}
+	return ""
+}
+
+func TestKeysDisplayReportsFullySuppressedDefaultByOneOverride(t *testing.T) {
+	tempAFHome(t)
+	path := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "config.toml")
+	if err := os.WriteFile(path, []byte(`[keys]
+quit = "Q"
+new = "c"
+up = ["u", "ctrl+p"]
+tasks = "ctrl+t"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	textOutput := runKeysDisplay(t, false)
+	for action, want := range map[string]string{
+		"limit_retry":    "limit_retry — (c taken by new)",
+		"switch_project": "switch_project — (ctrl+p taken by up)",
+	} {
+		got := normalizedKeysDisplayLine(textOutput, action)
+		if got != want {
+			t.Errorf("af keys %s row = %q, want %q\n%s", action, got, want, textOutput)
+		}
+	}
+
+	jsonOutput := runKeysDisplay(t, true)
+	rows := make(map[string]keysDisplayJSONRow)
+	for _, row := range decodeKeysDisplayJSON(t, jsonOutput) {
+		rows[row.Action] = row
+	}
+	for action, want := range map[string]struct {
+		key   string
+		taker string
+	}{
+		"limit_retry":    {"c", "new"},
+		"switch_project": {"ctrl+p", "up"},
+	} {
+		row := rows[action]
+		if len(row.Keys) != 0 || len(row.SuppressedBy) != 1 || row.SuppressedBy[0].Key != want.key || len(row.SuppressedBy[0].TakenBy) != 1 || row.SuppressedBy[0].TakenBy[0] != want.taker {
+			t.Errorf("af keys --json %s = keys %v, suppressed_by %v; want no keys and %s taken by %s", action, row.Keys, row.SuppressedBy, want.key, want.taker)
+		}
+	}
+
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, []byte(jsonOutput)); err != nil {
+		t.Fatal(err)
+	}
+	wantOrderedRow := `{"action":"limit_retry","description":"retry","keys":[],"default":["c"],"rebound":false,"suppressed_by":[{"key":"c","taken_by":["new"]}]}`
+	if !strings.Contains(compact.String(), wantOrderedRow) {
+		t.Fatalf("suppressed_by must be appended after every existing row member; want %s in:\n%s", wantOrderedRow, jsonOutput)
+	}
+}
+
+func TestKeysDisplayReportsPartiallySuppressedDefault(t *testing.T) {
+	tempAFHome(t)
+	path := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "config.toml")
+	if err := os.WriteFile(path, []byte("[keys]\nnew = \"k\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	textOutput := runKeysDisplay(t, false)
+	if got, want := normalizedKeysDisplayLine(textOutput, "up"), "up up (k taken by new)"; got != want {
+		t.Fatalf("partially suppressed up row = %q, want %q\n%s", got, want, textOutput)
+	}
+	for _, row := range decodeKeysDisplayJSON(t, runKeysDisplay(t, true)) {
+		if row.Action != "up" {
+			continue
+		}
+		if len(row.Keys) != 1 || row.Keys[0] != "up" || len(row.SuppressedBy) != 1 || row.SuppressedBy[0].Key != "k" || len(row.SuppressedBy[0].TakenBy) != 1 || row.SuppressedBy[0].TakenBy[0] != "new" {
+			t.Fatalf("partially suppressed up JSON = keys %v, suppressed_by %v; want [up], [{k [new]}]", row.Keys, row.SuppressedBy)
+		}
+		return
+	}
+	t.Fatal("af keys --json omitted up")
+}
+
+func TestKeysDisplayReportsFullySuppressedDefaultBySeveralOverrides(t *testing.T) {
+	tempAFHome(t)
+	path := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "config.toml")
+	if err := os.WriteFile(path, []byte("[keys]\nnew = \"k\"\nquit = \"up\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	textOutput := runKeysDisplay(t, false)
+	if got, want := normalizedKeysDisplayLine(textOutput, "up"), "up — (up taken by quit; k taken by new)"; got != want {
+		t.Fatalf("fully suppressed multi-key up row = %q, want %q\n%s", got, want, textOutput)
+	}
+	for _, row := range decodeKeysDisplayJSON(t, runKeysDisplay(t, true)) {
+		if row.Action != "up" {
+			continue
+		}
+		if len(row.Keys) != 0 || len(row.SuppressedBy) != 2 ||
+			row.SuppressedBy[0].Key != "up" || len(row.SuppressedBy[0].TakenBy) != 1 || row.SuppressedBy[0].TakenBy[0] != "quit" ||
+			row.SuppressedBy[1].Key != "k" || len(row.SuppressedBy[1].TakenBy) != 1 || row.SuppressedBy[1].TakenBy[0] != "new" {
+			t.Fatalf("fully suppressed multi-key up JSON = keys %v, suppressed_by %v", row.Keys, row.SuppressedBy)
+		}
+		return
+	}
+	t.Fatal("af keys --json omitted up")
+}
+
+func TestKeysDisplayIdentifiesSuppressedFixedAction(t *testing.T) {
+	tempAFHome(t)
+	path := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "config.toml")
+	if err := os.WriteFile(path, []byte("[keys]\nnew = \"g\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	textOutput := runKeysDisplay(t, false)
+	want := "jump to tab (number or name) — (g taken by new)"
+	var got string
+	for _, line := range strings.Split(textOutput, "\n") {
+		if strings.Contains(line, "jump to tab (number or name)") {
+			got = strings.Join(strings.Fields(line), " ")
+			break
+		}
+	}
+	if got != want {
+		t.Fatalf("suppressed fixed action row = %q, want %q\n%s", got, want, textOutput)
+	}
+	for _, row := range decodeKeysDisplayJSON(t, runKeysDisplay(t, true)) {
+		if row.Description != "jump to tab (number or name)" {
+			continue
+		}
+		if row.Action != "" || len(row.Keys) != 0 || len(row.SuppressedBy) != 1 || row.SuppressedBy[0].Key != "g" || len(row.SuppressedBy[0].TakenBy) != 1 || row.SuppressedBy[0].TakenBy[0] != "new" {
+			t.Fatalf("suppressed fixed-action JSON = action %q, keys %v, suppressed_by %v", row.Action, row.Keys, row.SuppressedBy)
+		}
+		return
+	}
+	t.Fatal("af keys --json omitted fixed jump-to-tab action")
+}
+
 func TestKeysJSONConfigErrorEnvelope(t *testing.T) {
 	tempAFHome(t)
 	path := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "config.toml")

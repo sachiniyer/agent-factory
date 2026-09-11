@@ -452,8 +452,8 @@ The TUI's key bindings are rebindable from a `[keys]` table. Each entry maps an 
 ```toml
 [keys]
 quit = "Q"
-new = "c"
-up = ["u", "ctrl+p"]
+new = "ctrl+n"
+up = ["u", "ctrl+k"]
 tasks = "ctrl+t"
 ```
 
@@ -466,6 +466,26 @@ tasks = "ctrl+t"
 - **Reserved keys** are rejected: binding any action to `enter`, `tab`, `shift+tab`, `esc`, `ctrl+]`, or a digit `1`–`9` is a startup error naming the key and why it's reserved (they drive interaction, the focus ring, overlay cancel, the interactive-mode exit, and the 1–9 tab jump respectively).
 - **`ctrl+c` is a fixed hard exit, not a reserved key.** Validation does *not* reject it — you can write `quit = "ctrl+c"` (or point any action at it) with no error — but `ctrl+c` always quits and is handled before the keymap ever sees the keypress, so binding an action to it has no effect: the hard exit wins. It is therefore not *effectively* rebindable, which is different from the reserved keys above that are outright rejected at load.
 - Any problem — an unknown action, an unparseable or reserved key, or two user overrides bound to the same key — is a **hard error at startup** that names the file and the offending action, so a typo can't silently leave you with a dead key. **Compatibility exception:** the retired `open_pr` and `copy_pr` actions are ignored with a one-line warning naming the config file and removed action (once per file and action per process). Every other unknown action remains a hard startup error. A user override on a key *suppresses* any default binding for that key rather than erroring, so an upgrade that ships a new default binding never breaks an existing config — the user's binding wins and the new action is simply unbound by default. The bottom menu and the `?` help overlay both reflect your rebinds.
+
+**Intentional default-key conflict.** If you assign keys that another action has
+only by default, your overrides win and those defaults are suppressed:
+
+```toml
+[keys]
+new = "c"
+up = ["u", "ctrl+p"]
+```
+
+Here `c` creates a session and `ctrl+p` moves up. `limit_retry` and
+`switch_project` become unbound; `af keys` reports them as
+`— (c taken by new)` and `— (ctrl+p taken by up)` so every lost key remains
+visible and actionable. This is not a startup error because neither losing
+claim came from another user override.
+If only one key from a multi-key default is taken, the row keeps its remaining
+keys and names the loss separately, such as `up   up   (k taken by new)`.
+Suppressed fixed bindings use their description in the action column so the
+disabled behavior is still identifiable.
+
 - **Global-only.** `keys` is rejected in in-repo configs — a cloned repository can never rebind your terminal.
 - **TOML-only.** The keymap exists only in `config.toml`; a `keys` block in a legacy `config.json` is ignored with a warning.
 
