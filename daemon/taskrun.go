@@ -22,7 +22,16 @@ import (
 // no failure side-effects fire. The daemon auto-resume scheduler (opt-in) or the
 // manual `c` retry re-delivers the stored prompt once the window resets, after
 // which the run records its normal completion status.
-const TaskStatusLimitParked = "parked: usage limit"
+const (
+	TaskStatusLimitParked = "parked: usage limit"
+	// TaskStatusInterrupted is recorded when a task-spawned session loses the
+	// runtime that received its prompt and restore starts a replacement. Replaying
+	// the prompt could duplicate external side effects, while calling the fresh
+	// runtime's idle state a completion would apply on_complete to unfinished work.
+	// Keep the session and expose the conservative outcome through the task-list
+	// surfaces that already render LastRunStatus (#4222).
+	TaskStatusInterrupted = "interrupted: agent runtime lost"
+)
 
 // Indirected so delivery tests can observe the daemon RPCs without dialing —
 // or spawning — a real daemon. Both helpers loop back through the daemon's

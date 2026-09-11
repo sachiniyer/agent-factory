@@ -55,7 +55,9 @@ func TestTransitionTable_RunEffectsAreTheAgreedTable(t *testing.T) {
 	want := map[transitionKind]runEffect{
 		// Opening/booting the session: the run is under way.
 		tkBeginCreate: runKeep,
-		tkConfirmLive: runKeep,
+		// Confirming a replacement after Lost closes the predecessor's run as
+		// interrupted; every other source state keeps it.
+		tkConfirmLive: runEndsOnRestoredRuntime,
 		// Re-spawning an established session's runtime after a usage limit (#2997)
 		// continues its run; it neither opens nor closes one.
 		tkBeginRespawn: runKeep,

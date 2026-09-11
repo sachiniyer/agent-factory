@@ -107,8 +107,9 @@ type InstanceData struct {
 	// It proves bytes changed, not who produced them or what they meant.
 	LastPaneChurnAt time.Time `json:"last_pane_churn_at,omitzero"`
 	// TaskRunActive records whether this session's task run is still in flight
-	// (#1892) — true from creation, false once the agent goes idle or startup
-	// settles terminal-unknown. It is the one fact the watch-task concurrency cap
+	// (#1892) — true from creation, false once the prompted agent goes idle,
+	// startup settles terminal-unknown, or a Lost runtime is replaced without
+	// replaying its prompt. It is the one fact the watch-task concurrency cap
 	// counts, and it is stored rather than
 	// re-derived because every neighbouring signal answers a different question:
 	// Lost cannot tell a finished run from an interrupted one, and an in-flight op

@@ -60,7 +60,10 @@ const taskLifecycleHookWait = 10 * time.Minute
 //     true forever, including for the session someone is typing into right now.
 //
 //   - the session settled into LiveReady. CommitArchive also ends a run, and that
-//     session is already archived with nothing left to do.
+//     session is already archived with nothing left to do. ConfirmLive after a
+//     Lost-runtime replacement closes an interrupted run into LiveRunning instead;
+//     its later idle tick arrives with taskRunWasActive=false. Both routes therefore
+//     stay outside the completion-only lifecycle hook.
 //
 //   - startup did not settle terminal-unknown. This one is checked explicitly
 //     even though the poll cannot currently deliver such a session here, and the

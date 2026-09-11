@@ -29,10 +29,14 @@ func TestTaskRunEndsOnlyForRuntimeThatReceivedPrompt(t *testing.T) {
 	t.Run("prompted runtime still completes on its idle edge", func(t *testing.T) {
 		inst := &Instance{
 			TaskID:        "task-id",
-			liveness:      LiveRunning,
+			liveness:      LiveReady,
 			taskRunActive: true,
 		}
 
+		require.NoError(t, inst.Transition(BeginCreate()))
+		require.NoError(t, inst.Transition(ConfirmLive()))
+		require.True(t, inst.TaskRunActive(),
+			"confirming the original runtime must retain the run for prompt delivery")
 		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 		require.False(t, inst.TaskRunActive(),
 			"the runtime that received the prompt still completes its run when it goes idle")

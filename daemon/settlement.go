@@ -5,6 +5,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // settleOwedEntry identifies a session whose settlement write did not land, so
@@ -60,22 +61,52 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 	return nil
 }
 
-// prepareRuntimeReplacement durably retires facts owned by the predecessor at
-// the replacement's ConfirmLive boundary. Production Recover and Respawn
-// implementations confirm the fresh runtime live before returning, so clearing
-// and persisting only after they return leaves a crash window: restart sees the
-// new process, classifies it as a reattach, and reloads predecessor evidence.
+// prepareRuntimeReplacement retires facts owned by the predecessor at the
+// replacement's ConfirmLive boundary. That includes classifying a task run whose
+// prompted runtime was Lost: the replacement is not given the prompt, so the run
+// closes as interrupted here instead of being misclassified as complete on its
+// first idle observation. Production Recover and Respawn implementations confirm
+// the fresh runtime live before returning, so clearing and persisting only after
+// they return leaves a crash window: restart sees the new process, classifies it
+// as a reattach, and reloads predecessor evidence.
 //
 // The ordinary post-operation noteRuntimeReplaced call remains necessary. A
 // slow remote replacement can accumulate fresh transport observations after
 // this boundary reset and before it returns; the post-success reset retires
 // those in-memory observations, while this settlement makes the fence safe.
 func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *session.Instance) error {
+	view := instance.LifecycleView()
+	if view.InFlightOp == session.OpRestoring && view.TaskRunActive && view.TaskID != "" {
+		m.recordInterruptedTaskRun(view.TaskID, view.Title)
+	}
 	m.noteRuntimeReplaced(repoID, instance)
 	if err := m.persistSettlement(repoID, key, instance); err != nil {
 		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", err)
 	}
 	return nil
+}
+
+// recordInterruptedTaskRun makes a Lost task runtime's outcome visible at the
+// replacement boundary. The live-boundary callback runs before ConfirmLive, so
+// OpRestoring + TaskRunActive identifies the exact case: the departed runtime
+// received the prompt, while the replacement did not. Limit resumes arrive as
+// OpRespawning and are excluded because they re-deliver their queued prompt.
+//
+// The timestamp remains the original delivery time. This is a status change,
+// not a second run, and UpdateTaskStatus's nil mode prevents a concurrent newer
+// delivery from having its timestamp rolled back.
+func (m *Manager) recordInterruptedTaskRun(taskID, title string) {
+	updated, err := task.UpdateTaskStatus(taskID, nil, TaskStatusInterrupted)
+	if err != nil {
+		m.warn().Printf(
+			"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, skipped on_complete, and left the session in place for inspection; could not record last_run_status %q: %v",
+			taskID, title, TaskStatusInterrupted, err)
+		return
+	}
+	m.publishEvent(agentproto.EventTaskUpdated, updated)
+	m.warn().Printf(
+		"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, recorded last_run_status %q, skipped on_complete, and left the session in place for inspection",
+		taskID, title, TaskStatusInterrupted)
 }
 
 func (m *Manager) persistRuntimeReplacement(repoID, title string, instance *session.Instance) {

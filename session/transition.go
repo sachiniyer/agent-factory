@@ -299,6 +299,18 @@ const (
 	// pending. That conflation is what let a finished run reclaim a slot through
 	// the archive door.
 	runEndsOnIdleEdge
+	// runEndsOnRestoredRuntime: a replacement runtime cannot finish the run whose
+	// prompt went to its predecessor. ConfirmLive applies this only when it enters
+	// from OpRestoring. Creating confirms the original prompted runtime; a limit
+	// resume stays fenced in OpRespawning until it re-delivers the prompt; and an
+	// archived restore already has no active run.
+	//
+	// Closing at the identity boundary, rather than waiting for the replacement's
+	// first idle observation, makes the invariant structural: an idle edge can end
+	// a run only on the runtime that received its prompt. The daemon records this
+	// distinct outcome as interrupted and deliberately does not replay a prompt
+	// whose predecessor may already have performed external side effects (#4222).
+	runEndsOnRestoredRuntime
 	// runEnds: this transition ends the run outright, whatever the agent was doing.
 	// CommitArchive only: a committed archive is the user deliberately shelving the
 	// session. Its slot is already released (an Archived session is not restorable
@@ -384,10 +396,11 @@ var transitionTable = map[transitionKind]edgeSpec{
 			return stateAxes{LiveRunning, OpNone}
 		},
 		yieldWhenBlocked: true,
-		// A spawn completing says the agent is up, not that its work is done. It
-		// cannot REOPEN a finished run either: the marker only ever goes true→false,
-		// so a restored archive (whose commit ended the run) stays ended here.
-		run: runKeep,
+		// A lost-session replacement never received its predecessor's task prompt,
+		// so it cannot own or complete that run. End the marker at this identity
+		// boundary; the daemon records the interrupted outcome before ConfirmLive.
+		// Every other ConfirmLive shape keeps the marker unchanged.
+		run: runEndsOnRestoredRuntime,
 	},
 	tkObserveLiveness: {
 		allowedFrom: func(stateAxes) bool { return true },
@@ -630,6 +643,16 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 			// idle mid-teardown. Not the resulting state alone — a session is born
 			// LiveReady before its agent ever runs, so that would end the run at birth.
 			if to.liveness == LiveReady && from.liveness != LiveReady {
+				i.taskRunActive = false
+				i.touchLocked()
+				i.captureAdoptionBaselineLocked()
+			}
+		case runEndsOnRestoredRuntime:
+			// The from-state proves runtime identity: OpRestoring means Recover
+			// replaced a Lost runtime without delivering its task prompt. Other
+			// ConfirmLive callers either own the original runtime or keep a
+			// respawn fenced until prompt delivery, so they must retain the run.
+			if from.op == OpRestoring {
 				i.taskRunActive = false
 				i.touchLocked()
 				i.captureAdoptionBaselineLocked()
