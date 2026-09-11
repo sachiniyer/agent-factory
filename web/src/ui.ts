@@ -838,11 +838,17 @@ export class AppShell {
       return;
     }
     const focus = document.activeElement as HTMLElement | null;
+    // Escape can finish the shortcut before this deferred composition pass. Its
+    // return has already closed an incidental Session actions disclosure, while
+    // leaving a user-opened one expanded. Carry that settled state through the
+    // move even when there is no longer an open picker to restore it for us.
+    const sessionActionsOpen = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
     this.appControls.close();
     this.terminalChrome?.menu.close();
     this.closeProjectMenu();
     this.sessionFirst?.setActive(active);
     this.el.classList.toggle("af-session-first", active);
+    if (sessionActionsOpen) this.terminalChrome?.menu.open();
     // Reparenting closes the old enclosing disclosure. Reopen through the new
     // owner and capture its return state before restoring the focused item.
     if (pickerOpen) {
