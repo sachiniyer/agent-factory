@@ -92,6 +92,10 @@ func unreadableRepoInstances(t *testing.T, repoID string) {
 // auto-create arm (deliverPromptForTask) and an empty target drives the fresh-per-run
 // create arm (createSessionForTask).
 func seedWatchTaskForManager(t *testing.T, taskID, projectPath, target string) {
+	seedWatchTaskWithProgram(t, taskID, projectPath, target, "")
+}
+
+func seedWatchTaskWithProgram(t *testing.T, taskID, projectPath, target, program string) {
 	t.Helper()
 	if err := task.AddTask(task.Task{
 		ID:            taskID,
@@ -100,11 +104,44 @@ func seedWatchTaskForManager(t *testing.T, taskID, projectPath, target string) {
 		WatchCmd:      "watch.sh",
 		TargetSession: target,
 		ProjectPath:   projectPath,
+		Program:       program,
 		Enabled:       true,
 		CreatedAt:     time.Now(),
 	}); err != nil {
 		t.Fatalf("seed watch task: %v", err)
 	}
+}
+
+// handEditWatchTaskProgram models a retained value written by an older af or by
+// the user. Current AddTask correctly rejects it, while the read path deliberately
+// preserves it so an unrelated edit does not make legacy tasks unmanageable.
+func handEditWatchTaskProgram(t *testing.T, from, to string) {
+	t.Helper()
+	path, err := task.MigrateOnLoadPath()
+	require.NoError(t, err)
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	oldField := fmt.Sprintf("\"program\": %q", from)
+	newField := fmt.Sprintf("\"program\": %q", to)
+	require.Contains(t, string(raw), oldField, "the seeded task must persist its program")
+	raw = []byte(strings.Replace(string(raw), oldField, newField, 1))
+	require.NoError(t, os.WriteFile(path, raw, 0o644))
+}
+
+// flattenControlCreateSession routes the task create through the RPC handler's
+// validation boundary, then flattens the error exactly as net/rpc does.
+func flattenControlCreateSession(t *testing.T, manager *Manager) {
+	t.Helper()
+	orig := createSessionForTask
+	server := &controlServer{manager: manager}
+	createSessionForTask = func(req CreateSessionRequest) (*session.InstanceData, error) {
+		var resp CreateSessionResponse
+		if err := server.CreateSession(req, &resp); err != nil {
+			return nil, fmt.Errorf("%s", err.Error())
+		}
+		return &resp.Instance, nil
+	}
+	t.Cleanup(func() { createSessionForTask = orig })
 }
 
 // flattenDeliverPrompt swaps deliverPromptForTask for a stub that calls the real
@@ -370,6 +407,36 @@ func TestRepro_WatcherRefundsRateSlotOnDefaultAccountFailure(t *testing.T) {
 
 	assert.Equal(t, 0, spentSlots(w), "an account-default refusal before reservation must refund the rate slot")
 	assert.Equal(t, 1, w.queue.pendingCount(), "the failed delivery must remain queued for replay")
+}
+
+// TestRepro_WatcherRefundsRateSlotOnUnsupportedLegacyTaskProgram covers both
+// control paths a retained task program can take before manager create logic:
+// the CreateSession RPC gate for per-run tasks and DeliverPrompt's missing-target
+// gate for targeted tasks. Neither path reserves or delivers, so both must refund.
+func TestRepro_WatcherRefundsRateSlotOnUnsupportedLegacyTaskProgram(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		target  string
+		flatten func(*testing.T, *Manager)
+	}{
+		{name: "per-run create", flatten: flattenControlCreateSession},
+		{name: "missing target auto-create", target: "absent-worker", flatten: flattenDeliverPrompt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, _, repoPath := newStatusTestManager(t)
+			taskID := "repro-program-" + strings.ReplaceAll(tc.name, " ", "-")
+			seedWatchTaskWithProgram(t, taskID, repoPath, tc.target, "claude")
+			handEditWatchTaskProgram(t, "claude", "removed-agent")
+			tc.flatten(t, manager)
+
+			w := newRateSlotWatcher(t, taskID, deliverWatchEvent)
+			close(w.stopCh)
+			w.handleEvent("new issue #4191", &tailBuffer{})
+
+			assert.Equal(t, 0, spentSlots(w), "a program refusal before manager create must refund the rate slot")
+			assert.Equal(t, 1, w.queue.pendingCount(), "the failed delivery must remain queued for replay")
+		})
+	}
 }
 
 // TestReserveCreate_OrdinaryTitleWalkFailureStaysPlain guards the provenance
