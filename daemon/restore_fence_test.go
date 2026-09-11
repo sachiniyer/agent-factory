@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -254,8 +255,15 @@ func TestRestoreSession_ProbeUnknownRefusalLowersTheFence(t *testing.T) {
 	inst, _ := registerStartedRemote(t, manager, repoID, repoPath, "remote-unknown", sandbox.srv.URL, session.Lost)
 	sandbox.watch(inst)
 
-	if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "remote-unknown", RepoID: repoID}); err == nil {
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "remote-unknown", RepoID: repoID})
+	if err == nil {
 		t.Fatal("manual restore accepted an indeterminate probe")
+	}
+	if got, want := err.Error(), killSuggestionFor(inst); !strings.Contains(got, want) {
+		t.Fatalf("the indeterminate refusal advertised a command that cannot release it\n got: %s\nwant suggestion: %s", got, want)
+	}
+	if got, refusing := err.Error(), forceReapSuggestionFor(inst); strings.Contains(got, refusing) {
+		t.Fatalf("the indeterminate refusal advertised --force-reap even though the empty branch makes that command refuse: %s", got)
 	}
 	sandbox.assertKillWasHiddenAtTheProbe(t)
 	if got := inst.GetLiveness(); got != session.LiveLost {
