@@ -201,15 +201,14 @@ func TestSandboxHome_SetsAndRestores(t *testing.T) {
 	}
 }
 
-// TestSandboxHome_ScrubsAndRestoresMarkers pins the #1120 marker contract:
-// SandboxHome scrubs AF_SESSION/AF_SESSION_GEN/AF_HOME for the package run, and
-// restore puts each marker back to its exact pre-sandbox state — including unsetting a
-// marker that was absent before but got set during the run, so nothing set
-// mid-package leaks past restore.
+// TestSandboxHome_ScrubsAndRestoresMarkers pins the #1120/#4194 marker contract:
+// SandboxHome scrubs AF_SESSION/AF_SESSION_GEN/AF_HOME, installs a fresh stable
+// test-run identity, and restores every marker to its exact pre-sandbox state.
 func TestSandboxHome_ScrubsAndRestoresMarkers(t *testing.T) {
 	// Present before: must be scrubbed during the run and restored after.
 	t.Setenv("AF_SESSION", "pre-sandbox-session")
 	t.Setenv("AF_SESSION_GEN", "pre-sandbox-generation")
+	t.Setenv(envMarkerTestRun, "pre-sandbox-run")
 	// Absent before: t.Setenv registers restoration of the original value,
 	// then Unsetenv makes it genuinely absent for SandboxHome to observe.
 	t.Setenv("AF_HOME", "placeholder")
@@ -227,6 +226,9 @@ func TestSandboxHome_ScrubsAndRestoresMarkers(t *testing.T) {
 	if v, ok := os.LookupEnv("AF_HOME"); ok {
 		t.Fatalf("SandboxHome must scrub AF_HOME; still set to %q", v)
 	}
+	if got, want := os.Getenv(envMarkerTestRun), os.Getenv("AGENT_FACTORY_HOME"); got != want {
+		t.Fatalf("test-run marker = %q, want stable sandbox identity %q", got, want)
+	}
 
 	// Simulate a test (or child-env plumbing) setting a marker mid-run.
 	if err := os.Setenv("AF_HOME", "set-during-run"); err != nil {
@@ -242,6 +244,9 @@ func TestSandboxHome_ScrubsAndRestoresMarkers(t *testing.T) {
 	}
 	if v, ok := os.LookupEnv("AF_HOME"); ok {
 		t.Fatalf("restore must unset AF_HOME (absent pre-sandbox); still set to %q", v)
+	}
+	if got := os.Getenv(envMarkerTestRun); got != "pre-sandbox-run" {
+		t.Fatalf("restore did not put %s back; got %q", envMarkerTestRun, got)
 	}
 }
 

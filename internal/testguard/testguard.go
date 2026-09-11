@@ -134,34 +134,37 @@ func ConfigTripwire() func() error {
 	}
 }
 
-const envMarkerHome = "AF_HOME"
-
-var (
-	sandboxHomesMu sync.Mutex
-	sandboxHomes   []string
+const (
+	envMarkerHome    = "AF_HOME"
+	envMarkerTestRun = "AF_TESTGUARD_RUN"
 )
 
-// sandboxHomeCheckpoint identifies the next SandboxHome created in this test
+var (
+	sandboxRunsMu sync.Mutex
+	sandboxRuns   []string
+)
+
+// sandboxRunCheckpoint identifies the next SandboxHome created in this test
 // process. TmuxTripwire takes a checkpoint before package sandboxing starts, so
 // another test process's temp home can never be mistaken for one of ours.
-func sandboxHomeCheckpoint() int {
-	sandboxHomesMu.Lock()
-	defer sandboxHomesMu.Unlock()
-	return len(sandboxHomes)
+func sandboxRunCheckpoint() int {
+	sandboxRunsMu.Lock()
+	defer sandboxRunsMu.Unlock()
+	return len(sandboxRuns)
 }
 
-func recordSandboxHome(home string) {
-	sandboxHomesMu.Lock()
-	defer sandboxHomesMu.Unlock()
-	sandboxHomes = append(sandboxHomes, home)
+func recordSandboxRun(id string) {
+	sandboxRunsMu.Lock()
+	defer sandboxRunsMu.Unlock()
+	sandboxRuns = append(sandboxRuns, id)
 }
 
-func sandboxHomesSince(checkpoint int) map[string]bool {
-	sandboxHomesMu.Lock()
-	defer sandboxHomesMu.Unlock()
-	owned := make(map[string]bool, len(sandboxHomes)-checkpoint)
-	for _, home := range sandboxHomes[checkpoint:] {
-		owned[home] = true
+func sandboxRunsSince(checkpoint int) map[string]bool {
+	sandboxRunsMu.Lock()
+	defer sandboxRunsMu.Unlock()
+	owned := make(map[string]bool, len(sandboxRuns)-checkpoint)
+	for _, id := range sandboxRuns[checkpoint:] {
+		owned[id] = true
 	}
 	return owned
 }
@@ -185,11 +188,11 @@ func ambientAFSessions() map[string]bool {
 	return sessions
 }
 
-// ambientAFSessionHome reads the ownership marker from one exact tmux session.
+// ambientAFSessionMarker reads one ownership marker from an exact tmux session.
 // False covers a missing marker, malformed output, and a query failure: none is
 // affirmative evidence that this test run owns the session.
-func ambientAFSessionHome(name string) (string, bool) {
-	out, err := exec.Command("tmux", "show-environment", "-t", "="+name, envMarkerHome).Output()
+func ambientAFSessionMarker(name, marker string) (string, bool) {
+	out, err := exec.Command("tmux", "show-environment", "-t", "="+name, marker).Output()
 	if err != nil {
 		return "", false
 	}
@@ -197,16 +200,26 @@ func ambientAFSessionHome(name string) (string, bool) {
 	if strings.ContainsAny(line, "\r\n") {
 		return "", false
 	}
-	home, ok := strings.CutPrefix(line, envMarkerHome+"=")
-	return home, ok
+	value, ok := strings.CutPrefix(line, marker+"=")
+	return value, ok
+}
+
+func ambientAFSessionOwned(name string, ownedRuns map[string]bool) bool {
+	for _, marker := range []string{envMarkerHome, envMarkerTestRun} {
+		if value, readable := ambientAFSessionMarker(name, marker); readable && ownedRuns[value] {
+			return true
+		}
+	}
+	return false
 }
 
 // TmuxTripwire returns a verify func for TestMain to call after m.Run(). Verify
-// reports only a session whose AF_HOME marker exactly matches a sandbox that
-// SandboxHome created for this run. Arrival time is not ownership: a different,
-// absent, or unreadable marker is not proof and is ignored (#4194). Tests that
-// need real tmux should call IsolateTmux, whose private server this tripwire
-// cannot even see.
+// reports only a session whose AF_HOME or AF_TESTGUARD_RUN marker exactly
+// matches a sandbox that SandboxHome created for this run. The stable run marker
+// preserves attribution when an individual test overrides AGENT_FACTORY_HOME.
+// Arrival time is not ownership: a different, absent, or unreadable identity is
+// not proof and is ignored (#4194). Tests that need real tmux should call
+// IsolateTmux, whose private server this tripwire cannot even see.
 //
 // Call it BEFORE SandboxHome and before any test changes TMUX_TMPDIR/TMUX. The
 // former gives it an ownership checkpoint; restore TMUX_TMPDIR/TMUX before
@@ -219,13 +232,12 @@ func TmuxTripwire() func() error {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return func() error { return nil }
 	}
-	homeCheckpoint := sandboxHomeCheckpoint()
+	runCheckpoint := sandboxRunCheckpoint()
 	return func() error {
-		ownedHomes := sandboxHomesSince(homeCheckpoint)
+		ownedRuns := sandboxRunsSince(runCheckpoint)
 		var leaked []string
 		for name := range ambientAFSessions() {
-			home, readable := ambientAFSessionHome(name)
-			if readable && ownedHomes[home] {
+			if ambientAFSessionOwned(name, ownedRuns) {
 				leaked = append(leaked, name)
 			}
 		}
@@ -233,7 +245,7 @@ func TmuxTripwire() func() error {
 			return nil
 		}
 		sort.Strings(leaked)
-		return fmt.Errorf("tmux tripwire: session(s) %v on the ambient tmux server carry this package's sandbox AF_HOME. "+
+		return fmt.Errorf("tmux tripwire: session(s) %v on the ambient tmux server carry this package's sandbox ownership marker. "+
 			"Possible causes are a test that bypassed testguard.IsolateTmux or cleanup, or a session belonging to a live Agent Factory install or another concurrent run. "+
 			"DO NOT KILL IT based on this diagnostic; inspect ownership first. On a known-concurrent host, set AF_DISABLE_TMUX_TRIPWIRE=1 (#1056/#4194)", leaked)
 	}
@@ -253,17 +265,28 @@ func TmuxTripwire() func() error {
 // inherits the pane's markers, so every child a test spawns would otherwise
 // carry the production install's identity — which breaks any test asserting
 // on marker absence (e.g. doctor's home-match gate) and misattributes test
-// children to the real install.
+// children to the real install. AF_TESTGUARD_RUN is replaced with this run's
+// stable identity so per-test AGENT_FACTORY_HOME overrides remain attributable.
 func SandboxHome() func() {
 	dir, err := os.MkdirTemp("", "af-test-home-")
 	if err != nil {
 		panic("testguard: cannot create sandbox AGENT_FACTORY_HOME: " + err.Error())
 	}
 	prev, had := os.LookupEnv("AGENT_FACTORY_HOME")
+	prevTestRun, hadTestRun := os.LookupEnv(envMarkerTestRun)
 	if err := os.Setenv("AGENT_FACTORY_HOME", dir); err != nil {
 		panic("testguard: cannot set sandbox AGENT_FACTORY_HOME: " + err.Error())
 	}
-	recordSandboxHome(dir)
+	if err := os.Setenv(envMarkerTestRun, dir); err != nil {
+		if had {
+			_ = os.Setenv("AGENT_FACTORY_HOME", prev)
+		} else {
+			_ = os.Unsetenv("AGENT_FACTORY_HOME")
+		}
+		_ = os.RemoveAll(dir)
+		panic("testguard: cannot set sandbox run marker: " + err.Error())
+	}
+	recordSandboxRun(dir)
 	prevSession, hadSession := os.LookupEnv("AF_SESSION")
 	prevGeneration, hadGeneration := os.LookupEnv("AF_SESSION_GEN")
 	prevAFHome, hadAFHome := os.LookupEnv("AF_HOME")
@@ -290,6 +313,11 @@ func SandboxHome() func() {
 			_ = os.Setenv("AF_HOME", prevAFHome)
 		} else {
 			_ = os.Unsetenv("AF_HOME")
+		}
+		if hadTestRun {
+			_ = os.Setenv(envMarkerTestRun, prevTestRun)
+		} else {
+			_ = os.Unsetenv(envMarkerTestRun)
 		}
 		_ = os.RemoveAll(dir)
 	}
