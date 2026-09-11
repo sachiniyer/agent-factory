@@ -15,6 +15,13 @@ import (
 func checkConfigAndStorage(ctx *scanContext, report *Report) *config.Config {
 	load, cfgErr := config.LoadConfigReadOnly()
 	cfg := load.Config
+	if cfg == nil && load.Missing {
+		// Missing is a known configuration state, not a load failure: startup
+		// materializes these defaults. Keep downstream checks active against that
+		// effective posture, especially when a still-running daemon or root session
+		// predates deletion of the file.
+		cfg = config.DefaultConfig()
+	}
 	channel := "unknown"
 	if cfg != nil && cfg.UpdateChannel != "" {
 		channel = cfg.UpdateChannel

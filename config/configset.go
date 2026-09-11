@@ -571,7 +571,7 @@ func unsettableConfigKeyError(key, projectSelector string) error {
 		parent := key[:i]
 		if spec, ok := settableKeySpecs[parent]; ok && spec.structured && manifestKeyIsTable(parent) {
 			projectFlag := ""
-			if projectSelector != "" {
+			if projectSelector != "" && isProjectPersonalKey(parent) {
 				projectFlag = " --project " + ShellQuotePath(projectSelector)
 			}
 			hint = fmt.Sprintf(" Set the whole table with `af config set %s '<compact-json>'%s`.", parent, projectFlag)

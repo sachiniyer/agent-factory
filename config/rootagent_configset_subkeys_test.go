@@ -104,3 +104,13 @@ func TestUnsettableProjectTableSubkeyHintPreservesSelector(t *testing.T) {
 		})
 	}
 }
+
+func TestUnsettableProjectGlobalTableSubkeyHintOmitsSelector(t *testing.T) {
+	_, repoRoot, _ := registeredTestProject(t)
+
+	_, err := SetProjectConfigValue(repoRoot, "root_agents.unknown", "codex")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "af config set root_agents '<compact-json>'")
+	require.NotContains(t, err.Error(), "af config set root_agents '<compact-json>' --project",
+		"the suggested whole-table command must not preserve a scope the parent rejects")
+}

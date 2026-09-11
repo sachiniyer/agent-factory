@@ -59,6 +59,23 @@ func TestRootAgentProgramDriftNamesBothCommandsAndRemedy(t *testing.T) {
 	require.True(t, check.Problem)
 }
 
+func TestRootAgentMissingGlobalConfigStillReportsLiveRoot(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, false)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	opts.daemonHealth = rootAgentDoctorHealth
+	opts.sessionInventory = rootAgentInventory(repoPath, "claude")
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	check := findCheck(t, report, "root agent program")
+	require.Equal(t, StatusWarn, check.Status)
+	require.Contains(t, check.Detail, "configured profile is disabled")
+	require.Contains(t, check.Remediation, "kill the root")
+	require.True(t, check.Problem)
+}
+
 func TestRootAgentProgramDriftResolvesFromLiveWorktreePath(t *testing.T) {
 	testguard.IsolateTmux(t)
 	opts := testOptions(t, false)
