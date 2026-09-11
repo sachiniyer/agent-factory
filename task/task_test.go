@@ -397,7 +397,7 @@ func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 	assert.Equal(t, "completed", s.LastRunStatus, "LastRunStatus must retain the fresher scheduler value, not regress to stale")
 	assert.Equal(t, "session-new", s.LastRunSessionID, "LastRunSessionID must retain the fresher scheduler identity")
 	assert.Equal(t, uint64(1), s.LastRunSequence, "LastRunSequence must retain the scheduler ordering proof")
-	assert.Equal(t, uint64(2), s.LastRunRevision, "LastRunRevision must retain scheduler publication order")
+	assert.Equal(t, uint64(1), s.LastRunRevision, "LastRunRevision must retain the task-wide status barrier")
 	assert.Equal(t, "generation-a", s.GenerationID, "GenerationID is immutable across task edits")
 	assert.True(t, s.CreatedAt.Equal(created), "CreatedAt is immutable and must be preserved from disk")
 }
@@ -644,7 +644,7 @@ func TestTaskRunIdentitySeparatesEqualTimestampSessions(t *testing.T) {
 
 	_, _, err := BeginTaskRun("w1", "", "session-a", 1, 0, runAt, "started")
 	require.NoError(t, err)
-	_, _, err = BeginTaskRun("w1", "", "session-b", 2, 1, runAt, "started")
+	_, _, err = BeginTaskRun("w1", "", "session-b", 2, 0, runAt, "started")
 	require.NoError(t, err)
 
 	_, applied, err := UpdateTaskRunStart("w1", "", "session-a", 1, 0, runAt, "started")
@@ -726,7 +726,7 @@ func TestTaskRunStartRepairsOverPriorIdentifiedRow(t *testing.T) {
 	_, _, err := BeginTaskRun("w1", "", "session-old", 1, 0, oldRunAt, "started")
 	require.NoError(t, err)
 
-	_, applied, err := UpdateTaskRunStart("w1", "", "session-new", 2, 1, newRunAt, "started")
+	_, applied, err := UpdateTaskRunStart("w1", "", "session-new", 2, 0, newRunAt, "started")
 	require.NoError(t, err)
 	require.True(t, applied,
 		"repairing a committed new session must not require the previous run identity to be empty")

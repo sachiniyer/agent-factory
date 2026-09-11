@@ -135,10 +135,12 @@ type Task struct {
 	// cannot reuse an old order. Zero means there is no session-run history or the
 	// row predates this field.
 	LastRunSequence uint64 `json:"last_run_sequence,omitempty"`
-	// LastRunRevision changes on every scheduler-owned last-run mutation. A
+	// LastRunRevision changes on every task-wide, non-session status write. A
 	// session create captures it at admission and may publish its run only while
 	// the revision is unchanged, preserving watcher termination that arrives
-	// during slow provisioning. Zero denotes no status writes yet.
+	// during slow provisioning. Session-backed writes instead use generation,
+	// stable session ID, and sequence for identity and order. Zero denotes no
+	// task-wide status writes yet.
 	LastRunRevision uint64 `json:"last_run_revision,omitempty"`
 	// Audit is the bounded trail of mutations to this task — the one field here
 	// that is a HISTORY rather than a current value, and the only way to answer

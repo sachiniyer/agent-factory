@@ -21,11 +21,20 @@ const (
 // tasks can still receive status changes. A nil lastRunAt preserves the
 // timestamp, session identity, and sequence; watcher supervision uses that form
 // so it cannot detach a live run from the token its outcome needs. Every applied
-// write advances LastRunRevision, including status-only supervision. A non-nil
-// timestamp starts a non-session-backed status and clears the session token,
-// while retaining the sequence as the allocator's durable high-water mark.
+// write advances LastRunRevision, including status-only supervision. Session-
+// backed writers do not advance that barrier: generation, stable session ID,
+// and sequence order their changes without making concurrent admissions reject
+// one another. A non-nil timestamp starts a non-session-backed status and clears
+// the session token, while retaining the sequence as the allocator's durable
+// high-water mark.
 func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) (Task, error) {
+	var revisionErr error
 	updated, _, err := mutateTaskStatus(taskID, func(t *Task) bool {
+		if t.LastRunRevision == ^uint64(0) {
+			revisionErr = fmt.Errorf("task last-run revision exhausted")
+			return false
+		}
+		t.LastRunRevision++
 		if lastRunAt != nil {
 			t.LastRunAt = lastRunAt
 			t.LastRunSessionID = ""
@@ -33,6 +42,9 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 		t.LastRunStatus = lastRunStatus
 		return true
 	})
+	if err == nil && revisionErr != nil {
+		return Task{}, revisionErr
+	}
 	return updated, err
 }
 
@@ -41,8 +53,9 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 // assigned sequence orders different run IDs by admission rather than by a
 // timestamp or whichever delivery caller happens to resume first. GenerationID
 // binds the write to the task incarnation, while expectedRevision proves no
-// scheduler-owned observation landed after admission. A mismatched proof or a
-// lower/equal sequence leaves the row untouched.
+// task-wide status observation landed after admission. Session publications do
+// not advance that revision; their sequence decides which admitted run is
+// newest. A mismatched proof or a lower/equal sequence leaves the row untouched.
 func BeginTaskRun(
 	taskID, taskGenerationID, runID string,
 	runSequence, expectedRevision uint64,
@@ -208,10 +221,6 @@ func mutateTaskStatus(taskID string, mutate func(*Task) bool) (Task, bool, error
 		if !applied {
 			return nil
 		}
-		if tasks[row].LastRunRevision == ^uint64(0) {
-			return fmt.Errorf("task last-run revision exhausted")
-		}
-		tasks[row].LastRunRevision++
 
 		generation, err := writeTasks(tasks)
 		if err != nil {
