@@ -315,6 +315,8 @@ func retainedArchiveLocation(warning string) string {
 // title stays aligned with its siblings.
 func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, hasMultipleRepos bool, expanded bool) string {
 	archiveWarning := i.ArchiveWarning()
+	worktreeWarning := i.WorktreeWarning()
+	hasWarning := archiveWarning != "" || worktreeWarning != ""
 	arrow := nonExpandableArrow
 	if Expandable(i) {
 		if expanded {
@@ -456,11 +458,16 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		titleText = "[archive incomplete] " + titleText
 	}
 	// A verified post-safety-dialog model change is orthogonal to liveness: the
-	// session can keep working and otherwise look healthy. Add it LAST so it is
-	// the outermost prefix; narrow rails retain the reason before lower-priority
-	// remote/lifecycle context or the title can be clipped (#2307).
+	// session can keep working and otherwise look healthy. Keep it outside the
+	// lower-priority remote/lifecycle context so narrow rails retain the reason
+	// before that context or the title can be clipped (#2307).
 	if i.AgentModelChange() != nil {
 		titleText = "[model changed] " + titleText
+	}
+	// A worktree warning means a bare commit could damage the live branch. It is
+	// the outermost prefix so it remains visible ahead of every advisory state.
+	if worktreeWarning != "" {
+		titleText = "[worktree unsafe] " + titleText
 	}
 	prefixSepWidth := 0
 	if prefix != "" {
@@ -547,7 +554,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// code subtracted 3 to reserve the ASCII "..." tail — now that the tail is
 	// a single cell, that over-reserved 2 cells and mis-truncated at narrow
 	// widths (#1772 review).
-	if !selected && !expanded && archiveWarning == "" && !restoreFailed {
+	if !selected && !expanded && !hasWarning && !restoreFailed {
 		description = ""
 	}
 	branchWidth := runewidth.StringWidth(description)
@@ -567,7 +574,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	branchLine := fmt.Sprintf("%s %s-%s%s", strings.Repeat(" ", prefixWidth), branchIcon, description, spaces)
 
 	lines := []string{title}
-	if archiveWarning == "" {
+	if !hasWarning {
 		if description != "" {
 			lines = append(lines, descS.Render(branchLine))
 		}
@@ -577,7 +584,13 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		if description != "" {
 			lines = append(lines, descS.PaddingBottom(0).Render(branchLine))
 		}
-		warningTexts := []string{archiveWarning}
+		warningTexts := make([]string, 0, 3)
+		if worktreeWarning != "" {
+			warningTexts = append(warningTexts, worktreeWarning)
+		}
+		if archiveWarning != "" {
+			warningTexts = append(warningTexts, archiveWarning)
+		}
 		if location := retainedArchiveLocation(archiveWarning); location != "" {
 			// Put the recovery location before the prose-heavy warning. A typical
 			// sidebar cannot fit the full bounded report on one line, but it must

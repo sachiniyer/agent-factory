@@ -345,6 +345,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	wg := &sync.WaitGroup{}
 	stopCh := make(chan struct{})
 	startInstancePollLoop(manager, time.Duration(cfg.DaemonPollInterval)*time.Millisecond, stopCh, wg)
+	startWorktreeIntegrityLoop(manager, worktreeIntegrityInterval, stopCh, wg)
 
 	// Watch our own AF home directory (the dir holding tasks.json, the
 	// control socket, and state). If it is deleted out from under us — an
@@ -441,13 +442,19 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 // to its projection without re-reading disk. Recomputed on every refresh, so a
 // row that starts loading again stops being a ghost — the same self-healing
 // projection discipline as the rest of the count.
-func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, error) {
+func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, worktreeInventoryState, error) {
+	worktreeInventory := worktreeInventoryState{incompleteRepo: make(map[string]error)}
 	if err := config.MigrateAllRepoInstancesForDaemonLoad(); err != nil {
-		return existing, nil, err
+		worktreeInventory.globalErr = fmt.Errorf("persisted session migration failed: %w", err)
+		return existing, nil, worktreeInventory, err
 	}
-	allInstances, err := config.LoadAllRepoInstances()
+	allInstances, skippedRepos, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
-		return existing, nil, err
+		worktreeInventory.globalErr = fmt.Errorf("persisted session inventory could not be read: %w", err)
+		return existing, nil, worktreeInventory, err
+	}
+	for _, skipped := range skippedRepos {
+		worktreeInventory.incompleteRepo[skipped.RepoID] = fmt.Errorf("persisted session inventory is incomplete: %s", skipped.String())
 	}
 
 	next := make(map[string]*session.Instance)
@@ -459,6 +466,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 
 		var data []session.InstanceData
 		if err := json.Unmarshal(raw, &data); err != nil {
+			worktreeInventory.incompleteRepo[repoID] = fmt.Errorf("persisted session inventory for repository %s is corrupted: %w", repoID, err)
 			// Skip corrupted per-repo JSON instead of failing the whole
 			// refresh (#603). At startup (existing==nil) a single corrupt
 			// file used to abort NewManager and orphan every live session
@@ -507,6 +515,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 					if rawTaskRunHoldsSlot(item) {
 						ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
 					}
+					worktreeInventory.unmaterialized = append(worktreeInventory.unmaterialized, item)
 					continue
 				}
 			}
@@ -544,6 +553,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 					ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
 					log.WarningLog.Printf("watch task %s: session %q failed to load but its run is still counted against max_concurrent_runs (#1892); kill or repair the session to release its slot", item.TaskID, item.Title)
 				}
+				worktreeInventory.unmaterialized = append(worktreeInventory.unmaterialized, item)
 				continue
 			}
 			next[key] = instance
@@ -569,12 +579,24 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			if !warnedRepos[repoID] {
 				log.WarningLog.Printf("daemon preserving in-memory instances for missing repo directory: %s", repoID)
 				warnedRepos[repoID] = true
+				// The live rows are still real, but the persisted cohort that used
+				// to accompany them is now unobservable. Preserve both facts: the
+				// instances stay addressable and no later scan may read the absent
+				// inventory as proof that a duplicate branch was repaired.
+				worktreeInventory.incompleteRepo[repoID] = fmt.Errorf("persisted session inventory for repository %s disappeared while live in-memory sessions remain", repoID)
 			}
 			next[key] = inst
 		}
 	}
+	sort.Slice(worktreeInventory.unmaterialized, func(left, right int) bool {
+		leftRow := worktreeInventory.unmaterialized[left]
+		rightRow := worktreeInventory.unmaterialized[right]
+		leftKey := leftRow.Worktree.RepoPath + "\x00" + leftRow.Worktree.WorktreePath + "\x00" + leftRow.ID + "\x00" + leftRow.Title
+		rightKey := rightRow.Worktree.RepoPath + "\x00" + rightRow.Worktree.WorktreePath + "\x00" + rightRow.ID + "\x00" + rightRow.Title
+		return leftKey < rightKey
+	})
 
-	return next, ghostTaskRuns, nil
+	return next, ghostTaskRuns, worktreeInventory, nil
 }
 
 func daemonInstanceKey(repoID, title string) string {

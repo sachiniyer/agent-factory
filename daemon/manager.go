@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	stdlog "log"
 	"sort"
@@ -103,7 +104,12 @@ type Manager struct {
 	// automatic account replacement. Manager.mu protects roster shape; it cannot
 	// cover per-instance liveness writes without inverting existing lock order.
 	accountLimitMu sync.Mutex
-
+	// Serialize #4092 probes off the operational status/self-healing loop.
+	worktreeIntegrityMu      sync.Mutex
+	worktreeInspector        func(context.Context, []session.InstanceData) []session.SessionWorktreeInspection
+	worktreeInventory        worktreeInventoryState
+	worktreeInventoryVersion uint64
+	worktreeBeforeReconcile  func()
 	// ready is closed once restored state is safe for state-dependent RPCs. For
 	// RunDaemon that includes the startup orphan sweep as well as instance restore,
 	// so a create cannot race the destructive sweep (#2632). Until then the daemon
@@ -781,7 +787,7 @@ func (m *Manager) RestoreInstances() error {
 // RunDaemon binds its control socket first (#829), performs this load, then keeps
 // state RPCs gated until the startup orphan sweep is complete (#2632).
 func (m *Manager) restoreInstances() error {
-	instances, ghosts, err := refreshDaemonInstances(nil)
+	instances, ghosts, worktreeInventory, err := refreshDaemonInstances(nil)
 	if err != nil {
 		return err
 	}
@@ -802,6 +808,7 @@ func (m *Manager) restoreInstances() error {
 	m.mu.Lock()
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
+	m.setWorktreeInventoryLocked(worktreeInventory)
 	m.registerLoadRuntimeSettlementsLocked(owed)
 	m.mu.Unlock()
 	return nil
@@ -919,8 +926,9 @@ func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 }
 
 func (m *Manager) refreshLocked() error {
-	refreshed, ghosts, err := refreshDaemonInstances(m.instances)
+	refreshed, ghosts, worktreeInventory, err := refreshDaemonInstances(m.instances)
 	if err != nil {
+		m.setWorktreeInventoryLocked(worktreeInventory)
 		return err
 	}
 	owed := persistLoadRuntimeReplacements(refreshed)
@@ -931,34 +939,9 @@ func (m *Manager) refreshLocked() error {
 	// ghost, or its slot would be held twice — once by the ghost and once by the
 	// instance it became.
 	m.ghostTaskRuns = ghosts
+	m.setWorktreeInventoryLocked(worktreeInventory)
 	m.registerLoadRuntimeSettlementsLocked(owed)
 	return nil
-}
-
-// startLockForRepo returns the per-repo lock serializing session/tab creation
-// against other mutations of that repo, lazily creating it.
-//
-// LOCK CONTRACT (#2106): it takes m.mu, so it must NEVER be called with m.mu
-// already held — sync.Mutex is not reentrant and the goroutine would deadlock on
-// the manager lock, stalling every other operation behind it. That rules out
-// calling it, m.persistInstance, or m.persistInstanceErr from any `...Locked`
-// helper or other code running under m.mu; persist from there with the lock-free
-// persistInstanceData instead, which takes only the instances.json file lock.
-//
-// Acquiring the returned lock while holding m.mu is likewise forbidden: the
-// established order is repoStartLock BEFORE m.mu (CreateSession holds the start
-// lock across its body and takes m.mu under it), so the reverse closes an ABBA
-// cycle — the #2006 lock-inversion class.
-func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	lock := m.repoStartLocks[repoID]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.repoStartLocks[repoID] = lock
-	}
-	return lock
 }
 
 // opLockFor returns the per-session operation lock serializing kill teardown

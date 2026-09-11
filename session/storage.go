@@ -285,6 +285,9 @@ type InstanceData struct {
 	// may ride snapshots and lifecycle events; the full report is storage-only so
 	// a large unreadable tree cannot turn every status response into megabytes.
 	ArchiveWarning string `json:"archive_warning,omitempty"`
+	// WorktreeWarning is the bounded, read-only projection of a dangerous live
+	// checkout shape. It is recomputed from Git and never persisted.
+	WorktreeWarning string `json:"worktree_warning,omitempty"`
 	// ArchiveReport makes a deliberately incomplete archive discoverable across
 	// daemon restarts and at restore time. It lives beside the session record,
 	// never inside the copied tree where a user path could collide with it. Live
@@ -346,6 +349,9 @@ func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreAccountSwapRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()
 	d = d.restoreMissingAccountSwapMissionEvidence()
+	// Worktree warnings are valid only when recomputed from a live Git checkout.
+	// A disk-fallback read must never resurrect a stale projection.
+	d.WorktreeWarning = ""
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
 		d.ArchiveWarning = d.ArchiveReport.Warning(archiveWarningOperation(livenessFromData(d)))
 	}
@@ -424,6 +430,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.ArchiveWarning = ""
 	d = d.restoreMissingHandoffMissionEvidence()
 	d = d.restoreMissingAccountSwapMissionEvidence()
+	d.WorktreeWarning = ""
 	d = d.projectPendingAccountSwapForPreviousRelease()
 	d = d.projectPendingHandoffForPreviousRelease()
 	// The compatibility projection must capture original values before either it

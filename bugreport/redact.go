@@ -725,6 +725,12 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.LostRestoreFailure != nil {
 		d.LostRestoreFailure.Error = r.scrubDiagnostic(d.LostRestoreFailure.Error)
 	}
+	// WorktreeWarning can quote user-chosen branch and sibling-lane names. It is
+	// a live safety projection rather than durable recovery evidence, so a public
+	// bundle keeps only the fact that a warning existed and drops its payload.
+	if d.WorktreeWarning != "" {
+		d.WorktreeWarning = redactedMarker
+	}
 	// ArchiveWarning is the bounded projection of ArchiveReport.Warning, and that
 	// renderer prints the user-chosen names of the files af could not read.
 	// #3554 closed the LOG path for exactly this text, but scrubArchiveWarningPaths

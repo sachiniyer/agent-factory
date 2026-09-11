@@ -1,8 +1,12 @@
 package daemon
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -397,6 +401,108 @@ func (m *Manager) RefreshStatuses() {
 
 	for _, e := range entries {
 		m.refreshInstanceStatus(e.repoID, e.instance)
+	}
+}
+
+// refreshWorktreeIntegrityWarnings projects dangerous checkout evidence into
+// session status. It never writes Git state and deliberately preserves the last
+// definite warning when a later probe is unreadable: unknown is not clean.
+func (m *Manager) refreshWorktreeIntegrityWarnings() {
+	m.refreshWorktreeIntegrityWarningsContext(context.Background())
+}
+
+func (m *Manager) refreshWorktreeIntegrityWarningsContext(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	m.worktreeIntegrityMu.Lock()
+	defer m.worktreeIntegrityMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+
+	m.mu.Lock()
+	entries := make([]worktreeInspectionEntry, 0, len(m.instances))
+	for key, instance := range m.instances {
+		if instance == nil {
+			continue
+		}
+		repoID, _ := splitDaemonInstanceKey(key)
+		entries = append(entries, worktreeInspectionEntry{key: key, repoID: repoID, instance: instance})
+	}
+	additionalRows := append([]session.InstanceData(nil), m.worktreeInventory.unmaterialized...)
+	inventoryState := m.worktreeInventory
+	inventoryVersion := m.worktreeInventoryVersion
+	m.mu.Unlock()
+	rows := make([]session.InstanceData, 0, len(entries))
+	for _, entry := range entries {
+		rows = append(rows, entry.instance.ToInstanceData())
+	}
+	scanRows := append(append([]session.InstanceData(nil), rows...), additionalRows...)
+
+	inspector := m.worktreeInspector
+	if inspector == nil {
+		inspector = session.InspectSessionWorktreesContext
+	}
+	inspections := inspector(ctx, scanRows)
+	if ctx.Err() != nil || !m.worktreeInspectionSnapshotCurrent(entries, rows, inventoryVersion) {
+		return
+	}
+	if m.worktreeBeforeReconcile != nil {
+		m.worktreeBeforeReconcile()
+	}
+	inspectionsByID := make(map[string]session.SessionWorktreeInspection, len(inspections))
+	for _, inspection := range inspections {
+		inspectionsByID[inspection.InstanceID] = inspection
+	}
+	updates := make([]session.WorktreeInspectionReconciliation, len(entries))
+	for index, entry := range entries {
+		row := rows[index]
+		update := session.WorktreeInspectionReconciliation{Instance: entry.instance, Snapshot: row}
+		if inspection, ok := inspectionsByID[row.ID]; ok {
+			update.Warning = inspection.Warning
+			update.Incomplete = errors.Join(inspection.IncompleteError(), inventoryState.incompleteFor(entry.repoID))
+		} else if session.NeedsWorktreeIntegrityInspection(row) {
+			update.Incomplete = errors.Join(
+				fmt.Errorf("worktree safety inspector returned no result for live local lane %q", row.Title),
+				inventoryState.incompleteFor(entry.repoID),
+			)
+		}
+		updates[index] = update
+	}
+
+	// A clean result for one lane depends on the identity and applicability of
+	// every peer in the correlation. Hold the manager roster, then lock every
+	// captured row in the daemon's established manager-to-instance order. The
+	// cohort, not an individual row, is the compare-and-swap unit: any peer
+	// restore or membership change rejects every update before a warning clears.
+	changed, applied := session.ReconcileWorktreeInspectionCohortIfCurrent(updates, func() (bool, func()) {
+		m.mu.Lock()
+		if !m.worktreeInspectionMembershipCurrentLocked(entries, inventoryVersion) {
+			m.mu.Unlock()
+			return false, nil
+		}
+		return true, m.mu.Unlock
+	})
+	if !applied {
+		return
+	}
+	for index, rowChanged := range changed {
+		if rowChanged {
+			m.publishWorktreeIntegrityChange(entries[index].repoID, entries[index].instance)
+		}
+	}
+}
+
+func (m *Manager) publishWorktreeIntegrityChange(repoID string, instance *session.Instance) {
+	lock := m.startLockForRepo(repoID)
+	lock.Lock()
+	defer lock.Unlock()
+	m.mu.Lock()
+	owned := m.instances[daemonInstanceKey(repoID, instance.Title)] == instance
+	m.mu.Unlock()
+	if owned {
+		m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
 	}
 }
 

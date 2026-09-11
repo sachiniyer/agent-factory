@@ -1,7 +1,8 @@
 // The status-dot + title mapping for a sidebar row (#1592 Phase 5 PR3). This is a
 // line-for-line port of the TUI renderer, ui/tree/render.go — the single source of
 // truth for how (Liveness, InFlightOp) become a glyph, a color, and the [lost] /
-// [deleting] / [limit] / [remote] / [model changed] title prefixes. The web MUST
+// [deleting] / [limit] / [remote] / [model changed] / [worktree unsafe] title
+// prefixes. The web MUST
 // match it exactly:
 // two thin clients of the same projection cannot diverge in status semantics, only
 // in pixels (design §3). Adding a Liveness value forces a deliberate choice here,
@@ -407,6 +408,9 @@ export function rowTitle(s: SessionData): string {
   if (s.model_change) {
     title = "[model changed] " + title;
   }
+  if (worktreeWarningText(s) !== "") {
+    title = "[worktree unsafe] " + title;
+  }
   return title;
 }
 
@@ -415,6 +419,14 @@ export function rowTitle(s: SessionData): string {
  * about whether a warning exists. */
 export function archiveWarningText(s: SessionData): string {
   return s.archive_warning?.trim() ?? "";
+}
+
+export function worktreeWarningText(s: SessionData): string {
+  return s.worktree_warning?.trim() ?? "";
+}
+
+export function sessionWarningText(s: SessionData): string {
+  return [worktreeWarningText(s), archiveWarningText(s)].filter(Boolean).join("\n");
 }
 
 /** Mirrors session.RootRecreateContext.Note (session/root_recreate.go): the short

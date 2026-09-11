@@ -268,6 +268,10 @@ type Options struct {
 	// checkpointed to disk yet, so an inventory that reads only disk would call
 	// a live session's directory an orphan (#3560).
 	sessionInventory func() ([]session.InstanceData, error)
+	// worktreeInventory is separate from sessionInventory because the orphaned-pin
+	// checker deliberately re-reads its callback at exact race-closing points.
+	// The worktree check must not consume one of those sequenced observations.
+	worktreeInventory func() ([]session.InstanceData, error)
 
 	// taskInventory returns every task on the box, each carrying whether its
 	// arming was actually observed (task.ArmingUnknown when it was not). Defaults
@@ -384,6 +388,9 @@ func (o *Options) applyDefaults() error {
 	if o.sessionInventory == nil {
 		o.sessionInventory = daemonSessionInventory
 	}
+	if o.worktreeInventory == nil {
+		o.worktreeInventory = completeWorktreeInventory
+	}
 	if o.taskInventory == nil {
 		o.taskInventory = daemonTaskInventory
 	}
@@ -474,6 +481,7 @@ func Run(opts Options) (*Report, error) {
 	// Before every check that reads the session list, so its silence is
 	// explained before it is read rather than after.
 	checkTmuxInspection(ctx, report)
+	checkWorktreeIntegrity(ctx, report, health)
 	checkOrphanedProcesses(ctx, report)
 	checkRunawayChildren(ctx, report)
 	checkLeakedTmuxSessions(ctx, report)

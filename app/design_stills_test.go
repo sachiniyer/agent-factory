@@ -35,7 +35,7 @@ func TestDesignDriverScenes(t *testing.T) {
 	source, err := os.Getwd()
 	require.NoError(t, err)
 	for _, mode := range []string{"light", "dark"} {
-		for _, scene := range []string{"appearance-system", "appearance", "sessions-dense", "projects-degraded", "account-picker", "task-actions", "task-delete", "single-project", "multiple-projects", "preview-help", "search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "help-actions", "confirmation", "confirmation-external", "confirmation-reused", "sandbox-restore", "interactive-help", "task-watch", "search", "project-picker", "selection", "prompt"} {
+		for _, scene := range []string{"appearance-system", "appearance", "sessions-dense", "projects-degraded", "account-picker", "task-actions", "task-delete", "single-project", "multiple-projects", "preview-help", "search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "worktree-warning-before", "worktree-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "help-actions", "confirmation", "confirmation-external", "confirmation-reused", "sandbox-restore", "interactive-help", "task-watch", "search", "project-picker", "selection", "prompt"} {
 			t.Run(scene+"-"+mode, func(t *testing.T) {
 				h, inst := newDesignDriverSceneHome(t, mode, nil)
 				switch scene {
@@ -66,6 +66,8 @@ func TestDesignDriverScenes(t *testing.T) {
 					h.relayout()
 				case "archive-warning":
 					inst.ReconcileArchiveWarning("Archive incomplete: complete original tree retained at /retained/source")
+				case "worktree-warning":
+					inst.ReconcileWorktreeWarning("DANGER: HEAD moved without a local reflog entry; do not commit, reset, clean, or check out anything")
 				case "alarm":
 					h.alarmBanner.SetAlarms([]ui.AlarmInfo{{TaskName: "Review intake", Target: "Apply design roles", Pending: 3}})
 					h.relayout()
