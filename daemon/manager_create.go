@@ -351,6 +351,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	}
 	data := instance.ToInstanceData()
 	conversationToken := instance.AgentRuntimeToken()
+	taskRunStatus := "started"
+	if data.Liveness == session.LiveLimitReached {
+		taskRunStatus = TaskStatusLimitParked
+	}
 
 	// Register the in-memory instance and persist it to disk inside the
 	// same critical section. The daemon refresh loop rebuilds
@@ -363,6 +367,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// fence acquired before finishCreateStart stays held through this insertion,
 	// so the candidate is either absent for the whole commit or visible as
 	// limited.
+	var taskStatusErr error
 	persistErr := func() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -372,6 +377,15 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 			return err
 		}
 		instance.PinStorageRepoID(repo.ID)
+		// Publish a task-created session's run identity while Manager.mu still
+		// hides the new row from recovery. The session record landed first, so a
+		// task-store failure cannot advertise a run whose session never committed;
+		// the post-RPC repair handles that failure after publication. Holding the
+		// manager lock across this small file update is intentional: releasing it
+		// here recreates the window where recovery can observe an unidentified run.
+		if req.TaskID != "" {
+			_, taskStatusErr = task.BeginTaskRun(req.TaskID, instance.ID, instance.CreatedAt, taskRunStatus)
+		}
 		// Register the provider discovery in the same manager-lock critical
 		// section that makes the instance visible. A concurrent status poll can
 		// therefore never observe a newly created root without also seeing that
@@ -380,6 +394,9 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return nil
 	}()
 	releaseLimitPublicationFence()
+	if taskStatusErr != nil {
+		log.ErrorLog.Printf("failed to publish task run identity for task %s: %v", req.TaskID, taskStatusErr)
+	}
 	if persistErr != nil {
 		// Same rule as the start-failure path above, minus the remedy: the record
 		// write is what just failed, so keeping a record is not available. Report the

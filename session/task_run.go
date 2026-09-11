@@ -3,8 +3,9 @@ package session
 import "time"
 
 // TaskRunIdentity is the durable association between a task delivery and the
-// session runtime that received it. RunAt is zero only for records written by a
-// binary that predates explicit run identity.
+// session runtime that received it. SessionID is the unique identity; RunAt is
+// its display timestamp and is zero only for records written before task-run
+// publication moved inside the manager boundary.
 type TaskRunIdentity struct {
 	TaskID    string
 	SessionID string

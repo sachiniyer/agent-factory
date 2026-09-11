@@ -100,11 +100,11 @@ type Instance struct {
 	// so a session has exactly one run. Work a user starts in that session
 	// afterwards is theirs, not the task's, and must not consume the task's cap.
 	taskRunActive bool
-	// taskRunAt is the durable identity shared with the owning task's LastRunAt.
-	// It is minted before a task-created session becomes visible, so recovery can
-	// classify that run even when it races the caller's task-status write. Zero
-	// identifies a record written before this field existed; daemon owns the
-	// deliberately conservative compatibility decision for those records.
+	// taskRunAt is the durable timestamp shared with the owning task's LastRunAt.
+	// The stable session ID is the run's identity; this timestamp is display data
+	// and distinguishes current records from ones written before run publication
+	// moved inside the manager boundary. Zero selects the daemon's deliberately
+	// conservative compatibility decision for those older records.
 	taskRunAt time.Time
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see

@@ -60,15 +60,15 @@ var cronDeferPollInterval = 1 * time.Second
 // (#1586). Callers that can catch up a held delivery pass true; a forced final
 // attempt passes false.
 //
-// The returned timestamp is the run identity written to LastRunAt. A newly
-// created task session returns its immutable CreatedAt, letting a later outcome
-// update that task row only if no newer run has superseded it.
-func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (string, time.Time, error) {
+// A newly created task session returns its stable ID and immutable CreatedAt.
+// The ID identifies its task row; the timestamp remains display data. A target-
+// session delivery has no per-run session ID and returns an empty one.
+func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (string, string, time.Time, error) {
 	_, err := config.LoadConfig()
 	if err != nil {
 		// Pre-flight: this returns before any create or send, so the watch paths
 		// refund the rate slot (#2102). Inert for cron, which only checks err != nil.
-		return "", time.Time{}, notAttempted(fmt.Errorf("failed to load config: %w", err))
+		return "", "", time.Time{}, notAttempted(fmt.Errorf("failed to load config: %w", err))
 	}
 
 	// Ask the SAME question the cap was validated against (#1892). Reading the raw
@@ -105,13 +105,13 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 			// reaches the manager over net/rpc, which flattens the sentinel to a
 			// string (see atConcurrencyLimitErrText).
 			if isAtConcurrencyLimitErr(err) {
-				return "", time.Time{}, errAtConcurrencyLimit
+				return "", "", time.Time{}, errAtConcurrencyLimit
 			}
 			wrapped := fmt.Errorf("failed to start task session: %w", err)
 			if isNotAttemptedErr(err) {
-				return "", time.Time{}, notAttempted(wrapped)
+				return "", "", time.Time{}, notAttempted(wrapped)
 			}
-			return "", time.Time{}, wrapped
+			return "", "", time.Time{}, wrapped
 		}
 		// The freshly created session hit a usage-limit wall during startup and
 		// was parked, not failed (#1146 PR4). Record the parked status so the run
@@ -119,10 +119,10 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 		// prompt once the limit window resets.
 		if data.Liveness == session.LiveLimitReached {
 			log.InfoLog.Print(taskParkedLogMessage(t.ID, data.Title))
-			return TaskStatusLimitParked, data.CreatedAt, nil
+			return TaskStatusLimitParked, data.ID, data.CreatedAt, nil
 		}
 		log.InfoLog.Print(taskStartedLogMessage(t.ID, data.Title))
-		return "started", data.CreatedAt, nil
+		return "started", data.ID, data.CreatedAt, nil
 	}
 
 	// Route through the daemon's serialized create-or-send path. When several
@@ -154,12 +154,12 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 		// refusal already does above. Without this the tag never survives the hop
 		// and the budget drains over an outage, which is the bug #2501 reports.
 		if isNotAttemptedErr(err) {
-			return "", time.Time{}, notAttempted(wrapped)
+			return "", "", time.Time{}, notAttempted(wrapped)
 		}
-		return "", time.Time{}, wrapped
+		return "", "", time.Time{}, wrapped
 	}
 	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, target, status)
-	return status, time.Now(), nil
+	return status, "", time.Now(), nil
 }
 
 // Keep task-created title logging on the same %q encoding as target-session
@@ -188,11 +188,11 @@ func taskParkedLogMessage(taskID, title string) string {
 // daemon's pause lease auto-expires if the TUI dies (statusPollLease), so a
 // crashed/stale client can never wedge the delivery — it lands on the next poll
 // once the lease lapses.
-func deliverCronTaskPrompt(t *task.Task, prompt string) (string, time.Time, error) {
+func deliverCronTaskPrompt(t *task.Task, prompt string) (string, string, time.Time, error) {
 	for {
-		status, runAt, err := deliverTaskPrompt(t, prompt, true)
+		status, runID, runAt, err := deliverTaskPrompt(t, prompt, true)
 		if err != nil || status != StatusDeferredAttached {
-			return status, runAt, err
+			return status, runID, runAt, err
 		}
 		time.Sleep(cronDeferPollInterval)
 	}
@@ -331,16 +331,25 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 		return fmt.Errorf("project path %s is not a valid git repository", t.ProjectPath)
 	}
 
-	status, runAt, err := deliverCronTaskPrompt(t, t.Prompt)
+	status, runID, runAt, err := deliverCronTaskPrompt(t, t.Prompt)
 	if err != nil {
 		return err
 	}
 
-	// Update task status. Use UpdateTaskStatus so we don't re-validate Program
-	// — the task already ran via deliverTaskPrompt, and the stored Program
-	// value may predate current enum validation (see #664).
-	if _, _, err := task.UpdateTaskRunStart(taskID, runAt, status); err != nil {
+	// Repair a session-backed status write the manager could not publish, or
+	// record a target-session delivery. Both helpers deliberately skip Program
+	// revalidation: the task already ran and may predate the current enum (#664).
+	if err := recordDeliveredTaskRun(taskID, runID, runAt, status); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 	return nil
+}
+
+func recordDeliveredTaskRun(taskID, runID string, runAt time.Time, status string) error {
+	if runID == "" {
+		_, err := task.UpdateTaskStatus(taskID, &runAt, status)
+		return err
+	}
+	_, _, err := task.UpdateTaskRunStart(taskID, runID, runAt, status)
+	return err
 }

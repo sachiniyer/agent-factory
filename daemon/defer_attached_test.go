@@ -188,7 +188,7 @@ func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
 	var status string
 	var err error
 	go func() {
-		status, _, err = deliverCronTaskPrompt(tsk, tsk.Prompt)
+		status, _, _, err = deliverCronTaskPrompt(tsk, tsk.Prompt)
 		close(done)
 	}()
 
@@ -347,7 +347,7 @@ func TestDeliverCronTaskPrompt_NeverPastesWhileAttached(t *testing.T) {
 	var status string
 	var err error
 	go func() {
-		status, _, err = deliverCronTaskPrompt(tsk, tsk.Prompt)
+		status, _, _, err = deliverCronTaskPrompt(tsk, tsk.Prompt)
 		close(done)
 	}()
 

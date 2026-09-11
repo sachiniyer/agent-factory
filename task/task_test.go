@@ -354,8 +354,8 @@ func TestUpdateTaskNotFound(t *testing.T) {
 // UpdateTask is a user-edit path; its caller may hold a stale copy of the
 // scheduler-owned status fields (read before a concurrent scheduler run or
 // manual trigger bumped them via UpdateTaskStatus). UpdateTask must NOT
-// clobber the fresher on-disk LastRunAt/LastRunStatus (nor the immutable
-// CreatedAt) when applying a user edit.
+// clobber the fresher on-disk LastRunAt/LastRunStatus/LastRunSessionID (nor the
+// immutable CreatedAt) when applying a user edit.
 func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	created := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
@@ -366,7 +366,9 @@ func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 
 	// Scheduler bumps the status to a fresher value via the canonical path.
 	t2 := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
-	_, statusErr := UpdateTaskStatus("u1", &t2, "completed")
+	_, statusErr := BeginTaskRun("u1", "session-new", t2, "started")
+	require.NoError(t, statusErr)
+	_, statusErr = UpdateTaskStatus("u1", nil, "completed")
 	require.NoError(t, statusErr)
 
 	// A user edit patches only user-editable fields; the scheduler-owned status
@@ -391,6 +393,7 @@ func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 	require.NotNil(t, s.LastRunAt)
 	assert.True(t, s.LastRunAt.Equal(t2), "LastRunAt must retain the fresher scheduler value t2, not regress to stale t1")
 	assert.Equal(t, "completed", s.LastRunStatus, "LastRunStatus must retain the fresher scheduler value, not regress to stale")
+	assert.Equal(t, "session-new", s.LastRunSessionID, "LastRunSessionID must retain the fresher scheduler identity")
 	assert.True(t, s.CreatedAt.Equal(created), "CreatedAt is immutable and must be preserved from disk")
 }
 
@@ -611,82 +614,70 @@ func TestUpdateTaskStatus_NilLastRunAtPreservesTimestamp(t *testing.T) {
 	assert.Equal(t, "stopped", got.LastRunStatus, "LastRunStatus must still update")
 }
 
-func TestUpdateTaskStatusIfLastRunAtCannotOverwriteNewerRun(t *testing.T) {
-	older := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
-	newer := older.Add(time.Minute)
+func TestTaskRunIdentitySeparatesEqualTimestampSessions(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	setupTestTasks(t, []Task{{
 		ID: "w1", Name: "Watcher", Prompt: "p", WatchCmd: "tail -f x",
-		ProjectPath: "/tmp", Enabled: true, LastRunAt: &older, LastRunStatus: "started",
+		ProjectPath: "/tmp", Enabled: true,
 	}})
 
-	updated, applied, err := UpdateTaskStatusIfLastRunAt("w1", older, "interrupted: agent runtime lost")
+	_, err := BeginTaskRun("w1", "session-a", runAt, "started")
+	require.NoError(t, err)
+	_, err = BeginTaskRun("w1", "session-b", runAt, "started")
+	require.NoError(t, err)
+
+	_, applied, err := UpdateTaskRunStart("w1", "session-a", runAt, "started")
+	require.NoError(t, err)
+	assert.False(t, applied, "a delayed older start cannot replace the manager-published successor")
+	_, applied, err = UpdateTaskRunOutcome("w1", "session-a", "interrupted: agent runtime lost")
+	require.NoError(t, err)
+	assert.False(t, applied, "equal timestamps do not let one session claim another's row")
+	_, applied, err = UpdateTaskRunOutcome("w1", "session-b", "interrupted: agent runtime lost")
 	require.NoError(t, err)
 	require.True(t, applied)
-	assert.Equal(t, "interrupted: agent runtime lost", updated.LastRunStatus)
-
-	_, err = UpdateTaskStatus("w1", &newer, "started")
-	require.NoError(t, err)
-	_, applied, err = UpdateTaskStatusIfLastRunAt("w1", older, "interrupted: agent runtime lost")
-	require.NoError(t, err)
-	assert.False(t, applied, "an older session no longer owns the task's last-run row")
 
 	got, err := GetTask("w1")
 	require.NoError(t, err)
-	require.NotNil(t, got.LastRunAt)
-	assert.True(t, got.LastRunAt.Equal(newer))
-	assert.Equal(t, "started", got.LastRunStatus,
-		"the older interruption must not replace the newer run's status")
+	assert.Equal(t, "session-b", got.LastRunSessionID)
+	assert.Equal(t, "interrupted: agent runtime lost", got.LastRunStatus)
 }
 
-func TestTaskRunStartCannotOverwriteAnOutcomeThatWinsThePublicationRace(t *testing.T) {
-	older := time.Date(2026, 9, 11, 8, 59, 0, 0, time.UTC)
-	runAt := older.Add(time.Minute)
+func TestTaskRunOutcomePreservesLaterWatcherSupervisionStatus(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	for _, status := range []string{"stopped", "errored: watcher exited"} {
+		t.Run(status, func(t *testing.T) {
+			setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
+			_, err := BeginTaskRun("w1", "session-a", runAt, "started")
+			require.NoError(t, err)
+			_, err = UpdateTaskStatus("w1", nil, status)
+			require.NoError(t, err)
 
-	for _, tc := range []struct {
-		name         string
-		outcomeFirst bool
-	}{
-		{name: "start lands first"},
-		{name: "outcome lands first", outcomeFirst: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			setupTestTasks(t, []Task{{
-				ID: "w1", Name: "Watcher", Prompt: "p", WatchCmd: "tail -f x",
-				ProjectPath: "/tmp", Enabled: true, LastRunAt: &older, LastRunStatus: "started",
-			}})
-
-			if tc.outcomeFirst {
-				_, applied, err := UpdateTaskRunOutcome("w1", runAt, "interrupted: agent runtime lost")
-				require.NoError(t, err)
-				require.True(t, applied)
-				_, applied, err = UpdateTaskRunStart("w1", runAt, "started")
-				require.NoError(t, err)
-				assert.False(t, applied, "a delayed start writer must not reopen a terminal outcome")
-			} else {
-				_, applied, err := UpdateTaskRunStart("w1", runAt, "started")
-				require.NoError(t, err)
-				require.True(t, applied)
-				_, applied, err = UpdateTaskRunOutcome("w1", runAt, "interrupted: agent runtime lost")
-				require.NoError(t, err)
-				require.True(t, applied)
-			}
-
+			_, applied, err := UpdateTaskRunOutcome("w1", "session-a", "interrupted: agent runtime lost")
+			require.NoError(t, err)
+			assert.False(t, applied)
 			got, err := GetTask("w1")
 			require.NoError(t, err)
-			require.NotNil(t, got.LastRunAt)
-			assert.True(t, got.LastRunAt.Equal(runAt))
-			assert.Equal(t, "interrupted: agent runtime lost", got.LastRunStatus)
+			assert.Equal(t, status, got.LastRunStatus)
+			assert.Equal(t, "session-a", got.LastRunSessionID,
+				"status-only supervision must preserve the run identity it superseded")
 		})
 	}
+}
 
-	newer := runAt.Add(time.Minute)
-	setupTestTasks(t, []Task{{
-		ID: "w1", Name: "Watcher", Prompt: "p", WatchCmd: "tail -f x",
-		ProjectPath: "/tmp", Enabled: true, LastRunAt: &newer, LastRunStatus: "started",
-	}})
-	_, applied, err := UpdateTaskRunOutcome("w1", runAt, "interrupted: agent runtime lost")
+func TestTaskRunStartRepairsOnlyAnUnidentifiedRow(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	setupTestTasks(t, []Task{{ID: "w1", LastRunStatus: "started"}})
+
+	_, applied, err := UpdateTaskRunStart("w1", "session-a", runAt, "started")
 	require.NoError(t, err)
-	assert.False(t, applied, "an older outcome must not replace a newer run")
+	require.True(t, applied)
+	_, applied, err = UpdateTaskRunStart("w1", "session-a", runAt, "started")
+	require.NoError(t, err)
+	assert.False(t, applied)
+
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	assert.Equal(t, "session-a", got.LastRunSessionID)
 }
 
 // TestUpdateTaskStatus_NotFound verifies the not-found error path that the

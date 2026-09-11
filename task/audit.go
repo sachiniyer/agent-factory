@@ -128,7 +128,7 @@ func auditUpdate(before, after *Task, actor Actor, at time.Time) bool {
 //
 // It mirrors DiffTask's field list deliberately: those are exactly the fields a
 // surface can patch, so a field that gains an editor must be added to both. The
-// scheduler-owned LastRunAt/LastRunStatus are absent because they are not
+// scheduler-owned LastRunAt/LastRunStatus/LastRunSessionID are absent because they are not
 // mutations anyone made — auditing every run's status bump would push the
 // enable/disable entries this exists for straight out of the bounded window.
 // RepoID is absent for the same reason: it is derived from ProjectPath, which is
@@ -166,7 +166,7 @@ func changedFields(before, after Task) []string {
 //   - Audit: a forged trail is not just wrong data. Lateness is measured from the
 //     most recent enable IN that trail, so an entry dated in the future pushes the
 //     reference past now and switches overdue detection off for that task forever.
-//   - LastRunAt / LastRunStatus: scheduler-owned by contract (see UpdateTaskStatus,
+//   - LastRunAt / LastRunStatus / LastRunSessionID: scheduler-owned by contract (see UpdateTaskStatus,
 //     and the surface-parity inventory, which already declared them "never a client
 //     input"). scheduleReference prefers a nonzero LastRunAt over CreatedAt, so a
 //     forged future run time suppresses detection the same way — a task that has
@@ -190,6 +190,7 @@ func (t *Task) resetStoreOwnedFields(now time.Time) {
 	t.Audit = nil
 	t.LastRunAt = nil
 	t.LastRunStatus = ""
+	t.LastRunSessionID = ""
 	if t.CreatedAt.IsZero() || t.CreatedAt.After(now) {
 		t.CreatedAt = now
 	}

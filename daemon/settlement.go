@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
@@ -97,27 +96,15 @@ func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *sessio
 // received the prompt, while the replacement did not. Limit resumes arrive as
 // OpRespawning and are excluded because they re-deliver their queued prompt.
 //
-// A current record carries an exact run timestamp minted before publication.
-// The outcome writer can therefore close the small race where recovery observes
-// the session before its delivery caller records "started", while refusing any
-// later timestamp. A pre-field record takes the conservative compatibility path
-// below: it claims the current task timestamp only when it postdates this
-// session's creation and no known session or pending create can be its successor,
-// then uses an exact CAS so a concurrent delivery still wins.
+// A current task row carries the stable ID of the session that owns its run.
+// That token is published before the session, so neither equal timestamps nor a
+// wall-clock correction can make one run impersonate another. A row left
+// unidentified by an earlier binary or a failed start-status write takes the
+// conservative compatibility path below.
 func (m *Manager) recordInterruptedTaskRun(run session.TaskRunIdentity) {
-	var (
-		updated task.Task
-		applied bool
-		err     error
-	)
-	if run.RunAt.IsZero() {
-		var legacyRunAt time.Time
-		legacyRunAt, applied, err = m.legacyTaskRunAt(run)
-		if err == nil && applied {
-			updated, applied, err = task.UpdateTaskStatusIfLastRunAt(run.TaskID, legacyRunAt, TaskStatusInterrupted)
-		}
-	} else {
-		updated, applied, err = task.UpdateTaskRunOutcome(run.TaskID, run.RunAt, TaskStatusInterrupted)
+	updated, applied, err := task.UpdateTaskRunOutcome(run.TaskID, run.SessionID, TaskStatusInterrupted)
+	if err == nil && !applied {
+		updated, applied, err = m.claimUnidentifiedInterruptedTaskRun(run)
 	}
 	if err != nil {
 		m.warn().Printf(
@@ -137,37 +124,51 @@ func (m *Manager) recordInterruptedTaskRun(run session.TaskRunIdentity) {
 		run.TaskID, run.Title, TaskStatusInterrupted)
 }
 
-func (m *Manager) legacyTaskRunAt(run session.TaskRunIdentity) (time.Time, bool, error) {
+func (m *Manager) claimUnidentifiedInterruptedTaskRun(run session.TaskRunIdentity) (task.Task, bool, error) {
 	m.mu.Lock()
 	for _, candidate := range m.instances {
 		if candidate.ID != run.SessionID && candidate.TaskID == run.TaskID &&
 			!candidate.CreatedAt.Before(run.CreatedAt) {
 			m.mu.Unlock()
-			return time.Time{}, false, nil
+			return task.Task{}, false, nil
 		}
 	}
 	for _, candidate := range m.pendingCreates {
 		if candidate.ID != run.SessionID && candidate.TaskID == run.TaskID &&
 			!candidate.CreatedAt.Before(run.CreatedAt) {
 			m.mu.Unlock()
-			return time.Time{}, false, nil
+			return task.Task{}, false, nil
 		}
 	}
 	m.mu.Unlock()
 
 	stored, err := task.GetTask(run.TaskID)
 	if err != nil {
-		return time.Time{}, false, err
+		return task.Task{}, false, err
 	}
-	// A pre-field session was published as "started". Any other status is an
-	// explicit outcome owned by another writer, and missing legacy identity is
-	// not authority to reopen it. Normal completion historically left "started"
-	// in place, so this cannot identify every departed successor; that ambiguity
-	// is irreducible for records that never stored a run identity.
-	if stored.LastRunAt == nil || stored.LastRunAt.Before(run.CreatedAt) || stored.LastRunStatus != "started" {
-		return time.Time{}, false, nil
+	if stored.LastRunSessionID != "" {
+		return task.Task{}, false, nil
 	}
-	return *stored.LastRunAt, true, nil
+	desiredRunAt := run.RunAt
+	if desiredRunAt.IsZero() {
+		// A pre-field session was published as "started" with a timestamp minted
+		// after CreateSession returned. Any other status is an explicit outcome,
+		// and missing identity is not authority to reopen it. Normal completion
+		// historically left "started", so a departed legacy successor remains
+		// irreducibly ambiguous until these records age out.
+		if stored.LastRunAt == nil || stored.LastRunAt.Before(run.CreatedAt) || stored.LastRunStatus != "started" {
+			return task.Task{}, false, nil
+		}
+		desiredRunAt = *stored.LastRunAt
+	} else if stored.LastRunStatus != "" && stored.LastRunStatus != "started" {
+		// With no token, a later watcher supervision status cannot be attributed
+		// safely. Preserve it rather than turning evidence into an interruption.
+		return task.Task{}, false, nil
+	}
+	return task.ClaimUnidentifiedTaskRunOutcome(
+		run.TaskID, run.SessionID, stored.LastRunAt, stored.LastRunStatus,
+		desiredRunAt, TaskStatusInterrupted,
+	)
 }
 
 func (m *Manager) persistRuntimeReplacement(repoID, title string, instance *session.Instance) {

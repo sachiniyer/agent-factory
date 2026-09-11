@@ -118,6 +118,11 @@ type Task struct {
 	CreatedAt     time.Time  `json:"created_at"`
 	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
 	LastRunStatus string     `json:"last_run_status,omitempty"`
+	// LastRunSessionID is the stable identity of a session-per-run delivery.
+	// Outcomes match this token rather than treating the wall-clock LastRunAt as
+	// identity or ordering evidence. Empty for target-session deliveries and rows
+	// written before this field existed.
+	LastRunSessionID string `json:"last_run_session_id,omitempty"`
 	// Audit is the bounded trail of mutations to this task — the one field here
 	// that is a HISTORY rather than a current value, and the only way to answer
 	// "did someone turn this off?" (#3623). Written by the store inside the same

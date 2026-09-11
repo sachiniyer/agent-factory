@@ -319,15 +319,17 @@ func TestAddTask_DiscardsClientSuppliedRunHistory(t *testing.T) {
 	created, err := AddTaskChecked(Task{
 		ID: "history1", Name: "Forged history", Prompt: "p", CronExpr: "20 * * * *",
 		ProjectPath: dir, Program: "claude", Enabled: true,
-		LastRunAt: &forged, LastRunStatus: "started",
+		LastRunAt: &forged, LastRunStatus: "started", LastRunSessionID: "forged-session",
 	}, ActorAPI, nil)
 	require.NoError(t, err)
 	assert.Nil(t, created.LastRunAt, "a task that has never run has no run time")
 	assert.Empty(t, created.LastRunStatus)
+	assert.Empty(t, created.LastRunSessionID)
 
 	stored, err := GetTask("history1")
 	require.NoError(t, err)
 	require.Nil(t, stored.LastRunAt)
+	assert.Empty(t, stored.LastRunSessionID)
 	assert.True(t, DeriveScheduleHealth(*stored, stored.CreatedAt.Add(3*time.Hour)).Overdue,
 		"and the derivation reaches the task instead of waiting a year")
 }
@@ -344,7 +346,7 @@ func TestAddTask_ResetsEveryStoreOwnedField(t *testing.T) {
 	created, err := AddTaskChecked(Task{
 		ID: "kitchen1", Name: "Everything at once", Prompt: "p", CronExpr: "20 * * * *",
 		ProjectPath: dir, Program: "claude", Enabled: true,
-		CreatedAt: future, LastRunAt: &future, LastRunStatus: "started",
+		CreatedAt: future, LastRunAt: &future, LastRunStatus: "started", LastRunSessionID: "forged-session",
 		Audit:   []AuditEntry{{At: future, Actor: ActorCLI, Action: AuditEnabled}},
 		Overdue: true, MissedOccurrences: 99, MissedOccurrencesCapped: true,
 		Unschedulable: true, Arming: ArmingArmed, NextRunAt: &next,
@@ -354,6 +356,7 @@ func TestAddTask_ResetsEveryStoreOwnedField(t *testing.T) {
 	assert.False(t, created.CreatedAt.After(time.Now().Add(time.Minute)), "created_at clamped")
 	assert.Nil(t, created.LastRunAt)
 	assert.Empty(t, created.LastRunStatus)
+	assert.Empty(t, created.LastRunSessionID)
 	require.Len(t, created.Audit, 1, "only the store's own create entry")
 	assert.Equal(t, AuditCreated, created.Audit[0].Action)
 	assert.False(t, created.Overdue, "the response must not echo a health verdict the client invented")

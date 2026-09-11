@@ -7,69 +7,113 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 )
 
-// UpdateTaskStatus updates only the LastRunAt and LastRunStatus fields of the
-// task with the given ID. Unlike UpdateTask, it does not re-validate other
-// fields (notably Program), so pre-existing tasks whose Program value would
-// fail current enum validation can still have their run status bumped by the
-// scheduler and TUI dispatch paths. Returns an error if no task with the given
-// ID exists.
-//
-// A nil lastRunAt means "leave LastRunAt untouched" — only LastRunStatus is
-// written. Callers that record a supervision-status change (not an event
-// delivery) pass nil so a concurrent writer's newer LastRunAt is never reverted
-// by a value the caller read outside the file lock (#1215).
-// It returns the record as committed, identified against the file the write
-// produced. Returning it rather than only an error is what stops the next caller
-// that PUBLISHES a status change from announcing the copy it walked in with:
-// that copy was identified against the pre-write bytes, so it names a version of
-// the store that this very call retired (#3684 review). Callers that only need
-// the error discard it.
+// UpdateTaskStatus updates only the scheduler-owned last-run fields. Unlike
+// UpdateTask, it does not re-validate other fields (notably Program), so legacy
+// tasks can still receive status changes. A nil lastRunAt preserves both the
+// timestamp and its session identity; watcher supervision uses that form so it
+// cannot detach a live run from the token its outcome needs. A non-nil timestamp
+// starts a non-session-backed status and clears that token.
 func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) (Task, error) {
-	updated, _, err := updateTaskStatus(taskID, lastRunAt, lastRunStatus, taskStatusAlways)
+	updated, _, err := mutateTaskStatus(taskID, func(t *Task) bool {
+		if lastRunAt != nil {
+			t.LastRunAt = lastRunAt
+			t.LastRunSessionID = ""
+		}
+		t.LastRunStatus = lastRunStatus
+		return true
+	})
 	return updated, err
 }
 
-// UpdateTaskStatusIfLastRunAt updates LastRunStatus only when the stored
-// LastRunAt still identifies expectedRunAt. It is the completion/interruption
-// writer for a session-backed run: another run may have updated the task row
-// while this session was alive, and an older outcome must not overwrite the
-// newer run's status. The comparison and write share the task-file lock.
-//
-// Reports false with no error when the row does not identify that run (normally
-// because a newer one owns it). LastRunAt is left unchanged whichever way the
-// comparison goes.
-func UpdateTaskStatusIfLastRunAt(taskID string, expectedRunAt time.Time, lastRunStatus string) (Task, bool, error) {
-	return updateTaskStatus(taskID, &expectedRunAt, lastRunStatus, taskStatusAtExactRun)
+// BeginTaskRun authoritatively publishes a session-per-run delivery. The daemon
+// calls it while the new session is still hidden behind Manager.mu, so different
+// run IDs are ordered by manager publication rather than by timestamps or by
+// whichever delivery caller happens to resume first.
+func BeginTaskRun(taskID, runID string, runAt time.Time, lastRunStatus string) (Task, error) {
+	if runID == "" {
+		return Task{}, fmt.Errorf("task run id is required")
+	}
+	updated, _, err := mutateTaskStatus(taskID, func(t *Task) bool {
+		t.LastRunAt = &runAt
+		t.LastRunStatus = lastRunStatus
+		t.LastRunSessionID = runID
+		return true
+	})
+	return updated, err
 }
 
-// UpdateTaskRunStart records a delivered run only if no equal or later run is
-// already represented. Equality is deliberately a refusal: recovery may have
-// recorded the outcome after the session became visible but before the delivery
-// caller returned, and that terminal outcome must not be changed back to
-// "started".
-func UpdateTaskRunStart(taskID string, runAt time.Time, lastRunStatus string) (Task, bool, error) {
-	return updateTaskStatus(taskID, &runAt, lastRunStatus, taskStatusBeforeRun)
+// UpdateTaskRunStart is the post-RPC repair for BeginTaskRun. It fills an
+// unidentified row when the manager's earlier task-store write failed, but
+// refuses any identified row — including the same run after recovery recorded
+// its outcome, and a different run published in the meantime.
+func UpdateTaskRunStart(taskID, runID string, runAt time.Time, lastRunStatus string) (Task, bool, error) {
+	if runID == "" {
+		return Task{}, false, fmt.Errorf("task run id is required")
+	}
+	return mutateTaskStatus(taskID, func(t *Task) bool {
+		if t.LastRunSessionID != "" {
+			return false
+		}
+		t.LastRunAt = &runAt
+		t.LastRunStatus = lastRunStatus
+		t.LastRunSessionID = runID
+		return true
+	})
 }
 
-// UpdateTaskRunOutcome records a session-backed run's terminal outcome while
-// its identity is still current. A missing or older row is claimed too: the
-// session and its run identity are durable before the delivery caller writes
-// "started", so recovery can legitimately win that race. A later run is never
-// overwritten.
-func UpdateTaskRunOutcome(taskID string, runAt time.Time, lastRunStatus string) (Task, bool, error) {
-	return updateTaskStatus(taskID, &runAt, lastRunStatus, taskStatusAtOrBeforeRun)
+// UpdateTaskRunOutcome changes only the current session-backed run, and only
+// while its delivery status is still "started". Matching the stable session ID
+// makes equal timestamps and clock corrections irrelevant; checking the status
+// preserves later watcher supervision evidence such as "stopped" or "errored".
+func UpdateTaskRunOutcome(taskID, runID, lastRunStatus string) (Task, bool, error) {
+	if runID == "" {
+		return Task{}, false, fmt.Errorf("task run id is required")
+	}
+	return mutateTaskStatus(taskID, func(t *Task) bool {
+		if t.LastRunSessionID != runID || t.LastRunStatus != "started" {
+			return false
+		}
+		t.LastRunStatus = lastRunStatus
+		return true
+	})
 }
 
-type taskStatusMode uint8
+// ClaimUnidentifiedTaskRunOutcome is the compatibility writer for a task row
+// with no run token. The caller first establishes whether that legacy/missed
+// start can belong to the session; this function then compares the exact row
+// snapshot under the file lock before installing the durable identity and
+// outcome. desiredRunAt is the historical stored timestamp for a legacy row and
+// the session's creation timestamp for a current start-publication failure.
+func ClaimUnidentifiedTaskRunOutcome(
+	taskID, runID string,
+	expectedRunAt *time.Time,
+	expectedStatus string,
+	desiredRunAt time.Time,
+	lastRunStatus string,
+) (Task, bool, error) {
+	if runID == "" {
+		return Task{}, false, fmt.Errorf("task run id is required")
+	}
+	return mutateTaskStatus(taskID, func(t *Task) bool {
+		if t.LastRunSessionID != "" || t.LastRunStatus != expectedStatus ||
+			!sameOptionalTime(t.LastRunAt, expectedRunAt) {
+			return false
+		}
+		t.LastRunAt = &desiredRunAt
+		t.LastRunStatus = lastRunStatus
+		t.LastRunSessionID = runID
+		return true
+	})
+}
 
-const (
-	taskStatusAlways taskStatusMode = iota
-	taskStatusAtExactRun
-	taskStatusBeforeRun
-	taskStatusAtOrBeforeRun
-)
+func sameOptionalTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
+}
 
-func updateTaskStatus(taskID string, runAt *time.Time, lastRunStatus string, mode taskStatusMode) (Task, bool, error) {
+func mutateTaskStatus(taskID string, mutate func(*Task) bool) (Task, bool, error) {
 	if err := ValidateTaskID(taskID); err != nil {
 		return Task{}, false, err
 	}
@@ -88,29 +132,19 @@ func updateTaskStatus(taskID string, runAt *time.Time, lastRunStatus string, mod
 			return err
 		}
 
-		found := false
 		row := -1
 		for i := range tasks {
-			if tasks[i].ID == taskID {
-				found = true
-				if !taskStatusMayApply(tasks[i].LastRunAt, runAt, mode) {
-					return nil
-				}
-				// nil means "preserve the on-disk LastRunAt": a status-only
-				// update must not clobber a newer event-delivery timestamp that
-				// a concurrent writer committed while this caller held a stale
-				// copy (#1215).
-				if mode != taskStatusAtExactRun && runAt != nil {
-					tasks[i].LastRunAt = runAt
-				}
-				tasks[i].LastRunStatus = lastRunStatus
-				row = i
-				applied = true
-				break
+			if tasks[i].ID != taskID {
+				continue
 			}
+			row = i
+			if !mutate(&tasks[i]) {
+				return nil
+			}
+			applied = true
+			break
 		}
-
-		if !found {
+		if row < 0 {
 			return fmt.Errorf("task with id %q not found", taskID)
 		}
 		if !applied {
@@ -128,19 +162,4 @@ func updateTaskStatus(taskID string, runAt *time.Time, lastRunStatus string, mod
 		return Task{}, false, lockErr
 	}
 	return updated, applied, nil
-}
-
-func taskStatusMayApply(stored, runAt *time.Time, mode taskStatusMode) bool {
-	switch mode {
-	case taskStatusAlways:
-		return true
-	case taskStatusAtExactRun:
-		return stored != nil && runAt != nil && stored.Equal(*runAt)
-	case taskStatusBeforeRun:
-		return runAt != nil && (stored == nil || stored.Before(*runAt))
-	case taskStatusAtOrBeforeRun:
-		return runAt != nil && (stored == nil || !stored.After(*runAt))
-	default:
-		return false
-	}
 }

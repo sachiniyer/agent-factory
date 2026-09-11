@@ -55,7 +55,8 @@ type AddTaskResponse struct {
 // edit another client made to a different field. This replaces the prior
 // full-struct read-modify-write, which re-applied every user field from the
 // caller's possibly-stale copy. Scheduler-owned fields (LastRunAt/LastRunStatus/
-// CreatedAt) are never patchable — UpdateTaskStatus stays their writer.
+// LastRunSessionID/CreatedAt) are never patchable — task status helpers stay
+// their writers.
 //
 // Expect optionally carries the project the caller authorized the id against,
 // re-verified under the same lock — see task.ProjectExpectation.

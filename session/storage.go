@@ -126,10 +126,11 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
-	// TaskRunAt is the immutable identity of this session-backed task delivery.
-	// It is written before the session becomes visible and matches the owning
-	// task's LastRunAt. Additive + omitzero: older rows decode to zero and take the
-	// daemon's conservative legacy attribution path.
+	// TaskRunAt is the immutable display timestamp of this session-backed task
+	// delivery; the stable session ID is its identity. It is written before the
+	// session becomes visible and matches the owning task's LastRunAt. Additive +
+	// omitzero: older rows decode to zero and take the daemon's conservative legacy
+	// attribution path.
 	TaskRunAt time.Time `json:"task_run_at,omitzero"`
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a

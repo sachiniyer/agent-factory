@@ -20,8 +20,8 @@ import (
 // enable/disable toggle sends just Enabled) is structurally incapable of
 // clobbering a concurrent edit another client made to a different field.
 //
-// Only the user-editable fields are patchable. The scheduler-owned LastRunAt/
-// LastRunStatus and the immutable CreatedAt never appear here — UpdateTaskStatus
+// Only the user-editable fields are patchable. The scheduler-owned LastRunAt,
+// LastRunStatus, and LastRunSessionID and the immutable CreatedAt never appear here — UpdateTaskStatus
 // stays their canonical writer (#731/#1215), and preserving them is now inherent
 // to the merge (the record starts from the on-disk copy).
 //
@@ -80,7 +80,7 @@ func (u TaskUpdate) IsEmpty() bool {
 }
 
 // apply merges the non-nil fields of u onto t and returns the result. It never
-// touches CreatedAt/LastRunAt/LastRunStatus, so a merge onto the freshly-loaded
+// touches CreatedAt/LastRunAt/LastRunStatus/LastRunSessionID, so a merge onto the freshly-loaded
 // record preserves those scheduler-owned values automatically.
 func (u TaskUpdate) apply(t Task) Task {
 	if u.Name != nil {
