@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -184,7 +185,8 @@ func TestWorktreeBranchBindingsIgnoresRepositoryEnvironmentOverrides(t *testing.
 
 	held, err := BranchesHeldByWorktrees(targetRoot)
 	require.NoError(t, err)
-	assert.Equal(t, []string{holderPath}, held["target-held"])
+	require.Len(t, held["target-held"], 1)
+	assert.Equal(t, pathutil.ResolveForCompare(holderPath), pathutil.ResolveForCompare(held["target-held"][0]))
 }
 
 // TestBranchesHeldByWorktrees_NonRepoErrors pins the answer AF must not
