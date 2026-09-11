@@ -165,7 +165,9 @@ jobs:
                 "aggregate_heads",
                 JSON.stringify(aggregateHeads.map((headSha) => ({ head_sha: headSha }))),
               );
-              if (context.eventName === "workflow_dispatch" && targets.length === 0) {
+              // Automated recovery can become unnecessary while it waits. Its
+              // resolver has already validated the input and PR eligibility.
+              if (context.eventName === "workflow_dispatch" && targets.length === 0 && !payload.inputs?.previous_head_sha) {
                 const failure = new Error("No pull-request head was resolved for manual recovery.");
                 failure.failWorkflow = true;
                 throw failure;

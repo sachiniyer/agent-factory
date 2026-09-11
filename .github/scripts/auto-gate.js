@@ -1849,16 +1849,36 @@ async function processAggregateHead({
         );
       }
       if (error?.autoGateRecoveryFailure) {
-        // Infrastructure failure, not ordinary refusal/waiting. Publish the
-        // promised command in the required check AND fail the workflow caller.
-        await upsertAggregateCheck({
-          github, context, core, headSha: pending.headSha,
-          checkRuns: [], checkRunId: invalidated.checkRunId,
-          decision: {
-            status: "completed", conclusion: "failure",
-            output: { title: "BLOCKED: Auto Gate recovery scheduling failed", summary: message },
-          },
-        });
+        // A check belongs to a SHA, but this recovery belongs to the PR. Always
+        // leave instructions on the PR: even an observed successor SHA can move
+        // again before publication. Never reuse the initiating check's ID.
+        const publicationErrors = [];
+        try {
+          await github.rest.issues.createComment({
+            ...context.repo, issue_number: prNumber,
+            body: `## Auto Gate recovery failed\n\n${message}`,
+          });
+        } catch (publicationError) {
+          publicationErrors.push(publicationError);
+        }
+        const recoveryHead = normalizeHeadSha(error.autoGateRecoveryHeadSha);
+        if (recoveryHead) {
+          try {
+            await createAggregateCheck({
+              github, context, core, headSha: recoveryHead,
+              decision: {
+                status: "completed", conclusion: "failure",
+                output: { title: "BLOCKED: Auto Gate recovery scheduling failed", summary: message },
+              },
+            });
+          } catch (publicationError) {
+            publicationErrors.push(publicationError);
+          }
+        }
+        if (publicationErrors.length) {
+          throw new AggregateError([error, ...publicationErrors],
+            `${message}; recovery publication also failed: ${publicationErrors.map(formatError).join("; ")}`);
+        }
         throw error;
       }
       if (isReadFailure(error)) {
@@ -2304,7 +2324,8 @@ async function ensureValidationRun({
   headSha,
   headRefName,
   attempts = 3,
-  // A test seam, and the only one in this file. Without it the suite sleeps ten
+  canRecover = async () => true,
+  // A test seam for bounded polling. Without it the suite sleeps ten
   // real seconds on the one path that must find nothing, on every run forever;
   // with it the wait is what production uses unless a caller says otherwise.
   delayMs = Number(process.env.AUTO_GATE_VALIDATION_POLL_MS ?? 5000),
@@ -2312,6 +2333,7 @@ async function ensureValidationRun({
 }) {
   const { owner, repo } = context.repo;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (!await canRecover()) return { cancelled: true };
     const listed = await retryRead(`could not list workflow runs for ${headSha}`, () =>
       github.rest.actions.listWorkflowRunsForRepo({
         owner,
@@ -2328,13 +2350,15 @@ async function ensureValidationRun({
       // and returned, leaving them parked. On #3811's `31720d97` they appeared 4
       // seconds late and sat for 33 minutes (#3814). So the approve pass runs
       // again here, on what the wait actually found.
-      await approveParkedRuns({ github, context, headSha, core });
-      return { dispatched: false };
+      if (!await canRecover()) return { cancelled: true };
+      const { parked, approved } = await approveParkedRuns({ github, context, headSha, core });
+      return { dispatched: false, found: true, approved: parked.length === approved.length };
     }
     if (attempt < attempts - 1) {
       await sleep(delayMs);
     }
   }
+  if (!await canRecover()) return { cancelled: true };
   if (!headRefName) {
     core.warning(
       `No pull_request run appeared for ${headSha} and the head ref is unknown, so PR Validation ` +
@@ -2479,6 +2503,7 @@ async function merge({
     // mean a second state carrying a copy of that invalidation.
     let updateAccepted = false;
     let recoveryError = null;
+    let observedUpdatedHead = null;
     try {
       await updateBranchToBase({ github, context, prNumber, headSha: gate.headSha });
       updateAccepted = true;
@@ -2487,8 +2512,9 @@ async function merge({
       const updated = await retryRead(`could not re-read PR #${prNumber} after update-branch`, () =>
         github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
       );
-      const newHead = updated?.data?.head?.sha;
-      if (newHead && normalizeHeadSha(newHead) !== normalizeHeadSha(gate.headSha)) {
+      const newHead = normalizeHeadSha(updated?.data?.head?.sha);
+      if (newHead && newHead !== normalizeHeadSha(gate.headSha)) {
+        observedUpdatedHead = newHead;
         const { approved } = await approveParkedRuns({ github, context, headSha: newHead, core });
         if (approved.length > 0) {
           core.notice(
@@ -2545,6 +2571,7 @@ async function merge({
           `Run ${recoveryCommand}`,
       );
       failure.autoGateRecoveryFailure = true;
+      failure.autoGateRecoveryHeadSha = observedUpdatedHead;
       throw failure;
     }
     const scheduled = `Auto Gate follow-up scheduled for PR #${prNumber}; its resolver must observe a head different from ${gate.headSha}`;
@@ -3358,20 +3385,51 @@ async function resolveTargets({
 
   const sourceSha = payload.check_suite?.head_sha || payload.workflow_run?.head_sha || payload.sha;
   const targets = [];
-  for (const number of [...new Set(numbers.filter(Boolean))]) {
+  recoveryTargets: for (const number of [...new Set(numbers.filter(Boolean))]) {
     let pr = await getPullRequest({ github, context, number });
     if (previousHead) {
-      // An update can remain invisible after the dispatch starts. Do not freeze
-      // that stale SHA into workflow outputs and rely on a suppressed event to
-      // repair the serialized lane's later association-changed result (#4210).
-      for (let attempt = 1; normalizeHeadSha(pr.headRefOid) === previousHead && attempt < headPollAttempts; attempt += 1) {
-        await sleep(headPollDelayMs);
-        pr = await getPullRequest({ github, context, number });
+      const eligible = (current) => current.state === "OPEN" && !current.merged && current.baseRefName === "master";
+      let recovered = false;
+      // Head visibility and run visibility are separate transitions. Reuse the
+      // existing validation recovery after each observed head, then recheck it
+      // before publishing. Eligibility is checked on every read and before the
+      // shared recovery helper approves or dispatches anything.
+      for (let attempt = 0; attempt < headPollAttempts; attempt += 1) {
+        if (!eligible(pr)) {
+          core.notice(`PR #${number} is no longer eligible for Auto Gate recovery; nothing to do`);
+          continue recoveryTargets;
+        }
+        const observed = normalizeHeadSha(pr.headRefOid);
+        if (observed && observed !== previousHead) {
+          const validation = await ensureValidationRun({
+            github, context, core, headSha: observed, headRefName: pr.headRefName,
+            delayMs: headPollDelayMs, sleep,
+            canRecover: async () => {
+              pr = await getPullRequest({ github, context, number });
+              return eligible(pr) && normalizeHeadSha(pr.headRefOid) === observed;
+            },
+          });
+          if (!validation.cancelled && !validation.dispatched && (!validation.found || !validation.approved)) {
+            throw new Error(`Auto Gate validation recovery failed for PR #${number} on ${observed}; ` +
+              `run gh workflow run ${GATE_WORKFLOW} --repo ${context.repo.owner}/${context.repo.repo} --ref master ` +
+              `-f pr_number=${number} -f previous_head_sha=${previousHead}`);
+          }
+          pr = await getPullRequest({ github, context, number });
+          if (!eligible(pr)) continue recoveryTargets;
+          if (!validation.cancelled && normalizeHeadSha(pr.headRefOid) === observed) {
+            recovered = true;
+            break;
+          }
+        }
+        if (attempt < headPollAttempts - 1) {
+          await sleep(headPollDelayMs);
+          pr = await getPullRequest({ github, context, number });
+        }
       }
-      if (!normalizeHeadSha(pr.headRefOid) || normalizeHeadSha(pr.headRefOid) === previousHead) {
+      if (!recovered) {
         const { owner, repo } = context.repo;
         throw new Error(
-          `Auto Gate recovery for PR #${number} still exposes initiating head ${previousHead}; no stale target was published. ` +
+          `Auto Gate recovery for PR #${number} still exposes initiating head ${previousHead} or has not settled; no stale target was published. ` +
           `Run gh workflow run ${GATE_WORKFLOW} --repo ${owner}/${repo} --ref master ` +
           `-f pr_number=${number} -f previous_head_sha=${previousHead}`,
         );

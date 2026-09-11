@@ -112,21 +112,27 @@ Auto Gate itself.
 
 After immediate recovery, the gate now dispatches `auto-gate.yml` on the trusted
 base branch with `pr_number` and the initiating `previous_head_sha`, even if the
-head read was stale or recovery failed. The successor resolver excludes that
-initiating SHA: it reads up to six times, five seconds apart, until a different
-valid head is visible. It publishes no target while the initiating SHA remains
-visible. Exhaustion fails the resolver job with a recovery command rather than
-silently fixing a stale target in the serialized lane. Ordinary manual dispatch
-without `previous_head_sha` keeps its existing single-read behavior.
-Only an accepted update schedules this successor; ordinary evaluations do not
-schedule themselves. Existing approval checks still write only to parked
-`pull_request` runs, leaving queued/running runs alone.
+head read was stale or recovery failed. Recovery checks the PR's eligibility on
+each read: closed, merged, and non-master PRs are successful no-ops, including
+in the resolver workflow that consumes an empty target list.
 
-The dispatch is single-shot. A failure is an infrastructure error, not an
-ordinary merge refusal: the aggregate caller publishes its recovery command in
-the required check and rethrows it to fail the workflow. The command includes
-both `pr_number` and `previous_head_sha`. An ambiguous write is not retried or
-described as confirmed scheduling. Ordinary merge refusals remain waiting states.
+For an eligible PR, the successor excludes the initiating SHA, then invokes the
+existing `ensureValidationRun` recovery. Seeing a new head does not prove that
+its runs exist: this shared helper waits for late runs, approves parked runs,
+and dispatches validation if none appear. Recovery rechecks the PR before those
+writes and after the wait; a changed head must itself be recovered before it
+becomes a target. Six bounded recovery attempts prevent endless polling.
+Exhaustion fails with a recovery command instead of publishing a stale target.
+Ordinary manual dispatch without `previous_head_sha` keeps its single-read
+behavior. Queued/running runs still receive no approval writes.
+
+The follow-up dispatch is single-shot. A failure is an infrastructure error,
+not an ordinary refusal. The caller posts the recovery command on the PR, where
+it stays visible even if the head moves again, and creates a failing check on
+the observed post-update SHA when one is available. It never reuses the
+initiating aggregate's check ID for those instructions. Publication failures
+retain the original command in the workflow error. The workflow still fails;
+ordinary merge refusals remain successful waiting states.
 
 The first version of this fix reproduced the class of failure it was meant to
 remove: its caller could report recovery as handled while the promised work

@@ -5481,6 +5481,131 @@ test("the happy path squash-merges the exact evaluated head", async () => {
 // computed against the tree that actually lands.
 // ---------------------------------------------------------------------------
 
+test("#4210-r3: a PR closed during the validation wait stops successfully before approval", async () => {
+  const overrides = { 1465: {} };
+  const github = fakeGateGithub({ headSha: OTHER_SHA, pullRequestsByNumber: overrides, runsAppearAfterReads: 1,
+    runsByHeadSha: { [OTHER_SHA]: [{ id: 701, event: "pull_request", conclusion: "action_required" }] },
+  });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => { overrides[1465].state = "CLOSED"; },
+  });
+  assert.deepEqual(targets, []);
+  assert.deepEqual(github.approvedRuns, []);
+  assert.deepEqual(github.dispatchedWorkflows, []);
+});
+
+test("#4210-r3: a head moving during validation recovery is recovered before publishing", async () => {
+  const newest = "f".repeat(40);
+  const overrides = { 1465: {} };
+  const github = fakeGateGithub({ headSha: OTHER_SHA, pullRequestsByNumber: overrides, runsAppearAfterReads: 1,
+    runsByHeadSha: {
+      [OTHER_SHA]: [{ id: 701, event: "pull_request", conclusion: "action_required" }],
+      [newest]: [{ id: 702, event: "pull_request", conclusion: "action_required" }],
+    },
+  });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => { overrides[1465].headRefOid = newest; },
+  });
+  assert.equal(targets[0].headSha, newest);
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [702]);
+});
+
+test("#4210-r3: a successor with no PR runs uses the existing validation dispatch fallback", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.deepEqual(github.dispatchedWorkflows.map((run) => run.workflow_id), ["pr.yml"]);
+});
+
+// Review round three: recovery belongs to the live PR, not just a head read.
+function queuedRecoveryRuns(head = OTHER_SHA) {
+  return { [head]: [{ id: 701, name: "PR Validation", event: "pull_request", status: "queued", conclusion: null }] };
+}
+
+for (const observed of [true, false]) {
+  test(`#4210-r3: dispatch failure remains visible on the PR (updated head observed=${observed})`, async () => {
+    const github = fakeGateGithub({ behindBy: 1,
+      headAfterUpdate: observed ? OTHER_SHA : null,
+      runsByHeadSha: queuedRecoveryRuns(),
+      workflowDispatchErrorsByWorkflow: { "auto-gate.yml": new Error("dispatch unavailable") },
+    });
+    const { error } = await runApplyGateStep({ github });
+    assert.ok(error);
+    assert.equal(github.recoveryComments.length, 1);
+    assert.equal(github.recoveryComments[0].issue_number, 1465);
+    assert.match(github.recoveryComments[0].body, /gh workflow run auto-gate.yml/);
+    if (observed) {
+      const current = github.createdChecks.find((check) => check.head_sha === OTHER_SHA &&
+        check.output?.title === "BLOCKED: Auto Gate recovery scheduling failed");
+      assert.ok(current, "instructions must not reuse the pre-update aggregate check ID");
+      assert.equal(current.conclusion, "failure");
+      assert.match(current.output.summary, /gh workflow run auto-gate.yml/);
+    }
+  });
+}
+
+for (const state of ["action_required", "queued", "in_progress"]) {
+  test(`#4210-r3: eligible successor waits for late ${state} runs using validation recovery`, async () => {
+    const github = fakeGateGithub({ headSha: OTHER_SHA, runsAppearAfterReads: 1,
+      runsByHeadSha: { [OTHER_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request",
+        status: state === "action_required" ? "completed" : state,
+        conclusion: state === "action_required" ? state : null }] },
+    });
+    const delays = [];
+    const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+      headPollDelayMs: 7, sleep: async (ms) => delays.push(ms),
+    });
+    assert.equal(targets[0].headSha, OTHER_SHA);
+    assert.deepEqual(delays, [7], "head visibility is not run visibility");
+    assert.deepEqual(github.approvedRuns.map((run) => run.run_id), state === "action_required" ? [701] : []);
+    assert.deepEqual(github.dispatchedWorkflows, [], "an existing validation must not be duplicated");
+  });
+}
+
+// Execute the actual resolver workflow body so an empty successful result cannot
+// be turned into a failure by its consumer again.
+async function runRecoveryResolver(github) {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const match = workflow.match(/- name: Evaluate gate[\s\S]*?script: \|\n([\s\S]*?)(?=\n      # A keep)/);
+  assert.ok(match);
+  const script = match[1].split("\n").map((line) => line.replace(/^ {12}/, "")).join("\n");
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const outputs = {};
+  const helper = { ...autoGate, resolveTargets: (args) => autoGate.resolveTargets({ ...args,
+    headPollAttempts: 3, headPollDelayMs: 0, sleep: async () => {},
+  }) };
+  const requireStub = (id) => id === "fs" ? { existsSync: () => true }
+    : id === "path" ? path : helper;
+  await new AsyncFunction("github", "context", "core", "require", "process", script)(
+    github, recoveryContext(), { ...fakeCore(), setOutput: (key, value) => { outputs[key] = value; } },
+    requireStub, { env: { GITHUB_WORKSPACE: "/workspace", PR_NUMBER: "1465" } },
+  );
+  return outputs;
+}
+
+for (const [name, state] of Object.entries({ closed: { state: "CLOSED" }, merged: { merged: true }, retargeted: { baseRefName: "other" } })) {
+  for (const duringPoll of [false, true]) {
+    test(`#4210-r3: ${name} recovery is a successful no-op (during poll=${duringPoll})`, async () => {
+      const overrides = { 1465: duringPoll ? {} : state };
+      const github = fakeGateGithub({ pullRequestsByNumber: overrides });
+      const graphql = github.graphql;
+      github.graphql = async (query, variables) => {
+        if (duringPoll && github.graphqlReadsByNumber[1465] >= 1) overrides[1465] = state;
+        return graphql(query, variables);
+      };
+      const outputs = await runRecoveryResolver(github);
+      assert.deepEqual(JSON.parse(outputs.targets), []);
+      assert.deepEqual(JSON.parse(outputs.aggregate_heads), []);
+      assert.equal(github.graphqlReadsByNumber[1465], duringPoll ? 2 : 1);
+      assert.deepEqual(github.runListReads, []);
+      assert.deepEqual(github.approvedRuns, []);
+      assert.deepEqual(github.dispatchedWorkflows, []);
+    });
+  }
+}
+
 // #4210 review: exercise the resolver and workflow caller, not only merge().
 function recoveryContext(previous = HEAD_SHA) {
   return { ...fakeContext(), eventName: "workflow_dispatch",
@@ -5497,7 +5622,7 @@ test("#4210: dispatch carries the initiating head into the successor", async () 
 
 test("#4210: a successor waits through stale reads before publishing its target", async () => {
   const overrides = { 1465: { headRefOid: HEAD_SHA } };
-  const github = fakeGateGithub({ pullRequestsByNumber: overrides });
+  const github = fakeGateGithub({ pullRequestsByNumber: overrides, runsByHeadSha: queuedRecoveryRuns() });
   const delays = [];
   const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
     headPollAttempts: 3, headPollDelayMs: 7, sleep: async (ms) => {
@@ -5507,11 +5632,11 @@ test("#4210: a successor waits through stale reads before publishing its target"
   });
   assert.equal(targets[0].headSha, OTHER_SHA);
   assert.deepEqual(delays, [7, 7]);
-  assert.equal(github.graphqlReadsByNumber[1465], 3);
+  assert.ok(github.graphqlReadsByNumber[1465] >= 3);
 });
 
 test("#4210: an already-visible successor head resolves without waiting", async () => {
-  const targets = await autoGate.resolveTargets({ github: fakeGateGithub({ headSha: OTHER_SHA }),
+  const targets = await autoGate.resolveTargets({ github: fakeGateGithub({ headSha: OTHER_SHA, runsByHeadSha: queuedRecoveryRuns() }),
     context: recoveryContext(), core: fakeCore(), prNumber: 1465,
     sleep: async () => assert.fail("new head needs no wait"),
   });
@@ -5545,7 +5670,7 @@ test("#4210: ordinary manual resolution still accepts the current head without w
 });
 
 test("#4210: a recovery dispatch failure fails the workflow and publishes its command in the check", async () => {
-  const github = fakeGateGithub({ behindBy: 1,
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: OTHER_SHA, runsByHeadSha: queuedRecoveryRuns(),
     workflowDispatchErrorsByWorkflow: { "auto-gate.yml": new Error("dispatch refused") },
   });
   const { error } = await runApplyGateStep({ github });
@@ -5553,7 +5678,7 @@ test("#4210: a recovery dispatch failure fails the workflow and publishes its co
   assert.match(error.message, /dispatch refused/);
   assert.match(error.message, /gh workflow run auto-gate.yml/);
   assert.doesNotMatch(error.message, /^Refusing to merge/);
-  const failure = github.updatedChecks.find((check) => check.output?.title === "BLOCKED: Auto Gate recovery scheduling failed");
+  const failure = github.createdChecks.find((check) => check.head_sha === OTHER_SHA && check.output?.title === "BLOCKED: Auto Gate recovery scheduling failed");
   assert.ok(failure, "the required aggregate must expose the recovery command");
   assert.equal(failure.conclusion, "failure");
   assert.match(failure.output.summary, /dispatch refused/);
@@ -9585,6 +9710,7 @@ function fakeGateGithub({
     workflowDispatchAttempts: 0,
     runListReads: [],
     approvedRuns: [],
+    recoveryComments: [],
     headShaAfterUpdate: null,
     rest: {
       actions: {
@@ -9678,7 +9804,10 @@ function fakeGateGithub({
           github.branchRefs = github.branchRefs.filter((branch) => branch.name !== name);
         },
       },
-      issues: { listComments },
+      issues: { listComments, createComment: async (options) => {
+        github.recoveryComments.push(options);
+        return { data: { id: 1 } };
+      } },
       repos: {
         listCommitStatusesForRef,
         listPullRequestsAssociatedWithCommit,
