@@ -313,7 +313,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// release HERE: a refusal whose advertised retry lands on the same branch and
 		// refuses again is the same defect wearing a helpful message.
 		if !force {
-			return "", refuseIndeterminateReap(instance)
+			return "", refuseIndeterminateReap(repoID, instance)
 		}
 		// Forced past an unanswerable probe: the sandbox may well be alive behind a
 		// broken path, so a replacement still must not land on the default branch and
@@ -367,8 +367,8 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			break
 		}
 		// The shared selector keeps the refusal's off-ramp executable even when
-		// this session has no branch and --force-reap cannot proceed (#4164).
-		if err := m.preserveSandboxBeforeReap(repoID, key, instance, reapRefusalSuggestionFor(instance)); err != nil {
+		// this session's branch is not durable and --force-reap cannot proceed (#4195).
+		if err := m.preserveSandboxBeforeReap(repoID, key, instance, reapRefusalSuggestionFor(repoID, instance)); err != nil {
 			return "", err
 		}
 		// The push landed: reset the push-failure episode budget so that a later
