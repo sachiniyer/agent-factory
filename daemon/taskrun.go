@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -374,4 +375,24 @@ func recordDeliveredTaskRun(taskID string, delivery taskDelivery) error {
 		taskID, delivery.run.TaskGenerationID, delivery.run.SessionID,
 		delivery.run.Sequence, delivery.run.Revision, delivery.run.RunAt, delivery.status)
 	return err
+}
+
+// recordResumedTaskRun advances a parked task row after its queued prompt lands.
+// If the task-store write fails, interruption still accepts the parked active
+// status; a later watcher stopped/errored write is deliberately preserved because
+// it no longer matches the expected parked state.
+func (m *Manager) recordResumedTaskRun(instance *session.Instance) {
+	run := instance.TaskRun()
+	if run.TaskID == "" {
+		return
+	}
+	updated, applied, err := task.AdvanceTaskRunStatus(
+		run.TaskID, run.TaskGenerationID, run.SessionID,
+		TaskStatusLimitParked, task.RunStatusStarted)
+	if err != nil {
+		m.warn().Printf("resumed task session %q but could not update task %s from parked to started: %v",
+			instance.Title, run.TaskID, err)
+	} else if applied {
+		m.publishEvent(agentproto.EventTaskUpdated, updated)
+	}
 }

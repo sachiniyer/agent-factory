@@ -972,23 +972,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	}
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
-	// A parked task row describes a prompt still queued at the limit fence. Once
-	// that prompt lands, advance the exact session-owned row to started. If the
-	// task-store write fails, interruption still accepts the parked active status;
-	// a later watcher stopped/errored write is deliberately preserved because it
-	// no longer matches the expected parked state.
-	run := instance.TaskRun()
-	if run.TaskID != "" {
-		updated, applied, statusErr := task.AdvanceTaskRunStatus(
-			run.TaskID, run.TaskGenerationID, run.SessionID,
-			TaskStatusLimitParked, task.RunStatusStarted)
-		if statusErr != nil {
-			m.warn().Printf("resumed task session %q but could not update task %s from parked to started: %v",
-				instance.Title, run.TaskID, statusErr)
-		} else if applied {
-			m.publishEvent(agentproto.EventTaskUpdated, updated)
-		}
-	}
+	m.recordResumedTaskRun(instance)
 	if persistErr != nil {
 		m.warn().Printf("failed to persist instance %q: %v", instance.Title, persistErr)
 		if manual {
