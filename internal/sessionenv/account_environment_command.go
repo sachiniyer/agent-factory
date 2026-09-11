@@ -270,10 +270,62 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 				return nil, true
 			}
 		default:
+			if unrecognizedWrapperHidesAccountAssignment(words, names) {
+				return nil, true
+			}
 			return words, false
 		}
 	}
 	return nil, false
+}
+
+// unrecognizedWrapperHidesAccountAssignment reports whether the literal tail
+// words of an unrecognized argv-passthrough wrapper carry a NAME=... assignment
+// whose NAME is one af removes for the selected account.
+//
+// unwrapAccountCommand peels a CLOSED list of wrappers (exec/command/builtin/
+// nohup/nice/timeout/setsid/stdbuf/ionice/taskset); every other binary that runs
+// a child command and passes argv through (strace/perf/valgrind/gdb --args/
+// xargs/...) falls to the default arm and was returned opaque. Wrapping the
+// modelled `env NAME=value <agent>` mutation — which the guard already refuses
+// bare and under every modelled wrapper — in an unmodeled wrapper hid the inner
+// assignment from the walk, so `strace env CODEX_HOME=/other codex` was accepted
+// while `nohup env CODEX_HOME=/other codex` was refused.
+//
+// This lifts envCallMutatesAccountEnvironment's NAME= rule one level: the
+// wrapper cannot be proven inert when its argv carries the same literal
+// assignment token the bare env form is already refused for. It latches onto
+// that NAME= signal specifically rather than the wrapper's option spelling or a
+// keyword scan, so noun-uses such as `man env`, `make env`, `git grep env`,
+// `ls env/bin`, `pip show env`, or `strace -p 1234 env` (none of which carries
+// a denied NAME= word) stay allowed. Mutation that lives inside a quoted
+// -c/-e script string (e.g. `strace sh -c 'unset CODEX_HOME; codex'`) is a
+// fundamental limitation of static argv analysis this guard does not close.
+func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}) bool {
+	for _, word := range words[1:] {
+		name, assignment := wrapperArgAssignmentName(word)
+		if assignment && accountEnvironmentNameDenied(name, names) {
+			return true
+		}
+	}
+	return false
+}
+
+// wrapperArgAssignmentName reports the assignment target in a word that, after
+// the shell's quote removal, reads as a NAME=value token. A bare or
+// dynamic-value assignment has a literal NAME= prefix as its first part
+// (shellWordAssignmentName); a quoted assignment ("NAME=value" or 'NAME=value')
+// reduces to the same argument and is read through literalShellWord.
+func wrapperArgAssignmentName(word *syntax.Word) (string, bool) {
+	if name, ok := shellWordAssignmentName(word); ok {
+		return name, true
+	}
+	value, literal := literalShellWord(word)
+	if !literal {
+		return "", false
+	}
+	name, _, found := strings.Cut(value, "=")
+	return name, found && validName(name)
 }
 
 func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {
