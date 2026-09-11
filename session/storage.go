@@ -187,6 +187,11 @@ type InstanceData struct {
 	PendingAccountSwap *AccountSwapData `json:"pending_account_swap,omitempty"`
 
 	Program string `json:"program"`
+	// RuntimeProgram is the override-resolved base command of the last agent
+	// runtime whose launch positively succeeded. Empty on records written before
+	// this evidence existed; callers must treat absence as unknown, never infer it
+	// from Program's requested label.
+	RuntimeProgram string `json:"runtime_program,omitempty"`
 	// Account is the credential account this session's provider panes use (#3051).
 	// Persisted because the identity a session runs as must survive a daemon
 	// restart and an archive/restore: a session that silently reverted to the

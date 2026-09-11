@@ -144,6 +144,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 	i.mu.RLock()
 	tmuxSession := i.tmuxLocked()
 	i.mu.RUnlock()
+	var runtimeProgram string
 
 	// Setup error handler to cleanup resources on any error.
 	// Kill() acquires its own lock, so we must not hold i.mu here.
@@ -244,6 +245,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// attach-session does not re-exec the program.
 		if workDir != "" {
 			resolution := resolveLaunchProgramForInstance(i)
+			runtimeProgram = resolution.command
 			program := injectSystemPrompt(resolution.command, resolveSkillTarget(i, resolution.command))
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase))
@@ -255,6 +257,9 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			return setupErr
 		}
 		if restoreResult == tmux.RestoreRespawned {
+			if strings.TrimSpace(runtimeProgram) != "" {
+				i.setRuntimeProgram(runtimeProgram)
+			}
 			// The persisted delivery verdict and pane age belonged to the process
 			// that disappeared with the old tmux server. A pure reattach preserves
 			// them; a confirmed respawn must not attribute them to its replacement.
@@ -263,6 +268,14 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// unconditionally, even when there was no idle evidence to clear.
 			resetAgentBrokerCaptures(i)
 			i.markLoadRuntimeReplaced(true)
+		} else {
+			// A tmux name surviving across daemon downtime does not prove that it
+			// still names the process AF launched: an operator can remove and recreate
+			// the session under the same sanitized name. Keep the live pane, but retire
+			// its persisted launch-command claim and checkpoint that loss of evidence.
+			if i.clearRuntimeProgramForUnverifiedReattach() {
+				i.markLoadRuntimeReplaced(false)
+			}
 		}
 	} else {
 		i.mu.RLock()
@@ -281,11 +294,13 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		var program string
 		var proof sessionenv.AccountLaunchProof
 		if prepared != nil {
-			if prepared.workDir != gw.GetWorktreePath() || strings.TrimSpace(prepared.program) == "" {
+			if prepared.workDir != gw.GetWorktreePath() || strings.TrimSpace(prepared.program) == "" ||
+				strings.TrimSpace(prepared.baseProgram) == "" {
 				setupErr = fmt.Errorf("prepared create launch no longer matches session %q", i.Title)
 				return setupErr
 			}
 			program = prepared.program
+			runtimeProgram = prepared.baseProgram
 			proof = prepared.accountProof
 			if prepared.conversation.HasID() {
 				i.SetAgentConversation(prepared.conversation)
@@ -295,6 +310,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// produces. A prepared create carries both from its earlier freeze.
 			resolution := resolveLaunchProgramForInstance(i)
 			base := resolution.command
+			runtimeProgram = base
 			program = prepareLaunchConversation(i, base)
 			program = injectSystemPrompt(program, resolveSkillTarget(i, program))
 			proof = accountLaunchProof(base, program, resolution.trustBase)
@@ -332,6 +348,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			}
 			return setupErr
 		}
+		i.setRuntimeProgram(runtimeProgram)
 	}
 
 	// Rebuild the tab roster a reaped record handed this create, if any (#2628).
@@ -500,6 +517,7 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 		}
 		return fmt.Errorf("swap agent: failed to start %s for %q: %w", i.AgentProgram(), i.Title, err)
 	}
+	i.setRuntimeProgram(plan.baseProgram)
 
 	resetAgentBrokerCaptures(i)
 	return nil

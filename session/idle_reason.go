@@ -217,9 +217,11 @@ func (i *Instance) ClearIdleEvidence() bool {
 }
 
 // LoadRuntimeReplacement carries the process-local settlement produced while a
-// persisted session is reconstructed. Agent distinguishes the task-owning
-// runtime from a sibling tab; InterruptedTaskRun is set only when that agent
-// replacement closed an active task run.
+// persisted session is reconstructed. Replaced says some runtime fact needs a
+// checkpoint: a process was replaced or an unverified reattachment retired its
+// persisted launch-command evidence. Agent distinguishes a confirmed replacement
+// of the task-owning runtime from both evidence retirement and a sibling tab;
+// InterruptedTaskRun is set only when that agent replacement closed an active run.
 type LoadRuntimeReplacement struct {
 	Replaced           bool
 	Agent              bool
@@ -228,10 +230,11 @@ type LoadRuntimeReplacement struct {
 }
 
 // markLoadRuntimeReplaced records that Start(false) created a replacement agent
-// or sibling process. Agent replacement also reaches the shared task-run
-// replacement rule while provenance is exact; sibling replacement deliberately
-// does not. The daemon loader consumes this after FromInstanceData returns so
-// every affected fact can be settled before the restored map is authoritative.
+// or sibling process, or retired unverified runtime-command evidence. A confirmed
+// agent replacement also reaches the shared task-run replacement rule while
+// provenance is exact; the other cases deliberately do not. The daemon loader
+// consumes this after FromInstanceData returns so every affected fact can be
+// settled before the restored map is authoritative.
 func (i *Instance) markLoadRuntimeReplaced(agent bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
