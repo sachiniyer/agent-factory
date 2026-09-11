@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/spf13/cobra"
 )
 
@@ -244,5 +245,61 @@ func TestConfigValidateJSONAcceptsAnEmptyStub(t *testing.T) {
 	}
 	if !strings.Contains(res.Path, "config.toml") {
 		t.Errorf("an empty stub must report its toml path, got %q", res.Path)
+	}
+}
+
+func TestConfigValidateJSONReportsAdvisoryUncertainty(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	previousLoad := configValidateLoadReadOnly
+	configValidateLoadReadOnly = func() (config.ReadOnlyConfigLoad, error) {
+		return config.ReadOnlyConfigLoad{
+			Path:                   "/tmp/config.toml",
+			EmptyStub:              true,
+			DirectoryAccessWarning: "directory access probe unavailable: function not implemented",
+		}, nil
+	}
+	t.Cleanup(func() { configValidateLoadReadOnly = previousLoad })
+	previousJSON := configJSONFlag
+	configJSONFlag = true
+	t.Cleanup(func() { configJSONFlag = previousJSON })
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := configValidateCmd.RunE(cmd, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var envelope struct {
+		Data struct {
+			OK        bool `json:"ok"`
+			Uncertain bool `json:"uncertain"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatalf("stdout is not a JSON envelope: %v\n%s", err, out.String())
+	}
+	if !envelope.Data.OK || !envelope.Data.Uncertain {
+		t.Fatalf("advisory result = ok:%t uncertain:%t; want true/true\n%s",
+			envelope.Data.OK, envelope.Data.Uncertain, out.String())
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, out.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(compact.String(), `"warning":"directory access probe unavailable: function not implemented","uncertain":true`) {
+		t.Fatalf("uncertain must be appended after the established result members:\n%s", compact.String())
+	}
+}
+
+func TestConfigValidateHelpDescribesAdvisorySuccess(t *testing.T) {
+	help := strings.Join(strings.Fields(configValidateCmd.Long), " ")
+	for _, want := range []string{
+		"exit 0 means no config defect was found",
+		"does not prove that a later startup can regenerate an empty stub",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("validate help does not contain %q:\n%s", want, configValidateCmd.Long)
+		}
 	}
 }
