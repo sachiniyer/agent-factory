@@ -103,6 +103,55 @@ Because that loop brings a behind head up to date itself, the ruleset's strict
 required-status-checks policy can stay on: a hand merge no longer has to win a
 race against the fleet's merge rate.
 
+**Every accepted update-branch schedules another Auto Gate evaluation (#4209).**
+The update endpoint can acknowledge before a PR read exposes its new head. The
+immediate approval and run-existence checks only execute when that read returns
+a different SHA, so a stale read used to skip both. The PR Validation dispatch
+inside the existence check could not repair that exit, and it never dispatched
+Auto Gate itself.
+
+After immediate recovery, the gate now dispatches `auto-gate.yml` on the trusted
+base branch with `pr_number` and the initiating `previous_head_sha`, even if the
+head read was stale or recovery failed. Recovery checks the PR's eligibility on
+each read: closed, merged, and non-master PRs are successful no-ops, including
+in the resolver workflow that consumes an empty target list.
+
+For an eligible PR, the successor excludes the initiating SHA, then invokes the
+existing `ensureValidationRun` recovery. Seeing a new head does not prove that
+its runs exist: this shared helper queries the `pr.yml` workflow specifically,
+waits for its late run, and then approves parked runs on the head. An earlier
+Docs or Dependency review run cannot satisfy that wait. If PR Validation never
+appears, the helper dispatches it. Recovery rechecks the PR before those
+writes and after the wait; a changed head must itself be recovered before it
+becomes a target. Six bounded recovery attempts prevent endless polling.
+Exhaustion fails with a recovery command instead of publishing a stale target.
+Ordinary manual dispatch without `previous_head_sha` keeps its single-read
+behavior. Queued/running runs still receive no approval writes.
+
+The follow-up dispatch is single-shot. A failure is an infrastructure error,
+not an ordinary refusal. The caller posts the recovery command on the PR, where
+it stays visible even if the head moves again, and includes the observed
+post-update SHA when available. The initiating lane does not write an aggregate
+on the successor head: that head has its own serialized owner, whose newer PASS
+must not be superseded by an unfenced recovery failure. Publication failures
+retain the original command in the workflow error. The workflow still fails;
+ordinary merge refusals remain successful waiting states.
+
+The successor reports its own failures on the PR the same way. Nothing else is
+guaranteed to revisit the head the gate pushed while its runs sit parked, and
+the successor runs under `workflow_dispatch`, whose payload names no head the
+resolver workflow could turn red. Every failure in its recovery goes through one catch: a
+retry-exhausted read, a refused read, and a recovery it could not confirm alike.
+That catch posts the rerun command on the PR, with the observed successor head
+when it has one, and keeps the command in the workflow error. Before this, an
+exhausted run listing or PR read ended as a red run on master whose message had
+no command, and even the resolver's own refusals never reached the PR.
+
+The first version of this fix reproduced the class of failure it was meant to
+remove: its caller could report recovery as handled while the promised work
+never happened. A stale successor target and a swallowed dispatch error are now
+tested through their consumers, not just through the helper producing them.
+
 **A base that moves between the compare and the merge waits; it does not red the
 run (#3808).** `PUT /pulls/N/merge` answers 405 `Base branch was modified` when
 another merge lands in the window the up-to-date compare cannot close. Nobody won
