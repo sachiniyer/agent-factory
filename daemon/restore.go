@@ -323,6 +323,20 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			return "", err
 		}
 		m.warn().Printf("restore of %q: --force-reap given past an indeterminate probe; af could not reach the sandbox to push it, so anything it holds unpushed is discarded", title)
+		// The sandbox is being replaced, so this is the same force-replace the
+		// probeAnsweredDead force arm below performs: end the push-failure episode
+		// so a later failure against the new sandbox earns a fresh budget rather
+		// than inheriting the old one's escalation, and end any in-progress Recover
+		// episode too. Without resetRecoverBudget, d8e4e08f's give-up assignment
+		// (consecutiveFailures = lostRestoreMaxAttempts) from a prior preserve-push
+		// give-up survives the replacement, and the first Recover failure against
+		// the brand-new sandbox counts as attempt maxAttempts+1 and triggers
+		// immediate give-up — overwriting the prior durable LostRestoreFailure with
+		// the new sandbox's provision error at the wrong attempt count. The reset
+		// invariant the next arm over was fixed for applies identically here: this
+		// arm runs the same force-replace-then-Recover shape.
+		m.resetPreserveBudget(repoID, instance)
+		m.resetRecoverBudget(repoID, instance)
 	case probeAbsent:
 		// af's own not-provisioned sentinel: nothing to preserve, so replacement is
 		// unconditional. The only arm that licenses that.
