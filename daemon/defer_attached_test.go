@@ -396,7 +396,7 @@ type busyDeliver struct {
 	success  []string
 }
 
-func (d *busyDeliver) deliver(_, line string) error {
+func (d *busyDeliver) deliver(_, _ string, line string) error {
 	if d.attached.Load() {
 		return errTargetBusy
 	}

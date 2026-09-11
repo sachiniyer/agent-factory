@@ -86,7 +86,7 @@ func TestOutageEndToEnd_LostRestoreAndReplay(t *testing.T) {
 	dir := t.TempDir()
 	script := `echo replay-e1; echo replay-e2; echo replay-e3; sleep 300`
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab140001", script, dir)))
-	s.deliver = func(taskID, line string) error {
+	s.deliver = func(taskID, _ string, line string) error {
 		return manager.SendPrompt(SendPromptRequest{Title: "worker", RepoID: repo.ID, Prompt: line})
 	}
 	queueDir, _ := s.queueDir()

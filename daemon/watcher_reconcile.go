@@ -170,21 +170,23 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 }
 
 // cleanOrphanQueues removes event-queue files whose task ID is absent from
-// tasks.json entirely.
+// tasks.json entirely and queues owned by an older generation of a reused ID.
 //
 // Scoped the same way the watchers are, and for the same reason: outside the
 // scope this reconcile did not stop anything, so a still-running watcher would
 // otherwise have the file its drainer is replaying deleted underneath it. The
-// removal a scoped write cares about — its own task's — is always in scope,
-// and the full re-arm still sweeps everything.
+// removal or replacement a scoped write cares about — its own task's — is
+// always in scope, and the full re-arm still sweeps everything.
 func (s *watcherSupervisor) cleanOrphanQueues(tasks []task.Task, scope watchScope) {
 	dir, err := s.queueDir()
 	if err != nil {
 		return
 	}
-	known := make(map[string]struct{}, len(tasks))
+	known := make(map[string]string, len(tasks))
 	for _, t := range tasks {
-		known[t.ID] = struct{}{}
+		if _, duplicate := known[t.ID]; !duplicate {
+			known[t.ID] = eventQueueStem(t.ID, t.GenerationID)
+		}
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -192,11 +194,12 @@ func (s *watcherSupervisor) cleanOrphanQueues(tasks []task.Task, scope watchScop
 	}
 	for _, e := range entries {
 		name := e.Name()
-		id := strings.TrimSuffix(strings.TrimSuffix(name, ".jsonl"), ".cursor")
-		if id == name { // neither suffix matched
+		stem := strings.TrimSuffix(strings.TrimSuffix(name, ".jsonl"), ".cursor")
+		if stem == name { // neither suffix matched
 			continue
 		}
-		if _, ok := known[id]; ok {
+		id, _, _ := strings.Cut(stem, ".")
+		if expected, ok := known[id]; ok && stem == expected {
 			continue
 		}
 		if !scope.covers(id) {

@@ -127,7 +127,7 @@ type watcherSupervisor struct {
 	// lifecycle statuses without a task store, and queueDir redirects the
 	// durable event queues to a scratch directory.
 	loadTasks func() ([]task.Task, error)
-	deliver   func(taskID, line string) error
+	deliver   func(taskID, taskGenerationID, line string) error
 	setStatus func(taskID, taskGenerationID, status string)
 	logPath   func(taskID string) (string, error)
 	queueDir  func() (string, error)
@@ -208,7 +208,7 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 	if dir, err := s.queueDir(); err != nil {
 		log.WarningLog.Printf("watch task %s: event queue unavailable (failed deliveries will be dropped): %v", t.ID, err)
 	} else {
-		w.queue = newEventQueue(dir, t.ID)
+		w.queue = newEventQueueForGeneration(dir, t.ID, t.GenerationID)
 	}
 	return w
 }
@@ -682,7 +682,7 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 		return
 	}
 
-	err := w.sup.deliver(w.taskID, line)
+	err := w.sup.deliver(w.taskID, w.generationID, line)
 	w.recordDeliveryResult(time.Now(), err)
 	if err != nil {
 		switch {
@@ -810,7 +810,7 @@ func (w *taskWatcher) stopDraining() {
 // prompt/target_session edits apply without restarting the script), renders
 // {{line}}, and routes through the same delivery path cron fires use, then
 // records the run status (#664 path).
-func deliverWatchEvent(taskID, line string) error {
+func deliverWatchEvent(taskID, taskGenerationID, line string) error {
 	// The three pre-flight checks below fail before anything is created or sent,
 	// so they are tagged notAttempted and the caller refunds their rate slot
 	// (#2102). Everything past them can fail with the delivery already in
@@ -818,6 +818,10 @@ func deliverWatchEvent(taskID, line string) error {
 	t, err := task.GetTask(taskID)
 	if err != nil {
 		return notAttempted(fmt.Errorf("failed to load task: %w", err))
+	}
+	if t.GenerationID != taskGenerationID {
+		return notAttempted(fmt.Errorf(
+			"task %s was replaced before its watcher event could be delivered", taskID))
 	}
 	if !t.Enabled {
 		return notAttempted(fmt.Errorf("task %s is disabled", taskID))

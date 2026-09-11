@@ -932,7 +932,7 @@ func TestWatcherDrainLogsExpiryCountWhenStoppedMidBackoff(t *testing.T) {
 	// fails forever, so the drainer sits in the stop-aware backoff sleep — the
 	// exact window the stop has to land in.
 	var attempts atomic.Int64
-	s.deliver = func(taskID, line string) error {
+	s.deliver = func(taskID, _ string, line string) error {
 		attempts.Add(1)
 		return errors.New("target unreachable (outage)")
 	}
@@ -983,7 +983,7 @@ func TestWatcherDrain_StaleCursorSuccessResetsBackoff(t *testing.T) {
 	attempts := 0
 	hookErr := make(chan error, 1)
 	postSuccessFailure := make(chan struct{})
-	w = newRateSlotWatcher(t, taskID, func(_, _ string) error {
+	w = newRateSlotWatcher(t, taskID, func(_, _, _ string) error {
 		attempts++
 		switch attempts {
 		case 1, 2:
@@ -1051,7 +1051,7 @@ type flakyDeliver struct {
 	success []string
 }
 
-func (d *flakyDeliver) deliver(taskID, line string) error {
+func (d *flakyDeliver) deliver(taskID, _ string, line string) error {
 	if !d.healed.Load() {
 		return errors.New("target unreachable (outage)")
 	}
