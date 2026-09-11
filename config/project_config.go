@@ -305,8 +305,9 @@ type checkoutMarkerReadResult struct {
 }
 
 type checkoutMarkerReadFlight struct {
-	done   chan struct{}
-	result checkoutMarkerReadResult
+	done              chan struct{}
+	result            checkoutMarkerReadResult
+	beforeWakeForTest func()
 }
 
 // checkoutMarkerReadFlights bounds an unavailable marker path to one
@@ -320,12 +321,21 @@ func checkoutMarkerRead(path string) *checkoutMarkerReadFlight {
 	if loaded {
 		return actual.(*checkoutMarkerReadFlight)
 	}
-	go func() {
-		flight.result.id, flight.result.exists, flight.result.err = readCheckoutID(path)
-		close(flight.done)
-		checkoutMarkerReadFlights.Delete(path)
-	}()
+	go completeCheckoutMarkerRead(path, flight)
 	return flight
+}
+
+func completeCheckoutMarkerRead(path string, flight *checkoutMarkerReadFlight) {
+	flight.result.id, flight.result.exists, flight.result.err = readCheckoutID(path)
+	// Remove the completed result before publishing it. A waiter awakened by
+	// done may immediately re-probe after a checkout replacement; leaving this
+	// flight discoverable until after close would let that revalidation consume
+	// the old checkout's marker result.
+	checkoutMarkerReadFlights.CompareAndDelete(path, flight)
+	if flight.beforeWakeForTest != nil {
+		flight.beforeWakeForTest()
+	}
+	close(flight.done)
 }
 
 func projectForWorkspace(root string) (Project, bool, error) {

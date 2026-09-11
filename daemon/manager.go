@@ -246,10 +246,10 @@ type Manager struct {
 	// every ApplyConfig. That boundary covers global and project-scoped live
 	// writes alike; guarded by mu.
 	rootProgramDriftConfigEpoch uint64
-	// Async command inspections are named by workspace and joined after the poll
-	// exits, so every Add precedes Wait. The map is guarded by mu.
+	// Async inspection state: consumers may join; shutdown abandons uncancellable reads.
 	rootProgramDriftInFlight map[string]int
 	rootProgramDriftWG       sync.WaitGroup
+	rootProgramDriftStopping bool
 	// Transcript probe overrides are manager-local and set only before the
 	// manager is used. Never restore them during cleanup: a timed-out filesystem
 	// inspection may outlive both its caller and the joined poll loop (#4212).

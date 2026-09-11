@@ -56,6 +56,11 @@ func drainDaemon(
 	// during their deferred teardown.
 	close(stopCh)
 	wg.Wait()
+	// The poll is out, so no new root-program inspection can start. Those reads
+	// are side-effect-free and may be blocked forever in uncancellable filesystem
+	// I/O: discard any late result, but never make shutdown wait for the reader.
+	// Active result consumers (notably tests) join explicitly.
+	m.abandonRootProgramDriftInspectionsForShutdown()
 	// The poll loop is out, so no further root-agent create can be launched; wait
 	// for one that already is (#3721). JOINED, never cancelled — a create torn
 	// down mid-provision is the half-created session the always-ensure loop has no
@@ -64,10 +69,6 @@ func drainDaemon(
 	// it. This is also what the poll goroutine's own wg.Wait did while the create
 	// still ran on it.
 	m.waitRootAgentCreatesForShutdown()
-	// Root-program drift inspections also run off the poll goroutine. Join them
-	// after the poll has stopped launching new ones, so neither a normal resolver
-	// tail nor a deliberately single-flighted stalled read outlives its Manager.
-	m.waitRootProgramDriftInspectionsForShutdown()
 	// RPCs and the poll are gone, and root creates (which can launch a final
 	// conversation capture) are joined. No detached durable writer may now be
 	// admitted; let pre-destructive and permanently stalled work stand down, and

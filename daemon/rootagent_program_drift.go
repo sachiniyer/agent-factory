@@ -98,7 +98,8 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 // launchAdoptedRootProgramResolution gives every asynchronous inspection one
 // owner: the Manager. A normal read may finish after its ensure pass returns,
 // while an uncancellable filesystem read may remain parked indefinitely; both
-// stay joinable until their actual worker exits.
+// stay joinable by result consumers until their actual worker exits. Daemon
+// shutdown abandons these read-only results instead of joining the parked read.
 func (m *Manager) launchAdoptedRootProgramResolution(
 	repo *config.RepoContext,
 	repoID, key, workspace string,
@@ -139,8 +140,9 @@ func (m *Manager) waitRootProgramDriftInspections() {
 	m.rootProgramDriftWG.Wait()
 }
 
-func (m *Manager) waitRootProgramDriftInspectionsForShutdown() {
+func (m *Manager) abandonRootProgramDriftInspectionsForShutdown() {
 	m.mu.Lock()
+	m.rootProgramDriftStopping = true
 	pending := make([]string, 0, len(m.rootProgramDriftInFlight))
 	count := 0
 	for workspace, inFlight := range m.rootProgramDriftInFlight {
@@ -150,10 +152,9 @@ func (m *Manager) waitRootProgramDriftInspectionsForShutdown() {
 	m.mu.Unlock()
 	if count > 0 {
 		sort.Strings(pending)
-		m.info().Printf("waiting for %d in-flight root-agent program inspection(s) before shutting down (%s); an inspection is never abandoned — one stalled on a checkout that does not answer will hold shutdown until it does (#4087)",
+		m.info().Printf("abandoning %d in-flight root-agent program inspection(s) during shutdown (%s); their read-only results will be discarded and an unresponsive checkout will not hold process exit open (#4087)",
 			count, strings.Join(pending, ", "))
 	}
-	m.waitRootProgramDriftInspections()
 }
 
 func rootProgramDriftNeedsInspection(profile config.RootAgent, identity *resolvedProjectRoot) bool {
@@ -239,6 +240,10 @@ func verifyAdoptedRootProgramCheckout(identity *resolvedProjectRoot) error {
 
 func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, checkoutID, configuredProgram string, resolveErr error, inst *session.Instance, evidence session.RuntimeProgramEvidence) {
 	m.mu.Lock()
+	if m.rootProgramDriftStopping {
+		m.mu.Unlock()
+		return
+	}
 	if st.programDriftResolvingEpoch != resolutionEpoch {
 		m.mu.Unlock()
 		return
