@@ -28,7 +28,7 @@ on:
     types: [completed]
   # GitHub has intermittently omitted that terminal workflow_run event. Reconcile
   # only stale decisions that name a PR Validation blocker; the helper coalesces
-  # by PR/head and caps each sweep at ten evaluations (#4242).
+  # by PR/head and rotates through at most ten head inspections per sweep (#4242).
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
@@ -218,7 +218,9 @@ jobs:
         # AUTO_GATE_ENABLED, because deleting a ref is the gate writing to this
         # repository on its own, which is the thing that switch turns off. With
         # it off nothing merges, so nothing new leaks either.
-        if: always() && vars.AUTO_GATE_ENABLED == 'true'
+        # The schedule exists only to reconcile required checks. Do not spend its
+        # deliberately bounded API budget on unrelated branch housekeeping.
+        if: always() && vars.AUTO_GATE_ENABLED == 'true' && github.event_name != 'schedule'
         uses: actions/github-script@v8
         with:
           github-token: ${{ github.token }}

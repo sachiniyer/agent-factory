@@ -516,6 +516,10 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.match(workflow, /workflow_run:\s+workflows: \[PR Validation\]\s+types: \[completed\]/);
   assert.match(workflow, /schedule:\s+- cron: "\*\/5 \* \* \* \*"/);
   assert.match(helper, /context\.eventName === "schedule"[\s\S]*?listRequiredCheckReevaluationTargets/);
+  assert.match(
+    workflow,
+    /if: always\(\) && vars\.AUTO_GATE_ENABLED == 'true' && github\.event_name != 'schedule'/,
+  );
   assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
   assert.match(
     workflow,
@@ -5882,6 +5886,68 @@ test("scheduled reconciliation wakes a Build-blocked decision once after validat
   assert.deepEqual(unrelated, [], "PR Validation completion cannot wake an unrelated blocker");
 });
 
+test("scheduled reconciliation treats a same-second check completion as newer", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          reconciliationDecision({
+            prNumber: 1465,
+            headSha: HEAD_SHA,
+            // Decision stamps preserve milliseconds, while GitHub truncates
+            // check-run completed_at. The completion happened after this
+            // evaluation, but both API values name the same second.
+            evaluatedAt: "2026-07-09T21:13:58.750Z",
+          }),
+          reconciliationRequiredCheck("Build", "2026-07-09T21:13:58Z"),
+        ],
+      },
+    }),
+    context,
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+});
+
+test("scheduled reconciliation rotates a ten-head inspection window", async () => {
+  const pulls = [];
+  const checksByHead = {};
+  for (let number = 1; number <= 23; number += 1) {
+    const sha = number.toString(16).padStart(40, "0");
+    pulls.push(reconciliationPull(number, sha));
+    checksByHead[sha] = [
+      reconciliationDecision({
+        prNumber: number,
+        headSha: sha,
+        evaluatedAt: "2026-07-09T20:00:00Z",
+      }),
+      reconciliationRequiredCheck("Build", "2026-07-09T21:00:00Z"),
+    ];
+  }
+
+  const inspectedBySweep = [];
+  for (let window = 0; window < 3; window += 1) {
+    const inspectedHeads = [];
+    await autoGate.resolveTargets({
+      github: scheduledReconciliationGithub({ pulls, checksByHead, inspectedHeads }),
+      context: { ...fakeContext(), eventName: "schedule" },
+      core: fakeCore(),
+      reconciliationNowMs: window * 5 * 60 * 1000,
+    });
+    assert.ok(inspectedHeads.length <= 10, "one sweep must make at most ten head reads");
+    inspectedBySweep.push(...inspectedHeads);
+  }
+
+  assert.equal(new Set(inspectedBySweep).size, 23, "later sweeps inspect every deferred head");
+});
+
 test("scheduled reconciliation caps one sweep at ten PRs", async () => {
   const pulls = [];
   const checksByHead = {};
@@ -5905,6 +5971,7 @@ test("scheduled reconciliation caps one sweep at ten PRs", async () => {
     github: scheduledReconciliationGithub({ pulls, checksByHead }),
     context: { ...fakeContext(), eventName: "schedule" },
     core: fakeCore(),
+    reconciliationNowMs: 0,
   });
 
   assert.equal(targets.length, 10, "runner work is bounded even when more stale PRs exist");
@@ -9392,12 +9459,13 @@ test("a sweep that stops at its page cap says so", async () => {
   assert.deepEqual(wholeCore.warnings, []);
 });
 
-test("the gate runs the sweep once per run, whether or not anything merged", () => {
+test("the gate runs the sweep once per non-reconciliation run", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
 
-  // The resolver job, which every subscribed event reaches — NOT apply-gate,
-  // which is a per-aggregate-head matrix that does not run at all when nothing
-  // was invalidated, and would sweep once per head when it does.
+  // The resolver job — NOT apply-gate, which is a per-aggregate-head matrix that
+  // does not run at all when nothing was invalidated, and would sweep once per
+  // head when it does. The scheduled reconciliation is the one exception: its
+  // quota is reserved for repairing required-check decisions.
   const resolver = workflow.slice(
     workflow.indexOf("  auto-gate:"),
     workflow.indexOf("  invalidate-gate:"),
@@ -9411,7 +9479,10 @@ test("the gate runs the sweep once per run, whether or not anything merged", () 
   // Housekeeping must never red the gate, and must still run on a gate run whose
   // evaluation failed — but deleting a ref is the gate writing to the repository
   // on its own, so the switch that turns that off has to reach it.
-  assert.match(resolver, /if: always\(\) && vars\.AUTO_GATE_ENABLED == 'true'\n\s+uses: actions\/github-script/);
+  assert.match(
+    resolver,
+    /if: always\(\) && vars\.AUTO_GATE_ENABLED == 'true' && github\.event_name != 'schedule'\n\s+uses: actions\/github-script/,
+  );
   assert.match(resolver, /catch \(error\) \{[\s\S]{0,300}core\.warning\(/);
 });
 
@@ -11442,18 +11513,18 @@ function reconciliationDecision({
   };
 }
 
-function scheduledReconciliationGithub({ pulls, checksByHead }) {
-  const listForRef = function listForRef() {};
+function scheduledReconciliationGithub({ pulls, checksByHead, inspectedHeads = [] }) {
   return {
     rest: {
-      checks: { listForRef },
+      checks: {
+        listForRef: async (options) => {
+          inspectedHeads.push(options.ref);
+          return { data: { check_runs: checksByHead[options.ref] || [] } };
+        },
+      },
       pulls: {
         list: async () => ({ data: pulls, headers: {} }),
       },
-    },
-    paginate: async (fn, options) => {
-      assert.equal(fn, listForRef);
-      return checksByHead[options.ref] || [];
     },
   };
 }

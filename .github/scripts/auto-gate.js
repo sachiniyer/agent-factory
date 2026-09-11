@@ -2311,6 +2311,8 @@ const GATE_WORKFLOW = "auto-gate.yml";
 // decisions. The next sweep drains the rest.
 const REQUIRED_CHECK_REEVALUATION_LIMIT = 10;
 const REQUIRED_CHECK_RECONCILIATION_SCAN_LIMIT = 100;
+const REQUIRED_CHECK_RECONCILIATION_HEAD_LIMIT = 10;
+const REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
 const PR_VALIDATION_REQUIRED_CHECK_NAMES = ["Build", "Lint"];
 
 // Reruns the successor of an accepted update, whichever lane failed to finish
@@ -3448,7 +3450,14 @@ function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead }) {
       }
       return Math.max(latest, parseTimestamp(check.completed_at || check.updated_at) || 0);
     }, 0);
-    if (completedAt <= evaluatedAt) {
+    // Check-run timestamps lose milliseconds in GitHub's API. A completion
+    // later in the decision's second otherwise looks older forever, because no
+    // second terminal transition will arrive. A same-second tie therefore earns
+    // one conservative reevaluation; its new stamp makes later sweeps skip it.
+    if (
+      completedAt === 0 ||
+      Math.floor(completedAt / 1000) < Math.floor(evaluatedAt / 1000)
+    ) {
       continue;
     }
     candidates.push({
@@ -3471,7 +3480,56 @@ function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead }) {
     .map(({ prNumber, headSha, decisionKey }) => ({ prNumber, headSha, decisionKey }));
 }
 
-async function listRequiredCheckReevaluationTargets({ github, context, core }) {
+function requiredCheckReconciliationWindow(pulls, nowMs) {
+  const heads = new Map();
+  for (const pull of pulls || []) {
+    const headSha = normalizeHeadSha(pull?.head?.sha || pull?.headRefOid);
+    const baseRefName = pull?.base?.ref || pull?.baseRefName;
+    const state = String(pull?.state || "").toLowerCase();
+    const prNumber = Number(pull?.number);
+    if (
+      !headSha ||
+      !Number.isSafeInteger(prNumber) ||
+      prNumber <= 0 ||
+      state !== "open" ||
+      baseRefName !== "master"
+    ) {
+      continue;
+    }
+    const existing = heads.get(headSha);
+    if (!existing || prNumber < existing.prNumber) {
+      heads.set(headSha, { headSha, prNumber });
+    }
+  }
+
+  const orderedHeads = [...heads.values()].sort(
+    (left, right) => left.prNumber - right.prNumber || left.headSha.localeCompare(right.headSha),
+  );
+  if (orderedHeads.length === 0) {
+    return { pulls: [], heads: [], totalHeads: 0, windowIndex: 0, windowCount: 0 };
+  }
+  const windowCount = Math.ceil(
+    orderedHeads.length / REQUIRED_CHECK_RECONCILIATION_HEAD_LIMIT,
+  );
+  const slot = Math.floor(nowMs / REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS);
+  const windowIndex = ((slot % windowCount) + windowCount) % windowCount;
+  const selectedHeads = orderedHeads.slice(
+    windowIndex * REQUIRED_CHECK_RECONCILIATION_HEAD_LIMIT,
+    (windowIndex + 1) * REQUIRED_CHECK_RECONCILIATION_HEAD_LIMIT,
+  );
+  const selected = new Set(selectedHeads.map(({ headSha }) => headSha));
+  return {
+    pulls: (pulls || []).filter((pull) =>
+      selected.has(normalizeHeadSha(pull?.head?.sha || pull?.headRefOid)),
+    ),
+    heads: selectedHeads.map(({ headSha }) => headSha),
+    totalHeads: orderedHeads.length,
+    windowIndex,
+    windowCount,
+  };
+}
+
+async function listRequiredCheckReevaluationTargets({ github, context, core, nowMs }) {
   const { owner, repo } = context.repo;
   const listedPulls = await retryRead(
     "could not list open PRs for required-check reconciliation",
@@ -3493,15 +3551,16 @@ async function listRequiredCheckReevaluationTargets({ github, context, core }) {
         `${REQUIRED_CHECK_RECONCILIATION_SCAN_LIMIT} open master PRs.`,
     );
   }
-  const heads = [...new Set(
-    pulls
-      .map((pull) => normalizeHeadSha(pull?.head?.sha || pull?.headRefOid))
-      .filter(Boolean),
-  )];
+  // Head reads dominate the fallback's quota cost. Walk one stable, rotating
+  // PR-number window per schedule slot so a burst cannot consume the API budget
+  // needed by ordinary gate events. Deferred heads remain blocked; if the set
+  // stays stable, each appears in a later five-minute window.
+  const window = requiredCheckReconciliationWindow(pulls, nowMs);
   const checkRunsByHead = new Map();
-  for (const headSha of heads) {
-    const checkRuns = await retryRead(`could not read reconciliation checks at ${headSha}`, () =>
-      github.paginate(github.rest.checks.listForRef, {
+  for (const headSha of window.heads) {
+    const response = await retryRead(
+      `could not read reconciliation checks at ${headSha}`,
+      () => github.rest.checks.listForRef({
         owner,
         repo,
         ref: headSha,
@@ -3509,10 +3568,13 @@ async function listRequiredCheckReevaluationTargets({ github, context, core }) {
         per_page: 100,
       }),
     );
-    checkRunsByHead.set(headSha, checkRuns);
+    checkRunsByHead.set(headSha, response?.data?.check_runs || []);
   }
 
-  const stale = requiredCheckReevaluationCandidates({ pulls, checkRunsByHead });
+  const stale = requiredCheckReevaluationCandidates({
+    pulls: window.pulls,
+    checkRunsByHead,
+  });
   const targets = stale.slice(0, REQUIRED_CHECK_REEVALUATION_LIMIT);
   if (stale.length > targets.length) {
     core.warning(
@@ -3521,8 +3583,9 @@ async function listRequiredCheckReevaluationTargets({ github, context, core }) {
     );
   }
   core.notice(
-    `Required-check reconciliation found ${stale.length} stale decision(s) and selected ` +
-      `${targets.length}.`,
+    `Required-check reconciliation inspected window ${window.windowIndex + 1}/` +
+      `${window.windowCount} (${window.heads.length}/${window.totalHeads} head(s)), found ` +
+      `${stale.length} stale decision(s), and selected ${targets.length}.`,
   );
   return targets;
 }
@@ -3532,9 +3595,15 @@ async function resolveTargets({
   headPollAttempts = 6,
   headPollDelayMs = 5000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  reconciliationNowMs = Date.now(),
 }) {
   if (context.eventName === "schedule") {
-    return listRequiredCheckReevaluationTargets({ github, context, core });
+    return listRequiredCheckReevaluationTargets({
+      github,
+      context,
+      core,
+      nowMs: reconciliationNowMs,
+    });
   }
   const numbers = [];
   const payload = context.payload;
