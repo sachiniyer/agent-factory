@@ -19,6 +19,7 @@ package testguard
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -29,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
 )
@@ -135,9 +137,13 @@ func ConfigTripwire() func() error {
 }
 
 const (
-	envMarkerHome    = "AF_HOME"
-	envMarkerTestRun = "AF_TESTGUARD_RUN"
+	envMarkerHome         = "AF_HOME"
+	envMarkerTestRun      = "AF_TESTGUARD_RUN"
+	tmuxTripwireWaitDelay = 250 * time.Millisecond
 )
+
+// A var only so the wedge test can shorten it; production never reassigns it.
+var tmuxTripwireTimeout = 10 * time.Second
 
 var (
 	sandboxRunsMu sync.Mutex
@@ -192,7 +198,11 @@ func ambientAFSessions() map[string]bool {
 // False covers a missing marker, malformed output, and a query failure: none is
 // affirmative evidence that this test run owns the session.
 func ambientAFSessionMarker(name, marker string) (string, bool) {
-	out, err := exec.Command("tmux", "show-environment", "-t", "="+name, marker).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxTripwireTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tmux", "show-environment", "-t", "="+name, marker)
+	cmd.WaitDelay = tmuxTripwireWaitDelay
+	out, err := cmd.Output()
 	if err != nil {
 		return "", false
 	}
@@ -205,7 +215,7 @@ func ambientAFSessionMarker(name, marker string) (string, bool) {
 }
 
 func ambientAFSessionOwned(name string, ownedRuns map[string]bool) bool {
-	for _, marker := range []string{envMarkerHome, envMarkerTestRun} {
+	for _, marker := range []string{envMarkerTestRun, envMarkerHome} {
 		if value, readable := ambientAFSessionMarker(name, marker); readable && ownedRuns[value] {
 			return true
 		}

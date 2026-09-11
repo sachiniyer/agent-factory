@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // sandbox points the tripwire's ambient resolution at a temp dir and returns
@@ -344,6 +345,9 @@ show-environment)
     printf '%s\n' 'server became unreachable' >&2
     exit 1
     ;;
+  =af_wedged:*)
+    exec /bin/sleep 60
+    ;;
   *) exit 2 ;;
   esac
   ;;
@@ -361,6 +365,24 @@ esac
 			t.Fatalf("mark fake tmux ready: %v", err)
 		}
 	}, ownerFile
+}
+
+// TestAmbientAFSessionMarker_BoundsUnreadableQuery keeps the tripwire from
+// wedging TestMain after the package suite has already finished. A timeout is
+// ownership-unknown, never evidence that this run owns the session.
+func TestAmbientAFSessionMarker_BoundsUnreadableQuery(t *testing.T) {
+	fakeTripwireTmux(t)
+	previous := tmuxTripwireTimeout
+	tmuxTripwireTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { tmuxTripwireTimeout = previous })
+
+	started := time.Now()
+	if value, readable := ambientAFSessionMarker("af_wedged", envMarkerHome); readable {
+		t.Fatalf("wedged ownership query returned readable marker %q", value)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("wedged ownership query returned after %s, want the local deadline", elapsed)
+	}
 }
 
 // TestTmuxTripwire_AttributesNewSessionsBySandboxHome pins both sides of the
