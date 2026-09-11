@@ -376,7 +376,11 @@ export class TerminalSoftInput {
   }
   private queueTrailingFlush(range: CompositionRange): void {
     const trailingLength = range.trailingLength ?? 0;
-    if (!trailingLength || !range.frozenText || range.trailingFlush) return;
+    // A queued release (set by a deleteContentBackward Backspace before the
+    // compositionend setTimeout fires) already owns the trailing text: it sends
+    // queuedInput.beforeText + emissions, i.e. the trailing plus the DEL that
+    // erases it. Flushing here could only re-emit text that was just deleted.
+    if (!trailingLength || !range.frozenText || range.trailingFlush || range.queuedInput) return;
     const text = range.frozenText.slice(-trailingLength);
     const flush: TrailingFlush = { text };
     range.trailingFlush = flush;
