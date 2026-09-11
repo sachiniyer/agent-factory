@@ -1090,7 +1090,12 @@ export class AppShell {
     // in creation order and close the disclosure after syncPhone reopened it.
     this.appControls = appbarControls([
       ...(this.installEl ? [this.installEl] : []), themeToggle, disconnect,
-    ], this.phone, this.captureNewTabCancelReturn);
+    ], this.phone, this.captureNewTabCancelReturn, () => {
+      // The phone disclosure owns the carried desktop actions. A user dismissal
+      // retires that state, unlike layout and picker-return programmatic closes.
+      const slot = this.terminalChrome?.newTabSlot;
+      if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.close();
+    });
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     disconnect.addEventListener("click", () => {
       this.appControls.close();

@@ -8,7 +8,7 @@ import type { ITheme } from "@xterm/xterm";
 
 /** A disclosure owns only visibility and focus; callers own the operations.
  * Responsive callers may keep the panel inline by returning false from enabled. */
-export function actionsDisclosure(label = "Session actions", enabled = () => true) {
+export function actionsDisclosure(label = "Session actions", enabled = () => true, onDismiss = () => {}) {
   const trigger = h("button", { type: "button", class: "af-term-more" }, h("span", { class: "af-term-more-label" }, "Actions"), h("span", { class: "af-term-more-compact", ariaHidden: "true" }, "…"));
   trigger.setAttribute("aria-label", label);
   trigger.setAttribute("aria-expanded", "false");
@@ -17,7 +17,7 @@ export function actionsDisclosure(label = "Session actions", enabled = () => tru
   panel.hidden = true;
   const el = h("div", { class: "af-term-more-wrap" }, trigger, panel);
   const outside = (event: MouseEvent) => {
-    if (!el.contains(event.target as Node)) close();
+    if (!el.contains(event.target as Node)) dismiss();
   };
   const close = (restoreFocus = false) => {
     panel.hidden = enabled();
@@ -25,18 +25,23 @@ export function actionsDisclosure(label = "Session actions", enabled = () => tru
     document.removeEventListener("mousedown", outside);
     if (restoreFocus) trigger.focus();
   };
+  // User dismissal can retire carried state; layout/picker closes must not.
+  const dismiss = (restoreFocus = false) => {
+    close(restoreFocus);
+    onDismiss();
+  };
   const open = () => {
     if (!enabled()) return;
     panel.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
     document.addEventListener("mousedown", outside);
   };
-  trigger.addEventListener("click", () => panel.hidden ? open() : close());
+  trigger.addEventListener("click", () => panel.hidden ? open() : dismiss());
   el.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && enabled() && !panel.hidden) {
       event.preventDefault();
       event.stopPropagation();
-      close(true);
+      dismiss(true);
     }
   });
   return { el, panel, trigger, open, close, dispose: close };
@@ -48,8 +53,9 @@ export function appbarControls(
   controls: HTMLElement[],
   phone = window.matchMedia("(max-width: 768px)"),
   beforeSync: () => void = () => {},
+  onDismiss: () => void = () => {},
 ) {
-  const menu = actionsDisclosure("More app controls", () => phone.matches);
+  const menu = actionsDisclosure("More app controls", () => phone.matches, onDismiss);
   menu.el.className = "af-appbar-tools-wrap";
   menu.trigger.className = "af-appbar-more";
   menu.trigger.replaceChildren(icon("ellipsis"));

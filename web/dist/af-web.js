@@ -7200,7 +7200,8 @@ function icon(name, className = "") {
 }
 
 // src/components.ts
-function actionsDisclosure(label = "Session actions", enabled = () => true) {
+function actionsDisclosure(label = "Session actions", enabled = () => true, onDismiss = () => {
+}) {
   const trigger = h("button", { type: "button", class: "af-term-more" }, h("span", { class: "af-term-more-label" }, "Actions"), h("span", { class: "af-term-more-compact", ariaHidden: "true" }, "\u2026"));
   trigger.setAttribute("aria-label", label);
   trigger.setAttribute("aria-expanded", "false");
@@ -7209,7 +7210,7 @@ function actionsDisclosure(label = "Session actions", enabled = () => true) {
   panel.hidden = true;
   const el2 = h("div", { class: "af-term-more-wrap" }, trigger, panel);
   const outside = (event) => {
-    if (!el2.contains(event.target)) close();
+    if (!el2.contains(event.target)) dismiss();
   };
   const close = (restoreFocus = false) => {
     panel.hidden = enabled();
@@ -7217,25 +7218,30 @@ function actionsDisclosure(label = "Session actions", enabled = () => true) {
     document.removeEventListener("mousedown", outside);
     if (restoreFocus) trigger.focus();
   };
+  const dismiss = (restoreFocus = false) => {
+    close(restoreFocus);
+    onDismiss();
+  };
   const open = () => {
     if (!enabled()) return;
     panel.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
     document.addEventListener("mousedown", outside);
   };
-  trigger.addEventListener("click", () => panel.hidden ? open() : close());
+  trigger.addEventListener("click", () => panel.hidden ? open() : dismiss());
   el2.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && enabled() && !panel.hidden) {
       event.preventDefault();
       event.stopPropagation();
-      close(true);
+      dismiss(true);
     }
   });
   return { el: el2, panel, trigger, open, close, dispose: close };
 }
 function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"), beforeSync = () => {
+}, onDismiss = () => {
 }) {
-  const menu = actionsDisclosure("More app controls", () => phone.matches);
+  const menu = actionsDisclosure("More app controls", () => phone.matches, onDismiss);
   menu.el.className = "af-appbar-tools-wrap";
   menu.trigger.className = "af-appbar-more";
   menu.trigger.replaceChildren(icon("ellipsis"));
@@ -15581,7 +15587,10 @@ var AppShell = class {
       ...this.installEl ? [this.installEl] : [],
       themeToggle,
       disconnect2
-    ], this.phone, this.captureNewTabCancelReturn);
+    ], this.phone, this.captureNewTabCancelReturn, () => {
+      const slot = this.terminalChrome?.newTabSlot;
+      if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.close();
+    });
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     disconnect2.addEventListener("click", () => {
       this.appControls.close();

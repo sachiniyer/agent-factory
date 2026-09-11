@@ -133,3 +133,29 @@ test("session-first applies to selected terminals at phone widths, regardless of
     }
   }
 });
+
+for (const dismissal of ["Escape", "toggle", "outside"]) {
+  test(`explicit phone ${dismissal} clears carried session state, responsive closes do not`, () => {
+    const session = components.actionsDisclosure();
+    const query = media(1280);
+    const outer = components.appbarControls([], query, () => {}, () => session.close());
+    session.open();
+    Object.assign(query, { matches: true });
+    query.dispatchEvent(new Event("change"));
+    assert.equal(session.trigger.getAttribute("aria-expanded"), "true", "resize is not a user dismissal");
+    outer.open();
+    outer.close();
+    assert.equal(session.trigger.getAttribute("aria-expanded"), "true", "picker return must preserve user-opened state");
+    outer.trigger.click(); // Native Enter/Space activation emits click without mousedown.
+    if (dismissal === "Escape") outer.el.dispatchEvent(Object.assign(new Event("keydown"), { key: "Escape" }));
+    else if (dismissal === "toggle") outer.trigger.click();
+    else doc.dispatchEvent(new Event("mousedown"));
+    assert.equal(outer.trigger.getAttribute("aria-expanded"), "false");
+    assert.equal(session.trigger.getAttribute("aria-expanded"), "false");
+    Object.assign(query, { matches: false });
+    query.dispatchEvent(new Event("change"));
+    assert.equal(session.trigger.getAttribute("aria-expanded"), "false", "dismissed state must not return on desktop");
+    outer.dispose();
+    session.dispose();
+  });
+}
