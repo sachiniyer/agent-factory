@@ -286,35 +286,91 @@ func TestSandboxTmux_SetsAndRestores(t *testing.T) {
 	}
 }
 
-// TestTmuxTripwire_FiresOnLeakedSession exercises the tripwire against the
-// private server IsolateTmux provides, so the test itself is hermetic: the
-// "ambient" server the tripwire snapshots is the throwaway one.
-func TestTmuxTripwire_FiresOnLeakedSession(t *testing.T) {
-	IsolateTmux(t) // skips when tmux is unavailable
+// fakeTripwireTmux installs a hermetic tmux command that exposes one preexisting
+// session at snapshot time and four new sessions after markReady. It performs no
+// tmux operation and never contacts the ambient server.
+func fakeTripwireTmux(t *testing.T) (markReady func(), ownerFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	readyFile := filepath.Join(dir, "ready")
+	ownerFile = filepath.Join(dir, "owner")
+	script := `#!/bin/sh
+case "$1" in
+list-sessions)
+  printf '%s\n' af_preexisting
+  if [ -f "$AF_TRIPWIRE_READY_FILE" ]; then
+    printf '%s\n' af_owned af_foreign af_unmarked af_unreadable
+  fi
+  ;;
+show-environment)
+  case "$3" in
+  =af_owned)
+    IFS= read -r owner < "$AF_TRIPWIRE_OWNER_FILE"
+    printf 'AF_HOME=%s\n' "$owner"
+    ;;
+  =af_foreign)
+    printf '%s\n' 'AF_HOME=/real/agent-factory-home'
+    ;;
+  =af_unmarked)
+    printf '%s\n' 'unknown variable: AF_HOME' >&2
+    exit 1
+    ;;
+  =af_unreadable)
+    printf '%s\n' 'server became unreachable' >&2
+    exit 1
+    ;;
+  *) exit 2 ;;
+  esac
+  ;;
+*) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AF_TRIPWIRE_READY_FILE", readyFile)
+	t.Setenv("AF_TRIPWIRE_OWNER_FILE", ownerFile)
+	return func() {
+		if err := os.WriteFile(readyFile, nil, 0644); err != nil {
+			t.Fatalf("mark fake tmux ready: %v", err)
+		}
+	}, ownerFile
+}
 
+// TestTmuxTripwire_AttributesNewSessionsBySandboxHome pins both sides of the
+// ownership boundary. Arrival during the package window is not attribution: an
+// AF_HOME matching this run is reported, while a different, absent, or
+// unreadable marker is not proof that the run owns the session (#4194).
+func TestTmuxTripwire_AttributesNewSessionsBySandboxHome(t *testing.T) {
+	markReady, ownerFile := fakeTripwireTmux(t)
 	verify := TmuxTripwire()
-	if err := verify(); err != nil {
-		t.Fatalf("tripwire fired with no sessions created: %v", err)
+	restoreHome := SandboxHome()
+	sandboxHome := os.Getenv("AGENT_FACTORY_HOME")
+	if err := os.WriteFile(ownerFile, []byte(sandboxHome+"\n"), 0644); err != nil {
+		restoreHome()
+		t.Fatalf("record sandbox home: %v", err)
 	}
-
-	const leak = "af_testguard_tripwire_leak"
-	if out, err := exec.Command("tmux", "new-session", "-d", "-s", leak, "sleep", "60").CombinedOutput(); err != nil {
-		t.Skipf("cannot start tmux session on private server: %v: %s", err, out)
-	}
+	markReady()
+	// Mirror TestMain: the sandbox is restored before the tripwire verifies.
+	restoreHome()
 
 	err := verify()
 	if err == nil {
-		t.Fatal("tripwire did not fire on a leaked af_ session")
+		t.Fatal("tripwire did not report the new session owned by this test run")
 	}
-	if !strings.Contains(err.Error(), leak) {
-		t.Fatalf("tripwire error should name the leaked session %q; got: %v", leak, err)
+	if !strings.Contains(err.Error(), "af_owned") {
+		t.Fatalf("tripwire did not name the session carrying this run's AF_HOME marker: %v", err)
 	}
-
-	if err := exec.Command("tmux", "kill-session", "-t", "="+leak).Run(); err != nil {
-		t.Fatalf("kill leaked session: %v", err)
+	for _, notOwned := range []string{"af_preexisting", "af_foreign", "af_unmarked", "af_unreadable"} {
+		if strings.Contains(err.Error(), notOwned) {
+			t.Fatalf("tripwire attributed %s without proof that this run owns it: %v", notOwned, err)
+		}
 	}
-	if err := verify(); err != nil {
-		t.Fatalf("tripwire fired after the session was cleaned up: %v", err)
+	for _, safeText := range []string{"live Agent Factory install or another concurrent run", "DO NOT KILL IT", "AF_DISABLE_TMUX_TRIPWIRE=1"} {
+		if !strings.Contains(err.Error(), safeText) {
+			t.Fatalf("tripwire diagnostic must contain %q, got: %v", safeText, err)
+		}
 	}
 }
 
