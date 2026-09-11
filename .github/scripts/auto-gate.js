@@ -4234,7 +4234,9 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
 // The containment test is a compare against the base BRANCH rather than a
 // remembered sha, for the same reason #3752 reads the branch: the question is
 // whether that parent is base history now, not whether it matched something the
-// gate recorded earlier.
+// gate recorded earlier. The returned oid/date are the terminal content head;
+// evidenceHeadOids also retains every verified first parent, nearest first, so
+// evidence posted between consecutive gate updates is not walked past (#4239).
 async function updateBranchContentHead({
   github,
   context,
@@ -4443,6 +4445,7 @@ async function updateBranchContentHead({
   let parents = headParents;
   let contentHead = null;
   let chainLength = 0;
+  const evidenceHeadOids = [];
   while (
     chainLength < maxDepth &&
     (await isUpdateBranchMerge(parents)) &&
@@ -4451,13 +4454,19 @@ async function updateBranchContentHead({
     const first = parents[0];
     chainLength += 1;
     contentHead = await readCommit(first.oid, first.committedDate);
+    evidenceHeadOids.push(contentHead.oid);
     mergeOid = contentHead.oid;
     parents = contentHead.parents;
   }
   if (!contentHead) {
     return null;
   }
-  return { oid: contentHead.oid, committedDate: contentHead.committedDate, chainLength };
+  return {
+    oid: contentHead.oid,
+    committedDate: contentHead.committedDate,
+    chainLength,
+    evidenceHeadOids,
+  };
 }
 
 // The Codex finding artifacts a gate must not merge past: those carrying a
@@ -4590,17 +4599,28 @@ async function evaluateCodex({
     headSha: sha,
     contentHead,
   });
-  // A recognised update-branch merge has two valid names for the reviewed PR
-  // content: the current merge commit and the first-parent content head. Accept
-  // either. A fresh review can legitimately name the merge itself, while the
-  // whole point of #4235 is that an earlier review names the unchanged content
-  // head. No other ancestor is admitted here; updateBranchContentHead is the
-  // fail-closed proof that permits the second name.
-  const reviewedHeadShas = [...new Set(
+  // A recognised chain of update-branch merges has one valid evidence name per
+  // tree-proven link: the current merge and every first parent walked on the way
+  // to the terminal content head. A review or unavailability reply may have
+  // landed on any of them between gate updates. No other ancestor is admitted;
+  // updateBranchContentHead's fail-closed proof authorizes every added name.
+  const evidenceHeadOids = Array.isArray(contentHead?.evidenceHeadOids)
+    ? contentHead.evidenceHeadOids
+    : [contentHead?.oid];
+  const evidenceHeadShas = [...new Set(
+    [sha, ...evidenceHeadOids].map(normalizeHeadSha).filter(Boolean),
+  )];
+  // Body links are location prose, not a claim about what Codex reviewed. Keep
+  // their pre-#4239 scope — current and terminal content head — while accepting
+  // every verified intermediate only where GitHub's commit_id authenticates the
+  // artifact's subject. Otherwise a supporting link to an intermediate update
+  // merge can classify an unacknowledged finding as head-bound (#4240).
+  const bodyLinkHeadShas = [...new Set(
     [sha, contentHead?.oid].map(normalizeHeadSha).filter(Boolean),
   )];
-  const artifactBindsToReviewedHead = (artifact) =>
-    reviewedHeadShas.some((headSha) => codexArtifactBindsToHead(artifact, headSha));
+  const artifactBindsToFindingHead = (artifact) =>
+    evidenceHeadShas.includes(String(artifact.commit_id || "").toLowerCase()) ||
+    bodyLinkHeadShas.some((headSha) => codexArtifactBindsToHead(artifact, headSha));
 
   if (headCommitTime == null) {
     reasons.push("last commit timestamp was unavailable, so Codex freshness cannot be verified");
@@ -4652,7 +4672,7 @@ async function evaluateCodex({
   const codexInlineReplies = reviewComments
     .filter((comment) =>
       comment.user?.login === CODEX_REVIEWER && comment.in_reply_to_id &&
-      reviewedHeadShas.includes(String(comment.commit_id || "").toLowerCase()),
+      evidenceHeadShas.includes(String(comment.commit_id || "").toLowerCase()),
     )
     .map((comment) => ({
       ...comment,
@@ -4683,7 +4703,7 @@ async function evaluateCodex({
   // activity and its comment time says nothing about when this review completed.
   const matchingReviewArtifacts = codexReviewArtifacts
     .map((artifact) => {
-      for (const headSha of reviewedHeadShas) {
+      for (const headSha of evidenceHeadShas) {
         const parsed = parseVerdictArtifact(
           artifact,
           headSha,
@@ -4760,7 +4780,7 @@ async function evaluateCodex({
     // Split, because the states need different actions from a reader: silence
     // says request a review, an unparseable review says inspect the artifact, and
     // a stale matching verdict says its review predates this head transition.
-    const namedHead = reviewedHeadShas.find(
+    const namedHead = evidenceHeadShas.find(
       (headSha) =>
         summaryNamesHead(codexReviewArtifacts, headSha) &&
         summaryCorroboration(corroborationArtifacts, headSha, headCurrentSince),
@@ -4809,7 +4829,7 @@ async function evaluateCodex({
   // exactly what #3591 closed for inline findings.
   const findingBlockers = [];
   const headBoundArtifacts = codexReviewArtifacts.filter((artifact) =>
-    artifactBindsToReviewedHead(artifact),
+    artifactBindsToFindingHead(artifact),
   );
   // Newest-wins, with ties broken toward the finding (Codex P1 on #3676). The
   // sort is by timestamp alone and is stable, so two artifacts stamped in the
@@ -4883,7 +4903,10 @@ async function evaluateCodex({
     artifacts: codexReviewArtifacts,
     acknowledgementCandidates: [...comments, ...reviews],
     headSha: sha,
-    headShas: reviewedHeadShas,
+    // Only current/terminal body links classify a finding here. Intermediate
+    // commit_id fields were already excluded above as authenticated assertions;
+    // an intermediate SHA mentioned only in prose remains unbound and blocks.
+    headShas: bodyLinkHeadShas,
     headCommitTime,
   });
   if (unboundFindingArtifacts.length > 0) {
