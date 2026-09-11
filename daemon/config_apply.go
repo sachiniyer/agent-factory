@@ -40,7 +40,10 @@ type ApplyConfigResult struct {
 	// Pending names changed keys this daemon build reads only at startup, so they
 	// take effect on the next daemon start: root_agents / root_agent (their
 	// next-daemon-start contract, carved out pending #2216) and branch_prefix (read
-	// from the FROZEN startup config in the title-reservation helpers).
+	// from the FROZEN startup config in the title-reservation helpers). Save
+	// surfaces append the root-only half of that contract: an already-running root
+	// is adopted as-is, so changing its program, disabling it, or removing its
+	// enabling entry also requires killing it.
 	Pending []string
 	// Warnings are operator/user-facing notices produced while applying (#2480 PR2):
 	// the tokenless-network exposure notice (#2168 — warn, never refuse) and a
@@ -166,7 +169,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// branch_prefix rides along in the swapped config, but its runtime consumers
 	// read frozen m.cfg so an unrelated apply cannot advance that generation behind
 	// the next-start notice.
-	m.live.Store(newCfg)
+	m.applyLiveConfigAndInvalidateRootProgramDrift(newCfg)
 
 	// limit_patterns snapshots at construction, so the swap alone would be a silent
 	// no-op — rebuild the detector in place.

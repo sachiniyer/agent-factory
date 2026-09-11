@@ -135,11 +135,10 @@ func TestGlobalManifestCoversEveryGlobalConfigKey(t *testing.T) {
 // justifying only the exclusions that WERE deliberate. With this test the two
 // lists cannot part company silently again.
 //
-// The two dynamic families need care: program_overrides and limit_patterns are
-// PREFIXES, not literal settable keys. `af config set program_overrides.claude
-// <cmd>` works while a bare `af config set program_overrides <cmd>` does not, so
-// the registry key matches the manifest key, but the user-facing form carries a
-// ".<name>" leaf. All three are checked below.
+// The dynamic families need care: program_overrides and limit_patterns admit a
+// ".<name>" leaf, and a structured family may also admit the bare whole-table
+// form. The registry key still matches the manifest parent. All three directions
+// are checked below.
 func TestManifestAgreesWithSettableKeys(t *testing.T) {
 	byKey := manifestKeyIndex(t)
 
@@ -172,17 +171,26 @@ func TestManifestAgreesWithSettableKeys(t *testing.T) {
 
 	// 3. The user-facing settable list (what `af config set` prints, and what a
 	//    briefing tells an agent to type) resolves back onto the manifest. A
-	//    dynamic family renders as "prefix.<name>", so strip the leaf before
-	//    matching — the prefix is the manifest key.
+	//    dynamic family renders as "prefix.<name>" and a fixed table leaf as
+	//    "prefix.leaf", so both forms resolve back to the parent manifest key.
 	for _, shown := range SettableKeys() {
 		key := strings.TrimSuffix(shown, ".<name>")
+		if key == shown {
+			if prefix, leaf, ok := strings.Cut(shown, "."); ok {
+				if spec, found := settableKeySpecs[prefix]; found {
+					if _, allowed := spec.subkeys[leaf]; allowed {
+						key = prefix
+					}
+				}
+			}
+		}
 		if _, ok := byKey[key]; !ok {
 			t.Errorf("SettableKeys() advertises %q, which resolves to key %q — absent from the manifest",
 				shown, key)
 		}
 		// A "prefix.<name>" form must correspond to a spec actually marked
 		// dynamic, or the leaf would be rejected at set time.
-		if shown != key && !settableKeySpecs[key].dynamic {
+		if strings.HasSuffix(shown, ".<name>") && !settableKeySpecs[key].dynamic {
 			t.Errorf("SettableKeys() renders %q as a dynamic family, but settableKeySpecs[%q].dynamic is false", shown, key)
 		}
 	}
@@ -505,6 +513,8 @@ func TestRenderBriefingTellsAgentHowToSet(t *testing.T) {
 		"`af config set session_env_passthrough <value>`",
 		"`af config set root_agents <value>`",
 		"`af config set root_agent <value>`",
+		"`af config set root_agent.enabled <value>`",
+		"`af config set root_agent.program <value>`",
 		"`af config set keys <value>`",
 	} {
 		if !strings.Contains(out, want) {
