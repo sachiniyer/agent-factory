@@ -226,7 +226,8 @@ func claudeFolderTrustDialogPresent(content string) bool {
 }
 
 // claudeMCPTrustFooterIsLast reports whether the MCP trust modal's "Enter to
-// confirm" affordance is the last non-blank content in the pane. A live MCP
+// confirm" affordance is the last non-blank content in the pane AND belongs to
+// the same contiguous block of non-blank rows as the MCP question. A live MCP
 // modal is the last thing on screen, so its footer is the final row; a quoted
 // mention of the MCP phrase has the agent's composer or further output below
 // it, so the footer is not last. This is the same footer-is-last discipline
@@ -235,23 +236,54 @@ func claudeFolderTrustDialogPresent(content string) bool {
 // `affordance == last` rule: "a working agent paints its composer beneath its
 // output, so a quoted dialog has something after it and a live one does not."
 //
+// Both the MCP question and the footer must appear in the same contiguous block
+// of non-blank rows, so an unrelated picker whose final row happens to begin
+// with "Enter to confirm" does not satisfy this check when the MCP question is
+// in a separate block above it.
+//
 // Rows are parsed with claudeTrustRowOf so box-drawing chrome and ANSI styling
 // are stripped before the affordance is matched, letting a framed and an
 // unframed modal reduce to the same footer.
 func claudeMCPTrustFooterIsLast(content string) bool {
 	affordance := strings.ToLower(claudeTrustAffordancePrefix)
-	var footer claudeTrustRow
-	found := false
-	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
-		if row := claudeTrustRowOf(line); !row.blank {
-			footer = row
-			found = true
+	question := "do you trust this new mcp server"
+
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	rows := make([]claudeTrustRow, len(lines))
+	for i, line := range lines {
+		rows[i] = claudeTrustRowOf(line)
+	}
+
+	// Find the index of the last non-blank row.
+	lastIdx := -1
+	for i := len(rows) - 1; i >= 0; i-- {
+		if !rows[i].blank {
+			lastIdx = i
+			break
 		}
 	}
-	if !found {
+	if lastIdx < 0 {
 		return false
 	}
-	return strings.HasPrefix(strings.ToLower(footer.label), affordance)
+
+	// The last non-blank row must be the footer.
+	if !strings.HasPrefix(strings.ToLower(rows[lastIdx].label), affordance) {
+		return false
+	}
+
+	// Walk back to find the start of the contiguous block that ends at lastIdx.
+	blockStart := lastIdx
+	for blockStart > 0 && !rows[blockStart-1].blank {
+		blockStart--
+	}
+
+	// The MCP question must appear in that same block.
+	for i := blockStart; i <= lastIdx; i++ {
+		if strings.Contains(strings.ToLower(rows[i].label), question) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseClaudeFolderTrustDialog locates the cursor row and the affirmative row.
