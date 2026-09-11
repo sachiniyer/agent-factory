@@ -64,6 +64,10 @@ func drainDaemon(
 	// it. This is also what the poll goroutine's own wg.Wait did while the create
 	// still ran on it.
 	m.waitRootAgentCreatesForShutdown()
+	// Root-program drift inspections also run off the poll goroutine. Join them
+	// after the poll has stopped launching new ones, so neither a normal resolver
+	// tail nor a deliberately single-flighted stalled read outlives its Manager.
+	m.waitRootProgramDriftInspectionsForShutdown()
 	// RPCs and the poll are gone, and root creates (which can launch a final
 	// conversation capture) are joined. No detached durable writer may now be
 	// admitted; let pre-destructive and permanently stalled work stand down, and

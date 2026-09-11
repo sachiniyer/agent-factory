@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -67,7 +68,7 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 		st.programDriftLatchPending = false
 		global := m.Config()
 		m.mu.Unlock()
-		go m.resolveAndFinishAdoptedRootProgram(repo, repoID, key, workspace, st, profile, identity,
+		m.launchAdoptedRootProgramResolution(repo, repoID, key, workspace, st, profile, identity,
 			resolutionEpoch, global, inst, evidence)
 		return
 	}
@@ -90,8 +91,69 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 		return
 	}
 	global := m.Config()
-	go m.resolveAndFinishAdoptedRootProgram(repo, repoID, key, workspace, st, profile, identity,
+	m.launchAdoptedRootProgramResolution(repo, repoID, key, workspace, st, profile, identity,
 		resolutionEpoch, global, inst, evidence)
+}
+
+// launchAdoptedRootProgramResolution gives every asynchronous inspection one
+// owner: the Manager. A normal read may finish after its ensure pass returns,
+// while an uncancellable filesystem read may remain parked indefinitely; both
+// stay joinable until their actual worker exits.
+func (m *Manager) launchAdoptedRootProgramResolution(
+	repo *config.RepoContext,
+	repoID, key, workspace string,
+	st *rootEnsureState,
+	profile config.RootAgent,
+	identity *resolvedProjectRoot,
+	resolutionEpoch uint64,
+	global *config.Config,
+	inst *session.Instance,
+	evidence session.RuntimeProgramEvidence,
+) {
+	m.mu.Lock()
+	if m.rootProgramDriftInFlight == nil {
+		m.rootProgramDriftInFlight = make(map[string]int)
+	}
+	m.rootProgramDriftInFlight[workspace]++
+	m.rootProgramDriftWG.Add(1)
+	m.mu.Unlock()
+	go func() {
+		defer m.finishAdoptedRootProgramResolution(workspace)
+		m.resolveAndFinishAdoptedRootProgram(repo, repoID, key, workspace, st, profile, identity,
+			resolutionEpoch, global, inst, evidence)
+	}()
+}
+
+func (m *Manager) finishAdoptedRootProgramResolution(workspace string) {
+	m.mu.Lock()
+	if m.rootProgramDriftInFlight[workspace] <= 1 {
+		delete(m.rootProgramDriftInFlight, workspace)
+	} else {
+		m.rootProgramDriftInFlight[workspace]--
+	}
+	m.mu.Unlock()
+	m.rootProgramDriftWG.Done()
+}
+
+func (m *Manager) waitRootProgramDriftInspections() {
+	m.rootProgramDriftWG.Wait()
+}
+
+func (m *Manager) waitRootProgramDriftInspectionsForShutdown() {
+	m.mu.Lock()
+	pending := make([]string, 0, len(m.rootProgramDriftInFlight))
+	count := 0
+	for workspace, inFlight := range m.rootProgramDriftInFlight {
+		pending = append(pending, workspace)
+		count += inFlight
+	}
+	m.mu.Unlock()
+	if count > 0 {
+		sort.Strings(pending)
+		m.info().Printf("waiting for %d in-flight root-agent program inspection(s) before shutting down (%s); an inspection is never abandoned — one stalled on a checkout that does not answer will hold shutdown until it does (#4087)",
+			count, strings.Join(pending, ", "))
+	}
+	m.waitRootProgramDriftInspections()
 }
 
 func rootProgramDriftNeedsInspection(profile config.RootAgent, identity *resolvedProjectRoot) bool {

@@ -48,18 +48,26 @@ func TestAdoptedSingletonBareWorktreePreservesIdentityForCommandResolution(t *te
 
 	previousResolve := resolveRootProgramConfigForInspection
 	identitySeen := make(chan string, 1)
+	releaseResolve := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseResolve) }) }
 	resolveRootProgramConfigForInspection = func(got *config.RepoContext, _ *config.Config) (*config.ResolvedConfig, error) {
 		select {
 		case identitySeen <- got.IdentityPath():
 		default:
 		}
+		<-releaseResolve
 		resolved := config.DefaultConfig()
 		resolved.ProgramOverrides = map[string]string{"codex": "/resolved/codex"}
 		return &config.ResolvedConfig{Config: *resolved}, nil
 	}
 	t.Cleanup(func() { resolveRootProgramConfigForInspection = previousResolve })
+	t.Cleanup(func() {
+		release()
+		manager.waitRootProgramDriftInspections()
+	})
 
-	manager.ensureRootAgentsAndWait()
+	manager.EnsureRootAgents()
 	select {
 	case got := <-identitySeen:
 		if got != repo.IdentityPath() {
@@ -67,6 +75,22 @@ func TestAdoptedSingletonBareWorktreePreservesIdentityForCommandResolution(t *te
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("drift command resolver did not run")
+	}
+	joined := make(chan struct{})
+	go func() {
+		manager.waitRootProgramDriftInspections()
+		close(joined)
+	}()
+	select {
+	case <-joined:
+		t.Fatal("manager stopped owning a root-program worker before the resolver returned")
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	select {
+	case <-joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("manager did not release the root-program worker after the resolver returned")
 	}
 }
 

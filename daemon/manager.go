@@ -246,6 +246,10 @@ type Manager struct {
 	// every ApplyConfig. That boundary covers global and project-scoped live
 	// writes alike; guarded by mu.
 	rootProgramDriftConfigEpoch uint64
+	// Async command inspections are named by workspace and joined after the poll
+	// exits, so every Add precedes Wait. The map is guarded by mu.
+	rootProgramDriftInFlight map[string]int
+	rootProgramDriftWG       sync.WaitGroup
 	// Transcript probe overrides are manager-local and set only before the
 	// manager is used. Never restore them during cleanup: a timed-out filesystem
 	// inspection may outlive both its caller and the joined poll loop (#4212).
@@ -735,6 +739,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		targetLocks:               make(map[string]*sync.Mutex),
 		rootEnsureStates:          make(map[string]*rootEnsureState),
 		rootProgramDriftLogged:    make(map[string]bool),
+		rootProgramDriftInFlight:  make(map[string]int),
 		rootCreateRefusals:        make(map[string]rootCreateRefusal),
 		rootCreatesInFlight:       make(map[string]string),
 		rootKilledAt:              make(map[string]time.Time),
