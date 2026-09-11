@@ -175,11 +175,22 @@ func sandboxRunsSince(checkpoint int) map[string]bool {
 	return owned
 }
 
+// ambientTmuxOutput bounds every read from the ambient tmux server. These
+// commands run from TestMain after the package suite has finished, so a wedged
+// server must not wedge the test process indefinitely.
+func ambientTmuxOutput(args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxTripwireTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	cmd.WaitDelay = tmuxTripwireWaitDelay
+	return cmd.Output()
+}
+
 // ambientAFSessions lists the af_-prefixed session names on the tmux server
 // the current environment resolves to. A nil map means no reachable server —
 // nothing to leak against.
 func ambientAFSessions() map[string]bool {
-	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	out, err := ambientTmuxOutput("list-sessions", "-F", "#{session_name}")
 	if err != nil {
 		return nil
 	}
@@ -198,11 +209,7 @@ func ambientAFSessions() map[string]bool {
 // False covers a missing marker, malformed output, and a query failure: none is
 // affirmative evidence that this test run owns the session.
 func ambientAFSessionMarker(name, marker string) (string, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxTripwireTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "tmux", "show-environment", "-t", "="+name, marker)
-	cmd.WaitDelay = tmuxTripwireWaitDelay
-	out, err := cmd.Output()
+	out, err := ambientTmuxOutput("show-environment", "-t", "="+name, marker)
 	if err != nil {
 		return "", false
 	}
