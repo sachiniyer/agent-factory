@@ -44,6 +44,9 @@ type Instance struct {
 	// construction, so cross-goroutine readers may read it without the mutex
 	// (like ID and Title).
 	TaskID string
+	// taskGenerationID binds TaskID to the exact task row incarnation that
+	// spawned this session. Empty is the legacy pre-field generation.
+	taskGenerationID string
 	// Title is the title of the instance.
 	Title string
 	// Path is the path to the workspace.
@@ -111,6 +114,9 @@ type Instance struct {
 	// sequence decides which delayed start publication is newer. Zero predates
 	// the ordering field.
 	taskRunSequence uint64
+	// taskRunRevision is the owning task row's last-run revision captured before
+	// provisioning. Publication is admitted only while that revision is unchanged.
+	taskRunRevision uint64
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.

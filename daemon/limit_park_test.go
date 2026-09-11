@@ -201,7 +201,7 @@ func stubParkedCreate(t *testing.T) {
 		}
 		return &session.InstanceData{
 			ID: title + "-id", Title: title, Liveness: session.LiveLimitReached,
-			CreatedAt: time.Now(), TaskRunSequence: 1,
+			TaskGenerationID: req.TaskGenerationID, CreatedAt: time.Now(), TaskRunSequence: 1,
 		}, nil
 	}
 	t.Cleanup(func() { createSessionForTask = orig })
@@ -216,15 +216,15 @@ func TestDeliverTaskPrompt_ParksOnUsageLimit(t *testing.T) {
 	stubParkedCreate(t)
 
 	tsk := &task.Task{ID: "ffff0010", Name: "nightly", Prompt: "do it", CronExpr: "0 3 * * *", ProjectPath: repo, Enabled: true}
-	status, _, _, _, err := deliverTaskPrompt(tsk, tsk.Prompt, true)
+	delivery, err := deliverTaskPrompt(tsk, tsk.Prompt, true)
 	if err != nil {
 		t.Fatalf("deliverTaskPrompt must not error on a park: %v", err)
 	}
-	if status != TaskStatusLimitParked {
-		t.Fatalf("status = %q, want %q", status, TaskStatusLimitParked)
+	if delivery.status != TaskStatusLimitParked {
+		t.Fatalf("status = %q, want %q", delivery.status, TaskStatusLimitParked)
 	}
-	if strings.HasPrefix(status, "errored") {
-		t.Fatalf("a parked run must never carry an errored status, got %q", status)
+	if strings.HasPrefix(delivery.status, "errored") {
+		t.Fatalf("a parked run must never carry an errored status, got %q", delivery.status)
 	}
 }
 
@@ -299,14 +299,18 @@ func TestResumeFromLimit_ParkedTaskSessionReDeliversTaskPrompt(t *testing.T) {
 func TestResumeFromLimitAdvancesParkedTaskStatus(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	tsk := enabledCronTask("feed0001", repoPath)
-	require.NoError(t, task.AddTask(tsk))
+	created, err := task.AddTaskChecked(tsk, task.ActorUnknown, nil)
+	require.NoError(t, err)
+	tsk = created
 	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "parked-status", Path: repoPath, Program: "claude", TaskID: tsk.ID,
-		CreatedAt: runAt, TaskRunAt: runAt, TaskRunSequence: 1,
+		TaskGenerationID: tsk.GenerationID, CreatedAt: runAt, TaskRunAt: runAt,
+		TaskRunSequence: 1, TaskRunRevision: 0,
 	})
 	require.NoError(t, err)
-	_, _, err = task.BeginTaskRun(tsk.ID, inst.ID, 1, runAt, TaskStatusLimitParked)
+	_, _, err = task.BeginTaskRun(
+		tsk.ID, tsk.GenerationID, inst.ID, 1, 0, runAt, TaskStatusLimitParked)
 	require.NoError(t, err)
 	backend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
 	inst.SetBackend(backend)

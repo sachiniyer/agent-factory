@@ -20,9 +20,10 @@ const (
 // UpdateTask, it does not re-validate other fields (notably Program), so legacy
 // tasks can still receive status changes. A nil lastRunAt preserves the
 // timestamp, session identity, and sequence; watcher supervision uses that form
-// so it cannot detach a live run from the token its outcome needs. A non-nil
-// timestamp starts a non-session-backed status and clears that token, while
-// retaining the sequence as the allocator's durable high-water mark.
+// so it cannot detach a live run from the token its outcome needs. Every applied
+// write advances LastRunRevision, including status-only supervision. A non-nil
+// timestamp starts a non-session-backed status and clears the session token,
+// while retaining the sequence as the allocator's durable high-water mark.
 func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) (Task, error) {
 	updated, _, err := mutateTaskStatus(taskID, func(t *Task) bool {
 		if lastRunAt != nil {
@@ -38,14 +39,22 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 // BeginTaskRun authoritatively publishes a session-per-run delivery. The daemon
 // calls it while the new session is still hidden behind Manager.mu. The manager
 // assigned sequence orders different run IDs by admission rather than by a
-// timestamp or whichever delivery caller happens to resume first. A lower or
-// equal sequence is a delayed writer and is left untouched.
-func BeginTaskRun(taskID, runID string, runSequence uint64, runAt time.Time, lastRunStatus string) (Task, bool, error) {
+// timestamp or whichever delivery caller happens to resume first. GenerationID
+// binds the write to the task incarnation, while expectedRevision proves no
+// scheduler-owned observation landed after admission. A mismatched proof or a
+// lower/equal sequence leaves the row untouched.
+func BeginTaskRun(
+	taskID, taskGenerationID, runID string,
+	runSequence, expectedRevision uint64,
+	runAt time.Time,
+	lastRunStatus string,
+) (Task, bool, error) {
 	if runID == "" || runSequence == 0 {
 		return Task{}, false, fmt.Errorf("task run id and sequence are required")
 	}
 	return mutateTaskStatus(taskID, func(t *Task) bool {
-		if runSequence <= t.LastRunSequence {
+		if t.GenerationID != taskGenerationID || t.LastRunRevision != expectedRevision ||
+			runSequence <= t.LastRunSequence {
 			return false
 		}
 		t.LastRunAt = &runAt
@@ -58,25 +67,32 @@ func BeginTaskRun(taskID, runID string, runSequence uint64, runAt time.Time, las
 
 // UpdateTaskRunStart is the post-RPC repair for BeginTaskRun. A greater manager
 // sequence safely replaces even an identified prior run after the manager's
-// earlier task-store write failed; the same or a newer run is left untouched.
-// Thus a delayed repair cannot reopen its own terminal outcome or overwrite a
-// successor.
-func UpdateTaskRunStart(taskID, runID string, runSequence uint64, runAt time.Time, lastRunStatus string) (Task, bool, error) {
-	return BeginTaskRun(taskID, runID, runSequence, runAt, lastRunStatus)
+// earlier task-store write failed; it carries the same generation and revision
+// proofs as the in-manager publication. Thus a delayed repair cannot reopen its
+// own terminal outcome, overwrite watcher supervision, or claim a replacement
+// task incarnation.
+func UpdateTaskRunStart(
+	taskID, taskGenerationID, runID string,
+	runSequence, expectedRevision uint64,
+	runAt time.Time,
+	lastRunStatus string,
+) (Task, bool, error) {
+	return BeginTaskRun(taskID, taskGenerationID, runID, runSequence, expectedRevision, runAt, lastRunStatus)
 }
 
 // UpdateTaskRunOutcome changes only the current session-backed run, and only
 // while its delivery status is active (started, parked at a usage limit, or
-// blank after a temporary not-armed marker was cleared). Matching the stable
-// session ID makes equal timestamps and clock corrections irrelevant; checking
-// the status preserves later watcher supervision evidence such as "stopped" or
-// "errored".
-func UpdateTaskRunOutcome(taskID, runID, lastRunStatus string) (Task, bool, error) {
+// blank after a temporary not-armed marker was cleared). Matching the task
+// generation and stable session ID makes ID reuse, equal timestamps, and clock
+// corrections irrelevant; checking the status preserves later watcher
+// supervision evidence such as "stopped" or "errored".
+func UpdateTaskRunOutcome(taskID, taskGenerationID, runID, lastRunStatus string) (Task, bool, error) {
 	if runID == "" {
 		return Task{}, false, fmt.Errorf("task run id is required")
 	}
 	return mutateTaskStatus(taskID, func(t *Task) bool {
-		if t.LastRunSessionID != runID || !sessionRunStatusActive(t.LastRunStatus) {
+		if t.GenerationID != taskGenerationID || t.LastRunSessionID != runID ||
+			!sessionRunStatusActive(t.LastRunStatus) {
 			return false
 		}
 		t.LastRunStatus = lastRunStatus
@@ -88,12 +104,13 @@ func UpdateTaskRunOutcome(taskID, runID, lastRunStatus string) (Task, bool, erro
 // changing its identity or display timestamp. Limit resume uses it to turn the
 // parked delivery into started after its queued prompt lands. A later watcher
 // supervision status is not the expected status and therefore wins the race.
-func AdvanceTaskRunStatus(taskID, runID, fromStatus, toStatus string) (Task, bool, error) {
+func AdvanceTaskRunStatus(taskID, taskGenerationID, runID, fromStatus, toStatus string) (Task, bool, error) {
 	if runID == "" {
 		return Task{}, false, fmt.Errorf("task run id is required")
 	}
 	return mutateTaskStatus(taskID, func(t *Task) bool {
-		if t.LastRunSessionID != runID || t.LastRunStatus != fromStatus {
+		if t.GenerationID != taskGenerationID || t.LastRunSessionID != runID ||
+			t.LastRunStatus != fromStatus {
 			return false
 		}
 		t.LastRunStatus = toStatus
@@ -111,16 +128,19 @@ func sessionRunStatusActive(status string) bool {
 
 // ClaimUnidentifiedTaskRunOutcome is the compatibility writer for a legacy row
 // or a start whose manager-ordered publication failed. The caller first proves
-// the candidate can own the row; this function then compares its exact identity,
-// sequence, status, and timestamp under the file lock before installing the
-// durable identity and outcome. desiredRunAt is the historical stored timestamp
-// for a legacy row and the session's creation timestamp for a current failure.
+// the candidate can own the row; this function then compares its exact task
+// generation, revision, run identity, sequence, status, and timestamp under the
+// file lock before installing the durable identity and outcome. desiredRunAt is
+// the historical stored timestamp for a legacy row and the session's creation
+// timestamp for a current failure.
 func ClaimUnidentifiedTaskRunOutcome(
 	taskID, runID string,
 	expectedRunAt *time.Time,
 	expectedStatus string,
 	expectedSessionID string,
 	expectedSequence uint64,
+	expectedRevision uint64,
+	expectedGenerationID string,
 	desiredRunAt time.Time,
 	desiredSequence uint64,
 	lastRunStatus string,
@@ -129,7 +149,9 @@ func ClaimUnidentifiedTaskRunOutcome(
 		return Task{}, false, fmt.Errorf("task run id is required")
 	}
 	return mutateTaskStatus(taskID, func(t *Task) bool {
-		if t.LastRunSessionID != expectedSessionID || t.LastRunSequence != expectedSequence ||
+		if t.GenerationID != expectedGenerationID ||
+			t.LastRunSessionID != expectedSessionID || t.LastRunSequence != expectedSequence ||
+			t.LastRunRevision != expectedRevision ||
 			t.LastRunStatus != expectedStatus ||
 			!sameOptionalTime(t.LastRunAt, expectedRunAt) {
 			return false
@@ -186,6 +208,10 @@ func mutateTaskStatus(taskID string, mutate func(*Task) bool) (Task, bool, error
 		if !applied {
 			return nil
 		}
+		if tasks[row].LastRunRevision == ^uint64(0) {
+			return fmt.Errorf("task last-run revision exhausted")
+		}
+		tasks[row].LastRunRevision++
 
 		generation, err := writeTasks(tasks)
 		if err != nil {

@@ -28,9 +28,12 @@ type InstanceData struct {
 	// omitempty + additive: records written before #1892 simply have no task_id
 	// and count against no limit (rollforward, mirroring the ID precedent above).
 	TaskID string `json:"task_id,omitempty"`
-	Title  string `json:"title"`
-	Path   string `json:"path"`
-	Branch string `json:"branch"`
+	// TaskGenerationID binds TaskID to the exact task incarnation that spawned
+	// this session. Empty denotes sessions written before the field existed.
+	TaskGenerationID string `json:"task_generation_id,omitempty"`
+	Title            string `json:"title"`
+	Path             string `json:"path"`
+	Branch           string `json:"branch"`
 	// Status is the legacy single-axis status int (#1195). Still written for one
 	// release for rollback safety and read as the fallback source for records
 	// that predate the `liveness` field. New code should read Liveness.
@@ -136,6 +139,9 @@ type InstanceData struct {
 	// session-backed task delivery. It lets a delayed task-row writer prove it is
 	// newer without comparing timestamps. Zero denotes a pre-field record.
 	TaskRunSequence uint64 `json:"task_run_sequence,omitempty"`
+	// TaskRunRevision is the owning task row's last-run revision observed before
+	// provisioning. It makes delayed publication conditional on an unchanged row.
+	TaskRunRevision uint64 `json:"task_run_revision,omitempty"`
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a
 	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and

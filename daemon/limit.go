@@ -959,7 +959,8 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	run := instance.TaskRun()
 	if run.TaskID != "" {
 		updated, applied, statusErr := task.AdvanceTaskRunStatus(
-			run.TaskID, run.SessionID, TaskStatusLimitParked, task.RunStatusStarted)
+			run.TaskID, run.TaskGenerationID, run.SessionID,
+			TaskStatusLimitParked, task.RunStatusStarted)
 		if statusErr != nil {
 			m.warn().Printf("resumed task session %q but could not update task %s from parked to started: %v",
 				instance.Title, run.TaskID, statusErr)

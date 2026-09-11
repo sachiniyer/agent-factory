@@ -70,22 +70,29 @@ func TestTaskRunIdentityPersistsWithoutInventingOneForLegacyRecords(t *testing.T
 	runAt := time.Date(2026, 9, 11, 9, 0, 0, 123, time.UTC)
 	inst, err := NewInstance(InstanceOptions{
 		Title: "identified", Path: t.TempDir(), Program: "claude", TaskID: "task-id",
-		CreatedAt: runAt, TaskRunAt: runAt, TaskRunSequence: 17,
+		TaskGenerationID: "task-generation", CreatedAt: runAt, TaskRunAt: runAt,
+		TaskRunSequence: 17, TaskRunRevision: 23,
 	})
 	require.NoError(t, err)
 	stored := inst.ToInstanceData().ForStorage()
 	require.True(t, stored.TaskRunAt.Equal(runAt))
 	require.Equal(t, uint64(17), stored.TaskRunSequence)
+	require.Equal(t, "task-generation", stored.TaskGenerationID)
+	require.Equal(t, uint64(23), stored.TaskRunRevision)
 	raw, err := json.Marshal(stored)
 	require.NoError(t, err)
 	var reloaded InstanceData
 	require.NoError(t, json.Unmarshal(raw, &reloaded))
 	require.True(t, reloaded.TaskRunAt.Equal(runAt))
 	require.Equal(t, uint64(17), reloaded.TaskRunSequence)
+	require.Equal(t, "task-generation", reloaded.TaskGenerationID)
+	require.Equal(t, uint64(23), reloaded.TaskRunRevision)
 
 	legacy := stored
 	legacy.TaskRunAt = time.Time{}
 	legacy.TaskRunSequence = 0
+	legacy.TaskGenerationID = ""
+	legacy.TaskRunRevision = 0
 	raw, err = json.Marshal(legacy)
 	require.NoError(t, err)
 	reloaded = InstanceData{}
@@ -93,4 +100,6 @@ func TestTaskRunIdentityPersistsWithoutInventingOneForLegacyRecords(t *testing.T
 	require.True(t, reloaded.TaskRunAt.IsZero(),
 		"a pre-field record must remain distinguishable for compatibility attribution")
 	require.Zero(t, reloaded.TaskRunSequence)
+	require.Empty(t, reloaded.TaskGenerationID)
+	require.Zero(t, reloaded.TaskRunRevision)
 }

@@ -46,9 +46,10 @@ type CreateSessionRequest struct {
 	// all. encoding/json drops a "-" field on decode, and jsonFields skips it, so
 	// it is neither accepted nor advertised in the route catalog.
 	//
-	// TaskRepoID carries the same retained project binding used by targeted task
+	// TaskRepoID carries the retained project binding used by targeted task
 	// delivery, so reserveCreate can reject a path that was rebound between the
-	// task runner and final create admission.
+	// task runner and final create admission. TaskGenerationID similarly binds the
+	// reusable task ID to the exact row that admitted this delivery.
 	//
 	// That boundary is the point: provenance is an assertion the daemon makes
 	// about its own delivery, never a claim a client gets to make. Were it
@@ -56,8 +57,9 @@ type CreateSessionRequest struct {
 	// capped task's id and have countTaskRunsLocked charge it against that task —
 	// consuming its slots and parking its events, from a session that task never
 	// spawned.
-	TaskID     string `json:"-"`
-	TaskRepoID string `json:"-"`
+	TaskID           string `json:"-"`
+	TaskRepoID       string `json:"-"`
+	TaskGenerationID string `json:"-"`
 	// TaskOrigin marks every daemon-internal automated create, including a
 	// legacy targeted task with neither retained RepoID nor per-run ownership.
 	// Unlike TaskID it is not persisted on the session and never affects

@@ -60,7 +60,7 @@ The `Request fields` column above lists each body's TOP-LEVEL keys. Where one of
 
 | Path | Nested fields |
 |------|---------------|
-| `/v1/AddTask` | `task.id`, `task.name`, `task.prompt`, `task.cron_expr`, `task.watch_cmd`, `task.target_session`, `task.max_concurrent_runs`, `task.on_complete`, `task.project_path`, `task.repo_id`, `task.program`, `task.enabled`, `task.created_at`, `task.last_run_at`, `task.last_run_status`, `task.last_run_session_id`, `task.last_run_sequence`, `task.audit`, `task.overdue`, `task.missed_occurrences`, `task.missed_occurrences_capped`, `task.unschedulable`, `task.unschedulable_reason`, `task.unassessable`, `task.next_run_at`, `task.arming`, `task.ordinal`, `task.store_generation` |
+| `/v1/AddTask` | `task.id`, `task.name`, `task.prompt`, `task.cron_expr`, `task.watch_cmd`, `task.target_session`, `task.max_concurrent_runs`, `task.on_complete`, `task.project_path`, `task.repo_id`, `task.program`, `task.enabled`, `task.created_at`, `task.generation_id`, `task.last_run_at`, `task.last_run_status`, `task.last_run_session_id`, `task.last_run_sequence`, `task.last_run_revision`, `task.audit`, `task.overdue`, `task.missed_occurrences`, `task.missed_occurrences_capped`, `task.unschedulable`, `task.unschedulable_reason`, `task.unassessable`, `task.next_run_at`, `task.arming`, `task.ordinal`, `task.store_generation` |
 | `/v1/UpdateTask` | `update.name`, `update.prompt`, `update.cron_expr`, `update.watch_cmd`, `update.target_session`, `update.max_concurrent_runs`, `update.on_complete`, `update.project_path`, `update.program`, `update.enabled`, `expect.enforce`, `expect.project_path` |
 | `/v1/RemoveTask` | `expect.enforce`, `expect.project_path` |
 | `/v1/RestartTask` | `expect.enforce`, `expect.project_path` |

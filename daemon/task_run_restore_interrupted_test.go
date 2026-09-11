@@ -16,15 +16,16 @@ func TestRestoredTaskRuntimeIsRecordedInterruptedAndSkipsOnComplete(t *testing.T
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	tsk := enabledCronTask("dead0001", repoPath)
 	tsk.OnComplete = task.OnCompleteArchive
-	require.NoError(t, task.AddTask(tsk))
+	tsk = addStatusTestTask(t, tsk)
 
 	deliveredAt := time.Date(2026, 9, 11, 9, 0, 0, 123, time.UTC)
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "interrupted-run", Path: repoPath, Program: "claude", TaskID: tsk.ID,
-		CreatedAt: deliveredAt, TaskRunAt: deliveredAt, TaskRunSequence: 1,
+		TaskGenerationID: tsk.GenerationID, CreatedAt: deliveredAt, TaskRunAt: deliveredAt,
+		TaskRunSequence: 1, TaskRunRevision: 0,
 	})
 	require.NoError(t, err)
-	_, _, err = task.BeginTaskRun(tsk.ID, inst.ID, 1, deliveredAt, "started")
+	_, _, err = task.BeginTaskRun(tsk.ID, tsk.GenerationID, inst.ID, 1, 0, deliveredAt, "started")
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStartedForTest(true)
@@ -105,12 +106,13 @@ func TestRestoredTaskRuntimeIsRecordedInterruptedAndSkipsOnComplete(t *testing.T
 func TestRestoredOlderTaskRuntimeDoesNotOverwriteNewerRunStatus(t *testing.T) {
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	tsk := enabledCronTask("dead0002", repoPath)
-	require.NoError(t, task.AddTask(tsk))
+	tsk = addStatusTestTask(t, tsk)
 
 	olderRunAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "older-run", Path: repoPath, Program: "claude", TaskID: tsk.ID,
-		CreatedAt: olderRunAt, TaskRunAt: olderRunAt, TaskRunSequence: 1,
+		TaskGenerationID: tsk.GenerationID, CreatedAt: olderRunAt, TaskRunAt: olderRunAt,
+		TaskRunSequence: 1, TaskRunRevision: 0,
 	})
 	require.NoError(t, err)
 	inst.SetStartedForTest(true)
@@ -122,7 +124,8 @@ func TestRestoredOlderTaskRuntimeDoesNotOverwriteNewerRunStatus(t *testing.T) {
 	manager.mu.Unlock()
 
 	newerRunAt := olderRunAt.Add(time.Minute)
-	_, _, err = task.BeginTaskRun(tsk.ID, "successor-session", 2, newerRunAt, "started")
+	_, _, err = task.BeginTaskRun(
+		tsk.ID, tsk.GenerationID, "successor-session", 2, 0, newerRunAt, "started")
 	require.NoError(t, err)
 	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveLost)))
 	require.NoError(t, inst.Transition(session.MarkRestoring()))
@@ -144,14 +147,15 @@ func TestRestoredTaskRuntimeOutcomeWinsRaceWithStartedStatus(t *testing.T) {
 	previousRunAt := time.Date(2026, 9, 11, 8, 0, 0, 0, time.UTC)
 	tsk.LastRunAt = &previousRunAt
 	tsk.LastRunStatus = "started"
-	require.NoError(t, task.AddTask(tsk))
+	tsk = addStatusTestTask(t, tsk)
 	_, err := task.UpdateTaskStatus(tsk.ID, &previousRunAt, "started")
 	require.NoError(t, err)
 
 	runAt := previousRunAt.Add(time.Hour)
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "publication-race", Path: repoPath, Program: "claude", TaskID: tsk.ID,
-		CreatedAt: runAt, TaskRunAt: runAt, TaskRunSequence: 1,
+		TaskGenerationID: tsk.GenerationID, CreatedAt: runAt, TaskRunAt: runAt,
+		TaskRunSequence: 1, TaskRunRevision: 1,
 	})
 	require.NoError(t, err)
 	inst.SetStartedForTest(true)
@@ -166,7 +170,8 @@ func TestRestoredTaskRuntimeOutcomeWinsRaceWithStartedStatus(t *testing.T) {
 	require.NoError(t, inst.Transition(session.MarkRestoring()))
 	require.NoError(t, manager.prepareRuntimeReplacement(repoID, key, inst))
 
-	_, applied, err := task.UpdateTaskRunStart(tsk.ID, inst.ID, 1, runAt, "started")
+	_, applied, err := task.UpdateTaskRunStart(
+		tsk.ID, tsk.GenerationID, inst.ID, 1, 1, runAt, "started")
 	require.NoError(t, err)
 	assert.False(t, applied, "the delayed delivery writer must not reopen the interrupted outcome")
 	got, err := task.GetTask(tsk.ID)
@@ -184,14 +189,15 @@ func TestRestoredLegacyTaskRuntimeUsesAttributedLastRunTimestamp(t *testing.T) {
 	legacyRunAt := createdAt.Add(3 * time.Second)
 	tsk.LastRunAt = &legacyRunAt
 	tsk.LastRunStatus = "started"
-	require.NoError(t, task.AddTask(tsk))
+	tsk = addStatusTestTask(t, tsk)
 	_, err := task.UpdateTaskStatus(tsk.ID, &legacyRunAt, "started")
 	require.NoError(t, err)
 
 	// No TaskRunAt: this is the shape persisted by binaries before explicit run
 	// identity. Their task caller minted LastRunAt only after CreateSession returned.
 	inst, err := session.NewInstance(session.InstanceOptions{
-		Title: "legacy-run", Path: repoPath, Program: "claude", TaskID: tsk.ID, CreatedAt: createdAt,
+		Title: "legacy-run", Path: repoPath, Program: "claude", TaskID: tsk.ID,
+		TaskGenerationID: tsk.GenerationID, CreatedAt: createdAt,
 	})
 	require.NoError(t, err)
 	inst.SetStartedForTest(true)
@@ -221,18 +227,20 @@ func TestRestoredLegacyTaskRuntimeDoesNotClaimKnownSuccessor(t *testing.T) {
 	newerRunAt := createdAt.Add(time.Minute)
 	tsk.LastRunAt = &newerRunAt
 	tsk.LastRunStatus = "started"
-	require.NoError(t, task.AddTask(tsk))
+	tsk = addStatusTestTask(t, tsk)
 	_, err := task.UpdateTaskStatus(tsk.ID, &newerRunAt, "started")
 	require.NoError(t, err)
 
 	legacy, err := session.NewInstance(session.InstanceOptions{
-		Title: "legacy-older", Path: repoPath, Program: "claude", TaskID: tsk.ID, CreatedAt: createdAt,
+		Title: "legacy-older", Path: repoPath, Program: "claude", TaskID: tsk.ID,
+		TaskGenerationID: tsk.GenerationID, CreatedAt: createdAt,
 	})
 	require.NoError(t, err)
 	legacy.SetStartedForTest(true)
 	legacy.SetStatusForTest(session.Running)
 	successor, err := session.NewInstance(session.InstanceOptions{
-		Title: "known-successor", Path: repoPath, Program: "claude", TaskID: tsk.ID, CreatedAt: newerRunAt,
+		Title: "known-successor", Path: repoPath, Program: "claude", TaskID: tsk.ID,
+		TaskGenerationID: tsk.GenerationID, CreatedAt: newerRunAt,
 	})
 	require.NoError(t, err)
 	key := daemonInstanceKey(repoID, legacy.Title)
@@ -259,12 +267,13 @@ func TestRestoredLegacyTaskRuntimeDoesNotReplaceTerminalOutcome(t *testing.T) {
 	terminalRunAt := createdAt.Add(time.Minute)
 	tsk.LastRunAt = &terminalRunAt
 	tsk.LastRunStatus = "errored: successor failed"
-	require.NoError(t, task.AddTask(tsk))
+	tsk = addStatusTestTask(t, tsk)
 	_, err := task.UpdateTaskStatus(tsk.ID, &terminalRunAt, "errored: successor failed")
 	require.NoError(t, err)
 
 	legacy, err := session.NewInstance(session.InstanceOptions{
-		Title: "legacy-before-terminal", Path: repoPath, Program: "claude", TaskID: tsk.ID, CreatedAt: createdAt,
+		Title: "legacy-before-terminal", Path: repoPath, Program: "claude", TaskID: tsk.ID,
+		TaskGenerationID: tsk.GenerationID, CreatedAt: createdAt,
 	})
 	require.NoError(t, err)
 	legacy.SetStartedForTest(true)
@@ -288,14 +297,15 @@ func TestRestoredLegacyTaskRuntimeDoesNotReplaceTerminalOutcome(t *testing.T) {
 func TestRestoredTaskRuntimePreservesLaterWatcherSupervisionStatus(t *testing.T) {
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	tsk := enabledCronTask("dead0007", repoPath)
-	require.NoError(t, task.AddTask(tsk))
+	tsk = addStatusTestTask(t, tsk)
 	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "supervision-wins", Path: repoPath, Program: "claude", TaskID: tsk.ID,
-		CreatedAt: runAt, TaskRunAt: runAt, TaskRunSequence: 1,
+		TaskGenerationID: tsk.GenerationID, CreatedAt: runAt, TaskRunAt: runAt,
+		TaskRunSequence: 1, TaskRunRevision: 0,
 	})
 	require.NoError(t, err)
-	_, _, err = task.BeginTaskRun(tsk.ID, inst.ID, 1, runAt, "started")
+	_, _, err = task.BeginTaskRun(tsk.ID, tsk.GenerationID, inst.ID, 1, 0, runAt, "started")
 	require.NoError(t, err)
 	_, err = task.UpdateTaskStatus(tsk.ID, nil, "errored: watcher exited")
 	require.NoError(t, err)
@@ -321,11 +331,12 @@ func TestRestoredTaskRuntimePreservesLaterWatcherSupervisionStatus(t *testing.T)
 func TestRestoredTaskRuntimeDoesNotClaimRecreatedTaskID(t *testing.T) {
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	oldTask := enabledCronTask("dead0010", repoPath)
-	require.NoError(t, task.AddTask(oldTask))
+	oldTask = addStatusTestTask(t, oldTask)
 	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	oldSession, err := session.NewInstance(session.InstanceOptions{
 		Title: "prior-incarnation", Path: repoPath, Program: "claude", TaskID: oldTask.ID,
-		CreatedAt: runAt, TaskRunAt: runAt, TaskRunSequence: 1,
+		TaskGenerationID: oldTask.GenerationID, CreatedAt: runAt, TaskRunAt: runAt,
+		TaskRunSequence: 1, TaskRunRevision: 0,
 	})
 	require.NoError(t, err)
 	oldSession.SetStartedForTest(true)
@@ -339,7 +350,8 @@ func TestRestoredTaskRuntimeDoesNotClaimRecreatedTaskID(t *testing.T) {
 	require.NoError(t, task.RemoveTask(oldTask.ID, task.ProjectExpectation{}))
 	replacement := enabledCronTask(oldTask.ID, repoPath)
 	replacement.Name = "replacement"
-	require.NoError(t, task.AddTask(replacement))
+	replacement = addStatusTestTask(t, replacement)
+	require.NotEqual(t, oldTask.GenerationID, replacement.GenerationID)
 
 	require.NoError(t, oldSession.Transition(session.ObserveLiveness(session.LiveLost)))
 	require.NoError(t, oldSession.Transition(session.MarkRestoring()))
@@ -358,20 +370,21 @@ func TestRestoredLegacyTaskRuntimeDoesNotClaimPersistedUnloadedSuccessor(t *test
 	tsk := enabledCronTask("dead0008", repoPath)
 	createdAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	successorAt := createdAt.Add(time.Minute)
-	require.NoError(t, task.AddTask(tsk))
+	tsk = addStatusTestTask(t, tsk)
 	_, err := task.UpdateTaskStatus(tsk.ID, &successorAt, task.RunStatusStarted)
 	require.NoError(t, err)
 
 	legacy, err := session.NewInstance(session.InstanceOptions{
 		Title: "legacy-materialized", Path: repoPath, Program: "claude",
-		TaskID: tsk.ID, CreatedAt: createdAt,
+		TaskID: tsk.ID, TaskGenerationID: tsk.GenerationID, CreatedAt: createdAt,
 	})
 	require.NoError(t, err)
 	legacy.SetStartedForTest(true)
 	legacy.SetStatusForTest(session.Running)
 	ghost := session.InstanceData{
 		ID: "unloaded-successor", Title: "unloaded-successor", Path: repoPath,
-		TaskID: tsk.ID, TaskRunActive: true, CreatedAt: successorAt,
+		TaskID: tsk.ID, TaskGenerationID: tsk.GenerationID,
+		TaskRunActive: true, CreatedAt: successorAt,
 		Status: session.Running, Liveness: session.LiveRunning,
 	}
 	raw, err := json.Marshal([]session.InstanceData{legacy.ToInstanceData(), ghost})
@@ -397,11 +410,12 @@ func TestRestoredTaskRuntimeDoesNotClaimTargetSessionDelivery(t *testing.T) {
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	tsk := enabledCronTask("dead0009", repoPath)
 	tsk.TargetSession = "shared-target"
-	require.NoError(t, task.AddTask(tsk))
+	tsk = addStatusTestTask(t, tsk)
 	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "old-per-run", Path: repoPath, Program: "claude", TaskID: tsk.ID,
-		CreatedAt: runAt, TaskRunAt: runAt, TaskRunSequence: 1,
+		TaskGenerationID: tsk.GenerationID, CreatedAt: runAt, TaskRunAt: runAt,
+		TaskRunSequence: 1, TaskRunRevision: 0,
 	})
 	require.NoError(t, err)
 	inst.SetStartedForTest(true)
@@ -428,4 +442,11 @@ func TestRestoredTaskRuntimeDoesNotClaimTargetSessionDelivery(t *testing.T) {
 	require.NotNil(t, got.LastRunAt)
 	assert.True(t, got.LastRunAt.Equal(targetAt))
 	assert.Contains(t, logs.warnings.String(), "the task row does not identify this run")
+}
+
+func addStatusTestTask(t *testing.T, tsk task.Task) task.Task {
+	t.Helper()
+	created, err := task.AddTaskChecked(tsk, task.ActorUnknown, nil)
+	require.NoError(t, err)
+	return created
 }

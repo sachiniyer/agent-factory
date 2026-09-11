@@ -822,11 +822,11 @@ func deliverWatchEvent(taskID, line string) error {
 	if strings.TrimSpace(prompt) == "" {
 		return notAttempted(fmt.Errorf("event rendered an empty prompt (line %q)", line))
 	}
-	status, runID, runSequence, runAt, err := deliverTaskPrompt(t, prompt, true)
+	delivery, err := deliverTaskPrompt(t, prompt, true)
 	if err != nil {
 		return err
 	}
-	if status == StatusDeferredAttached {
+	if delivery.status == StatusDeferredAttached {
 		// A TUI is attached full-screen to the target session; the delivery was
 		// held so it can't paste into and submit the user's in-progress input
 		// (#1586). Signal the caller (handleEvent / drainLoop) to re-queue and
@@ -835,7 +835,7 @@ func deliverWatchEvent(taskID, line string) error {
 		// logged quietly, since a deferral is expected, not an outage.
 		return errTargetBusy
 	}
-	if err := recordDeliveredTaskRun(taskID, runID, runSequence, runAt, status); err != nil {
+	if err := recordDeliveredTaskRun(taskID, delivery); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 	return nil

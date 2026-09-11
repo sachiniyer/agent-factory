@@ -3,17 +3,20 @@ package session
 import "time"
 
 // TaskRunIdentity is the durable association between a task delivery and the
-// session runtime that received it. SessionID is the unique identity; Sequence
-// is its clock-independent delivery order; RunAt is its display timestamp and
-// is zero only for records written before task-run publication moved inside the
-// manager boundary.
+// session runtime that received it. TaskGenerationID binds the reusable TaskID
+// to one task incarnation; SessionID is the unique run identity; Sequence is its
+// clock-independent delivery order; Revision is the task-row CAS observed at
+// admission. RunAt is display data and is zero only for records written before
+// task-run publication moved inside the manager boundary.
 type TaskRunIdentity struct {
-	TaskID    string
-	SessionID string
-	Title     string
-	Sequence  uint64
-	RunAt     time.Time
-	CreatedAt time.Time
+	TaskID           string
+	TaskGenerationID string
+	SessionID        string
+	Title            string
+	Sequence         uint64
+	Revision         uint64
+	RunAt            time.Time
+	CreatedAt        time.Time
 }
 
 // TaskRun returns this session's immutable task-delivery identity. The active
@@ -21,8 +24,9 @@ type TaskRunIdentity struct {
 // that ordered its task-row writes.
 func (i *Instance) TaskRun() TaskRunIdentity {
 	return TaskRunIdentity{
-		TaskID: i.TaskID, SessionID: i.ID, Title: i.Title,
-		Sequence: i.taskRunSequence, RunAt: i.taskRunAt, CreatedAt: i.CreatedAt,
+		TaskID: i.TaskID, TaskGenerationID: i.taskGenerationID,
+		SessionID: i.ID, Title: i.Title, Sequence: i.taskRunSequence,
+		Revision: i.taskRunRevision, RunAt: i.taskRunAt, CreatedAt: i.CreatedAt,
 	}
 }
 

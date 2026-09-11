@@ -355,18 +355,20 @@ func TestUpdateTaskNotFound(t *testing.T) {
 // scheduler-owned status fields (read before a concurrent scheduler run or
 // manual trigger bumped them via UpdateTaskStatus). UpdateTask must NOT
 // clobber the fresher on-disk LastRunAt/LastRunStatus/LastRunSessionID/
-// LastRunSequence (nor the immutable CreatedAt) when applying a user edit.
+// LastRunSequence/LastRunRevision or GenerationID (nor the immutable CreatedAt)
+// when applying a user edit.
 func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	created := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
 	tasks := []Task{
-		{ID: "u1", Name: "Old Name", Prompt: "old prompt", CronExpr: "0 * * * *", Enabled: true, CreatedAt: created, LastRunAt: &t1, LastRunStatus: "started"},
+		{ID: "u1", Name: "Old Name", Prompt: "old prompt", CronExpr: "0 * * * *", Enabled: true,
+			CreatedAt: created, GenerationID: "generation-a", LastRunAt: &t1, LastRunStatus: "started"},
 	}
 	setupTestTasks(t, tasks)
 
 	// Scheduler bumps the status to a fresher value via the canonical path.
 	t2 := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
-	_, _, statusErr := BeginTaskRun("u1", "session-new", 1, t2, "started")
+	_, _, statusErr := BeginTaskRun("u1", "generation-a", "session-new", 1, 0, t2, "started")
 	require.NoError(t, statusErr)
 	_, statusErr = UpdateTaskStatus("u1", nil, "completed")
 	require.NoError(t, statusErr)
@@ -395,6 +397,8 @@ func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 	assert.Equal(t, "completed", s.LastRunStatus, "LastRunStatus must retain the fresher scheduler value, not regress to stale")
 	assert.Equal(t, "session-new", s.LastRunSessionID, "LastRunSessionID must retain the fresher scheduler identity")
 	assert.Equal(t, uint64(1), s.LastRunSequence, "LastRunSequence must retain the scheduler ordering proof")
+	assert.Equal(t, uint64(2), s.LastRunRevision, "LastRunRevision must retain scheduler publication order")
+	assert.Equal(t, "generation-a", s.GenerationID, "GenerationID is immutable across task edits")
 	assert.True(t, s.CreatedAt.Equal(created), "CreatedAt is immutable and must be preserved from disk")
 }
 
@@ -430,6 +434,22 @@ func TestGenerateIDEntropyFailure(t *testing.T) {
 	require.Error(t, err, "GenerateID must surface the entropy failure")
 	assert.Empty(t, id, "no ID may be returned when entropy is unavailable")
 	assert.NotEqual(t, "00000000", id, "GenerateID must never emit the all-zero ID")
+}
+
+func TestAddTaskGenerationEntropyFailureDoesNotWrite(t *testing.T) {
+	setupTestTasks(t, []Task{})
+	orig := randReader
+	randReader = failingReader{}
+	t.Cleanup(func() { randReader = orig })
+
+	err := AddTask(Task{
+		ID: "entropy1", Prompt: "p", CronExpr: "0 9 * * *", ProjectPath: "/tmp", Enabled: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "task generation ID")
+	stored, loadErr := LoadTasks()
+	require.NoError(t, loadErr)
+	assert.Empty(t, stored, "an add without a durable incarnation token must not create a task")
 }
 
 // TestLoadTaskWithoutProgramFieldFallsBackToEmpty verifies that a task record
@@ -622,18 +642,18 @@ func TestTaskRunIdentitySeparatesEqualTimestampSessions(t *testing.T) {
 		ProjectPath: "/tmp", Enabled: true,
 	}})
 
-	_, _, err := BeginTaskRun("w1", "session-a", 1, runAt, "started")
+	_, _, err := BeginTaskRun("w1", "", "session-a", 1, 0, runAt, "started")
 	require.NoError(t, err)
-	_, _, err = BeginTaskRun("w1", "session-b", 2, runAt, "started")
+	_, _, err = BeginTaskRun("w1", "", "session-b", 2, 1, runAt, "started")
 	require.NoError(t, err)
 
-	_, applied, err := UpdateTaskRunStart("w1", "session-a", 1, runAt, "started")
+	_, applied, err := UpdateTaskRunStart("w1", "", "session-a", 1, 0, runAt, "started")
 	require.NoError(t, err)
 	assert.False(t, applied, "a delayed older start cannot replace the manager-published successor")
-	_, applied, err = UpdateTaskRunOutcome("w1", "session-a", "interrupted: agent runtime lost")
+	_, applied, err = UpdateTaskRunOutcome("w1", "", "session-a", "interrupted: agent runtime lost")
 	require.NoError(t, err)
 	assert.False(t, applied, "equal timestamps do not let one session claim another's row")
-	_, applied, err = UpdateTaskRunOutcome("w1", "session-b", "interrupted: agent runtime lost")
+	_, applied, err = UpdateTaskRunOutcome("w1", "", "session-b", "interrupted: agent runtime lost")
 	require.NoError(t, err)
 	require.True(t, applied)
 
@@ -647,7 +667,7 @@ func TestTaskRunIdentitySeparatesEqualTimestampSessions(t *testing.T) {
 func TestNonSessionStatusRetainsTaskRunSequenceHighWater(t *testing.T) {
 	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
-	_, _, err := BeginTaskRun("w1", "session-a", 7, runAt, RunStatusStarted)
+	_, _, err := BeginTaskRun("w1", "", "session-a", 7, 0, runAt, RunStatusStarted)
 	require.NoError(t, err)
 	targetAt := runAt.Add(time.Minute)
 	_, err = UpdateTaskStatus("w1", &targetAt, "sent")
@@ -666,12 +686,12 @@ func TestTaskRunOutcomePreservesLaterWatcherSupervisionStatus(t *testing.T) {
 		for _, supervisionStatus := range []string{"stopped", "errored: watcher exited"} {
 			t.Run(runStatus+"/"+supervisionStatus, func(t *testing.T) {
 				setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
-				_, _, err := BeginTaskRun("w1", "session-a", 1, runAt, runStatus)
+				_, _, err := BeginTaskRun("w1", "", "session-a", 1, 0, runAt, runStatus)
 				require.NoError(t, err)
 				_, err = UpdateTaskStatus("w1", nil, supervisionStatus)
 				require.NoError(t, err)
 
-				_, applied, err := UpdateTaskRunOutcome("w1", "session-a", "interrupted: agent runtime lost")
+				_, applied, err := UpdateTaskRunOutcome("w1", "", "session-a", "interrupted: agent runtime lost")
 				require.NoError(t, err)
 				assert.False(t, applied)
 				got, err := GetTask("w1")
@@ -687,10 +707,10 @@ func TestTaskRunOutcomePreservesLaterWatcherSupervisionStatus(t *testing.T) {
 func TestTaskRunOutcomeClosesResumedParkedRun(t *testing.T) {
 	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
-	_, _, err := BeginTaskRun("w1", "session-a", 1, runAt, "parked: usage limit")
+	_, _, err := BeginTaskRun("w1", "", "session-a", 1, 0, runAt, "parked: usage limit")
 	require.NoError(t, err)
 
-	_, applied, err := UpdateTaskRunOutcome("w1", "session-a", "interrupted: agent runtime lost")
+	_, applied, err := UpdateTaskRunOutcome("w1", "", "session-a", "interrupted: agent runtime lost")
 	require.NoError(t, err)
 	require.True(t, applied,
 		"a resumed run retains its session identity when the parked status write survives its prompt delivery")
@@ -703,10 +723,10 @@ func TestTaskRunStartRepairsOverPriorIdentifiedRow(t *testing.T) {
 	oldRunAt := time.Date(2026, 9, 11, 8, 0, 0, 0, time.UTC)
 	newRunAt := oldRunAt.Add(time.Hour)
 	setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
-	_, _, err := BeginTaskRun("w1", "session-old", 1, oldRunAt, "started")
+	_, _, err := BeginTaskRun("w1", "", "session-old", 1, 0, oldRunAt, "started")
 	require.NoError(t, err)
 
-	_, applied, err := UpdateTaskRunStart("w1", "session-new", 2, newRunAt, "started")
+	_, applied, err := UpdateTaskRunStart("w1", "", "session-new", 2, 1, newRunAt, "started")
 	require.NoError(t, err)
 	require.True(t, applied,
 		"repairing a committed new session must not require the previous run identity to be empty")
@@ -720,10 +740,10 @@ func TestTaskRunStartRepairsOnlyAnUnidentifiedRow(t *testing.T) {
 	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	setupTestTasks(t, []Task{{ID: "w1", LastRunStatus: "started"}})
 
-	_, applied, err := UpdateTaskRunStart("w1", "session-a", 1, runAt, "started")
+	_, applied, err := UpdateTaskRunStart("w1", "", "session-a", 1, 0, runAt, "started")
 	require.NoError(t, err)
 	require.True(t, applied)
-	_, applied, err = UpdateTaskRunStart("w1", "session-a", 1, runAt, "started")
+	_, applied, err = UpdateTaskRunStart("w1", "", "session-a", 1, 0, runAt, "started")
 	require.NoError(t, err)
 	assert.False(t, applied)
 

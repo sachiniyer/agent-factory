@@ -104,7 +104,8 @@ func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *sessio
 // unidentified by an earlier binary or a failed start-status write takes the
 // conservative compatibility path below.
 func (m *Manager) recordInterruptedTaskRun(repoID string, run session.TaskRunIdentity) {
-	updated, applied, err := task.UpdateTaskRunOutcome(run.TaskID, run.SessionID, TaskStatusInterrupted)
+	updated, applied, err := task.UpdateTaskRunOutcome(
+		run.TaskID, run.TaskGenerationID, run.SessionID, TaskStatusInterrupted)
 	if err == nil && !applied {
 		updated, applied, err = m.claimUnidentifiedInterruptedTaskRun(repoID, run)
 	}
@@ -127,6 +128,18 @@ func (m *Manager) recordInterruptedTaskRun(repoID string, run session.TaskRunIde
 }
 
 func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session.TaskRunIdentity) (task.Task, bool, error) {
+	stored, err := task.GetTask(run.TaskID)
+	if err != nil {
+		return task.Task{}, false, err
+	}
+	// Task IDs are reusable user-facing handles. The generation is the durable
+	// proof that this session belongs to the current row; an old session that
+	// survives remove+add must not even enter compatibility attribution for the
+	// replacement. Empty==empty preserves rows and sessions from before the field.
+	if stored.GenerationID != run.TaskGenerationID {
+		return task.Task{}, false, nil
+	}
+
 	// A committed session is durable before it enters m.instances, and an
 	// unloadable record never enters that map at all. Read the persisted universe,
 	// then add the only rows not there yet: pending creates. Candidate order uses
@@ -156,10 +169,6 @@ func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session
 	}
 	m.mu.Unlock()
 
-	stored, err := task.GetTask(run.TaskID)
-	if err != nil {
-		return task.Task{}, false, err
-	}
 	// A task currently configured for a shared target cannot have produced this
 	// older per-run session's present row. This also protects `started` target
 	// rows written by older binaries, before target auto-creation was normalized
@@ -190,7 +199,8 @@ func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session
 	}
 	return task.ClaimUnidentifiedTaskRunOutcome(
 		run.TaskID, run.SessionID, stored.LastRunAt, stored.LastRunStatus,
-		stored.LastRunSessionID, stored.LastRunSequence, desiredRunAt,
+		stored.LastRunSessionID, stored.LastRunSequence, stored.LastRunRevision,
+		run.TaskGenerationID, desiredRunAt,
 		desiredSequence, TaskStatusInterrupted,
 	)
 }
@@ -220,13 +230,15 @@ func persistedTaskRunsForAttribution(restoringRepoID string) ([]session.Instance
 
 func taskRunMayFollow(candidate session.InstanceData, run session.TaskRunIdentity) bool {
 	return taskRunIdentityMayFollow(session.TaskRunIdentity{
-		TaskID: candidate.TaskID, SessionID: candidate.ID,
-		Sequence: candidate.TaskRunSequence, CreatedAt: candidate.CreatedAt,
+		TaskID: candidate.TaskID, TaskGenerationID: candidate.TaskGenerationID,
+		SessionID: candidate.ID, Sequence: candidate.TaskRunSequence,
+		CreatedAt: candidate.CreatedAt,
 	}, run)
 }
 
 func taskRunIdentityMayFollow(candidate, run session.TaskRunIdentity) bool {
-	if candidate.TaskID != run.TaskID || candidate.SessionID == run.SessionID {
+	if candidate.TaskID != run.TaskID || candidate.TaskGenerationID != run.TaskGenerationID ||
+		candidate.SessionID == run.SessionID {
 		return false
 	}
 	if candidate.Sequence != 0 && run.Sequence != 0 {

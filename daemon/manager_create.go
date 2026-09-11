@@ -75,7 +75,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	if err := applyDefaultAccount(cfg, &req); err != nil {
 		return session.InstanceData{}, err
 	}
-	taskRunSequence, err := m.nextTaskRunSequence(req.TaskID)
+	taskRunAdmission, err := m.nextTaskRunAdmission(req.TaskID, req.TaskGenerationID)
 	if err != nil {
 		return session.InstanceData{}, err
 	}
@@ -110,8 +110,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		taskRunAt = createdAt
 	}
 	pending := session.InstanceData{
-		ID:              session.NewInstanceID(),
-		TaskID:          req.TaskID,
+		ID:     session.NewInstanceID(),
+		TaskID: req.TaskID, TaskGenerationID: taskRunAdmission.generationID,
 		Title:           title,
 		Path:            workspace,
 		Status:          session.Loading,
@@ -119,12 +119,11 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		InFlightOp:      session.OpCreating,
 		TaskRunActive:   req.TaskID != "",
 		TaskRunAt:       taskRunAt,
-		TaskRunSequence: taskRunSequence,
-		CreatedAt:       createdAt,
-		UpdatedAt:       createdAt,
-		Prompt:          req.Prompt,
-		Program:         req.Program,
-		Worktree:        session.GitWorktreeData{RepoPath: repo.IdentityPath()},
+		TaskRunSequence: taskRunAdmission.sequence, TaskRunRevision: taskRunAdmission.revision,
+		CreatedAt: createdAt, UpdatedAt: createdAt,
+		Prompt:   req.Prompt,
+		Program:  req.Program,
+		Worktree: session.GitWorktreeData{RepoPath: repo.IdentityPath()},
 	}
 	key := daemonInstanceKey(repo.ID, title)
 	m.mu.Lock()
@@ -169,12 +168,13 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// was picked up on the next create; now it applies on save/ApplyConfig like
 	// every other key — a deliberate, uniform change (see the #2480 release note).
 	instance, err := session.NewInstance(session.InstanceOptions{
-		ID:                             pending.ID,
-		CreatedAt:                      pending.CreatedAt,
-		Title:                          title,
-		TaskID:                         req.TaskID,
+		ID:        pending.ID,
+		CreatedAt: pending.CreatedAt,
+		Title:     title,
+		TaskID:    req.TaskID, TaskGenerationID: pending.TaskGenerationID,
 		TaskRunAt:                      pending.TaskRunAt,
 		TaskRunSequence:                pending.TaskRunSequence,
+		TaskRunRevision:                pending.TaskRunRevision,
 		Path:                           workspace,
 		Program:                        req.Program,
 		Account:                        req.Account,
@@ -391,7 +391,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// here recreates the window where recovery can observe an unidentified run.
 		if req.TaskID != "" {
 			_, _, taskStatusErr = task.BeginTaskRun(
-				req.TaskID, instance.ID, data.TaskRunSequence, instance.CreatedAt, taskRunStatus)
+				req.TaskID, data.TaskGenerationID, instance.ID, data.TaskRunSequence,
+				data.TaskRunRevision, instance.CreatedAt, taskRunStatus)
 		}
 		// Register the provider discovery in the same manager-lock critical
 		// section that makes the instance visible. A concurrent status poll can

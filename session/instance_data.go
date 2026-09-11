@@ -18,11 +18,12 @@ func (i *Instance) ToInstanceData() InstanceData {
 // CreatedAt and UpdatedAt are copied unchanged; reading does not mutate a session.
 func (i *Instance) toInstanceDataLocked() InstanceData {
 	data := InstanceData{
-		ID:     i.ID,
-		TaskID: i.TaskID,
-		Title:  i.Title,
-		Path:   i.Path,
-		Branch: i.Branch,
+		ID:               i.ID,
+		TaskID:           i.TaskID,
+		TaskGenerationID: i.taskGenerationID,
+		Title:            i.Title,
+		Path:             i.Path,
+		Branch:           i.Branch,
 		// Serialize the two-axis state plus the legacy composed Status. Liveness is
 		// the daemon truth; InFlightOp rides daemon snapshots so secondary TUIs can
 		// cold-start into archive/restore operations without lossy Status
@@ -100,6 +101,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	data.TaskRunActive = i.taskRunActive
 	data.TaskRunAt = i.taskRunAt
 	data.TaskRunSequence = i.taskRunSequence
+	data.TaskRunRevision = i.taskRunRevision
 
 	// Persist each tab so the full local agent+shell tab list survives a restart
 	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
@@ -312,13 +314,14 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		data.UpdatedAt = data.CreatedAt
 	}
 	instance := &Instance{
-		ID:         id,
-		TaskID:     data.TaskID,
-		Title:      data.Title,
-		Path:       data.Path,
-		Branch:     data.Branch,
-		liveness:   liveness,
-		inFlightOp: inFlightOp,
+		ID:               id,
+		TaskID:           data.TaskID,
+		taskGenerationID: data.TaskGenerationID,
+		Title:            data.Title,
+		Path:             data.Path,
+		Branch:           data.Branch,
+		liveness:         liveness,
+		inFlightOp:       inFlightOp,
 		// Carried across the restart (#1892). An outage that loses sessions is the
 		// same event that restarts the daemon, so this fact has to come back from
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
@@ -326,6 +329,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		taskRunActive:            data.TaskRunActive,
 		taskRunAt:                data.TaskRunAt,
 		taskRunSequence:          data.TaskRunSequence,
+		taskRunRevision:          data.TaskRunRevision,
 		limitResetAt:             data.LimitResetAt,
 		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,

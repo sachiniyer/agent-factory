@@ -112,10 +112,15 @@ type Task struct {
 	// migration on purpose: the backfill would have to shell out to git for
 	// every task inside the tasks.json load path, and rows pick the field up as
 	// they are next written anyway.
-	RepoID        string     `json:"repo_id,omitempty"`
-	Program       string     `json:"program"`
-	Enabled       bool       `json:"enabled"`
-	CreatedAt     time.Time  `json:"created_at"`
+	RepoID    string    `json:"repo_id,omitempty"`
+	Program   string    `json:"program"`
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+	// GenerationID distinguishes two task rows that reuse the same user-facing
+	// ID. The store mints it on every add and sessions retain it, so a runtime
+	// belonging to a removed task can never publish status onto its replacement.
+	// Empty denotes a row written before this field existed.
+	GenerationID  string     `json:"generation_id,omitempty"`
 	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
 	LastRunStatus string     `json:"last_run_status,omitempty"`
 	// LastRunSessionID is the stable identity of a session-per-run delivery.
@@ -130,6 +135,11 @@ type Task struct {
 	// cannot reuse an old order. Zero means there is no session-run history or the
 	// row predates this field.
 	LastRunSequence uint64 `json:"last_run_sequence,omitempty"`
+	// LastRunRevision changes on every scheduler-owned last-run mutation. A
+	// session create captures it at admission and may publish its run only while
+	// the revision is unchanged, preserving watcher termination that arrives
+	// during slow provisioning. Zero denotes no status writes yet.
+	LastRunRevision uint64 `json:"last_run_revision,omitempty"`
 	// Audit is the bounded trail of mutations to this task — the one field here
 	// that is a HISTORY rather than a current value, and the only way to answer
 	// "did someone turn this off?" (#3623). Written by the store inside the same
@@ -573,7 +583,9 @@ func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error
 	}
 	// Everything the STORE owns is reset here, as a class rather than one field
 	// at a time — see resetStoreOwnedFields.
-	t.resetStoreOwnedFields(nowFn())
+	if err := t.resetStoreOwnedFields(nowFn()); err != nil {
+		return Task{}, err
+	}
 	// Canonicalize before validating so validation judges exactly what will be
 	// stored — a whitespace-only target session must not validate as "no target
 	// session" and then behave as one at delivery time (#1892).
@@ -755,9 +767,17 @@ var randReader io.Reader = rand.Reader
 // Callers must fail the operation loudly rather than persist a zero/colliding
 // ID. See #897.
 func GenerateID() (string, error) {
-	b := make([]byte, 4)
+	return generateRandomHex(4, "task ID")
+}
+
+func generateTaskGenerationID() (string, error) {
+	return generateRandomHex(16, "task generation ID")
+}
+
+func generateRandomHex(byteCount int, label string) (string, error) {
+	b := make([]byte, byteCount)
 	if _, err := io.ReadFull(randReader, b); err != nil {
-		return "", fmt.Errorf("failed to generate random task ID: %w", err)
+		return "", fmt.Errorf("failed to generate random %s: %w", label, err)
 	}
 	return hex.EncodeToString(b), nil
 }
