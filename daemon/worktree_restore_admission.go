@@ -13,6 +13,80 @@ import (
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
+// restoreAdmissionIdentity is the complete identity a local restore decision
+// depends on. No single field is sufficient:
+//
+//   - inventoryRepoID is the persisted (possibly historical) key that owns the
+//     row and must still identify this exact instance at apply time;
+//   - canonicalRepoID is Git's current identity and keys admission shared with
+//     creates addressed through a newer repository path;
+//   - resolvedWorktreePath is the selected relocation/workspace identity, not
+//     an unselected alternate or a spelling-sensitive pathname;
+//   - instance distinguishes the restoring lane from every other live owner of
+//     that path.
+//
+// Restore admission may clear none of these dimensions independently. The
+// observation and the under-lock revalidation compare the tuple as a unit.
+type restoreAdmissionIdentity struct {
+	inventoryRepoID      string
+	canonicalRepoID      string
+	repoPath             string
+	worktreePath         string
+	resolvedWorktreePath string
+	instance             *session.Instance
+}
+
+func observeRestoreAdmissionIdentity(
+	inventoryRepoID string,
+	instance *session.Instance,
+	admissionWorktreePath string,
+) (restoreAdmissionIdentity, session.InstanceData, error) {
+	row := instance.ToInstanceData()
+	repoPath := strings.TrimSpace(row.Worktree.RepoPath)
+	worktreePath := strings.TrimSpace(admissionWorktreePath)
+	if repoPath == "" || worktreePath == "" {
+		return restoreAdmissionIdentity{}, row, fmt.Errorf("repository or worktree identity is missing")
+	}
+	canonicalRepo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		return restoreAdmissionIdentity{}, row, fmt.Errorf("could not establish the canonical repository identity: %w", err)
+	}
+	resolvedWorktreePath := pathutil.ResolveForCompare(worktreePath)
+	if resolvedWorktreePath == "" {
+		return restoreAdmissionIdentity{}, row, fmt.Errorf("could not resolve worktree path %s for comparison", config.ShellQuotePath(worktreePath))
+	}
+	if _, statErr := os.Stat(worktreePath); statErr == nil {
+		worktreeRepo, repoErr := config.RepoFromPath(worktreePath)
+		if repoErr != nil {
+			return restoreAdmissionIdentity{}, row, fmt.Errorf("could not establish which repository owns worktree %s: %w", config.ShellQuotePath(worktreePath), repoErr)
+		}
+		if worktreeRepo.ID != canonicalRepo.ID {
+			return restoreAdmissionIdentity{}, row, fmt.Errorf("worktree %s belongs to repository %s, not the session repository %s", config.ShellQuotePath(worktreePath), worktreeRepo.ID, canonicalRepo.ID)
+		}
+	} else if !os.IsNotExist(statErr) {
+		return restoreAdmissionIdentity{}, row, fmt.Errorf("could not inspect worktree path %s: %w", config.ShellQuotePath(worktreePath), statErr)
+	}
+	return restoreAdmissionIdentity{
+		inventoryRepoID:      inventoryRepoID,
+		canonicalRepoID:      canonicalRepo.ID,
+		repoPath:             repoPath,
+		worktreePath:         worktreePath,
+		resolvedWorktreePath: resolvedWorktreePath,
+		instance:             instance,
+	}, row, nil
+}
+
+func (identity restoreAdmissionIdentity) sameTuple(other restoreAdmissionIdentity) bool {
+	return identity.inventoryRepoID == other.inventoryRepoID &&
+		identity.canonicalRepoID == other.canonicalRepoID &&
+		identity.resolvedWorktreePath == other.resolvedWorktreePath &&
+		identity.instance == other.instance
+}
+
+func (identity restoreAdmissionIdentity) matchesWorktree(path string) bool {
+	return path != "" && pathutil.ResolveForCompare(path) == identity.resolvedWorktreePath
+}
+
 // reserveLocalRestoreBranch validates and reserves the complete branch
 // admission decision for one local recovery. The observed branch, not the
 // cached record, is authoritative when the worktree is still registered.
@@ -32,50 +106,44 @@ func (m *Manager) reserveLocalRestoreBranch(
 	requireRegistered bool,
 	admissionWorktreePath string,
 ) (func(), error) {
-	row := instance.ToInstanceData()
-	repoPath := strings.TrimSpace(row.Worktree.RepoPath)
-	worktreePath := strings.TrimSpace(admissionWorktreePath)
-	if repoPath == "" || worktreePath == "" {
-		return nil, fmt.Errorf("cannot restore session %q: its repository or worktree identity is missing, so af cannot verify branch ownership", title)
-	}
-	canonicalRepo, err := config.RepoFromPath(repoPath)
+	identity, row, err := observeRestoreAdmissionIdentity(repoID, instance, admissionWorktreePath)
 	if err != nil {
-		return nil, fmt.Errorf("cannot restore session %q: af could not establish the repository identity needed to serialize worktree admission; nothing was moved: %w", title, err)
+		return nil, fmt.Errorf("cannot restore session %q: af could not establish its worktree admission identity; nothing was moved: %w", title, err)
 	}
 
-	initial, err := worktreeBranchBindings(repoPath)
+	initial, err := worktreeBranchBindings(identity.repoPath)
 	if err != nil {
 		return nil, fmt.Errorf("cannot restore session %q: could not inspect worktree branch bindings; nothing was moved: %w", title, err)
 	}
-	branch, registered, err := restoreCandidateBranch(row, initial, worktreePath)
+	branch, registered, err := restoreCandidateBranch(row, initial, identity)
 	if err != nil {
 		return nil, fmt.Errorf("cannot restore session %q: %w", title, err)
 	}
 	if !registered && requireRegistered {
-		return nil, fmt.Errorf("cannot restore session %q: its worktree %s is absent from Git's registration, so af cannot establish the branch it would activate; nothing was moved", title, config.ShellQuotePath(worktreePath))
+		return nil, fmt.Errorf("cannot restore session %q: its worktree %s is absent from Git's registration, so af cannot establish the branch it would activate; nothing was moved", title, config.ShellQuotePath(identity.worktreePath))
 	}
 	// repoID is the persisted inventory key and may survive a repository rename.
 	// Admission is a property of the physical Git repository, so restores and
 	// creates must rendezvous on the identity Git resolves now, not on whichever
 	// historical key addresses this row.
-	lock := m.worktreeAdmissionLockForRepo(canonicalRepo.ID)
+	lock := m.worktreeAdmissionLockForRepo(identity.canonicalRepoID)
 	lock.Lock()
 	release := lock.Unlock
-	freshRepo, err := config.RepoFromPath(repoPath)
+	freshIdentity, freshRow, err := observeRestoreAdmissionIdentity(repoID, instance, admissionWorktreePath)
 	if err != nil {
 		release()
-		return nil, fmt.Errorf("cannot restore session %q: af could not revalidate the repository identity under worktree admission; nothing was moved: %w", title, err)
+		return nil, fmt.Errorf("cannot restore session %q: af could not revalidate its worktree admission identity under the reservation; nothing was moved: %w", title, err)
 	}
-	if freshRepo.ID != canonicalRepo.ID {
+	if !identity.sameTuple(freshIdentity) {
 		release()
-		return nil, fmt.Errorf("cannot restore session %q: its repository identity changed during worktree admission; retry after it settles", title)
+		return nil, fmt.Errorf("cannot restore session %q: its repository, worktree, or instance identity changed during worktree admission; retry after it settles", title)
 	}
-	fresh, err := worktreeBranchBindings(repoPath)
+	fresh, err := worktreeBranchBindings(freshIdentity.repoPath)
 	if err != nil {
 		release()
 		return nil, fmt.Errorf("cannot restore session %q: could not revalidate worktree branch bindings; nothing was moved: %w", title, err)
 	}
-	freshBranch, freshRegistered, err := restoreCandidateBranch(row, fresh, worktreePath)
+	freshBranch, freshRegistered, err := restoreCandidateBranch(freshRow, fresh, freshIdentity)
 	if err != nil || freshBranch != branch || freshRegistered != registered {
 		release()
 		if err != nil {
@@ -84,30 +152,30 @@ func (m *Manager) reserveLocalRestoreBranch(
 		return nil, fmt.Errorf("cannot restore session %q: its worktree branch registration changed during admission; retry after it settles", title)
 	}
 
-	diskData, err := loadRepoInstanceData(repoID)
+	diskData, err := loadRepoInstanceData(identity.inventoryRepoID)
 	if err != nil {
 		release()
 		return nil, fmt.Errorf("cannot restore session %q: could not read the persisted lane inventory needed to verify worktree ownership: %w", title, err)
 	}
 	m.mu.Lock()
-	current := m.instances[daemonInstanceKey(repoID, title)]
-	if lanes := m.liveLanesHoldingWorktreeExceptLocked(worktreePath, instance, diskData); len(lanes) > 0 {
+	current := m.instances[daemonInstanceKey(identity.inventoryRepoID, title)]
+	if lanes := m.liveLanesHoldingWorktreeLocked(identity.worktreePath, identity.instance, diskData); len(lanes) > 0 {
 		m.mu.Unlock()
 		release()
 		lane := lanes[0]
 		handoff := shellsuggest.PositionalCommand("af", []string{"sessions", "handoff", "--to", "<agent>"}, lane)
 		if branch == "" {
 			return nil, fmt.Errorf("cannot restore session %q: its detached HEAD worktree at %s is already used by live lane %q. Restoring could move the checkout out from under that lane or start another agent in its files and index, so continue there with `%s`; af did not rename, detach, reset, or move either worktree",
-				title, config.ShellQuotePath(worktreePath), lane, handoff)
+				title, config.ShellQuotePath(identity.worktreePath), lane, handoff)
 		}
 		return nil, fmt.Errorf("cannot restore session %q: its worktree at %s is already used by live lane %q. Restoring could move the checkout out from under that lane or start another agent in its files and index, so continue there with `%s`; af did not rename, detach, reset, or move either worktree",
-			title, config.ShellQuotePath(worktreePath), lane, handoff)
+			title, config.ShellQuotePath(identity.worktreePath), lane, handoff)
 	}
 	for _, binding := range fresh {
-		if sameWorktreePath(binding.Path, worktreePath) || branch == "" || binding.Branch != branch {
+		if identity.matchesWorktree(binding.Path) || branch == "" || binding.Branch != branch {
 			continue
 		}
-		if lanes := m.liveLanesHoldingWorktreeExceptLocked(binding.Path, instance, diskData); len(lanes) > 0 {
+		if lanes := m.liveLanesHoldingWorktreeLocked(binding.Path, identity.instance, diskData); len(lanes) > 0 {
 			m.mu.Unlock()
 			release()
 			lane := lanes[0]
@@ -117,20 +185,19 @@ func (m *Manager) reserveLocalRestoreBranch(
 		}
 	}
 	m.mu.Unlock()
-	if current != instance {
+	if current != identity.instance {
 		release()
 		return nil, fmt.Errorf("session %q changed state before its branch holders could be verified", title)
 	}
 	return release, nil
 }
 
-// liveLanesHoldingWorktreeExceptLocked returns every live owner of holder across
-// the complete manager roster except the exact instance being restored. A
-// repository rename can leave that owner under a historical map key, and a
-// retained worktree can already be shared by an archived lane and a live --here
-// lane, so neither the map key nor path equality can identify the restoring
-// owner; only pointer/stable-ID identity can exclude it safely.
-func (m *Manager) liveLanesHoldingWorktreeExceptLocked(holder string, restoring *session.Instance, diskData []session.InstanceData) []string {
+// liveLanesHoldingWorktreeLocked is the one owner matcher for create and restore
+// admission. Git establishes the repository and holder path; this resolves that
+// path across the complete manager roster, including historical repository map
+// keys. exclude is nil for create and the exact restoring instance for restore.
+// Persisted copies use the stable instance ID for the same exclusion.
+func (m *Manager) liveLanesHoldingWorktreeLocked(holder string, exclude *session.Instance, diskData []session.InstanceData) []string {
 	target := pathutil.ResolveForCompare(holder)
 	if target == "" {
 		return nil
@@ -149,7 +216,7 @@ func (m *Manager) liveLanesHoldingWorktreeExceptLocked(holder string, restoring 
 		lanes = append(lanes, title)
 	}
 	for _, candidate := range m.instances {
-		if candidate == nil || candidate == restoring || candidate.IsArchived() || pathutil.ResolveForCompare(candidate.GetWorktreePath()) != target {
+		if candidate == nil || candidate == exclude || candidate.IsArchived() || pathutil.ResolveForCompare(candidate.GetWorktreePath()) != target {
 			continue
 		}
 		add(candidate.Title, candidate.ID)
@@ -158,7 +225,7 @@ func (m *Manager) liveLanesHoldingWorktreeExceptLocked(holder string, restoring 
 		if session.IsArchivedData(data) || pathutil.ResolveForCompare(data.Worktree.WorktreePath) != target {
 			continue
 		}
-		if restoring != nil && data.ID != "" && data.ID == restoring.ID {
+		if exclude != nil && data.ID != "" && data.ID == exclude.ID {
 			continue
 		}
 		add(data.Title, data.ID)
@@ -170,41 +237,41 @@ func (m *Manager) liveLanesHoldingWorktreeExceptLocked(holder string, restoring 
 func restoreCandidateBranch(
 	row session.InstanceData,
 	bindings []sessiongit.WorktreeBranchBinding,
-	worktreePath string,
+	identity restoreAdmissionIdentity,
 ) (branch string, registered bool, err error) {
 	for _, binding := range bindings {
-		if sameWorktreePath(binding.Path, worktreePath) {
+		if identity.matchesWorktree(binding.Path) {
 			switch {
 			case binding.HeadSHA == "":
-				return "", true, fmt.Errorf("worktree %s has no observed HEAD, so its active branch is unknown", config.ShellQuotePath(worktreePath))
+				return "", true, fmt.Errorf("worktree %s has no observed HEAD, so its active branch is unknown", config.ShellQuotePath(identity.worktreePath))
 			case binding.Branch != "":
 				return binding.Branch, true, nil
 			case binding.Detached:
 				return "", true, nil
 			default:
-				return "", true, fmt.Errorf("worktree %s has neither a branch nor a detached-HEAD marker, so its active branch is unknown", config.ShellQuotePath(worktreePath))
+				return "", true, fmt.Errorf("worktree %s has neither a branch nor a detached-HEAD marker, so its active branch is unknown", config.ShellQuotePath(identity.worktreePath))
 			}
 		}
 	}
-	if _, statErr := os.Stat(worktreePath); statErr == nil {
+	if _, statErr := os.Stat(identity.worktreePath); statErr == nil {
 		// A bounded relocation can move the directory before `git worktree
 		// repair` completes. In that state the repository-wide listing still
 		// names the now-absent old path, but the selected directory's own .git
 		// link remains authoritative. Probe that exact identity-qualified path;
 		// never borrow branch metadata from the unselected recovery alternate.
-		branch, detached, directErr := sessiongit.WorktreeBranchAtPath(worktreePath)
+		branch, detached, directErr := sessiongit.WorktreeBranchAtPath(identity.worktreePath)
 		switch {
 		case directErr != nil:
-			return "", false, fmt.Errorf("worktree %s exists but its active branch could not be established directly: %w", config.ShellQuotePath(worktreePath), directErr)
+			return "", false, fmt.Errorf("worktree %s exists but its active branch could not be established directly: %w", config.ShellQuotePath(identity.worktreePath), directErr)
 		case branch != "":
 			return branch, true, nil
 		case detached:
 			return "", true, nil
 		default:
-			return "", false, fmt.Errorf("worktree %s has neither an attached branch nor a detached-HEAD marker; worktree safety is unknown", config.ShellQuotePath(worktreePath))
+			return "", false, fmt.Errorf("worktree %s has neither an attached branch nor a detached-HEAD marker; worktree safety is unknown", config.ShellQuotePath(identity.worktreePath))
 		}
 	} else if !os.IsNotExist(statErr) {
-		return "", false, fmt.Errorf("worktree %s could not be identified: %w", config.ShellQuotePath(worktreePath), statErr)
+		return "", false, fmt.Errorf("worktree %s could not be identified: %w", config.ShellQuotePath(identity.worktreePath), statErr)
 	}
 	branch = strings.TrimSpace(row.Worktree.BranchName)
 	if branch == "" {

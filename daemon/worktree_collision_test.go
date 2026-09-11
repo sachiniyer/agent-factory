@@ -694,6 +694,20 @@ func TestArchivedRestoreFindsLiveHolderUnderHistoricalRepoKey(t *testing.T) {
 		"Git's holder path must be matched against the complete live roster after a repository-key rename")
 }
 
+func TestArchivedRestoreRejectsWorktreeFromDifferentRepository(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "archived", "foreign-worktree")
+	foreignRepo := setupControlRepo(t)
+
+	release, err := manager.reserveLocalRestoreBranch(repoID, archived.Title, archived, true, foreignRepo)
+	if release != nil {
+		release()
+	}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "belongs to repository",
+		"a branch observation from an unrelated repository must not satisfy the restore identity tuple")
+}
+
 func TestArchivedRestoreIgnoresStaleRelocationAliasForBranchAdmission(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "archived", "stale-alias")

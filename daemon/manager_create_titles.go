@@ -242,36 +242,7 @@ func sameCreateWorktreePath(left, right string) bool {
 }
 
 func (m *Manager) liveLaneHoldingWorktreeLocked(holder string, diskData []session.InstanceData) string {
-	target := pathutil.ResolveForCompare(holder)
-	if target == "" {
-		return ""
-	}
-	lanes := make([]string, 0)
-	seen := make(map[string]struct{})
-	add := func(title, id string) {
-		key := "title:" + title
-		if id != "" {
-			key = "id:" + id
-		}
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		lanes = append(lanes, title)
-	}
-	for _, candidate := range m.instances {
-		if candidate == nil || candidate.IsArchived() || pathutil.ResolveForCompare(candidate.GetWorktreePath()) != target {
-			continue
-		}
-		add(candidate.Title, candidate.ID)
-	}
-	for _, data := range diskData {
-		if session.IsArchivedData(data) || pathutil.ResolveForCompare(data.Worktree.WorktreePath) != target {
-			continue
-		}
-		add(data.Title, data.ID)
-	}
-	sort.Strings(lanes)
+	lanes := m.liveLanesHoldingWorktreeLocked(holder, nil, diskData)
 	if len(lanes) == 0 {
 		return ""
 	}
