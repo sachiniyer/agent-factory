@@ -80,8 +80,16 @@ func LoginAgents() []string {
 // in-flight pane. Hex digits [0-9a-f] are all stable, and the encoding is
 // injective, so two distinct names can never produce one tmux session name
 // regardless of which characters ValidateName admits.
+//
+// The "x-" sub-prefix distinguishes hex-encoded names from legacy (raw-name)
+// session titles so that an existing account whose name happens to look like a
+// hex string (e.g. "776f726b") can never collide with the newly encoded form of
+// a different account (e.g. "work" → "776f726b"). Legacy titles match
+// "af-login-<agent>-<rawname>" without the "x-" infix; the new format matches
+// "af-login-<agent>-x-<hexname>", so the two namespaces are disjoint and
+// Supervisor.adopt cannot mistake a legacy pane for a newly created one.
 func LoginSessionName(agent, name string) string {
-	return "af-login-" + agent + "-" + hex.EncodeToString([]byte(name))
+	return "af-login-" + agent + "-x-" + hex.EncodeToString([]byte(name))
 }
 
 // accountCredentialArtifacts is the file the AGENT writes when its login

@@ -268,6 +268,23 @@ func TestLoginSessionName_IsStableAndScoped(t *testing.T) {
 	}
 }
 
+// TestLoginSessionName_HexNamespaceSeparation verifies that an account whose raw
+// name looks like a hex string cannot collide with the newly-encoded form of a
+// different account. For example, the account named "776f726b" must not share a
+// session title with the account named "work" (whose hex encoding is "776f726b").
+// The "x-" infix in the new format separates the two namespaces: the legacy form
+// "af-login-<agent>-776f726b" and the new form "af-login-<agent>-x-776f726b" are
+// distinct even though the hex body is identical.
+func TestLoginSessionName_HexNamespaceSeparation(t *testing.T) {
+	// "work" hex-encodes to "776f726b"; an account literally named "776f726b"
+	// must not produce the same session title as the account named "work".
+	work := LoginSessionName("codex", "work")
+	hexLiteral := LoginSessionName("codex", "776f726b")
+	if work == hexLiteral {
+		t.Fatalf("account %q and account %q share the session name %q — hex-namespace separation is broken", "work", "776f726b", work)
+	}
+}
+
 // TestLoginSessionName_IsInjectiveAcrossDotVersusUnderscore is the collision this
 // package cannot see at the tmux boundary but must prevent regardless: the titles
 // it produces reach tmux's sanitizer (toTmuxName), which rewrites '.' to '_', so
