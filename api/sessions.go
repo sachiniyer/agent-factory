@@ -344,6 +344,12 @@ var sessionsCreateCmd = &cobra.Command{
 	Short: "Create a new session",
 	Long: `Create a new session running an agent in its own git worktree.
 
+With --prompt, unconfirmed or incomplete delivery adds a warning field to the
+JSON session result. Outside --json mode, it also prints the warning on stderr.
+The session remains created;
+inspect its pane before retrying, since an unverified prompt may already have
+run. Creation still exits successfully and does not automatically resend.
+
 With --here (alias --in-place) the session instead attaches to the repo's
 existing working tree at its current branch: no worktree or branch is created,
 the agent runs in the repo root, and killing the session never removes the
@@ -498,7 +504,7 @@ pointing at one).`,
 				shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, data.Title)))
 		}
 
-		return jsonOut(data)
+		return reportCreatedSession(data, createPromptFlag)
 	},
 }
 
