@@ -816,8 +816,9 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 // while this session was alive, and an older outcome must not overwrite the
 // newer run's status. The comparison and write share the task-file lock.
 //
-// Reports false with no error when a newer run owns the row. LastRunAt is left
-// unchanged whichever way the comparison goes.
+// Reports false with no error when the row does not identify that run (normally
+// because a newer one owns it). LastRunAt is left unchanged whichever way the
+// comparison goes.
 func UpdateTaskStatusIfLastRunAt(taskID string, expectedRunAt time.Time, lastRunStatus string) (Task, bool, error) {
 	return updateTaskStatus(taskID, nil, lastRunStatus, &expectedRunAt)
 }

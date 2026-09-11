@@ -10,6 +10,11 @@ package session
 // so a daemon crash before the ordinary post-recovery write cannot reload the
 // predecessor's run as active. ConfirmLive retains the same run effect as a
 // structural fallback for callers without a settlement callback.
+//
+// OpRestoring is a no-prompt-replay contract. Any future recovery that chooses
+// to deliver the prompt again must remain under a delivery fence such as
+// OpRespawning, or introduce a distinct state; it must not cross this boundary
+// and hand an already-closed run to the prompted replacement.
 func (i *Instance) InterruptTaskRunAtRestoreBoundary() (taskID, title string, interrupted bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()

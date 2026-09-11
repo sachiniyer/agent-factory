@@ -110,7 +110,7 @@ func (m *Manager) recordInterruptedTaskRun(taskID, title string, runAt time.Time
 	}
 	if !applied {
 		m.warn().Printf(
-			"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, skipped on_complete, and left the session in place for inspection; did not replace last_run_status because a newer run owns the task row",
+			"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, skipped on_complete, and left the session in place for inspection; did not replace last_run_status because the task row does not identify this run",
 			taskID, title)
 		return
 	}

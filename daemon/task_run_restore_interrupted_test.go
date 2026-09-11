@@ -129,5 +129,5 @@ func TestRestoredOlderTaskRuntimeDoesNotOverwriteNewerRunStatus(t *testing.T) {
 	assert.True(t, gotTask.LastRunAt.Equal(newerRunAt))
 	assert.Equal(t, "started", gotTask.LastRunStatus,
 		"an older session's interruption must not replace the newer run's status")
-	assert.Contains(t, logs.warnings.String(), "a newer run owns the task row")
+	assert.Contains(t, logs.warnings.String(), "the task row does not identify this run")
 }
