@@ -38,9 +38,11 @@ func (i *Instance) TaskRun() TaskRunIdentity {
 // at their pre-ConfirmLive boundary, while load reconstructors invoke it only
 // after RestoreWithResult confirms RestoreRespawned for the agent tab. A sibling
 // tab replacement never reaches it. A prompt-redelivery fence is the explicit
-// exception: OpRespawning promises to re-deliver the queued task prompt, while a
+// exception: OpRespawning promises to re-deliver the queued task prompt, a
 // durable OpReplacing mission supplies the replacement agent's continuation
-// context. Both keep the run until that delivery transaction lowers its fence.
+// context, and a committed manual account swap with transaction-scoped
+// non-delivery proof is replayed by the limit scheduler after load. Each keeps
+// the run until that delivery transaction settles.
 //
 // The daemon must persist the closed session marker before publishing the task
 // outcome. ConfirmLive retains runEndsOnRestoredRuntime as a structural fallback
@@ -53,13 +55,73 @@ func (i *Instance) InterruptTaskRunAtRuntimeReplacement() (TaskRunIdentity, bool
 
 func (i *Instance) interruptTaskRunAtRuntimeReplacementLocked() (TaskRunIdentity, bool) {
 	replaysPrompt := i.inFlightOp == OpRespawning ||
-		(i.inFlightOp == OpReplacing && i.pendingHandoffMission != "")
+		(i.inFlightOp == OpReplacing && i.pendingHandoffMission != "") ||
+		i.pendingAccountSwapPromptReplayableLocked()
 	if replaysPrompt || !i.taskRunActive {
 		return TaskRunIdentity{}, false
 	}
 	i.closeTaskRunLocked()
 	i.taskRunInterruptionPending = true
 	return i.TaskRun(), true
+}
+
+// pendingAccountSwapPromptReplayableLocked identifies the one load-time account
+// replacement whose successor is authorized to receive the stored task prompt.
+// A marker alone is not enough: manual delivery may be ambiguous, and replaying
+// then could duplicate side effects. The transaction must name a mission, prove
+// all replacement panes started, and carry its own positive non-delivery verdict.
+// Caller holds i.mu.
+func (i *Instance) pendingAccountSwapPromptReplayableLocked() bool {
+	pending := i.pendingAccountSwap
+	return pending != nil && pending.Manual && pending.Mission != "" &&
+		pending.ReplacementPanesStarted && pending.MissionDeliveryStatus == PromptNotDelivered
+}
+
+// HoldRuntimeReplacementUntilSettlement prevents a restored runtime from
+// becoming lifecycle-visible while disk can still resurrect the prompted
+// predecessor's active run. It is process-local: the durable fact being awaited
+// is the already-set TaskRunInterruptionPending session checkpoint.
+func (i *Instance) HoldRuntimeReplacementUntilSettlement() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRestoring || !i.taskRunInterruptionPending {
+		return false
+	}
+	i.runtimeReplacementSettlementBlocked = true
+	return true
+}
+
+// RuntimeReplacementSettlementBlocked reports whether a failed interrupted-run
+// checkpoint owns the restore fence. The settlement retry uses this to bypass
+// the ordinary no-write-during-operation rule for this one safe, closed snapshot.
+func (i *Instance) RuntimeReplacementSettlementBlocked() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.runtimeReplacementSettlementBlocked
+}
+
+// ReleaseRuntimeReplacementAfterSettlement exposes a replacement only after a
+// successful write made the predecessor run's close durable. It applies
+// ConfirmLive under the same lock that removes the hold, so neither a poll nor a
+// deferred fence owner can observe an unblocked OpRestoring gap.
+func (i *Instance) ReleaseRuntimeReplacementAfterSettlement() (bool, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.runtimeReplacementSettlementBlocked {
+		return false, nil
+	}
+	if i.inFlightOp != OpRestoring {
+		// A teardown may supersede recovery while its disk write is failing. That
+		// owner now controls visibility; never replace its op with ConfirmLive.
+		i.runtimeReplacementSettlementBlocked = false
+		return false, nil
+	}
+	i.runtimeReplacementSettlementBlocked = false
+	if err := i.transitionLocked(ConfirmLive()); err != nil {
+		i.runtimeReplacementSettlementBlocked = true
+		return false, err
+	}
+	return true, nil
 }
 
 // PendingTaskRunInterruption returns the exact run whose task-row outcome still

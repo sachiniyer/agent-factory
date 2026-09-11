@@ -543,8 +543,10 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 
 	// Settle predecessor evidence at the exact ConfirmLive edge: late enough that
 	// a failed recovery leaves its evidence intact, but before the backend can
-	// lower the restore fence and expose the replacement. A failed write remains
-	// owed and does not veto a replacement that is already running (#2883).
+	// lower the restore fence and expose the replacement. Ordinary failed writes
+	// remain owed without tearing down a replacement that is already running
+	// (#2883); a failed active-run close keeps OpRestoring until retry makes the
+	// interruption durable.
 	//
 	// The same fenced entry point the manual restore RPC uses (#3555). This loop
 	// raises no lifecycle fence of its own — the op-lock above serializes daemon

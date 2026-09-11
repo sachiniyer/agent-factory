@@ -91,8 +91,12 @@ func (i *Instance) Recover() error {
 //
 // The callback exists for lifecycle facts that must be settled after a backend
 // has successfully created the runtime but before the restore fence is dropped.
-// It cannot veto recovery: settlement failures remain owed for retry, and a full
-// disk must not turn a running replacement back into Lost.
+// An ordinary settlement failure cannot veto recovery: it remains owed for
+// retry, and a full disk must not tear down a running replacement. There is one
+// stricter boundary. When replacement closed an active task run and that close
+// is not durable, the replacement stays behind OpRestoring until a retry lands;
+// otherwise a restart could reload the run as active and let this runtime's idle
+// edge execute the predecessor's on_complete.
 //
 // The fence is raised for the whole backend call so clients see the operation
 // and hide Kill, and so the status poll — which skips any session with an op in
@@ -162,10 +166,16 @@ func (i *Instance) recoverUnderHeldFence(beforeLive func()) error {
 //
 // ClearOp is unconditionally legal, so the OpRestoring check is not about legality:
 // it makes sure a kill or archive overlay that SUPERSEDED this fence is not cleared
-// out from under its own owner — which is why the check and the clear share one
-// critical section in clearOpIfHeld rather than being read-then-write.
+// out from under its own owner. The interrupted-run settlement hold is checked in
+// that same critical section: a deferred release cannot bypass the live-boundary
+// veto while disk still describes the predecessor run as active.
 func (i *Instance) EndRecoverFence() bool {
-	return i.clearOpIfHeld(OpRestoring, "restore", nil)
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.runtimeReplacementSettlementBlocked && i.inFlightOp == OpRestoring {
+		return false
+	}
+	return i.clearOpIfHeldLocked(OpRestoring, "restore", nil)
 }
 
 // BeginRecoverFence validates the recover precondition and raises the restore
@@ -318,6 +328,13 @@ func (i *Instance) EndLimitResume() bool {
 func (i *Instance) clearOpIfHeld(held InFlightOp, operation string, cleared func()) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	return i.clearOpIfHeldLocked(held, operation, cleared)
+}
+
+// clearOpIfHeldLocked is the already-locked half used by EndRecoverFence, whose
+// interrupted-run settlement hold must be checked in the same critical section
+// as the release it can veto. Caller holds i.mu.
+func (i *Instance) clearOpIfHeldLocked(held InFlightOp, operation string, cleared func()) bool {
 	if i.inFlightOp != held {
 		return false
 	}

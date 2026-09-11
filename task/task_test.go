@@ -221,6 +221,8 @@ func TestGetTaskNotFound(t *testing.T) {
 	_, err := GetTask("missing")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
+	assert.True(t, IsTaskNotFound(err),
+		"a successful store read with an absent row must be distinguishable from transient storage failure")
 }
 
 // ptr returns the address of v, for building the pointer fields of a TaskUpdate
@@ -763,6 +765,7 @@ func TestUpdateTaskStatus_NotFound(t *testing.T) {
 	_, err := UpdateTaskStatus("missing", &now, "started")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
+	assert.True(t, IsTaskNotFound(err))
 }
 
 // TestUpdateTask_RejectsBadProgram is the regression guard that #664's fix

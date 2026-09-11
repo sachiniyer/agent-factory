@@ -45,8 +45,10 @@ type settleOwedEntry struct {
 //
 // So settlement writes are durable AND retried: the failure reaches the caller
 // instead of a log line, and the row joins a retry set the poll drains until the
-// write lands. It announces like every other committed change (#2782) — memory
-// has already moved, whether or not disk agreed yet.
+// write lands. An interrupted task-run close adds one ordering constraint: its
+// replacement remains behind the restore fence until one write has made that
+// close durable. persistSettlement releases that hold after the safe write and
+// then checkpoints the visible LiveRunning state.
 func (m *Manager) persistSettlement(repoID, key string, instance *session.Instance) error {
 	// Bookkeeping belongs to the SAME repo-ordered critical section as the write.
 	// If it happened after unlock, an older successful checkpoint could resume
@@ -55,6 +57,19 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 	repoStartLock.Lock()
 	data := instance.ToInstanceData()
 	err := persistInstanceData(repoID, data)
+	if err == nil {
+		released, releaseErr := instance.ReleaseRuntimeReplacementAfterSettlement()
+		if releaseErr != nil {
+			err = fmt.Errorf("release the runtime-replacement settlement fence: %w", releaseErr)
+		} else if released {
+			// The first write made the interrupted close durable, so the replacement
+			// can now become live. Checkpoint that visible state separately: failure
+			// here can leave disk conservatively Lost, but can no longer resurrect
+			// the active run or execute on_complete on the wrong runtime.
+			data = instance.ToInstanceData()
+			err = persistInstanceData(repoID, data)
+		}
+	}
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	m.recordSettlementWrite(repoID, key, instance, err)
 	repoStartLock.Unlock()
@@ -87,6 +102,12 @@ func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *sessio
 	run, interrupted := instance.InterruptTaskRunAtRuntimeReplacement()
 	m.noteRuntimeReplaced(repoID, instance)
 	settlementErr := m.persistSettlement(repoID, key, instance)
+	if settlementErr != nil && interrupted {
+		// ConfirmLive runs immediately after this callback. Hold its restore fence
+		// before returning so a failed close cannot become visible. Any later
+		// settlement success releases the same hold centrally in persistSettlement.
+		instance.HoldRuntimeReplacementUntilSettlement()
+	}
 	// The session settlement comes first. A task-file lock or disk fault must not
 	// keep predecessor-owned remote-loss evidence live after the replacement is
 	// already running, or a restart plus one blip could re-provision it again.
@@ -118,6 +139,13 @@ func (m *Manager) recordInterruptedTaskRun(
 		run.TaskID, run.TaskGenerationID, run.SessionID, TaskStatusInterrupted)
 	if err == nil && !applied {
 		updated, applied, err = m.claimUnidentifiedInterruptedTaskRun(repoID, run)
+	}
+	if task.IsTaskNotFound(err) {
+		settlementErr := m.clearInterruptedTaskRunObligation(repoID, key, instance, run)
+		m.warn().Printf(
+			"task %s: session %q lost the runtime that received its run prompt; the task was removed, so its generation can never accept last_run_status %q; retired the outcome retry, skipped on_complete, and left the session in place for inspection",
+			run.TaskID, run.Title, TaskStatusInterrupted)
+		return settlementErr
 	}
 	if err != nil {
 		m.recordInterruptedTaskRunWrite(repoID, key, instance, &run)
@@ -372,7 +400,9 @@ func (m *Manager) FlushOwedSettlements() {
 // while the session is between operations. Task-row outcomes do not use this
 // gate: their immutable generation/session identity remains meaningful after
 // the session is removed, and their own compare-and-set decides whether a newer
-// task status has superseded them.
+// task status has superseded them. The one allowed in-operation whole-row retry
+// is an interrupted-run close holding OpRestoring: that closed snapshot is the
+// prerequisite for lowering its fence, not a half-built transaction.
 //
 // A retry is a WHOLE-ROW write of live memory, so running it inside another
 // session transaction would checkpoint that transaction's half-built state. A
@@ -405,7 +435,8 @@ func (m *Manager) flushOneOwedInstanceSettlement(entry settleOwedEntry) error {
 		m.recordSettlementWrite(entry.repoID, entry.key, entry.instance, nil)
 		return nil
 	}
-	if entry.instance.GetInFlightOp() != session.OpNone {
+	if entry.instance.GetInFlightOp() != session.OpNone &&
+		!entry.instance.RuntimeReplacementSettlementBlocked() {
 		return nil
 	}
 	return m.persistSettlement(entry.repoID, entry.key, entry.instance)

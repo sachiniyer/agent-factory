@@ -575,6 +575,9 @@ func (i *Instance) Transition(ev TransitionEvent) error {
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if ev.kind == tkConfirmLive && i.runtimeReplacementSettlementBlocked && i.inFlightOp == OpRestoring {
+		return nil
+	}
 	return i.transitionLocked(ev)
 }
 

@@ -123,6 +123,13 @@ type Instance struct {
 	// task outcome lands or a newer task row proves it no longer applies. Persisted
 	// so a daemon exit between those two store writes cannot lose the obligation.
 	taskRunInterruptionPending bool
+	// runtimeReplacementSettlementBlocked is a process-local hold on the restore
+	// fence. It is raised only when a replacement closed an active task run but
+	// that close failed to reach the session store. ConfirmLive and the restore
+	// owner's deferred release both yield until a later settlement persists the
+	// close; otherwise a restart could reload the run as active and let the
+	// replacement's idle edge execute on_complete.
+	runtimeReplacementSettlementBlocked bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.

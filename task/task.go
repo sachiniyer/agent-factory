@@ -754,7 +754,7 @@ func GetTask(id string) (*Task, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("task with id %q not found", id)
+	return nil, newTaskNotFoundError(id)
 }
 
 // randReader is the entropy source for GenerateID. It is a package variable so

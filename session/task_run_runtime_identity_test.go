@@ -96,6 +96,23 @@ func TestTaskRunEndsOnlyForRuntimeThatReceivedPrompt(t *testing.T) {
 			"positive transaction-scoped non-delivery promises the replacement the pending prompt")
 	})
 
+	t.Run("ambiguous account-swap delivery interrupts the run", func(t *testing.T) {
+		inst := &Instance{
+			TaskID:        "task-id",
+			liveness:      LiveLimitReached,
+			taskRunActive: true,
+			pendingAccountSwap: &AccountSwapData{
+				Manual: true, From: "work", To: "personal", Mission: "continue the task",
+				ReplacementPanesStarted: true, MissionDeliveryStatus: PromptCouldNotConfirm,
+			},
+		}
+
+		_, interrupted := inst.InterruptTaskRunAtRuntimeReplacement()
+		require.True(t, interrupted)
+		require.False(t, inst.TaskRunActive(),
+			"an ambiguous mission may already have run and cannot authorize automatic replay")
+	})
+
 	t.Run("prompted runtime still completes on its idle edge", func(t *testing.T) {
 		inst := &Instance{
 			TaskID:        "task-id",
@@ -181,4 +198,27 @@ func TestPendingTaskRunInterruptionSurvivesStorageRoundTrip(t *testing.T) {
 		"a stale retry must not clear another run's durable outcome")
 	require.True(t, restored.ClearPendingTaskRunInterruption(pending))
 	require.False(t, restored.ToInstanceData().TaskRunInterruptionPending)
+}
+
+func TestRuntimeReplacementSettlementHoldOwnsRestoreFenceUntilRelease(t *testing.T) {
+	inst := &Instance{
+		ID: "session-id", TaskID: "task-id", taskGenerationID: "generation-id",
+		Title: "held-replacement", liveness: LiveLost, inFlightOp: OpRestoring,
+		taskRunActive: true,
+	}
+	_, interrupted := inst.InterruptTaskRunAtRuntimeReplacement()
+	require.True(t, interrupted)
+	require.True(t, inst.HoldRuntimeReplacementUntilSettlement())
+
+	require.NoError(t, inst.Transition(ConfirmLive()))
+	require.Equal(t, OpRestoring, inst.GetInFlightOp())
+	require.Equal(t, LiveLost, inst.GetLiveness())
+	require.False(t, inst.EndRecoverFence(),
+		"the restore owner's deferred release must not bypass the settlement hold")
+
+	released, err := inst.ReleaseRuntimeReplacementAfterSettlement()
+	require.NoError(t, err)
+	require.True(t, released)
+	require.Equal(t, OpNone, inst.GetInFlightOp())
+	require.Equal(t, LiveRunning, inst.GetLiveness())
 }

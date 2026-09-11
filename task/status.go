@@ -241,7 +241,7 @@ func mutateTaskStatus(taskID string, mutate func(*Task) bool) (Task, bool, error
 			break
 		}
 		if row < 0 {
-			return fmt.Errorf("task with id %q not found", taskID)
+			return newTaskNotFoundError(taskID)
 		}
 		if !applied {
 			return nil

@@ -379,8 +379,10 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 
 	// Settle predecessor evidence at the exact ConfirmLive edge: late enough that
 	// a failed recovery leaves its evidence intact, but before the backend can
-	// lower the restore fence and expose the replacement. A failed write remains
-	// owed and does not veto a replacement that is already running (#2883).
+	// lower the restore fence and expose the replacement. Ordinary failed writes
+	// remain owed without tearing down a replacement that is already running
+	// (#2883); a failed active-run close keeps OpRestoring until retry makes the
+	// interruption durable.
 	// The fence this runs under was raised at the top of the operation, so it has
 	// been hiding Kill since before the probe (#3586). The held variant re-checks
 	// that precondition through the shared ledger (RuntimeActionRecoverFenced)
