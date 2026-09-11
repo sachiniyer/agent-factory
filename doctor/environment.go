@@ -58,13 +58,16 @@ func reportConfigValidity(report *Report, load config.ReadOnlyConfigLoad, err er
 		}
 		report.Fail(sectionConfig, "config", fmt.Sprintf("%s is not valid: %v", path, err),
 			"edit the config file, or delete it to regenerate defaults")
+	case load.DirectoryAccessWarning != "":
+		report.Warn(sectionConfig, "config", load.DirectoryAccessWarning,
+			"run `af` to attempt regeneration; startup reports any failure", false)
 	case load.EmptyStub:
 		// A contentless config.toml with no shadowing config.json is a state
 		// af self-heals on the next start, so it is a WARN (advisory), not a
 		// FAIL: a health check that exits 1 for a state af considers healthy
 		// disagrees with the thing it diagnoses. problem=false keeps it out
 		// of UnresolvedCount so `af doctor` exits 0, matching startup.
-		report.Warn(sectionConfig, "config", fmt.Sprintf("empty config stub at %s; af will regenerate defaults on the next start", load.Path),
+		report.Warn(sectionConfig, "config", fmt.Sprintf("empty config stub at %s; af will attempt to regenerate defaults on the next start", load.Path),
 			"run `af` once to regenerate defaults, or delete the stub", false)
 	case load.Missing:
 		report.Warn(sectionConfig, "config", fmt.Sprintf("no config file at %s; defaults will be created on first write", load.Path),

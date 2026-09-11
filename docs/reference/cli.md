@@ -1009,8 +1009,10 @@ materializes nothing — a read-only check.
 
 This is the companion to a raw hand-edit. "af config set" validates every scalar
 and structured key before it writes and so cannot leave a broken file. A manual
-edit bypasses that protection: exit 0 means af can load it, while a non-zero exit
-names what must be fixed before the next launch.
+edit bypasses that protection: exit 0 means no config defect was found, while a
+non-zero exit names what must be fixed before the next launch. An inconclusive
+read-only directory-access probe does not prove that a later startup can
+regenerate an empty stub; text output warns, and JSON appends uncertain=true.
 
 Local-only: it checks the config on the machine it runs on, so
 --daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
@@ -1750,6 +1752,12 @@ af sessions backends
 Create a new session
 
 Create a new session running an agent in its own git worktree.
+
+With --prompt, unconfirmed or incomplete delivery adds a warning field to the
+JSON session result. Outside --json mode, it also prints the warning on stderr.
+The session remains created;
+inspect its pane before retrying, since an unverified prompt may already have
+run. Creation still exits successfully and does not automatically resend.
 
 With --here (alias --in-place) the session instead attaches to the repo's
 existing working tree at its current branch: no worktree or branch is created,
