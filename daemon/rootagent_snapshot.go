@@ -357,7 +357,8 @@ func logRegistryRecordProblems(warn *stdlog.Logger, failures []config.ProjectRec
 // project whose recorded root RESOLVED: the path an in-place root agent runs
 // at, plus the identity evidence that path was accepted on. Both halves are
 // kept because the sweep needs them at different moments — the root at every
-// visit, the identity only at a create (#3366).
+// visit, the identity at a create and while inspecting an adopted root's
+// command layers (#3366/#4087).
 //
 // A path alone was the defect. The snapshot binds a repo ID to a create path
 // once (at boot, or on re-attribution) and every later create, heal and
@@ -372,6 +373,11 @@ type resolvedProjectRoot struct {
 	// but an in-place root agent runs at the checkout the user registered
 	// (#3361's identity/workspace boundary).
 	root string
+	// identityRoot is the repository's identity-bearing root. It differs from
+	// root for a linked worktree of a bare repository and must travel with the
+	// cached ID so later config resolution reads the same repo-keyed layers as
+	// creation did.
+	identityRoot string
 	// projectID names the registry record, so a refusal can tell the user
 	// which project to rebind.
 	projectID string
@@ -456,10 +462,10 @@ func projectRootAgentLayers(warn *stdlog.Logger, projects []config.Project, fenc
 	unresolvedRoots = map[string]unresolvedProjectRecord{}
 	reconcileOwed = map[string]reconcileOwedEntry{}
 	for _, p := range projects {
-		var repoID, repoRoot string
+		var repoID, repoRoot, identityRoot string
 		repo, probeCtx, cancelProbe, repoErr := resolveProjectRoot(p.Root)
 		if repoErr == nil {
-			repoID, repoRoot = repo.ID, repo.Root
+			repoID, repoRoot, identityRoot = repo.ID, repo.Root, repo.IdentityPath()
 			// Repo identity comes from repo.ID, but an in-place root agent runs
 			// at the registered checkout. Keep that recorded root explicit: the
 			// pre-#3358 resolver substituted the non-repository parent of a bare
@@ -490,7 +496,11 @@ func projectRootAgentLayers(warn *stdlog.Logger, projects []config.Project, fenc
 				// this: exact-workspace match plus the record's own checkout
 				// marker. Unproven simply means not yet — the project stays
 				// provisional and the next pass tries again.
-				proven, ok := config.ResolveRegisteredProjectRepoID(probeCtx, p)
+				provenRepo, ok := config.ResolveRegisteredProjectRepo(probeCtx, p)
+				proven := ""
+				if ok {
+					proven = provenRepo.ID
+				}
 				switch {
 				case ok && proven == repoID:
 					if _, err := config.ReconcileProjectRepoID(p.ID, repoID, identityWriteWanted(fence, repoID)); err != nil {
@@ -515,7 +525,7 @@ func projectRootAgentLayers(warn *stdlog.Logger, projects []config.Project, fenc
 					// legacy opt-in resolving the proven identity could then
 					// start without the project's disable. The proof wins,
 					// because it is the evidence about which checkout this is.
-					repoID, repoRoot = proven, p.Root
+					repoID, repoRoot, identityRoot = proven, p.Root, provenRepo.IdentityPath()
 					if _, err := config.ReconcileProjectRepoID(p.ID, repoID, identityWriteWanted(fence, repoID)); err != nil {
 						reconcileOwed[p.ID] = reconcileOwedEntry{repoID: repoID, proven: true}
 						warn.Printf("root agent snapshot: project %s's checkout is verified under %s rather than the identity its path resolved to, but that could not be recorded; retrying on the ensure cadence: %v", p.ID, repoID, err)
@@ -534,7 +544,9 @@ func projectRootAgentLayers(warn *stdlog.Logger, projects []config.Project, fenc
 			// The record's checkout id rides along so the create boundary can
 			// re-prove the checkout at that path is still this project's own,
 			// rather than trusting a binding made once at boot (#3366).
-			projectRoots[repoID] = resolvedProjectRoot{root: p.Root, projectID: p.ID, checkoutID: p.CheckoutID}
+			projectRoots[repoID] = resolvedProjectRoot{
+				root: p.Root, identityRoot: identityRoot, projectID: p.ID, checkoutID: p.CheckoutID,
+			}
 		} else {
 			// The recorded root does not resolve right now — an absent mount, a
 			// checkout deleted or no longer a git repository. The singleton sweep

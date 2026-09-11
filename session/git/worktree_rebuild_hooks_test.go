@@ -352,12 +352,14 @@ func TestRebuildFromExistingBranch_RecreatedTreeIsUntouchedByThePriorRun(t *test
 	repoRoot := createGitRepo(t)
 	commitInitial(t, repoRoot)
 
+	writeFailed := filepath.Join(t.TempDir(), "write-failed")
+
 	// $$ is the hook shell's pid; the worktree path is resolved by the hook at
 	// run time via $PWD's absolute value captured before any deletion.
 	repoID := config.RepoIDFromRoot(repoRoot)
 	writeLegacyRepoConfig(t, repoID, &config.RepoConfig{
 		PostWorktreeCommands: []string{
-			`d="$PWD"; while true; do echo "$$" >> "$d/hook-touched"; sleep 0.01; done`,
+			`d="$PWD"; failed=; while true; do if ! echo "$$" >> "$d/hook-touched"; then if [ -z "$failed" ]; then echo "$$" > ` + shellquote.Quote(writeFailed) + `; failed=1; fi; fi; sleep 0.01; done`,
 		},
 	})
 	cfg := config.DefaultConfig()
@@ -375,9 +377,24 @@ func TestRebuildFromExistingBranch_RecreatedTreeIsUntouchedByThePriorRun(t *test
 	oldPID := strings.TrimSpace(strings.Split(strings.TrimSpace(readFile(t, touched)), "\n")[0])
 	require.NotEmpty(t, oldPID)
 
-	// The worktree vanishes — the Lost-recovery trigger. The old hook keeps
-	// running, still pointed at this absolute path.
-	require.NoError(t, os.RemoveAll(worktreePath))
+	// Rename within the same parent to atomically make the recorded path vanish
+	// (#4206). An in-flight redirection can still create an entry in the moved
+	// directory. Wait for this serial hook loop to report a failed write to the
+	// old path: all earlier redirections have then finished, and subsequent ones
+	// cannot resolve the absent parent. Only then is RemoveAll free of writers.
+	// The hook stays live; Git's registration and branch remain unchanged.
+	vanishedPath := worktreePath + ".vanished"
+	require.NoError(t, os.Rename(worktreePath, vanishedPath))
+	require.True(t, waitForFile(t, writeFailed, 10*time.Second),
+		"the prior hook never acknowledged a failed write after the rename")
+	require.Equal(t, oldPID, strings.TrimSpace(readFile(t, writeFailed)))
+	require.NoError(t, os.RemoveAll(vanishedPath))
+	require.NoDirExists(t, worktreePath)
+	select {
+	case <-gw.HooksDone():
+		t.Fatal("the prior hook must still be running when the worktree vanishes")
+	default:
+	}
 
 	require.NoError(t, gw.RebuildFromExistingBranch())
 	require.True(t, waitForFile(t, touched, 10*time.Second), "the rebuilt worktree's hook never ran")

@@ -63,8 +63,8 @@ Read the state words alongside the glyphs, rather than relying on color:
 | Archive icon and dimmed row | Archived session |
 | Working label | Work is in progress; the status dot is omitted |
 
-The secondary line includes idle detail and the branch when available, such as
-`Needs you · pane changed · 12m ago`. These are observations of terminal activity,
+The secondary line includes the branch when available, and the selected row adds
+idle detail, such as `Needs you · pane changed · 12m ago`. These are observations of terminal activity,
 not a claim that the agent finished or asked a question. Diagnostic title prefixes
 such as `[lost]`, `[deleting]`, `[limit]`, and `[remote]` add context.
 
@@ -165,15 +165,17 @@ the current agent and continue with the replacement. A limit-blocked local
 session can offer both; see [usage limits](usage-limits.md).
 
 Open a rail row’s **…** menu for **Archive** and **Delete session**. Other actionable rows
-reveal the menu on hover or keyboard focus. Each opens a confirmation:
+reveal the menu on hover or keyboard focus. Archive and Delete session each open a confirmation:
 
 - **Archive** tears down a local session's terminal and moves its worktree into
   the archive. For Docker, SSH, or remote-hook sessions, it pushes the branch to
   origin and tears down the remote sandbox; there is no local worktree to move.
 - **Restore**, in the archive action's place on an archived row, moves a local
-  worktree back and respawns the agent. For a remote session, it provisions a
-  fresh sandbox from the pushed branch and relaunches the agent; the old
-  sandbox's conversation does not return. Reveal **Archived** in the filter first.
+  worktree back and respawns the agent. A local restore starts at once, with no
+  confirmation: a dialog shows its progress and offers **Retry restore** if the
+  daemon refuses it. For a remote session, it asks for confirmation first, then
+  provisions a fresh sandbox from the pushed branch and relaunches the agent; the
+  old sandbox's conversation does not return. Reveal **Archived** in the filter first.
 - **Delete session** permanently tears down the session and removes its record. It removes
   Agent Factory-managed worktrees and deletes only branches created by Agent
   Factory. In-place or external worktrees and pre-existing branches are preserved.

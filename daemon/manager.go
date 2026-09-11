@@ -35,6 +35,9 @@ type Manager struct {
 	live atomic.Pointer[config.Config]
 	// configApplyMu serializes live config swaps and their side effects.
 	configApplyMu sync.Mutex
+	// accountSwapAfterManualPrecheckForTest pauses a manual handoff after its
+	// advisory launch check and before personal policy is locked.
+	accountSwapAfterManualPrecheckForTest func()
 	// pollReloadCh signals the poll goroutine to reset its ticker after ApplyConfig
 	// changed daemon_poll_interval (#2480). Buffered size 1 with a non-blocking
 	// send, so a burst of applies collapses to one reset and ApplyConfig never
@@ -234,6 +237,24 @@ type Manager struct {
 	// written in config.json) for a legacy entry, or by the registered project's
 	// resolved root path for a singleton-only candidate (#2216 Phase 6).
 	rootEnsureStates map[string]*rootEnsureState
+	// rootProgramDriftLogged deduplicates the adopted-command warning by resolved
+	// repository identity. Two legacy paths can share one repo while retaining
+	// independent retry states; they must still produce only one warning. Guarded
+	// by mu and retained for the Manager's lifetime.
+	rootProgramDriftLogged map[string]bool
+	// rootProgramDriftConfigEpoch invalidates configured-command resolutions on
+	// every ApplyConfig. That boundary covers global and project-scoped live
+	// writes alike; guarded by mu.
+	rootProgramDriftConfigEpoch uint64
+	// Async inspection state: consumers may join; shutdown abandons uncancellable reads.
+	rootProgramDriftInFlight map[string]int
+	rootProgramDriftWG       sync.WaitGroup
+	rootProgramDriftStopping bool
+	// Transcript probe overrides are manager-local and set only before the
+	// manager is used. Never restore them during cleanup: a timed-out filesystem
+	// inspection may outlive both its caller and the joined poll loop (#4212).
+	inspectClaudeProjectConversations func(string, string, session.AgentConversationData) (session.ClaudeProjectConversationState, error)
+	claudeTranscriptInspectBudget     time.Duration
 	// rootCreateRefusals holds each repo's standing create-boundary identity
 	// refusal (#3714): the outcome class of the most recent identity proof at
 	// a root create, and when it was taken. Keyed by REPO ID — the key
@@ -717,6 +738,8 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		aliveObservations:         make(map[string]uint64),
 		targetLocks:               make(map[string]*sync.Mutex),
 		rootEnsureStates:          make(map[string]*rootEnsureState),
+		rootProgramDriftLogged:    make(map[string]bool),
+		rootProgramDriftInFlight:  make(map[string]int),
 		rootCreateRefusals:        make(map[string]rootCreateRefusal),
 		rootCreatesInFlight:       make(map[string]string),
 		rootKilledAt:              make(map[string]time.Time),
@@ -974,19 +997,4 @@ func (m *Manager) opLockFor(key string) *sync.Mutex {
 		m.instanceOpLocks[key] = lock
 	}
 	return lock
-}
-
-// attachCredentialsToAll gives every instance the daemon holds its credential
-// minter (#3068).
-//
-// Applied at the two points where the daemon takes ownership of instances built
-// from DISK — the startup restore and every refresh — because that is the half a
-// per-call-site fix keeps missing: session.FromInstanceData cannot populate it,
-// so a session loaded after a daemon restart would provision its replacement
-// sandbox with no callback and no error. Idempotent and cheap; re-attaching to an
-// instance that already has one is a pointer write.
-func (m *Manager) attachCredentialsToAll(instances map[string]*session.Instance) {
-	for _, inst := range instances {
-		attachSandboxCredentials(m, inst)
-	}
 }

@@ -53,26 +53,30 @@ const rootEnsureEscalationThreshold = 6
 var (
 	rootEnsureBackoffBase = 10 * time.Second
 	rootEnsureBackoffMax  = 5 * time.Minute
+	// Checked-in and personal project configuration can change outside
+	// ApplyConfig. Re-resolve the command off the poll goroutine on this cadence.
+	rootProgramDriftConfigInspectionInterval = 30 * time.Second
 	// A transcript creation or removal can lag one poll without affecting the
 	// live root. Bound the directory scan instead of statting every historical
 	// transcript on the daemon's default one-second ensure cadence.
 	rootClaudeTranscriptInspectionInterval = 30 * time.Second
-	// rootClaudeTranscriptInspectBudget bounds how long the poll goroutine will
-	// WAIT for one transcript inspection (#3782 item 3).
-	//
-	// Deliberately NOT rootRepoProbeBudget, even though the value matches and
-	// the asymmetry is the same. That budget bounds a git CHILD PROCESS, which
-	// a context can kill; this one bounds a wait on os.ReadDir and a stat per
-	// entry, which no context can cancel — so it is a bound on the caller, and
-	// the read outlives it. Two mechanisms, two names, and a reader who
-	// conflates them will reach for a context that cannot help.
-	//
-	// 2s for the same reason the sibling is 2s: the inspection is advisory
-	// while the root is live, so being late costs a resumable conversation id
-	// staying stale for one more 30s interval, and #3503 is the standing
-	// lesson about stingy budgets on a box whose load baseline is 60-95.
-	rootClaudeTranscriptInspectBudget = 2 * time.Second
 )
+
+// rootClaudeTranscriptInspectBudget bounds how long the poll goroutine will
+// WAIT for one transcript inspection (#3782 item 3).
+//
+// Deliberately NOT rootRepoProbeBudget, even though the value matches and
+// the asymmetry is the same. That budget bounds a git CHILD PROCESS, which
+// a context can kill; this one bounds a wait on os.ReadDir and a stat per
+// entry, which no context can cancel — so it is a bound on the caller, and
+// the read outlives it. Two mechanisms, two names, and a reader who
+// conflates them will reach for a context that cannot help.
+//
+// 2s for the same reason the sibling is 2s: the inspection is advisory
+// while the root is live, so being late costs a resumable conversation id
+// staying stale for one more 30s interval, and #3503 is the standing
+// lesson about stingy budgets on a box whose load baseline is 60-95.
+const rootClaudeTranscriptInspectBudget = 2 * time.Second
 
 // rootEnsureBackoffFor is the shared ensure-cadence backoff curve: base
 // doubling per consecutive failure, capped at max. Used by the per-candidate
@@ -120,6 +124,39 @@ type rootEnsureState struct {
 	// suppressLogged dedupes the "not re-creating a user-killed root" log
 	// line to once per suppression.
 	suppressLogged bool
+	// programDriftLogged dedupes the adopted-root command warning for this
+	// ensure-state. A healthy adopt is revisited every sweep tick, so the bit is
+	// deliberately not reset by rootEnsureSucceeded.
+	programDriftLogged       bool
+	programDriftLoggedRepoID string
+	// The default root command and bare agent names require repository/config
+	// resolution. Cache that answer after resolving it off the ensure sweep; the
+	// key covers the frozen profile, ApplyConfig epoch, repository identity,
+	// registered-checkout marker, and workspace. The complete repository config
+	// stack is periodically re-resolved
+	// off the poll goroutine because checked-in and personal project files can
+	// change without that epoch advancing; a cached command is never compared
+	// before the refresh. The key fields also identify a failed attempt so its
+	// retry delay applies only while those same resolution inputs remain current;
+	// programDriftResolved alone says the cached command is valid.
+	programDriftResolving          bool
+	programDriftResolvingEpoch     uint64
+	programDriftResolved           bool
+	programDriftResolvedEpoch      uint64
+	programDriftResolvedRepoID     string
+	programDriftResolvedWorkspace  string
+	programDriftResolvedCheckoutID string
+	programDriftResolvedProfile    config.RootAgent
+	programDriftConfiguredProgram  string
+	programDriftNextConfigCheck    time.Time
+	// A config result can finish against runtime evidence invalidated while the
+	// read was in flight. Retry that cached result against fresh evidence on the
+	// next sweep without admitting another filesystem reader.
+	programDriftLatchPending bool
+	// Test seam immediately before the latch tentatively claims its manager-owned
+	// dedupe bits. Runtime evidence is committed separately under the instance
+	// lifecycle lock.
+	programDriftBeforeLatchForTest func()
 	// Claude transcript verification is advisory while the root is live. Keep
 	// its filesystem work and any persistent inspection warning off the hot
 	// one-second ensure path.
@@ -419,9 +456,9 @@ func resolveLegacyRootRepo(path string) (*config.RepoContext, error) {
 // and the state is keyed by that resolved root path.
 //
 // The binding's identity evidence rides down to ensureResolvedRoot, which
-// re-proves it at the create boundary only (#3366): a binding made once, at
-// boot or at re-attribution, is not evidence about the checkout that is at the
-// path now.
+// re-proves it at the create boundary and around adopted-root command-layer
+// reads (#3366/#4087): a binding made once, at boot or at re-attribution, is
+// not evidence about the checkout that is at the path now.
 func (m *Manager) ensureSingletonRootAgent(repoID string, binding resolvedProjectRoot) {
 	m.mu.Lock()
 	st := m.rootEnsureStateForLocked(binding.root)
@@ -430,7 +467,7 @@ func (m *Manager) ensureSingletonRootAgent(repoID string, binding resolvedProjec
 	if skip {
 		return
 	}
-	repo := &config.RepoContext{Root: binding.root, ID: repoID}
+	repo := &config.RepoContext{Root: binding.root, IdentityRoot: binding.identityRoot, ID: repoID}
 	resolution := m.resolvedRootAgentFor(repoID, nil)
 	m.ensureResolvedRoot(binding.root, st, repo, resolution, &binding)
 }
@@ -522,6 +559,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			// and whoever created it — is the root agent. The one mutation is
 			// refreshing a recorded Claude conversation from durable transcript
 			// evidence, so a later outage does not carry a rotated-away id (#3306).
+			m.checkAdoptedRootProgramDrift(repo, key, workspace, st, resolution.RootAgent, inst, identity)
 			m.refreshRootClaudeConversation(repo.ID, key, workspace, inst, st)
 			m.rootEnsureSucceeded(st)
 			return
@@ -824,27 +862,91 @@ func rootAgentProgram(repoRoot string, rc config.RootAgentConfig) string {
 }
 
 // rootAgentProgramForProfile resolves the command the root agent runs from a
-// resolved root-agent profile. An explicit program wins verbatim (an agent enum
-// name still resolves through program_overrides downstream, exactly like any
-// session program). The default profile — an empty program — is the repo's
-// resolved claude command with --dangerously-skip-permissions ensured, the root
-// agent's whole purpose being autonomous operation (#1106).
+// resolved root-agent profile. An explicit program wins verbatim (a bare agent
+// name resolves through program_overrides downstream, exactly like any session
+// program). The default profile — an empty program — is the repo's resolved
+// claude command with --dangerously-skip-permissions ensured, the root agent's
+// whole purpose being autonomous operation (#1106).
 func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
 	if strings.TrimSpace(ra.Program) != "" {
 		return ra.Program
 	}
-	program := "claude"
 	repo, err := config.RepoFromPath(repoRoot)
 	if err == nil {
 		var resolved *config.ResolvedConfig
 		resolved, err = config.ResolveConfigForRepo(repo)
 		if err == nil {
-			program = config.ResolveProgram(&resolved.Config, "claude")
+			return rootAgentCreateProgramFromResolvedConfig(&resolved.Config)
 		}
 	}
-	if err != nil {
-		log.WarningLog.Printf("root agent for %s: failed to resolve repo config, using bare claude: %v", repoRoot, err)
+	log.WarningLog.Printf("root agent for %s: failed to resolve repo config, using bare claude: %v", repoRoot, err)
+	return finishRootAgentProgram("claude")
+}
+
+// rootAgentCreateProgramFromResolvedConfig performs the root-specific first
+// stage for the empty/default profile. The returned command is handed to the
+// ordinary session launch resolver, which performs the second lookup if this
+// stage selected another bare agent name. It must not pre-apply that second
+// lookup or launch will perform a third one.
+func rootAgentCreateProgramFromResolvedConfig(cfg *config.Config) string {
+	return finishRootAgentProgram(config.ResolveProgram(cfg, "claude"))
+}
+
+func rootAgentProgramForResolvedRepo(repo *config.RepoContext, ra config.RootAgent, resolve func(*config.RepoContext) (*config.ResolvedConfig, error)) (string, error) {
+	requested := ra.Program
+	hasProgram := strings.TrimSpace(requested) != ""
+	if hasProgram && !tmux.IsSupportedProgram(requested) {
+		return rootAgentProgramFromResolvedConfig(ra, nil)
 	}
+	if repo == nil {
+		return "", fmt.Errorf("repo context is required to resolve root-agent program %q", requested)
+	}
+	resolved, err := resolve(repo)
+	if err != nil {
+		return "", err
+	}
+	return rootAgentProgramFromResolvedConfig(ra, resolved)
+}
+
+func rootAgentProgramFromResolvedConfig(ra config.RootAgent, resolved *config.ResolvedConfig) (string, error) {
+	requested := ra.Program
+	// Outer whitespace decides only whether the default form was requested.
+	// Otherwise the exact bytes select an override or become the shell command:
+	// trailing whitespace can be escaped and therefore shell-significant.
+	hasProgram := strings.TrimSpace(requested) != ""
+	if hasProgram && !tmux.IsSupportedProgram(requested) {
+		return requested, nil
+	}
+	if resolved == nil {
+		return "", fmt.Errorf("resolved repository config is required to interpret root-agent program %q", requested)
+	}
+	if hasProgram {
+		return config.ResolveProgram(&resolved.Config, requested), nil
+	}
+	// The default-profile create first resolves claude here, then hands that
+	// command to the ordinary session launch path. If the first override is
+	// itself a bare agent name, launch resolves that name once more. Diagnostics
+	// must reproduce both stages or a root created from chained overrides appears
+	// stale immediately even though it runs exactly what AF launched.
+	program := rootAgentCreateProgramFromResolvedConfig(&resolved.Config)
+	return config.ResolveProgram(&resolved.Config, program), nil
+}
+
+// RootAgentProgramForProfileResolvedConfig interprets a profile through an
+// already-resolved repository-config snapshot. Read-only diagnostics use it to
+// keep the profile and its program_overrides on one source generation.
+func RootAgentProgramForProfileResolvedConfig(ra config.RootAgent, resolved *config.ResolvedConfig) (string, error) {
+	return rootAgentProgramFromResolvedConfig(ra, resolved)
+}
+
+// RootAgentProfileNeedsRepoConfig reports whether interpreting a root profile
+// depends on repository-scoped program_overrides. Diagnostics use the same
+// predicate so a free-form command does not acquire an unrelated Git failure.
+func RootAgentProfileNeedsRepoConfig(ra config.RootAgent) bool {
+	return strings.TrimSpace(ra.Program) == "" || tmux.IsSupportedProgram(ra.Program)
+}
+
+func finishRootAgentProgram(program string) string {
 	// Only ensure the claude-only flag when the resolved command actually
 	// runs claude: a program_overrides entry may point "claude" at another
 	// program that exits on the unknown flag (#1116 defect class — e.g. the
@@ -854,4 +956,25 @@ func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
 		program += " " + rootDangerouslySkipPermissionsFlag
 	}
 	return program
+}
+
+// RootAgentProgramForProfileInspection exposes the daemon's exact command
+// interpretation to read-only diagnostics. The caller resolves the repository
+// under its own deadline; config resolution suppresses the durable in-repo load
+// observation that runtime callers intentionally record.
+func RootAgentProgramForProfileInspection(repo *config.RepoContext, ra config.RootAgent, global *config.Config) (string, error) {
+	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
+		return config.ResolveConfigForRepoInspectionWithGlobal(repo, global)
+	}
+	return rootAgentProgramForResolvedRepo(repo, ra, resolve)
+}
+
+// RootAgentProgramForProfileInspectionContext is the bounded form used by
+// doctor. Its deadline covers the config files needed to turn a bare agent name
+// into the exact command AF would launch, not only the preceding Git probes.
+func RootAgentProgramForProfileInspectionContext(ctx context.Context, repo *config.RepoContext, ra config.RootAgent, global *config.Config) (string, error) {
+	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
+		return config.ResolveConfigForRepoInspectionWithGlobalContext(ctx, repo, global)
+	}
+	return rootAgentProgramForResolvedRepo(repo, ra, resolve)
 }

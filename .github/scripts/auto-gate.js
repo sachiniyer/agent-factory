@@ -808,13 +808,15 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     github,
     context,
     baseRefName: pr.baseRefName,
+    headSha: pr.headRefOid,
     headParents: pr.headParents,
     subject,
   });
   if (contentHead) {
     notes.push(
       `content head ${contentHead.oid}, current head ${pr.headRefOid} — the head is a merge that ` +
-        `only brought ${pr.baseRefName} in, so review evidence stays bound to the content head`,
+        `preserves the reviewed content while bringing ${pr.baseRefName} in, so approval and ` +
+        `Codex evidence stay bound to the content head`,
     );
   }
 
@@ -1831,6 +1833,16 @@ async function processAggregateHead({
         core.notice(reason);
         return { state: "waiting", pending, aggregate, reason };
       }
+      const publicationErrors = [];
+      if (error?.autoGateRecoveryFailure) {
+        // Report on the PR before invalidating: an invalidation failure must
+        // not suppress the only visible recovery instructions. This lane owns
+        // only the initiating head, so it never writes a successor aggregate.
+        const publicationError = await publishRecoveryFailure({
+          github, context, prNumber, message, observedHeadSha: error.autoGateRecoveryHeadSha,
+        });
+        if (publicationError) publicationErrors.push(publicationError);
+      }
       let invalidated;
       try {
         invalidated = await invalidateAggregateDecision({
@@ -1844,9 +1856,19 @@ async function processAggregateHead({
         }
       } catch (invalidationError) {
         throw new AggregateError(
-          [error, invalidationError],
-          `Merge attempt and aggregate invalidation both failed on ${pending.headSha}`,
+          [error, ...publicationErrors, invalidationError],
+          error?.autoGateRecoveryFailure
+            ? `${message}; aggregate invalidation also failed: ${formatError(invalidationError)}` +
+              (publicationErrors.length ? `; recovery publication also failed: ${publicationErrors.map(formatError).join("; ")}` : "")
+            : `Merge attempt and aggregate invalidation both failed on ${pending.headSha}`,
         );
+      }
+      if (error?.autoGateRecoveryFailure) {
+        if (publicationErrors.length) {
+          throw new AggregateError([error, ...publicationErrors],
+            `${message}; recovery publication also failed: ${publicationErrors.map(formatError).join("; ")}`);
+        }
+        throw error;
       }
       if (isReadFailure(error)) {
         const blocked = await blockAggregateEvaluation({
@@ -2270,8 +2292,35 @@ async function listParkedRuns({ github, context, headSha, subject = null }) {
 // The workflow the gate dispatches when nothing validated a head it created.
 // Named, so a test can assert the file it points at actually accepts a dispatch.
 const VALIDATION_WORKFLOW = "pr.yml";
+const GATE_WORKFLOW = "auto-gate.yml";
 
-// Make sure SOMETHING is going to validate the head the gate just created.
+// Reruns the successor of an accepted update, whichever lane failed to finish
+// it. Safe to repeat: the resolver re-reads the PR and approves only what is
+// still parked.
+function gateRecoveryCommand({ context, ref, prNumber, previousHeadSha }) {
+  const { owner, repo } = context.repo;
+  return `gh workflow run ${GATE_WORKFLOW} --repo ${owner}/${repo} --ref ${ref} ` +
+    `-f pr_number=${prNumber} -f previous_head_sha=${previousHeadSha}`;
+}
+
+// A recovery failure belongs on the PR conversation, which follows the PR
+// across head changes; a red run on master is not where anyone looks for a PR
+// that never merges. Returns a publication error instead of throwing it, so the
+// caller keeps the command in its own failure either way.
+async function publishRecoveryFailure({ github, context, prNumber, message, observedHeadSha }) {
+  try {
+    await github.rest.issues.createComment({
+      ...context.repo, issue_number: prNumber,
+      body: `## Auto Gate recovery failed\n\n${message}` +
+        (observedHeadSha ? `\n\nObserved post-update head: ${observedHeadSha}` : ""),
+    });
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
+
+// Make sure PR Validation will validate the head the gate just created.
 //
 // GitHub does create a `pull_request` run for a bot-authored merge commit — parked
 // — and approveParkedRuns handles that. But "it always does" is an assumption,
@@ -2290,7 +2339,8 @@ async function ensureValidationRun({
   headSha,
   headRefName,
   attempts = 3,
-  // A test seam, and the only one in this file. Without it the suite sleeps ten
+  canRecover = async () => true,
+  // A test seam for bounded polling. Without it the suite sleeps ten
   // real seconds on the one path that must find nothing, on every run forever;
   // with it the wait is what production uses unless a caller says otherwise.
   delayMs = Number(process.env.AUTO_GATE_VALIDATION_POLL_MS ?? 5000),
@@ -2298,10 +2348,14 @@ async function ensureValidationRun({
 }) {
   const { owner, repo } = context.repo;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const listed = await retryRead(`could not list workflow runs for ${headSha}`, () =>
-      github.rest.actions.listWorkflowRunsForRepo({
+    if (!await canRecover()) return { cancelled: true };
+    const listed = await retryRead(`could not list PR Validation runs for ${headSha}`, () =>
+      github.rest.actions.listWorkflowRuns({
         owner,
         repo,
+        // Query the workflow identity, not its display name or the first run
+        // in the repository-wide listing. Docs can become visible earlier.
+        workflow_id: VALIDATION_WORKFLOW,
         head_sha: headSha,
         event: "pull_request",
         per_page: 1,
@@ -2314,16 +2368,18 @@ async function ensureValidationRun({
       // and returned, leaving them parked. On #3811's `31720d97` they appeared 4
       // seconds late and sat for 33 minutes (#3814). So the approve pass runs
       // again here, on what the wait actually found.
-      await approveParkedRuns({ github, context, headSha, core });
-      return { dispatched: false };
+      if (!await canRecover()) return { cancelled: true };
+      const { parked, approved } = await approveParkedRuns({ github, context, headSha, core });
+      return { dispatched: false, found: true, approved: parked.length === approved.length };
     }
     if (attempt < attempts - 1) {
       await sleep(delayMs);
     }
   }
+  if (!await canRecover()) return { cancelled: true };
   if (!headRefName) {
     core.warning(
-      `No pull_request run appeared for ${headSha} and the head ref is unknown, so PR Validation ` +
+      `No PR Validation pull_request run appeared for ${headSha} and the head ref is unknown, so PR Validation ` +
         "could not be dispatched; the decision will report the required checks as unreported.",
     );
     return { dispatched: false };
@@ -2336,7 +2392,7 @@ async function ensureValidationRun({
       ref: headRefName,
     });
     core.notice(
-      `No pull_request run appeared for ${headSha}; dispatched PR Validation on ${headRefName}.`,
+      `No PR Validation pull_request run appeared for ${headSha}; dispatched PR Validation on ${headRefName}.`,
     );
     return { dispatched: true };
   } catch (error) {
@@ -2463,15 +2519,20 @@ async function merge({
     // invalidates the aggregate that authorized this merge and records the
     // reason — which is exactly what both cases need. Returning instead would
     // mean a second state carrying a copy of that invalidation.
+    let updateAccepted = false;
+    let recoveryError = null;
+    let observedUpdatedHead = null;
     try {
       await updateBranchToBase({ github, context, prNumber, headSha: gate.headSha });
+      updateAccepted = true;
       // The endpoint returns a status message, not the sha it wrote, so the new
       // head is read back before its parked runs can be found (#3807).
       const updated = await retryRead(`could not re-read PR #${prNumber} after update-branch`, () =>
         github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
       );
-      const newHead = updated?.data?.head?.sha;
-      if (newHead && normalizeHeadSha(newHead) !== normalizeHeadSha(gate.headSha)) {
+      const newHead = normalizeHeadSha(updated?.data?.head?.sha);
+      if (newHead && newHead !== normalizeHeadSha(gate.headSha)) {
+        observedUpdatedHead = newHead;
         const { approved } = await approveParkedRuns({ github, context, headSha: newHead, core });
         if (approved.length > 0) {
           core.notice(
@@ -2488,15 +2549,55 @@ async function merge({
         });
       }
     } catch (error) {
-      // A conflict with the base is the ordinary failure here, and it blocks:
-      // nothing merges, and the next evaluation sees CONFLICTING and says so.
-      // A head that moved under the compare-and-set lands here too, correctly —
-      // this run evaluated a head that is no longer current.
-      throw new Error(
-        `Refusing to merge PR #${prNumber}; ${reason} — the update failed: ${formatError(error)}`,
-      );
+      // An update rejection creates no successor to recover. Once accepted,
+      // though, even a failed head/run read must not bypass its scheduling.
+      if (!updateAccepted) {
+        throw new Error(
+          `Refusing to merge PR #${prNumber}; ${reason} — the update failed: ${formatError(error)}`,
+        );
+      }
+      recoveryError = error;
     }
-    throw new Error(`Refusing to merge PR #${prNumber}; ${reason}`);
+
+    // The update endpoint can acknowledge before GET /pulls exposes its SHA.
+    // Then the guard above skips BOTH approval and the existence wait (#4209).
+    // PR Validation's fallback dispatch is inside that guard and is not a gate
+    // wakeup. Schedule the gate after EVERY accepted update, independently of
+    // head visibility, run appearance, and the success of immediate recovery.
+    //
+    // Use master's trusted workflow and the existing PR-number input. Its
+    // resolver carries the initiating SHA as an exclusion: it waits until a
+    // different head is visible before publishing any target. A single read of
+    // "current" can be stale in the successor just as it was in this run.
+    // Single-shot: a dispatch accepted before a transport error must not be
+    // replayed. If scheduling fails, report a concrete recovery command.
+    const recoveryCommand = gateRecoveryCommand({
+      context, ref: gate.baseRefName, prNumber, previousHeadSha: gate.headSha,
+    });
+    try {
+      await github.rest.actions.createWorkflowDispatch({
+        owner,
+        repo,
+        workflow_id: GATE_WORKFLOW,
+        ref: gate.baseRefName,
+        inputs: { pr_number: String(prNumber), previous_head_sha: gate.headSha },
+      });
+    } catch (error) {
+      const failure = new Error(
+        `Auto Gate infrastructure failure for PR #${prNumber}: update was accepted but follow-up scheduling failed: ` +
+          `${formatError(error)}${recoveryError ? `; immediate recovery also failed: ${formatError(recoveryError)}` : ""}. ` +
+          `Run ${recoveryCommand}`,
+      );
+      failure.autoGateRecoveryFailure = true;
+      failure.autoGateRecoveryHeadSha = observedUpdatedHead;
+      throw failure;
+    }
+    const scheduled = `Auto Gate follow-up scheduled for PR #${prNumber}; its resolver must observe a head different from ${gate.headSha}`;
+    core.notice(scheduled);
+    throw new Error(
+      `Refusing to merge PR #${prNumber}; ${reason}; ${scheduled}` +
+        (recoveryError ? `; immediate post-update recovery failed: ${formatError(recoveryError)}` : ""),
+    );
   }
 
   // Defer rather than race (#3829).
@@ -3270,9 +3371,19 @@ async function sweepMergedHeadRefs({
   };
 }
 
-async function resolveTargets({ github, context, core, prNumber }) {
+async function resolveTargets({
+  github, context, core, prNumber,
+  headPollAttempts = 6,
+  headPollDelayMs = 5000,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
   const numbers = [];
   const payload = context.payload;
+  const rawPreviousHead = context.eventName === "workflow_dispatch"
+    ? payload.inputs?.previous_head_sha || "" : "";
+  const previousHead = rawPreviousHead ? normalizeHeadSha(rawPreviousHead) : null;
+  if (rawPreviousHead && !previousHead) throw new Error("Invalid previous_head_sha for Auto Gate recovery");
+  if (previousHead && !prNumber) throw new Error("Auto Gate recovery requires an explicit PR number");
 
   if (prNumber) {
     numbers.push(prNumber);
@@ -3293,7 +3404,15 @@ async function resolveTargets({ github, context, core, prNumber }) {
   const sourceSha = payload.check_suite?.head_sha || payload.workflow_run?.head_sha || payload.sha;
   const targets = [];
   for (const number of [...new Set(numbers.filter(Boolean))]) {
-    const pr = await getPullRequest({ github, context, number });
+    const pr = previousHead
+      ? await recoverSuccessorHead({
+        github, context, core, number, previousHead, headPollAttempts, headPollDelayMs, sleep,
+      })
+      : await getPullRequest({ github, context, number });
+    // Recovery answers null for a PR that is no longer eligible: nothing to do.
+    if (!pr) {
+      continue;
+    }
     if (
       sourceSha &&
       (pr.state !== "OPEN" || pr.merged || pr.baseRefName !== "master" || pr.headRefOid !== sourceSha)
@@ -3307,6 +3426,82 @@ async function resolveTargets({ github, context, core, prNumber }) {
     });
   }
   return targets;
+}
+
+// Automated recovery for an accepted update-branch (#4209): wait for a head
+// other than the initiating one, make sure PR Validation will run on it, and
+// return the PR once that head is still current — or null once the PR is no
+// longer eligible, which is a successful no-op.
+//
+// Nothing else is guaranteed to revisit that head: its runs can sit parked until
+// this lane or a human approves them. And this lane runs under
+// workflow_dispatch, whose payload names no head its caller could turn red. So
+// every failure here — a retry-exhausted read, a refused one, or recovery that
+// could not be confirmed — leaves through the ONE catch below, which puts the
+// rerun command on the PR as well as in the error.
+async function recoverSuccessorHead({
+  github, context, core, number, previousHead, headPollAttempts, headPollDelayMs, sleep,
+}) {
+  const eligible = (current) => current.state === "OPEN" && !current.merged && current.baseRefName === "master";
+  let observedHead = null;
+  try {
+    let pr = await getPullRequest({ github, context, number });
+    // Head visibility and run visibility are separate transitions. Reuse the
+    // existing validation recovery after each observed head, then recheck it
+    // before publishing. Eligibility is checked on every read and before the
+    // shared recovery helper approves or dispatches anything.
+    for (let attempt = 0; attempt < headPollAttempts; attempt += 1) {
+      if (!eligible(pr)) {
+        core.notice(`PR #${number} is no longer eligible for Auto Gate recovery; nothing to do`);
+        return null;
+      }
+      const observed = normalizeHeadSha(pr.headRefOid);
+      if (observed && observed !== previousHead) {
+        observedHead = observed;
+        const validation = await ensureValidationRun({
+          github, context, core, headSha: observed, headRefName: pr.headRefName,
+          delayMs: headPollDelayMs, sleep,
+          canRecover: async () => {
+            pr = await getPullRequest({ github, context, number });
+            return eligible(pr) && normalizeHeadSha(pr.headRefOid) === observed;
+          },
+        });
+        if (!validation.cancelled && !validation.dispatched && (!validation.found || !validation.approved)) {
+          throw new Error(validation.found
+            ? `not every parked run on ${observed} could be approved`
+            : `no PR Validation run appeared on ${observed} and none could be dispatched`);
+        }
+        pr = await getPullRequest({ github, context, number });
+        if (!eligible(pr)) {
+          return null;
+        }
+        if (!validation.cancelled && normalizeHeadSha(pr.headRefOid) === observed) {
+          return pr;
+        }
+      }
+      if (attempt < headPollAttempts - 1) {
+        await sleep(headPollDelayMs);
+        pr = await getPullRequest({ github, context, number });
+      }
+    }
+    throw new Error(
+      `PR #${number} still exposes initiating head ${previousHead} or has not settled; no stale target was published`,
+    );
+  } catch (error) {
+    const message = `Auto Gate recovery failed for PR #${number}: ${formatError(error)}. Run ` +
+      gateRecoveryCommand({ context, ref: "master", prNumber: number, previousHeadSha: previousHead });
+    const publicationError = await publishRecoveryFailure({
+      github, context, prNumber: number, message, observedHeadSha: observedHead,
+    });
+    const failure = new Error(
+      publicationError ? `${message}; recovery publication also failed: ${formatError(publicationError)}` : message,
+      { cause: error },
+    );
+    // Keep the classification, so the workflow catch takes the exit it always
+    // would have. Either exit now carries the command.
+    failure.autoGateReadFailure = isReadFailure(error);
+    throw failure;
+  }
 }
 
 async function listOpenMasterPullRequestsForHead({ github, context, headSha }) {
@@ -4026,30 +4221,27 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
 }
 
 // The commit whose CONTENT this head carries, when the head is a merge that only
-// brought the base branch in — or null (#3803).
+// brought the base branch in — or null (#3803, #4235).
 //
-// Shape: exactly two parents, and the SECOND is contained in the base branch.
-// That is what `PUT update-branch` produces, first parent the previous head and
-// second parent the base tip, and it is the case where nothing about the reviewed
-// change moved. Anything else — an ordinary push, a merge of some other branch —
-// returns null and the anchors reset as they always did.
+// The cheap filter is the shape `PUT update-branch` produces: exactly two
+// parents, with the SECOND contained in the base branch. Shape alone is not
+// authorization to carry review evidence, because a hand-written conflict
+// resolution has the same parents. For every accepted link, derive the only
+// unambiguous path-level three-way result from the parents and their merge base,
+// then require the merge commit's complete tree to equal it. A truncated tree,
+// same-path conflict, malformed entry or committed-tree mismatch returns null.
 //
 // The containment test is a compare against the base BRANCH rather than a
 // remembered sha, for the same reason #3752 reads the branch: the question is
 // whether that parent is base history now, not whether it matched something the
-// gate recorded earlier.
-//
-// Residual, stated because it is real: this identifies the SHAPE, not the author.
-// A merge commit with those parents but a hand-written conflict resolution would
-// carry an approval onto content nobody approved. It is bounded — only allowed
-// authors' PRs reach the merge path at all, so producing one means the maintainer
-// or the bot did it deliberately — and closing it needs the gate to record the
-// sha it created, which `PUT update-branch` does not return. Named here so the
-// next reader does not have to rediscover it.
+// gate recorded earlier. The returned oid/date are the terminal content head;
+// evidenceHeadOids also retains every verified first parent, nearest first, so
+// evidence posted between consecutive gate updates is not walked past (#4239).
 async function updateBranchContentHead({
   github,
   context,
   baseRefName,
+  headSha,
   headParents,
   subject,
   // Bounded because this walks one API read per link. Four laps was ordinary on
@@ -4058,6 +4250,158 @@ async function updateBranchContentHead({
   maxDepth = 20,
 }) {
   const { owner, repo } = context.repo;
+  const currentHead = normalizeHeadSha(headSha);
+  if (!currentHead) {
+    return null;
+  }
+
+  const commitReads = new Map();
+  const treeReads = new Map();
+
+  // REST commit reads supply the tree identity that the GraphQL parent snapshot
+  // does not. Cache promises, not just results, so concurrent tree reads cannot
+  // duplicate an API call for a merge base that is also one of the parents.
+  const readCommit = async (oid, knownDate = null) => {
+    oid = normalizeHeadSha(oid);
+    if (!oid) {
+      return null;
+    }
+    if (!commitReads.has(oid)) {
+      commitReads.set(oid, retryRead(`could not read commit ${oid}`, async () => {
+        const commit = await github.rest.repos.getCommit({ owner, repo, ref: oid });
+        if (normalizeHeadSha(commit?.data?.sha) !== oid) {
+          return null;
+        }
+        return {
+          oid,
+          committedDate: commit?.data?.commit?.committer?.date,
+          parents: (commit?.data?.parents || []).map((parent) => ({ oid: parent.sha })),
+          treeOid: normalizeHeadSha(commit?.data?.commit?.tree?.sha),
+        };
+      }, subject));
+    }
+    const commit = await commitReads.get(oid);
+    return knownDate ? { ...commit, committedDate: knownDate } : commit;
+  };
+
+  // A recursive Git tree is a complete manifest only when GitHub says it was
+  // not truncated. Directory object ids are normalized because they necessarily
+  // change with their children; retaining the directory paths still catches
+  // empty trees and file/directory replacements. Leaf mode, type and object id
+  // preserve every executable, symlink, submodule and content difference.
+  const readTree = async (commitOid) => {
+    const commit = await readCommit(commitOid);
+    if (!commit?.treeOid) {
+      return null;
+    }
+    if (!treeReads.has(commit.treeOid)) {
+      treeReads.set(commit.treeOid, retryRead(
+        `could not read tree ${commit.treeOid} for commit ${commit.oid}`,
+        async () => {
+          const response = await github.rest.git.getTree({
+            owner,
+            repo,
+            tree_sha: commit.treeOid,
+            recursive: "true",
+          });
+          const data = response?.data;
+          if (
+            data?.truncated !== false ||
+            normalizeHeadSha(data?.sha) !== commit.treeOid ||
+            !Array.isArray(data?.tree)
+          ) {
+            return null;
+          }
+          const manifest = new Map();
+          for (const entry of data.tree) {
+            if (
+              typeof entry?.path !== "string" || entry.path === "" ||
+              !["tree", "blob", "commit"].includes(entry?.type) ||
+              !normalizeHeadSha(entry?.sha)
+            ) {
+              return null;
+            }
+            if (manifest.has(entry.path)) {
+              return null;
+            }
+            if (entry.type === "tree") {
+              if (entry.mode !== "040000") {
+                return null;
+              }
+              manifest.set(entry.path, "040000\0tree");
+              continue;
+            }
+            const validLeafMode = entry.type === "commit"
+              ? entry.mode === "160000"
+              : /^(?:100644|100755|120000)$/.test(String(entry.mode || ""));
+            if (!validLeafMode) {
+              return null;
+            }
+            manifest.set(entry.path, `${entry.mode}\0${entry.type}\0${entry.sha.toLowerCase()}`);
+          }
+          return manifest;
+        },
+        subject,
+      ));
+    }
+    return treeReads.get(commit.treeOid);
+  };
+
+  const sameTree = (left, right) =>
+    left != null && right != null && left.size === right.size &&
+    [...left].every(([path, entry]) => right.get(path) === entry);
+
+  const mergeTreeIsContentPreserving = async (mergeOid, parents) => {
+    const [first, second] = parents;
+    const comparison = await retryRead(
+      `could not find merge base for ${first.oid} and ${second.oid}`,
+      () => github.rest.repos.compareCommitsWithBasehead({
+        owner,
+        repo,
+        basehead: `${first.oid}...${second.oid}`,
+        per_page: 1,
+      }),
+      subject,
+    );
+    const mergeBase = normalizeHeadSha(comparison?.data?.merge_base_commit?.sha);
+    if (!mergeBase) {
+      return false;
+    }
+    const [baseTree, firstTree, secondTree, committedTree] = await Promise.all([
+      readTree(mergeBase),
+      readTree(first.oid),
+      readTree(second.oid),
+      readTree(mergeOid),
+    ]);
+    if (!baseTree || !firstTree || !secondTree || !committedTree) {
+      return false;
+    }
+
+    const expected = new Map();
+    const paths = new Set([...baseTree.keys(), ...firstTree.keys(), ...secondTree.keys()]);
+    for (const path of paths) {
+      const base = baseTree.get(path);
+      const firstValue = firstTree.get(path);
+      const secondValue = secondTree.get(path);
+      let merged;
+      if (firstValue === secondValue) {
+        merged = firstValue;
+      } else if (firstValue === base) {
+        merged = secondValue;
+      } else if (secondValue === base) {
+        merged = firstValue;
+      } else {
+        // Both sides changed one leaf differently. Reconstructing a textual
+        // merge would require executing or trusting PR content, so this result
+        // is deliberately unknown and review evidence does not carry.
+        return false;
+      }
+      if (merged !== undefined) {
+        expected.set(path, merged);
+      }
+    }
+    return sameTree(expected, committedTree);
+  };
 
   // Whether these parents are the shape `PUT update-branch` produces: exactly
   // two, the second contained in the base branch.
@@ -4085,22 +4429,6 @@ async function updateBranchContentHead({
     return status === "identical" || status === "behind";
   };
 
-  // One read per link, giving both the link's own date and its parents. The
-  // GraphQL query that produced `headParents` carries dates for the head's
-  // parents, so those are preferred and the read is only for what it does not
-  // have — but the date must come from somewhere for every link, because the
-  // anchor IS that date.
-  const readCommit = async (oid, knownDate) => {
-    const commit = await retryRead(`could not read commit ${oid}`, () =>
-      github.rest.repos.getCommit({ owner, repo, ref: oid }),
-    );
-    return {
-      oid,
-      committedDate: knownDate || commit?.data?.commit?.committer?.date,
-      parents: (commit?.data?.parents || []).map((parent) => ({ oid: parent.sha })),
-    };
-  };
-
   // Walk the FIRST-PARENT chain while every link is one of the gate's own merges
   // (#3815). #3803 walked exactly one, which closed the single-lap case and
   // reopened it a level down: when the gate update-branches a head that is itself
@@ -4113,19 +4441,32 @@ async function updateBranchContentHead({
   // merge of something that is not the base branch. That commit is the content
   // head, and anchoring there is what makes an approval survive a chain of laps
   // while still resetting the moment someone pushes code.
+  let mergeOid = currentHead;
   let parents = headParents;
   let contentHead = null;
   let chainLength = 0;
-  while (chainLength < maxDepth && (await isUpdateBranchMerge(parents))) {
+  const evidenceHeadOids = [];
+  while (
+    chainLength < maxDepth &&
+    (await isUpdateBranchMerge(parents)) &&
+    (await mergeTreeIsContentPreserving(mergeOid, parents))
+  ) {
     const first = parents[0];
     chainLength += 1;
     contentHead = await readCommit(first.oid, first.committedDate);
+    evidenceHeadOids.push(contentHead.oid);
+    mergeOid = contentHead.oid;
     parents = contentHead.parents;
   }
   if (!contentHead) {
     return null;
   }
-  return { oid: contentHead.oid, committedDate: contentHead.committedDate, chainLength };
+  return {
+    oid: contentHead.oid,
+    committedDate: contentHead.committedDate,
+    chainLength,
+    evidenceHeadOids,
+  };
 }
 
 // The Codex finding artifacts a gate must not merge past: those carrying a
@@ -4147,6 +4488,7 @@ function unansweredFindingArtifacts({
   artifacts,
   acknowledgementCandidates,
   headSha,
+  headShas = [headSha],
   headCommitTime,
 }) {
   const acknowledgements = acknowledgementCandidates.filter(
@@ -4183,7 +4525,7 @@ function unansweredFindingArtifacts({
       // Bound to this head is classified, not unclassifiable: the rule above
       // already inspected it, and blocking twice for one artifact would report a
       // finding that "names no commit" about one that names this very head.
-      !codexArtifactBindsToHead(artifact, headSha),
+      !headShas.some((candidate) => codexArtifactBindsToHead(artifact, candidate)),
   );
   const unboundFindingArtifacts = findingCandidates.filter((artifact) => {
     // Fails closed on an unknown order, like every other timestamp comparison in
@@ -4257,6 +4599,28 @@ async function evaluateCodex({
     headSha: sha,
     contentHead,
   });
+  // A recognised chain of update-branch merges has one valid evidence name per
+  // tree-proven link: the current merge and every first parent walked on the way
+  // to the terminal content head. A review or unavailability reply may have
+  // landed on any of them between gate updates. No other ancestor is admitted;
+  // updateBranchContentHead's fail-closed proof authorizes every added name.
+  const evidenceHeadOids = Array.isArray(contentHead?.evidenceHeadOids)
+    ? contentHead.evidenceHeadOids
+    : [contentHead?.oid];
+  const evidenceHeadShas = [...new Set(
+    [sha, ...evidenceHeadOids].map(normalizeHeadSha).filter(Boolean),
+  )];
+  // Body links are location prose, not a claim about what Codex reviewed. Keep
+  // their pre-#4239 scope — current and terminal content head — while accepting
+  // every verified intermediate only where GitHub's commit_id authenticates the
+  // artifact's subject. Otherwise a supporting link to an intermediate update
+  // merge can classify an unacknowledged finding as head-bound (#4240).
+  const bodyLinkHeadShas = [...new Set(
+    [sha, contentHead?.oid].map(normalizeHeadSha).filter(Boolean),
+  )];
+  const artifactBindsToFindingHead = (artifact) =>
+    evidenceHeadShas.includes(String(artifact.commit_id || "").toLowerCase()) ||
+    bodyLinkHeadShas.some((headSha) => codexArtifactBindsToHead(artifact, headSha));
 
   if (headCommitTime == null) {
     reasons.push("last commit timestamp was unavailable, so Codex freshness cannot be verified");
@@ -4308,7 +4672,7 @@ async function evaluateCodex({
   const codexInlineReplies = reviewComments
     .filter((comment) =>
       comment.user?.login === CODEX_REVIEWER && comment.in_reply_to_id &&
-      String(comment.commit_id || "").toLowerCase() === String(sha).toLowerCase(),
+      evidenceHeadShas.includes(String(comment.commit_id || "").toLowerCase()),
     )
     .map((comment) => ({
       ...comment,
@@ -4338,7 +4702,20 @@ async function evaluateCodex({
   // comment order, because the summary comment is edited on every review
   // activity and its comment time says nothing about when this review completed.
   const matchingReviewArtifacts = codexReviewArtifacts
-    .map((artifact) => parseVerdictArtifact(artifact, sha, corroborationArtifacts, headCurrentSince))
+    .map((artifact) => {
+      for (const headSha of evidenceHeadShas) {
+        const parsed = parseVerdictArtifact(
+          artifact,
+          headSha,
+          corroborationArtifacts,
+          headCurrentSince,
+        );
+        if (parsed) {
+          return { ...parsed, headSha };
+        }
+      }
+      return null;
+    })
     .filter(Boolean)
     .sort((left, right) => right.time - left.time);
   const verdict = matchingReviewArtifacts[0];
@@ -4403,11 +4780,15 @@ async function evaluateCodex({
     // Split, because the states need different actions from a reader: silence
     // says request a review, an unparseable review says inspect the artifact, and
     // a stale matching verdict says its review predates this head transition.
+    const namedHead = evidenceHeadShas.find(
+      (headSha) =>
+        summaryNamesHead(codexReviewArtifacts, headSha) &&
+        summaryCorroboration(corroborationArtifacts, headSha, headCurrentSince),
+    );
     const missingVerdictReason = verdict
       ? `Codex verdict for the head commit is older than the head commit timestamp${suffix}`
-      : summaryNamesHead(codexReviewArtifacts, sha) &&
-          summaryCorroboration(corroborationArtifacts, sha, headCurrentSince)
-        ? `a Codex review exists for head ${sha} but carried no parseable verdict${suffix}`
+      : namedHead
+        ? `a Codex review exists for head ${namedHead} but carried no parseable verdict${suffix}`
         : `Codex has not reviewed head ${sha} yet${suffix}`;
     if (reviewerUnavailable) {
       reviewerUnavailableReason = missingVerdictReason;
@@ -4420,7 +4801,11 @@ async function evaluateCodex({
       remedy: CODEX_VERDICT_REMEDY,
     };
   } else {
-    notes.push(`Codex verdict matches head ${sha}`);
+    notes.push(
+      verdict.headSha === normalizeHeadSha(sha)
+        ? `Codex verdict matches head ${sha}`
+        : `Codex verdict matches content head ${verdict.headSha}`,
+    );
     notes.push(`Codex verdict corroborated by ${verdict.corroboration}`);
   }
 
@@ -4444,7 +4829,7 @@ async function evaluateCodex({
   // exactly what #3591 closed for inline findings.
   const findingBlockers = [];
   const headBoundArtifacts = codexReviewArtifacts.filter((artifact) =>
-    codexArtifactBindsToHead(artifact, sha),
+    artifactBindsToFindingHead(artifact),
   );
   // Newest-wins, with ties broken toward the finding (Codex P1 on #3676). The
   // sort is by timestamp alone and is stable, so two artifacts stamped in the
@@ -4518,6 +4903,10 @@ async function evaluateCodex({
     artifacts: codexReviewArtifacts,
     acknowledgementCandidates: [...comments, ...reviews],
     headSha: sha,
+    // Only current/terminal body links classify a finding here. Intermediate
+    // commit_id fields were already excluded above as authenticated assertions;
+    // an intermediate SHA mentioned only in prose remains unbound and blocks.
+    headShas: bodyLinkHeadShas,
     headCommitTime,
   });
   if (unboundFindingArtifacts.length > 0) {
@@ -5168,6 +5557,7 @@ module.exports = {
     listParkedRuns,
     ensureValidationRun,
     VALIDATION_WORKFLOW,
+    GATE_WORKFLOW,
     decisionSummaryBody,
     DECISION_STAMP_PREFIX,
     maintainerApproval,

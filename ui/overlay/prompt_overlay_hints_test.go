@@ -14,7 +14,7 @@ func TestPromptOverlayKeepsComposerHintsByDefault(t *testing.T) {
 	forceProfile(t, termenv.TrueColor)
 	p := NewPromptOverlay("Initial prompt", "fix the flaky test")
 	p.SetMaxSize(80, 24)
-	got := p.Render()
+	got := renderedText(p.Render())
 
 	for _, want := range []string{"enter newline", "tab done", "ctrl+c cancel", "Initial prompt"} {
 		if !strings.Contains(got, want) {
@@ -28,22 +28,16 @@ func TestPromptOverlayKeepsComposerHintsByDefault(t *testing.T) {
 // told the operator enter made a newline while enter actually submitted, and
 // advertised a tab key that did nothing.
 func TestPromptOverlayCallerCanReplaceHintsAndPlaceholder(t *testing.T) {
-	// Pin the profile: the placeholder's styling renders differently under a
-	// leaked ANSI256 profile, and a test that depends on run order is not a test.
 	forceProfile(t, termenv.TrueColor)
 	p := NewPromptOverlay("Jump to tab (number or name)", "")
 	p.SetPlaceholder("Tab number or name…")
 	p.SetHints("enter jump · esc cancel", "enter jump · esc cancel")
 	p.SetMaxSize(80, 24)
-	got := p.Render()
+	got := renderedText(p.Render())
 
-	if got := p.textarea.Placeholder; got != "Tab number or name…" {
-		t.Errorf("placeholder = %q, want the jump's own; the composer's invites a prompt for the agent", got)
+	if !strings.Contains(got, "Tab number or name…") {
+		t.Errorf("rendered prompt is missing the jump's own placeholder; the composer's invites a prompt for the agent:\n%s", got)
 	}
-	// The placeholder's RENDERED form depends on the process-wide lipgloss
-	// profile, which other tests in this package mutate, so it is asserted on
-	// the widget above rather than in the styled output. The hints below are
-	// plain text and render identically under every profile.
 	for _, absent := range []string{"enter newline", "tab done"} {
 		if strings.Contains(got, absent) {
 			t.Errorf("jump prompt still renders the composer's copy %q, which is wrong for this overlay:\n%s", absent, got)
