@@ -5481,6 +5481,83 @@ test("the happy path squash-merges the exact evaluated head", async () => {
 // computed against the tree that actually lands.
 // ---------------------------------------------------------------------------
 
+// #4209: update-branch can return before the PR read exposes the new SHA.
+// In that window the existing approval/existence helpers are never reached.
+// A successor must be scheduled even though the current run cannot see its head.
+test("#4209: an accepted update with a stale head read schedules the gate that approves its late runs", async () => {
+  const NEW_HEAD = "d0bece4610c37b7d397100132ce03126ad556bfe";
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: NEW_HEAD,
+    pullGetSnapshots: [{ head: { sha: HEAD_SHA } }],
+    runsByHeadSha: { [NEW_HEAD]: [
+      { id: 101, name: "PR Validation", event: "pull_request", conclusion: "action_required" },
+      { id: 102, name: "Docs", event: "pull_request", conclusion: "action_required" },
+      { id: 103, name: "Dependency review", event: "pull_request", conclusion: "action_required" },
+    ] },
+  });
+  await assert.rejects(() => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }), /Refusing to merge/);
+  assert.deepEqual(github.approvedRuns, [], "the new head is not visible to this evaluation yet");
+  assert.equal(github.dispatchedWorkflows.length, 1);
+  const scheduled = github.dispatchedWorkflows[0];
+  assert.deepEqual(scheduled, {
+    owner: "sachiniyer", repo: "agent-factory", workflow_id: "auto-gate.yml",
+    ref: "master", inputs: { pr_number: "1465" },
+  });
+  const context = { ...fakeContext(), eventName: "workflow_dispatch", payload: {} };
+  const next = fakeGateGithub({ headSha: NEW_HEAD,
+    runsByHeadSha: { [NEW_HEAD]: [
+      { id: 101, name: "PR Validation", event: "pull_request", conclusion: "action_required" },
+      { id: 102, name: "Docs", event: "pull_request", conclusion: "action_required" },
+      { id: 103, name: "Dependency review", event: "pull_request", conclusion: "action_required" },
+    ] },
+  });
+  const targets = await autoGate.resolveTargets({ github: next, context, core: fakeCore(), prNumber: Number(scheduled.inputs.pr_number) });
+  assert.equal(targets[0].headSha, NEW_HEAD, "dispatch resolves the current head, never the stale initiating SHA");
+  await autoGate.evaluate({ github: next, context, core: fakeCore(), prNumber: targets[0].prNumber, setOutputs: false });
+  assert.deepEqual(next.approvedRuns.map((run) => run.run_id), [101, 102, 103]);
+  assert.deepEqual(next.dispatchedWorkflows, [], "evaluation alone must not create a dispatch loop");
+});
+
+for (const state of ["queued", "in_progress", "action_required"]) {
+  test(`#4209: successor scheduling leaves ${state} runs alone unless approval is required`, async () => {
+    const NEW_HEAD = "d0bece4610c37b7d397100132ce03126ad556bfe";
+    const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: NEW_HEAD,
+      runsByHeadSha: { [NEW_HEAD]: [{ id: 101, name: "PR Validation", event: "pull_request",
+        status: state === "action_required" ? "completed" : state,
+        conclusion: state === "action_required" ? state : null }] },
+    });
+    await assert.rejects(() => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }), /Refusing to merge/);
+    assert.deepEqual(github.approvedRuns.map((run) => run.run_id), state === "action_required" ? [101] : []);
+    assert.deepEqual(github.dispatchedWorkflows.map((run) => run.workflow_id), ["auto-gate.yml"], "only gate evaluation is scheduled, not duplicate validation");
+  });
+}
+
+test("#4209: a post-update read failure still schedules recovery", async () => {
+  const github = fakeGateGithub({ behindBy: 1, pullGetError: new Error("PR read unavailable") });
+  await assert.rejects(() => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }), /PR read unavailable/);
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.deepEqual(github.dispatchedWorkflows.map((run) => run.workflow_id), ["auto-gate.yml"]);
+});
+
+test("#4209: a rejected update does not schedule a successor", async () => {
+  const github = fakeGateGithub({ behindBy: 1, updateBranchError: new Error("update rejected") });
+  await assert.rejects(() => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }), /update rejected/);
+  assert.deepEqual(github.dispatchedWorkflows, []);
+});
+
+test("#4209: a failed follow-up dispatch names the manual recovery instead of claiming it is scheduled", async () => {
+  const github = fakeGateGithub({ behindBy: 1,
+    workflowDispatchErrorsByWorkflow: { "auto-gate.yml": new Error("dispatch refused") },
+  });
+  await assert.rejects(() => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }), (error) => {
+    assert.match(error.message, /update was accepted/);
+    assert.match(error.message, /dispatch refused/);
+    assert.match(error.message, /gh workflow run auto-gate.yml --repo sachiniyer\/agent-factory --ref master -f pr_number=1465/);
+    return true;
+  });
+  assert.equal(github.workflowDispatchAttempts, 1, "an ambiguous dispatch write is not retried");
+  assert.deepEqual(github.dispatchedWorkflows, []);
+});
+
 // #3807. The merge commit `PUT update-branch` writes is authored by the workflow
 // token, so every `pull_request` run it triggers is attributed to
 // `github-actions[bot]` and GitHub parks it in `action_required` behind "Approve
@@ -5532,7 +5609,7 @@ test("the gate approves the runs its own update-branch parked for approval", asy
 // while making the #3807 fallback fail at runtime with a 422 and no outward sign.
 // The same gap covered the master-push list, so both are checked here.
 test("every workflow the gate dispatches declares workflow_dispatch", () => {
-  const dispatched = [...__test.MASTER_PUSH_WORKFLOWS, __test.VALIDATION_WORKFLOW];
+  const dispatched = [...__test.MASTER_PUSH_WORKFLOWS, __test.VALIDATION_WORKFLOW, __test.GATE_WORKFLOW];
   for (const file of dispatched) {
     const workflow = fs.readFileSync(path.join(__dirname, "..", "workflows", file), "utf8");
     // The `on:` block, up to the first top-level key after it. Canonical spelling
@@ -5758,8 +5835,12 @@ test("a green PR whose head is behind master is updated instead of merged", asyn
   // Compare-and-set: an update racing a push must not rebuild the branch on top
   // of a head this run never evaluated.
   assert.equal(github.updateBranchCalls[0].expected_head_sha, HEAD_SHA);
-  // Nothing after the merge runs: no head-ref deletion, no master re-verification.
-  assert.deepEqual(github.dispatchedWorkflows, []);
+  // Only the successor gate runs: no head-ref deletion or master verification
+  // workflows, since the update did not merge the PR.
+  assert.deepEqual(github.dispatchedWorkflows, [{
+    owner: "sachiniyer", repo: "agent-factory", workflow_id: "auto-gate.yml",
+    ref: "master", inputs: { pr_number: "1465" },
+  }]);
   assert.deepEqual(github.deletedRefs, []);
 });
 

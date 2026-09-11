@@ -103,6 +103,25 @@ Because that loop brings a behind head up to date itself, the ruleset's strict
 required-status-checks policy can stay on: a hand merge no longer has to win a
 race against the fleet's merge rate.
 
+**Every accepted update-branch schedules another Auto Gate evaluation (#4209).**
+The update endpoint can acknowledge before a PR read exposes its new head. The
+immediate approval and run-existence checks only execute when that read returns
+a different SHA, so a stale read used to skip both. The PR Validation dispatch
+inside the existence check could not repair that exit, and it never dispatched
+Auto Gate itself.
+
+After immediate recovery, the gate now dispatches `auto-gate.yml` on the trusted
+base branch with `pr_number`, even if the head read was stale or recovery failed.
+The successor uses the existing resolver to bind to the PR's current head when
+it starts, rather than evaluating the superseded SHA that initiated the update.
+Only an accepted update schedules this successor; ordinary evaluations do not
+schedule themselves. Existing approval checks still write only to parked
+`pull_request` runs, leaving queued/running runs alone.
+
+The dispatch is single-shot. A failure is reported in the refusal with the
+exact `gh workflow run auto-gate.yml ... -f pr_number=N` recovery command; an
+ambiguous write is not retried or described as confirmed scheduling.
+
 **A base that moves between the compare and the merge waits; it does not red the
 run (#3808).** `PUT /pulls/N/merge` answers 405 `Base branch was modified` when
 another merge lands in the window the up-to-date compare cannot close. Nobody won

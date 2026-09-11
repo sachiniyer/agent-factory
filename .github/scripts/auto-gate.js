@@ -2270,6 +2270,7 @@ async function listParkedRuns({ github, context, headSha, subject = null }) {
 // The workflow the gate dispatches when nothing validated a head it created.
 // Named, so a test can assert the file it points at actually accepts a dispatch.
 const VALIDATION_WORKFLOW = "pr.yml";
+const GATE_WORKFLOW = "auto-gate.yml";
 
 // Make sure SOMETHING is going to validate the head the gate just created.
 //
@@ -2463,8 +2464,11 @@ async function merge({
     // invalidates the aggregate that authorized this merge and records the
     // reason — which is exactly what both cases need. Returning instead would
     // mean a second state carrying a copy of that invalidation.
+    let updateAccepted = false;
+    let recoveryError = null;
     try {
       await updateBranchToBase({ github, context, prNumber, headSha: gate.headSha });
+      updateAccepted = true;
       // The endpoint returns a status message, not the sha it wrote, so the new
       // head is read back before its parked runs can be found (#3807).
       const updated = await retryRead(`could not re-read PR #${prNumber} after update-branch`, () =>
@@ -2488,15 +2492,50 @@ async function merge({
         });
       }
     } catch (error) {
-      // A conflict with the base is the ordinary failure here, and it blocks:
-      // nothing merges, and the next evaluation sees CONFLICTING and says so.
-      // A head that moved under the compare-and-set lands here too, correctly —
-      // this run evaluated a head that is no longer current.
+      // An update rejection creates no successor to recover. Once accepted,
+      // though, even a failed head/run read must not bypass its scheduling.
+      if (!updateAccepted) {
+        throw new Error(
+          `Refusing to merge PR #${prNumber}; ${reason} — the update failed: ${formatError(error)}`,
+        );
+      }
+      recoveryError = error;
+    }
+
+    // The update endpoint can acknowledge before GET /pulls exposes its SHA.
+    // Then the guard above skips BOTH approval and the existence wait (#4209).
+    // PR Validation's fallback dispatch is inside that guard and is not a gate
+    // wakeup. Schedule the gate after EVERY accepted update, independently of
+    // head visibility, run appearance, and the success of immediate recovery.
+    //
+    // Use master's trusted workflow and the existing PR-number input. Its
+    // resolver binds the successor to the CURRENT PR/head pair when it starts;
+    // carrying gate.headSha here would bind it to the superseded head instead.
+    // Single-shot: a dispatch accepted before a transport error must not be
+    // replayed. If scheduling fails, report a concrete recovery command.
+    const recoveryCommand =
+      `gh workflow run ${GATE_WORKFLOW} --repo ${owner}/${repo} --ref ${gate.baseRefName} -f pr_number=${prNumber}`;
+    try {
+      await github.rest.actions.createWorkflowDispatch({
+        owner,
+        repo,
+        workflow_id: GATE_WORKFLOW,
+        ref: gate.baseRefName,
+        inputs: { pr_number: String(prNumber) },
+      });
+    } catch (error) {
       throw new Error(
-        `Refusing to merge PR #${prNumber}; ${reason} — the update failed: ${formatError(error)}`,
+        `Refusing to merge PR #${prNumber}; update was accepted but Auto Gate follow-up scheduling failed: ` +
+          `${formatError(error)}${recoveryError ? `; immediate recovery also failed: ${formatError(recoveryError)}` : ""}. ` +
+          `Run ${recoveryCommand}`,
       );
     }
-    throw new Error(`Refusing to merge PR #${prNumber}; ${reason}`);
+    const scheduled = `Auto Gate follow-up scheduled for PR #${prNumber}; its resolver will bind to the current head`;
+    core.notice(scheduled);
+    throw new Error(
+      `Refusing to merge PR #${prNumber}; ${reason}; ${scheduled}` +
+        (recoveryError ? `; immediate post-update recovery failed: ${formatError(recoveryError)}` : ""),
+    );
   }
 
   // Defer rather than race (#3829).
@@ -5168,6 +5207,7 @@ module.exports = {
     listParkedRuns,
     ensureValidationRun,
     VALIDATION_WORKFLOW,
+    GATE_WORKFLOW,
     decisionSummaryBody,
     DECISION_STAMP_PREFIX,
     maintainerApproval,
