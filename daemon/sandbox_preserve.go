@@ -76,6 +76,16 @@ func killSuggestionFor(instance *session.Instance) string {
 	return shellsuggest.PositionalCommand("af", args, instance.Title)
 }
 
+// reapRefusalSuggestionFor never names an off-ramp whose branch precondition is
+// already known to be false. --force-reap requires a known branch: without one
+// it would refuse at the same guard, so kill/recreate is the executable path.
+func reapRefusalSuggestionFor(instance *session.Instance) string {
+	if instance.GetBranch() == "" {
+		return killSuggestionFor(instance)
+	}
+	return forceReapSuggestionFor(instance)
+}
+
 // preserveSandboxBeforeReap runs the push that makes a reachable sandbox's work
 // durable before recovery destroys it (#2923/#2925/#2959).
 //
@@ -285,8 +295,8 @@ func refuseIndeterminateReap(instance *session.Instance) error {
 	return fmt.Errorf(
 		"cannot restore %q: af could not determine whether its sandbox is gone or merely unreachable, "+
 			"and replacing it would discard anything it has not pushed. "+
-			"It stays recoverable and the daemon keeps retrying; if you know the sandbox is gone, force it with: %s",
-		instance.Title, forceReapSuggestionFor(instance))
+			"It stays recoverable and the daemon keeps retrying; if you know the sandbox is gone, end it with: %s",
+		instance.Title, reapRefusalSuggestionFor(instance))
 }
 
 // archiveWithin runs the sandbox's push under a hard local deadline, mirroring

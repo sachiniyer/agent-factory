@@ -187,7 +187,7 @@ func TestRestoreSession_IndeterminateSandboxIsNotReplaced(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	srv := newSandboxProbeServer(t, "af/session-branch")
 	srv.unreachable.Store(true)
-	_, backend, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "indeterminate", srv.url, session.Lost)
+	inst, backend, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "indeterminate", srv.url, session.Lost)
 
 	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "indeterminate", RepoID: repoID})
 
@@ -202,8 +202,11 @@ func TestRestoreSession_IndeterminateSandboxIsNotReplaced(t *testing.T) {
 		t.Fatalf("archive calls = %d, want 0: there is nothing to push to when the sandbox cannot be reached", got)
 	}
 	requireSandboxSurvived(t, reap, "unreachable is not gone — it may be live behind a broken network path, still holding work")
-	if !strings.Contains(err.Error(), "--force-reap") {
-		t.Fatalf("the refusal must name the command that releases it (#2917), got: %v", err)
+	if got, want := err.Error(), killSuggestionFor(inst); !strings.Contains(got, want) {
+		t.Fatalf("the refusal must name the command that can release it (#2917/#4181)\n got: %s\nwant suggestion: %s", got, want)
+	}
+	if strings.Contains(err.Error(), "--force-reap") {
+		t.Fatalf("the refusal named --force-reap even though this session has no branch and that retry refuses: %v", err)
 	}
 }
 
@@ -249,6 +252,17 @@ func TestRestoreSession_ForceReapReleasesTheIndeterminateRefusal(t *testing.T) {
 	inst := manager.instances[daemonInstanceKey(repoID, "forced-unknown")]
 	inst.SetSandboxBranch("af/known-branch")
 	manager.persistInstance(repoID, inst)
+
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "forced-unknown", RepoID: repoID})
+	if err == nil {
+		t.Fatal("an indeterminate sandbox was replaced without --force-reap")
+	}
+	if got, want := err.Error(), forceReapSuggestionFor(inst); !strings.Contains(got, want) {
+		t.Fatalf("a session with a durable branch must keep the executable --force-reap off-ramp\n got: %s\nwant suggestion: %s", got, want)
+	}
+	if got, destructive := err.Error(), killSuggestionFor(inst); strings.Contains(got, destructive) {
+		t.Fatalf("a session with a durable branch was sent to the unnecessarily destructive kill path: %s", got)
+	}
 
 	if _, _, err := manager.RestoreSession(RestoreSessionRequest{
 		Title: "forced-unknown", RepoID: repoID, ForceReap: true,
