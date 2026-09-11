@@ -237,7 +237,7 @@ func TestApplyConfigRejectsPreApplyRootProgramResolutionCompletion(t *testing.T)
 		t.Fatal(err)
 	}
 	manager.finishAdoptedRootProgramDrift(repo.ID, key, repoPath, st,
-		config.RootAgent{Enabled: true, Program: "codex"}, 0, "codex", nil, root, evidence)
+		config.RootAgent{Enabled: true, Program: "codex"}, 0, "", "codex", nil, root, evidence)
 
 	manager.mu.Lock()
 	resolved, configured := st.programDriftResolved, st.programDriftConfiguredProgram
@@ -323,7 +323,7 @@ func TestAdoptedRootProgramDriftLatchRejectsReplacedRuntime(t *testing.T) {
 		root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "/opt/codex"))
 	}
 	manager.checkAdoptedRootProgramDrift(repo,
-		daemonInstanceKey(repo.ID, session.RootSessionTitle), repo.WorkspacePath(), st, profile, root)
+		daemonInstanceKey(repo.ID, session.RootSessionTitle), repo.WorkspacePath(), st, profile, root, nil)
 
 	manager.mu.Lock()
 	latched := st.programDriftLogged || manager.rootProgramDriftLogged[repo.ID]
@@ -524,7 +524,7 @@ func TestAdoptedRootProgramResolutionFailureRetries(t *testing.T) {
 	}
 	st := &rootEnsureState{}
 	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
-	manager.checkAdoptedRootProgramDrift(repo, key, repoPath, st, config.RootAgent{}, root)
+	manager.checkAdoptedRootProgramDrift(repo, key, repoPath, st, config.RootAgent{}, root, nil)
 	waitForRootProgramResolutionIdle(t, manager, st)
 	manager.mu.Lock()
 	resolvedAfterFailure := st.programDriftResolved
@@ -536,7 +536,7 @@ func TestAdoptedRootProgramResolutionFailureRetries(t *testing.T) {
 	if err := writeRootDriftRepoConfig(repoPath, "[program_overrides]\nclaude = 'codex'\n"); err != nil {
 		t.Fatal(err)
 	}
-	manager.checkAdoptedRootProgramDrift(repo, key, repoPath, st, config.RootAgent{}, root)
+	manager.checkAdoptedRootProgramDrift(repo, key, repoPath, st, config.RootAgent{}, root, nil)
 	waitForRootProgramResolutionIdle(t, manager, st)
 	manager.mu.Lock()
 	resolved, configured := st.programDriftResolved, st.programDriftConfiguredProgram
@@ -579,7 +579,7 @@ func TestAdoptedRootProgramCacheIncludesRepositoryIdentity(t *testing.T) {
 	}
 	st := &rootEnsureState{}
 	manager.checkAdoptedRootProgramDrift(firstRepo,
-		daemonInstanceKey(firstRepo.ID, session.RootSessionTitle), workspace, st, config.RootAgent{}, root)
+		daemonInstanceKey(firstRepo.ID, session.RootSessionTitle), workspace, st, config.RootAgent{}, root, nil)
 	waitForRootProgramResolutionIdle(t, manager, st)
 
 	if err := os.Remove(workspace); err != nil {
@@ -596,7 +596,7 @@ func TestAdoptedRootProgramCacheIncludesRepositoryIdentity(t *testing.T) {
 		t.Fatal("replacement repository unexpectedly kept the old identity")
 	}
 	manager.checkAdoptedRootProgramDrift(secondRepo,
-		daemonInstanceKey(secondRepo.ID, session.RootSessionTitle), workspace, st, config.RootAgent{}, root)
+		daemonInstanceKey(secondRepo.ID, session.RootSessionTitle), workspace, st, config.RootAgent{}, root, nil)
 	waitForRootProgramResolutionIdle(t, manager, st)
 	manager.mu.Lock()
 	configured := st.programDriftConfiguredProgram
@@ -604,6 +604,64 @@ func TestAdoptedRootProgramCacheIncludesRepositoryIdentity(t *testing.T) {
 	if configured != "gemini" {
 		t.Fatalf("repointed workspace reused configured command %q, want gemini", configured)
 	}
+}
+
+func TestResolveAdoptedRootProgramDriftRequiresStableRegisteredCheckout(t *testing.T) {
+	t.Run("unchanged checkout", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+		repoPath := setupControlRepo(t)
+		project := registerTestProject(t, repoPath)
+		repo, err := config.RepoFromPath(project.Root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity := &resolvedProjectRoot{
+			root: project.Root, projectID: project.ID, checkoutID: project.CheckoutID,
+		}
+		resolve := func(*config.RepoContext) (*config.ResolvedConfig, error) {
+			resolved := config.DefaultConfig()
+			resolved.ProgramOverrides = map[string]string{"codex": "/registered/codex"}
+			return &config.ResolvedConfig{Config: *resolved}, nil
+		}
+		configured, err := resolveAdoptedRootProgramForDrift(repo,
+			config.RootAgent{Enabled: true, Program: "codex"}, identity, resolve)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if configured != "/registered/codex" {
+			t.Fatalf("configured command = %q, want /registered/codex", configured)
+		}
+	})
+
+	t.Run("replacement during command read", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+		repoPath := setupControlRepo(t)
+		project := registerTestProject(t, repoPath)
+		repo, err := config.RepoFromPath(project.Root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity := &resolvedProjectRoot{
+			root: project.Root, projectID: project.ID, checkoutID: project.CheckoutID,
+		}
+		resolve := func(*config.RepoContext) (*config.ResolvedConfig, error) {
+			if err := os.Rename(project.Root, project.Root+".original"); err != nil {
+				return nil, err
+			}
+			setupRootDriftRepoAt(t, project.Root)
+			resolved := config.DefaultConfig()
+			resolved.ProgramOverrides = map[string]string{"codex": "/replacement/codex"}
+			return &config.ResolvedConfig{Config: *resolved}, nil
+		}
+		configured, err := resolveAdoptedRootProgramForDrift(repo,
+			config.RootAgent{Enabled: true, Program: "codex"}, identity, resolve)
+		if err == nil {
+			t.Fatalf("replacement checkout command %q was accepted under the original personal profile", configured)
+		}
+		if !strings.Contains(err.Error(), "no longer carries") {
+			t.Fatalf("replacement refusal = %v, want checkout-marker mismatch", err)
+		}
+	})
 }
 
 func TestAdoptedRootProgramDriftRevalidatesRuntimeBeforeLatching(t *testing.T) {
@@ -631,7 +689,7 @@ func TestAdoptedRootProgramDriftRevalidatesRuntimeBeforeLatching(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager.finishAdoptedRootProgramDrift(repo.ID, key, repoPath, st,
-		config.RootAgent{Enabled: true, Program: "codex"}, 0, "codex", nil, root, evidence)
+		config.RootAgent{Enabled: true, Program: "codex"}, 0, "", "codex", nil, root, evidence)
 	if strings.Contains(warnings.String(), "root agent program drift") {
 		t.Fatalf("completion latched drift from the replaced runtime:\n%s", warnings.String())
 	}
@@ -653,7 +711,7 @@ func TestAdoptedRootProgramDriftRevalidatesRuntimeBeforeLatching(t *testing.T) {
 	}
 	t.Cleanup(func() { resolveRootProgramConfigForInspection = previousResolve })
 	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st,
-		config.RootAgent{Enabled: true, Program: "codex"}, root)
+		config.RootAgent{Enabled: true, Program: "codex"}, root, nil)
 	if resolveCalls != 0 {
 		t.Fatalf("cached latch retry started %d config reader(s), want zero", resolveCalls)
 	}

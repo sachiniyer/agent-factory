@@ -108,9 +108,10 @@ type RootAgentInspectionSnapshot struct {
 	personalDocument *sourceDocument
 	repositoryID     string
 	checkoutID       string
+	// Test-only scheduling seam scoped to this snapshot so parallel inspections
+	// cannot observe a package-global hook.
+	beforeCommandReadForTest func()
 }
-
-var rootAgentInspectionBeforeCommandReadForTest func()
 
 // ErrRootAgentInspectionIdentityChanged means two repository observations
 // could not be combined because the checkout resolved to different identities.
@@ -134,8 +135,8 @@ func (s *RootAgentInspectionSnapshot) ResolveConfigForRepoContext(ctx context.Co
 	if err := s.verifyCheckoutIdentity(ctx, repo); err != nil {
 		return nil, err
 	}
-	if rootAgentInspectionBeforeCommandReadForTest != nil {
-		rootAgentInspectionBeforeCommandReadForTest()
+	if s.beforeCommandReadForTest != nil {
+		s.beforeCommandReadForTest()
 	}
 	resolved, err := resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx, repo, s.global, s.personalDocument)
 	if err != nil {

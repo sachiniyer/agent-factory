@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -16,12 +17,12 @@ var resolveRootProgramConfigForInspection = config.ResolveConfigForRepoInspectio
 // repository config resolution, so that work is single-flighted off the
 // one-second ensure sweep. The resolving bit belongs to the asynchronous
 // reader's actual lifetime: if an uncancellable file read stalls, no replacement
-// worker can start until that reader exits. The result is cached by
-// repository, workspace, profile, and ApplyConfig epoch, then the complete
-// read-only repository config resolution is periodically rerun because
-// checked-in and personal files can change without advancing that epoch. A
-// cached command is never compared until that refresh succeeds.
-func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, workspace string, st *rootEnsureState, profile config.RootAgent, inst *session.Instance) {
+// worker can start until that reader exits. The result is cached by repository,
+// workspace, registered-checkout marker, profile, and ApplyConfig epoch, then
+// the complete read-only repository config resolution is periodically rerun
+// because checked-in and personal files can change without advancing that
+// epoch. A cached command is never compared until that refresh succeeds.
+func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, workspace string, st *rootEnsureState, profile config.RootAgent, inst *session.Instance, identity *resolvedProjectRoot) {
 	evidence := inst.ObserveRuntimeProgram()
 	runningProgram := evidence.Program()
 	if strings.TrimSpace(runningProgram) == "" || inst.GetInFlightOp() != session.OpNone ||
@@ -38,14 +39,15 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 		return
 	}
 	resolutionEpoch := m.rootProgramDriftConfigEpoch
-	inputsMatch := rootProgramDriftResolutionInputsMatch(st, resolutionEpoch, repoID, workspace, profile)
-	cacheMatches := rootProgramDriftCacheMatches(st, resolutionEpoch, repoID, workspace, profile)
+	checkoutID := rootProgramDriftCheckoutID(identity)
+	inputsMatch := rootProgramDriftResolutionInputsMatch(st, resolutionEpoch, repoID, workspace, checkoutID, profile)
+	cacheMatches := rootProgramDriftCacheMatches(st, resolutionEpoch, repoID, workspace, checkoutID, profile)
 	if cacheMatches && st.programDriftLatchPending && !st.programDriftResolving {
 		configuredProgram := st.programDriftConfiguredProgram
 		st.programDriftLatchPending = false
 		m.mu.Unlock()
 		m.latchOrRetryAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
-			resolutionEpoch, configuredProgram, inst, evidence)
+			resolutionEpoch, checkoutID, configuredProgram, inst, evidence)
 		return
 	}
 	if st.programDriftResolving || (inputsMatch && time.Now().Before(st.programDriftNextConfigCheck)) {
@@ -57,7 +59,7 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 		if !RootAgentProfileNeedsRepoConfig(profile) {
 			m.mu.Unlock()
 			m.latchOrRetryAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
-				resolutionEpoch, configuredProgram, inst, evidence)
+				resolutionEpoch, checkoutID, configuredProgram, inst, evidence)
 			return
 		}
 		st.programDriftResolving = true
@@ -65,7 +67,7 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 		st.programDriftLatchPending = false
 		global := m.Config()
 		m.mu.Unlock()
-		go m.resolveAndFinishAdoptedRootProgram(repo, repoID, key, workspace, st, profile,
+		go m.resolveAndFinishAdoptedRootProgram(repo, repoID, key, workspace, st, profile, identity,
 			resolutionEpoch, global, inst, evidence)
 		return
 	}
@@ -76,28 +78,38 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 	st.programDriftResolvedEpoch = resolutionEpoch
 	st.programDriftResolvedRepoID = repoID
 	st.programDriftResolvedWorkspace = workspace
+	st.programDriftResolvedCheckoutID = checkoutID
 	st.programDriftResolvedProfile = profile
 	st.programDriftConfiguredProgram = ""
 	st.programDriftNextConfigCheck = time.Time{}
 	m.mu.Unlock()
 
 	if !RootAgentProfileNeedsRepoConfig(profile) {
-		m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile, resolutionEpoch, profile.Program, nil, inst, evidence)
+		m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
+			resolutionEpoch, checkoutID, profile.Program, nil, inst, evidence)
 		return
 	}
 	global := m.Config()
-	go m.resolveAndFinishAdoptedRootProgram(repo, repoID, key, workspace, st, profile,
+	go m.resolveAndFinishAdoptedRootProgram(repo, repoID, key, workspace, st, profile, identity,
 		resolutionEpoch, global, inst, evidence)
 }
 
-func rootProgramDriftCacheMatches(st *rootEnsureState, epoch uint64, repoID, workspace string, profile config.RootAgent) bool {
-	return st.programDriftResolved && rootProgramDriftResolutionInputsMatch(st, epoch, repoID, workspace, profile)
+func rootProgramDriftCheckoutID(identity *resolvedProjectRoot) string {
+	if identity == nil {
+		return ""
+	}
+	return identity.checkoutID
 }
 
-func rootProgramDriftResolutionInputsMatch(st *rootEnsureState, epoch uint64, repoID, workspace string, profile config.RootAgent) bool {
+func rootProgramDriftCacheMatches(st *rootEnsureState, epoch uint64, repoID, workspace, checkoutID string, profile config.RootAgent) bool {
+	return st.programDriftResolved && rootProgramDriftResolutionInputsMatch(st, epoch, repoID, workspace, checkoutID, profile)
+}
+
+func rootProgramDriftResolutionInputsMatch(st *rootEnsureState, epoch uint64, repoID, workspace, checkoutID string, profile config.RootAgent) bool {
 	return st.programDriftResolvedEpoch == epoch &&
 		st.programDriftResolvedRepoID == repoID &&
 		st.programDriftResolvedWorkspace == workspace &&
+		st.programDriftResolvedCheckoutID == checkoutID &&
 		st.programDriftResolvedProfile == profile
 }
 
@@ -106,6 +118,7 @@ func (m *Manager) resolveAndFinishAdoptedRootProgram(
 	repoID, key, workspace string,
 	st *rootEnsureState,
 	profile config.RootAgent,
+	identity *resolvedProjectRoot,
 	resolutionEpoch uint64,
 	global *config.Config,
 	inst *session.Instance,
@@ -114,12 +127,44 @@ func (m *Manager) resolveAndFinishAdoptedRootProgram(
 	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
 		return resolveRootProgramConfigForInspection(repo, global)
 	}
-	configuredProgram, err := rootAgentProgramForResolvedRepo(repo, profile, resolve)
+	configuredProgram, err := resolveAdoptedRootProgramForDrift(repo, profile, identity, resolve)
 	m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
-		resolutionEpoch, configuredProgram, err, inst, evidence)
+		resolutionEpoch, rootProgramDriftCheckoutID(identity), configuredProgram, err, inst, evidence)
 }
 
-func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, configuredProgram string, resolveErr error, inst *session.Instance, evidence session.RuntimeProgramEvidence) {
+func resolveAdoptedRootProgramForDrift(repo *config.RepoContext, profile config.RootAgent, identity *resolvedProjectRoot, resolve func(*config.RepoContext) (*config.ResolvedConfig, error)) (string, error) {
+	// The frozen personal root-agent profile and the command-bearing filesystem
+	// layers are one diagnostic only while the registered checkout identity holds
+	// across the latter read. A check on either side alone leaves a replacement
+	// window in which documents from two checkouts can be combined.
+	if err := verifyAdoptedRootProgramCheckout(identity); err != nil {
+		return "", err
+	}
+	configuredProgram, err := rootAgentProgramForResolvedRepo(repo, profile, resolve)
+	if err != nil {
+		return "", err
+	}
+	if err := verifyAdoptedRootProgramCheckout(identity); err != nil {
+		return "", err
+	}
+	return configuredProgram, nil
+}
+
+func verifyAdoptedRootProgramCheckout(identity *resolvedProjectRoot) error {
+	if identity == nil {
+		return nil
+	}
+	matches, err := config.ProjectCheckoutMatches(identity.root, identity.checkoutID)
+	if err != nil {
+		return fmt.Errorf("verify registered checkout for root program drift: %w", err)
+	}
+	if !matches {
+		return fmt.Errorf("verify registered checkout for root program drift: checkout at %s no longer carries project %s marker %s", identity.root, identity.projectID, identity.checkoutID)
+	}
+	return nil
+}
+
+func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, checkoutID, configuredProgram string, resolveErr error, inst *session.Instance, evidence session.RuntimeProgramEvidence) {
 	m.mu.Lock()
 	if st.programDriftResolvingEpoch != resolutionEpoch {
 		m.mu.Unlock()
@@ -144,6 +189,7 @@ func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, s
 	st.programDriftResolvedEpoch = resolutionEpoch
 	st.programDriftResolvedRepoID = repoID
 	st.programDriftResolvedWorkspace = workspace
+	st.programDriftResolvedCheckoutID = checkoutID
 	st.programDriftResolvedProfile = profile
 	st.programDriftConfiguredProgram = configuredProgram
 	st.programDriftNextConfigCheck = time.Time{}
@@ -152,17 +198,17 @@ func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, s
 	}
 	m.mu.Unlock()
 	m.latchOrRetryAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
-		resolutionEpoch, configuredProgram, inst, evidence)
+		resolutionEpoch, checkoutID, configuredProgram, inst, evidence)
 }
 
-func (m *Manager) latchOrRetryAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, configuredProgram string, inst *session.Instance, evidence session.RuntimeProgramEvidence) {
+func (m *Manager) latchOrRetryAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, checkoutID, configuredProgram string, inst *session.Instance, evidence session.RuntimeProgramEvidence) {
 	if !m.latchAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
-		resolutionEpoch, configuredProgram, inst, evidence) {
+		resolutionEpoch, checkoutID, configuredProgram, inst, evidence) {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if rootProgramDriftCacheMatches(st, resolutionEpoch, repoID, workspace, profile) &&
+	if rootProgramDriftCacheMatches(st, resolutionEpoch, repoID, workspace, checkoutID, profile) &&
 		st.programDriftConfiguredProgram == configuredProgram &&
 		!(st.programDriftLogged && st.programDriftLoggedRepoID == repoID) &&
 		!m.rootProgramDriftLogged[repoID] && m.instances[key] == inst {
@@ -177,7 +223,7 @@ func (m *Manager) latchOrRetryAdoptedRootProgramDrift(repoID, key, workspace str
 // instance order already used by daemon lifecycle bookkeeping, so config apply
 // and runtime invalidation either land first and suppress the warning, or wait
 // until the warning has been emitted.
-func (m *Manager) latchAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, configuredProgram string, inst *session.Instance, evidence session.RuntimeProgramEvidence) bool {
+func (m *Manager) latchAdoptedRootProgramDrift(repoID, key, workspace string, st *rootEnsureState, profile config.RootAgent, resolutionEpoch uint64, checkoutID, configuredProgram string, inst *session.Instance, evidence session.RuntimeProgramEvidence) bool {
 	runningProgram := evidence.Program()
 	status := inst.GetStatus()
 	if status == session.Dead || status == session.Lost || status == session.Archived {
@@ -185,7 +231,7 @@ func (m *Manager) latchAdoptedRootProgramDrift(repoID, key, workspace string, st
 	}
 
 	m.mu.Lock()
-	if !rootProgramDriftCacheMatches(st, resolutionEpoch, repoID, workspace, profile) ||
+	if !rootProgramDriftCacheMatches(st, resolutionEpoch, repoID, workspace, checkoutID, profile) ||
 		st.programDriftConfiguredProgram != configuredProgram ||
 		(st.programDriftLogged && st.programDriftLoggedRepoID == repoID) ||
 		m.rootProgramDriftLogged[repoID] || m.instances[key] != inst {
@@ -240,6 +286,7 @@ func (m *Manager) applyLiveConfigAndInvalidateRootProgramDrift(newCfg *config.Co
 		st.programDriftResolvedEpoch = 0
 		st.programDriftResolvedRepoID = ""
 		st.programDriftResolvedWorkspace = ""
+		st.programDriftResolvedCheckoutID = ""
 		st.programDriftResolvedProfile = config.RootAgent{}
 		st.programDriftConfiguredProgram = ""
 		st.programDriftNextConfigCheck = time.Time{}

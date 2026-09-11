@@ -150,11 +150,10 @@ func TestRootAgentInspectionSnapshotRejectsCheckoutReplacementDuringCommandRead(
 	require.NoError(t, err)
 	commandReadEntered := make(chan struct{})
 	resumeCommandRead := make(chan struct{})
-	rootAgentInspectionBeforeCommandReadForTest = func() {
+	snapshot.beforeCommandReadForTest = func() {
 		close(commandReadEntered)
 		<-resumeCommandRead
 	}
-	t.Cleanup(func() { rootAgentInspectionBeforeCommandReadForTest = nil })
 	resolved := make(chan error, 1)
 	go func() {
 		_, resolveErr := snapshot.ResolveConfigForRepoContext(ctx, repo)

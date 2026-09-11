@@ -130,22 +130,24 @@ type rootEnsureState struct {
 	programDriftLoggedRepoID string
 	// The default root command and bare agent names require repository/config
 	// resolution. Cache that answer after resolving it off the ensure sweep; the
-	// key covers the frozen profile, ApplyConfig epoch, repository identity, and
-	// workspace. The complete repository config stack is periodically re-resolved
+	// key covers the frozen profile, ApplyConfig epoch, repository identity,
+	// registered-checkout marker, and workspace. The complete repository config
+	// stack is periodically re-resolved
 	// off the poll goroutine because checked-in and personal project files can
 	// change without that epoch advancing; a cached command is never compared
 	// before the refresh. The key fields also identify a failed attempt so its
 	// retry delay applies only while those same resolution inputs remain current;
 	// programDriftResolved alone says the cached command is valid.
-	programDriftResolving         bool
-	programDriftResolvingEpoch    uint64
-	programDriftResolved          bool
-	programDriftResolvedEpoch     uint64
-	programDriftResolvedRepoID    string
-	programDriftResolvedWorkspace string
-	programDriftResolvedProfile   config.RootAgent
-	programDriftConfiguredProgram string
-	programDriftNextConfigCheck   time.Time
+	programDriftResolving          bool
+	programDriftResolvingEpoch     uint64
+	programDriftResolved           bool
+	programDriftResolvedEpoch      uint64
+	programDriftResolvedRepoID     string
+	programDriftResolvedWorkspace  string
+	programDriftResolvedCheckoutID string
+	programDriftResolvedProfile    config.RootAgent
+	programDriftConfiguredProgram  string
+	programDriftNextConfigCheck    time.Time
 	// A config result can finish against runtime evidence invalidated while the
 	// read was in flight. Retry that cached result against fresh evidence on the
 	// next sweep without admitting another filesystem reader.
@@ -556,7 +558,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			// and whoever created it — is the root agent. The one mutation is
 			// refreshing a recorded Claude conversation from durable transcript
 			// evidence, so a later outage does not carry a rotated-away id (#3306).
-			m.checkAdoptedRootProgramDrift(repo, key, workspace, st, resolution.RootAgent, inst)
+			m.checkAdoptedRootProgramDrift(repo, key, workspace, st, resolution.RootAgent, inst, identity)
 			m.refreshRootClaudeConversation(repo.ID, key, workspace, inst, st)
 			m.rootEnsureSucceeded(st)
 			return

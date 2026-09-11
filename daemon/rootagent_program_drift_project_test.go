@@ -117,7 +117,7 @@ func TestAdoptedRootProgramDriftSkipsUserKilledRuntime(t *testing.T) {
 	}
 
 	manager.checkAdoptedRootProgramDrift(repo,
-		daemonInstanceKey(repo.ID, session.RootSessionTitle), repo.WorkspacePath(), st, profile, root)
+		daemonInstanceKey(repo.ID, session.RootSessionTitle), repo.WorkspacePath(), st, profile, root, nil)
 
 	manager.mu.Lock()
 	latched := st.programDriftLogged || manager.rootProgramDriftLogged[repo.ID]
@@ -174,7 +174,7 @@ func TestSlowAdoptedRootProgramInspectionStaysSingleFlightAndConsumesResult(t *t
 	st := &rootEnsureState{}
 	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
 
-	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root)
+	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root, nil)
 	select {
 	case <-resolveStarted:
 	case <-time.After(5 * time.Second):
@@ -185,7 +185,7 @@ func TestSlowAdoptedRootProgramInspectionStaysSingleFlightAndConsumesResult(t *t
 	// nor admit a replacement reader.
 	time.Sleep(2 * rootProgramDriftConfigInspectionInterval)
 	time.Sleep(rootRepoProbeBudget)
-	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root)
+	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root, nil)
 	select {
 	case <-resolveStarted:
 		t.Fatal("elapsed backoff admitted a second inspection while the first reader was still blocked")
@@ -208,7 +208,7 @@ func TestSlowAdoptedRootProgramInspectionStaysSingleFlightAndConsumesResult(t *t
 	}
 
 	time.Sleep(2 * rootProgramDriftConfigInspectionInterval)
-	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root)
+	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root, nil)
 	select {
 	case <-resolveStarted:
 	case <-time.After(5 * time.Second):
