@@ -174,7 +174,7 @@ func TestProjectPickerAddErrorKeepsOpen(t *testing.T) {
 	p.TakeAddRequest()
 	p.SetAddError("not a git repository: /bad")
 	p.SetMaxSize(80, 24)
-	out := p.Render()
+	out := renderedText(p.Render())
 	if !strings.Contains(out, "not a git repository") {
 		t.Fatalf("add error should render inline; got:\n%s", out)
 	}
@@ -201,7 +201,7 @@ func TestProjectPickerEscCancels(t *testing.T) {
 func TestProjectPickerRenderShowsCountsAndNavHint(t *testing.T) {
 	p := pickerFixture()
 	p.SetMaxSize(80, 24)
-	out := p.Render()
+	out := renderedText(p.Render())
 	if !strings.Contains(out, "agent-factory") || !strings.Contains(out, "(12)") {
 		t.Fatalf("render should show project names and session counts; got:\n%s", out)
 	}
@@ -229,11 +229,11 @@ func (p *ProjectPickerOverlay) selectedProjectForTest() (Project, bool) {
 func TestProjectPickerDegradedNotice(t *testing.T) {
 	p := NewProjectPickerOverlay([]Project{{Name: "alpha", Root: "/repos/alpha"}}, "")
 	p.SetMaxSize(60, 20)
-	if out := p.Render(); strings.Contains(out, "Cannot read registry") {
+	if out := renderedText(p.Render()); strings.Contains(out, "Cannot read registry") {
 		t.Fatalf("a healthy picker must not warn, got:\n%s", out)
 	}
 	p.SetDegraded(true)
-	out := p.Render()
+	out := renderedText(p.Render())
 	if !strings.Contains(out, "Cannot read registry") {
 		t.Fatalf("a degraded picker must warn that the list may be incomplete, got:\n%s", out)
 	}
