@@ -15721,11 +15721,13 @@ var AppShell = class {
       return;
     }
     const focus = document.activeElement;
+    const sessionActionsOpen = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
     this.appControls.close();
     this.terminalChrome?.menu.close();
     this.closeProjectMenu();
     this.sessionFirst?.setActive(active);
     this.el.classList.toggle("af-session-first", active);
+    if (sessionActionsOpen) this.terminalChrome?.menu.open();
     if (pickerOpen) {
       reopenPicker();
     }
