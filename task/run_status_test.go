@@ -56,3 +56,25 @@ func TestTaskRunPublicationDoesNotOverwriteWatcherTerminationAfterAdmission(t *t
 	require.NoError(t, err)
 	assert.True(t, applied)
 }
+
+func TestConcurrentTaskRunPublicationsUseSequenceWithinOneAdmissionRevision(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
+	admitted, err := GetTask("w1")
+	require.NoError(t, err)
+
+	_, applied, err := BeginTaskRun(
+		"w1", admitted.GenerationID, "session-a", 1, admitted.LastRunRevision, runAt, RunStatusStarted)
+	require.NoError(t, err)
+	require.True(t, applied)
+	_, applied, err = BeginTaskRun(
+		"w1", admitted.GenerationID, "session-b", 2, admitted.LastRunRevision,
+		runAt.Add(time.Second), RunStatusStarted)
+	require.NoError(t, err)
+	assert.True(t, applied,
+		"a higher-sequence run admitted against the same row must supersede the earlier publication")
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	assert.Equal(t, "session-b", got.LastRunSessionID)
+	assert.Equal(t, uint64(2), got.LastRunSequence)
+}
