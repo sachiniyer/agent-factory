@@ -33,7 +33,7 @@ func probeRepoGoneOrigin(ctx context.Context, worktree *GitWorktree) error {
 	if worktree.repoPath == "" {
 		return fmt.Errorf("%w: repo path is empty", ErrRepoGone)
 	}
-	commandEnv := repositoryScopedGitCommandEnvironment()
+	commandEnv := append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 	bare, bareErr := worktree.runGitCommandContextWithEnvironment(
 		ctx, worktree.repoPath, commandEnv, "rev-parse", "--is-bare-repository",
 	)
