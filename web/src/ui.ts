@@ -1040,12 +1040,7 @@ export class AppShell {
     // The view switcher: one tab per top-level view, left-to-right in the [ / ] cycle
     // order (nav.ts VIEWS), the active one highlighted in update(). A click routes
     // through actions.switchView, exactly like the keyboard path.
-    const { el: viewNav, tabs } = viewNavigation((view) => {
-      // Switching views can synchronously reparent the phone panel before the click
-      // bubbles. Notify the disclosure while it still owns carried session state.
-      if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
-      this.actions.switchView(view);
-    });
+    const { el: viewNav, tabs } = viewNavigation((view) => this.switchView(view));
     this.viewTabs = tabs;
     this.viewNav = viewNav;
 
@@ -1099,7 +1094,7 @@ export class AppShell {
       // The phone disclosure owns the carried desktop actions. A user dismissal
       // retires that state, unlike layout and picker-return programmatic closes.
       const slot = this.terminalChrome?.newTabSlot;
-      if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.close();
+      if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
     });
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     disconnect.addEventListener("click", () => {
@@ -1602,7 +1597,7 @@ export class AppShell {
     menu.trigger.replaceChildren("…");
     menu.panel.append(...buttons);
     menu.el.addEventListener("click", (event) => event.stopPropagation());
-    menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
+    menu.panel.addEventListener("click", () => menu.dismiss(true), { capture: true });
     host.append(menu.el);
     return host;
   }
@@ -1629,6 +1624,7 @@ export class AppShell {
         if (surface === "rail") {
           this.runRailExit(run);
         } else {
+          this.appControls.dismiss();
           run();
         }
       });
@@ -1659,6 +1655,7 @@ export class AppShell {
         if (surface === "rail") {
           this.runRailExit(() => this.actions.kill(killSession));
         } else {
+          this.appControls.dismiss();
           this.actions.kill(killSession);
         }
       });
@@ -1884,6 +1881,14 @@ export class AppShell {
       this.actions.switchProject(p.root);
     });
     return item;
+  }
+
+  /** One user-owned view transition for both appbar tabs and document shortcuts. */
+  switchView(view: View): void {
+    // The store update can synchronously reparent the phone panel. Notify its
+    // disclosure first, while it still owns the carried Session actions state.
+    if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
+    this.actions.switchView(view);
   }
 
   /** Keyboard twin of the New tab button, including its per-kind availability. */

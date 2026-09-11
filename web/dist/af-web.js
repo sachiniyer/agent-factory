@@ -15547,10 +15547,7 @@ var AppShell = class {
       this.themeOpts.set(choice, opt);
       themeToggle.append(opt);
     }
-    const { el: viewNav, tabs } = viewNavigation((view) => {
-      if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
-      this.actions.switchView(view);
-    });
+    const { el: viewNav, tabs } = viewNavigation((view) => this.switchView(view));
     this.viewTabs = tabs;
     this.viewNav = viewNav;
     this.projectSwitchName = h("span", { class: "af-project-switch-name" }, "\u2014");
@@ -15592,7 +15589,7 @@ var AppShell = class {
       disconnect2
     ], this.phone, this.captureNewTabCancelReturn, () => {
       const slot = this.terminalChrome?.newTabSlot;
-      if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.close();
+      if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
     });
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     disconnect2.addEventListener("click", () => {
@@ -16173,7 +16170,7 @@ var AppShell = class {
     menu.trigger.replaceChildren("\u2026");
     menu.panel.append(...buttons);
     menu.el.addEventListener("click", (event) => event.stopPropagation());
-    menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
+    menu.panel.addEventListener("click", () => menu.dismiss(true), { capture: true });
     host.append(menu.el);
     return host;
   }
@@ -16192,6 +16189,7 @@ var AppShell = class {
         if (surface2 === "rail") {
           this.runRailExit(run);
         } else {
+          this.appControls.dismiss();
           run();
         }
       });
@@ -16219,6 +16217,7 @@ var AppShell = class {
         if (surface2 === "rail") {
           this.runRailExit(() => this.actions.kill(killSession2));
         } else {
+          this.appControls.dismiss();
           this.actions.kill(killSession2);
         }
       });
@@ -16412,6 +16411,11 @@ var AppShell = class {
       this.actions.switchProject(p.root);
     });
     return item;
+  }
+  /** One user-owned view transition for both appbar tabs and document shortcuts. */
+  switchView(view) {
+    if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
+    this.actions.switchView(view);
   }
   /** Keyboard twin of the New tab button, including its per-kind availability. */
   openNewTabPicker(shortcutReturn) {
@@ -18974,7 +18978,8 @@ function onKeydown(e) {
       closeSessionTab(store.get().activeTab);
       break;
     case "switchView":
-      switchView(action.view);
+      if (shell) shell.switchView(action.view);
+      else switchView(action.view);
       break;
     case "cyclePane":
       splitView.cyclePane(action.delta);

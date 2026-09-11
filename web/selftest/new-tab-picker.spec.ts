@@ -1,4 +1,40 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
+
+async function carrySessionActionsToPhone(
+  page: Page,
+  request: APIRequestContext,
+  filterSelected = false,
+) {
+  await page.setViewportSize({ width: 1280, height: 844 });
+  const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+  const session = snapshot.data.instances.find((s: { title: string }) =>
+    s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
+  expect(session?.id).toBeTruthy();
+  await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+  await expect(page.locator(".af-term-title")).toHaveText(session.title);
+  if (filterSelected) {
+    for (const kind of ["needs-you", "working", "waiting-limit", "broken"]) {
+      await page.locator(".af-rail-filter").click();
+      const item = page.locator(`.af-filter-item[data-kind="${kind}"]`);
+      await expect(item).toBeVisible();
+      if (await item.getAttribute("aria-checked") === "true") await item.click();
+      await expect(item).toHaveAttribute("aria-checked", "false");
+      await page.locator(".af-rail-title").click();
+      await expect(page.locator(".af-filter-menu")).toBeHidden();
+    }
+    await expect(page.locator(".af-row-selected")).toHaveCount(0);
+  }
+  const sessionActions = page.getByRole("button", { name: "Session actions", exact: true, includeHidden: true });
+  await sessionActions.click();
+  await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
+  await page.setViewportSize({ width: 390, height: 844 });
+  const controls = page.getByRole("button", { name: "More app controls", exact: true });
+  await controls.focus();
+  await page.keyboard.press("Enter");
+  await expect(controls).toHaveAttribute("aria-expanded", "true");
+  await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
+  return { controls, session, sessionActions };
+}
 
 // This runs against the embedded app only inside the sanctioned web testbox.
 for (const width of [1280, 390]) {
@@ -375,24 +411,36 @@ for (const key of ["Enter", "Space"]) {
   });
 }
 
-test("phone keyboard panel action dismisses carried desktop Session actions", async ({ page, request }) => {
-  await page.setViewportSize({ width: 1280, height: 844 });
-  const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
-  const session = snapshot.data.instances.find((s: { title: string }) =>
-    s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
-  await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
-  await expect(page.locator(".af-term-title")).toHaveText(session.title);
-  const sessionActions = page.getByRole("button", { name: "Session actions", exact: true, includeHidden: true });
-  await sessionActions.click();
-  await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
-  await page.setViewportSize({ width: 390, height: 844 });
-  const controls = page.getByRole("button", { name: "More app controls", exact: true });
-  await controls.focus();
-  await page.keyboard.press("Enter");
-  await expect(controls).toHaveAttribute("aria-expanded", "true");
-  const tasks = page.getByRole("tab", { name: "Tasks", exact: true });
-  await tasks.focus();
-  await page.keyboard.press("Enter");
-  await expect(controls).toHaveAttribute("aria-expanded", "false");
-  await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
-});
+for (const activation of ["view tab", "view shortcut"] as const) {
+  test(`phone ${activation} dismisses carried desktop Session actions`, async ({ page, request }) => {
+    const { controls, sessionActions } = await carrySessionActionsToPhone(page, request);
+    if (activation === "view tab") {
+      const tasks = page.getByRole("tab", { name: "Tasks", exact: true });
+      await tasks.focus();
+      await page.keyboard.press("Enter");
+    } else {
+      await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+      await page.keyboard.press("]");
+    }
+    await expect(controls).toHaveAttribute("aria-expanded", "false");
+    await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+  });
+}
+
+for (const action of ["Archive session", "Delete session"] as const) {
+  for (const key of ["Enter", "Space"] as const) {
+    test(`phone fallback ${action} via ${key} dismisses carried Session actions`, async ({ page, request }) => {
+      const { controls, session, sessionActions } = await carrySessionActionsToPhone(page, request, true);
+      const target = page.locator(".af-term-actions").getByRole("button", {
+        name: `${action} “${session.title}”`, exact: true,
+      });
+      await expect(target).toBeVisible();
+      await target.focus();
+      await page.keyboard.press(key);
+      await expect(page.getByRole("dialog")).toBeVisible();
+      await expect(controls).toHaveAttribute("aria-expanded", "false");
+      await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+      await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+    });
+  }
+}

@@ -2704,7 +2704,8 @@ function onKeydown(e: KeyboardEvent): void {
       closeSessionTab(store.get().activeTab);
       break;
     case "switchView":
-      switchView(action.view);
+      if (shell) shell.switchView(action.view);
+      else switchView(action.view);
       break;
     case "cyclePane":
       splitView.cyclePane(action.delta);
