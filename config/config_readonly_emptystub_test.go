@@ -214,3 +214,209 @@ func TestLoadConfigReadOnly_EmptySymlinkStubStaysLoudError(t *testing.T) {
 	_, err = os.Stat(target)
 	require.NoError(t, err, "the dotfiles target must be left in place")
 }
+
+// stageDefaultAFHome stages the CONCRETE default ~/.agent-factory under a fake
+// $HOME with AGENT_FACTORY_HOME empty (treated as unset by ConfigDirFor), so
+// concreteDefaultAFHome is genuinely exercised against the real default name —
+// the arrangement seedHome cannot reach, because seedHome sets
+// AGENT_FACTORY_HOME and so pins a CUSTOM home the diagnostic never repairs.
+// When mode is more restrictive than the default it also registers a cleanup
+// restoring writability so t.TempDir can remove the tree. Returns the AF home
+// path (the .agent-factory directory itself).
+func stageDefaultAFHome(t *testing.T, content string, mode os.FileMode) string {
+	t.Helper()
+	fastShell(t)
+	userHome := t.TempDir()
+	afHome := filepath.Join(userHome, ".agent-factory")
+	require.NoError(t, os.Mkdir(afHome, 0o755))
+	tomlPath := filepath.Join(afHome, TomlConfigFileName)
+	require.NoError(t, os.WriteFile(tomlPath, []byte(content), 0o644))
+	require.NoError(t, os.Chmod(afHome, mode))
+	if mode&0o200 == 0 {
+		// A read-only home blocks t.TempDir's recursive cleanup; restore
+		// owner-write first so the temp tree can be removed.
+		t.Cleanup(func() { _ = os.Chmod(afHome, 0o755) })
+	}
+	t.Setenv("HOME", userHome)
+	t.Setenv("AGENT_FACTORY_HOME", "")
+	return afHome
+}
+
+// TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyRepairable is the headline
+// fix: a contentless config.toml in an owner-owned default ~/.agent-factory
+// tightened to a write-less mode (0500) is a state startup self-heals —
+// secureAFHomeForPath chmod-repairs the home to 0700 before its os.Remove. The
+// no-write diagnostic, which never runs secureAFHomeForPath, must NOT report a
+// removal failure here: it must agree with startup and return EmptyStub=true
+// with no error. Before the fix the directory-access gate probed the unrepaired
+// 0500 mode and errored with "cannot write to config directory: permission
+// denied" on a state af boots cleanly on.
+func TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyRepairable(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses mode bits, so a 0500 home cannot be staged as non-writable")
+	}
+	afHome := stageDefaultAFHome(t, "# placeholder; fill in later\n", 0o500)
+	tomlPath := filepath.Join(afHome, TomlConfigFileName)
+
+	loaded, err := LoadConfigReadOnly()
+	require.NoError(t, err, "a chmod-repairable default home self-heals at startup; the diagnostic must agree")
+	assert.True(t, loaded.EmptyStub, "an effectively-empty stub in a repairable default home must surface as EmptyStub")
+	assert.False(t, loaded.Missing)
+	assert.NotNil(t, loaded.Config, "EmptyStub carries DefaultConfig() so downstream diagnostics can evaluate the next-start posture")
+	assert.Empty(t, loaded.DirectoryAccessWarning, "startup will repair the home; there is no access uncertainty to report")
+	assert.Equal(t, tomlPath, loaded.Path)
+
+	// No-write contract: the stub is intact, the home stays read-only, nothing
+	// was created.
+	got, err := os.ReadFile(tomlPath)
+	require.NoError(t, err)
+	assert.Equal(t, "# placeholder; fill in later\n", string(got), "LoadConfigReadOnly must not remove or rewrite the stub")
+	info, err := os.Stat(afHome)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o500), info.Mode().Perm(), "the diagnostic must not chmod-repair the home it reports on")
+	entries, err := os.ReadDir(afHome)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "the diagnostic must not materialize any file beside the stub")
+}
+
+// TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyAgreesWithStartup pins the
+// full guarantee the bug broke: the read-only diagnostic and startup must agree
+// on identical INPUT states. The two run against separate staged default homes
+// because LoadConfig mutates disk. On a default home @0500 the diagnostic must
+// return EmptyStub=true (no error) AND startup must self-heal (no error) — the
+// same verdict — rather than the diagnostic erroring while startup succeeds.
+func TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyAgreesWithStartup(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses mode bits, so a 0500 home cannot be staged as non-writable")
+	}
+	for name, content := range effectivelyEmptyTomlInputs() {
+		t.Run(name, func(t *testing.T) {
+			// Read-only on a fresh default home @0500: the diagnostic verdict.
+			afHomeRO := stageDefaultAFHome(t, content, 0o500)
+			loaded, roErr := LoadConfigReadOnly()
+			require.NoError(t, roErr, "read-only diagnostic must not fail a state startup self-heals")
+			assert.True(t, loaded.EmptyStub)
+			got, err := os.ReadFile(filepath.Join(afHomeRO, TomlConfigFileName))
+			require.NoError(t, err)
+			assert.Equal(t, content, string(got), "LoadConfigReadOnly must not mutate the stub")
+
+			// Startup on a separate identical default home @0500: the
+			// self-heal verdict. secureAFHomeForPath chmod-repairs to 0700,
+			// removes the stub, and materializes non-empty defaults.
+			afHomeLC := stageDefaultAFHome(t, content, 0o500)
+			cfg, lcErr := LoadConfig()
+			require.NoError(t, lcErr, "startup must self-heal the empty stub in a repairable default home")
+			require.NotNil(t, cfg)
+			info, err := os.Stat(afHomeLC)
+			require.NoError(t, err)
+			assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(), "startup chmod-repairs the default home before removing the stub")
+			lcAfter, err := os.ReadFile(filepath.Join(afHomeLC, TomlConfigFileName))
+			require.NoError(t, err)
+			assert.NotEmpty(t, lcAfter, "startup must re-materialize non-empty defaults over the stub")
+		})
+	}
+}
+
+// TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyAliasSymlink covers the
+// other repair arrangement secureAFHomeForPath chmods: an AGENT_FACTORY_HOME
+// that is an alias symlink whose target IS the concrete default home (the
+// "pin the default explicitly" case its own comments anticipate). The gate must
+// stand down here too, so the diagnostic agrees with startup's symlink-target
+// chmod repair.
+func TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyAliasSymlink(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses mode bits, so a 0500 home cannot be staged as non-writable")
+	}
+	fastShell(t)
+	userHome := t.TempDir()
+	afHome := filepath.Join(userHome, ".agent-factory")
+	require.NoError(t, os.Mkdir(afHome, 0o755))
+	tomlPath := filepath.Join(afHome, TomlConfigFileName)
+	require.NoError(t, os.WriteFile(tomlPath, []byte("# placeholder\n"), 0o644))
+	require.NoError(t, os.Chmod(afHome, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(afHome, 0o755) })
+
+	// An alias symlink pointing into the concrete default home.
+	aliasBase := t.TempDir()
+	alias := filepath.Join(aliasBase, "af-home-alias")
+	require.NoError(t, os.Symlink(afHome, alias))
+	t.Setenv("HOME", userHome)
+	t.Setenv("AGENT_FACTORY_HOME", alias)
+
+	loaded, err := LoadConfigReadOnly()
+	require.NoError(t, err, "an alias symlink into the concrete default is repairable; the diagnostic must agree with startup")
+	assert.True(t, loaded.EmptyStub)
+	assert.NotNil(t, loaded.Config)
+	assert.Empty(t, loaded.DirectoryAccessWarning)
+	// No-write: the stub and the home's mode are untouched.
+	got, err := os.ReadFile(tomlPath)
+	require.NoError(t, err)
+	assert.Equal(t, "# placeholder\n", string(got))
+	info, err := os.Stat(afHome)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o500), info.Mode().Perm(), "the diagnostic must not chmod-repair the concrete default it reports on")
+}
+
+// TestStartupWouldRepairHome pins the predicate that decides whether the
+// directory-access gate stands down. It must return true only for the cases
+// secureAFHomeForPath chmod-repairs (concrete default, or an alias into it) that
+// the current user owns, and false for everything startup leaves to its raw
+// remove — custom homes, default-names-that-themselves-are-symlinks, and
+// foreign-owned defaults where the chmod startup attempts would fail.
+func TestStartupWouldRepairHome(t *testing.T) {
+	t.Run("custom home is not repaired", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		// A custom home never matches the default name, so concreteDefaultAFHome
+		// returns "" regardless of ownership or mode.
+		assert.False(t, startupWouldRepairHome(home))
+	})
+
+	t.Run("concrete default home owned by current user is repaired", func(t *testing.T) {
+		afHome := stageDefaultAFHome(t, "", 0o755)
+		assert.True(t, startupWouldRepairHome(afHome), "owner-owned concrete default is chmod-repairable by startup")
+	})
+
+	t.Run("alias symlink into concrete default is repaired", func(t *testing.T) {
+		fastShell(t)
+		userHome := t.TempDir()
+		afHome := filepath.Join(userHome, ".agent-factory")
+		require.NoError(t, os.Mkdir(afHome, 0o755))
+		aliasBase := t.TempDir()
+		alias := filepath.Join(aliasBase, "af-home-alias")
+		require.NoError(t, os.Symlink(afHome, alias))
+		t.Setenv("HOME", userHome)
+		t.Setenv("AGENT_FACTORY_HOME", alias)
+		assert.True(t, startupWouldRepairHome(alias), "an alias into the concrete default is chmod-repairable on its target")
+	})
+
+	t.Run("default name itself is a symlink is not repaired", func(t *testing.T) {
+		fastShell(t)
+		userHome := t.TempDir()
+		customDir := t.TempDir()
+		// The default name ~/.agent-factory is itself a symlink to a
+		// caller-owned directory; its target is caller-owned and not repairable.
+		require.NoError(t, os.Symlink(customDir, filepath.Join(userHome, ".agent-factory")))
+		t.Setenv("HOME", userHome)
+		t.Setenv("AGENT_FACTORY_HOME", "")
+		assert.False(t, startupWouldRepairHome(filepath.Join(userHome, ".agent-factory")),
+			"a default-name whose target is caller-owned is not chmod-repairable")
+	})
+
+	t.Run("foreign-owned default home is not repaired", func(t *testing.T) {
+		if os.Getuid() != 0 {
+			t.Skip("staging a foreign-owned directory requires chown, which needs root")
+		}
+		afHome := stageDefaultAFHome(t, "", 0o755)
+		// Re-owner the concrete default to another user; the current process
+		// (root) is no longer the owner, so the chmod startup attempts would
+		// fail and the gate must stay.
+		require.NoError(t, os.Chmod(afHome, 0o700)) // restore writability for chown/cleanup
+		require.NoError(t, os.Chown(afHome, 65534, 65534))
+		t.Cleanup(func() {
+			_ = os.Chmod(afHome, 0o755)
+			_ = os.Chown(afHome, 0, 0)
+		})
+		assert.False(t, startupWouldRepairHome(afHome), "a default home not owned by the current user is not chmod-repairable by it")
+	})
+}

@@ -142,6 +142,66 @@ func TestConfigValidateAcceptsAnEmptyStub(t *testing.T) {
 	}
 }
 
+// TestConfigValidateAcceptsAnEmptyStubDefaultHomeReadOnly is the chmod-repairable
+// default-home case for this command: a contentless config.toml in an owner-owned
+// default ~/.agent-factory tightened to a write-less mode (0500) is a state af
+// self-heals at startup (secureAFHomeForPath chmod-repairs to 0700 before removing
+// the stub). validate's stated contract is "the same parse+validate af runs at
+// startup", so it must report OK and exit 0 — not the "cannot write to config
+// directory: permission denied" the read-only diagnostic raised before the fix.
+//
+// Unlike TestConfigValidateAcceptsAnEmptyStub, this stages the home as the
+// CONCRETE default via $HOME (AGENT_FACTORY_HOME empty) at a write-less mode, so
+// secureAFHomeForPath's repair path — which the bug's gate wrongly ignored — is
+// genuinely exercised.
+func TestConfigValidateAcceptsAnEmptyStubDefaultHomeReadOnly(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses mode bits, so a 0500 home cannot be staged as non-writable")
+	}
+	t.Setenv("SHELL", "/bin/sh")
+	userHome := t.TempDir()
+	afHome := filepath.Join(userHome, ".agent-factory")
+	if err := os.Mkdir(afHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := filepath.Join(afHome, "config.toml")
+	if err := os.WriteFile(tomlPath, []byte("# placeholder\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(afHome, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(afHome, 0o755) })
+	t.Setenv("HOME", userHome)
+	t.Setenv("AGENT_FACTORY_HOME", "")
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := configValidateCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("a chmod-repairable default home self-heals at startup; validate must report OK, got: %v", err)
+	}
+	if !strings.Contains(out.String(), "config OK") {
+		t.Errorf("validate must report OK for a repairable default home, got: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "empty stub") {
+		t.Errorf("validate must name the empty-stub state, got: %q", out.String())
+	}
+
+	// No-write: the stub is untouched and the home stays read-only.
+	after, _ := os.ReadFile(tomlPath)
+	if string(after) != "# placeholder\n" {
+		t.Errorf("validate changed the empty stub it checked.\n got: %q\nwant: %q", after, "# placeholder\n")
+	}
+	info, err := os.Stat(afHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o500 {
+		t.Errorf("validate must not chmod-repair the home it reports on, got mode %o", info.Mode().Perm())
+	}
+}
+
 // TestConfigValidateAcceptsACommentOnlyStub pins the #3196 widening: a comments
 // -only config.toml (`# TODO fill this in`) is effectively empty, and startup
 // self-heals it just like a zero-byte stub. validate must agree — not reject a

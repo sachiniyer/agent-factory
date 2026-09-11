@@ -122,3 +122,58 @@ func TestCheckConfigAndStorage_EmptyStubIsHealthy(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1, "doctor must not materialize any file beside the stub")
 }
+
+// TestCheckConfigAndStorage_EmptyStubDefaultHomeReadOnlyIsHealthy is the
+// end-to-end `af doctor` guarantee for the chmod-repairable default home: a
+// contentless config.toml in an owner-owned default ~/.agent-factory tightened
+// to a write-less mode (0500) is a state af self-heals at startup, so doctor's
+// CONFIG validity row must be an advisory WARN (problem=false), not the FAIL
+// (problem=true) it raised before the fix when the read-only diagnostic errored
+// on the unrepaired 0500 mode. The config row agreeing with startup is the
+// in-scope fix; see the inline note about the separate hook-logs check.
+//
+// Unlike TestCheckConfigAndStorage_EmptyStubIsHealthy above, this stages the home
+// as the CONCRETE default via $HOME (AGENT_FACTORY_HOME empty) at a write-less
+// mode — the arrangement the gate's write-permission probe wrongly rejected and
+// that seedHome-based tests never reach by pinning a custom home.
+func TestCheckConfigAndStorage_EmptyStubDefaultHomeReadOnlyIsHealthy(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses mode bits, so a 0500 home cannot be staged as non-writable")
+	}
+	t.Setenv("SHELL", "/bin/sh")
+	userHome := t.TempDir()
+	afHome := filepath.Join(userHome, ".agent-factory")
+	require.NoError(t, os.Mkdir(afHome, 0o755))
+	tomlPath := filepath.Join(afHome, config.TomlConfigFileName)
+	require.NoError(t, os.WriteFile(tomlPath, []byte("# placeholder\n"), 0o644))
+	require.NoError(t, os.Chmod(afHome, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(afHome, 0o755) })
+	t.Setenv("HOME", userHome)
+	t.Setenv("AGENT_FACTORY_HOME", "")
+
+	report := &Report{}
+	cfg := checkConfigAndStorage(&scanContext{opts: Options{ConfigDir: afHome}}, report)
+	require.NotNil(t, cfg, "EmptyStub carries DefaultConfig() so downstream diagnostics can evaluate the next-start posture")
+
+	row := findCheck(t, report, "config")
+	require.Equal(t, StatusWarn, row.Status, "an empty stub is advisory, not a failure")
+	require.False(t, row.Problem, "a chmod-repairable default home self-heals at startup; the config row must not FAIL it")
+	require.Contains(t, row.Detail, "empty config stub")
+
+	// The config row is no longer the false FAIL it was before the fix. The
+	// hook-logs storage check is a SEPARATE diagnostic that probes the home's
+	// current writability for creating logs/hooks; like the gate this fix
+	// replaces, it does not model secureAFHomeForPath's chmod repair, so it
+	// may still report a problem on a write-less default home. That is outside
+	// this bug report's scope (the empty-stub config gate); the guarantee here is
+	// that the CONFIG row agrees with startup, not that every other check
+	// passes on a read-only home.
+
+	// No-write: the stub is untouched and the home stays read-only.
+	stub, err := os.ReadFile(tomlPath)
+	require.NoError(t, err)
+	require.Equal(t, "# placeholder\n", string(stub), "doctor must not rewrite the stub it checks")
+	info, err := os.Stat(afHome)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o500), info.Mode().Perm(), "doctor must not chmod-repair the home it reports on")
+}
