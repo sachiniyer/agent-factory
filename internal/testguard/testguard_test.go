@@ -299,26 +299,43 @@ case "$1" in
 list-sessions)
   printf '%s\n' af_preexisting
   if [ -f "$AF_TRIPWIRE_READY_FILE" ]; then
-    printf '%s\n' af_owned af_foreign af_unmarked af_unreadable
+    printf '%s\n' af_owned af_overridden af_foreign af_unmarked af_unreadable
   fi
   ;;
 show-environment)
-  case "$3" in
-  =af_preexisting)
+  case "$3:$4" in
+  =af_preexisting:AF_HOME)
     printf '%s\n' 'AF_HOME=/real/agent-factory-home'
     ;;
-  =af_owned)
+  =af_preexisting:AF_TESTGUARD_RUN)
+    printf '%s\n' 'AF_TESTGUARD_RUN=another-run'
+    ;;
+  =af_owned:AF_HOME)
     IFS= read -r owner < "$AF_TRIPWIRE_OWNER_FILE"
     printf 'AF_HOME=%s\n' "$owner"
     ;;
-  =af_foreign)
+  =af_owned:AF_TESTGUARD_RUN)
+    IFS= read -r owner < "$AF_TRIPWIRE_OWNER_FILE"
+    printf 'AF_TESTGUARD_RUN=%s\n' "$owner"
+    ;;
+  =af_overridden:AF_HOME)
+    printf '%s\n' 'AF_HOME=/per-test/overridden-home'
+    ;;
+  =af_overridden:AF_TESTGUARD_RUN)
+    IFS= read -r owner < "$AF_TRIPWIRE_OWNER_FILE"
+    printf 'AF_TESTGUARD_RUN=%s\n' "$owner"
+    ;;
+  =af_foreign:AF_HOME)
     printf '%s\n' 'AF_HOME=/real/agent-factory-home'
     ;;
-  =af_unmarked)
-    printf '%s\n' 'unknown variable: AF_HOME' >&2
+  =af_foreign:AF_TESTGUARD_RUN)
+    printf '%s\n' 'AF_TESTGUARD_RUN=another-run'
+    ;;
+  =af_unmarked:*)
+    printf 'unknown variable: %s\n' "$4" >&2
     exit 1
     ;;
-  =af_unreadable)
+  =af_unreadable:*)
     printf '%s\n' 'server became unreachable' >&2
     exit 1
     ;;
@@ -343,8 +360,9 @@ esac
 
 // TestTmuxTripwire_AttributesNewSessionsBySandboxHome pins both sides of the
 // ownership boundary. Arrival during the package window is not attribution: an
-// AF_HOME matching this run is reported, while a different, absent, or
-// unreadable marker is not proof that the run owns the session (#4194).
+// AF_HOME matching this run is reported, as is a per-test home carrying the
+// run marker. A different, absent, or unreadable identity is not proof that the
+// run owns the session (#4194).
 func TestTmuxTripwire_AttributesNewSessionsBySandboxHome(t *testing.T) {
 	markReady, ownerFile := fakeTripwireTmux(t)
 	verify := TmuxTripwire()
@@ -364,6 +382,9 @@ func TestTmuxTripwire_AttributesNewSessionsBySandboxHome(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "af_owned") {
 		t.Fatalf("tripwire did not name the session carrying this run's AF_HOME marker: %v", err)
+	}
+	if !strings.Contains(err.Error(), "af_overridden") {
+		t.Fatalf("tripwire lost ownership when the test overrode AGENT_FACTORY_HOME: %v", err)
 	}
 	for _, notOwned := range []string{"af_preexisting", "af_foreign", "af_unmarked", "af_unreadable"} {
 		if strings.Contains(err.Error(), notOwned) {
