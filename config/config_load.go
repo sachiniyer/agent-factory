@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"golang.org/x/sys/unix"
 )
 
 // LoadConfig reads the user's config file, validates it, and returns the
@@ -165,7 +166,8 @@ type ReadOnlyConfigLoad struct {
 	// symlink-stub cases stay loud errors, matching loadConfig). Config is
 	// DefaultConfig(): the effective configuration startup will materialize on
 	// the next start, so downstream diagnostics can evaluate the real next-start
-	// posture without writing anything.
+	// posture without writing anything. Directory access is checked, but this
+	// verdict does not guarantee that startup can remove the stub or write defaults.
 	EmptyStub bool
 }
 
@@ -213,15 +215,11 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 		jsonExists := fileExists(configPath)
 		if isEffectivelyEmptyToml(tomlData) && !jsonExists {
 			if info, lerr := os.Lstat(tomlPath); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
-				// Startup's self-heal calls os.Remove(tomlPath), which requires write
-				// permission on configDir. If the directory is not writable the
-				// diagnostic's "healthy" verdict would disagree with startup's error.
-				// Test removability before claiming the stub is a self-healing state.
-				if tmp, terr := os.CreateTemp(configDir, ".af-stub-check-*"); terr != nil {
-					return ReadOnlyConfigLoad{Path: tomlPath}, fmt.Errorf("failed to remove empty config file %s: %w", prettyTomlPath, terr)
-				} else {
-					_ = tmp.Close()
-					_ = os.Remove(tmp.Name())
+				// Check directory write/search access using effective credentials without
+				// creating a probe file. This is necessary for self-heal, not proof
+				// that removal will succeed (e.g. sticky bits, immutable files, races).
+				if err := unix.Faccessat(unix.AT_FDCWD, configDir, unix.W_OK|unix.X_OK, unix.AT_EACCESS); err != nil {
+					return ReadOnlyConfigLoad{Path: tomlPath}, fmt.Errorf("cannot write to config directory %s: %w", prettyHomePath(configDir), err)
 				}
 				return ReadOnlyConfigLoad{Path: tomlPath, EmptyStub: true, Config: DefaultConfig()}, nil
 			}
