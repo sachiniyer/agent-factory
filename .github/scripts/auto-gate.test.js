@@ -4599,6 +4599,86 @@ test("an inline usage-limit reply does not carry across a content-changing merge
   assert.doesNotMatch(blocked.notes.join("\n"), /content head/);
 });
 
+test("an intermediate commit cited as finding context stays unbound across update merges", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const LAP1 = "9e27c60100000000000000000000000000000000";
+  const BASE1 = "ba5e000100000000000000000000000000000000";
+  const BASE2 = "ba5e000200000000000000000000000000000000";
+  const MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+  const finding = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    citing: LAP1,
+    id: 4239021,
+    timestamp: "2026-07-09T10:44:00Z",
+  });
+
+  const updateChain = {
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: LAP1, committedDate: "2026-07-09T10:40:00Z" },
+      { oid: BASE2, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    baseContainedShas: [BASE1, BASE2],
+    mergeBaseSha: MERGE_BASE,
+    parentsByOid: {
+      [LAP1]: [
+        { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+        { oid: BASE1, committedDate: "2026-07-09T10:39:00Z" },
+      ],
+    },
+    commitDatesByOid: {
+      [LAP1]: "2026-07-09T10:40:00Z",
+      [CONTENT]: "2026-07-09T10:30:00Z",
+    },
+    treeEntriesByCommit: {
+      [MERGE_BASE]: {},
+      [CONTENT]: { "pr.txt": "1".repeat(40) },
+      [BASE1]: { "base-one.txt": "2".repeat(40) },
+      [LAP1]: { "pr.txt": "1".repeat(40), "base-one.txt": "2".repeat(40) },
+      [BASE2]: { "base-two.txt": "3".repeat(40) },
+      [HEAD_SHA]: {
+        "pr.txt": "1".repeat(40),
+        "base-one.txt": "2".repeat(40),
+        "base-two.txt": "3".repeat(40),
+      },
+    },
+    reviews: [],
+  };
+  const blocked = await evaluateGate({
+    ...updateChain,
+    issueComments: [finding, codexVerdict(LAP1, "2026-07-09T10:46:00Z")],
+  });
+
+  assert.equal(blocked.shouldMerge, false, "a contextual link must not become a head assertion");
+  assert.ok(
+    blocked.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${blocked.reasons.join("; ")}`,
+  );
+  assert.ok(
+    blocked.reasons.some((reason) => reason.includes(finding.html_url)),
+    `the blocker must name the unbound finding: ${blocked.reasons.join("; ")}`,
+  );
+
+  // The opposite policy applies to GitHub's commit_id: it states which commit
+  // the review is about, so a finding authenticated to the same intermediate
+  // head remains part of the carried review rather than becoming unbound.
+  const authenticated = await evaluateGate({
+    ...updateChain,
+    issueComments: [
+      codexReview(LAP1, "P2: authenticated intermediate finding.", "2026-07-09T10:46:00Z"),
+    ],
+  });
+  assert.equal(authenticated.shouldMerge, false, "an authenticated finding must carry");
+  assert.ok(
+    authenticated.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${authenticated.reasons.join("; ")}`,
+  );
+  assert.ok(
+    !authenticated.reasons.some((reason) => reason.includes("name no commit")),
+    `an authenticated commit_id is classified: ${authenticated.reasons.join("; ")}`,
+  );
+});
+
 // #4235. Unlike the degraded path above, an ordinary verdict is bound by the
 // commit SHA it names. The gate already identifies the first parent as the
 // unchanged PR-content head; the verdict must follow that identity just as the

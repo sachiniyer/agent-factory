@@ -4610,8 +4610,17 @@ async function evaluateCodex({
   const evidenceHeadShas = [...new Set(
     [sha, ...evidenceHeadOids].map(normalizeHeadSha).filter(Boolean),
   )];
-  const artifactBindsToEvidenceHead = (artifact) =>
-    evidenceHeadShas.some((headSha) => codexArtifactBindsToHead(artifact, headSha));
+  // Body links are location prose, not a claim about what Codex reviewed. Keep
+  // their pre-#4239 scope — current and terminal content head — while accepting
+  // every verified intermediate only where GitHub's commit_id authenticates the
+  // artifact's subject. Otherwise a supporting link to an intermediate update
+  // merge can classify an unacknowledged finding as head-bound (#4240).
+  const bodyLinkHeadShas = [...new Set(
+    [sha, contentHead?.oid].map(normalizeHeadSha).filter(Boolean),
+  )];
+  const artifactBindsToFindingHead = (artifact) =>
+    evidenceHeadShas.includes(String(artifact.commit_id || "").toLowerCase()) ||
+    bodyLinkHeadShas.some((headSha) => codexArtifactBindsToHead(artifact, headSha));
 
   if (headCommitTime == null) {
     reasons.push("last commit timestamp was unavailable, so Codex freshness cannot be verified");
@@ -4820,7 +4829,7 @@ async function evaluateCodex({
   // exactly what #3591 closed for inline findings.
   const findingBlockers = [];
   const headBoundArtifacts = codexReviewArtifacts.filter((artifact) =>
-    artifactBindsToEvidenceHead(artifact),
+    artifactBindsToFindingHead(artifact),
   );
   // Newest-wins, with ties broken toward the finding (Codex P1 on #3676). The
   // sort is by timestamp alone and is stable, so two artifacts stamped in the
@@ -4894,7 +4903,10 @@ async function evaluateCodex({
     artifacts: codexReviewArtifacts,
     acknowledgementCandidates: [...comments, ...reviews],
     headSha: sha,
-    headShas: evidenceHeadShas,
+    // Only current/terminal body links classify a finding here. Intermediate
+    // commit_id fields were already excluded above as authenticated assertions;
+    // an intermediate SHA mentioned only in prose remains unbound and blocks.
+    headShas: bodyLinkHeadShas,
     headCommitTime,
   });
   if (unboundFindingArtifacts.length > 0) {
