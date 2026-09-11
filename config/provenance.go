@@ -597,6 +597,7 @@ func clonedInterface(value reflect.Value) any {
 }
 
 func jsonEquivalent(left, right any) bool {
+	left, right, _ = alignStructMapForComparison(left, right)
 	canonical := func(value any) (any, error) {
 		encoded, err := json.Marshal(value)
 		if err != nil {
@@ -613,6 +614,90 @@ func jsonEquivalent(left, right any) bool {
 	leftValue, leftErr := canonical(left)
 	rightValue, rightErr := canonical(right)
 	return leftErr == nil && rightErr == nil && reflect.DeepEqual(leftValue, rightValue)
+}
+
+// alignStructMapForComparison makes a map-versus-struct comparison invariant
+// to struct json tags, most importantly omitempty, so jsonEquivalent never
+// reports a false value difference caused by the serialization asymmetry between
+// a raw decoded map and the typed struct it decoded into.
+//
+// jsonEquivalent canonicalizes each side with json.Marshal. json.Marshal drops
+// zero-valued struct fields tagged omitempty but keeps every key the user wrote
+// in a raw map[string]any. So when one operand is a configured map and the other
+// is its typed struct, an explicit zero on an omitempty field (for example
+// remote_hooks.provision_cmd = "") survives on only the map side, the two
+// marshal outputs diverge, and jsonEquivalent reports a difference even though
+// the loader performed no normalization. Re-encoding the configured map through
+// the struct's type runs omitempty on both sides, eliminating the artifact.
+//
+// Only a struct (or pointer to one) opposite a map is aligned. Every other
+// pairing — struct/struct, map/map, scalar/scalar — already marshals
+// symmetrically and is returned unchanged, so existing callers keep their
+// exact behavior. If re-encoding the map through the struct fails (for example a
+// configured value that does not fit the struct's fields), the originals are
+// returned and the caller compares them as it did before, so a genuine
+// difference surfaces instead of being masked. The guard cannot hide a real
+// change: after re-encoding the map side carries each field's configured
+// (pre-normalization) value and the struct side carries its typed
+// (post-normalization) value, so any field the loader actually rewrote still
+// marshals differently and compares unequal.
+func alignStructMapForComparison(left, right any) (any, any, bool) {
+	leftStruct, rightStruct := jsonObjectStructType(left), jsonObjectStructType(right)
+	var (
+		structType reflect.Type
+		mapSide    any
+		mapIsLeft  bool
+	)
+	switch {
+	case leftStruct != nil && isJSONMap(right):
+		structType, mapSide, mapIsLeft = leftStruct, right, false
+	case rightStruct != nil && isJSONMap(left):
+		structType, mapSide, mapIsLeft = rightStruct, left, true
+	default:
+		return left, right, false
+	}
+	encoded, err := json.Marshal(mapSide)
+	if err != nil {
+		return left, right, false
+	}
+	fresh := reflect.New(structType)
+	if err := json.Unmarshal(encoded, fresh.Interface()); err != nil {
+		return left, right, false
+	}
+	if mapIsLeft {
+		return fresh.Interface(), right, true
+	}
+	return left, fresh.Interface(), true
+}
+
+// isJSONMap reports whether value is a Go map. A raw decoded config shape is
+// always a map[string]any for a table, and that is the only side alignment ever
+// re-encodes; structs and other operands are rejected here so a struct/struct
+// pair stays on the original code path.
+func isJSONMap(value any) bool {
+	if value == nil {
+		return false
+	}
+	return reflect.TypeOf(value).Kind() == reflect.Map
+}
+
+// jsonObjectStructType returns the struct type behind value after unwrapping
+// pointers, or nil when value is not a struct or pointer to one. Nil pointers
+// carry a type and are still treated as a struct side, so json.Marshal's null
+// rendering of a nil pointer compares against the re-encoded map consistently
+// with the comparison the caller performed before this guard.
+func jsonObjectStructType(value any) reflect.Type {
+	if value == nil {
+		return nil
+	}
+	t := reflect.TypeOf(value)
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil
+	}
+	return t
 }
 
 func leafKeyPath(key, leaf string) string {
