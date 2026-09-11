@@ -125,6 +125,22 @@ func (s *RootAgentInspectionSnapshot) ResolvedRootAgent() ResolvedValue {
 	return s.resolved
 }
 
+// ResolveRootAgentForRepoContext returns the captured profile only after the
+// repository that will consume it proves it is still the checkout whose
+// personal document the snapshot contains. This is the profile-only twin of
+// ResolveConfigForRepoContext: callers that make a verdict without reading
+// command layers still must not apply a removed checkout's profile to its
+// same-path replacement.
+func (s *RootAgentInspectionSnapshot) ResolveRootAgentForRepoContext(ctx context.Context, repo *RepoContext) (ResolvedValue, error) {
+	if s == nil {
+		return ResolvedValue{}, fmt.Errorf("root-agent inspection snapshot is required")
+	}
+	if err := s.verifyCheckoutIdentity(ctx, repo); err != nil {
+		return ResolvedValue{}, err
+	}
+	return s.resolved, nil
+}
+
 // ResolveConfigForRepoContext resolves command-bearing repository config while
 // reusing this snapshot's global and personal-project documents. Checked-in and
 // legacy-repo sources are read once here; neither participates in root_agent.

@@ -268,6 +268,14 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// unconditionally, even when there was no idle evidence to clear.
 			resetAgentBrokerCaptures(i)
 			i.markLoadRuntimeReplaced()
+		} else {
+			// A tmux name surviving across daemon downtime does not prove that it
+			// still names the process AF launched: an operator can remove and recreate
+			// the session under the same sanitized name. Keep the live pane, but retire
+			// its persisted launch-command claim and checkpoint that loss of evidence.
+			if i.clearRuntimeProgramForUnverifiedReattach() {
+				i.markLoadRuntimeReplaced()
+			}
 		}
 	} else {
 		i.mu.RLock()

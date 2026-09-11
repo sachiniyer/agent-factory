@@ -157,6 +157,10 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	}
 	if restoreResult == tmux.RestoreRespawned {
 		i.setRuntimeProgram(declarationBase)
+	} else {
+		// Restore established only that the persisted tmux name exists. A session
+		// recreated under that name is not proof of the command AF last launched.
+		i.clearRuntimeProgramForUnverifiedReattach()
 	}
 	if err := b.setupTabs(i); err != nil {
 		return finishRecoverTabFailure(i.Title, rebuilt, restoreResult, ts, err)

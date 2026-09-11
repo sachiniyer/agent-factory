@@ -162,6 +162,46 @@ func TestRootAgentProgramCheckoutReplacementIsIncomplete(t *testing.T) {
 	require.Contains(t, report.Incomplete, "root agent program")
 }
 
+func TestRootAgentExplicitProgramCheckoutReplacementIsIncomplete(t *testing.T) {
+	opts := testOptions(t, false)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	project, err := config.RegisterProject(repoPath)
+	require.NoError(t, err)
+	_, err = config.SetProjectConfigValue(project.ID, "root_agent", `{"enabled":true,"program":"/original/codex"}`)
+	require.NoError(t, err)
+	opts.sessionInventory = rootAgentInventory(repoPath, "/original/codex")
+	installRootAgentSamePathReplacementAfterSnapshot(t, repoPath)
+
+	report := runRootAgentProgramCheck(t, opts, config.DefaultConfig())
+	check := findCheck(t, report, "root agent program")
+	require.Equal(t, StatusWarn, check.Status)
+	require.Contains(t, check.Detail, "repository identity changed")
+	require.NotContains(t, check.Detail, "match the configured command",
+		"an explicit command from the removed checkout must not produce a definite match")
+	require.Contains(t, report.Incomplete, "root agent program")
+}
+
+func TestRootAgentDisabledProfileCheckoutReplacementIsIncomplete(t *testing.T) {
+	opts := testOptions(t, false)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	project, err := config.RegisterProject(repoPath)
+	require.NoError(t, err)
+	_, err = config.SetProjectConfigValue(project.ID, "root_agent", `{"enabled":false}`)
+	require.NoError(t, err)
+	opts.sessionInventory = rootAgentInventory(repoPath, "claude")
+	installRootAgentSamePathReplacementAfterSnapshot(t, repoPath)
+
+	report := runRootAgentProgramCheck(t, opts, config.DefaultConfig())
+	check := findCheck(t, report, "root agent program")
+	require.Equal(t, StatusWarn, check.Status)
+	require.Contains(t, check.Detail, "repository identity changed")
+	require.NotContains(t, check.Detail, "configured profile is disabled",
+		"a disabled verdict from the removed checkout must not be reported as current")
+	require.Contains(t, report.Incomplete, "root agent program")
+}
+
 func TestRootAgentDefaultProfileMatchesChainedLaunchOverrides(t *testing.T) {
 	testguard.IsolateTmux(t)
 	opts := testOptions(t, false)
@@ -283,6 +323,8 @@ func TestRootAgentProgramInspectionBudgetsEachRootIndependently(t *testing.T) {
 	opts := testOptions(t, false)
 	firstRepo := filepath.Join(t.TempDir(), "first")
 	secondRepo := filepath.Join(t.TempDir(), "second")
+	require.NoError(t, exec.Command("git", "init", firstRepo).Run())
+	require.NoError(t, exec.Command("git", "init", secondRepo).Run())
 	cfg := config.DefaultConfig()
 	opts.sessionInventory = func() ([]session.InstanceData, error) {
 		return []session.InstanceData{
@@ -298,7 +340,11 @@ func TestRootAgentProgramInspectionBudgetsEachRootIndependently(t *testing.T) {
 	previousInspect := inspectRootAgentProgram
 	rootAgentProgramProbeTimeout = 100 * time.Millisecond
 	resolveRootAgentForInspection = func(_ context.Context, _ *config.Config, path string, _ bool) (rootAgentProgramInspection, error) {
-		return rootAgentProgramInspection{resolved: config.ResolvedValue{Value: config.RootAgent{Enabled: true, Program: "/" + filepath.Base(path)}}}, nil
+		return rootAgentProgramInspection{
+			resolveProfile: func(context.Context, *config.RepoContext) (config.ResolvedValue, error) {
+				return config.ResolvedValue{Value: config.RootAgent{Enabled: true, Program: "/" + filepath.Base(path)}}, nil
+			},
+		}, nil
 	}
 	secondInspected := false
 	inspectRootAgentProgram = func(ctx context.Context, _ *config.RepoContext, profile config.RootAgent, _ rootAgentProgramInspection) (string, error) {
@@ -511,6 +557,22 @@ func runRootAgentProgramCheck(t *testing.T, opts Options, cfg *config.Config) *R
 	report := &Report{}
 	checkRootAgentPrograms(ctx, report, cfg)
 	return report
+}
+
+func installRootAgentSamePathReplacementAfterSnapshot(t *testing.T, repoPath string) {
+	t.Helper()
+	previousResolve := resolveRootAgentForInspection
+	replaced := false
+	resolveRootAgentForInspection = func(ctx context.Context, global *config.Config, selector string, strict bool) (rootAgentProgramInspection, error) {
+		inspection, err := previousResolve(ctx, global, selector, strict)
+		if err == nil && !replaced {
+			replaced = true
+			require.NoError(t, os.Rename(repoPath, repoPath+".original"))
+			require.NoError(t, exec.Command("git", "init", repoPath).Run())
+		}
+		return inspection, err
+	}
+	t.Cleanup(func() { resolveRootAgentForInspection = previousResolve })
 }
 
 func directoryBytes(t *testing.T, dir string) map[string]string {

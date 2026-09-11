@@ -621,6 +621,21 @@ func (i *Instance) setRuntimeProgramLocked(program string) {
 	i.runtimeProgram = program
 }
 
+// clearRuntimeProgramForUnverifiedReattach retires a persisted launch-command
+// claim when load can establish only that a tmux name exists, not that it still
+// names the process AF launched. It reports whether durable state changed so a
+// load caller can checkpoint the clear before publishing the restored row.
+func (i *Instance) clearRuntimeProgramForUnverifiedReattach() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.runtimeProgram == "" {
+		return false
+	}
+	i.runtimeEvidenceGeneration.Add(1)
+	i.runtimeProgram = ""
+	return true
+}
+
 // SetTmuxSession sets the agent tab's tmux session for testing purposes,
 // materializing the single Agent tab if needed.
 func (i *Instance) SetTmuxSession(session *tmux.TmuxSession) {

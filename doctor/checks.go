@@ -20,8 +20,8 @@ import (
 )
 
 type rootAgentProgramInspection struct {
-	resolved      config.ResolvedValue
-	resolveConfig func(context.Context, *config.RepoContext) (*config.ResolvedConfig, error)
+	resolveProfile func(context.Context, *config.RepoContext) (config.ResolvedValue, error)
+	resolveConfig  func(context.Context, *config.RepoContext) (*config.ResolvedConfig, error)
 }
 
 var (
@@ -32,8 +32,8 @@ var (
 			return rootAgentProgramInspection{}, err
 		}
 		return rootAgentProgramInspection{
-			resolved:      snapshot.ResolvedRootAgent(),
-			resolveConfig: snapshot.ResolveConfigForRepoContext,
+			resolveProfile: snapshot.ResolveRootAgentForRepoContext,
+			resolveConfig:  snapshot.ResolveConfigForRepoContext,
 		}, nil
 	}
 	inspectRootAgentProgram = func(ctx context.Context, repo *config.RepoContext, profile config.RootAgent, inspection rootAgentProgramInspection) (string, error) {
@@ -321,7 +321,37 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			report.markIncomplete("root agent program")
 			continue
 		}
-		resolved := inspection.resolved
+		commandPath := inst.Worktree.WorktreePath
+		if commandPath == "" {
+			commandPath = inst.Path
+		}
+		if commandPath == "" {
+			commandPath = identityPath
+		}
+		commandRepo, resolveErr := config.RepoFromPathContext(probeCtx, commandPath)
+		if resolveErr != nil {
+			cancel()
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not revalidate the configured profile for live root at %s: %s", commandPath, oneLine(resolveErr)),
+				"restore the checkout or mount, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		resolved, resolveErr := inspection.resolveProfile(probeCtx, commandRepo)
+		if resolveErr != nil {
+			cancel()
+			unresolved++
+			remediation := "repair the named config source, then rerun `af doctor`"
+			if errors.Is(resolveErr, config.ErrRootAgentInspectionIdentityChanged) {
+				remediation = "rerun `af doctor`; if the checkout is being replaced, wait for that operation to finish first"
+			}
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not revalidate the configured profile for live root at %s: %s", commandPath, oneLine(resolveErr)),
+				remediation, false)
+			report.markIncomplete("root agent program")
+			continue
+		}
 		if config.RootAgentValueFailsClosed(resolved) {
 			cancel()
 			unresolved++
@@ -358,26 +388,6 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 				"restart the daemon, then kill the root to record a fresh launch command", false)
 			report.markIncomplete("root agent program")
 			continue
-		}
-		commandPath := inst.Worktree.WorktreePath
-		if commandPath == "" {
-			commandPath = inst.Path
-		}
-		if commandPath == "" {
-			commandPath = identityPath
-		}
-		var commandRepo *config.RepoContext
-		if daemon.RootAgentProfileNeedsRepoConfig(profile) {
-			commandRepo, resolveErr = config.RepoFromPathContext(probeCtx, commandPath)
-			if resolveErr != nil {
-				cancel()
-				unresolved++
-				report.Warn(sectionDaemon, "root agent program",
-					fmt.Sprintf("could not resolve the configured command for live root at %s: %s", commandPath, oneLine(resolveErr)),
-					"restore the checkout or mount, then rerun `af doctor`", false)
-				report.markIncomplete("root agent program")
-				continue
-			}
 		}
 		configuredProgram, programErr := inspectRootAgentProgram(probeCtx, commandRepo, profile, inspection)
 		cancel()
