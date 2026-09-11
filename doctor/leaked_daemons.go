@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
@@ -415,10 +417,11 @@ const daemonSocketReadBatch = 64
 // of them. The only directory this reads in full is the one it proves positive,
 // and that directory holds exactly one entry.
 func holdsOnlyADaemonSocket(dir string) bool {
-	f, err := os.Open(dir)
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return false
 	}
+	f := os.NewFile(uintptr(fd), dir)
 	defer func() { _ = f.Close() }()
 	var first string
 	count := 0

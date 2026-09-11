@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -673,6 +674,27 @@ func TestHoldsOnlyADaemonSocketRejectsASubdirectoryBorrowingTheSocketName(t *tes
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, daemon.HTTPSocketName()), 0755))
 	require.False(t, holdsOnlyADaemonSocket(dir),
 		"a directory wearing the socket's name is not a socket")
+}
+
+// holdsOnlyADaemonSocket must return promptly when the candidate path has been
+// replaced by a FIFO between the temp-home sweep and this check. A plain
+// os.Open of a FIFO blocks until a writer appears; opening with O_DIRECTORY
+// (and O_NONBLOCK) rejects the FIFO immediately, so the scan cannot hang.
+func TestHoldsOnlyADaemonSocketDoesNotBlockOnAFIFO(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "candidate-turned-fifo")
+	require.NoError(t, syscall.Mkfifo(fifo, 0o600))
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- holdsOnlyADaemonSocket(fifo) // must not block
+	}()
+	select {
+	case result := <-done:
+		require.False(t, result, "a FIFO is not a dead-socket directory")
+	case <-time.After(5 * time.Second):
+		t.Fatal("holdsOnlyADaemonSocket blocked on a FIFO; O_DIRECTORY open required")
+	}
 }
 
 // The threat model end-to-end: a small level-1 parent holds one level-2 child
