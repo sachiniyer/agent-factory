@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -250,23 +251,111 @@ func projectForRoot(root string) (Project, bool, error) {
 // checkout marker. Bare linked worktrees share the common directory that owns
 // that marker, while two clones at the same path have different markers.
 func projectForRepo(repo *RepoContext) (Project, bool, error) {
+	return projectForRepoContext(context.Background(), repo)
+}
+
+func projectForRepoContext(ctx context.Context, repo *RepoContext) (Project, bool, error) {
 	if repo == nil {
 		return Project{}, false, nil
 	}
-	return projectForWorkspace(repo.WorkspacePath())
+	return projectForWorkspaceContext(ctx, repo.WorkspacePath())
+}
+
+// projectRegistryReadError distinguishes an unreadable registry (which ordinary
+// config resolution may degrade for compatibility) from a checkout-identity
+// probe that failed. The latter is an unknown answer and must propagate.
+type projectRegistryReadError struct {
+	err error
+}
+
+func (e *projectRegistryReadError) Error() string { return "read project registry: " + e.err.Error() }
+func (e *projectRegistryReadError) Unwrap() error { return e.err }
+
+func isProjectRegistryReadError(err error) bool {
+	var target *projectRegistryReadError
+	return errors.As(err, &target)
+}
+
+// checkoutMarkerProbeError preserves an UNKNOWN checkout-identity observation
+// through the project lookup instead of collapsing it into marker absence.
+type checkoutMarkerProbeError struct {
+	err        error
+	completion <-chan struct{}
+}
+
+func (e *checkoutMarkerProbeError) Error() string { return e.err.Error() }
+func (e *checkoutMarkerProbeError) Unwrap() error { return e.err }
+
+// CheckoutMarkerProbeCompletion returns the completion of an uncancellable
+// checkout-marker read that outlived its caller's deadline. A long-lived
+// caller can retain its own single-flight until this closes; nil means no read
+// remains in flight.
+func CheckoutMarkerProbeCompletion(err error) <-chan struct{} {
+	var target *checkoutMarkerProbeError
+	if errors.As(err, &target) {
+		return target.completion
+	}
+	return nil
+}
+
+type checkoutMarkerReadResult struct {
+	id     string
+	exists bool
+	err    error
+}
+
+type checkoutMarkerReadFlight struct {
+	done              chan struct{}
+	result            checkoutMarkerReadResult
+	beforeWakeForTest func()
+}
+
+// checkoutMarkerReadFlights bounds an unavailable marker path to one
+// uncancellable os.ReadFile. Callers may time out independently, but a later
+// probe joins the parked read instead of stranding another goroutine.
+var checkoutMarkerReadFlights sync.Map
+
+func checkoutMarkerRead(path string) *checkoutMarkerReadFlight {
+	flight := &checkoutMarkerReadFlight{done: make(chan struct{})}
+	actual, loaded := checkoutMarkerReadFlights.LoadOrStore(path, flight)
+	if loaded {
+		return actual.(*checkoutMarkerReadFlight)
+	}
+	go completeCheckoutMarkerRead(path, flight)
+	return flight
+}
+
+func completeCheckoutMarkerRead(path string, flight *checkoutMarkerReadFlight) {
+	flight.result.id, flight.result.exists, flight.result.err = readCheckoutID(path)
+	// Remove the completed result before publishing it. A waiter awakened by
+	// done may immediately re-probe after a checkout replacement; leaving this
+	// flight discoverable until after close would let that revalidation consume
+	// the old checkout's marker result.
+	checkoutMarkerReadFlights.CompareAndDelete(path, flight)
+	if flight.beforeWakeForTest != nil {
+		flight.beforeWakeForTest()
+	}
+	close(flight.done)
 }
 
 func projectForWorkspace(root string) (Project, bool, error) {
+	return projectForWorkspaceContext(context.Background(), root)
+}
+
+func projectForWorkspaceContext(parent context.Context, root string) (Project, bool, error) {
 	if root == "" {
 		return Project{}, false, nil
 	}
 	projects, err := listProjectsWithoutRootProbes()
 	if err != nil {
+		return Project{}, false, &projectRegistryReadError{err: err}
+	}
+	ctx, cancel := context.WithTimeout(parent, registeredProjectScanTimeout)
+	defer cancel()
+	checkoutID, ok, err := checkoutIDForWorkspaceContext(ctx, root)
+	if err != nil {
 		return Project{}, false, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), registeredProjectScanTimeout)
-	defer cancel()
-	checkoutID, ok := checkoutIDForWorkspaceContext(ctx, root)
 	if !ok {
 		return Project{}, false, nil
 	}
@@ -302,7 +391,7 @@ func listProjectsWithoutRootProbes() ([]Project, error) {
 	return projects, nil
 }
 
-func checkoutIDForWorkspaceContext(parent context.Context, root string) (string, bool) {
+func checkoutIDForWorkspaceContext(parent context.Context, root string) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(parent, registeredProjectProbeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--git-common-dir")
@@ -312,34 +401,50 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 	cmd.WaitDelay = repoProbeWaitDelay(ctx)
 	out, err := cmd.Output()
 	if err != nil {
-		return "", false
+		return "", false, checkoutMarkerProbeFailure(ctx, root, err)
 	}
 	commonDir := trimGitOutputLine(out)
 	if commonDir == "" || strings.Contains(commonDir, "\n") {
-		return "", false
+		return "", false, nil
 	}
 	if !filepath.IsAbs(commonDir) {
 		commonDir = filepath.Join(root, commonDir)
 	}
 	markerName, err := checkoutMarkerName()
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
-	type markerResult struct {
-		id     string
-		exists bool
-		err    error
-	}
-	result := make(chan markerResult, 1)
-	go func() {
-		id, exists, err := readCheckoutID(filepath.Join(commonDir, checkoutMarkerDirName, markerName))
-		result <- markerResult{id: id, exists: exists, err: err}
-	}()
+	flight := checkoutMarkerRead(filepath.Join(commonDir, checkoutMarkerDirName, markerName))
 	select {
-	case marker := <-result:
-		return marker.id, marker.exists && marker.err == nil
+	case <-flight.done:
+		marker := flight.result
+		if marker.err != nil {
+			return "", false, &checkoutMarkerProbeError{err: marker.err}
+		}
+		return marker.id, marker.exists, nil
 	case <-ctx.Done():
-		return "", false
+		// Prefer a completed read when it raced the deadline. Only a reader that
+		// is still alive belongs in the error's completion handle.
+		select {
+		case <-flight.done:
+			marker := flight.result
+			if marker.err != nil {
+				return "", false, &checkoutMarkerProbeError{err: marker.err}
+			}
+			return marker.id, marker.exists, nil
+		default:
+			return "", false, &checkoutMarkerProbeError{
+				err:        fmt.Errorf("read checkout marker for %s: %w", root, ctx.Err()),
+				completion: flight.done,
+			}
+		}
+	}
+}
+
+func checkoutMarkerProbeFailure(ctx context.Context, root string, err error) error {
+	classified := markUnansweredProbe(ctx, err)
+	return &checkoutMarkerProbeError{
+		err: fmt.Errorf("inspect checkout marker location for %s: %w", root, classified),
 	}
 }
 
@@ -348,6 +453,18 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 // checkout marker still matches. It rejects upward resolution after a nested
 // checkout disappears and replacement checkouts at a reused path.
 func ResolveRegisteredProjectRepoID(parent context.Context, project Project) (string, bool) {
+	repo, ok := ResolveRegisteredProjectRepo(parent, project)
+	if !ok {
+		return "", false
+	}
+	return repo.ID, true
+}
+
+// ResolveRegisteredProjectRepo returns the complete repository context for a
+// durable project only when the exact registered workspace and checkout marker
+// still agree. Keeping the identity root with the ID matters for bare
+// repositories addressed through linked worktrees.
+func ResolveRegisteredProjectRepo(parent context.Context, project Project) (*RepoContext, bool) {
 	if registeredProjectProofRaceHookForTest != nil {
 		registeredProjectProofRaceHookForTest()
 	}
@@ -356,26 +473,29 @@ func ResolveRegisteredProjectRepoID(parent context.Context, project Project) (st
 	root := project.Root
 	repo, err := RepoFromPathContext(ctx, root)
 	if err != nil {
-		return "", false
+		return nil, false
 	}
 	// A registered root is identity evidence only when Git still recognizes that
 	// exact workspace. If a nested checkout disappears, resolving its old path
 	// may discover an enclosing repository; never lend the nested registration's
 	// personal config to that ancestor.
 	if filepath.Clean(repo.WorkspacePath()) != filepath.Clean(root) {
-		return "", false
+		return nil, false
 	}
-	checkoutID, ok := checkoutIDForWorkspaceContext(ctx, root)
+	checkoutID, ok, err := checkoutIDForWorkspaceContext(ctx, root)
+	if err != nil {
+		return nil, false
+	}
 	if !ok || checkoutID != project.CheckoutID {
-		return "", false
+		return nil, false
 	}
-	return repo.ID, true
+	return repo, true
 }
 
 // WithProjectConfigLockForRoot runs fn while holding the personal config file
 // lock for the registered project rooted at root. An unregistered root has no
-// supported personal-project writer, so fn runs without a lock. Registry and
-// lock failures are returned before fn runs.
+// supported personal-project writer, so fn runs without a lock. Registry,
+// checkout-identity, and lock failures are returned before fn runs.
 //
 // Identity-changing operations use this to keep their final personal-policy
 // read and durable identity checkpoint atomic with af config set/unset
