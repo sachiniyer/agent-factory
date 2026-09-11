@@ -105,44 +105,7 @@ func SessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string,
 // verification-to-track window: if the session is replaced between the marker
 // read and the track call, the generation will differ and adoption fails closed.
 func SessionGenerationMarker(cmdExec cmd.Executor, sanitizedName string) (generation string, present bool, err error) {
-	ctx, cancel := tmuxTimeoutContext()
-	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), EnvMarkerGeneration)
-	markerTimedOut := ctx.Err() != nil
-	cancel()
-	if markerErr == nil {
-		line := strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r")
-		if line == "-"+EnvMarkerGeneration {
-			return "", false, nil
-		}
-		if strings.ContainsAny(line, "\r\n") {
-			return "", false, fmt.Errorf("read %s generation marker for tmux session %s: malformed multiline response", EnvMarkerGeneration, sanitizedName)
-		}
-		gen, ok := strings.CutPrefix(line, EnvMarkerGeneration+"=")
-		if !ok {
-			return "", false, fmt.Errorf("read %s generation marker for tmux session %s: malformed response %q", EnvMarkerGeneration, sanitizedName, line)
-		}
-		return gen, true, nil
-	}
-	if markerTimedOut {
-		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
-	}
-	if !missingSessionEnvMarker(markerErr) {
-		return "", false, fmt.Errorf("read %s generation marker for tmux session %s: %w", EnvMarkerGeneration, sanitizedName, markerErr)
-	}
-	// The targeted result identified an absent variable. Confirm the session
-	// answered at all by querying the full environment without consuming it.
-	allCtx, allCancel := tmuxTimeoutContext()
-	_, allErr := outputTmuxBoundedWith(allCtx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName))
-	allTimedOut := allCtx.Err() != nil
-	allCancel()
-	if allErr == nil {
-		return "", false, nil
-	}
-	if allTimedOut {
-		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
-	}
-	return "", false, fmt.Errorf("read %s generation marker for tmux session %s: targeted query: %v; environment query: %w",
-		EnvMarkerGeneration, sanitizedName, markerErr, allErr)
+	return sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerGeneration)
 }
 
 // sessionHomeMarker reads the AF_HOME ancestry marker from a tmux session's
@@ -162,29 +125,35 @@ func SessionGenerationMarker(cmdExec cmd.Executor, sanitizedName string) (genera
 // the named variable was absent. If neither query answers, ownership remains
 // unknown and cleanup decides whether the exact session has since vanished.
 func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string, present bool, err error) {
+	return sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerHome)
+}
+
+// sessionEnvMarker binds the query, response parser, and absence classifier to
+// one marker name so readers cannot accidentally classify a different variable.
+func sessionEnvMarker(cmdExec cmd.Executor, sanitizedName, marker string) (string, bool, error) {
 	ctx, cancel := tmuxTimeoutContext()
-	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), EnvMarkerHome)
+	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), marker)
 	markerTimedOut := ctx.Err() != nil
 	cancel()
 	if markerErr == nil {
 		line := strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r")
-		if line == "-"+EnvMarkerHome {
+		if line == "-"+marker {
 			return "", false, nil
 		}
 		if strings.ContainsAny(line, "\r\n") {
-			return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: malformed multiline response", EnvMarkerHome, sanitizedName)
+			return "", false, fmt.Errorf("read %s marker for tmux session %s: malformed multiline response", marker, sanitizedName)
 		}
-		home, ok := strings.CutPrefix(line, EnvMarkerHome+"=")
+		value, ok := strings.CutPrefix(line, marker+"=")
 		if !ok {
-			return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: malformed response %q", EnvMarkerHome, sanitizedName, line)
+			return "", false, fmt.Errorf("read %s marker for tmux session %s: malformed response %q", marker, sanitizedName, line)
 		}
-		return home, true, nil
+		return value, true, nil
 	}
 	if markerTimedOut {
 		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
 	}
-	if !missingSessionEnvMarker(markerErr) {
-		return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: %w", EnvMarkerHome, sanitizedName, markerErr)
+	if !missingSessionEnvMarker(markerErr, marker) {
+		return "", false, fmt.Errorf("read %s marker for tmux session %s: %w", marker, sanitizedName, markerErr)
 	}
 
 	// The targeted result itself identified an absent variable. Ask for the
@@ -202,18 +171,18 @@ func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string,
 		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
 	}
 
-	return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: targeted query: %v; environment query: %w",
-		EnvMarkerHome, sanitizedName, markerErr, allErr)
+	return "", false, fmt.Errorf("read %s marker for tmux session %s: targeted query: %v; environment query: %w",
+		marker, sanitizedName, markerErr, allErr)
 }
 
 // missingSessionEnvMarker recognizes tmux's explicit absent-variable answer
 // from the TARGETED query. Exit status alone is insufficient: a transient
 // wrapper/server failure may also be nonzero, and a later command succeeding
 // cannot retroactively determine why the first failed.
-func missingSessionEnvMarker(err error) bool {
+func missingSessionEnvMarker(err error, marker string) bool {
 	var exitErr *exec.ExitError
 	return errors.As(err, &exitErr) &&
-		strings.TrimSpace(string(exitErr.Stderr)) == "unknown variable: "+EnvMarkerHome
+		strings.TrimSpace(string(exitErr.Stderr)) == "unknown variable: "+marker
 }
 
 var (
