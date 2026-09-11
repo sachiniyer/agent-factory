@@ -234,6 +234,11 @@ type Manager struct {
 	// written in config.json) for a legacy entry, or by the registered project's
 	// resolved root path for a singleton-only candidate (#2216 Phase 6).
 	rootEnsureStates map[string]*rootEnsureState
+	// Transcript probe overrides are manager-local and set only before the
+	// manager is used. Never restore them during cleanup: a timed-out filesystem
+	// inspection may outlive both its caller and the joined poll loop (#4212).
+	inspectClaudeProjectConversations func(string, string, session.AgentConversationData) (session.ClaudeProjectConversationState, error)
+	claudeTranscriptInspectBudget     time.Duration
 	// rootCreateRefusals holds each repo's standing create-boundary identity
 	// refusal (#3714): the outcome class of the most recent identity proof at
 	// a root create, and when it was taken. Keyed by REPO ID — the key
