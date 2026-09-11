@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // sandbox points the tripwire's ambient resolution at a temp dir and returns
@@ -201,15 +202,14 @@ func TestSandboxHome_SetsAndRestores(t *testing.T) {
 	}
 }
 
-// TestSandboxHome_ScrubsAndRestoresMarkers pins the #1120 marker contract:
-// SandboxHome scrubs AF_SESSION/AF_SESSION_GEN/AF_HOME for the package run, and
-// restore puts each marker back to its exact pre-sandbox state — including unsetting a
-// marker that was absent before but got set during the run, so nothing set
-// mid-package leaks past restore.
+// TestSandboxHome_ScrubsAndRestoresMarkers pins the #1120/#4194 marker contract:
+// SandboxHome scrubs AF_SESSION/AF_SESSION_GEN/AF_HOME, installs a fresh stable
+// test-run identity, and restores every marker to its exact pre-sandbox state.
 func TestSandboxHome_ScrubsAndRestoresMarkers(t *testing.T) {
 	// Present before: must be scrubbed during the run and restored after.
 	t.Setenv("AF_SESSION", "pre-sandbox-session")
 	t.Setenv("AF_SESSION_GEN", "pre-sandbox-generation")
+	t.Setenv(envMarkerTestRun, "pre-sandbox-run")
 	// Absent before: t.Setenv registers restoration of the original value,
 	// then Unsetenv makes it genuinely absent for SandboxHome to observe.
 	t.Setenv("AF_HOME", "placeholder")
@@ -227,6 +227,9 @@ func TestSandboxHome_ScrubsAndRestoresMarkers(t *testing.T) {
 	if v, ok := os.LookupEnv("AF_HOME"); ok {
 		t.Fatalf("SandboxHome must scrub AF_HOME; still set to %q", v)
 	}
+	if got, want := os.Getenv(envMarkerTestRun), os.Getenv("AGENT_FACTORY_HOME"); got != want {
+		t.Fatalf("test-run marker = %q, want stable sandbox identity %q", got, want)
+	}
 
 	// Simulate a test (or child-env plumbing) setting a marker mid-run.
 	if err := os.Setenv("AF_HOME", "set-during-run"); err != nil {
@@ -242,6 +245,9 @@ func TestSandboxHome_ScrubsAndRestoresMarkers(t *testing.T) {
 	}
 	if v, ok := os.LookupEnv("AF_HOME"); ok {
 		t.Fatalf("restore must unset AF_HOME (absent pre-sandbox); still set to %q", v)
+	}
+	if got := os.Getenv(envMarkerTestRun); got != "pre-sandbox-run" {
+		t.Fatalf("restore did not put %s back; got %q", envMarkerTestRun, got)
 	}
 }
 
@@ -286,35 +292,160 @@ func TestSandboxTmux_SetsAndRestores(t *testing.T) {
 	}
 }
 
-// TestTmuxTripwire_FiresOnLeakedSession exercises the tripwire against the
-// private server IsolateTmux provides, so the test itself is hermetic: the
-// "ambient" server the tripwire snapshots is the throwaway one.
-func TestTmuxTripwire_FiresOnLeakedSession(t *testing.T) {
-	IsolateTmux(t) // skips when tmux is unavailable
+// fakeTripwireTmux installs a hermetic tmux command that exposes one preexisting
+// foreign-owned session and four sessions after markReady. It performs no tmux
+// operation and never contacts the ambient server.
+func fakeTripwireTmux(t *testing.T) (markReady func(), ownerFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	readyFile := filepath.Join(dir, "ready")
+	ownerFile = filepath.Join(dir, "owner")
+	script := `#!/bin/sh
+case "$1" in
+list-sessions)
+  if [ "${AF_TRIPWIRE_WEDGE_LIST:-}" = 1 ]; then
+    exec /bin/sleep 1
+  fi
+  printf '%s\n' af_preexisting
+  if [ -f "$AF_TRIPWIRE_READY_FILE" ]; then
+    printf '%s\n' af_owned af_overridden af_foreign af_unmarked af_unreadable
+  fi
+  ;;
+show-environment)
+  case "$3:$4" in
+  =af_preexisting:AF_HOME)
+    printf '%s\n' 'AF_HOME=/real/agent-factory-home'
+    ;;
+  =af_preexisting:AF_TESTGUARD_RUN)
+    printf '%s\n' 'AF_TESTGUARD_RUN=another-run'
+    ;;
+  =af_owned:AF_HOME)
+    IFS= read -r owner < "$AF_TRIPWIRE_OWNER_FILE"
+    printf 'AF_HOME=%s\n' "$owner"
+    ;;
+  =af_owned:AF_TESTGUARD_RUN)
+    IFS= read -r owner < "$AF_TRIPWIRE_OWNER_FILE"
+    printf 'AF_TESTGUARD_RUN=%s\n' "$owner"
+    ;;
+  =af_overridden:AF_HOME)
+    printf '%s\n' 'AF_HOME=/per-test/overridden-home'
+    ;;
+  =af_overridden:AF_TESTGUARD_RUN)
+    IFS= read -r owner < "$AF_TRIPWIRE_OWNER_FILE"
+    printf 'AF_TESTGUARD_RUN=%s\n' "$owner"
+    ;;
+  =af_foreign:AF_HOME)
+    printf '%s\n' 'AF_HOME=/real/agent-factory-home'
+    ;;
+  =af_foreign:AF_TESTGUARD_RUN)
+    printf '%s\n' 'AF_TESTGUARD_RUN=another-run'
+    ;;
+  =af_unmarked:*)
+    printf 'unknown variable: %s\n' "$4" >&2
+    exit 1
+    ;;
+  =af_unreadable:*)
+    printf '%s\n' 'server became unreachable' >&2
+    exit 1
+    ;;
+  =af_wedged:*)
+    exec /bin/sleep 60
+    ;;
+  *) exit 2 ;;
+  esac
+  ;;
+*) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AF_TRIPWIRE_READY_FILE", readyFile)
+	t.Setenv("AF_TRIPWIRE_OWNER_FILE", ownerFile)
+	return func() {
+		if err := os.WriteFile(readyFile, nil, 0644); err != nil {
+			t.Fatalf("mark fake tmux ready: %v", err)
+		}
+	}, ownerFile
+}
 
+// TestAmbientAFSessions_BoundsUnreadableList keeps the first command on the
+// verification path from wedging TestMain after the package suite finishes.
+// An unreadable session list means there is nothing the tripwire can safely
+// attribute, so it returns no sessions after the local deadline.
+func TestAmbientAFSessions_BoundsUnreadableList(t *testing.T) {
+	fakeTripwireTmux(t)
+	t.Setenv("AF_TRIPWIRE_WEDGE_LIST", "1")
+	previous := tmuxTripwireTimeout
+	tmuxTripwireTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { tmuxTripwireTimeout = previous })
+
+	started := time.Now()
+	sessions := ambientAFSessions()
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("wedged session list returned after %s, want the local deadline", elapsed)
+	}
+	if sessions != nil {
+		t.Fatalf("wedged session list returned sessions %v", sessions)
+	}
+}
+
+// TestAmbientAFSessionMarker_BoundsUnreadableQuery keeps the tripwire from
+// wedging TestMain after the package suite has already finished. A timeout is
+// ownership-unknown, never evidence that this run owns the session.
+func TestAmbientAFSessionMarker_BoundsUnreadableQuery(t *testing.T) {
+	fakeTripwireTmux(t)
+	previous := tmuxTripwireTimeout
+	tmuxTripwireTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { tmuxTripwireTimeout = previous })
+
+	started := time.Now()
+	if value, readable := ambientAFSessionMarker("af_wedged", envMarkerHome); readable {
+		t.Fatalf("wedged ownership query returned readable marker %q", value)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("wedged ownership query returned after %s, want the local deadline", elapsed)
+	}
+}
+
+// TestTmuxTripwire_AttributesNewSessionsBySandboxHome pins both sides of the
+// ownership boundary. Arrival during the package window is not attribution: an
+// AF_HOME matching this run is reported, as is a per-test home carrying the
+// run marker. A different, absent, or unreadable identity is not proof that the
+// run owns the session (#4194).
+func TestTmuxTripwire_AttributesNewSessionsBySandboxHome(t *testing.T) {
+	markReady, ownerFile := fakeTripwireTmux(t)
 	verify := TmuxTripwire()
-	if err := verify(); err != nil {
-		t.Fatalf("tripwire fired with no sessions created: %v", err)
+	restoreHome := SandboxHome()
+	sandboxHome := os.Getenv("AGENT_FACTORY_HOME")
+	if err := os.WriteFile(ownerFile, []byte(sandboxHome+"\n"), 0644); err != nil {
+		restoreHome()
+		t.Fatalf("record sandbox home: %v", err)
 	}
-
-	const leak = "af_testguard_tripwire_leak"
-	if out, err := exec.Command("tmux", "new-session", "-d", "-s", leak, "sleep", "60").CombinedOutput(); err != nil {
-		t.Skipf("cannot start tmux session on private server: %v: %s", err, out)
-	}
+	markReady()
+	// Mirror TestMain: the sandbox is restored before the tripwire verifies.
+	restoreHome()
 
 	err := verify()
 	if err == nil {
-		t.Fatal("tripwire did not fire on a leaked af_ session")
+		t.Fatal("tripwire did not report the new session owned by this test run")
 	}
-	if !strings.Contains(err.Error(), leak) {
-		t.Fatalf("tripwire error should name the leaked session %q; got: %v", leak, err)
+	if !strings.Contains(err.Error(), "af_owned") {
+		t.Fatalf("tripwire did not name the session carrying this run's AF_HOME marker: %v", err)
 	}
-
-	if err := exec.Command("tmux", "kill-session", "-t", "="+leak).Run(); err != nil {
-		t.Fatalf("kill leaked session: %v", err)
+	if !strings.Contains(err.Error(), "af_overridden") {
+		t.Fatalf("tripwire lost ownership when the test overrode AGENT_FACTORY_HOME: %v", err)
 	}
-	if err := verify(); err != nil {
-		t.Fatalf("tripwire fired after the session was cleaned up: %v", err)
+	for _, notOwned := range []string{"af_preexisting", "af_foreign", "af_unmarked", "af_unreadable"} {
+		if strings.Contains(err.Error(), notOwned) {
+			t.Fatalf("tripwire attributed %s without proof that this run owns it: %v", notOwned, err)
+		}
+	}
+	for _, safeText := range []string{"live Agent Factory install or another concurrent run", "DO NOT KILL IT", "AF_DISABLE_TMUX_TRIPWIRE=1"} {
+		if !strings.Contains(err.Error(), safeText) {
+			t.Fatalf("tripwire diagnostic must contain %q, got: %v", safeText, err)
+		}
 	}
 }
 
