@@ -8,6 +8,7 @@ package daemon
 // delivery arms, and the classifications that remain distinct.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -124,19 +125,19 @@ func flattenDeliverPrompt(t *testing.T, manager *Manager) {
 }
 
 // flattenCreateSession is the create-arm counterpart: it swaps createSessionForTask
-// for a stub that calls the real manager.reserveCreate and flattens the error to
-// text, exercising the re-mint at taskrun.go:98.
+// for a stub that calls the real manager.CreateSession and flattens the error to
+// text, exercising both the full pre-reservation boundary and the re-mint at
+// taskrun.go:98.
 func flattenCreateSession(t *testing.T, manager *Manager) {
 	t.Helper()
 	orig := createSessionForTask
 	createSessionForTask = func(req CreateSessionRequest) (*session.InstanceData, error) {
-		_, _, release, _, err := manager.reserveCreate(req)
+		data, err := manager.CreateSession(context.Background(), req)
 		if err != nil {
 			return nil, fmt.Errorf("%s", err.Error())
 		}
-		release()
 		t.Fatalf("createSessionForTask stub: expected the pre-flight failure for title base %q, but reserveCreate succeeded", req.TitleBase)
-		return nil, nil
+		return &data, nil
 	}
 	t.Cleanup(func() { createSessionForTask = orig })
 }
@@ -348,6 +349,26 @@ func TestRepro_WatcherRefundsRateSlotOnTitleWalkFailure(t *testing.T) {
 	w.handleEvent("new issue #4186", &tailBuffer{})
 
 	assert.Equal(t, 0, spentSlots(w), "a title-walk failure before the reservation commit must refund the rate slot")
+	assert.Equal(t, 1, w.queue.pendingCount(), "the failed delivery must remain queued for replay")
+}
+
+// TestRepro_WatcherRefundsRateSlotOnDefaultAccountFailure reaches the earlier
+// pre-reservation refusal in CreateSession itself. A project default that names
+// an unregistered account prevents any session work, so the watch attempt must
+// refund just like an error returned by reserveCreate.
+func TestRepro_WatcherRefundsRateSlotOnDefaultAccountFailure(t *testing.T) {
+	_, repoPath, project := defaultAccountFixture(t, "claude", "")
+	writeProjectAccounts(t, project, "[default_accounts]\nclaude = \"missing\"\n")
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	seedWatchTaskForManager(t, "repro-account-default", repoPath, "")
+	flattenCreateSession(t, manager)
+
+	w := newRateSlotWatcher(t, "repro-account-default", deliverWatchEvent)
+	close(w.stopCh)
+	w.handleEvent("new issue #4191", &tailBuffer{})
+
+	assert.Equal(t, 0, spentSlots(w), "an account-default refusal before reservation must refund the rate slot")
 	assert.Equal(t, 1, w.queue.pendingCount(), "the failed delivery must remain queued for replay")
 }
 
