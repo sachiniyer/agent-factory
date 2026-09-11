@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
@@ -13,6 +14,39 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Task add/update invokes validateEnabledTaskTarget while holding the tasks-file
+// lock. The validator therefore must not acquire Manager.mu: session creation
+// publishes its task identity while holding Manager.mu and then takes that file
+// lock, so the inverse order deadlocks both operations and the daemon with them.
+// Capture the target state before the store callback instead.
+func TestTaskTargetValidatorDoesNotAcquireManagerLock(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	candidate := archiveTargetTask("lockfree", "Lock Free", repoPath, "missing-target", true)
+	candidate.RepoID = repoID
+	validation := manager.prepareTaskTargetValidation(
+		candidate.RepoID, candidate.TargetSession, candidate.Enabled)
+
+	manager.mu.Lock()
+	validated := make(chan error, 1)
+	go func() {
+		validated <- manager.validateEnabledTaskTarget(candidate, validation)
+	}()
+
+	select {
+	case err := <-validated:
+		manager.mu.Unlock()
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		manager.mu.Unlock()
+		select {
+		case <-validated:
+		case <-time.After(5 * time.Second):
+			t.Fatal("validator stayed wedged after Manager.mu was released")
+		}
+		t.Fatal("task-store validator waited for Manager.mu, completing the task-store/manager lock cycle")
+	}
+}
 
 func TestArchiveSession_UnresolvedLegacyTaskScopeFailsClosed(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)

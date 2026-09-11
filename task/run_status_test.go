@@ -1,0 +1,29 @@
+package task
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestTaskRunOutcomeClosesIdentifiedRunAfterArmingStatusClears(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
+	_, _, err := BeginTaskRun("w1", "session-a", 1, runAt, RunStatusStarted)
+	require.NoError(t, err)
+	_, err = UpdateTaskStatus("w1", nil, "errored: not armed: target unavailable")
+	require.NoError(t, err)
+	_, err = UpdateTaskStatus("w1", nil, "")
+	require.NoError(t, err)
+
+	_, applied, err := UpdateTaskRunOutcome("w1", "session-a", "interrupted: agent runtime lost")
+	require.NoError(t, err)
+	assert.True(t, applied,
+		"clearing a temporary arming refusal must not make the identified active run uncloseable")
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	assert.Equal(t, "interrupted: agent runtime lost", got.LastRunStatus)
+	assert.Equal(t, "session-a", got.LastRunSessionID)
+}
