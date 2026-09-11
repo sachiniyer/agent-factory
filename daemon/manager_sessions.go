@@ -485,7 +485,17 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	if instance.IsTearingDown() {
 		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
 	}
+	releaseLimitFence := func() {}
+	if req.TaskOrigin {
+		// Limit publication and automated submission are one ordered boundary.
+		// The status poll publishes through this same mutex, so it cannot mark a
+		// target limit-reached after this check but before the keystrokes land.
+		testHookTaskPromptBeforeLimitFence()
+		m.accountLimitMu.Lock()
+		releaseLimitFence = m.accountLimitMu.Unlock
+	}
 	if err := taskPromptTargetLivenessError(req.Title, instance.GetLiveness(), req.TaskOrigin); err != nil {
+		releaseLimitFence()
 		return session.PromptCouldNotConfirm, notAttempted(err)
 	}
 	// Deliver through the agent-server (#1592 Phase 2 PR4), not the tmux-shaped
@@ -494,6 +504,7 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	// socket, so its failure is ambiguous ("never sent" vs "sent, reply lost") and
 	// is deliberately NOT tagged notAttempted — an ambiguous failure stays charged.
 	status, err := instance.SendPromptWithEvidence(req.Prompt, nowFunc)
+	releaseLimitFence()
 	// Delivery evidence changes the row even when liveness does not. Publish it
 	// immediately so list clients can distinguish a confirmed miss from #3162's
 	// honest could-not-confirm instead of waiting for the status poll.

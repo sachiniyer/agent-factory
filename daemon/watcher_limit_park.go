@@ -1,6 +1,10 @@
 package daemon
 
-import "time"
+import (
+	"bufio"
+	"bytes"
+	"time"
+)
 
 // watcherLimitBackpressurePoll bounds how quickly a watch reader resumes after
 // the drainer makes room in a usage-limit-protected queue. It is a package var
@@ -22,4 +26,24 @@ func (w *taskWatcher) waitForLimitQueueCapacity() bool {
 		}
 	}
 	return !w.stopRequested()
+}
+
+// persistBufferedLimitEvents saves every complete event bufio already pulled
+// from the subprocess pipe before a stop interrupted capacity backpressure.
+// Those bytes are no longer recoverable from the producer after restart. The
+// queue is necessarily limit-protected when this path runs, so appending the
+// reader's bounded buffer cannot evict older events; an unterminated suffix is
+// still not an event and remains intentionally discarded.
+func (w *taskWatcher) persistBufferedLimitEvents(br *bufio.Reader, tail *tailBuffer) {
+	buffered, err := br.Peek(br.Buffered())
+	if err != nil || len(buffered) == 0 {
+		return
+	}
+	lastNewline := bytes.LastIndexByte(buffered, '\n')
+	if lastNewline < 0 {
+		return
+	}
+	for _, line := range bytes.Split(buffered[:lastNewline], []byte{'\n'}) {
+		w.enqueueEvent(string(bytes.TrimRight(line, "\r")), tail, true)
+	}
 }

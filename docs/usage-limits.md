@@ -520,8 +520,11 @@ backpressure hold the producer until replay makes room, rather than dropping an
 event or growing managed queue storage without limit.
 
 This automatic park is deliberately task-only. A manual `af sessions
-send-prompt` still delivers to a `[limit]` session, because typing into the pane
-may be necessary to answer a credits or limit picker and recover the lane.
+send-prompt` still delivers to a `[limit]` session, because typing may be needed
+to answer a credits or limit **picker**. Do not type into a timed auto-continue
+banner: Claude explicitly treats any typing as cancellation. In a Codex numbered
+picker, use the arrow keys to select the intended choice before sending Enter;
+digits are ignored and Enter accepts whichever choice is already highlighted.
 
 Before this behavior, such a run spun a readiness timeout and was recorded as a
 failure even though nothing was actually wrong — you'd just hit your plan limit.
