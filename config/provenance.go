@@ -747,8 +747,8 @@ func structJSONFields(t reflect.Type) map[string]jsonFieldMeta {
 		}
 		out[name] = jsonFieldMeta{
 			omitempty: hasOmitempty,
-			zeroValue: zeroMap[name],           // nil when omitempty (not in zero-marshal output)
-			typeZero:  goTypeJSONZero(f.Type),  // type-specific zero for omitempty comparison
+			zeroValue: zeroMap[name],          // nil when omitempty (not in zero-marshal output)
+			typeZero:  goTypeJSONZero(f.Type), // type-specific zero for omitempty comparison
 		}
 	}
 	return out
