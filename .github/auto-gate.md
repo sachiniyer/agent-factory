@@ -118,8 +118,10 @@ in the resolver workflow that consumes an empty target list.
 
 For an eligible PR, the successor excludes the initiating SHA, then invokes the
 existing `ensureValidationRun` recovery. Seeing a new head does not prove that
-its runs exist: this shared helper waits for late runs, approves parked runs,
-and dispatches validation if none appear. Recovery rechecks the PR before those
+its runs exist: this shared helper queries the `pr.yml` workflow specifically,
+waits for its late run, and then approves parked runs on the head. An earlier
+Docs or Dependency review run cannot satisfy that wait. If PR Validation never
+appears, the helper dispatches it. Recovery rechecks the PR before those
 writes and after the wait; a changed head must itself be recovered before it
 becomes a target. Six bounded recovery attempts prevent endless polling.
 Exhaustion fails with a recovery command instead of publishing a stale target.
@@ -128,9 +130,10 @@ behavior. Queued/running runs still receive no approval writes.
 
 The follow-up dispatch is single-shot. A failure is an infrastructure error,
 not an ordinary refusal. The caller posts the recovery command on the PR, where
-it stays visible even if the head moves again, and creates a failing check on
-the observed post-update SHA when one is available. It never reuses the
-initiating aggregate's check ID for those instructions. Publication failures
+it stays visible even if the head moves again, and includes the observed
+post-update SHA when available. The initiating lane does not write an aggregate
+on the successor head: that head has its own serialized owner, whose newer PASS
+must not be superseded by an unfenced recovery failure. Publication failures
 retain the original command in the workflow error. The workflow still fails;
 ordinary merge refusals remain successful waiting states.
 

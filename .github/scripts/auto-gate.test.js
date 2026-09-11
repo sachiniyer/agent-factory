@@ -5484,7 +5484,7 @@ test("the happy path squash-merges the exact evaluated head", async () => {
 test("#4210-r3: a PR closed during the validation wait stops successfully before approval", async () => {
   const overrides = { 1465: {} };
   const github = fakeGateGithub({ headSha: OTHER_SHA, pullRequestsByNumber: overrides, runsAppearAfterReads: 1,
-    runsByHeadSha: { [OTHER_SHA]: [{ id: 701, event: "pull_request", conclusion: "action_required" }] },
+    runsByHeadSha: { [OTHER_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request", conclusion: "action_required" }] },
   });
   const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
     sleep: async () => { overrides[1465].state = "CLOSED"; },
@@ -5499,8 +5499,8 @@ test("#4210-r3: a head moving during validation recovery is recovered before pub
   const overrides = { 1465: {} };
   const github = fakeGateGithub({ headSha: OTHER_SHA, pullRequestsByNumber: overrides, runsAppearAfterReads: 1,
     runsByHeadSha: {
-      [OTHER_SHA]: [{ id: 701, event: "pull_request", conclusion: "action_required" }],
-      [newest]: [{ id: 702, event: "pull_request", conclusion: "action_required" }],
+      [OTHER_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request", conclusion: "action_required" }],
+      [newest]: [{ id: 702, name: "PR Validation", event: "pull_request", conclusion: "action_required" }],
     },
   });
   const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
@@ -5517,6 +5517,56 @@ test("#4210-r3: a successor with no PR runs uses the existing validation dispatc
   });
   assert.equal(targets[0].headSha, OTHER_SHA);
   assert.deepEqual(github.dispatchedWorkflows.map((run) => run.workflow_id), ["pr.yml"]);
+});
+
+for (const status of ["action_required", "queued", "in_progress"]) {
+  test(`#4210-r4: Docs appearing first cannot satisfy validation recovery (${status})`, async () => {
+    const runs = [{ id: 800, name: "Docs", event: "pull_request", status: "completed", conclusion: "action_required" }];
+    const github = fakeGateGithub({ headSha: OTHER_SHA, runsByHeadSha: { [OTHER_SHA]: runs } });
+    const waits = [];
+    await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+      headPollDelayMs: 7, sleep: async (ms) => {
+        waits.push(ms);
+        runs.push({ id: 801, name: "PR Validation", event: "pull_request",
+          status: status === "action_required" ? "completed" : status,
+          conclusion: status === "action_required" ? status : null });
+      },
+    });
+    assert.deepEqual(waits, [7]);
+    assert.deepEqual(github.approvedRuns.map((run) => run.run_id), status === "action_required" ? [800, 801] : [800]);
+    assert.deepEqual(github.dispatchedWorkflows, []);
+    assert.ok(github.runListReads.some((read) => read.workflow_id === "pr.yml"));
+  });
+}
+
+test("#4210-r4: unrelated PR runs do not suppress the validation dispatch fallback", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA, runsByHeadSha: { [OTHER_SHA]: [
+    { id: 800, name: "Dependency review", event: "pull_request", status: "queued", conclusion: null },
+  ] } });
+  await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465, sleep: async () => {} });
+  assert.deepEqual(github.dispatchedWorkflows.map((run) => run.workflow_id), ["pr.yml"]);
+  assert.deepEqual(github.approvedRuns, []);
+});
+
+test("#4210-r4: dispatch failure cannot supersede a concurrent successor PASS", async () => {
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: OTHER_SHA, runsByHeadSha: queuedRecoveryRuns() });
+  const dispatch = github.rest.actions.createWorkflowDispatch;
+  let successorCheckId;
+  github.rest.actions.createWorkflowDispatch = async (options) => {
+    if (options.workflow_id !== "auto-gate.yml") return dispatch(options);
+    const response = await github.rest.checks.create({ ...fakeContext().repo,
+      head_sha: OTHER_SHA, name: "Auto Gate decision", external_id: aggregateExternalId(OTHER_SHA),
+      status: "completed", conclusion: "success", output: { title: "PASS", summary: "Successor owner passed" },
+    });
+    successorCheckId = response.data.id;
+    throw new Error("recovery dispatch unavailable");
+  };
+  const { error } = await runApplyGateStep({ github });
+  assert.match(error.message, /recovery dispatch unavailable/);
+  assert.deepEqual(github.createdChecks.filter((check) => check.head_sha === OTHER_SHA).map((check) => check.conclusion), ["success"]);
+  assert.ok(!github.updatedChecks.some((check) => check.check_run_id === successorCheckId));
+  assert.equal(github.recoveryComments.length, 1);
+  assert.match(github.recoveryComments[0].body, /gh workflow run auto-gate.yml/);
 });
 
 // Review round three: recovery belongs to the live PR, not just a head read.
@@ -5536,13 +5586,9 @@ for (const observed of [true, false]) {
     assert.equal(github.recoveryComments.length, 1);
     assert.equal(github.recoveryComments[0].issue_number, 1465);
     assert.match(github.recoveryComments[0].body, /gh workflow run auto-gate.yml/);
-    if (observed) {
-      const current = github.createdChecks.find((check) => check.head_sha === OTHER_SHA &&
-        check.output?.title === "BLOCKED: Auto Gate recovery scheduling failed");
-      assert.ok(current, "instructions must not reuse the pre-update aggregate check ID");
-      assert.equal(current.conclusion, "failure");
-      assert.match(current.output.summary, /gh workflow run auto-gate.yml/);
-    }
+    assert.ok(!github.createdChecks.some((check) => check.head_sha === OTHER_SHA),
+      "the initiating lane must not publish a successor aggregate");
+    if (observed) assert.match(github.recoveryComments[0].body, new RegExp(OTHER_SHA));
   });
 }
 
@@ -5669,7 +5715,7 @@ test("#4210: ordinary manual resolution still accepts the current head without w
   assert.equal(targets[0].headSha, HEAD_SHA);
 });
 
-test("#4210: a recovery dispatch failure fails the workflow and publishes its command in the check", async () => {
+test("#4210: a recovery dispatch failure fails the workflow and publishes its command on the PR", async () => {
   const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: OTHER_SHA, runsByHeadSha: queuedRecoveryRuns(),
     workflowDispatchErrorsByWorkflow: { "auto-gate.yml": new Error("dispatch refused") },
   });
@@ -5678,11 +5724,9 @@ test("#4210: a recovery dispatch failure fails the workflow and publishes its co
   assert.match(error.message, /dispatch refused/);
   assert.match(error.message, /gh workflow run auto-gate.yml/);
   assert.doesNotMatch(error.message, /^Refusing to merge/);
-  const failure = github.createdChecks.find((check) => check.head_sha === OTHER_SHA && check.output?.title === "BLOCKED: Auto Gate recovery scheduling failed");
-  assert.ok(failure, "the required aggregate must expose the recovery command");
-  assert.equal(failure.conclusion, "failure");
-  assert.match(failure.output.summary, /dispatch refused/);
-  assert.match(failure.output.summary, /gh workflow run auto-gate.yml/);
+  assert.equal(github.recoveryComments.length, 1);
+  assert.match(github.recoveryComments[0].body, /dispatch refused/);
+  assert.match(github.recoveryComments[0].body, /gh workflow run auto-gate.yml/);
   assert.equal(github.workflowDispatchAttempts, 1);
 });
 
@@ -9714,6 +9758,12 @@ function fakeGateGithub({
     headShaAfterUpdate: null,
     rest: {
       actions: {
+        listWorkflowRuns: async (options) => {
+          assert.equal(options.workflow_id, "pr.yml");
+          const listed = await github.rest.actions.listWorkflowRunsForRepo(options);
+          const runs = listed.data.workflow_runs.filter((run) => run.name === "PR Validation");
+          return { data: { total_count: runs.length, workflow_runs: runs.slice(0, options.per_page) } };
+        },
         listWorkflowRunsForRepo: async (options) => {
           github.runListReads.push(options);
           // Per HEAD, not globally: evaluateRequiredChecks lists runs for the

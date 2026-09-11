@@ -1851,29 +1851,17 @@ async function processAggregateHead({
       if (error?.autoGateRecoveryFailure) {
         // A check belongs to a SHA, but this recovery belongs to the PR. Always
         // leave instructions on the PR: even an observed successor SHA can move
-        // again before publication. Never reuse the initiating check's ID.
+        // again before publication. This lane owns only the initiating head;
+        // creating a successor aggregate here could supersede its owner's PASS.
         const publicationErrors = [];
         try {
           await github.rest.issues.createComment({
             ...context.repo, issue_number: prNumber,
-            body: `## Auto Gate recovery failed\n\n${message}`,
+            body: `## Auto Gate recovery failed\n\n${message}` +
+              (error.autoGateRecoveryHeadSha ? `\n\nObserved post-update head: ${error.autoGateRecoveryHeadSha}` : ""),
           });
         } catch (publicationError) {
           publicationErrors.push(publicationError);
-        }
-        const recoveryHead = normalizeHeadSha(error.autoGateRecoveryHeadSha);
-        if (recoveryHead) {
-          try {
-            await createAggregateCheck({
-              github, context, core, headSha: recoveryHead,
-              decision: {
-                status: "completed", conclusion: "failure",
-                output: { title: "BLOCKED: Auto Gate recovery scheduling failed", summary: message },
-              },
-            });
-          } catch (publicationError) {
-            publicationErrors.push(publicationError);
-          }
         }
         if (publicationErrors.length) {
           throw new AggregateError([error, ...publicationErrors],
@@ -2305,7 +2293,7 @@ async function listParkedRuns({ github, context, headSha, subject = null }) {
 const VALIDATION_WORKFLOW = "pr.yml";
 const GATE_WORKFLOW = "auto-gate.yml";
 
-// Make sure SOMETHING is going to validate the head the gate just created.
+// Make sure PR Validation will validate the head the gate just created.
 //
 // GitHub does create a `pull_request` run for a bot-authored merge commit — parked
 // — and approveParkedRuns handles that. But "it always does" is an assumption,
@@ -2334,10 +2322,13 @@ async function ensureValidationRun({
   const { owner, repo } = context.repo;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (!await canRecover()) return { cancelled: true };
-    const listed = await retryRead(`could not list workflow runs for ${headSha}`, () =>
-      github.rest.actions.listWorkflowRunsForRepo({
+    const listed = await retryRead(`could not list PR Validation runs for ${headSha}`, () =>
+      github.rest.actions.listWorkflowRuns({
         owner,
         repo,
+        // Query the workflow identity, not its display name or the first run
+        // in the repository-wide listing. Docs can become visible earlier.
+        workflow_id: VALIDATION_WORKFLOW,
         head_sha: headSha,
         event: "pull_request",
         per_page: 1,
@@ -2361,7 +2352,7 @@ async function ensureValidationRun({
   if (!await canRecover()) return { cancelled: true };
   if (!headRefName) {
     core.warning(
-      `No pull_request run appeared for ${headSha} and the head ref is unknown, so PR Validation ` +
+      `No PR Validation pull_request run appeared for ${headSha} and the head ref is unknown, so PR Validation ` +
         "could not be dispatched; the decision will report the required checks as unreported.",
     );
     return { dispatched: false };
@@ -2374,7 +2365,7 @@ async function ensureValidationRun({
       ref: headRefName,
     });
     core.notice(
-      `No pull_request run appeared for ${headSha}; dispatched PR Validation on ${headRefName}.`,
+      `No PR Validation pull_request run appeared for ${headSha}; dispatched PR Validation on ${headRefName}.`,
     );
     return { dispatched: true };
   } catch (error) {
