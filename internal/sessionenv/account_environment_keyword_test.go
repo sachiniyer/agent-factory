@@ -79,6 +79,10 @@ func TestValidateAccountEnvironmentCommand_AllowsOrdinaryShellOptions(t *testing
 		// A `+`-prefixed flag does not end option parsing, but `--` still does:
 		// the `-k` after `--` is the positional parameter $1, not an option.
 		"set +e -- -k; npm run dev",
+		// A lone `-` is also a bash option terminator: bash documents it as
+		// "assign any remaining arguments to the positional parameters", so
+		// `-k` after `-` is $1, not an option that enables keyword mode.
+		"set +e - -k; npm run dev",
 		"hash -r; npm run dev",
 		"hash npm; npm run dev",
 		"npm run dev",

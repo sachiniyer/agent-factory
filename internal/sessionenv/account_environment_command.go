@@ -474,10 +474,13 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 		}
 		// `--` and the first non-option operand both end option parsing: every
 		// word after one is a positional parameter, so `set -- -k` assigns the
-		// string "-k" to $1 and enables nothing. A `+` prefix is a turn-OFF flag
-		// in bash, not a non-option operand, so it does NOT end the scan: `set
-		// +e -k` still enables keyword mode and must be caught by the loop below.
-		if value == "--" || (!strings.HasPrefix(value, "-") && !strings.HasPrefix(value, "+")) {
+		// string "-k" to $1 and enables nothing. A lone `-` is also a bash
+		// option terminator ("assign any remaining arguments to the positional
+		// parameters"); `set +e - -k` assigns "-k" to $1 and does NOT enable
+		// keyword mode. A `+` prefix is a turn-OFF flag in bash, not a
+		// non-option operand, so it does NOT end the scan: `set +e -k` still
+		// enables keyword mode and must be caught by the loop below.
+		if value == "--" || value == "-" || (!strings.HasPrefix(value, "-") && !strings.HasPrefix(value, "+")) {
 			return false
 		}
 		// A long-form switch names its mode in the next word. `+o keyword` turns
