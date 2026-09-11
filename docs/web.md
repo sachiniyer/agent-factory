@@ -63,8 +63,8 @@ Read the state words alongside the glyphs, rather than relying on color:
 | Archive icon and dimmed row | Archived session |
 | Working label | Work is in progress; the status dot is omitted |
 
-The secondary line includes idle detail and the branch when available, such as
-`Needs you · pane changed · 12m ago`. These are observations of terminal activity,
+The secondary line includes the branch when available, and the selected row adds
+idle detail, such as `Needs you · pane changed · 12m ago`. These are observations of terminal activity,
 not a claim that the agent finished or asked a question. Diagnostic title prefixes
 such as `[lost]`, `[deleting]`, `[limit]`, and `[remote]` add context.
 
