@@ -1005,8 +1005,10 @@ materializes nothing — a read-only check.
 
 This is the companion to a raw hand-edit. "af config set" validates every scalar
 and structured key before it writes and so cannot leave a broken file. A manual
-edit bypasses that protection: exit 0 means af can load it, while a non-zero exit
-names what must be fixed before the next launch.
+edit bypasses that protection: exit 0 means no config defect was found, while a
+non-zero exit names what must be fixed before the next launch. An inconclusive
+read-only directory-access probe does not prove that a later startup can
+regenerate an empty stub; text output warns, and JSON appends uncertain=true.
 
 Local-only: it checks the config on the machine it runs on, so
 --daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
