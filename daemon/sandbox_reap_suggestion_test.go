@@ -26,14 +26,19 @@ func TestRestoreSession_ReapAdviceRequiresDurableBranch(t *testing.T) {
 				missing      bool
 				unreadable   bool
 				wantForce    bool
+				repairHint   string
 			}{
 				{name: "unknown_branch", storedID: "current"},
-				{name: "missing_record", memoryBranch: "af/current", missing: true},
+				{name: "missing_record", memoryBranch: "af/current", missing: true, repairHint: "stored record is missing"},
 				{name: "unrecorded_branch", memoryBranch: "af/current", storedID: "current"},
 				{name: "blank_stored_branch", memoryBranch: "af/current", storedBranch: " \t", storedID: "current"},
-				{name: "reused_title", memoryBranch: "af/current", storedBranch: "af/current", storedID: "previous"},
+				{name: "reused_title", memoryBranch: "af/current", storedBranch: "af/current", storedID: "previous", repairHint: "different session"},
 				{name: "stale_branch", memoryBranch: "af/current", storedBranch: "af/previous", storedID: "current"},
-				{name: "record_read_error", memoryBranch: "af/current", unreadable: true},
+				{name: "record_read_error", memoryBranch: "af/current", unreadable: true, repairHint: "could not read its stored record"},
+				{name: "unknown_branch_missing_record", missing: true, repairHint: "stored record is missing"},
+				{name: "unknown_branch_read_error", unreadable: true, repairHint: "could not read its stored record"},
+				{name: "unknown_branch_reused_title", storedID: "previous", repairHint: "different session"},
+				{name: "reused_title_blank_branch", memoryBranch: "af/current", storedID: "previous", repairHint: "different session"},
 				{name: "durable_matching_branch", memoryBranch: "af/current", storedBranch: "af/current", storedID: "current", wantForce: true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
@@ -70,6 +75,17 @@ func TestRestoreSession_ReapAdviceRequiresDurableBranch(t *testing.T) {
 					require.Error(t, err)
 					require.Zero(t, backend.recoverCalls())
 					requireSandboxSurvived(t, reap, "restore refused before replacement")
+					if tc.repairHint != "" {
+						// The guard and both callers must retain repair advice. A
+						// title-only kill could target a successor or fail its tombstone.
+						for _, diagnostic := range []string{err.Error(), guardErr.Error()} {
+							require.NotContains(t, diagnostic, "sessions kill")
+							require.NotContains(t, diagnostic, "--force-reap")
+							require.Contains(t, diagnostic, tc.repairHint)
+							require.Contains(t, diagnostic, "Retry")
+						}
+						return
+					}
 					want, unwanted := killSuggestionFor(inst), forceReapSuggestionFor(inst)
 					if tc.wantForce {
 						want, unwanted = unwanted, want
