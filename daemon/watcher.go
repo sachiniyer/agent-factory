@@ -213,8 +213,10 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 	return w
 }
 
-// watcherSignature captures the fields that define the watch process itself;
-// a change to any of them restarts the script on reload.
+// watcherSignature captures the task generation and fields that define the
+// watch process itself; a change to any restarts the script on reload. Generation
+// is ownership, not configuration: a same-shaped task re-added under a reused ID
+// must not inherit the removed generation's watcher or its later status writes.
 // tailBuffer and its failure-summary helpers live in tailbuffer.go (extracted
 // to keep watcher.go under its file-length ceiling, #1145).
 

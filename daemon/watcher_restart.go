@@ -50,7 +50,7 @@ func (s *watcherSupervisor) restart(t task.Task) error {
 }
 
 func watcherSignature(t task.Task) string {
-	return t.WatchCmd + "\x00" + t.ProjectPath + "\x00" + t.Name
+	return t.GenerationID + "\x00" + t.WatchCmd + "\x00" + t.ProjectPath + "\x00" + t.Name
 }
 
 func stopWatchers(ws []*taskWatcher) {

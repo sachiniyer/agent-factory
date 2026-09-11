@@ -1,6 +1,9 @@
 package session
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // TaskRunIdentity is the durable association between a task delivery and the
 // session runtime that received it. TaskGenerationID binds the reusable TaskID
@@ -40,9 +43,10 @@ func (i *Instance) TaskRun() TaskRunIdentity {
 // tab replacement never reaches it. A prompt-redelivery fence is the explicit
 // exception: OpRespawning promises to re-deliver the queued task prompt, a
 // durable OpReplacing mission supplies the replacement agent's continuation
-// context, and a committed manual account swap with transaction-scoped
-// non-delivery proof is replayed by the limit scheduler after load. Each keeps
-// the run until that delivery transaction settles.
+// context, a load-respawned limit-parked task retains its stored queued prompt,
+// and a committed manual account swap with transaction-scoped non-delivery proof
+// is replayed by the limit scheduler after load. Each keeps the run until that
+// delivery transaction settles.
 //
 // The daemon must persist the closed session marker before publishing the task
 // outcome. ConfirmLive retains runEndsOnRestoredRuntime as a structural fallback
@@ -56,6 +60,7 @@ func (i *Instance) InterruptTaskRunAtRuntimeReplacement() (TaskRunIdentity, bool
 func (i *Instance) interruptTaskRunAtRuntimeReplacementLocked() (TaskRunIdentity, bool) {
 	replaysPrompt := i.inFlightOp == OpRespawning ||
 		(i.inFlightOp == OpReplacing && i.pendingHandoffMission != "") ||
+		(i.liveness == LiveLimitReached && i.TaskID != "" && strings.TrimSpace(i.Prompt) != "") ||
 		i.pendingAccountSwapPromptReplayableLocked()
 	if replaysPrompt || !i.taskRunActive {
 		return TaskRunIdentity{}, false
