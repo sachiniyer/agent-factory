@@ -109,3 +109,30 @@ func TestRootAgentInspectionSnapshotKeepsProfileAndOverridesOnOneGeneration(t *t
 	require.Equal(t, "codex", profile.Program)
 	require.Equal(t, "/old/codex", ResolveProgram(&resolved.Config, profile.Program))
 }
+
+func TestRootAgentInspectionSnapshotRejectsSamePathCheckoutReplacement(t *testing.T) {
+	_, repoRoot, project := registeredTestProject(t)
+	_, err := SetProjectConfigValue(project.ID, "root_agent", `{"enabled":true,"program":"codex"}`)
+	require.NoError(t, err)
+	_, err = SetProjectConfigValue(project.ID, "program_overrides.codex", "/original/codex")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	snapshot, err := ResolveRootAgentInspectionSnapshotWithConfigContext(ctx, DefaultConfig(), repoRoot, false)
+	require.NoError(t, err)
+
+	originalPath := repoRoot + ".original"
+	require.NoError(t, os.Rename(repoRoot, originalPath))
+	require.NoError(t, exec.Command("git", "init", repoRoot).Run())
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, InRepoConfigDirName), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, InRepoConfigDirName, TomlConfigFileName),
+		[]byte("[program_overrides]\ncodex = '/replacement/codex'\n"), 0o600))
+
+	replacement, err := RepoFromPath(repoRoot)
+	require.NoError(t, err)
+	resolved, err := snapshot.ResolveConfigForRepoContext(ctx, replacement)
+	require.ErrorIs(t, err, ErrRootAgentInspectionIdentityChanged,
+		"a path-derived repository ID cannot prove that a checkout at the same location is unchanged")
+	require.Nil(t, resolved, "documents from different checkout generations must not be combined")
+}

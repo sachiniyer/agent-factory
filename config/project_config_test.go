@@ -294,21 +294,35 @@ func TestProjectLookupMarkerProbeTimeoutIsUnknown(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
-func TestProjectConfigLockTreatsUnknownMarkerAsEnrichment(t *testing.T) {
+func TestProjectConfigLockRefusesCallbackAfterTransientMarkerFailure(t *testing.T) {
 	_, repoRoot, _ := registeredTestProject(t)
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
 	shimDir := t.TempDir()
 	shim := filepath.Join(shimDir, "git")
-	require.NoError(t, os.WriteFile(shim, []byte("#!/bin/sh\nexec /bin/sleep 5\n"), 0o755))
+	countPath := filepath.Join(shimDir, "marker-count")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$3" = "rev-parse" ] && [ "$4" = "--git-common-dir" ]; then
+  if [ ! -e %q ]; then
+    : > %q
+    exit 7
+  fi
+fi
+exec %q "$@"
+`, countPath, countPath, realGit)
+	require.NoError(t, os.WriteFile(shim, []byte(script), 0o755))
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	called := false
-	err := WithProjectConfigLockForRoot(repoRoot, func() error {
+	err = WithProjectConfigLockForRoot(repoRoot, func() error {
 		called = true
+		_, found, lookupErr := projectForRoot(repoRoot)
+		require.NoError(t, lookupErr, "the later policy read reproduces after the transient probe failure")
+		require.True(t, found)
 		return nil
 	})
-	require.NoError(t, err,
-		"an unanswered marker used only to select an extra lock must not replace the wrapped decision")
-	require.True(t, called, "the wrapped decision must still run when checkout identity is unknown")
+	require.Error(t, err, "an unknown identity cannot authorize an unlocked mutating callback")
+	require.False(t, called, "the callback must wait for a proven project-config lock")
 }
 
 func TestProjectForRootMatchesRegisteredRoot(t *testing.T) {

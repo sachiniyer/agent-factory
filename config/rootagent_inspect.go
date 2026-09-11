@@ -107,6 +107,7 @@ type RootAgentInspectionSnapshot struct {
 	global           *Config
 	personalDocument *sourceDocument
 	repositoryID     string
+	checkoutID       string
 }
 
 // ErrRootAgentInspectionIdentityChanged means two repository observations
@@ -135,6 +136,20 @@ func (s *RootAgentInspectionSnapshot) ResolveConfigForRepoContext(ctx context.Co
 		}
 		return nil, fmt.Errorf("%w: profile repository %s, command repository %s; rerun the inspection",
 			ErrRootAgentInspectionIdentityChanged, s.repositoryID, commandRepoID)
+	}
+	if s.checkoutID != "" {
+		if repo == nil {
+			return nil, fmt.Errorf("%w: the profile checkout was registered but the command repository is unresolved; rerun the inspection",
+				ErrRootAgentInspectionIdentityChanged)
+		}
+		checkoutID, found, err := checkoutIDForWorkspaceContext(ctx, repo.WorkspacePath())
+		if err != nil {
+			return nil, fmt.Errorf("verify root-agent inspection checkout identity: %w", err)
+		}
+		if !found || checkoutID != s.checkoutID {
+			return nil, fmt.Errorf("%w: the checkout at %s no longer carries the registered identity captured with the profile; rerun the inspection",
+				ErrRootAgentInspectionIdentityChanged, repo.WorkspacePath())
+		}
 	}
 	return resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx, repo, s.global, s.personalDocument)
 }
@@ -187,6 +202,7 @@ func rootAgentInspectionSnapshotFromAssembly(global *Config, assembly rootAgentI
 		global:           global,
 		personalDocument: assembly.personalDocument,
 		repositoryID:     assembly.repositoryID,
+		checkoutID:       assembly.checkoutID,
 	}
 }
 
@@ -212,6 +228,10 @@ type rootAgentInspectionAssembly struct {
 	// A related command resolve must prove it still addresses this repository
 	// before these documents can be combined with checked-in config.
 	repositoryID string
+	// checkoutID is the durable registered-checkout marker captured with the
+	// personal document. Unlike repositoryID, it changes when another clone
+	// replaces a checkout at the same canonical path.
+	checkoutID string
 	// personalDocument is the exact personal config layer that supplied inputs.
 	// A related effective-config resolve reuses it rather than reopening the file.
 	personalDocument *sourceDocument
@@ -349,6 +369,7 @@ func assembleRootAgentInspectionInputsFromConfigWithContext(ctx context.Context,
 			}
 		}
 		if found {
+			out.checkoutID = project.CheckoutID
 			pc, err := LoadProjectConfig(project.ID)
 			if err != nil {
 				// Fail CLOSED, like the daemon (#3241) — and explain rather than

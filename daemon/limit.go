@@ -640,12 +640,20 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			root = instance.Path
 		}
 		fallbackEligible := true
-		swapErr := config.WithProjectConfigLockForRoot(root, func() error {
-			var err error
-			fallbackEligible, err = m.commitNewAccountSwapIdentity(
-				repoID, key, requestedTitle, instance, accountSwap, liveConfig)
-			return err
-		})
+		var swapErr error
+		if accountSwap.manual {
+			if err := m.checkManualAccountSwap(instance, accountSwap); err != nil {
+				swapErr = fmt.Errorf("no configured account can replace the limited identity for %q: %w", requestedTitle, err)
+			}
+		}
+		if swapErr == nil {
+			swapErr = config.WithProjectConfigLockForRoot(root, func() error {
+				var err error
+				fallbackEligible, err = m.commitNewAccountSwapIdentity(
+					repoID, key, requestedTitle, instance, accountSwap, liveConfig)
+				return err
+			})
+		}
 		if swapErr != nil {
 			if !fallbackEligible || !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, swapErr) {
 				return resumeNotPerformed, swapErr

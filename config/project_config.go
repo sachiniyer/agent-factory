@@ -276,20 +276,13 @@ func isProjectRegistryReadError(err error) bool {
 }
 
 // checkoutMarkerProbeError preserves an UNKNOWN checkout-identity observation
-// so each caller can apply its own policy. Identity decisions keep the error and
-// fail closed; callers using the marker only to enrich an independent decision
-// may deliberately continue without a project match.
+// through the project lookup instead of collapsing it into marker absence.
 type checkoutMarkerProbeError struct {
 	err error
 }
 
 func (e *checkoutMarkerProbeError) Error() string { return e.err.Error() }
 func (e *checkoutMarkerProbeError) Unwrap() error { return e.err }
-
-func isCheckoutMarkerProbeError(err error) bool {
-	var target *checkoutMarkerProbeError
-	return errors.As(err, &target)
-}
 
 func projectForWorkspace(root string) (Project, bool, error) {
 	return projectForWorkspaceContext(context.Background(), root)
@@ -431,23 +424,14 @@ func ResolveRegisteredProjectRepoID(parent context.Context, project Project) (st
 
 // WithProjectConfigLockForRoot runs fn while holding the personal config file
 // lock for the registered project rooted at root. An unregistered root has no
-// supported personal-project writer, so fn runs without a lock. Registry and
-// lock failures are returned before fn runs.
+// supported personal-project writer, so fn runs without a lock. Registry,
+// checkout-identity, and lock failures are returned before fn runs.
 //
 // Identity-changing operations use this to keep their final personal-policy
 // read and durable identity checkpoint atomic with af config set/unset
 // --project. The ordinary resolver intentionally remains a point-in-time read.
 func WithProjectConfigLockForRoot(root string, fn func() error) error {
 	project, found, err := projectForRoot(root)
-	if isCheckoutMarkerProbeError(err) {
-		// The marker selects an extra personal-config lock; it is not the domain
-		// decision made by fn. An unanswered probe cannot establish a project to
-		// lock, but it must not replace an independent refusal (for example, a
-		// missing handoff executable) with an infrastructure diagnostic. Callers
-		// whose decision itself depends on checkout identity use the strict lookup
-		// paths above and keep failing closed.
-		return fn()
-	}
 	if err != nil {
 		return err
 	}
