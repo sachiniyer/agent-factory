@@ -206,10 +206,9 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			"structural keys config cannot touch — are listed last. Contextual pane\n" +
 			"actions such as pane_prev/pane_next are included; their default arrow keys\n" +
 			"apply only while a workspace pane has focus.\n\n" +
-			"When a user rebind takes another action's default, the affected row keeps any\n" +
-			"remaining keys and SOURCE names each removed key and its taker. A fully\n" +
-			"suppressed action shows an em dash instead of a key. JSON appends the same\n" +
-			"key/taker pairs in suppressed_by.\n\n" +
+			"Every default key removed by a user rebind is named in SOURCE with its taker.\n" +
+			"The affected row keeps any remaining keys; when none remain, it shows an em\n" +
+			"dash instead. JSON appends the same key/taker pairs in suppressed_by.\n\n" +
 			"Key values use config spellings you can paste into [keys]. With --json,\n" +
 			"bindings are wrapped in {data,error}; keys/default keep those spellings.",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -262,11 +261,10 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 				}
 				switch {
 				case len(info.SuppressedBy) > 0:
-					if len(info.Keys) == 0 {
-						source = fmt.Sprintf("taken by %s", strings.Join(suppressionTakers(info.SuppressedBy), ", "))
-					} else {
-						source = fmt.Sprintf("(%s)", strings.Join(suppressedKeyDetails(info.SuppressedBy), "; "))
-					}
+					// This is one invariant, not separate full/partial cases: every
+					// suppressed key is always attributed to every override that took
+					// it. Whether any active keys remain affects only the KEYS cell.
+					source = fmt.Sprintf("(%s)", strings.Join(suppressedKeyDetails(info.SuppressedBy), "; "))
 				case info.Action == "":
 					source = "fixed"
 				case info.Rebound:
@@ -288,20 +286,6 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 // alphabetize the existing public fields (#4221).
 type keysJSONBinding struct {
 	keys.BindingInfo
-}
-
-func suppressionTakers(suppressed []keys.SuppressedKey) []string {
-	var takers []string
-	seen := make(map[string]bool)
-	for _, lost := range suppressed {
-		for _, taker := range lost.TakenBy {
-			if !seen[taker] {
-				takers = append(takers, taker)
-				seen[taker] = true
-			}
-		}
-	}
-	return takers
 }
 
 func suppressedKeyDetails(suppressed []keys.SuppressedKey) []string {

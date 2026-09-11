@@ -409,8 +409,9 @@ type BindingInfo struct {
 	Default []string `json:"default"`
 	// Rebound reports whether an override replaced the default.
 	Rebound bool `json:"rebound"`
-	// SuppressedBy identifies each inactive default key and the user-rebound
-	// actions that took it. The CLI appends it to JSON only when non-empty.
+	// SuppressedBy has one entry for every inactive default key, whether or not
+	// other keys remain active, and attributes each to every user-rebound action
+	// that took it. The CLI appends it to JSON only when non-empty.
 	SuppressedBy []SuppressedKey `json:"-"`
 }
 

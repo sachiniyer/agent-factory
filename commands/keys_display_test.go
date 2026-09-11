@@ -143,7 +143,7 @@ func normalizedKeysDisplayLine(output, firstField string) string {
 	return ""
 }
 
-func TestKeysDisplayReportsFullySuppressedDefaults(t *testing.T) {
+func TestKeysDisplayReportsFullySuppressedDefaultByOneOverride(t *testing.T) {
 	tempAFHome(t)
 	path := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "config.toml")
 	if err := os.WriteFile(path, []byte(`[keys]
@@ -157,8 +157,8 @@ tasks = "ctrl+t"
 
 	textOutput := runKeysDisplay(t, false)
 	for action, want := range map[string]string{
-		"limit_retry":    "limit_retry — taken by new",
-		"switch_project": "switch_project — taken by up",
+		"limit_retry":    "limit_retry — (c taken by new)",
+		"switch_project": "switch_project — (ctrl+p taken by up)",
 	} {
 		got := normalizedKeysDisplayLine(textOutput, action)
 		if got != want {
@@ -217,6 +217,31 @@ func TestKeysDisplayReportsPartiallySuppressedDefault(t *testing.T) {
 	t.Fatal("af keys --json omitted up")
 }
 
+func TestKeysDisplayReportsFullySuppressedDefaultBySeveralOverrides(t *testing.T) {
+	tempAFHome(t)
+	path := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "config.toml")
+	if err := os.WriteFile(path, []byte("[keys]\nnew = \"k\"\nquit = \"up\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	textOutput := runKeysDisplay(t, false)
+	if got, want := normalizedKeysDisplayLine(textOutput, "up"), "up — (up taken by quit; k taken by new)"; got != want {
+		t.Fatalf("fully suppressed multi-key up row = %q, want %q\n%s", got, want, textOutput)
+	}
+	for _, row := range decodeKeysDisplayJSON(t, runKeysDisplay(t, true)) {
+		if row.Action != "up" {
+			continue
+		}
+		if len(row.Keys) != 0 || len(row.SuppressedBy) != 2 ||
+			row.SuppressedBy[0].Key != "up" || len(row.SuppressedBy[0].TakenBy) != 1 || row.SuppressedBy[0].TakenBy[0] != "quit" ||
+			row.SuppressedBy[1].Key != "k" || len(row.SuppressedBy[1].TakenBy) != 1 || row.SuppressedBy[1].TakenBy[0] != "new" {
+			t.Fatalf("fully suppressed multi-key up JSON = keys %v, suppressed_by %v", row.Keys, row.SuppressedBy)
+		}
+		return
+	}
+	t.Fatal("af keys --json omitted up")
+}
+
 func TestKeysDisplayIdentifiesSuppressedFixedAction(t *testing.T) {
 	tempAFHome(t)
 	path := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "config.toml")
@@ -225,7 +250,7 @@ func TestKeysDisplayIdentifiesSuppressedFixedAction(t *testing.T) {
 	}
 
 	textOutput := runKeysDisplay(t, false)
-	want := "jump to tab (number or name) — taken by new"
+	want := "jump to tab (number or name) — (g taken by new)"
 	var got string
 	for _, line := range strings.Split(textOutput, "\n") {
 		if strings.Contains(line, "jump to tab (number or name)") {
