@@ -88,6 +88,7 @@ for (const width of [1280, 390]) {
     await expect(code).toBeFocused();
     await page.keyboard.press("Enter");
     await expect.poll(() => creates.map(c => c.kind)).toEqual(["vscode"]);
+    await expect(page.locator(".af-toast")).toContainText("picker test refusal");
     await expect(page.locator(".af-term-title")).toHaveText(session.title);
     expect(page.url()).toContain(encodeURIComponent(session.id));
     await page.keyboard.press("Control+]");
