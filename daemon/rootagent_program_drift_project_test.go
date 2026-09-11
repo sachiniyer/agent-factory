@@ -127,31 +127,31 @@ func TestAdoptedRootProgramDriftSkipsUserKilledRuntime(t *testing.T) {
 	}
 }
 
-func TestFailedAdoptedRootProgramInspectionBacksOffWhileReaderStaysBlocked(t *testing.T) {
+func TestTimedOutAdoptedRootProgramInspectionStaysSingleFlightUntilReaderExits(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
 	previousInterval := rootProgramDriftConfigInspectionInterval
 	previousBudget := rootRepoProbeBudget
 	previousResolve := resolveRootProgramConfigForInspection
-	rootProgramDriftConfigInspectionInterval = 30 * time.Second
-	rootRepoProbeBudget = 100 * time.Millisecond
+	rootProgramDriftConfigInspectionInterval = 20 * time.Millisecond
+	rootRepoProbeBudget = 50 * time.Millisecond
 	readerRelease := make(chan struct{})
-	readerDone := make(chan struct{}, 2)
-	resolveStarted := make(chan struct{}, 2)
-	resolveRootProgramConfigForInspection = func(ctx context.Context, _ *config.RepoContext, _ *config.Config) (*config.ResolvedConfig, error) {
+	readerDone := make(chan struct{}, 3)
+	resolveStarted := make(chan struct{}, 3)
+	released := false
+	resolveRootProgramConfigForInspection = func(_ *config.RepoContext, _ *config.Config) (*config.ResolvedConfig, error) {
 		resolveStarted <- struct{}{}
-		go func() {
-			<-readerRelease
-			readerDone <- struct{}{}
-		}()
-		<-ctx.Done()
-		return nil, ctx.Err()
+		<-readerRelease
+		readerDone <- struct{}{}
+		return &config.ResolvedConfig{Config: *config.DefaultConfig()}, nil
 	}
 	t.Cleanup(func() {
 		rootProgramDriftConfigInspectionInterval = previousInterval
 		rootRepoProbeBudget = previousBudget
 		resolveRootProgramConfigForInspection = previousResolve
-		close(readerRelease)
+		if !released {
+			close(readerRelease)
+		}
 	})
 
 	repoPath := setupControlRepo(t)
@@ -163,7 +163,7 @@ func TestFailedAdoptedRootProgramInspectionBacksOffWhileReaderStaysBlocked(t *te
 		t.Fatalf("create pre-existing root: %v", err)
 	}
 	root := findRootInstance(t, manager, repoPath)
-	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "claude"))
+	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "codex"))
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
 		t.Fatal(err)
@@ -178,17 +178,60 @@ func TestFailedAdoptedRootProgramInspectionBacksOffWhileReaderStaysBlocked(t *te
 	case <-time.After(5 * time.Second):
 		t.Fatal("first drift inspection did not start")
 	}
-	waitForRootProgramResolutionIdle(t, manager, st)
-	select {
-	case <-readerDone:
-		t.Fatal("simulated uncancellable reader stopped before the retry decision")
-	default:
-	}
-
+	waitForRootProgramResolutionParked(t, manager, st)
+	time.Sleep(2 * rootProgramDriftConfigInspectionInterval)
 	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root)
 	select {
 	case <-resolveStarted:
-		t.Fatal("second drift inspection started while the first reader was still blocked")
-	case <-time.After(200 * time.Millisecond):
+		t.Fatal("elapsed backoff admitted a second inspection while the first reader was still blocked")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(readerRelease)
+	released = true
+	select {
+	case <-readerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("released reader did not exit")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root)
+		manager.mu.Lock()
+		resolving := st.programDriftResolving
+		manager.mu.Unlock()
+		if !resolving {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("completed reader did not release the single-flight state")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	time.Sleep(2 * rootProgramDriftConfigInspectionInterval)
+	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root)
+	select {
+	case <-resolveStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a completed reader did not permit the next inspection")
+	}
+	waitForRootProgramResolutionIdle(t, manager, st)
+}
+
+func waitForRootProgramResolutionParked(t *testing.T, manager *Manager, st *rootEnsureState) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		manager.mu.Lock()
+		parked := st.programDriftResolving && st.programDriftResolverDone != nil
+		manager.mu.Unlock()
+		if parked {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for root program resolution to retain its reader")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

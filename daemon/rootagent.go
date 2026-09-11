@@ -137,8 +137,13 @@ type rootEnsureState struct {
 	// before the refresh. The key fields also identify a failed attempt so its
 	// retry delay applies only while those same resolution inputs remain current;
 	// programDriftResolved alone says the cached command is valid.
-	programDriftResolving         bool
-	programDriftResolvingEpoch    uint64
+	programDriftResolving      bool
+	programDriftResolvingEpoch uint64
+	// programDriftResolverDone is non-nil after the caller's wait budget expires
+	// while the synchronous config reader is still alive. The resolving bit stays
+	// set until this exact worker exits: os.ReadFile cannot be canceled, so a time
+	// backoff alone would merely reduce the rate of stranded readers.
+	programDriftResolverDone      <-chan struct{}
 	programDriftResolved          bool
 	programDriftResolvedEpoch     uint64
 	programDriftResolvedRepoID    string
