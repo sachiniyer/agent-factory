@@ -8389,7 +8389,7 @@ var TerminalSoftInput = class {
   }
   queueTrailingFlush(range) {
     const trailingLength = range.trailingLength ?? 0;
-    if (!trailingLength || !range.frozenText || range.trailingFlush) return;
+    if (!trailingLength || !range.frozenText || range.trailingFlush || range.queuedInput) return;
     const text = range.frozenText.slice(-trailingLength);
     const flush = { text };
     range.trailingFlush = flush;
