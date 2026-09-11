@@ -681,6 +681,15 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	}
 
 	if !w.tryReserveEventSlot() {
+		// A rate-full window is normally permission to drop a chatty source's
+		// newest event. A targeted session already at a usage limit is different:
+		// this distinct event was never attempted and must establish protected
+		// backlog before the ordinary rate policy can consume it. The observer is
+		// fail-closed and ordered against in-flight limit snapshots.
+		if w.targetLimitRequiresRetention() {
+			w.enqueueEvent(line, tail, true)
+			return
+		}
 		now := time.Now()
 		w.mu.Lock()
 		w.dropped++

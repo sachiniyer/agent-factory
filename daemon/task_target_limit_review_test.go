@@ -319,6 +319,41 @@ func TestExistingBacklogIsProtectedBeforeLimitBurstCanEvict(t *testing.T) {
 	}
 }
 
+func TestLimitedTargetQueuesBeforeLiveRateDrop(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "limited-rate", readyFakeBackend{session.NewFakeBackend()}, true, session.Running)
+	manager.setLimitReached(inst, time.Now().Add(time.Hour))
+	if err := task.AddTask(task.Task{
+		ID: "a4223110", Name: "watch-limited-rate", Prompt: "event: {{line}}",
+		WatchCmd: "watch.sh", TargetSession: "limited-rate", ProjectPath: repoPath,
+		Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	s := newWatcherSupervisor()
+	s.observeTargetLimit = manager.observeTaskTargetLimit
+	stopCh := make(chan struct{})
+	close(stopCh)
+	w := &taskWatcher{
+		taskID: "a4223110", sup: s, queue: newEventQueue(t.TempDir(), "a4223110"), stopCh: stopCh,
+	}
+	for i := 0; i < s.eventsPerMinute; i++ {
+		w.eventTimes = append(w.eventTimes, time.Now())
+	}
+
+	w.handleEvent("must-survive-rate-window", &tailBuffer{})
+	if got := w.queue.pendingCount(); got != 1 {
+		t.Fatalf("limited target event was rate-dropped: pending=%d", got)
+	}
+	if !w.queue.retainLimitParked() {
+		t.Fatal("limited target event did not establish protected backlog")
+	}
+	if w.dropped != 0 {
+		t.Fatalf("limited target event incremented rate-drop counter: %d", w.dropped)
+	}
+}
+
 func TestStopPersistsCompleteEventsPrefetchedBeforeLimitBackpressure(t *testing.T) {
 	queue := newEventQueue(t.TempDir(), "a4223103")
 	if err := queue.enqueue("already-parked", true); err != nil {
