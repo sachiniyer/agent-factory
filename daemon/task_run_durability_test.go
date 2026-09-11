@@ -147,6 +147,13 @@ func TestInterruptedTaskSessionWriteFailureKeepsReplacementFenced(t *testing.T) 
 	failedWrites, _, heal := fullDiskFor(t, inst.Title, diskFull)
 	require.ErrorIs(t, manager.prepareRuntimeReplacement(repoID, key, inst), diskFull)
 	require.Positive(t, failedWrites(), "the witness must fail the interrupted-session checkpoint")
+	pending, owed := inst.PendingTaskRunInterruption()
+	require.True(t, owed, "the durable outbox must remain raised until its own checkpoint lands")
+	require.Equal(t, inst.ID, pending.SessionID)
+	beforeRetry, err := task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	require.Equal(t, task.RunStatusStarted, beforeRetry.LastRunStatus,
+		"task outcome publication must not outrun the session record that makes the close restart-durable")
 	require.NoError(t, inst.Transition(session.ConfirmLive()))
 	require.Equal(t, session.OpRestoring, inst.GetInFlightOp(),
 		"the replacement must stay fenced while disk could resurrect the predecessor's active run")
