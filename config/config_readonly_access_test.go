@@ -1,3 +1,5 @@
+//go:build linux
+
 package config
 
 import (
@@ -17,17 +19,27 @@ func TestLoadConfigReadOnly_EmptyStubOldKernelACL(t *testing.T) {
 	fastShell(t)
 	home := seedHome(t, "# placeholder\n")
 	original := configDirectoryFaccessat
-	t.Cleanup(func() { configDirectoryFaccessat = original })
+	oldEffective, oldCapget := configDirectoryFaccessat2, configDirectoryCapget
+	t.Cleanup(func() {
+		configDirectoryFaccessat = original
+		configDirectoryFaccessat2, configDirectoryCapget = oldEffective, oldCapget
+	})
+	// This is routing coverage with simulated capability-free credentials.
+	configDirectoryCapget = func(_ *unix.CapUserHeader, _ *unix.CapUserData) error { return nil }
 
 	for _, tc := range []struct {
-		name      string
-		kernelErr error
+		name        string
+		kernelErr   error
+		unavailable error
 	}{
-		{name: "ACL grants access"},
-		{name: "ACL denies access", kernelErr: unix.EACCES},
+		{name: "ENOSYS ACL grants access", unavailable: unix.ENOSYS},
+		{name: "ENOSYS ACL denies access", kernelErr: unix.EACCES, unavailable: unix.ENOSYS},
+		{name: "EPERM ACL grants access", unavailable: unix.EPERM},
+		{name: "EPERM ACL denies access", kernelErr: unix.EACCES, unavailable: unix.EPERM},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
+			configDirectoryFaccessat2 = func(int, string, uint32, int) error { return tc.unavailable }
 			configDirectoryFaccessat = func(dirfd int, path string, mode uint32, flags int) error {
 				called = true
 				assert.Equal(t, unix.AT_FDCWD, dirfd)

@@ -221,14 +221,7 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 				// Check directory write/search access using effective credentials without
 				// creating a probe file. This is necessary for self-heal, not proof
 				// that removal will succeed (e.g. sticky bits, immutable files, races).
-				// With matching credentials, flags 0 uses the kernel's ACL-aware
-				// faccessat even on older Linux. AT_EACCESS can fall back to
-				// ACL-blind mode-bit emulation when faccessat2 is unavailable.
-				flags := unix.AT_EACCESS
-				if os.Getuid() == os.Geteuid() && os.Getgid() == os.Getegid() {
-					flags = 0
-				}
-				if err := configDirectoryFaccessat(unix.AT_FDCWD, configDir, unix.W_OK|unix.X_OK, flags); err != nil {
+				if err := checkConfigDirectoryAccess(configDir); err != nil {
 					return ReadOnlyConfigLoad{Path: tomlPath}, fmt.Errorf("cannot write to config directory %s: %w", prettyHomePath(configDir), err)
 				}
 				return ReadOnlyConfigLoad{Path: tomlPath, EmptyStub: true, Config: DefaultConfig()}, nil
