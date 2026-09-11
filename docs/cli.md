@@ -309,7 +309,8 @@ came from a dead Agent Factory session, removes stale temp homes, stops daemons
 proven to be running a temp-dir binary, removes dead-socket directories, and
 removes orphaned host-key pins, logging each action; anything it cannot verify is
 reported, never touched, and stays advisory rather than failing the run. Exits 1
-only when an actionable condition remains — advisory warnings do not.
+when an actionable condition remains or a check stopped before finishing —
+advisory warnings do not.
 
 The last two are the debris a test or debug run leaves behind (#3845). A daemon
 whose binary lives under the temp dir is not an install, and one that has been up
