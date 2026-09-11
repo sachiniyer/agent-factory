@@ -32,6 +32,10 @@ on:
         description: Pull request number to evaluate
         required: true
         type: number
+      previous_head_sha:
+        description: Initiating head that an update-branch recovery must wait to move past
+        required: false
+        type: string
 
 permissions:
   contents: write

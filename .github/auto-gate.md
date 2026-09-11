@@ -111,16 +111,27 @@ inside the existence check could not repair that exit, and it never dispatched
 Auto Gate itself.
 
 After immediate recovery, the gate now dispatches `auto-gate.yml` on the trusted
-base branch with `pr_number`, even if the head read was stale or recovery failed.
-The successor uses the existing resolver to bind to the PR's current head when
-it starts, rather than evaluating the superseded SHA that initiated the update.
+base branch with `pr_number` and the initiating `previous_head_sha`, even if the
+head read was stale or recovery failed. The successor resolver excludes that
+initiating SHA: it reads up to six times, five seconds apart, until a different
+valid head is visible. It publishes no target while the initiating SHA remains
+visible. Exhaustion fails the resolver job with a recovery command rather than
+silently fixing a stale target in the serialized lane. Ordinary manual dispatch
+without `previous_head_sha` keeps its existing single-read behavior.
 Only an accepted update schedules this successor; ordinary evaluations do not
 schedule themselves. Existing approval checks still write only to parked
 `pull_request` runs, leaving queued/running runs alone.
 
-The dispatch is single-shot. A failure is reported in the refusal with the
-exact `gh workflow run auto-gate.yml ... -f pr_number=N` recovery command; an
-ambiguous write is not retried or described as confirmed scheduling.
+The dispatch is single-shot. A failure is an infrastructure error, not an
+ordinary merge refusal: the aggregate caller publishes its recovery command in
+the required check and rethrows it to fail the workflow. The command includes
+both `pr_number` and `previous_head_sha`. An ambiguous write is not retried or
+described as confirmed scheduling. Ordinary merge refusals remain waiting states.
+
+The first version of this fix reproduced the class of failure it was meant to
+remove: its caller could report recovery as handled while the promised work
+never happened. A stale successor target and a swallowed dispatch error are now
+tested through their consumers, not just through the helper producing them.
 
 **A base that moves between the compare and the merge waits; it does not red the
 run (#3808).** `PUT /pulls/N/merge` answers 405 `Base branch was modified` when

@@ -1848,6 +1848,19 @@ async function processAggregateHead({
           `Merge attempt and aggregate invalidation both failed on ${pending.headSha}`,
         );
       }
+      if (error?.autoGateRecoveryFailure) {
+        // Infrastructure failure, not ordinary refusal/waiting. Publish the
+        // promised command in the required check AND fail the workflow caller.
+        await upsertAggregateCheck({
+          github, context, core, headSha: pending.headSha,
+          checkRuns: [], checkRunId: invalidated.checkRunId,
+          decision: {
+            status: "completed", conclusion: "failure",
+            output: { title: "BLOCKED: Auto Gate recovery scheduling failed", summary: message },
+          },
+        });
+        throw error;
+      }
       if (isReadFailure(error)) {
         const blocked = await blockAggregateEvaluation({
           github,
@@ -2509,28 +2522,32 @@ async function merge({
     // head visibility, run appearance, and the success of immediate recovery.
     //
     // Use master's trusted workflow and the existing PR-number input. Its
-    // resolver binds the successor to the CURRENT PR/head pair when it starts;
-    // carrying gate.headSha here would bind it to the superseded head instead.
+    // resolver carries the initiating SHA as an exclusion: it waits until a
+    // different head is visible before publishing any target. A single read of
+    // "current" can be stale in the successor just as it was in this run.
     // Single-shot: a dispatch accepted before a transport error must not be
     // replayed. If scheduling fails, report a concrete recovery command.
     const recoveryCommand =
-      `gh workflow run ${GATE_WORKFLOW} --repo ${owner}/${repo} --ref ${gate.baseRefName} -f pr_number=${prNumber}`;
+      `gh workflow run ${GATE_WORKFLOW} --repo ${owner}/${repo} --ref ${gate.baseRefName} ` +
+      `-f pr_number=${prNumber} -f previous_head_sha=${gate.headSha}`;
     try {
       await github.rest.actions.createWorkflowDispatch({
         owner,
         repo,
         workflow_id: GATE_WORKFLOW,
         ref: gate.baseRefName,
-        inputs: { pr_number: String(prNumber) },
+        inputs: { pr_number: String(prNumber), previous_head_sha: gate.headSha },
       });
     } catch (error) {
-      throw new Error(
-        `Refusing to merge PR #${prNumber}; update was accepted but Auto Gate follow-up scheduling failed: ` +
+      const failure = new Error(
+        `Auto Gate infrastructure failure for PR #${prNumber}: update was accepted but follow-up scheduling failed: ` +
           `${formatError(error)}${recoveryError ? `; immediate recovery also failed: ${formatError(recoveryError)}` : ""}. ` +
           `Run ${recoveryCommand}`,
       );
+      failure.autoGateRecoveryFailure = true;
+      throw failure;
     }
-    const scheduled = `Auto Gate follow-up scheduled for PR #${prNumber}; its resolver will bind to the current head`;
+    const scheduled = `Auto Gate follow-up scheduled for PR #${prNumber}; its resolver must observe a head different from ${gate.headSha}`;
     core.notice(scheduled);
     throw new Error(
       `Refusing to merge PR #${prNumber}; ${reason}; ${scheduled}` +
@@ -3309,9 +3326,19 @@ async function sweepMergedHeadRefs({
   };
 }
 
-async function resolveTargets({ github, context, core, prNumber }) {
+async function resolveTargets({
+  github, context, core, prNumber,
+  headPollAttempts = 6,
+  headPollDelayMs = 5000,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
   const numbers = [];
   const payload = context.payload;
+  const rawPreviousHead = context.eventName === "workflow_dispatch"
+    ? payload.inputs?.previous_head_sha || "" : "";
+  const previousHead = rawPreviousHead ? normalizeHeadSha(rawPreviousHead) : null;
+  if (rawPreviousHead && !previousHead) throw new Error("Invalid previous_head_sha for Auto Gate recovery");
+  if (previousHead && !prNumber) throw new Error("Auto Gate recovery requires an explicit PR number");
 
   if (prNumber) {
     numbers.push(prNumber);
@@ -3332,7 +3359,24 @@ async function resolveTargets({ github, context, core, prNumber }) {
   const sourceSha = payload.check_suite?.head_sha || payload.workflow_run?.head_sha || payload.sha;
   const targets = [];
   for (const number of [...new Set(numbers.filter(Boolean))]) {
-    const pr = await getPullRequest({ github, context, number });
+    let pr = await getPullRequest({ github, context, number });
+    if (previousHead) {
+      // An update can remain invisible after the dispatch starts. Do not freeze
+      // that stale SHA into workflow outputs and rely on a suppressed event to
+      // repair the serialized lane's later association-changed result (#4210).
+      for (let attempt = 1; normalizeHeadSha(pr.headRefOid) === previousHead && attempt < headPollAttempts; attempt += 1) {
+        await sleep(headPollDelayMs);
+        pr = await getPullRequest({ github, context, number });
+      }
+      if (!normalizeHeadSha(pr.headRefOid) || normalizeHeadSha(pr.headRefOid) === previousHead) {
+        const { owner, repo } = context.repo;
+        throw new Error(
+          `Auto Gate recovery for PR #${number} still exposes initiating head ${previousHead}; no stale target was published. ` +
+          `Run gh workflow run ${GATE_WORKFLOW} --repo ${owner}/${repo} --ref master ` +
+          `-f pr_number=${number} -f previous_head_sha=${previousHead}`,
+        );
+      }
+    }
     if (
       sourceSha &&
       (pr.state !== "OPEN" || pr.merged || pr.baseRefName !== "master" || pr.headRefOid !== sourceSha)

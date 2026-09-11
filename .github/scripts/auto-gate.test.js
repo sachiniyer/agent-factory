@@ -5481,6 +5481,95 @@ test("the happy path squash-merges the exact evaluated head", async () => {
 // computed against the tree that actually lands.
 // ---------------------------------------------------------------------------
 
+// #4210 review: exercise the resolver and workflow caller, not only merge().
+function recoveryContext(previous = HEAD_SHA) {
+  return { ...fakeContext(), eventName: "workflow_dispatch",
+    payload: { inputs: { pr_number: "1465", previous_head_sha: previous } } };
+}
+
+test("#4210: dispatch carries the initiating head into the successor", async () => {
+  const github = fakeGateGithub({ behindBy: 1 });
+  await assert.rejects(() => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }), /Refusing to merge/);
+  assert.equal(github.dispatchedWorkflows[0].inputs.previous_head_sha, HEAD_SHA);
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  assert.match(workflow, /previous_head_sha:\n(?:.*\n)*? {8}type: string/);
+});
+
+test("#4210: a successor waits through stale reads before publishing its target", async () => {
+  const overrides = { 1465: { headRefOid: HEAD_SHA } };
+  const github = fakeGateGithub({ pullRequestsByNumber: overrides });
+  const delays = [];
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    headPollAttempts: 3, headPollDelayMs: 7, sleep: async (ms) => {
+      delays.push(ms);
+      if (delays.length === 2) overrides[1465].headRefOid = OTHER_SHA;
+    },
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.deepEqual(delays, [7, 7]);
+  assert.equal(github.graphqlReadsByNumber[1465], 3);
+});
+
+test("#4210: an already-visible successor head resolves without waiting", async () => {
+  const targets = await autoGate.resolveTargets({ github: fakeGateGithub({ headSha: OTHER_SHA }),
+    context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => assert.fail("new head needs no wait"),
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+});
+
+test("#4210: a permanently stale successor fails with recovery instructions, never a stale target", async () => {
+  const github = fakeGateGithub();
+  await assert.rejects(() => autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    headPollAttempts: 3, sleep: async () => {},
+  }), (error) => {
+    assert.match(error.message, /still exposes initiating head/);
+    assert.match(error.message, /gh workflow run auto-gate.yml/);
+    assert.match(error.message, new RegExp(`previous_head_sha=${HEAD_SHA}`));
+    return true;
+  });
+  assert.equal(github.graphqlReadsByNumber[1465], 3);
+});
+
+test("#4210: malformed initiating SHAs cannot disable the successor wait", async () => {
+  await assert.rejects(() => autoGate.resolveTargets({ github: fakeGateGithub(), context: recoveryContext("invalid"),
+    core: fakeCore(), prNumber: 1465,
+  }), /Invalid previous_head_sha/);
+});
+
+test("#4210: ordinary manual resolution still accepts the current head without waiting", async () => {
+  const targets = await autoGate.resolveTargets({ github: fakeGateGithub(), context: recoveryContext(""),
+    core: fakeCore(), prNumber: 1465, sleep: async () => assert.fail("ordinary manual dispatch must not wait"),
+  });
+  assert.equal(targets[0].headSha, HEAD_SHA);
+});
+
+test("#4210: a recovery dispatch failure fails the workflow and publishes its command in the check", async () => {
+  const github = fakeGateGithub({ behindBy: 1,
+    workflowDispatchErrorsByWorkflow: { "auto-gate.yml": new Error("dispatch refused") },
+  });
+  const { error } = await runApplyGateStep({ github });
+  assert.ok(error, "processAggregateHead must not swallow infrastructure failure as waiting");
+  assert.match(error.message, /dispatch refused/);
+  assert.match(error.message, /gh workflow run auto-gate.yml/);
+  assert.doesNotMatch(error.message, /^Refusing to merge/);
+  const failure = github.updatedChecks.find((check) => check.output?.title === "BLOCKED: Auto Gate recovery scheduling failed");
+  assert.ok(failure, "the required aggregate must expose the recovery command");
+  assert.equal(failure.conclusion, "failure");
+  assert.match(failure.output.summary, /dispatch refused/);
+  assert.match(failure.output.summary, /gh workflow run auto-gate.yml/);
+  assert.equal(github.workflowDispatchAttempts, 1);
+});
+
+test("#4210: ordinary update refusal remains a successful waiting workflow", async () => {
+  const github = fakeGateGithub({ behindBy: 1 });
+  const { error, notices } = await runApplyGateStep({ github });
+  assert.equal(error, null);
+  assert.match(notices.join("\n"), /Refusing to merge PR #1465; head is behind/);
+  assert.equal(github.createdChecks.at(-1).conclusion, "failure");
+  assert.equal(github.mergeAttempts, 0);
+});
+
 // #4209: update-branch can return before the PR read exposes the new SHA.
 // In that window the existing approval/existence helpers are never reached.
 // A successor must be scheduled even though the current run cannot see its head.
@@ -5500,9 +5589,9 @@ test("#4209: an accepted update with a stale head read schedules the gate that a
   const scheduled = github.dispatchedWorkflows[0];
   assert.deepEqual(scheduled, {
     owner: "sachiniyer", repo: "agent-factory", workflow_id: "auto-gate.yml",
-    ref: "master", inputs: { pr_number: "1465" },
+    ref: "master", inputs: { pr_number: "1465", previous_head_sha: HEAD_SHA },
   });
-  const context = { ...fakeContext(), eventName: "workflow_dispatch", payload: {} };
+  const context = { ...fakeContext(), eventName: "workflow_dispatch", payload: { inputs: scheduled.inputs } };
   const next = fakeGateGithub({ headSha: NEW_HEAD,
     runsByHeadSha: { [NEW_HEAD]: [
       { id: 101, name: "PR Validation", event: "pull_request", conclusion: "action_required" },
@@ -5839,7 +5928,7 @@ test("a green PR whose head is behind master is updated instead of merged", asyn
   // workflows, since the update did not merge the PR.
   assert.deepEqual(github.dispatchedWorkflows, [{
     owner: "sachiniyer", repo: "agent-factory", workflow_id: "auto-gate.yml",
-    ref: "master", inputs: { pr_number: "1465" },
+    ref: "master", inputs: { pr_number: "1465", previous_head_sha: HEAD_SHA },
   }]);
   assert.deepEqual(github.deletedRefs, []);
 });
