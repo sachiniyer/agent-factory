@@ -2,7 +2,12 @@ package daemon
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -11,6 +16,179 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+func TestAdoptedSingletonBareWorktreePreservesIdentityForCommandResolution(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	base := testguard.CanonicalTempDir(t)
+	seedPath := filepath.Join(base, "seed")
+	barePath := filepath.Join(base, "identity.git")
+	worktreePath := filepath.Join(base, "checkout")
+	setupRootDriftRepoAt(t, seedPath)
+	if err := exec.Command("git", "clone", "--bare", seedPath, barePath).Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("git", "--git-dir", barePath, "worktree", "add", worktreePath).Run(); err != nil {
+		t.Fatal(err)
+	}
+	project := registerTestProject(t, worktreePath)
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = 'codex'")
+	repo, err := config.RepoFromPath(project.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, _ := newManagerCapturingWarnings(t, config.DefaultConfig())
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: session.RootSessionTitle, RepoPath: project.Root, Program: "claude", InPlace: true, allowReserved: true,
+	}); err != nil {
+		t.Fatalf("create pre-existing root: %v", err)
+	}
+	root := findRootInstance(t, manager, project.Root)
+	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "/resolved/codex"))
+
+	previousResolve := resolveRootProgramConfigForInspection
+	identitySeen := make(chan string, 1)
+	resolveRootProgramConfigForInspection = func(got *config.RepoContext, _ *config.Config) (*config.ResolvedConfig, error) {
+		select {
+		case identitySeen <- got.IdentityPath():
+		default:
+		}
+		resolved := config.DefaultConfig()
+		resolved.ProgramOverrides = map[string]string{"codex": "/resolved/codex"}
+		return &config.ResolvedConfig{Config: *resolved}, nil
+	}
+	t.Cleanup(func() { resolveRootProgramConfigForInspection = previousResolve })
+
+	manager.ensureRootAgentsAndWait()
+	select {
+	case got := <-identitySeen:
+		if got != repo.IdentityPath() {
+			t.Fatalf("drift command resolver identity = %q, want bare repository %q", got, repo.IdentityPath())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("drift command resolver did not run")
+	}
+}
+
+func TestTimedOutCheckoutMarkerReadRetainsRootProgramSingleFlight(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	previousInterval := rootProgramDriftConfigInspectionInterval
+	rootProgramDriftConfigInspectionInterval = 0
+	t.Cleanup(func() { rootProgramDriftConfigInspectionInterval = previousInterval })
+
+	repoPath := setupControlRepo(t)
+	registerTestProject(t, repoPath)
+	manager, _ := newManagerCapturingWarnings(t, config.DefaultConfig())
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: session.RootSessionTitle, RepoPath: repoPath, Program: "claude", InPlace: true, allowReserved: true,
+	}); err != nil {
+		t.Fatalf("create pre-existing root: %v", err)
+	}
+	root := findRootInstance(t, manager, repoPath)
+	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "codex"))
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realResolve := resolveRootProgramConfigForInspection
+	var resolveMu sync.Mutex
+	resolveCount := 0
+	resolveRootProgramConfigForInspection = func(repo *config.RepoContext, global *config.Config) (*config.ResolvedConfig, error) {
+		resolveMu.Lock()
+		resolveCount++
+		resolveMu.Unlock()
+		return realResolve(repo, global)
+	}
+	t.Cleanup(func() { resolveRootProgramConfigForInspection = realResolve })
+	markers, err := filepath.Glob(filepath.Join(repoPath, ".git", "agent-factory", "checkout-id-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := ""
+	for _, candidate := range markers {
+		if !strings.HasSuffix(candidate, ".lock") {
+			marker = candidate
+		}
+	}
+	if marker == "" {
+		t.Fatalf("find checkout marker: paths=%v err=%v", markers, err)
+	}
+	markerData, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var releaseOnce sync.Once
+	releaseDone := make(chan error, 1)
+	released := false
+	release := func() {
+		releaseOnce.Do(func() {
+			go func() { releaseDone <- os.WriteFile(marker, markerData, 0o600) }()
+		})
+	}
+	t.Cleanup(func() {
+		if !released {
+			release()
+			<-releaseDone
+		}
+		_ = os.Remove(marker)
+		_ = os.WriteFile(marker, markerData, 0o600)
+	})
+
+	profile := config.RootAgent{Enabled: true, Program: "codex"}
+	st := &rootEnsureState{}
+	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
+	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root, nil)
+	time.Sleep(500 * time.Millisecond)
+	manager.mu.Lock()
+	resolving := st.programDriftResolving
+	manager.mu.Unlock()
+	if !resolving {
+		t.Fatal("checkout-marker timeout released the single flight while its os.ReadFile was still blocked")
+	}
+	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root, nil)
+	time.Sleep(50 * time.Millisecond)
+	manager.mu.Lock()
+	stillResolving := st.programDriftResolving
+	manager.mu.Unlock()
+	if !stillResolving {
+		t.Fatal("a second sweep replaced the still-running checkout-marker inspection")
+	}
+	resolveMu.Lock()
+	started := resolveCount
+	resolveMu.Unlock()
+	if started != 1 {
+		t.Fatalf("config inspections started while the marker reader was parked = %d, want 1", started)
+	}
+
+	release()
+	releaseErr := <-releaseDone
+	released = true
+	if releaseErr != nil {
+		t.Fatal(releaseErr)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, markerData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForRootProgramResolutionIdle(t, manager, st)
+	manager.checkAdoptedRootProgramDrift(repo, key, repo.WorkspacePath(), st, profile, root, nil)
+	waitForRootProgramResolutionIdle(t, manager, st)
+	resolveMu.Lock()
+	started = resolveCount
+	resolveMu.Unlock()
+	if started != 2 {
+		t.Fatalf("config inspections after the parked reader completed = %d, want 2", started)
+	}
+}
 
 func TestAdoptedRootProgramCacheRevalidatesProjectOverride(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))

@@ -35,6 +35,9 @@ type Manager struct {
 	live atomic.Pointer[config.Config]
 	// configApplyMu serializes live config swaps and their side effects.
 	configApplyMu sync.Mutex
+	// accountSwapAfterManualPrecheckForTest pauses a manual handoff after its
+	// advisory launch check and before personal policy is locked.
+	accountSwapAfterManualPrecheckForTest func()
 	// pollReloadCh signals the poll goroutine to reset its ticker after ApplyConfig
 	// changed daemon_poll_interval (#2480). Buffered size 1 with a non-blocking
 	// send, so a burst of applies collapses to one reset and ApplyConfig never

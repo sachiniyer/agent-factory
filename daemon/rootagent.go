@@ -456,9 +456,9 @@ func resolveLegacyRootRepo(path string) (*config.RepoContext, error) {
 // and the state is keyed by that resolved root path.
 //
 // The binding's identity evidence rides down to ensureResolvedRoot, which
-// re-proves it at the create boundary only (#3366): a binding made once, at
-// boot or at re-attribution, is not evidence about the checkout that is at the
-// path now.
+// re-proves it at the create boundary and around adopted-root command-layer
+// reads (#3366/#4087): a binding made once, at boot or at re-attribution, is
+// not evidence about the checkout that is at the path now.
 func (m *Manager) ensureSingletonRootAgent(repoID string, binding resolvedProjectRoot) {
 	m.mu.Lock()
 	st := m.rootEnsureStateForLocked(binding.root)
@@ -467,7 +467,7 @@ func (m *Manager) ensureSingletonRootAgent(repoID string, binding resolvedProjec
 	if skip {
 		return
 	}
-	repo := &config.RepoContext{Root: binding.root, ID: repoID}
+	repo := &config.RepoContext{Root: binding.root, IdentityRoot: binding.identityRoot, ID: repoID}
 	resolution := m.resolvedRootAgentFor(repoID, nil)
 	m.ensureResolvedRoot(binding.root, st, repo, resolution, &binding)
 }

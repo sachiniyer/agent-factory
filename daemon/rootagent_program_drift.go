@@ -132,6 +132,13 @@ func (m *Manager) resolveAndFinishAdoptedRootProgram(
 		return resolveRootProgramConfigForInspection(repo, global)
 	}
 	configuredProgram, err := resolveAdoptedRootProgramForDrift(repo, profile, identity, resolve)
+	if completion := config.CheckoutMarkerProbeCompletion(err); completion != nil {
+		// This function already owns the per-root asynchronous worker. Keep that
+		// worker (and therefore programDriftResolving) alive until the
+		// uncancellable marker read actually exits; its deadline only bounded the
+		// nested caller's wait, not the os.ReadFile itself.
+		<-completion
+	}
 	m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
 		resolutionEpoch, rootProgramDriftCheckoutID(identity), configuredProgram, err, inst, evidence)
 }

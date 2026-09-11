@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -62,6 +64,61 @@ func TestCheckoutMarkerCompletedFailureWinsOverExpiredContext(t *testing.T) {
 	require.NotErrorIs(t, err, context.Canceled,
 		"the completed Git result must still win when the caller deadline lands before classification")
 	require.Contains(t, err.Error(), "exit status 7")
+}
+
+func TestCheckoutMarkerTimeoutReusesParkedRead(t *testing.T) {
+	_, repoRoot, project := registeredTestProject(t)
+	markerName, err := checkoutMarkerName()
+	require.NoError(t, err)
+	marker := filepath.Join(repoRoot, ".git", checkoutMarkerDirName, markerName)
+	markerData, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(marker))
+	require.NoError(t, syscall.Mkfifo(marker, 0o600))
+
+	var releaseOnce sync.Once
+	releaseDone := make(chan error, 1)
+	released := false
+	release := func() {
+		releaseOnce.Do(func() {
+			go func() { releaseDone <- os.WriteFile(marker, markerData, 0o600) }()
+		})
+	}
+	t.Cleanup(func() {
+		if !released {
+			release()
+			<-releaseDone
+		}
+		_ = os.Remove(marker)
+		_ = os.WriteFile(marker, markerData, 0o600)
+	})
+
+	_, _, firstErr := checkoutIDForWorkspaceContext(context.Background(), repoRoot)
+	require.Error(t, firstErr)
+	first := CheckoutMarkerProbeCompletion(firstErr)
+	require.NotNil(t, first, "the timed-out os.ReadFile must expose its actual lifetime")
+	_, _, secondErr := checkoutIDForWorkspaceContext(context.Background(), repoRoot)
+	require.Error(t, secondErr)
+	second := CheckoutMarkerProbeCompletion(secondErr)
+	require.NotNil(t, second)
+	require.Equal(t, first, second, "a second probe must join the parked marker read")
+
+	release()
+	releaseErr := <-releaseDone
+	released = true
+	require.NoError(t, releaseErr)
+	select {
+	case <-first:
+	case <-time.After(5 * time.Second):
+		t.Fatal("checkout-marker read did not complete after its mount became responsive")
+	}
+	require.NoError(t, os.Remove(marker))
+	require.NoError(t, os.WriteFile(marker, markerData, 0o600))
+
+	got, found, err := checkoutIDForWorkspaceContext(context.Background(), repoRoot)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, project.CheckoutID, got, "a completed flight must release the path for a fresh healthy read")
 }
 
 func TestRootAgentInspectionPropagatesCompletedCheckoutProbeFailure(t *testing.T) {
