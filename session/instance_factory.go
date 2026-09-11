@@ -31,9 +31,10 @@ type InstanceOptions struct {
 	// a user-created session. It is what lets the daemon count a task's in-flight
 	// sessions for the watch-task concurrency limit without guessing from titles.
 	TaskID string
-	// TaskRunAt is the timestamp the task row uses to identify this delivery.
-	// Daemon task creation supplies it before publishing the session; zero is
-	// retained for direct constructors and records created by older binaries.
+	// TaskRunAt is the display timestamp persisted for this delivery. The session
+	// ID is its stable identity. Daemon task creation supplies the timestamp before
+	// publishing the session; zero is retained for direct constructors and records
+	// created by older binaries.
 	TaskRunAt time.Time
 	// SandboxCredentials mints and revokes the per-session credential a provisioned
 	// sandbox uses to call back into the daemon (#2999, #3068). An INTERFACE rather
