@@ -14,10 +14,10 @@ That's it. Keep PRs focused and small when possible.
 Agent Factory is distributed as the `af` application; its exported Go
 identifiers are internal cross-package implementation, not a supported import
 API, and may be removed without a major-version bump. Compatibility review
-instead protects CLI behavior and output, config keys, the documented public
-HTTP API in `docs/http-api.md` — its cataloged routes and request fields plus
-the response shapes that page documents, but not the routes it lists as outside
-the catalog — on-disk task and session state, and behavior that user scripts
-depend on. This
+instead protects CLI behavior and output, config keys, the public HTTP contract
+as `docs/http-api.md` documents it — everything that page specifies for public
+routes, with catalog membership used only to exclude the routes it lists as not
+public — on-disk task and session state, and behavior that user scripts depend
+on. This
 boundary keeps dead-code cleanup possible; it does not permit user-visible
 breakage.

@@ -417,10 +417,10 @@ stack, revert the foreign paths out of your tree, and say so in the PR.
   supported import API; removing one is not a breaking change and does not
   require a major version. The supported compatibility surface is the `af`
   binary's user-visible behavior: CLI behavior and output, config keys, the
-  documented public HTTP API in `docs/http-api.md` (its cataloged routes and
-  request fields plus the response shapes that page documents, but not the
-  routes it lists as outside the catalog), on-disk task and session state, and
-  behavior user scripts depend on.
+  public HTTP contract as `docs/http-api.md` documents it (everything that page
+  specifies for public routes, with catalog membership used only to exclude the
+  routes it lists as not public), on-disk task and session state, and behavior
+  user scripts depend on.
 
 ## Copy & glyph conventions
 
