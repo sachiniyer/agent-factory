@@ -414,7 +414,7 @@ func TestDefinitiveMissingRepository_IgnoresReasonWordsInsidePath(t *testing.T) 
 // sets *nongit_ok=1 for both in setup.c, so both must authorize
 // repo-gone cleanup.
 func TestDefinitiveNonGitRepository_RecognizesBothOutsideRepositoryVariants(t *testing.T) {
-	env := repoGoneGitCommandEnvironment()
+	env := repositoryScopedGitCommandEnvironment()
 	for name, stderr := range map[string]string{
 		"ceiling":     "fatal: not a git repository (or any of the parent directories): .git\n",
 		"mount-point": "fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n",
@@ -438,15 +438,15 @@ func TestDefinitiveNonGitRepository_FiltersUnrelatedAndGitDirErrors(t *testing.T
 	}{
 		"unrelated-error": {
 			stderr: "fatal: not our message at all\n",
-			env:    repoGoneGitCommandEnvironment(),
+			env:    repositoryScopedGitCommandEnvironment(),
 		},
 		"git-dir-set-ceiling": {
 			stderr: "fatal: not a git repository (or any of the parent directories): .git\n",
-			env:    append(repoGoneGitCommandEnvironment(), "GIT_DIR=/tmp/unrelated"),
+			env:    append(repositoryScopedGitCommandEnvironment(), "GIT_DIR=/tmp/unrelated"),
 		},
 		"git-dir-set-mount-point": {
 			stderr: "fatal: not a git repository (or any parent up to mount point /)\n",
-			env:    append(repoGoneGitCommandEnvironment(), "GIT_DIR=/tmp/unrelated"),
+			env:    append(repositoryScopedGitCommandEnvironment(), "GIT_DIR=/tmp/unrelated"),
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

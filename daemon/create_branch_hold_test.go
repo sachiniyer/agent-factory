@@ -196,7 +196,7 @@ func TestNextAvailableTitle_CeilingFailureNamesHeldSuffixHolders(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 
 	const rungs = 10000
-	held := make(map[string]string, rungs)
+	held := make(map[string][]string, rungs)
 	holderFor := func(rung string) string { return filepath.Join("/archived", rung+" (archived)") }
 	rungTitle := func(i int) string {
 		if i == 1 {
@@ -205,10 +205,10 @@ func TestNextAvailableTitle_CeilingFailureNamesHeldSuffixHolders(t *testing.T) {
 		return fmt.Sprintf("sweep-%d", i)
 	}
 	for i := 1; i <= rungs; i++ {
-		held[manager.branchForTitle(rungTitle(i))] = holderFor(rungTitle(i))
+		held[manager.branchForTitle(rungTitle(i))] = []string{holderFor(rungTitle(i))}
 	}
 	prev := branchesHeldByWorktrees
-	branchesHeldByWorktrees = func(string) (map[string]string, error) { return held, nil }
+	branchesHeldByWorktrees = func(string) (map[string][]string, error) { return held, nil }
 	t.Cleanup(func() { branchesHeldByWorktrees = prev })
 
 	manager.mu.Lock()

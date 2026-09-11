@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,6 +61,14 @@ func firstFreeSuffix(t *testing.T, repoRoot, base string) string {
 	return ""
 }
 
+func onlyBranchHolder(t *testing.T, held map[string][]string, branch string) string {
+	t.Helper()
+	holders, ok := held[branch]
+	require.True(t, ok, "branch %q is not held", branch)
+	require.Len(t, holders, 1, "branch %q unexpectedly has multiple holders", branch)
+	return holders[0]
+}
+
 // TestBranchesHeldByWorktrees_ReportsArchivedHolds is the #2091 root-cause
 // observation: `git branch` alone cannot answer "is this name usable" — every
 // held branch is also just a branch — but `git worktree list --porcelain` names
@@ -73,10 +82,30 @@ func TestBranchesHeldByWorktrees_ReportsArchivedHolds(t *testing.T) {
 
 	require.Contains(t, held, "foo")
 	require.Contains(t, held, "foo-2")
-	assert.Equal(t, filepath.Join(archiveDir, "foo (archived)"), held["foo"])
-	assert.Equal(t, filepath.Join(archiveDir, "foo-2 (archived)"), held["foo-2"])
+	assert.Equal(t, filepath.Join(archiveDir, "foo (archived)"), onlyBranchHolder(t, held, "foo"))
+	assert.Equal(t, filepath.Join(archiveDir, "foo-2 (archived)"), onlyBranchHolder(t, held, "foo-2"))
 	// The next rung of the ladder is free, and nothing invented a hold for it.
 	assert.NotContains(t, held, "foo-3")
+}
+
+func TestParseWorktreeBranchHoldsPreservesEveryHolder(t *testing.T) {
+	holds, err := parseWorktreeBranchHolds(
+		"worktree /repo/live\x00HEAD abc\x00branch refs/heads/shared\x00\x00" +
+			"worktree /repo/archived\x00HEAD def\x00branch refs/heads/shared\x00\x00")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/repo/live", "/repo/archived"}, holds["shared"],
+		"a corrupted multiply-bound branch must not overwrite an earlier holder")
+}
+
+func TestParseWorktreeBranchBindingsDistinguishesDetachedFromBranchName(t *testing.T) {
+	bindings, err := parseWorktreeBranchBindings(
+		"worktree /repo/named\x00HEAD abc\x00branch refs/heads/(detached)\x00\x00" +
+			"worktree /repo/detached\x00HEAD def\x00detached\x00\x00")
+	require.NoError(t, err)
+	assert.Equal(t, []WorktreeBranchBinding{
+		{Path: "/repo/named", Branch: "(detached)", HeadSHA: "abc"},
+		{Path: "/repo/detached", HeadSHA: "def", Detached: true},
+	}, bindings)
 }
 
 // TestBranchesHeldByWorktrees_WalkSkipsArchivedSuffixes is the regression lock
@@ -143,6 +172,23 @@ func TestBranchesHeldByWorktrees_UnheldExistingBranchStaysFree(t *testing.T) {
 	assert.Equal(t, "foo", firstFreeSuffix(t, repoRoot, "foo"))
 }
 
+func TestWorktreeBranchBindingsIgnoresRepositoryEnvironmentOverrides(t *testing.T) {
+	targetRoot := createGitRepo(t)
+	runGitInPlaceTest(t, targetRoot, "commit", "--allow-empty", "-m", "target init")
+	holderPath := filepath.Join(t.TempDir(), "target-holder")
+	runGitInPlaceTest(t, targetRoot, "worktree", "add", "-b", "target-held", holderPath)
+
+	overrideRoot := createGitRepo(t)
+	runGitInPlaceTest(t, overrideRoot, "commit", "--allow-empty", "-m", "override init")
+	t.Setenv("GIT_DIR", filepath.Join(overrideRoot, ".git"))
+	t.Setenv("GIT_WORK_TREE", overrideRoot)
+
+	held, err := BranchesHeldByWorktrees(targetRoot)
+	require.NoError(t, err)
+	require.Len(t, held["target-held"], 1)
+	assert.Equal(t, pathutil.ResolveForCompare(holderPath), pathutil.ResolveForCompare(held["target-held"][0]))
+}
+
 // TestBranchesHeldByWorktrees_NonRepoErrors pins the answer AF must not
 // fabricate: a repo it cannot ask returns an error, never an empty "nothing is
 // held" map that would read as a confident all-clear.
@@ -188,10 +234,10 @@ func TestParseWorktreeBranchHolds(t *testing.T) {
 	held, err := parseWorktreeBranchHolds(porcelain)
 	require.NoError(t, err)
 
-	assert.Equal(t, map[string]string{
-		"master": "/repos/main",
-		"siyer/simplify-abstractions-2": "/home/u/.agent-factory/archived/abc/" +
-			"Simplify Abstractions-2 (archived)",
+	assert.Equal(t, map[string][]string{
+		"master": {"/repos/main"},
+		"siyer/simplify-abstractions-2": {"/home/u/.agent-factory/archived/abc/" +
+			"Simplify Abstractions-2 (archived)"},
 	}, held)
 }
 

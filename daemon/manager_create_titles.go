@@ -3,7 +3,9 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -17,6 +19,41 @@ import (
 // manager_create.go, which crossed the 1000-line limit). These helpers all run
 // under the manager lock and answer one question between them: can this title be
 // used, and if not, what should be done with the archived record holding it.
+
+// branchesHeldByWorktrees is a seam for the bounded Git branch-holder probe.
+var branchesHeldByWorktrees = git.BranchesHeldByWorktrees
+
+// worktreeBranchBindings is the evidence-bearing form used by --here admission,
+// which must inspect the target's actual branch rather than derive one from its
+// requested title.
+var worktreeBranchBindings = git.WorktreeBranchBindings
+
+func (m *Manager) worktreeHeldBranchesLocked(repoPath string, remote bool) map[string][]string {
+	if remote {
+		return nil
+	}
+	held, err := branchesHeldByWorktrees(repoPath)
+	if err != nil {
+		m.warn().Printf("could not list worktree branch holds for %s; resolving the session title without them (a name an archived worktree holds will fail at worktree add instead of being skipped): %v", repoPath, err)
+		return nil
+	}
+	return held
+}
+
+func (m *Manager) branchForTitle(title string) string {
+	return git.BranchForTitle(m.cfg.BranchPrefix, title)
+}
+
+// reserveCreate keeps the established unit-test seam free of a long-lived
+// reservation. Production uses reserveCreateForSession and holds admission from
+// its final observation through live-row publication.
+func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, string, func(), *session.InstanceData, error) {
+	return m.reserveCreateWithWorktreeAdmission(req, false)
+}
+
+func (m *Manager) reserveCreateForSession(req CreateSessionRequest) (*config.RepoContext, string, func(), *session.InstanceData, error) {
+	return m.reserveCreateWithWorktreeAdmission(req, true)
+}
 
 // refuseHeldBranchReuseLocked refuses an explicit-title create BEFORE the
 // archived-name-reuse rename touches anything, when the branch the new session
@@ -69,8 +106,8 @@ func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, na
 	}
 	branch := m.branchForTitle(title)
 	// Indexing a nil map is the nil-probe path: not held, so no refusal.
-	holder, held := m.worktreeHeldBranchesLocked(repoPath, false)[branch]
-	if !held {
+	holders := m.worktreeHeldBranchesLocked(repoPath, false)[branch]
+	if len(holders) == 0 {
 		return nil
 	}
 	// A holder that is NOT the archived session gets its own refusal, because the
@@ -79,8 +116,14 @@ func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, na
 	// `af sessions kill` on a session whose removal would not release anything.
 	// The reclaim declines on the same fact, so branching here does not answer the
 	// question differently — it only says out loud which worktree is in the way.
-	if !archivedWorktreeHoldsBranch(archived, holder) {
-		return fmt.Errorf("cannot create session %q: branch %q is checked out by the worktree at %s — not by the archived session %q holding that name — and the new session would derive that same branch. Moving another worktree's branch aside is not af's call, so freeing the archived name would not free the branch and the create would fail at `git worktree add` — release that branch yourself, or create this session under a different name",
+	for _, holder := range holders {
+		if archivedWorktreeHoldsBranch(archived, holder) {
+			continue
+		}
+		if lane := m.liveLaneHoldingWorktreeLocked(holder, diskData); lane != "" {
+			return liveHeldBranchRefusal(title, branch, lane, holder)
+		}
+		return fmt.Errorf("cannot create session %q: branch %q is checked out by the worktree at %s — not only by the archived session %q holding that name — and the new session would derive that same branch. Moving another worktree's branch aside is not af's call, so freeing the archived name would not free the branch and the create would fail at `git worktree add` — release that branch yourself, or create this session under a different name",
 			title, branch, config.ShellQuotePath(holder), archived.Title)
 	}
 	// The branch is held — but as of #2127 the rename can often take it with it,
@@ -96,8 +139,177 @@ func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, na
 		return nil
 	}
 	return fmt.Errorf("cannot create session %q: the archived session %q still has branch %q checked out at %s, and the new session would derive that same branch. Its branch cannot be moved aside automatically (it is published, externally owned, or its state could not be determined), so freeing the name would not free the branch and the create would fail at `git worktree add` — permanently delete the archived session to release both (%s), or create this session under a different name",
-		title, archived.Title, branch, config.ShellQuotePath(holder),
+		title, archived.Title, branch, config.ShellQuotePath(holders[0]),
 		shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, archived.Title))
+}
+
+// refuseNonReusableTitleConflictLocked preserves title-admission precedence
+// ahead of the worktree collision guard. A create serialized behind the winner
+// of the same-title race must report the established "already exists" or
+// "reserved" error, rather than misdescribe that winner's worktree as an
+// unrelated branch collision.
+//
+// The archived-only case is deliberately excluded: reserveCreate renames that
+// record to free the requested title. Every other record conflict is final and
+// can be reported before inspecting Git without changing any state.
+func (m *Manager) refuseNonReusableTitleConflictLocked(repoID, repoPath, title string, namespace runtimeNameNamespace, diskData []session.InstanceData) error {
+	archived, _, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, diskData)
+	if err != nil || archived != nil {
+		return err
+	}
+	return m.findTitleRecordConflictLocked(repoID, repoPath, title, namespace, diskData)
+}
+
+// refuseLiveHeldBranchLocked is the narrow #4092 create admission guard. A
+// normal local create derives its branch from the title; --here must instead use
+// the target worktree's observed branch and path. Only a positively identified
+// live lane refuses, and AF never renames, detaches, resets, or moves either
+// worktree on this path.
+func (m *Manager) refuseLiveHeldBranchLocked(repoPath, workspace, title string, namespace runtimeNameNamespace, inPlace bool, diskData []session.InstanceData) error {
+	if namespace != runtimeNamespaceLocalTmux {
+		return nil
+	}
+	var branch string
+	var holders []string
+	if inPlace {
+		var err error
+		branch, holders, err = inPlaceBranchHolders(repoPath, workspace)
+		if err != nil {
+			return fmt.Errorf("cannot create session %q in place: af could not verify the target worktree's actual branch; nothing was started: %w", title, err)
+		}
+	} else {
+		branch = m.branchForTitle(title)
+		holders = m.worktreeHeldBranchesLocked(repoPath, false)[branch]
+	}
+	for _, holder := range holders {
+		lane := m.liveLaneHoldingWorktreeLocked(holder, diskData)
+		if lane == "" {
+			continue
+		}
+		if inPlace {
+			if branch == "" {
+				return liveHeldInPlaceDetachedRefusal(title, workspace, lane, holder)
+			}
+			return liveHeldInPlaceBranchRefusal(title, branch, workspace, lane, holder)
+		}
+		return liveHeldBranchRefusal(title, branch, lane, holder)
+	}
+	return nil
+}
+
+func inPlaceBranchHolders(repoPath, workspace string) (string, []string, error) {
+	bindings, err := worktreeBranchBindings(repoPath)
+	if err != nil {
+		return "", nil, err
+	}
+	var target *git.WorktreeBranchBinding
+	for index := range bindings {
+		if !sameCreateWorktreePath(bindings[index].Path, workspace) {
+			continue
+		}
+		if target != nil {
+			return "", nil, fmt.Errorf("worktree %s appears more than once in Git's branch listing", config.ShellQuotePath(workspace))
+		}
+		target = &bindings[index]
+	}
+	if target == nil {
+		return "", nil, fmt.Errorf("worktree %s is absent from Git's branch listing", config.ShellQuotePath(workspace))
+	}
+	if target.HeadSHA == "" {
+		return "", nil, fmt.Errorf("worktree %s has no observed HEAD", config.ShellQuotePath(workspace))
+	}
+	if target.Detached {
+		if target.Branch != "" {
+			return "", nil, fmt.Errorf("worktree %s is reported as both detached and on branch %q", config.ShellQuotePath(workspace), target.Branch)
+		}
+		return "", []string{target.Path}, nil
+	}
+	if target.Branch == "" {
+		return "", nil, fmt.Errorf("worktree %s has neither a branch nor a detached-HEAD marker", config.ShellQuotePath(workspace))
+	}
+	holders := make([]string, 0, len(bindings))
+	for _, binding := range bindings {
+		if binding.Branch == target.Branch {
+			holders = append(holders, binding.Path)
+		}
+	}
+	return target.Branch, holders, nil
+}
+
+func sameCreateWorktreePath(left, right string) bool {
+	left = pathutil.ResolveForCompare(left)
+	return left != "" && left == pathutil.ResolveForCompare(right)
+}
+
+func (m *Manager) liveLaneHoldingWorktreeLocked(holder string, diskData []session.InstanceData) string {
+	target := pathutil.ResolveForCompare(holder)
+	if target == "" {
+		return ""
+	}
+	lanes := make([]string, 0)
+	seen := make(map[string]struct{})
+	add := func(title, id string) {
+		key := "title:" + title
+		if id != "" {
+			key = "id:" + id
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		lanes = append(lanes, title)
+	}
+	for _, candidate := range m.instances {
+		if candidate == nil || candidate.IsArchived() || pathutil.ResolveForCompare(candidate.GetWorktreePath()) != target {
+			continue
+		}
+		add(candidate.Title, candidate.ID)
+	}
+	for _, data := range diskData {
+		if session.IsArchivedData(data) || pathutil.ResolveForCompare(data.Worktree.WorktreePath) != target {
+			continue
+		}
+		add(data.Title, data.ID)
+	}
+	sort.Strings(lanes)
+	if len(lanes) == 0 {
+		return ""
+	}
+	return lanes[0]
+}
+
+func liveHeldBranchRefusal(title, branch, lane, holder string) error {
+	handoff := shellsuggest.PositionalCommand("af", []string{"sessions", "handoff", "--to", "<agent>"}, lane)
+	return fmt.Errorf("cannot create session %q: branch %q is already checked out by live lane %q at %s. Refusing to bind two live worktrees to one branch because a sibling branch move can turn the idle lane's unchanged index into a staged revert. Continue in that workspace with `%s`, or choose a different session title; af did not rename, detach, reset, or move either worktree",
+		title, branch, lane, config.ShellQuotePath(holder), handoff)
+}
+
+func liveHeldInPlaceBranchRefusal(title, branch, workspace, lane, holder string) error {
+	handoff := shellsuggest.PositionalCommand("af", []string{"sessions", "handoff", "--to", "<agent>"}, lane)
+	return fmt.Errorf("cannot create session %q in place at %s: its current branch %q is already checked out by live lane %q at %s. Refusing to activate two live worktrees on one branch because a sibling branch move can turn the idle lane's unchanged index into a staged revert. Continue in the existing lane with `%s`, or check out a different branch in the target worktree yourself; af did not rename, detach, reset, or move either worktree",
+		title, config.ShellQuotePath(workspace), branch, lane, config.ShellQuotePath(holder), handoff)
+}
+
+func liveHeldInPlaceDetachedRefusal(title, workspace, lane, holder string) error {
+	handoff := shellsuggest.PositionalCommand("af", []string{"sessions", "handoff", "--to", "<agent>"}, lane)
+	return fmt.Errorf("cannot create session %q in place at %s: its detached HEAD worktree is already used by live lane %q at %s. Refusing to activate two live lanes in one worktree because both would share its files and index. Continue in the existing lane with `%s`, or choose a different worktree yourself; af did not rename, detach, reset, or move either worktree",
+		title, config.ShellQuotePath(workspace), lane, config.ShellQuotePath(holder), handoff)
+}
+
+// worktreeAdmissionLockForRepo serializes create-side branch/path admission.
+// It is keyed by the canonical repository ID already resolved at create entry.
+func (m *Manager) worktreeAdmissionLockForRepo(repoID string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.worktreeAdmissionLocks == nil {
+		m.worktreeAdmissionLocks = make(map[string]*sync.Mutex)
+	}
+	lock := m.worktreeAdmissionLocks[repoID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		m.worktreeAdmissionLocks[repoID] = lock
+	}
+	return lock
 }
 
 // reclaimArchivedBranchLocked decides the branch name the archived session moves
@@ -138,8 +350,8 @@ func (m *Manager) reclaimArchivedBranchLocked(repoPath string, archived *session
 	// branch off base and the old history would move to a name nobody asked for —
 	// which is a semantic change #2127 never asked for. #2127 is about the case
 	// where the branch is HELD and the create therefore CANNOT proceed at all.
-	holder, blocking := held[current]
-	if !blocking {
+	holders := held[current]
+	if len(holders) == 0 {
 		return ""
 	}
 	// Held by WHOM is a second question, and skipping it is what let this rename
@@ -158,7 +370,8 @@ func (m *Manager) reclaimArchivedBranchLocked(repoPath string, archived *session
 	// worktree path of its own, is "I cannot tell whose branch this is", which must
 	// never authorize rewriting it. Same fail-closed direction as the published and
 	// candidate-existence probes on either side of this one.
-	if !archivedWorktreeHoldsBranch(archived, holder) {
+	// Renaming a multiply-held ref would move every attached worktree's HEAD.
+	if len(holders) != 1 || !archivedWorktreeHoldsBranch(archived, holders[0]) {
 		return ""
 	}
 	// The candidate name must be genuinely FREE, and "not checked out" is not the
@@ -169,7 +382,7 @@ func (m *Manager) reclaimArchivedBranchLocked(repoPath string, archived *session
 	// cleared. BranchExists closes that, and its unknown answer declines, because a
 	// name that cannot be ruled out must be treated as taken rather than renamed
 	// onto.
-	if _, taken := held[candidate]; taken {
+	if len(held[candidate]) > 0 {
 		return ""
 	}
 	if !archived.ArchivedCandidateBranchIsFree(candidate) {
@@ -593,10 +806,10 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 			candidate = fmt.Sprintf("%s-%d", boundedBase, i)
 		}
 		branch := m.branchForTitle(candidate)
-		if holder, held := heldBranches[branch]; held {
+		if holders := heldBranches[branch]; len(holders) > 0 {
 			// Accumulated rather than logged per rung (#3838): the walk is the whole
 			// event, and every rung of it says the same thing.
-			skipped = append(skipped, heldRung{title: candidate, holder: holder})
+			skipped = append(skipped, heldRung{title: candidate, holder: strings.Join(holders, ", ")})
 			continue
 		}
 		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, namespace, false, diskData, inPlace)
