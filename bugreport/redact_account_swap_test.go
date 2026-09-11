@@ -21,12 +21,13 @@ import (
 func TestRedactInstanceDataRedactsAccountSwapLabels(t *testing.T) {
 	reset := time.Now().Add(time.Hour)
 	d := session.InstanceData{
-		ID:           "abc123",
-		Program:      "claude",
-		Status:       session.Status(1),
-		Account:      "acme-prod",
-		LimitAgent:   "codex",
-		LimitAccount: "acme-prod",
+		ID:             "abc123",
+		Program:        "claude",
+		RuntimeProgram: "/home/siyer/.local/bin/claude --dangerously-skip-permissions",
+		Status:         session.Status(1),
+		Account:        "acme-prod",
+		LimitAgent:     "codex",
+		LimitAccount:   "acme-prod",
 		PendingAccountSwap: &session.AccountSwapData{
 			From:                  "acme-prod",
 			To:                    "acme-staging",
@@ -62,6 +63,9 @@ func TestRedactInstanceDataRedactsAccountSwapLabels(t *testing.T) {
 	if d.ID != "abc123" || d.Program != "claude" || d.Status != session.Status(1) {
 		t.Errorf("structural fields mutated: %+v", d)
 	}
+	if d.RuntimeProgram != "claude" {
+		t.Errorf("runtime program did not redact to its bounded agent label: %q", d.RuntimeProgram)
+	}
 	if d.AccountLimitObservations[0].Agent != "claude" {
 		t.Errorf("agent enum redacted; it is bounded and load-bearing for triage: %q",
 			d.AccountLimitObservations[0].Agent)
@@ -89,19 +93,25 @@ func TestRedactInstancesFallbackRedactsAccountSwapLabels(t *testing.T) {
 	r := &redactor{}
 	raw := json.RawMessage(`[{
 		"id":"leg-1","status":"legacy-string-status","program":"claude",
+		"runtime_program":"/home/siyer/.local/bin/claude --dangerously-skip-permissions",
 		"limit_agent":"codex","limit_account":"acme-prod",
 		"pending_account_swap":{"from":"acme-prod","to":"acme-staging","conversation_id":"8f466d20-784b"},
 		"account_limit_observations":[{"agent":"claude","account":"acme-prod"}]
 	}]`)
 	out := string(r.redactInstancesJSON(raw))
-	for _, leaked := range []string{"acme-prod", "acme-staging", "8f466d20-784b"} {
+	for _, leaked := range []string{
+		"acme-prod", "acme-staging", "8f466d20-784b",
+		"/home/siyer/.local/bin/claude", "--dangerously-skip-permissions",
+	} {
 		if strings.Contains(out, leaked) {
 			t.Errorf("fallback path leaked %q:\n%s", leaked, out)
 		}
 	}
 	// The KEYS survive with a marker, which is what keeps the fallback useful:
 	// "a swap was pending" and "an identity was walled" are still readable.
-	for _, kept := range []string{"limit_account", "pending_account_swap", "account_limit_observations"} {
+	for _, kept := range []string{
+		"runtime_program", "limit_account", "pending_account_swap", "account_limit_observations",
+	} {
 		if !strings.Contains(out, kept) {
 			t.Errorf("fallback path dropped the whole %q key, losing the triage fact:\n%s", kept, out)
 		}

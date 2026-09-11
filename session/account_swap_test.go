@@ -226,6 +226,22 @@ func TestValidateManualAccountSwapAcceptsHealthySiblingBinary(t *testing.T) {
 	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 }
 
+func TestCheckManualAccountSwapDoesNotRecordLaunchPlan(t *testing.T) {
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, tmux.ProgramClaude), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", bin+":/usr/bin:/bin")
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, tmux.ProgramClaude)
+	inst.liveness = LiveRunning
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+
+	require.NoError(t, inst.CheckManualAccountSwap("work", tmux.ProgramClaude))
+	require.Nil(t, inst.accountSwapLaunch, "the unlocked check must not leave mutation authority behind")
+	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramClaude))
+	require.NotNil(t, inst.accountSwapLaunch, "locked admission still records the launch plan")
+}
+
 func TestValidateAccountSwapPreflightsCloudAuthenticationMode(t *testing.T) {
 	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
 	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
