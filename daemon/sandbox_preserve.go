@@ -111,18 +111,20 @@ func reapRefusalSuggestionFor(repoID string, instance *session.Instance) string 
 // Returns nil when the caller may proceed to reap. A non-nil error means REFUSE:
 // leave the session Lost and recoverable, because the alternative is destroying
 // work that nothing else has a copy of.
-// escapeSuggestion is the guidance a caller offers when the push refuses: a
-// command or a repair diagnostic. It is a parameter because the escape depends on the
+// reapGuidance is the guidance a caller offers when the push refuses: a command
+// or a repair diagnostic. It is a parameter because the escape depends on the
 // door this was reached through: the restore paths can force a reap, and the
 // limit-resume path cannot — RestoreSession refuses a LiveLimitReached session
 // (it is not archived, Lost, or Dead) and ResumeFromLimitRequest has no force
 // option, so --force-reap there is a hatch that always fails.
 //
-// This file already refuses to do that in the empty-branch case, for the same
-// stated reason: an escape hatch that cannot open is the thing this guard exists
-// to avoid. Making the suggestion the caller's to name applies that rule to
-// every door instead of one (Codex on #2967).
-func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *session.Instance, escapeSuggestion string) error {
+// Every refusal before the branch is durably settled preserves this classification.
+// An archive error or empty branch is a fact about the push attempt, not a new
+// verdict about which destructive command is executable. Re-selecting from that
+// narrower symptom can advertise kill despite unreadable storage or identity
+// drift, or replace an executable force-reap with an unnecessarily destructive
+// kill (#4195).
+func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *session.Instance, reapGuidance string) error {
 	branch, err := archiveWithin(instance.AgentServer(), sandboxPushTimeout)
 	if err != nil {
 		// Refuse, exactly as ArchiveSandbox refuses (AbortArchiveToLost) when its
@@ -137,22 +139,24 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 				"and the push that would make its unpushed work durable failed (%w). "+
 				"Replacing it now would destroy any commits it holds. "+
 				"It stays recoverable. Recovery guidance: %s",
-			instance.Title, err, escapeSuggestion)
+			instance.Title, err, reapGuidance)
 	}
 	if branch == "" {
 		// A push that reports no branch leaves recovery with the empty RestoreBranch
 		// that clones the default branch — the reported bug. Refuse rather than
 		// "succeed" onto the wrong branch.
-		// NOT --force-reap here: the forced arm requires a known branch, and an empty
-		// one is precisely what this case has, so that retry would refuse again. An
-		// escape hatch that cannot open is the thing this whole guard is built to
-		// avoid, so name the alternative that actually ends it.
+		//
+		// Do not choose an off-ramp from this response. The session may already have
+		// a durable branch that makes --force-reap executable, or its stored record
+		// may be unreadable or belong to another identity, making a title-only kill
+		// fail or target the wrong session. reapGuidance was classified from those
+		// actual preconditions before the archive attempt, so retain it unchanged.
 		return fmt.Errorf(
-			"refusing to replace the sandbox for %q: its push reported no branch name, so a replacement "+
-				"would clone the repository's default branch and strand whatever the sandbox holds. "+
-				"af cannot recover this session onto its own branch without one. If its work is "+
-				"expendable, remove it and create a replacement: %s",
-			instance.Title, killSuggestionFor(instance))
+			"refusing to replace the sandbox for %q: its push reported no branch name, so af cannot "+
+				"prove what branch that attempt made durable. Replacing it automatically could clone the "+
+				"repository's default branch or return to stale work and strand whatever the sandbox holds. "+
+				"It stays recoverable. Recovery guidance: %s",
+			instance.Title, reapGuidance)
 	}
 	// Record it the INSTANT it is durable, for the reason ArchiveSandbox records it
 	// there: from here the branch is the only handle on the user's work, so it

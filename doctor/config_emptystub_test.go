@@ -46,6 +46,25 @@ func TestReportConfigValidity_MissingStaysDistinct(t *testing.T) {
 	require.NotContains(t, row.Detail, "empty config stub")
 }
 
+func TestMissingConfigKeepsDefaultAgentBinaryAdvisory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHELL", "/bin/sh")
+	t.Setenv("PATH", t.TempDir())
+
+	ctx := &scanContext{opts: Options{ConfigDir: home}}
+	report := &Report{}
+	cfg := checkConfigAndStorage(ctx, report)
+	require.Nil(t, cfg, "a missing file must not make defaults look user-configured to every downstream check")
+
+	checkAgentBinaries(cfg, report)
+	claude := findCheck(t, report, "claude")
+	require.Equal(t, StatusWarn, claude.Status)
+	require.False(t, claude.Problem,
+		"an absent config does not establish that the default agent binary is a user-configured requirement")
+}
+
 // TestWorktreeMode_EmptyStubDefaultsToSibling pins that an empty stub is treated
 // like Missing for the worktree-root inference: both self-heal to DefaultConfig,
 // whose WorktreeRoot is WorktreeRootSibling. Without this, an empty stub would
