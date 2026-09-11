@@ -79,6 +79,23 @@ func TestTaskRunEndsOnlyForRuntimeThatReceivedPrompt(t *testing.T) {
 			"OpReplacing carries a durable mission that will prompt the replacement runtime")
 	})
 
+	t.Run("pending account-swap replay preserves the run", func(t *testing.T) {
+		inst := &Instance{
+			TaskID:        "task-id",
+			liveness:      LiveLimitReached,
+			taskRunActive: true,
+			pendingAccountSwap: &AccountSwapData{
+				Manual: true, From: "work", To: "personal", Mission: "continue the task",
+				ReplacementPanesStarted: true, MissionDeliveryStatus: PromptNotDelivered,
+			},
+		}
+
+		_, interrupted := inst.InterruptTaskRunAtRuntimeReplacement()
+		require.False(t, interrupted)
+		require.True(t, inst.TaskRunActive(),
+			"positive transaction-scoped non-delivery promises the replacement the pending prompt")
+	})
+
 	t.Run("prompted runtime still completes on its idle edge", func(t *testing.T) {
 		inst := &Instance{
 			TaskID:        "task-id",
