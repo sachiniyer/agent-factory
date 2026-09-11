@@ -1831,6 +1831,16 @@ async function processAggregateHead({
         core.notice(reason);
         return { state: "waiting", pending, aggregate, reason };
       }
+      const publicationErrors = [];
+      if (error?.autoGateRecoveryFailure) {
+        // Report on the PR before invalidating: an invalidation failure must
+        // not suppress the only visible recovery instructions. This lane owns
+        // only the initiating head, so it never writes a successor aggregate.
+        const publicationError = await publishRecoveryFailure({
+          github, context, prNumber, message, observedHeadSha: error.autoGateRecoveryHeadSha,
+        });
+        if (publicationError) publicationErrors.push(publicationError);
+      }
       let invalidated;
       try {
         invalidated = await invalidateAggregateDecision({
@@ -1844,9 +1854,19 @@ async function processAggregateHead({
         }
       } catch (invalidationError) {
         throw new AggregateError(
-          [error, invalidationError],
-          `Merge attempt and aggregate invalidation both failed on ${pending.headSha}`,
+          [error, ...publicationErrors, invalidationError],
+          error?.autoGateRecoveryFailure
+            ? `${message}; aggregate invalidation also failed: ${formatError(invalidationError)}` +
+              (publicationErrors.length ? `; recovery publication also failed: ${publicationErrors.map(formatError).join("; ")}` : "")
+            : `Merge attempt and aggregate invalidation both failed on ${pending.headSha}`,
         );
+      }
+      if (error?.autoGateRecoveryFailure) {
+        if (publicationErrors.length) {
+          throw new AggregateError([error, ...publicationErrors],
+            `${message}; recovery publication also failed: ${publicationErrors.map(formatError).join("; ")}`);
+        }
+        throw error;
       }
       if (isReadFailure(error)) {
         const blocked = await blockAggregateEvaluation({
@@ -2270,8 +2290,35 @@ async function listParkedRuns({ github, context, headSha, subject = null }) {
 // The workflow the gate dispatches when nothing validated a head it created.
 // Named, so a test can assert the file it points at actually accepts a dispatch.
 const VALIDATION_WORKFLOW = "pr.yml";
+const GATE_WORKFLOW = "auto-gate.yml";
 
-// Make sure SOMETHING is going to validate the head the gate just created.
+// Reruns the successor of an accepted update, whichever lane failed to finish
+// it. Safe to repeat: the resolver re-reads the PR and approves only what is
+// still parked.
+function gateRecoveryCommand({ context, ref, prNumber, previousHeadSha }) {
+  const { owner, repo } = context.repo;
+  return `gh workflow run ${GATE_WORKFLOW} --repo ${owner}/${repo} --ref ${ref} ` +
+    `-f pr_number=${prNumber} -f previous_head_sha=${previousHeadSha}`;
+}
+
+// A recovery failure belongs on the PR conversation, which follows the PR
+// across head changes; a red run on master is not where anyone looks for a PR
+// that never merges. Returns a publication error instead of throwing it, so the
+// caller keeps the command in its own failure either way.
+async function publishRecoveryFailure({ github, context, prNumber, message, observedHeadSha }) {
+  try {
+    await github.rest.issues.createComment({
+      ...context.repo, issue_number: prNumber,
+      body: `## Auto Gate recovery failed\n\n${message}` +
+        (observedHeadSha ? `\n\nObserved post-update head: ${observedHeadSha}` : ""),
+    });
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
+
+// Make sure PR Validation will validate the head the gate just created.
 //
 // GitHub does create a `pull_request` run for a bot-authored merge commit — parked
 // — and approveParkedRuns handles that. But "it always does" is an assumption,
@@ -2290,7 +2337,8 @@ async function ensureValidationRun({
   headSha,
   headRefName,
   attempts = 3,
-  // A test seam, and the only one in this file. Without it the suite sleeps ten
+  canRecover = async () => true,
+  // A test seam for bounded polling. Without it the suite sleeps ten
   // real seconds on the one path that must find nothing, on every run forever;
   // with it the wait is what production uses unless a caller says otherwise.
   delayMs = Number(process.env.AUTO_GATE_VALIDATION_POLL_MS ?? 5000),
@@ -2298,10 +2346,14 @@ async function ensureValidationRun({
 }) {
   const { owner, repo } = context.repo;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const listed = await retryRead(`could not list workflow runs for ${headSha}`, () =>
-      github.rest.actions.listWorkflowRunsForRepo({
+    if (!await canRecover()) return { cancelled: true };
+    const listed = await retryRead(`could not list PR Validation runs for ${headSha}`, () =>
+      github.rest.actions.listWorkflowRuns({
         owner,
         repo,
+        // Query the workflow identity, not its display name or the first run
+        // in the repository-wide listing. Docs can become visible earlier.
+        workflow_id: VALIDATION_WORKFLOW,
         head_sha: headSha,
         event: "pull_request",
         per_page: 1,
@@ -2314,16 +2366,18 @@ async function ensureValidationRun({
       // and returned, leaving them parked. On #3811's `31720d97` they appeared 4
       // seconds late and sat for 33 minutes (#3814). So the approve pass runs
       // again here, on what the wait actually found.
-      await approveParkedRuns({ github, context, headSha, core });
-      return { dispatched: false };
+      if (!await canRecover()) return { cancelled: true };
+      const { parked, approved } = await approveParkedRuns({ github, context, headSha, core });
+      return { dispatched: false, found: true, approved: parked.length === approved.length };
     }
     if (attempt < attempts - 1) {
       await sleep(delayMs);
     }
   }
+  if (!await canRecover()) return { cancelled: true };
   if (!headRefName) {
     core.warning(
-      `No pull_request run appeared for ${headSha} and the head ref is unknown, so PR Validation ` +
+      `No PR Validation pull_request run appeared for ${headSha} and the head ref is unknown, so PR Validation ` +
         "could not be dispatched; the decision will report the required checks as unreported.",
     );
     return { dispatched: false };
@@ -2336,7 +2390,7 @@ async function ensureValidationRun({
       ref: headRefName,
     });
     core.notice(
-      `No pull_request run appeared for ${headSha}; dispatched PR Validation on ${headRefName}.`,
+      `No PR Validation pull_request run appeared for ${headSha}; dispatched PR Validation on ${headRefName}.`,
     );
     return { dispatched: true };
   } catch (error) {
@@ -2463,15 +2517,20 @@ async function merge({
     // invalidates the aggregate that authorized this merge and records the
     // reason — which is exactly what both cases need. Returning instead would
     // mean a second state carrying a copy of that invalidation.
+    let updateAccepted = false;
+    let recoveryError = null;
+    let observedUpdatedHead = null;
     try {
       await updateBranchToBase({ github, context, prNumber, headSha: gate.headSha });
+      updateAccepted = true;
       // The endpoint returns a status message, not the sha it wrote, so the new
       // head is read back before its parked runs can be found (#3807).
       const updated = await retryRead(`could not re-read PR #${prNumber} after update-branch`, () =>
         github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
       );
-      const newHead = updated?.data?.head?.sha;
-      if (newHead && normalizeHeadSha(newHead) !== normalizeHeadSha(gate.headSha)) {
+      const newHead = normalizeHeadSha(updated?.data?.head?.sha);
+      if (newHead && newHead !== normalizeHeadSha(gate.headSha)) {
+        observedUpdatedHead = newHead;
         const { approved } = await approveParkedRuns({ github, context, headSha: newHead, core });
         if (approved.length > 0) {
           core.notice(
@@ -2488,15 +2547,55 @@ async function merge({
         });
       }
     } catch (error) {
-      // A conflict with the base is the ordinary failure here, and it blocks:
-      // nothing merges, and the next evaluation sees CONFLICTING and says so.
-      // A head that moved under the compare-and-set lands here too, correctly —
-      // this run evaluated a head that is no longer current.
-      throw new Error(
-        `Refusing to merge PR #${prNumber}; ${reason} — the update failed: ${formatError(error)}`,
-      );
+      // An update rejection creates no successor to recover. Once accepted,
+      // though, even a failed head/run read must not bypass its scheduling.
+      if (!updateAccepted) {
+        throw new Error(
+          `Refusing to merge PR #${prNumber}; ${reason} — the update failed: ${formatError(error)}`,
+        );
+      }
+      recoveryError = error;
     }
-    throw new Error(`Refusing to merge PR #${prNumber}; ${reason}`);
+
+    // The update endpoint can acknowledge before GET /pulls exposes its SHA.
+    // Then the guard above skips BOTH approval and the existence wait (#4209).
+    // PR Validation's fallback dispatch is inside that guard and is not a gate
+    // wakeup. Schedule the gate after EVERY accepted update, independently of
+    // head visibility, run appearance, and the success of immediate recovery.
+    //
+    // Use master's trusted workflow and the existing PR-number input. Its
+    // resolver carries the initiating SHA as an exclusion: it waits until a
+    // different head is visible before publishing any target. A single read of
+    // "current" can be stale in the successor just as it was in this run.
+    // Single-shot: a dispatch accepted before a transport error must not be
+    // replayed. If scheduling fails, report a concrete recovery command.
+    const recoveryCommand = gateRecoveryCommand({
+      context, ref: gate.baseRefName, prNumber, previousHeadSha: gate.headSha,
+    });
+    try {
+      await github.rest.actions.createWorkflowDispatch({
+        owner,
+        repo,
+        workflow_id: GATE_WORKFLOW,
+        ref: gate.baseRefName,
+        inputs: { pr_number: String(prNumber), previous_head_sha: gate.headSha },
+      });
+    } catch (error) {
+      const failure = new Error(
+        `Auto Gate infrastructure failure for PR #${prNumber}: update was accepted but follow-up scheduling failed: ` +
+          `${formatError(error)}${recoveryError ? `; immediate recovery also failed: ${formatError(recoveryError)}` : ""}. ` +
+          `Run ${recoveryCommand}`,
+      );
+      failure.autoGateRecoveryFailure = true;
+      failure.autoGateRecoveryHeadSha = observedUpdatedHead;
+      throw failure;
+    }
+    const scheduled = `Auto Gate follow-up scheduled for PR #${prNumber}; its resolver must observe a head different from ${gate.headSha}`;
+    core.notice(scheduled);
+    throw new Error(
+      `Refusing to merge PR #${prNumber}; ${reason}; ${scheduled}` +
+        (recoveryError ? `; immediate post-update recovery failed: ${formatError(recoveryError)}` : ""),
+    );
   }
 
   // Defer rather than race (#3829).
@@ -3270,9 +3369,19 @@ async function sweepMergedHeadRefs({
   };
 }
 
-async function resolveTargets({ github, context, core, prNumber }) {
+async function resolveTargets({
+  github, context, core, prNumber,
+  headPollAttempts = 6,
+  headPollDelayMs = 5000,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
   const numbers = [];
   const payload = context.payload;
+  const rawPreviousHead = context.eventName === "workflow_dispatch"
+    ? payload.inputs?.previous_head_sha || "" : "";
+  const previousHead = rawPreviousHead ? normalizeHeadSha(rawPreviousHead) : null;
+  if (rawPreviousHead && !previousHead) throw new Error("Invalid previous_head_sha for Auto Gate recovery");
+  if (previousHead && !prNumber) throw new Error("Auto Gate recovery requires an explicit PR number");
 
   if (prNumber) {
     numbers.push(prNumber);
@@ -3293,7 +3402,15 @@ async function resolveTargets({ github, context, core, prNumber }) {
   const sourceSha = payload.check_suite?.head_sha || payload.workflow_run?.head_sha || payload.sha;
   const targets = [];
   for (const number of [...new Set(numbers.filter(Boolean))]) {
-    const pr = await getPullRequest({ github, context, number });
+    const pr = previousHead
+      ? await recoverSuccessorHead({
+        github, context, core, number, previousHead, headPollAttempts, headPollDelayMs, sleep,
+      })
+      : await getPullRequest({ github, context, number });
+    // Recovery answers null for a PR that is no longer eligible: nothing to do.
+    if (!pr) {
+      continue;
+    }
     if (
       sourceSha &&
       (pr.state !== "OPEN" || pr.merged || pr.baseRefName !== "master" || pr.headRefOid !== sourceSha)
@@ -3307,6 +3424,82 @@ async function resolveTargets({ github, context, core, prNumber }) {
     });
   }
   return targets;
+}
+
+// Automated recovery for an accepted update-branch (#4209): wait for a head
+// other than the initiating one, make sure PR Validation will run on it, and
+// return the PR once that head is still current — or null once the PR is no
+// longer eligible, which is a successful no-op.
+//
+// Nothing else is guaranteed to revisit that head: its runs can sit parked until
+// this lane or a human approves them. And this lane runs under
+// workflow_dispatch, whose payload names no head its caller could turn red. So
+// every failure here — a retry-exhausted read, a refused one, or recovery that
+// could not be confirmed — leaves through the ONE catch below, which puts the
+// rerun command on the PR as well as in the error.
+async function recoverSuccessorHead({
+  github, context, core, number, previousHead, headPollAttempts, headPollDelayMs, sleep,
+}) {
+  const eligible = (current) => current.state === "OPEN" && !current.merged && current.baseRefName === "master";
+  let observedHead = null;
+  try {
+    let pr = await getPullRequest({ github, context, number });
+    // Head visibility and run visibility are separate transitions. Reuse the
+    // existing validation recovery after each observed head, then recheck it
+    // before publishing. Eligibility is checked on every read and before the
+    // shared recovery helper approves or dispatches anything.
+    for (let attempt = 0; attempt < headPollAttempts; attempt += 1) {
+      if (!eligible(pr)) {
+        core.notice(`PR #${number} is no longer eligible for Auto Gate recovery; nothing to do`);
+        return null;
+      }
+      const observed = normalizeHeadSha(pr.headRefOid);
+      if (observed && observed !== previousHead) {
+        observedHead = observed;
+        const validation = await ensureValidationRun({
+          github, context, core, headSha: observed, headRefName: pr.headRefName,
+          delayMs: headPollDelayMs, sleep,
+          canRecover: async () => {
+            pr = await getPullRequest({ github, context, number });
+            return eligible(pr) && normalizeHeadSha(pr.headRefOid) === observed;
+          },
+        });
+        if (!validation.cancelled && !validation.dispatched && (!validation.found || !validation.approved)) {
+          throw new Error(validation.found
+            ? `not every parked run on ${observed} could be approved`
+            : `no PR Validation run appeared on ${observed} and none could be dispatched`);
+        }
+        pr = await getPullRequest({ github, context, number });
+        if (!eligible(pr)) {
+          return null;
+        }
+        if (!validation.cancelled && normalizeHeadSha(pr.headRefOid) === observed) {
+          return pr;
+        }
+      }
+      if (attempt < headPollAttempts - 1) {
+        await sleep(headPollDelayMs);
+        pr = await getPullRequest({ github, context, number });
+      }
+    }
+    throw new Error(
+      `PR #${number} still exposes initiating head ${previousHead} or has not settled; no stale target was published`,
+    );
+  } catch (error) {
+    const message = `Auto Gate recovery failed for PR #${number}: ${formatError(error)}. Run ` +
+      gateRecoveryCommand({ context, ref: "master", prNumber: number, previousHeadSha: previousHead });
+    const publicationError = await publishRecoveryFailure({
+      github, context, prNumber: number, message, observedHeadSha: observedHead,
+    });
+    const failure = new Error(
+      publicationError ? `${message}; recovery publication also failed: ${formatError(publicationError)}` : message,
+      { cause: error },
+    );
+    // Keep the classification, so the workflow catch takes the exit it always
+    // would have. Either exit now carries the command.
+    failure.autoGateReadFailure = isReadFailure(error);
+    throw failure;
+  }
 }
 
 async function listOpenMasterPullRequestsForHead({ github, context, headSha }) {
@@ -5168,6 +5361,7 @@ module.exports = {
     listParkedRuns,
     ensureValidationRun,
     VALIDATION_WORKFLOW,
+    GATE_WORKFLOW,
     decisionSummaryBody,
     DECISION_STAMP_PREFIX,
     maintainerApproval,
