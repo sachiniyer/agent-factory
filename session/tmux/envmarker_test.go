@@ -52,12 +52,14 @@ func TestSessionEnvFlagsIncludeMarkers(t *testing.T) {
 	forceNewSessionEnvMarkers(t, true)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv(envMarkerTestguardRun, "test-run-1")
 
 	flags := sessionEnvFlags("af_abc_mysession", "generation-1")
 	require.Equal(t, []string{
 		"-e", "AF_SESSION=af_abc_mysession",
 		"-e", "AF_SESSION_GEN=generation-1",
 		"-e", "AF_HOME=" + home,
+		"-e", "AF_TESTGUARD_RUN=test-run-1",
 	}, flags)
 }
 
@@ -74,6 +76,7 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 	forceSessionEnvExecutable(t, "/test/af")
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv(envMarkerTestguardRun, "test-run-1")
 	oldNewSessionGeneration := newSessionGeneration
 	newSessionGeneration = func() string { return "generation-1" }
 	t.Cleanup(func() { newSessionGeneration = oldNewSessionGeneration })
@@ -101,7 +104,7 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 	require.NoError(t, session.Start(workdir))
 	require.NotEmpty(t, ptyFactory.cmds)
 	require.Equal(t,
-		fmt.Sprintf("tmux new-session -d -s af_marked -c %s -e AF_SESSION=af_marked -e AF_SESSION_GEN=generation-1 -e AF_HOME=%s %s",
+		fmt.Sprintf("tmux new-session -d -s af_marked -c %s -e AF_SESSION=af_marked -e AF_SESSION_GEN=generation-1 -e AF_HOME=%s -e AF_TESTGUARD_RUN=test-run-1 %s",
 			workdir, home, wrappedProgramForTest(t, "/test/af", "claude")),
 		strings.Join(ptyFactory.cmds[0].Args, " "))
 }
