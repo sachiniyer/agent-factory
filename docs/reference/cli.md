@@ -1037,12 +1037,13 @@ The agent-factory daemon runs task cron schedules in-process, supervises
 watch-task scripts, monitors sessions, and serves the bundled web UI.
 
 The web UI is part of the daemon — there is no separate web command — so it is
-served whenever the daemon is running. Opening the TUI starts one: it reads
-session state through the daemon and spawns it if none is up, so simply opening
-af serves the web UI. A bare 'af' launch also runs a background check that
-starts the daemon when an enabled task exists. Cobra subcommands do not run
-that task check; a subcommand that needs the daemon may start it for its own
-operation.
+served whenever the daemon is running. On-demand process startup belongs to the
+default local target: opening a locally targeted TUI ensures its daemon, while
+--daemon-url or AF_DAEMON_URL selects a remote daemon that af only dials and
+never starts. A bare 'af' launch separately checks the local task store and may
+start the local daemon for enabled tasks, even when the TUI target is remote.
+Cobra subcommands do not run that task check; a local daemon operation may own
+its own ensure.
 
 With af running, open:
 

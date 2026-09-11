@@ -602,7 +602,7 @@ func TestUpgrade_ShutdownAndRespawnFailuresAreOppositeStates(t *testing.T) {
 		if strings.Contains(got, "af daemon restart") {
 			t.Fatalf("`af daemon restart` starts nothing when no daemon is running.\ngot=%q", got)
 		}
-		if !strings.Contains(got, "Running af starts one") {
+		if !strings.Contains(got, "default local target starts one") {
 			t.Fatalf("the message must name what actually starts a daemon.\ngot=%q", got)
 		}
 	})

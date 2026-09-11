@@ -59,12 +59,14 @@ paragraph because it's why `af` doesn't corrupt itself:
 
 ## Lifecycle
 
-The daemon starts **on demand**. Opening the TUI makes sure one is running,
-whether or not a task or root agent is configured. A bare `af` launch also runs
-a background check that starts the daemon when an enabled task exists. That
-enabled-task check runs only for bare `af`; subcommands such as `af version` and
-`af config list` do not run it. For interactive use you usually don't have to
-think about it at all.
+On-demand startup is scoped to the **default local target**. A locally targeted
+TUI makes sure its daemon is running, whether or not a task or root agent is
+configured. `--daemon-url` or `AF_DAEMON_URL` selects a remote daemon that af
+only dials and never starts. A bare `af` launch separately checks the local task
+store and may start the local daemon for enabled tasks, even when its TUI target
+is remote. Subcommands do not run that root-command check; a local operation
+that needs the daemon may perform its own ensure. For interactive local use you
+usually don't have to think about it at all.
 
 To keep tasks and sessions running across logouts and reboots, install the
 daemon's autostart unit once:

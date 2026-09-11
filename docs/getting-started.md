@@ -158,11 +158,13 @@ Schedule an agent to run on its own:
 af tasks add --name "Daily triage" --prompt "Triage open issues" --cron "0 9 * * *"
 ```
 
-Scheduled and event-driven tasks are run by the background **daemon**. Opening
-the TUI starts it on demand. On a bare `af` launch, a background check also
-starts it when an enabled task exists; subcommands such as `af version` and
-`af config list` do not run that check. To keep it — and your tasks — running
-across logouts and reboots, install its autostart unit once:
+Scheduled and event-driven tasks are run by the background **daemon**. On-demand
+startup belongs to the default local target: a locally targeted TUI ensures its
+daemon, while `--daemon-url` or `AF_DAEMON_URL` only dials a remote one. A bare
+`af` launch separately checks the local task store and may start the local daemon
+for enabled tasks; subcommands do not run that root-command check. To keep it —
+and your tasks — running across logouts and reboots, install its autostart unit
+once:
 
 ```bash
 af daemon install

@@ -16,10 +16,10 @@ import (
 )
 
 // The daemon is the single always-on host for task schedules (cron and watch
-// scripts), session monitoring, and the web UI. Launching the TUI starts it:
-// the cold start reads session state through the daemon
-// (coldStartFromSnapshot -> withDaemonHTTP -> daemon.EnsureDaemon), and
-// ensureDaemonForTasks checks scheduled work on a bare root launch. Cobra
+// scripts), session monitoring, and the web UI. On-demand process startup is
+// local-only: the default local TUI target reaches daemon.EnsureDaemon through
+// coldStartFromSnapshot -> withDaemonHTTP, while a selected remote target is
+// dial-only. A bare root launch separately checks the local task store; Cobra
 // subcommands do not run that check. `af daemon install` registers a user-level
 // autostart unit so schedules and the web UI survive logouts and reboots without
 // ever opening af.
@@ -31,12 +31,13 @@ var daemonCmd = &cobra.Command{
 watch-task scripts, monitors sessions, and serves the bundled web UI.
 
 The web UI is part of the daemon — there is no separate web command — so it is
-served whenever the daemon is running. Opening the TUI starts one: it reads
-session state through the daemon and spawns it if none is up, so simply opening
-af serves the web UI. A bare 'af' launch also runs a background check that
-starts the daemon when an enabled task exists. Cobra subcommands do not run
-that task check; a subcommand that needs the daemon may start it for its own
-operation.
+served whenever the daemon is running. On-demand process startup belongs to the
+default local target: opening a locally targeted TUI ensures its daemon, while
+--daemon-url or AF_DAEMON_URL selects a remote daemon that af only dials and
+never starts. A bare 'af' launch separately checks the local task store and may
+start the local daemon for enabled tasks, even when the TUI target is remote.
+Cobra subcommands do not run that task check; a local daemon operation may own
+its own ensure.
 
 With af running, open:
 
@@ -101,7 +102,7 @@ var daemonUninstallCmd = &cobra.Command{
 			return nil
 		}
 		fmt.Printf("daemon autostart removed: %s\n", unitPath)
-		fmt.Println("the daemon still starts on demand when you open the TUI; bare af also checks enabled tasks")
+		fmt.Println("the local daemon still starts on demand for local operations; bare af also checks local enabled tasks")
 		return nil
 	},
 }
@@ -237,9 +238,9 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 	if info.Running {
 		fmt.Fprintln(w, "daemon: running")
 	} else {
-		// Name both root-command paths without implying Cobra subcommands run the
-		// enabled-task check; a daemon-using subcommand owns its own startup behavior.
-		fmt.Fprintln(w, "daemon: not running (starts on demand when the TUI opens; bare af checks enabled tasks)")
+		// State the lifecycle property rather than one caller list: only operations
+		// targeting the default local daemon may start it; remote targets are dial-only.
+		fmt.Fprintln(w, "daemon: not running (starts on demand for default local-target operations; remote targets are dial-only)")
 	}
 	if info.Phase != "" {
 		fmt.Fprintf(w, "  phase:          %s\n", info.Phase)
@@ -766,11 +767,13 @@ func respawnDaemonAfterUpgrade(execPath string) (respawnResult, error) {
 	return respawnResult{UnitErr: unitErr, UnitGateErr: gateErr}, nil
 }
 
-// ensureDaemonForTasks is the enabled-task background check used by the bare
-// root command's TUI RunE. Cobra subcommands do not invoke it. Failures are
-// logged rather than surfaced because it runs alongside TUI launch, and the
-// next bare af invocation retries. The TUI's HTTP path separately ensures the
-// daemon and surfaces a startup failure.
+// ensureDaemonForTasks is the LOCAL enabled-task background check used by the
+// bare root command's TUI RunE. It always reads this AF home's task store and
+// ensures its local daemon; selecting a remote TUI target does not retarget this
+// lifecycle work, and never starts the remote daemon. Cobra subcommands do not
+// invoke it. Failures are logged rather than surfaced because it runs alongside
+// TUI launch, and the next bare af invocation retries. The TUI's HTTP path
+// separately ensures only its default local target and surfaces startup failure.
 //
 // The enabled-task gate is correct here and only here: this is the cold-start
 // path (bare af launch), where no daemon was previously running. The post-upgrade
