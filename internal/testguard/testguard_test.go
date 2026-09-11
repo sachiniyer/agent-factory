@@ -303,6 +303,9 @@ func fakeTripwireTmux(t *testing.T) (markReady func(), ownerFile string) {
 	script := `#!/bin/sh
 case "$1" in
 list-sessions)
+  if [ "${AF_TRIPWIRE_WEDGE_LIST:-}" = 1 ]; then
+    exec /bin/sleep 1
+  fi
   printf '%s\n' af_preexisting
   if [ -f "$AF_TRIPWIRE_READY_FILE" ]; then
     printf '%s\n' af_owned af_overridden af_foreign af_unmarked af_unreadable
@@ -365,6 +368,27 @@ esac
 			t.Fatalf("mark fake tmux ready: %v", err)
 		}
 	}, ownerFile
+}
+
+// TestAmbientAFSessions_BoundsUnreadableList keeps the first command on the
+// verification path from wedging TestMain after the package suite finishes.
+// An unreadable session list means there is nothing the tripwire can safely
+// attribute, so it returns no sessions after the local deadline.
+func TestAmbientAFSessions_BoundsUnreadableList(t *testing.T) {
+	fakeTripwireTmux(t)
+	t.Setenv("AF_TRIPWIRE_WEDGE_LIST", "1")
+	previous := tmuxTripwireTimeout
+	tmuxTripwireTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { tmuxTripwireTimeout = previous })
+
+	started := time.Now()
+	sessions := ambientAFSessions()
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("wedged session list returned after %s, want the local deadline", elapsed)
+	}
+	if sessions != nil {
+		t.Fatalf("wedged session list returned sessions %v", sessions)
+	}
 }
 
 // TestAmbientAFSessionMarker_BoundsUnreadableQuery keeps the tripwire from
