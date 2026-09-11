@@ -46,7 +46,7 @@ func TestDaemonRestartPreservesDaemonSpawnedTmux(t *testing.T) {
 	t.Setenv("AF_FAKE_AF_BIN", h.bin)
 
 	h.run("daemon", "install")
-	waitForRestartDaemonReady(t, "", managerLog)
+	waitForRestartDaemonReady(t, "", managerLog, restartReadinessContext{stage: "install", home: h.home, restartOutput: "not_run"})
 
 	created := h.createSession("restart-survivor")
 	if created.TmuxName == "" {
@@ -55,7 +55,7 @@ func TestDaemonRestartPreservesDaemonSpawnedTmux(t *testing.T) {
 	t.Setenv("AF_FAKE_TMUX_SESSION", created.TmuxName)
 
 	serverPID, panePID := tmuxProcessIDs(t, created.TmuxName)
-	restartAndAssertTmuxPIDs(t, h, created.TmuxName, serverPID, panePID, managerLog)
+	restartAndAssertTmuxPIDs(t, h, "first restart (generated unit)", created.TmuxName, serverPID, panePID, managerLog)
 
 	// Fault-inject the old unit policy after proving the generated unit is safe.
 	// The second restart can survive only if the daemon originally created the
@@ -74,7 +74,7 @@ func TestDaemonRestartPreservesDaemonSpawnedTmux(t *testing.T) {
 	}
 	t.Setenv("AF_FAKE_FORCE_CONTROL_GROUP", "1")
 
-	restartAndAssertTmuxPIDs(t, h, created.TmuxName, serverPID, panePID, managerLog)
+	restartAndAssertTmuxPIDs(t, h, "second restart (forced control-group)", created.TmuxName, serverPID, panePID, managerLog)
 	refreshedUnit, err := os.ReadFile(unitPath)
 	if err != nil {
 		t.Fatalf("read refreshed unit: %v", err)
@@ -130,14 +130,16 @@ func tmuxProcessIDs(t *testing.T, name string) (serverPID, panePID int) {
 	return serverPID, panePID
 }
 
-func restartAndAssertTmuxPIDs(t *testing.T, h *harness, name string, wantServerPID, wantPanePID int, managerLog string) {
+func restartAndAssertTmuxPIDs(t *testing.T, h *harness, stage, name string, wantServerPID, wantPanePID int, managerLog string) {
 	t.Helper()
-	before := waitForRestartDaemonReady(t, "", managerLog)
-	if out := h.run("daemon", "restart"); strings.TrimSpace(out) != "daemon restarted" {
+	detail := restartReadinessContext{stage: stage, home: h.home, tmuxName: name, restartOutput: "not_run"}
+	before := waitForRestartDaemonReady(t, "", managerLog, detail)
+	detail.restartOutput = h.run("daemon", "restart")
+	if strings.TrimSpace(detail.restartOutput) != "daemon restarted" {
 		log, _ := os.ReadFile(managerLog)
-		t.Fatalf("expected a restart, not a no-daemon no-op; output=%q\nmanager log:\n%s", out, log)
+		t.Fatalf("%s: expected a restart, not a no-daemon no-op; output=%q\nmanager log:\n%s", stage, detail.restartOutput, log)
 	}
-	waitForRestartDaemonReady(t, before.BootID, managerLog)
+	waitForRestartDaemonReady(t, before.BootID, managerLog, detail)
 
 	gotServerPID, gotPanePID := tmuxProcessIDs(t, name)
 	if gotServerPID != wantServerPID || gotPanePID != wantPanePID {
@@ -151,23 +153,44 @@ func restartAndAssertTmuxPIDs(t *testing.T, h *harness, name string, wantServerP
 // Waiting for that PID and the surviving tmux session can let the next restart
 // run during the handoff gap, where a correct no-daemon no-op skips the legacy
 // unit migration (#4189). Require a ready responder from a NEW boot.
-func waitForRestartDaemonReady(t *testing.T, previousBootID, managerLog string) daemon.HealthStatus {
+func waitForRestartDaemonReady(t *testing.T, previousBootID, managerLog string, detail restartReadinessContext) daemon.HealthStatus {
 	t.Helper()
 	var last daemon.HealthStatus
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	var pid int
+	var pidValid bool
+	pidLive, tmuxExists := "not_checked", "not_checked"
+	waitUntil(t, 10*time.Second, detail.stage+" to report a ready daemon after boot "+previousBootID, func() bool {
 		last = daemon.Health()
-		if last.PingErr == nil && last.Phase == daemon.DaemonPhaseReady &&
-			last.BootID != "" && last.BootID != previousBootID &&
-			last.ServingPID > 1 && last.ServingPID == last.PIDFilePID {
-			return last
+		// Supplemental observations retain the old PID/tmux short-circuit order.
+		// They do not gate the handoff: its readiness predicate below is unchanged.
+		pid, pidValid = daemonPID(detail.home)
+		pidLive, tmuxExists = "not_checked", "not_checked"
+		if pidValid {
+			alive := pidAlive(pid)
+			pidLive = fmt.Sprint(alive)
+			if alive && detail.tmuxName != "" {
+				tmuxExists = fmt.Sprint(tmuxSessionExists(detail.tmuxName))
+			}
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	log, _ := os.ReadFile(managerLog)
-	t.Fatalf("timeout waiting for a ready daemon after boot %q: ping=%v phase=%s boot=%q servingPID=%d recordedPID=%d\nmanager log:\n%s",
-		previousBootID, last.PingErr, last.Phase, last.BootID, last.ServingPID, last.PIDFilePID, log)
+		return last.PingErr == nil && last.Phase == daemon.DaemonPhaseReady &&
+			last.BootID != "" && last.BootID != previousBootID &&
+			last.ServingPID > 1 && last.ServingPID == last.PIDFilePID
+	}, func() {
+		// Report the retained observations, not a new post-timeout probe.
+		log, logErr := os.ReadFile(managerLog)
+		t.Logf("%s: last handoff observation after boot %q: ping=%v phase=%s boot=%q servingPID=%d recordedPID=%d\n"+
+			"supplemental observations: pid=%d pid_file_valid=%t pid_alive=%s tmux_session=%q tmux_exists=%s; restart_output=%q; manager_log_error=%v\nmanager log:\n%s",
+			detail.stage, previousBootID, last.PingErr, last.Phase, last.BootID, last.ServingPID, last.PIDFilePID,
+			pid, pidValid, pidLive, detail.tmuxName, tmuxExists, detail.restartOutput, logErr, log)
+	})
 	return last
+}
+
+type restartReadinessContext struct {
+	stage         string
+	home          string
+	tmuxName      string
+	restartOutput string
 }
 
 const fakeSystemdRun = `
