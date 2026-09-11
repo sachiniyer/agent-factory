@@ -159,7 +159,7 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 	// Fail fast instead of blocking on a credential/passphrase prompt when a
 	// remote needs auth and no terminal is attached. Force stable diagnostics so
 	// repository classification is fail-closed and locale-independent.
-	cmd.Env = environment
+	cmd.Env = repositoryPathEnvironment(environment)
 	// Own process group so the deadline kills git AND its transport child
 	// together. exec.CommandContext's default Cancel SIGKILLs only the git
 	// process, leaving ssh / git-remote-https orphaned and still holding the
@@ -211,10 +211,5 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 
 func (g *GitWorktree) gitCommandEnvironment() []string {
 	return append(sessionenv.Filter(os.Environ(), "", g.hookEnvPassthrough),
-		"GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
-}
-
-func repoGoneGitCommandEnvironment() []string {
-	return append(sessionenv.Filter(os.Environ(), "", nil),
 		"GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 }
