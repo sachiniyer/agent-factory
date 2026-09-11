@@ -181,6 +181,41 @@ func TestConcurrentInPlaceCreatesReserveBranchAdmission(t *testing.T) {
 	require.Error(t, second.err)
 	assert.Contains(t, second.err.Error(), branch)
 	assert.Contains(t, second.err.Error(), "first-here")
+	assert.NotContains(t, second.err.Error(), "already exists")
+	assert.NotContains(t, second.err.Error(), "already reserved")
+}
+
+func TestConcurrentSameTitleCreateKeepsDuplicateTitleError(t *testing.T) {
+	manager, _, repoPath := newStatusTestManager(t)
+	backend := session.NewFakeBackend()
+	backend.CompleteStart()
+	entered, unblock := blockingCreateFactory(t, inPlaceAdmissionFakeBackend{readyFakeBackend{backend}}, nil)
+	server := &controlServer{manager: manager}
+	request := CreateSessionRequest{Title: "dupe", RepoPath: repoPath, Program: "claude", InPlace: true}
+	firstDone := startCreateCall(server, request)
+	waitForCreateFactory(t, entered)
+	secondDone := startCreateCall(server, request)
+	require.Eventually(t, func() bool {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		return len(manager.pendingCreates) == 1
+	}, time.Second, 5*time.Millisecond)
+	select {
+	case result := <-secondDone:
+		t.Fatalf("duplicate create did not wait for title admission: %v", result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	unblock()
+	first := waitForCreateResult(t, firstDone)
+	second := waitForCreateResult(t, secondDone)
+	require.NoError(t, first.err)
+	require.Error(t, second.err)
+	assert.True(t,
+		strings.Contains(second.err.Error(), "already exists") || strings.Contains(second.err.Error(), "reserved"),
+		"duplicate create error should preserve the title-reservation contract: %v", second.err,
+	)
+	assert.NotContains(t, second.err.Error(), "already checked out by live lane")
 }
 
 func TestReserveCreateKeepsEveryHolderBeforeArchivedRename(t *testing.T) {

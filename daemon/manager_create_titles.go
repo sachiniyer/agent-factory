@@ -143,6 +143,23 @@ func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, na
 		shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, archived.Title))
 }
 
+// refuseNonReusableTitleConflictLocked preserves title-admission precedence
+// ahead of the worktree collision guard. A create serialized behind the winner
+// of the same-title race must report the established "already exists" or
+// "reserved" error, rather than misdescribe that winner's worktree as an
+// unrelated branch collision.
+//
+// The archived-only case is deliberately excluded: reserveCreate renames that
+// record to free the requested title. Every other record conflict is final and
+// can be reported before inspecting Git without changing any state.
+func (m *Manager) refuseNonReusableTitleConflictLocked(repoID, repoPath, title string, namespace runtimeNameNamespace, diskData []session.InstanceData) error {
+	archived, _, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, diskData)
+	if err != nil || archived != nil {
+		return err
+	}
+	return m.findTitleRecordConflictLocked(repoID, repoPath, title, namespace, diskData)
+}
+
 // refuseLiveHeldBranchLocked is the narrow #4092 create admission guard. A
 // normal local create derives its branch from the title; --here must instead use
 // the target worktree's observed branch and path. Only a positively identified

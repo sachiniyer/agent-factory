@@ -794,6 +794,14 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 		// archived session out of the way so the new session can take the name
 		// (feat: reuse archived name). A LIVE collision is left untouched, so
 		// validateTitleAvailableLocked below still rejects it exactly as before.
+		// Ask that record question before the worktree guard as well: once branch
+		// admission has serialized concurrent creates, the winner of a same-title
+		// race is both a title conflict and the live holder of the branch it just
+		// created. The title conflict is the useful, established diagnosis; the
+		// worktree refusal is reserved for a genuinely different live lane.
+		if err := m.refuseNonReusableTitleConflictLocked(repo.ID, identityRoot, title, nameNamespace, diskData); err != nil {
+			return nil, "", nil, nil, err
+		}
 		//
 		// Ahead of that rename, refuse when the branch this create would derive is
 		// already checked out somewhere (#2127) — freeing the title does not free
