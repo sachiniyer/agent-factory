@@ -3,6 +3,7 @@ package doctor
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -376,6 +377,24 @@ func checkDeadSocketHomes(ctx *scanContext, report *Report) {
 	}
 }
 
+// readDaemonSocketDir reads one bounded batch from an open candidate directory
+// the sweep handed to checkDeadSocketHomes. Indirected so a test can confirm the
+// dead-socket check bounds its OWN read of a candidate: the sweep refuses to read
+// a million-entry directory in full so that it cannot hang or be OOM-killed
+// before it reports an incompleteness notice (#3466), and the consumer of its
+// candidate list must not undo that by re-reading a huge candidate here with
+// os.ReadDir (#3845). The level-2 candidate the sweep records but never opens
+// is the worst case — its contents were never bounded by any read, so no
+// notice precedes the read this seam exists to keep bounded.
+var readDaemonSocketDir = func(f *os.File, n int) ([]os.DirEntry, error) { return f.ReadDir(n) }
+
+// daemonSocketReadBatch is how many entries holdsOnlyADaemonSocket reads at a
+// time. The only directory this reads to the end is the positive shape, which
+// holds exactly one entry; every non-matching candidate — the common case — is
+// decided within the first batch, so the read is bounded by the work the
+// decision needs rather than by the size of the directory.
+const daemonSocketReadBatch = 64
+
 // holdsOnlyADaemonSocket reports whether dir's ENTIRE content is one entry, and
 // that entry is the daemon's HTTP socket.
 //
@@ -383,15 +402,53 @@ func checkDeadSocketHomes(ctx *scanContext, report *Report) {
 // is false rather than a guess, and the name alone is never enough — only the
 // mode proves the entry is a socket and not a file that borrowed the name, the
 // same rule checkStaleSockets follows.
+//
+// The read is STREAMED and bounded, on purpose, because this is the consumer of
+// the bounded sweep in temp_homes.go. The sweep refuses to read a pathological
+// candidate (a single directory with millions of entries) in full, so that the
+// dead-socket check cannot hang or be OOM-killed before it gets to say so; that
+// bound is wasted if the consumer then re-materializes the whole listing here
+// with os.ReadDir, which reads and name-sorts every entry before returning. So
+// holdsOnlyADaemonSocket reads in small batches and decides as soon as the shape
+// can be settled — a second entry, or a first entry that is not the socket —
+// which makes the common non-matching candidate read ~2 entries rather than all
+// of them. The only directory this reads in full is the one it proves positive,
+// and that directory holds exactly one entry.
 func holdsOnlyADaemonSocket(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 {
+	f, err := os.Open(dir)
+	if err != nil {
 		return false
 	}
-	if entries[0].Name() != daemon.HTTPSocketName() {
+	defer func() { _ = f.Close() }()
+	var first string
+	count := 0
+	for {
+		entries, readErr := readDaemonSocketDir(f, daemonSocketReadBatch)
+		for _, e := range entries {
+			count++
+			if count == 1 {
+				first = e.Name()
+			}
+			if count > 1 || first != daemon.HTTPSocketName() {
+				return false
+			}
+		}
+		// EOF is the clean end of the listing, not a failure: it is the only
+		// state from which count is final and the single-entry shape can be
+		// proven. A non-EOF read error means the listing is incomplete, so a
+		// directory whose contents could not be read to the end is never
+		// asserted to hold "only" a socket.
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return false
+		}
+	}
+	if count != 1 {
 		return false
 	}
-	info, err := os.Lstat(filepath.Join(dir, entries[0].Name()))
+	info, err := os.Lstat(filepath.Join(dir, first))
 	return err == nil && info.Mode()&os.ModeSocket != 0
 }
 
