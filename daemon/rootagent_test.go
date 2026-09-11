@@ -957,8 +957,8 @@ func TestDeliverPromptSendsIntoEnsuredRoot(t *testing.T) {
 	}
 }
 
-// ensureRootAgentsAndWait runs one ensure pass and joins the creates it
-// launched.
+// ensureRootAgentsAndWait runs one ensure pass and joins the asynchronous root
+// work it launched.
 //
 // Since #3721 a root (re-)create runs on its own goroutine, so a test asserting
 // on the create's OUTCOME — the session it registered, the options it handed
@@ -974,4 +974,5 @@ func TestDeliverPromptSendsIntoEnsuredRoot(t *testing.T) {
 func (m *Manager) ensureRootAgentsAndWait() {
 	m.EnsureRootAgents()
 	m.waitRootAgentCreates()
+	m.waitRootProgramDriftInspections()
 }

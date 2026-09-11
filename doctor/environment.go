@@ -14,6 +14,7 @@ import (
 
 func checkConfigAndStorage(ctx *scanContext, report *Report) *config.Config {
 	load, cfgErr := config.LoadConfigReadOnly()
+	ctx.globalConfigMissing = load.Missing
 	cfg := load.Config
 	channel := "unknown"
 	if cfg != nil && cfg.UpdateChannel != "" {

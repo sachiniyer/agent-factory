@@ -640,12 +640,33 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			root = instance.Path
 		}
 		fallbackEligible := true
-		swapErr := config.WithProjectConfigLockForRoot(root, func() error {
+		var precheckErr error
+		if accountSwap.manual {
+			if err := m.checkManualAccountSwap(instance, accountSwap); err != nil {
+				precheckErr = fmt.Errorf("no configured account can replace the limited identity for %q: %w", requestedTitle, err)
+			}
+			if m.accountSwapAfterManualPrecheckForTest != nil {
+				m.accountSwapAfterManualPrecheckForTest()
+			}
+		}
+		// The unlocked manual check is latency-only evidence. Its program and
+		// candidate policy may change before the personal-project lock is acquired,
+		// so failures as well as successes are re-evaluated under that lock. When
+		// the lock lookup itself cannot establish a project, preserve a domain
+		// refusal the precheck already proved instead of replacing it with marker
+		// probe infrastructure detail.
+		lockEntered := false
+		lockErr := config.WithProjectConfigLockForRoot(root, func() error {
+			lockEntered = true
 			var err error
 			fallbackEligible, err = m.commitNewAccountSwapIdentity(
 				repoID, key, requestedTitle, instance, accountSwap, liveConfig)
 			return err
 		})
+		swapErr := lockErr
+		if !lockEntered && precheckErr != nil {
+			swapErr = precheckErr
+		}
 		if swapErr != nil {
 			if !fallbackEligible || !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, swapErr) {
 				return resumeNotPerformed, swapErr
