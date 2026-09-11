@@ -241,6 +241,9 @@ func sanitizeArchiveTitle(title string) string {
 			cut--
 		}
 		s = strings.TrimLeft(s[:cut], "-.")
+		if s == "" {
+			s = "session"
+		}
 	}
 	return s
 }
