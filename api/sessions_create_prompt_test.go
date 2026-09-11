@@ -88,12 +88,17 @@ func TestSessionsCreateReportsPromptUncertainty(t *testing.T) {
 					require.Equal(t, tc.status, got.LastPromptDeliveryStatus)
 					diagnostic, err := os.ReadFile(stderr.Name())
 					require.NoError(t, err)
+					if envelope {
+						require.Empty(t, string(diagnostic), "--json must emit only its structured envelope")
+					}
 					if tc.wantWarning {
 						require.NotEmpty(t, got.Warning)
 						require.Contains(t, got.Warning, "created")
 						require.Contains(t, got.Warning, "prompt")
 						require.Contains(t, got.Warning, "Inspect")
-						require.Contains(t, string(diagnostic), got.Warning)
+						if !envelope {
+							require.Contains(t, string(diagnostic), got.Warning)
+						}
 					} else {
 						require.Empty(t, got.Warning)
 						require.False(t, strings.Contains(string(diagnostic), "Warning:"))

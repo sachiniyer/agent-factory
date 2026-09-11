@@ -344,8 +344,9 @@ var sessionsCreateCmd = &cobra.Command{
 	Short: "Create a new session",
 	Long: `Create a new session running an agent in its own git worktree.
 
-With --prompt, unconfirmed or incomplete delivery produces a warning on stderr
-and a warning field in the JSON session result. The session remains created;
+With --prompt, unconfirmed or incomplete delivery adds a warning field to the
+JSON session result. Outside --json mode, it also prints the warning on stderr.
+The session remains created;
 inspect its pane before retrying, since an unverified prompt may already have
 run. Creation still exits successfully and does not automatically resend.
 

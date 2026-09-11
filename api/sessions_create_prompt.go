@@ -38,6 +38,8 @@ func reportCreatedSession(data *session.InstanceData, prompt string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "Warning: "+warning)
+	if !envelopeOutput {
+		fmt.Fprintln(os.Stderr, "Warning: "+warning)
+	}
 	return jsonOut(result)
 }
