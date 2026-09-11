@@ -20,6 +20,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,6 +49,29 @@ func transientRepoResolutionFail(t *testing.T, repoPath string) {
 func corruptRepoInstances(t *testing.T, repoID string) {
 	t.Helper()
 	require.NoError(t, config.LoadState().SaveInstances(repoID, json.RawMessage("{not valid json")))
+}
+
+// malformedTitleWalkRecord persists a row that is valid JSON but whose archive
+// ownership projection cannot be restored. loadRepoInstanceData therefore
+// succeeds, and nextAvailableTitleLocked is the first operation that refuses it.
+func malformedTitleWalkRecord(t *testing.T, repoID, repoPath, title string) {
+	t.Helper()
+	rows, err := json.Marshal([]session.InstanceData{{
+		ID:          "malformed-title-owner",
+		Title:       title,
+		Path:        repoPath,
+		Status:      session.Ready,
+		BackendType: "local",
+		Worktree: session.GitWorktreeData{
+			RepoPath:         repoPath,
+			ExternalWorktree: true,
+			RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{
+				State: sessiongit.RelocationRecoveryClaimStale,
+			},
+		},
+	}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances(repoID, rows))
 }
 
 // unreadableRepoInstances replaces the repo's instances.json with a DIRECTORY so
@@ -113,7 +137,7 @@ func flattenCreateSession(t *testing.T, manager *Manager) {
 			return nil, fmt.Errorf("%s", err.Error())
 		}
 		release()
-		t.Fatalf("createSessionForTask stub: expected the pre-flight failure, but reserveCreate succeeded")
+		t.Fatalf("createSessionForTask stub: expected the pre-flight failure for title base %q, but reserveCreate succeeded", req.TitleBase)
 		return nil, nil
 	}
 	t.Cleanup(func() { createSessionForTask = orig })
@@ -265,6 +289,27 @@ func TestRepro_WatcherRefundsRateSlotOnCreatePreflight(t *testing.T) {
 
 	assert.Equal(t, 0, spentSlots(w), "a pre-flight create failure must refund the rate slot")
 	assert.Equal(t, 1, w.queue.pendingCount(), "a failed delivery is queued for replay")
+}
+
+// TestRepro_WatcherRefundsRateSlotOnTitleWalkFailure reaches the pre-reservation
+// title walk used by every per-run task create. The corrupt ownership projection
+// makes that walk fail with errTitleCheckFatal after the earlier store load has
+// succeeded. The watch attempt delivered nothing, so its rate slot must be
+// available immediately rather than remaining charged for the 60-second window.
+func TestRepro_WatcherRefundsRateSlotOnTitleWalkFailure(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	// Slash and dash remain distinct branch names but collapse to the same
+	// archive directory, so the first candidate reaches the ownership decoder.
+	malformedTitleWalkRecord(t, repoID, repoPath, "repro/watch")
+	seedWatchTaskForManager(t, "repro-title-walk", repoPath, "")
+	flattenCreateSession(t, manager)
+
+	w := newRateSlotWatcher(t, "repro-title-walk", deliverWatchEvent)
+	close(w.stopCh)
+	w.handleEvent("new issue #4186", &tailBuffer{})
+
+	assert.Equal(t, 0, spentSlots(w), "a title-walk failure before the reservation commit must refund the rate slot")
+	assert.Equal(t, 1, w.queue.pendingCount(), "the failed delivery must remain queued for replay")
 }
 
 // TestRepro_ReserveCreateGenuineConflictStaysChargedForTask is the non-regression
