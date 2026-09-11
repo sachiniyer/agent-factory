@@ -4,11 +4,12 @@ async function carrySessionActionsToPhone(
   page: Page,
   request: APIRequestContext,
   filterSelected = false,
+  sessionTitle = process.env.AF_WEB_SESSION_A ?? "probe-a",
 ) {
   await page.setViewportSize({ width: 1280, height: 844 });
   const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
   const session = snapshot.data.instances.find((s: { title: string }) =>
-    s.title === (process.env.AF_WEB_SESSION_A ?? "probe-a"));
+    s.title === sessionTitle);
   expect(session?.id).toBeTruthy();
   await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
   await expect(page.locator(".af-term-title")).toHaveText(session.title);
@@ -443,4 +444,22 @@ for (const action of ["Archive session", "Delete session"] as const) {
       await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
     });
   }
+}
+
+for (const activation of ["tab Enter", "tab Space", "tab shortcut"] as const) {
+  test(`phone ${activation} dismisses carried actions before tab-kind recomposition`, async ({ page, request }) => {
+    const title = process.env.AF_WEB_SESSION_WEB ?? "probe-web";
+    const { controls, session, sessionActions } = await carrySessionActionsToPhone(page, request, false, title);
+    const webIndex = session.tabs.findIndex((tab: { kind: number }) => tab.kind === 3);
+    expect(webIndex).toBeGreaterThan(0);
+    if (activation === "tab shortcut") {
+      await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+      await page.keyboard.press(String(webIndex + 1));
+    } else {
+      await page.locator(`.af-tab[data-tab-index="${webIndex}"]`).focus();
+      await page.keyboard.press(activation.slice(4));
+    }
+    await expect(controls).toHaveAttribute("aria-expanded", "false");
+    await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+  });
 }

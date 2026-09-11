@@ -16412,10 +16412,27 @@ var AppShell = class {
     });
     return item;
   }
+  /** Retires carried actions before a user-owned transition can recompose them. */
+  dismissCarriedActions() {
+    if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
+  }
   /** One user-owned view transition for both appbar tabs and document shortcuts. */
   switchView(view) {
-    if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
+    this.dismissCarriedActions();
     this.actions.switchView(view);
+  }
+  /** Tab buttons and 1-9 shortcuts share the same pre-recomposition dismissal. */
+  openTab(index) {
+    this.dismissCarriedActions();
+    this.actions.openTab(index);
+  }
+  switchTab(index) {
+    this.dismissCarriedActions();
+    this.actions.switchTab(index);
+  }
+  closeTab(index) {
+    this.dismissCarriedActions();
+    this.actions.closeTab(index);
   }
   /** Keyboard twin of the New tab button, including its per-kind availability. */
   openNewTabPicker(shortcutReturn) {
@@ -16743,7 +16760,19 @@ var AppShell = class {
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
     const shown = new Set(state.shownTabs);
     const children = tabs.map(
-      (tab, i) => tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions, () => this.liveTabIdentity(i), selected.id ?? "")
+      (tab, i) => tabButton(
+        tab,
+        i,
+        i === active,
+        shown.has(i),
+        canRename,
+        canClose,
+        this.actions,
+        () => this.openTab(i),
+        () => this.closeTab(i),
+        () => this.liveTabIdentity(i),
+        selected.id ?? ""
+      )
     );
     const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
@@ -17201,14 +17230,14 @@ function tabCenters(bar) {
     return r.left + r.width / 2;
   });
 }
-function tabButton(tab, index, active, shown, canRename, canClose, actions2, liveIdentity, selectedSessionId) {
+function tabButton(tab, index, active, shown, canRename, canClose, actions2, openTab2, closeTab2, liveIdentity, selectedSessionId) {
   const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
   const btn = h("button", { type: "button", class: cls, draggable: true });
   btn.setAttribute("role", "tab");
   btn.setAttribute("aria-selected", active ? "true" : "false");
   btn.dataset.tabIndex = String(index);
   btn.append(icon(tabIcon(tab.kind), "af-tab-glyph"), h("span", { class: "af-tab-label" }, tabLabel(tab)));
-  btn.addEventListener("click", () => actions2.openTab(index));
+  btn.addEventListener("click", openTab2);
   const renameable = canRename && isRenameableTab(tab.kind);
   btn.title = renameable ? `${tabDisplayLabel(tab)} \u2014 double-click to rename` : tabDisplayLabel(tab);
   if (renameable) {
@@ -17224,7 +17253,7 @@ function tabButton(tab, index, active, shown, canRename, canClose, actions2, liv
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
       e.stopPropagation();
-      actions2.closeTab(index);
+      closeTab2();
     });
     btn.append(close);
   }
@@ -18953,7 +18982,8 @@ function onKeydown(e) {
       focusRail();
       break;
     case "switchTab":
-      switchTab(action.index);
+      if (shell) shell.switchTab(action.index);
+      else switchTab(action.index);
       break;
     case "newTab": {
       const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -18975,7 +19005,8 @@ function onKeydown(e) {
       break;
     }
     case "closeTab":
-      closeSessionTab(store.get().activeTab);
+      if (shell) shell.closeTab(store.get().activeTab);
+      else closeSessionTab(store.get().activeTab);
       break;
     case "switchView":
       if (shell) shell.switchView(action.view);

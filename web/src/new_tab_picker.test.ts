@@ -94,6 +94,22 @@ test("phone picker return follows its current desktop owner", () => {
   assert.deepEqual(calls, ["session", "new-tab"]);
 });
 
+for (const action of ["openTab", "switchTab", "closeTab"] as const) {
+  test(`${action} dismisses carried actions before its tab transition`, () => {
+    const calls: string[] = [];
+    const shell = {
+      el: { classList: { contains: () => true } },
+      appControls: { dismiss: () => calls.push("dismiss") },
+      actions: { [action]: (index: number) => calls.push(`${action}:${index}`) },
+      dismissCarriedActions: (AppShell.prototype as unknown as {
+        dismissCarriedActions(this: AppShell): void;
+      }).dismissCarriedActions,
+    } as unknown as AppShell;
+    AppShell.prototype[action].call(shell, 2);
+    assert.deepEqual(calls, ["dismiss", `${action}:2`]);
+  });
+}
+
 for (const userOpened of [false, true]) {
   for (const cancelBeforeRecomposition of [false, true]) {
     test(`responsive shortcut cancellation preserves userOpened=${userOpened}, cancelBeforeRecomposition=${cancelBeforeRecomposition}`, () => {

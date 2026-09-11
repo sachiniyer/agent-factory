@@ -2675,7 +2675,8 @@ function onKeydown(e: KeyboardEvent): void {
       focusRail();
       break;
     case "switchTab":
-      switchTab(action.index);
+      if (shell) shell.switchTab(action.index);
+      else switchTab(action.index);
       break;
     case "newTab": {
       const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -2701,7 +2702,8 @@ function onKeydown(e: KeyboardEvent): void {
       break;
     }
     case "closeTab":
-      closeSessionTab(store.get().activeTab);
+      if (shell) shell.closeTab(store.get().activeTab);
+      else closeSessionTab(store.get().activeTab);
       break;
     case "switchView":
       if (shell) shell.switchView(action.view);

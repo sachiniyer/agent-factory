@@ -1883,12 +1883,33 @@ export class AppShell {
     return item;
   }
 
+  /** Retires carried actions before a user-owned transition can recompose them. */
+  private dismissCarriedActions(): void {
+    if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
+  }
+
   /** One user-owned view transition for both appbar tabs and document shortcuts. */
   switchView(view: View): void {
     // The store update can synchronously reparent the phone panel. Notify its
     // disclosure first, while it still owns the carried Session actions state.
-    if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
+    this.dismissCarriedActions();
     this.actions.switchView(view);
+  }
+
+  /** Tab buttons and 1-9 shortcuts share the same pre-recomposition dismissal. */
+  openTab(index: number): void {
+    this.dismissCarriedActions();
+    this.actions.openTab(index);
+  }
+
+  switchTab(index: number): void {
+    this.dismissCarriedActions();
+    this.actions.switchTab(index);
+  }
+
+  closeTab(index: number): void {
+    this.dismissCarriedActions();
+    this.actions.closeTab(index);
   }
 
   /** Keyboard twin of the New tab button, including its per-kind availability. */
@@ -2285,7 +2306,8 @@ export class AppShell {
     // them on every snapshot instead — see syncTabIdentityCaches (#1779).
 
     const children: HTMLElement[] = tabs.map((tab, i) =>
-      tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions, () => this.liveTabIdentity(i), selected.id ?? ""),
+      tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions,
+        () => this.openTab(i), () => this.closeTab(i), () => this.liveTabIdentity(i), selected.id ?? ""),
     );
     const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
@@ -2961,6 +2983,8 @@ function tabButton(
   canRename: boolean,
   canClose: boolean,
   actions: Actions,
+  openTab: () => void,
+  closeTab: () => void,
   /** This tab's identity as of the LATEST snapshot — see AppShell.liveTabIdentity.
    *  A getter rather than a value because this button outlives the render that built
    *  it: it is called when a GESTURE fires, so the identity is the one the roster the
@@ -2987,7 +3011,7 @@ function tabButton(
   // read. tabDisplayLabel() supplies the plain-text title without leaking an icon
   // name into the accessible surface.
   btn.append(icon(tabIcon(tab.kind), "af-tab-glyph"), h("span", { class: "af-tab-label" }, tabLabel(tab)));
-  btn.addEventListener("click", () => actions.openTab(index));
+  btn.addEventListener("click", openTab);
   // Rename-in-place (#1813), offered ONLY where a name is actually rendered: an
   // agent/shell tab draws a fixed label and ignores its name, so an edit there could
   // only appear to work (see isRenameableTab). A tab-managed session is required for
@@ -3015,7 +3039,7 @@ function tabButton(
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
       e.stopPropagation();
-      actions.closeTab(index);
+      closeTab();
     });
     btn.append(close);
   }
