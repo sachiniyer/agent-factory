@@ -5519,6 +5519,39 @@ test("#4210-r3: a successor with no PR runs uses the existing validation dispatc
   assert.deepEqual(github.dispatchedWorkflows.map((run) => run.workflow_id), ["pr.yml"]);
 });
 
+for (const [invalidationFails, publicationFails] of [[true, false], [false, true], [true, true]]) {
+  test(`#4210-r5: recovery command survives invalidation=${invalidationFails} publication=${publicationFails} failures`, async () => {
+    const github = fakeGateGithub({ behindBy: 1,
+      workflowDispatchErrorsByWorkflow: { "auto-gate.yml": new Error("dispatch unavailable") },
+    });
+    const operations = [];
+    const createCheck = github.rest.checks.create;
+    github.rest.checks.create = async (options) => {
+      if (github.workflowDispatchAttempts > 0) {
+        operations.push("invalidate");
+        if (invalidationFails) throw Object.assign(new Error("invalidation rejected"), { status: 422 });
+      }
+      return createCheck(options);
+    };
+    const createComment = github.rest.issues.createComment;
+    github.rest.issues.createComment = async (options) => {
+      operations.push("notice");
+      if (publicationFails) throw new Error("comment unavailable");
+      return createComment(options);
+    };
+    const { error } = await runApplyGateStep({ github });
+    assert.ok(error);
+    assert.match(error.message, /dispatch unavailable/);
+    assert.match(error.message, /gh workflow run auto-gate.yml/);
+    if (invalidationFails) assert.match(error.message, /invalidation rejected/);
+    if (publicationFails) assert.match(error.message, /comment unavailable/);
+    assert.deepEqual(operations, ["notice", "invalidate"], "publication and invalidation are both attempted, in that order");
+    assert.equal(github.recoveryComments.length, publicationFails ? 0 : 1);
+    if (!publicationFails) assert.match(github.recoveryComments[0].body, /gh workflow run auto-gate.yml/);
+    assert.equal(github.workflowDispatchAttempts, 1);
+  });
+}
+
 for (const status of ["action_required", "queued", "in_progress"]) {
   test(`#4210-r4: Docs appearing first cannot satisfy validation recovery (${status})`, async () => {
     const runs = [{ id: 800, name: "Docs", event: "pull_request", status: "completed", conclusion: "action_required" }];

@@ -1831,6 +1831,21 @@ async function processAggregateHead({
         core.notice(reason);
         return { state: "waiting", pending, aggregate, reason };
       }
+      const publicationErrors = [];
+      if (error?.autoGateRecoveryFailure) {
+        // Report on the PR before invalidating: an invalidation failure must
+        // not suppress the only visible recovery instructions. This lane owns
+        // only the initiating head, so it never writes a successor aggregate.
+        try {
+          await github.rest.issues.createComment({
+            ...context.repo, issue_number: prNumber,
+            body: `## Auto Gate recovery failed\n\n${message}` +
+              (error.autoGateRecoveryHeadSha ? `\n\nObserved post-update head: ${error.autoGateRecoveryHeadSha}` : ""),
+          });
+        } catch (publicationError) {
+          publicationErrors.push(publicationError);
+        }
+      }
       let invalidated;
       try {
         invalidated = await invalidateAggregateDecision({
@@ -1844,25 +1859,14 @@ async function processAggregateHead({
         }
       } catch (invalidationError) {
         throw new AggregateError(
-          [error, invalidationError],
-          `Merge attempt and aggregate invalidation both failed on ${pending.headSha}`,
+          [error, ...publicationErrors, invalidationError],
+          error?.autoGateRecoveryFailure
+            ? `${message}; aggregate invalidation also failed: ${formatError(invalidationError)}` +
+              (publicationErrors.length ? `; recovery publication also failed: ${publicationErrors.map(formatError).join("; ")}` : "")
+            : `Merge attempt and aggregate invalidation both failed on ${pending.headSha}`,
         );
       }
       if (error?.autoGateRecoveryFailure) {
-        // A check belongs to a SHA, but this recovery belongs to the PR. Always
-        // leave instructions on the PR: even an observed successor SHA can move
-        // again before publication. This lane owns only the initiating head;
-        // creating a successor aggregate here could supersede its owner's PASS.
-        const publicationErrors = [];
-        try {
-          await github.rest.issues.createComment({
-            ...context.repo, issue_number: prNumber,
-            body: `## Auto Gate recovery failed\n\n${message}` +
-              (error.autoGateRecoveryHeadSha ? `\n\nObserved post-update head: ${error.autoGateRecoveryHeadSha}` : ""),
-          });
-        } catch (publicationError) {
-          publicationErrors.push(publicationError);
-        }
         if (publicationErrors.length) {
           throw new AggregateError([error, ...publicationErrors],
             `${message}; recovery publication also failed: ${publicationErrors.map(formatError).join("; ")}`);
