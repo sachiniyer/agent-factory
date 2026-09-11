@@ -34,6 +34,11 @@ const (
 	// the same sanitized name and Agent Factory home. AF_SESSION proves the
 	// reusable name, not which process generation carried it (#3309).
 	EnvMarkerGeneration = "AF_SESSION_GEN"
+	// envMarkerTestguardRun carries a test process's stable ownership identity
+	// across per-test AGENT_FACTORY_HOME overrides. It is deliberately private:
+	// production consumers authorize ownership with AF_HOME, while testguard uses
+	// the same string literal to diagnose test leaks without importing this package.
+	envMarkerTestguardRun = "AF_TESTGUARD_RUN"
 )
 
 // newSessionGeneration mints the process-generation identity stamped into one
@@ -76,6 +81,9 @@ func sessionEnvFlags(sanitizedName, generation string) []string {
 	}
 	if home, err := afHomeDir(); err == nil {
 		flags = append(flags, "-e", EnvMarkerHome+"="+home)
+	}
+	if testRun := os.Getenv(envMarkerTestguardRun); testRun != "" {
+		flags = append(flags, "-e", envMarkerTestguardRun+"="+testRun)
 	}
 	return flags
 }
