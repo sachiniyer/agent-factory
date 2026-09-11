@@ -225,6 +225,35 @@ func claudeFolderTrustDialogPresent(content string) bool {
 	return strings.Contains(ansiCSISequence.ReplaceAllString(content, ""), claudeTrustAffirmativeLabel)
 }
 
+// claudeMCPTrustFooterIsLast reports whether the MCP trust modal's "Enter to
+// confirm" affordance is the last non-blank content in the pane. A live MCP
+// modal is the last thing on screen, so its footer is the final row; a quoted
+// mention of the MCP phrase has the agent's composer or further output below
+// it, so the footer is not last. This is the same footer-is-last discipline
+// claudeTrustPickerStructure applies to the folder-trust branch
+// (claude_trust.go:307-310) and that CodexTrustPromptPresent applies as its
+// `affordance == last` rule: "a working agent paints its composer beneath its
+// output, so a quoted dialog has something after it and a live one does not."
+//
+// Rows are parsed with claudeTrustRowOf so box-drawing chrome and ANSI styling
+// are stripped before the affordance is matched, letting a framed and an
+// unframed modal reduce to the same footer.
+func claudeMCPTrustFooterIsLast(content string) bool {
+	affordance := strings.ToLower(claudeTrustAffordancePrefix)
+	var footer claudeTrustRow
+	found := false
+	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+		if row := claudeTrustRowOf(line); !row.blank {
+			footer = row
+			found = true
+		}
+	}
+	if !found {
+		return false
+	}
+	return strings.HasPrefix(strings.ToLower(footer.label), affordance)
+}
+
 // parseClaudeFolderTrustDialog locates the cursor row and the affirmative row.
 //
 // Both must be unambiguous and both must belong to the same block of adjacent
@@ -345,7 +374,10 @@ func (t *TmuxSession) answerClaudeTrustPrompt(content string) bool {
 		// The MCP-server trust prompt, or the legacy folder-trust wording.
 		// Neither renders a row af can locate by label and neither is what
 		// regressed in 2.1.257, so both keep the historical Enter tap on
-		// whatever Claude Code preselected.
+		// whatever Claude Code preselected. The MCP branch is structurally
+		// guarded at the predicate (claudeMCPTrustFooterIsLast) so only a live
+		// modal — footer last — reaches this Enter; the legacy wording stays
+		// a bare substring match.
 		if err := t.TapEnter(); err != nil {
 			log.ErrorLog.Printf("could not tap enter on trust/MCP screen: %v", err)
 			return true

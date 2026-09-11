@@ -784,3 +784,59 @@ func TestCheckAndHandleTrustPrompt_RealClaudeFolderTrustDialogIsStillDriven(t *t
 	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels())
 	require.Equal(t, []string{"Down", "Enter"}, injectedKeyNames(keys))
 }
+
+// The MCP-server trust prompt is anchored on its unique question AND the
+// modal's "Enter to confirm" footer being the LAST non-blank content on screen,
+// the same footer-is-last discipline the folder-trust branch applies. Output
+// that quotes the MCP phrase — including this repo's own source, where the
+// phrase appears verbatim — must inject nothing, however long it stays on
+// screen, because a spurious Enter lands on the agent's composer.
+func TestCheckAndHandleTrustPrompt_QuotedMCPTrustDialogInjectsNothing(t *testing.T) {
+	mcpModal := "New MCP server found. Do you trust this new MCP server?\n" +
+		"❯ 1. Yes\n  2. No\nEnter to confirm"
+
+	for _, tt := range []struct{ name, content string }{
+		{
+			// The modal chrome is quoted above the agent's composer — the shape
+			// every live pane has, and the exact shape the folder-trust branch
+			// refuses. The footer is NOT last, so the MCP branch must refuse too.
+			name: "quoted above the agent's composer",
+			content: mcpModal + "\n\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ > Type your message here           │\n" +
+				"╰────────────────────────────────────╯\n" +
+				"? for shortcuts\n",
+		},
+		{
+			// The phrase in agent prose with trailing content below it.
+			name:    "quoted with trailing prose",
+			content: mcpModal + "\nThat is the MCP trust dialog af answers.\n",
+		},
+		{
+			// The phrase appears verbatim with no modal chrome at all — the shape
+			// of a code review or explanation that mentions the dialog.
+			name: "phrase in agent prose without chrome",
+			content: "I see the New MCP server found prompt. Do you trust this new MCP server?\n" +
+				"❯ I will select Yes for you\n? for shortcuts\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.False(t, handled, "a quoted MCP phrase is not a live modal, so af must not report one in the way")
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may be injected into a pane that only quotes the MCP dialog; got %v", cmds)
+		})
+	}
+}
+
+// The same guard from the other side: a pane showing the REAL MCP modal — the
+// footer last, nothing painted below it — still fires Enter, so the guard
+// does not stop af answering a genuine launch gate.
+func TestCheckAndHandleTrustPrompt_RealMCPTrustDialogStillFiresEnter(t *testing.T) {
+	mcpModal := "New MCP server found. Do you trust this new MCP server?\n" +
+		"❯ 1. Yes\n  2. No\nEnter to confirm"
+	handled, cmds := runTrustPromptCheck(t, ProgramClaude, mcpModal)
+	require.True(t, handled, "the live MCP modal is in the way")
+	require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)),
+		"the real MCP modal keeps the historical Enter tap on Claude Code's preselection")
+}

@@ -473,14 +473,21 @@ func reverseVideoURLSubject(line string) bool {
 // trust this folder" or the "Enter to confirm" affordance), so a stray mention
 // of the phrase in scrollback or agent output never triggers a dismissal. The
 // old wording is a self-contained, dialog-specific string and stays matched
-// as-is. The MCP prompt ("New MCP server found. Do you trust this new MCP
-// server? ❯ 1. Yes ... Enter to confirm") is anchored on its UNIQUE question
-// "do you trust this new mcp server" — a phrase Claude only ever renders inside
-// the real MCP trust modal, never in ordinary output. We deliberately do NOT
-// anchor on a generic marker like "Enter to confirm": that affordance appears
-// in many dialogs, so pairing it with a bare "new mcp server" mention would
-// still false-match on normal agent output. Each anchor here is a string that
-// only its own dialog emits, closing the whole false-positive class.
+// as-is.
+//
+// The MCP prompt ("New MCP server found. Do you trust this new MCP server? ❯
+// 1. Yes ... Enter to confirm") is anchored on its unique question "do you
+// trust this new mcp server" AND the modal's "Enter to confirm" footer being
+// the last non-blank content in the pane. The phrase alone cannot tell a live
+// modal from output that merely quotes it — af's own source contains the
+// phrase verbatim — so the footer-is-last rule (the same discipline
+// claudeTrustPickerStructure applies to the folder-trust branch,
+// claude_trust.go:307-310, and CodexTrustPromptPresent applies as its
+// `affordance == last` rule) refuses a quoted phrase whose agent composer or
+// further output is painted below it. Requiring the footer at the END is
+// strictly stronger than requiring it anywhere in the content: a working
+// agent paints its composer beneath its output, so a quoted dialog has
+// something after it and a live one does not.
 func claudeTrustPromptPresent(content string) bool {
 	lower := strings.ToLower(content)
 
@@ -489,8 +496,11 @@ func claudeTrustPromptPresent(content string) bool {
 	reworded := strings.Contains(content, "Is this a project you created or one you trust") &&
 		strings.Contains(content, "Yes, I trust this folder")
 
-	// MCP trust dialog — anchored on its unique question (case-insensitive).
-	mcpDialog := strings.Contains(lower, "do you trust this new mcp server")
+	// MCP trust dialog — anchored on its unique question (case-insensitive)
+	// AND the modal's footer being the last content on screen, so a quoted
+	// mention of the phrase with the composer painted below it does not fire.
+	mcpDialog := strings.Contains(lower, "do you trust this new mcp server") &&
+		claudeMCPTrustFooterIsLast(content)
 
 	return reworded ||
 		mcpDialog ||
