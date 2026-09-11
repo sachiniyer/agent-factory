@@ -68,8 +68,9 @@ const SESSION_C = process.env.AF_WEB_SESSION_C ?? "probe-c";
 // The name of the task the harness seeds (web-selftest-entry.sh) so the tasks list
 // is non-empty on load.
 const SEEDED_TASK = process.env.AF_WEB_TASK_NAME ?? "probe-task";
+const SEEDED_TASK_CRON = process.env.AF_WEB_TASK_CRON ?? "0 9 * * *";
 // The task the harness seeds ALREADY OVERDUE (#3626): created a month back with an
-// hourly schedule and no run, so the daemon derives it as overdue on first read.
+// daily schedule and no run, so the daemon derives it as overdue on first read.
 const OVERDUE_TASK = process.env.AF_WEB_OVERDUE_TASK ?? "probe-overdue";
 // The task in the TASK-ONLY project (a third repo with a task but no session,
 // redesign PR2): proves a task-only repo lists in the switcher and its tasks scope.
@@ -4908,7 +4909,7 @@ test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round
   await expect(tasks).toBeVisible();
   const seeded = tasks.locator(".af-task-row", { hasText: SEEDED_TASK });
   await expect(seeded).toHaveCount(1);
-  await expect(seeded.locator(".af-task-trigger")).toContainText("0 9 * * *");
+  await expect(seeded.locator(".af-task-trigger")).toContainText(SEEDED_TASK_CRON);
 
   // Add a cron task via the + Add modal. The project picker defaults to the scoped
   // project (redesign PR2), so the task lands in it; a cron task requires a prompt
