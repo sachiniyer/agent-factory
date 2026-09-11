@@ -12,7 +12,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -77,7 +76,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return session.InstanceData{}, err
 	}
 	reservationBoundaryDelegated = true
-	repo, title, release, renamedArchived, err := m.reserveCreate(req)
+	repo, title, release, renamedArchived, err := m.reserveCreateForSession(req)
 	if err != nil {
 		return session.InstanceData{}, err
 	}
@@ -576,7 +575,7 @@ func describeLegacyTasks(tasks []task.Task) string {
 // without a task file on disk. Production never reassigns it.
 var loadTasksForLegacyScan = task.LoadTasks
 
-func (m *Manager) reserveCreate(req CreateSessionRequest) (_ *config.RepoContext, _ string, _ func(), _ *session.InstanceData, retErr error) {
+func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, holdWorktreeAdmission bool) (_ *config.RepoContext, _ string, _ func(), _ *session.InstanceData, retErr error) {
 	reservationCommitted := false
 	defer func() {
 		if !reservationCommitted {
@@ -699,6 +698,24 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (_ *config.RepoContext
 	// (#2778/#2415), and this check has to stay ahead of the archived-name-reuse
 	// rename and behind the project-delete fence, exactly where it was.
 	inPlaceConflict := session.InPlaceBackendConflict(backendOpts, workspace)
+	nameNamespace := runtimeNamespaceForKind(runtimeKind)
+
+	// Keep the create's final branch/path observation reserved until its live row
+	// is published. Without this lock, two --here creates can both observe no
+	// owner and then activate the same branch or detached worktree concurrently.
+	releaseWorktreeAdmission := func() {}
+	worktreeAdmissionHeld := false
+	if holdWorktreeAdmission && nameNamespace == runtimeNamespaceLocalTmux {
+		lock := m.worktreeAdmissionLockForRepo(repo.ID)
+		lock.Lock()
+		releaseWorktreeAdmission = lock.Unlock
+		worktreeAdmissionHeld = true
+	}
+	defer func() {
+		if worktreeAdmissionHeld {
+			releaseWorktreeAdmission()
+		}
+	}()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -731,8 +748,6 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (_ *config.RepoContext
 	if err := m.admitTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
 		return nil, "", nil, nil, err
 	}
-
-	nameNamespace := runtimeNamespaceForKind(runtimeKind)
 
 	// An in-place session and an off-box runtime are contradictory, and
 	// NewInstance is where that is enforced — but it runs long after this
@@ -769,6 +784,11 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (_ *config.RepoContext
 		if err != nil {
 			return nil, "", nil, nil, err
 		}
+		if req.InPlace {
+			if err := m.refuseLiveHeldBranchLocked(identityRoot, workspace, title, nameNamespace, true, diskData); err != nil {
+				return nil, "", nil, nil, err
+			}
+		}
 	} else {
 		// When the requested title is held ONLY by an archived session, rename that
 		// archived session out of the way so the new session can take the name
@@ -781,6 +801,9 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (_ *config.RepoContext
 		// discovering it at `git worktree add` leaves the archived session renamed
 		// for a create that then did not happen, which is exactly the state the
 		// admission comment above promises this function never produces.
+		if err := m.refuseLiveHeldBranchLocked(identityRoot, workspace, title, nameNamespace, req.InPlace, diskData); err != nil {
+			return nil, "", nil, nil, err
+		}
 		if err := m.refuseHeldBranchReuseLocked(repo.ID, identityRoot, title, nameNamespace, req.InPlace, diskData); err != nil {
 			return nil, "", nil, nil, err
 		}
@@ -845,7 +868,6 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (_ *config.RepoContext
 	m.reserveTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns)
 	release := func() {
 		m.mu.Lock()
-		defer m.mu.Unlock()
 		delete(m.reservedTitles, key)
 		delete(m.reservedArchiveTitles, key)
 		if tmuxReservationKey != "" {
@@ -859,8 +881,11 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (_ *config.RepoContext
 		// handing the slot over with no gap. On a failed create nothing was
 		// registered, and dropping the reservation is exactly the right refund.
 		m.releaseTaskRunLocked(repo.ID, req.TaskID)
+		m.mu.Unlock()
+		releaseWorktreeAdmission()
 	}
 
+	worktreeAdmissionHeld = false
 	return repo, title, release, renamedArchived, nil
 }
 
@@ -876,49 +901,6 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (_ *config.RepoContext
 // available title", swallowing the actionable corruption message. Callers check
 // errors.Is and surface it instead of suffixing around it.
 var errTitleCheckFatal = errors.New("cannot verify title availability")
-
-// branchesHeldByWorktrees is the git query worktreeHeldBranchesLocked runs. A
-// package var so tests can force the probe to FAIL in isolation — the answer
-// that must NOT block a create (#2127) — without breaking the repo out from
-// under the rest of the create path, which needs it readable to get that far.
-// Mirrors reuseArchivedRenamePersist's precedent. Production points it at the
-// real query and never reassigns it.
-var branchesHeldByWorktrees = git.BranchesHeldByWorktrees
-
-// worktreeHeldBranchesLocked answers "which branches are already checked out by
-// a worktree of this repo" for the title walk (#2091), mapping each to the
-// worktree holding it. Runs under m.mu.
-//
-// Two deliberate non-answers:
-//
-//   - Hook sessions (remote) never take a local worktree — backend_local is the
-//     only caller of NewGitWorktree — so no local branch can block their name,
-//     and probing the repo for them would be answering a question nobody asked.
-//   - A probe that could not RUN returns nil, not an empty map with a shrug.
-//     Nil means "no holds known", which leaves the pre-#2091 behavior exactly as
-//     it was: the create proceeds, and if the name really is held, `git worktree
-//     add` refuses it loudly and changes nothing. That is the right failure for
-//     an unanswerable question. The destructive reading would be to treat an
-//     unreadable repo as "everything is held" and walk a recurring task's name
-//     to an ever-growing suffix on the strength of a probe that never answered.
-func (m *Manager) worktreeHeldBranchesLocked(repoPath string, remote bool) map[string]string {
-	if remote {
-		return nil
-	}
-	held, err := branchesHeldByWorktrees(repoPath)
-	if err != nil {
-		m.warn().Printf("could not list worktree branch holds for %s; resolving the session title without them (a name an archived worktree holds will fail at worktree add instead of being skipped): %v", repoPath, err)
-		return nil
-	}
-	return held
-}
-
-// branchForTitle derives the git branch name for a session title using the same
-// prefix and sanitization the git worktree layer applies, so the daemon can
-// detect branch collisions before worktree setup runs.
-func (m *Manager) branchForTitle(title string) string {
-	return git.BranchForTitle(m.cfg.BranchPrefix, title)
-}
 
 // keepFailedCreate registers and persists an instance whose create FAILED but
 // whose cleanup could not complete safely, so its tmux and/or worktree are still
