@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // The watch-task concurrency limit (#1892) is enforced inside the manager's
@@ -19,14 +20,32 @@ import (
 // createForTask issues one task-attributed create against the manager, exactly as
 // the watch delivery path does.
 func createForTask(m *Manager, repoPath, taskID, base string, limit int) (session.InstanceData, error) {
+	taskFixtureMu.Lock()
+	stored, err := task.GetTask(taskID)
+	var generationID string
+	if task.IsTaskNotFound(err) {
+		var created task.Task
+		created, err = task.AddTaskChecked(enabledCronTask(taskID, repoPath), task.ActorUnknown, nil)
+		generationID = created.GenerationID
+	} else if err == nil {
+		generationID = stored.GenerationID
+	}
+	taskFixtureMu.Unlock()
+	if err != nil {
+		return session.InstanceData{}, fmt.Errorf("prepare task fixture: %w", err)
+	}
 	return m.CreateSession(context.Background(), CreateSessionRequest{
 		TitleBase:         base,
 		RepoPath:          repoPath,
 		Program:           "claude",
 		TaskID:            taskID,
+		TaskGenerationID:  generationID,
+		TaskOrigin:        true,
 		MaxConcurrentRuns: limit,
 	})
 }
+
+var taskFixtureMu sync.Mutex
 
 // settle drives a created session to idle, the transition that releases its
 // concurrency slot. It goes through the same ObserveLiveness edge the daemon's

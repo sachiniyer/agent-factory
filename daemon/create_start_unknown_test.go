@@ -76,9 +76,11 @@ func TestCreateSession_UnknownStartDoesNotAttemptDestructiveCleanup(t *testing.T
 		t.Fatalf("NewManager: %v", err)
 	}
 	_, events := manager.events.subscribe()
+	tsk := addStatusTestTask(t, enabledCronTask("task-uncertain", repoPath))
 
 	_, createErr := manager.CreateSession(context.Background(), CreateSessionRequest{
-		Title: "uncertain-start", RepoPath: repoPath, Program: "claude", TaskID: "task-uncertain",
+		Title: "uncertain-start", RepoPath: repoPath, Program: "claude",
+		TaskID: tsk.ID, TaskGenerationID: tsk.GenerationID, TaskOrigin: true,
 	})
 	if createErr == nil {
 		t.Fatal("CreateSession reported success though startup state is unknown")
