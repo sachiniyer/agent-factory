@@ -108,7 +108,10 @@ func TestLoadConfigReadOnly_EmptyStubDoesNotMutate(t *testing.T) {
 
 	after, err := os.ReadDir(home)
 	require.NoError(t, err)
-	require.Len(t, after, len(before), "validate must not create any file (no config.json, no lock, no backup)")
+	require.Len(t, after, len(before), "validate must leave no new files (no config.json, no lock, no backup)")
+	probes, err := filepath.Glob(filepath.Join(home, ".af-stub-check-*"))
+	require.NoError(t, err)
+	assert.Empty(t, probes, "read-only validation must leave no probe files")
 }
 
 // TestLoadConfigReadOnly_EmptyStubWithShadowStaysLoudError mirrors loadConfig:
@@ -148,7 +151,7 @@ func TestLoadConfigReadOnly_EmptyStubWithShadowStaysLoudError(t *testing.T) {
 // config.toml is readable but the containing directory is not writable, so
 // startup's os.Remove(tomlPath) would fail. The diagnostic must NOT return
 // EmptyStub (which implies "af will self-heal") when self-heal is impossible;
-// it must return the same error startup would, so the two agree.
+// it must identify the directory permission failure without claiming a removal.
 func TestLoadConfigReadOnly_EmptyStubUnremovableDirIsError(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root bypasses mode bits, so a read-only directory cannot be staged here")
@@ -169,7 +172,16 @@ func TestLoadConfigReadOnly_EmptyStubUnremovableDirIsError(t *testing.T) {
 	loaded, roErr := LoadConfigReadOnly()
 	require.Error(t, roErr, "an empty stub in a non-writable home must be a loud error, not EmptyStub")
 	assert.False(t, loaded.EmptyStub, "EmptyStub must not be set when the home is not writable (self-heal would fail)")
-	assert.Contains(t, roErr.Error(), "failed to remove empty config file")
+	assert.Contains(t, roErr.Error(), "cannot write to config directory "+prettyHomePath(home))
+	assert.ErrorIs(t, roErr, os.ErrPermission)
+	assert.NotContains(t, roErr.Error(), TomlConfigFileName)
+	assert.NotContains(t, roErr.Error(), ".af-stub-check-")
+	got, err := os.ReadFile(tomlPath)
+	require.NoError(t, err)
+	assert.Equal(t, "# placeholder\n", string(got))
+	probes, err := filepath.Glob(filepath.Join(home, ".af-stub-check-*"))
+	require.NoError(t, err)
+	assert.Empty(t, probes, "failed validation must leave no probe files")
 }
 
 // TestLoadConfigReadOnly_EmptySymlinkStubStaysLoudError mirrors loadConfig: a

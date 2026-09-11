@@ -808,13 +808,15 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     github,
     context,
     baseRefName: pr.baseRefName,
+    headSha: pr.headRefOid,
     headParents: pr.headParents,
     subject,
   });
   if (contentHead) {
     notes.push(
       `content head ${contentHead.oid}, current head ${pr.headRefOid} — the head is a merge that ` +
-        `only brought ${pr.baseRefName} in, so review evidence stays bound to the content head`,
+        `preserves the reviewed content while bringing ${pr.baseRefName} in, so approval and ` +
+        `Codex evidence stay bound to the content head`,
     );
   }
 
@@ -4219,30 +4221,25 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
 }
 
 // The commit whose CONTENT this head carries, when the head is a merge that only
-// brought the base branch in — or null (#3803).
+// brought the base branch in — or null (#3803, #4235).
 //
-// Shape: exactly two parents, and the SECOND is contained in the base branch.
-// That is what `PUT update-branch` produces, first parent the previous head and
-// second parent the base tip, and it is the case where nothing about the reviewed
-// change moved. Anything else — an ordinary push, a merge of some other branch —
-// returns null and the anchors reset as they always did.
+// The cheap filter is the shape `PUT update-branch` produces: exactly two
+// parents, with the SECOND contained in the base branch. Shape alone is not
+// authorization to carry review evidence, because a hand-written conflict
+// resolution has the same parents. For every accepted link, derive the only
+// unambiguous path-level three-way result from the parents and their merge base,
+// then require the merge commit's complete tree to equal it. A truncated tree,
+// same-path conflict, malformed entry or committed-tree mismatch returns null.
 //
 // The containment test is a compare against the base BRANCH rather than a
 // remembered sha, for the same reason #3752 reads the branch: the question is
 // whether that parent is base history now, not whether it matched something the
 // gate recorded earlier.
-//
-// Residual, stated because it is real: this identifies the SHAPE, not the author.
-// A merge commit with those parents but a hand-written conflict resolution would
-// carry an approval onto content nobody approved. It is bounded — only allowed
-// authors' PRs reach the merge path at all, so producing one means the maintainer
-// or the bot did it deliberately — and closing it needs the gate to record the
-// sha it created, which `PUT update-branch` does not return. Named here so the
-// next reader does not have to rediscover it.
 async function updateBranchContentHead({
   github,
   context,
   baseRefName,
+  headSha,
   headParents,
   subject,
   // Bounded because this walks one API read per link. Four laps was ordinary on
@@ -4251,6 +4248,158 @@ async function updateBranchContentHead({
   maxDepth = 20,
 }) {
   const { owner, repo } = context.repo;
+  const currentHead = normalizeHeadSha(headSha);
+  if (!currentHead) {
+    return null;
+  }
+
+  const commitReads = new Map();
+  const treeReads = new Map();
+
+  // REST commit reads supply the tree identity that the GraphQL parent snapshot
+  // does not. Cache promises, not just results, so concurrent tree reads cannot
+  // duplicate an API call for a merge base that is also one of the parents.
+  const readCommit = async (oid, knownDate = null) => {
+    oid = normalizeHeadSha(oid);
+    if (!oid) {
+      return null;
+    }
+    if (!commitReads.has(oid)) {
+      commitReads.set(oid, retryRead(`could not read commit ${oid}`, async () => {
+        const commit = await github.rest.repos.getCommit({ owner, repo, ref: oid });
+        if (normalizeHeadSha(commit?.data?.sha) !== oid) {
+          return null;
+        }
+        return {
+          oid,
+          committedDate: commit?.data?.commit?.committer?.date,
+          parents: (commit?.data?.parents || []).map((parent) => ({ oid: parent.sha })),
+          treeOid: normalizeHeadSha(commit?.data?.commit?.tree?.sha),
+        };
+      }, subject));
+    }
+    const commit = await commitReads.get(oid);
+    return knownDate ? { ...commit, committedDate: knownDate } : commit;
+  };
+
+  // A recursive Git tree is a complete manifest only when GitHub says it was
+  // not truncated. Directory object ids are normalized because they necessarily
+  // change with their children; retaining the directory paths still catches
+  // empty trees and file/directory replacements. Leaf mode, type and object id
+  // preserve every executable, symlink, submodule and content difference.
+  const readTree = async (commitOid) => {
+    const commit = await readCommit(commitOid);
+    if (!commit?.treeOid) {
+      return null;
+    }
+    if (!treeReads.has(commit.treeOid)) {
+      treeReads.set(commit.treeOid, retryRead(
+        `could not read tree ${commit.treeOid} for commit ${commit.oid}`,
+        async () => {
+          const response = await github.rest.git.getTree({
+            owner,
+            repo,
+            tree_sha: commit.treeOid,
+            recursive: "true",
+          });
+          const data = response?.data;
+          if (
+            data?.truncated !== false ||
+            normalizeHeadSha(data?.sha) !== commit.treeOid ||
+            !Array.isArray(data?.tree)
+          ) {
+            return null;
+          }
+          const manifest = new Map();
+          for (const entry of data.tree) {
+            if (
+              typeof entry?.path !== "string" || entry.path === "" ||
+              !["tree", "blob", "commit"].includes(entry?.type) ||
+              !normalizeHeadSha(entry?.sha)
+            ) {
+              return null;
+            }
+            if (manifest.has(entry.path)) {
+              return null;
+            }
+            if (entry.type === "tree") {
+              if (entry.mode !== "040000") {
+                return null;
+              }
+              manifest.set(entry.path, "040000\0tree");
+              continue;
+            }
+            const validLeafMode = entry.type === "commit"
+              ? entry.mode === "160000"
+              : /^(?:100644|100755|120000)$/.test(String(entry.mode || ""));
+            if (!validLeafMode) {
+              return null;
+            }
+            manifest.set(entry.path, `${entry.mode}\0${entry.type}\0${entry.sha.toLowerCase()}`);
+          }
+          return manifest;
+        },
+        subject,
+      ));
+    }
+    return treeReads.get(commit.treeOid);
+  };
+
+  const sameTree = (left, right) =>
+    left != null && right != null && left.size === right.size &&
+    [...left].every(([path, entry]) => right.get(path) === entry);
+
+  const mergeTreeIsContentPreserving = async (mergeOid, parents) => {
+    const [first, second] = parents;
+    const comparison = await retryRead(
+      `could not find merge base for ${first.oid} and ${second.oid}`,
+      () => github.rest.repos.compareCommitsWithBasehead({
+        owner,
+        repo,
+        basehead: `${first.oid}...${second.oid}`,
+        per_page: 1,
+      }),
+      subject,
+    );
+    const mergeBase = normalizeHeadSha(comparison?.data?.merge_base_commit?.sha);
+    if (!mergeBase) {
+      return false;
+    }
+    const [baseTree, firstTree, secondTree, committedTree] = await Promise.all([
+      readTree(mergeBase),
+      readTree(first.oid),
+      readTree(second.oid),
+      readTree(mergeOid),
+    ]);
+    if (!baseTree || !firstTree || !secondTree || !committedTree) {
+      return false;
+    }
+
+    const expected = new Map();
+    const paths = new Set([...baseTree.keys(), ...firstTree.keys(), ...secondTree.keys()]);
+    for (const path of paths) {
+      const base = baseTree.get(path);
+      const firstValue = firstTree.get(path);
+      const secondValue = secondTree.get(path);
+      let merged;
+      if (firstValue === secondValue) {
+        merged = firstValue;
+      } else if (firstValue === base) {
+        merged = secondValue;
+      } else if (secondValue === base) {
+        merged = firstValue;
+      } else {
+        // Both sides changed one leaf differently. Reconstructing a textual
+        // merge would require executing or trusting PR content, so this result
+        // is deliberately unknown and review evidence does not carry.
+        return false;
+      }
+      if (merged !== undefined) {
+        expected.set(path, merged);
+      }
+    }
+    return sameTree(expected, committedTree);
+  };
 
   // Whether these parents are the shape `PUT update-branch` produces: exactly
   // two, the second contained in the base branch.
@@ -4278,22 +4427,6 @@ async function updateBranchContentHead({
     return status === "identical" || status === "behind";
   };
 
-  // One read per link, giving both the link's own date and its parents. The
-  // GraphQL query that produced `headParents` carries dates for the head's
-  // parents, so those are preferred and the read is only for what it does not
-  // have — but the date must come from somewhere for every link, because the
-  // anchor IS that date.
-  const readCommit = async (oid, knownDate) => {
-    const commit = await retryRead(`could not read commit ${oid}`, () =>
-      github.rest.repos.getCommit({ owner, repo, ref: oid }),
-    );
-    return {
-      oid,
-      committedDate: knownDate || commit?.data?.commit?.committer?.date,
-      parents: (commit?.data?.parents || []).map((parent) => ({ oid: parent.sha })),
-    };
-  };
-
   // Walk the FIRST-PARENT chain while every link is one of the gate's own merges
   // (#3815). #3803 walked exactly one, which closed the single-lap case and
   // reopened it a level down: when the gate update-branches a head that is itself
@@ -4306,13 +4439,19 @@ async function updateBranchContentHead({
   // merge of something that is not the base branch. That commit is the content
   // head, and anchoring there is what makes an approval survive a chain of laps
   // while still resetting the moment someone pushes code.
+  let mergeOid = currentHead;
   let parents = headParents;
   let contentHead = null;
   let chainLength = 0;
-  while (chainLength < maxDepth && (await isUpdateBranchMerge(parents))) {
+  while (
+    chainLength < maxDepth &&
+    (await isUpdateBranchMerge(parents)) &&
+    (await mergeTreeIsContentPreserving(mergeOid, parents))
+  ) {
     const first = parents[0];
     chainLength += 1;
     contentHead = await readCommit(first.oid, first.committedDate);
+    mergeOid = contentHead.oid;
     parents = contentHead.parents;
   }
   if (!contentHead) {
@@ -4340,6 +4479,7 @@ function unansweredFindingArtifacts({
   artifacts,
   acknowledgementCandidates,
   headSha,
+  headShas = [headSha],
   headCommitTime,
 }) {
   const acknowledgements = acknowledgementCandidates.filter(
@@ -4376,7 +4516,7 @@ function unansweredFindingArtifacts({
       // Bound to this head is classified, not unclassifiable: the rule above
       // already inspected it, and blocking twice for one artifact would report a
       // finding that "names no commit" about one that names this very head.
-      !codexArtifactBindsToHead(artifact, headSha),
+      !headShas.some((candidate) => codexArtifactBindsToHead(artifact, candidate)),
   );
   const unboundFindingArtifacts = findingCandidates.filter((artifact) => {
     // Fails closed on an unknown order, like every other timestamp comparison in
@@ -4450,6 +4590,17 @@ async function evaluateCodex({
     headSha: sha,
     contentHead,
   });
+  // A recognised update-branch merge has two valid names for the reviewed PR
+  // content: the current merge commit and the first-parent content head. Accept
+  // either. A fresh review can legitimately name the merge itself, while the
+  // whole point of #4235 is that an earlier review names the unchanged content
+  // head. No other ancestor is admitted here; updateBranchContentHead is the
+  // fail-closed proof that permits the second name.
+  const reviewedHeadShas = [...new Set(
+    [sha, contentHead?.oid].map(normalizeHeadSha).filter(Boolean),
+  )];
+  const artifactBindsToReviewedHead = (artifact) =>
+    reviewedHeadShas.some((headSha) => codexArtifactBindsToHead(artifact, headSha));
 
   if (headCommitTime == null) {
     reasons.push("last commit timestamp was unavailable, so Codex freshness cannot be verified");
@@ -4501,7 +4652,7 @@ async function evaluateCodex({
   const codexInlineReplies = reviewComments
     .filter((comment) =>
       comment.user?.login === CODEX_REVIEWER && comment.in_reply_to_id &&
-      String(comment.commit_id || "").toLowerCase() === String(sha).toLowerCase(),
+      reviewedHeadShas.includes(String(comment.commit_id || "").toLowerCase()),
     )
     .map((comment) => ({
       ...comment,
@@ -4531,7 +4682,20 @@ async function evaluateCodex({
   // comment order, because the summary comment is edited on every review
   // activity and its comment time says nothing about when this review completed.
   const matchingReviewArtifacts = codexReviewArtifacts
-    .map((artifact) => parseVerdictArtifact(artifact, sha, corroborationArtifacts, headCurrentSince))
+    .map((artifact) => {
+      for (const headSha of reviewedHeadShas) {
+        const parsed = parseVerdictArtifact(
+          artifact,
+          headSha,
+          corroborationArtifacts,
+          headCurrentSince,
+        );
+        if (parsed) {
+          return { ...parsed, headSha };
+        }
+      }
+      return null;
+    })
     .filter(Boolean)
     .sort((left, right) => right.time - left.time);
   const verdict = matchingReviewArtifacts[0];
@@ -4596,11 +4760,15 @@ async function evaluateCodex({
     // Split, because the states need different actions from a reader: silence
     // says request a review, an unparseable review says inspect the artifact, and
     // a stale matching verdict says its review predates this head transition.
+    const namedHead = reviewedHeadShas.find(
+      (headSha) =>
+        summaryNamesHead(codexReviewArtifacts, headSha) &&
+        summaryCorroboration(corroborationArtifacts, headSha, headCurrentSince),
+    );
     const missingVerdictReason = verdict
       ? `Codex verdict for the head commit is older than the head commit timestamp${suffix}`
-      : summaryNamesHead(codexReviewArtifacts, sha) &&
-          summaryCorroboration(corroborationArtifacts, sha, headCurrentSince)
-        ? `a Codex review exists for head ${sha} but carried no parseable verdict${suffix}`
+      : namedHead
+        ? `a Codex review exists for head ${namedHead} but carried no parseable verdict${suffix}`
         : `Codex has not reviewed head ${sha} yet${suffix}`;
     if (reviewerUnavailable) {
       reviewerUnavailableReason = missingVerdictReason;
@@ -4613,7 +4781,11 @@ async function evaluateCodex({
       remedy: CODEX_VERDICT_REMEDY,
     };
   } else {
-    notes.push(`Codex verdict matches head ${sha}`);
+    notes.push(
+      verdict.headSha === normalizeHeadSha(sha)
+        ? `Codex verdict matches head ${sha}`
+        : `Codex verdict matches content head ${verdict.headSha}`,
+    );
     notes.push(`Codex verdict corroborated by ${verdict.corroboration}`);
   }
 
@@ -4637,7 +4809,7 @@ async function evaluateCodex({
   // exactly what #3591 closed for inline findings.
   const findingBlockers = [];
   const headBoundArtifacts = codexReviewArtifacts.filter((artifact) =>
-    codexArtifactBindsToHead(artifact, sha),
+    artifactBindsToReviewedHead(artifact),
   );
   // Newest-wins, with ties broken toward the finding (Codex P1 on #3676). The
   // sort is by timestamp alone and is stable, so two artifacts stamped in the
@@ -4711,6 +4883,7 @@ async function evaluateCodex({
     artifacts: codexReviewArtifacts,
     acknowledgementCandidates: [...comments, ...reviews],
     headSha: sha,
+    headShas: reviewedHeadShas,
     headCommitTime,
   });
   if (unboundFindingArtifacts.length > 0) {

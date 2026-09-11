@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"golang.org/x/sys/unix"
 )
 
 // LoadConfig reads the user's config file, validates it, and returns the
@@ -154,19 +155,14 @@ type ReadOnlyConfigLoad struct {
 	Missing      bool
 	LegacyJSON   bool
 	ShadowedJSON bool
-	// EmptyStub is set when a contentless config.toml (zero bytes, whitespace,
-	// a UTF-8 BOM, or comments only) is present with no shadowing config.json
-	// and is a regular file rather than a symlink-stub. Startup's LoadConfig
-	// self-heals this state — it removes the stub and materializes defaults,
-	// returning (*Config, nil) — but a no-write diagnostic must not mutate
-	// disk, so it returns this verdict instead of the loud "config is empty"
-	// error parseConfigTOML raises. That keeps `af doctor` and `af config
-	// validate` aligned with the startup they claim to mirror (the shadow and
-	// symlink-stub cases stay loud errors, matching loadConfig). Config is
-	// DefaultConfig(): the effective configuration startup will materialize on
-	// the next start, so downstream diagnostics can evaluate the real next-start
-	// posture without writing anything.
+	// EmptyStub identifies contentless, unshadowed TOML that startup will attempt
+	// to replace with defaults. Config contains those defaults for diagnostics.
+	// A successful directory-access check is not proof that removal or writing
+	// will succeed (e.g. immutable stubs, sticky directories, races). Startup
+	// is the authority on regeneration; diagnostics never perform it.
 	EmptyStub bool
+	// DirectoryAccessWarning is nonempty when empty-stub access could not be verified.
+	DirectoryAccessWarning string
 }
 
 // LoadConfigReadOnly reads and validates the active global config without
@@ -195,35 +191,22 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 
 	tomlData, tomlErr := os.ReadFile(tomlPath)
 	if tomlErr == nil {
-		// Mirror loadConfig's empty-stub disambiguation so the read-only
-		// diagnostics agree with startup's verdict on a contentless
-		// config.toml (zero bytes, whitespace, a BOM, or comments only).
-		// loadConfig self-heals the regular-file/no-config.json case by
-		// removing the stub and materializing defaults; a diagnostic that
-		// cannot write returns the verdict that self-heal would produce
-		// (EmptyStub) instead of parseConfigTOML's hard "config is empty"
-		// error — otherwise `af doctor`/`af config validate` would reject a
-		// state af boots on (#864 fingerprint; the comment-only widening in
-		// #3196 broadened this branch while leaving the read-only path
-		// divergent). The two cases loadConfig keeps as loud errors — a
-		// config.json shadow (re-materializing would discard those
-		// settings) and a symlink-stub (a hand-made arrangement, not a
-		// failed write) — fall through to parseLoadedConfigTOML, which
-		// raises the same error loadConfig does for them.
+		// Recognize the same empty-stub candidate startup attempts to regenerate.
+		// A shadowed config.json or a hand-made symlink stays a loud parse error.
 		jsonExists := fileExists(configPath)
 		if isEffectivelyEmptyToml(tomlData) && !jsonExists {
 			if info, lerr := os.Lstat(tomlPath); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
-				// Startup's self-heal calls os.Remove(tomlPath), which requires write
-				// permission on configDir. If the directory is not writable the
-				// diagnostic's "healthy" verdict would disagree with startup's error.
-				// Test removability before claiming the stub is a self-healing state.
-				if tmp, terr := os.CreateTemp(configDir, ".af-stub-check-*"); terr != nil {
-					return ReadOnlyConfigLoad{Path: tomlPath}, fmt.Errorf("failed to remove empty config file %s: %w", prettyTomlPath, terr)
-				} else {
-					_ = tmp.Close()
-					_ = os.Remove(tmp.Name())
+				loaded := ReadOnlyConfigLoad{Path: tomlPath, EmptyStub: true}
+				if err := checkConfigDirectoryAccess(configDir); err != nil {
+					if err != unix.ENOSYS && err != unix.EPERM {
+						return ReadOnlyConfigLoad{Path: tomlPath}, fmt.Errorf("cannot write to config directory %s: %w", prettyHomePath(configDir), err)
+					}
+					// ENOSYS is unavailable; EPERM may be a policy block or a real
+					// denial. Neither justifies guessing through another check.
+					loaded.DirectoryAccessWarning = fmt.Sprintf("directory write/search access to %s could not be verified: %v; startup will attempt regeneration", prettyHomePath(configDir), err)
 				}
-				return ReadOnlyConfigLoad{Path: tomlPath, EmptyStub: true, Config: DefaultConfig()}, nil
+				loaded.Config = DefaultConfig()
+				return loaded, nil
 			}
 		}
 		cfg, err := parseLoadedConfigTOML(tomlData, prettyTomlPath, tomlPath)
