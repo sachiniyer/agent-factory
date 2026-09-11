@@ -486,6 +486,10 @@ func TestLiveInstance_RespawnsMissingSessionOnLoad(t *testing.T) {
 
 	attemptedAt := time.Date(2026, 8, 10, 20, 0, 0, 0, time.UTC)
 	data := deadInstanceData(t, Ready, agentName, shellName)
+	data.TaskID = "task-live-load"
+	data.TaskRunActive = true
+	data.TaskRunAt = attemptedAt
+	data.TaskRunSequence = 1
 	data.LastPromptAttemptAt = attemptedAt
 	data.LastPromptDeliveryStatus = PromptDelivered
 	data.LastPaneChurnAt = attemptedAt.Add(time.Minute)
@@ -502,6 +506,8 @@ func TestLiveInstance_RespawnsMissingSessionOnLoad(t *testing.T) {
 		"a replacement process must not inherit the predecessor runtime's pane-churn age")
 	assert.True(t, restored.ConsumeLoadRuntimeReplacement(),
 		"the daemon loader must be told to persist the replacement's evidence clear")
+	assert.False(t, restored.TaskRunActive(),
+		"a load-time replacement did not receive the vanished runtime's task prompt and cannot finish its run")
 }
 
 func TestLiveInstance_ReattachesExistingSessionWithIdleEvidence(t *testing.T) {

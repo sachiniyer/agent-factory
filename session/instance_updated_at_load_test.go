@@ -109,6 +109,7 @@ func TestUpdatedAtLoadSiblingRuntimeBoundary(t *testing.T) {
 				tab := &Tab{ID: "sibling", Name: "sibling", Kind: kind, Command: "sh", tmux: sibling}
 				i := &Instance{Title: "updated-at-sibling", Path: repo, Program: "claude", backend: &LocalBackend{},
 					liveness: LiveReady, CreatedAt: before, UpdatedAt: before, gitWorktree: gw, Tabs: []*Tab{newAgentTab(agent), tab},
+					TaskID: "task-sibling", taskRunActive: true,
 					lastPromptAttemptAt: before, lastPromptDeliveryStatus: PromptDelivered, lastPaneChurnAt: before}
 				// Seed the durable record before load, then checkpoint only when the
 				// daemon settlement predicate includes this instance.
@@ -125,6 +126,8 @@ func TestUpdatedAtLoadSiblingRuntimeBoundary(t *testing.T) {
 				require.Equal(t, before, i.lastPromptAttemptAt)
 				require.Equal(t, PromptDelivered, i.lastPromptDeliveryStatus)
 				require.Equal(t, before, i.lastPaneChurnAt)
+				require.True(t, i.TaskRunActive(),
+					"replacing a sibling tab does not replace the agent runtime that received the task prompt")
 				enrolled := i.ConsumeLoadRuntimeReplacement()
 				require.Equal(t, !existing, enrolled)
 				if enrolled {
