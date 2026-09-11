@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -55,20 +56,29 @@ func TestLoadConfigReadOnly_UsesEffectiveKernelAccess(t *testing.T) {
 
 // This checks fallback selection with injected capability metadata; it does
 // not provision capabilities or test their enforcement by the Linux kernel.
-func TestConfigDirectoryAccess_FallbackRetainsEffectiveRouting(t *testing.T) {
+func TestConfigDirectoryAccess_FallbackCapabilityRouting(t *testing.T) {
+	if os.Getuid() != os.Geteuid() || os.Getgid() != os.Getegid() {
+		t.Skip("routing cases require matching real/effective IDs")
+	}
 	oldEffective, oldFallback, oldCapget := configDirectoryFaccessat2, configDirectoryFaccessat, configDirectoryCapget
 	t.Cleanup(func() {
 		configDirectoryFaccessat2, configDirectoryFaccessat, configDirectoryCapget = oldEffective, oldFallback, oldCapget
 	})
 	for _, unavailable := range []error{unix.ENOSYS, unix.EPERM} {
 		for _, tc := range []struct {
-			name string
-			data unix.CapUserData
-			err  error
+			name      string
+			data      unix.CapUserData
+			err       error
+			wantFlags int
 		}{
-			{"effective capability", unix.CapUserData{Effective: 1 << unix.CAP_DAC_OVERRIDE}, nil},
-			{"permitted capability", unix.CapUserData{Permitted: 1 << unix.CAP_DAC_OVERRIDE}, nil},
-			{"capget denied", unix.CapUserData{}, unix.EPERM},
+			{"effective DAC override", unix.CapUserData{Effective: 1 << unix.CAP_DAC_OVERRIDE}, nil, unix.AT_EACCESS},
+			{"permitted DAC override", unix.CapUserData{Permitted: 1 << unix.CAP_DAC_OVERRIDE}, nil, unix.AT_EACCESS},
+			{"effective DAC search", unix.CapUserData{Effective: 1 << unix.CAP_DAC_READ_SEARCH}, nil, unix.AT_EACCESS},
+			{"permitted DAC search", unix.CapUserData{Permitted: 1 << unix.CAP_DAC_READ_SEARCH}, nil, unix.AT_EACCESS},
+			{"effective network capability", unix.CapUserData{Effective: 1 << unix.CAP_NET_BIND_SERVICE}, nil, 0},
+			{"permitted network capability", unix.CapUserData{Permitted: 1 << unix.CAP_NET_BIND_SERVICE}, nil, 0},
+			{"mixed DAC and network", unix.CapUserData{Effective: 1<<unix.CAP_DAC_OVERRIDE | 1<<unix.CAP_NET_BIND_SERVICE}, nil, unix.AT_EACCESS},
+			{"capget denied", unix.CapUserData{}, unix.EPERM, unix.AT_EACCESS},
 		} {
 			t.Run(unavailable.Error()+"/"+tc.name, func(t *testing.T) {
 				configDirectoryFaccessat2 = func(int, string, uint32, int) error { return unavailable }
@@ -79,7 +89,7 @@ func TestConfigDirectoryAccess_FallbackRetainsEffectiveRouting(t *testing.T) {
 				called := false
 				configDirectoryFaccessat = func(_ int, _ string, _ uint32, flags int) error {
 					called = true
-					assert.Equal(t, unix.AT_EACCESS, flags, "must not switch to real-ID capability semantics")
+					assert.Equal(t, tc.wantFlags, flags, "only DAC capabilities require effective-access fallback")
 					return unix.EACCES
 				}
 				require.ErrorIs(t, checkConfigDirectoryAccess(t.TempDir()), unix.EACCES)
