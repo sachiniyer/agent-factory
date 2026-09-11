@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/daemon"
 )
 
 // TestDaemonRestartPreservesDaemonSpawnedTmux is the #2176 regression at the
@@ -44,23 +46,7 @@ func TestDaemonRestartPreservesDaemonSpawnedTmux(t *testing.T) {
 	t.Setenv("AF_FAKE_AF_BIN", h.bin)
 
 	h.run("daemon", "install")
-	ready := false
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		pid, ok := daemonPID(h.home)
-		if ok && pidAlive(pid) {
-			info, err := os.Stat(filepath.Join(h.home, "daemon.sock"))
-			if err == nil && info.Mode()&os.ModeSocket != 0 {
-				ready = true
-				break
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !ready {
-		log, _ := os.ReadFile(managerLog)
-		t.Fatalf("fake-systemd daemon did not become ready:\n%s", log)
-	}
+	waitForRestartDaemonReady(t, "", managerLog)
 
 	created := h.createSession("restart-survivor")
 	if created.TmuxName == "" {
@@ -146,11 +132,12 @@ func tmuxProcessIDs(t *testing.T, name string) (serverPID, panePID int) {
 
 func restartAndAssertTmuxPIDs(t *testing.T, h *harness, name string, wantServerPID, wantPanePID int, managerLog string) {
 	t.Helper()
-	h.run("daemon", "restart")
-	waitUntil(t, 10*time.Second, "daemon restart to restore control-plane readiness", func() bool {
-		pid, ok := daemonPID(h.home)
-		return ok && pidAlive(pid) && tmuxSessionExists(name)
-	})
+	before := waitForRestartDaemonReady(t, "", managerLog)
+	if out := h.run("daemon", "restart"); strings.TrimSpace(out) != "daemon restarted" {
+		log, _ := os.ReadFile(managerLog)
+		t.Fatalf("expected a restart, not a no-daemon no-op; output=%q\nmanager log:\n%s", out, log)
+	}
+	waitForRestartDaemonReady(t, before.BootID, managerLog)
 
 	gotServerPID, gotPanePID := tmuxProcessIDs(t, name)
 	if gotServerPID != wantServerPID || gotPanePID != wantPanePID {
@@ -158,6 +145,29 @@ func restartAndAssertTmuxPIDs(t *testing.T, h *harness, name string, wantServerP
 		t.Fatalf("daemon restart replaced the live tmux process tree: server pid %d -> %d, pane pid %d -> %d\nmanager log:\n%s",
 			wantServerPID, gotServerPID, wantPanePID, gotPanePID, log)
 	}
+}
+
+// The PID file can still name the departing daemon after its socket closes.
+// Waiting for that PID and the surviving tmux session can let the next restart
+// run during the handoff gap, where a correct no-daemon no-op skips the legacy
+// unit migration (#4189). Require a ready responder from a NEW boot.
+func waitForRestartDaemonReady(t *testing.T, previousBootID, managerLog string) daemon.HealthStatus {
+	t.Helper()
+	var last daemon.HealthStatus
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		last = daemon.Health()
+		if last.PingErr == nil && last.Phase == daemon.DaemonPhaseReady &&
+			last.BootID != "" && last.BootID != previousBootID &&
+			last.ServingPID > 1 && last.ServingPID == last.PIDFilePID {
+			return last
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	log, _ := os.ReadFile(managerLog)
+	t.Fatalf("timeout waiting for a ready daemon after boot %q: ping=%v phase=%s boot=%q servingPID=%d recordedPID=%d\nmanager log:\n%s",
+		previousBootID, last.PingErr, last.Phase, last.BootID, last.ServingPID, last.PIDFilePID, log)
+	return last
 }
 
 const fakeSystemdRun = `
@@ -178,9 +188,11 @@ if [ "${1:-}" = "--user" ]; then
 fi
 
 unit_path="${XDG_CONFIG_HOME}/systemd/user/agent-factory-daemon.service"
+manager_pid_file="${AF_FAKE_MANAGER_LOG}.pid"
 
 start_daemon() {
     sh -c 'AGENT_FACTORY_SYSTEMD_UNIT=agent-factory-daemon.service; SYSTEMD_EXEC_PID=$$; export AGENT_FACTORY_SYSTEMD_UNIT SYSTEMD_EXEC_PID; exec "$1" --daemon' fake-systemd "$AF_FAKE_AF_BIN" >>"$AF_FAKE_MANAGER_LOG" 2>&1 &
+    printf '%s\n' "$!" >"$manager_pid_file"
     printf 'started daemon pid=%s\n' "$!" >>"$AF_FAKE_MANAGER_LOG"
 }
 
@@ -197,6 +209,23 @@ case "${1:-}" in
         exit 0
         ;;
     restart)
+        # A real service manager serializes stop completion before start. Socket
+        # closure alone is too early: the old daemon still saves state and holds
+        # its home lock. Track our own child rather than its disappearing PID file.
+        old_pid="$(cat "$manager_pid_file")"
+        attempts=0
+        while [ "$attempts" -lt 200 ]; do
+            state="$(ps -o stat= -p "$old_pid" 2>/dev/null || true)"
+            case "$state" in
+                ""|Z*) break ;;
+            esac
+            attempts=$((attempts + 1))
+            sleep 0.05
+        done
+        if [ "$attempts" -eq 200 ]; then
+            printf 'previous daemon pid=%s did not exit before restart\n' "$old_pid" >>"$AF_FAKE_MANAGER_LOG"
+            exit 1
+        fi
         if [ "${AF_FAKE_FORCE_CONTROL_GROUP:-}" = "1" ] || ! grep -q '^KillMode=process$' "$unit_path"; then
             server_pid="$(tmux display-message -p -t "=${AF_FAKE_TMUX_SESSION}:" '#{pid}' 2>/dev/null || true)"
             if [ -n "$server_pid" ] && [ "$server_pid" -gt 1 ]; then
