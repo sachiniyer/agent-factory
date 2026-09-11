@@ -126,6 +126,10 @@ func setupTaskRepo(t *testing.T) string {
 // backs the target_session path (the serialized create-or-send the daemon owns
 // since #865). The deliver recorder reports "sent" when the seeded target
 // exists and "started" otherwise, mirroring Manager.DeliverPrompt.
+func stubTaskRunAt() time.Time {
+	return time.Date(2026, 9, 11, 9, 0, 0, 123, time.UTC)
+}
+
 func stubTaskDelivery(t *testing.T) (*[]CreateSessionRequest, *[]DeliverPromptRequest) {
 	t.Helper()
 	var creates []CreateSessionRequest
@@ -138,7 +142,7 @@ func stubTaskDelivery(t *testing.T) (*[]CreateSessionRequest, *[]DeliverPromptRe
 		if title == "" {
 			title = req.TitleBase
 		}
-		return &session.InstanceData{Title: title, CreatedAt: time.Now()}, nil
+		return &session.InstanceData{Title: title, CreatedAt: stubTaskRunAt()}, nil
 	}
 	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
 		delivers = append(delivers, req)
@@ -288,12 +292,15 @@ func TestDeliverTaskPrompt_CreatesSessionWithoutTarget(t *testing.T) {
 	creates, delivers := stubTaskDelivery(t)
 
 	tsk := &task.Task{ID: "ffff0002", Name: "nightly", Prompt: "do it", CronExpr: "0 3 * * *", ProjectPath: repo, Enabled: true}
-	status, _, err := deliverTaskPrompt(tsk, tsk.Prompt, true)
+	status, runAt, err := deliverTaskPrompt(tsk, tsk.Prompt, true)
 	if err != nil {
 		t.Fatalf("deliverTaskPrompt: %v", err)
 	}
 	if status != "started" {
 		t.Fatalf("status = %q, want started", status)
+	}
+	if !runAt.Equal(stubTaskRunAt()) {
+		t.Fatalf("run timestamp = %v, want the created session identity %v", runAt, stubTaskRunAt())
 	}
 	if len(*delivers) != 0 {
 		t.Fatalf("expected no DeliverPrompt calls, got %d", len(*delivers))
