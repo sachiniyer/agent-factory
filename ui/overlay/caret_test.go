@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
 	"github.com/sachiniyer/agent-factory/ui"
@@ -17,6 +18,13 @@ func forceProfile(t *testing.T, p termenv.Profile) {
 	prev := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(p)
 	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+}
+
+// renderedText removes terminal encoding before tests inspect user-visible
+// copy. Styling may split a word with escape sequences even though every rune
+// is present on screen.
+func renderedText(rendered string) string {
+	return xansi.Strip(rendered)
 }
 
 // TestSearchOverlayRendersCaretNotUnderscore covers #1826 item 7 at the search
