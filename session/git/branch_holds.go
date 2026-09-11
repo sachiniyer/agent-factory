@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -78,10 +79,8 @@ func WorktreeBranchBindings(repoRoot string) ([]WorktreeBranchBinding, error) {
 	// indistinguishable from a record terminator. Same fix as worktreeListed
 	// (#3423) and worktreeListedBranchBounded (#3278); no new git floor.
 	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "worktree", "list", "--porcelain", "-z")
-	// Repository-selection variables such as GIT_DIR and GIT_WORK_TREE override
-	// -C. This probe is admission authority for repoRoot, so it must use the same
-	// filtered control-plane environment as the other repository identity probes.
-	cmd.Env = repositoryScopedGitCommandEnvironment()
+	// Keep repository selection bound to -C without changing runtime settings.
+	cmd.Env = append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 	// Bound the post-exit wait so a child that inherited the capture pipe cannot
 	// hold Output() open past the deadline (#856).
 	cmd.WaitDelay = gitWaitDelay
