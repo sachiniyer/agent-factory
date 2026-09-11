@@ -298,6 +298,13 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex
 ### Requirements on the daemon host
 
 - The `docker` CLI on `PATH` and a reachable Docker daemon.
+- A **local** Docker engine — `DOCKER_HOST` / `DOCKER_CONTEXT` pointing at this
+  machine. `docker run` publishes the in-container agent-server port on the engine
+  host's loopback (`-p 127.0.0.1::8000`), and the daemon dials its own loopback to
+  reach it, so a remote engine yields an endpoint this daemon can never connect to.
+  af refuses a remote engine at create time (and reports it unavailable at choose
+  time) rather than provisioning a session that fails later with an opaque
+  `connection refused` to `127.0.0.1`.
 - The repo must have an `origin` remote the container can clone from (GitHub for
   a real repo; a `file://` path + a `run_args` bind-mount for a self-contained
   test).

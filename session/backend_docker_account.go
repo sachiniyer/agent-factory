@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/csv"
 	"fmt"
 	"path"
@@ -445,25 +446,65 @@ func localDockerEndpoint(endpoint string) bool {
 		strings.HasPrefix(endpoint, "fd://")
 }
 
-// dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will
-// talk to and reports whether it is local. Two callers need that answer for the
-// same underlying reason — Docker resolves AND labels a bind source on the daemon
-// host, not the CLI host: ensureAccountDockerEngineLocal refuses a remote engine
-// outright, and bindMountRelabel keeps the SELinux relabel when locality cannot
-// be proven (#3589).
-func (p *dockerProvisioner) dockerEngineEndpoint() (endpoint string, local bool, err error) {
-	environ := p.dockerEnvironment()
+// remoteDockerEngineError is the one wording for "the Docker engine is not on this
+// host", shared by Provision (create time) and BackendUnusableReason (choose time)
+// — mirroring dockerCLIMissingError / missingOriginError, so the reason the web
+// gives at choose time is the reason the CLI prints at create time. The published
+// agent-server port is on the engine host's loopback; the daemon dials its own, so
+// a remote engine is unreachable and the failure would otherwise surface later as
+// an opaque `dial tcp 127.0.0.1:<port>: connect: connection refused`.
+func remoteDockerEngineError(endpoint string) error {
+	return fmt.Errorf("backend=docker: the docker backend requires a local Docker engine, but the Docker endpoint %q is remote; the in-container agent-server port is published on the engine host's loopback, which this daemon cannot reach", endpoint)
+}
+
+// dockerLocalityProbeError is the fail-closed wording for "I could not establish
+// whether the Docker engine is local", shared by Provision and
+// BackendUnusableReason. The account path names the account inline; this is the
+// account-agnostic half, matching that path's posture (refuse, do not proceed)
+// when locality cannot be proven.
+func dockerLocalityProbeError(err error) error {
+	return fmt.Errorf("backend=docker: cannot establish that the Docker daemon is local: %w", err)
+}
+
+// resolveDockerEngineEndpoint resolves the Docker endpoint this daemon's docker
+// CLI will talk to and reports whether it is local. It is the shared core of the
+// provision-time dockerEngineEndpoint method and the choose-time picker locality
+// check, so create-time and choose-time cannot disagree on what "local" means.
+//
+// It reads DOCKER_HOST / DOCKER_CONTEXT from environ exactly as the docker CLI
+// receives them, and runs `docker context inspect` only when DOCKER_HOST is unset
+// or a DOCKER_CONTEXT is named — the same call ensureAccountDockerEngineLocal and
+// bindMountRelabel make. Two concerns turn on the engine being local: Docker
+// resolves AND labels a bind source on the daemon host (not the CLI host), and the
+// agent-server port publishes on the engine host's loopback while the daemon dials
+// its own. A remote engine breaks the latter for every docker session, not only
+// account-scoped ones.
+func resolveDockerEngineEndpoint(environ []string) (endpoint string, local bool, err error) {
 	dockerHost := environmentValue(environ, "DOCKER_HOST")
 	dockerContext := environmentValue(environ, "DOCKER_CONTEXT")
 	endpoint = dockerHost
 	if dockerContext != "" || endpoint == "" {
-		out, derr := p.docker(dockerShortStepTimeout, "context", "inspect", "--format", dockerEndpointFormat)
+		ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
+		defer cancel()
+		out, derr := dockerExec(ctx, environ, "context", "inspect", "--format", dockerEndpointFormat)
 		if derr != nil {
 			return "", false, fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), derr)
 		}
 		endpoint = strings.TrimSpace(string(out))
 	}
 	return endpoint, localDockerEndpoint(endpoint), nil
+}
+
+// dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will
+// talk to and reports whether it is local. It delegates to
+// resolveDockerEngineEndpoint so the provision-time answer and the choose-time
+// picker answer cannot disagree. Three callers turn on the engine being local:
+// ensureAccountDockerEngineLocal refuses a remote engine for account sessions
+// (bind-mount identity), ensureDockerEngineLocal refuses it for every other
+// session (dial-back reachability), and bindMountRelabel keeps the SELinux relabel
+// when locality cannot be proven (#3589).
+func (p *dockerProvisioner) dockerEngineEndpoint() (endpoint string, local bool, err error) {
+	return resolveDockerEngineEndpoint(p.dockerEnvironment())
 }
 
 // ensureAccountDockerEngineLocal proves bind mounts are interpreted on this
@@ -480,6 +521,25 @@ func (p *dockerProvisioner) ensureAccountDockerEngineLocal() error {
 		return fmt.Errorf(
 			"backend=docker: account %q cannot be used with remote Docker endpoint %q: bind mounts resolve on the daemon host, so this host's account path would not be the selected identity",
 			p.spec.Account.Name, endpoint)
+	}
+	return nil
+}
+
+// ensureDockerEngineLocal refuses a remote Docker engine before the container is
+// created, for every docker session that is not account-scoped. runContainer
+// publishes the agent-server port on the engine host's loopback (`-p
+// 127.0.0.1::<agentPort>`) and provision dials the daemon's own 127.0.0.1, so a
+// remote engine yields an endpoint the daemon can never reach — the failure
+// surfaces later as an opaque `dial tcp 127.0.0.1:<port>: connect: connection
+// refused` rather than at create time. Mirrors ensureAccountDockerEngineLocal's
+// posture (refuse, do not proceed) and fails closed on a probe error the same way.
+func (p *dockerProvisioner) ensureDockerEngineLocal() error {
+	endpoint, local, err := p.dockerEngineEndpoint()
+	if err != nil {
+		return dockerLocalityProbeError(err)
+	}
+	if !local {
+		return remoteDockerEngineError(endpoint)
 	}
 	return nil
 }

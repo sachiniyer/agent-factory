@@ -443,6 +443,11 @@ func TestDockerAccount_ReadBannerLogReadRunsAsTheAccountOwner(t *testing.T) {
 // either name a nonexistent uid or shadow the image's default USER.
 func TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// A local engine so the non-account pre-run locality guard passes without a
+	// docker call; this test exercises the banner-read exec, not the remote-engine
+	// refusal.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
 	repo := initTempGitRepo(t)
 	runGit(t, repo, "remote", "add", "origin", "https://example.invalid/fixture.git")
