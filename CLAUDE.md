@@ -416,12 +416,13 @@ stack, revert the foreign paths out of your tree, and say so in the PR.
 - Treat exported Go identifiers as repository-internal implementation, not a
   supported import API; removing one is not a breaking change and does not
   require a major version. The supported compatibility surface is the `af`
-  binary's user-visible behavior — whatever it presents to users as a contract,
-  with the list below as illustration rather than boundary: CLI behavior and
-  output, config keys, the public HTTP surface wherever the docs specify it
-  (including authentication and CORS guarantees documented outside the route
-  catalogue, and excluding the routes `docs/http-api.md` lists as not public),
-  durable on-disk state af owns, and behavior user scripts depend on.
+  project's user-visible behavior — whatever it publishes to users as a
+  contract, with the list below as illustration rather than boundary: CLI
+  behavior and output, config keys, the public HTTP surface wherever the docs
+  specify it (including authentication and CORS guarantees documented outside
+  the route catalogue, and excluding the routes `docs/http-api.md` lists as not
+  public), durable on-disk state af owns, the documented install path and the
+  plugin and skill distribution, and behavior user scripts depend on.
 
 ## Copy & glyph conventions
 
