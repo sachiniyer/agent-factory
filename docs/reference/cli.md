@@ -1348,9 +1348,10 @@ structural keys config cannot touch — are listed last. Contextual pane
 actions such as pane_prev/pane_next are included; their default arrow keys
 apply only while a workspace pane has focus.
 
-When a user rebind takes another action's default, that action has no key and
-SOURCE names the taker. The JSON row likewise has no keys and appends a
-suppressed_by list naming the user-rebound action.
+When a user rebind takes another action's default, the affected row keeps any
+remaining keys and SOURCE names each removed key and its taker. A fully
+suppressed action shows an em dash instead of a key. JSON appends the same
+key/taker pairs in suppressed_by.
 
 Key values use config spellings you can paste into [keys]. With --json,
 bindings are wrapped in {data,error}; keys/default keep those spellings.

@@ -480,6 +480,10 @@ Here `c` creates a session and `ctrl+p` moves up. `limit_retry` and
 `switch_project` become unbound; `af keys` reports them as `— taken by new` and
 `— taken by up` so the lost bindings are visible and actionable. This is not a
 startup error because neither losing claim came from another user override.
+If only one key from a multi-key default is taken, the row keeps its remaining
+keys and names the loss separately, such as `up   up   (k taken by new)`.
+Suppressed fixed bindings use their description in the action column so the
+disabled behavior is still identifiable.
 
 - **Global-only.** `keys` is rejected in in-repo configs — a cloned repository can never rebind your terminal.
 - **TOML-only.** The keymap exists only in `config.toml`; a `keys` block in a legacy `config.json` is ignored with a warning.

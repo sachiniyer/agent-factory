@@ -206,9 +206,10 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			"structural keys config cannot touch — are listed last. Contextual pane\n" +
 			"actions such as pane_prev/pane_next are included; their default arrow keys\n" +
 			"apply only while a workspace pane has focus.\n\n" +
-			"When a user rebind takes another action's default, that action has no key and\n" +
-			"SOURCE names the taker. The JSON row likewise has no keys and appends a\n" +
-			"suppressed_by list naming the user-rebound action.\n\n" +
+			"When a user rebind takes another action's default, the affected row keeps any\n" +
+			"remaining keys and SOURCE names each removed key and its taker. A fully\n" +
+			"suppressed action shows an em dash instead of a key. JSON appends the same\n" +
+			"key/taker pairs in suppressed_by.\n\n" +
 			"Key values use config spellings you can paste into [keys]. With --json,\n" +
 			"bindings are wrapped in {data,error}; keys/default keep those spellings.",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -243,7 +244,8 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			}
 
 			// SOURCE only annotates the rows that carry information: fixed
-			// (structural, un-rebindable) and rebound (with the default shown).
+			// (structural, un-rebindable), rebound (with the default shown), and
+			// suppressed (with each lost key attributed to its taker).
 			// The old DESCRIPTION column restated ACTION, and a SOURCE of
 			// "default" on every plain binding said nothing — both dropped so
 			// the table reads at a glance (#1749). A blank SOURCE means the
@@ -254,10 +256,17 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 				action, keyList, source := info.Action, strings.Join(info.Keys, ", "), ""
 				if info.Action == "" {
 					action = "-"
+					if len(info.SuppressedBy) > 0 {
+						action = info.Desc
+					}
 				}
 				switch {
 				case len(info.SuppressedBy) > 0:
-					source = fmt.Sprintf("taken by %s", strings.Join(info.SuppressedBy, ", "))
+					if len(info.Keys) == 0 {
+						source = fmt.Sprintf("taken by %s", strings.Join(suppressionTakers(info.SuppressedBy), ", "))
+					} else {
+						source = fmt.Sprintf("(%s)", strings.Join(suppressedKeyDetails(info.SuppressedBy), "; "))
+					}
 				case info.Action == "":
 					source = "fixed"
 				case info.Rebound:
@@ -274,11 +283,33 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 )
 
 // keysJSONBinding preserves the five established BindingInfo members exactly
-// as encoded, then appends suppressed_by only for a row whose defaults yielded
-// to user bindings. Re-encoding through a map would alphabetize the existing
-// public fields (#4221).
+// as encoded, then appends the suppressed key/taker pairs only for a row whose
+// defaults yielded to user bindings. Re-encoding through a map would
+// alphabetize the existing public fields (#4221).
 type keysJSONBinding struct {
 	keys.BindingInfo
+}
+
+func suppressionTakers(suppressed []keys.SuppressedKey) []string {
+	var takers []string
+	seen := make(map[string]bool)
+	for _, lost := range suppressed {
+		for _, taker := range lost.TakenBy {
+			if !seen[taker] {
+				takers = append(takers, taker)
+				seen[taker] = true
+			}
+		}
+	}
+	return takers
+}
+
+func suppressedKeyDetails(suppressed []keys.SuppressedKey) []string {
+	details := make([]string, 0, len(suppressed))
+	for _, lost := range suppressed {
+		details = append(details, fmt.Sprintf("%s taken by %s", lost.Key, strings.Join(lost.TakenBy, ", ")))
+	}
+	return details
 }
 
 func (b keysJSONBinding) MarshalJSON() ([]byte, error) {

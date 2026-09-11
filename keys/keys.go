@@ -409,9 +409,16 @@ type BindingInfo struct {
 	Default []string `json:"default"`
 	// Rebound reports whether an override replaced the default.
 	Rebound bool `json:"rebound"`
-	// SuppressedBy names the user-rebound actions that took one or more of this
-	// action's default keys. The CLI appends it to JSON only when non-empty.
-	SuppressedBy []string `json:"-"`
+	// SuppressedBy identifies each inactive default key and the user-rebound
+	// actions that took it. The CLI appends it to JSON only when non-empty.
+	SuppressedBy []SuppressedKey `json:"-"`
+}
+
+// SuppressedKey is one default key removed from an action's active binding set,
+// together with the user-rebound actions that claim it.
+type SuppressedKey struct {
+	Key     string   `json:"key"`
+	TakenBy []string `json:"taken_by"`
 }
 
 // EffectiveBindings returns every action's effective binding with the given
@@ -550,22 +557,19 @@ func buildMaps(overrides map[string][]string) (builtMaps, error) {
 	for i, sp := range specs {
 		effective := effectiveKeys[i]
 		active := effective
-		var suppressedBy []string
+		var suppressedBy []SuppressedKey
 		if sup := suppressed[sp.name]; len(sup) > 0 {
 			active = make([]string, 0, len(effective))
-			seenTakers := make(map[string]bool, len(sup))
 			for _, k := range effective {
 				takers, dropped := sup[k]
 				if !dropped {
 					active = append(active, k)
 					continue
 				}
-				for _, taker := range takers {
-					if !seenTakers[taker] {
-						suppressedBy = append(suppressedBy, taker)
-						seenTakers[taker] = true
-					}
-				}
+				suppressedBy = append(suppressedBy, SuppressedKey{
+					Key:     displayKeys([]string{k}, false)[0],
+					TakenBy: append([]string(nil), takers...),
+				})
 			}
 		}
 
