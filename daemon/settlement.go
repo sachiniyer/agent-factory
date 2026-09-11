@@ -102,20 +102,25 @@ func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *sessio
 	run, interrupted := instance.InterruptTaskRunAtRuntimeReplacement()
 	m.noteRuntimeReplaced(repoID, instance)
 	settlementErr := m.persistSettlement(repoID, key, instance)
-	if settlementErr != nil && interrupted {
-		// ConfirmLive runs immediately after this callback. Hold its restore fence
-		// before returning so a failed close cannot become visible. Any later
-		// settlement success releases the same hold centrally in persistSettlement.
-		instance.HoldRuntimeReplacementUntilSettlement()
+	if settlementErr != nil {
+		if interrupted {
+			// ConfirmLive runs immediately after this callback. Hold its restore
+			// fence before returning and queue the task write BEHIND the owed session
+			// write. Publishing the outcome now would clear the only durable outbox
+			// marker before disk records the run close; a daemon restart could then
+			// reload TaskRunActive and execute on_complete on the replacement.
+			instance.HoldRuntimeReplacementUntilSettlement()
+			if run.TaskID != "" {
+				m.recordInterruptedTaskRunWrite(repoID, key, instance, &run)
+			}
+		}
+		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", settlementErr)
 	}
 	// The session settlement comes first. A task-file lock or disk fault must not
 	// keep predecessor-owned remote-loss evidence live after the replacement is
 	// already running, or a restart plus one blip could re-provision it again.
 	if interrupted && run.TaskID != "" {
 		m.recordInterruptedTaskRun(repoID, key, instance, run)
-	}
-	if settlementErr != nil {
-		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", settlementErr)
 	}
 	return nil
 }
