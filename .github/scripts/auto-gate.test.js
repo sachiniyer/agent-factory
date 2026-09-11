@@ -4845,6 +4845,210 @@ test("a reviewer outage requires approval even before degradation activates", as
   assert.match(approved.summary, /^PASS:/);
 });
 
+// #4204: the label selects the gate; a maintainer comment identifies the code
+// actually exercised. Use full evaluate() so a stale claim cannot still merge.
+function playTestComment(sha = HEAD_SHA) {
+  return prComment("sachiniyer", `Play-tested commit: ${sha}\n\nDriver passed. — Captain Claude`);
+}
+
+function tuiTree(entries = {}) {
+  return { truncated: false, tree: Object.entries(entries).map(([path, sha]) => ({
+    path, sha, mode: "100644", type: "blob",
+  })) };
+}
+
+const PLAY_TEST_TREE = { "session/tmux/envmarker.go": "1".repeat(40) };
+function playTestFixture(overrides = {}) {
+  return {
+    labels: ["play-tested"],
+    files: ["session/tmux/envmarker.go"],
+    issueComments: [codexVerdict(HEAD_SHA), playTestComment(OTHER_SHA)],
+    treesByOid: {
+      [OTHER_SHA]: tuiTree(PLAY_TEST_TREE),
+      [HEAD_SHA]: tuiTree(PLAY_TEST_TREE),
+    },
+    ...overrides,
+  };
+}
+
+test("#4204: a play-tested label and current-head attestation pass without tree reads", async () => {
+  const result = await evaluateGate(playTestFixture({
+    issueComments: [codexVerdict(HEAD_SHA), playTestComment()], treesByOid: {},
+  }));
+  assert.equal(result.shouldMerge, true);
+  assert.match(result.notes.join("\n"), new RegExp(`play-tested commit ${HEAD_SHA} covers head ${HEAD_SHA}`));
+});
+
+test("#4204: a label alone is not play-test evidence", async () => {
+  const result = await evaluateGate(playTestFixture({ issueComments: [codexVerdict(HEAD_SHA)] }));
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /no SHA-bound attestation/);
+});
+
+test("#4204: an attestation does not replace the label", async () => {
+  const result = await evaluateGate(playTestFixture({ labels: [] }));
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+});
+
+for (const [kind, entries] of Object.entries({
+  edit: { "session/tmux/envmarker.go": "2".repeat(40) },
+  addition: { ...PLAY_TEST_TREE, "app/pane.go": "2".repeat(40) },
+  deletion: {},
+  rename: { "session/tmux/envmarker_test.go": "1".repeat(40) },
+  ui: { ...PLAY_TEST_TREE, "ui/pane.go": "2".repeat(40) },
+})) {
+  test(`#4204: gated ${kind} invalidates the old play-test`, async () => {
+    const result = await evaluateGate(playTestFixture({ treesByOid: {
+      [OTHER_SHA]: tuiTree(PLAY_TEST_TREE), [HEAD_SHA]: tuiTree(entries),
+    } }));
+    assert.equal(result.shouldMerge, false);
+    assert.match(result.reasons.join("\n"), /attestation.*is stale: gated paths changed/);
+  });
+}
+
+test("#4204: a rebase changing only ungated and test files preserves the play-test", async () => {
+  const result = await evaluateGate(playTestFixture({ treesByOid: {
+    [OTHER_SHA]: tuiTree(PLAY_TEST_TREE),
+    [HEAD_SHA]: tuiTree({ ...PLAY_TEST_TREE, "docs/guide.md": "2".repeat(40),
+      "session/tmux/envmarker_test.go": "3".repeat(40), "app/app_test.go": "4".repeat(40) }),
+  } }));
+  assert.equal(result.shouldMerge, true);
+  assert.match(result.notes.join("\n"), new RegExp(`play-tested commit ${OTHER_SHA} covers head ${HEAD_SHA}`));
+});
+
+for (const changed of [false, true]) {
+  test(`#4204: a master merge ${changed ? "with changed gated content invalidates" : "preserves"} the play-test`, async () => {
+    const result = await evaluateGate(playTestFixture({
+      headCommittedDate: "2026-07-09T02:00:00Z",
+      headParents: [{ oid: OTHER_SHA, committedDate: "2026-07-09T01:00:00Z" },
+        { oid: "b".repeat(40) }],
+      issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T02:20:00Z"), playTestComment(OTHER_SHA)],
+      treesByOid: {
+        [OTHER_SHA]: tuiTree(PLAY_TEST_TREE),
+        [HEAD_SHA]: tuiTree({ ...PLAY_TEST_TREE, ...(changed
+          ? { "session/tmux/envmarker.go": "2".repeat(40) }
+          : { "docs/master.md": "2".repeat(40) }) }),
+      },
+    }));
+    assert.equal(result.shouldMerge, !changed, result.summary);
+    assert.match(result.notes.join("\n"), /content head/);
+    if (changed) assert.match(result.reasons.join("\n"), /gated paths changed/);
+    else assert.match(result.notes.join("\n"), /gated paths unchanged/);
+  });
+}
+
+test("#4204: gated file mode changes invalidate the play-test", async () => {
+  const current = tuiTree(PLAY_TEST_TREE);
+  current.tree[0].mode = "100755";
+  const result = await evaluateGate(playTestFixture({ treesByOid: {
+    [OTHER_SHA]: tuiTree(PLAY_TEST_TREE), [HEAD_SHA]: current,
+  } }));
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /gated paths changed/);
+});
+
+for (const tree of [undefined, { truncated: true, tree: [] }, { truncated: false },
+  { truncated: false, tree: [{ path: "app/pane.go" }] }, new Error("tree unavailable")]) {
+  test(`#4204: unavailable or incomplete trees fail closed (${JSON.stringify(tree)})`, async () => {
+    const result = await evaluateGate(playTestFixture({ treesByOid: {
+      [OTHER_SHA]: tuiTree(PLAY_TEST_TREE), [HEAD_SHA]: tree,
+    } }));
+    assert.equal(result.shouldMerge, false);
+    assert.match(result.reasons.join("\n"), /auto-gate evaluation error:/);
+  });
+}
+
+for (const comment of [
+  prComment("outside-contributor", `Play-tested commit: ${HEAD_SHA}`),
+  prComment("sachiniyer", `> Play-tested commit: ${HEAD_SHA}`),
+  playTestComment(HEAD_SHA.slice(0, 9)),
+  prComment("sachiniyer", `Play-tested commit: ${HEAD_SHA} but failed`),
+]) {
+  test(`#4204: untrusted or ambiguous attestation is rejected (${comment.body.split("\n")[0]})`, async () => {
+    const result = await evaluateGate(playTestFixture({ issueComments: [codexVerdict(HEAD_SHA), comment] }));
+    assert.equal(result.shouldMerge, false);
+    assert.match(result.reasons.join("\n"), /no SHA-bound attestation/);
+  });
+}
+
+test("#4204: a fresh attestation restores the gate after gated content changes", async () => {
+  const old = playTestComment(OTHER_SHA);
+  const fresh = { ...playTestComment(), created_at: "2026-07-09T01:30:00Z", updated_at: "2026-07-09T01:30:00Z" };
+  const result = await evaluateGate(playTestFixture({ issueComments: [fresh, codexVerdict(HEAD_SHA), old] }));
+  assert.equal(result.shouldMerge, true);
+  assert.match(result.notes.join("\n"), new RegExp(`play-tested commit ${HEAD_SHA}`));
+});
+
+// PR #4205 review: timestamps have only second precision. The newer ID must
+// win in both safety directions, independently of the comments API's order.
+for (const latestSha of [HEAD_SHA, OTHER_SHA]) {
+  for (const reverse of [false, true]) {
+    test(`#4205: same-second attestation IDs select ${latestSha === HEAD_SHA ? "fresh" : "stale"} evidence (reverse=${reverse})`, async () => {
+      const comments = [
+        { ...playTestComment(latestSha === HEAD_SHA ? OTHER_SHA : HEAD_SHA), id: 9 },
+        { ...playTestComment(latestSha), id: 10 },
+      ];
+      if (reverse) comments.reverse();
+      const result = await evaluateGate(playTestFixture({
+        issueComments: [codexVerdict(HEAD_SHA), ...comments],
+        treesByOid: {
+          [OTHER_SHA]: tuiTree(PLAY_TEST_TREE),
+          [HEAD_SHA]: tuiTree({ "session/tmux/envmarker.go": "2".repeat(40) }),
+        },
+      }));
+      assert.equal(result.shouldMerge, latestSha === HEAD_SHA, result.summary);
+      if (latestSha === HEAD_SHA) {
+        assert.match(result.notes.join("\n"), new RegExp(`play-tested commit ${HEAD_SHA}`));
+      } else {
+        assert.match(result.reasons.join("\n"), /gated paths changed/);
+      }
+    });
+  }
+}
+
+for (const failure of ["commit unavailable", "tree unavailable", "tree incomplete"]) {
+  for (const author of ["detail-app", "sachiniyer"]) {
+    test(`#4205: ${failure} remains ${author === "detail-app" ? "advisory for manual" : "blocking for automatic"} merge`, async () => {
+      const github = fakeGateGithub(playTestFixture({ author }));
+      if (failure === "commit unavailable") {
+        github.rest.repos.getCommit = async () => { throw new Error("attested commit unavailable"); };
+      } else if (failure === "tree unavailable") {
+        github.rest.git.getTree = async () => { throw new Error("attested tree unavailable"); };
+      } else {
+        github.rest.git.getTree = async () => ({ data: { truncated: true, tree: [] } });
+      }
+      const result = await autoGate.evaluate({
+        github, context: fakeContext(), core: fakeCore(), prNumber: 1465, setOutputs: false,
+      });
+      assert.equal(result.shouldMerge, false);
+      if (author === "detail-app") {
+        assert.equal(result.manualMergeRequired, true);
+        assert.deepEqual(result.manualMergeBlockers, []);
+        assert.match(result.summary, /^PASS:/);
+        assert.match(result.reasons.join("\n"), /play-tested attestation could not be verified:.*(?:unavailable|incomplete)/);
+        assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
+      } else {
+        assert.match(result.summary, /^BLOCKED:/);
+        assert.match(result.reasons.join("\n"), /auto-gate evaluation error:.*(?:unavailable|incomplete)/);
+      }
+    });
+  }
+}
+
+test("#4205: advisory play-test read failures do not waive a manual verdict blocker", async () => {
+  const result = await evaluateGate(playTestFixture({
+    author: "detail-app",
+    issueComments: [playTestComment(OTHER_SHA)],
+    treesByOid: { [OTHER_SHA]: new Error("attested tree unavailable") },
+  }));
+  assert.equal(result.shouldMerge, false);
+  assert.equal(result.manualMergeRequired, true);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.manualMergeBlockers.map((blocker) => blocker.reason).join("\n"), /Codex has not reviewed head/);
+  assert.match(result.reasons.join("\n"), /play-tested attestation could not be verified:.*unavailable/);
+});
+
 // The TUI path gate asks whether a user could SEE the change, and answered it by
 // prefix alone — so a diff whose only file under app/, ui/ or session/tmux/ was
 // a `_test.go` file demanded a play-test of nothing (#3607). #3601 paid for one.
@@ -9700,6 +9904,8 @@ function fakeGateGithub({
   reviews = [],
   reviewComments = [],
   files = [],
+  labels = [],
+  treesByOid = {},
   associatedPullRequests = [
     { number: 1465, state: "open", base: { ref: "master" }, head: { sha: headSha } },
   ],
@@ -9970,6 +10176,11 @@ function fakeGateGithub({
         },
       },
       git: {
+        getTree: async ({ tree_sha }) => {
+          const tree = treesByOid[tree_sha];
+          if (tree instanceof Error) throw tree;
+          return { data: tree };
+        },
         getRef: async ({ ref }) => {
           github.refReads.push(ref);
           if (refReadError) {
@@ -10012,7 +10223,7 @@ function fakeGateGithub({
         listPullRequestsAssociatedWithCommit,
         getCommit: async ({ ref }) => ({
           data: {
-            commit: { committer: { date: (commitDatesByOid || {})[ref] } },
+            commit: { committer: { date: (commitDatesByOid || {})[ref] }, tree: { sha: ref } },
             // Default: an ordinary one-parent commit, so the first-parent walk
             // stops at the first link unless a fixture describes a chain.
             parents: (parentsByOid[ref] || [{ oid: "0".repeat(40) }]).map((p) => ({ sha: p.oid })),
@@ -10189,7 +10400,7 @@ function fakeGateGithub({
               (pullRequestOverride.nativeAutoMergeEnabled ?? nativeAutoMergeEnabled)
                 ? { enabledAt: "2026-07-09T01:05:00Z" }
                 : null,
-            labels: { nodes: [] },
+            labels: { nodes: labels.map((name) => ({ name })) },
             createdAt: pullRequestOverride.prCreatedAt ?? prCreatedAt,
             commits: {
               nodes: [

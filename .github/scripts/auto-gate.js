@@ -775,18 +775,8 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // gate for a diff with nothing to look at. The subtraction is per FILE, not
   // per PR: a production file under any prefix still requires the label, and so
   // does a diff that changes a test and a production file together.
-  const touchesTui = files.some(
-    (path) => !path.endsWith("_test.go") && TUI_PATH_PREFIXES.some((prefix) => path.startsWith(prefix)),
-  );
+  const touchesTui = files.some(isGatedTuiPath);
   const labels = new Set(pr.labels.map((label) => label.toLowerCase()));
-
-  if (touchesTui && !labels.has("play-tested")) {
-    reasons.push("PR touches visible TUI/pane paths and is missing the play-tested label");
-  } else if (touchesTui) {
-    notes.push("TUI path gate passed with play-tested label");
-  } else {
-    notes.push("TUI path gate not required");
-  }
 
   const requiredChecks = await evaluateRequiredChecks({
     github,
@@ -833,6 +823,28 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     reasons.push(...codex.reasons);
   }
   notes.push(...codex.notes);
+
+  if (touchesTui && !labels.has("play-tested")) {
+    reasons.push("PR touches visible TUI/pane paths and is missing the play-tested label");
+  } else if (touchesTui) {
+    let playTest;
+    try {
+      playTest = await evaluatePlayTest({ github, context, pr, comments: codex.comments, subject });
+    } catch (error) {
+      // TUI evidence is advisory for authors the gate never auto-merges. Keep
+      // unreadable snapshots advisory too, without swallowing review/check
+      // failures or relaxing snapshot verification on the automatic path.
+      if (ALLOWED_AUTHORS.has(pr.author)) throw error;
+      playTest = {
+        ok: false,
+        message: `play-tested attestation could not be verified: ${error.message || String(error)}`,
+      };
+    }
+    if (playTest.ok) notes.push(playTest.message);
+    else reasons.push(playTest.message);
+  } else {
+    notes.push("TUI path gate not required");
+  }
 
   // A reviewer-unavailable response cannot provide the verdict this gate waits
   // for, so waiting may be a permanent stop on the whole repository (#3378).
@@ -3803,6 +3815,69 @@ async function readNativeAutoMergeStates({ github, context, numbers, retry = tru
   return states;
 }
 
+function isGatedTuiPath(path) {
+  return !path.endsWith("_test.go") && TUI_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
+// Like a prose review verdict, the attestation names its commit explicitly.
+// The latest recognized attestation wins; a label alone cannot identify tested code.
+async function evaluatePlayTest({ github, context, pr, comments, subject }) {
+  const attestations = comments
+    .filter((comment) => ALLOWED_AUTHORS.has(comment.user?.login || ""))
+    .map((comment) => ({
+      comment,
+      sha: /^Play-tested commit: ([0-9a-f]{40})$/i.exec(
+        String(comment.body || "").split("\n", 1)[0].trim(),
+      )?.[1].toLowerCase(),
+    }))
+    .filter(({ comment, sha }) => sha && reviewArtifactTime(comment) > 0)
+    // GitHub timestamps have second precision; IDs order comments within a
+    // second, regardless of pagination/API order. Time still takes precedence
+    // so editing an older attestation can supersede a newer comment.
+    .sort((a, b) => reviewArtifactTime(b.comment) - reviewArtifactTime(a.comment) ||
+      Number(b.comment.id || 0) - Number(a.comment.id || 0));
+  const testedSha = attestations[0]?.sha;
+  const remedy = `post a maintainer comment beginning "Play-tested commit: ${pr.headRefOid}" after play-testing that commit`;
+  if (!testedSha) {
+    return { ok: false, message: `play-tested label has no SHA-bound attestation; ${remedy}` };
+  }
+  if (testedSha !== pr.headRefOid.toLowerCase()) {
+    // Compare snapshots, not GitHub's three-dot/merge-base diff. Rebases can
+    // diverge and compare's file list can truncate. Tree equality covers adds,
+    // deletes, renames, modes and merge conflict resolutions as well as edits.
+    const snapshot = async (sha) => {
+      const { owner, repo } = context.repo;
+      const commit = await retryRead(`could not read play-tested commit ${sha}`, () =>
+        github.rest.repos.getCommit({ owner, repo, ref: sha }), subject);
+      const treeSha = normalizeHeadSha(commit?.data?.commit?.tree?.sha);
+      if (!treeSha) throw new Error(`play-tested commit ${sha} has no tree SHA`);
+      const response = await retryRead(`could not read play-tested tree for ${sha}`, () =>
+        github.rest.git.getTree({ owner, repo, tree_sha: treeSha, recursive: "1" }), subject);
+      const data = response?.data;
+      if (data?.truncated !== false || !Array.isArray(data.tree)) {
+        throw new Error(`play-tested tree for ${sha} is incomplete`);
+      }
+      const entries = [];
+      for (const entry of data.tree) {
+        if (typeof entry.path !== "string" || !normalizeHeadSha(entry.sha) ||
+            !["tree", "blob", "commit"].includes(entry.type) || !entry.mode) {
+          throw new Error(`play-tested tree for ${sha} has an invalid entry`);
+        }
+        if (entry.type !== "tree" && isGatedTuiPath(entry.path)) {
+          entries.push(JSON.stringify([entry.path, entry.type, entry.mode, entry.sha]));
+        }
+      }
+      return JSON.stringify(entries.sort());
+    };
+    const tested = await snapshot(testedSha);
+    const current = await snapshot(pr.headRefOid);
+    if (tested !== current) {
+      return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
+    }
+  }
+  return { ok: true, message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} (gated paths unchanged)` };
+}
+
 async function listPullRequestFiles({ github, context, number, subject = null }) {
   const { owner, repo } = context.repo;
   const files = await retryRead(
@@ -4857,6 +4932,7 @@ async function evaluateCodex({
     findingBlockers,
     // Read here because this is where the comments and reviews already are; the
     // caller decides what it means.
+    comments,
     maintainerApproval: maintainerApproval({ comments, reviews, headCurrentSince }),
   };
 }

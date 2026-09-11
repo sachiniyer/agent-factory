@@ -10,6 +10,39 @@ Auto Gate publishes two kinds of check run:
   app. It passes only when every open pull request to `master` at the commit has
   a passing composite decision.
 
+## Play-test evidence
+
+A PR touching production files under `app/`, `ui/`, or `session/tmux/`
+requires the `play-tested` label and a comment from an account in the gate's
+`ALLOWED_AUTHORS` set. After testing, start the comment with this exact line,
+using the full 40-character SHA of the commit actually tested:
+
+```text
+Play-tested commit: <full tested commit SHA>
+```
+
+Put the command, result, and signature on subsequent lines. The latest matching
+comment is the attestation; the label alone no longer satisfies the gate.
+Comments are ordered by their update time, then descending numeric comment ID
+when timestamps share a second.
+Existing labeled PRs need a comment identifying their actual tested commit.
+Do not substitute the current head unless that is the code you exercised.
+
+An attestation for the current head passes directly. For an older commit, the
+gate compares complete Git tree snapshots of the tested commit and current
+head, restricted to the same gated paths and excluding `_test.go` files.
+Evidence survives a master merge or rebase when those files are unchanged.
+Content, path, or file-mode changes require another play-test and a new comment;
+merge shape alone cannot exempt a conflict resolution. Missing or truncated
+trees block verification. Removing the label also blocks the automatic gate.
+The existing manual-path advisory policy for the TUI requirement is unchanged.
+For non-allowlisted authors, snapshot read failures remain advisory as well;
+they do not suppress the manual path's independent review blockers.
+
+This uses snapshot equality rather than the compare API's merge-base diff,
+which can omit differences between rebased heads and truncate its file list.
+The decision names both the tested SHA and the head it covers.
+
 ## Shared heads
 
 Two pull requests can point at the same commit. Their composite decisions remain
