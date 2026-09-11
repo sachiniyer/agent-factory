@@ -75,9 +75,8 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 // this boundary reset and before it returns; the post-success reset retires
 // those in-memory observations, while this settlement makes the fence safe.
 func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *session.Instance) error {
-	view := instance.LifecycleView()
-	if view.InFlightOp == session.OpRestoring && view.TaskRunActive && view.TaskID != "" {
-		m.recordInterruptedTaskRun(view.TaskID, view.Title)
+	if taskID, title, interrupted := instance.InterruptTaskRunAtRestoreBoundary(); interrupted && taskID != "" {
+		m.recordInterruptedTaskRun(taskID, title)
 	}
 	m.noteRuntimeReplaced(repoID, instance)
 	if err := m.persistSettlement(repoID, key, instance); err != nil {

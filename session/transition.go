@@ -629,23 +629,19 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	if i.taskRunActive {
 		switch spec.run {
 		case runEnds:
-			i.taskRunActive = false
-			i.touchLocked()
+			i.closeTaskRunLocked()
 			// The completion transition IS the capture point for the adoption
 			// baseline (#3865): taken here, inside the same i.mu section that ends
 			// the run, nothing — not the rest of this transition, not the poll's
 			// later persistPollChange — can land a delivery that reads as though it
 			// had always been there. See session/adoption_fence.go.
-			i.captureAdoptionBaselineLocked()
 		case runEndsOnIdleEdge:
 			// The AGENT's own axis, and the EDGE into it. Not ClassifyActivity — that
 			// calls an in-flight archive "pending", which would miss an agent going
 			// idle mid-teardown. Not the resulting state alone — a session is born
 			// LiveReady before its agent ever runs, so that would end the run at birth.
 			if to.liveness == LiveReady && from.liveness != LiveReady {
-				i.taskRunActive = false
-				i.touchLocked()
-				i.captureAdoptionBaselineLocked()
+				i.closeTaskRunLocked()
 			}
 		case runEndsOnRestoredRuntime:
 			// The from-state proves runtime identity: OpRestoring means Recover
@@ -653,9 +649,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 			// ConfirmLive callers either own the original runtime or keep a
 			// respawn fenced until prompt delivery, so they must retain the run.
 			if from.op == OpRestoring {
-				i.taskRunActive = false
-				i.touchLocked()
-				i.captureAdoptionBaselineLocked()
+				i.closeTaskRunLocked()
 			}
 		}
 	}

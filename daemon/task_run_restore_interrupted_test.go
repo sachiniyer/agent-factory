@@ -35,6 +35,10 @@ func TestRestoredTaskRuntimeIsRecordedInterruptedAndSkipsOnComplete(t *testing.T
 	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveLost)))
 	require.NoError(t, inst.Transition(session.MarkRestoring()))
 	require.NoError(t, manager.prepareRuntimeReplacement(repoID, key, inst))
+	require.False(t, inst.TaskRunActive(),
+		"the pre-live settlement must close the run before the restore fence drops")
+	assert.False(t, persistedInstanceByTitle(t, repoID, inst.Title).TaskRunActive,
+		"a crash before the post-recovery write must not reload the interrupted run as active")
 	require.NoError(t, inst.Transition(session.ConfirmLive()))
 	require.False(t, inst.TaskRunActive(),
 		"the replacement runtime did not receive the prompt and cannot own the interrupted run")
