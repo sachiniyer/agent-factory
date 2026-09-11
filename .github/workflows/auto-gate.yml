@@ -26,6 +26,11 @@ on:
   workflow_run:
     workflows: [PR Validation]
     types: [completed]
+  # GitHub has intermittently omitted that terminal workflow_run event. Reconcile
+  # only stale decisions that name a PR Validation blocker; the helper coalesces
+  # by PR/head and caps each sweep at ten evaluations (#4242).
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       pr_number:
@@ -346,7 +351,7 @@ jobs:
     # Invalidation has already run for EVERY event, outside both lanes. Keep
     # each head separate so a comment cannot replace synchronize's previous head.
     concurrency:
-      group: auto-gate-target-${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number || github.event.workflow_run.head_sha || github.event.check_suite.head_sha || github.event.sha || github.run_id }}-head-${{ matrix.aggregate.head_sha }}
+      group: auto-gate-target-${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number || github.event.workflow_run.head_sha || github.event.check_suite.head_sha || github.event.sha || github.event.schedule || github.run_id }}-head-${{ matrix.aggregate.head_sha }}
       cancel-in-progress: false
     uses: ./.github/workflows/auto-gate-aggregate.yml
     with:

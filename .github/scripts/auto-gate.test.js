@@ -442,6 +442,7 @@ test("Auto Gate dedupes evaluation jobs only after ungrouped invalidation", asyn
     "github.event.workflow_run.head_sha",
     "github.event.check_suite.head_sha",
     "github.event.sha",
+    "github.event.schedule",
     "github.run_id",
   ]);
   // Evaluate the actual expression's property/OR subset, including Actions'
@@ -461,6 +462,7 @@ test("Auto Gate dedupes evaluation jobs only after ungrouped invalidation", asyn
     pull_request_target: [{ pull_request: { number: 4060 } }, {}, 4060],
     status: [{ sha: HEAD_SHA }, {}, HEAD_SHA],
     workflow_run: [{ workflow_run: { head_sha: HEAD_SHA } }, {}, HEAD_SHA],
+    schedule: [{ schedule: "*/5 * * * *" }, {}, "*/5 * * * *"],
     workflow_dispatch: [{}, { pr_number: 4060 }, 4060],
   };
   const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
@@ -512,6 +514,8 @@ test("Auto Gate can be recovered manually by PR number", () => {
     /pull_request_target:\s+types: \[opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled, auto_merge_enabled, auto_merge_disabled\]/,
   );
   assert.match(workflow, /workflow_run:\s+workflows: \[PR Validation\]\s+types: \[completed\]/);
+  assert.match(workflow, /schedule:\s+- cron: "\*\/5 \* \* \* \*"/);
+  assert.match(helper, /context\.eventName === "schedule"[\s\S]*?listRequiredCheckReevaluationTargets/);
   assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
   assert.match(
     workflow,
@@ -5805,6 +5809,106 @@ test("PR Validation workflow completion resolves every PR at its head", async ()
   });
 
   assert.deepEqual(targets.map((target) => target.prNumber), [1465, 2048]);
+});
+
+test("scheduled reconciliation wakes a Build-blocked decision once after validation completes", async () => {
+  const validationCompletedAt = "2026-07-09T21:13:58Z";
+  const staleDecision = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T21:00:52Z",
+  });
+  const context = { ...fakeContext(), eventName: "schedule" };
+
+  const stale = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          staleDecision,
+          reconciliationRequiredCheck("Build", validationCompletedAt),
+          reconciliationRequiredCheck("Lint", "2026-07-09T21:02:32Z"),
+        ],
+      },
+    }),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(stale, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+
+  // reportDecision refreshes the stamp in-place. The same completed workflow
+  // must not wake this PR on every five-minute sweep after that one evaluation.
+  const refreshed = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          reconciliationDecision({
+            prNumber: 1465,
+            headSha: HEAD_SHA,
+            evaluatedAt: "2026-07-09T21:14:30Z",
+          }),
+          reconciliationRequiredCheck("Build", validationCompletedAt),
+        ],
+      },
+    }),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(refreshed, [], "one validation completion buys at most one reevaluation");
+
+  const unrelated = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          reconciliationDecision({
+            prNumber: 1465,
+            headSha: HEAD_SHA,
+            evaluatedAt: "2026-07-09T21:00:52Z",
+            reason: "Codex has not reviewed this head yet",
+          }),
+          reconciliationRequiredCheck("Build", validationCompletedAt),
+        ],
+      },
+    }),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(unrelated, [], "PR Validation completion cannot wake an unrelated blocker");
+});
+
+test("scheduled reconciliation caps one sweep at ten PRs", async () => {
+  const pulls = [];
+  const checksByHead = {};
+  for (let number = 1; number <= 12; number += 1) {
+    const sha = number.toString(16).padStart(40, "0");
+    pulls.push(reconciliationPull(number, sha));
+    checksByHead[sha] = [
+      reconciliationDecision({
+        prNumber: number,
+        headSha: sha,
+        evaluatedAt: "2026-07-09T20:00:00Z",
+      }),
+      reconciliationRequiredCheck(
+        "Build",
+        `2026-07-09T21:${String(number).padStart(2, "0")}:00Z`,
+      ),
+    ];
+  }
+
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({ pulls, checksByHead }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+
+  assert.equal(targets.length, 10, "runner work is bounded even when more stale PRs exist");
+  assert.equal(new Set(targets.map((target) => target.prNumber)).size, targets.length);
 });
 
 test("the happy path squash-merges the exact evaluated head", async () => {
@@ -11294,6 +11398,63 @@ function fakeContext(payload = {}) {
     repo: { owner: "sachiniyer", repo: "agent-factory" },
     payload,
     eventName: "pull_request",
+  };
+}
+
+function reconciliationPull(number, headSha) {
+  return {
+    number,
+    state: "open",
+    base: { ref: "master" },
+    head: { sha: headSha },
+  };
+}
+
+function reconciliationRequiredCheck(name, completedAt) {
+  return {
+    id: name === "Build" ? 9001 : 9002,
+    name,
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "completed",
+    conclusion: "success",
+    completed_at: completedAt,
+  };
+}
+
+function reconciliationDecision({
+  prNumber,
+  headSha,
+  evaluatedAt,
+  reason = `required check Build (app ${ACTIONS_APP_ID}) is missing on ${headSha}`,
+}) {
+  return {
+    id: prNumber,
+    name: decisionName(prNumber, headSha),
+    external_id: decisionExternalId(prNumber, headSha),
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "completed",
+    conclusion: "failure",
+    completed_at: evaluatedAt,
+    output: {
+      title: `WAITING: ${reason}`,
+      summary: `evaluated: ${evaluatedAt}\n\nBLOCKED: ${reason}`,
+    },
+  };
+}
+
+function scheduledReconciliationGithub({ pulls, checksByHead }) {
+  const listForRef = function listForRef() {};
+  return {
+    rest: {
+      checks: { listForRef },
+      pulls: {
+        list: async () => ({ data: pulls, headers: {} }),
+      },
+    },
+    paginate: async (fn, options) => {
+      assert.equal(fn, listForRef);
+      return checksByHead[options.ref] || [];
+    },
   };
 }
 

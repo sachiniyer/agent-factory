@@ -1023,6 +1023,17 @@ function decisionSummaryBody(summary) {
   return newline === -1 ? "" : text.slice(newline + 1).replace(/^\n+/, "");
 }
 
+function decisionEvaluationTime(decision) {
+  const summary = String(decision?.output?.summary || decision?.summary || "");
+  const firstLine = summary.split("\n", 1)[0];
+  if (!firstLine.startsWith(DECISION_STAMP_PREFIX)) {
+    return 0;
+  }
+  // The optional run id is provenance, not part of the ISO timestamp.
+  const timestamp = firstLine.slice(DECISION_STAMP_PREFIX.length).split(" (run ", 1)[0];
+  return parseTimestamp(timestamp) || 0;
+}
+
 function firstUnmetRequirement(result) {
   return titleFragment(
     (result.reasons || []).find((reason) => String(reason || "").trim() !== ""),
@@ -2293,6 +2304,14 @@ async function listParkedRuns({ github, context, headSha, subject = null }) {
 // Named, so a test can assert the file it points at actually accepts a dispatch.
 const VALIDATION_WORKFLOW = "pr.yml";
 const GATE_WORKFLOW = "auto-gate.yml";
+// A schedule is the backstop for terminal workflow_run events GitHub does not
+// deliver. It never fans one workflow's matrix out into one gate run per check:
+// completed Build/Lint checks select only decisions that name them as blockers,
+// each PR/head appears once, and one sweep selects at most this many stale
+// decisions. The next sweep drains the rest.
+const REQUIRED_CHECK_REEVALUATION_LIMIT = 10;
+const REQUIRED_CHECK_RECONCILIATION_SCAN_LIMIT = 100;
+const PR_VALIDATION_REQUIRED_CHECK_NAMES = ["Build", "Lint"];
 
 // Reruns the successor of an accepted update, whichever lane failed to finish
 // it. Safe to repeat: the resolver re-reads the PR and approves only what is
@@ -3371,12 +3390,152 @@ async function sweepMergedHeadRefs({
   };
 }
 
+function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead }) {
+  const candidates = [];
+  for (const pull of pulls || []) {
+    const headSha = normalizeHeadSha(pull?.head?.sha || pull?.headRefOid);
+    const baseRefName = pull?.base?.ref || pull?.baseRefName;
+    const state = String(pull?.state || "").toLowerCase();
+    const prNumber = Number(pull?.number);
+    if (
+      !headSha ||
+      !Number.isSafeInteger(prNumber) ||
+      prNumber <= 0 ||
+      state !== "open" ||
+      baseRefName !== "master"
+    ) {
+      continue;
+    }
+
+    const identity = decisionIdentity(prNumber, headSha);
+    const headChecks = checkRunsByHead.get(headSha) || [];
+    const decision = newestCheckGeneration(
+      headChecks.filter(
+        (run) =>
+          run.name === identity.checkName &&
+          run.external_id === identity.externalId &&
+          run.app?.id === GITHUB_ACTIONS_APP_ID,
+      ),
+    );
+    if (decision) {
+      // An in-flight decision already owns the wake, and a success has nothing
+      // for PR Validation to clear. Other blockers do not earn runner work from
+      // this workflow's completion.
+      if (decision.status !== "completed" || decision.conclusion === "success") {
+        continue;
+      }
+    }
+
+    const evaluatedAt = decision ? decisionEvaluationTime(decision) : 0;
+    const body = decision
+      ? decisionSummaryBody(
+          decision.output?.summary || decision.summary || decision.output?.title || "",
+        )
+      : "";
+    const blockedNames = decision
+      ? PR_VALIDATION_REQUIRED_CHECK_NAMES.filter((name) =>
+          body.includes(`required check ${name} `) || body.includes(`required check ${name}(`),
+        )
+      : PR_VALIDATION_REQUIRED_CHECK_NAMES;
+    const completedAt = blockedNames.reduce((latest, name) => {
+      const check = newestCheckGeneration(
+        headChecks.filter(
+          (run) => run.name === name && run.app?.id === GITHUB_ACTIONS_APP_ID,
+        ),
+      );
+      if (check?.status !== "completed") {
+        return latest;
+      }
+      return Math.max(latest, parseTimestamp(check.completed_at || check.updated_at) || 0);
+    }, 0);
+    if (completedAt <= evaluatedAt) {
+      continue;
+    }
+    candidates.push({
+      prNumber,
+      headSha,
+      decisionKey: identity.key,
+      evaluatedAt,
+      completedAt,
+    });
+  }
+
+  // Oldest frozen decision first, so a backlog drains instead of the newest ten
+  // monopolising every sweep. PR number makes equal timestamps deterministic.
+  return candidates
+    .sort((left, right) =>
+      left.evaluatedAt - right.evaluatedAt ||
+      left.completedAt - right.completedAt ||
+      left.prNumber - right.prNumber,
+    )
+    .map(({ prNumber, headSha, decisionKey }) => ({ prNumber, headSha, decisionKey }));
+}
+
+async function listRequiredCheckReevaluationTargets({ github, context, core }) {
+  const { owner, repo } = context.repo;
+  const listedPulls = await retryRead(
+    "could not list open PRs for required-check reconciliation",
+    () =>
+      github.rest.pulls.list({
+        owner,
+        repo,
+        state: "open",
+        base: "master",
+        sort: "updated",
+        direction: "desc",
+        per_page: REQUIRED_CHECK_RECONCILIATION_SCAN_LIMIT,
+      }),
+  );
+  const pulls = listedPulls?.data || [];
+  if (pulls.length >= REQUIRED_CHECK_RECONCILIATION_SCAN_LIMIT) {
+    core.warning(
+      `Required-check reconciliation inspected only the first ` +
+        `${REQUIRED_CHECK_RECONCILIATION_SCAN_LIMIT} open master PRs.`,
+    );
+  }
+  const heads = [...new Set(
+    pulls
+      .map((pull) => normalizeHeadSha(pull?.head?.sha || pull?.headRefOid))
+      .filter(Boolean),
+  )];
+  const checkRunsByHead = new Map();
+  for (const headSha of heads) {
+    const checkRuns = await retryRead(`could not read reconciliation checks at ${headSha}`, () =>
+      github.paginate(github.rest.checks.listForRef, {
+        owner,
+        repo,
+        ref: headSha,
+        filter: "all",
+        per_page: 100,
+      }),
+    );
+    checkRunsByHead.set(headSha, checkRuns);
+  }
+
+  const stale = requiredCheckReevaluationCandidates({ pulls, checkRunsByHead });
+  const targets = stale.slice(0, REQUIRED_CHECK_REEVALUATION_LIMIT);
+  if (stale.length > targets.length) {
+    core.warning(
+      `Required-check reconciliation deferred ${stale.length - targets.length} stale PR(s); ` +
+        `each sweep wakes at most ${REQUIRED_CHECK_REEVALUATION_LIMIT}.`,
+    );
+  }
+  core.notice(
+    `Required-check reconciliation found ${stale.length} stale decision(s) and selected ` +
+      `${targets.length}.`,
+  );
+  return targets;
+}
+
 async function resolveTargets({
   github, context, core, prNumber,
   headPollAttempts = 6,
   headPollDelayMs = 5000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
+  if (context.eventName === "schedule") {
+    return listRequiredCheckReevaluationTargets({ github, context, core });
+  }
   const numbers = [];
   const payload = context.payload;
   const rawPreviousHead = context.eventName === "workflow_dispatch"

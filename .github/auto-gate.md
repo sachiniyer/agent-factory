@@ -385,8 +385,15 @@ writes.
 
 GitHub suppresses `check_suite` recursion for suites created by Actions. The
 required `Lint` and `Build` jobs both belong to **PR Validation**, so Auto Gate
-also subscribes to that workflow's terminal `workflow_run` event. This ensures
-their completed state is reevaluated without subscribing Auto Gate to itself.
+also subscribes to that workflow's terminal `workflow_run` event. GitHub has
+intermittently omitted that event, so a five-minute reconciliation pass backs it
+up: it wakes only a failed or absent exact decision older than a completed PR
+Validation `Build` or `Lint` check and, for an existing decision, only when the
+decision names that completed check as a blocker. Runs are coalesced per
+PR/head, one completion buys at most one reevaluation, and each pass wakes at
+most ten PRs; an older backlog drains first. This avoids both the
+frozen-decision failure and one gate evaluation per completed matrix job
+(#4242).
 
 GitHub also suppresses `push` workflows when Auto Gate merges with its
 `GITHUB_TOKEN`. After a merge, the gate therefore dispatches the five
