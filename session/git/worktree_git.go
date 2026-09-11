@@ -214,7 +214,12 @@ func (g *GitWorktree) gitCommandEnvironment() []string {
 		"GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 }
 
-func repoGoneGitCommandEnvironment() []string {
+// repositoryScopedGitCommandEnvironment keeps ambient repository-selection
+// variables from overriding an explicit path supplied by AF. In particular,
+// GIT_DIR and GIT_WORK_TREE take precedence over `git -C`; sessionenv.Filter's
+// control-plane allowlist excludes them and the other repository-local variables
+// reported by `git rev-parse --local-env-vars`.
+func repositoryScopedGitCommandEnvironment() []string {
 	return append(sessionenv.Filter(os.Environ(), "", nil),
 		"GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 }
