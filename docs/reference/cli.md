@@ -1747,6 +1747,11 @@ Create a new session
 
 Create a new session running an agent in its own git worktree.
 
+With --prompt, unconfirmed or incomplete delivery produces a warning on stderr
+and a warning field in the JSON session result. The session remains created;
+inspect its pane before retrying, since an unverified prompt may already have
+run. Creation still exits successfully and does not automatically resend.
+
 With --here (alias --in-place) the session instead attaches to the repo's
 existing working tree at its current branch: no worktree or branch is created,
 the agent runs in the repo root, and killing the session never removes the
