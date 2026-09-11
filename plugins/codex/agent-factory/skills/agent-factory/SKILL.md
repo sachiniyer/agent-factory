@@ -18,7 +18,7 @@ Sessions (one agent per isolated worktree):
   af sessions kill <title>                             Delete a session; work in af-owned workspaces can be lost
   af sessions archive <title>                          Archive (tmux down, worktree moved out; restartable)
   af sessions archive --self                            Archive your OWN session (resolved via whoami); no title needed
-  af sessions handoff [--to <agent>] [--account <name>] -- <title>  Continue under another agent, account, or both
+  af sessions handoff <title> [--to <agent>] [--account <name>]  Continue under another agent, account, or both
   af sessions retry-limit <title>                      Retry a usage-limit resume or an inspected, unconfirmed handoff
   af sessions restore <title>                          Restore an archived, lost, or dead session
 

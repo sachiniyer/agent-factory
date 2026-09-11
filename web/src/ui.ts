@@ -1882,11 +1882,7 @@ export class AppShell {
       const preserveSessionActions = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
       this.newTabCancelReturn.set(trigger, () => {
         // Close inside-out before restoring focus outside either disclosure.
-        // A responsive recomposition or stream resync may have closed the
-        // disclosure while the picker owned focus. Reassert the state captured
-        // at shortcut entry instead of assuming an originally-open menu survived.
-        if (preserveSessionActions) this.terminalChrome?.menu.open();
-        else this.terminalChrome?.menu.close();
+        if (!preserveSessionActions) this.terminalChrome?.menu.close();
         // Recomposition may have opened app controls after the shortcut began.
         // Preserve it only when the user had already opened the phone disclosure.
         if (this.appControls.panel.contains(slot) && !preserveAppControls) this.appControls.close();
