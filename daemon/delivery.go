@@ -52,6 +52,12 @@ const StatusDeferredAttached = "deferred: target attached"
 // durable re-queue/retry without tripping the delivery-failure alarm (#1238).
 var errTargetBusy = errors.New("target session is attached; delivery deferred until detach")
 
+// errTargetLimitReached tells the watch path to retain a distinct event while
+// its target is usage-limit parked. Cron consumes the public parked status
+// directly and skips that occurrence; manual sends never receive this sentinel
+// because only TaskOrigin enables the limit gate.
+var errTargetLimitReached = errors.New("target session is parked at a usage limit")
+
 // errNotAttempted marks a delivery failure that provably sent NOTHING: the
 // attempt died on a pre-flight check, before any session was created and before
 // any keystroke reached a pane. The watch paths refund the rate slot such an
@@ -214,7 +220,10 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 	if deleting {
 		return "", session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; %s", req.Title, notDeliveredMarker))
 	}
-	if err := promptTargetLivenessError(req.Title, liveness); err != nil {
+	if err := taskPromptTargetLivenessError(req.Title, liveness, req.TaskOrigin); err != nil {
+		if errors.Is(err, errTargetLimitReached) {
+			return TaskStatusLimitParked, session.PromptNotDelivered, nil
+		}
 		return "", session.PromptCouldNotConfirm, notAttempted(err)
 	}
 	if exists {
@@ -229,8 +238,13 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 		if m.deferWhileAttached(repo.ID, req) {
 			return StatusDeferredAttached, session.PromptNotDelivered, nil
 		}
-		deliveryStatus, err := m.SendPromptWithStatus(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt})
+		deliveryStatus, err := m.SendPromptWithStatus(SendPromptRequest{
+			Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
+		})
 		if err != nil {
+			if errors.Is(err, errTargetLimitReached) {
+				return TaskStatusLimitParked, session.PromptNotDelivered, nil
+			}
 			return "", session.PromptCouldNotConfirm, err
 		}
 		return "sent", deliveryStatus, nil
@@ -257,7 +271,10 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 		// send into it. Genuine conflicts (branch collisions, config errors)
 		// are not retryable and surface as-is.
 		if isConcurrentCreateErr(err) {
-			if werr := m.waitForTargetSession(repo.ID, req.Title); werr != nil {
+			if werr := m.waitForTargetSession(repo.ID, req.Title, req.TaskOrigin); werr != nil {
+				if errors.Is(werr, errTargetLimitReached) {
+					return TaskStatusLimitParked, session.PromptNotDelivered, nil
+				}
 				// The target never materialized within the wait (its liveness went
 				// bad, it was deleted, or targetDeliverWait elapsed): nothing was
 				// sent, so this is pre-flight and must refund (#2501). This is the
@@ -271,8 +288,13 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 			if m.deferWhileAttached(repo.ID, req) {
 				return StatusDeferredAttached, session.PromptNotDelivered, nil
 			}
-			deliveryStatus, serr := m.SendPromptWithStatus(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt})
+			deliveryStatus, serr := m.SendPromptWithStatus(SendPromptRequest{
+				Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
+			})
 			if serr != nil {
+				if errors.Is(serr, errTargetLimitReached) {
+					return TaskStatusLimitParked, session.PromptNotDelivered, nil
+				}
 				return "", session.PromptCouldNotConfirm, serr
 			}
 			return "sent", deliveryStatus, nil
@@ -359,7 +381,7 @@ func (m *Manager) targetSessionState(repoID, title string) (exists, deleting boo
 // waitForTargetSession blocks until the target session exists, surfacing
 // undeliverable liveness states rather than delivering into them, bounded by
 // targetDeliverWait.
-func (m *Manager) waitForTargetSession(repoID, title string) error {
+func (m *Manager) waitForTargetSession(repoID, title string, taskOrigin bool) error {
 	deadline := time.Now().Add(targetDeliverWait)
 	for {
 		exists, deleting, liveness, err := m.targetSessionState(repoID, title)
@@ -374,7 +396,7 @@ func (m *Manager) waitForTargetSession(repoID, title string) error {
 		if deleting {
 			return fmt.Errorf("target session %q is being deleted; %s", title, notDeliveredMarker)
 		}
-		if err := promptTargetLivenessError(title, liveness); err != nil {
+		if err := taskPromptTargetLivenessError(title, liveness, taskOrigin); err != nil {
 			return err
 		}
 		if exists {

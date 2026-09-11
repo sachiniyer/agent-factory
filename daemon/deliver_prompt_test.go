@@ -999,7 +999,7 @@ func TestWaitForTargetSession_ReturnsWhenSessionAppears(t *testing.T) {
 		}
 	}()
 
-	if err := manager.waitForTargetSession(repo.ID, "captain"); err != nil {
+	if err := manager.waitForTargetSession(repo.ID, "captain", false); err != nil {
 		t.Fatalf("waitForTargetSession should have seen the session appear: %v", err)
 	}
 }

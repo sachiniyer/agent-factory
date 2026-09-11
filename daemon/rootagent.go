@@ -666,7 +666,10 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 		// (#2501), and the error names what actually stops the root.
 		return "", session.PromptCouldNotConfirm, true, notAttempted(fmt.Errorf("root agent for %q will not materialize: %s; %s", repo.Root, rootAgentUnavailableDetail(verdict), notDeliveredMarker))
 	}
-	if err := m.waitForTargetSession(repo.ID, req.Title); err != nil {
+	if err := m.waitForTargetSession(repo.ID, req.Title, req.TaskOrigin); err != nil {
+		if errors.Is(err, errTargetLimitReached) {
+			return TaskStatusLimitParked, session.PromptNotDelivered, true, nil
+		}
 		// Pre-flight: the root never reappeared within the wait, so nothing was
 		// sent — refund the rate slot (#2501). This is the reserved-root outage
 		// path a monitor task targeting `root` hits during a tmux blip.
@@ -678,8 +681,13 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 	if m.deferWhileAttached(repo.ID, req) {
 		return StatusDeferredAttached, session.PromptNotDelivered, true, nil
 	}
-	status, err := m.SendPromptWithStatus(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt})
+	status, err := m.SendPromptWithStatus(SendPromptRequest{
+		Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
+	})
 	if err != nil {
+		if errors.Is(err, errTargetLimitReached) {
+			return TaskStatusLimitParked, session.PromptNotDelivered, true, nil
+		}
 		return "", session.PromptCouldNotConfirm, true, err
 	}
 	return "sent", status, true, nil

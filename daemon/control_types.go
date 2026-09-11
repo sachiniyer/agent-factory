@@ -351,6 +351,11 @@ type SendPromptRequest struct {
 	// can't land on the wrong session under a cross-repo title collision (#1592
 	// Phase 5 follow-up). TUI/CLI/delivery callers omit it and resolve by title.
 	ID string `json:"id"`
+	// TaskOrigin is daemon-internal provenance. Automated task delivery sets it
+	// so the final, op-lock-protected liveness check can park at a usage limit;
+	// manual send-prompt leaves it false because an operator may need to answer a
+	// limit or credits picker in that pane.
+	TaskOrigin bool `json:"-"`
 }
 
 type SendPromptResponse struct {
@@ -387,10 +392,10 @@ type DeliverPromptRequest struct {
 	DeferWhileAttached bool `json:"defer_while_attached,omitempty"`
 }
 
-// DeliverPromptResponse reports how the prompt was delivered. Status is
-// "started" when this call created the target session (the prompt was its
-// initial prompt) and "sent" when it was sent into a session that already
-// existed — the same status vocabulary deliverTaskPrompt records on a task.
+// DeliverPromptResponse reports how the prompt was handled. Status is "started"
+// when this call created the target session, "sent" when it sent into an
+// existing session, and "parked: usage limit" when task provenance made it skip
+// a limit-reached target — the same vocabulary deliverTaskPrompt records.
 type DeliverPromptResponse struct {
 	Status         string                       `json:"status"`
 	DeliveryStatus session.PromptDeliveryStatus `json:"delivery_status"`

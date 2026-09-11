@@ -567,6 +567,9 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 func (w *taskWatcher) consumeLines(r io.Reader, tail *tailBuffer) {
 	br := bufio.NewReaderSize(r, maxWatchLineBytes)
 	for {
+		if !w.waitForLimitQueueCapacity() {
+			return
+		}
 		chunk, err := br.ReadSlice('\n')
 		switch {
 		case err == nil:
@@ -653,7 +656,7 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	// PURPOSE — enqueue refuses unknown state, so queue-routing would only
 	// drop the event, and delivering beats FIFO. Cost: ordering, not loss.
 	if w.queue != nil && w.queue.pendingCountFresh() > 0 {
-		w.enqueueEvent(line, tail)
+		w.enqueueEvent(line, tail, false)
 		return
 	}
 
@@ -681,7 +684,15 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	err := w.sup.deliver(w.taskID, line)
 	w.recordDeliveryResult(time.Now(), err)
 	if err != nil {
+		limitParked := false
 		switch {
+		case errors.Is(err, errTargetLimitReached):
+			// The target is at a known usage-limit wall. Preserve the event and
+			// refund its unused rate slot, but do not raise a delivery-failure
+			// alarm: the pipeline is intentionally parked until liveness clears.
+			limitParked = true
+			w.releaseEventSlot()
+			log.InfoLog.Printf("watch task %s: target session is at a usage limit; deferring event until the limit clears", w.taskID)
 		case errors.Is(err, errTargetBusy):
 			// Not a failure: a TUI is attached to the target, so the event is
 			// held and retried after detach rather than pasted into live typing
@@ -714,7 +725,7 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 			}
 			log.ErrorLog.Printf("watch task %s: failed to deliver event: %v", w.taskID, err)
 		}
-		w.enqueueEvent(line, tail)
+		w.enqueueEvent(line, tail, limitParked)
 	}
 }
 
@@ -768,12 +779,12 @@ func (w *taskWatcher) releaseEventSlot() {
 // The line also lands in the run's failure tail — it did not become a
 // delivered event this run (#797). When the queue is unavailable or the append
 // fails, this degrades to the pre-#1129 behavior: logged and dropped.
-func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer) {
+func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer, limitParked bool) {
 	tail.add(line)
 	if w.queue == nil {
 		return
 	}
-	if err := w.queue.enqueue(line); err != nil {
+	if err := w.queue.enqueue(line, limitParked); err != nil {
 		log.ErrorLog.Printf("watch task %s: failed to queue event for replay; dropping it: %v", w.taskID, err)
 		return
 	}
@@ -838,6 +849,9 @@ func deliverWatchEvent(taskID, line string) error {
 	now := time.Now()
 	if _, err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
+	}
+	if status == TaskStatusLimitParked {
+		return errTargetLimitReached
 	}
 	return nil
 }

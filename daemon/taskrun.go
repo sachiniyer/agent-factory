@@ -15,13 +15,11 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
-// TaskStatusLimitParked is the run status recorded when a task-driven session
-// hits a usage-limit wall during startup and is PARKED instead of failed (#1146
-// PR4). It is deliberately NOT an "errored:"-prefixed value, so the TUI and task
-// history show the run waiting for the limit window to reset — not failed — and
-// no failure side-effects fire. The daemon auto-resume scheduler (opt-in) or the
-// manual `c` retry re-delivers the stored prompt once the window resets, after
-// which the run records its normal completion status.
+// TaskStatusLimitParked is recorded when a task-driven create hits a usage-limit
+// wall at startup (#1146 PR4), or when a targeted task finds its existing
+// session already limit-parked (#4223). It is deliberately NOT an
+// "errored:"-prefixed value: create-per-run prompts resume with their session;
+// targeted cron occurrences skip, while targeted watch events queue for replay.
 const TaskStatusLimitParked = "parked: usage limit"
 
 // Indirected so delivery tests can observe the daemon RPCs without dialing —
@@ -39,7 +37,8 @@ var cronDeferPollInterval = 1 * time.Second
 // deliverTaskPrompt delivers one rendered prompt for a task and returns the
 // status string to record on it. With TargetSession empty it creates a fresh
 // session per run (the historical task behavior, status "started"). With
-// TargetSession set it sends the prompt into that session (status "sent"),
+// TargetSession set it sends the prompt into that session (status "sent"), or
+// returns "parked: usage limit" without typing when the target is limit-reached,
 // auto-creating the session with the task's ProjectPath/Program when it does
 // not exist yet (Sachin-approved in #782, mirroring `af sessions send-prompt
 // --create`). The target session is looked up in the task's own repo so a
@@ -144,6 +143,10 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 			return "", notAttempted(wrapped)
 		}
 		return "", wrapped
+	}
+	if status == TaskStatusLimitParked {
+		log.InfoLog.Printf("task %s parked delivery to target session %q at a usage limit; prompt not sent", t.ID, target)
+		return status, nil
 	}
 	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, target, status)
 	return status, nil

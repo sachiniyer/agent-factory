@@ -136,7 +136,7 @@ func (w *taskWatcher) drainLoop() {
 			w.stopDraining()
 			return
 		}
-		if ok && w.sup.queueMaxAge > 0 && time.Since(ev.TS) > w.sup.queueMaxAge {
+		if ok && !w.queue.retainLimitParked() && w.sup.queueMaxAge > 0 && time.Since(ev.TS) > w.sup.queueMaxAge {
 			// Retention (#1129): an event older than the age bound is expired
 			// instead of delivered — a prompt about a days-old notification is
 			// noise, and re-sweepable sources re-emit on their next poll.
@@ -184,6 +184,23 @@ func (w *taskWatcher) drainLoop() {
 		}
 		if err := w.sup.deliver(w.taskID, ev.Line); err != nil {
 			w.recordDeliveryResult(time.Now(), err)
+			if errors.Is(err, errTargetLimitReached) {
+				// A known limit park is not an outage and delivered nothing. Retain
+				// the head past ordinary age/cap eviction, refund this attempt's rate
+				// slot, and retry on the base cadence until liveness clears.
+				w.releaseEventSlot()
+				if markErr := w.queue.markLimitParked(); markErr != nil {
+					log.ErrorLog.Printf("watch task %s: failed to protect usage-limit backlog from retention bounds: %v", w.taskID, markErr)
+				}
+				if parkLog.allow("usage-limit", time.Now()) {
+					log.InfoLog.Printf("watch task %s: target session is at a usage limit; holding %d queued event(s) until the limit clears — repeats at most every %s while this holds", w.taskID, w.queue.pendingCount(), watcherParkLogInterval)
+				}
+				if !w.sleepStopAware(w.sup.drainBaseBackoff) {
+					w.stopDraining()
+					return
+				}
+				continue
+			}
 			if errors.Is(err, errAtConcurrencyLimit) {
 				// The task is at its max_concurrent_runs cap (#1892): nothing was
 				// created and nothing is wrong. Refund the rate slot this attempt

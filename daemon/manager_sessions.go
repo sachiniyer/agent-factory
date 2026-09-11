@@ -485,7 +485,7 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	if instance.IsTearingDown() {
 		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
 	}
-	if err := promptTargetLivenessError(req.Title, instance.GetLiveness()); err != nil {
+	if err := taskPromptTargetLivenessError(req.Title, instance.GetLiveness(), req.TaskOrigin); err != nil {
 		return session.PromptCouldNotConfirm, notAttempted(err)
 	}
 	// Deliver through the agent-server (#1592 Phase 2 PR4), not the tmux-shaped
@@ -523,6 +523,18 @@ func promptTargetLivenessError(title string, liveness session.Liveness) error {
 		return fmt.Errorf("target session %q is Archived; prompt not delivered; restore it first (%s)", title, shellsuggest.PositionalCommand("af", []string{"sessions", "restore"}, title))
 	}
 	return nil
+}
+
+// taskPromptTargetLivenessError extends the ordinary target guard only for an
+// automated task delivery. LiveLimitReached is intentionally allowed by the
+// manual helper above: typing into a limit or credits picker can be the only way
+// for an operator to recover the lane. A scheduler has no such intent, and its
+// keystrokes can cancel an agent's own timed auto-continue.
+func taskPromptTargetLivenessError(title string, liveness session.Liveness, taskOrigin bool) error {
+	if taskOrigin && liveness == session.LiveLimitReached {
+		return fmt.Errorf("%w: target session %q is at a usage limit; prompt not delivered", errTargetLimitReached, title)
+	}
+	return promptTargetLivenessError(title, liveness)
 }
 
 // agentServerForStream resolves the /v1/sessions/{id}/stream target to its cached
