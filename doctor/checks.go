@@ -383,9 +383,13 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		cancel()
 		if programErr != nil {
 			unresolved++
+			remediation := "repair the named config source, then rerun `af doctor`"
+			if errors.Is(programErr, config.ErrRootAgentInspectionIdentityChanged) {
+				remediation = "rerun `af doctor`; if the checkout is being replaced, wait for that operation to finish first"
+			}
 			report.Warn(sectionDaemon, "root agent program",
 				fmt.Sprintf("could not inspect the configured command for live root at %s: %s", commandPath, oneLine(programErr)),
-				"repair the named config source, then rerun `af doctor`", false)
+				remediation, false)
 			report.markIncomplete("root agent program")
 			continue
 		}

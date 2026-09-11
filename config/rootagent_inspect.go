@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -105,7 +106,12 @@ type RootAgentInspectionSnapshot struct {
 	resolved         ResolvedValue
 	global           *Config
 	personalDocument *sourceDocument
+	repositoryID     string
 }
+
+// ErrRootAgentInspectionIdentityChanged means two repository observations
+// could not be combined because the checkout resolved to different identities.
+var ErrRootAgentInspectionIdentityChanged = errors.New("repository identity changed during root-agent inspection")
 
 // ResolvedRootAgent returns the profile and provenance captured by the snapshot.
 func (s *RootAgentInspectionSnapshot) ResolvedRootAgent() ResolvedValue {
@@ -121,6 +127,14 @@ func (s *RootAgentInspectionSnapshot) ResolvedRootAgent() ResolvedValue {
 func (s *RootAgentInspectionSnapshot) ResolveConfigForRepoContext(ctx context.Context, repo *RepoContext) (*ResolvedConfig, error) {
 	if s == nil {
 		return nil, fmt.Errorf("root-agent inspection snapshot is required")
+	}
+	if s.repositoryID != "" && (repo == nil || repo.ID != s.repositoryID) {
+		commandRepoID := "unresolved"
+		if repo != nil && repo.ID != "" {
+			commandRepoID = repo.ID
+		}
+		return nil, fmt.Errorf("%w: profile repository %s, command repository %s; rerun the inspection",
+			ErrRootAgentInspectionIdentityChanged, s.repositoryID, commandRepoID)
 	}
 	return resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx, repo, s.global, s.personalDocument)
 }
@@ -172,6 +186,7 @@ func rootAgentInspectionSnapshotFromAssembly(global *Config, assembly rootAgentI
 		resolved:         resolveRootAgentInspectionAssembly(assembly, projectSelected),
 		global:           global,
 		personalDocument: assembly.personalDocument,
+		repositoryID:     assembly.repositoryID,
 	}
 }
 
@@ -193,6 +208,10 @@ func resolveRootAgentInspectionAssembly(assembly rootAgentInspectionAssembly, pr
 type rootAgentInspectionAssembly struct {
 	inputs RootAgentInputs
 	locs   rootAgentLocations
+	// repositoryID is the identity that selected the legacy and personal layers.
+	// A related command resolve must prove it still addresses this repository
+	// before these documents can be combined with checked-in config.
+	repositoryID string
 	// personalDocument is the exact personal config layer that supplied inputs.
 	// A related effective-config resolve reuses it rather than reopening the file.
 	personalDocument *sourceDocument
@@ -271,6 +290,7 @@ func assembleRootAgentInspectionInputsFromConfigWithContext(ctx context.Context,
 		if err != nil {
 			return rootAgentInspectionAssembly{}, fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
 		}
+		out.repositoryID = repo.ID
 		var legacy *RootAgentConfig
 		var key string
 		if bounded {

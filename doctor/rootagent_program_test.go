@@ -112,6 +112,54 @@ func TestRootAgentProgramDriftResolvesFromLiveWorktreePath(t *testing.T) {
 	check := findCheck(t, report, "root agent program")
 	require.Equal(t, StatusPass, check.Status)
 	require.Contains(t, check.Detail, "match the configured command")
+	require.NotContains(t, report.Incomplete, "root agent program",
+		"an unchanged checkout identity must retain the existing definite match verdict")
+}
+
+func TestRootAgentProgramCheckoutReplacementIsIncomplete(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, false)
+	root := t.TempDir()
+	originalPath := filepath.Join(root, "original")
+	replacementPath := filepath.Join(root, "replacement")
+	commandPath := filepath.Join(root, "current")
+	for _, fixture := range []struct {
+		path    string
+		command string
+	}{
+		{path: originalPath, command: "/original/codex"},
+		{path: replacementPath, command: "/replacement/codex"},
+	} {
+		require.NoError(t, exec.Command("git", "init", fixture.path).Run())
+		require.NoError(t, os.MkdirAll(filepath.Join(fixture.path, config.InRepoConfigDirName), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(fixture.path, config.InRepoConfigDirName, config.TomlConfigFileName),
+			[]byte("[program_overrides]\ncodex = '"+fixture.command+"'\n"), 0o600))
+	}
+	require.NoError(t, os.Symlink(originalPath, commandPath))
+	body := "schema_version = 1\n[root_agents]\n\"" + commandPath + "\" = { program = \"codex\" }\n"
+	require.NoError(t, os.WriteFile(filepath.Join(opts.ConfigDir, config.TomlConfigFileName), []byte(body), 0o600))
+	opts.daemonHealth = rootAgentDoctorHealth
+	opts.sessionInventory = rootAgentInventory(commandPath, "/original/codex")
+
+	previousResolve := resolveRootAgentForInspection
+	resolveRootAgentForInspection = func(ctx context.Context, global *config.Config, selector string, strict bool) (rootAgentProgramInspection, error) {
+		inspection, err := previousResolve(ctx, global, selector, strict)
+		if err == nil {
+			require.NoError(t, os.Remove(commandPath))
+			require.NoError(t, os.Symlink(replacementPath, commandPath))
+		}
+		return inspection, err
+	}
+	t.Cleanup(func() { resolveRootAgentForInspection = previousResolve })
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	check := findCheck(t, report, "root agent program")
+	require.Equal(t, StatusWarn, check.Status)
+	require.Contains(t, check.Detail, "repository identity changed")
+	require.NotContains(t, check.Detail, "program drift",
+		"documents from different repository generations must not produce a drift verdict")
+	require.Contains(t, report.Incomplete, "root agent program")
 }
 
 func TestRootAgentDefaultProfileMatchesChainedLaunchOverrides(t *testing.T) {
