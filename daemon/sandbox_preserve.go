@@ -81,10 +81,11 @@ func killSuggestionFor(instance *session.Instance) string {
 // branch. Reuse the guard rather than duplicating its predicate, so new refusal
 // conditions cannot leave the advice advertising a command that immediately fails.
 // The record read is worth doing on this recovery path, which already probes the
-// sandbox; any guard error selects kill/recreate instead.
+// sandbox. Preserve the guard's diagnostic: missing/unreadable storage needs repair,
+// and a conflicting identity must never lead to a title-only destructive command.
 func reapRefusalSuggestionFor(repoID string, instance *session.Instance) string {
-	if requireDurableSandboxBranch(repoID, instance) != nil {
-		return killSuggestionFor(instance)
+	if err := requireDurableSandboxBranch(repoID, instance); err != nil {
+		return err.Error()
 	}
 	return forceReapSuggestionFor(instance)
 }
@@ -110,8 +111,8 @@ func reapRefusalSuggestionFor(repoID string, instance *session.Instance) string 
 // Returns nil when the caller may proceed to reap. A non-nil error means REFUSE:
 // leave the session Lost and recoverable, because the alternative is destroying
 // work that nothing else has a copy of.
-// escapeSuggestion is the command a caller offers when the push refuses. It is a
-// parameter rather than a constant because the escape that works depends on the
+// escapeSuggestion is the guidance a caller offers when the push refuses: a
+// command or a repair diagnostic. It is a parameter because the escape depends on the
 // door this was reached through: the restore paths can force a reap, and the
 // limit-resume path cannot — RestoreSession refuses a LiveLimitReached session
 // (it is not archived, Lost, or Dead) and ResumeFromLimitRequest has no force
@@ -135,7 +136,7 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 			"refusing to replace the sandbox for %q: its agent is gone but the sandbox still ANSWERS, "+
 				"and the push that would make its unpushed work durable failed (%w). "+
 				"Replacing it now would destroy any commits it holds. "+
-				"It stays recoverable; if you know its work is expendable, force it with: %s",
+				"It stays recoverable. Recovery guidance: %s",
 			instance.Title, err, escapeSuggestion)
 	}
 	if branch == "" {
@@ -212,24 +213,23 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 // So an authorization to DESTROY reads the durable record. Anything less trusts
 // state that the destruction itself is about to make unrecoverable.
 func requireDurableSandboxBranch(repoID string, instance *session.Instance) error {
-	if err := requireKnownSandboxBranch(instance); err != nil {
-		return err
-	}
+	// Check storage and identity before branch state: even an unknown branch
+	// cannot license kill advice when its tombstone cannot be written or its
+	// title now belongs to a different session.
 	rec, err := findPersistedInstance(repoID, instance.Title)
 	if err != nil {
 		return fmt.Errorf(
 			"cannot replace the sandbox for %q: af could not read its stored record to confirm the "+
 				"branch is durable, and replacing it on a branch that exists only in memory risks "+
-				"stranding the work already pushed there: %w",
+				"stranding the work already pushed there. Retry once the stored record is readable: %w",
 			instance.Title, err)
 	}
-	if rec == nil || strings.TrimSpace(rec.Branch) == "" {
+	if rec == nil {
 		return fmt.Errorf(
-			"cannot replace the sandbox for %q: its branch %q is known only in memory — the write that "+
-				"would have recorded it did not land — so a crash after the replacement would leave nothing "+
-				"pointing at the pushed work. Retry once the record is writable; if its work is expendable, "+
-				"remove it and create a replacement: %s",
-			instance.Title, instance.GetBranch(), killSuggestionFor(instance))
+			"cannot replace the sandbox for %q: its stored record is missing, so neither its branch "+
+				"durability nor a kill intent can be recorded safely. Retry once this session's own "+
+				"record is restored; keep the sandbox intact while repairing storage",
+			instance.Title)
 	}
 	// A record under this title is not necessarily a record of THIS session.
 	// Titles are reused — an archived name can be reclaimed — so a stored row
@@ -238,9 +238,20 @@ func requireDurableSandboxBranch(repoID string, instance *session.Instance) erro
 	if rec.ID != "" && instance.ID != "" && rec.ID != instance.ID {
 		return fmt.Errorf(
 			"cannot replace the sandbox for %q: the stored record under that title belongs to a "+
-				"different session, so af cannot confirm this sandbox's branch %q was ever recorded. "+
-				"Retry once its own record is written; if its work is expendable, remove it and create "+
-				"a replacement: %s",
+				"different session (stored ID %q, current ID %q), so af cannot confirm this sandbox's "+
+				"branch %q was ever recorded. Retry after reconciling these identities and restoring "+
+				"this session's own record without overwriting the other session",
+			instance.Title, rec.ID, instance.ID, instance.GetBranch())
+	}
+	if err := requireKnownSandboxBranch(instance); err != nil {
+		return err
+	}
+	if strings.TrimSpace(rec.Branch) == "" {
+		return fmt.Errorf(
+			"cannot replace the sandbox for %q: its branch %q is known only in memory — the write that "+
+				"would have recorded it did not land — so a crash after the replacement would leave nothing "+
+				"pointing at the pushed work. Retry once the record is writable; if its work is expendable, "+
+				"remove it and create a replacement: %s",
 			instance.Title, instance.GetBranch(), killSuggestionFor(instance))
 	}
 	// Non-empty is not the question — MATCHING is. A partial archive pushes a new
@@ -298,7 +309,7 @@ func refuseIndeterminateReap(repoID string, instance *session.Instance) error {
 	return fmt.Errorf(
 		"cannot restore %q: af could not determine whether its sandbox is gone or merely unreachable, "+
 			"and replacing it would discard anything it has not pushed. "+
-			"It stays recoverable and the daemon keeps retrying; if you know the sandbox is gone, end it with: %s",
+			"It stays recoverable and the daemon keeps retrying. Recovery guidance: %s",
 		instance.Title, reapRefusalSuggestionFor(repoID, instance))
 }
 
