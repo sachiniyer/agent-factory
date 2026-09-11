@@ -24,10 +24,13 @@ func TestLoadConfigReadOnly_EmptyStubOldKernelACL(t *testing.T) {
 		configDirectoryFaccessat = original
 		configDirectoryFaccessat2, configDirectoryCapget = oldEffective, oldCapget
 	})
-	// This is routing coverage with a simulated unrelated network capability.
+	// Routing coverage: unrelated effective capability plus inactive permitted DAC bits.
 	configDirectoryCapget = func(_ *unix.CapUserHeader, data *unix.CapUserData) error {
 		data.Effective = 1 << unix.CAP_NET_BIND_SERVICE
 		data.Permitted = 1 << unix.CAP_NET_BIND_SERVICE
+		if os.Getuid() != 0 {
+			data.Permitted |= 1<<unix.CAP_DAC_OVERRIDE | 1<<unix.CAP_DAC_READ_SEARCH
+		}
 		return nil
 	}
 

@@ -60,6 +60,12 @@ func TestConfigDirectoryAccess_FallbackCapabilityRouting(t *testing.T) {
 	if os.Getuid() != os.Geteuid() || os.Getgid() != os.Getegid() {
 		t.Skip("routing cases require matching real/effective IDs")
 	}
+	// Real-ID access uses permitted capabilities for root, but an empty
+	// capability set for non-root. This models routing, not enforcement.
+	permittedFlags := 0
+	if os.Getuid() == 0 {
+		permittedFlags = unix.AT_EACCESS
+	}
 	oldEffective, oldFallback, oldCapget := configDirectoryFaccessat2, configDirectoryFaccessat, configDirectoryCapget
 	t.Cleanup(func() {
 		configDirectoryFaccessat2, configDirectoryFaccessat, configDirectoryCapget = oldEffective, oldFallback, oldCapget
@@ -72,9 +78,9 @@ func TestConfigDirectoryAccess_FallbackCapabilityRouting(t *testing.T) {
 			wantFlags int
 		}{
 			{"effective DAC override", unix.CapUserData{Effective: 1 << unix.CAP_DAC_OVERRIDE}, nil, unix.AT_EACCESS},
-			{"permitted DAC override", unix.CapUserData{Permitted: 1 << unix.CAP_DAC_OVERRIDE}, nil, unix.AT_EACCESS},
+			{"permitted-only DAC override", unix.CapUserData{Permitted: 1 << unix.CAP_DAC_OVERRIDE}, nil, permittedFlags},
 			{"effective DAC search", unix.CapUserData{Effective: 1 << unix.CAP_DAC_READ_SEARCH}, nil, unix.AT_EACCESS},
-			{"permitted DAC search", unix.CapUserData{Permitted: 1 << unix.CAP_DAC_READ_SEARCH}, nil, unix.AT_EACCESS},
+			{"permitted-only DAC search", unix.CapUserData{Permitted: 1 << unix.CAP_DAC_READ_SEARCH}, nil, permittedFlags},
 			{"effective network capability", unix.CapUserData{Effective: 1 << unix.CAP_NET_BIND_SERVICE}, nil, 0},
 			{"permitted network capability", unix.CapUserData{Permitted: 1 << unix.CAP_NET_BIND_SERVICE}, nil, 0},
 			{"mixed DAC and network", unix.CapUserData{Effective: 1<<unix.CAP_DAC_OVERRIDE | 1<<unix.CAP_NET_BIND_SERVICE}, nil, unix.AT_EACCESS},
