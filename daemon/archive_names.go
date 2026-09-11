@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -207,15 +208,39 @@ func (m *Manager) inspectArchiveDestination(repoID string, inst *session.Instanc
 	return "", fmt.Errorf("cannot archive session %q: destination %s already exists; no existing session owns it", inst.Title, dest)
 }
 
+// archiveLeafNameMax is the Linux per-component filesystem limit (NAME_MAX). The
+// archive leaf is a single path segment under <AF_HOME>/archived/<repoID>/, so it
+// must stay within it or the directory create / move fails with "file name too
+// long" — the same class #2528 bounded for the worktree/branch/slug paths. Nothing
+// appends a collision suffix to this leaf (collisions are reported as errors by
+// inspectArchiveDestination / archiveDestinationOwner, not disambiguated), so the
+// full NAME_MAX budget is available, unlike boundWorktreeComponent's reserve.
+const archiveLeafNameMax = 255
+
 // sanitizeArchiveTitle makes a session title safe as a single path segment,
 // mirroring NewGitWorktree's safeSessionName handling (strip "..", "/"→"-",
 // trim leading separators), falling back to "session" when nothing remains.
+// The leaf is bounded to archiveLeafNameMax so a long title — creatable via the
+// CLI/RPC/HTTP without the TUI's 32-char cap, since the authoritative
+// validateTitleShapeLocked checks only shape — cannot derive an archive
+// directory that overruns NAME_MAX. The cut lands on a rune boundary so a
+// multi-byte title whose limit falls mid-rune does not leave invalid UTF-8 in
+// the archive directory name; the leading-only trim matches the function's
+// existing semantics (it is idempotent here — leading "-." was already stripped
+// above — but mirrors the earlier trim and guards against future changes).
 func sanitizeArchiveTitle(title string) string {
 	s := strings.ReplaceAll(title, "..", "")
 	s = strings.ReplaceAll(s, "/", "-")
 	s = strings.TrimLeft(s, "-.")
 	if s == "" {
 		s = "session"
+	}
+	if len(s) > archiveLeafNameMax {
+		cut := archiveLeafNameMax
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = strings.TrimLeft(s[:cut], "-.")
 	}
 	return s
 }
