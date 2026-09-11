@@ -281,7 +281,8 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 
 // unrecognizedWrapperHidesAccountAssignment reports whether the literal tail
 // words of an unrecognized argv-passthrough wrapper carry a NAME=... assignment
-// whose NAME is one af removes for the selected account.
+// whose NAME is one af removes for the selected account, specifically by
+// nesting an env invocation inside the wrapper's argument list.
 //
 // unwrapAccountCommand peels a CLOSED list of wrappers (exec/command/builtin/
 // nohup/nice/timeout/setsid/stdbuf/ionice/taskset); every other binary that runs
@@ -292,40 +293,26 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 // assignment from the walk, so `strace env CODEX_HOME=/other codex` was accepted
 // while `nohup env CODEX_HOME=/other codex` was refused.
 //
-// This lifts envCallMutatesAccountEnvironment's NAME= rule one level: the
-// wrapper cannot be proven inert when its argv carries the same literal
-// assignment token the bare env form is already refused for. It latches onto
-// that NAME= signal specifically rather than the wrapper's option spelling or a
-// keyword scan, so noun-uses such as `man env`, `make env`, `git grep env`,
-// `ls env/bin`, `pip show env`, or `strace -p 1234 env` (none of which carries
-// a denied NAME= word) stay allowed. Mutation that lives inside a quoted
-// -c/-e script string (e.g. `strace sh -c 'unset CODEX_HOME; codex'`) is a
-// fundamental limitation of static argv analysis this guard does not close.
+// This lifts envCallMutatesAccountEnvironment's NAME= rule one level: scan
+// the wrapper's literal argv tail for an `env` invocation and delegate to
+// envCallMutatesAccountEnvironment when one is found. Commands that do not
+// contain a nested env invocation are not refused even when an argument
+// resembles a NAME=value token, so noun-uses such as `echo CODEX_HOME=/tmp`,
+// `rg 'OPENAI_API_KEY='`, `man env`, `make env`, `git grep env`, `ls env/bin`,
+// `pip show env`, or `strace -p 1234 env` (none of which carries a nested env
+// invocation with a denied assignment) stay allowed.
 func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}) bool {
-	for _, word := range words[1:] {
-		name, assignment := wrapperArgAssignmentName(word)
-		if assignment && accountEnvironmentNameDenied(name, names) {
-			return true
+	for i, word := range words[1:] {
+		if !isAccountCommandName(word, "env") {
+			continue
 		}
+		// Found an `env` word in the tail. Delegate to envCallMutatesAccountEnvironment
+		// for the arguments following it. The dynamic-name branch in
+		// unwrappedAccountCommandMutates already refuses non-literal command names,
+		// so a dynamic wrapper like $WRAPPER is still caught at the call site.
+		return envCallMutatesAccountEnvironment(words[2+i:], names)
 	}
 	return false
-}
-
-// wrapperArgAssignmentName reports the assignment target in a word that, after
-// the shell's quote removal, reads as a NAME=value token. A bare or
-// dynamic-value assignment has a literal NAME= prefix as its first part
-// (shellWordAssignmentName); a quoted assignment ("NAME=value" or 'NAME=value')
-// reduces to the same argument and is read through literalShellWord.
-func wrapperArgAssignmentName(word *syntax.Word) (string, bool) {
-	if name, ok := shellWordAssignmentName(word); ok {
-		return name, true
-	}
-	value, literal := literalShellWord(word)
-	if !literal {
-		return "", false
-	}
-	name, _, found := strings.Cut(value, "=")
-	return name, found && validName(name)
 }
 
 func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {

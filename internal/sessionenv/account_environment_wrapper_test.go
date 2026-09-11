@@ -146,6 +146,12 @@ func TestValidateAccountEnvironmentCommand_WrapperGuardStaysNarrow(t *testing.T)
 		"strace ionice -c 3 npm run dev",
 		// A no-op assignment with no command is not the exploit shape.
 		"strace",
+		// Non-wrapper commands whose arguments resemble a NAME=value token are
+		// not refused: the argument is never executed as an environment mutation.
+		"echo CODEX_HOME=/tmp",
+		"rg OPENAI_API_KEY= .",
+		"grep CODEX_HOME= /etc/environment",
+		"cat CODEX_HOME=/other",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"command %q carries no denied NAME= word and must stay allowed", command)
