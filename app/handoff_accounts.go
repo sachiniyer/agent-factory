@@ -33,7 +33,15 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 	if msg.err != nil {
 		return m, m.handleNotice(fmt.Errorf("load handoff accounts: %w", msg.err))
 	}
-	current, _ := selected.AccountSelection()
+	// An auto-selected (limit-scheduler) account is reversible, so an
+	// agent-only ("ambient") handoff must stay selectable — mirroring the
+	// daemon's `account != "" && !automatic` gate. Treating it as a manual
+	// pin suppresses ambient rows and drops every agent without a
+	// registered account, breaking TUI/CLI handoff parity.
+	current, automatic := selected.AccountSelection()
+	if automatic {
+		current = ""
+	}
 	agents, accounts, labels, warnings := []string{}, []string{}, []string{}, []string{}
 	preselected := -1
 	for _, agent := range append([]string{msg.agent}, handoffAgentChoices(msg.agent)...) {
