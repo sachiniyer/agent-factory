@@ -181,7 +181,7 @@ Because the binding is inherited from the current directory, running `tasks add`
 
 ## `af daemon`
 
-The background daemon hosts task cron schedules, watch-task scripts, session monitoring, and the web UI. It starts on demand whenever `af` runs and an enabled task exists; installing it as a user-level autostart unit (systemd user service on Linux, launchd agent on macOS) keeps scheduled tasks firing after reboots. See [tasks.md](tasks.md#daemon-lifecycle).
+The background daemon hosts task cron schedules, watch-task scripts, session monitoring, and the web UI. Opening the TUI starts it on demand. A bare `af` launch also runs an enabled-task background check; subcommands do not run that check. Installing the daemon as a user-level autostart unit (systemd user service on Linux, launchd agent on macOS) keeps scheduled tasks firing after reboots. See [tasks.md](tasks.md#daemon-lifecycle).
 
 ```bash
 af daemon install      # register autostart at login

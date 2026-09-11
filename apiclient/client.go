@@ -1,9 +1,11 @@
 // Package apiclient is the typed Go client for the daemon-hosted HTTP/JSON and
 // WebSocket APIs. Local clients reach the daemon through `daemon-http.sock`;
-// targeted clients may instead reach a remote daemon. It carries both reads and
-// control operations, including session lifecycle, tabs, tasks, accounts, and
-// configuration. The TUI uses it for every daemon read and control call, and
-// CLI/API paths use it where they speak HTTP rather than gob `net/rpc`.
+// targeted clients may instead reach a remote daemon. It carries the TUI's
+// session/task projection reads and a large set of control operations, including
+// session lifecycle, tabs, tasks, projects, accounts, and configuration. The
+// local account-management paths (list, register, and login) and the local-only
+// config-agent spawn and reap are exceptions: they still use the daemon's gob
+// control client. The CLI/API layers contain both HTTP and gob callers as well.
 //
 // HTTP calls decode the shared `{data,error}` envelope into the same daemon
 // request/response types used by the control plane. The envelope is not

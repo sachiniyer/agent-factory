@@ -57,9 +57,10 @@ closing any of them does not stop the work.
 
 It also keeps sessions alive across process death and reboots, runs the
 scheduler, handles usage-limit parking and resume, and serves the web client.
-Opening the TUI starts it on demand; any `af` invocation also starts it when an
-enabled task exists. Install its autostart unit once to keep tasks firing across
-logouts:
+Opening the TUI starts it on demand. On a bare `af` launch, a background check
+also starts it when an enabled task exists. That enabled-task check does not run
+for subcommands such as `af version` or `af config list`. Install its autostart
+unit once to keep tasks firing across logouts:
 
 ```bash
 af daemon install   # systemd user service on Linux, launchd agent on macOS

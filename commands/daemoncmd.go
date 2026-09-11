@@ -19,9 +19,10 @@ import (
 // scripts), session monitoring, and the web UI. Launching the TUI starts it:
 // the cold start reads session state through the daemon
 // (coldStartFromSnapshot -> withDaemonHTTP -> daemon.EnsureDaemon), and
-// ensureDaemonForTasks covers the scheduled-work case. `af daemon install`
-// registers a user-level autostart unit so schedules and the web UI survive
-// logouts and reboots without ever opening af.
+// ensureDaemonForTasks checks scheduled work on a bare root launch. Cobra
+// subcommands do not run that check. `af daemon install` registers a user-level
+// autostart unit so schedules and the web UI survive logouts and reboots without
+// ever opening af.
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
@@ -30,11 +31,12 @@ var daemonCmd = &cobra.Command{
 watch-task scripts, monitors sessions, and serves the bundled web UI.
 
 The web UI is part of the daemon — there is no separate web command — so it is
-served whenever the daemon is running. Running af starts one: the TUI reads
+served whenever the daemon is running. Opening the TUI starts one: it reads
 session state through the daemon and spawns it if none is up, so simply opening
-af serves the web UI. Any enabled task starts one too. Only
-standalone commands that never talk to the daemon (such as 'af config list')
-leave it down.
+af serves the web UI. A bare 'af' launch also runs a background check that
+starts the daemon when an enabled task exists. Cobra subcommands do not run
+that task check; a subcommand that needs the daemon may start it for its own
+operation.
 
 With af running, open:
 
@@ -99,7 +101,7 @@ var daemonUninstallCmd = &cobra.Command{
 			return nil
 		}
 		fmt.Printf("daemon autostart removed: %s\n", unitPath)
-		fmt.Println("the daemon still starts on demand whenever you run af with enabled tasks")
+		fmt.Println("the daemon still starts on demand when you open the TUI; bare af also checks enabled tasks")
 		return nil
 	},
 }
@@ -235,10 +237,9 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 	if info.Running {
 		fmt.Fprintln(w, "daemon: running")
 	} else {
-		// The on-demand promise is unconditional again: since #2168 Phase 0 there
-		// is no config the daemon refuses to start under, so there is no posture
-		// that makes this line a lie.
-		fmt.Fprintln(w, "daemon: not running (starts on demand when you run af with an enabled task)")
+		// Name both root-command paths without implying Cobra subcommands run the
+		// enabled-task check; a daemon-using subcommand owns its own startup behavior.
+		fmt.Fprintln(w, "daemon: not running (starts on demand when the TUI opens; bare af checks enabled tasks)")
 	}
 	if info.Phase != "" {
 		fmt.Fprintf(w, "  phase:          %s\n", info.Phase)
@@ -765,14 +766,14 @@ func respawnDaemonAfterUpgrade(execPath string) (respawnResult, error) {
 	return respawnResult{UnitErr: unitErr, UnitGateErr: gateErr}, nil
 }
 
-// ensureDaemonForTasks starts the daemon when any enabled task exists, so
-// cron schedules are evaluated even if the user never opens the TUI.
-// Failures are logged rather than surfaced because this is a background ensure
-// before command dispatch, and the next af invocation retries. The TUI's HTTP
-// path separately ensures the daemon and surfaces a startup failure.
+// ensureDaemonForTasks is the enabled-task background check used by the bare
+// root command's TUI RunE. Cobra subcommands do not invoke it. Failures are
+// logged rather than surfaced because it runs alongside TUI launch, and the
+// next bare af invocation retries. The TUI's HTTP path separately ensures the
+// daemon and surfaces a startup failure.
 //
 // The enabled-task gate is correct here and only here: this is the cold-start
-// path (af launch), where no daemon was previously running. The post-upgrade
+// path (bare af launch), where no daemon was previously running. The post-upgrade
 // respawn path must not use it — see respawnDaemonAfterUpgrade (#813).
 func ensureDaemonForTasks() {
 	tasks, err := task.LoadTasks()

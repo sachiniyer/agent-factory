@@ -7,7 +7,10 @@ task is actually firing.
 
 A task delivers a prompt to an AI agent session automatically. Every task has exactly one **trigger** — a cron schedule (`cron_expr`) or a long-running watch script (`watch_cmd`) — and one **delivery mode**: create a fresh session per fire, or send the prompt into an existing session (`target_session`).
 
-Tasks are hosted by the agent-factory daemon, which starts automatically whenever `af` runs and an enabled task exists. There are no per-task OS scheduler units — see [Daemon lifecycle](#daemon-lifecycle) and [Migration notes](#migration-notes).
+Tasks are hosted by the agent-factory daemon. Opening the TUI starts it on demand,
+and a bare `af` launch also runs a background check that starts it when an enabled
+task exists; subcommands do not run that check. There are no per-task OS scheduler
+units — see [Daemon lifecycle](#daemon-lifecycle) and [Migration notes](#migration-notes).
 
 ## Trigger × delivery matrix
 
@@ -404,7 +407,7 @@ In the TUI, an automation that has stopped firing — or whose expression the sc
 
 The daemon is the single scheduler host: it evaluates cron expressions and supervises watch scripts.
 
-- Every `af` invocation ensures the daemon is running whenever an enabled task exists, and the daemon keeps running after the TUI exits.
+- Opening the TUI ensures the daemon is running. The enabled-task background check runs only on a bare `af` launch, not on subcommands, and the daemon keeps running after the TUI exits.
 - To keep tasks firing across **reboots** without opening `af`, register the user-level autostart unit (a systemd user service on Linux, a launchd agent on macOS):
 
 ```bash

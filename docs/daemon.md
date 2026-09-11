@@ -60,10 +60,11 @@ paragraph because it's why `af` doesn't corrupt itself:
 ## Lifecycle
 
 The daemon starts **on demand**. Opening the TUI makes sure one is running,
-whether or not a task or root agent is configured. Separately, whenever you run
-`af` and an enabled task exists, `af` starts the daemon so the task does not
-depend on someone opening the TUI. For interactive use you usually don't have
-to think about it at all.
+whether or not a task or root agent is configured. A bare `af` launch also runs
+a background check that starts the daemon when an enabled task exists. That
+enabled-task check runs only for bare `af`; subcommands such as `af version` and
+`af config list` do not run it. For interactive use you usually don't have to
+think about it at all.
 
 To keep tasks and sessions running across logouts and reboots, install the
 daemon's autostart unit once:

@@ -148,9 +148,10 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 				}
 				program = programFlag
 			}
-			// The daemon hosts the task scheduler (#782), so make sure
-			// it is up whenever an enabled task exists. In the background:
-			// daemon launch can take a few seconds and must not delay the TUI.
+			// On a bare root launch, the daemon hosts the task scheduler (#782),
+			// so make sure it is up whenever an enabled task exists. Run the
+			// ensure in the background because daemon launch can take a few
+			// seconds and must not delay the TUI.
 			go launchEnsureDaemonForTasks()
 
 			app.Version = version
