@@ -63,6 +63,22 @@ func TestTaskRunEndsOnlyForRuntimeThatReceivedPrompt(t *testing.T) {
 			"OpRespawning promises prompt redelivery and must retain the queued run")
 	})
 
+	t.Run("pending handoff replay fence preserves the run", func(t *testing.T) {
+		inst := &Instance{
+			TaskID:                "task-id",
+			liveness:              LiveRunning,
+			inFlightOp:            OpReplacing,
+			taskRunActive:         true,
+			pendingHandoffMission: "continue the inherited work",
+			handoffDeliveryStatus: PromptNotDelivered,
+		}
+
+		_, interrupted := inst.InterruptTaskRunAtRuntimeReplacement()
+		require.False(t, interrupted)
+		require.True(t, inst.TaskRunActive(),
+			"OpReplacing carries a durable mission that will prompt the replacement runtime")
+	})
+
 	t.Run("prompted runtime still completes on its idle edge", func(t *testing.T) {
 		inst := &Instance{
 			TaskID:        "task-id",
