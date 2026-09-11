@@ -66,6 +66,39 @@ func TestArchiveHook_OutputFileStragglerDoesNotDelaySuccess(t *testing.T) {
 		"a descendant holding the direct output file must not recreate the old capture-pipe wait")
 }
 
+// The straggler test above uses a generous 500ms deadline so the shell's
+// microsecond exit lands far inside it, but the os/exec race this guards
+// lives where the shell's natural exit and the deadline coincide. When the
+// deadline fires the same instant the shell exits 0, os/exec's watchCtx can
+// splice context.DeadlineExceeded over the nil exit-0 error (its `<-ctx.Done()`
+// arm reaching `if err == nil && watch.err != nil { err = watch.err }`). The
+// backgrounded `sleep 30` keeps the process group alive, so Cancel()'s
+// group-wide SIGKILL returns 0 instead of ESRCH — pushing it into the
+// `return nil` arm that lets the splice through, rather than os.ErrProcessDone
+// which suppresses it. A 1ms deadline makes the shell's natural exit and the
+// deadline fire at approximately the same instant, opening that window on
+// roughly one in a few hundred iterations. Before the fix, that surfaced as
+// `context deadline exceeded (full output: …)` for a hook that exited 0 — the
+// false failure the comment in archive_hook.go promises is no longer
+// reported. The guard drops the spliced error on a clean (exit-0) exit; it
+// must NOT drop a real *ExitError (exit 23) or a SIGKILL'd shell, which the
+// other tests in this file pin.
+func TestArchiveHook_ExitZeroWithStragglerNeverReportsContextDeadline(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	writeOnArchiveCommand(t, "sleep 30 >&1 2>&1 &")
+	withArchiveHookTimeout(t, 1*time.Millisecond)
+	hookCtx := archiveHookContext(t)
+	for i := 0; i < 5000; i++ {
+		err := runOnArchiveHook(hookCtx)
+		if err == nil {
+			continue
+		}
+		if strings.Contains(err.Error(), "context deadline exceeded") {
+			t.Fatalf("iteration %d: exit-0 hook reported %q", i, err.Error())
+		}
+	}
+}
+
 // The same shape with a failing shell: the exit status and output are the
 // outcome, and an output-file straggler cannot hold that answer past the clock.
 func TestArchiveHook_OutputFileStragglerDoesNotHideExitStatus(t *testing.T) {

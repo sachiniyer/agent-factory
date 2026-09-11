@@ -195,7 +195,17 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	if ctx.Err() != nil && (cmd.ProcessState == nil || !cmd.ProcessState.Exited()) {
 		return fmt.Errorf("timed out after %s%s", onArchiveHookTimeout, outputReport)
 	}
-	if err != nil {
+	// os/exec's Wait() can splice context.DeadlineExceeded over a nil exit-0
+	// error when the deadline fires the same instant the process exits its
+	// own accord (watchCtx's <-ctx.Done() arm reaching `if err == nil &&
+	// watch.err != nil { err = watch.err }`). Exited() is true in that case,
+	// so the timed-out guard above skips, and without this guard the spliced
+	// error would surface as a false failure for a hook that reached a clean
+	// exit — exactly the false report the comment above promises is gone.
+	// ExitCode()==0 is load-bearing: Exited() is also true for exit 23,
+	// where err is a real *ExitError that must be preserved, and for a
+	// SIGKILL'd shell, which the timed-out guard above handles first.
+	if err != nil && !(cmd.ProcessState != nil && cmd.ProcessState.Exited() && cmd.ProcessState.ExitCode() == 0) {
 		return fmt.Errorf("%w%s", err, outputReport)
 	}
 	if outputReadErr == nil {
