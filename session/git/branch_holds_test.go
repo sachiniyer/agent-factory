@@ -171,6 +171,22 @@ func TestBranchesHeldByWorktrees_UnheldExistingBranchStaysFree(t *testing.T) {
 	assert.Equal(t, "foo", firstFreeSuffix(t, repoRoot, "foo"))
 }
 
+func TestWorktreeBranchBindingsIgnoresRepositoryEnvironmentOverrides(t *testing.T) {
+	targetRoot := createGitRepo(t)
+	runGitInPlaceTest(t, targetRoot, "commit", "--allow-empty", "-m", "target init")
+	holderPath := filepath.Join(t.TempDir(), "target-holder")
+	runGitInPlaceTest(t, targetRoot, "worktree", "add", "-b", "target-held", holderPath)
+
+	overrideRoot := createGitRepo(t)
+	runGitInPlaceTest(t, overrideRoot, "commit", "--allow-empty", "-m", "override init")
+	t.Setenv("GIT_DIR", filepath.Join(overrideRoot, ".git"))
+	t.Setenv("GIT_WORK_TREE", overrideRoot)
+
+	held, err := BranchesHeldByWorktrees(targetRoot)
+	require.NoError(t, err)
+	assert.Equal(t, []string{holderPath}, held["target-held"])
+}
+
 // TestBranchesHeldByWorktrees_NonRepoErrors pins the answer AF must not
 // fabricate: a repo it cannot ask returns an error, never an empty "nothing is
 // held" map that would read as a confident all-clear.
