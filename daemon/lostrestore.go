@@ -693,12 +693,26 @@ func (m *Manager) resetPreserveBudget(repoID string, inst *session.Instance) {
 // running episode. The symmetric probeAlive paths that settle the session
 // (RestoreLostSessions) instead delete the whole lostRestoreStates entry, so
 // they do not use this helper either.
+//
+// An entry is always created (or reset in place) so that a daemon restart before
+// the operator uses --force-reap does not leave lostRestoreStates empty: if the
+// entry were absent, recordLostRestoreFailure would seed consecutiveFailures from
+// the persisted terminal failure, causing the first new-sandbox failure to be
+// counted as attempt maxAttempts+1 and triggering immediate give-up. The zeroed
+// entry ensures the new sandbox starts from attempt 1.
+// Any stale awaitingConfirm from the predecessor episode is also cleared: the
+// old sandbox is gone, so its pending confirmation is irrelevant, and leaving it
+// set would cause the next automatic poll to double-charge a failure.
 func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
 	stateKey := stableSessionKey(repoID, inst)
 	m.mu.Lock()
-	if st := m.lostRestoreStates[stateKey]; st != nil {
-		st.consecutiveFailures = 0
+	st := m.lostRestoreStates[stateKey]
+	if st == nil {
+		st = &lostRestoreState{}
+		m.lostRestoreStates[stateKey] = st
 	}
+	st.consecutiveFailures = 0
+	st.awaitingConfirm = false
 	m.mu.Unlock()
 }
 
