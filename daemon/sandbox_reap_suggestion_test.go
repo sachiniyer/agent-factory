@@ -64,7 +64,9 @@ func TestRestoreSession_ReapAdviceRequiresDurableBranch(t *testing.T) {
 						require.Error(t, guardErr)
 					}
 
-					_, _, err = manager.RestoreSession(RestoreSessionRequest{Title: inst.Title, RepoID: repoID})
+					// Start after resolution so missing/corrupt records exercise
+					// the reap advice rather than the title resolver's refresh.
+					_, err = manager.restoreLostOrDeadSession(repoID, inst.Title, inst, false)
 					require.Error(t, err)
 					require.Zero(t, backend.recoverCalls())
 					requireSandboxSurvived(t, reap, "restore refused before replacement")
