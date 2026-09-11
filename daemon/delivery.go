@@ -182,21 +182,29 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 // A newly started session is could-not-confirm: creation succeeded, but this
 // path has no pane observation that could honestly prove its initial prompt.
 func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, session.PromptDeliveryStatus, error) {
+	status, deliveryStatus, _, err := m.deliverPromptWithOutcome(req)
+	return status, deliveryStatus, err
+}
+
+// deliverPromptWithOutcome also reports whether a newly created limit-parked
+// session retained this exact prompt for resume. Only task delivery needs that
+// distinction; the public status remains "parked: usage limit" either way.
+func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, session.PromptDeliveryStatus, bool, error) {
 	// These all fail before any create or send — nothing was delivered — so they
 	// are pre-flight and tagged notAttempted so the watch path refunds the rate
 	// slot (#2501). RepoFromPath in particular is watch-reachable: a momentarily
 	// unresolvable project during an outage must not burn budget.
 	if req.Prompt == "" {
-		return "", session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("prompt is required"))
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("prompt is required"))
 	}
 	if req.RepoPath == "" {
-		return "", session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("repo path is required"))
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("repo path is required"))
 	}
 	repo, err := config.RepoFromPath(req.RepoPath)
 	if err != nil {
 		// Carry notDeliveredMarker so this is refundable across the RPC hop (#2501):
 		// a momentarily unresolvable project during an outage must not burn budget.
-		return "", session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
 	}
 	// A task's retained RepoID is its authoritative project binding. ProjectPath
 	// still supplies the filesystem root a delivery needs, but a symlink or
@@ -204,7 +212,7 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 	// rebind at the final daemon boundary so a task bound to A never delivers into
 	// B; the operator can explicitly rebind the task through the supported update.
 	if req.TaskRepoID != "" && req.TaskRepoID != repo.ID {
-		return "", session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("task is bound to repo %s, but project path %q now resolves to repo %s; prompt not delivered — rebind the task to use this project", req.TaskRepoID, req.RepoPath, repo.ID))
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("task is bound to repo %s, but project path %q now resolves to repo %s; prompt not delivered — rebind the task to use this project", req.TaskRepoID, req.RepoPath, repo.ID))
 	}
 
 	unlock := m.lockTarget(repo.ID, req.Title)
@@ -215,16 +223,16 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 	if err != nil {
 		// A pre-flight state refresh that failed sent nothing (#2501): the watch
 		// path must refund the rate slot this attempt reserved, not charge it.
-		return "", session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("could not check target session %q state; %s: %w", req.Title, notDeliveredMarker, err))
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("could not check target session %q state; %s: %w", req.Title, notDeliveredMarker, err))
 	}
 	if deleting {
-		return "", session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; %s", req.Title, notDeliveredMarker))
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("target session %q is being deleted; %s", req.Title, notDeliveredMarker))
 	}
 	if err := taskPromptTargetLivenessError(req.Title, liveness, req.TaskOrigin); err != nil {
 		if errors.Is(err, errTargetLimitReached) {
-			return TaskStatusLimitParked, session.PromptNotDelivered, nil
+			return TaskStatusLimitParked, session.PromptNotDelivered, false, nil
 		}
-		return "", session.PromptCouldNotConfirm, notAttempted(err)
+		return "", session.PromptCouldNotConfirm, false, notAttempted(err)
 	}
 	if exists {
 		// A TUI is attached full-screen to this session (#1160 pause lease), so
@@ -236,18 +244,18 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 		// automated deliveries set DeferWhileAttached — a manual send-prompt is an
 		// explicit user action and still lands immediately.
 		if m.deferWhileAttached(repo.ID, req) {
-			return StatusDeferredAttached, session.PromptNotDelivered, nil
+			return StatusDeferredAttached, session.PromptNotDelivered, false, nil
 		}
 		deliveryStatus, err := m.SendPromptWithStatus(SendPromptRequest{
 			Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
 		})
 		if err != nil {
 			if errors.Is(err, errTargetLimitReached) {
-				return TaskStatusLimitParked, session.PromptNotDelivered, nil
+				return TaskStatusLimitParked, session.PromptNotDelivered, false, nil
 			}
-			return "", session.PromptCouldNotConfirm, err
+			return "", session.PromptCouldNotConfirm, false, err
 		}
-		return "sent", deliveryStatus, nil
+		return "sent", deliveryStatus, false, nil
 	}
 
 	// If the absent target is this repo's daemon-managed root agent — only
@@ -256,7 +264,7 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 	// the reserved-name guard would reject, dropping the event with a misleading
 	// "pick another name" error; #1223).
 	if status, deliveryStatus, handled, rerr := m.deliverToReemergingRoot(repo, req); handled {
-		return status, deliveryStatus, rerr
+		return status, deliveryStatus, false, rerr
 	}
 
 	// The session is absent and, because deliveries to this target serialize on
@@ -273,35 +281,36 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 		if isConcurrentCreateErr(err) {
 			if werr := m.waitForTargetSession(repo.ID, req.Title, req.TaskOrigin); werr != nil {
 				if errors.Is(werr, errTargetLimitReached) {
-					return TaskStatusLimitParked, session.PromptNotDelivered, nil
+					return TaskStatusLimitParked, session.PromptNotDelivered, false, nil
 				}
 				// The target never materialized within the wait (its liveness went
 				// bad, it was deleted, or targetDeliverWait elapsed): nothing was
 				// sent, so this is pre-flight and must refund (#2501). This is the
 				// outage path — a 30s wait that times out repeatedly would otherwise
 				// drain the budget the recovery needs.
-				return "", session.PromptCouldNotConfirm, notAttempted(werr)
+				return "", session.PromptCouldNotConfirm, false, notAttempted(werr)
 			}
 			// A TUI can attach during the wait above, so re-check the defer lease
 			// before sending — otherwise this path pastes into an attached pane the
 			// "exists" path would have deferred (#1638).
 			if m.deferWhileAttached(repo.ID, req) {
-				return StatusDeferredAttached, session.PromptNotDelivered, nil
+				return StatusDeferredAttached, session.PromptNotDelivered, false, nil
 			}
 			deliveryStatus, serr := m.SendPromptWithStatus(SendPromptRequest{
 				Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
 			})
 			if serr != nil {
 				if errors.Is(serr, errTargetLimitReached) {
-					return TaskStatusLimitParked, session.PromptNotDelivered, nil
+					return TaskStatusLimitParked, session.PromptNotDelivered, false, nil
 				}
-				return "", session.PromptCouldNotConfirm, serr
+				return "", session.PromptCouldNotConfirm, false, serr
 			}
-			return "sent", deliveryStatus, nil
+			return "sent", deliveryStatus, false, nil
 		}
-		return "", session.PromptCouldNotConfirm, fmt.Errorf("failed to auto-create target session %q: %w", req.Title, err)
+		return "", session.PromptCouldNotConfirm, false, fmt.Errorf("failed to auto-create target session %q: %w", req.Title, err)
 	}
-	return createdTaskStatus(created), session.PromptCouldNotConfirm, nil
+	status := createdTaskStatus(created)
+	return status, session.PromptCouldNotConfirm, status == TaskStatusLimitParked, nil
 }
 
 // createMissingPromptTarget owns the auto-create interval before CreateSession.

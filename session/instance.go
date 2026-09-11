@@ -19,6 +19,10 @@ type Instance struct {
 	// gitWorktree, diffStats.
 	mu               sync.RWMutex
 	agentObservation *agentObservationRuntime
+	// agentObservationSettlementMu extends the runtime's transport lock through
+	// daemon interpretation, so an automated send cannot overtake a completed
+	// pane snapshot whose usage-limit conclusion has not been published yet.
+	agentObservationSettlementMu sync.Mutex
 	// agentObservationGeneration is atomic because daemon-owned side effects
 	// validate an observation while holding Manager.mu, not Instance.mu. Runtime
 	// replacement invalidates it before later manager bookkeeping, which orders a

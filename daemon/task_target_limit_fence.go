@@ -11,6 +11,10 @@ import (
 // old check-to-send race. Production never replaces this no-op.
 var testHookTaskPromptBeforeLimitFence = func() {}
 
+// testHookTaskPromptBeforeObservationFence proves a task send has reached the
+// boundary while an older pane snapshot is still in flight.
+var testHookTaskPromptBeforeObservationFence = func() {}
+
 // observeTaskTargetLimit orders a watch event's retention admission against
 // limit publication. A clean observation admits this event to ordinary queue
 // bounds before a later transition; a known limit protects the backlog before

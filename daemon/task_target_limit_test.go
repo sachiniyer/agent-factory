@@ -15,8 +15,9 @@ import (
 func routeTaskDeliveryToManager(t *testing.T, manager *Manager) {
 	t.Helper()
 	original := deliverPromptForTask
-	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
-		return manager.DeliverPrompt(req)
+	deliverPromptForTask = func(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
+		status, deliveryStatus, promptRetained, err := manager.deliverPromptWithOutcome(req)
+		return taskPromptDeliveryResult{status: status, deliveryStatus: deliveryStatus, promptRetained: promptRetained}, err
 	}
 	t.Cleanup(func() { deliverPromptForTask = original })
 }
@@ -145,8 +146,8 @@ func TestDeliverWatchEventRecordsLimitParkAndRequestsReplay(t *testing.T) {
 		t.Fatalf("AddTask: %v", err)
 	}
 	original := deliverPromptForTask
-	deliverPromptForTask = func(DeliverPromptRequest) (string, error) {
-		return TaskStatusLimitParked, nil
+	deliverPromptForTask = func(DeliverPromptRequest) (taskPromptDeliveryResult, error) {
+		return taskPromptDeliveryResult{status: TaskStatusLimitParked}, nil
 	}
 	t.Cleanup(func() { deliverPromptForTask = original })
 
@@ -213,8 +214,14 @@ func TestLimitParkedWatchQueueBackpressuresAtCapacity(t *testing.T) {
 	t.Cleanup(func() { watcherLimitBackpressurePoll = originalPoll })
 	w := &taskWatcher{queue: queue, stopCh: make(chan struct{})}
 	t.Cleanup(func() { close(w.stopCh) })
-	waitDone := make(chan bool, 1)
-	go func() { waitDone <- w.waitForLimitQueueCapacity() }()
+	type waitResult struct {
+		proceed, stoppedDuringLimitBackpressure bool
+	}
+	waitDone := make(chan waitResult, 1)
+	go func() {
+		proceed, stopped := w.waitForLimitQueueCapacity()
+		waitDone <- waitResult{proceed: proceed, stoppedDuringLimitBackpressure: stopped}
+	}()
 	select {
 	case <-waitDone:
 		t.Fatal("watch reader did not backpressure at the protected queue cap")
@@ -229,8 +236,8 @@ func TestLimitParkedWatchQueueBackpressuresAtCapacity(t *testing.T) {
 		advanceEventQueue(t, queue, cursor)
 	}
 	select {
-	case ok := <-waitDone:
-		if !ok {
+	case result := <-waitDone:
+		if !result.proceed || result.stoppedDuringLimitBackpressure {
 			t.Fatal("capacity wait reported a stop after replay made room")
 		}
 	case <-time.After(time.Second):

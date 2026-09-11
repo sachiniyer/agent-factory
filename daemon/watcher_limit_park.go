@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // watcherLimitBackpressurePoll bounds how quickly a watch reader resumes after
@@ -17,15 +19,28 @@ var watcherLimitBackpressurePoll = 100 * time.Millisecond
 // the subprocess blocks on the pipe instead of AF dropping distinct events or
 // growing its own queue without limit. A stop always breaks the wait so watcher
 // reload and daemon shutdown remain bounded.
-func (w *taskWatcher) waitForLimitQueueCapacity() bool {
+func (w *taskWatcher) waitForLimitQueueCapacity() (proceed, stoppedDuringLimitBackpressure bool) {
 	for w.queue != nil && w.queue.limitParkedAtCapacity() {
 		select {
 		case <-w.stopCh:
-			return false
+			return false, true
 		case <-time.After(watcherLimitBackpressurePoll):
 		}
 	}
-	return !w.stopRequested()
+	return !w.stopRequested(), false
+}
+
+// targetLimitRequiresRetention applies the fail-closed side of queue safety:
+// an absent observation is never permission to expire or oldest-evict distinct
+// events. The supervisor's production observer orders the positive/negative
+// answer against limit publication; tests inject the same point-in-time answer.
+func (w *taskWatcher) targetLimitRequiresRetention() bool {
+	limitParked, err := w.sup.observeTargetLimit(w.taskID)
+	if err == nil {
+		return limitParked
+	}
+	log.WarningLog.Printf("watch task %s: cannot observe target usage-limit state; protecting backlog until delivery succeeds: %v", w.taskID, err)
+	return true
 }
 
 // persistBufferedLimitEvents saves every complete event bufio already pulled

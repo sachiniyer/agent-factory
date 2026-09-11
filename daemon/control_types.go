@@ -399,6 +399,10 @@ type DeliverPromptRequest struct {
 type DeliverPromptResponse struct {
 	Status         string                       `json:"status"`
 	DeliveryStatus session.PromptDeliveryStatus `json:"delivery_status"`
+	// PromptRetained distinguishes a newly created limit-parked target, whose
+	// initial prompt is already owned by resume, from an existing limited target
+	// whose watch event still needs queue replay.
+	PromptRetained bool `json:"prompt_retained,omitempty"`
 }
 
 // CreateTabRequest asks the daemon to spawn a tab in the target session's

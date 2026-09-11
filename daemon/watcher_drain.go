@@ -136,7 +136,18 @@ func (w *taskWatcher) drainLoop() {
 			w.stopDraining()
 			return
 		}
-		if ok && !w.queue.retainLimitParked() && w.sup.queueMaxAge > 0 && time.Since(ev.TS) > w.sup.queueMaxAge {
+		aged := ok && w.sup.queueMaxAge > 0 && time.Since(ev.TS) > w.sup.queueMaxAge
+		retainForLimit := w.queue.retainLimitParked()
+		if aged && !retainForLimit && w.targetLimitRequiresRetention() {
+			retainForLimit = true
+			// The target entered a usage-limit episode while this ordinary backlog
+			// waited. Protect it BEFORE the age policy can consume the head; the
+			// delivery below will confirm the park and retry on the base cadence.
+			if markErr := w.queue.markLimitParked(); markErr != nil {
+				log.ErrorLog.Printf("watch task %s: failed to protect aged backlog at a usage limit: %v", w.taskID, markErr)
+			}
+		}
+		if aged && !retainForLimit {
 			// Retention (#1129): an event older than the age bound is expired
 			// instead of delivered — a prompt about a days-old notification is
 			// noise, and re-sweepable sources re-emit on their next poll.

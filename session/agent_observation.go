@@ -23,6 +23,17 @@ type agentObservationTarget struct {
 	runtime *agentObservationRuntime
 }
 
+// HoldAgentObservationSettlement makes a daemon observation's transport read
+// and every state conclusion derived from it one boundary. Automated prompt
+// delivery takes the same per-instance fence around its final liveness check and
+// submission, so it runs wholly before the snapshot or wholly after its apply.
+// Manual delivery intentionally does not use this task-safety boundary.
+func (i *Instance) HoldAgentObservationSettlement() func() {
+	i.agentObservationSettlementMu.Lock()
+	var once sync.Once
+	return func() { once.Do(i.agentObservationSettlementMu.Unlock) }
+}
+
 // agentObservationTarget binds the server and its observation lock in the same
 // i.mu section. Runtime replacement clears i.agentObservation alongside the
 // derived server cache, so predecessor I/O and replacement I/O never share a

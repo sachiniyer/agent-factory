@@ -47,6 +47,112 @@ func TestCreatePerRunWatchLimitParkDoesNotRequestQueueReplay(t *testing.T) {
 	}
 }
 
+func TestTargetedAutoCreateLimitParkDoesNotRequestQueueReplay(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	if err := task.AddTask(task.Task{
+		ID: "a4223104", Name: "watch-target-create-limit", Prompt: "event: {{line}}",
+		WatchCmd: "watch.sh", TargetSession: "missing-target", ProjectPath: repoPath,
+		Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	original := deliverPromptForTask
+	deliverPromptForTask = func(DeliverPromptRequest) (taskPromptDeliveryResult, error) {
+		return taskPromptDeliveryResult{status: TaskStatusLimitParked, promptRetained: true}, nil
+	}
+	t.Cleanup(func() { deliverPromptForTask = original })
+
+	if err := deliverWatchEvent("a4223104", "issue 4223"); err != nil {
+		t.Fatalf("targeted auto-create park requested duplicate queue replay: %v", err)
+	}
+	stored, err := task.GetTask("a4223104")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if stored.LastRunStatus != TaskStatusLimitParked {
+		t.Fatalf("targeted auto-create status = %q, want %q", stored.LastRunStatus, TaskStatusLimitParked)
+	}
+}
+
+type blockingLimitSnapshotBackend struct {
+	readyFakeBackend
+	started  chan struct{}
+	release  chan struct{}
+	once     sync.Once
+	recorder *promptRecorder
+}
+
+func (b *blockingLimitSnapshotBackend) HasUpdated(*session.Instance) (bool, bool, string) {
+	b.once.Do(func() { close(b.started) })
+	<-b.release
+	return false, false, claudeLimitBanner
+}
+
+func (b *blockingLimitSnapshotBackend) SendPromptCommand(_ *session.Instance, prompt string) error {
+	b.recorder.add(prompt)
+	return nil
+}
+
+func TestTaskPromptWaitsForInFlightLimitSnapshotSettlement(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	recorder := &promptRecorder{}
+	backend := &blockingLimitSnapshotBackend{
+		readyFakeBackend: readyFakeBackend{session.NewFakeBackend()},
+		started:          make(chan struct{}), release: make(chan struct{}), recorder: recorder,
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "snapshot-race", backend, true, session.Running)
+
+	pollDone := make(chan struct{})
+	go func() {
+		manager.refreshInstanceStatus(repoID, inst)
+		close(pollDone)
+	}()
+	select {
+	case <-backend.started:
+	case <-time.After(time.Second):
+		t.Fatal("status poll did not enter pane snapshot")
+	}
+
+	reachedObservationFence := make(chan struct{})
+	originalHook := testHookTaskPromptBeforeObservationFence
+	var once sync.Once
+	testHookTaskPromptBeforeObservationFence = func() {
+		once.Do(func() { close(reachedObservationFence) })
+	}
+	t.Cleanup(func() { testHookTaskPromptBeforeObservationFence = originalHook })
+	sendDone := make(chan error, 1)
+	go func() {
+		_, err := manager.SendPromptWithStatus(SendPromptRequest{
+			Title: "snapshot-race", RepoID: repoID, Prompt: "scheduled", TaskOrigin: true,
+		})
+		sendDone <- err
+	}()
+	select {
+	case <-reachedObservationFence:
+	case <-time.After(time.Second):
+		t.Fatal("task send did not reach observation-settlement fence")
+	}
+	close(backend.release)
+
+	select {
+	case <-pollDone:
+	case <-time.After(time.Second):
+		t.Fatal("status poll did not publish captured usage limit")
+	}
+	select {
+	case err := <-sendDone:
+		if !errors.Is(err, errTargetLimitReached) {
+			t.Fatalf("send overtook captured limit observation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("task send stayed blocked after observation settlement")
+	}
+	if got := recorder.snapshot(); len(got) != 0 {
+		t.Fatalf("task prompt overtook captured limit observation: %v", got)
+	}
+}
+
 func TestTaskPromptLimitTransitionIsSerializedWithFinalSend(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	recorder := &promptRecorder{}
@@ -164,5 +270,76 @@ func TestStopPersistsCompleteEventsPrefetchedBeforeLimitBackpressure(t *testing.
 	want := []string{"already-parked", "prefetched-one", "prefetched-two"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("persisted events = %v, want %v", got, want)
+	}
+}
+
+func TestOrdinaryStopDoesNotPromotePrefetchedLinesToLimitBacklog(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "a4223105")
+	if err := queue.enqueue("ordinary-backlog"); err != nil {
+		t.Fatalf("seed ordinary queue: %v", err)
+	}
+	stopCh := make(chan struct{})
+	s := newWatcherSupervisor()
+	s.observeTargetLimit = func(string) (bool, error) {
+		close(stopCh)
+		return false, nil
+	}
+	w := &taskWatcher{taskID: "a4223105", sup: s, queue: queue, stopCh: stopCh}
+	w.consumeLines(strings.NewReader("first\nsecond\nthird\n"), &tailBuffer{})
+
+	if got := queue.pendingCount(); got != 2 {
+		t.Fatalf("ordinary stop persisted prefetched events as limit backlog: pending=%d, want seed + first only", got)
+	}
+	if queue.retainLimitParked() {
+		t.Fatal("ordinary stop created a usage-limit retention marker")
+	}
+}
+
+func TestAgedBacklogObservesTargetLimitBeforeExpiringHead(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "limited-aged", readyFakeBackend{session.NewFakeBackend()}, true, session.Running)
+	manager.setLimitReached(inst, time.Now().Add(time.Hour))
+	if err := task.AddTask(task.Task{
+		ID: "a4223106", Name: "watch-aged-backlog", Prompt: "event: {{line}}",
+		WatchCmd: "watch.sh", TargetSession: "limited-aged", ProjectPath: repoPath,
+		Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	queue := newEventQueue(t.TempDir(), "a4223106")
+	queue.now = func() time.Time { return time.Now().Add(-73 * time.Hour) }
+	if err := queue.enqueue("aged-distinct-event"); err != nil {
+		t.Fatalf("seed aged queue: %v", err)
+	}
+	s := newWatcherSupervisor()
+	s.observeTargetLimit = manager.observeTaskTargetLimit
+	s.deliver = func(string, string) error { return errTargetLimitReached }
+	s.queueMaxAge = 72 * time.Hour
+	s.drainBaseBackoff = time.Hour
+	stopCh := make(chan struct{})
+	w := &taskWatcher{taskID: "a4223106", sup: s, queue: queue, stopCh: stopCh, draining: true}
+	w.wg.Add(1)
+	delivered := make(chan struct{})
+	originalDeliver := s.deliver
+	s.deliver = func(taskID, line string) error {
+		close(delivered)
+		return originalDeliver(taskID, line)
+	}
+	go w.drainLoop()
+	select {
+	case <-delivered:
+	case <-time.After(time.Second):
+		close(stopCh)
+		w.wg.Wait()
+		t.Fatal("aged event expired before target limit observation")
+	}
+	close(stopCh)
+	w.wg.Wait()
+	if got := queue.pendingCount(); got != 1 {
+		t.Fatalf("aged limit-held event was consumed: pending=%d", got)
+	}
+	if !queue.retainLimitParked() {
+		t.Fatal("aged limit-held backlog was not durably protected")
 	}
 }

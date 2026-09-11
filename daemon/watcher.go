@@ -574,8 +574,11 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 func (w *taskWatcher) consumeLines(r io.Reader, tail *tailBuffer) {
 	br := bufio.NewReaderSize(r, maxWatchLineBytes)
 	for {
-		if !w.waitForLimitQueueCapacity() {
-			w.persistBufferedLimitEvents(br, tail)
+		proceed, stoppedDuringLimitBackpressure := w.waitForLimitQueueCapacity()
+		if !proceed {
+			if stoppedDuringLimitBackpressure {
+				w.persistBufferedLimitEvents(br, tail)
+			}
 			return
 		}
 		chunk, err := br.ReadSlice('\n')
@@ -664,13 +667,7 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	// PURPOSE — enqueue refuses unknown state, so queue-routing would only
 	// drop the event, and delivering beats FIFO. Cost: ordering, not loss.
 	if w.queue != nil && w.queue.pendingCountFresh() > 0 {
-		limitParked, err := w.sup.observeTargetLimit(w.taskID)
-		if err != nil {
-			// Retention is a safety decision: an unavailable observation is
-			// unknown, never permission to evict a distinct event.
-			limitParked = true
-			log.WarningLog.Printf("watch task %s: cannot observe target usage-limit state; protecting backlog until delivery succeeds: %v", w.taskID, err)
-		}
+		limitParked := w.targetLimitRequiresRetention()
 		w.enqueueEvent(line, tail, limitParked)
 		return
 	}
@@ -848,7 +845,7 @@ func deliverWatchEvent(taskID, line string) error {
 	if strings.TrimSpace(prompt) == "" {
 		return notAttempted(fmt.Errorf("event rendered an empty prompt (line %q)", line))
 	}
-	status, err := deliverTaskPrompt(t, prompt, true)
+	status, promptRetained, err := deliverTaskPromptOutcome(t, prompt, true)
 	if err != nil {
 		return err
 	}
@@ -865,7 +862,7 @@ func deliverWatchEvent(taskID, line string) error {
 	if _, err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
-	if status == TaskStatusLimitParked && task.CanonicalTargetSession(t.TargetSession) != "" {
+	if status == TaskStatusLimitParked && !promptRetained {
 		// A targeted watch owns distinct external data, so its queue must replay.
 		// A create-per-run watch already stored this prompt on the one parked
 		// session; queueing it too would create duplicate sessions on every retry.
