@@ -638,6 +638,57 @@ func TestUpdateTaskStatusIfLastRunAtCannotOverwriteNewerRun(t *testing.T) {
 		"the older interruption must not replace the newer run's status")
 }
 
+func TestTaskRunStartCannotOverwriteAnOutcomeThatWinsThePublicationRace(t *testing.T) {
+	older := time.Date(2026, 9, 11, 8, 59, 0, 0, time.UTC)
+	runAt := older.Add(time.Minute)
+
+	for _, tc := range []struct {
+		name         string
+		outcomeFirst bool
+	}{
+		{name: "start lands first"},
+		{name: "outcome lands first", outcomeFirst: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTestTasks(t, []Task{{
+				ID: "w1", Name: "Watcher", Prompt: "p", WatchCmd: "tail -f x",
+				ProjectPath: "/tmp", Enabled: true, LastRunAt: &older, LastRunStatus: "started",
+			}})
+
+			if tc.outcomeFirst {
+				_, applied, err := UpdateTaskRunOutcome("w1", runAt, "interrupted: agent runtime lost")
+				require.NoError(t, err)
+				require.True(t, applied)
+				_, applied, err = UpdateTaskRunStart("w1", runAt, "started")
+				require.NoError(t, err)
+				assert.False(t, applied, "a delayed start writer must not reopen a terminal outcome")
+			} else {
+				_, applied, err := UpdateTaskRunStart("w1", runAt, "started")
+				require.NoError(t, err)
+				require.True(t, applied)
+				_, applied, err = UpdateTaskRunOutcome("w1", runAt, "interrupted: agent runtime lost")
+				require.NoError(t, err)
+				require.True(t, applied)
+			}
+
+			got, err := GetTask("w1")
+			require.NoError(t, err)
+			require.NotNil(t, got.LastRunAt)
+			assert.True(t, got.LastRunAt.Equal(runAt))
+			assert.Equal(t, "interrupted: agent runtime lost", got.LastRunStatus)
+		})
+	}
+
+	newer := runAt.Add(time.Minute)
+	setupTestTasks(t, []Task{{
+		ID: "w1", Name: "Watcher", Prompt: "p", WatchCmd: "tail -f x",
+		ProjectPath: "/tmp", Enabled: true, LastRunAt: &newer, LastRunStatus: "started",
+	}})
+	_, applied, err := UpdateTaskRunOutcome("w1", runAt, "interrupted: agent runtime lost")
+	require.NoError(t, err)
+	assert.False(t, applied, "an older outcome must not replace a newer run")
+}
+
 // TestUpdateTaskStatus_NotFound verifies the not-found error path that the
 // runner / TUI rely on to log a meaningful failure when a task is deleted
 // mid-run.

@@ -339,7 +339,7 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 	// Update task status. Use UpdateTaskStatus so we don't re-validate Program
 	// — the task already ran via deliverTaskPrompt, and the stored Program
 	// value may predate current enum validation (see #664).
-	if _, err := task.UpdateTaskStatus(taskID, &runAt, status); err != nil {
+	if _, _, err := task.UpdateTaskRunStart(taskID, runAt, status); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 	return nil

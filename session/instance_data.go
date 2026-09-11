@@ -98,6 +98,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// reintroduce the bug it fixes — a session whose run is live must read as active
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
+	data.TaskRunAt = i.taskRunAt
 
 	// Persist each tab so the full local agent+shell tab list survives a restart
 	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
@@ -322,6 +323,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
 		taskRunActive:            data.TaskRunActive,
+		taskRunAt:                data.TaskRunAt,
 		limitResetAt:             data.LimitResetAt,
 		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,

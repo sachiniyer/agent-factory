@@ -76,14 +76,14 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 // this boundary reset and before it returns; the post-success reset retires
 // those in-memory observations, while this settlement makes the fence safe.
 func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *session.Instance) error {
-	taskID, title, interrupted := instance.InterruptTaskRunAtRestoreBoundary()
+	run, interrupted := instance.InterruptTaskRunAtRestoreBoundary()
 	m.noteRuntimeReplaced(repoID, instance)
 	settlementErr := m.persistSettlement(repoID, key, instance)
 	// The session settlement comes first. A task-file lock or disk fault must not
 	// keep predecessor-owned remote-loss evidence live after the replacement is
 	// already running, or a restart plus one blip could re-provision it again.
-	if interrupted && taskID != "" {
-		m.recordInterruptedTaskRun(taskID, title, instance.CreatedAt)
+	if interrupted && run.TaskID != "" {
+		m.recordInterruptedTaskRun(run)
 	}
 	if settlementErr != nil {
 		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", settlementErr)
@@ -97,27 +97,72 @@ func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *sessio
 // received the prompt, while the replacement did not. Limit resumes arrive as
 // OpRespawning and are excluded because they re-deliver their queued prompt.
 //
-// runAt is the exact timestamp the successful delivery wrote to LastRunAt. The
-// conditional update changes the status only while that identity still owns the
-// row; a newer concurrent run keeps both its timestamp and its status.
-func (m *Manager) recordInterruptedTaskRun(taskID, title string, runAt time.Time) {
-	updated, applied, err := task.UpdateTaskStatusIfLastRunAt(taskID, runAt, TaskStatusInterrupted)
+// A current record carries an exact run timestamp minted before publication.
+// The outcome writer can therefore close the small race where recovery observes
+// the session before its delivery caller records "started", while refusing any
+// later timestamp. A pre-field record takes the conservative compatibility path
+// below: it claims the current task timestamp only when it postdates this
+// session's creation and no known session or pending create can be its successor,
+// then uses an exact CAS so a concurrent delivery still wins.
+func (m *Manager) recordInterruptedTaskRun(run session.TaskRunIdentity) {
+	var (
+		updated task.Task
+		applied bool
+		err     error
+	)
+	if run.RunAt.IsZero() {
+		var legacyRunAt time.Time
+		legacyRunAt, applied, err = m.legacyTaskRunAt(run)
+		if err == nil && applied {
+			updated, applied, err = task.UpdateTaskStatusIfLastRunAt(run.TaskID, legacyRunAt, TaskStatusInterrupted)
+		}
+	} else {
+		updated, applied, err = task.UpdateTaskRunOutcome(run.TaskID, run.RunAt, TaskStatusInterrupted)
+	}
 	if err != nil {
 		m.warn().Printf(
 			"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, skipped on_complete, and left the session in place for inspection; could not record last_run_status %q: %v",
-			taskID, title, TaskStatusInterrupted, err)
+			run.TaskID, run.Title, TaskStatusInterrupted, err)
 		return
 	}
 	if !applied {
 		m.warn().Printf(
 			"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, skipped on_complete, and left the session in place for inspection; did not replace last_run_status because the task row does not identify this run",
-			taskID, title)
+			run.TaskID, run.Title)
 		return
 	}
 	m.publishEvent(agentproto.EventTaskUpdated, updated)
 	m.warn().Printf(
 		"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, recorded last_run_status %q, skipped on_complete, and left the session in place for inspection",
-		taskID, title, TaskStatusInterrupted)
+		run.TaskID, run.Title, TaskStatusInterrupted)
+}
+
+func (m *Manager) legacyTaskRunAt(run session.TaskRunIdentity) (time.Time, bool, error) {
+	m.mu.Lock()
+	for _, candidate := range m.instances {
+		if candidate.ID != run.SessionID && candidate.TaskID == run.TaskID &&
+			!candidate.CreatedAt.Before(run.CreatedAt) {
+			m.mu.Unlock()
+			return time.Time{}, false, nil
+		}
+	}
+	for _, candidate := range m.pendingCreates {
+		if candidate.ID != run.SessionID && candidate.TaskID == run.TaskID &&
+			!candidate.CreatedAt.Before(run.CreatedAt) {
+			m.mu.Unlock()
+			return time.Time{}, false, nil
+		}
+	}
+	m.mu.Unlock()
+
+	stored, err := task.GetTask(run.TaskID)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if stored.LastRunAt == nil || stored.LastRunAt.Before(run.CreatedAt) {
+		return time.Time{}, false, nil
+	}
+	return *stored.LastRunAt, true, nil
 }
 
 func (m *Manager) persistRuntimeReplacement(repoID, title string, instance *session.Instance) {

@@ -101,6 +101,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// the completed Instance inherits below, so clients upsert rather than replacing
 	// one identity with another.
 	createdAt := time.Now()
+	taskRunAt := time.Time{}
+	if req.TaskID != "" {
+		taskRunAt = createdAt
+	}
 	pending := session.InstanceData{
 		ID:            session.NewInstanceID(),
 		TaskID:        req.TaskID,
@@ -110,6 +114,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		Liveness:      session.LiveReady,
 		InFlightOp:    session.OpCreating,
 		TaskRunActive: req.TaskID != "",
+		TaskRunAt:     taskRunAt,
 		CreatedAt:     createdAt,
 		UpdatedAt:     createdAt,
 		Prompt:        req.Prompt,
@@ -163,6 +168,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		CreatedAt:                      pending.CreatedAt,
 		Title:                          title,
 		TaskID:                         req.TaskID,
+		TaskRunAt:                      pending.TaskRunAt,
 		Path:                           workspace,
 		Program:                        req.Program,
 		Account:                        req.Account,
