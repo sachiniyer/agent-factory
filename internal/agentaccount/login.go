@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -72,6 +73,67 @@ func LoginAgents() []string {
 // name is built).
 func LoginSessionName(agent, name string) string {
 	return "af-login-" + agent + "-" + name
+}
+
+// loginTmuxPrefix mirrors session/tmux.TmuxPrefix. NewTmuxSession prepends it to
+// the sanitized title; this package reproduces that so it can derive the exact
+// tmux name a login pane ends up with WITHOUT importing session/tmux, which would
+// pull a heavy dependency tree (log, credscrub, proctree, systemdunit, terminal,
+// agentproto, ...) into this deliberately-lightweight package — and into every
+// importer of it.
+//
+// The mirror is held equal to the real value by
+// TestLoginTmuxSessionName_MatchesTmuxSanitization, which lives in this package's
+// test file and CAN import session/tmux. That is the same mirror-plus-drift-test
+// pattern accountCredentialArtifacts uses to shadow session's agentCredentialFiles
+// across the one-way import boundary session/agentaccount sits on. If
+// session/tmux.TmuxPrefix ever changes, the drift test goes red here rather than
+// letting a silent collision slip through registration.
+const loginTmuxPrefix = "af_"
+
+// loginTmuxStableRune mirrors session/tmux.stableTmuxNameRune. See loginTmuxPrefix
+// for why this is a mirror rather than an import, and the drift test for why a
+// stale mirror is caught.
+func loginTmuxStableRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || r == '_' || r == '-'
+}
+
+// LoginTmuxSessionName returns the exact tmux session name a login pane for
+// (agent, name) ends up with — i.e. what
+// tmux.NewTmuxSession(LoginSessionName(agent, name), program).SanitizedName()
+// returns.
+//
+// It exists so registration can detect when two distinct account names collapse
+// to ONE tmux login-pane name after session/tmux's sanitization, and refuse the
+// second before it ever shares a pane with the first. toTmuxName folds every rune
+// that is not a letter, number, mark, '_' or '-' to '_'. nameRule admits '.', '_'
+// and '-' as its only punctuation, and among those '.' is the ONLY rune that
+// folds — so for names registration accepts, the collision set is precisely two
+// names that differ only by '.' vs '_' in corresponding positions (e.g. proj.test
+// and proj_test). Without a guard, both register to distinct directories yet
+// adopt() — which keys pane reuse on the sanitized tmux name — would hand a
+// login for the second account to the first account's already-running pane, and
+// the credential would land in the first account's directory while the CLI
+// reported Reused=true for the second.
+//
+// Deriving the collision key here rather than in session/tmux keeps the guard at
+// the registration chokepoint exactly as refuseCaseCollision sits, and keeps this
+// package free of a heavy import. The derivation is a faithful mirror of the
+// title fold toTmuxName applies (-whitespace, then non-stable → '_'), plus the
+// 'af_' prefix NewTmuxSession prepends; the drift test pins it to the real thing.
+func LoginTmuxSessionName(agent, name string) string {
+	title := LoginSessionName(agent, name)
+	folded := strings.Map(func(r rune) rune {
+		switch {
+		case loginTmuxStableRune(r):
+			return r
+		case unicode.IsSpace(r):
+			return -1
+		default:
+			return '_'
+		}
+	}, title)
+	return loginTmuxPrefix + folded
 }
 
 // accountCredentialArtifacts is the file the AGENT writes when its login

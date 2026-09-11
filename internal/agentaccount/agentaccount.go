@@ -130,6 +130,20 @@ func Register(home, agent, name string) (string, error) {
 	if err := refuseCaseCollision(home, agent, name); err != nil {
 		return "", err
 	}
+	// The tmux-sanitization collision is the punctuation analogue of the
+	// case-folding hazard above, and they sit together for the same reason: nameRule
+	// admits both '.' and '_', but the login-pane tmux name sanitizes '.' to '_'
+	// (see LoginTmuxSessionName), so two accounts such as proj.test and proj_test
+	// register to distinct directories yet share one tmux login-pane name. adopt
+	// keys reuse on that sanitized name, so a login for the second would be handed
+	// the first account's already-running pane and the credential would be written
+	// into the first account's directory while the CLI reported Reused=true for the
+	// second — the silent wrong-account outcome this feature exists to prevent.
+	// Refusing the second registration, exactly as the case guard refuses a
+	// case-variant, makes the pair impossible going forward.
+	if err := refuseSanitizationCollision(home, agent, name); err != nil {
+		return "", err
+	}
 	// BEFORE MkdirAll, which follows an ancestor symlink silently and would create
 	// the account inside its target before any check below could object.
 	if err := refuseSymlinkedAncestor(home, dir); err != nil {
@@ -386,6 +400,65 @@ func refuseCaseCollision(home, agent, name string) error {
 					"because macOS and Windows filesystems treat them as one directory and both accounts would share "+
 					"a single identity",
 				name, other, agent)
+		}
+	}
+	return nil
+}
+
+// refuseSanitizationCollision rejects a name whose login-pane tmux session name
+// matches an existing account's for the same agent — the '.' vs '_' analogue of
+// refuseCaseCollision.
+//
+// toTmuxName (session/tmux/session.go) folds '.' to '_'; nameRule admits both, so
+// proj.test and proj_test are distinct registered accounts that collapse to one
+// tmux login-pane name. adopt keys pane reuse on that sanitized name plus the
+// (account-agnostic) home marker, so the second login would be handed the first
+// account's running pane and the credential would land in the first account's
+// directory while the CLI reported Reused=true for the second. Refusing at
+// registration — the single chokepoint `af accounts add`, `af accounts login` and
+// the daemon's account route all pass through — makes the pair impossible going
+// forward, mirroring how refuseCaseCollision heads off case-folding.
+//
+// Idempotency is load-bearing and subtler than the case guard's. A colliding pair
+// CAN already exist in an install that predates this guard (or reach it through
+// the check-then-act window below), and `af accounts login <an account that
+// already exists>` re-enters Register idempotently: that re-registration MUST
+// succeed or login breaks for an account whose directory is right there. So a
+// name that is ALREADY registered is allowed through regardless of a colliding
+// sibling. The guard refuses only a NEW name that would collide with an existing
+// one.
+//
+// Like refuseCaseCollision this is a check-then-act over List, so two concurrent
+// registrations of a '.'/'_' pair can both pass it before either creates a
+// directory. Unlike the case hazard there is no filesystem fold to serialize the
+// pair (the two names are distinct directories on every platform), and the
+// reserveName O_EXCL is keyed on strings.ToLower(name) — also distinct for the
+// pair — so the race is not closed by the reservation. The residual window
+// requires two simultaneous registrations of names differing only by '.' vs '_',
+// which no workflow guides an operator toward; the steady-state guard is what
+// the bug report recommends and what matches refuseCaseCollision's check half.
+func refuseSanitizationCollision(home, agent, name string) error {
+	existing, err := List(home, agent)
+	if err != nil {
+		return err
+	}
+	// Idempotent re-registration: the account already exists, so login — which
+	// re-enters Register — must still work even if a colliding sibling was
+	// registered before this guard existed.
+	for _, other := range existing {
+		if other == name {
+			return nil
+		}
+	}
+	want := LoginTmuxSessionName(agent, name)
+	for _, other := range existing {
+		if LoginTmuxSessionName(agent, other) == want {
+			return fmt.Errorf(
+				"account %q collides with existing account %q for %s: both derive to the same tmux login-pane name %q "+
+					"because tmux folds \".\" to \"_\", so the two accounts would share one login pane and a login flow "+
+					"for one could write its credential into the other's account directory — rename one of the accounts "+
+					"so it differs by more than \".\" vs \"_\"",
+				name, other, agent, want)
 		}
 	}
 	return nil

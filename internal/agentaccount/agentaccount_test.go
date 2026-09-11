@@ -464,3 +464,155 @@ func TestReserveName_DoesNotPoisonTheNameWhenTheOwnerWriteFails(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "work", string(owner), "a successful registration must record its owner")
 }
+
+// TestRegister_RefusesANameThatCollidesAfterTmuxSanitization is the punctuation
+// analogue of TestRegister_RefusesANameThatDiffersOnlyByCase. nameRule admits
+// both '.' and '_', but tmux sanitization folds '.' to '_', so proj.test and
+// proj_test collapse to one login-pane name. Without a guard a login for the
+// second would be handed the first account's running pane (adopt keys reuse on
+// the sanitized name) and the credential would land in the first account's
+// directory while the CLI reported Reused=true for the second — exactly the
+// silent wrong-account outcome this feature exists to prevent. The registration
+// chokepoint must refuse the second name.
+func TestRegister_RefusesANameThatCollidesAfterTmuxSanitization(t *testing.T) {
+	home := t.TempDir()
+	if _, err := Register(home, "codex", "proj.test"); err != nil {
+		t.Fatalf("register proj.test: %v", err)
+	}
+
+	_, err := Register(home, "codex", "proj_test")
+	if err == nil {
+		t.Fatal("registering a name that folds to an existing account's tmux login name must be refused")
+	}
+	if !strings.Contains(err.Error(), "collides with existing account") {
+		t.Fatalf("the refusal must name the collision, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "proj.test") {
+		t.Fatalf("the refusal must name the conflicting account, got: %v", err)
+	}
+
+	// The refused registration must not have created the account.
+	names, err := List(home, "codex")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(names) != 1 || names[0] != "proj.test" {
+		t.Fatalf("the refused registration must leave the registry untouched, got %v", names)
+	}
+	if _, err := os.Stat(filepath.Join(home, DirName, "codex", "proj_test")); err == nil {
+		t.Fatal("the refused registration created the colliding account directory")
+	}
+
+	// The collision is symmetric: registering in the other order refuses too.
+	other := t.TempDir()
+	if _, err := Register(other, "codex", "proj_test"); err != nil {
+		t.Fatalf("register proj_test first: %v", err)
+	}
+	if _, err := Register(other, "codex", "proj.test"); err == nil {
+		t.Fatal("registering proj.test after proj_test must also be refused")
+	}
+}
+
+// TestRegister_TmuxSanitizationGuardAcceptsDistinctNames keeps the guard from
+// over-reaching. Names with dots and underscores that do NOT fold to one tmux
+// name must all register, singly and together.
+func TestRegister_TmuxSanitizationGuardAcceptsDistinctNames(t *testing.T) {
+	home := t.TempDir()
+	// Each folds to a distinct tmux login name: proj.test->proj_test,
+	// proj.deploy->proj_deploy, stage_dev->stage_dev, plain->plain.
+	for _, name := range []string{"proj.test", "proj.deploy", "stage_dev", "plain"} {
+		if _, err := Register(home, "codex", name); err != nil {
+			t.Fatalf("register %q: %v", name, err)
+		}
+	}
+	names, err := List(home, "codex")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(names) != 4 {
+		t.Fatalf("expected 4 distinct accounts, got %v", names)
+	}
+}
+
+// TestRegister_TmuxSanitizationGuardKeepsIdempotentRegistration is the
+// re-registration guarantee: registering the SAME name twice must stay
+// idempotent. refuseSanitizationCollision short-circuits on an exact match, so
+// the guard never turns an ordinary re-registration into a refusal.
+func TestRegister_TmuxSanitizationGuardKeepsIdempotentRegistration(t *testing.T) {
+	home := t.TempDir()
+	if _, err := Register(home, "codex", "proj.test"); err != nil {
+		t.Fatalf("register proj.test: %v", err)
+	}
+	again, err := Register(home, "codex", "proj.test")
+	if err != nil {
+		t.Fatalf("re-registering the same name must stay idempotent: %v", err)
+	}
+	want, err := Dir(home, "codex", "proj.test")
+	if err != nil {
+		t.Fatalf("dir: %v", err)
+	}
+	if again != want {
+		t.Fatalf("re-registration returned %q, want %q", again, want)
+	}
+}
+
+// TestRegister_TmuxSanitizationGuardAllowsALoginForAnExistingCollidingAccount
+// covers the idempotency subtlety that distinguishes this guard from the case
+// guard. A colliding pair CAN pre-date the guard (an install that registered the
+// pair before this fix), and `af accounts login <an account that already exists>`
+// re-enters Register idempotently. That re-registration MUST succeed — or login
+// would break for an account whose directory is already correct — even though a
+// colliding sibling sits beside it. The guard refuses a NEW colliding name; it
+// must not refuse re-use of one already registered.
+//
+// The pair is staged by creating the second account's directory directly, which
+// is the on-disk state a pre-fix install would have reached; List then reports
+// both, and the short-circuit admits an exact re-registration of either.
+func TestRegister_TmuxSanitizationGuardAllowsALoginForAnExistingCollidingAccount(t *testing.T) {
+	home := t.TempDir()
+	if _, err := Register(home, "codex", "proj.test"); err != nil {
+		t.Fatalf("register proj.test: %v", err)
+	}
+	// Stage the colliding sibling as a pre-existing account: a real directory
+	// that List reports, but never passed through the (now-existing) guard.
+	collidingDir, err := Dir(home, "codex", "proj_test")
+	if err != nil {
+		t.Fatalf("dir: %v", err)
+	}
+	if err := os.MkdirAll(collidingDir, dirMode); err != nil {
+		t.Fatalf("stage pre-existing colliding account: %v", err)
+	}
+
+	names, err := List(home, "codex")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	// Precondition: the colliding pair really is there together.
+	if !containsName(names, "proj.test") || !containsName(names, "proj_test") {
+		t.Fatalf("precondition: expected both colliding accounts present, got %v", names)
+	}
+
+	// Re-registering the existing colliding accounts must be idempotent, not a
+	// refusal. This is the path `af accounts login` takes for an account that
+	// already exists.
+	if _, err := Register(home, "codex", "proj_test"); err != nil {
+		t.Fatalf("re-registering an existing colliding account must be idempotent so login still works, got: %v", err)
+	}
+	if _, err := Register(home, "codex", "proj.test"); err != nil {
+		t.Fatalf("re-registering proj.test after a pre-existing collision must be idempotent, got: %v", err)
+	}
+
+	// A NEW name that does NOT collide must still be accepted alongside the pair.
+	if _, err := Register(home, "codex", "proj.deploy"); err != nil {
+		t.Fatalf("registering a non-colliding name alongside a colliding pair must be accepted: %v", err)
+	}
+}
+
+func containsName(names []string, want string) bool {
+	for _, n := range names {
+		if n == want {
+			return true
+		}
+	}
+	return false
+}

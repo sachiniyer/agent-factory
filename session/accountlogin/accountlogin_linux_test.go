@@ -645,3 +645,104 @@ func TestLoginDoesNotAdoptAnotherHomesPane(t *testing.T) {
 		t.Fatal("home B's Stop killed home A's login pane — a pane home B never owned")
 	}
 }
+
+// TestLoginRefusesADotUnderscoreCollisionRatherThanAdoptingTheWrongPane is the
+// same-home punctuation hazard that the cross-home marker guard cannot reach:
+// two accounts for ONE agent whose names differ only by '.' vs '_' (proj.test
+// and proj_test) both register to distinct directories but collapse to ONE tmux
+// login-pane name, because toTmuxName folds '.' to '_'. adopt keys pane reuse on
+// that sanitized name plus the (account-agnostic, same-home) AF_HOME marker, so
+// before the fix a login for proj_test was handed proj.test's already-running
+// pane — the operator's credential then landed in proj.test's directory while
+// the CLI reported Reused=true for proj_test (#3835).
+//
+// The registration guard (agentaccount.refuseSanitizationCollision) refuses the
+// second name before a pane is ever created, so the operator gets a collision
+// error naming the conflicting account instead of a silent wrong-pane attach.
+// This asserts the fix where it is decidable: through the production supervisor
+// Start path on a real tmux server, with proj.test's pane left live so the
+// pre-fix adopt path would have found it.
+func TestLoginRefusesADotUnderscoreCollisionRatherThanAdoptingTheWrongPane(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	binDir := t.TempDir()
+	writeBlockingAgentFixture(t, binDir, "codex")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	supervisor := New()
+	t.Cleanup(supervisor.Stop)
+	ctx := context.Background()
+
+	// proj.test opens and holds a live login pane — the precondition for the
+	// pre-fix collision, since adopt only finds a pane that ProbeSession can see.
+	first, err := supervisor.Start(ctx, Request{Home: home, Agent: "codex", Name: "proj.test"})
+	if err != nil {
+		t.Fatalf("start proj.test login pane: %v", err)
+	}
+	if first.Reused {
+		t.Fatal("the first login reported it reused a pane")
+	}
+	if !supervisor.Live("codex", "proj.test") {
+		t.Fatal("proj.test's login pane is not live right after a successful start")
+	}
+
+	// proj_test folds to the same tmux login-pane name. This must be REFUSED at
+	// registration rather than returning Reused=true against proj.test's pane.
+	second, err := supervisor.Start(ctx, Request{Home: home, Agent: "codex", Name: "proj_test"})
+	if err == nil {
+		t.Fatal("a login for proj_test was accepted alongside a live proj.test login " +
+			"instead of being refused — the dot/underscore collision was not caught")
+	}
+	if second.Reused {
+		t.Fatal("the refused proj_test login was handed proj.test's pane (Reused=true) " +
+			"instead of being refused before any pane adoption")
+	}
+	if !strings.Contains(err.Error(), "collides with existing account") {
+		t.Fatalf("the refusal must name the collision, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "proj.test") {
+		t.Fatalf("the refusal must name the conflicting account proj.test, got: %v", err)
+	}
+
+	// proj.test's pane must still be live and untouched — the refused login
+	// neither adopted it nor left a competing pane behind.
+	if !supervisor.Live("codex", "proj.test") {
+		t.Fatal("proj.test's login pane did not survive the refused proj_test login")
+	}
+	// And proj_test must not have been tracked as a login pane at all.
+	if supervisor.Live("codex", "proj_test") {
+		t.Fatal("the refused proj_test login left a tracked pane behind")
+	}
+}
+
+// TestLoginDoesNotCollideADotUnderscorePairAcrossAgents keeps the guard scoped
+// per agent. The login-pane name carries the agent, so codex/proj.test and
+// claude/proj.test derive to distinct tmux names and must NOT be refused for
+// colliding — the collision is within one agent's namespace, exactly as
+// refuseCaseCollision is.
+func TestLoginDoesNotCollideADotUnderscorePairAcrossAgents(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	binDir := t.TempDir()
+	writeBlockingAgentFixture(t, binDir, "codex")
+	writeBlockingAgentFixture(t, binDir, "claude")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	supervisor := New()
+	t.Cleanup(supervisor.Stop)
+	ctx := context.Background()
+	if _, err := supervisor.Start(ctx, Request{Home: home, Agent: "codex", Name: "proj.test"}); err != nil {
+		t.Fatalf("start codex/proj.test: %v", err)
+	}
+	// A same-named account for a DIFFERENT agent must start its own pane, not be
+	// refused as a collision.
+	other, err := supervisor.Start(ctx, Request{Home: home, Agent: "claude", Name: "proj.test"})
+	if err != nil {
+		t.Fatalf("a login for a different agent with the same name must not be refused: %v", err)
+	}
+	if other.Reused {
+		t.Fatal("claude/proj.test reused codex/proj.test's pane; the agent segment must keep them apart")
+	}
+}
