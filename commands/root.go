@@ -17,6 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
@@ -205,6 +206,9 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			"structural keys config cannot touch — are listed last. Contextual pane\n" +
 			"actions such as pane_prev/pane_next are included; their default arrow keys\n" +
 			"apply only while a workspace pane has focus.\n\n" +
+			"When a user rebind takes another action's default, that action has no key and\n" +
+			"SOURCE names the taker. The JSON row likewise has no keys and appends a\n" +
+			"suppressed_by list naming the user-rebound action.\n\n" +
 			"Key values use config spellings you can paste into [keys]. With --json,\n" +
 			"bindings are wrapped in {data,error}; keys/default keep those spellings.",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -231,7 +235,11 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 				return jsonWrapError(cmd, asJSON, err)
 			}
 			if asJSON {
-				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(infos))
+				rows := make([]keysJSONBinding, len(infos))
+				for i, info := range infos {
+					rows[i] = keysJSONBinding{BindingInfo: info}
+				}
+				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(rows))
 			}
 
 			// SOURCE only annotates the rows that carry information: fixed
@@ -243,19 +251,50 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 0, 3, ' ', 0)
 			fmt.Fprintln(w, "ACTION\tKEYS\tSOURCE")
 			for _, info := range infos {
-				action, source := info.Action, ""
+				action, keyList, source := info.Action, strings.Join(info.Keys, ", "), ""
+				if info.Action == "" {
+					action = "-"
+				}
 				switch {
+				case len(info.SuppressedBy) > 0:
+					source = fmt.Sprintf("taken by %s", strings.Join(info.SuppressedBy, ", "))
 				case info.Action == "":
-					action, source = "-", "fixed"
+					source = "fixed"
 				case info.Rebound:
 					source = fmt.Sprintf("rebound (default: %s)", strings.Join(info.Default, ", "))
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\n", action, strings.Join(info.Keys, ", "), source)
+				if keyList == "" && len(info.SuppressedBy) > 0 {
+					keyList = "—"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\n", action, keyList, source)
 			}
 			return w.Flush()
 		},
 	}
 )
+
+// keysJSONBinding preserves the five established BindingInfo members exactly
+// as encoded, then appends suppressed_by only for a row whose defaults yielded
+// to user bindings. Re-encoding through a map would alphabetize the existing
+// public fields (#4221).
+type keysJSONBinding struct {
+	keys.BindingInfo
+}
+
+func (b keysJSONBinding) MarshalJSON() ([]byte, error) {
+	object, err := json.Marshal(b.BindingInfo)
+	if err != nil {
+		return nil, err
+	}
+	if len(b.SuppressedBy) == 0 {
+		return object, nil
+	}
+	suppressedBy, err := json.Marshal(b.SuppressedBy)
+	if err != nil {
+		return nil, err
+	}
+	return session.AppendJSONMember(object, "suppressed_by", suppressedBy)
+}
 
 type Options struct {
 	Version string

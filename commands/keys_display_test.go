@@ -90,6 +90,96 @@ func TestKeysDisplayConfigRoundTrip(t *testing.T) {
 	}
 }
 
+func TestKeysDisplayReportsSuppressedDefaults(t *testing.T) {
+	tempAFHome(t)
+	path := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "config.toml")
+	if err := os.WriteFile(path, []byte(`[keys]
+quit = "Q"
+new = "c"
+up = ["u", "ctrl+p"]
+tasks = "ctrl+t"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(jsonOutput bool) string {
+		t.Helper()
+		var out bytes.Buffer
+		keysCmd.SetOut(&out)
+		if err := keysCmd.Flags().Set("json", fmt.Sprint(jsonOutput)); err != nil {
+			t.Fatal(err)
+		}
+		if err := keysCmd.RunE(keysCmd, nil); err != nil {
+			t.Fatal(err)
+		}
+		keysCmd.SetOut(nil)
+		return out.String()
+	}
+	t.Cleanup(func() {
+		keysCmd.SetOut(nil)
+		_ = keysCmd.Flags().Set("json", "false")
+	})
+
+	textOutput := run(false)
+	for action, want := range map[string]string{
+		"limit_retry":    "limit_retry — taken by new",
+		"switch_project": "switch_project — taken by up",
+	} {
+		var got string
+		for _, line := range strings.Split(textOutput, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) > 0 && fields[0] == action {
+				got = strings.Join(fields, " ")
+				break
+			}
+		}
+		if got != want {
+			t.Errorf("af keys %s row = %q, want %q\n%s", action, got, want, textOutput)
+		}
+	}
+
+	jsonOutput := run(true)
+	var envelope struct {
+		Data []struct {
+			Action       string   `json:"action"`
+			Keys         []string `json:"keys"`
+			SuppressedBy []string `json:"suppressed_by"`
+		} `json:"data"`
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(jsonOutput), &envelope); err != nil {
+		t.Fatalf("af keys --json must return an envelope: %v\n%s", err, jsonOutput)
+	}
+	if string(envelope.Error) != "null" {
+		t.Fatalf("af keys --json error = %s, want null", envelope.Error)
+	}
+	rows := make(map[string]struct {
+		keys         []string
+		suppressedBy []string
+	})
+	for _, row := range envelope.Data {
+		rows[row.Action] = struct {
+			keys         []string
+			suppressedBy []string
+		}{row.Keys, row.SuppressedBy}
+	}
+	for action, taker := range map[string]string{"limit_retry": "new", "switch_project": "up"} {
+		row := rows[action]
+		if len(row.keys) != 0 || len(row.suppressedBy) != 1 || row.suppressedBy[0] != taker {
+			t.Errorf("af keys --json %s = keys %v, suppressed_by %v; want no keys, suppressed_by [%s]", action, row.keys, row.suppressedBy, taker)
+		}
+	}
+
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, []byte(jsonOutput)); err != nil {
+		t.Fatal(err)
+	}
+	wantOrderedRow := `{"action":"limit_retry","description":"retry","keys":[],"default":["c"],"rebound":false,"suppressed_by":["new"]}`
+	if !strings.Contains(compact.String(), wantOrderedRow) {
+		t.Fatalf("suppressed_by must be appended after every existing row member; want %s in:\n%s", wantOrderedRow, jsonOutput)
+	}
+}
+
 func TestKeysJSONConfigErrorEnvelope(t *testing.T) {
 	tempAFHome(t)
 	path := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "config.toml")
