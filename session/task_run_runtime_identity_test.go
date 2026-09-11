@@ -96,6 +96,20 @@ func TestTaskRunEndsOnlyForRuntimeThatReceivedPrompt(t *testing.T) {
 			"positive transaction-scoped non-delivery promises the replacement the pending prompt")
 	})
 
+	t.Run("ordinary limit-parked load replacement preserves the queued run", func(t *testing.T) {
+		inst := &Instance{
+			TaskID:        "task-id",
+			Prompt:        "run the scheduled audit",
+			liveness:      LiveLimitReached,
+			taskRunActive: true,
+		}
+
+		_, interrupted := inst.InterruptTaskRunAtRuntimeReplacement()
+		require.False(t, interrupted)
+		require.True(t, inst.TaskRunActive(),
+			"the limit scheduler will deliver the stored prompt to the replacement runtime")
+	})
+
 	t.Run("ambiguous account-swap delivery interrupts the run", func(t *testing.T) {
 		inst := &Instance{
 			TaskID:        "task-id",

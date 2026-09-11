@@ -499,6 +499,16 @@ func TestWatchArming_StaleWatcherAfterAFailedReloadIsNotArmed(t *testing.T) {
 	assert.Equal(t, task.ArmingNotArmed, supervisor.armingFor(renamed))
 }
 
+func TestWatcherSignatureIncludesTaskGeneration(t *testing.T) {
+	before := watchTask("reused01", "sleep 30", t.TempDir())
+	before.GenerationID = "generation-before-remove"
+	after := before
+	after.GenerationID = "generation-after-readd"
+
+	assert.NotEqual(t, watcherSignature(before), watcherSignature(after),
+		"a watcher owned by a removed task generation must not supervise its re-added namesake")
+}
+
 // TestWatchArming_DuringShutdownIsUnknown is the twin of the scheduler resetting
 // its started latch in Stop. The supervisor's Stop EMPTIES the watcher map while
 // the control socket deliberately stays open to drain in-flight deliveries, so a
