@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -30,16 +29,16 @@ func reportCreatedSession(data *session.InstanceData, prompt string) error {
 	if err != nil {
 		return err
 	}
-	var result map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &result); err != nil {
+	warningJSON, err := json.Marshal(warning)
+	if err != nil {
 		return err
 	}
-	result["warning"], err = json.Marshal(warning)
+	result, err := session.AppendJSONMember(raw, "warning", warningJSON)
 	if err != nil {
 		return err
 	}
 	if !envelopeOutput {
-		fmt.Fprintln(os.Stderr, "Warning: "+warning)
+		fmt.Fprintln(warnWriter, "Warning: "+warning)
 	}
-	return jsonOut(result)
+	return jsonOut(json.RawMessage(result))
 }

@@ -1,8 +1,8 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -22,8 +22,12 @@ func TestSessionsCreateReportsPromptUncertainty(t *testing.T) {
 		}
 		t.Run(mode, func(t *testing.T) {
 			previousEnvelope := envelopeOutput
+			previousWarnWriter := warnWriter
 			envelopeOutput = envelope
-			t.Cleanup(func() { envelopeOutput = previousEnvelope })
+			t.Cleanup(func() {
+				envelopeOutput = previousEnvelope
+				warnWriter = previousWarnWriter
+			})
 			for _, tc := range []struct {
 				name        string
 				status      session.PromptDeliveryStatus
@@ -41,6 +45,8 @@ func TestSessionsCreateReportsPromptUncertainty(t *testing.T) {
 				{"limit_parked", "", "do work", true, false},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
+					var warningOutput bytes.Buffer
+					warnWriter = &warningOutput
 					t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 					repo := t.TempDir()
 					require.NoError(t, exec.Command("git", "init", repo).Run())
@@ -58,11 +64,6 @@ func TestSessionsCreateReportsPromptUncertainty(t *testing.T) {
 						return data, nil
 					}
 					t.Cleanup(func() { createSessionViaDaemon = original })
-					stderr, err := os.CreateTemp(t.TempDir(), "stderr")
-					require.NoError(t, err)
-					originalStderr := os.Stderr
-					os.Stderr = stderr
-					t.Cleanup(func() { os.Stderr = originalStderr; _ = stderr.Close() })
 					out, runErr := runCmdCaptureStdout(t, sessionsCreateCmd, nil)
 					require.NoError(t, runErr, "creation succeeded; uncertainty must not invite blind recreation")
 					require.Equal(t, 1, calls)
@@ -86,10 +87,9 @@ func TestSessionsCreateReportsPromptUncertainty(t *testing.T) {
 					require.Contains(t, projected, "liveness_name")
 					require.Equal(t, "stable-id", got.ID)
 					require.Equal(t, tc.status, got.LastPromptDeliveryStatus)
-					diagnostic, err := os.ReadFile(stderr.Name())
-					require.NoError(t, err)
+					diagnostic := warningOutput.String()
 					if envelope {
-						require.Empty(t, string(diagnostic), "--json must emit only its structured envelope")
+						require.Empty(t, diagnostic, "--json must emit only its structured envelope")
 					}
 					if tc.wantWarning {
 						require.NotEmpty(t, got.Warning)
@@ -97,12 +97,13 @@ func TestSessionsCreateReportsPromptUncertainty(t *testing.T) {
 						require.Contains(t, got.Warning, "prompt")
 						require.Contains(t, got.Warning, "Inspect")
 						if !envelope {
-							require.Contains(t, string(diagnostic), got.Warning)
+							require.Contains(t, diagnostic, got.Warning)
 						}
 					} else {
 						require.Empty(t, got.Warning)
-						require.False(t, strings.Contains(string(diagnostic), "Warning:"))
+						require.False(t, strings.Contains(diagnostic, "Warning:"))
 					}
+					require.Less(t, strings.Index(string(out), `"title"`), strings.Index(string(out), `"path"`), "adding warning must preserve InstanceData's public field order")
 				})
 			}
 
