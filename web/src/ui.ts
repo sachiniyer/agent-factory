@@ -1885,7 +1885,11 @@ export class AppShell {
 
   /** Retires carried actions before a user-owned transition can recompose them. */
   private dismissCarriedActions(): void {
+    // Dismiss through the owner in the CURRENT composition. A Web/VS Code tab is
+    // not session-first, but its desktop Session actions disclosure can still be
+    // carried open when a phone user selects a terminal tab.
     if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
+    else this.terminalChrome?.menu.dismiss();
   }
 
   /** One user-owned view transition for both appbar tabs and document shortcuts. */
@@ -1910,6 +1914,15 @@ export class AppShell {
   closeTab(index: number): void {
     this.dismissCarriedActions();
     this.actions.closeTab(index);
+  }
+
+  /** A touch pane drop is a user-owned tab transition, but only if a pane accepts it. */
+  private dropTabOnPaneAt(clientX: number, clientY: number, drag: DragPayload): boolean {
+    // Hit-test before dismissal so a release outside both the bar and every pane
+    // remains a cancel. The drop itself can synchronously recompose the active kind.
+    if (!this.actions.paneDropHintAt(clientX, clientY)) return false;
+    this.dismissCarriedActions();
+    return this.actions.dropTabOnPaneAt(clientX, clientY, drag);
   }
 
   /** Keyboard twin of the New tab button, including its per-kind availability. */
@@ -2532,7 +2545,7 @@ export class AppShell {
       if (!held) {
         return; // a tap: the button's own click handler owns it
       }
-      if (!bar.contains(document.elementFromPoint(x, y)) && this.actions.dropTabOnPaneAt(x, y, drag)) {
+      if (!bar.contains(document.elementFromPoint(x, y)) && this.dropTabOnPaneAt(x, y, drag)) {
         return; // landed in a pane: split or replaced
       }
       // Outside the bar is a CANCEL. The mouse path only reorders when the drop lands

@@ -16415,6 +16415,7 @@ var AppShell = class {
   /** Retires carried actions before a user-owned transition can recompose them. */
   dismissCarriedActions() {
     if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
+    else this.terminalChrome?.menu.dismiss();
   }
   /** One user-owned view transition for both appbar tabs and document shortcuts. */
   switchView(view) {
@@ -16433,6 +16434,12 @@ var AppShell = class {
   closeTab(index) {
     this.dismissCarriedActions();
     this.actions.closeTab(index);
+  }
+  /** A touch pane drop is a user-owned tab transition, but only if a pane accepts it. */
+  dropTabOnPaneAt(clientX, clientY, drag) {
+    if (!this.actions.paneDropHintAt(clientX, clientY)) return false;
+    this.dismissCarriedActions();
+    return this.actions.dropTabOnPaneAt(clientX, clientY, drag);
   }
   /** Keyboard twin of the New tab button, including its per-kind availability. */
   openNewTabPicker(shortcutReturn) {
@@ -16937,7 +16944,7 @@ var AppShell = class {
       if (!held) {
         return;
       }
-      if (!bar.contains(document.elementFromPoint(x, y)) && this.actions.dropTabOnPaneAt(x, y, drag)) {
+      if (!bar.contains(document.elementFromPoint(x, y)) && this.dropTabOnPaneAt(x, y, drag)) {
         return;
       }
       const r = bar.getBoundingClientRect();

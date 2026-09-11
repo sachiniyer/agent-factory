@@ -463,3 +463,66 @@ for (const activation of ["tab Enter", "tab Space", "tab shortcut"] as const) {
     await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
   });
 }
+
+for (const key of ["Enter", "Space"] as const) {
+  test(`phone ${key} dismisses Session actions when entering session-first`, async ({ page, request }) => {
+    const title = process.env.AF_WEB_SESSION_WEB ?? "probe-web";
+    await page.setViewportSize({ width: 1280, height: 844 });
+    const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+    const session = snapshot.data.instances.find((s: { title: string }) => s.title === title);
+    expect(session?.id).toBeTruthy();
+    const webIndex = session.tabs.findIndex((tab: { kind: number }) => tab.kind === 3);
+    expect(webIndex).toBeGreaterThan(0);
+    await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+    await expect(page.locator(".af-term-title")).toHaveText(session.title);
+    await page.locator(`.af-tab[data-tab-index="${webIndex}"]`).click();
+    await expect(page.locator(`.af-tab[data-tab-index="${webIndex}"]`)).toHaveAttribute("aria-selected", "true");
+    await page.setViewportSize({ width: 390, height: 844 });
+    const sessionActions = page.getByRole("button", { name: "Session actions", exact: true, includeHidden: true });
+    await sessionActions.click();
+    await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
+    await page.locator('.af-tab[data-tab-index="0"]').focus();
+    await page.keyboard.press(key);
+    await expect(page.locator(".af-app")).toHaveClass(/af-session-first/);
+    await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+  });
+}
+
+test("phone touch pane drop dismisses carried Session actions before recomposition", async ({ page, request }) => {
+  const title = process.env.AF_WEB_SESSION_WEB ?? "probe-web";
+  const { session, sessionActions } = await carrySessionActionsToPhone(page, request, false, title);
+  const webIndex = session.tabs.findIndex((tab: { kind: number }) => tab.kind === 3);
+  expect(webIndex).toBeGreaterThan(0);
+  const webTab = page.locator(`.af-tab[data-tab-index="${webIndex}"]`);
+  await webTab.scrollIntoViewIfNeeded();
+  const point = await webTab.evaluate((tab) => {
+    const r = tab.getBoundingClientRect();
+    const event = new PointerEvent("pointerdown", {
+      bubbles: true, cancelable: true, pointerId: 42, pointerType: "touch",
+      clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+    });
+    tab.dispatchEvent(event);
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  });
+  await expect(page.locator("body")).toHaveClass(/af-dragging-tab/, { timeout: 2_000 });
+  await page.locator(".af-tabbar").evaluate((bar, { pointerId, from }) => {
+    const pane = document.querySelector<HTMLElement>(".af-term-host .af-pane");
+    if (!pane) throw new Error("focused pane not found");
+    const r = pane.getBoundingClientRect();
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    bar.dispatchEvent(new PointerEvent("pointermove", {
+      bubbles: true, cancelable: true, pointerId, pointerType: "touch",
+      clientX: (from.x + x) / 2, clientY: (from.y + y) / 2,
+    }));
+    bar.dispatchEvent(new PointerEvent("pointermove", {
+      bubbles: true, cancelable: true, pointerId, pointerType: "touch", clientX: x, clientY: y,
+    }));
+    bar.dispatchEvent(new PointerEvent("pointerup", {
+      bubbles: true, cancelable: true, pointerId, pointerType: "touch", clientX: x, clientY: y,
+    }));
+  }, { pointerId: 42, from: point });
+  await expect(page.locator(`.af-tab[data-tab-index="${webIndex}"]`)).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".af-app")).not.toHaveClass(/af-session-first/);
+  await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+});

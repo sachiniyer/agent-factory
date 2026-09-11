@@ -95,18 +95,41 @@ test("phone picker return follows its current desktop owner", () => {
 });
 
 for (const action of ["openTab", "switchTab", "closeTab"] as const) {
-  test(`${action} dismisses carried actions before its tab transition`, () => {
+  for (const sessionFirst of [true, false]) {
+    test(`${action} dismisses carried actions before its tab transition from sessionFirst=${sessionFirst}`, () => {
+      const calls: string[] = [];
+      const shell = {
+        el: { classList: { contains: () => sessionFirst } },
+        terminalChrome: { menu: { dismiss: () => calls.push("session-dismiss") } },
+        appControls: { dismiss: () => calls.push("app-dismiss") },
+        actions: { [action]: (index: number) => calls.push(`${action}:${index}`) },
+        dismissCarriedActions: (AppShell.prototype as unknown as {
+          dismissCarriedActions(this: AppShell): void;
+        }).dismissCarriedActions,
+      } as unknown as AppShell;
+      AppShell.prototype[action].call(shell, 2);
+      assert.deepEqual(calls, [sessionFirst ? "app-dismiss" : "session-dismiss", `${action}:2`]);
+    });
+  }
+}
+
+for (const paneAcceptsDrop of [true, false]) {
+  test(`a touch pane drop dismisses carried actions only when accepted=${paneAcceptsDrop}`, () => {
     const calls: string[] = [];
+    const drag = { id: "web", index: 1, tabs: ["agent", "web"] };
     const shell = {
-      el: { classList: { contains: () => true } },
-      appControls: { dismiss: () => calls.push("dismiss") },
-      actions: { [action]: (index: number) => calls.push(`${action}:${index}`) },
-      dismissCarriedActions: (AppShell.prototype as unknown as {
-        dismissCarriedActions(this: AppShell): void;
-      }).dismissCarriedActions,
+      actions: {
+        paneDropHintAt: () => { calls.push("pane"); return paneAcceptsDrop; },
+        dropTabOnPaneAt: () => { calls.push("drop"); return true; },
+      },
+      dismissCarriedActions: () => calls.push("dismiss"),
     } as unknown as AppShell;
-    AppShell.prototype[action].call(shell, 2);
-    assert.deepEqual(calls, ["dismiss", `${action}:2`]);
+    const dropTabOnPaneAt = (AppShell.prototype as unknown as {
+      dropTabOnPaneAt(this: AppShell, x: number, y: number, payload: typeof drag): boolean;
+    }).dropTabOnPaneAt;
+
+    assert.equal(dropTabOnPaneAt.call(shell, 20, 30, drag), paneAcceptsDrop);
+    assert.deepEqual(calls, paneAcceptsDrop ? ["pane", "dismiss", "drop"] : ["pane"]);
   });
 }
 
