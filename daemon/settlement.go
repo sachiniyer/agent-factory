@@ -159,7 +159,12 @@ func (m *Manager) legacyTaskRunAt(run session.TaskRunIdentity) (time.Time, bool,
 	if err != nil {
 		return time.Time{}, false, err
 	}
-	if stored.LastRunAt == nil || stored.LastRunAt.Before(run.CreatedAt) {
+	// A pre-field session was published as "started". Any other status is an
+	// explicit outcome owned by another writer, and missing legacy identity is
+	// not authority to reopen it. Normal completion historically left "started"
+	// in place, so this cannot identify every departed successor; that ambiguity
+	// is irreducible for records that never stored a run identity.
+	if stored.LastRunAt == nil || stored.LastRunAt.Before(run.CreatedAt) || stored.LastRunStatus != "started" {
 		return time.Time{}, false, nil
 	}
 	return *stored.LastRunAt, true, nil

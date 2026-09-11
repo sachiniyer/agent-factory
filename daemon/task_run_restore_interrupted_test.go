@@ -239,3 +239,34 @@ func TestRestoredLegacyTaskRuntimeDoesNotClaimKnownSuccessor(t *testing.T) {
 	assert.Equal(t, "started", got.LastRunStatus)
 	assert.Contains(t, logs.warnings.String(), "the task row does not identify this run")
 }
+
+func TestRestoredLegacyTaskRuntimeDoesNotReplaceTerminalOutcome(t *testing.T) {
+	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	tsk := enabledCronTask("dead0006", repoPath)
+	createdAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	terminalRunAt := createdAt.Add(time.Minute)
+	tsk.LastRunAt = &terminalRunAt
+	tsk.LastRunStatus = "errored: successor failed"
+	require.NoError(t, task.AddTask(tsk))
+
+	legacy, err := session.NewInstance(session.InstanceOptions{
+		Title: "legacy-before-terminal", Path: repoPath, Program: "claude", TaskID: tsk.ID, CreatedAt: createdAt,
+	})
+	require.NoError(t, err)
+	legacy.SetStartedForTest(true)
+	legacy.SetStatusForTest(session.Running)
+	key := daemonInstanceKey(repoID, legacy.Title)
+	seedDiskInstance(t, repoID, legacy.Title, repoPath)
+	manager.mu.Lock()
+	manager.instances[key] = legacy
+	manager.mu.Unlock()
+
+	require.NoError(t, legacy.Transition(session.ObserveLiveness(session.LiveLost)))
+	require.NoError(t, legacy.Transition(session.MarkRestoring()))
+	require.NoError(t, manager.prepareRuntimeReplacement(repoID, key, legacy))
+
+	got, err := task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "errored: successor failed", got.LastRunStatus)
+	assert.Contains(t, logs.warnings.String(), "the task row does not identify this run")
+}
