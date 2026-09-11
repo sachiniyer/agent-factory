@@ -389,25 +389,22 @@ func (m *Manager) FlushOwedSettlements() {
 	m.mu.Unlock()
 
 	for _, entry := range owed {
-		if entry.persistInstance {
-			if err := m.flushOneOwedInstanceSettlement(entry); err != nil {
-				m.warn().Printf("settlement retry for %q: %v", entry.instance.Title, err)
-			}
-		}
-		if entry.interruptedTaskRun != nil {
-			_ = m.recordInterruptedTaskRun(
-				entry.repoID, entry.key, entry.instance, *entry.interruptedTaskRun)
+		if err := m.flushOneOwedSettlement(entry); err != nil {
+			m.warn().Printf("settlement retry for %q: %v", entry.instance.Title, err)
 		}
 	}
 }
 
-// flushOneOwedInstanceSettlement retries one owed instance write, but only
-// while the session is between operations. Task-row outcomes do not use this
-// gate: their immutable generation/session identity remains meaningful after
-// the session is removed, and their own compare-and-set decides whether a newer
-// task status has superseded them. The one allowed in-operation whole-row retry
-// is an interrupted-run close holding OpRestoring: that closed snapshot is the
-// prerequisite for lowering its fence, not a half-built transaction.
+// flushOneOwedSettlement retries both halves of one settlement under the
+// session's lifecycle lock. The exact task generation/session identity makes an
+// outcome safe against a successor task row, but recording it also clears the
+// session's durable outbox marker and checkpoints the whole instance. That
+// checkpoint is a session lifecycle write and must not bypass this gate merely
+// because the task half happened to be the only obligation left.
+//
+// The one allowed in-operation whole-row retry is an interrupted-run close
+// holding OpRestoring: that closed snapshot is the prerequisite for lowering
+// its fence, not a half-built transaction.
 //
 // A retry is a WHOLE-ROW write of live memory, so running it inside another
 // session transaction would checkpoint that transaction's half-built state. A
@@ -424,7 +421,7 @@ func (m *Manager) FlushOwedSettlements() {
 // not stall behind a slow teardown, and a skipped retry costs nothing — the
 // obligation stays owed for the next tick, and a newer settlement on the same row
 // discharges it outright.
-func (m *Manager) flushOneOwedInstanceSettlement(entry settleOwedEntry) error {
+func (m *Manager) flushOneOwedSettlement(entry settleOwedEntry) error {
 	opLock := m.opLockFor(entry.key)
 	if !opLock.TryLock() {
 		return nil
@@ -438,11 +435,20 @@ func (m *Manager) flushOneOwedInstanceSettlement(entry settleOwedEntry) error {
 	m.mu.Unlock()
 	if !registered {
 		m.recordSettlementWrite(entry.repoID, entry.key, entry.instance, nil)
-		return nil
-	}
-	if entry.instance.GetInFlightOp() != session.OpNone &&
+	} else if entry.instance.GetInFlightOp() != session.OpNone &&
 		!entry.instance.RuntimeReplacementSettlementBlocked() {
 		return nil
 	}
-	return m.persistSettlement(entry.repoID, entry.key, entry.instance)
+	if registered && entry.persistInstance {
+		if err := m.persistSettlement(entry.repoID, entry.key, entry.instance); err != nil {
+			// The task outcome is ordered after the durable session close. If that
+			// prerequisite still fails, leave both obligations for the next tick.
+			return err
+		}
+	}
+	if entry.interruptedTaskRun != nil {
+		return m.recordInterruptedTaskRun(
+			entry.repoID, entry.key, entry.instance, *entry.interruptedTaskRun)
+	}
+	return nil
 }

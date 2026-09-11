@@ -73,6 +73,57 @@ func TestInterruptedTaskStatusWriteFailureIsRetried(t *testing.T) {
 		"the owed exact-run outcome must land after task storage recovers")
 }
 
+func TestInterruptedTaskOutcomeRetryWaitsForSessionLifecycleLock(t *testing.T) {
+	manager, _, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	tsk := addStatusTestTask(t, enabledCronTask("retry004", repoPath))
+	runAt := time.Date(2026, 9, 11, 9, 30, 0, 0, time.UTC)
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "serialized-interruption", Path: repoPath, Program: "claude", TaskID: tsk.ID,
+		TaskGenerationID: tsk.GenerationID, CreatedAt: runAt, TaskRunAt: runAt,
+		TaskRunSequence: 1,
+	})
+	require.NoError(t, err)
+	_, _, err = task.BeginTaskRun(tsk.ID, tsk.GenerationID, inst.ID, 1, 0, runAt, task.RunStatusStarted)
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	key := daemonInstanceKey(repoID, inst.Title)
+	seedDiskInstance(t, repoID, inst.Title, repoPath)
+	manager.mu.Lock()
+	manager.instances[key] = inst
+	manager.mu.Unlock()
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveLost)))
+	require.NoError(t, inst.Transition(session.MarkRestoring()))
+
+	tasksPath, err := task.MigrateOnLoadPath()
+	require.NoError(t, err)
+	original, err := os.ReadFile(tasksPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(tasksPath, []byte("{"), 0600))
+	require.NoError(t, manager.prepareRuntimeReplacement(repoID, key, inst))
+	require.NoError(t, os.WriteFile(tasksPath, original, 0600))
+
+	// Model a handoff/archive owning the lifecycle transaction. The poll-driven
+	// retry must not clear and checkpoint the session outbox in the middle of it.
+	opLock := manager.opLockFor(key)
+	opLock.Lock()
+	manager.FlushOwedSettlements()
+	got, err := task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	require.Equal(t, task.RunStatusStarted, got.LastRunStatus)
+	_, pending := inst.PendingTaskRunInterruption()
+	require.True(t, pending, "the session outbox must remain intact while lifecycle owns the row")
+	opLock.Unlock()
+
+	manager.FlushOwedSettlements()
+	got, err = task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	require.Equal(t, TaskStatusInterrupted, got.LastRunStatus)
+	_, pending = inst.PendingTaskRunInterruption()
+	require.False(t, pending)
+}
+
 func TestInterruptedTaskStatusRetrySurvivesDaemonRestart(t *testing.T) {
 	manager, _, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	tsk := addStatusTestTask(t, enabledCronTask("retry002", repoPath))
@@ -105,6 +156,11 @@ func TestInterruptedTaskStatusRetrySurvivesDaemonRestart(t *testing.T) {
 	require.NoError(t, os.WriteFile(tasksPath, original, 0600))
 
 	stored := persistedInstanceByTitle(t, repoID, inst.Title)
+	stored.BackendType = "local"
+	stored.Worktree = session.GitWorktreeData{
+		RepoPath: repoPath, WorktreePath: repoPath, SessionName: inst.Title,
+		BranchName: "master", ExternalWorktree: true,
+	}
 	reloaded, err := session.FromInstanceData(stored)
 	require.NoError(t, err)
 	restarted := &Manager{instances: map[string]*session.Instance{key: reloaded}}
