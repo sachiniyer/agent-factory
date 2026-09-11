@@ -23,7 +23,18 @@ import (
 // production.
 var testHookCreateLimitObservedBeforePublication = func() {}
 
-func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (session.InstanceData, error) {
+func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (_ session.InstanceData, retErr error) {
+	// CreateSession owns the portion of the pre-reservation boundary before it
+	// delegates to reserveCreate. That function takes ownership from its entry to
+	// the exact reservedTitles commit. The two defers make the whole interval
+	// exhaustive without double-wrapping reserveCreate's errors.
+	reservationBoundaryDelegated := false
+	defer func() {
+		if !reservationBoundaryDelegated {
+			retErr = taskPreflightError(req.TaskOrigin, req.TaskID, req.TaskRepoID, retErr)
+		}
+	}()
+
 	// Own the create's lifetime: cancel derives a child context that is cancelled
 	// the instant this returns (success, failure, or panic), so the readiness poll
 	// StartAndSendPromptWithConversationCapture runs can never outlive the create
@@ -65,6 +76,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	if err := applyDefaultAccount(cfg, &req); err != nil {
 		return session.InstanceData{}, err
 	}
+	reservationBoundaryDelegated = true
 	repo, title, release, renamedArchived, err := m.reserveCreate(req)
 	if err != nil {
 		return session.InstanceData{}, err
@@ -433,22 +445,10 @@ func (m *Manager) projectDeleteMovedLocked(repoID string, since uint64) bool {
 // this create was outside m.mu; the guidance differs, and a create told to
 // "retry after deletion finishes" about a delete that already finished would be
 // telling the user to wait for nothing.
-//
-// TaskOrigin is daemon-only provenance independent of retained identity or
-// concurrency ownership. Legacy targeted rows can have neither TaskID nor
-// TaskRepoID, but admission still knows this create came from automation.
-// Nothing has reserved a name, created a runtime, or sent a prompt on any of
-// these paths, so the refusal is provably not attempted and carries the
-// wire-visible marker. Keep the older identity shapes as compatibility evidence
-// for in-process callers constructed before TaskOrigin was added; ordinary
-// client creates carry none of these fields and retain their plain error.
-func projectDeleteRefusal(req CreateSessionRequest, repoID string, inProgress bool) error {
+func projectDeleteRefusal(repoID string, inProgress bool) error {
 	err := fmt.Errorf("project %s is being deleted; retry the session create after deletion finishes", repoID)
 	if !inProgress {
 		err = fmt.Errorf("project %s was being deleted while this session create resolved its backend; nothing was created — retry if the project still exists", repoID)
-	}
-	if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
-		err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
 	}
 	return err
 }
@@ -576,7 +576,14 @@ func describeLegacyTasks(tasks []task.Task) string {
 // without a task file on disk. Production never reassigns it.
 var loadTasksForLegacyScan = task.LoadTasks
 
-func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, string, func(), *session.InstanceData, error) {
+func (m *Manager) reserveCreate(req CreateSessionRequest) (_ *config.RepoContext, _ string, _ func(), _ *session.InstanceData, retErr error) {
+	reservationCommitted := false
+	defer func() {
+		if !reservationCommitted {
+			retErr = taskPreflightError(req.TaskOrigin, req.TaskID, req.TaskRepoID, retErr)
+		}
+	}()
+
 	if req.RepoPath == "" {
 		return nil, "", nil, nil, fmt.Errorf("repo path is required")
 	}
@@ -597,9 +604,6 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 
 	repo, err := repoFromPathForCreate(req.RepoPath)
 	if err != nil {
-		if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
-			err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
-		}
 		return nil, "", nil, nil, err
 	}
 	warnLegacyBareCloneSessions(repo)
@@ -654,7 +658,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// an ordinary create after a completed delete, not a race.
 	deleteActive, deleteMoved := m.projectDeleteStateFor(repo.ID, deleteSeq)
 	if deleteActive || deleteMoved {
-		return nil, "", nil, nil, projectDeleteRefusal(req, repo.ID, deleteActive)
+		return nil, "", nil, nil, projectDeleteRefusal(repo.ID, deleteActive)
 	}
 
 	// Same reasoning for the task-run cap, which the hoist also moved behind the
@@ -703,20 +707,14 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// pre-resolver check could not see.
 	_, deleting := m.projectDeletes[repo.ID]
 	if deleting || m.projectDeleteMovedLocked(repo.ID, deleteSeq) {
-		return nil, "", nil, nil, projectDeleteRefusal(req, repo.ID, deleting)
+		return nil, "", nil, nil, projectDeleteRefusal(repo.ID, deleting)
 	}
 	if err := m.refreshLocked(); err != nil {
-		if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
-			err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
-		}
 		return nil, "", nil, nil, err
 	}
 
 	diskData, err := loadRepoInstanceData(repo.ID)
 	if err != nil {
-		if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
-			err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
-		}
 		return nil, "", nil, nil, err
 	}
 
@@ -828,6 +826,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// returns the release() only on success); m.mu has been held unbroken since
 	// admitTaskRunLocked, so the count is exactly what admission saw.
 	m.reservedTitles[key] = struct{}{}
+	reservationCommitted = true
 	if nameNamespace == runtimeNamespaceLocalTmux && !req.InPlace {
 		if m.reservedArchiveTitles == nil {
 			m.reservedArchiveTitles = make(map[string]struct{})

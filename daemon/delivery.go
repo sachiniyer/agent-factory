@@ -84,17 +84,19 @@ var errNotAttempted = errors.New("delivery not attempted")
 // so it is enforced here, at the one constructor every pre-flight failure passes
 // through: whatever a call site writes, the wire text is refundable. Call sites
 // should still SPELL the marker where it reads naturally (most already do, and
-// notattempted_marker_test.go lints the near-misses) — the append below is the
+// notattempted_marker_test.go lints the near-misses) — the insertion below is the
 // floor, not the style.
 func notAttempted(err error) error {
 	if err == nil {
 		return nil
 	}
-	// Append only when absent: a message that already says it must not grow a
-	// second copy trailing a pasteable command (#2512), and %w keeps errors.Is/As
-	// against the underlying cause working through the extra layer.
+	// Insert only when absent, and BEFORE the original error. A refusal may end in
+	// a pasteable shell command; adding protocol text after it turns that text into
+	// part of the advertised command (#4191). Prefixing keeps every unknown target
+	// error safe without enumerating which ones contain commands, while %w keeps
+	// errors.Is/As against the underlying cause working through the extra layer.
 	if !strings.Contains(err.Error(), notDeliveredMarker) {
-		err = fmt.Errorf("%w; %s", err, notDeliveredMarker)
+		err = fmt.Errorf("%s: %w", notDeliveredMarker, err)
 	}
 	return &notAttemptedError{err: err}
 }
@@ -114,7 +116,7 @@ func (e *notAttemptedError) Is(target error) bool { return target == errNotAttem
 // not actually refund). Same idiom, same reason, as atConcurrencyLimitErrText
 // (#1892) — but chosen to be NATURAL user-facing text that already belongs in
 // these messages ("... prompt not delivered") rather than a machine token, so the
-// wire survivability costs the user nothing even where it has to be appended.
+// wire survivability costs the user nothing even where it has to be inserted.
 // Every pre-flight message reachable from the watch path carries it —
 // notAttempted() guarantees that rather than trusting each call site to remember
 // (#3477); deliverTaskPrompt re-mints the sentinel on a match.
@@ -244,26 +246,10 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 	}
 
 	// The session is absent and, because deliveries to this target serialize on
-	// the per-target lock, no other in-daemon delivery is creating it. Gate the
-	// auto-create path: req.Program flows directly into CreateSession here,
-	// bypassing controlServer.createSession and its gate, so a raw RPC/HTTP
-	// caller can reach provisioning with an unsupported program through this
-	// handler. Apply the same program validation before the create fires.
-	// Internal callers (root-agent ensure loop, task delivery) pass TaskRepoID
-	// or TaskOrigin and do NOT set Program; the check is a no-op for them (empty
-	// program is allowed). Only an external JSON-settable Program is rejected.
-	if err := validateCreateProgram(req.Program); err != nil {
-		return "", session.PromptCouldNotConfirm, err
-	}
-	// Create it now and deliver the prompt as its initial prompt.
-	created, err := m.CreateSession(context.Background(), CreateSessionRequest{
-		Title:      req.Title,
-		RepoPath:   req.RepoPath,
-		Program:    req.Program,
-		Prompt:     req.Prompt,
-		TaskRepoID: req.TaskRepoID,
-		TaskOrigin: req.TaskOrigin,
-	})
+	// the per-target lock, no other in-daemon delivery is creating it. Validate
+	// and create through one boundary-owning helper so task provenance covers
+	// every refusal before Manager.CreateSession takes over.
+	created, err := m.createMissingPromptTarget(req)
 	if err != nil {
 		// A creator outside this daemon (a plain `af sessions create`, the API)
 		// can still claim the title between our check and reserveCreate. Rather
@@ -294,6 +280,35 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 		return "", session.PromptCouldNotConfirm, fmt.Errorf("failed to auto-create target session %q: %w", req.Title, err)
 	}
 	return createdTaskStatus(created), session.PromptCouldNotConfirm, nil
+}
+
+// createMissingPromptTarget owns the auto-create interval before CreateSession.
+// req.Program flows directly through this path, bypassing
+// controlServer.createSession and its gate, so it needs the same validation. A
+// retained task program can be invalid after an upgrade or hand edit; that
+// refusal still precedes any reservation or delivery and must keep its task
+// provenance across the RPC hop. Once CreateSession is called, its own boundary
+// owns classification through the reservation commit.
+func (m *Manager) createMissingPromptTarget(req DeliverPromptRequest) (_ session.InstanceData, retErr error) {
+	managerDelegated := false
+	defer func() {
+		if !managerDelegated {
+			retErr = taskPreflightError(req.TaskOrigin, "", req.TaskRepoID, retErr)
+		}
+	}()
+
+	if err := validateCreateProgram(req.Program); err != nil {
+		return session.InstanceData{}, err
+	}
+	managerDelegated = true
+	return m.CreateSession(context.Background(), CreateSessionRequest{
+		Title:      req.Title,
+		RepoPath:   req.RepoPath,
+		Program:    req.Program,
+		Prompt:     req.Prompt,
+		TaskRepoID: req.TaskRepoID,
+		TaskOrigin: req.TaskOrigin,
+	})
 }
 
 // lockTarget acquires the per-(repo, title) delivery lock, creating it on first

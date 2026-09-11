@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
@@ -154,6 +156,34 @@ func TestReserveCreate_UnclaimableGuardStaysOutOfTheWay(t *testing.T) {
 	assert.Contains(t, err.Error(), "conflicting tmux session \""+orphan+"\" is already running",
 		"the descriptive session name must be the real tmux target, not the unsanitized title")
 	assert.Nil(t, renamed)
+}
+
+// TestReserveCreate_TaskOrphanTmuxRefusalKeepsCleanupCommandPasteable covers a
+// command-bearing refusal newly admitted to the shared task boundary. The wire
+// marker must classify the failure without trailing the advertised shell command
+// with another command fragment.
+func TestReserveCreate_TaskOrphanTmuxRefusalKeepsCleanupCommandPasteable(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	const title = "task-orphan"
+	tmuxName := tmux.SanitizedNameForRepo(title, repoPath)
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", tmuxName, "sh").CombinedOutput()
+	require.NoError(t, err, string(out))
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+tmuxName).Run() })
+
+	_, _, release, _, err := manager.reserveCreate(CreateSessionRequest{
+		RepoPath:   repoPath,
+		Title:      title,
+		Program:    "claude",
+		TaskOrigin: true,
+		TaskRepoID: repoID,
+	})
+	if release != nil {
+		release()
+	}
+	require.Error(t, err)
+	require.True(t, isNotAttemptedErr(err), "the task refusal must remain refundable")
+	wantSuffix := "Clean it up with: " + shellsuggest.Command("tmux", "kill-session", "-t", tmuxName)
+	assert.True(t, strings.HasSuffix(err.Error(), wantSuffix), "cleanup command must remain the final pasteable text: %q", err)
 }
 
 // TestValidateTitleClaimable_IgnoresTheRowBeingRenamed is the other direction of
