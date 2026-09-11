@@ -23,6 +23,7 @@ func TestRestoreSession_ReapAdviceRequiresDurableBranch(t *testing.T) {
 				memoryBranch string
 				storedBranch string
 				storedID     string
+				foreignFirst bool
 				missing      bool
 				unreadable   bool
 				wantForce    bool
@@ -40,6 +41,9 @@ func TestRestoreSession_ReapAdviceRequiresDurableBranch(t *testing.T) {
 				{name: "unknown_branch_reused_title", storedID: "previous", repairHint: "different session"},
 				{name: "reused_title_blank_branch", memoryBranch: "af/current", storedID: "previous", repairHint: "different session"},
 				{name: "durable_matching_branch", memoryBranch: "af/current", storedBranch: "af/current", storedID: "current", wantForce: true},
+				{name: "foreign_before_durable_match", memoryBranch: "af/current", storedBranch: "af/current", storedID: "current", foreignFirst: true, wantForce: true},
+				{name: "foreign_before_unknown_branch_match", storedID: "current", foreignFirst: true},
+				{name: "foreign_durable_before_unrecorded_match", memoryBranch: "af/current", storedID: "current", foreignFirst: true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					manager, repoID, repoPath := newStatusTestManager(t)
@@ -50,6 +54,11 @@ func TestRestoreSession_ReapAdviceRequiresDurableBranch(t *testing.T) {
 					inst.ID = "current"
 					inst.SetSandboxBranch(tc.memoryBranch)
 					records := []session.InstanceData{}
+					if tc.foreignFirst {
+						foreign := inst.ToInstanceData()
+						foreign.ID, foreign.Branch = "previous", "af/current"
+						records = append(records, foreign)
+					}
 					if !tc.missing {
 						rec := inst.ToInstanceData()
 						rec.ID, rec.Branch = tc.storedID, tc.storedBranch
