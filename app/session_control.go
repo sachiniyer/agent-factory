@@ -14,7 +14,7 @@ import (
 
 // The session, task, project, tab, preview, and snapshot seams in this file use
 // the HTTP API client (#1592 Phase 2 PR3). Each builds a fresh apiclient.Client
-// per call — the same per-call dial the net/rpc callDaemon did — and only
+// per call — the same per-call dial the net/rpc callDaemon did — and
 // daemon.EnsureDaemon survives here only for the default local target, to spawn
 // that daemon at cold start exactly as callDaemon's implicit ensure used to. A
 // selected remote target is dial-only and never enters local lifecycle code.
