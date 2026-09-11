@@ -1,20 +1,18 @@
 package daemon
 
 // Regression suite for the watch-task rate-slot refund on reserveCreate pre-flight
-// failures. reserveCreate performs three pre-flight operations whose FIRST call (in
-// DeliverPromptWithStatus) is wrapped notAttempted but whose SECOND call (inside
-// reserveCreate) used to return a plain error, so the watch delivery path's
-// isNotAttemptedErr check returned false and the reserved rate slot was held for the
-// full 60s window. The fix wraps those three returns with notAttempted for
-// task-originated requests, mirroring the in-function projectDeleteRefusal precedent.
-// These tests pin each site directly, plus the end-to-end refund on both delivery
-// arms and the over-refund boundary.
+// failures. These errors provably precede the title reservation and deliver no
+// prompt, so a task create must report them as not attempted. The classification
+// belongs to the reservation boundary rather than an enumeration of individual
+// returns: these tests pin representative exits, the end-to-end refund on both
+// delivery arms, and the classifications that remain distinct.
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -180,6 +178,47 @@ func TestRepro_ReserveCreateRepoFromPathFailureIsNotAttempted(t *testing.T) {
 	}
 }
 
+// TestReserveCreate_MissingRepoPathUsesThePreReservationClassification covers
+// the earliest return in reserveCreate. An empty ProjectPath is representable on
+// a task row, and it still delivers nothing; a direct client request keeps the
+// same plain validation error.
+func TestReserveCreate_MissingRepoPathUsesThePreReservationClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  CreateSessionRequest
+		want bool
+	}{
+		{name: "task create", req: CreateSessionRequest{TaskOrigin: true}, want: true},
+		{name: "ordinary client create", req: CreateSessionRequest{}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, _, err := (&Manager{}).reserveCreate(tc.req)
+			require.ErrorContains(t, err, "repo path is required")
+			assert.Equal(t, tc.want, isNotAttemptedErr(err))
+			assert.Equal(t, tc.want, strings.Contains(err.Error(), notDeliveredMarker))
+		})
+	}
+}
+
+// TestReserveCreate_TaskBindingMarkerIsNotDuplicated pins the formerly accidental
+// coverage at the task-binding exit. The shared classifier now supplies the
+// typed tag, while notAttempted preserves the message's existing single marker.
+func TestReserveCreate_TaskBindingMarkerIsNotDuplicated(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	_, _, release, _, err := manager.reserveCreate(CreateSessionRequest{
+		Title:      "worker",
+		RepoPath:   repoPath,
+		Program:    "claude",
+		TaskRepoID: repoID + "-stale",
+	})
+	if err == nil {
+		release()
+		t.Fatal("expected a task-binding refusal")
+	}
+	require.True(t, isNotAttemptedErr(err))
+	assert.Equal(t, 1, strings.Count(err.Error(), notDeliveredMarker), "the wire marker must remain singular")
+}
+
 // TestRepro_ReserveCreateRefreshFailureIsNotAttempted pins the second pre-flight
 // return (refreshLocked): a TASK create whose locked refresh fails (here a
 // daemon-load migration HARD refusal on an unreadable per-repo instances file)
@@ -312,12 +351,32 @@ func TestRepro_WatcherRefundsRateSlotOnTitleWalkFailure(t *testing.T) {
 	assert.Equal(t, 1, w.queue.pendingCount(), "the failed delivery must remain queued for replay")
 }
 
-// TestRepro_ReserveCreateGenuineConflictStaysChargedForTask is the non-regression
-// guard against over-refund: a TASK create that fails on a GENUINE title collision
-// (a live session already owns the title) is a persistent config conflict, not a
-// transient pre-flight blip, so it must stay charged — the fix wraps only the
-// three pre-flight returns, not the post-admission conflict returns.
-func TestRepro_ReserveCreateGenuineConflictStaysChargedForTask(t *testing.T) {
+// TestReserveCreate_OrdinaryTitleWalkFailureStaysPlain guards the provenance
+// boundary at the reported exit. The same fatal title walk from a direct client
+// is not a watch delivery and must not acquire a refundable classification.
+func TestReserveCreate_OrdinaryTitleWalkFailureStaysPlain(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	malformedTitleWalkRecord(t, repoID, repoPath, "repro/watch")
+
+	_, _, release, _, err := manager.reserveCreate(CreateSessionRequest{
+		RepoPath:  repoPath,
+		TitleBase: "repro-watch",
+		Program:   "claude",
+	})
+	if err == nil {
+		release()
+		t.Fatal("expected the fatal title-walk refusal")
+	}
+	require.ErrorIs(t, err, errTitleCheckFatal)
+	assert.False(t, isNotAttemptedErr(err))
+	assert.NotContains(t, err.Error(), notDeliveredMarker)
+}
+
+// TestReserveCreate_TaskConflictBeforeReservationIsNotAttempted pins the actual
+// boundary rather than the permanence of the cause. A live title collision may
+// need user intervention, but this attempt still reserved no name and delivered
+// no prompt, so its watch rate slot is refundable.
+func TestReserveCreate_TaskConflictBeforeReservationIsNotAttempted(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerStarted(t, manager, repoID, repoPath, "worker", session.NewFakeBackend(), true, session.Ready)
 
@@ -333,6 +392,16 @@ func TestRepro_ReserveCreateGenuineConflictStaysChargedForTask(t *testing.T) {
 		release()
 		t.Fatal("expected a genuine title-collision refusal")
 	}
-	assert.False(t, isNotAttemptedErr(err), "a genuine title collision must stay charged (not refundable)")
-	assert.NotContains(t, err.Error(), notDeliveredMarker, "a genuine conflict must not carry the watch marker")
+	assert.True(t, isNotAttemptedErr(err), "a title collision before the reservation commit must be refundable")
+	assert.Contains(t, err.Error(), notDeliveredMarker, "the classification must survive net/rpc flattening")
+}
+
+// TestTaskCreatePreReservationError_PreservesConcurrencyClassification ensures
+// the shared boundary helper does not absorb the task-cap sentinel. The watcher
+// has a dedicated branch that refunds and parks that event.
+func TestTaskCreatePreReservationError_PreservesConcurrencyClassification(t *testing.T) {
+	err := taskCreatePreReservationError(CreateSessionRequest{TaskOrigin: true}, errAtConcurrencyLimit)
+	require.ErrorIs(t, err, errAtConcurrencyLimit)
+	assert.False(t, isNotAttemptedErr(err))
+	assert.NotContains(t, err.Error(), notDeliveredMarker)
 }
