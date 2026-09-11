@@ -186,9 +186,17 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 			},
 		)
 	}
-	if h.PingErr == nil && cfg != nil {
-		checkRunningDaemonConfig(report, h, cfg)
-		checkRootAgentPrograms(ctx, report, cfg)
+	daemonConfig := cfg
+	if h.PingErr == nil && daemonConfig == nil && ctx.globalConfigMissing {
+		// A deleted or never-materialized file has a known next-start posture,
+		// but it does not make every default a user-configured requirement. Apply
+		// defaults only to diagnostics about the daemon that is demonstrably still
+		// running with an older snapshot; other checks retain nil/unconfigured.
+		daemonConfig = config.DefaultConfig()
+	}
+	if h.PingErr == nil && daemonConfig != nil {
+		checkRunningDaemonConfig(report, h, daemonConfig)
+		checkRootAgentPrograms(ctx, report, daemonConfig)
 	}
 	// The #2090 exposure is INFORMATIONAL since #2168 Phase 0: a tokenless
 	// network listener is an allowed, deliberate configuration, so this is a Warn
