@@ -645,3 +645,61 @@ func TestLoginDoesNotAdoptAnotherHomesPane(t *testing.T) {
 		t.Fatal("home B's Stop killed home A's login pane — a pane home B never owned")
 	}
 }
+
+// TestLoginPaneCollisionDotVsUnderscoreGetsDistinctPanes is the regression test for
+// the tmux-name collision between account names that differ only by '.' vs '_'
+// (e.g. `work.proj` and `work_proj`). Before the fix, LoginSessionName embedded the
+// raw account name, toTmuxName rewrote the '.' to '_', and both accounts sanitized
+// to one tmux session name — so the second login adopted the FIRST account's
+// in-flight pane and the operator was handed a pane writing the wrong account's
+// credential directory. The fix hex-encodes the name inside LoginSessionName, so
+// the two produce distinct, tmux-stable session names and each gets its own pane.
+func TestLoginPaneCollisionDotVsUnderscoreGetsDistinctPanes(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	binDir := t.TempDir()
+	writeBlockingAgentFixture(t, binDir, "codex")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	supervisor := New()
+	t.Cleanup(supervisor.Stop)
+	ctx := context.Background()
+
+	first, err := supervisor.Start(ctx, Request{Home: home, Agent: "codex", Name: "work.proj"})
+	if err != nil {
+		t.Fatalf("start first login (work.proj): %v", err)
+	}
+	if first.Reused {
+		t.Fatal("first login reported Reused")
+	}
+
+	second, err := supervisor.Start(ctx, Request{Home: home, Agent: "codex", Name: "work_proj"})
+	if err != nil {
+		t.Fatalf("start second login (work_proj): %v", err)
+	}
+	if second.Reused {
+		t.Fatal("second login reused a pane — the dot-vs-underscore collision is still present")
+	}
+	if second.TmuxName == first.TmuxName {
+		t.Fatalf("colliding accounts share the tmux session name %q — they must be distinct", first.TmuxName)
+	}
+
+	// The colliding accounts live in distinct credential directories, and each
+	// pane is scoped to its own — so the second must NOT report logged in (no
+	// credential was written to work_proj's directory) and the first's pane must
+	// still be live and untouched.
+	if second.Dir == first.Dir {
+		t.Fatalf("colliding accounts share directory %q — they should be distinct", first.Dir)
+	}
+	if second.LoggedIn {
+		t.Fatal("work_proj reported logged in though no credential was written to its directory")
+	}
+	if !supervisor.Live("codex", "work.proj") {
+		t.Fatal("work.proj's login pane was lost after work_proj's start")
+	}
+	if !supervisor.Live("codex", "work_proj") {
+		t.Fatal("work_proj's login is not tracked as live")
+	}
+}

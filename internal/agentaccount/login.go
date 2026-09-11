@@ -1,6 +1,7 @@
 package agentaccount
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -70,8 +71,17 @@ func LoginAgents() []string {
 // The af- prefix keeps it inside the namespace every af cleanup path recognizes
 // (tmux.NewTmuxSession adds the af_ prefix on top, exactly as the config agent's
 // name is built).
+//
+// The name is HEX-ENCODED before it reaches tmux's own naming sanitizer
+// (toTmuxName, which rewrites every rune that is not a letter, digit, mark, '_'
+// or '-' to '_'). ValidateName permits '.', but '.' is not stable under that
+// sanitizer, so without encoding the names `work.proj` and `work_proj` collapse
+// onto one tmux session name and a second login can adopt the OTHER account's
+// in-flight pane. Hex digits [0-9a-f] are all stable, and the encoding is
+// injective, so two distinct names can never produce one tmux session name
+// regardless of which characters ValidateName admits.
 func LoginSessionName(agent, name string) string {
-	return "af-login-" + agent + "-" + name
+	return "af-login-" + agent + "-" + hex.EncodeToString([]byte(name))
 }
 
 // accountCredentialArtifacts is the file the AGENT writes when its login

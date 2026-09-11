@@ -267,3 +267,47 @@ func TestLoginSessionName_IsStableAndScoped(t *testing.T) {
 		seen[got] = tc.agent + "/" + tc.name
 	}
 }
+
+// TestLoginSessionName_IsInjectiveAcrossDotVersusUnderscore is the collision this
+// package cannot see at the tmux boundary but must prevent regardless: the titles
+// it produces reach tmux's sanitizer (toTmuxName), which rewrites '.' to '_', so
+// two names that differ only by '.' vs '_' must not collapse onto one title. This
+// package cannot import session/tmux, so the stable-rune policy is mirrored here
+// rather than cross-checked — the policy is "letters, digits, '_', '-' only".
+func TestLoginSessionName_IsInjectiveAcrossDotVersusUnderscore(t *testing.T) {
+	for _, tc := range []struct{ a, b string }{
+		{"work.proj", "work_proj"},
+		{"a.b.c", "a_b_c"},
+		{"work.proj", "work-proj"},
+		{"x.", "x_"},
+		{".x", "_x"},
+	} {
+		gotA := LoginSessionName("codex", tc.a)
+		gotB := LoginSessionName("codex", tc.b)
+		if gotA == gotB {
+			t.Fatalf("%q and %q produce the same login session name %q", tc.a, tc.b, gotA)
+		}
+	}
+}
+
+// TestLoginSessionName_ProducesTmuxStableRunes mirrors the positive punctuation
+// policy tmux's toTmuxName uses (session/tmux/session.go: stableTmuxNameRune) —
+// letters, digits, '_' and '-' — without importing that package, which this one
+// cannot. Every character of the title must survive the sanitizer unchanged, or
+// the name af probes could be rewritten to one it does not own.
+func TestLoginSessionName_ProducesTmuxStableRunes(t *testing.T) {
+	for _, name := range []string{
+		"work.proj", "work_proj", "work-proj",
+		"a.b.c", "MiXeD.CaSe-1", "x...y", "_undot",
+		"with space", "tab\there", "p@ss", "ünïcödé",
+	} {
+		got := LoginSessionName("codex", name)
+		// toTmuxName prepends "af_" and writes spaces to nothing; everything that
+		// reaches the sanitizer from the body must be a stable rune.
+		for _, r := range got {
+			if !(strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-", r)) {
+				t.Fatalf("LoginSessionName(%q) produced non-stable rune %q in %q", name, r, got)
+			}
+		}
+	}
+}
