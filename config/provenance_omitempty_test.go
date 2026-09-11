@@ -17,9 +17,10 @@ import (
 // on only the configured-map side of a MergeReplace comparison, and
 // resolveReplace falsely appended "load-time normalization changed the configured
 // value before resolution" to the winning candidate's reason even though the
-// loader performed no normalization. The comparator now re-encodes the
-// configured map through the typed struct's type so omitempty shapes both marshal
-// outputs identically.
+// loader performed no normalization. The comparator now aligns the raw map
+// subtractively: zero-valued omitempty keys are removed from a copy, absent
+// non-omitempty keys are materialized with their struct zero, and unknown fields
+// and explicit JSON nulls are left untouched so the comparison is never lossy.
 
 // TestResolveConfigProvenanceRemoteHooksOmitemptyProvisionCmdIsNotNormalization
 // is the direct regression: an explicitly empty provision_cmd (which carries
@@ -153,6 +154,39 @@ func TestJSONEquivalentAlignsStructMapOmitempty(t *testing.T) {
 	t.Run("map against map is unchanged", func(t *testing.T) {
 		assert.True(t, jsonEquivalent(map[string]any{"a": "1"}, map[string]any{"a": "1"}))
 		assert.False(t, jsonEquivalent(map[string]any{"a": "1"}, map[string]any{"a": "2"}))
+	})
+	t.Run("explicit null on omitempty scalar differs from struct zero", func(t *testing.T) {
+		// An in-repo JSON config that writes `provision_cmd: null` is decoded
+		// into the raw map as nil. The tolerant loader coerces nil to "" (the
+		// string zero), so the typed struct holds "". nil != "" in the aligned
+		// map, so jsonEquivalent must report a difference and the normalization
+		// note fires correctly. The alignment must not treat nil as the same
+		// artifact as the empty string "".
+		raw := map[string]any{"launch_cmd": "l", "delete_cmd": "d", "provision_cmd": nil}
+		assert.False(t, jsonEquivalent(raw, &RemoteHooks{LaunchCmd: "l", DeleteCmd: "d", ProvisionCmd: ""}))
+	})
+	t.Run("unknown nested field in map is preserved and differs from struct", func(t *testing.T) {
+		// An in-repo config may contain unknown nested keys under remote_hooks
+		// that the top-level allowlist permits and the tolerant decoders ignore.
+		// The raw shape map retains them but the typed struct cannot represent
+		// them, so the configured candidate differs from the effective struct and
+		// the normalization note must fire. The alignment must not drop unknown
+		// keys by re-decoding through the struct type.
+		raw := map[string]any{
+			"launch_cmd":     "l",
+			"delete_cmd":     "d",
+			"unknown_nested": map[string]any{"key": "val"},
+		}
+		assert.False(t, jsonEquivalent(raw, &RemoteHooks{LaunchCmd: "l", DeleteCmd: "d"}))
+	})
+	t.Run("zero-valued omitempty field is removed as a genuine artifact", func(t *testing.T) {
+		// The empty string on provision_cmd (omitempty) is the type-appropriate
+		// zero: the struct never emits it and the user wrote nothing meaningful.
+		// Alignment removes it from the map copy, matching the struct's marshal
+		// output, so the comparison reports equality and no false normalization
+		// note is produced. This proves subtraction is still active.
+		raw := map[string]any{"launch_cmd": "l", "delete_cmd": "d", "provision_cmd": ""}
+		assert.True(t, jsonEquivalent(raw, &RemoteHooks{LaunchCmd: "l", DeleteCmd: "d", ProvisionCmd: ""}))
 	})
 }
 
