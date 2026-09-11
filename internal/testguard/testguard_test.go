@@ -287,8 +287,8 @@ func TestSandboxTmux_SetsAndRestores(t *testing.T) {
 }
 
 // fakeTripwireTmux installs a hermetic tmux command that exposes one preexisting
-// session at snapshot time and four new sessions after markReady. It performs no
-// tmux operation and never contacts the ambient server.
+// foreign-owned session and four sessions after markReady. It performs no tmux
+// operation and never contacts the ambient server.
 func fakeTripwireTmux(t *testing.T) (markReady func(), ownerFile string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -304,6 +304,9 @@ list-sessions)
   ;;
 show-environment)
   case "$3" in
+  =af_preexisting)
+    printf '%s\n' 'AF_HOME=/real/agent-factory-home'
+    ;;
   =af_owned)
     IFS= read -r owner < "$AF_TRIPWIRE_OWNER_FILE"
     printf 'AF_HOME=%s\n' "$owner"
