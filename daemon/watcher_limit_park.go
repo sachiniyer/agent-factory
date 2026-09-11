@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"bufio"
-	"bytes"
+	"errors"
+	"io"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -43,22 +45,43 @@ func (w *taskWatcher) targetLimitRequiresRetention() bool {
 	return true
 }
 
-// persistBufferedLimitEvents saves every complete event bufio already pulled
-// from the subprocess pipe before a stop interrupted capacity backpressure.
-// Those bytes are no longer recoverable from the producer after restart. The
-// queue is necessarily limit-protected when this path runs, so appending the
-// reader's bounded buffer cannot evict older events; an unterminated suffix is
-// still not an event and remains intentionally discarded.
-func (w *taskWatcher) persistBufferedLimitEvents(br *bufio.Reader, tail *tailBuffer) {
-	buffered, err := br.Peek(br.Buffered())
-	if err != nil || len(buffered) == 0 {
-		return
-	}
-	lastNewline := bytes.LastIndexByte(buffered, '\n')
-	if lastNewline < 0 {
-		return
-	}
-	for _, line := range bytes.Split(buffered[:lastNewline], []byte{'\n'}) {
-		w.enqueueEvent(string(bytes.TrimRight(line, "\r")), tail, true)
+// persistRemainingLimitEvents saves complete events accepted before a stop
+// interrupted capacity backpressure. The caller waits until the process group
+// has been killed, so this drains both bufio-prefetched bytes and the now-finite
+// kernel pipe without reopening production. The queue is limit-protected, so
+// these already-emitted events may cross its ordinary cap without eviction.
+func (w *taskWatcher) persistRemainingLimitEvents(br *bufio.Reader, tail *tailBuffer) {
+	for {
+		chunk, err := br.ReadSlice('\n')
+		switch {
+		case err == nil:
+			w.enqueueEvent(strings.TrimRight(string(chunk), "\r\n"), tail, true)
+		case errors.Is(err, bufio.ErrBufferFull):
+			line := string(chunk)
+			discarded := 0
+			var tailErr error
+			for {
+				var more []byte
+				more, tailErr = br.ReadSlice('\n')
+				discarded += len(more)
+				if !errors.Is(tailErr, bufio.ErrBufferFull) {
+					break
+				}
+			}
+			if tailErr != nil {
+				tail.add(line)
+				return
+			}
+			log.WarningLog.Printf("watch task %s: stdout line exceeded %d bytes during stop drain; truncated (%d bytes discarded)", w.taskID, maxWatchLineBytes, discarded)
+			w.enqueueEvent(line, tail, true)
+		case errors.Is(err, io.EOF):
+			if len(chunk) > 0 {
+				log.WarningLog.Printf("watch task %s: discarding %d bytes of unterminated stdout output during stop drain", w.taskID, len(chunk))
+				tail.add(string(chunk))
+			}
+			return
+		default:
+			return
+		}
 	}
 }

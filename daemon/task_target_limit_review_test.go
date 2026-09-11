@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -153,6 +154,87 @@ func TestTaskPromptWaitsForInFlightLimitSnapshotSettlement(t *testing.T) {
 	}
 }
 
+func TestWatchQueueAdmissionWaitsForInFlightLimitSnapshotSettlement(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &blockingLimitSnapshotBackend{
+		readyFakeBackend: readyFakeBackend{session.NewFakeBackend()},
+		started:          make(chan struct{}), release: make(chan struct{}), recorder: &promptRecorder{},
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "queue-snapshot-race", backend, true, session.Running)
+	if err := task.AddTask(task.Task{
+		ID: "a4223107", Name: "watch-queue-snapshot-race", Prompt: "event: {{line}}",
+		WatchCmd: "watch.sh", TargetSession: "queue-snapshot-race", ProjectPath: repoPath,
+		Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	queue := newEventQueue(t.TempDir(), "a4223107")
+	for i := 0; i < watcherQueueMaxEvents; i++ {
+		if err := queue.enqueue(fmt.Sprintf("old-%03d", i)); err != nil {
+			t.Fatalf("seed event %d: %v", i, err)
+		}
+	}
+	s := newWatcherSupervisor()
+	s.observeTargetLimit = manager.observeTaskTargetLimit
+	stopCh := make(chan struct{})
+	close(stopCh)
+	w := &taskWatcher{taskID: "a4223107", sup: s, queue: queue, stopCh: stopCh}
+
+	pollDone := make(chan struct{})
+	go func() {
+		manager.refreshInstanceStatus(repoID, inst)
+		close(pollDone)
+	}()
+	select {
+	case <-backend.started:
+	case <-time.After(time.Second):
+		t.Fatal("status poll did not enter pane snapshot")
+	}
+
+	reachedObservationFence := make(chan struct{})
+	originalHook := testHookTaskLimitObserveBeforeObservationFence
+	var once sync.Once
+	testHookTaskLimitObserveBeforeObservationFence = func() {
+		once.Do(func() { close(reachedObservationFence) })
+	}
+	t.Cleanup(func() { testHookTaskLimitObserveBeforeObservationFence = originalHook })
+	handleDone := make(chan struct{})
+	go func() {
+		w.handleEvent("new-after-captured-limit", &tailBuffer{})
+		close(handleDone)
+	}()
+	select {
+	case <-reachedObservationFence:
+	case <-time.After(time.Second):
+		t.Fatal("queue admission did not reach observation-settlement fence")
+	}
+	select {
+	case <-handleDone:
+		t.Fatal("queue admission overtook an in-flight limit snapshot")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(backend.release)
+	select {
+	case <-pollDone:
+	case <-time.After(time.Second):
+		t.Fatal("status poll did not publish captured usage limit")
+	}
+	select {
+	case <-handleDone:
+	case <-time.After(time.Second):
+		t.Fatal("queue admission stayed blocked after observation settlement")
+	}
+
+	if got := queue.pendingCount(); got != watcherQueueMaxEvents+1 {
+		t.Fatalf("captured limit allowed cap eviction: pending=%d", got)
+	}
+	ev, _, ok, err := queue.peek()
+	if err != nil || !ok || ev.Line != "old-000" {
+		t.Fatalf("oldest distinct event was evicted: event=%+v ok=%v err=%v", ev, ok, err)
+	}
+}
+
 func TestTaskPromptLimitTransitionIsSerializedWithFinalSend(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	recorder := &promptRecorder{}
@@ -251,7 +333,7 @@ func TestStopPersistsCompleteEventsPrefetchedBeforeLimitBackpressure(t *testing.
 	if _, err := br.Peek(len("prefetched-one\nprefetched-two\npartial")); err != nil {
 		t.Fatalf("prefetch fixture: %v", err)
 	}
-	w.persistBufferedLimitEvents(br, &tailBuffer{})
+	w.persistRemainingLimitEvents(br, &tailBuffer{})
 
 	var got []string
 	for {
@@ -273,6 +355,50 @@ func TestStopPersistsCompleteEventsPrefetchedBeforeLimitBackpressure(t *testing.
 	}
 }
 
+func TestStopDrainsCompleteEventsAlreadyAcceptedByKernelPipe(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "a4223108")
+	for i := 0; i < watcherQueueMaxEvents; i++ {
+		if err := queue.enqueue(fmt.Sprintf("old-%03d", i), true); err != nil {
+			t.Fatalf("seed event %d: %v", i, err)
+		}
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer reader.Close()
+	if _, err := writer.WriteString("kernel-one\nkernel-two\n"); err != nil {
+		t.Fatalf("write kernel-buffered events: %v", err)
+	}
+
+	stopCh := make(chan struct{})
+	close(stopCh)
+	writersStopped := make(chan struct{})
+	w := &taskWatcher{taskID: "a4223108", sup: newWatcherSupervisor(), queue: queue, stopCh: stopCh}
+	done := make(chan struct{})
+	go func() {
+		w.consumeLines(reader, &tailBuffer{}, writersStopped)
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("reader closed before the stopped writer released its kernel pipe")
+	case <-time.After(20 * time.Millisecond):
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	close(writersStopped)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not finish draining the closed kernel pipe")
+	}
+	if got := queue.pendingCount(); got != watcherQueueMaxEvents+2 {
+		t.Fatalf("kernel-buffered events were lost: pending=%d", got)
+	}
+}
+
 func TestOrdinaryStopDoesNotPromotePrefetchedLinesToLimitBacklog(t *testing.T) {
 	queue := newEventQueue(t.TempDir(), "a4223105")
 	if err := queue.enqueue("ordinary-backlog"); err != nil {
@@ -285,7 +411,7 @@ func TestOrdinaryStopDoesNotPromotePrefetchedLinesToLimitBacklog(t *testing.T) {
 		return false, nil
 	}
 	w := &taskWatcher{taskID: "a4223105", sup: s, queue: queue, stopCh: stopCh}
-	w.consumeLines(strings.NewReader("first\nsecond\nthird\n"), &tailBuffer{})
+	w.consumeLines(strings.NewReader("first\nsecond\nthird\n"), &tailBuffer{}, nil)
 
 	if got := queue.pendingCount(); got != 2 {
 		t.Fatalf("ordinary stop persisted prefetched events as limit backlog: pending=%d, want seed + first only", got)
@@ -341,5 +467,41 @@ func TestAgedBacklogObservesTargetLimitBeforeExpiringHead(t *testing.T) {
 	}
 	if !queue.retainLimitParked() {
 		t.Fatal("aged limit-held backlog was not durably protected")
+	}
+}
+
+func TestRepeatedParkOfSameWatchEventDoesNotRestampLastRun(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	if err := task.AddTask(task.Task{
+		ID: "a4223109", Name: "watch-park-timestamp", Prompt: "event: {{line}}",
+		WatchCmd: "watch.sh", TargetSession: "limited", ProjectPath: repoPath,
+		Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	original := deliverPromptForTask
+	deliverPromptForTask = func(DeliverPromptRequest) (taskPromptDeliveryResult, error) {
+		return taskPromptDeliveryResult{status: TaskStatusLimitParked}, nil
+	}
+	t.Cleanup(func() { deliverPromptForTask = original })
+
+	if err := deliverWatchEvent("a4223109", "one occurrence"); !errors.Is(err, errTargetLimitReached) {
+		t.Fatalf("first park = %v, want replay request", err)
+	}
+	first, err := task.GetTask("a4223109")
+	if err != nil || first.LastRunAt == nil {
+		t.Fatalf("first parked status: task=%+v err=%v", first, err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if err := deliverWatchEvent("a4223109", "one occurrence"); !errors.Is(err, errTargetLimitReached) {
+		t.Fatalf("parked replay = %v, want replay request", err)
+	}
+	second, err := task.GetTask("a4223109")
+	if err != nil {
+		t.Fatalf("reload parked status: %v", err)
+	}
+	if second.LastRunAt == nil || !second.LastRunAt.Equal(*first.LastRunAt) {
+		t.Fatalf("same parked occurrence restamped LastRunAt: first=%v second=%v", first.LastRunAt, second.LastRunAt)
 	}
 }

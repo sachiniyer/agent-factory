@@ -517,10 +517,11 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	}
 
 	readerDone := make(chan struct{})
+	stdoutWritersStopped := make(chan struct{})
 	go func() {
 		defer close(readerDone)
 		defer r.Close()
-		w.consumeLines(r, tail)
+		w.consumeLines(r, tail, stdoutWritersStopped)
 	}()
 
 	stderrDone := make(chan struct{})
@@ -561,6 +562,7 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	// not outlive the watcher. This also closes any inherited stdout/stderr
 	// write ends, so both reader goroutines are guaranteed to reach EOF.
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	close(stdoutWritersStopped)
 	<-readerDone
 	<-stderrDone
 
@@ -571,13 +573,19 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 // maxWatchLineBytes are truncated to the cap and the remainder discarded with
 // a logged note; unterminated trailing output at EOF is not an event but is
 // kept in the failure tail — it is often the script's death rattle (#797).
-func (w *taskWatcher) consumeLines(r io.Reader, tail *tailBuffer) {
+func (w *taskWatcher) consumeLines(r io.Reader, tail *tailBuffer, stdoutWritersStopped <-chan struct{}) {
 	br := bufio.NewReaderSize(r, maxWatchLineBytes)
 	for {
 		proceed, stoppedDuringLimitBackpressure := w.waitForLimitQueueCapacity()
 		if !proceed {
 			if stoppedDuringLimitBackpressure {
-				w.persistBufferedLimitEvents(br, tail)
+				// Do not close the read end until the stopped process group has
+				// relinquished every write end. Bytes already accepted by the kernel
+				// belong to emitted events just as much as bytes bufio prefetched.
+				if stdoutWritersStopped != nil {
+					<-stdoutWritersStopped
+				}
+				w.persistRemainingLimitEvents(br, tail)
 			}
 			return
 		}
@@ -858,9 +866,15 @@ func deliverWatchEvent(taskID, line string) error {
 		// logged quietly, since a deferral is expected, not an outage.
 		return errTargetBusy
 	}
-	now := time.Now()
-	if _, err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
-		log.ErrorLog.Printf("failed to update task status: %v", err)
+	// A parked replay retries the same queue head on the base cadence. Once the
+	// task already says parked, rewriting LastRunAt would manufacture a fresh run
+	// every few seconds even though no prompt landed. A later success still writes
+	// normally, and the first park after any other status records the occurrence.
+	if status != TaskStatusLimitParked || t.LastRunStatus != TaskStatusLimitParked {
+		now := time.Now()
+		if _, err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
+			log.ErrorLog.Printf("failed to update task status: %v", err)
+		}
 	}
 	if status == TaskStatusLimitParked && !promptRetained {
 		// A targeted watch owns distinct external data, so its queue must replay.
