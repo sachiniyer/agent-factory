@@ -205,7 +205,7 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	// ExitCode()==0 is load-bearing: Exited() is also true for exit 23,
 	// where err is a real *ExitError that must be preserved, and for a
 	// SIGKILL'd shell, which the timed-out guard above handles first.
-	if err != nil && !(cmd.ProcessState != nil && cmd.ProcessState.Exited() && cmd.ProcessState.ExitCode() == 0) {
+	if err != nil && !(errors.Is(err, context.DeadlineExceeded) && cmd.ProcessState != nil && cmd.ProcessState.Exited() && cmd.ProcessState.ExitCode() == 0) {
 		return fmt.Errorf("%w%s", err, outputReport)
 	}
 	if outputReadErr == nil {
