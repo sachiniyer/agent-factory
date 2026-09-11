@@ -664,6 +664,37 @@ func TestTaskRunOutcomePreservesLaterWatcherSupervisionStatus(t *testing.T) {
 	}
 }
 
+func TestTaskRunOutcomeClosesResumedParkedRun(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
+	_, err := BeginTaskRun("w1", "session-a", runAt, "parked: usage limit")
+	require.NoError(t, err)
+
+	_, applied, err := UpdateTaskRunOutcome("w1", "session-a", "interrupted: agent runtime lost")
+	require.NoError(t, err)
+	require.True(t, applied,
+		"a resumed run retains its session identity when the parked status write survives its prompt delivery")
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	assert.Equal(t, "interrupted: agent runtime lost", got.LastRunStatus)
+}
+
+func TestTaskRunStartRepairsOverPriorIdentifiedRow(t *testing.T) {
+	oldRunAt := time.Date(2026, 9, 11, 8, 0, 0, 0, time.UTC)
+	newRunAt := oldRunAt.Add(time.Hour)
+	setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
+	_, err := BeginTaskRun("w1", "session-old", oldRunAt, "started")
+	require.NoError(t, err)
+
+	_, applied, err := UpdateTaskRunStart("w1", "session-new", newRunAt, "started")
+	require.NoError(t, err)
+	require.True(t, applied,
+		"repairing a committed new session must not require the previous run identity to be empty")
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	assert.Equal(t, "session-new", got.LastRunSessionID)
+}
+
 func TestTaskRunStartRepairsOnlyAnUnidentifiedRow(t *testing.T) {
 	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	setupTestTasks(t, []Task{{ID: "w1", LastRunStatus: "started"}})
