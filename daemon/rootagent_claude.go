@@ -39,7 +39,7 @@ func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, in
 		// check is simply skipped, and the throttle brings it back.
 		m.logRootClaudeTranscriptWarning(st,
 			"root agent for %s could not verify its recorded claude conversation %s against the project transcript store: the inspection did not finish within %s, so it was not inspected this tick — the recorded conversation is unchanged and the check runs again on its next interval",
-			repoRoot, recorded.ID, rootClaudeTranscriptInspectBudget)
+			repoRoot, recorded.ID, m.rootClaudeTranscriptBudget())
 		return
 	}
 	if err != nil {
@@ -91,10 +91,12 @@ func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, in
 		repoRoot, recorded.ID, state.Resume.ID)
 }
 
-// inspectClaudeProjectConversations is the transcript read this bound exists
-// for. A package var so a test can drive the stalled-store case; production
-// assigns it once.
-var inspectClaudeProjectConversations = session.InspectClaudeProjectConversations
+func (m *Manager) rootClaudeTranscriptBudget() time.Duration {
+	if m.claudeTranscriptInspectBudget > 0 {
+		return m.claudeTranscriptInspectBudget
+	}
+	return rootClaudeTranscriptInspectBudget
+}
 
 // inspectRootClaudeTranscript runs one transcript inspection for a live root
 // and reports whether it FINISHED, so a caller can tell "the store says X" from
@@ -136,15 +138,19 @@ func (m *Manager) inspectRootClaudeTranscript(st *rootEnsureState, program, repo
 	// parking forever on a send nobody will receive — the leak a bound of this
 	// shape introduces if the channel is unbuffered.
 	done := make(chan inspection, 1)
+	inspect := m.inspectClaudeProjectConversations
+	if inspect == nil {
+		inspect = session.InspectClaudeProjectConversations
+	}
 	go func() {
-		state, err := inspectClaudeProjectConversations(program, repoRoot, recorded)
+		state, err := inspect(program, repoRoot, recorded)
 		m.mu.Lock()
 		st.claudeTranscriptInspecting = false
 		m.mu.Unlock()
 		done <- inspection{state: state, err: err}
 	}()
 
-	timer := time.NewTimer(rootClaudeTranscriptInspectBudget)
+	timer := time.NewTimer(m.rootClaudeTranscriptBudget())
 	defer timer.Stop()
 	select {
 	case result := <-done:
