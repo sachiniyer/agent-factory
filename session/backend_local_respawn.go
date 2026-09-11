@@ -171,7 +171,11 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// completion resolves while yielding to a kill/archive teardown fence (#1195
 	// Phase 2d — the chokepoint form of MarkLive). The daemon poll re-derives
 	// Ready/Running from the live session from here on and persists the transition.
-	_ = i.Transition(ConfirmLive())
+	live := ConfirmLive()
+	if restoreResult == tmux.RestoreRespawned {
+		live = ConfirmRuntimeReplacementLive()
+	}
+	_ = i.Transition(live)
 
 	// The re-spawned tmux is a new pane process; a PTY broker that was still holding
 	// the dead pane's clientless capture must drop it so the next Subscribe streams

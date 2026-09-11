@@ -117,6 +117,10 @@ type TransitionEvent struct {
 	resetAt     time.Time
 	epoch       uint64
 	epochScoped bool
+	// runtimeReplaced is positive provenance from the backend that the agent
+	// process which owned the prior lifecycle was replaced. OpRestoring alone
+	// cannot prove that: local recovery can reattach the original tmux runtime.
+	runtimeReplaced bool
 }
 
 // AtEpoch scopes an event to the state epoch its decision was made at (#2135):
@@ -144,6 +148,15 @@ func BeginCreate() TransitionEvent { return TransitionEvent{kind: tkBeginCreate}
 // MarkLive). It YIELDS (no-op) when a kill/archive op is in flight, so a
 // completing spawn never resurrects a session a teardown owns.
 func ConfirmLive() TransitionEvent { return TransitionEvent{kind: tkConfirmLive} }
+
+// ConfirmRuntimeReplacementLive is ConfirmLive with backend-owned proof that
+// recovery spawned a different agent runtime. This is the only ConfirmLive form
+// that may run the predecessor-settlement boundary or apply the structural
+// interrupted-run fallback. A plain ConfirmLive includes successful reattach,
+// where the prompted runtime still exists and still owns its task run.
+func ConfirmRuntimeReplacementLive() TransitionEvent {
+	return TransitionEvent{kind: tkConfirmLive, runtimeReplaced: true}
+}
 
 // ObserveLiveness applies the daemon's authoritative liveness (was SetLiveness).
 // It is the unconditional daemon-truth edge: it sets liveness and preserves the
@@ -396,10 +409,10 @@ var transitionTable = map[transitionKind]edgeSpec{
 			return stateAxes{LiveRunning, OpNone}
 		},
 		yieldWhenBlocked: true,
-		// A lost-session replacement never received its predecessor's task prompt,
-		// so it cannot own or complete that run. End the marker at this identity
-		// boundary; the daemon records the interrupted outcome before ConfirmLive.
-		// Every other ConfirmLive shape keeps the marker unchanged.
+		// A backend-proven lost-session replacement never received its predecessor's
+		// task prompt, so it cannot own or complete that run. End the marker at this
+		// identity boundary; the daemon records the interrupted outcome before
+		// ConfirmLive. A reattach uses plain ConfirmLive and keeps the marker.
 		run: runEndsOnRestoredRuntime,
 	},
 	tkObserveLiveness: {
@@ -570,7 +583,7 @@ func SetIllegalTransitionHook(fn func(msg string)) (restore func()) {
 // yielding edge (ObserveLiveness always, ConfirmLive under a teardown op) that
 // is out-of-set is a silent no-op. INERT until Phase 2d migrates the writers.
 func (i *Instance) Transition(ev TransitionEvent) error {
-	if ev.kind == tkConfirmLive {
+	if ev.kind == tkConfirmLive && ev.runtimeReplaced {
 		i.runLiveBoundary()
 	}
 	i.mu.Lock()
@@ -654,11 +667,10 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 				i.closeTaskRunLocked()
 			}
 		case runEndsOnRestoredRuntime:
-			// The from-state proves runtime identity: OpRestoring means Recover
-			// replaced a Lost runtime without delivering its task prompt. Other
-			// ConfirmLive callers either own the original runtime or keep a
-			// respawn fenced until prompt delivery, so they must retain the run.
-			if from.op == OpRestoring {
+			// The backend's event proves runtime identity. OpRestoring alone is
+			// insufficient: local recovery may have reattached the original tmux
+			// runtime, which still owns the prompt and must retain its run.
+			if ev.runtimeReplaced && from.op == OpRestoring {
 				i.closeTaskRunLocked()
 			}
 		}

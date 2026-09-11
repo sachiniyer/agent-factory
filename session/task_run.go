@@ -37,10 +37,11 @@ func (i *Instance) TaskRun() TaskRunIdentity {
 // received its prompt has been replaced without replaying that prompt. The
 // returned identity is valid only when interrupted is true.
 //
-// Runtime replacement is the provenance proof: restore-time callers invoke this
-// at their pre-ConfirmLive boundary, while load reconstructors invoke it only
-// after RestoreWithResult confirms RestoreRespawned for the agent tab. A sibling
-// tab replacement never reaches it. A prompt-redelivery fence is the explicit
+// Runtime replacement is the provenance proof: restore-time backends admit the
+// boundary only through ConfirmRuntimeReplacementLive, while load reconstructors
+// invoke it only after RestoreWithResult confirms RestoreRespawned for the agent
+// tab. A successful reattach and a sibling-tab replacement never reach it. A
+// prompt-redelivery fence is the explicit
 // exception: OpRespawning promises to re-deliver the queued task prompt, a
 // durable OpReplacing mission supplies the replacement agent's continuation
 // context, a load-respawned limit-parked task retains its stored queued prompt,
@@ -49,8 +50,8 @@ func (i *Instance) TaskRun() TaskRunIdentity {
 // delivery transaction settles.
 //
 // The daemon must persist the closed session marker before publishing the task
-// outcome. ConfirmLive retains runEndsOnRestoredRuntime as a structural fallback
-// for restore callers that omit the settlement callback.
+// outcome. ConfirmRuntimeReplacementLive retains runEndsOnRestoredRuntime as a
+// structural fallback for restore callers that omit the settlement callback.
 func (i *Instance) InterruptTaskRunAtRuntimeReplacement() (TaskRunIdentity, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()

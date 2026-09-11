@@ -72,9 +72,11 @@ func (i *Instance) KillTrustingOwnLifecycleLock() error {
 
 // runtimeLiveBoundary lets the daemon settle predecessor-owned evidence at the
 // exact lifecycle edge that exposes a replacement. The callback runs outside
-// Instance.mu, immediately before ConfirmLive takes that lock and clears the
-// restore fence. A pointer plus sync.Once keeps the boundary one-shot while the
-// registration remains installed for the whole backend call.
+// Instance.mu, immediately before a backend-proven
+// ConfirmRuntimeReplacementLive takes that lock and clears the restore fence.
+// Plain ConfirmLive reattachments deliberately do not consume it. A pointer
+// plus sync.Once keeps the boundary one-shot while the registration remains
+// installed for the whole backend call.
 type runtimeLiveBoundary struct {
 	fn   func()
 	once sync.Once

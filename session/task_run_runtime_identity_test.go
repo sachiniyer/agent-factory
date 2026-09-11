@@ -27,7 +27,7 @@ func TestTaskRunEndsOnlyForRuntimeThatReceivedPrompt(t *testing.T) {
 		require.True(t, run.RunAt.Equal(runAt))
 		require.False(t, inst.TaskRunActive(),
 			"the settlement boundary must durably close the predecessor's run")
-		require.NoError(t, inst.Transition(ConfirmLive()))
+		require.NoError(t, inst.Transition(ConfirmRuntimeReplacementLive()))
 		require.False(t, inst.TaskRunActive(),
 			"a replacement runtime that never received the run prompt must not own the active run")
 
@@ -36,7 +36,7 @@ func TestTaskRunEndsOnlyForRuntimeThatReceivedPrompt(t *testing.T) {
 			"the replacement runtime's first idle observation must not complete the interrupted run")
 	})
 
-	t.Run("restore confirmation is the structural fallback", func(t *testing.T) {
+	t.Run("replacement confirmation is the structural fallback", func(t *testing.T) {
 		inst := &Instance{
 			TaskID:        "task-id",
 			liveness:      LiveLost,
@@ -44,9 +44,29 @@ func TestTaskRunEndsOnlyForRuntimeThatReceivedPrompt(t *testing.T) {
 			taskRunActive: true,
 		}
 
-		require.NoError(t, inst.Transition(ConfirmLive()))
+		require.NoError(t, inst.Transition(ConfirmRuntimeReplacementLive()))
 		require.False(t, inst.TaskRunActive(),
 			"a caller without a settlement callback must not transfer the run to a restored runtime")
+	})
+
+	t.Run("reattached prompted runtime retains its run", func(t *testing.T) {
+		inst := &Instance{
+			TaskID:        "task-id",
+			liveness:      LiveLost,
+			inFlightOp:    OpRestoring,
+			taskRunActive: true,
+		}
+		boundaryCalled := false
+		require.NoError(t, inst.withLiveBoundary(func() {
+			boundaryCalled = true
+			inst.InterruptTaskRunAtRuntimeReplacement()
+		}, func() error {
+			return inst.Transition(ConfirmLive())
+		}))
+		require.False(t, boundaryCalled,
+			"reattachment is not runtime replacement provenance")
+		require.True(t, inst.TaskRunActive(),
+			"the original prompted runtime still owns and may complete its run")
 	})
 
 	t.Run("prompt redelivery fence preserves the run", func(t *testing.T) {

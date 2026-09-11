@@ -196,7 +196,10 @@ func recoverSandbox(i *Instance) error {
 		}
 		return err
 	}
-	_ = i.Transition(ConfirmLive())
+	// reprovisionRemote always creates a fresh sandbox. Carry that backend-owned
+	// identity proof into the lifecycle boundary so predecessor evidence is
+	// retired; a plain ConfirmLive is reserved for paths that may only reattach.
+	_ = i.Transition(ConfirmRuntimeReplacementLive())
 	return nil
 }
 
