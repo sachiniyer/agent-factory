@@ -155,7 +155,7 @@ go vet ./...
 deadcode -test ./...   # empty output = nothing unreachable
 ```
 
-Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadcode@v0.48.0`; CI pins the same version. Its findings are advisory (#3014) — an unreachable symbol is worth fixing or explaining in the PR, but it does not hold the merge, and it must never be silenced with a per-symbol allowlist. This project's Go floor is 1.25 (raised from 1.24 in #1592 Phase 4 PR5 to pull in the CVE-patched `golang.org/x/crypto` ≥ v0.52.0, which requires Go 1.25); deadcode must be ≥ v0.45.0 to analyze go1.25 source (older x/tools cannot).
+Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadcode@v0.48.0`; CI pins the same version. Its findings are advisory (#3014) — an unreachable symbol is worth fixing or explaining in the PR, but it does not hold the merge, and it must never be silenced with a per-symbol allowlist. Remove unreachable exported symbols instead of preserving them for Go 1 compatibility: this repository ships `af` as an application and does not promise a stable Go import API. Dead-code cleanup must still preserve every user-visible `af` contract listed under Conventions. This project's Go floor is 1.25 (raised from 1.24 in #1592 Phase 4 PR5 to pull in the CVE-patched `golang.org/x/crypto` ≥ v0.52.0, which requires Go 1.25); deadcode must be ≥ v0.45.0 to analyze go1.25 source (older x/tools cannot).
 
 **File-length lint (#1145):** `scripts/lint-file-length.sh` fails if any Go
 file exceeds its line limit — 1000 lines for production code, 1500 for
@@ -413,6 +413,12 @@ stack, revert the foreign paths out of your tree, and say so in the PR.
 - Keep PRs focused and small
 - Run the full gate suite above before submitting
 - Version is stored in `main.go` (`version` var) and auto-bumped by CI
+- Treat exported Go identifiers as repository-internal implementation, not a
+  supported import API; removing one is not a breaking change and does not
+  require a major version. The supported compatibility surface is the `af`
+  binary's user-visible behavior: CLI behavior and output, config keys,
+  JSON/HTTP contracts, on-disk task and session state, and behavior user scripts
+  depend on.
 
 ## Copy & glyph conventions
 
