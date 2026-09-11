@@ -474,8 +474,10 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 		}
 		// `--` and the first non-option operand both end option parsing: every
 		// word after one is a positional parameter, so `set -- -k` assigns the
-		// string "-k" to $1 and enables nothing.
-		if value == "--" || !strings.HasPrefix(value, "-") {
+		// string "-k" to $1 and enables nothing. A `+` prefix is a turn-OFF flag
+		// in bash, not a non-option operand, so it does NOT end the scan: `set
+		// +e -k` still enables keyword mode and must be caught by the loop below.
+		if value == "--" || (!strings.HasPrefix(value, "-") && !strings.HasPrefix(value, "+")) {
 			return false
 		}
 		// A long-form switch names its mode in the next word. `+o keyword` turns
@@ -496,9 +498,9 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 			continue
 		}
 		// Short options cluster, so a guard matching only a lone "-k" walks
-		// straight past "-ek" (the #3402 lesson). "+k" DISABLES keyword mode and
-		// is not a prefix match here.
-		if strings.ContainsRune(value[1:], 'k') {
+		// straight past "-ek" (the #3402 lesson). `+k` DISABLES keyword mode and
+		// must stay allowed, so only the `-`-prefixed cluster form enables it.
+		if value[0] == '-' && strings.ContainsRune(value[1:], 'k') {
 			return true
 		}
 	}
