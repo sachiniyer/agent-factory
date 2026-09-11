@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
@@ -75,12 +76,17 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 // this boundary reset and before it returns; the post-success reset retires
 // those in-memory observations, while this settlement makes the fence safe.
 func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *session.Instance) error {
-	if taskID, title, interrupted := instance.InterruptTaskRunAtRestoreBoundary(); interrupted && taskID != "" {
-		m.recordInterruptedTaskRun(taskID, title)
-	}
+	taskID, title, interrupted := instance.InterruptTaskRunAtRestoreBoundary()
 	m.noteRuntimeReplaced(repoID, instance)
-	if err := m.persistSettlement(repoID, key, instance); err != nil {
-		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", err)
+	settlementErr := m.persistSettlement(repoID, key, instance)
+	// The session settlement comes first. A task-file lock or disk fault must not
+	// keep predecessor-owned remote-loss evidence live after the replacement is
+	// already running, or a restart plus one blip could re-provision it again.
+	if interrupted && taskID != "" {
+		m.recordInterruptedTaskRun(taskID, title, instance.CreatedAt)
+	}
+	if settlementErr != nil {
+		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", settlementErr)
 	}
 	return nil
 }
@@ -91,15 +97,21 @@ func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *sessio
 // received the prompt, while the replacement did not. Limit resumes arrive as
 // OpRespawning and are excluded because they re-deliver their queued prompt.
 //
-// The timestamp remains the original delivery time. This is a status change,
-// not a second run, and UpdateTaskStatus's nil mode prevents a concurrent newer
-// delivery from having its timestamp rolled back.
-func (m *Manager) recordInterruptedTaskRun(taskID, title string) {
-	updated, err := task.UpdateTaskStatus(taskID, nil, TaskStatusInterrupted)
+// runAt is the exact timestamp the successful delivery wrote to LastRunAt. The
+// conditional update changes the status only while that identity still owns the
+// row; a newer concurrent run keeps both its timestamp and its status.
+func (m *Manager) recordInterruptedTaskRun(taskID, title string, runAt time.Time) {
+	updated, applied, err := task.UpdateTaskStatusIfLastRunAt(taskID, runAt, TaskStatusInterrupted)
 	if err != nil {
 		m.warn().Printf(
 			"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, skipped on_complete, and left the session in place for inspection; could not record last_run_status %q: %v",
 			taskID, title, TaskStatusInterrupted, err)
+		return
+	}
+	if !applied {
+		m.warn().Printf(
+			"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, skipped on_complete, and left the session in place for inspection; did not replace last_run_status because a newer run owns the task row",
+			taskID, title)
 		return
 	}
 	m.publishEvent(agentproto.EventTaskUpdated, updated)

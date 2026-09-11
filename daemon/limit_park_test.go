@@ -197,7 +197,7 @@ func stubParkedCreate(t *testing.T) {
 		if title == "" {
 			title = req.TitleBase
 		}
-		return &session.InstanceData{Title: title, Liveness: session.LiveLimitReached}, nil
+		return &session.InstanceData{Title: title, Liveness: session.LiveLimitReached, CreatedAt: time.Now()}, nil
 	}
 	t.Cleanup(func() { createSessionForTask = orig })
 }
@@ -211,7 +211,7 @@ func TestDeliverTaskPrompt_ParksOnUsageLimit(t *testing.T) {
 	stubParkedCreate(t)
 
 	tsk := &task.Task{ID: "ffff0010", Name: "nightly", Prompt: "do it", CronExpr: "0 3 * * *", ProjectPath: repo, Enabled: true}
-	status, err := deliverTaskPrompt(tsk, tsk.Prompt, true)
+	status, _, err := deliverTaskPrompt(tsk, tsk.Prompt, true)
 	if err != nil {
 		t.Fatalf("deliverTaskPrompt must not error on a park: %v", err)
 	}

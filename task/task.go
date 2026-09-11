@@ -806,17 +806,35 @@ func loadTasksForScope(scope *repoScope) ([]Task, error) {
 // the store that this very call retired (#3684 review). Callers that only need
 // the error discard it.
 func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) (Task, error) {
+	updated, _, err := updateTaskStatus(taskID, lastRunAt, lastRunStatus, nil)
+	return updated, err
+}
+
+// UpdateTaskStatusIfLastRunAt updates LastRunStatus only when the stored
+// LastRunAt still identifies expectedRunAt. It is the completion/interruption
+// writer for a session-backed run: another run may have updated the task row
+// while this session was alive, and an older outcome must not overwrite the
+// newer run's status. The comparison and write share the task-file lock.
+//
+// Reports false with no error when a newer run owns the row. LastRunAt is left
+// unchanged whichever way the comparison goes.
+func UpdateTaskStatusIfLastRunAt(taskID string, expectedRunAt time.Time, lastRunStatus string) (Task, bool, error) {
+	return updateTaskStatus(taskID, nil, lastRunStatus, &expectedRunAt)
+}
+
+func updateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string, expectedRunAt *time.Time) (Task, bool, error) {
 	if err := ValidateTaskID(taskID); err != nil {
-		return Task{}, err
+		return Task{}, false, err
 	}
 	path, err := getTasksPathFn()
 	if err != nil {
-		return Task{}, err
+		return Task{}, false, err
 	}
 	if err := ensureTasksSchemaMigrated(path); err != nil {
-		return Task{}, err
+		return Task{}, false, err
 	}
 	var updated Task
+	applied := false
 	lockErr := config.WithFileLock(path, func() error {
 		tasks, err := loadTasksLocked(path)
 		if err != nil {
@@ -827,6 +845,11 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 		row := -1
 		for i := range tasks {
 			if tasks[i].ID == taskID {
+				found = true
+				if expectedRunAt != nil &&
+					(tasks[i].LastRunAt == nil || !tasks[i].LastRunAt.Equal(*expectedRunAt)) {
+					return nil
+				}
 				// nil means "preserve the on-disk LastRunAt": a status-only
 				// update must not clobber a newer event-delivery timestamp that
 				// a concurrent writer committed while this caller held a stale
@@ -836,13 +859,16 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 				}
 				tasks[i].LastRunStatus = lastRunStatus
 				row = i
-				found = true
+				applied = true
 				break
 			}
 		}
 
 		if !found {
 			return fmt.Errorf("task with id %q not found", taskID)
+		}
+		if !applied {
+			return nil
 		}
 
 		generation, err := writeTasks(tasks)
@@ -853,9 +879,9 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 		return nil
 	})
 	if lockErr != nil {
-		return Task{}, lockErr
+		return Task{}, false, lockErr
 	}
-	return updated, nil
+	return updated, applied, nil
 }
 
 // capApplies reports whether this task's shape can carry a concurrency cap: it

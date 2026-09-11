@@ -15,13 +15,13 @@ func TestRestoredTaskRuntimeIsRecordedInterruptedAndSkipsOnComplete(t *testing.T
 	tsk := enabledCronTask("dead0001", repoPath)
 	tsk.OnComplete = task.OnCompleteArchive
 	require.NoError(t, task.AddTask(tsk))
-	deliveredAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
-	_, err := task.UpdateTaskStatus(tsk.ID, &deliveredAt, "started")
-	require.NoError(t, err)
 
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "interrupted-run", Path: repoPath, Program: "claude", TaskID: tsk.ID,
 	})
+	require.NoError(t, err)
+	deliveredAt := inst.CreatedAt
+	_, err = task.UpdateTaskStatus(tsk.ID, &deliveredAt, "started")
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStartedForTest(true)
@@ -96,4 +96,38 @@ func TestRestoredTaskRuntimeIsRecordedInterruptedAndSkipsOnComplete(t *testing.T
 	case <-time.After(5 * time.Second):
 		t.Fatal("a prompted runtime's normal idle edge must still apply on_complete")
 	}
+}
+
+func TestRestoredOlderTaskRuntimeDoesNotOverwriteNewerRunStatus(t *testing.T) {
+	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	tsk := enabledCronTask("dead0002", repoPath)
+	require.NoError(t, task.AddTask(tsk))
+
+	olderRunAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "older-run", Path: repoPath, Program: "claude", TaskID: tsk.ID, CreatedAt: olderRunAt,
+	})
+	require.NoError(t, err)
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	key := daemonInstanceKey(repoID, inst.Title)
+	seedDiskInstance(t, repoID, inst.Title, repoPath)
+	manager.mu.Lock()
+	manager.instances[key] = inst
+	manager.mu.Unlock()
+
+	newerRunAt := olderRunAt.Add(time.Minute)
+	_, err = task.UpdateTaskStatus(tsk.ID, &newerRunAt, "started")
+	require.NoError(t, err)
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveLost)))
+	require.NoError(t, inst.Transition(session.MarkRestoring()))
+	require.NoError(t, manager.prepareRuntimeReplacement(repoID, key, inst))
+
+	gotTask, err := task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	require.NotNil(t, gotTask.LastRunAt)
+	assert.True(t, gotTask.LastRunAt.Equal(newerRunAt))
+	assert.Equal(t, "started", gotTask.LastRunStatus,
+		"an older session's interruption must not replace the newer run's status")
+	assert.Contains(t, logs.warnings.String(), "a newer run owns the task row")
 }

@@ -822,7 +822,7 @@ func deliverWatchEvent(taskID, line string) error {
 	if strings.TrimSpace(prompt) == "" {
 		return notAttempted(fmt.Errorf("event rendered an empty prompt (line %q)", line))
 	}
-	status, err := deliverTaskPrompt(t, prompt, true)
+	status, runAt, err := deliverTaskPrompt(t, prompt, true)
 	if err != nil {
 		return err
 	}
@@ -835,8 +835,7 @@ func deliverWatchEvent(taskID, line string) error {
 		// logged quietly, since a deferral is expected, not an outage.
 		return errTargetBusy
 	}
-	now := time.Now()
-	if _, err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
+	if _, err := task.UpdateTaskStatus(taskID, &runAt, status); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 	return nil

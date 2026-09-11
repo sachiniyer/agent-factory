@@ -611,6 +611,33 @@ func TestUpdateTaskStatus_NilLastRunAtPreservesTimestamp(t *testing.T) {
 	assert.Equal(t, "stopped", got.LastRunStatus, "LastRunStatus must still update")
 }
 
+func TestUpdateTaskStatusIfLastRunAtCannotOverwriteNewerRun(t *testing.T) {
+	older := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Minute)
+	setupTestTasks(t, []Task{{
+		ID: "w1", Name: "Watcher", Prompt: "p", WatchCmd: "tail -f x",
+		ProjectPath: "/tmp", Enabled: true, LastRunAt: &older, LastRunStatus: "started",
+	}})
+
+	updated, applied, err := UpdateTaskStatusIfLastRunAt("w1", older, "interrupted: agent runtime lost")
+	require.NoError(t, err)
+	require.True(t, applied)
+	assert.Equal(t, "interrupted: agent runtime lost", updated.LastRunStatus)
+
+	_, err = UpdateTaskStatus("w1", &newer, "started")
+	require.NoError(t, err)
+	_, applied, err = UpdateTaskStatusIfLastRunAt("w1", older, "interrupted: agent runtime lost")
+	require.NoError(t, err)
+	assert.False(t, applied, "an older session no longer owns the task's last-run row")
+
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	require.NotNil(t, got.LastRunAt)
+	assert.True(t, got.LastRunAt.Equal(newer))
+	assert.Equal(t, "started", got.LastRunStatus,
+		"the older interruption must not replace the newer run's status")
+}
+
 // TestUpdateTaskStatus_NotFound verifies the not-found error path that the
 // runner / TUI rely on to log a meaningful failure when a task is deleted
 // mid-run.
