@@ -28,6 +28,9 @@ func (s *controlServer) UnsetConfigValue(req UnsetConfigValueRequest, resp *Unse
 			resp.Pending = applied.Pending
 			resp.Warnings = applied.Warnings
 			outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applied.FailedListenerKeys}
+		} else {
+			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+applyErr.Error())
+			outcome.DaemonApplyFailed = true
 		}
 	}
 	resp.RestartNotice = config.EffectNotice(result.Key, outcome)

@@ -143,13 +143,18 @@ func KeyEffectClass(key string) EffectClass {
 // new value now." over a warning saying the daemon was still serving the old
 // address. Carrying the outcome makes EffectNotice the one owner of the decision.
 //
-// The zero value is the honest "nothing applied it": no daemon was running, or its
-// apply returned an error. A caller with no apply result stays expressible.
+// The zero value means no daemon was reached to apply the save. An apply
+// failure must set DaemonApplyFailed instead of claiming that no daemon ran.
 type ApplyOutcome struct {
 	// DaemonApplied reports that a running daemon applied the on-disk config
 	// (daemon.Manager.ApplyConfig returned without error). It does NOT report that
 	// every changed key took effect — FailedListenerKeys is the rest of the answer.
 	DaemonApplied bool
+	// DaemonApplyFailed means apply returned an error after reaching the daemon.
+	DaemonApplyFailed bool
+	// DaemonApplyUnconfirmed distinguishes a lost RPC response from a daemon
+	// error: the daemon may have applied the config before the connection failed.
+	DaemonApplyUnconfirmed bool
 	// FailedListenerKeys names the socket keys (network.listen_addr /
 	// network.preview_listen_addr) whose live rebind failed, so bind-new-before-close
 	// left the OLD listener serving. Both daemon.ApplyConfigResult and
@@ -203,6 +208,12 @@ func EffectNotice(key string, outcome ApplyOutcome) string {
 	}
 	switch KeyEffectClass(key) {
 	case EffectAppliedLive:
+		if outcome.DaemonApplyUnconfirmed {
+			return "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
+		}
+		if outcome.DaemonApplyFailed {
+			return "Saved — the running daemon could not apply the new configuration and is still using its previous value. Fix the reload error in the warning, then restart the daemon to apply the saved value."
+		}
 		if outcome.DaemonApplied {
 			return "Applied — the running daemon is using the new value now."
 		}

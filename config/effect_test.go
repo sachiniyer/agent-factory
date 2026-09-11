@@ -177,11 +177,30 @@ func TestEffectNoticeAppliedLiveSurvivesASuccessfulRebind(t *testing.T) {
 }
 
 // TestEffectNoticeZeroOutcomeIsTheDaemonlessSentence: a caller with no apply result
-// at all — no daemon ran, or its apply errored — stays expressible, and gets the
+// at all — no daemon was reached — stays expressible, and gets the
 // pre-#3397 sentence verbatim.
 func TestEffectNoticeZeroOutcomeIsTheDaemonlessSentence(t *testing.T) {
 	const want = "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
 	if got := EffectNotice("network.listen_addr", ApplyOutcome{}); got != want {
 		t.Errorf("daemonless notice changed\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// A confirmed reload failure keeps the previous live configuration; a lost
+// response cannot establish that fact. Neither outcome means no daemon ran.
+func TestEffectNoticeDaemonApplyFailed(t *testing.T) {
+	const want = "Saved — the running daemon could not apply the new configuration and is still using its previous value. Fix the reload error in the warning, then restart the daemon to apply the saved value."
+	for _, key := range []string{"network.require_token", "require_token", "default_program"} {
+		if got := EffectNotice(key, ApplyOutcome{DaemonApplyFailed: true}); got != want {
+			t.Errorf("%s: got %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestEffectNoticeDaemonApplyUnconfirmed(t *testing.T) {
+	const want = "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
+	outcome := ApplyOutcome{DaemonApplyFailed: true, DaemonApplyUnconfirmed: true}
+	if got := EffectNotice("network.require_token", outcome); got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
