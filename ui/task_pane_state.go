@@ -133,6 +133,22 @@ func (s *TaskPane) RestoreFailedEdit(id string) {
 	s.markTaskDirty(id)
 }
 
+// RestoreFailedDelete makes a consumed deletion retryable and visible when its
+// daemon removal fails with a non-committed error. The task was already removed
+// from s.tasks at delete time, so without this restore it would vanish from the
+// pane while the disk reload that would re-show it (SetTasks) is gated on
+// !failedEdit — and a concurrent failed edit leaves failedEdit true, skipping
+// that reload. Re-appending to s.tasks keeps the row visible (the pane and
+// sidebar can never diverge, per saveContentPaneState), and re-queueing in
+// s.deleted retries the removal on the next save. The record still exists on
+// disk (the removal did not commit), so retrying RemoveTask is not the
+// already-deleted re-run ConsumeDeleted drains to avoid (fixes #763).
+func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
+	s.tasks = append(s.tasks, tsk)
+	s.deleted = append(s.deleted, tsk)
+	s.dirty = true
+}
+
 // ConsumeDeleted returns the tasks pending deletion and clears the pane's
 // deletion state so a subsequent save can't reprocess already-deleted tasks.
 // Failed edits restored after ConsumeDirty keep the pane dirty until the final

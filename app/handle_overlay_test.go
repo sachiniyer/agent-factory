@@ -1035,3 +1035,238 @@ func TestSaveContentPaneState_HooksAndTaskFailuresBothSurfaced(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to save task",
 		"the task error must not be dropped when hooks also fail")
 }
+
+// TestSaveContentPaneState_CombinedEditAndDeleteFailureKeepsDeletedTaskVisible
+// is the regression guard for the combined edit-fail + delete-fail case.
+//
+// saveContentPaneState persists edits then deletions, then reloads BOTH panes
+// from disk so they "can never diverge" (#934). The TaskPane reload
+// (sp.SetTasks) is gated on !failedEdit: a non-committed edit failure leaves
+// failedEdit true so the user's dirty edit draft survives for retry instead of
+// being discarded by the disk reload. That same gate also skips the reload
+// that re-shows a concurrently failed-to-delete task (the removal did not
+// commit, so it still exists on disk and in the sidebar, which reloads
+// unconditionally). The delete loop drains s.deleted via ConsumeDeleted with no
+// restore path (contrast RestoreFailedEdit for edits), so the task silently
+// vanished from the TaskPane until a later successful edit save re-opened the
+// reload — the TaskPane and sidebar showed different task counts.
+//
+// The fix adds RestoreFailedDelete, called on a non-committed delete failure,
+// which re-appends the task to s.tasks (visible) so the TaskPane matches the
+// sidebar/disk. We seed two tasks, toggle one (dirty edit) and delete the
+// other, inject non-committed failures for both daemon RPCs, and assert the
+// TaskPane still shows both tasks. The recovery screen is still surfaced (the
+// notification path is unchanged; the bug was the post-dismissal display).
+func TestSaveContentPaneState_CombinedEditAndDeleteFailureKeepsDeletedTaskVisible(t *testing.T) {
+	h := newTestHome(t)
+
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	keep := task.Task{
+		ID: "keep-confirm", Name: "keep", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	gone := task.Task{
+		ID: "gone-confirm", Name: "gone", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	require.NoError(t, task.AddTask(keep))
+	require.NoError(t, task.AddTask(gone))
+
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, loaded, 2)
+	tp := h.automations.TaskPane()
+	tp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	// The overlay opens the task straight into its edit form (#1249); Esc
+	// steps back to the list to drive the list-mode keys below.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+
+	// Inject non-committed failures for BOTH update and remove RPCs. A plain
+	// fmt.Errorf is not a MutationCommittedError (apiproto/committed.go uses
+	// errors.As), so IsMutationCommitted returns false — the non-committed
+	// branch fires for both, the exact precondition of the bug.
+	t.Cleanup(SetTaskUpdaterForTest(func(string, task.TaskUpdate, task.ProjectExpectation) error {
+		return fmt.Errorf("update daemon RPC failure")
+	}))
+	t.Cleanup(SetTaskRemoverForTest(func(string, task.ProjectExpectation) error {
+		return fmt.Errorf("remove daemon RPC failure")
+	}))
+
+	// Toggle the first task (keep) off — dirty edit, not yet persisted.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	// Move to the second task (gone) and delete it.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	require.True(t, tp.IsDirty(), "toggle + delete must mark the pane dirty")
+	require.Len(t, tp.GetTasks(), 1, "the deleted task is removed from the pane until the save reconciles")
+
+	// Trigger the save directly. Both RPCs fail with non-committed errors.
+	saveErr := h.saveContentPaneState()
+	require.Error(t, saveErr)
+	assert.Contains(t, saveErr.Error(), "failed to save task")
+	assert.Contains(t, saveErr.Error(), "failed to remove task")
+
+	// Disk still holds BOTH tasks (neither mutation committed).
+	disk, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, disk, 2, "disk must be unchanged since both RPCs failed")
+
+	// The sidebar reflects disk truth: BOTH tasks present (it always reloads).
+	require.Len(t, h.store.GetTasks(), 2, "sidebar reloads unconditionally and shows disk truth")
+
+	// FIX: the TaskPane must also show both tasks — the failed-to-delete task is
+	// restored via RestoreFailedDelete so the pane and sidebar can never
+	// diverge (#934). Pre-fix this asserted 1.
+	require.Len(t, tp.GetTasks(), 2,
+		"the failed-to-delete task must remain visible in the TaskPane (it still exists on disk)")
+
+	// The combined failure is surfaced via the recovery screen (the
+	// notification path is unchanged; the bug was the post-dismissal display).
+	require.NotNil(t, h.recovery, "the combined save failure must surface the recovery screen")
+	assert.Contains(t, h.recovery.detail, "failed to save task")
+	assert.Contains(t, h.recovery.detail, "failed to remove task")
+
+	// The pane stays dirty so the retained edit AND the re-queued delete retry
+	// on the next save (mirrors RestoreFailedEdit keeping the edit dirty).
+	assert.True(t, tp.IsDirty(), "the pane must stay dirty for retry")
+}
+
+// TestSaveContentPaneState_CombinedFailureRequeuesDeleteForRetry verifies the
+// other half of RestoreFailedDelete: the failed-to-delete task is re-queued in
+// s.deleted so the next save retries the removal. The record still exists on
+// disk (the first removal did not commit), so retrying RemoveTask is not a
+// spurious re-run of an already-deleted record — exactly what ConsumeDeleted
+// drains to avoid (fixes #763). We trigger the combined failure, then swap the
+// seams to success recorders and save again, asserting both the remove and
+// update RPCs fire a second time.
+func TestSaveContentPaneState_CombinedFailureRequeuesDeleteForRetry(t *testing.T) {
+	h := newTestHome(t)
+
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	keep := task.Task{
+		ID: "keep-retry", Name: "keep", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	gone := task.Task{
+		ID: "gone-retry", Name: "gone", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	require.NoError(t, task.AddTask(keep))
+	require.NoError(t, task.AddTask(gone))
+
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, loaded, 2)
+	tp := h.automations.TaskPane()
+	tp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+	_, _ = h.showTasksOverlay()
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+
+	// First save: both RPCs fail (non-committed), so gone is restored +
+	// re-queued and keep is restored dirty.
+	t.Cleanup(SetTaskUpdaterForTest(func(string, task.TaskUpdate, task.ProjectExpectation) error {
+		return fmt.Errorf("update daemon RPC failure")
+	}))
+	t.Cleanup(SetTaskRemoverForTest(func(string, task.ProjectExpectation) error {
+		return fmt.Errorf("remove daemon RPC failure")
+	}))
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	require.Error(t, h.saveContentPaneState())
+	require.Len(t, tp.GetTasks(), 2, "gone is restored after the combined failure")
+	require.True(t, tp.IsDirty(), "the pane stays dirty across the failed save")
+
+	// Second save: swap the seams to recorders that succeed and assert both the
+	// re-queued delete and the retained edit are dispatched again.
+	var updatedIDs, removedIDs []string
+	t.Cleanup(SetTaskUpdaterForTest(func(id string, _ task.TaskUpdate, _ task.ProjectExpectation) error {
+		updatedIDs = append(updatedIDs, id)
+		return nil
+	}))
+	t.Cleanup(SetTaskRemoverForTest(func(id string, _ task.ProjectExpectation) error {
+		removedIDs = append(removedIDs, id)
+		return nil
+	}))
+	require.NoError(t, h.saveContentPaneState())
+
+	assert.Equal(t, []string{"keep-retry"}, updatedIDs,
+		"the retained edit must be retried on the next save")
+	assert.Equal(t, []string{"gone-retry"}, removedIDs,
+		"the re-queued delete must be retried on the next save")
+}
+
+// TestSaveContentPaneState_DeleteFailureOnlyDoesNotPersistRetry confirms the
+// fix's re-queue does not change the established delete-fail-only contract: when
+// NO edit fails, failedEdit stays false, SetTasks runs, and it clears s.deleted
+// and the dirty flag — so the re-queued delete does NOT persist to a spurious
+// retry and the pane is not left blocking the background refresh. The disk
+// reload already re-shows the task from disk, identical to pre-fix behavior.
+func TestSaveContentPaneState_DeleteFailureOnlyDoesNotPersistRetry(t *testing.T) {
+	h := newTestHome(t)
+
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	gone := task.Task{
+		ID: "gone-only", Name: "gone", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	keep := task.Task{
+		ID: "keep-only", Name: "keep", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	require.NoError(t, task.AddTask(gone))
+	require.NoError(t, task.AddTask(keep))
+
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, loaded, 2)
+	tp := h.automations.TaskPane()
+	tp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+	_, _ = h.showTasksOverlay()
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+
+	// First save: ONLY the delete fails (no edit pending), so failedEdit stays
+	// false and SetTasks runs. A plain error is non-committed
+	// (IsMutationCommitted uses errors.As, so fmt.Errorf yields false).
+	var removedIDs []string
+	t.Cleanup(SetTaskRemoverForTest(func(id string, _ task.ProjectExpectation) error {
+		removedIDs = append(removedIDs, id)
+		return fmt.Errorf("remove daemon RPC failure")
+	}))
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	require.Len(t, tp.GetTasks(), 1, "the deleted task is removed until the save reconciles")
+
+	require.Error(t, h.saveContentPaneState())
+	// The disk reload (SetTasks ran because failedEdit is false) re-shows the
+	// task — the pre-fix recovery path, unchanged by RestoreFailedDelete.
+	require.Len(t, tp.GetTasks(), 2, "the failed-to-delete task reappears from disk via SetTasks")
+	require.Len(t, removedIDs, 1, "the remove RPC fires exactly once for the single delete")
+	// SetTasks cleared the re-queue: the pane is NOT left dirty, so there is no
+	// spurious retry and the background refresh can run (delete-fail-only path
+	// unchanged by the fix).
+	assert.False(t, tp.IsDirty(),
+		"SetTasks reconciled the pane; it must not be left dirty in the delete-fail-only path")
+}

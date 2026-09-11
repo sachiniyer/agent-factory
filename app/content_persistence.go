@@ -133,6 +133,14 @@ func (m *home) saveContentPaneState() error {
 				continue
 			}
 			log.ErrorLog.Printf("failed to remove task: %v", err)
+			// The removal did not commit: the record still exists on disk and in
+			// the sidebar (which reloads unconditionally below). Keep the row
+			// visible in the TaskPane and re-queue the delete for retry — the
+			// disk reload that would otherwise re-show it (sp.SetTasks below) is
+			// gated on !failedEdit, and a concurrent failed edit leaves that gate
+			// closed, so without this restore the pane would lose the row until a
+			// later successful edit save re-opened the reload.
+			sp.RestoreFailedDelete(tsk)
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to remove task %q: %w", tsk.Name, err))
 		}
 	}
