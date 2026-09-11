@@ -634,8 +634,9 @@ func printListenerAddr(cmd *cobra.Command, addr string) {
 // checked. The value is deliberately not returned — the point is the verdict,
 // and a config that fails to load has no value to report.
 type configValidateResult struct {
-	OK   bool   `json:"ok"`
-	Path string `json:"path"`
+	OK      bool   `json:"ok"`
+	Path    string `json:"path"`
+	Warning string `json:"warning,omitempty"`
 }
 
 var configValidateCmd = &cobra.Command{
@@ -676,10 +677,14 @@ host to check that host.`,
 		}
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(),
-				apiproto.Success(configValidateResult{OK: true, Path: loaded.Path}))
+				apiproto.Success(configValidateResult{OK: true, Path: loaded.Path, Warning: loaded.DirectoryAccessWarning}))
+		}
+		if loaded.DirectoryAccessWarning != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "config warning: %s\n", loaded.DirectoryAccessWarning)
+			return nil
 		}
 		if loaded.EmptyStub {
-			fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s is an empty stub — af will regenerate defaults on the next start\n", prettyPath(loaded.Path))
+			fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s is an empty stub — af will attempt to regenerate defaults on the next start\n", prettyPath(loaded.Path))
 			return nil
 		}
 		if loaded.Missing {
