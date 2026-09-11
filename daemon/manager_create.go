@@ -75,6 +75,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	if err := applyDefaultAccount(cfg, &req); err != nil {
 		return session.InstanceData{}, err
 	}
+	taskRunSequence, err := m.nextTaskRunSequence(req.TaskID)
+	if err != nil {
+		return session.InstanceData{}, err
+	}
 	reservationBoundaryDelegated = true
 	repo, title, release, renamedArchived, err := m.reserveCreateForSession(req)
 	if err != nil {
@@ -106,20 +110,21 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		taskRunAt = createdAt
 	}
 	pending := session.InstanceData{
-		ID:            session.NewInstanceID(),
-		TaskID:        req.TaskID,
-		Title:         title,
-		Path:          workspace,
-		Status:        session.Loading,
-		Liveness:      session.LiveReady,
-		InFlightOp:    session.OpCreating,
-		TaskRunActive: req.TaskID != "",
-		TaskRunAt:     taskRunAt,
-		CreatedAt:     createdAt,
-		UpdatedAt:     createdAt,
-		Prompt:        req.Prompt,
-		Program:       req.Program,
-		Worktree:      session.GitWorktreeData{RepoPath: repo.IdentityPath()},
+		ID:              session.NewInstanceID(),
+		TaskID:          req.TaskID,
+		Title:           title,
+		Path:            workspace,
+		Status:          session.Loading,
+		Liveness:        session.LiveReady,
+		InFlightOp:      session.OpCreating,
+		TaskRunActive:   req.TaskID != "",
+		TaskRunAt:       taskRunAt,
+		TaskRunSequence: taskRunSequence,
+		CreatedAt:       createdAt,
+		UpdatedAt:       createdAt,
+		Prompt:          req.Prompt,
+		Program:         req.Program,
+		Worktree:        session.GitWorktreeData{RepoPath: repo.IdentityPath()},
 	}
 	key := daemonInstanceKey(repo.ID, title)
 	m.mu.Lock()
@@ -169,6 +174,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		Title:                          title,
 		TaskID:                         req.TaskID,
 		TaskRunAt:                      pending.TaskRunAt,
+		TaskRunSequence:                pending.TaskRunSequence,
 		Path:                           workspace,
 		Program:                        req.Program,
 		Account:                        req.Account,
@@ -351,7 +357,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	}
 	data := instance.ToInstanceData()
 	conversationToken := instance.AgentRuntimeToken()
-	taskRunStatus := "started"
+	taskRunStatus := task.RunStatusStarted
 	if data.Liveness == session.LiveLimitReached {
 		taskRunStatus = TaskStatusLimitParked
 	}
@@ -384,7 +390,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// manager lock across this small file update is intentional: releasing it
 		// here recreates the window where recovery can observe an unidentified run.
 		if req.TaskID != "" {
-			_, taskStatusErr = task.BeginTaskRun(req.TaskID, instance.ID, instance.CreatedAt, taskRunStatus)
+			_, _, taskStatusErr = task.BeginTaskRun(
+				req.TaskID, instance.ID, data.TaskRunSequence, instance.CreatedAt, taskRunStatus)
 		}
 		// Register the provider discovery in the same manager-lock critical
 		// section that makes the instance visible. A concurrent status poll can

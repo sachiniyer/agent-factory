@@ -142,7 +142,9 @@ func stubTaskDelivery(t *testing.T) (*[]CreateSessionRequest, *[]DeliverPromptRe
 		if title == "" {
 			title = req.TitleBase
 		}
-		return &session.InstanceData{ID: "stub-session-id", Title: title, CreatedAt: stubTaskRunAt()}, nil
+		return &session.InstanceData{
+			ID: "stub-session-id", Title: title, CreatedAt: stubTaskRunAt(), TaskRunSequence: 1,
+		}, nil
 	}
 	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
 		delivers = append(delivers, req)
@@ -176,7 +178,7 @@ func TestDeliverTaskPromptCarriesRetainedRepoBinding(t *testing.T) {
 		TargetSession: "worker", Program: "claude",
 	}
 
-	_, _, _, err := deliverTaskPrompt(&tk, "run it", false)
+	_, _, _, _, err := deliverTaskPrompt(&tk, "run it", false)
 	if err != nil {
 		t.Fatalf("deliverTaskPrompt: %v", err)
 	}
@@ -196,7 +198,7 @@ func TestDeliverTaskPromptCarriesOriginForLegacyTarget(t *testing.T) {
 		ID: "legacy03", ProjectPath: repoPath, TargetSession: "worker", Program: "claude",
 	}
 
-	_, _, _, err := deliverTaskPrompt(&tk, "run it", false)
+	_, _, _, _, err := deliverTaskPrompt(&tk, "run it", false)
 	if err != nil {
 		t.Fatalf("deliverTaskPrompt: %v", err)
 	}
@@ -217,7 +219,7 @@ func TestCreateTaskSessionCarriesRetainedRepoBinding(t *testing.T) {
 		ID: "bound002", ProjectPath: repoPath, RepoID: boundRepoID, Program: "claude",
 	}
 
-	_, _, _, err := deliverTaskPrompt(&tk, "run it", false)
+	_, _, _, _, err := deliverTaskPrompt(&tk, "run it", false)
 	if err != nil {
 		t.Fatalf("deliverTaskPrompt: %v", err)
 	}
@@ -238,7 +240,7 @@ func TestCreateTaskBindingRefusalIsNotAttempted(t *testing.T) {
 	t.Cleanup(func() { createSessionForTask = origCreate })
 	tk := task.Task{ID: "bound003", ProjectPath: setupTaskRepo(t), RepoID: "repo-a"}
 
-	_, _, _, err := deliverTaskPrompt(&tk, "run it", false)
+	_, _, _, _, err := deliverTaskPrompt(&tk, "run it", false)
 	if !errors.Is(err, errNotAttempted) {
 		t.Fatalf("binding refusal = %v, want not-attempted classification", err)
 	}
@@ -292,7 +294,7 @@ func TestDeliverTaskPrompt_CreatesSessionWithoutTarget(t *testing.T) {
 	creates, delivers := stubTaskDelivery(t)
 
 	tsk := &task.Task{ID: "ffff0002", Name: "nightly", Prompt: "do it", CronExpr: "0 3 * * *", ProjectPath: repo, Enabled: true}
-	status, runID, runAt, err := deliverTaskPrompt(tsk, tsk.Prompt, true)
+	status, runID, _, runAt, err := deliverTaskPrompt(tsk, tsk.Prompt, true)
 	if err != nil {
 		t.Fatalf("deliverTaskPrompt: %v", err)
 	}
@@ -330,7 +332,7 @@ func TestDeliverTaskPrompt_SendsIntoExistingTargetSession(t *testing.T) {
 	seedTargetSession(t, repo, "captain")
 
 	tsk := &task.Task{ID: "ffff0003", Name: "gh-issues", Prompt: "Triage: {{line}}", WatchCmd: "watch.sh", TargetSession: "captain", ProjectPath: repo, Enabled: true}
-	status, _, _, err := deliverTaskPrompt(tsk, "Triage: new issue", true)
+	status, _, _, _, err := deliverTaskPrompt(tsk, "Triage: new issue", true)
 	if err != nil {
 		t.Fatalf("deliverTaskPrompt: %v", err)
 	}
@@ -360,12 +362,12 @@ func TestDeliverTaskPrompt_AutoCreatesMissingTargetSession(t *testing.T) {
 	creates, delivers := stubTaskDelivery(t)
 
 	tsk := &task.Task{ID: "ffff0004", Name: "gh-issues", WatchCmd: "watch.sh", TargetSession: "captain", ProjectPath: repo, Program: "claude", Enabled: true}
-	status, _, _, err := deliverTaskPrompt(tsk, "new issue #9", true)
+	status, _, _, _, err := deliverTaskPrompt(tsk, "new issue #9", true)
 	if err != nil {
 		t.Fatalf("deliverTaskPrompt: %v", err)
 	}
-	if status != "started" {
-		t.Fatalf("status = %q, want started", status)
+	if status != "sent" {
+		t.Fatalf("status = %q, want sent (a shared-target delivery is not a session-per-run start)", status)
 	}
 	if len(*creates) != 0 {
 		t.Fatalf("expected no direct CreateSession calls (delivery is serialized in the daemon), got %d", len(*creates))

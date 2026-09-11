@@ -3,15 +3,27 @@ package session
 import "time"
 
 // TaskRunIdentity is the durable association between a task delivery and the
-// session runtime that received it. SessionID is the unique identity; RunAt is
-// its display timestamp and is zero only for records written before task-run
-// publication moved inside the manager boundary.
+// session runtime that received it. SessionID is the unique identity; Sequence
+// is its clock-independent delivery order; RunAt is its display timestamp and
+// is zero only for records written before task-run publication moved inside the
+// manager boundary.
 type TaskRunIdentity struct {
 	TaskID    string
 	SessionID string
 	Title     string
+	Sequence  uint64
 	RunAt     time.Time
 	CreatedAt time.Time
+}
+
+// TaskRun returns this session's immutable task-delivery identity. The active
+// bit is deliberately separate: a completed session still retains the identity
+// that ordered its task-row writes.
+func (i *Instance) TaskRun() TaskRunIdentity {
+	return TaskRunIdentity{
+		TaskID: i.TaskID, SessionID: i.ID, Title: i.Title,
+		Sequence: i.taskRunSequence, RunAt: i.taskRunAt, CreatedAt: i.CreatedAt,
+	}
 }
 
 // InterruptTaskRunAtRestoreBoundary closes the run owned by a Lost runtime just
@@ -36,10 +48,7 @@ func (i *Instance) InterruptTaskRunAtRestoreBoundary() (TaskRunIdentity, bool) {
 		return TaskRunIdentity{}, false
 	}
 	i.closeTaskRunLocked()
-	return TaskRunIdentity{
-		TaskID: i.TaskID, SessionID: i.ID, Title: i.Title,
-		RunAt: i.taskRunAt, CreatedAt: i.CreatedAt,
-	}, true
+	return i.TaskRun(), true
 }
 
 // closeTaskRunLocked performs the shared, one-way task-run close and captures

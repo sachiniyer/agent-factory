@@ -12,6 +12,8 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The task-runner "park don't fail" tests (#1146 PR4). A task-driven session
@@ -197,7 +199,10 @@ func stubParkedCreate(t *testing.T) {
 		if title == "" {
 			title = req.TitleBase
 		}
-		return &session.InstanceData{Title: title, Liveness: session.LiveLimitReached, CreatedAt: time.Now()}, nil
+		return &session.InstanceData{
+			ID: title + "-id", Title: title, Liveness: session.LiveLimitReached,
+			CreatedAt: time.Now(), TaskRunSequence: 1,
+		}, nil
 	}
 	t.Cleanup(func() { createSessionForTask = orig })
 }
@@ -211,7 +216,7 @@ func TestDeliverTaskPrompt_ParksOnUsageLimit(t *testing.T) {
 	stubParkedCreate(t)
 
 	tsk := &task.Task{ID: "ffff0010", Name: "nightly", Prompt: "do it", CronExpr: "0 3 * * *", ProjectPath: repo, Enabled: true}
-	status, _, _, err := deliverTaskPrompt(tsk, tsk.Prompt, true)
+	status, _, _, _, err := deliverTaskPrompt(tsk, tsk.Prompt, true)
 	if err != nil {
 		t.Fatalf("deliverTaskPrompt must not error on a park: %v", err)
 	}
@@ -289,4 +294,36 @@ func TestResumeFromLimit_ParkedTaskSessionReDeliversTaskPrompt(t *testing.T) {
 	if inst.LimitReached() {
 		t.Fatal("resume must clear the limit so the run proceeds to completion")
 	}
+}
+
+func TestResumeFromLimitAdvancesParkedTaskStatus(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	tsk := enabledCronTask("feed0001", repoPath)
+	require.NoError(t, task.AddTask(tsk))
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "parked-status", Path: repoPath, Program: "claude", TaskID: tsk.ID,
+		CreatedAt: runAt, TaskRunAt: runAt, TaskRunSequence: 1,
+	})
+	require.NoError(t, err)
+	_, _, err = task.BeginTaskRun(tsk.ID, inst.ID, 1, runAt, TaskStatusLimitParked)
+	require.NoError(t, err)
+	backend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
+	inst.SetBackend(backend)
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	inst.Prompt = "run the nightly report"
+	inst.SetLimitReached(time.Now())
+	raw, err := json.Marshal([]session.InstanceData{inst.ToInstanceData()})
+	require.NoError(t, err)
+	require.NoError(t, config.LoadState().SaveInstances(repoID, raw))
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
+	manager.mu.Unlock()
+
+	require.NoError(t, manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}))
+	got, err := task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	assert.Equal(t, task.RunStatusStarted, got.LastRunStatus)
+	assert.Equal(t, inst.ID, got.LastRunSessionID)
 }

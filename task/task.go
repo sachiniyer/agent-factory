@@ -123,6 +123,13 @@ type Task struct {
 	// identity or ordering evidence. Empty for target-session deliveries and rows
 	// written before this field existed.
 	LastRunSessionID string `json:"last_run_session_id,omitempty"`
+	// LastRunSequence is the durable high-water mark that orders session-per-run
+	// deliveries without using a clock. The daemon assigns it monotonically;
+	// delayed start repairs may replace only a smaller sequence. Target-session
+	// status clears LastRunSessionID but retains this value so a daemon restart
+	// cannot reuse an old order. Zero means there is no session-run history or the
+	// row predates this field.
+	LastRunSequence uint64 `json:"last_run_sequence,omitempty"`
 	// Audit is the bounded trail of mutations to this task — the one field here
 	// that is a HISTORY rather than a current value, and the only way to answer
 	// "did someone turn this off?" (#3623). Written by the store inside the same

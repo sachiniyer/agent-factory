@@ -34,3 +34,23 @@ var fromInstanceDataForRefresh = session.FromInstanceData
 // seam keeps the unknown-outcome branch testable: if this write cannot be
 // confirmed, refresh must not materialize the legacy row under an ephemeral ID.
 var persistLegacyInstanceID = persistInstanceData
+
+func (m *Manager) refreshLocked() error {
+	refreshed, ghosts, taskRunSequence, err := refreshDaemonInstances(m.instances)
+	if err != nil {
+		return err
+	}
+	owed := persistLoadRuntimeReplacements(refreshed)
+	m.attachCredentialsToAll(refreshed)
+	m.instances = refreshed
+	// Replaced wholesale, never merged: the ghost set is a projection of what is on
+	// disk RIGHT NOW (#1892). A row that starts loading again must stop being a
+	// ghost, or its slot would be held twice — once by the ghost and once by the
+	// instance it became.
+	m.ghostTaskRuns = ghosts
+	if taskRunSequence > m.taskRunSequence {
+		m.taskRunSequence = taskRunSequence
+	}
+	m.registerLoadRuntimeSettlementsLocked(owed)
+	return nil
+}

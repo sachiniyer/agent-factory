@@ -106,6 +106,11 @@ type Instance struct {
 	// moved inside the manager boundary. Zero selects the daemon's deliberately
 	// conservative compatibility decision for those older records.
 	taskRunAt time.Time
+	// taskRunSequence is the daemon-assigned, clock-independent order of this
+	// session-backed delivery. The stable session ID remains its identity; this
+	// sequence decides which delayed start publication is newer. Zero predates
+	// the ordering field.
+	taskRunSequence uint64
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.

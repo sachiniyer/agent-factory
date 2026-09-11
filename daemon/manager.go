@@ -216,7 +216,12 @@ type Manager struct {
 	// cap's count — then behaves as if that session does not exist. Its agent may
 	// still be running, so the cap must keep counting it or a failed LOAD becomes a
 	// licence to exceed max_concurrent_runs after every restart.
-	ghostTaskRuns                          map[string]int
+	ghostTaskRuns map[string]int
+	// taskRunSequence is the greatest clock-independent delivery order observed
+	// in a task row or any persisted session (including unloadable ghosts). New
+	// session-per-run creates increment it under mu, so delayed publication can
+	// never confuse manager order with wall-clock order.
+	taskRunSequence                        uint64
 	repoStartLocks, worktreeAdmissionLocks map[string]*sync.Mutex
 	// aliveObservations counts POSITIVE liveness observations per session (keyed by
 	// stableSessionKey, so a same-title successor never inherits its predecessor's).
@@ -786,7 +791,7 @@ func (m *Manager) RestoreInstances() error {
 // RunDaemon binds its control socket first (#829), performs this load, then keeps
 // state RPCs gated until the startup orphan sweep is complete (#2632).
 func (m *Manager) restoreInstances() error {
-	instances, ghosts, err := refreshDaemonInstances(nil)
+	instances, ghosts, taskRunSequence, err := refreshDaemonInstances(nil)
 	if err != nil {
 		return err
 	}
@@ -807,6 +812,7 @@ func (m *Manager) restoreInstances() error {
 	m.mu.Lock()
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
+	m.taskRunSequence = taskRunSequence
 	m.registerLoadRuntimeSettlementsLocked(owed)
 	m.mu.Unlock()
 	return nil
@@ -921,23 +927,6 @@ func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 		data = append(data, projected)
 	}
 	return data
-}
-
-func (m *Manager) refreshLocked() error {
-	refreshed, ghosts, err := refreshDaemonInstances(m.instances)
-	if err != nil {
-		return err
-	}
-	owed := persistLoadRuntimeReplacements(refreshed)
-	m.attachCredentialsToAll(refreshed)
-	m.instances = refreshed
-	// Replaced wholesale, never merged: the ghost set is a projection of what is on
-	// disk RIGHT NOW (#1892). A row that starts loading again must stop being a
-	// ghost, or its slot would be held twice — once by the ghost and once by the
-	// instance it became.
-	m.ghostTaskRuns = ghosts
-	m.registerLoadRuntimeSettlementsLocked(owed)
-	return nil
 }
 
 // startLockForRepo returns the per-repo lock serializing session/tab creation

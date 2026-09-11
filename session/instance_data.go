@@ -99,6 +99,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
 	data.TaskRunAt = i.taskRunAt
+	data.TaskRunSequence = i.taskRunSequence
 
 	// Persist each tab so the full local agent+shell tab list survives a restart
 	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
@@ -324,6 +325,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// finished run from an interrupted one.
 		taskRunActive:            data.TaskRunActive,
 		taskRunAt:                data.TaskRunAt,
+		taskRunSequence:          data.TaskRunSequence,
 		limitResetAt:             data.LimitResetAt,
 		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,

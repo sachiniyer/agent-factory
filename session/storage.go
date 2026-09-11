@@ -132,6 +132,10 @@ type InstanceData struct {
 	// omitzero: older rows decode to zero and take the daemon's conservative legacy
 	// attribution path.
 	TaskRunAt time.Time `json:"task_run_at,omitzero"`
+	// TaskRunSequence is the clock-independent manager admission order for this
+	// session-backed task delivery. It lets a delayed task-row writer prove it is
+	// newer without comparing timestamps. Zero denotes a pre-field record.
+	TaskRunSequence uint64 `json:"task_run_sequence,omitempty"`
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a
 	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and

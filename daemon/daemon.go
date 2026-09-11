@@ -441,17 +441,18 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 // to its projection without re-reading disk. Recomputed on every refresh, so a
 // row that starts loading again stops being a ghost — the same self-healing
 // projection discipline as the rest of the count.
-func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, error) {
+func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, uint64, error) {
 	if err := config.MigrateAllRepoInstancesForDaemonLoad(); err != nil {
-		return existing, nil, err
+		return existing, nil, 0, err
 	}
 	allInstances, err := config.LoadAllRepoInstances()
 	if err != nil {
-		return existing, nil, err
+		return existing, nil, 0, err
 	}
 
 	next := make(map[string]*session.Instance)
 	ghostTaskRuns := make(map[string]int)
+	var taskRunSequence uint64
 	for repoID, raw := range allInstances {
 		if raw == nil || string(raw) == "[]" || string(raw) == "null" {
 			continue
@@ -488,6 +489,9 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		}
 
 		for _, item := range data {
+			if item.TaskRunSequence > taskRunSequence {
+				taskRunSequence = item.TaskRunSequence
+			}
 			key := daemonInstanceKey(repoID, item.Title)
 			if item.ID == "" && !isLegacyTransientGhost(item) {
 				item.ID = session.NewInstanceID()
@@ -574,7 +578,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		}
 	}
 
-	return next, ghostTaskRuns, nil
+	return next, ghostTaskRuns, taskRunSequence, nil
 }
 
 func daemonInstanceKey(repoID, title string) string {

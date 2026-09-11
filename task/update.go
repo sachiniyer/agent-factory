@@ -21,9 +21,10 @@ import (
 // clobbering a concurrent edit another client made to a different field.
 //
 // Only the user-editable fields are patchable. The scheduler-owned LastRunAt,
-// LastRunStatus, and LastRunSessionID and the immutable CreatedAt never appear here — UpdateTaskStatus
-// stays their canonical writer (#731/#1215), and preserving them is now inherent
-// to the merge (the record starts from the on-disk copy).
+// LastRunStatus, LastRunSessionID, and LastRunSequence and the immutable
+// CreatedAt never appear here — the status helpers stay their canonical writers
+// (#731/#1215), and preserving them is inherent to the merge (the record starts
+// from the on-disk copy).
 //
 // The json tags define the HTTP JSON body shape for the daemon's /v1/UpdateTask
 // route; a nil pointer serializes as an absent key (omitempty), so the wire form
@@ -80,8 +81,9 @@ func (u TaskUpdate) IsEmpty() bool {
 }
 
 // apply merges the non-nil fields of u onto t and returns the result. It never
-// touches CreatedAt/LastRunAt/LastRunStatus/LastRunSessionID, so a merge onto the freshly-loaded
-// record preserves those scheduler-owned values automatically.
+// touches CreatedAt/LastRunAt/LastRunStatus/LastRunSessionID/LastRunSequence,
+// so a merge onto the freshly-loaded record preserves those scheduler-owned
+// values automatically.
 func (u TaskUpdate) apply(t Task) Task {
 	if u.Name != nil {
 		t.Name = *u.Name

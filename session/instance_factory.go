@@ -36,6 +36,9 @@ type InstanceOptions struct {
 	// publishing the session; zero is retained for direct constructors and records
 	// created by older binaries.
 	TaskRunAt time.Time
+	// TaskRunSequence is the daemon-assigned ordering proof for delayed task-row
+	// publication. Zero is retained for direct constructors and older records.
+	TaskRunSequence uint64
 	// SandboxCredentials mints and revokes the per-session credential a provisioned
 	// sandbox uses to call back into the daemon (#2999, #3068). An INTERFACE rather
 	// than a pair of values so it runs only for off-box kinds — session cannot
@@ -592,6 +595,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		// is never counted against a cap.
 		taskRunActive:         opts.TaskID != "",
 		taskRunAt:             opts.TaskRunAt,
+		taskRunSequence:       opts.TaskRunSequence,
 		liveness:              LiveReady,
 		Path:                  absPath,
 		Program:               opts.Program,
