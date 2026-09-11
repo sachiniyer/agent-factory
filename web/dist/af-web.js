@@ -15547,7 +15547,10 @@ var AppShell = class {
       this.themeOpts.set(choice, opt);
       themeToggle.append(opt);
     }
-    const { el: viewNav, tabs } = viewNavigation((view) => this.actions.switchView(view));
+    const { el: viewNav, tabs } = viewNavigation((view) => {
+      if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
+      this.actions.switchView(view);
+    });
     this.viewTabs = tabs;
     this.viewNav = viewNav;
     this.projectSwitchName = h("span", { class: "af-project-switch-name" }, "\u2014");
@@ -15609,8 +15612,8 @@ var AppShell = class {
     this.phone.addEventListener("change", this.schedulePhoneSync);
     this.appControls.panel.addEventListener("click", (event) => {
       const target = event.target.closest("button, a");
-      if (this.el.classList.contains("af-session-first") && target && !target.closest(".af-theme-toggle")) this.appControls.dismiss();
-    }, true);
+      if (this.el.classList.contains("af-session-first") && target && !target.closest(".af-theme-toggle, .af-viewnav")) this.appControls.dismiss();
+    });
     this.railCount = h("span", { class: "af-rail-count" }, "0");
     const newBtn = h(
       "button",
@@ -16351,7 +16354,7 @@ var AppShell = class {
     add.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
-      this.appControls.close();
+      this.appControls.dismiss();
       this.actions.addProject();
     });
     footChildren.push(add);
@@ -16374,7 +16377,7 @@ var AppShell = class {
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
-          this.appControls.close();
+          this.appControls.dismiss();
           this.actions.deleteProject(currentSummary.root, currentSummary.name);
         });
       }
@@ -16405,7 +16408,7 @@ var AppShell = class {
     item.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
-      this.appControls.close();
+      this.appControls.dismiss();
       this.actions.switchProject(p.root);
     });
     return item;

@@ -1040,7 +1040,12 @@ export class AppShell {
     // The view switcher: one tab per top-level view, left-to-right in the [ / ] cycle
     // order (nav.ts VIEWS), the active one highlighted in update(). A click routes
     // through actions.switchView, exactly like the keyboard path.
-    const { el: viewNav, tabs } = viewNavigation((view) => this.actions.switchView(view));
+    const { el: viewNav, tabs } = viewNavigation((view) => {
+      // Switching views can synchronously reparent the phone panel before the click
+      // bubbles. Notify the disclosure while it still owns carried session state.
+      if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
+      this.actions.switchView(view);
+    });
     this.viewTabs = tabs;
     this.viewNav = viewNav;
 
@@ -1116,14 +1121,13 @@ export class AppShell {
     // Run after every owner-specific media listener. That guarantees the app-controls
     // disclosure has finished its own close/reflow before an open picker is restored.
     this.phone.addEventListener("change", this.schedulePhoneSync);
-    // A view action updates the store and reparents this panel synchronously. Capture
-    // while the phone disclosure still owns the carried session actions, so its
-    // user-dismissal notification cannot be lost before the event bubbles back.
+    // Nested controls stop propagation so opening them does not dismiss their owner.
+    // Other panel actions that reach this boundary are user dismissals.
     this.appControls.panel.addEventListener("click", event => {
       const target = (event.target as HTMLElement).closest("button, a");
       if (this.el.classList.contains("af-session-first") && target &&
-        !target.closest(".af-theme-toggle")) this.appControls.dismiss();
-    }, true);
+        !target.closest(".af-theme-toggle, .af-viewnav")) this.appControls.dismiss();
+    });
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");
     const newBtn = h(
@@ -1812,7 +1816,7 @@ export class AppShell {
     add.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
-      this.appControls.close();
+      this.appControls.dismiss();
       this.actions.addProject();
     });
     footChildren.push(add);
@@ -1843,7 +1847,7 @@ export class AppShell {
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
-          this.appControls.close();
+          this.appControls.dismiss();
           this.actions.deleteProject(currentSummary.root, currentSummary.name);
         });
       }
@@ -1876,7 +1880,7 @@ export class AppShell {
     item.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
-      this.appControls.close();
+      this.appControls.dismiss();
       this.actions.switchProject(p.root);
     });
     return item;
