@@ -84,17 +84,19 @@ var errNotAttempted = errors.New("delivery not attempted")
 // so it is enforced here, at the one constructor every pre-flight failure passes
 // through: whatever a call site writes, the wire text is refundable. Call sites
 // should still SPELL the marker where it reads naturally (most already do, and
-// notattempted_marker_test.go lints the near-misses) — the append below is the
+// notattempted_marker_test.go lints the near-misses) — the insertion below is the
 // floor, not the style.
 func notAttempted(err error) error {
 	if err == nil {
 		return nil
 	}
-	// Append only when absent: a message that already says it must not grow a
-	// second copy trailing a pasteable command (#2512), and %w keeps errors.Is/As
-	// against the underlying cause working through the extra layer.
+	// Insert only when absent, and BEFORE the original error. A refusal may end in
+	// a pasteable shell command; adding protocol text after it turns that text into
+	// part of the advertised command (#4191). Prefixing keeps every unknown target
+	// error safe without enumerating which ones contain commands, while %w keeps
+	// errors.Is/As against the underlying cause working through the extra layer.
 	if !strings.Contains(err.Error(), notDeliveredMarker) {
-		err = fmt.Errorf("%w; %s", err, notDeliveredMarker)
+		err = fmt.Errorf("%s: %w", notDeliveredMarker, err)
 	}
 	return &notAttemptedError{err: err}
 }
@@ -114,7 +116,7 @@ func (e *notAttemptedError) Is(target error) bool { return target == errNotAttem
 // not actually refund). Same idiom, same reason, as atConcurrencyLimitErrText
 // (#1892) — but chosen to be NATURAL user-facing text that already belongs in
 // these messages ("... prompt not delivered") rather than a machine token, so the
-// wire survivability costs the user nothing even where it has to be appended.
+// wire survivability costs the user nothing even where it has to be inserted.
 // Every pre-flight message reachable from the watch path carries it —
 // notAttempted() guarantees that rather than trusting each call site to remember
 // (#3477); deliverTaskPrompt re-mints the sentinel on a match.

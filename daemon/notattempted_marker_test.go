@@ -94,11 +94,11 @@ func TestNotAttemptedKeepsAlreadyMarkedMessagesVerbatim(t *testing.T) {
 		t.Fatalf("an already-marked message must pass through verbatim (#2512)\n got: %q\nwant: %q", got, msg)
 	}
 	if n := strings.Count(got, notDeliveredMarker); n != 1 {
-		t.Fatalf("marker appears %d times, want 1 — the append must not duplicate it: %q", n, got)
+		t.Fatalf("marker appears %d times, want 1 — insertion must not duplicate it: %q", n, got)
 	}
 }
 
-// TestNotAttemptedPreservesTheCauseChain: the append inserts a layer between the
+// TestNotAttemptedPreservesTheCauseChain: the marker insertion adds a layer between the
 // tag and the cause, so errors.Is/As against that cause must still work — the
 // concurrency-limit and liveness classifications elsewhere depend on it.
 func TestNotAttemptedPreservesTheCauseChain(t *testing.T) {
@@ -106,7 +106,7 @@ func TestNotAttemptedPreservesTheCauseChain(t *testing.T) {
 	err := notAttempted(fmt.Errorf("could not check target session state: %w", cause))
 
 	if !errors.Is(err, cause) {
-		t.Fatalf("the marker append severed the cause chain: %v", err)
+		t.Fatalf("the marker insertion severed the cause chain: %v", err)
 	}
 	if !errors.Is(err, errNotAttempted) {
 		t.Fatalf("the in-process sentinel must survive the extra layer: %v", err)

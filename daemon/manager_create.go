@@ -23,7 +23,18 @@ import (
 // production.
 var testHookCreateLimitObservedBeforePublication = func() {}
 
-func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (session.InstanceData, error) {
+func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (_ session.InstanceData, retErr error) {
+	// CreateSession owns the portion of the pre-reservation boundary before it
+	// delegates to reserveCreate. That function takes ownership from its entry to
+	// the exact reservedTitles commit. The two defers make the whole interval
+	// exhaustive without double-wrapping reserveCreate's errors.
+	reservationBoundaryDelegated := false
+	defer func() {
+		if !reservationBoundaryDelegated {
+			retErr = taskCreatePreReservationError(req, retErr)
+		}
+	}()
+
 	// Own the create's lifetime: cancel derives a child context that is cancelled
 	// the instant this returns (success, failure, or panic), so the readiness poll
 	// StartAndSendPromptWithConversationCapture runs can never outlive the create
@@ -65,6 +76,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	if err := applyDefaultAccount(cfg, &req); err != nil {
 		return session.InstanceData{}, err
 	}
+	reservationBoundaryDelegated = true
 	repo, title, release, renamedArchived, err := m.reserveCreate(req)
 	if err != nil {
 		return session.InstanceData{}, err
@@ -437,32 +449,6 @@ func projectDeleteRefusal(repoID string, inProgress bool) error {
 	err := fmt.Errorf("project %s is being deleted; retry the session create after deletion finishes", repoID)
 	if !inProgress {
 		err = fmt.Errorf("project %s was being deleted while this session create resolved its backend; nothing was created — retry if the project still exists", repoID)
-	}
-	return err
-}
-
-// taskCreatePreReservationError classifies every task-originated refusal before
-// reserveCreate's reservation commit as not attempted. The defer at that
-// function's entry applies this at the boundary rather than asking each return
-// site to remember it, so a new pre-flight exit cannot silently leak the watch
-// event's rate slot.
-//
-// TaskOrigin is daemon-only provenance independent of retained identity or
-// concurrency ownership. Legacy targeted rows can have neither TaskID nor
-// TaskRepoID, so retain those older identity shapes as compatibility evidence
-// for in-process callers constructed before TaskOrigin was added. Ordinary
-// client creates carry none of the three and retain their plain errors.
-//
-// A concurrency refusal also precedes the title reservation, but it has its own
-// sentinel and watcher branch: that branch parks the event and releases the
-// event-rate slot. Preserve that classification instead of obscuring it behind
-// the general pre-flight marker.
-func taskCreatePreReservationError(req CreateSessionRequest, err error) error {
-	if err == nil || errors.Is(err, errAtConcurrencyLimit) {
-		return err
-	}
-	if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
-		return notAttempted(err)
 	}
 	return err
 }
