@@ -504,8 +504,12 @@ func TestLiveInstance_RespawnsMissingSessionOnLoad(t *testing.T) {
 		"a replacement process must not inherit the predecessor runtime's idle reason")
 	assert.True(t, churnAt.IsZero(),
 		"a replacement process must not inherit the predecessor runtime's pane-churn age")
-	assert.True(t, restored.ConsumeLoadRuntimeReplacement(),
+	replacement := restored.ConsumeLoadRuntimeReplacement()
+	assert.True(t, replacement.Replaced,
 		"the daemon loader must be told to persist the replacement's evidence clear")
+	assert.True(t, replacement.Agent)
+	assert.True(t, replacement.TaskRunInterrupted)
+	assert.Equal(t, "task-live-load", replacement.InterruptedTaskRun.TaskID)
 	assert.False(t, restored.TaskRunActive(),
 		"a load-time replacement did not receive the vanished runtime's task prompt and cannot finish its run")
 }
@@ -530,6 +534,8 @@ func TestLiveInstance_ReattachesExistingSessionWithIdleEvidence(t *testing.T) {
 	attemptedAt := time.Date(2026, 8, 10, 20, 0, 0, 0, time.UTC)
 	churnAt := attemptedAt.Add(time.Minute)
 	data := deadInstanceData(t, Ready, agentName, shellName)
+	data.TaskID = "task-live-reattach"
+	data.TaskRunActive = true
 	data.LastPromptAttemptAt = attemptedAt
 	data.LastPromptDeliveryStatus = PromptDelivered
 	data.LastPaneChurnAt = churnAt
@@ -542,6 +548,8 @@ func TestLiveInstance_ReattachesExistingSessionWithIdleEvidence(t *testing.T) {
 		"a pure reattach must preserve the persisted runtime's idle evidence")
 	assert.Equal(t, churnAt, gotChurnAt,
 		"a pure reattach must preserve the persisted runtime's pane-churn age")
-	assert.False(t, restored.ConsumeLoadRuntimeReplacement(),
+	assert.False(t, restored.ConsumeLoadRuntimeReplacement().Replaced,
 		"a pure reattach must not request an evidence-clear settlement")
+	assert.True(t, restored.TaskRunActive(),
+		"reattaching the runtime that received the task prompt must preserve its run")
 }

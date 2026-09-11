@@ -21,7 +21,7 @@ func TestTaskRunEndsOnlyForRuntimeThatReceivedPrompt(t *testing.T) {
 		require.NoError(t, inst.Transition(ObserveLiveness(LiveLost)))
 		require.True(t, inst.TaskRunActive(), "losing the prompted runtime does not complete its run")
 		require.NoError(t, inst.Transition(MarkRestoring()))
-		run, interrupted := inst.InterruptTaskRunAtRestoreBoundary()
+		run, interrupted := inst.InterruptTaskRunAtRuntimeReplacement()
 		require.True(t, interrupted)
 		require.Equal(t, "task-id", run.TaskID)
 		require.True(t, run.RunAt.Equal(runAt))
@@ -47,6 +47,20 @@ func TestTaskRunEndsOnlyForRuntimeThatReceivedPrompt(t *testing.T) {
 		require.NoError(t, inst.Transition(ConfirmLive()))
 		require.False(t, inst.TaskRunActive(),
 			"a caller without a settlement callback must not transfer the run to a restored runtime")
+	})
+
+	t.Run("prompt redelivery fence preserves the run", func(t *testing.T) {
+		inst := &Instance{
+			TaskID:        "task-id",
+			liveness:      LiveLimitReached,
+			inFlightOp:    OpRespawning,
+			taskRunActive: true,
+		}
+
+		_, interrupted := inst.InterruptTaskRunAtRuntimeReplacement()
+		require.False(t, interrupted)
+		require.True(t, inst.TaskRunActive(),
+			"OpRespawning promises prompt redelivery and must retain the queued run")
 	})
 
 	t.Run("prompted runtime still completes on its idle edge", func(t *testing.T) {

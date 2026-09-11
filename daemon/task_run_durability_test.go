@@ -26,12 +26,13 @@ func TestTaskRunAdmissionRefusesUnreadableTaskRow(t *testing.T) {
 
 	require.Error(t, admissionErr,
 		"a failed row read is not proof that the task generation and revision are zero")
+	require.ErrorContains(t, admissionErr, "read task read0001 for run admission")
 	require.Zero(t, manager.taskRunSequence,
 		"a refused admission must not consume an ordering sequence")
 }
 
 func TestInterruptedTaskStatusWriteFailureIsRetried(t *testing.T) {
-	manager, _, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	tsk := addStatusTestTask(t, enabledCronTask("retry001", repoPath))
 	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	inst, err := session.NewInstance(session.InstanceOptions{
@@ -60,6 +61,8 @@ func TestInterruptedTaskStatusWriteFailureIsRetried(t *testing.T) {
 	require.NoError(t, os.WriteFile(tasksPath, []byte("{"), 0600))
 	require.NoError(t, manager.prepareRuntimeReplacement(repoID, key, inst))
 	require.False(t, inst.TaskRunActive(), "the session settlement is one-way even when task storage is unavailable")
+	require.Contains(t, logs.warnings.String(), "could not record last_run_status")
+	require.Contains(t, logs.warnings.String(), "will retry")
 	require.NoError(t, os.WriteFile(tasksPath, original, 0600))
 
 	manager.FlushOwedSettlements()

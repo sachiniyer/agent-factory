@@ -422,13 +422,13 @@ type Manager struct {
 	// stable instance identity so a same-title successor cannot inherit an old
 	// retry delay. Guarded by m.mu.
 	handoffRetryDue map[string]time.Time
-	// settleOwed holds sessions whose SETTLEMENT write failed — the write that
-	// records the outcome of an irreversible step (a delivered handoff mission, a
-	// recovery that rebuilt a branch). Keyed like handoffRetryDue by stable
-	// instance identity. It exists because nothing else repairs those writes: the
-	// status poll's change detection does not look at what they carry, so a lost
-	// one survives to the next daemon (#2781, #2883). flushOwedSettlements drains
-	// it on the poll. Guarded by m.mu.
+	// settleOwed holds durable outcomes of irreversible steps that have not yet
+	// reached every owning store: whole session rows (a delivered handoff mission,
+	// a recovery that rebuilt a branch) and the exact task-run interruption caused
+	// by an unprompted runtime replacement. Keyed like handoffRetryDue by stable
+	// instance identity. Neither fact is reconstructed by ordinary poll change
+	// detection, so FlushOwedSettlements retries it until it lands or a newer owner
+	// supersedes it (#2781, #2883, #4222). Guarded by m.mu.
 	settleOwed map[string]settleOwedEntry
 	// remoteLossStates debounces the remote Lost transition (#1794), keyed by
 	// stableSessionKey — the stable instance ID, which is what every writer and
@@ -815,6 +815,10 @@ func (m *Manager) restoreInstances() error {
 	m.taskRunSequence = taskRunSequence
 	m.registerLoadRuntimeSettlementsLocked(owed)
 	m.mu.Unlock()
+	// Task outcome publication needs the authoritative restored map for legacy
+	// successor checks. Drain it immediately after installation; transient task or
+	// instance storage failures remain in the same ledger for the ordinary poll.
+	m.FlushOwedSettlements()
 	return nil
 }
 

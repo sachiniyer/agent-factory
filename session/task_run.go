@@ -30,25 +30,28 @@ func (i *Instance) TaskRun() TaskRunIdentity {
 	}
 }
 
-// InterruptTaskRunAtRestoreBoundary closes the run owned by a Lost runtime just
-// before its replacement becomes visible. The returned identity is valid only
-// when interrupted is true.
+// InterruptTaskRunAtRuntimeReplacement closes a run when the agent runtime that
+// received its prompt has been replaced without replaying that prompt. The
+// returned identity is valid only when interrupted is true.
 //
-// This is the durable pre-ConfirmLive half of runEndsOnRestoredRuntime. The live
-// boundary callback must persist the instance before ConfirmLive drops the
-// restore fence; clearing here puts the interrupted outcome in that settlement,
-// so a daemon crash before the ordinary post-recovery write cannot reload the
-// predecessor's run as active. ConfirmLive retains the same run effect as a
-// structural fallback for callers without a settlement callback.
+// Runtime replacement is the provenance proof: restore-time callers invoke this
+// at their pre-ConfirmLive boundary, while load reconstructors invoke it only
+// after RestoreWithResult confirms RestoreRespawned for the agent tab. A sibling
+// tab replacement never reaches it. The OpRespawning fence is the one explicit
+// exception: it promises that limit resume will re-deliver the queued task prompt
+// before lowering the fence, so that replacement continues the same run.
 //
-// OpRestoring is a no-prompt-replay contract. Any future recovery that chooses
-// to deliver the prompt again must remain under a delivery fence such as
-// OpRespawning, or introduce a distinct state; it must not cross this boundary
-// and hand an already-closed run to the prompted replacement.
-func (i *Instance) InterruptTaskRunAtRestoreBoundary() (TaskRunIdentity, bool) {
+// The daemon must persist the closed session marker before publishing the task
+// outcome. ConfirmLive retains runEndsOnRestoredRuntime as a structural fallback
+// for restore callers that omit the settlement callback.
+func (i *Instance) InterruptTaskRunAtRuntimeReplacement() (TaskRunIdentity, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.inFlightOp != OpRestoring || !i.taskRunActive {
+	return i.interruptTaskRunAtRuntimeReplacementLocked()
+}
+
+func (i *Instance) interruptTaskRunAtRuntimeReplacementLocked() (TaskRunIdentity, bool) {
+	if i.inFlightOp == OpRespawning || !i.taskRunActive {
 		return TaskRunIdentity{}, false
 	}
 	i.closeTaskRunLocked()

@@ -216,24 +216,45 @@ func (i *Instance) ClearIdleEvidence() bool {
 	return changed
 }
 
-// markLoadRuntimeReplaced records that Start(false) created a replacement
-// agent or sibling process. The daemon loader consumes this after FromInstanceData
-// returns so the timestamp and any agent evidence clear are checkpointed before
-// the row is installed. Marking a sibling replacement does not clear agent evidence.
-func (i *Instance) markLoadRuntimeReplaced() {
+// LoadRuntimeReplacement carries the process-local settlement produced while a
+// persisted session is reconstructed. Agent distinguishes the task-owning
+// runtime from a sibling tab; InterruptedTaskRun is set only when that agent
+// replacement closed an active task run.
+type LoadRuntimeReplacement struct {
+	Replaced           bool
+	Agent              bool
+	InterruptedTaskRun TaskRunIdentity
+	TaskRunInterrupted bool
+}
+
+// markLoadRuntimeReplaced records that Start(false) created a replacement agent
+// or sibling process. Agent replacement also reaches the shared task-run
+// replacement rule while provenance is exact; sibling replacement deliberately
+// does not. The daemon loader consumes this after FromInstanceData returns so
+// every affected fact can be settled before the restored map is authoritative.
+func (i *Instance) markLoadRuntimeReplaced(agent bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.loadRuntimeReplaced = true
+	i.loadRuntimeReplacement.Replaced = true
+	if !agent {
+		return
+	}
+	i.loadRuntimeReplacement.Agent = true
+	run, interrupted := i.interruptTaskRunAtRuntimeReplacementLocked()
+	if interrupted {
+		i.loadRuntimeReplacement.InterruptedTaskRun = run
+		i.loadRuntimeReplacement.TaskRunInterrupted = true
+	}
 }
 
 // ConsumeLoadRuntimeReplacement reports one load-time replacement exactly once.
 // It is process-local coordination, never a persisted fact about the session.
-func (i *Instance) ConsumeLoadRuntimeReplacement() bool {
+func (i *Instance) ConsumeLoadRuntimeReplacement() LoadRuntimeReplacement {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	replaced := i.loadRuntimeReplaced
-	i.loadRuntimeReplaced = false
-	return replaced
+	replacement := i.loadRuntimeReplacement
+	i.loadRuntimeReplacement = LoadRuntimeReplacement{}
+	return replacement
 }
 
 // ReconcileIdleEvidence mirrors the daemon's evidence onto a client row model.

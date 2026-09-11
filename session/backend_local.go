@@ -262,7 +262,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// This also calls noteAgentRuntimeReplaced, which touches UpdatedAt
 			// unconditionally, even when there was no idle evidence to clear.
 			resetAgentBrokerCaptures(i)
-			i.markLoadRuntimeReplaced()
+			i.markLoadRuntimeReplaced(true)
 		}
 	} else {
 		i.mu.RLock()
@@ -578,7 +578,7 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				i.mu.Lock()
 				i.touchLocked()
 				i.mu.Unlock()
-				i.markLoadRuntimeReplaced()
+				i.markLoadRuntimeReplaced(false)
 				if account != "" {
 					respawnedAccountTabs = append(respawnedAccountTabs, tab.tmux)
 				}

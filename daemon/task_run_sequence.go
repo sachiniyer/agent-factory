@@ -19,22 +19,26 @@ type taskRunAdmission struct {
 // monotonic order. The captured revision is the compare side of publication's
 // CAS: watcher supervision written during provisioning must win.
 //
-// A missing or temporarily unreadable task row deliberately does not introduce
-// a new create refusal: later status publication already reports that condition,
-// and a sequence below the stored floor is conservatively rejected.
+// The row read is part of admission, not a best-effort hint. Its generation,
+// sequence, and revision all have legitimate zero values, so a read failure
+// cannot be converted to zeros without inventing a stale compare-and-set proof.
+// Fail closed before reserving a sequence or creating any runtime.
 func (m *Manager) nextTaskRunAdmission(taskID, expectedGenerationID string) (taskRunAdmission, error) {
 	if taskID == "" {
 		return taskRunAdmission{}, nil
 	}
 
-	admission := taskRunAdmission{generationID: expectedGenerationID}
-	if storedTask, err := task.GetTask(taskID); err == nil {
-		if storedTask.GenerationID != expectedGenerationID {
-			return taskRunAdmission{}, fmt.Errorf("task %s was replaced before its run was admitted", taskID)
-		}
-		admission.generationID = storedTask.GenerationID
-		admission.sequence = storedTask.LastRunSequence
-		admission.revision = storedTask.LastRunRevision
+	storedTask, err := task.GetTask(taskID)
+	if err != nil {
+		return taskRunAdmission{}, fmt.Errorf("read task %s for run admission: %w", taskID, err)
+	}
+	if storedTask.GenerationID != expectedGenerationID {
+		return taskRunAdmission{}, fmt.Errorf("task %s was replaced before its run was admitted", taskID)
+	}
+	admission := taskRunAdmission{
+		generationID: storedTask.GenerationID,
+		sequence:     storedTask.LastRunSequence,
+		revision:     storedTask.LastRunRevision,
 	}
 
 	m.mu.Lock()

@@ -10,13 +10,17 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
-// settleOwedEntry identifies a session whose settlement write did not land, so
-// the poll can retry it. Keyed elsewhere by stable instance identity; the pointer
-// is what proves the row has not been replaced since.
+// settleOwedEntry identifies the stores an irreversible session outcome has not
+// reached yet. persistInstance is a whole-row session write. interruptedTaskRun
+// is an exact-ID task-row write and remains meaningful even if the session is
+// later removed. Keyed elsewhere by stable instance identity; the pointer proves
+// whether a whole-row retry still belongs to the registered session.
 type settleOwedEntry struct {
-	repoID   string
-	key      string
-	instance *session.Instance
+	repoID             string
+	key                string
+	instance           *session.Instance
+	persistInstance    bool
+	interruptedTaskRun *session.TaskRunIdentity
 }
 
 // A SETTLEMENT is the write that records the outcome of an irreversible step —
@@ -64,27 +68,30 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 }
 
 // prepareRuntimeReplacement retires facts owned by the predecessor at the
-// replacement's ConfirmLive boundary. That includes classifying a task run whose
-// prompted runtime was Lost: the replacement is not given the prompt, so the run
-// closes as interrupted here instead of being misclassified as complete on its
-// first idle observation. Production Recover and Respawn implementations confirm
-// the fresh runtime live before returning, so clearing and persisting only after
-// they return leaves a crash window: restart sees the new process, classifies it
-// as a reattach, and reloads predecessor evidence.
+// replacement's ConfirmLive boundary. The session's shared replacement rule
+// classifies whether its task run was interrupted; OpRespawning is the only
+// prompt-redelivery fence and preserves the run, while an unprompted restore
+// closes it instead of letting the fresh runtime's first idle observation claim
+// completion. Load-time agent respawns reach that same rule while their exact
+// RestoreRespawned provenance is still available (load_runtime_settlement.go).
+// Production Recover and Respawn implementations confirm the fresh runtime live
+// before returning, so clearing and persisting only after they return leaves a
+// crash window: restart sees the new process, classifies it as a reattach, and
+// reloads predecessor evidence.
 //
 // The ordinary post-operation noteRuntimeReplaced call remains necessary. A
 // slow remote replacement can accumulate fresh transport observations after
 // this boundary reset and before it returns; the post-success reset retires
 // those in-memory observations, while this settlement makes the fence safe.
 func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *session.Instance) error {
-	run, interrupted := instance.InterruptTaskRunAtRestoreBoundary()
+	run, interrupted := instance.InterruptTaskRunAtRuntimeReplacement()
 	m.noteRuntimeReplaced(repoID, instance)
 	settlementErr := m.persistSettlement(repoID, key, instance)
 	// The session settlement comes first. A task-file lock or disk fault must not
 	// keep predecessor-owned remote-loss evidence live after the replacement is
 	// already running, or a restart plus one blip could re-provision it again.
 	if interrupted && run.TaskID != "" {
-		m.recordInterruptedTaskRun(repoID, run)
+		m.recordInterruptedTaskRun(repoID, key, instance, run)
 	}
 	if settlementErr != nil {
 		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", settlementErr)
@@ -92,39 +99,45 @@ func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *sessio
 	return nil
 }
 
-// recordInterruptedTaskRun makes a Lost task runtime's outcome visible at the
-// replacement boundary. The live-boundary callback runs before ConfirmLive, so
-// OpRestoring + TaskRunActive identifies the exact case: the departed runtime
-// received the prompt, while the replacement did not. Limit resumes arrive as
-// OpRespawning and are excluded because they re-deliver their queued prompt.
+// recordInterruptedTaskRun makes an unprompted task-runtime replacement visible.
+// Restore-time callers arrive before ConfirmLive; load-time callers arrive from
+// the exact RestoreRespawned marker. Limit resumes were excluded by the shared
+// session rule because OpRespawning promises to re-deliver their queued prompt.
 //
 // A current task row carries the stable ID of the session that owns its run.
 // That token is published before the session, so neither equal timestamps nor a
 // wall-clock correction can make one run impersonate another. A row left
 // unidentified by an earlier binary or a failed start-status write takes the
 // conservative compatibility path below.
-func (m *Manager) recordInterruptedTaskRun(repoID string, run session.TaskRunIdentity) {
+func (m *Manager) recordInterruptedTaskRun(
+	repoID, key string,
+	instance *session.Instance,
+	run session.TaskRunIdentity,
+) error {
 	updated, applied, err := task.UpdateTaskRunOutcome(
 		run.TaskID, run.TaskGenerationID, run.SessionID, TaskStatusInterrupted)
 	if err == nil && !applied {
 		updated, applied, err = m.claimUnidentifiedInterruptedTaskRun(repoID, run)
 	}
 	if err != nil {
+		m.recordInterruptedTaskRunWrite(repoID, key, instance, &run)
 		m.warn().Printf(
-			"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, skipped on_complete, and left the session in place for inspection; could not record last_run_status %q: %v",
+			"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, skipped on_complete, and left the session in place for inspection; could not record last_run_status %q and will retry: %v",
 			run.TaskID, run.Title, TaskStatusInterrupted, err)
-		return
+		return err
 	}
+	m.recordInterruptedTaskRunWrite(repoID, key, instance, nil)
 	if !applied {
 		m.warn().Printf(
 			"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, skipped on_complete, and left the session in place for inspection; did not replace last_run_status because the task row does not identify this run",
 			run.TaskID, run.Title)
-		return
+		return nil
 	}
 	m.publishEvent(agentproto.EventTaskUpdated, updated)
 	m.warn().Printf(
 		"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, recorded last_run_status %q, skipped on_complete, and left the session in place for inspection",
 		run.TaskID, run.Title, TaskStatusInterrupted)
+	return nil
 }
 
 func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session.TaskRunIdentity) (task.Task, bool, error) {
@@ -261,17 +274,49 @@ func (m *Manager) persistRuntimeReplacement(repoID, title string, instance *sess
 // production caller invokes it before releasing the repo start lock that ordered
 // the corresponding write, so completion scheduling cannot invert those facts.
 func (m *Manager) recordSettlementWrite(repoID, key string, instance *session.Instance, err error) {
-	owedKey := stableSessionKey(repoID, instance)
 	m.mu.Lock()
-	if err != nil {
-		if m.settleOwed == nil {
-			m.settleOwed = make(map[string]settleOwedEntry)
-		}
-		m.settleOwed[owedKey] = settleOwedEntry{repoID: repoID, key: key, instance: instance}
-	} else {
-		delete(m.settleOwed, owedKey)
-	}
+	entry := m.owedSettlementEntryLocked(repoID, key, instance)
+	entry.persistInstance = err != nil
+	m.storeOwedSettlementLocked(entry)
 	m.mu.Unlock()
+}
+
+// recordInterruptedTaskRunWrite adds or retires the task-row half of a runtime
+// replacement settlement without disturbing an independently owed instance-row
+// write. A nil run means the exact-ID update applied or a newer row won, either
+// of which discharges this obligation.
+func (m *Manager) recordInterruptedTaskRunWrite(
+	repoID, key string,
+	instance *session.Instance,
+	run *session.TaskRunIdentity,
+) {
+	m.mu.Lock()
+	entry := m.owedSettlementEntryLocked(repoID, key, instance)
+	entry.interruptedTaskRun = run
+	m.storeOwedSettlementLocked(entry)
+	m.mu.Unlock()
+}
+
+func (m *Manager) owedSettlementEntryLocked(
+	repoID, key string,
+	instance *session.Instance,
+) settleOwedEntry {
+	if entry, ok := m.settleOwed[stableSessionKey(repoID, instance)]; ok {
+		return entry
+	}
+	return settleOwedEntry{repoID: repoID, key: key, instance: instance}
+}
+
+func (m *Manager) storeOwedSettlementLocked(entry settleOwedEntry) {
+	owedKey := stableSessionKey(entry.repoID, entry.instance)
+	if !entry.persistInstance && entry.interruptedTaskRun == nil {
+		delete(m.settleOwed, owedKey)
+		return
+	}
+	if m.settleOwed == nil {
+		m.settleOwed = make(map[string]settleOwedEntry)
+	}
+	m.settleOwed[owedKey] = entry
 }
 
 // FlushOwedSettlements retries settlement writes that did not land, so a
@@ -287,28 +332,23 @@ func (m *Manager) FlushOwedSettlements() {
 	m.mu.Unlock()
 
 	for _, entry := range owed {
-		m.mu.Lock()
-		registered := m.instances[entry.key] == entry.instance
-		if !registered {
-			delete(m.settleOwed, stableSessionKey(entry.repoID, entry.instance))
+		if entry.persistInstance {
+			if err := m.flushOneOwedInstanceSettlement(entry); err != nil {
+				m.warn().Printf("settlement retry for %q: %v", entry.instance.Title, err)
+			}
 		}
-		m.mu.Unlock()
-		// The row is gone (killed) or a successor took its key. Its record is being
-		// deleted or belongs to another instance now, so writing this snapshot back
-		// would fight whatever removed it — and there is nothing left to settle
-		// either way, because a tombstone outranks every other marker on load
-		// (session.FromInstanceData).
-		if !registered {
-			continue
-		}
-		if err := m.flushOneOwedSettlement(entry); err != nil {
-			m.warn().Printf("settlement retry for %q: %v", entry.instance.Title, err)
+		if entry.interruptedTaskRun != nil {
+			_ = m.recordInterruptedTaskRun(
+				entry.repoID, entry.key, entry.instance, *entry.interruptedTaskRun)
 		}
 	}
 }
 
-// flushOneOwedSettlement retries one owed write, but only while the session
-// is between operations.
+// flushOneOwedInstanceSettlement retries one owed instance write, but only
+// while the session is between operations. Task-row outcomes do not use this
+// gate: their immutable generation/session identity remains meaningful after
+// the session is removed, and their own compare-and-set decides whether a newer
+// task status has superseded them.
 //
 // A retry is a WHOLE-ROW write of live memory, so running it inside another
 // session transaction would checkpoint that transaction's half-built state. A
@@ -325,7 +365,7 @@ func (m *Manager) FlushOwedSettlements() {
 // not stall behind a slow teardown, and a skipped retry costs nothing — the
 // obligation stays owed for the next tick, and a newer settlement on the same row
 // discharges it outright.
-func (m *Manager) flushOneOwedSettlement(entry settleOwedEntry) error {
+func (m *Manager) flushOneOwedInstanceSettlement(entry settleOwedEntry) error {
 	opLock := m.opLockFor(entry.key)
 	if !opLock.TryLock() {
 		return nil
@@ -337,7 +377,11 @@ func (m *Manager) flushOneOwedSettlement(entry settleOwedEntry) error {
 	m.mu.Lock()
 	registered := m.instances[entry.key] == entry.instance
 	m.mu.Unlock()
-	if !registered || entry.instance.GetInFlightOp() != session.OpNone {
+	if !registered {
+		m.recordSettlementWrite(entry.repoID, entry.key, entry.instance, nil)
+		return nil
+	}
+	if entry.instance.GetInFlightOp() != session.OpNone {
 		return nil
 	}
 	return m.persistSettlement(entry.repoID, entry.key, entry.instance)

@@ -44,7 +44,7 @@ func TestUpdatedAtLoadRuntimeBoundary(t *testing.T) {
 			require.True(t, i.lastPromptAttemptAt.IsZero())
 			require.Empty(t, i.lastPromptDeliveryStatus)
 			require.True(t, i.lastPaneChurnAt.IsZero())
-			require.Equal(t, !existing, i.ConsumeLoadRuntimeReplacement())
+			require.Equal(t, !existing, i.ConsumeLoadRuntimeReplacement().Replaced)
 			if existing {
 				require.Equal(t, before, i.ToInstanceData().UpdatedAt)
 				require.Zero(t, clockCalls, "reattachment is reconstruction, not activity")
@@ -128,12 +128,13 @@ func TestUpdatedAtLoadSiblingRuntimeBoundary(t *testing.T) {
 				require.Equal(t, before, i.lastPaneChurnAt)
 				require.True(t, i.TaskRunActive(),
 					"replacing a sibling tab does not replace the agent runtime that received the task prompt")
-				enrolled := i.ConsumeLoadRuntimeReplacement()
-				require.Equal(t, !existing, enrolled)
-				if enrolled {
+				replacement := i.ConsumeLoadRuntimeReplacement()
+				require.Equal(t, !existing, replacement.Replaced)
+				require.False(t, replacement.Agent)
+				if replacement.Replaced {
 					require.NoError(t, storage.SaveInstances([]*Instance{i}))
 				}
-				require.False(t, i.ConsumeLoadRuntimeReplacement(), "settlement is consumed once")
+				require.False(t, i.ConsumeLoadRuntimeReplacement().Replaced, "settlement is consumed once")
 				want := before
 				if !existing {
 					want = now

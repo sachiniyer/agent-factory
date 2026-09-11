@@ -148,7 +148,7 @@ type Instance struct {
 	lastPromptAttemptAt      time.Time
 	lastPromptDeliveryStatus PromptDeliveryStatus
 	lastPaneChurnAt          time.Time
-	loadRuntimeReplaced      bool
+	loadRuntimeReplacement   LoadRuntimeReplacement
 	// stateEpoch is the generation counter for lifecycle state and prompt-observation
 	// boundaries, bumped by every writer that changes one (#2135, #3168). It is how
 	// an observer learns whether its captured-pane decision was superseded before it applies it;
