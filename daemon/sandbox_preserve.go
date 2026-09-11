@@ -216,7 +216,7 @@ func requireDurableSandboxBranch(repoID string, instance *session.Instance) erro
 	// Check storage and identity before branch state: even an unknown branch
 	// cannot license kill advice when its tombstone cannot be written or its
 	// title now belongs to a different session.
-	rec, err := findPersistedInstance(repoID, instance.Title)
+	rec, err := findPersistedInstance(repoID, instance.Title, instance.ID)
 	if err != nil {
 		return fmt.Errorf(
 			"cannot replace the sandbox for %q: af could not read its stored record to confirm the "+
@@ -235,7 +235,7 @@ func requireDurableSandboxBranch(repoID string, instance *session.Instance) erro
 	// Titles are reused — an archived name can be reclaimed — so a stored row
 	// belonging to a different instance says nothing about whether this
 	// sandbox's branch is durable.
-	if rec.ID != "" && instance.ID != "" && rec.ID != instance.ID {
+	if !stableIDMatchesForDaemon(rec.ID, instance.ID) {
 		return fmt.Errorf(
 			"cannot replace the sandbox for %q: the stored record under that title belongs to a "+
 				"different session (stored ID %q, current ID %q), so af cannot confirm this sandbox's "+
@@ -272,18 +272,27 @@ func requireDurableSandboxBranch(repoID string, instance *session.Instance) erro
 	return nil
 }
 
-// findPersistedInstance reads one session's record off disk.
-func findPersistedInstance(repoID, title string) (*session.InstanceData, error) {
+// findPersistedInstance uses the same identity matching as persistInstanceData:
+// skip foreign same-title rows before accepting a compatible record. Retain a
+// foreign row only if no compatible row exists, for the identity-drift diagnostic.
+func findPersistedInstance(repoID, title, instanceID string) (*session.InstanceData, error) {
 	data, err := loadRepoInstanceData(repoID)
 	if err != nil {
 		return nil, err
 	}
+	var foreign *session.InstanceData
 	for i := range data {
-		if data[i].Title == title {
+		if data[i].Title != title {
+			continue
+		}
+		if stableIDMatchesForDaemon(data[i].ID, instanceID) {
 			return &data[i], nil
 		}
+		if foreign == nil {
+			foreign = &data[i]
+		}
 	}
-	return nil, nil
+	return foreign, nil
 }
 
 func requireKnownSandboxBranch(instance *session.Instance) error {
