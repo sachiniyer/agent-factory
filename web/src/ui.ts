@@ -1119,7 +1119,7 @@ export class AppShell {
     this.appControls.panel.addEventListener("click", event => {
       const target = (event.target as HTMLElement).closest("button, a");
       if (this.el.classList.contains("af-session-first") && target &&
-        !target.closest(".af-theme-toggle")) this.appControls.close();
+        !target.closest(".af-theme-toggle")) this.appControls.dismiss();
     });
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");

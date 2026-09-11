@@ -159,3 +159,15 @@ for (const dismissal of ["Escape", "toggle", "outside"]) {
     session.dispose();
   });
 }
+
+test("phone panel actions can dismiss carried session state", () => {
+  const session = components.actionsDisclosure();
+  const outer = components.appbarControls([], media(360), () => {}, () => session.close());
+  session.open();
+  outer.open();
+  outer.dismiss();
+  assert.equal(outer.trigger.getAttribute("aria-expanded"), "false");
+  assert.equal(session.trigger.getAttribute("aria-expanded"), "false");
+  outer.dispose();
+  session.dispose();
+});

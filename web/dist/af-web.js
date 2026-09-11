@@ -7236,7 +7236,7 @@ function actionsDisclosure(label = "Session actions", enabled = () => true, onDi
       dismiss(true);
     }
   });
-  return { el: el2, panel, trigger, open, close, dispose: close };
+  return { el: el2, panel, trigger, open, close, dismiss, dispose: close };
 }
 function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"), beforeSync = () => {
 }, onDismiss = () => {
@@ -15609,7 +15609,7 @@ var AppShell = class {
     this.phone.addEventListener("change", this.schedulePhoneSync);
     this.appControls.panel.addEventListener("click", (event) => {
       const target = event.target.closest("button, a");
-      if (this.el.classList.contains("af-session-first") && target && !target.closest(".af-theme-toggle")) this.appControls.close();
+      if (this.el.classList.contains("af-session-first") && target && !target.closest(".af-theme-toggle")) this.appControls.dismiss();
     });
     this.railCount = h("span", { class: "af-rail-count" }, "0");
     const newBtn = h(

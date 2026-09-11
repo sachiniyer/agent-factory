@@ -44,7 +44,7 @@ export function actionsDisclosure(label = "Session actions", enabled = () => tru
       dismiss(true);
     }
   });
-  return { el, panel, trigger, open, close, dispose: close };
+  return { el, panel, trigger, open, close, dismiss, dispose: close };
 }
 
 /** The app's secondary controls use the same disclosure and Escape/focus model.
