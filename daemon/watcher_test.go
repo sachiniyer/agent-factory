@@ -32,7 +32,7 @@ func (r *watchRecorder) deliver(taskID, line string) error {
 	return nil
 }
 
-func (r *watchRecorder) setStatus(taskID, status string) {
+func (r *watchRecorder) setStatus(taskID, _ string, status string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.statuses = append(r.statuses, taskID+":"+status)
@@ -630,7 +630,7 @@ func TestPersistWatcherStatus_PreservesLastRunAt(t *testing.T) {
 	deliveredAt := *delivered.LastRunAt
 
 	// A supervision-status persist must not revert that timestamp.
-	persistWatcherStatus("cafe0002", "stopped")
+	persistWatcherStatus("cafe0002", delivered.GenerationID, "stopped")
 
 	got, err := task.GetTask("cafe0002")
 	if err != nil {

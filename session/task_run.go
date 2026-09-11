@@ -37,9 +37,10 @@ func (i *Instance) TaskRun() TaskRunIdentity {
 // Runtime replacement is the provenance proof: restore-time callers invoke this
 // at their pre-ConfirmLive boundary, while load reconstructors invoke it only
 // after RestoreWithResult confirms RestoreRespawned for the agent tab. A sibling
-// tab replacement never reaches it. The OpRespawning fence is the one explicit
-// exception: it promises that limit resume will re-deliver the queued task prompt
-// before lowering the fence, so that replacement continues the same run.
+// tab replacement never reaches it. A prompt-redelivery fence is the explicit
+// exception: OpRespawning promises to re-deliver the queued task prompt, while a
+// durable OpReplacing mission supplies the replacement agent's continuation
+// context. Both keep the run until that delivery transaction lowers its fence.
 //
 // The daemon must persist the closed session marker before publishing the task
 // outcome. ConfirmLive retains runEndsOnRestoredRuntime as a structural fallback
@@ -51,11 +52,42 @@ func (i *Instance) InterruptTaskRunAtRuntimeReplacement() (TaskRunIdentity, bool
 }
 
 func (i *Instance) interruptTaskRunAtRuntimeReplacementLocked() (TaskRunIdentity, bool) {
-	if i.inFlightOp == OpRespawning || !i.taskRunActive {
+	replaysPrompt := i.inFlightOp == OpRespawning ||
+		(i.inFlightOp == OpReplacing && i.pendingHandoffMission != "")
+	if replaysPrompt || !i.taskRunActive {
 		return TaskRunIdentity{}, false
 	}
 	i.closeTaskRunLocked()
+	i.taskRunInterruptionPending = true
 	return i.TaskRun(), true
+}
+
+// PendingTaskRunInterruption returns the exact run whose task-row outcome still
+// has to be published. The marker is an outbox entry, not a second activity bit:
+// taskRunActive is already false while this remains true.
+func (i *Instance) PendingTaskRunInterruption() (TaskRunIdentity, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if !i.taskRunInterruptionPending {
+		return TaskRunIdentity{}, false
+	}
+	return i.TaskRun(), true
+}
+
+// ClearPendingTaskRunInterruption retires the durable outbox marker only when
+// the caller names the same immutable run. A stale retry cannot discharge a
+// successor's obligation merely because it retained the Instance pointer.
+func (i *Instance) ClearPendingTaskRunInterruption(run TaskRunIdentity) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.taskRunInterruptionPending || run.TaskID != i.TaskID ||
+		run.TaskGenerationID != i.taskGenerationID || run.SessionID != i.ID ||
+		run.Sequence != i.taskRunSequence || run.Revision != i.taskRunRevision {
+		return false
+	}
+	i.taskRunInterruptionPending = false
+	i.touchLocked()
+	return true
 }
 
 // closeTaskRunLocked performs the shared, one-way task-run close and captures

@@ -126,17 +126,41 @@ func (m *Manager) recordInterruptedTaskRun(
 			run.TaskID, run.Title, TaskStatusInterrupted, err)
 		return err
 	}
-	m.recordInterruptedTaskRunWrite(repoID, key, instance, nil)
+	settlementErr := m.clearInterruptedTaskRunObligation(repoID, key, instance, run)
 	if !applied {
 		m.warn().Printf(
 			"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, skipped on_complete, and left the session in place for inspection; did not replace last_run_status because the task row does not identify this run",
 			run.TaskID, run.Title)
-		return nil
+		return settlementErr
 	}
 	m.publishEvent(agentproto.EventTaskUpdated, updated)
 	m.warn().Printf(
 		"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, recorded last_run_status %q, skipped on_complete, and left the session in place for inspection",
 		run.TaskID, run.Title, TaskStatusInterrupted)
+	return settlementErr
+}
+
+// clearInterruptedTaskRunObligation retires both forms of the outbox entry after
+// the task write applied or its compare-and-set proved a newer row won. Memory's
+// retry entry is cleared first; the session marker is then checkpointed through
+// the ordinary settlement writer. If that checkpoint fails, its whole-row retry
+// remains owed in memory and the still-marked disk row reconstructs the task
+// check after a daemon restart, so neither crash side can lose the outcome.
+func (m *Manager) clearInterruptedTaskRunObligation(
+	repoID, key string,
+	instance *session.Instance,
+	run session.TaskRunIdentity,
+) error {
+	m.recordInterruptedTaskRunWrite(repoID, key, instance, nil)
+	if !instance.ClearPendingTaskRunInterruption(run) {
+		return nil
+	}
+	if err := m.persistSettlement(repoID, key, instance); err != nil {
+		m.warn().Printf(
+			"task %s: recorded the interrupted outcome for session %q but could not clear its durable retry marker; will retry: %v",
+			run.TaskID, run.Title, err)
+		return err
+	}
 	return nil
 }
 

@@ -104,7 +104,7 @@ func TestInterruptedTaskStatusRetrySurvivesDaemonRestart(t *testing.T) {
 	require.NoError(t, os.WriteFile(tasksPath, original, 0600))
 
 	stored := persistedInstanceByTitle(t, repoID, inst.Title)
-	reloaded, err := session.FromInstanceData(*stored)
+	reloaded, err := session.FromInstanceData(stored)
 	require.NoError(t, err)
 	restarted := &Manager{instances: map[string]*session.Instance{key: reloaded}}
 	owed := persistLoadRuntimeReplacements(restarted.instances)

@@ -129,6 +129,11 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// TaskRunInterruptionPending is the durable outbox marker for a replacement
+	// runtime whose predecessor received this task run's prompt. It is cleared only
+	// after the exact task-row interruption is recorded or superseded, so a daemon
+	// restart between the session and task writes reconstructs the owed outcome.
+	TaskRunInterruptionPending bool `json:"task_run_interruption_pending,omitempty"`
 	// TaskRunAt is the immutable display timestamp of this session-backed task
 	// delivery; the stable session ID is its identity. It is written before the
 	// session becomes visible and matches the owning task's LastRunAt. Additive +

@@ -180,7 +180,9 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (ta
 		status = "sent"
 	}
 	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, target, status)
-	return taskDelivery{status: status, run: session.TaskRunIdentity{TaskID: t.ID, RunAt: time.Now()}}, nil
+	return taskDelivery{status: status, run: session.TaskRunIdentity{
+		TaskID: t.ID, TaskGenerationID: t.GenerationID, RunAt: time.Now(),
+	}}, nil
 }
 
 // Keep task-created title logging on the same %q encoding as target-session
@@ -333,7 +335,8 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 			return
 		}
 		now := time.Now()
-		if _, uerr := task.UpdateTaskStatus(taskID, &now, "errored: "+err.Error()); uerr != nil {
+		if _, _, uerr := task.UpdateTaskStatusForGeneration(
+			taskID, t.GenerationID, &now, "errored: "+err.Error()); uerr != nil {
 			log.ErrorLog.Printf("failed to record errored status for task %s: %v", taskID, uerr)
 		}
 	}()
@@ -368,7 +371,8 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 
 func recordDeliveredTaskRun(taskID string, delivery taskDelivery) error {
 	if delivery.run.SessionID == "" {
-		_, err := task.UpdateTaskStatus(taskID, &delivery.run.RunAt, delivery.status)
+		_, _, err := task.UpdateTaskStatusForGeneration(
+			taskID, delivery.run.TaskGenerationID, &delivery.run.RunAt, delivery.status)
 		return err
 	}
 	_, _, err := task.UpdateTaskRunStart(

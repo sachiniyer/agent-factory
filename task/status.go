@@ -28,8 +28,33 @@ const (
 // the session token, while retaining the sequence as the allocator's durable
 // high-water mark.
 func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) (Task, error) {
+	updated, _, err := updateTaskStatus(taskID, "", false, lastRunAt, lastRunStatus)
+	return updated, err
+}
+
+// UpdateTaskStatusForGeneration updates scheduler-owned fields only while the
+// task ID still names the incarnation the caller loaded. It is for deliveries
+// and supervisors that may finish after remove+re-add reused the user-facing ID.
+// A generation mismatch is a clean refusal (applied=false), not a storage error.
+func UpdateTaskStatusForGeneration(
+	taskID, expectedGenerationID string,
+	lastRunAt *time.Time,
+	lastRunStatus string,
+) (Task, bool, error) {
+	return updateTaskStatus(taskID, expectedGenerationID, true, lastRunAt, lastRunStatus)
+}
+
+func updateTaskStatus(
+	taskID, expectedGenerationID string,
+	requireGeneration bool,
+	lastRunAt *time.Time,
+	lastRunStatus string,
+) (Task, bool, error) {
 	var revisionErr error
-	updated, _, err := mutateTaskStatus(taskID, func(t *Task) bool {
+	updated, applied, err := mutateTaskStatus(taskID, func(t *Task) bool {
+		if requireGeneration && t.GenerationID != expectedGenerationID {
+			return false
+		}
 		if t.LastRunRevision == ^uint64(0) {
 			revisionErr = fmt.Errorf("task last-run revision exhausted")
 			return false
@@ -43,9 +68,9 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 		return true
 	})
 	if err == nil && revisionErr != nil {
-		return Task{}, revisionErr
+		return Task{}, false, revisionErr
 	}
-	return updated, err
+	return updated, applied, err
 }
 
 // BeginTaskRun authoritatively publishes a session-per-run delivery. The daemon

@@ -78,3 +78,29 @@ func TestConcurrentTaskRunPublicationsUseSequenceWithinOneAdmissionRevision(t *t
 	assert.Equal(t, "session-b", got.LastRunSessionID)
 	assert.Equal(t, uint64(2), got.LastRunSequence)
 }
+
+func TestTaskStatusForGenerationRefusesReplacementRow(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 11, 0, 0, 0, time.UTC)
+	setupTestTasks(t, []Task{{
+		ID: "w1", GenerationID: "replacement-generation", WatchCmd: "tail -f x", Enabled: true,
+	}})
+
+	_, applied, err := UpdateTaskStatusForGeneration(
+		"w1", "removed-generation", &runAt, "sent")
+	require.NoError(t, err)
+	require.False(t, applied)
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	require.Empty(t, got.LastRunStatus)
+	require.Nil(t, got.LastRunAt)
+
+	_, applied, err = UpdateTaskStatusForGeneration(
+		"w1", "replacement-generation", &runAt, "sent")
+	require.NoError(t, err)
+	require.True(t, applied)
+	got, err = GetTask("w1")
+	require.NoError(t, err)
+	require.Equal(t, "sent", got.LastRunStatus)
+	require.NotNil(t, got.LastRunAt)
+	require.True(t, got.LastRunAt.Equal(runAt))
+}

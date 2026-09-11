@@ -128,7 +128,7 @@ type watcherSupervisor struct {
 	// durable event queues to a scratch directory.
 	loadTasks func() ([]task.Task, error)
 	deliver   func(taskID, line string) error
-	setStatus func(taskID, status string)
+	setStatus func(taskID, taskGenerationID, status string)
 	logPath   func(taskID string) (string, error)
 	queueDir  func() (string, error)
 
@@ -182,6 +182,7 @@ func (s *watcherSupervisor) Stop() {
 func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 	w := &taskWatcher{
 		taskID:        t.ID,
+		generationID:  t.GenerationID,
 		name:          t.Name,
 		cmdStr:        t.WatchCmd,
 		dir:           t.ProjectPath,
@@ -223,11 +224,12 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 // delivers synchronously, so a slow delivery backpressures the script's
 // stdout pipe rather than reordering events.
 type taskWatcher struct {
-	taskID string
-	name   string
-	cmdStr string
-	dir    string
-	sig    string
+	taskID       string
+	generationID string
+	name         string
+	cmdStr       string
+	dir          string
+	sig          string
 	// repoID/targetSession are captured at construction to label a delivery
 	// alarm (#1238) without disk I/O on the snapshot hot path. repoID scopes
 	// the alarm to a repo's snapshot; targetSession names where events are
@@ -339,7 +341,7 @@ func (w *taskWatcher) run() {
 			// The condition, stated so an operator can act on it: this stop
 			// holds until something names THIS task (#3837).
 			log.InfoLog.Printf("watch task %s: watch command exited cleanly; stopped until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts", w.taskID, w.taskID)
-			w.sup.setStatus(w.taskID, "stopped")
+			w.sup.setStatus(w.taskID, w.generationID, "stopped")
 			return
 		}
 
@@ -367,7 +369,7 @@ func (w *taskWatcher) run() {
 		failures = failures[cut:]
 		if len(failures) >= w.sup.crashMaxExits {
 			log.ErrorLog.Printf("watch task %s: %d failures within %s (last: %v); giving up until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts%s", w.taskID, len(failures), w.sup.crashWindow, runErr, w.taskID, tail.logSuffix())
-			w.sup.setStatus(w.taskID, failureSummary(runErr, tail))
+			w.sup.setStatus(w.taskID, w.generationID, failureSummary(runErr, tail))
 			return
 		}
 
@@ -850,8 +852,8 @@ func deliverWatchEvent(taskID, line string) error {
 // committed in the gap — the TOCTOU race in #1215. UpdateTaskStatus skips
 // Program enum validation so legacy task records still receive status bumps
 // (#664).
-func persistWatcherStatus(taskID, status string) {
-	if _, err := task.UpdateTaskStatus(taskID, nil, status); err != nil {
+func persistWatcherStatus(taskID, taskGenerationID, status string) {
+	if _, _, err := task.UpdateTaskStatusForGeneration(taskID, taskGenerationID, nil, status); err != nil {
 		log.WarningLog.Printf("failed to record watcher status %q on task %s: %v", status, taskID, err)
 	}
 }

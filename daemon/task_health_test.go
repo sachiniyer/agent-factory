@@ -262,7 +262,7 @@ func TestWatcherSupervisor_DuplicateIDsWatchTheFirst(t *testing.T) {
 	supervisor.queueDir = func() (string, error) { return dir, nil }
 	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
 	supervisor.deliver = func(string, string) error { return nil }
-	supervisor.setStatus = func(string, string) {}
+	supervisor.setStatus = func(string, string, string) {}
 	t.Cleanup(supervisor.Stop)
 
 	first := watchTask("dupe0002", "printf 'first\\n'; sleep 30", dir)
@@ -475,7 +475,7 @@ func TestWatchArming_StaleWatcherAfterAFailedReloadIsNotArmed(t *testing.T) {
 	supervisor.queueDir = func() (string, error) { return dir, nil }
 	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
 	supervisor.deliver = func(string, string) error { return nil }
-	supervisor.setStatus = func(string, string) {}
+	supervisor.setStatus = func(string, string, string) {}
 	t.Cleanup(supervisor.Stop)
 
 	before := watchTask("stalew01", "printf 'a\\n'; sleep 30", dir)
@@ -511,7 +511,7 @@ func TestWatchArming_DuringShutdownIsUnknown(t *testing.T) {
 	supervisor.queueDir = func() (string, error) { return dir, nil }
 	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
 	supervisor.deliver = func(string, string) error { return nil }
-	supervisor.setStatus = func(string, string) {}
+	supervisor.setStatus = func(string, string, string) {}
 
 	watch := watchTask("shutdown", "printf 'a\\n'; sleep 30", dir)
 	require.NoError(t, supervisor.reconcile([]task.Task{watch}, []task.Task{watch}, everyWatchTask()))

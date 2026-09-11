@@ -22,9 +22,10 @@ import (
 // function means a fourth caller cannot forget, because there is nowhere else to
 // call.
 //
-// teardownErr is whatever Instance.Kill returned, and ONLY an unknown-STATE error
-// blocks — see session.TeardownStateUnknown for why the distinction is the whole
-// design and not a detail.
+// teardownErr is whatever Instance.Kill returned. Unknown teardown STATE blocks
+// because the record is the workspace's retry handle; a pending interrupted-task
+// outcome blocks for the same durability reason until the task-store write lands.
+// See session.TeardownStateUnknown for why ordinary teardown errors do not block.
 //
 // Blocking on any non-nil error was wrong and inverted the goal (#1917 round 5): a
 // remote session whose sandbox teardown SUCCEEDED but whose in-sandbox /kill call
@@ -40,6 +41,11 @@ import (
 func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownErr error, evidence session.InstanceData) (bool, error) {
 	if session.TeardownStateUnknown(teardownErr) {
 		return false, fmt.Errorf("refusing to delete the record for session %q: its teardown did not complete safely, so its workspace is still on disk and this record is the only handle left on it: %w", title, teardownErr)
+	}
+	if evidence.TaskRunInterruptionPending {
+		return false, fmt.Errorf(
+			"refusing to delete the record for session %q while its interrupted task outcome is pending; this record is the durable retry handle and the daemon will remove it after the task status settles",
+			title)
 	}
 	if teardownErr != nil {
 		// The teardown TOLD us something went wrong, but not that the workspace's

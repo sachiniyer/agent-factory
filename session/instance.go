@@ -117,6 +117,12 @@ type Instance struct {
 	// taskRunRevision is the owning task row's last-run revision captured before
 	// provisioning. Publication is admitted only while that revision is unchanged.
 	taskRunRevision uint64
+	// taskRunInterruptionPending is the durable outbox bit for an interrupted
+	// session-backed run. Runtime replacement raises it in the same critical
+	// section that closes taskRunActive; the daemon clears it only after the exact
+	// task outcome lands or a newer task row proves it no longer applies. Persisted
+	// so a daemon exit between those two store writes cannot lose the obligation.
+	taskRunInterruptionPending bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.

@@ -133,3 +133,35 @@ func TestTaskRunIdentityPersistsWithoutInventingOneForLegacyRecords(t *testing.T
 	require.Empty(t, reloaded.TaskGenerationID)
 	require.Zero(t, reloaded.TaskRunRevision)
 }
+
+func TestPendingTaskRunInterruptionSurvivesStorageRoundTrip(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	inst := &Instance{
+		ID: "session-id", TaskID: "task-id", taskGenerationID: "generation-id",
+		Title: "interrupted", liveness: LiveLost, inFlightOp: OpRestoring,
+		taskRunActive: true, taskRunAt: runAt, taskRunSequence: 7, taskRunRevision: 9,
+		CreatedAt: runAt,
+	}
+	run, interrupted := inst.InterruptTaskRunAtRuntimeReplacement()
+	require.True(t, interrupted)
+
+	stored := inst.ToInstanceData().ForStorage()
+	stored.BackendType = "docker"
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err)
+	var decoded InstanceData
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	require.True(t, decoded.TaskRunInterruptionPending)
+	restored, err := FromInstanceData(decoded)
+	require.NoError(t, err)
+	pending, ok := restored.PendingTaskRunInterruption()
+	require.True(t, ok)
+	require.Equal(t, run, pending)
+
+	wrong := pending
+	wrong.Sequence++
+	require.False(t, restored.ClearPendingTaskRunInterruption(wrong),
+		"a stale retry must not clear another run's durable outcome")
+	require.True(t, restored.ClearPendingTaskRunInterruption(pending))
+	require.False(t, restored.ToInstanceData().TaskRunInterruptionPending)
+}

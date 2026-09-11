@@ -100,6 +100,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// reintroduce the bug it fixes — a session whose run is live must read as active
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
+	data.TaskRunInterruptionPending = i.taskRunInterruptionPending
 	data.TaskRunAt = i.taskRunAt
 	data.TaskRunSequence = i.taskRunSequence
 	data.TaskRunRevision = i.taskRunRevision
@@ -327,34 +328,38 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// same event that restarts the daemon, so this fact has to come back from
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
-		taskRunActive:            data.TaskRunActive,
-		taskRunAt:                data.TaskRunAt,
-		taskRunSequence:          data.TaskRunSequence,
-		taskRunRevision:          data.TaskRunRevision,
-		limitResetAt:             data.LimitResetAt,
-		limitAgent:               limitAgent,
-		limitAccount:             limitAccount,
-		accountLimitObservations: accountLimitObservations,
-		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
-		archiveWarning:           data.ArchiveWarning,
-		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
-		lastPromptAttemptAt:      data.LastPromptAttemptAt,
-		lastPromptDeliveryStatus: data.LastPromptDeliveryStatus,
-		lastPaneChurnAt:          data.LastPaneChurnAt,
-		Height:                   data.Height,
-		Width:                    data.Width,
-		CreatedAt:                data.CreatedAt,
-		UpdatedAt:                data.UpdatedAt,
-		Program:                  data.Program,
-		runtimeProgram:           data.RuntimeProgram,
-		Account:                  data.Account,
-		accountAutoSelected:      data.AccountAutoSelected,
-		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
-		Prompt:                   data.Prompt,
-		pendingHandoffMission:    data.PendingHandoffMission,
-		handoffDeliveryStatus:    data.HandoffDeliveryStatus,
-		userKilled:               data.UserKilled,
-		startupStateUnknown:      data.StartupStateUnknown,
+		// A pending interruption is durable proof that replacement already closed
+		// the run. If a hand-edited row claims both, the outbox wins rather than
+		// holding a concurrency slot for work whose terminal outcome is queued.
+		taskRunActive:              data.TaskRunActive && !data.TaskRunInterruptionPending,
+		taskRunInterruptionPending: data.TaskRunInterruptionPending,
+		taskRunAt:                  data.TaskRunAt,
+		taskRunSequence:            data.TaskRunSequence,
+		taskRunRevision:            data.TaskRunRevision,
+		limitResetAt:               data.LimitResetAt,
+		limitAgent:                 limitAgent,
+		limitAccount:               limitAccount,
+		accountLimitObservations:   accountLimitObservations,
+		agentModelChange:           agentModelChangeForLiveness(data.ModelChange, liveness),
+		archiveWarning:             data.ArchiveWarning,
+		lostRestoreFailure:         lostRestoreFailureFromData(data.LostRestoreFailure),
+		lastPromptAttemptAt:        data.LastPromptAttemptAt,
+		lastPromptDeliveryStatus:   data.LastPromptDeliveryStatus,
+		lastPaneChurnAt:            data.LastPaneChurnAt,
+		Height:                     data.Height,
+		Width:                      data.Width,
+		CreatedAt:                  data.CreatedAt,
+		UpdatedAt:                  data.UpdatedAt,
+		Program:                    data.Program,
+		runtimeProgram:             data.RuntimeProgram,
+		Account:                    data.Account,
+		accountAutoSelected:        data.AccountAutoSelected,
+		pendingAccountSwap:         cloneAccountSwapData(data.PendingAccountSwap),
+		Prompt:                     data.Prompt,
+		pendingHandoffMission:      data.PendingHandoffMission,
+		handoffDeliveryStatus:      data.HandoffDeliveryStatus,
+		userKilled:                 data.UserKilled,
+		startupStateUnknown:        data.StartupStateUnknown,
 		// Survives the restart on purpose (#2629): a root that came back amnesiac
 		// is still amnesiac, and a daemon restart is a likely part of the same
 		// outage. An unrecognized value from a newer binary loads as-is and
