@@ -1,9 +1,13 @@
 package config
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -47,6 +51,94 @@ func TestProjectConfigTomlPathValidatesID(t *testing.T) {
 
 	_, err = ProjectConfigTomlPath("not-a-project-id")
 	require.Error(t, err, "an invalid id must never resolve to a path component")
+}
+
+func TestCheckoutMarkerCompletedFailureWinsOverExpiredContext(t *testing.T) {
+	completed := exec.Command("sh", "-c", "exit 7").Run()
+	require.Error(t, completed)
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := checkoutMarkerProbeFailure(parent, t.TempDir(), completed)
+	require.Error(t, err, "a completed nonzero Git exit did not establish checkout-marker absence")
+	require.NotErrorIs(t, err, context.Canceled,
+		"the completed Git result must still win when the caller deadline lands before classification")
+	require.Contains(t, err.Error(), "exit status 7")
+}
+
+func TestCheckoutMarkerTimeoutReusesParkedRead(t *testing.T) {
+	_, repoRoot, project := registeredTestProject(t)
+	markerName, err := checkoutMarkerName()
+	require.NoError(t, err)
+	marker := filepath.Join(repoRoot, ".git", checkoutMarkerDirName, markerName)
+	markerData, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(marker))
+	require.NoError(t, syscall.Mkfifo(marker, 0o600))
+
+	var releaseOnce sync.Once
+	releaseDone := make(chan error, 1)
+	released := false
+	release := func() {
+		releaseOnce.Do(func() {
+			go func() { releaseDone <- os.WriteFile(marker, markerData, 0o600) }()
+		})
+	}
+	t.Cleanup(func() {
+		if !released {
+			release()
+			<-releaseDone
+		}
+		_ = os.Remove(marker)
+		_ = os.WriteFile(marker, markerData, 0o600)
+	})
+
+	_, _, firstErr := checkoutIDForWorkspaceContext(context.Background(), repoRoot)
+	require.Error(t, firstErr)
+	first := CheckoutMarkerProbeCompletion(firstErr)
+	require.NotNil(t, first, "the timed-out os.ReadFile must expose its actual lifetime")
+	_, _, secondErr := checkoutIDForWorkspaceContext(context.Background(), repoRoot)
+	require.Error(t, secondErr)
+	second := CheckoutMarkerProbeCompletion(secondErr)
+	require.NotNil(t, second)
+	require.Equal(t, first, second, "a second probe must join the parked marker read")
+
+	release()
+	releaseErr := <-releaseDone
+	released = true
+	require.NoError(t, releaseErr)
+	select {
+	case <-first:
+	case <-time.After(5 * time.Second):
+		t.Fatal("checkout-marker read did not complete after its mount became responsive")
+	}
+	require.NoError(t, os.Remove(marker))
+	require.NoError(t, os.WriteFile(marker, markerData, 0o600))
+
+	got, found, err := checkoutIDForWorkspaceContext(context.Background(), repoRoot)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, project.CheckoutID, got, "a completed flight must release the path for a fresh healthy read")
+}
+
+func TestRootAgentInspectionPropagatesCompletedCheckoutProbeFailure(t *testing.T) {
+	_, repoRoot, _ := registeredTestProject(t)
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	shimDir := t.TempDir()
+	shim := filepath.Join(shimDir, "git")
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$3\" = rev-parse ] && [ \"$4\" = --git-common-dir ] && [ \"$#\" -eq 4 ]; then exit 7; fi\nexec %q \"$@\"\n", realGit)
+	require.NoError(t, os.WriteFile(shim, []byte(script), 0o755))
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = ResolveRootAgentForInspectionWithConfigContext(ctx, cfg, repoRoot, false)
+	require.Error(t, err, "a failed checkout probe must not read as an absent personal layer")
+	require.Contains(t, err.Error(), "exit status 7")
+	require.NotErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func TestLoadProjectConfigAbsentIsNoLayer(t *testing.T) {
@@ -241,6 +333,53 @@ func TestResolveProjectSelectorNonGitPath(t *testing.T) {
 	_, err := ResolveProjectSelector(plain)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not inside a git repository")
+}
+
+func TestProjectLookupMarkerProbeTimeoutIsUnknown(t *testing.T) {
+	_, repoRoot, _ := registeredTestProject(t)
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	shimDir := t.TempDir()
+	shim := filepath.Join(shimDir, "git")
+	script := "#!/bin/sh\nsleep 1\nexec \"" + realGit + "\" \"$@\"\n"
+	require.NoError(t, os.WriteFile(shim, []byte(script), 0o755))
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, found, err := projectForWorkspaceContext(context.Background(), repoRoot)
+	require.Error(t, err, "a timed-out checkout-marker probe is unknown, not unregistered")
+	require.False(t, found)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestProjectConfigLockRefusesCallbackAfterTransientMarkerFailure(t *testing.T) {
+	_, repoRoot, _ := registeredTestProject(t)
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	shimDir := t.TempDir()
+	shim := filepath.Join(shimDir, "git")
+	countPath := filepath.Join(shimDir, "marker-count")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$3" = "rev-parse" ] && [ "$4" = "--git-common-dir" ]; then
+  if [ ! -e %q ]; then
+    : > %q
+    exit 7
+  fi
+fi
+exec %q "$@"
+`, countPath, countPath, realGit)
+	require.NoError(t, os.WriteFile(shim, []byte(script), 0o755))
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	called := false
+	err = WithProjectConfigLockForRoot(repoRoot, func() error {
+		called = true
+		_, found, lookupErr := projectForRoot(repoRoot)
+		require.NoError(t, lookupErr, "the later policy read reproduces after the transient probe failure")
+		require.True(t, found)
+		return nil
+	})
+	require.Error(t, err, "an unknown identity cannot authorize an unlocked mutating callback")
+	require.False(t, called, "the callback must wait for a proven project-config lock")
 }
 
 func TestProjectForRootMatchesRegisteredRoot(t *testing.T) {
