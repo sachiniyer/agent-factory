@@ -66,10 +66,11 @@ func UpdateTaskRunStart(taskID, runID string, runSequence uint64, runAt time.Tim
 }
 
 // UpdateTaskRunOutcome changes only the current session-backed run, and only
-// while its delivery status is active (started, or parked at a usage limit).
-// Matching the stable session ID makes equal timestamps and clock corrections
-// irrelevant; checking the status preserves later watcher supervision evidence
-// such as "stopped" or "errored".
+// while its delivery status is active (started, parked at a usage limit, or
+// blank after a temporary not-armed marker was cleared). Matching the stable
+// session ID makes equal timestamps and clock corrections irrelevant; checking
+// the status preserves later watcher supervision evidence such as "stopped" or
+// "errored".
 func UpdateTaskRunOutcome(taskID, runID, lastRunStatus string) (Task, bool, error) {
 	if runID == "" {
 		return Task{}, false, fmt.Errorf("task run id is required")
@@ -101,7 +102,11 @@ func AdvanceTaskRunStatus(taskID, runID, fromStatus, toStatus string) (Task, boo
 }
 
 func sessionRunStatusActive(status string) bool {
-	return status == RunStatusStarted || status == RunStatusLimitParked
+	// Arming supervision writes and later clears "errored: not armed" without
+	// changing the identified run. The exact nonempty session-ID match in the
+	// caller proves a blank row still belongs to that run; no terminal watcher
+	// status is admitted here.
+	return status == "" || status == RunStatusStarted || status == RunStatusLimitParked
 }
 
 // ClaimUnidentifiedTaskRunOutcome is the compatibility writer for a legacy row
