@@ -76,11 +76,14 @@ func killSuggestionFor(instance *session.Instance) string {
 	return shellsuggest.PositionalCommand("af", args, instance.Title)
 }
 
-// reapRefusalSuggestionFor never names an off-ramp whose branch precondition is
-// already known to be false. --force-reap requires a known branch: without one
-// it would refuse at the same guard, so kill/recreate is the executable path.
-func reapRefusalSuggestionFor(instance *session.Instance) string {
-	if instance.GetBranch() == "" {
+// reapRefusalSuggestionFor derives advice from the same guard as --force-reap:
+// the branch must be known, durable, and match this session's identity and current
+// branch. Reuse the guard rather than duplicating its predicate, so new refusal
+// conditions cannot leave the advice advertising a command that immediately fails.
+// The record read is worth doing on this recovery path, which already probes the
+// sandbox; any guard error selects kill/recreate instead.
+func reapRefusalSuggestionFor(repoID string, instance *session.Instance) string {
+	if requireDurableSandboxBranch(repoID, instance) != nil {
 		return killSuggestionFor(instance)
 	}
 	return forceReapSuggestionFor(instance)
@@ -291,12 +294,12 @@ func requireKnownSandboxBranch(instance *session.Instance) error {
 // Unreachable is NOT gone. A replacement here would reap a sandbox that may still
 // be holding hours of unpushed commits, so the decision is to refuse: stranded
 // cloud spend is visible on a bill and fixable afterwards, lost work is neither.
-func refuseIndeterminateReap(instance *session.Instance) error {
+func refuseIndeterminateReap(repoID string, instance *session.Instance) error {
 	return fmt.Errorf(
 		"cannot restore %q: af could not determine whether its sandbox is gone or merely unreachable, "+
 			"and replacing it would discard anything it has not pushed. "+
 			"It stays recoverable and the daemon keeps retrying; if you know the sandbox is gone, end it with: %s",
-		instance.Title, reapRefusalSuggestionFor(instance))
+		instance.Title, reapRefusalSuggestionFor(repoID, instance))
 }
 
 // archiveWithin runs the sandbox's push under a hard local deadline, mirroring

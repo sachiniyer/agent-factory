@@ -163,7 +163,10 @@ func TestRestoreSession_PushFailureWithADurableBranchStillNamesForceReap(t *test
 	srv := newSandboxProbeServer(t, "af/session-branch")
 	srv.archiveFails.Store(true)
 	inst, _, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "push-fails-branched", srv.url, session.Lost)
-	inst.Branch = "af/already-durable"
+	inst.SetSandboxBranch("af/already-durable")
+	if err := manager.persistInstanceErr(repoID, inst); err != nil {
+		t.Fatalf("persist durable branch: %v", err)
+	}
 
 	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "push-fails-branched", RepoID: repoID})
 

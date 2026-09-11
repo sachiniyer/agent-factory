@@ -485,8 +485,8 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// does not land, exactly as ArchiveSandbox refuses via AbortArchiveToLost.
 		//
 		// The shared selector keeps the refusal's off-ramp executable even when
-		// this session has no branch and --force-reap cannot proceed (#4164).
-		if err := m.preserveSandboxBeforeReap(repoID, key, inst, reapRefusalSuggestionFor(inst)); err != nil {
+		// this session's branch is not durable and --force-reap cannot proceed (#4195).
+		if err := m.preserveSandboxBeforeReap(repoID, key, inst, reapRefusalSuggestionFor(repoID, inst)); err != nil {
 			m.mu.Lock()
 			// Its OWN dedupe flag. remoteUnknownLogged is set by the unknown arm and
 			// never reset, so sharing it meant a sandbox that first went unreachable and
