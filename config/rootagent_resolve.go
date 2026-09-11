@@ -1,7 +1,5 @@
 package config
 
-import "strings"
-
 // This file is the canonical root-agent resolver and the permanent legacy
 // `root_agents` compatibility adapter (#2216 Phase 6). It defines the singleton
 // root-agent profile and ResolveRootAgent — the single authority on how every
@@ -115,21 +113,6 @@ type RootAgentResolution struct {
 	EnabledSource RootAgentSource      `json:"enabled_source"`
 	ProgramSource RootAgentSource      `json:"program_source,omitempty"`
 	Candidates    []RootAgentCandidate `json:"candidates"`
-}
-
-// normalizeRootAgentPrograms canonicalizes the insignificant outer whitespace
-// at the global config load boundary. It covers both the current singleton and
-// every legacy path entry so creation, persisted runtime evidence, and
-// diagnostics all receive the same command string.
-func normalizeRootAgentPrograms(cfg *Config) {
-	if cfg == nil {
-		return
-	}
-	cfg.RootAgent.Program = strings.TrimSpace(cfg.RootAgent.Program)
-	for path, profile := range cfg.RootAgents {
-		profile.Program = strings.TrimSpace(profile.Program)
-		cfg.RootAgents[path] = profile
-	}
 }
 
 // GlobalRootAgentLayer extracts the global [root_agent] singleton layer from a

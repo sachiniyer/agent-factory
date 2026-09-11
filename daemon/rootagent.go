@@ -886,8 +886,9 @@ func rootAgentCreateProgramFromResolvedConfig(cfg *config.Config) string {
 }
 
 func rootAgentProgramForResolvedRepo(repo *config.RepoContext, ra config.RootAgent, resolve func(*config.RepoContext) (*config.ResolvedConfig, error)) (string, error) {
-	requested := strings.TrimSpace(ra.Program)
-	if requested != "" && !tmux.IsSupportedProgram(requested) {
+	requested := ra.Program
+	hasProgram := strings.TrimSpace(requested) != ""
+	if hasProgram && !tmux.IsSupportedProgram(requested) {
 		return rootAgentProgramFromResolvedConfig(ra, nil)
 	}
 	if repo == nil {
@@ -901,14 +902,18 @@ func rootAgentProgramForResolvedRepo(repo *config.RepoContext, ra config.RootAge
 }
 
 func rootAgentProgramFromResolvedConfig(ra config.RootAgent, resolved *config.ResolvedConfig) (string, error) {
-	requested := strings.TrimSpace(ra.Program)
-	if requested != "" && !tmux.IsSupportedProgram(requested) {
-		return ra.Program, nil
+	requested := ra.Program
+	// Outer whitespace decides only whether the default form was requested.
+	// Otherwise the exact bytes select an override or become the shell command:
+	// trailing whitespace can be escaped and therefore shell-significant.
+	hasProgram := strings.TrimSpace(requested) != ""
+	if hasProgram && !tmux.IsSupportedProgram(requested) {
+		return requested, nil
 	}
 	if resolved == nil {
 		return "", fmt.Errorf("resolved repository config is required to interpret root-agent program %q", requested)
 	}
-	if requested != "" {
+	if hasProgram {
 		return config.ResolveProgram(&resolved.Config, requested), nil
 	}
 	// The default-profile create first resolves claude here, then hands that
@@ -931,8 +936,7 @@ func RootAgentProgramForProfileResolvedConfig(ra config.RootAgent, resolved *con
 // depends on repository-scoped program_overrides. Diagnostics use the same
 // predicate so a free-form command does not acquire an unrelated Git failure.
 func RootAgentProfileNeedsRepoConfig(ra config.RootAgent) bool {
-	program := strings.TrimSpace(ra.Program)
-	return program == "" || tmux.IsSupportedProgram(program)
+	return strings.TrimSpace(ra.Program) == "" || tmux.IsSupportedProgram(ra.Program)
 }
 
 func finishRootAgentProgram(program string) string {

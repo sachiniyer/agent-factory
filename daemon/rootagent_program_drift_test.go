@@ -362,7 +362,7 @@ func TestAdoptedRootProgramDriftResolvesBareAgentOverride(t *testing.T) {
 	}
 }
 
-func TestCreatedRootWithPaddedBareProgramDoesNotReportDrift(t *testing.T) {
+func TestCreatedRootWithPaddedProgramPreservesLaunchBytesWithoutDrift(t *testing.T) {
 	testguard.IsolateTmux(t)
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
@@ -389,8 +389,8 @@ func TestCreatedRootWithPaddedBareProgramDoesNotReportDrift(t *testing.T) {
 	if root == nil {
 		t.Fatal("root was not created")
 	}
-	if got := root.RuntimeProgram(); got != shim {
-		t.Fatalf("real launch recorded RuntimeProgram %q, want the normalized label's override %q", got, shim)
+	if got := root.RuntimeProgram(); got != padded {
+		t.Fatalf("real launch recorded RuntimeProgram %q, want configured bytes %q", got, padded)
 	}
 
 	manager.ensureRootAgentsAndWait()

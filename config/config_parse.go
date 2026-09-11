@@ -228,7 +228,6 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 	if config.SchemaVersion == LegacySchemaVersion {
 		config.SchemaVersion = GlobalConfigSchemaVersion
 	}
-	normalizeRootAgentPrograms(config)
 	if err := ValidateProgramEnum(
 		fmt.Sprintf("Config issue in %s: default_program", prettyConfigPath),
 		"default_program",

@@ -179,7 +179,6 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return nil, tomlParseError("personal project config "+prettyPath, err)
 	}
-	cfg.RootAgent.Program = strings.TrimSpace(cfg.RootAgent.Program)
 	presentKeys := make(map[string]bool, len(metadata.shape))
 	for key := range metadata.shape {
 		presentKeys[key] = true
