@@ -375,9 +375,20 @@ func TestRebuildFromExistingBranch_RecreatedTreeIsUntouchedByThePriorRun(t *test
 	oldPID := strings.TrimSpace(strings.Split(strings.TrimSpace(readFile(t, touched)), "\n")[0])
 	require.NotEmpty(t, oldPID)
 
-	// The worktree vanishes — the Lost-recovery trigger. The old hook keeps
-	// running, still pointed at this absolute path.
-	require.NoError(t, os.RemoveAll(worktreePath))
+	// Rename within the same parent to atomically make the recorded path vanish
+	// (#4206). RemoveAll there races the hook recreating hook-touched between
+	// its directory walk and unlink. The hook keeps running with the original
+	// absolute path; it cannot create that parent or new entries in the renamed tree.
+	// Git's registration and branch remain unchanged: this is still Lost recovery.
+	vanishedPath := worktreePath + ".vanished"
+	require.NoError(t, os.Rename(worktreePath, vanishedPath))
+	require.NoError(t, os.RemoveAll(vanishedPath))
+	require.NoDirExists(t, worktreePath)
+	select {
+	case <-gw.HooksDone():
+		t.Fatal("the prior hook must still be running when the worktree vanishes")
+	default:
+	}
 
 	require.NoError(t, gw.RebuildFromExistingBranch())
 	require.True(t, waitForFile(t, touched, 10*time.Second), "the rebuilt worktree's hook never ran")
