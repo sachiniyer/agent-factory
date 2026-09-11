@@ -1,18 +1,15 @@
-// Package apiclient is a typed Go client for the daemon-hosted HTTP/JSON API
-// (#1029) that the daemon serves on its `daemon-http.sock` Unix socket. It is
-// the read-side twin of the gob `net/rpc` control client in daemon/: it dials
-// the SAME daemon core over a DIFFERENT transport and, by decoding the shared
-// `{data,error}` envelope back into the SAME request/response structs the RPC
-// client uses, it returns byte-identical results. This is the seam #1592 Phase 2
-// grows the client API on — HTTP today, WebSocket streaming later — without the
-// TUI or CLI ever touching the wire shape.
+// Package apiclient is the typed Go client for the daemon-hosted HTTP/JSON and
+// WebSocket APIs. Local clients reach the daemon through `daemon-http.sock`;
+// targeted clients may instead reach a remote daemon. It carries both reads and
+// control operations, including session lifecycle, tabs, tasks, accounts, and
+// configuration. The TUI uses it for every daemon read and control call, and
+// CLI/API paths use it where they speak HTTP rather than gob `net/rpc`.
 //
-// Phase 2 PR2 scope: this client exposes only the READ-ONLY Snapshot path and
-// its first consumer is the non-spawning `af sessions list`/`get` read
-// (api/sessions.go). Every write/control call stays on net/rpc; the disk
-// fallback is unchanged. The envelope is NOT redefined here — the client decodes
-// the exact bytes daemon/httpserver.go writes via apiproto.WriteEnvelope, which
-// is what guarantees parity.
+// HTTP calls decode the shared `{data,error}` envelope into the same daemon
+// request/response types used by the control plane. The envelope is not
+// redefined here: the client decodes the exact bytes daemon/httpserver.go writes
+// through apiproto.WriteEnvelope. The gob control socket remains for callers
+// that still use it, but it is not the exclusive transport for writes.
 package apiclient
 
 import (

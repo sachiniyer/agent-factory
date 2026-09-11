@@ -59,9 +59,11 @@ paragraph because it's why `af` doesn't corrupt itself:
 
 ## Lifecycle
 
-The daemon starts **on demand**: whenever you run `af` and there is work to host
-(an enabled task or a root agent), `af` makes sure a daemon is running.
-That means for interactive use you usually don't have to think about it at all.
+The daemon starts **on demand**. Opening the TUI makes sure one is running,
+whether or not a task or root agent is configured. Separately, whenever you run
+`af` and an enabled task exists, `af` starts the daemon so the task does not
+depend on someone opening the TUI. For interactive use you usually don't have
+to think about it at all.
 
 To keep tasks and sessions running across logouts and reboots, install the
 daemon's autostart unit once:
