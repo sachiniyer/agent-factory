@@ -664,6 +664,46 @@ func TestResolveAdoptedRootProgramDriftRequiresStableRegisteredCheckout(t *testi
 	})
 }
 
+func TestAdoptedRootExplicitProgramRejectsReplacedRegisteredCheckout(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	repo, err := config.RepoFromPath(project.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, warnings := newManagerCapturingWarnings(t, config.DefaultConfig())
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: session.RootSessionTitle, RepoPath: project.Root, Program: "claude", InPlace: true, allowReserved: true,
+	}); err != nil {
+		t.Fatalf("create pre-existing root: %v", err)
+	}
+	root := findRootInstance(t, manager, project.Root)
+	root.SetTmuxSession(tmux.NewTmuxSession("root-runtime", "claude"))
+	identity := &resolvedProjectRoot{
+		root: project.Root, projectID: project.ID, checkoutID: project.CheckoutID,
+	}
+	if err := os.Rename(project.Root, project.Root+".original"); err != nil {
+		t.Fatal(err)
+	}
+	setupRootDriftRepoAt(t, project.Root)
+
+	st := &rootEnsureState{}
+	manager.checkAdoptedRootProgramDrift(repo,
+		daemonInstanceKey(repo.ID, session.RootSessionTitle), project.Root, st,
+		config.RootAgent{Enabled: true, Program: "/opt/codex"}, root, identity)
+	waitForRootProgramResolutionIdle(t, manager, st)
+	manager.mu.Lock()
+	resolved := st.programDriftResolved
+	latched := st.programDriftLogged || manager.rootProgramDriftLogged[repo.ID]
+	manager.mu.Unlock()
+	if resolved || latched || strings.Contains(warnings.String(), "root agent program drift") {
+		t.Fatalf("replaced checkout produced stale explicit-program drift: resolved=%v latched=%v warnings=%s",
+			resolved, latched, warnings.String())
+	}
+}
+
 func TestAdoptedRootProgramDriftRevalidatesRuntimeBeforeLatching(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)

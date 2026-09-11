@@ -56,7 +56,7 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 	}
 	if cacheMatches {
 		configuredProgram := st.programDriftConfiguredProgram
-		if !RootAgentProfileNeedsRepoConfig(profile) {
+		if !rootProgramDriftNeedsInspection(profile, identity) {
 			m.mu.Unlock()
 			m.latchOrRetryAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
 				resolutionEpoch, checkoutID, configuredProgram, inst, evidence)
@@ -84,7 +84,7 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 	st.programDriftNextConfigCheck = time.Time{}
 	m.mu.Unlock()
 
-	if !RootAgentProfileNeedsRepoConfig(profile) {
+	if !rootProgramDriftNeedsInspection(profile, identity) {
 		m.finishAdoptedRootProgramDrift(repoID, key, workspace, st, profile,
 			resolutionEpoch, checkoutID, profile.Program, nil, inst, evidence)
 		return
@@ -92,6 +92,10 @@ func (m *Manager) checkAdoptedRootProgramDrift(repo *config.RepoContext, key, wo
 	global := m.Config()
 	go m.resolveAndFinishAdoptedRootProgram(repo, repoID, key, workspace, st, profile, identity,
 		resolutionEpoch, global, inst, evidence)
+}
+
+func rootProgramDriftNeedsInspection(profile config.RootAgent, identity *resolvedProjectRoot) bool {
+	return RootAgentProfileNeedsRepoConfig(profile) || identity != nil
 }
 
 func rootProgramDriftCheckoutID(identity *resolvedProjectRoot) string {
@@ -193,7 +197,7 @@ func (m *Manager) finishAdoptedRootProgramDrift(repoID, key, workspace string, s
 	st.programDriftResolvedProfile = profile
 	st.programDriftConfiguredProgram = configuredProgram
 	st.programDriftNextConfigCheck = time.Time{}
-	if RootAgentProfileNeedsRepoConfig(profile) {
+	if RootAgentProfileNeedsRepoConfig(profile) || checkoutID != "" {
 		st.programDriftNextConfigCheck = time.Now().Add(rootProgramDriftConfigInspectionInterval)
 	}
 	m.mu.Unlock()
