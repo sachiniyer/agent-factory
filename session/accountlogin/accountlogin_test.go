@@ -19,8 +19,7 @@ import (
 // and the environment assertions below would pass or fail for the wrong reason.
 func TestMain(m *testing.M) {
 	sessionenv.AccountLookup = func(agent, name string) (sessionenv.Account, error) {
-		executable, _ := os.Executable()
-		return agentaccount.Selected(os.Getenv("AGENT_FACTORY_HOME"), agent, name, executable)
+		return agentaccount.Selected(os.Getenv("AGENT_FACTORY_HOME"), agent, name)
 	}
 	sessionenv.HandleInternalExec()
 	tmux.HandleDedicatedServerExec()

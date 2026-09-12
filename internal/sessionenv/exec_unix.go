@@ -48,6 +48,28 @@ func WrapAccountEnvironmentCommand(executable, agent, account string, extras []s
 	return wrapCommandWithMarker(executable, AccountEnvironmentExecMarker, agent, account, AccountLaunchProof{}, extras, command)
 }
 
+// WrapAgentServerCommand builds the effect-bound Docker/SSH handoff. Unlike the
+// generic command wrapper, this protocol carries no caller-supplied agent claim
+// and no nested executable path to authenticate: the receiving af derives the
+// policy from these exact agent-server arguments and execs itself.
+func WrapAgentServerCommand(executable string, extras, agentServerArgs []string) (string, error) {
+	normalized, err := NormalizeExtraNames(extras)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := agentServerProgram(agentServerArgs); !ok {
+		return "", fmt.Errorf("malformed generated agent-server handoff")
+	}
+	args := []string{executable, AgentServerExecMarker, strconv.Itoa(len(normalized))}
+	args = append(args, normalized...)
+	args = append(args, agentServerArgs...)
+	quoted := make([]string, len(args))
+	for idx, arg := range args {
+		quoted[idx] = shellquote.Quote(arg)
+	}
+	return strings.Join(quoted, " "), nil
+}
+
 func wrapCommand(executable, agent, account string, proof AccountLaunchProof, extras []string, command string) (string, error) {
 	marker := ExecMarker
 	if account != "" {
@@ -86,6 +108,13 @@ func wrapCommandWithMarker(executable, marker, agent, account string, proof Acco
 // on failure.
 func HandleInternalExec() {
 	if len(os.Args) < 2 {
+		return
+	}
+	if os.Args[1] == AgentServerExecMarker {
+		if err := agentServerExecInvocation(os.Args[2:]); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "af: could not start the filtered agent-server")
+			os.Exit(127)
+		}
 		return
 	}
 	scoped := os.Args[1] == AccountExecMarker
@@ -145,7 +174,16 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 		return err
 	}
 	command := args[len(args)-1]
-	environ := FilterForCommand(os.Environ(), agent, command, extras)
+	filterAgent := agent
+	if !environmentOnly && AgentForCommand(command) != agent {
+		// The argv protocol names an agent, but it is not authority by itself: a
+		// repository can invoke the private marker too. Re-derive the grant from the
+		// direct command, and on disagreement retain only common/explicit values.
+		// Agent-server uses its effect-bound protocol above instead of asking this
+		// generic path to infer identity from nested argv.
+		filterAgent = ""
+	}
+	environ := FilterForCommand(os.Environ(), filterAgent, command, extras)
 	// The account boundary is applied HERE, in the pane, after filtering and
 	// immediately before exec — the last point where anything can still change
 	// what the agent will see. A failure REFUSES the launch rather than falling
@@ -167,4 +205,34 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 	// interpret differently.
 	shell := "/bin/sh"
 	return processExec(shell, []string{shell, "-c", command}, environ)
+}
+
+func agentServerExecInvocation(args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("malformed internal agent-server environment invocation")
+	}
+	extraCount, err := strconv.Atoi(args[0])
+	if err != nil || extraCount < 0 || extraCount > len(args)-2 {
+		return fmt.Errorf("malformed internal agent-server environment invocation")
+	}
+	extras, err := NormalizeExtraNames(args[1 : 1+extraCount])
+	if err != nil {
+		return err
+	}
+	serverArgs := args[1+extraCount:]
+	program, ok := agentServerProgram(serverArgs)
+	if !ok {
+		return fmt.Errorf("malformed internal agent-server environment invocation")
+	}
+	// agent-server receives the resolved program string but no trusted identity
+	// for a path-qualified child. Keep that state structurally distinct from a
+	// bare supported-agent invocation: reducing ./codex to the basename "codex"
+	// would grant credentials to a repository-controlled executable.
+	agent := credentialAgentForCommand(program)
+	environ := FilterForCommand(os.Environ(), agent, program, extras)
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve current af executable: %w", err)
+	}
+	return processExec(executable, append([]string{executable}, serverArgs...), environ)
 }

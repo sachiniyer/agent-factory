@@ -209,18 +209,18 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 }
 
 func (w *sandboxWorkspace) agentServerCommand() (string, error) {
-	inner := fmt.Sprintf("exec %s agent-server --listen 127.0.0.1:0 --repo %s --title %s",
-		shellQuote(w.AfPath()), shellQuote(w.WorkspacePath()), shellQuote(w.spec.Title))
+	args := []string{"agent-server", "--listen", "127.0.0.1:0",
+		"--repo", w.WorkspacePath(), "--title", w.spec.Title}
 	if strings.TrimSpace(w.program) != "" {
-		inner += " --program " + shellQuote(w.program)
-		inner += " --program-resolved"
+		args = append(args, "--program", w.program, "--program-resolved")
 	}
 	for _, name := range w.spec.SessionEnvPassthrough {
-		inner += " --session-env " + shellQuote(name)
+		args = append(args, "--session-env", name)
 	}
-	filteredInner, err := sessionenv.WrapCommand(
-		w.AfPath(), w.agentName(), w.spec.SessionEnvPassthrough, inner,
-	)
+	// The marker re-execs the staged binary it is already running, so a symlinked
+	// session directory changes no identity comparison: there is none. Policy and
+	// the agent-server effect are derived from the same structured arguments.
+	filteredInner, err := sessionenv.WrapAgentServerCommand(w.AfPath(), w.spec.SessionEnvPassthrough, args)
 	if err != nil {
 		return "", fmt.Errorf("preparing filtered agent-server environment failed: %w", err)
 	}
