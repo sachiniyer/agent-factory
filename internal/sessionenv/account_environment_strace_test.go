@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -418,6 +419,27 @@ func TestValidateAccountEnvironmentCommand_StraceUnmodeledBareOptionChecksBothBo
 				"every possible child boundary in %q is an ordinary command", command)
 		})
 	}
+}
+
+func TestValidateAccountEnvironmentCommand_StraceAmbiguousBoundariesHaveLinearCost(t *testing.T) {
+	const optionCount = 30
+	command := "strace " + strings.Repeat("--future ", optionCount) + "npm run dev"
+	call, ok := singleCallIgnoringRedirections(command)
+	require.True(t, ok)
+
+	evaluation := &straceBoundaryEvaluation{}
+	_, unsafe := unwrapStraceState(
+		call.Args[1:],
+		straceDeferredHazards{},
+		map[string]struct{}{"CODEX_HOME": {}},
+		evaluation,
+	)
+	require.False(t, unsafe)
+	require.NotEmpty(t, evaluation.memo, "ambiguous suffix results must be memoized")
+	require.LessOrEqual(t, len(evaluation.memo), optionCount*2,
+		"each remaining-suffix boundary state should be evaluated at most once")
+	require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		"memoization must not reject a legitimate command with many self-contained options")
 }
 
 func TestValidateAccountEnvironmentCommand_StraceNoChildHazards(t *testing.T) {

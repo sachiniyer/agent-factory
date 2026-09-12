@@ -19,6 +19,16 @@ type straceOptionAction struct {
 	result   straceOptionResult
 }
 
+type straceBoundaryEvaluation struct {
+	memo map[straceBoundaryState]bool
+}
+
+type straceBoundaryState struct {
+	first     *syntax.Word
+	remaining int
+	hazards   straceDeferredHazards
+}
+
 type straceDeferredHazards struct {
 	environment bool
 	output      bool
@@ -123,13 +133,15 @@ var straceLongSelfContainedPrefixCollisions = map[string]struct{}{
 // every child boundary it could have, while syntactically attached values keep
 // their single fixed boundary without requiring an option catalogue.
 func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
-	return unwrapStraceState(words, straceDeferredHazards{}, names)
+	evaluation := &straceBoundaryEvaluation{}
+	return unwrapStraceState(words, straceDeferredHazards{}, names, evaluation)
 }
 
 func unwrapStraceState(
 	words []*syntax.Word,
 	hazards straceDeferredHazards,
 	names map[string]struct{},
+	evaluation *straceBoundaryEvaluation,
 ) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		token, parsed := parseStraceOptionToken(words[0])
@@ -151,7 +163,7 @@ func unwrapStraceState(
 			actions = parseStraceShortOptions(words, token, names)
 		}
 		if len(actions) != 1 {
-			return nil, straceOptionActionsUnsafe(words, actions, hazards, names)
+			return nil, straceOptionActionsUnsafe(words, actions, hazards, names, evaluation)
 		}
 		action := actions[0]
 		if action.consumed > len(words) {
@@ -585,6 +597,7 @@ func straceOptionActionsUnsafe(
 	actions []straceOptionAction,
 	hazards straceDeferredHazards,
 	names map[string]struct{},
+	evaluation *straceBoundaryEvaluation,
 ) bool {
 	for _, action := range actions {
 		if action.consumed > len(words) {
@@ -601,7 +614,7 @@ func straceOptionActionsUnsafe(
 		case straceOptionDeferredOutputUnsafe:
 			branchHazards.output = true
 		}
-		if straceTailMutatesAccountEnvironment(words[action.consumed:], branchHazards, names) {
+		if straceTailMutatesAccountEnvironment(words[action.consumed:], branchHazards, names, evaluation) {
 			return true
 		}
 	}
@@ -612,12 +625,25 @@ func straceTailMutatesAccountEnvironment(
 	words []*syntax.Word,
 	hazards straceDeferredHazards,
 	names map[string]struct{},
+	evaluation *straceBoundaryEvaluation,
 ) bool {
-	child, unsafe := unwrapStraceState(words, hazards, names)
-	if unsafe {
-		return true
+	state := straceBoundaryState{remaining: len(words), hazards: hazards}
+	if len(words) > 0 {
+		state.first = words[0]
 	}
-	return accountCommandWordsMutateEnvironment(child, names)
+	if result, found := evaluation.memo[state]; found {
+		return result
+	}
+	if evaluation.memo == nil {
+		evaluation.memo = make(map[straceBoundaryState]bool)
+	}
+	child, unsafe := unwrapStraceState(words, hazards, names, evaluation)
+	result := unsafe
+	if !unsafe {
+		result = accountCommandWordsMutateEnvironment(child, names)
+	}
+	evaluation.memo[state] = result
+	return result
 }
 
 func straceOptionValue(words []*syntax.Word, attachedValue string, attached bool) (string, int, bool) {
