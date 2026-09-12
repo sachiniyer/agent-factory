@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
@@ -46,13 +47,17 @@ func redactHookJSONDocument(document string) (string, bool) {
 	// Always re-encode, even when traversal found no surviving token field. The
 	// decoder collapses duplicate object members; returning the original bytes
 	// would resurrect an overwritten earlier member that traversal could not see.
-	encoded, err := json.Marshal(value)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	// Keep legal JSON bytes such as &, <, and > verbatim so redaction does not
+	// rewrite content merely because it round-tripped through the document encoder.
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(value); err != nil {
 		// Values produced by encoding/json are marshalable, but fail closed if that
 		// invariant ever changes rather than returning the original token.
 		return hookOutputRedaction, true
 	}
-	return string(encoded), true
+	return strings.TrimSuffix(buf.String(), "\n"), true
 }
 
 func decodeHookJSONDocument(document string) (any, bool) {
