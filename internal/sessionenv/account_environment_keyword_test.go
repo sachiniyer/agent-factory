@@ -46,6 +46,11 @@ func TestValidateAccountEnvironmentCommand_RefusesKeywordMode(t *testing.T) {
 		// prints settings) and then processes `-k` normally — enabling keyword
 		// mode. The scanner must NOT swallow `-k` as the mode name here.
 		"set +e -o -k; codex CODEX_HOME=/other",
+		// `o` embedded in a cluster has the same conditional arity as standalone
+		// `-o`: the following word is consumed as the mode name when it does not
+		// start with `-` or `+`. `set +e -eo keyword` enables `-e` and then
+		// `-o keyword`, which enables keyword mode — the guard must catch this.
+		"set +e -eo keyword; codex CODEX_HOME=/other",
 		// The lone form (no compound) is refused for the same contract reason
 		// as a lone `set -k`: keyword mode outlives the call that set it.
 		"set +e -k",
@@ -89,6 +94,10 @@ func TestValidateAccountEnvironmentCommand_AllowsOrdinaryShellOptions(t *testing
 		// "assign any remaining arguments to the positional parameters", so
 		// `-k` after `-` is $1, not an option that enables keyword mode.
 		"set +e - -k; npm run dev",
+		// Bash processes options left to right and the last setting wins: `+k`
+		// turns keyword mode back off after `-k` turned it on, so this sequence
+		// leaves keyword mode disabled and the command is valid.
+		"set +e -k +k; npm run dev",
 		"hash -r; npm run dev",
 		"hash npm; npm run dev",
 		"npm run dev",

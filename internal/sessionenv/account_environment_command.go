@@ -472,9 +472,17 @@ func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struc
 //	          when that word does not start with `-` or `+`. Real mode names
 //	          (pipefail, noclobber, keyword, …) never start with either; when
 //	          the next word does start with one it is another option that the
-//	          scan must keep examining. This is the only conditional-arity
-//	          option; all others have fixed arity (zero).
+//	          scan must keep examining. This applies to both the standalone
+//	          `-o` word and to `o` embedded in a minus-prefixed cluster.
+//	          These are the only conditional-arity options; all others have
+//	          fixed arity (zero).
+//
+// Keyword-mode tracking: bash processes options left to right; a later `-k`
+// overrides an earlier `+k` and vice versa. The scanner tracks the running
+// state rather than returning on the first `-k`, so a sequence like
+// `set -k +k` is correctly seen as leaving keyword mode off.
 func setMutatesAccountEnvironment(words []*syntax.Word) bool {
+	keywordMode := false
 	for idx := 0; idx < len(words); idx++ {
 		value, literal := literalShellWord(words[idx])
 		if !literal {
@@ -490,10 +498,9 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 		// non-option operand, so it does NOT end the scan: `set +e -k` still
 		// enables keyword mode and must be caught by the loop below.
 		if value == "--" || value == "-" || (!strings.HasPrefix(value, "-") && !strings.HasPrefix(value, "+")) {
-			return false
+			return keywordMode
 		}
-		// A long-form switch names its mode in the next word. `+o keyword` turns
-		// the mode OFF, so only the minus form is a switch on.
+		// A long-form switch names its mode in the next word.
 		//
 		// `-o` has conditional arity: it consumes the following word as a mode
 		// name ONLY when that word does not start with `-` or `+`. A real mode
@@ -519,20 +526,50 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 			if strings.HasPrefix(mode, "-") || strings.HasPrefix(mode, "+") {
 				continue
 			}
-			if value == "-o" && mode == "keyword" {
-				return true
+			if mode == "keyword" {
+				keywordMode = value == "-o"
 			}
 			idx++
 			continue
 		}
 		// Short options cluster, so a guard matching only a lone "-k" walks
-		// straight past "-ek" (the #3402 lesson). `+k` DISABLES keyword mode and
-		// must stay allowed, so only the `-`-prefixed cluster form enables it.
-		if value[0] == '-' && strings.ContainsRune(value[1:], 'k') {
-			return true
+		// straight past "-ek" (the #3402 lesson). Track the running state
+		// rather than returning immediately, so a later `+k` can cancel an
+		// earlier `-k` (bash processes options left to right and the last
+		// setting wins: `set -k +k` leaves keyword mode off).
+		//
+		// When a minus-prefixed cluster contains `o`, it has the same
+		// conditional arity as the standalone `-o`: if the following word does
+		// not start with `-` or `+`, that word is the mode name (and is consumed
+		// by advancing idx). A plus-prefixed cluster containing `o` (`+eo`)
+		// behaves as `+o` and turns the named mode OFF.
+		prefix := value[0]
+		tail := value[1:]
+		if strings.ContainsRune(tail, 'o') {
+			if idx+1 >= len(words) {
+				// No following word: bare cluster with `o`, prints settings.
+			} else {
+				mode, ok := literalShellWord(words[idx+1])
+				if !ok {
+					return true
+				}
+				if !strings.HasPrefix(mode, "-") && !strings.HasPrefix(mode, "+") {
+					// The following word is a mode name; consume it.
+					if mode == "keyword" {
+						keywordMode = prefix == '-'
+					}
+					idx++
+					continue
+				}
+				// The following word is another option; leave it for the next
+				// iteration and fall through to the `k` check below.
+			}
+		}
+		if strings.ContainsRune(tail, 'k') {
+			keywordMode = prefix == '-'
 		}
 	}
-	return false
+	return keywordMode
 }
 
 // hashMutatesAccountEnvironment reports whether a `hash` call remaps a command
