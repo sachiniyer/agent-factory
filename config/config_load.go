@@ -197,13 +197,27 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 		if isEffectivelyEmptyToml(tomlData) && !jsonExists {
 			if info, lerr := os.Lstat(tomlPath); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
 				loaded := ReadOnlyConfigLoad{Path: tomlPath, EmptyStub: true}
-				if err := checkConfigDirectoryAccess(configDir); err != nil {
-					if err != unix.ENOSYS && err != unix.EPERM {
-						return ReadOnlyConfigLoad{Path: tomlPath}, fmt.Errorf("cannot write to config directory %s: %w", prettyHomePath(configDir), err)
+				// Startup's loadConfig runs secureAFHomeForPath before the
+				// empty-stub self-heal. For a concrete default ~/.agent-factory
+				// (or an alias symlink into it) the current user owns, that
+				// chmod-repairs the home to 0700 — granting the write permission
+				// the stub removal needs — regardless of the directory's
+				// current mode. This no-write diagnostic sees only the
+				// unrepaired mode, so its directory-access gate would (wrongly)
+				// report a removal failure for a chmod-repairable home that
+				// startup boots cleanly on. Stand the gate down for exactly
+				// those repair cases so the verdict agrees with startup; keep
+				// it for custom, default-name-symlink, and foreign-owned homes
+				// where startup's remove can genuinely fail.
+				if !startupWouldRepairHome(configDir) {
+					if err := checkConfigDirectoryAccess(configDir); err != nil {
+						if err != unix.ENOSYS && err != unix.EPERM {
+							return ReadOnlyConfigLoad{Path: tomlPath}, fmt.Errorf("cannot write to config directory %s: %w", prettyHomePath(configDir), err)
+						}
+						// ENOSYS is unavailable; EPERM may be a policy block or a real
+						// denial. Neither justifies guessing through another check.
+						loaded.DirectoryAccessWarning = fmt.Sprintf("directory write/search access to %s could not be verified: %v; startup will attempt regeneration", prettyHomePath(configDir), err)
 					}
-					// ENOSYS is unavailable; EPERM may be a policy block or a real
-					// denial. Neither justifies guessing through another check.
-					loaded.DirectoryAccessWarning = fmt.Sprintf("directory write/search access to %s could not be verified: %v; startup will attempt regeneration", prettyHomePath(configDir), err)
 				}
 				loaded.Config = DefaultConfig()
 				return loaded, nil
@@ -234,6 +248,70 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 	}
 
 	return ReadOnlyConfigLoad{Path: tomlPath, Missing: true}, nil
+}
+
+// startupWouldRepairHome reports whether startup's loadConfig would chmod-repair
+// configDir to 0700 before the empty-stub self-heal runs. Such a repair makes the
+// subsequent os.Remove(tomlPath) succeed regardless of the directory's current
+// write mode, because os.Chmod requires ownership of the target, not the write
+// bit on it — so an owner-owned default home tightened to e.g. 0500 is
+// repairable at startup even though it is not writable now.
+//
+// LoadConfigReadOnly is no-write: it never calls secureAFHomeForPath, so its
+// directory-access gate probes the unrepaired mode and would (wrongly) report a
+// removal failure for a chmod-repairable default home. This predicate tells the
+// gate to stand down for exactly the cases startup repairs, so the diagnostic's
+// verdict agrees with the startup it claims to mirror.
+//
+// It models secureAFHomeForPath's repair decision — concreteDefaultAFHome
+// returns the chmod target precisely for the concrete default (a regular
+// directory) and for alias symlinks whose target is the concrete default — plus
+// a live chmod probe that mirrors the OUTCOME of startup's chmod (would it
+// succeed?) rather than merely whether startup attempts it. The probe attempts
+// exactly what startup does (os.Chmod to 0700), then restores the original mode
+// so the net change is zero. This call advances ctime and is the one
+// observable side-effect from this read-only path; it is deliberate — a probe
+// that does not attempt the operation cannot answer whether the kernel would
+// accept it.
+func startupWouldRepairHome(configDir string) bool {
+	absHome, err := filepath.Abs(configDir)
+	if err != nil {
+		return false
+	}
+	repairPath := concreteDefaultAFHome(absHome)
+	if repairPath == "" {
+		return false
+	}
+	// Stat follows symlinks, matching secureAFHomeForPath's os.Chmod target.
+	var st unix.Stat_t
+	if err := unix.Stat(repairPath, &st); err != nil {
+		return false
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return false
+	}
+	// Probe with exactly the chmod startup attempts (0o700). This catches
+	// read-only filesystems, immutable flags, and security policies that
+	// ownership alone cannot predict. On success, restore the original mode so
+	// the net effect on permissions is zero. Reconstruct the full os.FileMode
+	// from the raw Unix mode, including setuid/setgid/sticky, to avoid
+	// silently stripping those bits from the directory during restoration.
+	rawPerm := st.Mode & 0o7777
+	origMode := os.FileMode(rawPerm & 0o777)
+	if rawPerm&unix.S_ISUID != 0 {
+		origMode |= os.ModeSetuid
+	}
+	if rawPerm&unix.S_ISGID != 0 {
+		origMode |= os.ModeSetgid
+	}
+	if rawPerm&unix.S_ISVTX != 0 {
+		origMode |= os.ModeSticky
+	}
+	if err := os.Chmod(repairPath, 0o700); err != nil {
+		return false
+	}
+	_ = os.Chmod(repairPath, origMode) // restore; probe already answered the question
+	return true
 }
 
 // fileExists reports whether path exists (any stat error other than
