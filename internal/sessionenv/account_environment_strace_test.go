@@ -102,6 +102,23 @@ func TestValidateAccountEnvironmentCommand_RefusesExecutableStraceOutputTarget(t
 	}
 }
 
+func TestValidateAccountEnvironmentCommand_StraceTerminalOptionsOverrideEarlierRefusals(t *testing.T) {
+	for _, command := range []string{
+		"strace -E CODEX_HOME=/other --version",
+		"strace --env=CODEX_HOME=/other --version",
+		"strace -E CODEX_HOME=/other --help",
+		"strace --env=CODEX_HOME=/other -h",
+		"strace -o '|env CODEX_HOME=/other codex' -V",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"terminal strace command %q launches no child or output helper", command)
+	}
+
+	require.Error(t,
+		ValidateAccountEnvironmentCommand("strace -E --version", scopedProcessTabAccount()),
+		"a required option value must consume --version rather than treating it as terminal")
+}
+
 func TestValidateAccountEnvironmentCommand_StraceShortOptionArity(t *testing.T) {
 	t.Run("Y takes no value", func(t *testing.T) {
 		require.Error(t,

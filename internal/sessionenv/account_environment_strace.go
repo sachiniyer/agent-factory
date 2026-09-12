@@ -12,6 +12,7 @@ const (
 	straceOptionContinue straceOptionResult = iota
 	straceOptionStops
 	straceOptionUnsafe
+	straceOptionDeferredUnsafe
 	// Help and version stop parsing separately because they never execute a
 	// child. Every other short option that can consume the next argv word is in
 	// this set; options absent from it are self-contained in their argv word.
@@ -94,16 +95,17 @@ var straceLongSelfContainedPrefixCollisions = map[string]struct{}{
 // self-contained options cannot move the executable boundary and stay open to
 // spellings added by other strace versions.
 func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
+	deferredUnsafe := false
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
 			return nil, true
 		}
 		if option == "--" {
-			return words[1:], false
+			return words[1:], deferredUnsafe
 		}
 		if option == "-" || !strings.HasPrefix(option, "-") {
-			return words, false
+			return words, deferredUnsafe
 		}
 
 		var consumed int
@@ -117,12 +119,17 @@ func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Wo
 		case straceOptionContinue:
 			words = words[consumed:]
 		case straceOptionStops:
+			// A terminal option exits during option parsing. Earlier semantic
+			// hazards whose complete argv boundaries were known never take effect.
 			return nil, false
 		case straceOptionUnsafe:
 			return nil, true
+		case straceOptionDeferredUnsafe:
+			deferredUnsafe = true
+			words = words[consumed:]
 		}
 	}
-	return nil, false
+	return nil, deferredUnsafe
 }
 
 func parseStraceLongOption(words []*syntax.Word, names map[string]struct{}) (int, straceOptionResult) {
@@ -149,11 +156,11 @@ func parseStraceLongOption(words []*syntax.Word, names map[string]struct{}) (int
 	switch canonical {
 	case "--env":
 		if straceEnvironmentMutationUnsafe(operand, names) {
-			return 0, straceOptionUnsafe
+			return consumed, straceOptionDeferredUnsafe
 		}
 	case "--output":
 		if straceOutputTargetUnsafe(operand) {
-			return 0, straceOptionUnsafe
+			return consumed, straceOptionDeferredUnsafe
 		}
 	}
 	return consumed, straceOptionContinue
@@ -241,10 +248,10 @@ func parseStraceShortOptions(words []*syntax.Word, names map[string]struct{}) (i
 				return 0, straceOptionUnsafe
 			}
 			if flag == 'E' && straceEnvironmentMutationUnsafe(operand, names) {
-				return 0, straceOptionUnsafe
+				return consumed, straceOptionDeferredUnsafe
 			}
 			if flag == 'o' && straceOutputTargetUnsafe(operand) {
-				return 0, straceOptionUnsafe
+				return consumed, straceOptionDeferredUnsafe
 			}
 			return consumed, straceOptionContinue
 		default:

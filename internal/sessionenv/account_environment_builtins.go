@@ -251,7 +251,11 @@ func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 }
 
 func tasksetProcessOnlyOption(option string) bool {
-	if option == "--pid" {
+	// util-linux uses getopt_long, so every nonempty prefix of --pid is the
+	// same process-only mode while that prefix is unambiguous. Accepting a
+	// prefix unsupported by the installed taskset is harmless: taskset exits
+	// before it could launch a child.
+	if len(option) > 2 && strings.HasPrefix("--pid", option) {
 		return true
 	}
 	if len(option) < 2 || option[0] != '-' || option[1] == '-' {

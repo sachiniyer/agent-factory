@@ -68,6 +68,8 @@ func TestValidateAccountEnvironmentCommand_AllowsProcessOnlyWrapperModes(t *test
 		"ionice --uid 1000",
 		"taskset -p 0x1 123",
 		"taskset -cp 0-3 123",
+		"taskset --pi 123",
+		"taskset --pi 0x1 123",
 		"taskset --pid 0x1 123",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
