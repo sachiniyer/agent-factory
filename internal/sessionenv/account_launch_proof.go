@@ -94,7 +94,6 @@ func GenerateAccountLaunchProof(base, final string, trustedBaseArgs []string) (A
 func ValidateAccountCommand(command string, account Account) error {
 	proof := commandProof{
 		agent:             account.Agent,
-		trustedWrapper:    account.TrustedWrapper,
 		trustedExecutable: account.TrustedExecutable,
 		generated:         account.GeneratedArgs,
 	}

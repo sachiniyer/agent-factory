@@ -96,7 +96,7 @@ func (m *Manager) evaluateManualAccountSwap(instance *session.Instance, swap *au
 	if err != nil {
 		return nil, err
 	}
-	if _, err := agentaccount.Selected(home, swap.agent, swap.to, ""); err != nil {
+	if _, err := agentaccount.Selected(home, swap.agent, swap.to); err != nil {
 		return nil, err
 	}
 	limited, err := m.limitedAccountsForSwap(swap.agent, loadAccountLimitEvidenceForSwap)

@@ -44,34 +44,22 @@ type Account struct {
 	// It must also be a real path outside any temp directory: codex refuses to
 	// operate under /tmp, and an account is durable state regardless.
 	Dir string
-	// TrustedWrapper is the exact af binary path the LAUNCHER generated this
-	// session's handoff with, or empty when the program is not an af handoff.
-	//
-	// This is provenance, supplied rather than parsed. The docker and ssh
-	// backends generate `/usr/local/bin/af agent-server …` and a staged absolute
-	// path respectively, so a bare-name rule rejects af's OWN launch and refuses
-	// every account-scoped session on those backends. No amount of inspecting the
-	// string recovers "af wrote this"; the caller knows it, so it says so.
-	//
-	// Only an EXACT match is honoured — never a basename — so a repository file
-	// that merely shares the name is still refused (#2983 review).
-	TrustedWrapper string
 	// TrustedExecutable is the exact agent executable af selected for this
 	// launch, or empty when PATH must resolve the bare agent name.
 	//
 	// A path-qualified executable is otherwise unprovable: ./claude may be a
 	// repository file that receives the selected credential root. The one safe
 	// exception is an exact path from af's built-in auto-detected program
-	// override. Like TrustedWrapper, this is provenance supplied by the launcher,
-	// never inferred from a basename.
+	// override. This is provenance supplied by the launcher, never inferred from
+	// a basename.
 	TrustedExecutable string
 	// GeneratedArgs are the argument words af authored for this session's
 	// program, in order, unquoted. Usually those are launch-time additions; for
 	// af's built-in detected Claude command they also include the detected
 	// override's built-in arguments (#3108).
 	//
-	// This is the same shape of claim as TrustedWrapper, for the same reason. The
-	// local launch rewrites a bare `claude` into `claude --session-id <uuid>
+	// This is the same shape of claim for generated argument words. The local
+	// launch rewrites a bare `claude` into `claude --session-id <uuid>
 	// --plugin-dir <dir>` before the pane shim sees it, so the guard's no-arguments
 	// rule refused af's OWN output and the pane exited 127 (#3083). No amount of
 	// inspecting the string recovers "af wrote these"; the launcher knows, so it

@@ -12,6 +12,14 @@ import (
 // filtered session process. It is intentionally not a user-facing subcommand.
 const ExecMarker = "__af-session-env-exec"
 
+// AgentServerExecMarker is the effect-bound variant used by af's Docker and SSH
+// launchers. It accepts only agent-server arguments, derives the credential
+// policy from the program those arguments will actually launch, and then execs
+// the CURRENT af binary. Repository content can spell this marker, but cannot
+// redirect its executable or decouple the credential grant from the child it
+// names; the trusted code performs both operations as one transition.
+const AgentServerExecMarker = "__af-agent-server-env-exec"
+
 // AccountExecMarker is the account-scoped variant of ExecMarker.
 //
 // A SEPARATE marker rather than an extra argument, because the shim may be a
@@ -261,15 +269,7 @@ func Filter(source []string, agent string, extras []string) []string {
 // dynamic or unsupported syntax fails closed. Generic calls carry no authority
 // to inspect a nested agent-server program.
 func FilterForCommand(source []string, agent, command string, extras []string) []string {
-	return filterForCommand(source, agent, command, extras, "")
-}
-
-func filterForTrustedAgentServerCommand(source []string, agent, command string, extras []string, trustedWrapper string) []string {
-	return filterForCommand(source, agent, command, extras, trustedWrapper)
-}
-
-func filterForCommand(source []string, agent, command string, extras []string, trustedWrapper string) []string {
-	allowed := allowedNames(source, agent, command, extras, trustedWrapper)
+	allowed := allowedNames(source, agent, command, extras)
 	return filterAllowed(source, allowed)
 }
 
@@ -306,7 +306,7 @@ func filterAllowed(source []string, allowed map[string]struct{}) []string {
 //
 // It applies the same command-local cloud-mode policy as FilterForCommand.
 func ImportNamesForCommand(source []string, agent, command string, extras []string) []string {
-	allowed := allowedNames(source, agent, command, extras, "")
+	allowed := allowedNames(source, agent, command, extras)
 	for _, entry := range source {
 		name, _, ok := strings.Cut(entry, "=")
 		if ok && strings.HasPrefix(name, "LC_") && validName(name) {
@@ -377,8 +377,8 @@ func DockerForwardNames(source []string, _ string, extras []string) []string {
 	return out
 }
 
-func allowedNames(source []string, agent, command string, extras []string, trustedWrapper string) map[string]struct{} {
-	return allowedNamesWithAuthSelectors(agent, resolveAuthSelectors(source, agent, command, trustedWrapper), extras)
+func allowedNames(source []string, agent, command string, extras []string) map[string]struct{} {
+	return allowedNamesWithAuthSelectors(agent, ResolveAuthSelectors(source, agent, command), extras)
 }
 
 func allowedNamesWithAuthSelectors(agent string, selectors, extras []string) map[string]struct{} {
@@ -462,16 +462,10 @@ func CommandEnablesCloudCredentials(command string) (string, bool) {
 // own environment. The one layer a repository controls is filtered before it can
 // become a command — see CommandEnablesCloudCredentials.
 func ResolveAuthSelectors(source []string, agent, command string) []string {
-	return resolveAuthSelectors(source, agent, command, "")
-}
-
-func resolveAuthSelectors(source []string, agent, command, trustedWrapper string) []string {
 	var selectors []string
 	for _, group := range conditionalAgentNames[agent] {
 		enabled := environmentFlagEnabled(source, group.selector)
-		if found, commandEnabled := commandEnvironmentFlagStateForTrustedAgentServer(
-			command, agent, group.selector, trustedWrapper,
-		); found {
+		if found, commandEnabled := commandEnvironmentFlagState(command, agent, group.selector); found {
 			enabled = commandEnabled
 		}
 		if enabled {

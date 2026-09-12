@@ -448,7 +448,7 @@ func Resolve(explicit, project, global string) string {
 // against it would start an unauthenticated agent while the UI reported the
 // selected account — the silent-wrong-identity outcome this whole feature exists
 // to prevent.
-func Selected(home, agent, name, trustedWrapper string) (sessionenv.Account, error) {
+func Selected(home, agent, name string) (sessionenv.Account, error) {
 	if strings.TrimSpace(name) == "" {
 		return sessionenv.Account{}, nil
 	}
@@ -476,6 +476,6 @@ func Selected(home, agent, name, trustedWrapper string) (sessionenv.Account, err
 			name, agent, agent, name)
 	}
 	return sessionenv.Account{
-		Agent: agent, Name: name, Dir: dir, TrustedWrapper: trustedWrapper,
+		Agent: agent, Name: name, Dir: dir,
 	}, nil
 }

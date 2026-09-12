@@ -34,13 +34,11 @@ import (
 // as UNPROVABLE. New syntax then arrives as a refusal to scope rather than as a
 // silent bypass, which is the direction this repo can afford to be wrong in.
 // commandProof is what the CALLER knows and the string cannot say: which agent
-// this account scopes, which af binary generated a handoff, which exact detected
-// agent executable af selected, and which argument words af authored. Grouped
-// because all are provenance supplied from outside, and a positional recursion
-// invited passing them in the wrong order.
+// this account scopes, which exact detected agent executable af selected, and
+// which argument words af authored. Grouped because all are provenance supplied
+// from outside and positional parameters invited passing them in the wrong order.
 type commandProof struct {
 	agent             string
-	trustedWrapper    string
 	trustedExecutable string
 	generated         []string
 }
@@ -53,13 +51,10 @@ func commandOverridesName(command string, proof commandProof) (overrides, provab
 	if !ok {
 		return false, false
 	}
-	return callOverridesName(call, proof, 0)
+	return callOverridesName(call, proof)
 }
 
-func callOverridesName(call *syntax.CallExpr, proof commandProof, depth int) (overrides, provable bool) {
-	if depth > maxNestedProgramDepth {
-		return false, false
-	}
+func callOverridesName(call *syntax.CallExpr, proof commandProof) (overrides, provable bool) {
 	// Shell-parsed assignment prefixes: `CODEX_HOME=/other codex`.
 	for _, assign := range call.Assigns {
 		// ANY assignment, not only the identity names. LD_PRELOAD=./steal.so codex
@@ -92,20 +87,6 @@ func callOverridesName(call *syntax.CallExpr, proof commandProof, depth int) (ov
 		}
 		_ = assigned
 		return true, true
-	}
-
-	// A nested agent-server program carries its own command, and is the one
-	// wrapper this package already models.
-	// Only the EXACT absolute path the launcher generated this handoff with is
-	// accepted. Docker emits /usr/local/bin/af and ssh a staged absolute path;
-	// the caller supplies that provenance because the command spelling cannot.
-	// A bare `af` is still a PATH lookup a repository can influence, not identity.
-	if nested, ok := trustedAgentServerProgram(call, proof.trustedWrapper); ok {
-		inner, ok := singleSimpleCall(nested)
-		if !ok {
-			return false, false
-		}
-		return callOverridesName(inner, proof, depth+1)
 	}
 
 	if isBareName(words[0], "env") {
@@ -315,18 +296,4 @@ func isBareName(word *syntax.Word, want string) bool {
 		return false
 	}
 	return value == want
-}
-
-// isTrustedAfBinary reports whether a word is the exact absolute af path the
-// launcher generated the handoff with.
-//
-// Exact, never a basename or a bare PATH lookup. `af`, `./af`, and `/repo/af`
-// can all select repository-controlled executables; the separately supplied
-// launcher path is the identity, and a command string cannot manufacture it.
-func isTrustedAfBinary(word *syntax.Word, trustedWrapper string) bool {
-	if !filepath.IsAbs(trustedWrapper) {
-		return false
-	}
-	value, ok := literalShellWord(word)
-	return ok && value == trustedWrapper
 }

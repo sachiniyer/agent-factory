@@ -51,7 +51,7 @@ func TestDockerBackendAccountMountAliasRefused(t *testing.T) {
 	// make this test pass without ever reaching the boundary it is about.
 	previousLookup := sessionenv.AccountLookup
 	sessionenv.AccountLookup = func(agent, name string) (sessionenv.Account, error) {
-		return agentaccount.Selected(home, agent, name, "")
+		return agentaccount.Selected(home, agent, name)
 	}
 	t.Cleanup(func() { sessionenv.AccountLookup = previousLookup })
 
