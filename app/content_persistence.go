@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/apiclient"
@@ -133,11 +134,28 @@ func (m *home) saveContentPaneState() error {
 				continue
 			}
 			log.ErrorLog.Printf("failed to remove task: %v", err)
+			// Only restore when the record still exists: a "not found" error
+			// means another client already removed it, and a project-expectation
+			// error means it was rebound to a different project — in both cases
+			// the record is gone from this repo and re-queuing the delete would
+			// retry an operation that can never satisfy its original expectation.
+			// For any other failure (lock contention, transient I/O) the removal
+			// did not commit, so re-appending the row and re-queuing is correct.
+			// sp.SetTasks below is gated on !failedEdit; without this restore a
+			// concurrent failed edit would make the row disappear from the pane.
+			errMsg := err.Error()
+			recordGone := strings.Contains(errMsg, "not found") ||
+				strings.Contains(errMsg, "re-bound to a different project")
+			if !recordGone {
+				sp.RestoreFailedDelete(tsk)
+			}
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to remove task %q: %w", tsk.Name, err))
 		}
 	}
-	// Reload BOTH panes from disk so the TaskPane and sidebar can never diverge
-	// (#934): whatever actually committed, both panes now show it.
+	// Reload the sidebar unconditionally from disk. The TaskPane reload is
+	// gated on !failedEdit so user edits survive for retry (#934). When
+	// failedEdit is true the TaskPane retains its in-memory state; the two
+	// panes may temporarily diverge until the edit is saved or discarded.
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err == nil {
 		m.store.SetTasks(tasks)
