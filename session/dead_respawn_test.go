@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +17,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type failingLoadPtyFactory struct{ err error }
+
+func (f failingLoadPtyFactory) Start(*exec.Cmd) (*os.File, error) {
+	return nil, f.err
+}
 
 // countingExec is nameKeyedExec with a new-session counter. Sessions named in
 // `alive` report existing immediately; others are absent until their
@@ -522,6 +529,47 @@ func TestLiveInstance_RespawnsMissingSessionOnLoad(t *testing.T) {
 	assert.False(t, checkpoint.TaskRunActive,
 		"the interrupted close must be checkpointed before the replacement tmux process starts")
 	assert.True(t, checkpoint.TaskRunInterruptionPending)
+}
+
+func TestLiveInstance_FailedRespawnRetainsInterruptedOutcome(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_failed_load_agent"
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+			name, program, failingLoadPtyFactory{err: errors.New("runtime unavailable")}, exec)
+	}
+	defer func() { restoreTmuxSession = prev }()
+
+	runAt := time.Date(2026, 9, 12, 6, 0, 0, 0, time.UTC)
+	data := deadInstanceData(t, Ready, agentName, "")
+	data.Tabs = data.Tabs[:1]
+	data.TaskID = "task-failed-load"
+	data.TaskGenerationID = "generation-failed-load"
+	data.TaskRunActive = true
+	data.TaskRunAt = runAt
+	data.TaskRunSequence = 4
+	var checkpoint InstanceData
+	restored, err := FromInstanceDataWithLoadRuntimeCheckpoint(data, func(closed InstanceData) error {
+		checkpoint = closed
+		return nil
+	})
+	require.NoError(t, err,
+		"a durable interruption outbox must survive even when its replacement cannot start")
+	require.NotNil(t, restored)
+	require.True(t, checkpoint.TaskRunInterruptionPending)
+	require.False(t, checkpoint.TaskRunActive)
+	require.True(t, restored.Started(), "the retained Lost row must remain lifecycle-visible")
+	require.Equal(t, LiveLost, restored.GetLiveness())
+	_, pending := restored.PendingTaskRunInterruption()
+	require.True(t, pending, "the daemon must receive an instance whose task outcome it can drain")
+	require.Equal(t, agentName, restored.ToInstanceData().TmuxName,
+		"Lost recovery needs the exact persisted tmux handle to retry safely")
 }
 
 func TestLiveInstance_ReattachesExistingSessionWithIdleEvidence(t *testing.T) {

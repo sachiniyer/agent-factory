@@ -110,10 +110,10 @@ func TestResolveAttachTarget_RemoteStillHonorsExplicitRepo(t *testing.T) {
 
 // TestResolveAttachTarget_LocalStillResolvesOnDisk is the other half of the
 // contract, and the guard against over-correcting #1974 into "never look at
-// disk". A LOCAL attach must still resolve (and restore) the instance from this
-// machine's records — that restore is what gives the local daemon a session to
-// attach to — so an unknown title still fails locally rather than being handed
-// blindly to the daemon.
+// disk". A LOCAL attach still resolves identity from this machine's records,
+// but runtime restoration belongs to the daemon that owns durable settlement.
+// The CLI process must not independently respawn a task runtime before it starts
+// that daemon.
 func TestResolveAttachTarget_LocalStillResolvesOnDisk(t *testing.T) {
 	repoRoot := clientWithoutTheSession(t)
 	// No remoteTarget(t): this is the local unix-socket path.
@@ -126,10 +126,8 @@ func TestResolveAttachTarget_LocalStillResolvesOnDisk(t *testing.T) {
 		t.Fatalf("expected the local disk lookup to report not-found, got: %v", err)
 	}
 
-	// A title that IS on this machine's records gets PAST the scoped lookup —
-	// it fails later, in the restore, on this deliberately thin record. That
-	// difference is the point: the local path reads disk and its answer depends
-	// on what disk holds, which is precisely what the remote path must not do.
+	// A title that IS on this machine's records resolves without attempting to
+	// reconstruct its deliberately unavailable runtime in this CLI process.
 	repo, err := config.RepoFromPath(repoRoot)
 	if err != nil {
 		t.Fatalf("RepoFromPath: %v", err)
@@ -142,8 +140,11 @@ func TestResolveAttachTarget_LocalStillResolvesOnDisk(t *testing.T) {
 		t.Fatalf("save instances: %v", err)
 	}
 
-	_, _, err = resolveAttachTarget("local-one")
-	if err != nil && strings.Contains(err.Error(), "not found") {
-		t.Fatalf("a title present in this repo's records must resolve past the scoped lookup, got: %v", err)
+	title, repoID, err := resolveAttachTarget("local-one")
+	if err != nil {
+		t.Fatalf("a title present in this repo's records must resolve by identity only: %v", err)
+	}
+	if title != "local-one" || repoID != repo.ID {
+		t.Fatalf("resolved (%q, %q), want (%q, %q)", title, repoID, "local-one", repo.ID)
 	}
 }
