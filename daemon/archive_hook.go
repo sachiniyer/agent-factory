@@ -27,6 +27,13 @@ import (
 // reassigns it.
 var onArchiveHookTimeout = 30 * time.Minute
 
+// onArchiveHookAfterStart, if non-nil, is called after cmd.Start() succeeds
+// and before cmd.Wait() is called. Tests set it to inject a synchronization
+// point between the shell's exit and the context cancellation, enabling a
+// deterministic race between process exit and deadline without relying on
+// wall-clock timing. Production always leaves it nil.
+var onArchiveHookAfterStart func(cancel context.CancelFunc)
+
 const onArchiveHookWaitDelay = 2 * time.Second
 
 type onArchiveHookContext struct {
@@ -143,7 +150,12 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 		return nil
 	}
 
-	err = cmd.Run()
+	if err = cmd.Start(); err == nil {
+		if onArchiveHookAfterStart != nil {
+			onArchiveHookAfterStart(cancel)
+		}
+		err = cmd.Wait()
+	}
 	if cmd.Process != nil {
 		// A hook may background a descendant and exit. Kill the process group on
 		// every path so no cleanup process survives the archive operation with a

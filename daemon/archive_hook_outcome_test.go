@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -75,27 +77,55 @@ func TestArchiveHook_OutputFileStragglerDoesNotDelaySuccess(t *testing.T) {
 // backgrounded `sleep 30` keeps the process group alive, so Cancel()'s
 // group-wide SIGKILL returns 0 instead of ESRCH — pushing it into the
 // `return nil` arm that lets the splice through, rather than os.ErrProcessDone
-// which suppresses it. A 1ms deadline makes the shell's natural exit and the
-// deadline fire at approximately the same instant, opening that window on
-// roughly one in a few hundred iterations. Before the fix, that surfaced as
-// `context deadline exceeded (full output: …)` for a hook that exited 0 — the
-// false failure the comment in archive_hook.go promises is no longer
-// reported. The guard drops the spliced error on a clean (exit-0) exit; it
-// must NOT drop a real *ExitError (exit 23) or a SIGKILL'd shell, which the
+// which suppresses it.
+//
+// This test arranges the race deterministically via a synchronization seam:
+// the shell signals its exit by creating a marker file before it exits, and
+// the seam function waits for that file (confirming the shell has exited),
+// then cancels the context and yields the scheduler so watchCtx can reach the
+// ctx.Done branch before cmd.Wait() drains ctxResult. A single iteration
+// reliably opens the window; no wall-clock budget is required. Before the fix,
+// this surfaced as `context deadline exceeded (full output: …)` for a hook
+// that exited 0. The guard drops the spliced error on a clean (exit-0) exit;
+// it must NOT drop a real *ExitError (exit 23) or a SIGKILL'd shell, which the
 // other tests in this file pin.
 func TestArchiveHook_ExitZeroWithStragglerNeverReportsContextDeadline(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	writeOnArchiveCommand(t, "sleep 30 >&1 2>&1 &")
-	withArchiveHookTimeout(t, 1*time.Millisecond)
-	hookCtx := archiveHookContext(t)
-	for i := 0; i < 5000; i++ {
-		err := runOnArchiveHook(hookCtx)
-		if err == nil {
-			continue
+	// The shell creates exitMarker right before it exits, then backgrounds the
+	// straggler. The seam below waits for exitMarker (shell is done), cancels
+	// the context, and yields so watchCtx receives ctx.Done before cmd.Wait
+	// collects ctxResult — exactly the splice window the guard closes.
+	exitMarker := filepath.Join(t.TempDir(), "shell-exited")
+	writeOnArchiveCommand(t, fmt.Sprintf("touch %q; sleep 30 >&1 2>&1 &", exitMarker))
+
+	// Use a long timeout; the seam cancels the context at the right moment.
+	withArchiveHookTimeout(t, 30*time.Second)
+
+	original := onArchiveHookAfterStart
+	t.Cleanup(func() { onArchiveHookAfterStart = original })
+	onArchiveHookAfterStart = func(cancel context.CancelFunc) {
+		// Wait for the shell to signal it has exited.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(exitMarker); err == nil {
+				break
+			}
+			time.Sleep(time.Millisecond)
 		}
-		if strings.Contains(err.Error(), "context deadline exceeded") {
-			t.Fatalf("iteration %d: exit-0 hook reported %q", i, err.Error())
+		if _, err := os.Stat(exitMarker); err != nil {
+			// Shell didn't signal in time; cancel anyway so the test doesn't hang.
+			cancel()
+			return
 		}
+		// Shell has exited 0. Cancel the context now and yield so watchCtx
+		// can reach its ctx.Done branch before cmd.Wait reads ctxResult.
+		cancel()
+		runtime.Gosched()
+	}
+
+	err := runOnArchiveHook(archiveHookContext(t))
+	if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("exit-0 hook reported spliced deadline error: %q", err.Error())
 	}
 }
 
