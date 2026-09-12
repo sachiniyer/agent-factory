@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/require"
@@ -65,6 +66,8 @@ func TestInterruptedTaskStatusWriteFailureIsRetried(t *testing.T) {
 	require.Contains(t, logs.warnings.String(), "could not record last_run_status")
 	require.Contains(t, logs.warnings.String(), "will retry")
 	require.NoError(t, os.WriteFile(tasksPath, original, 0600))
+	require.NoError(t, inst.Transition(session.ConfirmRuntimeReplacementLive()),
+		"the fixture must complete the backend-owned replacement transition before the poll retry")
 
 	manager.FlushOwedSettlements()
 	got, err := task.GetTask(tsk.ID)
@@ -103,6 +106,8 @@ func TestInterruptedTaskOutcomeRetryWaitsForSessionLifecycleLock(t *testing.T) {
 	require.NoError(t, os.WriteFile(tasksPath, []byte("{"), 0600))
 	require.NoError(t, manager.prepareRuntimeReplacement(repoID, key, inst))
 	require.NoError(t, os.WriteFile(tasksPath, original, 0600))
+	require.NoError(t, inst.Transition(session.ConfirmRuntimeReplacementLive()),
+		"the fixture must leave OpRestoring before testing an unrelated lifecycle lock")
 
 	// Model a handoff/archive owning the lifecycle transaction. The poll-driven
 	// retry must not clear and checkpoint the session outbox in the middle of it.
@@ -163,7 +168,11 @@ func TestInterruptedTaskStatusRetrySurvivesDaemonRestart(t *testing.T) {
 	}
 	reloaded, err := session.FromInstanceData(stored)
 	require.NoError(t, err)
-	restarted := &Manager{instances: map[string]*session.Instance{key: reloaded}}
+	restarted, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	restarted.mu.Lock()
+	restarted.instances[key] = reloaded
+	restarted.mu.Unlock()
 	owed := persistLoadRuntimeReplacements(restarted.instances)
 	restarted.mu.Lock()
 	restarted.registerLoadRuntimeSettlementsLocked(owed)

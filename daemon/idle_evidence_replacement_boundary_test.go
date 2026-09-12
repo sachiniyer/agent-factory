@@ -32,7 +32,7 @@ func (b *liveBeforeRespawnReturnBackend) Respawn(inst *session.Instance) error {
 	if mutate != nil {
 		mutate(inst)
 	}
-	if err := inst.Transition(session.ConfirmLive()); err != nil {
+	if err := inst.Transition(session.ConfirmRuntimeReplacementLive()); err != nil {
 		return err
 	}
 	close(b.live)
@@ -41,7 +41,7 @@ func (b *liveBeforeRespawnReturnBackend) Respawn(inst *session.Instance) error {
 }
 
 func (b *liveBeforeRecoverReturnBackend) Recover(inst *session.Instance) error {
-	if err := inst.Transition(session.ConfirmLive()); err != nil {
+	if err := inst.Transition(session.ConfirmRuntimeReplacementLive()); err != nil {
 		return err
 	}
 	close(b.live)
