@@ -1026,7 +1026,7 @@ function decisionSummaryBody(summary) {
 }
 
 function requiredCheckSnapshotText(observations) {
-  const payload = JSON.stringify({ version: 1, checks: observations || [] });
+  const payload = JSON.stringify({ version: 2, checks: observations || [] });
   return `${REQUIRED_CHECK_SNAPSHOT_PREFIX}${payload} -->`;
 }
 
@@ -1042,7 +1042,9 @@ function decisionRequiredCheckSnapshot(decision) {
     const payload = JSON.parse(
       line.slice(REQUIRED_CHECK_SNAPSHOT_PREFIX.length, -" -->".length),
     );
-    return payload?.version === 1 && Array.isArray(payload.checks) ? payload.checks : null;
+    return (payload?.version === 1 || payload?.version === 2) && Array.isArray(payload.checks)
+      ? payload.checks
+      : null;
   } catch {
     return null;
   }
@@ -1055,6 +1057,24 @@ function sameRequiredCheckObservation(left, right) {
     left?.status === right?.status &&
     left?.conclusion === right?.conclusion
   );
+}
+
+function requiredCheckObservationKey(observation) {
+  return JSON.stringify([
+    observation?.kind || null,
+    observation?.id || null,
+    observation?.status || null,
+    observation?.conclusion ?? null,
+  ]);
+}
+
+function sameRequiredCheckGeneration(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+  const leftKeys = left.map(requiredCheckObservationKey).sort();
+  const rightKeys = right.map(requiredCheckObservationKey).sort();
+  return leftKeys.every((key, index) => key === rightKeys[index]);
 }
 
 function requiredCheckObservationIsTerminal(observation) {
@@ -3484,26 +3504,38 @@ function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead, statusesB
         }));
     const snapshot = decision ? decisionRequiredCheckSnapshot(decision) : null;
     const completedCheckChanged = blockedSpecs.some((spec) => {
-      const current = latestRequiredState(
+      const currentState = latestRequiredState(
         spec,
         headChecks,
         headStatuses,
-      )?.observation || {
+      );
+      const current = currentState?.observation || {
         kind: "missing",
         id: null,
         status: null,
         conclusion: null,
       };
-      if (!requiredCheckObservationIsTerminal(current)) {
+      const currentGeneration = currentState?.generation || [];
+      if (!currentGeneration.some(requiredCheckObservationIsTerminal)) {
         return false;
       }
-      const observed = snapshot?.find(
+      const snapshotEntry = snapshot?.find(
         (entry) => entry?.name === spec.context && entry?.appId === spec.sourceAppId,
-      )?.observed;
+      );
+      const observed = snapshotEntry?.observed;
       // An older or malformed decision has no snapshot. Reconcile it once and
       // replace it with direct evidence rather than inventing another clock
       // comparison. Ambiguity chooses a redundant read over a permanent freeze.
-      return !observed || !sameRequiredCheckObservation(observed, current);
+      if (!observed) {
+        return true;
+      }
+      if (Array.isArray(snapshotEntry.generation)) {
+        return !sameRequiredCheckGeneration(snapshotEntry.generation, currentGeneration);
+      }
+      // Version-one snapshots named only the selected observation. A second
+      // kind at the same winning timestamp is new evidence they could not
+      // represent, so refresh once and replace them with the complete set.
+      return currentGeneration.length > 1 || !sameRequiredCheckObservation(observed, current);
     });
     if (!completedCheckChanged) {
       continue;
@@ -4310,6 +4342,7 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
           status: null,
           conclusion: null,
         },
+        generation: state?.generation || [],
       });
     }
     if (!state) {
@@ -4502,7 +4535,33 @@ function latestRequiredState(spec, checkRuns, statuses) {
     }
     return 0;
   });
-  return candidates[0] || null;
+  const selected = candidates[0] || null;
+  if (!selected) {
+    return null;
+  }
+  const newestByKind = new Map();
+  for (const candidate of candidates) {
+    if (candidate.date !== selected.date) {
+      continue;
+    }
+    const kind = candidate.observation.kind;
+    const prior = newestByKind.get(kind);
+    if (
+      !prior ||
+      (candidate.generationID != null &&
+        (prior.generationID == null || candidate.generationID > prior.generationID))
+    ) {
+      newestByKind.set(kind, candidate);
+    }
+  }
+  return {
+    ...selected,
+    generation: [...newestByKind.values()]
+      .map((candidate) => candidate.observation)
+      .sort((left, right) =>
+        requiredCheckObservationKey(left).localeCompare(requiredCheckObservationKey(right)),
+      ),
+  };
 }
 
 function checkRunMatchesSpec(run, spec) {

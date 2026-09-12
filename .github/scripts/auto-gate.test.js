@@ -6193,6 +6193,80 @@ test("scheduled reconciliation breaks same-second commit-status ties by generati
   assert.deepEqual(statusReads, [HEAD_SHA], "only an actual timestamp tie earns a REST read");
 });
 
+test("scheduled reconciliation refreshes a cross-kind timestamp tie exactly once", async () => {
+  const stamp = "2026-07-09T01:11:00Z";
+  const build = checkRun({
+    id: 103_493_730_001,
+    nodeId: "CR_kwDORdIFwM8AAAAYGLY2UQ",
+    name: "Build",
+    conclusion: "failure",
+  });
+  build.completed_at = stamp;
+  const status = commitStatus({
+    id: 103_493_730_002,
+    nodeId: "SC_kwDORdIFwM8AAAAYGLY2Ug",
+    context: "Build",
+    state: "success",
+    createdAt: stamp,
+  });
+  const observedBuild = {
+    kind: "check_run",
+    id: build.node_id,
+    status: "completed",
+    conclusion: "failure",
+  };
+  const observedStatus = {
+    kind: "commit_status",
+    id: status.node_id,
+    status: "success",
+    conclusion: null,
+  };
+  const prior = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T01:10:00Z",
+    reason: "required check Build is failing",
+    observedChecks: [{ name: "Build", appId: null, observed: observedBuild }],
+  });
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const snapshot = (decision) => scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, HEAD_SHA)],
+    checksByHead: { [HEAD_SHA]: [decision, build] },
+    statusesByHead: { [HEAD_SHA]: [status] },
+  });
+
+  const stale = await autoGate.resolveTargets({
+    github: snapshot(prior),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(stale, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+
+  const refreshed = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T01:12:00Z",
+    reason: "required check Build is failing",
+    snapshotVersion: 2,
+    observedChecks: [{
+      name: "Build",
+      appId: null,
+      observed: observedBuild,
+      generation: [observedBuild, observedStatus],
+    }],
+  });
+  const unchanged = await autoGate.resolveTargets({
+    github: snapshot(refreshed),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(unchanged, [], "a snapshot that records both tied kinds must stay settled");
+});
+
 test("scheduled reconciliation round-trips source-less commit-status observations", async () => {
   const build = checkRun({ id: 701, name: "Build", conclusion: "success" });
   const lint = checkRun({ id: 702, name: "Lint", conclusion: "success" });
@@ -11979,6 +12053,7 @@ function reconciliationDecision({
   headSha,
   evaluatedAt,
   reason = `required check Build (app ${ACTIONS_APP_ID}) is missing on ${headSha}`,
+  snapshotVersion = 1,
   observedChecks = [{
     name: "Build",
     appId: ACTIONS_APP_ID,
@@ -11997,7 +12072,7 @@ function reconciliationDecision({
       title: `WAITING: ${reason}`,
       summary: `evaluated: ${evaluatedAt}\n\nBLOCKED: ${reason}`,
       text: `<!-- auto-gate-required-check-snapshot:${JSON.stringify({
-        version: 1,
+        version: snapshotVersion,
         checks: observedChecks,
       })} -->`,
     },
