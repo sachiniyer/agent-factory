@@ -169,6 +169,8 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 		switch {
 		case option == "--":
 			return words[1:], false
+		case utilLinuxTerminalOption(option):
+			return nil, false
 		case ioniceProcessOnlyOption(option):
 			// -p/-P/-u select existing-process modes. They never exec a
 			// child, so this external command cannot replace the selected
@@ -234,6 +236,8 @@ func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 		switch {
 		case option == "--":
 			return tasksetCommandAfterMask(words[1:])
+		case utilLinuxTerminalOption(option):
+			return nil, false
 		case tasksetProcessOnlyOption(option):
 			// -p switches taskset from command execution to inspecting or
 			// updating an existing PID. No child environment exists to mutate.
@@ -248,6 +252,14 @@ func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 		}
 	}
 	return nil, false
+}
+
+func utilLinuxTerminalOption(option string) bool {
+	if option == "-h" || option == "-V" {
+		return true
+	}
+	return len(option) > 2 &&
+		(strings.HasPrefix("--help", option) || strings.HasPrefix("--version", option))
 }
 
 func tasksetProcessOnlyOption(option string) bool {

@@ -77,6 +77,26 @@ func TestValidateAccountEnvironmentCommand_AllowsProcessOnlyWrapperModes(t *test
 	}
 }
 
+func TestValidateAccountEnvironmentCommand_AllowsTerminalUtilLinuxWrapperModes(t *testing.T) {
+	for _, command := range []string{
+		"ionice -h",
+		"ionice --help",
+		"ionice --he",
+		"ionice -V",
+		"ionice --version",
+		"ionice --ver",
+		"taskset -h",
+		"taskset --help",
+		"taskset --he",
+		"taskset -V",
+		"taskset --version",
+		"taskset --ver",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"terminal command %q launches no child whose account environment could be changed", command)
+	}
+}
+
 // `wait -p VAR` names a variable to receive the job id. After the first result
 // target the option scan treated a DYNAMIC word as safe, but bash keeps parsing
 // options there: `x=-p` expands to a second `-p`, so the NEXT word is another
