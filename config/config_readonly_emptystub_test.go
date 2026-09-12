@@ -403,20 +403,20 @@ func TestStartupWouldRepairHome(t *testing.T) {
 			"a default-name whose target is caller-owned is not chmod-repairable")
 	})
 
-	t.Run("foreign-owned default home is not repaired", func(t *testing.T) {
+	t.Run("foreign-owned default home is repairable by root", func(t *testing.T) {
 		if os.Getuid() != 0 {
 			t.Skip("staging a foreign-owned directory requires chown, which needs root")
 		}
 		afHome := stageDefaultAFHome(t, "", 0o755)
-		// Re-owner the concrete default to another user; the current process
-		// (root) is no longer the owner, so the chmod startup attempts would
-		// fail and the gate must stay.
+		// Re-own the concrete default to another user. Root retains CAP_FOWNER
+		// and can chmod any directory regardless of ownership, so startup's
+		// secureAFHomeForPath succeeds and startupWouldRepairHome must agree.
 		require.NoError(t, os.Chmod(afHome, 0o700)) // restore writability for chown/cleanup
 		require.NoError(t, os.Chown(afHome, 65534, 65534))
 		t.Cleanup(func() {
 			_ = os.Chmod(afHome, 0o755)
 			_ = os.Chown(afHome, 0, 0)
 		})
-		assert.False(t, startupWouldRepairHome(afHome), "a default home not owned by the current user is not chmod-repairable by it")
+		assert.True(t, startupWouldRepairHome(afHome), "root can chmod a foreign-owned default home, so it is repairable")
 	})
 }

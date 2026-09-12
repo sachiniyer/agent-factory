@@ -267,10 +267,12 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 // returns the chmod target precisely for the concrete default (a regular
 // directory) and for alias symlinks whose target is the concrete default — plus
 // a live chmod probe that mirrors the OUTCOME of startup's chmod (would it
-// succeed?) rather than merely whether startup attempts it. Probing with the
-// current mode (a no-op change in file content) establishes whether the kernel
-// would accept the call, surfacing read-only filesystems, immutable flags, and
-// security-policy rejections that UID equality cannot detect.
+// succeed?) rather than merely whether startup attempts it. The probe attempts
+// exactly what startup does (os.Chmod to 0700), then restores the original mode
+// so the net change is zero. This call advances ctime and is the one
+// observable side-effect from this read-only path; it is deliberate — a probe
+// that does not attempt the operation cannot answer whether the kernel would
+// accept it.
 func startupWouldRepairHome(configDir string) bool {
 	absHome, err := filepath.Abs(configDir)
 	if err != nil {
@@ -288,11 +290,28 @@ func startupWouldRepairHome(configDir string) bool {
 	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return false
 	}
-	// Probe chmod with the current permissions (a no-op change in content) to
-	// verify the kernel would accept it. This catches read-only filesystems,
-	// immutable flags, and security policies that ownership alone cannot predict.
-	currentPerm := os.FileMode(st.Mode & 0o7777)
-	return os.Chmod(repairPath, currentPerm) == nil
+	// Probe with exactly the chmod startup attempts (0o700). This catches
+	// read-only filesystems, immutable flags, and security policies that
+	// ownership alone cannot predict. On success, restore the original mode so
+	// the net effect on permissions is zero. Reconstruct the full os.FileMode
+	// from the raw Unix mode, including setuid/setgid/sticky, to avoid
+	// silently stripping those bits from the directory during restoration.
+	rawPerm := st.Mode & 0o7777
+	origMode := os.FileMode(rawPerm & 0o777)
+	if rawPerm&unix.S_ISUID != 0 {
+		origMode |= os.ModeSetuid
+	}
+	if rawPerm&unix.S_ISGID != 0 {
+		origMode |= os.ModeSetgid
+	}
+	if rawPerm&unix.S_ISVTX != 0 {
+		origMode |= os.ModeSticky
+	}
+	if err := os.Chmod(repairPath, 0o700); err != nil {
+		return false
+	}
+	_ = os.Chmod(repairPath, origMode) // restore; probe already answered the question
+	return true
 }
 
 // fileExists reports whether path exists (any stat error other than
