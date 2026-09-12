@@ -1111,6 +1111,29 @@ func TestTasksList_FallsBackToDiskWhenNoDaemon(t *testing.T) {
 	assert.Equal(t, "d1", tasks[0].ID)
 }
 
+// TestTasksListCarriesPersistedDroppedEvents pins the command's observable
+// contract for #4357. The input is a task record written in the public JSON
+// shape, not a Go struct field, so this test failed on the old reader by
+// silently discarding the count and emitting a healthy-looking row.
+func TestTasksListCarriesPersistedDroppedEvents(t *testing.T) {
+	useTempConfig(t)
+	stubDaemon(t)
+	previousAll := tasksListAllFlag
+	tasksListAllFlag = true
+	t.Cleanup(func() { tasksListAllFlag = previousAll })
+
+	path, err := task.MigrateOnLoadPath()
+	require.NoError(t, err)
+	raw := `{"schema_version":1,"tasks":[{"id":"d4357001","name":"watcher","watch_cmd":"tail -f events.log","program":"claude","enabled":true,"created_at":"2026-09-11T12:00:00Z","last_run_status":"dropped: event rate limit exceeded","dropped_events":7}]}`
+	require.NoError(t, os.WriteFile(path, []byte(raw), 0644))
+
+	out := captureStdout(t, func() {
+		require.NoError(t, tasksListCmd.RunE(tasksListCmd, nil))
+	})
+	require.Contains(t, out, `"dropped_events": 7`,
+		"af tasks list must preserve the durable rate-drop count")
+}
+
 // TestTasksList_PrefersDaemonSnapshot pins that when a daemon IS reachable the
 // live snapshot is authoritative — even when it diverges from disk — so the CLI
 // mirrors the daemon's view rather than a stale disk read.
