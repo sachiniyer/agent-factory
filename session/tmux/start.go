@@ -286,6 +286,24 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			// already keeps.
 			return t.answerClaudeTrustPrompt(content)
 		}
+		// The MCP trust modal is NOT atomic: Claude Code paints the question and
+		// options before it paints the "Enter to confirm" footer, so a capture
+		// taken mid-paint shows the question without the footer.
+		// claudeTrustPromptPresent requires the complete modal structure, so it
+		// returns false for a partially rendered frame. Without this guard, that
+		// false falls through to the return false below, and
+		// task.DismissTrustPrompt treats it as "pane is clear" — the prompt is
+		// delivered directly into the live but partially painted MCP picker.
+		//
+		// Requiring the confirmed structure to send a key is correct. Requiring
+		// the confirmed structure to PROCEED is not: "I could not confirm a trust
+		// prompt" and "there is definitely no trust prompt" are different answers
+		// and must not map to the same return value. The MCP question appearing
+		// on screen is enough to hold; the folder-trust handler already has
+		// settling logic for the same reason.
+		if claudeMCPDialogPartiallyRendered(content) {
+			return true
+		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
 		//

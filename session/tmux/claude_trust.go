@@ -155,6 +155,97 @@ type claudeTrustRow struct {
 // stop answering the dialog.
 const claudeTrustBoxDrawing = "│┃║╭╮╰╯┌┐└┘╔╗╚╝─━═┄┈├┤┏┓┗┛┬┴┼╠╣╦╩╬▏▕"
 
+// claudeMCPDialogPreamble is the line Claude Code renders immediately before the
+// trust question. The MCP modal always starts with this exact preamble; natural-
+// language prose about the dialog embeds the question in a sentence and does not
+// reproduce the preamble. Matching on the preamble (rather than the question
+// alone) is what keeps the partial-render detector from firing on agent output
+// that merely quotes the question string.
+const claudeMCPDialogPreamble = "new mcp server found"
+
+// claudeMCPDialogPartiallyRendered reports whether the pane shows the MCP
+// trust dialog in a state consistent with Claude Code still painting it — the
+// preamble ("New MCP server found") appears in the last contiguous block of
+// non-blank content AND the last non-blank row of that block looks like MCP
+// dialog content (the preamble, a known option label, or the footer prefix)
+// rather than agent prose.
+//
+// When Claude Code paints the MCP modal it renders top-to-bottom: preamble +
+// question first, then options, then the footer. A capture taken mid-paint
+// shows the preamble in the block and the last non-blank row is whatever was
+// painted last — the question itself, a partial option ("❯ 1. Yes"), or the
+// last option ("  2. No"). Agent prose or UI chrome (e.g. "? for shortcuts",
+// trailing explanatory text) appears in a different block or makes the last row
+// non-dialog, so the predicate stays false.
+//
+// This is the "unconfirmed" sentinel: the dialog looks real but is not yet
+// complete. The caller must not proceed to deliver the user's prompt; it must
+// retry until the dialog either completes (claudeTrustPromptPresent) or the
+// preamble is no longer in the expected position.
+func claudeMCPDialogPartiallyRendered(content string) bool {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	rows := make([]claudeTrustRow, len(lines))
+	for i, line := range lines {
+		rows[i] = claudeTrustRowOf(line)
+	}
+
+	// Find the last non-blank row.
+	lastIdx := -1
+	for i := len(rows) - 1; i >= 0; i-- {
+		if !rows[i].blank {
+			lastIdx = i
+			break
+		}
+	}
+	if lastIdx < 0 {
+		return false
+	}
+
+	// Walk back to find the start of the contiguous block ending at lastIdx.
+	blockStart := lastIdx
+	for blockStart > 0 && !rows[blockStart-1].blank {
+		blockStart--
+	}
+
+	// The preamble must appear somewhere in the last block.
+	hasPreamble := false
+	for i := blockStart; i <= lastIdx; i++ {
+		if strings.Contains(strings.ToLower(rows[i].label), claudeMCPDialogPreamble) {
+			hasPreamble = true
+			break
+		}
+	}
+	if !hasPreamble {
+		return false
+	}
+
+	// The last row of the block must look like MCP dialog content, not agent
+	// prose. A row is "dialog content" if it: carries the selection glyph (an
+	// in-progress option), contains the preamble (question still last), is one
+	// of the known option labels (with or without an ordinal), or starts with
+	// the footer prefix. Agent UI lines ("? for shortcuts", arbitrary prose)
+	// do not match any of these, so they disqualify the block.
+	lastLabel := strings.ToLower(rows[lastIdx].label)
+	if rows[lastIdx].selected {
+		return true // selection glyph is unambiguously dialog content
+	}
+	if strings.Contains(lastLabel, claudeMCPDialogPreamble) {
+		return true // question is still the last thing painted
+	}
+	if strings.HasPrefix(lastLabel, strings.ToLower(claudeTrustAffordancePrefix)) {
+		// The footer is there but claudeMCPTrustFooterIsLast returned false
+		// (option-label validation failed), which means the block isn't a
+		// valid MCP dialog. Do not treat this as partial render.
+		return false
+	}
+	for _, opt := range claudeMCPOptionLabels {
+		if lastLabel == opt || strings.HasSuffix(lastLabel, ". "+opt) || strings.HasSuffix(lastLabel, " "+opt) {
+			return true // a known option label is the last thing painted
+		}
+	}
+	return false
+}
+
 func claudeTrustRowOf(line string) claudeTrustRow {
 	line = strings.TrimSpace(ansiCSISequence.ReplaceAllString(strings.TrimSuffix(line, "\r"), ""))
 	// Strip the side borders so a bordered row and a bare row reduce to the
@@ -225,21 +316,34 @@ func claudeFolderTrustDialogPresent(content string) bool {
 	return strings.Contains(ansiCSISequence.ReplaceAllString(content, ""), claudeTrustAffirmativeLabel)
 }
 
+// claudeMCPOptionLabels are the fixed option labels the MCP trust picker
+// renders. Validating their presence in the same block as the question and
+// footer is what makes the check claim to know WHAT dialog is on screen rather
+// than only WHERE certain strings sit relative to each other. An agent that
+// quotes the MCP question above an unrelated picker cannot satisfy this because
+// it cannot reproduce both option labels inside the same contiguous block as
+// the unrelated footer. The labels are matched case-insensitively so a
+// rendering change in capitalisation does not break the guard.
+var claudeMCPOptionLabels = []string{"yes", "no"}
+
 // claudeMCPTrustFooterIsLast reports whether the MCP trust modal's "Enter to
-// confirm" affordance is the last non-blank content in the pane AND belongs to
-// the same contiguous block of non-blank rows as the MCP question. A live MCP
-// modal is the last thing on screen, so its footer is the final row; a quoted
-// mention of the MCP phrase has the agent's composer or further output below
-// it, so the footer is not last. This is the same footer-is-last discipline
-// claudeTrustPickerStructure applies to the folder-trust branch
-// (claude_trust.go:307-310) and that CodexTrustPromptPresent applies as its
-// `affordance == last` rule: "a working agent paints its composer beneath its
-// output, so a quoted dialog has something after it and a live one does not."
+// confirm" affordance is the last non-blank content in the pane AND the same
+// contiguous block as the footer contains the MCP question AND the modal's own
+// option labels ("yes" / "no"). A live MCP modal is the last thing on screen,
+// so its footer is the final row; a quoted mention of the MCP phrase has the
+// agent's composer or further output below it, so the footer is not last. This
+// is the same footer-is-last discipline claudeTrustPickerStructure applies to
+// the folder-trust branch (claude_trust.go:307-310) and that
+// CodexTrustPromptPresent applies as its `affordance == last` rule: "a working
+// agent paints its composer beneath its output, so a quoted dialog has
+// something after it and a live one does not."
 //
-// Both the MCP question and the footer must appear in the same contiguous block
-// of non-blank rows, so an unrelated picker whose final row happens to begin
-// with "Enter to confirm" does not satisfy this check when the MCP question is
-// in a separate block above it.
+// Validating the option labels — not just blank-line adjacency — is what closes
+// the cross-dialog injection class: an agent quoting the MCP question
+// immediately above an unrelated picker (with no intervening blank row) produces
+// a contiguous block that contains the question and the unrelated footer, but
+// the unrelated picker's option rows do not match the known MCP labels, so the
+// predicate stays false and no Enter is sent.
 //
 // Rows are parsed with claudeTrustRowOf so box-drawing chrome and ANSI styling
 // are stripped before the affordance is matched, letting a framed and an
@@ -277,13 +381,35 @@ func claudeMCPTrustFooterIsLast(content string) bool {
 		blockStart--
 	}
 
-	// The MCP question must appear in that same block.
+	// The block must contain the MCP question AND both known option labels.
+	// Requiring the options — not just the question — is what tells an agent-
+	// controlled-text quote from an actual dialog: the attacker can emit the
+	// question above any picker, but both option rows must also appear inside
+	// the same blank-line-delimited block as the footer for the predicate to
+	// fire. A generic picker cannot satisfy that without also reproducing the
+	// MCP option wording, which would then be answerable in good faith anyway.
+	hasQuestion := false
+	optionFound := make([]bool, len(claudeMCPOptionLabels))
 	for i := blockStart; i <= lastIdx; i++ {
-		if strings.Contains(strings.ToLower(rows[i].label), question) {
-			return true
+		lower := strings.ToLower(rows[i].label)
+		if strings.Contains(lower, question) {
+			hasQuestion = true
+		}
+		for j, opt := range claudeMCPOptionLabels {
+			if lower == opt || strings.HasSuffix(lower, ". "+opt) || strings.HasSuffix(lower, " "+opt) {
+				optionFound[j] = true
+			}
 		}
 	}
-	return false
+	if !hasQuestion {
+		return false
+	}
+	for _, found := range optionFound {
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // parseClaudeFolderTrustDialog locates the cursor row and the affirmative row.
