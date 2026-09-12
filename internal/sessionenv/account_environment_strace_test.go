@@ -71,6 +71,33 @@ func TestValidateAccountEnvironmentCommand_StraceShortOptionArity(t *testing.T) 
 	})
 }
 
+func TestValidateAccountEnvironmentCommand_StraceSyscallTimesOptionalValue(t *testing.T) {
+	for _, command := range []string{
+		"strace --syscall-times npm run dev",
+		"strace --syscall-times=ns npm run dev",
+	} {
+		require.NoError(t,
+			ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"--syscall-times takes an optional attached value and must leave the child visible")
+	}
+
+	require.Error(t,
+		ValidateAccountEnvironmentCommand(
+			"strace --syscall-times env CODEX_HOME=/other codex",
+			scopedProcessTabAccount(),
+		),
+		"bare --syscall-times must not consume the env executable as its optional value")
+}
+
+func TestValidateAccountEnvironmentCommand_StraceKVMValue(t *testing.T) {
+	require.NoError(t,
+		ValidateAccountEnvironmentCommand(
+			"strace --kvm=vcpu npm run dev",
+			scopedProcessTabAccount(),
+		),
+		"--kvm's attached value must be consumed before inspecting the child")
+}
+
 func TestValidateAccountEnvironmentCommand_FailClosedBoundaryStaysNarrow(t *testing.T) {
 	for _, command := range []string{
 		"echo CODEX_HOME=/tmp",

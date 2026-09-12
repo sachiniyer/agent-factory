@@ -86,12 +86,12 @@ func parseStraceLongOption(words []*syntax.Word, names map[string]struct{}) (int
 		}
 		return 1, straceOptionContinue
 	case "--absolute-timestamps", "--daemonize", "--decode-fds", "--quiet",
-		"--relative-timestamps", "--stack-trace", "--strings-in-hex", "--tips":
+		"--relative-timestamps", "--stack-trace", "--strings-in-hex", "--syscall-times", "--tips":
 		// These options take an optional value only in attached `=value` form.
 		return 1, straceOptionContinue
 	case "--abbrev", "--argv0", "--attach", "--columns", "--const-print-style",
 		"--decode-pids", "--detach-on", "--fault", "--inject", "--interruptible",
-		"--raw", "--read", "--signal", "--stack-trace-frame-limit",
+		"--kvm", "--raw", "--read", "--signal", "--stack-trace-frame-limit",
 		"--status", "--string-limit", "--summary-columns", "--summary-sort-by",
 		"--summary-syscall-overhead", "--syscall-limit", "--trace", "--trace-fds",
 		"--trace-path", "--user", "--verbose", "--write":
