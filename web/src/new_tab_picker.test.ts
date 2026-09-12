@@ -113,6 +113,26 @@ for (const action of ["openTab", "switchTab", "closeTab"] as const) {
   }
 }
 
+for (const previous of [null, false, true]) {
+  for (const next of [false, true]) {
+    test(`session composition observer dismisses previous=${previous}, next=${next}`, () => {
+      const calls: string[] = [];
+      const shell = {
+        terminalSelected: previous,
+        dismissCarriedActions: () => calls.push("dismiss"),
+      } as unknown as AppShell;
+      const observeSessionComposition = (AppShell.prototype as unknown as {
+        observeSessionComposition(this: AppShell, terminalSelected: boolean): void;
+      }).observeSessionComposition;
+
+      observeSessionComposition.call(shell, next);
+
+      assert.deepEqual(calls, previous !== null && previous !== next ? ["dismiss"] : []);
+      assert.equal((shell as unknown as { terminalSelected: boolean }).terminalSelected, next);
+    });
+  }
+}
+
 for (const paneAcceptsDrop of [true, false]) {
   test(`a touch pane drop dismisses carried actions only when accepted=${paneAcceptsDrop}`, () => {
     const calls: string[] = [];

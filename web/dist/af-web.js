@@ -15701,7 +15701,9 @@ var AppShell = class {
   header;
   viewNav;
   sessionFirst = null;
-  terminalSelected = false;
+  // The semantic input to session-first composition from the previous state update.
+  // null distinguishes the initial render from a real focused-kind/view transition.
+  terminalSelected = null;
   newTabPickerPosition = null;
   phoneSyncQueued = false;
   schedulePhoneSync = () => {
@@ -15713,7 +15715,7 @@ var AppShell = class {
     });
   };
   syncPhone() {
-    const active = this.phone.matches && this.terminalSelected;
+    const active = this.phone.matches && this.terminalSelected === true;
     const compositionChanged = this.el.classList.contains("af-session-first") !== active;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
     const responsiveState = this.responsiveNewTabState;
@@ -15931,6 +15933,9 @@ var AppShell = class {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
+    const selectedForPhone = selectedSession(state);
+    const focusedKind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
+    this.observeSessionComposition(isSessionFirst(true, state.view, focusedKind));
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
     if (this.lastKb !== kb) {
       this.lastKb = kb;
@@ -16035,9 +16040,6 @@ var AppShell = class {
         this.renderTabBar(state);
       }
     }
-    const selectedForPhone = selectedSession(state);
-    const kind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
-    this.terminalSelected = isSessionFirst(true, state.view, kind);
     this.syncPhone();
     this.syncTabIdentityCaches(state);
   }
@@ -16412,6 +16414,13 @@ var AppShell = class {
       this.actions.switchProject(p.root);
     });
     return item;
+  }
+  /** Invalidates carried disclosure state when its semantic composition owner changes. */
+  observeSessionComposition(terminalSelected) {
+    if (this.terminalSelected !== null && this.terminalSelected !== terminalSelected) {
+      this.dismissCarriedActions();
+    }
+    this.terminalSelected = terminalSelected;
   }
   /** Retires carried actions before a user-owned transition can recompose them. */
   dismissCarriedActions() {

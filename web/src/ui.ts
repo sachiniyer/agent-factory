@@ -795,7 +795,9 @@ export class AppShell {
   private readonly header: HTMLElement;
   private readonly viewNav: HTMLElement;
   private sessionFirst: ReturnType<typeof sessionFirstComposition> | null = null;
-  private terminalSelected = false;
+  // The semantic input to session-first composition from the previous state update.
+  // null distinguishes the initial render from a real focused-kind/view transition.
+  private terminalSelected: boolean | null = null;
   private newTabPickerPosition: (() => void) | null = null;
   private phoneSyncQueued = false;
   private readonly schedulePhoneSync = (): void => {
@@ -807,7 +809,7 @@ export class AppShell {
     });
   };
   private syncPhone(): void {
-    const active = this.phone.matches && this.terminalSelected;
+    const active = this.phone.matches && this.terminalSelected === true;
     const compositionChanged = this.el.classList.contains("af-session-first") !== active;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
     // appbarControls captures this before its media listener closes the phone
@@ -1279,6 +1281,13 @@ export class AppShell {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
+    const selectedForPhone = selectedSession(state);
+    const focusedKind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
+    // Observe the semantic owner before this update can replace or reparent its DOM.
+    // Viewport-only recomposition leaves this value alone and therefore preserves a
+    // user-opened disclosure; a focused-kind/view change invalidates carried state no
+    // matter which present or future action produced the store update.
+    this.observeSessionComposition(isSessionFirst(true, state.view, focusedKind));
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
     // terminal only "holds" it while a session is actually selected; with none
@@ -1465,9 +1474,6 @@ export class AppShell {
     // instead of using the now-known stable id. Adding ids to the signature would fix
     // the cache by reintroducing exactly the #1737 rebuild — so the cache is synced
     // independently of the render instead.
-    const selectedForPhone = selectedSession(state);
-    const kind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
-    this.terminalSelected = isSessionFirst(true, state.view, kind);
     this.syncPhone();
     this.syncTabIdentityCaches(state);
   }
@@ -1881,6 +1887,14 @@ export class AppShell {
       this.actions.switchProject(p.root);
     });
     return item;
+  }
+
+  /** Invalidates carried disclosure state when its semantic composition owner changes. */
+  private observeSessionComposition(terminalSelected: boolean): void {
+    if (this.terminalSelected !== null && this.terminalSelected !== terminalSelected) {
+      this.dismissCarriedActions();
+    }
+    this.terminalSelected = terminalSelected;
   }
 
   /** Retires carried actions before a user-owned transition can recompose them. */

@@ -37,6 +37,26 @@ async function carrySessionActionsToPhone(
   return { controls, session, sessionActions };
 }
 
+async function splitTabToRight(page: Page, index: number): Promise<void> {
+  await page.evaluate((tabIndex) => {
+    const tab = document.querySelector<HTMLElement>(`.af-tab[data-tab-index="${tabIndex}"]`);
+    const pane = document.querySelector<HTMLElement>(".af-term-host .af-pane");
+    if (!tab || !pane) throw new Error("drag source or target pane not found");
+    const transfer = new DataTransfer();
+    tab.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    const rect = pane.getBoundingClientRect();
+    const init = {
+      bubbles: true, cancelable: true, dataTransfer: transfer,
+      clientX: rect.right - 6, clientY: rect.top + rect.height / 2,
+    };
+    pane.dispatchEvent(new DragEvent("dragenter", init));
+    pane.dispatchEvent(new DragEvent("dragover", init));
+    pane.dispatchEvent(new DragEvent("drop", init));
+    tab.dispatchEvent(new DragEvent("dragend", { bubbles: true, dataTransfer: transfer }));
+  }, index);
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+}
+
 // This runs against the embedded app only inside the sanctioned web testbox.
 for (const width of [1280, 390]) {
   test(`4017: t opens the button's New tab picker without creating a tab at ${width}px`, async ({ page, request }, info) => {
@@ -527,3 +547,35 @@ test("phone touch pane drop dismisses carried Session actions before recompositi
   await expect(page.locator(".af-app")).not.toHaveClass(/af-session-first/);
   await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
 });
+
+for (const shortcut of ["Alt+j", "Alt+k", "Alt+w"] as const) {
+  test(`phone ${shortcut} dismisses carried actions when focused pane kind changes`, async ({ page, request }) => {
+    const title = process.env.AF_WEB_SESSION_WEB ?? "probe-web";
+    await page.setViewportSize({ width: 1280, height: 844 });
+    const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+    const session = snapshot.data.instances.find((s: { title: string }) => s.title === title);
+    expect(session?.id).toBeTruthy();
+    const webIndex = session.tabs.findIndex((tab: { kind: number }) => tab.kind === 3);
+    expect(webIndex).toBeGreaterThan(0);
+    await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
+    await expect(page.locator(".af-term-title")).toHaveText(session.title);
+    await splitTabToRight(page, webIndex);
+    await page.locator(".af-term-host .xterm").click();
+    await expect(page.locator('.af-tab[data-tab-index="0"]')).toHaveAttribute("aria-selected", "true");
+
+    const sessionActions = page.getByRole("button", {
+      name: "Session actions", exact: true, includeHidden: true,
+    });
+    await sessionActions.click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    const controls = page.getByRole("button", { name: "More app controls", exact: true });
+    await controls.click();
+    await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
+    await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+
+    await page.keyboard.press(shortcut);
+    await expect(page.locator(".af-app")).not.toHaveClass(/af-session-first/);
+    await expect(controls).toHaveAttribute("aria-expanded", "false");
+    await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+  });
+}
