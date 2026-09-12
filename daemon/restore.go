@@ -207,6 +207,16 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		return "", err
 	}
 	defer opLock.Unlock()
+	// A local Recover may rebuild a vanished worktree. Serialize that registration
+	// with create, and do the bounded wait before this restore claims or fences the
+	// row so a stalled peer cannot leave the session busy indefinitely.
+	worktreeAdmission, err := m.lockLocalWorktreeAdmissionWithin(repoID, title, "restore", instance)
+	if err != nil {
+		return "", err
+	}
+	if worktreeAdmission != nil {
+		defer worktreeAdmission.Unlock()
+	}
 
 	if err := m.claimRestoreOperation(repoID, key, title, waited, deleteSeq); err != nil {
 		return "", err
