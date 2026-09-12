@@ -199,8 +199,8 @@ The built-in allowlist keeps the pieces sessions need:
   resolved command (for example,
   `program_overrides.claude = "CLAUDE_CODE_USE_BEDROCK=1 claude"`). A
   command-local selector is trusted only when the entire command is one literal
-  Claude invocation (optionally through `env` or `exec`) or af's own generated
-  agent-server handoff. Compound commands, redirects, arbitrary wrappers, and
+  Claude invocation (optionally through `env` or `exec`). Compound commands,
+  redirects, arbitrary wrappers, and
   dynamic words require exporting the selector before starting af, or explicitly
   listing the provider credential names. Codex gets
   `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_HOME`,
