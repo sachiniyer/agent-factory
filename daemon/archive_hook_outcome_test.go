@@ -92,7 +92,7 @@ func newDeadlineContext() (context.Context, func()) {
 }
 
 func (dc *deadlineContext) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (dc *deadlineContext) Done() <-chan struct{}        { return dc.done }
+func (dc *deadlineContext) Done() <-chan struct{}       { return dc.done }
 func (dc *deadlineContext) Value(_ any) any             { return nil }
 func (dc *deadlineContext) Err() error {
 	select {
@@ -121,11 +121,11 @@ func (dc *deadlineContext) Err() error {
 //     context.Canceled — so watchCtx splices the exact error the production
 //     guard suppresses.
 //
-//  2. The shell signals its own exit by creating a marker file before it
-//     backgrounds the straggler. onArchiveHookAfterStart waits for that file
-//     (confirming the shell has exited), then triggers the deadline and yields
-//     the scheduler so watchCtx reaches its ctx.Done branch before cmd.Wait
-//     drains ctxResult.
+//  2. The shell signals its own exit via an EXIT trap that creates a marker
+//     file as the very last act before _exit(). onArchiveHookAfterStart waits
+//     for that file (portable: no /proc required), then triggers the deadline
+//     and yields the scheduler so watchCtx reaches its ctx.Done branch before
+//     cmd.Wait drains ctxResult.
 //
 //  3. The assertion is POSITIVE: runOnArchiveHook must return nil. "Does not
 //     contain the string" is not used, because that assertion passes whether the
@@ -136,12 +136,16 @@ func (dc *deadlineContext) Err() error {
 // with `context deadline exceeded` for a hook that exited 0 — the original bug.
 func TestArchiveHook_ExitZeroWithStragglerNeverReportsContextDeadline(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	// The shell creates exitMarker right before it backgrounds the straggler and
-	// exits. The seam waits for exitMarker (shell is done), triggers the deadline
-	// context, and yields so watchCtx receives ctx.Done before cmd.Wait collects
-	// ctxResult — exactly the splice window the guard closes.
+	// The shell's EXIT trap creates exitMarker as its very last act (after
+	// backgrounding the straggler). The seam waits for exitMarker (shell is
+	// done), triggers the deadline context, and yields so watchCtx receives
+	// ctx.Done before cmd.Wait collects ctxResult — exactly the splice window
+	// the guard closes.
 	exitMarker := filepath.Join(t.TempDir(), "shell-exited")
-	writeOnArchiveCommand(t, fmt.Sprintf("touch %q; sleep 30 >&1 2>&1 &", exitMarker))
+	// Use an EXIT trap so the marker file is written as the shell's very last
+	// act (after backgrounding the straggler). This gives the seam a reliable
+	// cross-platform signal that the shell process is about to _exit().
+	writeOnArchiveCommand(t, fmt.Sprintf("trap 'touch %q' EXIT; sleep 30 >&1 2>&1 &", exitMarker))
 
 	// Inject a context whose deadline fires on command, not on a wall-clock
 	// budget. The standard WithTimeout context would give context.Canceled on
@@ -158,8 +162,12 @@ func TestArchiveHook_ExitZeroWithStragglerNeverReportsContextDeadline(t *testing
 	guardFired := false
 	origAfterStart := onArchiveHookAfterStart
 	t.Cleanup(func() { onArchiveHookAfterStart = origAfterStart })
-	onArchiveHookAfterStart = func(cmd *exec.Cmd, _ context.CancelFunc) {
-		// Phase 1: wait for the shell's marker file (shell has begun its exit).
+	onArchiveHookAfterStart = func(_ *exec.Cmd, _ context.CancelFunc) {
+		// Wait for the shell's EXIT-trap marker (exitMarker is written by the
+		// shell's EXIT trap, so it appears only after the shell has completed all
+		// cleanup and is about to call _exit — the process is either already a
+		// zombie or will become one within one kernel syscall). This is portable:
+		// no /proc needed.
 		waitDeadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(waitDeadline) {
 			if _, err := os.Stat(exitMarker); err == nil {
@@ -172,22 +180,13 @@ func TestArchiveHook_ExitZeroWithStragglerNeverReportsContextDeadline(t *testing
 			triggerDeadline()
 			return
 		}
-		// Phase 2: wait for the shell PROCESS to fully exit (not just write the
-		// file). Without this, Cancel()'s SIGKILL to the process group can reach
-		// the shell before it becomes a zombie, making ProcessState record signal
-		// death (Exited() == false) rather than the natural exit-0 we need.
-		// We poll /proc/<pid>/status for State: Z (zombie) which means the process
-		// has exited and is waiting to be reaped — it is safe to SIGKILL the group
-		// without affecting the shell's recorded exit status.
-		statusPath := fmt.Sprintf("/proc/%d/status", cmd.Process.Pid)
-		waitDeadline = time.Now().Add(10 * time.Second)
-		for time.Now().Before(waitDeadline) {
-			data, readErr := os.ReadFile(statusPath)
-			if readErr != nil || strings.Contains(string(data), "\nState:\tZ") {
-				break // process gone or zombie — safe to proceed
-			}
-			time.Sleep(time.Millisecond)
-		}
+		// The EXIT trap has completed; the shell is about to call _exit(). Sleep
+		// briefly so the kernel has time to process that _exit() before we send
+		// SIGKILL to the process group — without this, the shell could receive
+		// SIGKILL while still alive and ProcessState would record signal death
+		// rather than the natural exit-0 we need. This window is nanoseconds
+		// (one kernel syscall), so 2ms gives many orders of magnitude of margin.
+		time.Sleep(2 * time.Millisecond)
 		// Shell has exited 0. Fire the deadline now and yield so watchCtx can
 		// reach its ctx.Done branch before cmd.Wait reads ctxResult.
 		guardFired = true
