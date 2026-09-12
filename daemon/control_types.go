@@ -835,6 +835,10 @@ type SetConfigValueResponse struct {
 	// FAILED, it names the address still serving rather than the one config now
 	// asks for, which is what the deferred notice beside it is about.
 	ListenerAddr string `json:"listener_addr,omitempty"`
+	// ApplyOutcome is appended to preserve every established response member's
+	// wire order. It lets automation distinguish applied, no-daemon, failed, and
+	// unconfirmed live applies without parsing RestartNotice or Warnings.
+	ApplyOutcome config.ApplyStatus `json:"apply_outcome,omitempty"`
 }
 
 // UnsetConfigValueRequest clears one globally unsettable migrated setting.
@@ -855,6 +859,8 @@ type UnsetConfigValueResponse struct {
 	// two verbs report it identically or one of them is the surface that quietly
 	// does not (#3397 is that lesson, on this same pair of handlers).
 	ListenerAddr string `json:"listener_addr,omitempty"`
+	// Keep this additive field last for the same wire-order contract as set.
+	ApplyOutcome config.ApplyStatus `json:"apply_outcome,omitempty"`
 }
 
 // ApplyConfigRequest asks the running daemon to apply the on-disk global config

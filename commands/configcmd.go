@@ -67,6 +67,33 @@ var (
 	configUnsetProjectFlag string
 )
 
+// configSaveJSONResult adds the live-apply outcome to SetResult/UnsetResult
+// without changing the established order of either payload. A map-based merge
+// would alphabetize every pre-existing member; AppendJSONMember makes the new
+// machine contract literally additive and last.
+type configSaveJSONResult struct {
+	result       any
+	applyOutcome config.ApplyStatus
+}
+
+func (r configSaveJSONResult) MarshalJSON() ([]byte, error) {
+	object, err := json.Marshal(r.result)
+	if err != nil {
+		return nil, err
+	}
+	status := r.applyOutcome
+	if status == "" {
+		// An older daemon can serve SetConfigValue without this newer response
+		// field. Absence is not evidence that its live apply succeeded.
+		status = config.ApplyStatusUnknown
+	}
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		return nil, err
+	}
+	return session.AppendJSONMember(object, "apply_outcome", encoded)
+}
+
 // configEntry is one config key and its effective value. Value is
 // heterogeneous — scalars for simple keys, maps for structural values.
 type configEntry struct {
@@ -600,7 +627,9 @@ owns.`, tmux.SupportedProgramsString()),
 		}
 		res := resp.Result
 		if configJSONFlag {
-			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
+			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(configSaveJSONResult{
+				result: res, applyOutcome: resp.ApplyOutcome,
+			}))
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s in %s\n", res.Key, echoValue(res.Value), configWriteLocation(res.Path))
 		// Writer warnings (validation) before the apply note: what the value MEANS
@@ -765,7 +794,9 @@ override file it clears is this machine's.`,
 			}
 			res := resp.Result
 			if configJSONFlag {
-				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
+				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(configSaveJSONResult{
+					result: res, applyOutcome: resp.ApplyOutcome,
+				}))
 			}
 			if !res.Removed {
 				fmt.Fprintf(cmd.OutOrStdout(), "no %s value to clear in %s\n", res.Key, configWriteLocation(res.Path))

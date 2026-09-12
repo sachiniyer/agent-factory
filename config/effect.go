@@ -164,6 +164,38 @@ type ApplyOutcome struct {
 	FailedListenerKeys []string
 }
 
+// ApplyStatus is the machine-readable summary of whether Manager.ApplyConfig
+// was reached and completed. It describes the apply attempt as a whole;
+// FailedListenerKeys remains the per-key answer when the attempt completed but
+// a listener rebind could not take effect.
+type ApplyStatus string
+
+const (
+	// ApplyStatusUnknown is what a newer client reports when an older daemon's
+	// response predates the additive apply_outcome field.
+	ApplyStatusUnknown     ApplyStatus = "unknown"
+	ApplyStatusApplied     ApplyStatus = "applied"
+	ApplyStatusNoDaemon    ApplyStatus = "no_daemon"
+	ApplyStatusFailed      ApplyStatus = "failed"
+	ApplyStatusUnconfirmed ApplyStatus = "unconfirmed"
+)
+
+// Status projects the outcome onto its stable wire value. Uncertainty wins
+// over failure if a malformed caller sets both: once the reply is lost, the
+// client cannot honestly claim the daemon kept its previous config.
+func (o ApplyOutcome) Status() ApplyStatus {
+	if o.DaemonApplyUnconfirmed {
+		return ApplyStatusUnconfirmed
+	}
+	if o.DaemonApplyFailed {
+		return ApplyStatusFailed
+	}
+	if o.DaemonApplied {
+		return ApplyStatusApplied
+	}
+	return ApplyStatusNoDaemon
+}
+
 // listenerRebindFailed reports whether key is one of the socket keys whose live
 // rebind failed in this apply.
 //

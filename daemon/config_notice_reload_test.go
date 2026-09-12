@@ -13,13 +13,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func requireReloadFailureNotice(t *testing.T, notice string, warnings, applied []string) {
+func requireReloadFailureNotice(t *testing.T, notice string, warnings, applied []string, outcome config.ApplyStatus) {
 	t.Helper()
 	require.Equal(t, "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value.", notice)
 	require.NotContains(t, notice, "no daemon")
 	require.NotContains(t, notice, "using the new value now")
 	require.Empty(t, applied)
 	require.Contains(t, strings.Join(warnings, "\n"), "reload config:")
+	require.Equal(t, config.ApplyStatusFailed, outcome)
 }
 
 func TestFailedConfigApplyOutcomeDistinguishesLostReply(t *testing.T) {
@@ -117,10 +118,10 @@ func TestServerConfigSaveReportsReloadFailure(t *testing.T) {
 			if unset {
 				require.NotNil(t, unsetResp.Result)
 				require.True(t, unsetResp.Result.Removed)
-				requireReloadFailureNotice(t, unsetResp.RestartNotice, unsetResp.Warnings, unsetResp.Applied)
+				requireReloadFailureNotice(t, unsetResp.RestartNotice, unsetResp.Warnings, unsetResp.Applied, unsetResp.ApplyOutcome)
 			} else {
 				require.NotNil(t, setResp.Result)
-				requireReloadFailureNotice(t, setResp.RestartNotice, setResp.Warnings, setResp.Applied)
+				requireReloadFailureNotice(t, setResp.RestartNotice, setResp.Warnings, setResp.Applied, setResp.ApplyOutcome)
 			}
 		})
 	}
@@ -152,12 +153,12 @@ func TestClientFallbackConfigSaveReportsReloadFailure(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, resp.Result)
 				require.True(t, resp.Result.Removed)
-				requireReloadFailureNotice(t, resp.RestartNotice, resp.Warnings, resp.Applied)
+				requireReloadFailureNotice(t, resp.RestartNotice, resp.Warnings, resp.Applied, resp.ApplyOutcome)
 			} else {
 				resp, err := SetGlobalConfigValue("network.require_token", "true")
 				require.NoError(t, err)
 				require.NotNil(t, resp.Result)
-				requireReloadFailureNotice(t, resp.RestartNotice, resp.Warnings, resp.Applied)
+				requireReloadFailureNotice(t, resp.RestartNotice, resp.Warnings, resp.Applied, resp.ApplyOutcome)
 			}
 			cfg, err := config.LoadConfig()
 			require.NoError(t, err)

@@ -204,3 +204,31 @@ func TestEffectNoticeDaemonApplyUnconfirmed(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+func TestApplyOutcomeStatus(t *testing.T) {
+	tests := []struct {
+		name    string
+		outcome ApplyOutcome
+		want    ApplyStatus
+	}{
+		{name: "no daemon", want: ApplyStatusNoDaemon},
+		{name: "applied", outcome: ApplyOutcome{DaemonApplied: true}, want: ApplyStatusApplied},
+		{name: "failed", outcome: ApplyOutcome{DaemonApplyFailed: true}, want: ApplyStatusFailed},
+		{name: "unconfirmed", outcome: ApplyOutcome{DaemonApplyUnconfirmed: true}, want: ApplyStatusUnconfirmed},
+		{
+			name: "uncertainty outranks a conflicting failure bit",
+			outcome: ApplyOutcome{
+				DaemonApplyFailed:      true,
+				DaemonApplyUnconfirmed: true,
+			},
+			want: ApplyStatusUnconfirmed,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.outcome.Status(); got != tc.want {
+				t.Errorf("Status() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -526,6 +526,7 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
 		resp.Warnings = append(resp.Warnings, warning)
 	}
+	resp.ApplyOutcome = outcome.Status()
 	// The notice logic is no longer mirrored from controlServer.SetConfigValue — it
 	// is the same code, in config.EffectNotice (#3397). Mirroring is what let the
 	// unset surfaces be written without the socket-key branch at all; passing the
@@ -586,6 +587,7 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
 		resp.Warnings = append(resp.Warnings, warning)
 	}
+	resp.ApplyOutcome = outcome.Status()
 	resp.RestartNotice = config.EffectNotice(result.Key, outcome)
 	return resp, nil
 }

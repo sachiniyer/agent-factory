@@ -559,6 +559,19 @@ func (s *exposureControlStub) ApplyConfig(_ daemon.ApplyConfigRequest, _ *daemon
 	return nil
 }
 
+type failedApplyControlStub struct{}
+
+func (s *failedApplyControlStub) SetConfigValue(req daemon.SetConfigValueRequest, resp *daemon.SetConfigValueResponse) error {
+	resp.Result = &config.SetResult{
+		Key:   config.CanonicalConfigKey(req.Key),
+		Value: req.Value,
+		Path:  remotePath,
+	}
+	resp.RestartNotice = "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
+	resp.Warnings = []string{"saved config, but live apply failed: reload config: forced"}
+	return nil
+}
+
 // serveControlStub binds the real control socket path inside the test's
 // AGENT_FACTORY_HOME to a net/rpc server running stub, so whatever the pane's
 // local save path dials reaches the stub instead of a real daemon. The general
@@ -677,6 +690,27 @@ func TestLocalConfigSetShowsExactlyOneExposureNoticeWithDaemon(t *testing.T) {
 	// config set`'s twin still prints the writer warning it reads from res.Warnings.
 	if !strings.Contains(strings.Join(result.Warnings, " "), "WRITER-WARNING") {
 		t.Errorf("result.Warnings must still carry the per-write warning; got %v", result.Warnings)
+	}
+}
+
+// TestLocalConfigSetRendersFailedApplyOutcome pins the TUI surface, not merely
+// the response carrier. A failed reload is useful only if the pane joins the
+// divergence notice and the actual reload error into the text the operator sees.
+func TestLocalConfigSetRendersFailedApplyOutcome(t *testing.T) {
+	localTarget(t)
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	serveControlStub(t, &failedApplyControlStub{})
+
+	_, notice, err := localConfigSet("network.require_token", "true")
+	if err != nil {
+		t.Fatalf("localConfigSet failed: %v", err)
+	}
+	const want = "Saved — the running daemon could not apply the new configuration and is still using its previous value. " +
+		"Resolve the warning, then retry the save or restart the daemon before relying on the saved value. " +
+		"saved config, but live apply failed: reload config: forced"
+	if notice != want {
+		t.Errorf("the TUI did not render the failed apply and its error\n got: %q\nwant: %q", notice, want)
 	}
 }
 

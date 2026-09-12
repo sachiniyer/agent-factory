@@ -33,6 +33,7 @@ func (s *controlServer) UnsetConfigValue(req UnsetConfigValueRequest, resp *Unse
 			outcome.DaemonApplyFailed = true
 		}
 	}
+	resp.ApplyOutcome = outcome.Status()
 	resp.RestartNotice = config.EffectNotice(result.Key, outcome)
 	// Where the daemon is accepting now, for a listener key (#3722). Same read as
 	// SetConfigValue's, after the apply for the same reason: clearing

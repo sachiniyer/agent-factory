@@ -55,6 +55,11 @@ type stubDaemon struct {
 	version string
 	// unserved names routes this daemon does not have, modelling an older build.
 	unserved map[string]bool
+
+	// applyOutcome is the machine-readable result of the daemon's live apply.
+	// Keeping it on the wire stub lets the JSON tests prove the CLI renders the
+	// response field instead of merely populating a Go value nobody can observe.
+	applyOutcome string
 }
 
 const stubDaemonConfigPath = "/home/boxoperator/.agent-factory/config.toml"
@@ -81,9 +86,10 @@ func (d *stubDaemon) listenerAddrFor(key string) string {
 func newStubDaemon(t *testing.T, version string, unserved ...string) *stubDaemon {
 	t.Helper()
 	d := &stubDaemon{
-		configPath: stubDaemonConfigPath,
-		version:    version,
-		unserved:   map[string]bool{},
+		configPath:   stubDaemonConfigPath,
+		version:      version,
+		unserved:     map[string]bool{},
+		applyOutcome: "applied",
 	}
 	for _, route := range unserved {
 		d.unserved[route] = true
@@ -118,24 +124,32 @@ func (d *stubDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
 		d.setReqs = append(d.setReqs, req)
 		d.mu.Unlock()
-		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.SetConfigValueResponse{
+		resp := daemon.SetConfigValueResponse{
 			Result: &config.SetResult{Key: req.Key, Value: req.Value, Path: d.configPath},
 			// The daemon computes the notice; the CLI echoes it. Pinning a distinctive
 			// one proves the remote answer is what reaches stdout.
 			RestartNotice: "applied to the running daemon",
 			Applied:       []string{req.Key},
 			ListenerAddr:  d.listenerAddrFor(req.Key),
-		}))
+		}
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(struct {
+			daemon.SetConfigValueResponse
+			ApplyOutcome string `json:"apply_outcome"`
+		}{resp, d.applyOutcome}))
 	case "/v1/UnsetConfigValue":
 		var req daemon.UnsetConfigValueRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		d.mu.Lock()
 		d.unsetReqs = append(d.unsetReqs, req)
 		d.mu.Unlock()
-		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.UnsetConfigValueResponse{
+		resp := daemon.UnsetConfigValueResponse{
 			Result:        &config.UnsetResult{Key: req.Key, Removed: true, Path: d.configPath},
 			RestartNotice: "applied to the running daemon",
-		}))
+		}
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(struct {
+			daemon.UnsetConfigValueResponse
+			ApplyOutcome string `json:"apply_outcome"`
+		}{resp, d.applyOutcome}))
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		_ = apiproto.WriteEnvelope(w, apiproto.Failure(fmt.Sprintf("unknown route %q", r.URL.Path)))
@@ -409,5 +423,67 @@ func TestConfigWriteSkewRefusalHonorsJSON(t *testing.T) {
 	}
 	if env.Error == nil || !strings.Contains(env.Error.Message, "does not serve the SetConfigValue route") {
 		t.Errorf("the envelope must carry the skew refusal, got: %q", errOut)
+	}
+}
+
+// TestConfigWriteJSONRendersFailedApplyOutcome pins the automation surface of
+// #4247. The write succeeded on disk, but the running daemon did not adopt it;
+// stdout therefore needs a distinct machine field for BOTH verbs. Matching a
+// warning sentence is not a contract automation can safely branch on.
+//
+// The expected strings also pin apply_outcome LAST. The field is additive, and
+// re-encoding SetResult/UnsetResult through a map would alphabetize every
+// existing member while adding it.
+func TestConfigWriteJSONRendersFailedApplyOutcome(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "set",
+			args: []string{"set", "network.require_token", "true", "--json"},
+			want: "{\n" +
+				"  \"data\": {\n" +
+				"    \"key\": \"network.require_token\",\n" +
+				"    \"value\": \"true\",\n" +
+				"    \"path\": \"" + stubDaemonConfigPath + "\",\n" +
+				"    \"requires_restart\": false,\n" +
+				"    \"apply_outcome\": \"failed\"\n" +
+				"  },\n" +
+				"  \"error\": null\n" +
+				"}\n",
+		},
+		{
+			name: "unset",
+			args: []string{"unset", "ssh.host_key_verification", "--json"},
+			want: "{\n" +
+				"  \"data\": {\n" +
+				"    \"key\": \"ssh.host_key_verification\",\n" +
+				"    \"path\": \"" + stubDaemonConfigPath + "\",\n" +
+				"    \"removed\": true,\n" +
+				"    \"requires_restart\": false,\n" +
+				"    \"apply_outcome\": \"failed\"\n" +
+				"  },\n" +
+				"  \"error\": null\n" +
+				"}\n",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			newConfigHome(t)
+			stub := newStubDaemon(t, "1.9.0")
+			stub.applyOutcome = "failed"
+			t.Setenv("AF_DAEMON_URL", "")
+
+			out, errOut, err := runConfigCLI(t, append([]string{"--daemon-url", stub.url()}, tc.args...)...)
+			if err != nil {
+				t.Fatalf("a saved config with a failed live apply is still a successful write: %v\nstderr: %s", err, errOut)
+			}
+			if out != tc.want {
+				t.Errorf("--json hid or reordered the failed apply outcome\n got:\n%s\nwant:\n%s", out, tc.want)
+			}
+		})
 	}
 }
