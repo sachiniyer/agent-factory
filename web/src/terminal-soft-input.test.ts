@@ -928,6 +928,13 @@ test("xterm _isComposing commit-only payload keeps queued trailing state alive",
   // than the current textarea value.  The queued release owns the trailing
   // text: transform() must apply the full queued sequence (commit + surviving
   // trailing + DEL) and must not re-emit the trailing chars from the timer.
+  //
+  // The trailing tail is two chars ("xy"); Backspace deletes only "y", leaving
+  // afterText = "字x".  The old bounded commit send("字") does NOT start with
+  // afterText, so the pre-existing queued.afterText branch (transform() line 287)
+  // cannot match, and the new commit-only fallback (line 323) is the only path
+  // that can handle it.  Removing the new `if (queued)` block causes this test
+  // to fail, proving it covers the new branch rather than the old one.
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget();
   const textarea = Object.assign(new EventTarget(), { value: "" });
@@ -935,7 +942,7 @@ test("xterm _isComposing commit-only payload keeps queued trailing state alive",
   const writes: string[] = [];
   const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value)));
   // Simulate xterm's _isComposing path: it emits the old bounded commit ("字")
-  // rather than the current textarea value ("字" after deletion of "x").
+  // rather than the current textarea value ("字x" after deletion of "y").
   // In the real flow this is the same timer path, so we capture `oldCommit`
   // at compositionend time and send that fixed string after the delay.
   let oldCommit = "";
@@ -950,18 +957,22 @@ test("xterm _isComposing commit-only payload keeps queued trailing state alive",
   textarea.value = "字";
   textarea.dispatchEvent(composition("compositionend", "字"));
   textarea.value = "字x";
-  host.dispatchEvent(insertText("x")); // trailing latin char after CJK commit
+  host.dispatchEvent(insertText("x")); // first trailing latin char after CJK commit
+  textarea.value = "字xy";
+  host.dispatchEvent(insertText("y")); // second trailing char; tail is now "xy"
   textarea.dispatchEvent(Object.assign(new Event("keydown"), { keyCode: 229 }));
   host.dispatchEvent(deleteBackward("beforeinput"));
-  textarea.value = "字"; // Backspace deletes the trailing "x"
+  textarea.value = "字x"; // Backspace deletes "y", keeping "x"; afterText = "字x"
   host.dispatchEvent(deleteBackward("input"));
   textarea.dispatchEvent(new Event("compositionstart")); // new composition before release timer
 
-  // tick(0): xterm's _isComposing path fires send("字").
-  // transform() must expand it to commit "字" + trailing "x" + DEL "\x7f".
+  // tick(0): xterm's _isComposing path fires send("字") — the OLD commit, not
+  // the current value.  "字" does not start with afterText "字x", so line 287
+  // cannot match.  The new if (queued) branch at line 323 applies the full
+  // queued sequence: commit "字" + trailing "xy" + DEL "\x7f".
   t.mock.timers.tick(0);
 
-  assert.deepEqual(writes, ["字x\x7f"]);
+  assert.deepEqual(writes, ["字xy\x7f"]);
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 
