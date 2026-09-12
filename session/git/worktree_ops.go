@@ -48,6 +48,7 @@ func (g *GitWorktree) Setup() error {
 	if setupErr != nil {
 		return setupErr
 	}
+	g.clearSetupRemovalRefusal()
 
 	// Fire-and-forget post-worktree hooks (cancellable via hooksCtx)
 	g.hooksDone = g.runHooks()
@@ -86,6 +87,7 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 		return err
 	}
 	g.branchCreatedByUs = branchCreatedByUs
+	g.clearSetupRemovalRefusal()
 
 	g.startHooks()
 	return nil
@@ -137,6 +139,7 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 
 	g.baseCommitSHA = baseCommit
 	g.branchCreatedByUs = true
+	g.clearSetupRemovalRefusal()
 	g.startHooks()
 	return nil
 }
@@ -634,6 +637,9 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 	// safe by default. These early paths run no git at all, so the run is trivially
 	// settled — but that is r.state()'s answer to give, not this function's.
 	r := &cleanupRun{g: g}
+	if err := r.refuseAfterSetupRemovalFailure(); err != nil {
+		return r.state(), err
+	}
 	// A cancellation signal is not process-exit proof. Join the hook runner before
 	// even inspecting the checkout, so neither git removal nor TempDir teardown can
 	// race a hook that is still creating files under it (#3173).

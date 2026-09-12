@@ -192,6 +192,21 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// is held reports the row busy, which is what it is.
 	m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
 
+	// Share create's repository admission lock from before destination selection
+	// through the move that registers it. Without this hold, create can select the
+	// same absent sibling path, restore can populate it, and create can act on its
+	// stale selection. The git layer still verifies branch ownership at its
+	// destructive remove boundary; this lock removes the AF-vs-AF interval that
+	// git's path-only `worktree remove` cannot make atomic by itself.
+	worktreeAdmission := m.worktreeAdmissionLockForRepo(repoID)
+	worktreeAdmission.Lock()
+	worktreeAdmissionHeld := true
+	defer func() {
+		if worktreeAdmissionHeld {
+			worktreeAdmission.Unlock()
+		}
+	}()
+
 	// Resolve relocation ownership before reading repo-derived restore context.
 	relocationClaim, err := m.claimRestoreRelocation(repoID, req.Title, instance)
 	if err != nil {
@@ -231,7 +246,10 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// archive intact (the git layer guarantees this) and surfaces an actionable
 	// message; the instance stays Archived.
 	claimTransferred = true
-	if err := instance.RestoreArchivedWorktreeHeldFencedWithClaim(dest, relocationClaim); err != nil {
+	restoreWorktreeErr := instance.RestoreArchivedWorktreeHeldFencedWithClaim(dest, relocationClaim)
+	worktreeAdmissionHeld = false
+	worktreeAdmission.Unlock()
+	if err := restoreWorktreeErr; err != nil {
 		if errors.Is(err, sessiongit.ErrRepoGone) {
 			return "", m.persistRepoGoneAtRestoreUse(repoID, req.Title, repoPath, instance, err)
 		}

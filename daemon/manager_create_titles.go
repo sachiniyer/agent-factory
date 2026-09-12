@@ -296,8 +296,11 @@ func liveHeldInPlaceDetachedRefusal(title, workspace, lane, holder string) error
 		title, config.ShellQuotePath(workspace), lane, config.ShellQuotePath(holder), handoff)
 }
 
-// worktreeAdmissionLockForRepo serializes create-side branch/path admission.
-// It is keyed by the canonical repository ID already resolved at create entry.
+// worktreeAdmissionLockForRepo serializes branch/path selection through the
+// filesystem operation that commits it. Create and archived restore both use
+// it: a free-path observation is not a reservation unless the peer that can
+// populate that path is excluded until the observing operation has acted.
+// It is keyed by the canonical repository ID already resolved at entry.
 func (m *Manager) worktreeAdmissionLockForRepo(repoID string) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
