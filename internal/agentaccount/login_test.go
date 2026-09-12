@@ -268,20 +268,37 @@ func TestLoginSessionName_IsStableAndScoped(t *testing.T) {
 	}
 }
 
-// TestLoginSessionName_HexNamespaceSeparation verifies that an account whose raw
-// name looks like a hex string cannot collide with the newly-encoded form of a
-// different account. For example, the account named "776f726b" must not share a
-// session title with the account named "work" (whose hex encoding is "776f726b").
-// The "x-" infix in the new format separates the two namespaces: the legacy form
-// "af-login-<agent>-776f726b" and the new form "af-login-<agent>-x-776f726b" are
-// distinct even though the hex body is identical.
+// TestLoginSessionName_HexNamespaceSeparation verifies that the new-format
+// session titles are disjoint from legacy (raw-name) titles, regardless of what
+// account names ValidateName permits.
+//
+// The adversarial pair is: legacy account "x-776f726b" (a valid name — starts
+// with a letter, contains only letters/digits/dashes) versus new-format account
+// "work" (whose hex encoding is "776f726b"). Under the old "x-" infix scheme
+// both produced "af-login-codex-x-776f726b". Under the fixed-prefix scheme,
+// legacy produces "af-login-codex-x-776f726b" and new produces
+// "af-loginx-codex-776f726b" — different at a position no account name can touch.
+//
+// Also verifies that two new-format accounts with different names produce
+// different titles, including the hex-literal case ("work" vs "776f726b").
 func TestLoginSessionName_HexNamespaceSeparation(t *testing.T) {
-	// "work" hex-encodes to "776f726b"; an account literally named "776f726b"
-	// must not produce the same session title as the account named "work".
-	work := LoginSessionName("codex", "work")
-	hexLiteral := LoginSessionName("codex", "776f726b")
-	if work == hexLiteral {
-		t.Fatalf("account %q and account %q share the session name %q — hex-namespace separation is broken", "work", "776f726b", work)
+	// P1 adversarial pair: legacy account "x-776f726b" vs new account "work".
+	// "work" hex-encodes to "776f726b", so the legacy name for "x-776f726b" is
+	// "af-login-codex-x-776f726b" and the new name for "work" is
+	// "af-loginx-codex-776f726b". They must differ.
+	legacyXHex := LegacyLoginSessionName("codex", "x-776f726b")
+	newWork := LoginSessionName("codex", "work")
+	if legacyXHex == newWork {
+		t.Fatalf("legacy account %q and new account %q share the session name %q — fixed-prefix separation is broken",
+			"x-776f726b", "work", legacyXHex)
+	}
+
+	// Two new-format accounts must also be distinct from each other, including
+	// the case where one name is the hex encoding of another.
+	newHexLiteral := LoginSessionName("codex", "776f726b")
+	if newWork == newHexLiteral {
+		t.Fatalf("new account %q and new account %q share the session name %q — hex encoding is not injective",
+			"work", "776f726b", newWork)
 	}
 }
 

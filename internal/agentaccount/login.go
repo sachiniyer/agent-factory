@@ -81,15 +81,31 @@ func LoginAgents() []string {
 // injective, so two distinct names can never produce one tmux session name
 // regardless of which characters ValidateName admits.
 //
-// The "x-" sub-prefix distinguishes hex-encoded names from legacy (raw-name)
-// session titles so that an existing account whose name happens to look like a
-// hex string (e.g. "776f726b") can never collide with the newly encoded form of
-// a different account (e.g. "work" → "776f726b"). Legacy titles match
-// "af-login-<agent>-<rawname>" without the "x-" infix; the new format matches
-// "af-login-<agent>-x-<hexname>", so the two namespaces are disjoint and
-// Supervisor.adopt cannot mistake a legacy pane for a newly created one.
+// The version marker "x" lives in the FIXED prefix segment — "af-loginx-<agent>-"
+// — which no account name can ever reach. Legacy titles match "af-login-<agent>-<rawname>"
+// (ValidateName permits any starting letter or digit, so "x-<rawname>" is a legal
+// legacy raw name). Placing the marker in the fixed prefix guarantees the two
+// namespaces are disjoint regardless of what ValidateName permits now or permitted
+// in any earlier release: "af-login-…" can only ever be a legacy pane and
+// "af-loginx-…" can only ever be a new-format pane, and Supervisor.adopt cannot
+// mistake one for the other.
+//
+// LegacyLoginSessionName returns the old raw-name format; Supervisor.Start probes
+// it during upgrades to detect a still-running legacy pane for this account.
 func LoginSessionName(agent, name string) string {
-	return "af-login-" + agent + "-x-" + hex.EncodeToString([]byte(name))
+	return "af-loginx-" + agent + "-" + hex.EncodeToString([]byte(name))
+}
+
+// LegacyLoginSessionName returns the pre-hex-encoding session name for one
+// account's login pane — the format used by binaries that predated this
+// encoding change.
+//
+// It is used only to DETECT a still-running legacy pane during upgrades: if a
+// daemon was killed while a login was open, the successor needs to find that pane
+// under its original name rather than creating a second one against the same
+// account directory. It must never be used to create a new pane.
+func LegacyLoginSessionName(agent, name string) string {
+	return "af-login-" + agent + "-" + name
 }
 
 // accountCredentialArtifacts is the file the AGENT writes when its login

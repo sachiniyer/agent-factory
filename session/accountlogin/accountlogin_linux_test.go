@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The sentinel values staged into the daemon's own environment before a login
@@ -643,6 +644,53 @@ func TestLoginDoesNotAdoptAnotherHomesPane(t *testing.T) {
 	successor.Stop()
 	if !abandoned.Live("codex", "work") {
 		t.Fatal("home B's Stop killed home A's login pane — a pane home B never owned")
+	}
+}
+
+// TestLoginRefusesWhenALegacyPaneIsStillRunning is the migration guard for
+// upgrades where an older daemon was killed while a login pane was open. The
+// legacy pane lives under "af-login-<agent>-<rawname>"; the new format lives
+// under "af-loginx-<agent>-<hexname>". Because the two namespaces are now
+// disjoint, a new Start would not find the legacy pane via adopt and would
+// instead create a second pane against the same account directory — racing over
+// auth.json and breaking the single-login guarantee. The fix probes the legacy
+// name and refuses with an actionable message when it is still live.
+func TestLoginRefusesWhenALegacyPaneIsStillRunning(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	binDir := t.TempDir()
+	writeBlockingAgentFixture(t, binDir, "codex")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Start a legacy-format pane directly by constructing it with the old name.
+	legacyName := agentaccount.LegacyLoginSessionName("codex", "work")
+	legacyPane := tmux.NewTmuxSession(legacyName, "codex login --device-auth")
+	dir, err := agentaccount.Register(home, "codex", "work")
+	if err != nil {
+		t.Fatalf("register account: %v", err)
+	}
+	if err := legacyPane.Start(dir); err != nil {
+		t.Fatalf("start legacy pane: %v", err)
+	}
+	t.Cleanup(func() { legacyPane.Close() })
+
+	// A new login for the same account must refuse rather than start a second pane.
+	supervisor := New()
+	t.Cleanup(supervisor.Stop)
+	ctx := context.Background()
+	_, err = supervisor.Start(ctx, Request{Home: home, Agent: "codex", Name: "work"})
+	if err == nil {
+		t.Fatal("new login accepted when a legacy pane is still running — should refuse to prevent a duplicate-pane race")
+	}
+	// The refusal must name the legacy session so the operator knows what to kill.
+	if !strings.Contains(err.Error(), legacyPane.SanitizedName()) {
+		t.Fatalf("refusal %q does not name the legacy session %q", err, legacyPane.SanitizedName())
+	}
+	// The supervisor must not have tracked any pane.
+	if supervisor.Live("codex", "work") {
+		t.Fatal("a refused login left a pane tracked in the supervisor")
 	}
 }
 

@@ -254,6 +254,29 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 			req.Agent, req.Name, pane.SanitizedName())
 	}
 
+	// LEGACY-PANE MIGRATION: before starting a new pane, check whether a
+	// still-running pane from an older binary holds the legacy name for this
+	// account. The legacy format is "af-login-<agent>-<rawname>"; the new format
+	// is "af-loginx-<agent>-<hexname>". Making the namespaces disjoint (the P1
+	// fix) guarantees adopt cannot silently reuse the wrong pane — but it also
+	// means a live legacy pane is invisible to adopt, so a new pane would start
+	// against the same account directory, and both processes would race over
+	// auth.json. That breaks the single-login guarantee the name derivation exists
+	// to provide (#3384).
+	//
+	// The safe answer is to REFUSE: a login is explicit and user-initiated, so a
+	// clear refusal costs the user one command (kill the legacy pane), while a
+	// silent second pane costs them a corrupted auth.json. The refusal names the
+	// legacy session and what to do, so it is actionable rather than mysterious.
+	legacyPane := tmux.NewTmuxSession(agentaccount.LegacyLoginSessionName(req.Agent, req.Name), program)
+	if legacyExists, legacyKnown := legacyPane.ProbeSession(); legacyKnown && legacyExists {
+		return Session{}, fmt.Errorf(
+			"cannot start the %s login flow for account %q: a login pane from an older agent-factory binary "+
+				"is still running under the legacy session name %s — finish or kill it first "+
+				"(tmux kill-session -t %s), then run this command again",
+			req.Agent, req.Name, legacyPane.SanitizedName(), legacyPane.SanitizedName())
+	}
+
 	if err := pane.SetEnvPassthrough(req.Passthrough); err != nil {
 		return Session{}, fmt.Errorf("invalid session environment pass-through for the login pane: %w", err)
 	}
