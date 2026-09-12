@@ -2,10 +2,12 @@ package session
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // Backend preconditions (#1933). docker, ssh, and hook each need things to be true
@@ -26,7 +28,11 @@ import (
 // checked here without side effects:
 //
 //	local  — nothing; it is always usable.
-//	docker — docker.image set, the `docker` CLI on PATH, an `origin` to clone from.
+//	docker — docker.image set, the `docker` CLI on PATH, an `origin` to clone from,
+//	         and a LOCAL Docker engine (the in-container agent-server port is
+//	         published on the engine host's loopback and dialed from the daemon's,
+//	         so a remote engine is unreachable; this is the same side-effect-free
+//	         `docker context inspect` / DOCKER_HOST read the runtime fails on).
 //	ssh    — ssh.host set, the `ssh` CLI on PATH, a readable ssh.identity_file if
 //	         one is configured, an `origin` to clone from. (Host reachability is a
 //	         network fact this must not dial for.)
@@ -121,6 +127,20 @@ func BackendUnusableReason(kind BackendKind, cfg *config.ResolvedConfig, repoRoo
 		}
 		if originRemoteURL(repoRoot) == "" {
 			return missingOriginError(BackendDocker, repoRoot)
+		}
+		// A remote Docker engine is unreachable: the agent-server port is published
+		// on the engine host's loopback and the daemon dials its own. Provision
+		// refuses the same engine (ensureDockerEngineLocal), so the picker must too
+		// — the same resolveDockerEngineEndpoint call, so choose-time and
+		// create-time cannot disagree. Fails closed on a probe error, matching the
+		// runtime: a picker is a promise, and "I could not prove the engine is
+		// local" is not "available".
+		endpoint, local, err := resolveDockerEngineEndpoint(sessionenv.DockerCLIEnvironment(os.Environ(), "", nil))
+		if err != nil {
+			return dockerLocalityProbeError(err)
+		}
+		if !local {
+			return remoteDockerEngineError(endpoint)
 		}
 	case BackendSSH:
 		// Since #3052 this backend delegates every step to OpenSSH. The in-process

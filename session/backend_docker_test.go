@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 // createThenFailRunOutput is the combined output `docker run -d` produces when it
@@ -42,6 +44,11 @@ func sawDockerRm(calls [][]string, id string) bool {
 // real docker daemon on the box is touched.
 func TestDockerProvision_CreateThenFail_ReapsContainer(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// A local engine so the pre-run locality guard passes without a docker call;
+	// remote engines are refused before `docker run` (see
+	// TestDockerProvision_NonAccountRefusesRemoteDockerEngine).
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	repoRoot := initTempGitRepo(t)
 	writeInRepoConfig(t, repoRoot, map[string]any{"backend": "docker", "docker": map[string]any{"image": "img:latest"}})
 
@@ -75,6 +82,8 @@ func TestDockerProvision_CreateThenFail_ReapsContainer(t *testing.T) {
 }
 
 func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	const engineID = "engine-that-created-container"
 	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		if len(args) == 0 {
@@ -152,6 +161,135 @@ func TestParseCreatedContainerID(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, parseCreatedContainerID([]byte(tc.out)))
+		})
+	}
+}
+
+// TestDockerProvision_NonAccountRefusesRemoteDockerEngine is the non-account half of
+// the remote-engine refusal. Account sessions already refused a remote engine
+// (TestDockerAccount_RefusesRemoteDockerEngine, via ensureAccountDockerEngineLocal,
+// for the bind-mount-identity reason); a non-account session against a remote
+// engine used to provision an unreachable http://127.0.0.1:<port> endpoint and
+// fail later with an opaque `connection refused`. Provision must now refuse the
+// remote engine BEFORE `docker run`, naming the remote-engine cause, exactly as the
+// account path does for its own reason.
+func TestDockerProvision_NonAccountRefusesRemoteDockerEngine(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("DOCKER_HOST", "tcp://remote.example.invalid:2376")
+	t.Setenv("DOCKER_CONTEXT", "")
+	repoRoot := initTempGitRepo(t)
+	writeInRepoConfig(t, repoRoot, map[string]any{"backend": "docker", "docker": map[string]any{"image": "img:latest"}})
+	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
+	defer SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af"))()
+
+	runCalled := false
+	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "run" {
+			runCalled = true
+		}
+		// Any docker call reaching the fake means the locality guard did not run
+		// first, so the returned error (rather than the remote-engine refusal)
+		// surfaces and fails the assertions below — pinning the guard's ordering.
+		return nil, fmt.Errorf("unexpected docker call in remote-engine test: %v", args)
+	})()
+
+	_, err := dockerRuntime{}.Provision(ProvisionSpec{
+		RepoRoot: repoRoot,
+		Title:    "remote-engine",
+		CloneURL: "file:///x",
+	})
+	require.Error(t, err, "a non-account session against a remote engine must be refused at create time")
+	require.Falsef(t, runCalled, "a remote engine must be refused before `docker run`, not after a container exists")
+	require.Contains(t, err.Error(), "remote", "the refusal must name the remote-engine cause, not an unrelated step")
+	require.Contains(t, err.Error(), "tcp://remote.example.invalid:2376", "the refusal must name the offending endpoint")
+}
+
+// TestBackendUnusableReason_DockerRefusesRemoteEngine is the choose-time half of
+// the remote-engine refusal. The runtime refuses a remote engine at create time
+// (TestDockerProvision_NonAccountRefusesRemoteDockerEngine); the picker must not
+// offer docker there either, or a client would select it and discover the failure
+// only at create time — the exact "offered, then fails later somewhere less
+// obvious" trap the picker exists to close. With DOCKER_HOST set, locality is read
+// from it directly (no `docker` call), so the answer is hermetic. Both surfaces
+// share resolveDockerEngineEndpoint, so choose-time and create-time cannot
+// disagree.
+func TestBackendUnusableReason_DockerRefusesRemoteEngine(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "tcp://remote.example:2376")
+	t.Setenv("DOCKER_CONTEXT", "")
+	repo := repoWithOriginForTest(t)
+	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
+	cfg := &config.ResolvedConfig{Docker: &config.DockerConfig{Image: "my-runtime:latest"}}
+
+	err := BackendUnusableReason(BackendDocker, cfg, repo)
+	require.Error(t, err, "a remote engine must not be offered as usable at choose time")
+	assert.Contains(t, err.Error(), "remote")
+	assert.Contains(t, err.Error(), "tcp://remote.example:2376")
+
+	// A local engine is selectable again, so the refusal is the only thing this
+	// test moved.
+	t.Run("local engine is selectable again", func(t *testing.T) {
+		t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+		t.Setenv("DOCKER_CONTEXT", "")
+		assert.NoError(t, BackendUnusableReason(BackendDocker, cfg, repo))
+	})
+}
+
+// TestBackendUnusableReason_DockerFailsClosedOnProbeError pins the fail-closed
+// posture: when locality cannot be established (DOCKER_HOST unset and `docker
+// context inspect` fails), the picker must report docker unavailable — not usable
+// — matching the runtime's own refusal (ensureDockerEngineLocal fails closed).
+// "I could not prove the engine is local" is not "available".
+func TestBackendUnusableReason_DockerFailsClosedOnProbeError(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "")
+	t.Setenv("DOCKER_CONTEXT", "")
+	repo := repoWithOriginForTest(t)
+	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "context" && args[1] == "inspect" {
+			return []byte("no context"), fmt.Errorf("context store corrupted")
+		}
+		return nil, fmt.Errorf("unexpected docker call: %v", args)
+	}))
+	cfg := &config.ResolvedConfig{Docker: &config.DockerConfig{Image: "my-runtime:latest"}}
+
+	err := BackendUnusableReason(BackendDocker, cfg, repo)
+	require.Error(t, err, "an unprovable locality must not be offered as usable")
+	assert.Contains(t, err.Error(), "local", "the reason must name the locality check that failed")
+}
+
+// TestLocalDockerEndpoint_LoopbackTCP checks that loopback TCP endpoints are
+// treated as local (tcp://127.0.0.1 and tcp://[::1]) while a genuinely remote
+// TCP host is still refused.
+func TestLocalDockerEndpoint_LoopbackTCP(t *testing.T) {
+	cases := []struct {
+		endpoint string
+		want     bool
+	}{
+		// loopback IPv4 — must be accepted as local
+		{"tcp://127.0.0.1:2375", true},
+		// loopback IPv4 — whole 127.0.0.0/8 range
+		{"tcp://127.0.2.3:2376", true},
+		// loopback IPv6 — must be accepted as local
+		{"tcp://[::1]:2375", true},
+		// remote IPv4 — must be refused
+		{"tcp://192.168.1.1:2375", false},
+		// remote hostname over TCP — must be refused
+		{"tcp://remote.example.invalid:2376", false},
+		// localhost / localhost. (RFC 6761 reserved) — must be accepted as local
+		{"tcp://localhost:2375", true},
+		{"tcp://localhost.:2375", true},
+		// a genuinely remote named host must still be refused
+		{"tcp://buildhost:2375", false},
+		// existing local schemes still work
+		{"unix:///var/run/docker.sock", true},
+		{"npipe:////./pipe/docker_engine", true},
+		{"fd://", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			got := localDockerEndpoint(tc.endpoint)
+			assert.Equalf(t, tc.want, got,
+				"localDockerEndpoint(%q): got %v, want %v", tc.endpoint, got, tc.want)
 		})
 	}
 }

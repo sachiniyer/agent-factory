@@ -15,6 +15,10 @@ import (
 
 func TestDockerEnvironmentDoesNotTrustRepoSelectedImageWithResolvedCredentials(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// A local engine so the pre-run locality guard passes without a docker call;
+	// this test captures `docker run`, which a remote engine never reaches.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	t.Setenv("OPENAI_API_KEY", "test-value")
 	t.Setenv("ANTHROPIC_API_KEY", "test-value")
 	repoRoot := initTempGitRepo(t)
