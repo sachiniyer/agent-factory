@@ -37,6 +37,9 @@ var watcherDeliveryAlarmThreshold = 3 * time.Minute
 func (w *taskWatcher) recordDeliveryResult(now time.Time, err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err == nil {
+		w.lastDeliveredAt = now
+	}
 	if err == nil || errors.Is(err, errTargetBusy) || errors.Is(err, errAtConcurrencyLimit) {
 		// A success clears the failure run. A deferral (target attached, #1586)
 		// clears it too: it is not a delivery failure, and the pipeline is now

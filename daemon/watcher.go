@@ -39,10 +39,11 @@ import (
 //     `af tasks restart <id>`, an enable/disable or watch_cmd/project_path/name
 //     edit of this task, a full reload, or a daemon start. A write to some
 //     other task does not (#3837, see watcher_reconcile.go)
-//   - events above 10/min per task are dropped with a logged warning
+//   - events above watcher_events_per_minute per task are dropped with a logged
+//     warning and a cumulative count on the task record
 //   - a failed delivery queues the event durably and a stop-aware drainer
 //     replays the backlog in order — before newer live events — once
-//     deliveries succeed again, rate-limited by the same 10/min window;
+//     deliveries succeed again, under the same configured rate window;
 //     the backlog is bounded (oldest dropped past 500 events / 256KB, with
 //     a logged count), survives daemon restarts, and events older than 72h
 //     are expired at replay time with a logged count (#1129)
@@ -56,11 +57,10 @@ const (
 	// event; the rest of the line is discarded with a logged note.
 	maxWatchLineBytes = 64 * 1024
 
-	watcherEventsPerMinute = 10
-	watcherBaseBackoff     = time.Second
-	watcherMaxBackoff      = 5 * time.Minute
-	watcherCrashWindow     = 10 * time.Minute
-	watcherCrashMaxExits   = 5
+	watcherBaseBackoff   = time.Second
+	watcherMaxBackoff    = 5 * time.Minute
+	watcherCrashWindow   = 10 * time.Minute
+	watcherCrashMaxExits = 5
 
 	// watcherStopGrace bounds how long a stop request waits after SIGTERM
 	// before escalating to a process-group SIGKILL. Mirrors
@@ -126,11 +126,12 @@ type watcherSupervisor struct {
 	// deliver observes events without spawning sessions, setStatus observes
 	// lifecycle statuses without a task store, and queueDir redirects the
 	// durable event queues to a scratch directory.
-	loadTasks func() ([]task.Task, error)
-	deliver   func(taskID, line string) error
-	setStatus func(taskID, status string)
-	logPath   func(taskID string) (string, error)
-	queueDir  func() (string, error)
+	loadTasks   func() ([]task.Task, error)
+	deliver     func(taskID, line string) error
+	setStatus   func(taskID, status string)
+	recordDrops func(taskID string, total int, droppedAt time.Time) error
+	logPath     func(taskID string) (string, error)
+	queueDir    func() (string, error)
 
 	shell            string
 	baseBackoff      time.Duration
@@ -145,11 +146,19 @@ type watcherSupervisor struct {
 }
 
 func newWatcherSupervisor() *watcherSupervisor {
+	return newWatcherSupervisorWithEventsPerMinute(config.DefaultWatcherEventsPerMinute)
+}
+
+func newWatcherSupervisorWithEventsPerMinute(eventsPerMinute int) *watcherSupervisor {
+	if eventsPerMinute <= 0 {
+		eventsPerMinute = config.DefaultWatcherEventsPerMinute
+	}
 	return &watcherSupervisor{
 		watchers:         make(map[string]*taskWatcher),
 		loadTasks:        task.LoadTasks,
 		deliver:          deliverWatchEvent,
 		setStatus:        persistWatcherStatus,
+		recordDrops:      persistWatcherDrops,
 		logPath:          watcherLogPath,
 		queueDir:         eventQueueDir,
 		shell:            watcherShell(),
@@ -157,7 +166,7 @@ func newWatcherSupervisor() *watcherSupervisor {
 		maxBackoff:       watcherMaxBackoff,
 		crashWindow:      watcherCrashWindow,
 		crashMaxExits:    watcherCrashMaxExits,
-		eventsPerMinute:  watcherEventsPerMinute,
+		eventsPerMinute:  eventsPerMinute,
 		stopGrace:        watcherStopGrace,
 		drainBaseBackoff: watcherDrainBaseBackoff,
 		drainMaxBackoff:  watcherDrainMaxBackoff,
@@ -180,17 +189,23 @@ func (s *watcherSupervisor) Stop() {
 }
 
 func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
+	dropped := t.DroppedEvents
+	if dropped < 0 {
+		dropped = 0
+	}
 	w := &taskWatcher{
-		taskID:        t.ID,
-		name:          t.Name,
-		cmdStr:        t.WatchCmd,
-		dir:           t.ProjectPath,
-		sig:           watcherSignature(t),
-		targetSession: t.TargetSession,
-		sup:           s,
-		stopCh:        make(chan struct{}),
-		doneCh:        make(chan struct{}),
-		startedCh:     make(chan struct{}),
+		taskID:         t.ID,
+		name:           t.Name,
+		cmdStr:         t.WatchCmd,
+		dir:            t.ProjectPath,
+		sig:            watcherSignature(t),
+		targetSession:  t.TargetSession,
+		sup:            s,
+		stopCh:         make(chan struct{}),
+		doneCh:         make(chan struct{}),
+		startedCh:      make(chan struct{}),
+		dropped:        dropped,
+		persistedDrops: dropped,
 	}
 	// Resolve the repo the task belongs to so a delivery alarm can be scoped to
 	// the right repo's snapshot (#1238). A resolution failure only costs the
@@ -254,10 +269,14 @@ type taskWatcher struct {
 	// lazily via ensureDrainer.
 	wg sync.WaitGroup
 
-	mu          sync.Mutex
-	dropped     int
-	eventTimes  []time.Time
-	lastDropLog time.Time
+	mu              sync.Mutex
+	dropped         int
+	persistedDrops  int
+	eventTimes      []time.Time
+	lastDropLog     time.Time
+	lastDroppedAt   time.Time
+	lastDeliveredAt time.Time
+	terminalStatus  string
 	// draining marks a live drainLoop goroutine, so at most one drains the
 	// queue at a time and replay order is preserved.
 	draining bool
@@ -277,11 +296,16 @@ type taskWatcher struct {
 // stop requests termination and blocks until the run goroutine returns. The
 // drainer is joined too: Reload starts a replacement watcher for the same task
 // only after stop returns, so two drainers can never interleave one task's
-// replay.
-func (w *taskWatcher) stop() {
+// replay. It returns the exact post-flush drop total so a caller that starts a
+// replacement cannot seed it from the older task snapshot taken before stop.
+func (w *taskWatcher) stop() int {
 	w.stopOnce.Do(func() { close(w.stopCh) })
 	<-w.doneCh
 	w.wg.Wait()
+	w.flushDroppedEvents()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.dropped
 }
 
 func (w *taskWatcher) finished() bool {
@@ -339,7 +363,7 @@ func (w *taskWatcher) run() {
 			// The condition, stated so an operator can act on it: this stop
 			// holds until something names THIS task (#3837).
 			log.InfoLog.Printf("watch task %s: watch command exited cleanly; stopped until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts", w.taskID, w.taskID)
-			w.sup.setStatus(w.taskID, "stopped")
+			w.persistTerminalStatus("stopped")
 			return
 		}
 
@@ -367,7 +391,7 @@ func (w *taskWatcher) run() {
 		failures = failures[cut:]
 		if len(failures) >= w.sup.crashMaxExits {
 			log.ErrorLog.Printf("watch task %s: %d failures within %s (last: %v); giving up until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts%s", w.taskID, len(failures), w.sup.crashWindow, runErr, w.taskID, tail.logSuffix())
-			w.sup.setStatus(w.taskID, failureSummary(runErr, tail))
+			w.persistTerminalStatus(failureSummary(runErr, tail))
 			return
 		}
 
@@ -662,6 +686,8 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 		w.mu.Lock()
 		w.dropped++
 		dropped := w.dropped
+		outcomeChanged := w.lastDroppedAt.IsZero() || w.lastDeliveredAt.After(w.lastDroppedAt)
+		w.lastDroppedAt = now
 		logIt := now.Sub(w.lastDropLog) >= time.Minute
 		if logIt {
 			w.lastDropLog = now
@@ -673,6 +699,9 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 		// protective policy against a chatty script, not an outage signal.
 		if logIt {
 			log.WarningLog.Printf("watch task %s: event rate exceeded %d/min; dropping excess events (%d dropped so far)", w.taskID, w.sup.eventsPerMinute, dropped)
+		}
+		if logIt || outcomeChanged {
+			w.persistDroppedEvents(dropped, now)
 		}
 		tail.add(line)
 		return
@@ -840,21 +869,6 @@ func deliverWatchEvent(taskID, line string) error {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 	return nil
-}
-
-// persistWatcherStatus records a watcher lifecycle status on the task:
-// "stopped", or "errored: <exit>: <first output line>" from the crash-loop
-// breaker (#797). LastRunAt is preserved — it tracks event deliveries, not
-// supervision changes. Passing nil for lastRunAt tells UpdateTaskStatus to
-// leave LastRunAt untouched: reading it here (outside the file lock) and
-// writing it back would revert a newer timestamp a concurrent deliverWatchEvent
-// committed in the gap — the TOCTOU race in #1215. UpdateTaskStatus skips
-// Program enum validation so legacy task records still receive status bumps
-// (#664).
-func persistWatcherStatus(taskID, status string) {
-	if _, err := task.UpdateTaskStatus(taskID, nil, status); err != nil {
-		log.WarningLog.Printf("failed to record watcher status %q on task %s: %v", status, taskID, err)
-	}
 }
 
 // watcherLogPath resolves (and creates the directory for) the per-task

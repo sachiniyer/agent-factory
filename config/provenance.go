@@ -784,36 +784,6 @@ func goTypeJSONZero(t reflect.Type) any {
 	return nil
 }
 
-// isJSONZero reports whether v is the JSON zero value for its Go type as
-// decoded from a raw JSON document into an any. Those zero values are: nil,
-// the empty string, the number 0, bool false, and empty slice/map. These are
-// precisely the values that json.Marshal would omit for an omitempty struct field.
-func isJSONZero(v any) bool {
-	if v == nil {
-		return true
-	}
-	switch c := v.(type) {
-	case string:
-		return c == ""
-	case bool:
-		return !c
-	case json.Number:
-		f, err := c.Float64()
-		return err == nil && f == 0
-	case float64:
-		return c == 0
-	case int64:
-		return c == 0
-	}
-	// Slice or map: zero if empty.
-	rv := reflect.ValueOf(v)
-	switch rv.Kind() {
-	case reflect.Slice, reflect.Map:
-		return rv.Len() == 0
-	}
-	return false
-}
-
 // isJSONMap reports whether value is a Go map. A raw decoded config shape is
 // always a map[string]any for a table, and that is the only side alignment ever
 // re-encodes; structs and other operands are rejected here so a struct/struct

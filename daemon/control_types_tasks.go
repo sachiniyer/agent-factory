@@ -54,8 +54,9 @@ type AddTaskResponse struct {
 // (the enable/disable toggle sends just Enabled) cannot clobber a concurrent
 // edit another client made to a different field. This replaces the prior
 // full-struct read-modify-write, which re-applied every user field from the
-// caller's possibly-stale copy. Scheduler-owned fields (LastRunAt/LastRunStatus/
-// CreatedAt) are never patchable — UpdateTaskStatus stays their writer.
+// caller's possibly-stale copy. Daemon-owned fields (LastRunAt/LastRunStatus/
+// DroppedEvents/CreatedAt) are never patchable — their dedicated task-store
+// operations stay their writers.
 //
 // Expect optionally carries the project the caller authorized the id against,
 // re-verified under the same lock — see task.ProjectExpectation.
