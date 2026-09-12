@@ -150,6 +150,13 @@ func parseStraceLongOption(words []*syntax.Word, names map[string]struct{}) (int
 		return 1, straceOptionContinue
 	}
 	operand, consumed, ok := straceOptionValue(words, attachedValue, attached)
+	if !ok && canonical == "--attach" && !attached && len(words) > 1 &&
+		isSimpleQuotedParameterWord(words[1]) {
+		// A read-only scalar expansion inside double quotes is exactly one argv
+		// word. It therefore fills -p's operand without hiding the next word;
+		// continue scanning because strace may also have a trailing child.
+		consumed, ok = 2, true
+	}
 	if !ok {
 		return 0, straceOptionUnsafe
 	}
@@ -244,6 +251,11 @@ func parseStraceShortOptions(words []*syntax.Word, names map[string]struct{}) (i
 				attachedValue = value[idx+1:]
 			}
 			operand, consumed, ok := straceOptionValue(words, attachedValue, attached)
+			if !ok && flag == 'p' && !attached && len(words) > 1 &&
+				isSimpleQuotedParameterWord(words[1]) {
+				// See the matching --attach case above.
+				consumed, ok = 2, true
+			}
 			if !ok {
 				return 0, straceOptionUnsafe
 			}
@@ -261,6 +273,21 @@ func parseStraceShortOptions(words []*syntax.Word, names map[string]struct{}) (i
 		}
 	}
 	return 1, straceOptionContinue
+}
+
+func isSimpleQuotedParameterWord(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) != 1 {
+		return false
+	}
+	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
+	if !ok || quoted.Dollar || len(quoted.Parts) != 1 {
+		return false
+	}
+	exp, ok := quoted.Parts[0].(*syntax.ParamExp)
+	return ok && exp.Param != nil && validName(exp.Param.Value) &&
+		exp.Flags == nil && exp.NestedParam == nil && exp.Index == nil &&
+		len(exp.Modifiers) == 0 && exp.Slice == nil && exp.Repl == nil && exp.Exp == nil &&
+		!exp.Excl && !exp.Length && !exp.Width && !exp.IsSet && exp.Names == 0
 }
 
 func straceOptionValue(words []*syntax.Word, attachedValue string, attached bool) (string, int, bool) {

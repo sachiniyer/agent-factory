@@ -80,15 +80,19 @@ func TestValidateAccountEnvironmentCommand_AllowsProcessOnlyWrapperModes(t *test
 func TestValidateAccountEnvironmentCommand_AllowsTerminalUtilLinuxWrapperModes(t *testing.T) {
 	for _, command := range []string{
 		"ionice -h",
+		"ionice -th",
 		"ionice --help",
 		"ionice --he",
 		"ionice -V",
+		"ionice -tV",
 		"ionice --version",
 		"ionice --ver",
 		"taskset -h",
+		"taskset -ah",
 		"taskset --help",
 		"taskset --he",
 		"taskset -V",
+		"taskset -aV",
 		"taskset --version",
 		"taskset --ver",
 	} {

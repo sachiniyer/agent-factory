@@ -169,7 +169,7 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 		switch {
 		case option == "--":
 			return words[1:], false
-		case utilLinuxTerminalOption(option):
+		case utilLinuxTerminalOption(option, "tpPu"):
 			return nil, false
 		case ioniceProcessOnlyOption(option):
 			// -p/-P/-u select existing-process modes. They never exec a
@@ -236,7 +236,7 @@ func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 		switch {
 		case option == "--":
 			return tasksetCommandAfterMask(words[1:])
-		case utilLinuxTerminalOption(option):
+		case utilLinuxTerminalOption(option, "acp"):
 			return nil, false
 		case tasksetProcessOnlyOption(option):
 			// -p switches taskset from command execution to inspecting or
@@ -254,12 +254,25 @@ func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return nil, false
 }
 
-func utilLinuxTerminalOption(option string) bool {
-	if option == "-h" || option == "-V" {
-		return true
+func utilLinuxTerminalOption(option, argumentFreeShortFlags string) bool {
+	if len(option) > 2 && strings.HasPrefix(option, "--") {
+		return strings.HasPrefix("--help", option) || strings.HasPrefix("--version", option)
 	}
-	return len(option) > 2 &&
-		(strings.HasPrefix("--help", option) || strings.HasPrefix("--version", option))
+	if len(option) < 2 || option[0] != '-' || option[1] == '-' {
+		return false
+	}
+	for _, flag := range option[1:] {
+		if flag == 'h' || flag == 'V' {
+			return true
+		}
+		// Only scan past argument-free flags. A value-taking flag owns the
+		// rest of its argv word, so an h or V after it is operand text rather
+		// than a terminal option.
+		if !strings.ContainsRune(argumentFreeShortFlags, flag) {
+			return false
+		}
+	}
+	return false
 }
 
 func tasksetProcessOnlyOption(option string) bool {

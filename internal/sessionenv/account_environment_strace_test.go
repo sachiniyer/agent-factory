@@ -273,3 +273,23 @@ func TestValidateAccountEnvironmentCommand_FailClosedBoundaryStaysNarrow(t *test
 			"command %q uses assignment-shaped text as data, not a child-environment mutation", command)
 	}
 }
+
+func TestValidateAccountEnvironmentCommand_AllowsQuotedDynamicStraceAttachPID(t *testing.T) {
+	for _, command := range []string{
+		`strace -p "$PID"`,
+		`strace --attach "$PID"`,
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"attach-only command %q launches no child whose account environment could be changed", command)
+	}
+
+	for _, command := range []string{
+		`strace -p "$PID" env CODEX_HOME=/other codex`,
+		`strace --attach "$PID" env CODEX_HOME=/other codex`,
+		`strace -p $PID`,
+		`strace --attach "$@"`,
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"dynamic PID operand in %q must not conceal a trailing child", command)
+	}
+}
