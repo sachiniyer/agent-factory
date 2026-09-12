@@ -131,6 +131,20 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		return "", err
 	}
 	defer opLock.Unlock()
+	// Join create's repository admission BEFORE claiming or fencing this row.
+	// A create can hold admission across an unbounded worktree add, so this wait
+	// must remain bounded; timing out here leaves the archive entirely untouched
+	// and, because no claim or fence exists yet, still honestly killable.
+	worktreeAdmission, err := m.lockLocalWorktreeAdmissionWithin(repoID, req.Title, "restore", instance)
+	if err != nil {
+		return "", err
+	}
+	worktreeAdmissionHeld := worktreeAdmission != nil
+	defer func() {
+		if worktreeAdmissionHeld {
+			worktreeAdmission.Unlock()
+		}
+	}()
 
 	if err := m.claimRestoreOperation(repoID, key, req.Title, waited, deleteSeq); err != nil {
 		return "", err
@@ -192,20 +206,12 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// is held reports the row busy, which is what it is.
 	m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
 
-	// Share create's repository admission lock from before destination selection
-	// through the move that registers it. Without this hold, create can select the
-	// same absent sibling path, restore can populate it, and create can act on its
-	// stale selection. The git layer still verifies branch ownership at its
-	// destructive remove boundary; this lock removes the AF-vs-AF interval that
-	// git's path-only `worktree remove` cannot make atomic by itself.
-	worktreeAdmission := m.worktreeAdmissionLockForRepo(repoID)
-	worktreeAdmission.Lock()
-	worktreeAdmissionHeld := true
-	defer func() {
-		if worktreeAdmissionHeld {
-			worktreeAdmission.Unlock()
-		}
-	}()
+	// Admission stays held from before destination selection through the move
+	// that registers it. Without this hold, create can select the same absent
+	// sibling path, restore can populate it, and create can act on its stale
+	// selection. The git layer still verifies branch ownership at its destructive
+	// remove boundary; this lock removes the AF-vs-AF interval that git's
+	// path-only `worktree remove` cannot make atomic by itself.
 
 	// Resolve relocation ownership before reading repo-derived restore context.
 	relocationClaim, err := m.claimRestoreRelocation(repoID, req.Title, instance)
@@ -247,8 +253,6 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// message; the instance stays Archived.
 	claimTransferred = true
 	restoreWorktreeErr := instance.RestoreArchivedWorktreeHeldFencedWithClaim(dest, relocationClaim)
-	worktreeAdmissionHeld = false
-	worktreeAdmission.Unlock()
 	if err := restoreWorktreeErr; err != nil {
 		if errors.Is(err, sessiongit.ErrRepoGone) {
 			return "", m.persistRepoGoneAtRestoreUse(repoID, req.Title, repoPath, instance, err)
@@ -321,7 +325,16 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// OpNone and would now refuse its own operation's fence. Its BeginRestore edge
 	// keeps that strict guard; BeginRestoreUnderHeldFence is the entry for the row
 	// that arrives already fenced.
-	if err := instance.RestoreFromArchiveHeldFenced(); err != nil {
+	restoreRuntimeErr := instance.RestoreFromArchiveHeldFenced()
+	// LocalBackend's Recover can rebuild if the restored path vanishes before it
+	// inspects it. Keep the same admission through that one rebuild choke point,
+	// then release as soon as the runtime call returns; persistence and reporting
+	// below cannot register a worktree and must not delay a waiting create.
+	if worktreeAdmissionHeld {
+		worktreeAdmissionHeld = false
+		worktreeAdmission.Unlock()
+	}
+	if err := restoreRuntimeErr; err != nil {
 		if perr := commitRestore(); perr != nil {
 			return failedRestoredArchiveResult(instance, restoredPath, fmt.Errorf("%w; its agent also failed to re-spawn: %v", perr, err))
 		}

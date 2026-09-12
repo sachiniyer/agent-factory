@@ -119,12 +119,6 @@ type GitWorktree struct {
 	// itself (via setupNewWorktree). When false, Cleanup() must NOT delete the
 	// branch because it pre-existed and likely contains user work.
 	branchCreatedByUs bool
-	// setupRemovalRefusal is a process-local fail-closed latch. Setup records why
-	// it declined to remove a worktree whose registered branch did not prove this
-	// object's ownership; the first-time-create error path immediately calls
-	// Cleanup(), so that later cleanup must inherit the refusal rather than retry
-	// the same path with its broader unregistered-directory authority.
-	setupRemovalRefusal atomic.Pointer[string]
 	// hooksCtx and hooksCancel control the lifetime of post-worktree hooks.
 	// Cancelling hooksCtx stops any in-flight hook commands so they don't
 	// outlive the worktree itself.

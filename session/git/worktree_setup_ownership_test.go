@@ -65,8 +65,16 @@ func TestSetupRefusesWorktreeRestoredAtSelectedPath(t *testing.T) {
 	}
 	cleanupState, cleanupErr := createWorktree.Cleanup()
 	assert.Equal(t, CleanupStateUnknown, cleanupState,
-		"the automatic first-create cleanup must inherit setup's ownership refusal")
+		"the automatic first-create cleanup must independently re-establish branch ownership")
 	assert.Error(t, cleanupErr)
+	restartedCreate, err := NewGitWorktreeFromStorage(
+		repoRoot, restorePath, createTitle, createBranch, "", false, true,
+	)
+	require.NoError(t, err)
+	restartCleanupState, restartCleanupErr := restartedCreate.Cleanup()
+	assert.Equal(t, CleanupStateUnknown, restartCleanupState,
+		"cleanup after restart must re-establish branch ownership instead of relying on the process-local setup refusal")
+	assert.Error(t, restartCleanupErr)
 
 	got, readErr := os.ReadFile(uncommittedPath)
 	require.NoError(t, readErr, "refused create must preserve the restored worktree's uncommitted file")

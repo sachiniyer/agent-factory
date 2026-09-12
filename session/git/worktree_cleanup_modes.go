@@ -52,27 +52,49 @@ func (r *cleanupRun) shouldRemoveWorktreeDir(removeErr error) bool {
 	return mayDeleteWorktreeDir(registered, ok, removeErr)
 }
 
-// requireRegisteredBranchMatch proves the registered worktree at the recorded
-// path is THIS session's before the registered-only mode acts on it (#3278
-// review). `git worktree remove -f` trusts the registration alone, so a
-// different worktree of the same still-present origin parked at the archived
-// path would be accepted and deleted, dirty changes included. The
-// registration's branch is the session-identifying fact git itself maintains;
-// a different branch, a detached checkout, an UNLISTED occupant, or a probe
-// that could not answer all refuse and retain — an unlisted directory is not
-// provably the archive either, this mode may never RemoveAll it, and its only
-// possible end state is retention, so nothing destructive (the writer reap
-// included) should touch it first.
-func (r *cleanupRun) requireRegisteredBranchMatch() error {
+// requireRegisteredBranchMatch proves a registered worktree at the recorded
+// path is THIS session's before either cleanup mode acts on it (#3278/#4342).
+// `git worktree remove -f` trusts the registration alone, so a different
+// worktree parked at the path would be accepted and deleted, dirty changes
+// included. The registration's branch is the session-identifying fact git
+// persists across daemon restarts; a mismatch, detached checkout, or failed
+// observation refuses in every mode.
+//
+// requireRegistration adds registered-only cleanup's stronger archive rule: an
+// unlisted directory and a listed entry whose occupant no longer carries this
+// repo's backpointer also refuse. Ordinary cleanup deliberately retains its
+// historical unregistered/corrupted-pointer fallbacks, but never for a path Git
+// positively registers on another branch.
+func (r *cleanupRun) requireRegisteredBranchMatch(requireRegistration bool) error {
 	// -z: NUL-delimited records (#3278 review) — a repository or worktree
 	// parent containing a newline would otherwise truncate the listed path
 	// and misreport the archive as unlisted, retaining it forever.
 	output, err := r.git("worktree", "list", "--porcelain", "-z")
 	if err != nil {
+		// Ordinary cleanup historically handles a fast, answered Git failure through
+		// its #726 validation-error fallback. Preserve that path: only a deadline is
+		// unknown. Registered-only archive cleanup has no such fallback and still
+		// requires a positive listing answer.
+		if !requireRegistration && !r.unknown {
+			return nil
+		}
 		r.unknown = true
 		refusal := fmt.Errorf(
 			"cannot verify that the registered worktree at %s belongs to this session: %v",
 			r.g.worktreePath, err,
+		)
+		r.errs = append(r.errs, refusal)
+		return refusal
+	}
+	if err := requireCompleteWorktreeListing(output); err != nil {
+		// An empty answered listing is the ordinary unregistered-directory case.
+		// Registered-only cleanup must instead prove its archive registration.
+		if !requireRegistration {
+			return nil
+		}
+		r.unknown = true
+		refusal := fmt.Errorf(
+			"cannot verify the complete worktree listing for %s: %v", r.g.worktreePath, err,
 		)
 		r.errs = append(r.errs, refusal)
 		return refusal
@@ -91,6 +113,9 @@ func (r *cleanupRun) requireRegisteredBranchMatch() error {
 		return refusal
 	}
 	if !listed {
+		if !requireRegistration {
+			return nil
+		}
 		r.unknown = true
 		refusal := fmt.Errorf(
 			"refusing to act on %s: git does not register it as a worktree, so it is not provably this session's archive; leaving it and the record in place",
@@ -114,6 +139,9 @@ func (r *cleanupRun) requireRegisteredBranchMatch() error {
 			r.errs = append(r.errs, refusal)
 			return refusal
 		}
+	}
+	if !requireRegistration {
+		return nil
 	}
 	// The listing is repo-side metadata and keeps reporting the recorded path
 	// and branch after the worktree was moved aside (git merely marks the
