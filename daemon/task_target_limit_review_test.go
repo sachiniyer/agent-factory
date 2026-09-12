@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -310,11 +311,21 @@ func TestSlowTaskPromptDoesNotBlockAnUnrelatedTarget(t *testing.T) {
 		release:          make(chan struct{}),
 	}
 	registerStarted(t, manager, repoID, repoPath, "slow-target", firstBackend, true, session.Running)
+	independentPath := setupTaskRepo(t)
+	independentRepo, err := config.RepoFromPath(independentPath)
+	if err != nil {
+		t.Fatalf("independent RepoFromPath: %v", err)
+	}
 	secondRecorder := &promptRecorder{}
-	registerStarted(t, manager, repoID, repoPath, "independent-target", recordingBackend{
+	registerStarted(t, manager, independentRepo.ID, independentPath, "independent-target", recordingBackend{
 		readyFakeBackend{session.NewFakeBackend()}, secondRecorder,
 	}, true, session.Running)
-	limitTarget := registerStarted(t, manager, repoID, repoPath, "limit-target",
+	limitPath := setupTaskRepo(t)
+	limitRepo, err := config.RepoFromPath(limitPath)
+	if err != nil {
+		t.Fatalf("limit RepoFromPath: %v", err)
+	}
+	limitTarget := registerStarted(t, manager, limitRepo.ID, limitPath, "limit-target",
 		readyFakeBackend{session.NewFakeBackend()}, true, session.Running)
 
 	firstDone := make(chan error, 1)
@@ -338,7 +349,7 @@ func TestSlowTaskPromptDoesNotBlockAnUnrelatedTarget(t *testing.T) {
 	secondDone := make(chan error, 1)
 	go func() {
 		_, err := manager.SendPromptWithStatus(SendPromptRequest{
-			Title: "independent-target", RepoID: repoID, Prompt: "second", TaskOrigin: true,
+			Title: "independent-target", RepoID: independentRepo.ID, Prompt: "second", TaskOrigin: true,
 		})
 		secondDone <- err
 	}()
