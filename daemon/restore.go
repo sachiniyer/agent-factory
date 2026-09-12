@@ -346,6 +346,29 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			return "", err
 		}
 		m.warn().Printf("restore of %q: --force-reap given past an indeterminate probe; af could not reach the sandbox to push it, so anything it holds unpushed is discarded", title)
+		// End the push-failure episode so a later failure against the new sandbox
+		// earns a fresh budget rather than inheriting the old one's escalation.
+		m.resetPreserveBudget(repoID, instance)
+		// Seed the in-memory entry now — before Recover runs — so that if Recover
+		// fails before the old sandbox is actually retired (i.e. before
+		// reapRemoteRuntimeForReplacement succeeds inside reprovisionRemote),
+		// recordLostRestoreFailure finds an existing entry and does NOT inherit
+		// consecutiveFailures from the persisted terminal failure. An entry that
+		// already exists is left untouched; a new entry starts at zero, so the
+		// first new-sandbox failure is attempt 1.
+		//
+		// The actual episode-counter reset (consecutiveFailures = 0, awaitingConfirm
+		// = false) is registered as a one-shot hook that reprovisionRemote fires
+		// only after reapRemoteRuntimeForReplacement returns without error — the
+		// point where the old sandbox is provably gone and the new episode genuinely
+		// begins. If reprovisionRemote fails before the reap (e.g. unresolvable
+		// account, invalid runtime config, agent-account drift), the hook is cleared
+		// without firing and the budget stays charged, preventing repeated pre-reap
+		// failures from resetting the budget indefinitely.
+		m.seedRestoreStateEntry(repoID, instance)
+		instance.SetOnSandboxRetired(func() {
+			m.resetRecoverBudget(repoID, instance)
+		})
 	case probeAbsent:
 		// af's own not-provisioned sentinel: nothing to preserve, so replacement is
 		// unconditional. The only arm that licenses that.

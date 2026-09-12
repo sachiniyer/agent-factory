@@ -695,21 +695,53 @@ func (m *Manager) resetPreserveBudget(repoID string, inst *session.Instance) {
 	m.mu.Unlock()
 }
 
+// seedRestoreStateEntry ensures a lostRestoreState entry exists for the session
+// without touching any existing episode counters. Call this before a Recover
+// attempt that follows a force-reap, so that if the Recover fails before the old
+// sandbox is retired, recordLostRestoreFailure finds a live entry and does NOT
+// seed consecutiveFailures from the persisted terminal failure — which would
+// count the first new-sandbox failure as attempt maxAttempts+1 and trigger
+// immediate give-up. A newly created entry starts at zero, so the first failure
+// is counted as attempt 1; an already-present entry keeps its current count,
+// which is the correct basis for the new attempt.
+func (m *Manager) seedRestoreStateEntry(repoID string, inst *session.Instance) {
+	stateKey := stableSessionKey(repoID, inst)
+	m.mu.Lock()
+	if m.lostRestoreStates[stateKey] == nil {
+		m.lostRestoreStates[stateKey] = &lostRestoreState{}
+	}
+	m.mu.Unlock()
+}
+
 // resetRecoverBudget clears the Recover-flap episode counter for the session
-// identified by repoID and inst. Call this when the sandbox is replaced (force-
-// reap): the old sandbox is gone, so any prior Recover failures are stale and
-// the new sandbox earns a fresh budget. Do NOT call this on a plain successful
-// preserve push — that does not replace the sandbox, and zeroing
-// consecutiveFailures there would erase a legitimate Recover-flap count from a
-// running episode. The symmetric probeAlive paths that settle the session
-// (RestoreLostSessions) instead delete the whole lostRestoreStates entry, so
-// they do not use this helper either.
+// identified by repoID and inst. Call this after the old sandbox is provably
+// retired (i.e. after a successful force-replace): the old sandbox is gone, so
+// any prior Recover failures are stale and the new sandbox earns a fresh budget.
+// Do NOT call this on a plain successful preserve push — that does not replace
+// the sandbox, and zeroing consecutiveFailures there would erase a legitimate
+// Recover-flap count from a running episode. The symmetric probeAlive paths that
+// settle the session (RestoreLostSessions) instead delete the whole
+// lostRestoreStates entry, so they do not use this helper either.
+//
+// An entry is always created (or reset in place) so that a daemon restart before
+// the operator uses --force-reap does not leave lostRestoreStates empty: if the
+// entry were absent, recordLostRestoreFailure would seed consecutiveFailures from
+// the persisted terminal failure, causing the first new-sandbox failure to be
+// counted as attempt maxAttempts+1 and triggering immediate give-up. The zeroed
+// entry ensures the new sandbox starts from attempt 1.
+// Any stale awaitingConfirm from the predecessor episode is also cleared: the
+// old sandbox is gone, so its pending confirmation is irrelevant, and leaving it
+// set would cause the next automatic poll to double-charge a failure.
 func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
 	stateKey := stableSessionKey(repoID, inst)
 	m.mu.Lock()
-	if st := m.lostRestoreStates[stateKey]; st != nil {
-		st.consecutiveFailures = 0
+	st := m.lostRestoreStates[stateKey]
+	if st == nil {
+		st = &lostRestoreState{}
+		m.lostRestoreStates[stateKey] = st
 	}
+	st.consecutiveFailures = 0
+	st.awaitingConfirm = false
 	m.mu.Unlock()
 }
 
