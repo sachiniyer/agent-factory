@@ -439,6 +439,11 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 		return resumeNotPerformed, nil
 	}
 	defer opLock.Unlock()
+	worktreeAdmission, err := m.lockLocalWorktreeAdmissionWithin(repoID, title, "resume", instance)
+	if err != nil {
+		return resumeNotPerformed, err
+	}
+	defer unlockWorktreeAdmission(worktreeAdmission)
 
 	m.mu.Lock()
 	current := m.instances[key]

@@ -153,8 +153,10 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 	defer func() {
 		if setupErr != nil {
 			if firstTimeSetup {
-				// New session: full cleanup (tmux + worktree) is safe.
-				if cleanupErr := i.Kill(); cleanupErr != nil {
+				// New session: clean up anything the failed create started. A setup
+				// ownership refusal created nothing and must not be widened into Kill's
+				// explicit-session deletion authority.
+				if cleanupErr := i.CleanupFailedCreate(setupErr); cleanupErr != nil {
 					setupErr = fmt.Errorf("%v (cleanup error: %v)", setupErr, cleanupErr)
 				}
 			} else {

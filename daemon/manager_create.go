@@ -326,7 +326,11 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// endpoint's error even when the sandbox teardown SUCCEEDED, so the
 		// workspace is already gone — tombstoning a row, holding the title and
 		// telling the user a workspace may remain would all be false.
-		killErr := instance.Kill()
+		// Local launch already made this same decision in its defer, but the
+		// manager retries cleanup for every backend. Preserve the setup refusal
+		// across that second boundary too: it proves the candidate created no
+		// workspace, not that the foreign occupant is now safe to kill.
+		killErr := instance.CleanupFailedCreate(serr)
 		if killErr != nil && !session.TeardownStateUnknown(killErr) {
 			m.warn().Printf("create of session %q: cleanup reported an error that does not leave its workspace state unknown; discarding the session as normal: %v", title, killErr)
 		}
@@ -737,8 +741,17 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	releaseWorktreeAdmission := func() {}
 	worktreeAdmissionHeld := false
 	if holdWorktreeAdmission && nameNamespace == runtimeNamespaceLocalTmux {
-		lock := m.worktreeAdmissionLockForRepo(repo.ID)
-		lock.Lock()
+		// Recovery may hold admission across an intentionally unbounded worktree
+		// add and operator hook. Bound this wait before manager reservations or an
+		// archived-title rename, so one stuck rebuild cannot wedge every later
+		// create in the repository and a timeout leaves no mutation to undo.
+		lock, waited, acquired := m.lockWorktreeAdmissionWithin(repo.ID)
+		if !acquired {
+			return nil, "", nil, nil, fmt.Errorf(
+				"cannot create session: timed out after %s waiting for another worktree operation in this repository; retry after that operation finishes",
+				waited,
+			)
+		}
 		releaseWorktreeAdmission = lock.Unlock
 		worktreeAdmissionHeld = true
 	}
