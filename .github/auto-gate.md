@@ -75,12 +75,17 @@ It is bound by `headCurrentSince` like a Codex artifact, so a push after the
 sign-off returns the PR to the manual pass. It waives the review requirement and
 nothing else.
 
-An update-branch is not such a push (#3803). When the head is a merge with exactly
-two parents whose second is contained in the base branch, the approval and every
-Codex artifact bind to the merge's FIRST parent — the content head — because the
-reviewed change did not move. Otherwise the gate's own update-branch would void
-the approval it had just acted on, which is the livelock #3799 hit minutes after
-#3796 landed. The decision names both heads.
+An update-branch is not such a push (#3803, #4235). Exactly two parents with the
+second contained in the base branch is the shape `PUT update-branch` produces, but
+a cheap pre-filter only; a hand-written conflict resolution has the same parents.
+The full check also reads the merge base and both parent trees, derives the only
+path-level three-way result, and requires the merge commit's tree to match it
+exactly — a truncated, malformed, same-path-conflicting or mismatched tree
+refuses carry. When the proof passes, the approval and every Codex artifact bind
+to the merge's FIRST parent — the content head — because the reviewed change did
+not move. Otherwise the gate's own update-branch would void the approval it had
+just acted on, which is the livelock #3799 hit minutes after #3796 landed. The
+decision names both heads.
 
 **The runs that update-branch triggers arrive parked, and the gate approves them
 (#3807).** The merge commit `PUT update-branch` writes is authored by the workflow
