@@ -478,8 +478,8 @@ Settable keys:
   keys                       compact JSON object of TUI action-to-key rebinds
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
-                             DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and network.require_token defaults to FALSE —
+                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
+                             full control plane on the network, and network.require_token defaults to false —
                              set network.require_token = true in the same breath, or anyone who can reach the
                              address controls this machine. af serves plain HTTP, so front a routable
                              listener with a TLS-terminating proxy or a private network.
