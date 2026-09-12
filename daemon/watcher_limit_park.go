@@ -20,20 +20,37 @@ var watcherLimitBackpressurePoll = 100 * time.Millisecond
 // multi-day limit park both lossless and bounded: AF stops reading stdout, so
 // the subprocess blocks on the pipe instead of AF dropping distinct events or
 // growing its own queue without limit. A stop always breaks the wait so watcher
-// reload and daemon shutdown remain bounded. Writer shutdown breaks it too:
-// once no process can add bytes, the finite pipe must be drained even though
-// no queue capacity became available, or runOnce would wait on a reader that
-// can never reach the EOF already sitting behind this pre-read gate. A stop
+// reload and daemon shutdown remain bounded. Once queue state is known, writer
+// shutdown breaks it too: no process can add bytes, so the finite pipe may drain
+// beyond the ordinary cap. Unknown state is different — enqueue must refuse it,
+// so the finite pipe remains the only lossless buffer until recovery. A stop
 // below capacity needs the same drain whenever the queue is limit-protected:
 // capacity controls when reads pause, but ownership of bytes already accepted
 // by the pipe does not depend on whether the disk backlog reached that bound.
 func (w *taskWatcher) waitForLimitQueueCapacity(stdoutWritersStopped <-chan struct{}) (proceed, drainFinitePipe bool) {
-	for w.queue != nil && w.queue.limitParkedAtCapacity() {
+	writersStopped := stdoutWritersStopped
+	writerFinished := false
+	for w.queue != nil {
+		blocked, unknown := w.queue.limitBackpressureState()
+		if !blocked {
+			break
+		}
+		if writerFinished && !unknown {
+			return false, true
+		}
 		select {
 		case <-w.stopCh:
 			return false, true
-		case <-stdoutWritersStopped:
-			return false, true
+		case <-writersStopped:
+			if !unknown {
+				return false, true
+			}
+			// The writer is finished, so leaving its pipe unread is bounded by
+			// the finite output already present. Disable the closed channel and
+			// keep retrying recovery: draining while state is unknown only hands
+			// those bytes to an enqueue that is required to refuse them.
+			writerFinished = true
+			writersStopped = nil
 		case <-time.After(watcherLimitBackpressurePoll):
 		}
 	}

@@ -722,8 +722,10 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 		// newest event. A targeted session already at a usage limit is different:
 		// this distinct event was never attempted and must establish protected
 		// backlog before the ordinary rate policy can consume it. The observer is
-		// fail-closed and ordered against in-flight limit snapshots.
-		if w.targetLimitRequiresRetention() {
+		// fail-closed and ordered against in-flight limit snapshots. Without a
+		// queue there is nowhere to retain it, so fall through to the visible drop
+		// counter and warning instead of silently claiming it was preserved.
+		if w.queue != nil && w.targetLimitRequiresRetention() {
 			w.enqueueEvent(line, tail, true)
 			return
 		}

@@ -145,7 +145,7 @@ func TestTargetLimitObservationRejectsConcurrentTaskRebind(t *testing.T) {
 	}
 }
 
-func TestUnreadableQueueBackpressuresUntilStateIsKnown(t *testing.T) {
+func TestUnreadableQueueBackpressuresAfterWriterExitUntilStateIsKnown(t *testing.T) {
 	dir := t.TempDir()
 	seed := newEventQueue(dir, "unknown-limit-state")
 	if err := seed.enqueue("parked-before-restart", true); err != nil {

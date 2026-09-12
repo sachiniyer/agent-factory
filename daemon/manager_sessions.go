@@ -489,22 +489,22 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	releaseLimitFence := func() {}
 	if req.TaskOrigin {
 		// The per-instance fence lets any older pane snapshot publish its derived
-		// liveness before this check. The manager fence then orders direct limit
-		// publication with submission, so no transition can land between the
-		// check and the keystrokes.
+		// liveness before this check. The manager fence orders the final read with
+		// direct limit publication, while this session's op lock and observation
+		// fence keep same-instance lifecycle/observation changes outside the send.
+		// Release the manager-wide fence before transport I/O: a wedged target must
+		// not block unrelated task deliveries or limit publication daemon-wide.
 		testHookTaskPromptBeforeObservationFence()
 		releaseObservationFence = instance.HoldAgentObservationSettlement()
 		testHookTaskPromptBeforeLimitFence()
 		m.accountLimitMu.Lock()
 		releaseLimitFence = m.accountLimitMu.Unlock
 	}
-	releaseDeliveryFences := func() {
-		releaseLimitFence()
+	livenessErr := taskPromptTargetLivenessError(req.Title, instance.GetLiveness(), req.TaskOrigin)
+	releaseLimitFence()
+	if livenessErr != nil {
 		releaseObservationFence()
-	}
-	if err := taskPromptTargetLivenessError(req.Title, instance.GetLiveness(), req.TaskOrigin); err != nil {
-		releaseDeliveryFences()
-		return session.PromptCouldNotConfirm, notAttempted(err)
+		return session.PromptCouldNotConfirm, notAttempted(livenessErr)
 	}
 	// Deliver through the agent-server (#1592 Phase 2 PR4), not the tmux-shaped
 	// Backend method — the daemon's delivery path is runtime-agnostic. SendPrompt
@@ -512,7 +512,7 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	// socket, so its failure is ambiguous ("never sent" vs "sent, reply lost") and
 	// is deliberately NOT tagged notAttempted — an ambiguous failure stays charged.
 	status, err := instance.SendPromptWithEvidence(req.Prompt, nowFunc)
-	releaseDeliveryFences()
+	releaseObservationFence()
 	// Delivery evidence changes the row even when liveness does not. Publish it
 	// immediately so list clients can distinguish a confirmed miss from #3162's
 	// honest could-not-confirm instead of waiting for the status poll.

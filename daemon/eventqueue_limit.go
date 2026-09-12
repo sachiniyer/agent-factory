@@ -159,23 +159,22 @@ func (q *eventQueue) retainLimitParked() bool {
 	return q.loadErr == nil && q.limitParked
 }
 
-// limitParkedAtCapacity tells the stdout reader to stop consuming bytes once a
-// protected backlog reaches the ordinary queue bound. The watch subprocess then
-// blocks on its pipe, so AF retains bounded disk use without dropping distinct
-// events. One final record may cross the byte cap; event lines are themselves
-// bounded, and the reader checks again before reading another. Unknown state
-// backpressures too: a failed load is not proof that the durable marker is
-// absent, and consuming another event while enqueue refuses that state would
-// discard it.
-func (q *eventQueue) limitParkedAtCapacity() bool {
+// limitBackpressureState tells the stdout reader whether consuming another line
+// could lose a protected event, and whether the reason is unreadable queue
+// state. Keeping those facts in one locked observation matters when the writer
+// exits: a known full queue may drain the now-finite pipe beyond its ordinary
+// cap, while unknown state must keep the pipe intact until enqueue can recover.
+// One final record may cross the byte cap; event lines are themselves bounded,
+// and the reader checks again before reading another.
+func (q *eventQueue) limitBackpressureState() (blocked, unknown bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	_ = q.retryLoadLocked()
 	if q.loadErr != nil {
-		return true
+		return true, true
 	}
 	if !q.limitParked {
-		return false
+		return false, false
 	}
-	return q.pending >= watcherQueueMaxEvents || q.size-q.offset >= watcherQueueMaxBytes
+	return q.pending >= watcherQueueMaxEvents || q.size-q.offset >= watcherQueueMaxBytes, false
 }
