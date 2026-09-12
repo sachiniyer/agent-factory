@@ -464,12 +464,12 @@ func TestMissionBrief_ReadsAsEnglishForEveryReason(t *testing.T) {
 func TestClearAutoSelectedAccount_AllowsSwapAgentAccountCheck(t *testing.T) {
 	backend := &LocalBackend{}
 	inst := &Instance{
-		Title:                "clear-auto-account",
-		Program:              tmux.ProgramClaude,
-		Account:              "work",
-		accountAutoSelected:  true,
-		backend:              backend,
-		liveness:             LiveRunning,
+		Title:               "clear-auto-account",
+		Program:             tmux.ProgramClaude,
+		Account:             "work",
+		accountAutoSelected: true,
+		backend:             backend,
+		liveness:            LiveRunning,
 	}
 	plan := AgentSwapPlan{target: tmux.ProgramCodex, program: tmux.ProgramCodex}
 
