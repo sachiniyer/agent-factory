@@ -254,3 +254,43 @@ func TestTaskArming_RefusedWatchTaskKeepsDurableQueue(t *testing.T) {
 	require.NoError(t, statErr,
 		"a refused task still exists in tasks.json, so its repairable backlog must not be treated as orphaned")
 }
+
+func TestTaskArming_PreGenerationTaskKeepsLegacyDurableQueue(t *testing.T) {
+	_, repoID, repoPath := newStatusTestManager(t)
+	legacy := watchTask("ab422401", "sleep 60", repoPath)
+	legacy.RepoID = repoID
+	require.Empty(t, legacy.GenerationID, "the fixture must model a task row written before generations existed")
+	raw, err := json.Marshal([]task.Task{legacy})
+	require.NoError(t, err)
+	tasksPath, err := task.MigrateOnLoadPath()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(tasksPath, raw, 0o600))
+	stored, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	require.Empty(t, stored[0].GenerationID,
+		"loading an upgrade row must not manufacture a new queue ownership identity")
+
+	watchers, _ := newTestSupervisor(t, task.LoadTasks)
+	queueDir, err := watchers.queueDir()
+	require.NoError(t, err)
+	queue := newEventQueueForGeneration(queueDir, legacy.ID, stored[0].GenerationID)
+	require.NoError(t, queue.enqueue("already-delivered"))
+	require.NoError(t, queue.enqueue("pending-across-upgrade"))
+	_, cursor, ok, err := queue.peek()
+	require.NoError(t, err)
+	require.True(t, ok)
+	advanceEventQueue(t, queue, cursor)
+
+	watchers.cleanOrphanQueues(stored, everyWatchTask())
+	for _, path := range []string{queue.path, queue.curPath} {
+		_, statErr := os.Stat(path)
+		require.NoError(t, statErr,
+			"generation-aware cleanup must retain a pre-generation task's legacy queue state")
+	}
+	reopened := newEventQueueForGeneration(queueDir, legacy.ID, stored[0].GenerationID)
+	event, _, ok, err := reopened.peek()
+	require.NoError(t, err)
+	require.True(t, ok, "the legacy backlog must remain pending after orphan cleanup")
+	require.Equal(t, "pending-across-upgrade", event.Line)
+}
