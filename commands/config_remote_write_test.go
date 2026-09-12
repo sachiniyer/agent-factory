@@ -447,13 +447,15 @@ func TestConfigWriteSkewRefusalHonorsJSON(t *testing.T) {
 // existing member while adding it.
 func TestConfigWriteJSONRendersFailedApplyOutcome(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
-		want string
+		name    string
+		outcome string
+		args    []string
+		want    string
 	}{
 		{
-			name: "set",
-			args: []string{"set", "network.require_token", "true", "--json"},
+			name:    "set failed",
+			outcome: "failed",
+			args:    []string{"set", "network.require_token", "true", "--json"},
 			want: "{\n" +
 				"  \"data\": {\n" +
 				"    \"key\": \"network.require_token\",\n" +
@@ -466,8 +468,9 @@ func TestConfigWriteJSONRendersFailedApplyOutcome(t *testing.T) {
 				"}\n",
 		},
 		{
-			name: "unset",
-			args: []string{"unset", "ssh.host_key_verification", "--json"},
+			name:    "unset failed",
+			outcome: "failed",
+			args:    []string{"unset", "ssh.host_key_verification", "--json"},
 			want: "{\n" +
 				"  \"data\": {\n" +
 				"    \"key\": \"ssh.host_key_verification\",\n" +
@@ -479,13 +482,28 @@ func TestConfigWriteJSONRendersFailedApplyOutcome(t *testing.T) {
 				"  \"error\": null\n" +
 				"}\n",
 		},
+		{
+			name:    "listener rebind deferred",
+			outcome: "deferred",
+			args:    []string{"set", "network.listen_addr", "127.0.0.1:9999", "--json"},
+			want: "{\n" +
+				"  \"data\": {\n" +
+				"    \"key\": \"network.listen_addr\",\n" +
+				"    \"value\": \"127.0.0.1:9999\",\n" +
+				"    \"path\": \"" + stubDaemonConfigPath + "\",\n" +
+				"    \"requires_restart\": false,\n" +
+				"    \"apply_outcome\": \"deferred\"\n" +
+				"  },\n" +
+				"  \"error\": null\n" +
+				"}\n",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			newConfigHome(t)
 			stub := newStubDaemon(t, "1.9.0")
-			stub.applyOutcome = "failed"
+			stub.applyOutcome = tc.outcome
 			t.Setenv("AF_DAEMON_URL", "")
 
 			out, errOut, err := runConfigCLI(t, append([]string{"--daemon-url", stub.url()}, tc.args...)...)

@@ -494,7 +494,7 @@ export interface ConfigSetResponse {
   warnings?: string[];
   /** Machine-readable live-apply result. Optional for older daemons; the form
    * renders the notice and warnings rather than re-deriving their policy. */
-  apply_outcome?: "applied" | "no_daemon" | "failed" | "unconfirmed" | "unknown";
+  apply_outcome?: "applied" | "deferred" | "no_daemon" | "failed" | "unconfirmed" | "unknown";
   /** Where the daemon is ACCEPTING now, when the written key moved one of its
    *  listeners (#3722) — absent for every other key. Saving network.listen_addr
    *  from this form moves the very listener the form is talking over, so the

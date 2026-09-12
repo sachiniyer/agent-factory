@@ -837,8 +837,8 @@ type SetConfigValueResponse struct {
 	// asks for, which is what the deferred notice beside it is about.
 	ListenerAddr string `json:"listener_addr,omitempty"`
 	// ApplyOutcome is appended to preserve every established response member's
-	// wire order. It lets automation distinguish applied, no-daemon, failed, and
-	// unconfirmed live applies without parsing RestartNotice or Warnings.
+	// wire order. It lets automation distinguish applied, deferred, no-daemon,
+	// failed, and unconfirmed saves without parsing RestartNotice or Warnings.
 	ApplyOutcome config.ApplyStatus `json:"apply_outcome,omitempty"`
 }
 

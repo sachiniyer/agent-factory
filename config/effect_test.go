@@ -205,29 +205,49 @@ func TestEffectNoticeDaemonApplyUnconfirmed(t *testing.T) {
 	}
 }
 
-func TestApplyOutcomeStatus(t *testing.T) {
+func TestApplyOutcomeStatusForKey(t *testing.T) {
 	tests := []struct {
 		name    string
 		outcome ApplyOutcome
+		key     string
 		want    ApplyStatus
 	}{
-		{name: "no daemon", want: ApplyStatusNoDaemon},
-		{name: "applied", outcome: ApplyOutcome{DaemonApplied: true}, want: ApplyStatusApplied},
-		{name: "failed", outcome: ApplyOutcome{DaemonApplyFailed: true}, want: ApplyStatusFailed},
-		{name: "unconfirmed", outcome: ApplyOutcome{DaemonApplyUnconfirmed: true}, want: ApplyStatusUnconfirmed},
+		{name: "no daemon", key: "default_program", want: ApplyStatusNoDaemon},
+		{name: "applied", outcome: ApplyOutcome{DaemonApplied: true}, key: "default_program", want: ApplyStatusApplied},
+		{name: "failed", outcome: ApplyOutcome{DaemonApplyFailed: true}, key: "default_program", want: ApplyStatusFailed},
+		{name: "unconfirmed", outcome: ApplyOutcome{DaemonApplyUnconfirmed: true}, key: "default_program", want: ApplyStatusUnconfirmed},
+		{
+			name: "failed listener key is deferred",
+			outcome: ApplyOutcome{
+				DaemonApplied:      true,
+				FailedListenerKeys: []string{"network.listen_addr"},
+			},
+			key:  "network.listen_addr",
+			want: ApplyStatusDeferred,
+		},
+		{
+			name: "unrelated key still applied",
+			outcome: ApplyOutcome{
+				DaemonApplied:      true,
+				FailedListenerKeys: []string{"network.listen_addr"},
+			},
+			key:  "network.require_token",
+			want: ApplyStatusApplied,
+		},
 		{
 			name: "uncertainty outranks a conflicting failure bit",
 			outcome: ApplyOutcome{
 				DaemonApplyFailed:      true,
 				DaemonApplyUnconfirmed: true,
 			},
+			key:  "default_program",
 			want: ApplyStatusUnconfirmed,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.outcome.Status(); got != tc.want {
-				t.Errorf("Status() = %q, want %q", got, tc.want)
+			if got := tc.outcome.StatusForKey(tc.key); got != tc.want {
+				t.Errorf("StatusForKey(%q) = %q, want %q", tc.key, got, tc.want)
 			}
 		})
 	}

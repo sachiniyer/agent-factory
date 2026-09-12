@@ -164,10 +164,10 @@ type ApplyOutcome struct {
 	FailedListenerKeys []string
 }
 
-// ApplyStatus is the machine-readable summary of whether Manager.ApplyConfig
-// was reached and completed. It describes the apply attempt as a whole;
-// FailedListenerKeys remains the per-key answer when the attempt completed but
-// a listener rebind could not take effect.
+// ApplyStatus is the machine-readable result for the key a save wrote. A
+// completed ApplyConfig can still be deferred for one listener key whose rebind
+// failed, so this is deliberately key-specific rather than merely the RPC's
+// success bit.
 type ApplyStatus string
 
 const (
@@ -178,17 +178,21 @@ const (
 	ApplyStatusNoDaemon    ApplyStatus = "no_daemon"
 	ApplyStatusFailed      ApplyStatus = "failed"
 	ApplyStatusUnconfirmed ApplyStatus = "unconfirmed"
+	ApplyStatusDeferred    ApplyStatus = "deferred"
 )
 
-// Status projects the outcome onto its stable wire value. Uncertainty wins
-// over failure if a malformed caller sets both: once the reply is lost, the
-// client cannot honestly claim the daemon kept its previous config.
-func (o ApplyOutcome) Status() ApplyStatus {
+// StatusForKey projects the whole apply onto one saved key's stable wire value.
+// Uncertainty wins over failure if a malformed caller sets both: once the reply
+// is lost, the client cannot honestly claim the daemon kept its previous config.
+func (o ApplyOutcome) StatusForKey(key string) ApplyStatus {
 	if o.DaemonApplyUnconfirmed {
 		return ApplyStatusUnconfirmed
 	}
 	if o.DaemonApplyFailed {
 		return ApplyStatusFailed
+	}
+	if o.listenerRebindFailed(key) {
+		return ApplyStatusDeferred
 	}
 	if o.DaemonApplied {
 		return ApplyStatusApplied
