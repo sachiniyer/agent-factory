@@ -114,36 +114,41 @@ for (const action of ["openTab", "switchTab", "closeTab"] as const) {
 }
 
 const compositionCases = [
-  [null, ["sessions", 0], false],
-  [["sessions", 0], ["sessions", 0], false],
-  [["sessions", 0], ["sessions", 1], true],
-  [["sessions", 3], ["sessions", 4], true],
-  [["sessions", 0], ["tasks", 0], true],
+  [null, ["sessions", "a", 0, 0], false],
+  [["sessions", "a", 0, 0], ["sessions", "a", 0, 0], false],
+  [["sessions", "a", 0, 0], ["sessions", "a", 1, 1], true],
+  [["sessions", "a", 1, 3], ["sessions", "a", 2, 4], true],
+  [["sessions", "a", 1, 1], ["sessions", "a", 2, 1], true],
+  [["sessions", "a", 0, 0], ["sessions", "b", 0, 0], true],
+  [["sessions", "a", 0, 0], ["tasks", "a", 0, 0], true],
 ] as const;
 for (const [previous, next, dismiss] of compositionCases) {
   test(`session composition observer dismisses previous=${previous}, next=${next}`, () => {
     const calls: string[] = [];
     const shell = {
-      sessionComposition: previous && { view: previous[0], focusedKind: previous[1] },
+      sessionComposition: previous && {
+        view: previous[0], selectedId: previous[1], activeTab: previous[2], focusedKind: previous[3],
+      },
       terminalSelected: false,
       dismissCarriedActions: () => calls.push("dismiss"),
     } as unknown as AppShell;
     const observeSessionComposition = (AppShell.prototype as unknown as {
       observeSessionComposition(
-        this: AppShell, view: "sessions" | "tasks" | "config", focusedKind: number | null,
+        this: AppShell, view: "sessions" | "tasks" | "config", selectedId: string | null,
+        activeTab: number, focusedKind: number | null,
       ): void;
     }).observeSessionComposition;
 
-    observeSessionComposition.call(shell, next[0], next[1]);
+    observeSessionComposition.call(shell, next[0], next[1], next[2], next[3]);
 
     assert.deepEqual(calls, dismiss ? ["dismiss"] : []);
     assert.deepEqual(
       (shell as unknown as { sessionComposition: unknown }).sessionComposition,
-      { view: next[0], focusedKind: next[1] },
+      { view: next[0], selectedId: next[1], activeTab: next[2], focusedKind: next[3] },
     );
     assert.equal(
       (shell as unknown as { terminalSelected: boolean }).terminalSelected,
-      next[0] === "sessions" && next[1] >= 0 && next[1] <= 2,
+      next[0] === "sessions" && next[3] >= 0 && next[3] <= 2,
     );
   });
 }

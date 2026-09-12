@@ -15702,9 +15702,9 @@ var AppShell = class {
   viewNav;
   sessionFirst = null;
   terminalSelected = false;
-  // The actual semantic inputs from the previous state update. The derived
-  // session-first boolean is too coarse: terminal→process and Web→VS Code focus
-  // changes must still invalidate a disclosure even though composition stays put.
+  // The disclosure context from the previous state update. Derived composition
+  // and focused kind are both too coarse: switching between same-kind panes must
+  // still invalidate carried actions, while viewport-only recomposition must not.
   sessionComposition = null;
   newTabPickerPosition = null;
   phoneSyncQueued = false;
@@ -15937,7 +15937,7 @@ var AppShell = class {
     this.syncDocumentTitle(state);
     const selectedForPhone = selectedSession(state);
     const focusedKind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
-    this.observeSessionComposition(state.view, focusedKind);
+    this.observeSessionComposition(state.view, state.selectedId, state.activeTab, focusedKind);
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
     if (this.lastKb !== kb) {
       this.lastKb = kb;
@@ -16417,13 +16417,13 @@ var AppShell = class {
     });
     return item;
   }
-  /** Invalidates carried disclosure state when the view or focused tab kind changes. */
-  observeSessionComposition(view, focusedKind) {
+  /** Invalidates carried disclosure state when its owning context changes. */
+  observeSessionComposition(view, selectedId, activeTab, focusedKind) {
     const previous = this.sessionComposition;
-    if (previous && (previous.view !== view || previous.focusedKind !== focusedKind)) {
+    if (previous && (previous.view !== view || previous.selectedId !== selectedId || previous.activeTab !== activeTab || previous.focusedKind !== focusedKind)) {
       this.dismissCarriedActions();
     }
-    this.sessionComposition = { view, focusedKind };
+    this.sessionComposition = { view, selectedId, activeTab, focusedKind };
     this.terminalSelected = isSessionFirst(true, view, focusedKind);
   }
   /** Retires carried actions before a user-owned transition can recompose them. */

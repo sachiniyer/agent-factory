@@ -796,10 +796,15 @@ export class AppShell {
   private readonly viewNav: HTMLElement;
   private sessionFirst: ReturnType<typeof sessionFirstComposition> | null = null;
   private terminalSelected = false;
-  // The actual semantic inputs from the previous state update. The derived
-  // session-first boolean is too coarse: terminal→process and Web→VS Code focus
-  // changes must still invalidate a disclosure even though composition stays put.
-  private sessionComposition: { view: View; focusedKind: number | null } | null = null;
+  // The disclosure context from the previous state update. Derived composition
+  // and focused kind are both too coarse: switching between same-kind panes must
+  // still invalidate carried actions, while viewport-only recomposition must not.
+  private sessionComposition: {
+    view: View;
+    selectedId: string | null;
+    activeTab: number;
+    focusedKind: number | null;
+  } | null = null;
   private newTabPickerPosition: (() => void) | null = null;
   private phoneSyncQueued = false;
   private readonly schedulePhoneSync = (): void => {
@@ -1286,10 +1291,10 @@ export class AppShell {
     const selectedForPhone = selectedSession(state);
     const focusedKind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
     // Observe the semantic owner before this update can replace or reparent its DOM.
-    // Viewport-only recomposition leaves this value alone and therefore preserves a
-    // user-opened disclosure; a focused-kind/view change invalidates carried state no
-    // matter which present or future action produced the store update.
-    this.observeSessionComposition(state.view, focusedKind);
+    // Viewport-only recomposition leaves this context alone and therefore preserves
+    // a user-opened disclosure; changing its view, session, or focused tab invalidates
+    // carried state no matter which present or future action produced the store update.
+    this.observeSessionComposition(state.view, state.selectedId, state.activeTab, focusedKind);
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
     // terminal only "holds" it while a session is actually selected; with none
@@ -1891,13 +1896,23 @@ export class AppShell {
     return item;
   }
 
-  /** Invalidates carried disclosure state when the view or focused tab kind changes. */
-  private observeSessionComposition(view: View, focusedKind: number | null): void {
+  /** Invalidates carried disclosure state when its owning context changes. */
+  private observeSessionComposition(
+    view: View,
+    selectedId: string | null,
+    activeTab: number,
+    focusedKind: number | null,
+  ): void {
     const previous = this.sessionComposition;
-    if (previous && (previous.view !== view || previous.focusedKind !== focusedKind)) {
+    if (previous && (
+      previous.view !== view
+      || previous.selectedId !== selectedId
+      || previous.activeTab !== activeTab
+      || previous.focusedKind !== focusedKind
+    )) {
       this.dismissCarriedActions();
     }
-    this.sessionComposition = { view, focusedKind };
+    this.sessionComposition = { view, selectedId, activeTab, focusedKind };
     this.terminalSelected = isSessionFirst(true, view, focusedKind);
   }
 
