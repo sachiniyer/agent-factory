@@ -171,13 +171,13 @@ func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
 	firstAttempt := make(chan struct{})
 	var once sync.Once
 	origDeliver := deliverPromptForTask
-	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
+	deliverPromptForTask = func(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
 		attempts.Add(1)
 		if req.DeferWhileAttached && attached.Load() {
 			once.Do(func() { close(firstAttempt) })
-			return StatusDeferredAttached, nil
+			return taskPromptDeliveryResult{status: StatusDeferredAttached}, nil
 		}
-		return "sent", nil
+		return taskPromptDeliveryResult{status: "sent"}, nil
 	}
 	t.Cleanup(func() { deliverPromptForTask = origDeliver })
 
@@ -257,14 +257,14 @@ func TestRunTask_CronFiresCoalesceDuringDefer(t *testing.T) {
 	firstAttempt := make(chan struct{})
 	var once sync.Once
 	origDeliver := deliverPromptForTask
-	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
+	deliverPromptForTask = func(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
 		if req.DeferWhileAttached && attached.Load() {
 			// The first held attempt proves the parked fire now owns the lock.
 			once.Do(func() { close(firstAttempt) })
-			return StatusDeferredAttached, nil
+			return taskPromptDeliveryResult{status: StatusDeferredAttached}, nil
 		}
 		delivered.Add(1)
-		return "sent", nil
+		return taskPromptDeliveryResult{status: "sent"}, nil
 	}
 	t.Cleanup(func() { deliverPromptForTask = origDeliver })
 
@@ -323,7 +323,7 @@ func TestDeliverCronTaskPrompt_NeverPastesWhileAttached(t *testing.T) {
 	firstAttempt := make(chan struct{})
 	var once sync.Once
 	origDeliver := deliverPromptForTask
-	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
+	deliverPromptForTask = func(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
 		attempts.Add(1)
 		once.Do(func() { close(firstAttempt) })
 		if attached.Load() {
@@ -333,10 +333,10 @@ func TestDeliverCronTaskPrompt_NeverPastesWhileAttached(t *testing.T) {
 			if !req.DeferWhileAttached {
 				forcedWhileAttached.Store(true)
 			}
-			return StatusDeferredAttached, nil
+			return taskPromptDeliveryResult{status: StatusDeferredAttached}, nil
 		}
 		pasted.Add(1)
-		return "sent", nil
+		return taskPromptDeliveryResult{status: "sent"}, nil
 	}
 	t.Cleanup(func() { deliverPromptForTask = origDeliver })
 
@@ -423,7 +423,7 @@ func TestWatcher_DefersDeliveryWhileTargetAttached(t *testing.T) {
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab158601", script, dir)))
 	bd := &busyDeliver{}
 	bd.attached.Store(true) // a TUI is attached to the target for now
-	s.deliver = bd.deliver
+	s.deliver = adaptWatchDelivery(bd.deliver)
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)

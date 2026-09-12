@@ -494,18 +494,37 @@ branch, so it is always something you ask for.
 ## Task runs: park, don't fail
 
 A **task** (cron or watch) can fire while your plan is already exhausted. When a
-task-driven session hits a usage-limit wall as it starts up — before its prompt
-is even delivered — Agent Factory **parks** the run instead of failing it:
+task-driven session hits a usage-limit wall as it starts up, or a task targets a
+session already marked `[limit]`, Agent Factory **parks** the run instead of
+typing into the limited pane or reporting a false success:
 
 - The session is **kept**, not torn down, and marked `[limit]` (with its reset
   time) so the badge, the manual `c` retry, and auto-resume all apply to it.
 - The task's run status is recorded as **`parked: usage limit`** — *not* an
   errored/failed run. It shows in the task manager as waiting for the limit
   window, and no failure side-effects fire.
-- Once the window resets, the **same resume machinery** takes over: auto-resume
-  (if `limit_auto_resume` is on) or your manual `c` retry re-delivers the
-  session's stored task prompt, and the run proceeds to completion. A parked run
-  becomes a completed one — never a failed one.
+- For a newly created task session, once the window resets the **same resume
+  machinery** takes over: auto-resume (if `limit_auto_resume` is on) or your
+  manual `c` retry re-delivers the session's stored task prompt, and the run
+  proceeds to completion. A parked run becomes a completed one — never a failed
+  one.
+
+For a task with `target_session`, trigger kind determines what parking retains.
+A cron occurrence is skipped and recorded `parked: usage limit`; the first cron
+fire after reset runs normally, without replaying a burst of identical prompts.
+A watch event is distinct data, so it enters the durable FIFO and replays after
+the target leaves `[limit]`. Limit-held watch backlogs are not expired at the
+ordinary 72-hour outage boundary. Once the bounded queue reaches 500 events or
+256KB, Agent Factory stops reading the watch command's stdout and lets pipe
+backpressure hold the producer until replay makes room, rather than dropping an
+event or growing managed queue storage without limit.
+
+This automatic park is deliberately task-only. A manual `af sessions
+send-prompt` still delivers to a `[limit]` session, because typing may be needed
+to answer a credits or limit **picker**. Do not type into a timed auto-continue
+banner: Claude explicitly treats any typing as cancellation. In a Codex numbered
+picker, use the arrow keys to select the intended choice before sending Enter;
+digits are ignored and Enter accepts whichever choice is already highlighted.
 
 Before this behavior, such a run spun a readiness timeout and was recorded as a
 failure even though nothing was actually wrong — you'd just hit your plan limit.

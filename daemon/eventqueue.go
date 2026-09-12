@@ -27,8 +27,10 @@ import (
 //
 // Layout: <AF home>/events/<taskID>.jsonl holds one JSON event per line;
 // <taskID>.cursor holds the byte offset of the first undelivered event, so a
-// pop is a cursor advance, not a file rewrite. Both files are removed whenever
-// the queue fully drains. The cursor is written AFTER the delivery it
+// pop is a cursor advance, not a file rewrite. A <taskID>.limit-parked marker
+// protects a backlog held by a known usage-limit wall from ordinary outage
+// expiry. All three files are removed whenever the queue fully drains. The
+// cursor is written AFTER the delivery it
 // acknowledges, so a daemon crash mid-replay redelivers at most one event —
 // at-least-once by design; exactly-once machinery is not worth building for a
 // prompt-delivery system.
@@ -93,10 +95,11 @@ type eventQueueCursor struct {
 // eventQueue is one task's durable backlog. Zero pending events is the steady
 // state: no files on disk, every field zero.
 type eventQueue struct {
-	taskID  string
-	path    string // <dir>/<taskID>.jsonl
-	curPath string // <dir>/<taskID>.cursor
-	remove  func(string) error
+	taskID    string
+	path      string // <dir>/<taskID>.jsonl
+	curPath   string // <dir>/<taskID>.cursor
+	limitPath string // <dir>/<taskID>.limit-parked
+	remove    func(string) error
 
 	// appendRecord/appendBoundary/truncate are the write seams. Production wires
 	// both appends to a real O_APPEND write and truncate to os.Truncate; tests
@@ -124,6 +127,16 @@ type eventQueue struct {
 	// lastLoadRetry throttles re-attempts to eventQueueLoadRetryInterval.
 	loadErr       error
 	lastLoadRetry time.Time
+	// limitParked is recovered from limitPath and remains set until the backlog
+	// drains. While set, age/cap eviction is disabled and the stdout reader
+	// backpressures at the ordinary cap instead, preserving distinct watch events
+	// across a multi-day limit window without unbounded AF-managed disk growth.
+	limitParked bool
+	// parkedStatusSeq identifies the queue head whose one parked occurrence was
+	// already written to the task store. It lives with the durable queue cursor,
+	// not LastRunStatus: watcher lifecycle reporting may legitimately replace the
+	// display status without turning a retry of this head into a new occurrence.
+	parkedStatusSeq int64
 
 	dropped     int // events dropped to the overflow caps, for the drop log
 	lastDropLog time.Time
@@ -161,6 +174,7 @@ func newEventQueue(dir, taskID string) *eventQueue {
 		taskID:         taskID,
 		path:           filepath.Join(dir, taskID+".jsonl"),
 		curPath:        filepath.Join(dir, taskID+".cursor"),
+		limitPath:      filepath.Join(dir, taskID+".limit-parked"),
 		remove:         os.Remove,
 		appendRecord:   appendRecordToFile,
 		appendBoundary: appendRecordToFile,
@@ -207,6 +221,9 @@ func (q *eventQueue) loadLocked() {
 	q.offset, q.size, q.pending, q.loadErr = 0, 0, 0, nil
 	var warns []string
 	err := q.scanDiskStateLocked(&warns)
+	if err == nil {
+		err = q.loadLimitParkedLocked()
+	}
 	if err != nil {
 		q.offset, q.size, q.pending = 0, 0, 0
 		q.loadErr = err
@@ -420,8 +437,15 @@ func (q *eventQueue) loadFailed() bool {
 }
 
 // enqueue appends one event and enforces the overflow caps by dropping oldest
-// pending events past them.
-func (q *eventQueue) enqueue(line string) error {
+// pending events past them. The optional flag marks a usage-limit-held event;
+// callers that have also recorded this exact occurrence use
+// enqueueWithParkedStatus so the queue persists both facts together.
+func (q *eventQueue) enqueue(line string, limitParked ...bool) error {
+	parkThisEvent := len(limitParked) > 0 && limitParked[0]
+	return q.enqueueWithParkedStatus(line, parkThisEvent, false)
+}
+
+func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusRecorded bool) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -432,6 +456,24 @@ func (q *eventQueue) enqueue(line string) error {
 	// while the state stays unknown.
 	if err := q.retryLoadNowLocked(); err != nil {
 		return fmt.Errorf("%w; refusing to append: %w", errEventQueueLoadFailed, err)
+	}
+	if q.pending == 0 && q.limitParked && !parkThisEvent {
+		if err := q.clearLimitParkedLocked(); err != nil {
+			return fmt.Errorf("failed to clear stale usage-limit queue marker: %w", err)
+		}
+	}
+	// A direct delivery can discover the limit before the event has a queue
+	// sequence. The queue is empty on that path, so the next sequence is the
+	// durable identity of the occurrence whose task status was just recorded.
+	// Never attach that fact to a tail behind an existing head.
+	parkedStatusSeq := q.parkedStatusSeq
+	if parkThisEvent && statusRecorded && q.pending == 0 {
+		parkedStatusSeq = q.seq + 1
+	}
+	if parkThisEvent && (!q.limitParked || parkedStatusSeq != q.parkedStatusSeq) {
+		if err := q.persistLimitParkedLocked(parkedStatusSeq); err != nil {
+			return fmt.Errorf("failed to persist usage-limit queue marker: %w", err)
+		}
 	}
 	if err := q.resetCursorBeforeFreshAppendLocked(); err != nil {
 		return err
@@ -461,7 +503,7 @@ func (q *eventQueue) enqueue(line string) error {
 			// Enforce the caps as the success path does: a persistently failing
 			// close must not let the backlog outgrow its bounds. The close error is
 			// the one worth returning, so a cap failure only gets logged.
-			if capErr := q.dropOldestOverCapsLocked(); capErr != nil {
+			if capErr := q.enforceCapsLocked(); capErr != nil {
 				log.WarningLog.Printf("watch task %s: failed to enforce event-queue caps after a close failure: %v", q.taskID, capErr)
 			}
 			return err
@@ -481,6 +523,13 @@ func (q *eventQueue) enqueue(line string) error {
 	q.size += int64(n)
 	q.pending++
 
+	return q.enforceCapsLocked()
+}
+
+func (q *eventQueue) enforceCapsLocked() error {
+	if q.limitParked {
+		return nil
+	}
 	return q.dropOldestOverCapsLocked()
 }
 
@@ -704,8 +753,11 @@ func (q *eventQueue) removeDrainedFilesLocked() (bool, error) {
 	// a refused teardown does not drop the jsonl and then stop (#3672 review).
 	// Draining the last event reaches here whether or not a cursor write
 	// happened first, so the removal seam would otherwise unlink a link the
-	// cursor's writer refuses to write through.
+	// cursor or limit-marker writer refuses to write through.
 	if err := config.RefuseManagedFileSymlink(q.curPath); err != nil {
+		return false, err
+	}
+	if err := config.RefuseManagedFileSymlink(q.limitPath); err != nil {
 		return false, err
 	}
 	if err := q.remove(q.path); err != nil && !os.IsNotExist(err) {
@@ -718,6 +770,12 @@ func (q *eventQueue) removeDrainedFilesLocked() (bool, error) {
 			return false, fmt.Errorf("failed to reset drained event-queue cursor: remove failed: %v; reset failed: %w", err, resetErr)
 		}
 		log.WarningLog.Printf("watch task %s: failed to remove drained event-queue cursor; reset it to 0: %v", q.taskID, err)
+	}
+	if err := q.clearLimitParkedLocked(); err != nil {
+		// The queue itself is already gone and the delivered event must not be
+		// resurrected. Leave the marker recorded in memory; the next append or
+		// daemon load retries its safe removal before trusting it.
+		log.WarningLog.Printf("watch task %s: failed to remove drained usage-limit queue marker: %v", q.taskID, err)
 	}
 	q.offset, q.size = 0, 0
 	return true, nil

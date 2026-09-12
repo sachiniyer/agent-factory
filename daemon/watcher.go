@@ -127,11 +127,15 @@ type watcherSupervisor struct {
 	// lifecycle statuses without a task store, and queueDir redirects the
 	// durable event queues to a scratch directory.
 	loadTasks   func() ([]task.Task, error)
-	deliver     func(taskID, line string) error
+	deliver     func(taskID, line string, options watchDeliveryOptions) error
 	setStatus   func(taskID, status string)
 	recordDrops func(taskID string, total int, droppedAt time.Time) error
 	logPath     func(taskID string) (string, error)
 	queueDir    func() (string, error)
+	// observeTargetLimit orders a backlog event's retention admission against
+	// limit publication. A later transition cannot make that already-admitted
+	// event retroactively part of the protected episode.
+	observeTargetLimit func(taskID string) (limited bool, err error)
 
 	shell            string
 	baseBackoff      time.Duration
@@ -154,13 +158,16 @@ func newWatcherSupervisorWithEventsPerMinute(eventsPerMinute int) *watcherSuperv
 		eventsPerMinute = config.DefaultWatcherEventsPerMinute
 	}
 	return &watcherSupervisor{
-		watchers:         make(map[string]*taskWatcher),
-		loadTasks:        task.LoadTasks,
-		deliver:          deliverWatchEvent,
-		setStatus:        persistWatcherStatus,
-		recordDrops:      persistWatcherDrops,
-		logPath:          watcherLogPath,
-		queueDir:         eventQueueDir,
+		watchers:    make(map[string]*taskWatcher),
+		loadTasks:   task.LoadTasks,
+		deliver:     deliverWatchEventWithOptions,
+		setStatus:   persistWatcherStatus,
+		recordDrops: persistWatcherDrops,
+		logPath:     watcherLogPath,
+		queueDir:    eventQueueDir,
+		observeTargetLimit: func(string) (bool, error) {
+			return false, nil
+		},
 		shell:            watcherShell(),
 		baseBackoff:      watcherBaseBackoff,
 		maxBackoff:       watcherMaxBackoff,
@@ -291,6 +298,19 @@ type taskWatcher struct {
 	deliverFailErr   string
 	loadFailSince    time.Time
 	loadFailErr      string
+
+	// statusMu makes the task-store parked status and its queue-head identity
+	// one publication with respect to watcher stop/crash reporting. It is
+	// deliberately separate from mu: a parked drainer may live indefinitely,
+	// while only this short two-store commit must exclude supervisor status.
+	statusMu sync.Mutex
+	// limitPublicationMu makes a drainer's delivery verdict and durable limit
+	// marker one publication with respect to stdout shutdown. Without it, stop
+	// can discard prefetched/pipe-buffered events after the delivery has found a
+	// limit but before the drainer has marked the queue. A drainer rechecks stop
+	// after entering this fence, so none can begin a new unpublished verdict
+	// after the reader makes its final retention decision.
+	limitPublicationMu sync.Mutex
 }
 
 // stop requests termination and blocks until the run goroutine returns. The
@@ -534,10 +554,11 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	}
 
 	readerDone := make(chan struct{})
+	stdoutWritersStopped := make(chan struct{})
 	go func() {
 		defer close(readerDone)
 		defer r.Close()
-		w.consumeLines(r, tail)
+		w.consumeLines(r, tail, stdoutWritersStopped)
 	}()
 
 	stderrDone := make(chan struct{})
@@ -578,6 +599,7 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	// not outlive the watcher. This also closes any inherited stdout/stderr
 	// write ends, so both reader goroutines are guaranteed to reach EOF.
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	close(stdoutWritersStopped)
 	<-readerDone
 	<-stderrDone
 
@@ -588,9 +610,22 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 // maxWatchLineBytes are truncated to the cap and the remainder discarded with
 // a logged note; unterminated trailing output at EOF is not an event but is
 // kept in the failure tail — it is often the script's death rattle (#797).
-func (w *taskWatcher) consumeLines(r io.Reader, tail *tailBuffer) {
+func (w *taskWatcher) consumeLines(r io.Reader, tail *tailBuffer, stdoutWritersStopped <-chan struct{}) {
 	br := bufio.NewReaderSize(r, maxWatchLineBytes)
 	for {
+		proceed, drainFinitePipe := w.waitForLimitQueueCapacity(stdoutWritersStopped)
+		if !proceed {
+			if drainFinitePipe {
+				// Do not close the read end until the stopped process group has
+				// relinquished every write end. Bytes already accepted by the kernel
+				// belong to emitted events just as much as bytes bufio prefetched.
+				if stdoutWritersStopped != nil {
+					<-stdoutWritersStopped
+				}
+				w.persistRemainingLimitEvents(br, tail)
+			}
+			return
+		}
 		chunk, err := br.ReadSlice('\n')
 		switch {
 		case err == nil:
@@ -677,11 +712,23 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	// PURPOSE — enqueue refuses unknown state, so queue-routing would only
 	// drop the event, and delivering beats FIFO. Cost: ordering, not loss.
 	if w.queue != nil && w.queue.pendingCountFresh() > 0 {
-		w.enqueueEvent(line, tail)
+		limitParked := w.targetLimitRequiresRetention()
+		w.enqueueEvent(line, tail, limitParked)
 		return
 	}
 
 	if !w.tryReserveEventSlot() {
+		// A rate-full window is normally permission to drop a chatty source's
+		// newest event. A targeted session already at a usage limit is different:
+		// this distinct event was never attempted and must establish protected
+		// backlog before the ordinary rate policy can consume it. The observer is
+		// fail-closed and ordered against in-flight limit snapshots. Without a
+		// queue there is nowhere to retain it, so fall through to the visible drop
+		// counter and warning instead of silently claiming it was preserved.
+		if w.queue != nil && w.targetLimitRequiresRetention() {
+			w.enqueueEvent(line, tail, true)
+			return
+		}
 		now := time.Now()
 		w.mu.Lock()
 		w.dropped++
@@ -707,10 +754,20 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 		return
 	}
 
-	err := w.sup.deliver(w.taskID, line)
+	err := w.sup.deliver(w.taskID, line, watchDeliveryOptions{})
 	w.recordDeliveryResult(time.Now(), err)
 	if err != nil {
+		limitParked := false
+		parkedStatusRecorded := false
 		switch {
+		case errors.Is(err, errTargetLimitReached):
+			// The target is at a known usage-limit wall. Preserve the event and
+			// refund its unused rate slot, but do not raise a delivery-failure
+			// alarm: the pipeline is intentionally parked until liveness clears.
+			limitParked = true
+			parkedStatusRecorded = watchParkedStatusRecorded(err)
+			w.releaseEventSlot()
+			log.InfoLog.Printf("watch task %s: target session is at a usage limit; deferring event until the limit clears", w.taskID)
 		case errors.Is(err, errTargetBusy):
 			// Not a failure: a TUI is attached to the target, so the event is
 			// held and retried after detach rather than pasted into live typing
@@ -743,53 +800,7 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 			}
 			log.ErrorLog.Printf("watch task %s: failed to deliver event: %v", w.taskID, err)
 		}
-		w.enqueueEvent(line, tail)
-	}
-}
-
-// tryReserveEventSlot applies the per-task delivery rate limit: prune the
-// sliding window, then reserve one slot if the window has room. Live
-// deliveries and the drainer's replays reserve through the same window, so
-// combined delivery pressure on the target session never exceeds
-// eventsPerMinute — a burst replay after an outage trickles in.
-//
-// This rate limit and the max_concurrent_runs cap (#1892) are orthogonal and do
-// not double-limit, so neither needs to know about the other. This one is
-// protective policy against a chatty script and DROPS excess events by design;
-// the cap is a resource bound and QUEUES them, never dropping. They compose
-// without any reconciliation because of handleEvent's FIFO gate above: the first
-// event the cap parks creates a backlog, and from then on every new event is
-// enqueued without ever consulting this limiter. So the moment concurrency is the
-// binding constraint, the rate limiter stops dropping — the two are never the
-// binding constraint at the same time.
-func (w *taskWatcher) tryReserveEventSlot() bool {
-	now := time.Now()
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	cut := 0
-	for cut < len(w.eventTimes) && now.Sub(w.eventTimes[cut]) >= time.Minute {
-		cut++
-	}
-	w.eventTimes = w.eventTimes[cut:]
-	if len(w.eventTimes) >= w.sup.eventsPerMinute {
-		return false
-	}
-	w.eventTimes = append(w.eventTimes, now)
-	return true
-}
-
-// releaseEventSlot refunds a rate slot reserved by tryReserveEventSlot when the
-// attempt did not actually deliver — a deferral (errTargetBusy, #1586) sends
-// nothing, so it must not spend the target's per-minute budget. It drops the
-// newest reservation; the live path and the drainer share the window, but the
-// limiter counts reservations rather than tracking identity, so removing one
-// per refunded attempt keeps the count exactly right regardless of which
-// goroutine's timestamp is dropped.
-func (w *taskWatcher) releaseEventSlot() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if n := len(w.eventTimes); n > 0 {
-		w.eventTimes = w.eventTimes[:n-1]
+		w.enqueueEvent(line, tail, limitParked, parkedStatusRecorded)
 	}
 }
 
@@ -797,12 +808,14 @@ func (w *taskWatcher) releaseEventSlot() {
 // The line also lands in the run's failure tail — it did not become a
 // delivered event this run (#797). When the queue is unavailable or the append
 // fails, this degrades to the pre-#1129 behavior: logged and dropped.
-func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer) {
+func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer, limitParked bool, parkedStatusRecorded ...bool) {
 	tail.add(line)
 	if w.queue == nil {
 		return
 	}
-	if err := w.queue.enqueue(line); err != nil {
+	statusRecorded := len(parkedStatusRecorded) > 0 && parkedStatusRecorded[0]
+	err := w.queue.enqueueWithParkedStatus(line, limitParked, statusRecorded)
+	if err != nil {
 		log.ErrorLog.Printf("watch task %s: failed to queue event for replay; dropping it: %v", w.taskID, err)
 		return
 	}
@@ -831,11 +844,17 @@ func (w *taskWatcher) stopDraining() {
 	w.mu.Unlock()
 }
 
-// deliverWatchEvent is the production delivery hook: it re-loads the task (so
-// prompt/target_session edits apply without restarting the script), renders
-// {{line}}, and routes through the same delivery path cron fires use, then
-// records the run status (#664 path).
+// deliverWatchEvent is the queue-less entry used by focused delivery tests.
+// Production supplies its queue-head identity through the options-aware half.
 func deliverWatchEvent(taskID, line string) error {
+	return deliverWatchEventWithOptions(taskID, line, watchDeliveryOptions{})
+}
+
+// deliverWatchEventWithOptions is the production delivery hook: it re-loads the
+// task (so prompt/target_session edits apply without restarting the script),
+// renders {{line}}, routes through the same delivery path cron fires use, and
+// records the run status (#664 path).
+func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOptions) error {
 	// The three pre-flight checks below fail before anything is created or sent,
 	// so they are tagged notAttempted and the caller refunds their rate slot
 	// (#2102). Everything past them can fail with the delivery already in
@@ -851,7 +870,7 @@ func deliverWatchEvent(taskID, line string) error {
 	if strings.TrimSpace(prompt) == "" {
 		return notAttempted(fmt.Errorf("event rendered an empty prompt (line %q)", line))
 	}
-	status, err := deliverTaskPrompt(t, prompt, true)
+	status, promptRetained, err := deliverTaskPromptOutcome(t, prompt, true)
 	if err != nil {
 		return err
 	}
@@ -864,9 +883,38 @@ func deliverWatchEvent(taskID, line string) error {
 		// logged quietly, since a deferral is expected, not an outage.
 		return errTargetBusy
 	}
-	now := time.Now()
-	if _, err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
-		log.ErrorLog.Printf("failed to update task status: %v", err)
+	// A parked replay retries the same queue head on the base cadence. The queue
+	// sequence, not mutable LastRunStatus presentation, says whether this exact
+	// occurrence was already recorded. A later success still writes normally.
+	// A live targeted park has no sequence until handleEvent durably enqueues it;
+	// writing the visible status here would leave a false park if that append
+	// fails. Defer only that shape: the drainer immediately retries the queued
+	// head with a cursor and publishes through commitParkedStatus. Create-per-run
+	// parks retain their prompt on the created session and still write here.
+	statusRecorded := status == TaskStatusLimitParked && options.parkedStatusRecorded
+	deferParkedStatus := status == TaskStatusLimitParked && !promptRetained && options.commitParkedStatus == nil
+	if !deferParkedStatus && (status != TaskStatusLimitParked || !statusRecorded) {
+		now := time.Now()
+		writeStatus := func() error {
+			_, err := updateWatchTaskStatus(taskID, &now, status)
+			return err
+		}
+		var err error
+		if status == TaskStatusLimitParked && options.commitParkedStatus != nil {
+			statusRecorded, err = options.commitParkedStatus(writeStatus)
+		} else {
+			err = writeStatus()
+			statusRecorded = status == TaskStatusLimitParked && err == nil
+		}
+		if err != nil {
+			log.ErrorLog.Printf("failed to update task status: %v", err)
+		}
+	}
+	if status == TaskStatusLimitParked && !promptRetained {
+		// A targeted watch owns distinct external data, so its queue must replay.
+		// A create-per-run watch already stored this prompt on the one parked
+		// session; queueing it too would create duplicate sessions on every retry.
+		return &watchTargetLimitError{statusRecorded: statusRecorded}
 	}
 	return nil
 }

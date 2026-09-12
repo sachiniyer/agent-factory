@@ -52,6 +52,12 @@ const StatusDeferredAttached = "deferred: target attached"
 // durable re-queue/retry without tripping the delivery-failure alarm (#1238).
 var errTargetBusy = errors.New("target session is attached; delivery deferred until detach")
 
+// errTargetLimitReached tells the watch path to retain a distinct event while
+// its target is usage-limit parked. Cron consumes the public parked status
+// directly and skips that occurrence; manual sends never receive this sentinel
+// because only TaskOrigin enables the limit gate.
+var errTargetLimitReached = errors.New("target session is parked at a usage limit")
+
 // errNotAttempted marks a delivery failure that provably sent NOTHING: the
 // attempt died on a pre-flight check, before any session was created and before
 // any keystroke reached a pane. The watch paths refund the rate slot such an
@@ -176,21 +182,29 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 // A newly started session is could-not-confirm: creation succeeded, but this
 // path has no pane observation that could honestly prove its initial prompt.
 func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, session.PromptDeliveryStatus, error) {
+	status, deliveryStatus, _, err := m.deliverPromptWithOutcome(req)
+	return status, deliveryStatus, err
+}
+
+// deliverPromptWithOutcome also reports whether a newly created limit-parked
+// session retained this exact prompt for resume. Only task delivery needs that
+// distinction; the public status remains "parked: usage limit" either way.
+func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, session.PromptDeliveryStatus, bool, error) {
 	// These all fail before any create or send — nothing was delivered — so they
 	// are pre-flight and tagged notAttempted so the watch path refunds the rate
 	// slot (#2501). RepoFromPath in particular is watch-reachable: a momentarily
 	// unresolvable project during an outage must not burn budget.
 	if req.Prompt == "" {
-		return "", session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("prompt is required"))
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("prompt is required"))
 	}
 	if req.RepoPath == "" {
-		return "", session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("repo path is required"))
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("repo path is required"))
 	}
 	repo, err := config.RepoFromPath(req.RepoPath)
 	if err != nil {
 		// Carry notDeliveredMarker so this is refundable across the RPC hop (#2501):
 		// a momentarily unresolvable project during an outage must not burn budget.
-		return "", session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
 	}
 	// A task's retained RepoID is its authoritative project binding. ProjectPath
 	// still supplies the filesystem root a delivery needs, but a symlink or
@@ -198,24 +212,21 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 	// rebind at the final daemon boundary so a task bound to A never delivers into
 	// B; the operator can explicitly rebind the task through the supported update.
 	if req.TaskRepoID != "" && req.TaskRepoID != repo.ID {
-		return "", session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("task is bound to repo %s, but project path %q now resolves to repo %s; prompt not delivered — rebind the task to use this project", req.TaskRepoID, req.RepoPath, repo.ID))
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("task is bound to repo %s, but project path %q now resolves to repo %s; prompt not delivered — rebind the task to use this project", req.TaskRepoID, req.RepoPath, repo.ID))
 	}
 
 	unlock := m.lockTarget(repo.ID, req.Title)
 	defer unlock()
 	testHookDeliverAfterTargetLock()
 
-	exists, deleting, liveness, err := m.targetSessionState(repo.ID, req.Title)
+	exists, deleting, err := m.targetSessionState(repo.ID, req.Title)
 	if err != nil {
 		// A pre-flight state refresh that failed sent nothing (#2501): the watch
 		// path must refund the rate slot this attempt reserved, not charge it.
-		return "", session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("could not check target session %q state; %s: %w", req.Title, notDeliveredMarker, err))
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("could not check target session %q state; %s: %w", req.Title, notDeliveredMarker, err))
 	}
 	if deleting {
-		return "", session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; %s", req.Title, notDeliveredMarker))
-	}
-	if err := promptTargetLivenessError(req.Title, liveness); err != nil {
-		return "", session.PromptCouldNotConfirm, notAttempted(err)
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("target session %q is being deleted; %s", req.Title, notDeliveredMarker))
 	}
 	if exists {
 		// A TUI is attached full-screen to this session (#1160 pause lease), so
@@ -227,13 +238,18 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 		// automated deliveries set DeferWhileAttached — a manual send-prompt is an
 		// explicit user action and still lands immediately.
 		if m.deferWhileAttached(repo.ID, req) {
-			return StatusDeferredAttached, session.PromptNotDelivered, nil
+			return StatusDeferredAttached, session.PromptNotDelivered, false, nil
 		}
-		deliveryStatus, err := m.SendPromptWithStatus(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt})
+		deliveryStatus, err := m.SendPromptWithStatus(SendPromptRequest{
+			Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
+		})
 		if err != nil {
-			return "", session.PromptCouldNotConfirm, err
+			if errors.Is(err, errTargetLimitReached) {
+				return TaskStatusLimitParked, session.PromptNotDelivered, false, nil
+			}
+			return "", session.PromptCouldNotConfirm, false, err
 		}
-		return "sent", deliveryStatus, nil
+		return "sent", deliveryStatus, false, nil
 	}
 
 	// If the absent target is this repo's daemon-managed root agent — only
@@ -242,7 +258,7 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 	// the reserved-name guard would reject, dropping the event with a misleading
 	// "pick another name" error; #1223).
 	if status, deliveryStatus, handled, rerr := m.deliverToReemergingRoot(repo, req); handled {
-		return status, deliveryStatus, rerr
+		return status, deliveryStatus, false, rerr
 	}
 
 	// The session is absent and, because deliveries to this target serialize on
@@ -258,28 +274,34 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 		// are not retryable and surface as-is.
 		if isConcurrentCreateErr(err) {
 			if werr := m.waitForTargetSession(repo.ID, req.Title); werr != nil {
-				// The target never materialized within the wait (its liveness went
-				// bad, it was deleted, or targetDeliverWait elapsed): nothing was
+				// The target never materialized within the wait (it was deleted or
+				// targetDeliverWait elapsed): nothing was
 				// sent, so this is pre-flight and must refund (#2501). This is the
 				// outage path — a 30s wait that times out repeatedly would otherwise
 				// drain the budget the recovery needs.
-				return "", session.PromptCouldNotConfirm, notAttempted(werr)
+				return "", session.PromptCouldNotConfirm, false, notAttempted(werr)
 			}
 			// A TUI can attach during the wait above, so re-check the defer lease
 			// before sending — otherwise this path pastes into an attached pane the
 			// "exists" path would have deferred (#1638).
 			if m.deferWhileAttached(repo.ID, req) {
-				return StatusDeferredAttached, session.PromptNotDelivered, nil
+				return StatusDeferredAttached, session.PromptNotDelivered, false, nil
 			}
-			deliveryStatus, serr := m.SendPromptWithStatus(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt})
+			deliveryStatus, serr := m.SendPromptWithStatus(SendPromptRequest{
+				Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
+			})
 			if serr != nil {
-				return "", session.PromptCouldNotConfirm, serr
+				if errors.Is(serr, errTargetLimitReached) {
+					return TaskStatusLimitParked, session.PromptNotDelivered, false, nil
+				}
+				return "", session.PromptCouldNotConfirm, false, serr
 			}
-			return "sent", deliveryStatus, nil
+			return "sent", deliveryStatus, false, nil
 		}
-		return "", session.PromptCouldNotConfirm, fmt.Errorf("failed to auto-create target session %q: %w", req.Title, err)
+		return "", session.PromptCouldNotConfirm, false, fmt.Errorf("failed to auto-create target session %q: %w", req.Title, err)
 	}
-	return createdTaskStatus(created), session.PromptCouldNotConfirm, nil
+	status := createdTaskStatus(created)
+	return status, session.PromptCouldNotConfirm, status == TaskStatusLimitParked, nil
 }
 
 // createMissingPromptTarget owns the auto-create interval before CreateSession.
@@ -330,39 +352,42 @@ func (m *Manager) lockTarget(repoID, title string) func() {
 }
 
 // targetSessionState reports whether a session with the given title exists for
-// the repo (in memory or persisted), whether it is mid-teardown, and the live
-// daemon instance's liveness when one is tracked. Deleting is transient
+// the repo (in memory or persisted) and whether it is mid-teardown. It does not
+// expose liveness: that point-in-time sample is not safe for delivery admission;
+// SendPromptWithStatus decides it under the per-instance observation fence.
+// Deleting is transient
 // in-memory state that is never persisted (#844/#847); the daemon's KillSession
 // path records it in killsInFlight, while TUI-initiated teardown is reflected on
 // the live instance as OpKilling.
-func (m *Manager) targetSessionState(repoID, title string) (exists, deleting bool, liveness session.Liveness, err error) {
+func (m *Manager) targetSessionState(repoID, title string) (exists, deleting bool, err error) {
 	m.mu.Lock()
 	if rerr := m.refreshLocked(); rerr != nil {
 		m.mu.Unlock()
-		return false, false, session.LivenessUnset, rerr
+		return false, false, rerr
 	}
 	key := daemonInstanceKey(repoID, title)
 	inst := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing {
-		return true, true, session.LivenessUnset, nil
+		return true, true, nil
 	}
 	if inst != nil {
-		return true, inst.IsTearingDown(), inst.GetLiveness(), nil
+		return true, inst.IsTearingDown(), nil
 	}
 
 	exists, err = repoHasSessionTitle(repoID, title)
-	return exists, false, session.LivenessUnset, err
+	return exists, false, err
 }
 
-// waitForTargetSession blocks until the target session exists, surfacing
-// undeliverable liveness states rather than delivering into them, bounded by
-// targetDeliverWait.
+// waitForTargetSession blocks until the target session exists, bounded by
+// targetDeliverWait. Liveness is deliberately left to SendPromptWithStatus's
+// final per-instance observation fence: refusing from this point-in-time sample
+// can skip an occurrence while an already-captured healthy snapshot is settling.
 func (m *Manager) waitForTargetSession(repoID, title string) error {
 	deadline := time.Now().Add(targetDeliverWait)
 	for {
-		exists, deleting, liveness, err := m.targetSessionState(repoID, title)
+		exists, deleting, err := m.targetSessionState(repoID, title)
 		if err != nil {
 			// Carry notDeliveredMarker on EVERY error path so a wait that ends
 			// without delivering is refundable across the RPC hop (#2501). The
@@ -373,9 +398,6 @@ func (m *Manager) waitForTargetSession(repoID, title string) error {
 		}
 		if deleting {
 			return fmt.Errorf("target session %q is being deleted; %s", title, notDeliveredMarker)
-		}
-		if err := promptTargetLivenessError(title, liveness); err != nil {
-			return err
 		}
 		if exists {
 			return nil

@@ -715,8 +715,13 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 	if m.deferWhileAttached(repo.ID, req) {
 		return StatusDeferredAttached, session.PromptNotDelivered, true, nil
 	}
-	status, err := m.SendPromptWithStatus(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt})
+	status, err := m.SendPromptWithStatus(SendPromptRequest{
+		Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
+	})
 	if err != nil {
+		if errors.Is(err, errTargetLimitReached) {
+			return TaskStatusLimitParked, session.PromptNotDelivered, true, nil
+		}
 		return "", session.PromptCouldNotConfirm, true, err
 	}
 	return "sent", status, true, nil

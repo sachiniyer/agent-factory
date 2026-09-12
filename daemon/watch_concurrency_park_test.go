@@ -83,7 +83,7 @@ func TestWatcherQueuesEventsParkedByConcurrencyLimit(t *testing.T) {
 	script := `echo e1; echo e2; echo e3; echo e4; sleep 60`
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab189201", script, dir)))
 	cd := &cappedDeliver{atLimit: true}
-	s.deliver = cd.deliver
+	s.deliver = adaptWatchDelivery(cd.deliver)
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -178,7 +178,7 @@ func TestConcurrencyParkRefundsRateSlots(t *testing.T) {
 	script := `echo e1; echo e2; sleep 60`
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab189202", script, dir)))
 	cd := &cappedDeliver{atLimit: true}
-	s.deliver = cd.deliver
+	s.deliver = adaptWatchDelivery(cd.deliver)
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
