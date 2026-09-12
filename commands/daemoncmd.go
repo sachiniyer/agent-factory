@@ -238,9 +238,13 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 	if info.Running {
 		fmt.Fprintln(w, "daemon: running")
 	} else {
-		// State the lifecycle property rather than one caller list: only operations
-		// targeting the default local daemon may start it; remote targets are dial-only.
-		fmt.Fprintln(w, "daemon: not running (starts on demand for default local-target operations; remote targets are dial-only)")
+		// Both production callers — `af daemon status` and the daemon section in
+		// `af bug-report` — are read-only and never spawn. State that first, then the
+		// governing boundary: only operations that own the default local daemon
+		// lifecycle may start it; remote targets are dial-only.
+		fmt.Fprintln(w, "daemon: not running (read-only checks do not start it; "+
+			"the default local daemon starts on demand for lifecycle-owning operations; "+
+			"remote targets are dial-only)")
 	}
 	if info.Phase != "" {
 		fmt.Fprintf(w, "  phase:          %s\n", info.Phase)
