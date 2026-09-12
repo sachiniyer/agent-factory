@@ -745,6 +745,57 @@ func TestLoginDoesNotRefuseWhenALegacyPaneFromADifferentHomeHasACollidingTitle(t
 	}
 }
 
+// TestLoginDoesNotRefuseWhenALegacyPaneFromTheSameHomeHasACollidingTitle is the
+// same-home variant of TestLoginDoesNotRefuseWhenALegacyPaneFromADifferentHomeHasACollidingTitle.
+// Two account names that differ only in a sanitized-away character (e.g. `work.proj`
+// vs `work_proj`) produce the same legacy title AND the same AF_HOME, so the
+// previous home-only check was insufficient and would falsely refuse the second
+// account's login. The fix adds a credential-root variable check (e.g. CODEX_HOME):
+// because the two accounts live in different directories, the pane's directory
+// reveals which account it belongs to, and only the matching one triggers a refusal.
+func TestLoginDoesNotRefuseWhenALegacyPaneFromTheSameHomeHasACollidingTitle(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	binDir := t.TempDir()
+	writeBlockingAgentFixture(t, binDir, "codex")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Register work_proj and start a legacy-format pane for it in THIS home.
+	// Its AF_HOME marker points at home, just as work.proj's would.
+	workProjDir, err := agentaccount.Register(home, "codex", "work_proj")
+	if err != nil {
+		t.Fatalf("register work_proj: %v", err)
+	}
+	legacyName := agentaccount.LegacyLoginSessionName("codex", "work_proj")
+	legacyPane := tmux.NewTmuxSession(legacyName, "codex login --device-auth")
+	if err := legacyPane.Start(workProjDir); err != nil {
+		t.Fatalf("start legacy pane for work_proj: %v", err)
+	}
+	t.Cleanup(func() { legacyPane.Close() })
+
+	// Register work.proj in the same home. Its legacy title sanitizes to the
+	// same string as work_proj, but its credential directory is different.
+	_, err = agentaccount.Register(home, "codex", "work.proj")
+	if err != nil {
+		t.Fatalf("register work.proj: %v", err)
+	}
+
+	// A new login for work.proj must NOT be refused: the legacy pane belongs to
+	// work_proj (different directory), not to work.proj.
+	supervisor := New()
+	t.Cleanup(supervisor.Stop)
+	ctx := context.Background()
+	_, err = supervisor.Start(ctx, Request{Home: home, Agent: "codex", Name: "work.proj"})
+	if err != nil {
+		t.Fatalf("new login for work.proj was refused when the colliding legacy pane belongs to work_proj in the same home: %v", err)
+	}
+	if !supervisor.Live("codex", "work.proj") {
+		t.Fatal("work.proj login was not tracked as live")
+	}
+}
+
 // TestLoginPaneCollisionDotVsUnderscoreGetsDistinctPanes is the regression test for
 // the tmux-name collision between account names that differ only by '.' vs '_'
 // (e.g. `work.proj` and `work_proj`). Before the fix, LoginSessionName embedded the

@@ -37,6 +37,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -297,6 +298,17 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 		// Verify ownership before refusing: read the AF_HOME marker set at pane
 		// creation. If it names a different home, the collision is in the sanitized
 		// title only — not a race risk for this home — so proceed.
+		//
+		// AF_HOME alone is not sufficient: two account names that sanitize to the
+		// same legacy title AND share a home (e.g. `work.proj` and `work_proj` in
+		// the same AF home) would both pass the home check, causing a false refusal
+		// for the second account. Verifying the agent's credential-root variable
+		// (e.g. CODEX_HOME) against THIS account's dir establishes account identity,
+		// not just home ownership — the legacy binary set it to the account's actual
+		// directory, so a different directory means a different account's title
+		// collision. Absent credential-root (pre-variable binary or variable not
+		// readable): ownership is unverifiable, proceed rather than block on an
+		// ambiguous pane.
 		legacySName := legacyPane.SanitizedName()
 		legacyOwner, legacyOwnerPresent, legacyOwnerErr := tmux.SessionHomeMarker(cmd.MakeExecutor(), legacySName)
 		if legacyOwnerErr != nil {
@@ -320,12 +332,26 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 					req.Agent, req.Name, req.Home, err)
 			}
 			if ownerCanon == homeCanon {
-				// Confirmed same home: this is our pane, refuse to create a second one.
-				return Session{}, fmt.Errorf(
-					"cannot start the %s login flow for account %q: a login pane from an older agent-factory binary "+
-						"is still running under the legacy session name %s — finish or kill it first "+
-						"(tmux kill-session -t %s), then run this command again",
-					req.Agent, req.Name, legacySName, legacySName)
+				// Confirmed same home: now verify the account identity via the agent's
+				// credential-root variable (e.g. CODEX_HOME). Two account names that
+				// differ only in a sanitized-away character produce the same legacy title
+				// AND the same AF_HOME — reading the directory that the pane was actually
+				// scoped to is the only way to tell them apart.
+				sameAccount, refuseErr := legacyPaneBelongsToAccount(req.Agent, req.Name, legacySName, dir)
+				if refuseErr != nil {
+					return Session{}, refuseErr
+				}
+				if sameAccount {
+					// Confirmed same home and same account: this is our pane, refuse to
+					// create a second one.
+					return Session{}, fmt.Errorf(
+						"cannot start the %s login flow for account %q: a login pane from an older agent-factory binary "+
+							"is still running under the legacy session name %s — finish or kill it first "+
+							"(tmux kill-session -t %s), then run this command again",
+						req.Agent, req.Name, legacySName, legacySName)
+				}
+				// Different account directory or absent credential-root: title collision
+				// only, not a race risk for this account — proceed.
 			}
 			// Confirmed different home: title collision, not a race risk for us.
 		}
@@ -520,6 +546,62 @@ func canonicalHome(path string) (string, error) {
 		return "", fmt.Errorf("canonicalize home %q: %w", path, err)
 	}
 	return real, nil
+}
+
+// legacyPaneBelongsToAccount reports whether a legacy pane was scoped to THIS
+// account. It reads the agent's credential-root environment variable (e.g.
+// CODEX_HOME) from the pane and compares its canonical path to dir.
+//
+// Returns (true, nil) when the pane provably belongs to this account.
+// Returns (false, nil) when the pane belongs to a different account (different
+// directory) or when the credential-root variable is absent (old binary / pane
+// predating the variable) — in either case the caller should proceed rather than
+// refuse, because the pane is not confirmed to be a race risk for this account.
+// Returns (false, non-nil) when tmux did not answer — treat as unknown and
+// propagate the error as a retryable refusal.
+//
+// AF_HOME establishes installation ownership but not account identity. Two
+// account names that differ only in a character tmux's sanitizer folds away
+// (e.g. `.` → `_`) produce the same legacy title AND the same AF_HOME, so the
+// home check alone cannot distinguish them. The credential-root variable was set
+// by the legacy binary to the exact directory the pane was running against, so
+// it is the unforgeable per-account discriminator.
+func legacyPaneBelongsToAccount(agent, name, legacySName, dir string) (sameAccount bool, refuseErr error) {
+	configVar, hasConfigVar := sessionenv.SupportsAccounts(agent)
+	if !hasConfigVar {
+		// Agent has no account-specific config variable: cannot verify account
+		// identity beyond the home. Treat as belonging to this account (i.e. refuse)
+		// to be conservative — this path only applies to agents without a credential
+		// root variable, which currently means the agent is not fully account-scoped
+		// anyway.
+		return true, nil
+	}
+	legacyDir, legacyDirPresent, legacyDirErr := tmux.SessionEnvVar(cmd.MakeExecutor(), legacySName, configVar)
+	if legacyDirErr != nil {
+		return false, fmt.Errorf(
+			"cannot start the %s login flow for account %q: tmux did not respond while "+
+				"checking the account directory of the legacy login pane %s — "+
+				"try again once the tmux server has settled",
+			agent, name, legacySName)
+	}
+	if !legacyDirPresent {
+		// Absent credential-root: pane was created by a binary predating the
+		// variable, or a tmux older than 3.2. Ownership cannot be verified for this
+		// account specifically — proceed rather than blocking on unverifiable evidence.
+		return false, nil
+	}
+	legacyDirCanon, err := canonicalHome(legacyDir)
+	if err != nil {
+		// Unresolvable path in the pane's environment: cannot confirm — proceed.
+		return false, nil
+	}
+	dirCanon, err := canonicalHome(dir)
+	if err != nil {
+		return false, fmt.Errorf(
+			"cannot start the %s login flow for account %q: could not resolve account directory %q: %w",
+			agent, name, dir, err)
+	}
+	return legacyDirCanon == dirCanon, nil
 }
 
 func (s *Supervisor) track(agent, name string, pane *tmux.TmuxSession) bool {
