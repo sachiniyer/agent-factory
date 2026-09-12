@@ -558,6 +558,15 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	// with a workDir is reattaching persisted state, so its first capture only
 	// establishes the monitor baseline; Start's inner Restore("") keeps the fresh
 	// process behavior where first output is an update.
+	//
+	// Clear the ProvenNoPane latch: a conclusive close latches it to prove the
+	// session had no pane at that moment, but reattaching to a LIVE session means
+	// this object is now in front of a pane that genuinely exists. The proof is
+	// about a specific pane's absence at a specific moment; attaching to a
+	// different incarnation of the session invalidates it. Without this clear, a
+	// reattach through this branch inherits a stale latch and teardown skips its
+	// liveness probe for a pane that is still running.
+	t.setProvenNoPane(false)
 	monitor := newStatusMonitor()
 	if workDir != "" {
 		monitor = newReattachStatusMonitor()

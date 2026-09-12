@@ -92,6 +92,54 @@ func TestCloseAndWaitForPaneExit_BlindConclusiveDoesNotLatchProvenNoPane(t *test
 		"a blind close lost the ancestry and must not latch the pane-gone proof")
 }
 
+// TestRestoreWithResult_LiveSessionClearsProvenNoPane guards the reattach path:
+// a conclusive non-blind close latches ProvenNoPane, but if the session is
+// subsequently recreated externally and this object reattaches through
+// RestoreWithResult's live-session branch, the stale latch must be cleared.
+// Without the clear, teardown trusts a proof that was about a different
+// incarnation and skips probing a pane that is genuinely alive.
+func TestRestoreWithResult_LiveSessionClearsProvenNoPane(t *testing.T) {
+	// Build a conclusive non-blind close so ProvenNoPane latches.
+	pid := exitedProcess(t).PID
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "display-message") {
+				return []byte(fmt.Sprintf("%d\n", pid)), nil
+			}
+			// list-panes: empty set → no descendants, blind=false.
+			return []byte(""), nil
+		},
+	}
+	s := newTmuxSession(toTmuxName("restore-clears-latch", ""), "claude", NewMockPtyFactory(t), cmdExec)
+	require.False(t, s.ProvenNoPane(), "fresh session has proved nothing")
+
+	// Phase 1: conclusive non-blind close latches ProvenNoPane.
+	state, blind, err := s.CloseAndWaitForPaneExitReportingBlindness()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.False(t, blind)
+	require.True(t, s.ProvenNoPane(), "conclusive non-blind close latches the proof")
+
+	// Phase 2: the session is recreated externally and reattached via
+	// RestoreWithResult's live-session branch (has-session returns true).
+	liveExec := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil }, // has-session → exists
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			return []byte("output"), nil
+		},
+	}
+	s.cmdExec = liveExec
+	result, restoreErr := s.RestoreWithResult("/some/work/dir")
+	require.NoError(t, restoreErr)
+	require.Equal(t, RestoreReattached, result)
+
+	// The stale proof must be cleared: teardown must probe rather than trust
+	// the latch from the previous incarnation's close.
+	require.False(t, s.ProvenNoPane(),
+		"reattaching to a live session must clear the stale ProvenNoPane latch")
+}
+
 // TestCloseAndWaitForPaneExit_InconclusiveDoesNotLatchProvenNoPane pins the
 // other half of the scope: an inconclusive teardown (PaneStateUnknown) latches
 // nothing, so the backstop close in stopForAccountSwap still runs on the
