@@ -104,3 +104,26 @@ func TestLiveDropOverlayPreservesTerminalWatcherStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestLiveDropOverlayPreservesRecordedParkedHeadOverTerminalStatus(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "d4357005")
+	require.NoError(t, queue.enqueueWithParkedStatus("held occurrence", true, true))
+	var persisted string
+	w := &taskWatcher{taskID: "d4357005", queue: queue}
+	s := &watcherSupervisor{
+		watchers:  map[string]*taskWatcher{w.taskID: w},
+		setStatus: func(_, status string) { persisted = status },
+	}
+	w.sup = s
+	w.persistTerminalStatus("stopped")
+	record := task.Task{ID: w.taskID, LastRunStatus: TaskStatusLimitParked}
+
+	s.applyLiveDropState(&record)
+
+	require.Equal(t, TaskStatusLimitParked, record.LastRunStatus)
+	require.Empty(t, persisted, "terminal persistence must not hide a recorded parked occurrence")
+	w.mu.Lock()
+	terminalStatus := w.terminalStatus
+	w.mu.Unlock()
+	require.Empty(t, terminalStatus, "live overlay must not latch a terminal status over a parked head")
+}

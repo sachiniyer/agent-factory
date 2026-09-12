@@ -159,6 +159,21 @@ func TestEventQueueCursorRemovalRefusesASymlinkedCursor(t *testing.T) {
 	})
 }
 
+func TestEventQueueDrainRefusesASymlinkedLimitMarkerBeforeDeletingBacklog(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "task-limit-marker")
+	link, target := linkedManagedFile(t, dir, "task-limit-marker.limit-parked", "parked\n")
+	require.NoError(t, os.WriteFile(q.path, []byte("{}\n"), 0644))
+
+	q.mu.Lock()
+	_, err := q.removeDrainedFilesLocked()
+	q.mu.Unlock()
+
+	assertRefusedSymlink(t, err, link, target, "parked\n")
+	assert.FileExists(t, q.path,
+		"limit-marker refusal must happen before deleting the backlog it describes")
+}
+
 // The unit file is what #3672 is titled after. ~/.config/systemd/user/ is a
 // directory where links are ordinary — that is how `systemctl enable` works — so
 // this is the one place a link is genuinely likely.
