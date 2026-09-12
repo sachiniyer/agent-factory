@@ -1,14 +1,12 @@
 package daemon
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/stretchr/testify/assert"
@@ -127,60 +125,32 @@ func TestArchiveLongTitleE2E(t *testing.T) {
 	})
 }
 
-// TestArchiveLongTitleCreateCollision verifies guarantee 9 end-to-end: two distinct
-// long titles that share their first 255 sanitized bytes collapse to one
-// archiveTitleKey and the second create is REJECTED at admission, not silently
-// aliased on disk. CreateSession runs the full admission path (branch-side guard
-// first, then the archive-namespace guard); the second must be refused. Mirrors
-// TestCreateSessionRejectsArchiveDirectoryCollision for the long-title truncation
-// class.
-func TestArchiveLongTitleCreateCollision(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	installInstantBackend(t)
-	repoPath := setupControlRepo(t)
-	m, err := NewManager(config.DefaultConfig())
-	require.NoError(t, err)
-
-	// Two distinct titles whose sanitized forms share their first 255 bytes —
-	// both 300 bytes, differing only in the final byte, so sanitizeArchiveTitle
-	// truncates each to the same 255-byte leaf and archiveTitleKey collides.
+// TestArchiveLongTitleInjectivity verifies that two distinct long titles whose
+// sanitized forms share the same prefix (up to 255 bytes) produce DIFFERENT
+// archive leaves. The digest-based truncation in sanitizeArchiveTitle makes the
+// leaf injective: titles that a pure prefix-cut would map to the same destination
+// are now kept apart, so distinct long-titled sessions that predate this fix can
+// all be archived without the second being rejected as a collision.
+func TestArchiveLongTitleInjectivity(t *testing.T) {
+	// Two 300-byte titles sharing their first 299 sanitized bytes — differing
+	// only in the last byte — but with distinct full-string digests.
 	titleA := strings.Repeat("a", 300)
 	titleB := strings.Repeat("a", 299) + "b"
-	require.Equal(t, sanitizeArchiveTitle(titleA), sanitizeArchiveTitle(titleB),
-		"both long titles must truncate to the same archive leaf")
+	leafA := sanitizeArchiveTitle(titleA)
+	leafB := sanitizeArchiveTitle(titleB)
+	require.NotEqual(t, leafA, leafB,
+		"two distinct long titles must produce different archive leaves (injective)")
+	require.LessOrEqual(t, len(leafA), archiveLeafNameMax, "leafA over NAME_MAX")
+	require.LessOrEqual(t, len(leafB), archiveLeafNameMax, "leafB over NAME_MAX")
 
-	_, err = m.CreateSession(context.Background(), CreateSessionRequest{Title: titleA, RepoPath: repoPath, Program: "claude"})
-	require.NoError(t, err, "first long-title create must succeed (shape-valid, bounded source worktree)")
-
-	_, err = m.CreateSession(context.Background(), CreateSessionRequest{Title: titleB, RepoPath: repoPath, Program: "claude"})
-	require.Error(t, err, "a second title truncating to the same archive leaf must be rejected, not silently aliased")
-	// The branch-side guard (truncating at 200) or the archive-namespace guard
-	// (truncating at 255) rejects it; both prove no silent on-disk aliasing.
-	assert.True(t,
-		strings.Contains(err.Error(), "already maps to archive directory") ||
-			strings.Contains(err.Error(), "branch") || strings.Contains(err.Error(), "already"),
-		"second long-title create must be refused at admission: %v", err)
-}
-
-// TestArchiveLongTitleArchiveNamespaceCollision exercises the archive-namespace
-// guard in isolation (validateArchiveTitleLocked), so guarantee 9 is verified at
-// the archive layer regardless of which order the branch-side guard runs. Two
-// 300-byte titles sharing their first 255 sanitized bytes must collide in the
-// portable archive namespace. This is host-safe (pure Manager map, no tmux/worktree).
-func TestArchiveLongTitleArchiveNamespaceCollision(t *testing.T) {
-	titleA := strings.Repeat("a", 300)
-	titleB := strings.Repeat("a", 299) + "b"
-	require.Equal(t, sanitizeArchiveTitle(titleA), sanitizeArchiveTitle(titleB))
-	require.True(t, archiveTitlesCollide(titleA, titleB), "truncating long titles must collide in the archive namespace")
-
-	m := &Manager{
-		instances:             make(map[string]*session.Instance),
-		reservedArchiveTitles: make(map[string]struct{}),
-	}
-	inst := &session.Instance{Title: titleA}
-	m.instances[daemonInstanceKey("repo", titleA)] = inst
-
-	err := m.validateArchiveTitleLocked("repo", titleB, nil, nil, false)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already maps to archive directory")
+	// The disambiguating suffix " (archived N)" (appended by uniqueArchivedTitleLocked
+	// to a long base) must also survive in the digest — each rung produces a
+	// distinct leaf so the suffix walk converges.
+	base := strings.Repeat("a", 300)
+	leaf1 := sanitizeArchiveTitle(base + " (archived)")
+	leaf2 := sanitizeArchiveTitle(base + " (archived 2)")
+	leaf3 := sanitizeArchiveTitle(base + " (archived 3)")
+	require.NotEqual(t, leaf1, leaf2, "archived-suffix rungs must produce distinct leaves")
+	require.NotEqual(t, leaf2, leaf3, "archived-suffix rungs must produce distinct leaves")
+	require.LessOrEqual(t, len(leaf1), archiveLeafNameMax, "archived-suffix leaf over NAME_MAX")
 }

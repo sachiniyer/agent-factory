@@ -138,12 +138,8 @@ func TestSanitizeArchiveTitleBoundsLongTitle(t *testing.T) {
 		})
 	}
 
-	// The bound runs AFTER the leading-only trim and preserves trailing
-	// separators — the report's reason for TrimLeft rather than Trim. A 256-byte
-	// "a…a--" leaf cuts to 255 ending in a single '-' that must survive.
-	require.Equal(t, strings.Repeat("a", 254)+"-", sanitizeArchiveTitle(strings.Repeat("a", 254)+"--"))
-
-	// Short / empty / separator-only titles keep their pre-fix behavior.
+	// Short / empty / separator-only titles keep their pre-fix behavior (no
+	// digest appended — they are already within NAME_MAX).
 	require.Equal(t, "MyApp", sanitizeArchiveTitle("MyApp"))
 	require.Equal(t, "session", sanitizeArchiveTitle(""))
 	require.Equal(t, "session", sanitizeArchiveTitle("---.."))
@@ -156,13 +152,19 @@ func TestSanitizeArchiveTitleBoundsLongTitle(t *testing.T) {
 // split the rune and emit a U+FFFD replacement on display/normalization.
 func TestSanitizeArchiveTitleTruncationRuneSafe(t *testing.T) {
 	// 252 ASCII bytes followed by a 4-byte rune (U+10348 𐍈), then more ASCII. The
-	// 255th byte sits inside the rune, so the rune-boundary cut backs up to 252.
+	// full sanitized form exceeds NAME_MAX, so the result is <prefix>-<digest>.
+	// The prefix cut must land on a rune boundary (no split runes).
 	const emoji = "𐍈"
 	title := strings.Repeat("a", 252) + emoji + strings.Repeat("b", 10)
 	got := sanitizeArchiveTitle(title)
 	require.LessOrEqual(t, len(got), archiveLeafNameMax, "leaf over NAME_MAX")
 	require.True(t, utf8.ValidString(got), "truncated leaf is not valid UTF-8: %q", got)
-	require.Equal(t, strings.Repeat("a", 252), got, "rune-boundary cut must drop the split rune and keep the 252 leading 'a's")
+	// The prefix portion (everything before the last '-' separator) must itself
+	// be valid UTF-8 — the rune-boundary walk ensures no rune is split.
+	dashIdx := strings.LastIndex(got, "-")
+	require.GreaterOrEqual(t, dashIdx, 0, "truncated leaf must contain the '-' digest separator")
+	prefix := got[:dashIdx]
+	require.True(t, utf8.ValidString(prefix), "prefix of truncated leaf is not valid UTF-8: %q", prefix)
 }
 
 // TestArchivedWorktreePathBoundsLongTitle feeds a long title through the full
