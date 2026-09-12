@@ -290,3 +290,25 @@ func TestRuntimeReplacementSettlementHoldOwnsRestoreFenceUntilRelease(t *testing
 	require.Equal(t, OpNone, inst.GetInFlightOp())
 	require.Equal(t, LiveRunning, inst.GetLiveness())
 }
+
+func TestRuntimeReplacementSettlementReleasesRestoreFenceAfterUnknownCleanup(t *testing.T) {
+	inst := &Instance{
+		ID: "session-id", TaskID: "task-id", taskGenerationID: "generation-id",
+		Title: "unknown-cleanup", liveness: LiveLost, inFlightOp: OpRestoring,
+		taskRunActive: true, runtimeCleanupStateUnknown: true,
+	}
+	_, interrupted := inst.InterruptTaskRunAtRuntimeReplacement()
+	require.True(t, interrupted)
+	require.True(t, inst.HoldRuntimeReplacementUntilSettlement())
+	require.False(t, inst.EndRecoverFence(),
+		"the restore owner cannot lower the fence before the interrupted close is durable")
+
+	released, err := inst.ReleaseRuntimeReplacementAfterSettlement()
+	require.NoError(t, err)
+	require.False(t, released, "unknown cleanup must never expose the replacement as live")
+	require.Equal(t, OpNone, inst.GetInFlightOp(),
+		"the settlement retry becomes responsible for lowering the transient restore fence")
+	require.Equal(t, LiveLost, inst.GetLiveness())
+	require.True(t, inst.ToInstanceData().RuntimeCleanupStateUnknown,
+		"the durable non-live cleanup fence must survive the transient operation release")
+}

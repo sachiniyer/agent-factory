@@ -142,8 +142,15 @@ func (i *Instance) ReleaseRuntimeReplacementAfterSettlement() (bool, error) {
 	if i.runtimeCleanupStateUnknown {
 		// Cleanup of the refused replacement did not establish that the process is
 		// gone. Make the interrupted outcome durable, but never turn that uncertainty
-		// into LiveRunning. A daemon restart reloads the durable cleanup fence with
-		// transient OpRestoring stripped and retries from the retained backend handle.
+		// into LiveRunning. The settlement retry is now the restore fence's only
+		// remaining owner, so it must lower transient OpRestoring itself; otherwise
+		// no owner calls EndRecoverFence again and polling skips this row forever.
+		// The durable cleanup-unknown marker and Lost liveness remain the independent
+		// fence that keeps the replacement non-live across this process and restart.
+		if err := i.transitionLocked(ClearOp()); err != nil {
+			i.runtimeReplacementSettlementBlocked = true
+			return false, err
+		}
 		return false, nil
 	}
 	if err := i.transitionLocked(ConfirmLive()); err != nil {
