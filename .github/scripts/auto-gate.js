@@ -1057,6 +1057,16 @@ function sameRequiredCheckObservation(left, right) {
   );
 }
 
+function requiredCheckObservationIsTerminal(observation) {
+  if (observation?.kind === "check_run") {
+    return observation.status === "completed";
+  }
+  if (observation?.kind === "commit_status") {
+    return observation.status !== "" && observation.status !== "pending";
+  }
+  return false;
+}
+
 function firstUnmetRequirement(result) {
   return titleFragment(
     (result.reasons || []).find((reason) => String(reason || "").trim() !== ""),
@@ -3417,7 +3427,7 @@ async function sweepMergedHeadRefs({
   };
 }
 
-function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead }) {
+function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead, statusesByHead }) {
   const candidates = [];
   for (const pull of pulls || []) {
     const headSha = normalizeHeadSha(pull?.head?.sha || pull?.headRefOid);
@@ -3436,6 +3446,7 @@ function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead }) {
 
     const identity = decisionIdentity(prNumber, headSha);
     const headChecks = checkRunsByHead.get(headSha) || [];
+    const headStatuses = statusesByHead.get(headSha) || [];
     const decision = newestCheckGeneration(
       headChecks.filter(
         (run) =>
@@ -3476,9 +3487,14 @@ function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead }) {
       const current = latestRequiredState(
         spec,
         headChecks,
-        [],
-      )?.observation;
-      if (current?.kind !== "check_run" || current.status !== "completed") {
+        headStatuses,
+      )?.observation || {
+        kind: "missing",
+        id: null,
+        status: null,
+        conclusion: null,
+      };
+      if (!requiredCheckObservationIsTerminal(current)) {
         return false;
       }
       const observed = snapshot?.find(
@@ -3545,6 +3561,12 @@ const REQUIRED_CHECK_RECONCILIATION_QUERY = `
                         text
                         checkSuite { app { databaseId slug } }
                       }
+                      ... on StatusContext {
+                        id
+                        context
+                        state
+                        createdAt
+                      }
                     }
                   }
                 }
@@ -3582,10 +3604,20 @@ function reconciliationCheckRun(run) {
   };
 }
 
+function reconciliationStatusContext(status) {
+  return {
+    node_id: status.id,
+    context: status.context,
+    state: String(status.state || "").toLowerCase(),
+    created_at: status.createdAt,
+  };
+}
+
 async function requiredCheckReconciliationSnapshot({ github, context, core }) {
   const { owner, repo } = context.repo;
   const pulls = [];
   const checkRunsByHead = new Map();
+  const statusesByHead = new Map();
   let after = null;
   let pages = 0;
   for (;;) {
@@ -3624,6 +3656,12 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
           .filter((node) => node?.__typename === "CheckRun")
           .map(reconciliationCheckRun),
       );
+      statusesByHead.set(
+        headSha,
+        (contexts?.nodes || [])
+          .filter((node) => node?.__typename === "StatusContext")
+          .map(reconciliationStatusContext),
+      );
     }
     if (!connection.pageInfo?.hasNextPage) {
       break;
@@ -3633,7 +3671,7 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
     }
     after = connection.pageInfo.endCursor;
   }
-  return { pulls, checkRunsByHead, pages };
+  return { pulls, checkRunsByHead, statusesByHead, pages };
 }
 
 async function listRequiredCheckReevaluationTargets({ github, context, core }) {
@@ -3645,6 +3683,7 @@ async function listRequiredCheckReevaluationTargets({ github, context, core }) {
   const stale = requiredCheckReevaluationCandidates({
     pulls: snapshot.pulls,
     checkRunsByHead: snapshot.checkRunsByHead,
+    statusesByHead: snapshot.statusesByHead,
   });
   const targets = stale.slice(0, REQUIRED_CHECK_REEVALUATION_LIMIT);
   if (stale.length > targets.length) {
@@ -4372,7 +4411,9 @@ function latestRequiredState(spec, checkRuns, statuses) {
         date: parseTimestamp(status.created_at) || 0,
         observation: {
           kind: "commit_status",
-          id: String(status.id || ""),
+          // The same cross-API identity rule as check runs: GraphQL id is the
+          // REST node_id, while a REST-only fixture can still fall back to id.
+          id: String(status.node_id || status.id || ""),
           status: String(status.state || ""),
           conclusion: null,
         },

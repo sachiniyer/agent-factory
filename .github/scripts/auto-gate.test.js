@@ -6025,6 +6025,75 @@ test("scheduled reconciliation matches full-width check identities across APIs",
   );
 });
 
+test("scheduled reconciliation round-trips source-less commit-status observations", async () => {
+  const build = checkRun({ id: 701, name: "Build", conclusion: "success" });
+  const lint = checkRun({ id: 702, name: "Lint", conclusion: "success" });
+  const failingStatus = commitStatus({
+    id: 103_493_700_001,
+    nodeId: "SC_kwDORdIFwM8AAAAYGLR2oQ",
+    context: "Build",
+    state: "failure",
+    createdAt: "2026-07-09T01:11:00Z",
+  });
+  const github = fakeGateGithub({
+    checkRuns: [build, lint],
+    statuses: [failingStatus],
+    requiredChecks: [{ context: "Build" }, { context: "Lint" }],
+  });
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /required check Build.*commit status failure/);
+  await autoGate.reportDecision({ github, context: fakeContext(), core: fakeCore(), result });
+  const written = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+  const decision = {
+    id: 703,
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    ...written,
+  };
+  const context = { ...fakeContext(), eventName: "schedule" };
+
+  const unchanged = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: { [HEAD_SHA]: [decision, build, lint] },
+      statusesByHead: { [HEAD_SHA]: [failingStatus] },
+    }),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(unchanged, [], "the status recorded by evaluation must compare equal");
+
+  const succeedingStatus = commitStatus({
+    id: 103_493_700_002,
+    nodeId: "SC_kwDORdIFwM8AAAAYGLR2og",
+    context: "Build",
+    state: "success",
+    createdAt: "2026-07-09T01:12:00Z",
+  });
+  const changed = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: { [HEAD_SHA]: [decision, build, lint] },
+      statusesByHead: { [HEAD_SHA]: [failingStatus, succeedingStatus] },
+    }),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(changed, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+});
+
 test("scheduled reconciliation retains source-less required-check observations", async () => {
   const build = checkRun({ id: 601, name: "Build", conclusion: "failure" });
   const lint = checkRun({ id: 602, name: "Lint", conclusion: "success" });
@@ -11764,6 +11833,7 @@ function reconciliationDecision({
 function scheduledReconciliationGithub({
   pulls,
   checksByHead,
+  statusesByHead = {},
   inspectedHeads = [],
   graphqlReads = [],
   truncatedHeads = [],
@@ -11773,6 +11843,7 @@ function scheduledReconciliationGithub({
     graphql: async (query, { after }) => {
       graphqlReads.push(after);
       const requestsCheckRunNodeId = /\.\.\. on CheckRun\s*\{\s*id(?:\s|$)/.test(query);
+      const requestsStatusContexts = /\.\.\. on StatusContext\s*\{/.test(query);
       const start = after == null ? 0 : Number(after);
       const page = pulls.slice(start, start + 100);
       const end = start + page.length;
@@ -11821,7 +11892,17 @@ function scheduledReconciliationGithub({
                               slug: run.app?.slug,
                             },
                           },
-                        })),
+                        })).concat(
+                          requestsStatusContexts
+                            ? (statusesByHead[pull.head.sha] || []).map((status) => ({
+                                __typename: "StatusContext",
+                                id: status.node_id,
+                                context: status.context,
+                                state: String(status.state).toUpperCase(),
+                                createdAt: status.created_at,
+                              }))
+                            : [],
+                        ),
                       },
                     },
                   },
@@ -11898,6 +11979,16 @@ function checkRun({
     conclusion,
     started_at: "2026-07-09T01:06:00Z",
     completed_at: status === "completed" ? "2026-07-09T01:10:00Z" : null,
+  };
+}
+
+function commitStatus({ id, nodeId, context, state, createdAt }) {
+  return {
+    id,
+    node_id: nodeId,
+    context,
+    state,
+    created_at: createdAt,
   };
 }
 
