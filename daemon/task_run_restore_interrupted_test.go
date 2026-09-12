@@ -84,6 +84,7 @@ func TestRestoredTaskRuntimeIsRecordedInterruptedAndSkipsOnComplete(t *testing.T
 	// declared lifecycle.
 	normal, err := session.NewInstance(session.InstanceOptions{
 		Title: "completed-run", Path: repoPath, Program: "claude", TaskID: tsk.ID,
+		TaskGenerationID: tsk.GenerationID,
 	})
 	require.NoError(t, err)
 	normal.SetStartedForTest(true)

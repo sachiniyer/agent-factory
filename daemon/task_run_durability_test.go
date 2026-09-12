@@ -241,6 +241,7 @@ func TestRepeatedRuntimeReplacementKeepsPendingInterruptionFenced(t *testing.T) 
 		TaskRunSequence: 1,
 	})
 	require.NoError(t, err)
+	inst.SetStartedForTest(true)
 	key := daemonInstanceKey(repoID, inst.Title)
 	seedDiskInstance(t, repoID, inst.Title, repoPath)
 	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveLost)))
