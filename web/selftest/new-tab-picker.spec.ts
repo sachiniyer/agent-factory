@@ -569,7 +569,11 @@ for (const shortcut of ["Alt+j", "Alt+k", "Alt+w"] as const) {
     await sessionActions.click();
     await page.setViewportSize({ width: 390, height: 844 });
     const controls = page.getByRole("button", { name: "More app controls", exact: true });
-    await controls.click();
+    // Pointer activation is an outside mousedown and correctly dismisses the inner
+    // disclosure. Use the finding's no-mousedown keyboard path so the Alt chord is
+    // the first user action that can invalidate the carried state.
+    await controls.focus();
+    await page.keyboard.press("Enter");
     await expect(sessionActions).toHaveAttribute("aria-expanded", "true");
     await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
 
