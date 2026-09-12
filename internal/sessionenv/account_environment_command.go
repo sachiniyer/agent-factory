@@ -269,7 +269,22 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 			if unsafe {
 				return nil, true
 			}
+		case isAccountCommandName(words[0], "strace"):
+			var unsafe bool
+			words, unsafe = unwrapStrace(words[1:], names)
+			if unsafe {
+				return nil, true
+			}
 		default:
+			// Residual accepted set: a literal executable not classified above as a
+			// shell mutator or command-executing wrapper, with its remaining words
+			// treated as that executable's data. Process tabs intentionally run
+			// arbitrary programs, so assignment-shaped operands alone prove nothing:
+			// `echo CODEX_HOME=/tmp` and `rg OPENAI_API_KEY=x` mutate no child
+			// environment. A wrapper added above earns different treatment by naming
+			// which word is executable; its parser must fail closed on every unknown
+			// option, unreduced operand, and unreduced executable rather than returning
+			// here as though uncertainty meant safety.
 			return words, false
 		}
 	}
