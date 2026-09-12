@@ -526,6 +526,7 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
 		resp.Warnings = append(resp.Warnings, warning)
 	}
+	resp.Warnings = completeConfigSaveWarnings(outcome, result.Warnings, resp.Warnings)
 	resp.ApplyOutcome = outcome.Status()
 	// The notice logic is no longer mirrored from controlServer.SetConfigValue — it
 	// is the same code, in config.EffectNotice (#3397). Mirroring is what let the

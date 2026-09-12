@@ -59,7 +59,10 @@ type stubDaemon struct {
 	// applyOutcome is the machine-readable result of the daemon's live apply.
 	// Keeping it on the wire stub lets the JSON tests prove the CLI renders the
 	// response field instead of merely populating a Go value nobody can observe.
-	applyOutcome string
+	applyOutcome  string
+	setNotice     string
+	writeWarnings []string
+	applyWarnings []string
 }
 
 const stubDaemonConfigPath = "/home/boxoperator/.agent-factory/config.toml"
@@ -90,6 +93,7 @@ func newStubDaemon(t *testing.T, version string, unserved ...string) *stubDaemon
 		version:      version,
 		unserved:     map[string]bool{},
 		applyOutcome: "applied",
+		setNotice:    "applied to the running daemon",
 	}
 	for _, route := range unserved {
 		d.unserved[route] = true
@@ -124,12 +128,19 @@ func (d *stubDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
 		d.setReqs = append(d.setReqs, req)
 		d.mu.Unlock()
+		var applied []string
+		if d.applyOutcome == "applied" {
+			applied = []string{req.Key}
+		}
 		resp := daemon.SetConfigValueResponse{
-			Result: &config.SetResult{Key: req.Key, Value: req.Value, Path: d.configPath},
+			Result: &config.SetResult{
+				Key: req.Key, Value: req.Value, Path: d.configPath, Warnings: d.writeWarnings,
+			},
 			// The daemon computes the notice; the CLI echoes it. Pinning a distinctive
 			// one proves the remote answer is what reaches stdout.
-			RestartNotice: "applied to the running daemon",
-			Applied:       []string{req.Key},
+			RestartNotice: d.setNotice,
+			Applied:       applied,
+			Warnings:      d.applyWarnings,
 			ListenerAddr:  d.listenerAddrFor(req.Key),
 		}
 		_ = apiproto.WriteEnvelope(w, apiproto.Success(struct {
@@ -485,5 +496,32 @@ func TestConfigWriteJSONRendersFailedApplyOutcome(t *testing.T) {
 				t.Errorf("--json hid or reordered the failed apply outcome\n got:\n%s\nwant:\n%s", out, tc.want)
 			}
 		})
+	}
+}
+
+func TestConfigSetRendersEveryFailedApplyWarningOnce(t *testing.T) {
+	const writeWarning = "saved value exposes a tokenless network listener"
+	const applyWarning = "saved config, but live apply failed: reload config: forced"
+	newConfigHome(t)
+	stub := newStubDaemon(t, "1.9.0")
+	stub.applyOutcome = "failed"
+	stub.setNotice = "Saved — the running daemon could not apply the new configuration."
+	stub.writeWarnings = []string{writeWarning}
+	// A failed-apply response is complete for single-carrier renderers, so it
+	// includes the write warning too. The CLI also has Result.Warnings and must
+	// not print that shared member twice.
+	stub.applyWarnings = []string{writeWarning, applyWarning}
+	t.Setenv("AF_DAEMON_URL", "")
+
+	out, errOut, err := runConfigCLI(t, "--daemon-url", stub.url(),
+		"set", "network.require_token", "false")
+	if err != nil {
+		t.Fatalf("config set failed: %v", err)
+	}
+	if !strings.Contains(out, stub.setNotice) {
+		t.Errorf("stdout did not render the failed-apply notice: %q", out)
+	}
+	if want := writeWarning + "\n" + applyWarning + "\n"; errOut != want {
+		t.Errorf("stderr did not render both warning sources exactly once\n got: %q\nwant: %q", errOut, want)
 	}
 }

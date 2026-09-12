@@ -23,6 +23,27 @@ func requireReloadFailureNotice(t *testing.T, notice string, warnings, applied [
 	require.Equal(t, config.ApplyStatusFailed, outcome)
 }
 
+func TestCompleteConfigSaveWarnings(t *testing.T) {
+	const writeWarning = "the saved value exposes the daemon"
+	const applyWarning = "saved config, but live apply failed: reload config: forced"
+
+	failed := completeConfigSaveWarnings(
+		config.ApplyOutcome{DaemonApplyFailed: true},
+		[]string{writeWarning},
+		[]string{writeWarning, applyWarning},
+	)
+	require.Equal(t, []string{writeWarning, applyWarning}, failed,
+		"a failed apply must retain both warning sources without duplicates")
+
+	applied := completeConfigSaveWarnings(
+		config.ApplyOutcome{DaemonApplied: true},
+		[]string{writeWarning},
+		[]string{"the running daemon's authoritative exposure warning"},
+	)
+	require.Equal(t, []string{"the running daemon's authoritative exposure warning"}, applied,
+		"a successful apply keeps its authoritative warnings instead of duplicating the exposure notice")
+}
+
 func TestFailedConfigApplyOutcomeDistinguishesLostReply(t *testing.T) {
 	t.Run("daemon refusal", func(t *testing.T) {
 		outcome, warning := failedConfigApplyOutcome(rpc.ServerError("apply refused during upgrade"))

@@ -152,14 +152,16 @@ test("saveNotice surfaces a failed live apply and its error", () => {
     "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value.";
   const warning =
     "saved config, but live apply failed: reload config: expected a top-level item to end with a newline";
+  const writeWarning = "saved value exposes a tokenless network listener";
   const notice = saveNotice(
     setResp({
-      result: { key: "network.require_token", value: "true", path: "/tmp/config.toml", requires_restart: false },
+      result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false },
       restart_notice: restartNotice,
-      warnings: [warning],
+      warnings: [writeWarning, warning],
+      apply_outcome: "failed",
     }),
   );
-  assert.equal(notice, `${restartNotice} · ${warning}`);
+  assert.equal(notice, `${restartNotice} · ${writeWarning} · ${warning}`);
 });
 
 test("saveNotice tolerates an older daemon that sends no address", () => {

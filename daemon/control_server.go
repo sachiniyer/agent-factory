@@ -245,6 +245,7 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 			outcome.DaemonApplyFailed = true
 		}
 	}
+	resp.Warnings = completeConfigSaveWarnings(outcome, result.Warnings, resp.Warnings)
 	resp.ApplyOutcome = outcome.Status()
 	// The per-key effect notice (#2480). A socket key (network.listen_addr /
 	// network.preview_listen_addr, #2480 PR2) whose live rebind FAILED did not apply —

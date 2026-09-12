@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -642,6 +643,13 @@ owns.`, tmux.SupportedProgramsString()),
 		fmt.Fprintln(cmd.OutOrStdout(), resp.RestartNotice)
 		printListenerAddr(cmd, resp.ListenerAddr)
 		for _, w := range resp.Warnings {
+			// Failed/unconfirmed applies carry the complete warning set on the
+			// response so single-carrier renderers cannot lose write warnings.
+			// This CLI already printed Result.Warnings above; do not print an
+			// exact duplicate again from the complete response set.
+			if slices.Contains(res.Warnings, w) {
+				continue
+			}
 			fmt.Fprintln(cmd.ErrOrStderr(), w)
 		}
 		return nil
