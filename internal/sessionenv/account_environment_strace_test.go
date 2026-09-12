@@ -113,9 +113,9 @@ func TestValidateAccountEnvironmentCommand_StraceTerminalOptionsOverrideEarlierR
 			"terminal strace command %q launches no child or output helper", command)
 	}
 
-	require.Error(t,
+	require.NoError(t,
 		ValidateAccountEnvironmentCommand("strace -E --version", scopedProcessTabAccount()),
-		"a required option value must consume --version rather than treating it as terminal")
+		"a required option value consumes --version, then no child exists to receive the environment change")
 }
 
 func TestValidateAccountEnvironmentCommand_StraceShortOptionArity(t *testing.T) {
@@ -369,6 +369,84 @@ func TestValidateAccountEnvironmentCommand_StraceDynamicValueBoundaries(t *testi
 		t.Run("unsafe/"+command, func(t *testing.T) {
 			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 				"unprovable value in %q must remain fail-closed", command)
+		})
+	}
+}
+
+func TestValidateAccountEnvironmentCommand_StraceOutputAppendModeArity(t *testing.T) {
+	for _, command := range []string{
+		"strace --output-append-mode append env CODEX_HOME=/other codex",
+		"strace --output-append-mode env CODEX_HOME=/other codex",
+	} {
+		t.Run("unsafe/"+command, func(t *testing.T) {
+			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"either supported output-append-mode arity in %q reaches a mutating child", command)
+		})
+	}
+
+	for _, command := range []string{
+		"strace --output-append-mode npm run dev",
+		"strace --output-append-mode append npm run dev",
+		"strace --output-append-mode=append npm run dev",
+	} {
+		t.Run("safe/"+command, func(t *testing.T) {
+			require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"every supported output-append-mode boundary in %q reaches an ordinary command", command)
+		})
+	}
+}
+
+func TestValidateAccountEnvironmentCommand_StraceNoChildHazards(t *testing.T) {
+	for _, command := range []string{
+		"strace -E CODEX_HOME=/other -p 123",
+		"strace --env=CODEX_HOME=/other --attach=123",
+		`strace -ECODEX_HOME="$OTHER_HOME" -p 123`,
+	} {
+		t.Run("environment/"+command, func(t *testing.T) {
+			require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"environment option in attach-only command %q has no child to modify", command)
+		})
+	}
+
+	for _, command := range []string{
+		"strace -E CODEX_HOME=/other env PORT=3000 npm run dev",
+		"strace -o '|env CODEX_HOME=/other codex' -p 123",
+	} {
+		t.Run("active/"+command, func(t *testing.T) {
+			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"executable hazard in %q remains active", command)
+		})
+	}
+}
+
+func TestValidateAccountEnvironmentCommand_StraceStaticSafeDynamicSemanticPrefixes(t *testing.T) {
+	for _, command := range []string{
+		`strace --env=PORT="$PORT" npm run dev`,
+		`strace --env PORT="$PORT" npm run dev`,
+		`strace -EPORT="$PORT" npm run dev`,
+		`strace -E PORT="$PORT" npm run dev`,
+		`strace --output=/tmp/trace-"$PID" npm run dev`,
+		`strace --output /tmp/trace-"$PID" npm run dev`,
+		`strace -o/tmp/trace-"$PID" npm run dev`,
+		`strace -o /tmp/trace-"$PID" npm run dev`,
+	} {
+		t.Run("safe/"+command, func(t *testing.T) {
+			require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"literal semantic prefix in %q proves the dynamic operand safe", command)
+		})
+	}
+
+	for _, command := range []string{
+		`strace --env=CODEX_HOME="$OTHER_HOME" codex`,
+		`strace -ECODEX_HOME="$OTHER_HOME" codex`,
+		`strace --env="$ENV_CHANGE" codex`,
+		`strace -E"$ENV_CHANGE" codex`,
+		`strace --output="$OUTPUT" codex`,
+		`strace -o"$OUTPUT" codex`,
+	} {
+		t.Run("unsafe/"+command, func(t *testing.T) {
+			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"dynamic security-sensitive prefix in %q must fail closed", command)
 		})
 	}
 }

@@ -118,6 +118,11 @@ func TestStracePrefixResolverMatchesInstalledGetoptTable(t *testing.T) {
 				require.NotEmpty(t, canonical,
 					"installed strace consumes a separate value for prefix %s", prefix)
 			} else {
+				if canonical != "" {
+					require.Contains(t, straceLongOptionsWithVersionedArity, canonical,
+						"only an explicit cross-version arity conflict may differ from installed strace")
+					continue
+				}
 				require.Empty(t, canonical,
 					"installed strace keeps the next word as the child for prefix %s", prefix)
 			}

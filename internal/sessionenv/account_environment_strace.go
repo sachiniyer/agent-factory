@@ -14,11 +14,21 @@ type straceOptionToken struct {
 	quotedOperandMayConsumeNext bool
 }
 
+type straceDeferredHazards struct {
+	environment bool
+	output      bool
+}
+
+func (hazards straceDeferredHazards) affectChild() bool {
+	return hazards.environment || hazards.output
+}
+
 const (
 	straceOptionContinue straceOptionResult = iota
 	straceOptionStops
 	straceOptionUnsafe
-	straceOptionDeferredUnsafe
+	straceOptionDeferredEnvironmentUnsafe
+	straceOptionDeferredOutputUnsafe
 	straceOptionAmbiguousValueBoundary
 	// Help and version stop parsing separately because they never execute a
 	// child. Every other short option that can consume the next argv word is in
@@ -31,12 +41,13 @@ const (
 	straceShortVersionOption        = 'V'
 )
 
-// This is the complete long-option set that may take its value from the next
-// argv word. The child boundary depends on these names (including GNU-style
-// abbreviations), so an unresolved value fails closed. Every literal option
-// that neither names nor abbreviates one of them is self-contained and advances
-// one word: accepting an unfamiliar spelling can then only let strace accept it
-// or reject it before launch; it cannot hide or replace the following child.
+// This is the complete long-option set whose required-value arity is stable
+// across the modeled versions. The child boundary depends on these names
+// (including GNU-style abbreviations), so an unresolved value fails closed.
+// Every literal option that neither names nor abbreviates a modeled family is
+// self-contained and advances one word: accepting an unfamiliar spelling can
+// then only let strace accept it or reject it before launch; it cannot hide or
+// replace the following child.
 //
 // Keep environment/output in this arity table too. Their attached values do not
 // move the child boundary, but they have security semantics of their own and
@@ -78,9 +89,17 @@ var straceLongOptionsWithSeparateValue = map[string]struct{}{
 	"--write":                    {},
 }
 
-// All entries above have required_argument and a nil flag in strace's
-// getopt_long table. These cross-version spellings also share the same val, so
-// glibc treats a common prefix as one match rather than as an ambiguity.
+// This option is argument-free in strace 6.8 but has a required mode operand in
+// a newer contract. Without an attached '=', both child boundaries must be
+// checked; treating either arity as universal can hide the other one's executable.
+var straceLongOptionsWithVersionedArity = map[string]struct{}{
+	"--output-append-mode": {},
+}
+
+// All entries in straceLongOptionsWithSeparateValue have required_argument and
+// a nil flag in strace's getopt_long table. These cross-version spellings also
+// share the same val, so glibc treats a common prefix as one match rather than
+// as an ambiguity.
 var straceLongEquivalentAliases = map[string]string{
 	"--decode-pid": "--decode-pids",
 	"--signal":     "--signals",
@@ -102,12 +121,12 @@ var straceLongSelfContainedPrefixCollisions = map[string]struct{}{
 // self-contained options cannot move the executable boundary and stay open to
 // spellings added by other strace versions.
 func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
-	return unwrapStraceState(words, false, names)
+	return unwrapStraceState(words, straceDeferredHazards{}, names)
 }
 
 func unwrapStraceState(
 	words []*syntax.Word,
-	deferredUnsafe bool,
+	hazards straceDeferredHazards,
 	names map[string]struct{},
 ) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
@@ -117,10 +136,10 @@ func unwrapStraceState(
 		}
 		option := token.literalPrefix
 		if option == "--" {
-			return words[1:], deferredUnsafe
+			return words[1:], hazards.affectChild()
 		}
 		if option == "-" || !strings.HasPrefix(option, "-") {
-			return words, deferredUnsafe
+			return words, hazards.affectChild()
 		}
 
 		var consumed int
@@ -139,14 +158,20 @@ func unwrapStraceState(
 			return nil, false
 		case straceOptionUnsafe:
 			return nil, true
-		case straceOptionDeferredUnsafe:
-			deferredUnsafe = true
+		case straceOptionDeferredEnvironmentUnsafe:
+			hazards.environment = true
+			words = words[consumed:]
+		case straceOptionDeferredOutputUnsafe:
+			hazards.output = true
 			words = words[consumed:]
 		case straceOptionAmbiguousValueBoundary:
-			return nil, straceAmbiguousValueBoundaryUnsafe(words, deferredUnsafe, names)
+			return nil, straceAmbiguousValueBoundaryUnsafe(words, hazards, names)
 		}
 	}
-	return nil, deferredUnsafe
+	// Environment options apply only to an executed tracee. With no child there
+	// is nothing to modify, while an executable output target still launches for
+	// attach mode and therefore remains unsafe.
+	return nil, hazards.output
 }
 
 func parseStraceLongOption(
@@ -170,32 +195,21 @@ func parseStraceLongOption(
 	if canonical == "" {
 		return 1, straceOptionContinue
 	}
-	if token.quotedOperand {
-		if canonical == "--env" || canonical == "--output" {
-			return 0, straceOptionUnsafe
+	if _, versionedArity := straceLongOptionsWithVersionedArity[canonical]; versionedArity {
+		if attached {
+			return 1, straceOptionContinue
 		}
+		return 0, straceOptionAmbiguousValueBoundary
+	}
+	if canonical == "--env" || canonical == "--output" {
+		return parseStraceSemanticOptionValue(words, token, attachedValue, attached, canonical, names)
+	}
+	if token.quotedOperand {
 		return 1, straceOptionContinue
 	}
-	var operand string
-	var consumed int
-	var ok bool
-	if canonical == "--env" || canonical == "--output" {
-		operand, consumed, ok = straceOptionValue(words, attachedValue, attached)
-	} else {
-		operand, consumed, ok = straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
-	}
+	_, consumed, ok := straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
 	if !ok {
 		return 0, straceOptionUnsafe
-	}
-	switch canonical {
-	case "--env":
-		if straceEnvironmentMutationUnsafe(operand, names) {
-			return consumed, straceOptionDeferredUnsafe
-		}
-	case "--output":
-		if straceOutputTargetUnsafe(operand) {
-			return consumed, straceOptionDeferredUnsafe
-		}
 	}
 	return consumed, straceOptionContinue
 }
@@ -204,6 +218,9 @@ func classifyStraceLongOption(option string) (string, straceOptionResult) {
 	switch option {
 	case "--help", "--version":
 		return option, straceOptionStops
+	}
+	if _, versionedArity := straceLongOptionsWithVersionedArity[option]; versionedArity {
+		return option, straceOptionContinue
 	}
 	if _, takesSeparateValue := straceLongOptionsWithSeparateValue[option]; takesSeparateValue {
 		return straceLongOptionFamily(option), straceOptionContinue
@@ -214,7 +231,8 @@ func classifyStraceLongOption(option string) (string, straceOptionResult) {
 
 	// Prefix decision table:
 	//   - no boundary-relevant family: self-contained, consume only this word;
-	//   - one family (possibly several equivalent aliases): consume its value;
+	//   - one family (possibly several equivalent aliases): return its canonical
+	//     name so the caller applies its stable or versioned arity;
 	//   - multiple inequivalent families: fail closed because arity/semantics
 	//     cannot be selected safely.
 	//
@@ -239,6 +257,11 @@ func classifyStraceLongOption(option string) (string, straceOptionResult) {
 	for candidate := range straceLongOptionsWithSeparateValue {
 		if strings.HasPrefix(candidate, option) {
 			addMatch(straceLongOptionFamily(candidate), straceOptionContinue)
+		}
+	}
+	for candidate := range straceLongOptionsWithVersionedArity {
+		if strings.HasPrefix(candidate, option) {
+			addMatch(candidate, straceOptionContinue)
 		}
 	}
 	for _, candidate := range []string{"--help", "--version"} {
@@ -281,31 +304,25 @@ func parseStraceShortOptions(
 			if attached {
 				attachedValue = value[idx+1:]
 			}
+			if flag == 'E' {
+				return parseStraceSemanticOptionValue(
+					words, token, attachedValue, attached, "--env", names,
+				)
+			}
+			if flag == 'o' {
+				return parseStraceSemanticOptionValue(
+					words, token, attachedValue, attached, "--output", names,
+				)
+			}
 			if token.quotedOperand {
-				if flag == 'E' || flag == 'o' {
-					return 0, straceOptionUnsafe
-				}
 				if token.quotedOperandMayConsumeNext {
 					return 0, straceOptionAmbiguousValueBoundary
 				}
 				return 1, straceOptionContinue
 			}
-			var operand string
-			var consumed int
-			var ok bool
-			if flag == 'E' || flag == 'o' {
-				operand, consumed, ok = straceOptionValue(words, attachedValue, attached)
-			} else {
-				operand, consumed, ok = straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
-			}
+			_, consumed, ok := straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
 			if !ok {
 				return 0, straceOptionUnsafe
-			}
-			if flag == 'E' && straceEnvironmentMutationUnsafe(operand, names) {
-				return consumed, straceOptionDeferredUnsafe
-			}
-			if flag == 'o' && straceOutputTargetUnsafe(operand) {
-				return consumed, straceOptionDeferredUnsafe
 			}
 			return consumed, straceOptionContinue
 		default:
@@ -321,24 +338,32 @@ func parseStraceOptionToken(word *syntax.Word) (straceOptionToken, bool) {
 	if value, literal := literalShellWord(word); literal {
 		return straceOptionToken{literalPrefix: value}, true
 	}
-	if word == nil || len(word.Parts) < 2 || !isSimpleQuotedParameterPart(word.Parts[len(word.Parts)-1]) {
+	prefix, dynamic := literalPrefixBeforeSimpleQuotedParameter(word)
+	if !dynamic {
 		return straceOptionToken{}, false
 	}
-	var prefix strings.Builder
-	for _, part := range word.Parts[:len(word.Parts)-1] {
-		if !appendLiteralShellPart(&prefix, part) {
-			return straceOptionToken{}, false
-		}
-	}
-	consumes, mayConsumeNext := straceOptionConsumesQuotedSuffix(prefix.String())
+	consumes, mayConsumeNext := straceOptionConsumesQuotedSuffix(prefix)
 	if !consumes {
 		return straceOptionToken{}, false
 	}
 	return straceOptionToken{
-		literalPrefix:               prefix.String(),
+		literalPrefix:               prefix,
 		quotedOperand:               true,
 		quotedOperandMayConsumeNext: mayConsumeNext,
 	}, true
+}
+
+func literalPrefixBeforeSimpleQuotedParameter(word *syntax.Word) (string, bool) {
+	if word == nil || len(word.Parts) == 0 || !isSimpleQuotedParameterPart(word.Parts[len(word.Parts)-1]) {
+		return "", false
+	}
+	var prefix strings.Builder
+	for _, part := range word.Parts[:len(word.Parts)-1] {
+		if !appendLiteralShellPart(&prefix, part) {
+			return "", false
+		}
+	}
+	return prefix.String(), true
 }
 
 func straceOptionConsumesQuotedSuffix(prefix string) (bool, bool) {
@@ -367,10 +392,8 @@ func straceOptionConsumesQuotedSuffix(prefix string) (bool, bool) {
 }
 
 func isSimpleQuotedParameterWord(word *syntax.Word) bool {
-	if word == nil || len(word.Parts) != 1 {
-		return false
-	}
-	return isSimpleQuotedParameterPart(word.Parts[0])
+	prefix, dynamic := literalPrefixBeforeSimpleQuotedParameter(word)
+	return dynamic && prefix == ""
 }
 
 func isSimpleQuotedParameterPart(part syntax.WordPart) bool {
@@ -383,6 +406,82 @@ func isSimpleQuotedParameterPart(part syntax.WordPart) bool {
 		exp.Flags == nil && exp.NestedParam == nil && exp.Index == nil &&
 		len(exp.Modifiers) == 0 && exp.Slice == nil && exp.Repl == nil && exp.Exp == nil &&
 		!exp.Excl && !exp.Length && !exp.Width && !exp.IsSet && exp.Names == 0
+}
+
+func parseStraceSemanticOptionValue(
+	words []*syntax.Word,
+	token straceOptionToken,
+	attachedValue string,
+	attached bool,
+	semantic string,
+	names map[string]struct{},
+) (int, straceOptionResult) {
+	if token.quotedOperand {
+		if token.quotedOperandMayConsumeNext {
+			return 0, straceOptionUnsafe
+		}
+		return 1, straceDynamicSemanticResult(semantic, attachedValue, names)
+	}
+	operand, consumed, literal := straceOptionValue(words, attachedValue, attached)
+	if literal {
+		return consumed, straceLiteralSemanticResult(semantic, operand, names)
+	}
+	if attached || len(words) < 2 {
+		return 0, straceOptionUnsafe
+	}
+	prefix, dynamic := literalPrefixBeforeSimpleQuotedParameter(words[1])
+	if !dynamic {
+		return 0, straceOptionUnsafe
+	}
+	return 2, straceDynamicSemanticResult(semantic, prefix, names)
+}
+
+func straceLiteralSemanticResult(
+	semantic string,
+	operand string,
+	names map[string]struct{},
+) straceOptionResult {
+	switch semantic {
+	case "--env":
+		if straceEnvironmentMutationUnsafe(operand, names) {
+			return straceOptionDeferredEnvironmentUnsafe
+		}
+	case "--output":
+		if straceOutputTargetUnsafe(operand) {
+			return straceOptionDeferredOutputUnsafe
+		}
+	}
+	return straceOptionContinue
+}
+
+func straceDynamicSemanticResult(
+	semantic string,
+	literalPrefix string,
+	names map[string]struct{},
+) straceOptionResult {
+	// Accepted dynamic semantic values are deliberately bounded: environment
+	// values need a complete literal NAME= prefix, and output targets need a
+	// literal first byte. Anything else fails closed, intentionally refusing
+	// forms such as --env="$SPEC" and -o"$PATH" whose security-sensitive portion
+	// is dynamic.
+	switch semantic {
+	case "--env":
+		name, _, fixedName := strings.Cut(literalPrefix, "=")
+		if !fixedName || !validName(name) {
+			return straceOptionUnsafe
+		}
+		if accountEnvironmentNameDenied(name, names) {
+			return straceOptionDeferredEnvironmentUnsafe
+		}
+	case "--output":
+		if literalPrefix == "" {
+			return straceOptionUnsafe
+		}
+		if straceOutputTargetUnsafe(literalPrefix) {
+			return straceOptionDeferredOutputUnsafe
+		}
+	}
+	return straceOptionContinue
 }
 
 func straceOptionValueAllowQuotedScalar(
@@ -401,14 +500,14 @@ func straceOptionValueAllowQuotedScalar(
 
 func straceAmbiguousValueBoundaryUnsafe(
 	words []*syntax.Word,
-	deferredUnsafe bool,
+	hazards straceDeferredHazards,
 	names map[string]struct{},
 ) bool {
 	// An attached value that is literal is self-contained. An attached value
 	// produced solely by an expansion may be empty; a short option then consumes
 	// the next argv word, so the token is not self-contained. Check both runtime
 	// boundaries.
-	if straceTailMutatesAccountEnvironment(words[1:], deferredUnsafe, names) {
+	if straceTailMutatesAccountEnvironment(words[1:], hazards, names) {
 		return true
 	}
 	if len(words) < 2 {
@@ -419,15 +518,15 @@ func straceAmbiguousValueBoundaryUnsafe(
 	if _, literal := literalShellWord(words[1]); !literal && !isSimpleQuotedParameterWord(words[1]) {
 		return true
 	}
-	return straceTailMutatesAccountEnvironment(words[2:], deferredUnsafe, names)
+	return straceTailMutatesAccountEnvironment(words[2:], hazards, names)
 }
 
 func straceTailMutatesAccountEnvironment(
 	words []*syntax.Word,
-	deferredUnsafe bool,
+	hazards straceDeferredHazards,
 	names map[string]struct{},
 ) bool {
-	child, unsafe := unwrapStraceState(words, deferredUnsafe, names)
+	child, unsafe := unwrapStraceState(words, hazards, names)
 	if unsafe {
 		return true
 	}
