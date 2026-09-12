@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
@@ -553,10 +554,8 @@ func canonicalHome(path string) (string, error) {
 // CODEX_HOME) from the pane and compares its canonical path to dir.
 //
 // Returns (true, nil) when the pane provably belongs to this account.
-// Returns (false, nil) when the pane belongs to a different account (different
-// directory) or when the credential-root variable is absent (old binary / pane
-// predating the variable) — in either case the caller should proceed rather than
-// refuse, because the pane is not confirmed to be a race risk for this account.
+// Returns (false, nil) when the pane provably belongs to a different account —
+// the caller should proceed rather than refuse.
 // Returns (false, non-nil) when tmux did not answer — treat as unknown and
 // propagate the error as a retryable refusal.
 //
@@ -566,6 +565,16 @@ func canonicalHome(path string) (string, error) {
 // home check alone cannot distinguish them. The credential-root variable was set
 // by the legacy binary to the exact directory the pane was running against, so
 // it is the unforgeable per-account discriminator.
+//
+// When the credential-root variable is absent (pane created by an older binary
+// that did not set it), we fall back to the name's sanitization stability. If
+// `name` contains no characters that tmux's sanitizer would fold away — that is,
+// `name` contains only letters, digits, `_` and `-` — then the legacy probe name
+// is unambiguous: no other valid account name could produce the same sanitized
+// title, so this is provably the same account and we refuse. If `name` DOES
+// contain characters that sanitize (like `.`), another account with `_` at those
+// positions could have produced the same title, so we cannot be certain and proceed
+// rather than risking a false refusal.
 func legacyPaneBelongsToAccount(agent, name, legacySName, dir string) (sameAccount bool, refuseErr error) {
 	configVar, hasConfigVar := sessionenv.SupportsAccounts(agent)
 	if !hasConfigVar {
@@ -585,10 +594,18 @@ func legacyPaneBelongsToAccount(agent, name, legacySName, dir string) (sameAccou
 			agent, name, legacySName)
 	}
 	if !legacyDirPresent {
-		// Absent credential-root: pane was created by a binary predating the
-		// variable, or a tmux older than 3.2. Ownership cannot be verified for this
-		// account specifically — proceed rather than blocking on unverifiable evidence.
-		return false, nil
+		// Absent credential-root: the legacy pane was created by a binary that did
+		// not stamp the account's credential-root variable in the tmux environment.
+		// Use the account name's sanitization stability as the fallback discriminator.
+		//
+		// tmux's toTmuxName folds any rune that is not a letter, digit, mark, '_' or
+		// '-' into '_'. If `name` contains only those stable runes, the legacy probe
+		// title derived from it is unambiguous — no other valid account name produces
+		// the same sanitized string — so this pane provably belongs to this account
+		// and we refuse. If `name` contains unstable runes (e.g. '.'), a different
+		// account with '_' at those positions could share the legacy title, so we
+		// cannot be certain and proceed rather than risking a false refusal.
+		return legacyNameIsSanitizationStable(name), nil
 	}
 	legacyDirCanon, err := canonicalHome(legacyDir)
 	if err != nil {
@@ -602,6 +619,27 @@ func legacyPaneBelongsToAccount(agent, name, legacySName, dir string) (sameAccou
 			agent, name, dir, err)
 	}
 	return legacyDirCanon == dirCanon, nil
+}
+
+// legacyNameIsSanitizationStable reports whether name contains only runes that
+// tmux's toTmuxName preserves unchanged. The sanitizer maps any rune that is not
+// a Unicode letter, digit, combining mark, '_' or '-' to '_'; stable names are
+// unchanged by that mapping and therefore have an unambiguous legacy probe title.
+func legacyNameIsSanitizationStable(name string) bool {
+	for _, r := range name {
+		if !isStableTmuxRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isStableTmuxRune mirrors the positive policy in session/tmux's stableTmuxNameRune.
+// It is duplicated rather than exported because adding an export would widen the
+// tmux package's surface for a single caller, and the rule is simple enough that
+// a local copy can be held in sync.
+func isStableTmuxRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || r == '_' || r == '-'
 }
 
 func (s *Supervisor) track(agent, name string, pane *tmux.TmuxSession) bool {
