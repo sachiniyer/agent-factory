@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -445,4 +447,67 @@ func TestMissionBrief_ReadsAsEnglishForEveryReason(t *testing.T) {
 			t.Fatalf("reason %q: brief still contains the malformed clause %q\n%s", tc.reason, tc.bannedIn, rendered)
 		}
 	}
+}
+
+// TestClearAutoSelectedAccount_AllowsSwapAgentAccountCheck is the regression
+// lock for the P1 finding: LocalBackend.SwapAgent unconditionally rejects any
+// non-empty i.Account (session/backend_local.go) to prevent silent cross-agent
+// identity collisions. An auto-selected account occupies the same field and
+// triggers the same refusal — breaking every ambient handoff for a
+// scheduler-scoped session.
+//
+// ClearAutoSelectedAccount must zero the account BEFORE SwapAgent is called so
+// the ambient handoff can proceed. The test verifies both halves by calling
+// SwapAgent before and after clearing against a minimal instance that has no
+// tmux binding (so the first post-clear failure is the tmux-absent error, not
+// the account error — proving the account check was passed).
+func TestClearAutoSelectedAccount_AllowsSwapAgentAccountCheck(t *testing.T) {
+	backend := &LocalBackend{}
+	inst := &Instance{
+		Title:               "clear-auto-account",
+		Program:             tmux.ProgramClaude,
+		Account:             "work",
+		accountAutoSelected: true,
+		backend:             backend,
+		liveness:            LiveRunning,
+	}
+	plan := AgentSwapPlan{target: tmux.ProgramCodex, program: tmux.ProgramCodex}
+
+	// Before clearing: SwapAgent must refuse with the account-scoped error.
+	err := backend.SwapAgent(inst, plan)
+	require.Error(t, err, "SwapAgent must reject a non-empty account before ClearAutoSelectedAccount")
+	require.Contains(t, err.Error(), "scoped to the",
+		"the pre-clear error must be the account-scope refusal, not a missing-runtime error")
+
+	// Clear the auto account.
+	cleared := inst.ClearAutoSelectedAccount()
+	require.True(t, cleared, "ClearAutoSelectedAccount must report true for an automatic account")
+	acct, auto := inst.AccountSelection()
+	require.Empty(t, acct, "Account must be cleared")
+	require.False(t, auto, "accountAutoSelected must be cleared")
+
+	// After clearing: SwapAgent must NOT fail with the account error. It will
+	// fail for the next reason in the function (no tmux binding), which proves
+	// the account check was passed — exactly what the daemon needs before calling
+	// SwapAgent for an ambient auto-account handoff.
+	err = backend.SwapAgent(inst, plan)
+	require.Error(t, err, "SwapAgent still fails (no tmux binding), but not for the account reason")
+	require.NotContains(t, err.Error(), "scoped to the",
+		"the post-clear error must not be the account-scope refusal")
+}
+
+// TestClearAutoSelectedAccount_NoOpForManualPin verifies the safety predicate:
+// ClearAutoSelectedAccount is inert for a manually-pinned account, so the
+// daemon cannot accidentally admit a hand-fixed identity as a side effect.
+func TestClearAutoSelectedAccount_NoOpForManualPin(t *testing.T) {
+	inst := &Instance{
+		Title:   "manual-pin",
+		Account: "work",
+		// accountAutoSelected is false (zero value) — this is a manual pin.
+	}
+	cleared := inst.ClearAutoSelectedAccount()
+	require.False(t, cleared, "ClearAutoSelectedAccount must be a no-op for a manual pin")
+	acct, auto := inst.AccountSelection()
+	require.Equal(t, "work", acct, "manual pin must not be cleared")
+	require.False(t, auto)
 }
