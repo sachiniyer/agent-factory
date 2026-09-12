@@ -235,11 +235,14 @@ func TestTaskArming_RefusedWatchTaskKeepsDurableQueue(t *testing.T) {
 	unsafe.TargetSession = session.RootSessionTitle
 	require.NoError(t, task.AddTask(unsafe),
 		"seed a task accepted while root-agent policy was enabled by the previous daemon")
+	stored, err := task.GetTask(unsafe.ID)
+	require.NoError(t, err)
 
 	watchers, _ := newTestSupervisor(t, task.LoadTasks)
 	queueDir, err := watchers.queueDir()
 	require.NoError(t, err)
-	require.NoError(t, newEventQueue(queueDir, unsafe.ID).enqueue("pending"))
+	queue := newEventQueueForGeneration(queueDir, stored.ID, stored.GenerationID)
+	require.NoError(t, queue.enqueue("pending"))
 
 	scheduler := newTaskScheduler()
 	scheduler.controlMu.Lock()
@@ -247,7 +250,7 @@ func TestTaskArming_RefusedWatchTaskKeepsDurableQueue(t *testing.T) {
 	scheduler.controlMu.Unlock()
 	require.NoError(t, reloadErr)
 	require.NotEmpty(t, refused, "unsafe task must be refused instead of armed")
-	_, statErr := os.Stat(filepath.Join(queueDir, unsafe.ID+".jsonl"))
+	_, statErr := os.Stat(queue.path)
 	require.NoError(t, statErr,
 		"a refused task still exists in tasks.json, so its repairable backlog must not be treated as orphaned")
 }
