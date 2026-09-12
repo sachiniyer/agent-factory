@@ -270,7 +270,18 @@ func (i *Instance) reprovisionRemote() error {
 	// only cleanup handle. An unknown outcome keeps the old wiring installed for a
 	// real retry instead of provisioning a second sandbox on a guess.
 	if err := i.reapRemoteRuntimeForReplacement(); err != nil {
+		// Retirement failed: clear any registered hook so it is not inherited by a
+		// later call or fired at the wrong point.
+		i.takeOnSandboxRetired()
 		return fmt.Errorf("cannot re-provision session %q: previous sandbox cleanup state is unknown: %w", i.Title, err)
+	}
+	// The old sandbox is now provably gone: fire the one-shot hook before
+	// continuing. This is the earliest point from which a new Recover episode
+	// can legitimately begin. Pre-reap failures are excluded because the old
+	// sandbox may still be live, and firing there would let repeated pre-reap
+	// failures reset the budget indefinitely.
+	if fn := i.takeOnSandboxRetired(); fn != nil {
+		fn()
 	}
 	// Mint AFTER the reap, through the same helper the create path uses (#3068).
 	//

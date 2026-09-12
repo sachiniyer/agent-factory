@@ -304,3 +304,149 @@ func TestRestoreLostSessions_ProbeUnknownForceReapMissingBudgetReset(t *testing.
 		t.Fatal("LostRestoreGaveUp = false after the force-reap: resetRecoverBudget must not clear the durable gave-up flag (the automatic loop stays suppressed)")
 	}
 }
+
+// preRetirementFailBackend is a remoteWorkspaceBackend whose Recover returns an
+// error WITHOUT calling FireOnSandboxRetired. It simulates the shape of a real
+// reprovisionRemote failure that returns before reapRemoteRuntimeForReplacement
+// runs — e.g. because the persisted account can no longer be resolved, the
+// runtime configuration is invalid, or program/account validation fails. In
+// those cases the old sandbox is still live, so the failure budget must not be
+// reset: the operator has not earned a fresh budget by replacing the sandbox.
+type preRetirementFailBackend struct {
+	*session.FakeBackend
+	mu       sync.Mutex
+	failWith error
+	recovers int
+}
+
+func (b *preRetirementFailBackend) Type() string { return "docker" }
+
+func (b *preRetirementFailBackend) Capabilities() session.Capabilities {
+	return session.Capabilities{
+		Workspace:        session.WorkspaceRemote,
+		Archive:          true,
+		Recover:          true,
+		InteractiveInput: true,
+	}
+}
+
+// Recover fails WITHOUT firing FireOnSandboxRetired, simulating a
+// reprovisionRemote early-return before reapRemoteRuntimeForReplacement.
+func (b *preRetirementFailBackend) Recover(_ *session.Instance) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.recovers++
+	return b.failWith
+}
+
+func (b *preRetirementFailBackend) recoverCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.recovers
+}
+
+// TestRestoreLostSessions_ProbeUnknownForceReapPreRetirementFailLeavesCountCharged
+// pins the P2 invariant: when a force-reap past the indeterminate probe causes
+// reprovisionRemote to fail BEFORE reapRemoteRuntimeForReplacement retires the
+// old sandbox (e.g. because the persisted account no longer resolves, the
+// runtime configuration is invalid, or program/account validation fails), the
+// Recover failure budget must NOT be cleared.
+//
+// Without the hook-based reset: the budget was cleared before Recover ran, so
+// any pre-retirement failure would be counted as attempt 1 rather than
+// maxAttempts+1 — and repeated force-reap attempts could restart the budget
+// indefinitely, preventing the give-up threshold from ever being reached.
+//
+// With the hook-based reset: the budget is only cleared when the sandbox is
+// provably retired (when FireOnSandboxRetired fires inside reprovisionRemote
+// after reapRemoteRuntimeForReplacement succeeds). A pre-retirement Recover
+// failure (this test) leaves the budget charged at its prior value, so
+// repeated pre-retirement failures accumulate rather than restart.
+func TestRestoreLostSessions_ProbeUnknownForceReapPreRetirementFailLeavesCountCharged(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	zeroRestoreBackoff(t)
+	manager, _, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+
+	const title = "remote-probeunknown-pre-retirement-fail"
+	preRetirementErr := errors.New("recover: cannot re-provision: account no longer resolvable")
+	srv, url := newProbeUnknownForceReapServer(t, true /* archive lands on pass 1 */)
+	inst, _ := registerStartedRemoteTask(t, manager, repoID, repoPath, title, url, session.Running)
+
+	// Replace the backend with one that simulates a pre-retirement Recover failure.
+	preRetirBackend := &preRetirementFailBackend{
+		FakeBackend: session.NewFakeBackend(),
+		failWith:    preRetirementErr,
+	}
+	inst.SetBackend(preRetirBackend)
+
+	// Drive to a Lost observation: the sandbox answers alive=false (answered dead).
+	manager.RefreshStatuses()
+	if got := inst.GetLiveness(); got != session.LiveLost {
+		t.Fatalf("setup: liveness = %v, want LiveLost", got)
+	}
+
+	// Pass 1: the pre-reap push lands, recording the branch durably;
+	// Recover fails immediately (pre-retirement), so consecutiveFailures = 1.
+	manager.RestoreLostSessions()
+	if got := srv.calls(); got != 1 {
+		t.Fatalf("after pass 1: archive calls = %d, want 1", got)
+	}
+	if got := preRetirBackend.recoverCalls(); got != 1 {
+		t.Fatalf("after pass 1: Recover calls = %d, want 1", got)
+	}
+	manager.mu.Lock()
+	st := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
+	manager.mu.Unlock()
+	if st == nil || st.consecutiveFailures != 1 {
+		t.Fatalf("after pass 1: consecutiveFailures = %v, want 1 (pre-retirement failure must NOT reset the budget)", func() int {
+			if st == nil {
+				return -1
+			}
+			return st.consecutiveFailures
+		}())
+	}
+
+	// Revoke origin auth so subsequent pre-reap pushes fail.
+	srv.setArchiveOK(false)
+
+	// Additional automatic passes: drive preserve-push failures to give-up.
+	// lostRestoreMaxAttempts passes are needed because each preserve-push
+	// failure increments preserveFailureAttempts, and the give-up fires at
+	// preserveFailureAttempts >= lostRestoreMaxAttempts.
+	for i := 0; i < lostRestoreMaxAttempts; i++ {
+		manager.RestoreLostSessions()
+	}
+	view := inst.LifecycleView()
+	if !view.LostRestoreGaveUp {
+		t.Fatal("expected LostRestoreGaveUp after enough preserve-push failures")
+	}
+
+	// Flip the probe to probeUnknown so the force-reap exercises that arm.
+	srv.flipUnknown()
+
+	// Force-reap: pre-retirement Recover failure. Since FireOnSandboxRetired is
+	// never called (the backend does not retire the sandbox), the budget must NOT
+	// be reset. The first force-reap attempt after give-up is charged as
+	// maxAttempts+1 — which hits the give-up again — rather than being reset to 1.
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{
+		Title: title, RepoID: repoID, ForceReap: true,
+	})
+	if err == nil {
+		t.Fatal("force-reap RestoreSession returned nil error, expected pre-retirement Recover failure to propagate")
+	}
+
+	// The budget must still be charged (at maxAttempts+1 now, not reset to 1):
+	// the old sandbox was never retired, so repeated pre-retirement force-reap
+	// attempts must accumulate failures rather than restarting the budget.
+	manager.mu.Lock()
+	st = manager.lostRestoreStates[stableSessionKey(repoID, inst)]
+	manager.mu.Unlock()
+	if st == nil || st.consecutiveFailures != lostRestoreMaxAttempts+1 {
+		got := -1
+		if st != nil {
+			got = st.consecutiveFailures
+		}
+		t.Fatalf("force-reap pre-retirement failure: consecutiveFailures = %d, want %d (the budget must NOT be reset for a pre-retirement failure)",
+			got, lostRestoreMaxAttempts+1)
+	}
+}
