@@ -55,6 +55,26 @@ func TestValidateAccountEnvironmentCommand_RefusesUnprovableExecutableWrappers(t
 	}
 }
 
+func TestValidateAccountEnvironmentCommand_AllowsProcessOnlyWrapperModes(t *testing.T) {
+	for _, command := range []string{
+		"ionice -p 123",
+		"ionice -p123",
+		"ionice -tp 123",
+		"ionice --pid 123",
+		"ionice --pid=123",
+		"ionice -P 123",
+		"ionice --pgid 123",
+		"ionice -u 1000",
+		"ionice --uid 1000",
+		"taskset -p 0x1 123",
+		"taskset -cp 0-3 123",
+		"taskset --pid 0x1 123",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"process-only command %q launches no child whose account environment could be changed", command)
+	}
+}
+
 // `wait -p VAR` names a variable to receive the job id. After the first result
 // target the option scan treated a DYNAMIC word as safe, but bash keeps parsing
 // options there: `x=-p` expands to a second `-p`, so the NEXT word is another

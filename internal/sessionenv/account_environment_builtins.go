@@ -169,6 +169,12 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 		switch {
 		case option == "--":
 			return words[1:], false
+		case ioniceProcessOnlyOption(option):
+			// -p/-P/-u select existing-process modes. They never exec a
+			// child, so this external command cannot replace the selected
+			// account environment inherited by one. Process-control policy is
+			// outside this validator's environment-mutation contract.
+			return nil, false
 		case option == "-t" || option == "--ignore":
 			words = words[1:]
 		case option == "-c" || option == "--class" || option == "-n" || option == "--classdata":
@@ -183,14 +189,37 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 			strings.HasPrefix(option, "--class=") || strings.HasPrefix(option, "--classdata="):
 			words = words[1:]
 		case strings.HasPrefix(option, "-"):
-			// -p/-P/-u retune an EXISTING process and run no command at all, so
-			// there is nothing here to unwrap; every other form is unmodelled.
 			return nil, true
 		default:
 			return words, false
 		}
 	}
 	return nil, false
+}
+
+func ioniceProcessOnlyOption(option string) bool {
+	if option == "--pid" || strings.HasPrefix(option, "--pid=") ||
+		option == "--pgid" || strings.HasPrefix(option, "--pgid=") ||
+		option == "--uid" || strings.HasPrefix(option, "--uid=") {
+		return true
+	}
+	if len(option) < 2 || option[0] != '-' || option[1] == '-' {
+		return false
+	}
+	for idx := 1; idx < len(option); idx++ {
+		switch option[idx] {
+		case 't':
+			continue
+		case 'p', 'P', 'u':
+			return true
+		case 'c', 'n':
+			// These flags consume the remainder as their attached value.
+			return false
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // unwrapTaskset is unwrapIonice for `taskset`, with one extra step: taskset's
@@ -205,18 +234,38 @@ func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 		switch {
 		case option == "--":
 			return tasksetCommandAfterMask(words[1:])
+		case tasksetProcessOnlyOption(option):
+			// -p switches taskset from command execution to inspecting or
+			// updating an existing PID. No child environment exists to mutate.
+			return nil, false
 		case option == "-a" || option == "--all-tasks" ||
 			option == "-c" || option == "--cpu-list":
 			words = words[1:]
 		case strings.HasPrefix(option, "-"):
-			// -p rebinds an EXISTING pid and runs no command; anything else is
-			// unmodelled.
 			return nil, true
 		default:
 			return tasksetCommandAfterMask(words)
 		}
 	}
 	return nil, false
+}
+
+func tasksetProcessOnlyOption(option string) bool {
+	if option == "--pid" {
+		return true
+	}
+	if len(option) < 2 || option[0] != '-' || option[1] == '-' {
+		return false
+	}
+	for _, flag := range option[1:] {
+		if flag == 'p' {
+			return true
+		}
+		if flag != 'a' && flag != 'c' {
+			return false
+		}
+	}
+	return false
 }
 
 func tasksetCommandAfterMask(words []*syntax.Word) ([]*syntax.Word, bool) {
