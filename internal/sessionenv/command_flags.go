@@ -24,8 +24,9 @@ func AgentForCommand(command string) string {
 }
 
 type agentCommand struct {
-	agent      string
-	executable string
+	agent                       string
+	executable                  string
+	executableResolutionChanged bool
 }
 
 func literalAgentCommand(command string) (agentCommand, bool) {
@@ -44,35 +45,67 @@ func literalAgentCommand(command string) (agentCommand, bool) {
 		return agentCommand{}, false
 	}
 	executable := args[0]
+	resolutionChanged := shellAssignmentsChangeExecutableResolution(call.Assigns)
 	if isTrustedEnvExecutable(args[0]) {
 		invocation, err := envcommand.Parse(args[1:], envcommand.Policy{AllowAssignments: true})
 		if err != nil || invocation.CommandIndex < 0 {
 			return agentCommand{}, false
 		}
 		executable = args[1+invocation.CommandIndex]
+		resolutionChanged = resolutionChanged || envChangesExecutableResolution(invocation)
 	}
 	agent := supportedAgent(executable)
-	return agentCommand{agent: agent, executable: executable}, agent != ""
+	return agentCommand{
+		agent:                       agent,
+		executable:                  executable,
+		executableResolutionChanged: resolutionChanged,
+	}, agent != ""
 }
 
 // credentialAgentForCommand is the fail-closed classifier for an untrusted
 // resolved program. Unlike AgentForCommand it preserves the executable token as
-// identity-bearing data and admits only a bare supported-agent name. A slash
-// means the caller selected a particular file, and neither its basename nor the
-// path spelling proves that file is the agent.
+// identity-bearing data and admits only a bare supported-agent name whose
+// resolution still uses the inherited operator environment. A slash selects an
+// untrusted file directly; PATH changes, env clearing or PATH removal, and env
+// chdir can select one indirectly.
 //
 // The residual accepted set is a literal bare agent invocation, optionally
-// preceded by exec or one of the modelled system env spellings. Every
-// path-qualified form is deliberately credential-free, including legitimate
-// custom installs such as /opt/bin/codex: this boundary receives no trusted
-// provenance for that file. The command still launches, and an operator can
-// explicitly authorize required names through session_env_passthrough.
+// preceded by exec or one of the modelled system env spellings, with literal
+// non-resolution assignments such as TERM, LANG, and agent cloud selectors.
+// Those remain accepted because POSIX executable lookup does not consult them.
+// Every path-qualified or resolution-changing form is deliberately
+// credential-free: this boundary receives no trusted provenance for the file it
+// selects. The command still launches, and an operator can explicitly authorize
+// required names through session_env_passthrough.
 func credentialAgentForCommand(command string) string {
 	invocation, ok := literalAgentCommand(command)
-	if !ok || strings.Contains(invocation.executable, "/") {
+	if !ok || strings.Contains(invocation.executable, "/") || invocation.executableResolutionChanged {
 		return ""
 	}
 	return invocation.agent
+}
+
+func shellAssignmentsChangeExecutableResolution(assignments []*syntax.Assign) bool {
+	for _, assignment := range assignments {
+		if assignment != nil && assignment.Name != nil && assignment.Name.Value == "PATH" {
+			return true
+		}
+	}
+	return false
+}
+
+func envChangesExecutableResolution(invocation envcommand.Invocation) bool {
+	// Clearing the environment or changing cwd changes lookup whenever PATH is
+	// absent or contains a relative entry. Neither can be proven harmless here.
+	if invocation.ClearEnvironment || invocation.Chdir != "" {
+		return true
+	}
+	for _, mutation := range invocation.Mutations {
+		if mutation.Name == "PATH" {
+			return true
+		}
+	}
+	return false
 }
 
 func supportedAgent(command string) string {

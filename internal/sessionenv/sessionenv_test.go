@@ -67,10 +67,20 @@ func TestCredentialAgentForCommandRequiresBareExecutable(t *testing.T) {
 		{command: "codex --model o3", want: "codex"},
 		{command: "exec -- codex", want: "codex"},
 		{command: "/usr/bin/env codex", want: "codex"},
+		{command: "TERM=xterm-256color codex", want: "codex"},
+		{command: "env LANG=C codex", want: "codex"},
+		{command: "CLAUDE_CODE_USE_BEDROCK=1 claude", want: "claude"},
+		{command: "env CLAUDE_CODE_USE_VERTEX=1 claude", want: "claude"},
 		{command: "./codex"},
 		{command: "/opt/bin/codex"},
 		{command: "exec -- ./codex"},
 		{command: "/usr/bin/env /opt/bin/codex"},
+		{command: "PATH=/workspace codex"},
+		{command: "env PATH=/workspace codex"},
+		{command: "env -u PATH codex"},
+		{command: "env --unset=PATH codex"},
+		{command: "env -i codex"},
+		{command: "env -C /workspace codex"},
 	} {
 		if got := credentialAgentForCommand(test.command); got != test.want {
 			t.Errorf("credentialAgentForCommand(%q) = %q, want %q", test.command, got, test.want)

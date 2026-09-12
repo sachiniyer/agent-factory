@@ -120,6 +120,31 @@ func TestAgentServerExecInvocationDoesNotGrantPathQualifiedAgentLookalike(t *tes
 	}
 }
 
+func TestAgentServerExecInvocationDoesNotGrantCommandResolutionOverrides(t *testing.T) {
+	for _, program := range []string{"PATH=/workspace codex", "env PATH=/workspace codex"} {
+		t.Run(program, func(t *testing.T) {
+			t.Setenv("OPENAI_API_KEY", "fixture")
+			wantErr := errors.New("stop before exec")
+			var gotEnvironment []string
+			previous := processExec
+			processExec = func(_ string, _ []string, environ []string) error {
+				gotEnvironment = append([]string(nil), environ...)
+				return wantErr
+			}
+			t.Cleanup(func() { processExec = previous })
+
+			serverArgs := []string{"agent-server", "--listen", ":1", "--repo", "/r", "--title", "t",
+				"--program", program, "--program-resolved"}
+			if err := agentServerExecInvocation(append([]string{"0"}, serverArgs...)); !errors.Is(err, wantErr) {
+				t.Fatalf("resolution-mutating handoff error = %v, want test sentinel", err)
+			}
+			if slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture") {
+				t.Fatalf("resolution-mutating program %q received the Codex credential", program)
+			}
+		})
+	}
+}
+
 func TestAgentServerExecInvocationAllowsExplicitGrantForPathQualifiedProgram(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "fixture")
 	wantErr := errors.New("stop before exec")
