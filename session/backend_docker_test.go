@@ -275,6 +275,11 @@ func TestLocalDockerEndpoint_LoopbackTCP(t *testing.T) {
 		{"tcp://192.168.1.1:2375", false},
 		// remote hostname over TCP — must be refused
 		{"tcp://remote.example.invalid:2376", false},
+		// localhost / localhost. (RFC 6761 reserved) — must be accepted as local
+		{"tcp://localhost:2375", true},
+		{"tcp://localhost.:2375", true},
+		// a genuinely remote named host must still be refused
+		{"tcp://buildhost:2375", false},
 		// existing local schemes still work
 		{"unix:///var/run/docker.sock", true},
 		{"npipe:////./pipe/docker_engine", true},

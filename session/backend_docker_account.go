@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
-	"net"
 	"net/url"
 	"path"
 	"strconv"
@@ -449,18 +448,20 @@ func localDockerEndpoint(endpoint string) bool {
 		strings.HasPrefix(lower, "fd://") {
 		return true
 	}
-	// A TCP endpoint whose host resolves to the loopback range is local by
-	// definition — the daemon can reach it regardless of transport scheme.
-	// tcp://127.0.0.1:2375, tcp://127.x.x.x:*, and tcp://[::1]:* are all local;
-	// any other host (including a resolvable remote hostname over TCP) is remote.
+	// A TCP endpoint whose host is a loopback address or the reserved loopback
+	// name is local by definition — the daemon can reach it regardless of
+	// transport scheme. tcp://127.0.0.1:2375, tcp://127.x.x.x:*, tcp://[::1]:*,
+	// tcp://localhost:2375, and tcp://localhost.:2375 are all local; any other
+	// host (including a resolvable remote hostname over TCP) is remote.
+	// isLoopbackHost (session/weburl.go) covers RFC 6761 "localhost"/"*.localhost"
+	// without DNS and ip.IsLoopback() for the full 127.0.0.0/8 and ::1 ranges.
 	if strings.HasPrefix(lower, "tcp://") {
 		u, err := url.Parse(endpoint)
 		if err != nil {
 			return false
 		}
 		host := u.Hostname() // strips port and brackets from IPv6
-		ip := net.ParseIP(host)
-		return ip != nil && ip.IsLoopback()
+		return isLoopbackHost(host)
 	}
 	return false
 }
