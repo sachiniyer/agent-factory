@@ -12,13 +12,15 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
-// The TUI drives every daemon control + read call over the HTTP API client
-// (#1592 Phase 2 PR3): it no longer touches the net/rpc control client at all.
-// The gob control socket stays for CLI/internal callers; the TUI is now a thin
-// HTTP client. Each seam below builds a fresh apiclient.Client per call — the
-// same per-call dial the net/rpc callDaemon did — and only daemon.EnsureDaemon
-// (a lifecycle concern, transport-agnostic) survives from the old path, to spawn
-// the daemon at cold start exactly as callDaemon's implicit ensure used to.
+// The session, task, project, tab, preview, and snapshot seams in this file use
+// the HTTP API client (#1592 Phase 2 PR3). Each builds a fresh apiclient.Client
+// per call — the same per-call dial the net/rpc callDaemon did — and
+// daemon.EnsureDaemon survives here only for the default local target, to spawn
+// that daemon at cold start exactly as callDaemon's implicit ensure used to. A
+// selected remote target is dial-only and never enters local lifecycle code.
+// Callers choose the transport by operation and target. Local account management,
+// config-agent spawn/reap, and config-editor writes still use the gob control
+// client; the local editor reads config in-process (ui/config_target.go).
 
 // daemonHTTPRetry{Wait,Poll} bound the retry the TUI's HTTP calls tolerate for
 // transient daemon lifecycle admission and startup transport races. Three

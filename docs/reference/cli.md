@@ -13,7 +13,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af accounts add`](#af-accounts-add) — Register a credential directory for an agent account
 - [`af accounts list`](#af-accounts-list) — List registered agent accounts
 - [`af accounts login`](#af-accounts-login) — Log in to an agent account by running the agent's own login flow
-- [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (not the web UI — that is 'af daemon')
+- [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (not the daemon-hosted web UI)
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
 - [`af completion`](#af-completion) — Generate the autocompletion script for the specified shell
@@ -103,7 +103,7 @@ af [flags]
 **Subcommands**
 
 - [`af accounts`](#af-accounts) — Manage per-session agent credential directories
-- [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (not the web UI — that is 'af daemon')
+- [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (not the daemon-hosted web UI)
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
 - [`af completion`](#af-completion) — Generate the autocompletion script for the specified shell
@@ -343,23 +343,29 @@ af accounts login <agent> <name> [flags]
 
 ## af agent-server
 
-Run a headless single-workspace backend (not the web UI — that is 'af daemon')
+Run a headless single-workspace backend (not the daemon-hosted web UI)
 
 Run a headless agent-server for exactly one session's workspace, served over
 the same REST + WebSocket protocol the daemon speaks, behind a plain-HTTP
 listener that requires a bearer token on every request.
 
 This does not start the web UI, and serves no frontend at all — opening its port
-in a browser returns a 404 saying so. If you want the browser app, run the
-daemon — any 'af' command starts it — and open http://localhost:8443. The web UI
-is bundled into the daemon and served from its network.listen_addr; agent-server is only
-the headless per-workspace backend that a daemon drives, and it exists to be
-consumed by a daemon rather than opened by a person.
+in a browser returns a 404 saying so. The browser app starts with the local
+daemon lifecycle: a bare 'af' launch on the default local target ensures the
+daemon, and any bare launch also starts the local daemon when its task store has
+an enabled task. 'af daemon install' starts it under the user service manager
+and keeps it available without an open TUI. Once the daemon is running, open
+http://localhost:8443. The web UI is bundled into the daemon and served from its
+network.listen_addr; agent-server is only the headless per-workspace backend that
+a daemon drives, and it exists to be consumed by a daemon rather than opened by
+a person.
 
 This is the process that runs inside a docker container or on an ssh remote
-(#1592 Phase 4): a remote daemon dials the authed URL it exposes and drives the
-workspace exactly as it drives a local in-process session. Run it directly only
-to host one workspace as a backend for a daemon on another machine.
+(#1592 Phase 4): the owning daemon dials the authed URL it exposes and drives
+the workspace exactly as it drives a local in-process session. Docker publishes
+that URL on the daemon host's loopback; SSH tunnels it from another machine. Run
+agent-server directly only to expose one separately provisioned workspace to a
+daemon.
 
 The listener always requires the token and serves plain HTTP (no TLS) — reach it
 over a private network or a tunnel (the docker/ssh runtimes forward a loopback
@@ -1044,11 +1050,13 @@ The agent-factory daemon runs task cron schedules in-process, supervises
 watch-task scripts, monitors sessions, and serves the bundled web UI.
 
 The web UI is part of the daemon — there is no separate web command — so it is
-served whenever the daemon is running. Running af starts one: the TUI reads
-session state through the daemon and spawns it if none is up, so simply opening
-af serves the web UI. Any enabled task starts one too. Only
-standalone commands that never talk to the daemon (such as 'af config list')
-leave it down.
+served whenever the daemon is running. On-demand process startup belongs to the
+default local target: opening a locally targeted TUI ensures its daemon, while
+--daemon-url or AF_DAEMON_URL selects a remote daemon that af only dials and
+never starts. A bare 'af' launch separately checks the local task store and may
+start the local daemon for enabled tasks, even when the TUI target is remote.
+Cobra subcommands do not run that task check; a local daemon operation may own
+its own ensure.
 
 With af running, open:
 
@@ -1061,7 +1069,7 @@ peers; on the default loopback listener same-host callers stay exempt, so the
 UI keeps opening with no login on this machine. Add network.require_loopback_token =
 true to require the token from localhost as well.
 Note that 'af agent-server' does not serve the web UI: it is the headless
-per-workspace backend a daemon drives on a remote machine.
+per-workspace server a daemon drives inside a separately provisioned workspace.
 
 Clients reach the daemon over a local Unix socket by default. To drive one from
 another machine, either ssh to that host and run 'af' there, or give network.listen_addr

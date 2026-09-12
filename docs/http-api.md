@@ -8,8 +8,10 @@ lives.
 The Agent Factory daemon exposes a small JSON API — a 1:1 mirror of the session
 and task operations the `af` CLI performs — over a **local Unix socket**. It is
 the same daemon core (`#960` single-writer model) the TUI and `af sessions` /
-`af tasks` commands already drive, reached over HTTP instead of the internal
-`net/rpc` control socket, so the two surfaces can never diverge.
+`af tasks` commands already drive. TUI and CLI callers use both HTTP and the
+internal `net/rpc` control socket, depending on the operation and target; HTTP
+is not a separate state owner. See [Daemon sockets](daemon.md#sockets) for live
+examples of the transport split.
 
 This page is a hand-written guide to the transport, auth, and envelope; the
 enumerated endpoint table is generated from the route catalog (see
@@ -44,10 +46,13 @@ $AGENT_FACTORY_HOME/daemon-http.sock
 So on a default install the socket is `~/.agent-factory/daemon-http.sock`. `af
 api` prints the resolved path for your environment.
 
-The socket is created when the daemon starts (on demand whenever `af` runs and
-there is work to host, or via an autostart unit — see
-[tasks.md](tasks.md#daemon-lifecycle)). If the socket does not exist, the daemon
-is not running.
+The socket is created when the local daemon starts. On-demand startup belongs to
+this default local target: a locally targeted TUI ensures it, while
+`--daemon-url` or `AF_DAEMON_URL` only dials the selected remote daemon. A bare
+`af` launch separately checks the local task store for enabled tasks; subcommands
+do not run that root-command check. An autostart unit can start the local daemon
+independently — see [tasks.md](tasks.md#daemon-lifecycle). If the socket does not
+exist, the local daemon is not running.
 
 ## Authentication
 

@@ -20,8 +20,11 @@ const (
 	// by tmux (LocalBackend). Zero value — a backend-less instance reads
 	// as a local workspace.
 	WorkspaceLocalWorktree WorkspaceKind = iota
-	// WorkspaceRemote: the workspace lives off-box; there is no local worktree or
-	// tmux to drive (docker, SSH, and remote-hook runtimes).
+	// WorkspaceRemote: the runtime provisions a separate workspace and exposes
+	// an agent-server rather than daemon-side worktree/tmux operations. This
+	// includes Docker on the daemon host as well as SSH, sandbox, and hook
+	// targets. The legacy "off-box" shorthand describes this capability boundary,
+	// not whether execution leaves the machine.
 	WorkspaceRemote
 )
 
@@ -32,7 +35,7 @@ const (
 // every backend implements every capability — but the descriptor stays so a
 // surface can gray out an op a given runtime hasn't wired up yet.
 type Capabilities struct {
-	// Workspace records where the workspace lives (local worktree vs off-box).
+	// Workspace records the worktree/agent-server capability boundary above.
 	Workspace WorkspaceKind
 
 	// There is deliberately no Attach bit (#1860). Attach is not an optional
@@ -157,7 +160,7 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 var ErrHandoffUnsupported = errors.New("agent handoff is only supported for local-worktree sessions")
 
 // Backend abstracts the session lifecycle so instances can be backed by local
-// tmux+git worktrees (the default) or an off-box docker, SSH, or hook runtime.
+// tmux+git worktrees (the default), a Docker container, or an SSH/sandbox/hook runtime.
 type Backend interface {
 	// Start initialises the session. When firstTimeSetup is true a brand-new
 	// session is created; otherwise an existing one is restored from storage.

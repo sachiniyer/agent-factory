@@ -27,9 +27,10 @@ import (
 //
 // The json tags define the HTTP JSON body shape for the daemon's /v1/UpdateTask
 // route; a nil pointer serializes as an absent key (omitempty), so the wire form
-// carries exactly the changed fields. The net/rpc gob control socket the CLI
-// uses goes through the same JSON encoding via GobEncode/GobDecode below — see
-// there for why plain gob would be lossy for this type.
+// carries exactly the changed fields. The net/rpc gob control socket the local
+// CLI path uses goes through the same JSON encoding via GobEncode/GobDecode
+// below — see there for why plain gob would be lossy for this type. Remote CLI
+// and TUI paths carry the same shape over HTTP.
 type TaskUpdate struct {
 	Name          *string `json:"name,omitempty"`
 	Prompt        *string `json:"prompt,omitempty"`

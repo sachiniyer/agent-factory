@@ -166,7 +166,11 @@ var runtimeRegistry = map[BackendKind]func() Runtime{
 }
 
 // backendProvisionsOffBox declares, per registered kind, whether the runtime
-// establishes the workspace somewhere other than the local filesystem.
+// provisions a separate workspace instead of using a daemon-managed worktree.
+// "Off-box" is the legacy name for this provisioning boundary, not physical
+// locality: Docker publishes its agent port on the daemon host's loopback;
+// SSH and sandbox use their configured SSH targets; hook placement is chosen
+// by the provisioner and may also be on the daemon host.
 //
 // It is a DECLARATION beside the registry rather than a condition rewritten at
 // each call site. #2778 was exactly that hazard in another form — a guard that
@@ -185,10 +189,10 @@ var backendProvisionsOffBox = map[BackendKind]bool{
 	BackendHook:    true,
 }
 
-// ProvisionsOffBox reports whether kind runs the session's workspace off the
-// local filesystem. It is what decides whether a create resolves the repo's
-// origin URL for the runtime to clone from: an off-box runtime clones from the
-// durable store, a local one uses the worktree in place.
+// ProvisionsOffBox reports whether kind provisions a separate workspace, as
+// defined by backendProvisionsOffBox. It decides whether a create resolves the
+// repo's origin URL: a separately provisioned runtime clones from that durable
+// store; a local one uses the worktree in place.
 //
 // An unregistered kind reports false, which is the conservative answer —
 // ParseBackendKind rejects those before they reach a runtime.
@@ -230,8 +234,8 @@ const AccountWriteBackRationale = "An account is a writable agent home, so the a
 // or sandbox would qualify too. What is missing is the guarantee, not the
 // possibility (#3103 review).
 //
-// Nor is this "every off-box kind": docker is off-box (backendProvisionsOffBox)
-// and answers TRUE, so off-box is the wrong axis to reason on here.
+// Nor is this "every separately provisioned kind": Docker provisions a container
+// (backendProvisionsOffBox) and answers true, so provisioning is the wrong axis.
 //
 // Placement is not the axis either — sandboxProvisioner.provision creates the
 // session dir and streams af's binary into it, and the provision-hook path reuses

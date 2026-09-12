@@ -631,17 +631,19 @@ task-started session, or a restore — each `post_worktree_commands` entry and
 Sessions created from the TUI or the CLI in-process are unaffected — those hooks
 run exactly as before — and on macOS the behaviour is unchanged everywhere.
 
-### Backend runtime (`backend`, `docker`, `ssh`)
+### Backend runtime (`backend`, `docker`, `ssh`, `sandbox`)
 
 `backend` selects the runtime a repo's sessions run on, and `--backend` overrides
-it per `af sessions create`:
+it per `af sessions create`. In canonical presentation order, the accepted
+values are:
 
 | Value | Runtime |
 |-------|---------|
 | `local` (default, or unset) | Today's in-process runtime: the agent runs as a tmux session in a git worktree on the machine running the daemon. |
-| `hook` | The remote-hook backend — a bring-your-own provisioner driven by the `[remote_hooks]` scripts. In the TUI's creation form, press `ctrl+r` to open the backend picker and select `hook`. |
 | `docker` | Run the workspace + agent in a container started from `[docker].image`. |
 | `ssh` | Run the workspace + agent on `[ssh].host` over ssh. |
+| `sandbox` | Run the workspace + agent on the host reached by the operator's global `sandbox.ssh` command. A repository may select this backend but cannot choose the command. |
+| `hook` | The remote-hook backend — a bring-your-own provisioner driven by the `[remote_hooks]` scripts. In the TUI's creation form, press `ctrl+r` to open the backend picker and select `hook`. |
 
 ```toml
 backend = "docker"

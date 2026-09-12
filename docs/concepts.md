@@ -56,9 +56,13 @@ and ask it to change things, so they cannot disagree about what exists, and
 closing any of them does not stop the work.
 
 It also keeps sessions alive across process death and reboots, runs the
-scheduler, handles usage-limit parking and resume, and serves the web client. It
-starts on demand when there is work to host; install its autostart unit once to
-keep tasks firing across logouts:
+scheduler, handles usage-limit parking and resume, and serves the web client.
+On-demand startup belongs to the default local target: a locally targeted TUI
+ensures its daemon, while `--daemon-url` or `AF_DAEMON_URL` selects a remote
+daemon that af only dials. A bare `af` launch separately checks the local task
+store and may start the local daemon for enabled tasks. Subcommands do not run
+that root-command check; a local operation that needs the daemon may perform its
+own ensure. Install its autostart unit once to keep tasks firing across logouts:
 
 ```bash
 af daemon install   # systemd user service on Linux, launchd agent on macOS

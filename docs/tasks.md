@@ -7,7 +7,12 @@ task is actually firing.
 
 A task delivers a prompt to an AI agent session automatically. Every task has exactly one **trigger** — a cron schedule (`cron_expr`) or a long-running watch script (`watch_cmd`) — and one **delivery mode**: create a fresh session per fire, or send the prompt into an existing session (`target_session`).
 
-Tasks are hosted by the agent-factory daemon, which starts automatically whenever `af` runs and an enabled task exists. There are no per-task OS scheduler units — see [Daemon lifecycle](#daemon-lifecycle) and [Migration notes](#migration-notes).
+Tasks are hosted by the agent-factory daemon. On-demand startup belongs to the
+default local target: a locally targeted TUI ensures its daemon, while a selected
+remote target is dial-only. A bare `af` launch separately checks the local task
+store for enabled tasks; subcommands do not run that root-command check. There
+are no per-task OS scheduler units — see [Daemon lifecycle](#daemon-lifecycle)
+and [Migration notes](#migration-notes).
 
 ## Trigger × delivery matrix
 
@@ -405,12 +410,12 @@ In the TUI, an automation that has stopped firing — or whose expression the sc
 
 The daemon is the single scheduler host: it evaluates cron expressions and supervises watch scripts.
 
-- Every `af` invocation ensures the daemon is running whenever an enabled task exists, and the daemon keeps running after the TUI exits.
+- On-demand startup belongs to the default local target. A locally targeted TUI ensures its daemon; `--daemon-url` or `AF_DAEMON_URL` only dials the selected remote. A bare `af` launch separately checks the local task store for enabled tasks, while subcommands do not run that root-command check. The local daemon keeps running after the TUI exits.
 - To keep tasks firing across **reboots** without opening `af`, register the user-level autostart unit (a systemd user service on Linux, a launchd agent on macOS):
 
 ```bash
 af daemon install      # register autostart at login
-af daemon uninstall    # remove it (the daemon still starts on demand)
+af daemon uninstall    # remove it (lifecycle-owning operations for the default local target still start the daemon on demand)
 ```
 
 - Task edits made through `af tasks` or the TUI go through the daemon: writes persist and the daemon re-arms its schedules in one RPC. The write lands first; if the schedule refresh fails, the edit is already committed and the daemon reports the post-commit failure rather than rolling it back. The daemon is the sole task writer; the TUI sends field-level patches (`UpdateTask(id, patch)`) so a single-field edit cannot clobber a concurrent edit another client made to a different field (#1700).

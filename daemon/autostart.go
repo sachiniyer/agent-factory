@@ -301,7 +301,7 @@ func InstallAutostart() (string, error) {
 		return plistPath, nil
 
 	default:
-		return "", fmt.Errorf("daemon autostart is not supported on %s (the daemon still starts automatically whenever you run af)", autostartGOOS)
+		return "", fmt.Errorf("daemon autostart is not supported on %s (lifecycle-owning operations for the default local target still start the daemon on demand)", autostartGOOS)
 	}
 }
 
