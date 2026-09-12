@@ -12,7 +12,7 @@ for (const operation of ["kill", "archive"]) {
   test(`rejected optimistic ${operation} retains the original row invoker`, async () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
-    const names = new Set(["openModal", "closeModal", "openConfirm", "captureModalInvoker"]);
+    const names = new Set(["openModal", "closeModal", "closeOverlays", "openConfirm", "captureModalInvoker"]);
     const handlers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text ?? ""))
       .map(node => node.getText(ast)).join("\n");
     const doc = { activeElement: null as any, body: { closest: () => null, getAttribute: () => null, isConnected: true, getClientRects: () => [{}] } };
@@ -47,7 +47,7 @@ for (const operation of ["kill", "archive"]) {
       getComputedStyle: () => ({ visibility: "visible" }),
       root: { querySelector: (selector: string) => selector.includes("data-session-id")
         ? rowPresent ? menu : null : selector === ".af-rail" ? rail : null },
-      modalHost: { replaceChildren() {} }, closeConfigAssistant() {},
+      modalHost: { replaceChildren() {} }, closeConfigAssistant() {}, closeAccountLogin() {},
       focusRail() {}, token: "", store: { get: () => ({ sessions: [session] }), subscribe: () => () => {} },
       confirmModal: (options: typeof confirms) => {
         confirms = options;
@@ -91,7 +91,7 @@ for (const [name, committed, optimisticConfirmed] of [
   test(name, async () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
-    const names = new Set(["openModal", "closeModal", "openConfirm"]);
+    const names = new Set(["openModal", "closeModal", "closeOverlays", "openConfirm"]);
     const handlers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text ?? ""))
       .map(node => node.getText(ast)).join("\n");
     let confirms: { onConfirm(): void };
@@ -102,7 +102,7 @@ for (const [name, committed, optimisticConfirmed] of [
     const context = {
       document: { activeElement: body, body }, CSS: { escape: (value: string) => value },
       getComputedStyle: () => ({ visibility: "visible" }), root: { querySelector: () => null },
-      modalHost: { replaceChildren() {} }, closeConfigAssistant() {}, focusRail() {}, token: "",
+      modalHost: { replaceChildren() {} }, closeConfigAssistant() {}, closeAccountLogin() {}, focusRail() {}, token: "",
       store: { get: () => ({ sessions: [session] }), subscribe: () => () => {} },
       confirmModal: (options: typeof confirms) => {
         confirms = options;
@@ -145,7 +145,7 @@ for (const connectionReplaced of [false, true]) {
 test(`a definitive restore refusal waits for accepted resync (replaced=${connectionReplaced})`, async () => {
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
   const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
-  const names = new Set(["openModal", "closeModal", "openConfirm"]);
+  const names = new Set(["openModal", "closeModal", "closeOverlays", "openConfirm"]);
   const handlers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text ?? ""))
     .map(node => node.getText(ast)).join("\n");
   const session = { id: "session", title: "Session", is_root: false, backend_type: "local", lifecycle_action: "restore" };
@@ -159,7 +159,7 @@ test(`a definitive restore refusal waits for accepted resync (replaced=${connect
   const context = {
     document: { activeElement: body, body }, CSS: { escape: (value: string) => value },
     getComputedStyle: () => ({ visibility: "visible" }), root: { querySelector: () => null },
-    modalHost: { replaceChildren() {} }, closeConfigAssistant() {}, focusRail() {}, token: "",
+    modalHost: { replaceChildren() {} }, closeConfigAssistant() {}, closeAccountLogin() {}, focusRail() {}, token: "",
     connectionGeneration: 1, pendingRestoreResync: false,
     store: { get: () => ({ phase: "app", sessions: [session] }), subscribe: () => () => {} },
     confirmModal: () => ({
