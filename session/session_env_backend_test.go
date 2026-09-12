@@ -350,6 +350,47 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 	}
 }
 
+// The backend-owned af path and the nested handoff are produced together here;
+// this pins the real proof wiring rather than testing the sessionenv predicate
+// with a trusted path supplied independently. `cat` is deliberate: a valid
+// non-agent program authenticates the wrapper while selecting no credential
+// allowlist, so an empty nested agent must not be confused with failed proof.
+// The empty program is the other generated grammar: agent-server defaults it to
+// Claude without rendering --program, and the proof must derive that same agent.
+func TestSandboxAgentServerAuthenticatesBackendWrapperVariants(t *testing.T) {
+	for name, program := range map[string]string{"non-agent": "cat", "default": ""} {
+		t.Run(name, func(t *testing.T) {
+			spec := ProvisionSpec{Title: "authenticated", Program: program}
+			tests := map[string]struct {
+				wrapper string
+				build   func() (string, error)
+			}{
+				"docker": {
+					wrapper: dockerAfBinaryPath,
+					build: func() (string, error) {
+						return (&dockerProvisioner{spec: spec, program: spec.Program}).agentServerCommand()
+					},
+				},
+				"ssh": {
+					wrapper: "/srv/af-session/af",
+					build: func() (string, error) {
+						return (&sandboxWorkspace{spec: spec, program: spec.Program, SessionDir: "/srv/af-session"}).agentServerCommand()
+					},
+				},
+			}
+			for backend, test := range tests {
+				command, err := test.build()
+				if err != nil {
+					t.Fatalf("%s handoff did not authenticate its backend-owned wrapper %q: %v", backend, test.wrapper, err)
+				}
+				if !strings.Contains(command, shellQuote(test.wrapper)) {
+					t.Fatalf("%s handoff omitted its backend-owned wrapper %q: %q", backend, test.wrapper, command)
+				}
+			}
+		})
+	}
+}
+
 func TestSandboxAgentServerMarksResolvedProgram(t *testing.T) {
 	spec := ProvisionSpec{Title: "override", Program: tmux.ProgramClaude}
 	tests := map[string]func() (string, error){

@@ -96,3 +96,27 @@ func TestExecInvocationAuthenticatesAgentServerHandoff(t *testing.T) {
 		t.Fatal("an af-looking repository binary authenticated the argv protocol's agent claim")
 	}
 }
+
+func TestExecInvocationAuthenticatesDefaultAgentServerHandoff(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "fixture")
+	wantErr := errors.New("stop before exec")
+	var gotEnvironment []string
+	previous := processExec
+	processExec = func(_ string, _ []string, environ []string) error {
+		gotEnvironment = append([]string(nil), environ...)
+		return wantErr
+	}
+	t.Cleanup(func() { processExec = previous })
+
+	currentExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := shellquote.Quote(currentExecutable) + " agent-server --listen :1 --repo /r --title t"
+	if err := execInvocation([]string{"claude", "0", command}, false); !errors.Is(err, wantErr) {
+		t.Fatalf("default-agent handoff error = %v, want test sentinel", err)
+	}
+	if !slices.Contains(gotEnvironment, "ANTHROPIC_API_KEY=fixture") {
+		t.Fatal("the authenticated no-program handoff lost the default Claude credential")
+	}
+}

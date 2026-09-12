@@ -9,7 +9,10 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-const maxNestedProgramDepth = 1
+const (
+	maxNestedProgramDepth     = 1
+	defaultAgentServerProgram = "claude"
+)
 
 // AgentForCommand returns a supported agent only when the complete command is
 // one literal invocation of that agent (optionally through env or exec). Nested
@@ -47,7 +50,7 @@ func agentForCommandAtDepth(command, trustedWrapper string, depth int) string {
 	if len(args) == 0 {
 		return ""
 	}
-	if args[0] == "env" {
+	if isTrustedEnvExecutable(args[0]) {
 		invocation, err := envcommand.Parse(args[1:], envcommand.Policy{AllowAssignments: true})
 		if err != nil || invocation.CommandIndex < 0 {
 			return ""
@@ -139,7 +142,7 @@ func directAgentFlagState(call *syntax.CallExpr, agent, name string) (found, ena
 	}
 
 	allLiteral := callIsLiteral(call)
-	if isBareName(words[0], "env") {
+	if isTrustedEnvWord(words[0]) {
 		found, enabled, ok := envAgentFlagState(call.Assigns, words[1:], agent, name)
 		if !ok || !found {
 			return false, false
@@ -231,19 +234,22 @@ func literalAgentServerProgram(call *syntax.CallExpr) (string, bool) {
 	}
 	words, _ := stripExecPrefix(call.Args)
 	args, _ := literalCommandArgs(words)
-	if len(args) < 10 || args[1] != "agent-server" {
+	if len(args) < 8 || args[1] != "agent-server" {
 		return "", false
 	}
 	if args[2] != "--listen" || args[3] == "" || args[4] != "--repo" || args[5] == "" ||
-		args[6] != "--title" || args[7] == "" || args[8] != "--program" || args[9] == "" {
+		args[6] != "--title" || args[7] == "" {
 		return "", false
 	}
-	program := args[9]
-	idx := 10
-	if idx >= len(args) || args[idx] != "--program-resolved" {
-		return "", false
+	program := defaultAgentServerProgram
+	idx := 8
+	if idx < len(args) && args[idx] == "--program" {
+		if idx+2 >= len(args) || args[idx+1] == "" || args[idx+2] != "--program-resolved" {
+			return "", false
+		}
+		program = args[idx+1]
+		idx += 3
 	}
-	idx++
 	for idx < len(args) {
 		if args[idx] != "--session-env" || idx+1 >= len(args) || !validName(args[idx+1]) {
 			return "", false
@@ -305,6 +311,26 @@ func wordEquals(word *syntax.Word, want string) bool {
 func wordBaseEquals(word *syntax.Word, want string) bool {
 	value, literal := literalShellWord(word)
 	return literal && strings.EqualFold(filepath.Base(value), want)
+}
+
+func isTrustedEnvWord(word *syntax.Word) bool {
+	value, literal := literalShellWord(word)
+	return literal && isTrustedEnvExecutable(value)
+}
+
+// isTrustedEnvExecutable keeps the existing bare form for compatibility: it is
+// resolved through the operator's inherited PATH, not a path selected from the
+// repository command. The two absolute forms are the conventional root-owned
+// system binaries on supported Unix hosts and are strictly less redirectable.
+// Every other path stays untrusted; in particular, a repository's ./env and a
+// user-writable /tmp/env cannot turn an agent-looking argument into a grant.
+func isTrustedEnvExecutable(executable string) bool {
+	switch executable {
+	case "env", "/bin/env", "/usr/bin/env":
+		return true
+	default:
+		return false
+	}
 }
 
 func literalCommandArgs(words []*syntax.Word) ([]string, bool) {

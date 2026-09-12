@@ -42,9 +42,35 @@ func TestAgentForCommandRejectsUntrustedAgentServerHandoff(t *testing.T) {
 	}
 }
 
-func TestAgentForCommandRejectsPathQualifiedEnvLookalike(t *testing.T) {
-	if got := AgentForCommand("./env codex"); got != "" {
-		t.Fatalf("AgentForCommand accepted a repository executable named env as %q", got)
+func TestAgentForCommandAuthenticatesEnvWrapper(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		want    string
+	}{
+		{command: "env codex", want: "codex"},
+		{command: "/usr/bin/env codex", want: "codex"},
+		{command: "/bin/env codex", want: "codex"},
+		{command: "./env codex"},
+		{command: "/tmp/env codex"},
+	} {
+		if got := AgentForCommand(test.command); got != test.want {
+			t.Errorf("AgentForCommand(%q) = %q, want %q", test.command, got, test.want)
+		}
+	}
+}
+
+func TestAbsoluteSystemEnvPreservesAgentCredentials(t *testing.T) {
+	const credential = "OPENAI_API_KEY=fixture"
+	for _, command := range []string{"/usr/bin/env codex", "/bin/env codex"} {
+		agent := AgentForCommand(command)
+		if got := FilterForCommand([]string{credential}, agent, command, nil); !slices.Contains(got, credential) {
+			t.Errorf("authenticated system env command %q lost the Codex credential", command)
+		}
+	}
+
+	command := "./env codex"
+	if got := FilterForCommand([]string{credential}, AgentForCommand(command), command, nil); slices.Contains(got, credential) {
+		t.Fatal("repository env lookalike received the Codex credential")
 	}
 }
 
@@ -58,6 +84,18 @@ func TestAgentForCommandAcceptsLaunchersTrustedAgentServerHandoff(t *testing.T) 
 	}
 	if got := agentForTrustedAgentServerCommand(command, "/other/af"); got != "" {
 		t.Fatalf("handoff authenticated by a different executable resolved to %q, want no agent", got)
+	}
+	defaultCommand := wrapper + " agent-server --listen :43110 --repo /workspace --title test"
+	if got := agentForTrustedAgentServerCommand(defaultCommand, wrapper); got != "claude" {
+		t.Fatalf("trusted no-program handoff resolved to %q, want the agent-server default claude", got)
+	}
+	defaultCommandWithEnv := defaultCommand + " --session-env CUSTOM_TOKEN"
+	if got := agentForTrustedAgentServerCommand(defaultCommandWithEnv, wrapper); got != "claude" {
+		t.Fatalf("trusted no-program handoff with session env resolved to %q, want the agent-server default claude", got)
+	}
+	malformedCommand := defaultCommand + " --program-resolved"
+	if got := agentForTrustedAgentServerCommand(malformedCommand, wrapper); got != "" {
+		t.Fatalf("trusted malformed no-program handoff resolved to %q, want no agent", got)
 	}
 }
 
@@ -146,6 +184,7 @@ func TestFilterForCommandHonorsLiteralClaudeCloudModeSelectors(t *testing.T) {
 	directCommands := []string{
 		"CLAUDE_CODE_USE_BEDROCK=1 claude",
 		"env CLAUDE_CODE_USE_BEDROCK=true claude",
+		"/usr/bin/env CLAUDE_CODE_USE_BEDROCK=true claude",
 		"env PATH=/opt/claude CLAUDE_CODE_USE_BEDROCK=1 claude",
 		"env -i CLAUDE_CODE_USE_BEDROCK=1 claude",
 	}

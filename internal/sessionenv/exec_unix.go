@@ -68,7 +68,7 @@ func wrapCommandWithMarker(executable, marker, agent, account string, proof Acco
 	// site; Docker/SSH supply the binary path they copied or staged themselves.
 	if call, ok := singleSimpleCall(command); ok {
 		if _, handoff := trustedAgentServerProgram(call, executable); handoff {
-			if nestedAgent := agentForTrustedAgentServerCommand(command, executable); nestedAgent == "" || nestedAgent != agent {
+			if nestedAgent := agentForTrustedAgentServerCommand(command, executable); nestedAgent != agent {
 				return "", fmt.Errorf("agent-server handoff does not match the trusted af launcher")
 			}
 		}
