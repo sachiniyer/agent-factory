@@ -753,8 +753,11 @@ func (q *eventQueue) removeDrainedFilesLocked() (bool, error) {
 	// a refused teardown does not drop the jsonl and then stop (#3672 review).
 	// Draining the last event reaches here whether or not a cursor write
 	// happened first, so the removal seam would otherwise unlink a link the
-	// cursor's writer refuses to write through.
+	// cursor or limit-marker writer refuses to write through.
 	if err := config.RefuseManagedFileSymlink(q.curPath); err != nil {
+		return false, err
+	}
+	if err := config.RefuseManagedFileSymlink(q.limitPath); err != nil {
 		return false, err
 	}
 	if err := q.remove(q.path); err != nil && !os.IsNotExist(err) {

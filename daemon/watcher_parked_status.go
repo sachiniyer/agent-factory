@@ -69,5 +69,11 @@ func (w *taskWatcher) commitParkedStatus(cursor eventQueueCursor, writeStatus fu
 	if _, err := w.queue.recordParkedStatus(cursor); err != nil {
 		log.ErrorLog.Printf("watch task %s: failed to record parked queue-head identity: %v", w.taskID, err)
 	}
+	// A terminal report may have committed before this park acquired statusMu.
+	// The parked outcome is now newer on disk, so retire the in-memory terminal
+	// overlay in the same publication or ListTasks would keep hiding it.
+	w.mu.Lock()
+	w.terminalStatus = ""
+	w.mu.Unlock()
 	return true, nil
 }

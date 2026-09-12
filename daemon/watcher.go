@@ -917,27 +917,6 @@ func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOpti
 	return nil
 }
 
-// persistSupervisorStatus keeps a confirmed usage-limit occurrence as the
-// task's visible status while its queue head is still held. The command's stop
-// or crash is logged independently; overwriting the task row here would both
-// hide the park and force the drainer to reconstruct occurrence identity from a
-// presentation field. Queue replay eventually replaces the status on success.
-func (w *taskWatcher) persistSupervisorStatus(status string) {
-	w.statusMu.Lock()
-	defer w.statusMu.Unlock()
-	if w.queue != nil {
-		recorded, err := w.queue.headParkedStatusRecorded()
-		if err != nil {
-			log.WarningLog.Printf("watch task %s: cannot verify parked queue-head status; preserving it rather than publishing %q: %v", w.taskID, status, err)
-			return
-		}
-		if recorded {
-			return
-		}
-	}
-	w.sup.setStatus(w.taskID, status)
-}
-
 // watcherLogPath resolves (and creates the directory for) the per-task
 // stderr log, ~/.agent-factory/logs/task-<id>.log.
 func watcherLogPath(taskID string) (string, error) {
