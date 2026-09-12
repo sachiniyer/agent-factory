@@ -992,6 +992,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     headRepository: pr.headRepository,
     headSha: pr.headRefOid,
     workflowsChanged,
+    requiredCheckObservations: requiredChecks.observations,
     reasons,
     notes,
   });
@@ -1011,6 +1012,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
 // stamp as the blocking reason — which is exactly what it did before this
 // constant existed.
 const DECISION_STAMP_PREFIX = "evaluated: ";
+const REQUIRED_CHECK_SNAPSHOT_PREFIX = "<!-- auto-gate-required-check-snapshot:";
 
 // A decision summary with the evaluation stamp removed, for readers that want the
 // REASON. The stamp is metadata about the write, not part of the decision.
@@ -1021,6 +1023,68 @@ function decisionSummaryBody(summary) {
   }
   const newline = text.indexOf("\n");
   return newline === -1 ? "" : text.slice(newline + 1).replace(/^\n+/, "");
+}
+
+function requiredCheckSnapshotText(observations) {
+  const payload = JSON.stringify({ version: 2, checks: observations || [] });
+  return `${REQUIRED_CHECK_SNAPSHOT_PREFIX}${payload} -->`;
+}
+
+function decisionRequiredCheckSnapshot(decision) {
+  const text = String(decision?.output?.text || "");
+  const line = text.split("\n").find((candidate) =>
+    candidate.startsWith(REQUIRED_CHECK_SNAPSHOT_PREFIX) && candidate.endsWith(" -->"),
+  );
+  if (!line) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(
+      line.slice(REQUIRED_CHECK_SNAPSHOT_PREFIX.length, -" -->".length),
+    );
+    return (payload?.version === 1 || payload?.version === 2) && Array.isArray(payload.checks)
+      ? payload.checks
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function sameRequiredCheckObservation(left, right) {
+  return (
+    left?.kind === right?.kind &&
+    left?.id === right?.id &&
+    left?.status === right?.status &&
+    left?.conclusion === right?.conclusion
+  );
+}
+
+function requiredCheckObservationKey(observation) {
+  return JSON.stringify([
+    observation?.kind || null,
+    observation?.id || null,
+    observation?.status || null,
+    observation?.conclusion ?? null,
+  ]);
+}
+
+function sameRequiredCheckGeneration(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+  const leftKeys = left.map(requiredCheckObservationKey).sort();
+  const rightKeys = right.map(requiredCheckObservationKey).sort();
+  return leftKeys.every((key, index) => key === rightKeys[index]);
+}
+
+function requiredCheckObservationIsTerminal(observation) {
+  if (observation?.kind === "check_run") {
+    return observation.status === "completed";
+  }
+  if (observation?.kind === "commit_status") {
+    return observation.status !== "" && observation.status !== "pending";
+  }
+  return false;
 }
 
 function firstUnmetRequirement(result) {
@@ -1162,6 +1226,11 @@ async function reportDecision({ github, context, core, result, manual = false })
     output: {
       title,
       summary,
+      // This is evidence about the state evaluateRequiredChecks actually read,
+      // not when this later write happened. The scheduled reconciler compares
+      // this identity/state tuple with the current check run and never needs to
+      // order clocks owned by different observations (#4242).
+      text: requiredCheckSnapshotText(result.requiredCheckObservations),
     },
   };
   try {
@@ -2293,6 +2362,13 @@ async function listParkedRuns({ github, context, headSha, subject = null }) {
 // Named, so a test can assert the file it points at actually accepts a dispatch.
 const VALIDATION_WORKFLOW = "pr.yml";
 const GATE_WORKFLOW = "auto-gate.yml";
+// A schedule is the backstop for terminal workflow_run events GitHub does not
+// deliver. It never fans one workflow's matrix out into one gate run per check:
+// completed Build/Lint checks select only decisions that name them as blockers,
+// each PR/head appears once, and one sweep starts at most this many evaluations.
+const REQUIRED_CHECK_REEVALUATION_LIMIT = 10;
+const REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE = 100;
+const PR_VALIDATION_REQUIRED_CHECK_NAMES = ["Build", "Lint"];
 
 // Reruns the successor of an accepted update, whichever lane failed to finish
 // it. Safe to repeat: the resolver re-reads the PR and approves only what is
@@ -3371,12 +3447,389 @@ async function sweepMergedHeadRefs({
   };
 }
 
+// A scheduled reconciliation may act only on the two source shapes the normal
+// evaluation snapshots below: GitHub Actions and legacy source-less checks. An
+// explicit different app is not source-less; treating it that way leaves no
+// matching snapshot and makes the PR consume the bounded wake budget forever.
+// Unknown parenthetical syntax is likewise not evidence of a source-less check.
+function blockedPRValidationSpec(body, context) {
+  const marker = `required check ${context}`;
+  let searchFrom = 0;
+  while (searchFrom < body.length) {
+    const foundAt = body.indexOf(marker, searchFrom);
+    if (foundAt < 0) {
+      return null;
+    }
+    const suffix = body.slice(foundAt + marker.length);
+    const app = suffix.match(/^ \(app ([1-9][0-9]*)\)(?: |$)/);
+    if (app) {
+      const sourceAppId = Number(app[1]);
+      if (Number.isSafeInteger(sourceAppId) && sourceAppId === GITHUB_ACTIONS_APP_ID) {
+        return { context, sourceAppId };
+      }
+      searchFrom = foundAt + marker.length;
+      continue;
+    }
+    if (suffix.startsWith(" ") && !suffix.startsWith(" (")) {
+      return { context, sourceAppId: null };
+    }
+    searchFrom = foundAt + marker.length;
+  }
+  return null;
+}
+
+function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead, statusesByHead }) {
+  const candidates = [];
+  for (const pull of pulls || []) {
+    const headSha = normalizeHeadSha(pull?.head?.sha || pull?.headRefOid);
+    const baseRefName = pull?.base?.ref || pull?.baseRefName;
+    const state = String(pull?.state || "").toLowerCase();
+    const prNumber = Number(pull?.number);
+    if (
+      !headSha ||
+      !Number.isSafeInteger(prNumber) ||
+      prNumber <= 0 ||
+      state !== "open" ||
+      baseRefName !== "master"
+    ) {
+      continue;
+    }
+
+    const identity = decisionIdentity(prNumber, headSha);
+    const headChecks = checkRunsByHead.get(headSha) || [];
+    const headStatuses = statusesByHead.get(headSha) || [];
+    const decision = newestCheckGeneration(
+      headChecks.filter(
+        (run) =>
+          run.name === identity.checkName &&
+          run.external_id === identity.externalId &&
+          run.app?.id === GITHUB_ACTIONS_APP_ID,
+      ),
+    );
+    if (decision) {
+      // An in-flight decision already owns the wake, and a success has nothing
+      // for PR Validation to clear. Other blockers do not earn runner work from
+      // this workflow's completion.
+      if (decision.status !== "completed" || decision.conclusion === "success") {
+        continue;
+      }
+    }
+
+    const body = decision
+      ? decisionSummaryBody(
+          decision.output?.summary || decision.summary || decision.output?.title || "",
+        )
+      : "";
+    const blockedSpecs = decision
+      ? PR_VALIDATION_REQUIRED_CHECK_NAMES.flatMap((name) => {
+          const spec = blockedPRValidationSpec(body, name);
+          return spec ? [spec] : [];
+        })
+      : PR_VALIDATION_REQUIRED_CHECK_NAMES.map((context) => ({
+          context,
+          sourceAppId: GITHUB_ACTIONS_APP_ID,
+        }));
+    const snapshot = decision ? decisionRequiredCheckSnapshot(decision) : null;
+    const completedCheckChanged = blockedSpecs.some((spec) => {
+      const currentState = latestRequiredState(
+        spec,
+        headChecks,
+        headStatuses,
+      );
+      const current = currentState?.observation || {
+        kind: "missing",
+        id: null,
+        status: null,
+        conclusion: null,
+      };
+      const currentGeneration = currentState?.generation || [];
+      if (!currentGeneration.some(requiredCheckObservationIsTerminal)) {
+        return false;
+      }
+      const snapshotEntry = snapshot?.find(
+        (entry) => entry?.name === spec.context && entry?.appId === spec.sourceAppId,
+      );
+      const observed = snapshotEntry?.observed;
+      // An older or malformed decision has no snapshot. Reconcile it once and
+      // replace it with direct evidence rather than inventing another clock
+      // comparison. Ambiguity chooses a redundant read over a permanent freeze.
+      if (!observed) {
+        return true;
+      }
+      if (Array.isArray(snapshotEntry.generation)) {
+        return !sameRequiredCheckGeneration(snapshotEntry.generation, currentGeneration);
+      }
+      // Version-one snapshots named only the selected observation. A second
+      // kind at the same winning timestamp is new evidence they could not
+      // represent, so refresh once and replace them with the complete set.
+      return currentGeneration.length > 1 || !sameRequiredCheckObservation(observed, current);
+    });
+    if (!completedCheckChanged) {
+      continue;
+    }
+    candidates.push({
+      prNumber,
+      headSha,
+      decisionKey: identity.key,
+    });
+  }
+
+  // The page is already quota-bounded; PR order only makes a shared-head tie
+  // deterministic.
+  return candidates
+    .sort((left, right) => left.prNumber - right.prNumber)
+    .map(({ prNumber, headSha, decisionKey }) => ({ prNumber, headSha, decisionKey }));
+}
+
+const REQUIRED_CHECK_RECONCILIATION_QUERY = `
+  query RequiredCheckReconciliation($owner: String!, $repo: String!, $after: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequests(
+        first: ${REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE}
+        after: $after
+        states: OPEN
+        baseRefName: "master"
+        orderBy: {field: CREATED_AT, direction: ASC}
+      ) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          number
+          state
+          baseRefName
+          headRefOid
+          commits(last: 1) {
+            nodes {
+              commit {
+                oid
+                statusCheckRollup {
+                  contexts(first: 100) {
+                    pageInfo { hasNextPage }
+                    nodes {
+                      __typename
+                      ... on CheckRun {
+                        id
+                        databaseId
+                        name
+                        status
+                        conclusion
+                        startedAt
+                        completedAt
+                        externalId
+                        permalink
+                        title
+                        summary
+                        text
+                        checkSuite { app { databaseId slug } }
+                      }
+                      ... on StatusContext {
+                        id
+                        context
+                        state
+                        createdAt
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+function reconciliationCheckRunDatabaseID(run) {
+  if (Number.isSafeInteger(run.databaseId) && run.databaseId > 0) {
+    return run.databaseId;
+  }
+  const permalinkID = /\/runs\/([1-9]\d*)(?:[/?#]|$)/.exec(String(run.permalink || ""))?.[1];
+  const parsed = Number(permalinkID);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function reconciliationCheckRun(run) {
+  return {
+    // CheckRun.databaseId is a nullable GraphQL Int even though REST check-run
+    // IDs are wider. The non-null permalink names that same numeric run, so it
+    // retains the monotonic tiebreak when databaseId cannot represent it.
+    id: reconciliationCheckRunDatabaseID(run),
+    // GraphQL's non-null Node ID is the REST check run's node_id. Keep that
+    // common identity for snapshots; databaseId has a narrower/nullable
+    // GraphQL type even though REST exposes the database key as a full number.
+    node_id: run.id,
+    name: run.name,
+    external_id: run.externalId,
+    app: {
+      id: run.checkSuite?.app?.databaseId,
+      slug: run.checkSuite?.app?.slug,
+    },
+    status: String(run.status || "").toLowerCase(),
+    conclusion: run.conclusion == null ? null : String(run.conclusion).toLowerCase(),
+    started_at: run.startedAt,
+    completed_at: run.completedAt,
+    output: {
+      title: run.title,
+      summary: run.summary,
+      text: run.text,
+    },
+  };
+}
+
+function reconciliationStatusContext(status) {
+  return {
+    node_id: status.id,
+    context: status.context,
+    state: String(status.state || "").toLowerCase(),
+    created_at: status.createdAt,
+  };
+}
+
+function statusContextsHaveTimestampTie(statuses) {
+  const seen = new Set();
+  for (const status of statuses) {
+    const key = `${status.context}\0${status.created_at || ""}`;
+    if (seen.has(key)) {
+      return true;
+    }
+    seen.add(key);
+  }
+  return false;
+}
+
+function tiedStatusGenerationIsOrdered(statuses) {
+  const groups = new Map();
+  for (const status of statuses) {
+    const key = `${status.context}\0${status.created_at || ""}`;
+    const group = groups.get(key) || [];
+    group.push(status);
+    groups.set(key, group);
+  }
+  return [...groups.values()].every((group) =>
+    group.length < 2 || group.every((status) => Number.isSafeInteger(status.id) && status.id > 0),
+  );
+}
+
+async function requiredCheckReconciliationSnapshot({ github, context, core }) {
+  const { owner, repo } = context.repo;
+  const pulls = [];
+  const checkRunsByHead = new Map();
+  const statusesByHead = new Map();
+  let after = null;
+  let pages = 0;
+  for (;;) {
+    const response = await retryRead(
+      `could not read required-check reconciliation page after ${after || "start"}`,
+      () => github.graphql(REQUIRED_CHECK_RECONCILIATION_QUERY, { owner, repo, after }),
+    );
+    pages += 1;
+    const connection = response?.repository?.pullRequests;
+    if (!connection || !Array.isArray(connection.nodes)) {
+      throw new Error("Required-check reconciliation returned an invalid pull-request page");
+    }
+    for (const pull of connection.nodes) {
+      const headSha = normalizeHeadSha(pull?.headRefOid);
+      const commit = pull?.commits?.nodes?.[0]?.commit;
+      const commitSha = normalizeHeadSha(commit?.oid);
+      const contexts = commit?.statusCheckRollup?.contexts;
+      if (!headSha || commitSha !== headSha) {
+        core.warning(
+          `Required-check reconciliation skipped PR #${pull?.number || "?"}: ` +
+            "its head and status-rollup commit did not match.",
+        );
+        continue;
+      }
+      if (contexts?.pageInfo?.hasNextPage) {
+        core.warning(
+          `Required-check reconciliation skipped PR #${pull.number}: its status rollup ` +
+            "exceeded 100 contexts.",
+        );
+        continue;
+      }
+      const checkRuns = (contexts?.nodes || [])
+        .filter((node) => node?.__typename === "CheckRun")
+        .map(reconciliationCheckRun);
+      if (checkRuns.some((run) => !Number.isSafeInteger(run.id))) {
+        core.warning(
+          `Required-check reconciliation skipped PR #${pull.number}: a check run had no ` +
+            "safe numeric generation ID.",
+        );
+        continue;
+      }
+      let statuses = (contexts?.nodes || [])
+        .filter((node) => node?.__typename === "StatusContext")
+        .map(reconciliationStatusContext);
+      // StatusContext exposes only its opaque node ID in GraphQL. A REST read is
+      // needed only for the rare same-context/same-second tie, where its numeric
+      // database ID is the one documented generation order available to us.
+      if (statusContextsHaveTimestampTie(statuses)) {
+        statuses = await retryRead(
+          `could not order tied commit statuses at ${headSha}`,
+          () => github.paginate(github.rest.repos.listCommitStatusesForRef, {
+            owner,
+            repo,
+            ref: headSha,
+            per_page: 100,
+          }),
+        );
+        if (!tiedStatusGenerationIsOrdered(statuses)) {
+          core.warning(
+            `Required-check reconciliation skipped PR #${pull.number}: tied commit statuses ` +
+              "had no safe numeric generation IDs.",
+          );
+          continue;
+        }
+      }
+      pulls.push(pull);
+      checkRunsByHead.set(headSha, checkRuns);
+      statusesByHead.set(headSha, statuses);
+    }
+    if (!connection.pageInfo?.hasNextPage) {
+      break;
+    }
+    if (!connection.pageInfo.endCursor || connection.pageInfo.endCursor === after) {
+      throw new Error("Required-check reconciliation pagination did not advance");
+    }
+    after = connection.pageInfo.endCursor;
+  }
+  return { pulls, checkRunsByHead, statusesByHead, pages };
+}
+
+async function listRequiredCheckReevaluationTargets({ github, context, core }) {
+  // One GraphQL page carries 100 PRs and each head's current check rollup. This
+  // makes every open PR eligible on every sweep without one REST read per head,
+  // wall-clock page assignment, or mutable cursor state. A truncated rollup is
+  // skipped fail-closed rather than combined with incomplete evidence.
+  const snapshot = await requiredCheckReconciliationSnapshot({ github, context, core });
+  const stale = requiredCheckReevaluationCandidates({
+    pulls: snapshot.pulls,
+    checkRunsByHead: snapshot.checkRunsByHead,
+    statusesByHead: snapshot.statusesByHead,
+  });
+  const targets = stale.slice(0, REQUIRED_CHECK_REEVALUATION_LIMIT);
+  if (stale.length > targets.length) {
+    core.warning(
+      `Required-check reconciliation deferred ${stale.length - targets.length} stale PR(s); ` +
+        `each sweep wakes at most ${REQUIRED_CHECK_REEVALUATION_LIMIT}.`,
+    );
+  }
+  core.notice(
+    `Required-check reconciliation read ${snapshot.pulls.length} PR(s) in ` +
+      `${snapshot.pages} GraphQL page(s), found ${stale.length} stale decision(s), and ` +
+      `selected ${targets.length}.`,
+  );
+  return targets;
+}
+
 async function resolveTargets({
   github, context, core, prNumber,
   headPollAttempts = 6,
   headPollDelayMs = 5000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
+  if (context.eventName === "schedule") {
+    return listRequiredCheckReevaluationTargets({ github, context, core });
+  }
   const numbers = [];
   const payload = context.payload;
   const rawPreviousHead = context.eventName === "workflow_dispatch"
@@ -3845,6 +4298,7 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
   );
   const notes = [];
   const reasons = [...required.errors];
+  const observations = [];
 
   if (syntheticDecisionSpecs.length > 0) {
     notes.push("Synthetic Auto Gate decisions are excluded from their own prerequisites");
@@ -3902,6 +4356,22 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
 
   for (const spec of specs) {
     const state = latestRequiredState(spec, checkRuns, statuses);
+    if (
+      PR_VALIDATION_REQUIRED_CHECK_NAMES.includes(spec.context) &&
+      (spec.sourceAppId === GITHUB_ACTIONS_APP_ID || spec.sourceAppId == null)
+    ) {
+      observations.push({
+        name: spec.context,
+        appId: spec.sourceAppId,
+        observed: state?.observation || {
+          kind: "missing",
+          id: null,
+          status: null,
+          conclusion: null,
+        },
+        generation: state?.generation || [],
+      });
+    }
     if (!state) {
       if (parkedRuns.length > 0) {
         const named = parkedRuns.map((run) => `${run.name} (${run.id})`).join(", ");
@@ -3922,7 +4392,7 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
     }
   }
 
-  return { ok: reasons.length === 0, reasons, notes };
+  return { ok: reasons.length === 0, reasons, notes, observations };
 }
 
 function isSyntheticDecisionContext(contextName) {
@@ -4042,6 +4512,15 @@ function latestRequiredState(spec, checkRuns, statuses) {
     const state = checkRunState(run);
     candidates.push({
       date: parseTimestamp(run.completed_at || run.started_at || run.created_at) || 0,
+      generationID: Number.isSafeInteger(run.id) ? run.id : null,
+      observation: {
+        kind: "check_run",
+        // REST calls this node_id; the reconciliation GraphQL query calls it
+        // id. Its opaque string is non-null in both APIs, unlike databaseId.
+        id: String(run.node_id || run.id || ""),
+        status: String(run.status || ""),
+        conclusion: run.conclusion == null ? null : String(run.conclusion),
+      },
       ...state,
     });
   }
@@ -4053,6 +4532,15 @@ function latestRequiredState(spec, checkRuns, statuses) {
       }
       candidates.push({
         date: parseTimestamp(status.created_at) || 0,
+        generationID: Number.isSafeInteger(status.id) ? status.id : null,
+        observation: {
+          kind: "commit_status",
+          // The same cross-API identity rule as check runs: GraphQL id is the
+          // REST node_id, while a REST-only fixture can still fall back to id.
+          id: String(status.node_id || status.id || ""),
+          status: String(status.state || ""),
+          conclusion: null,
+        },
         ok: status.state === "success",
         waiting: status.state === "pending",
         description: `commit status ${status.state}`,
@@ -4060,8 +4548,47 @@ function latestRequiredState(spec, checkRuns, statuses) {
     }
   }
 
-  candidates.sort((a, b) => b.date - a.date);
-  return candidates[0] || null;
+  candidates.sort((a, b) => {
+    const timeDifference = b.date - a.date;
+    if (timeDifference !== 0) {
+      return timeDifference;
+    }
+    if (
+      a.observation.kind === b.observation.kind &&
+      a.generationID != null &&
+      b.generationID != null
+    ) {
+      return b.generationID - a.generationID;
+    }
+    return 0;
+  });
+  const selected = candidates[0] || null;
+  if (!selected) {
+    return null;
+  }
+  const newestByKind = new Map();
+  for (const candidate of candidates) {
+    if (candidate.date !== selected.date) {
+      continue;
+    }
+    const kind = candidate.observation.kind;
+    const prior = newestByKind.get(kind);
+    if (
+      !prior ||
+      (candidate.generationID != null &&
+        (prior.generationID == null || candidate.generationID > prior.generationID))
+    ) {
+      newestByKind.set(kind, candidate);
+    }
+  }
+  return {
+    ...selected,
+    generation: [...newestByKind.values()]
+      .map((candidate) => candidate.observation)
+      .sort((left, right) =>
+        requiredCheckObservationKey(left).localeCompare(requiredCheckObservationKey(right)),
+      ),
+  };
 }
 
 function checkRunMatchesSpec(run, spec) {

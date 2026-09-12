@@ -26,6 +26,11 @@ on:
   workflow_run:
     workflows: [PR Validation]
     types: [completed]
+  # GitHub has intermittently omitted that terminal workflow_run event. Reconcile
+  # only stale decisions that name a PR Validation blocker; one paginated query
+  # batches PR heads/check rollups and at most ten reevaluations start (#4242).
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       pr_number:
@@ -44,6 +49,16 @@ permissions:
   checks: write
   statuses: read
   issues: write
+
+# A scheduled run carries no unique event: each one scans every open master PR,
+# so a newer pending schedule may replace an older pending copy without losing an
+# invalidation. Keep the active run alive through its aggregate transaction so
+# the next scan cannot select the same per-PR decisions while they are queued.
+# Every webhook/comment run gets its own run-id group and still reaches the
+# ungrouped invalidation below; those events are not fungible and never coalesce.
+concurrency:
+  group: auto-gate-${{ github.event_name == 'schedule' && 'required-check-reconciliation' || github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   auto-gate:
@@ -213,7 +228,9 @@ jobs:
         # AUTO_GATE_ENABLED, because deleting a ref is the gate writing to this
         # repository on its own, which is the thing that switch turns off. With
         # it off nothing merges, so nothing new leaks either.
-        if: always() && vars.AUTO_GATE_ENABLED == 'true'
+        # The schedule exists only to reconcile required checks. Do not spend its
+        # deliberately bounded API budget on unrelated branch housekeeping.
+        if: always() && vars.AUTO_GATE_ENABLED == 'true' && github.event_name != 'schedule'
         uses: actions/github-script@v8
         with:
           github-token: ${{ github.token }}
@@ -346,7 +363,7 @@ jobs:
     # Invalidation has already run for EVERY event, outside both lanes. Keep
     # each head separate so a comment cannot replace synchronize's previous head.
     concurrency:
-      group: auto-gate-target-${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number || github.event.workflow_run.head_sha || github.event.check_suite.head_sha || github.event.sha || github.run_id }}-head-${{ matrix.aggregate.head_sha }}
+      group: auto-gate-target-${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number || github.event.workflow_run.head_sha || github.event.check_suite.head_sha || github.event.sha || github.event.schedule || github.run_id }}-head-${{ matrix.aggregate.head_sha }}
       cancel-in-progress: false
     uses: ./.github/workflows/auto-gate-aggregate.yml
     with:

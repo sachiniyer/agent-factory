@@ -385,8 +385,31 @@ writes.
 
 GitHub suppresses `check_suite` recursion for suites created by Actions. The
 required `Lint` and `Build` jobs both belong to **PR Validation**, so Auto Gate
-also subscribes to that workflow's terminal `workflow_run` event. This ensures
-their completed state is reevaluated without subscribing Auto Gate to itself.
+also subscribes to that workflow's terminal `workflow_run` event. GitHub has
+intermittently omitted that event, so a five-minute reconciliation pass backs it
+up: it wakes only an absent exact decision, or a failed decision that names
+`Build` or `Lint` as a blocker and recorded a different state for the now-complete
+check. Runs are coalesced per PR/head. The decision records the check-run ID,
+status and conclusion that its
+required-check read actually observed; the reconciler compares that tuple with
+the current completed run rather than ordering check and publication clocks.
+Missing or malformed legacy evidence is reconciled conservatively once.
+
+Each pass paginates every open PR in creation order and carries its current check
+rollup in the same GraphQL snapshot, 100 PRs per request. Eligibility therefore
+depends on neither `updated_at` ordering nor a wall-clock page assignment: every
+PR, including the least recently updated one, is inspected in the next delivered
+sweep. The nominal scheduling bound is five minutes; a scheduler outage or delay
+adds directly to that bound instead of permanently skipping a page. At most ten
+stale decisions are reevaluated per sweep, so S simultaneously stale decisions
+drain in at most `ceil(S / 10)` delivered sweeps. A truncated per-head rollup is
+skipped fail-closed rather than treated as complete.
+
+The scan costs `ceil(N / 100)` GraphQL requests per pass: one request (12/hour)
+through the 83-head REST-quota threshold, or two (24/hour) for 120 PRs, before
+bounded retries. It performs no per-head REST reads. Scheduled passes also skip
+unrelated branch-sweep housekeeping. This avoids both the frozen-decision
+failure and one gate evaluation per completed matrix job (#4242).
 
 GitHub also suppresses `push` workflows when Auto Gate merges with its
 `GITHUB_TOKEN`. After a merge, the gate therefore dispatches the five

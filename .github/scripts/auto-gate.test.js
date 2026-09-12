@@ -405,10 +405,28 @@ test("the gate's own sources do not disqualify a review that quotes them", () =>
   }
 });
 
-test("Auto Gate dedupes evaluation jobs only after ungrouped invalidation", async () => {
+test("scheduled reconciliation coalesces only fungible full-scan workflows", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
-  assert.doesNotMatch(workflow, /^concurrency:/m,
-    "workflow concurrency must not delay or discard invalidation");
+  const beforeJobs = workflow.slice(0, workflow.indexOf("\njobs:"));
+  assert.match(
+    beforeJobs,
+    /concurrency:\n  group: auto-gate-\$\{\{ github\.event_name == 'schedule' && 'required-check-reconciliation' \|\| github\.run_id \}\}\n  cancel-in-progress: false/,
+    "a second schedule must wait for the selected targets' whole transaction",
+  );
+  assert.doesNotMatch(
+    beforeJobs,
+    /github\.event_name != 'schedule'/,
+    "webhook and comment invalidations need unique run-id groups and must never coalesce",
+  );
+});
+
+test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidation", async () => {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  assert.match(
+    workflow,
+    /^concurrency:\n  group: auto-gate-\$\{\{ github\.event_name == 'schedule' && 'required-check-reconciliation' \|\| github\.run_id \}\}\n  cancel-in-progress: false$/m,
+    "only fungible scheduled scans may share a workflow-level group",
+  );
   const jobs = Object.fromEntries([...workflow.matchAll(
     /^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/gm,
   )].map((match) => [match[1], match[2]]));
@@ -442,6 +460,7 @@ test("Auto Gate dedupes evaluation jobs only after ungrouped invalidation", asyn
     "github.event.workflow_run.head_sha",
     "github.event.check_suite.head_sha",
     "github.event.sha",
+    "github.event.schedule",
     "github.run_id",
   ]);
   // Evaluate the actual expression's property/OR subset, including Actions'
@@ -461,6 +480,7 @@ test("Auto Gate dedupes evaluation jobs only after ungrouped invalidation", asyn
     pull_request_target: [{ pull_request: { number: 4060 } }, {}, 4060],
     status: [{ sha: HEAD_SHA }, {}, HEAD_SHA],
     workflow_run: [{ workflow_run: { head_sha: HEAD_SHA } }, {}, HEAD_SHA],
+    schedule: [{ schedule: "*/5 * * * *" }, {}, "*/5 * * * *"],
     workflow_dispatch: [{}, { pr_number: 4060 }, 4060],
   };
   const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
@@ -512,6 +532,12 @@ test("Auto Gate can be recovered manually by PR number", () => {
     /pull_request_target:\s+types: \[opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled, auto_merge_enabled, auto_merge_disabled\]/,
   );
   assert.match(workflow, /workflow_run:\s+workflows: \[PR Validation\]\s+types: \[completed\]/);
+  assert.match(workflow, /schedule:\s+- cron: "\*\/5 \* \* \* \*"/);
+  assert.match(helper, /context\.eventName === "schedule"[\s\S]*?listRequiredCheckReevaluationTargets/);
+  assert.match(
+    workflow,
+    /if: always\(\) && vars\.AUTO_GATE_ENABLED == 'true' && github\.event_name != 'schedule'/,
+  );
   assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
   assert.match(
     workflow,
@@ -5807,6 +5833,769 @@ test("PR Validation workflow completion resolves every PR at its head", async ()
   assert.deepEqual(targets.map((target) => target.prNumber), [1465, 2048]);
 });
 
+test("scheduled reconciliation wakes a Build-blocked decision once after validation completes", async () => {
+  const validationCompletedAt = "2026-07-09T21:13:58Z";
+  const staleDecision = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T21:00:52Z",
+  });
+  const context = { ...fakeContext(), eventName: "schedule" };
+
+  const stale = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          staleDecision,
+          reconciliationRequiredCheck("Build", validationCompletedAt),
+          reconciliationRequiredCheck("Lint", "2026-07-09T21:02:32Z"),
+        ],
+      },
+    }),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(stale, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+
+  // reportDecision refreshes the stamp in-place. The same completed workflow
+  // must not wake this PR on every five-minute sweep after that one evaluation.
+  const refreshed = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          reconciliationDecision({
+            prNumber: 1465,
+            headSha: HEAD_SHA,
+            evaluatedAt: "2026-07-09T21:14:30Z",
+            observedChecks: [{
+              name: "Build",
+              appId: ACTIONS_APP_ID,
+              observed: {
+                kind: "check_run",
+                id: "9001",
+                status: "completed",
+                conclusion: "success",
+              },
+            }],
+          }),
+          reconciliationRequiredCheck("Build", validationCompletedAt),
+        ],
+      },
+    }),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(refreshed, [], "one validation completion buys at most one reevaluation");
+
+  const unrelated = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          reconciliationDecision({
+            prNumber: 1465,
+            headSha: HEAD_SHA,
+            evaluatedAt: "2026-07-09T21:00:52Z",
+            reason: "Codex has not reviewed this head yet",
+          }),
+          reconciliationRequiredCheck("Build", validationCompletedAt),
+        ],
+      },
+    }),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(unrelated, [], "PR Validation completion cannot wake an unrelated blocker");
+});
+
+test("scheduled reconciliation treats a same-second check completion as newer", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          reconciliationDecision({
+            prNumber: 1465,
+            headSha: HEAD_SHA,
+            // Decision stamps preserve milliseconds, while GitHub truncates
+            // check-run completed_at. The completion happened after this
+            // evaluation, but both API values name the same second.
+            evaluatedAt: "2026-07-09T21:13:58.750Z",
+          }),
+          reconciliationRequiredCheck("Build", "2026-07-09T21:13:58Z"),
+        ],
+      },
+    }),
+    context,
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+});
+
+test("scheduled reconciliation compares the check state observed before decision publication", async () => {
+  const build = checkRun({
+    id: 501,
+    name: "Build",
+    status: "in_progress",
+    conclusion: null,
+  });
+  const lint = checkRun({ id: 502, name: "Lint", conclusion: "success" });
+  const github = fakeGateGithub({ checkRuns: [build, lint] });
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /required check Build.*still settling/);
+
+  // The required-check snapshot is now stale, but the decision has not been
+  // published yet. Publication time is later than this completion and cannot
+  // tell the reconciler which state evaluateRequiredChecks actually observed.
+  build.status = "completed";
+  build.conclusion = "success";
+  build.completed_at = "2026-07-09T01:10:00Z";
+  await autoGate.reportDecision({ github, context: fakeContext(), core: fakeCore(), result });
+  const written = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+  assert.ok(written, "the frozen per-PR decision must be published");
+
+  const decision = {
+    id: 503,
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    ...written,
+  };
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: { [HEAD_SHA]: [decision, build, lint] },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+});
+
+test("scheduled reconciliation matches full-width check identities across APIs", async () => {
+  const checkRunId = 103_493_658_129;
+  const checkRunNodeId = "CR_kwDORdIFwM8AAAAYGLPmEQ";
+  const build = checkRun({
+    id: checkRunId,
+    nodeId: checkRunNodeId,
+    graphqlDatabaseId: null,
+    name: "Build",
+    conclusion: "failure",
+  });
+  const lint = checkRun({ id: 502, name: "Lint", conclusion: "success" });
+  const github = fakeGateGithub({ checkRuns: [build, lint] });
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(result.shouldMerge, false);
+  await autoGate.reportDecision({ github, context: fakeContext(), core: fakeCore(), result });
+  const written = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [{
+          id: 503,
+          app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+          ...written,
+        }, build, lint],
+      },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(
+    targets,
+    [],
+    "an unchanged check must match even when its GraphQL database ID is absent",
+  );
+});
+
+test("scheduled reconciliation orders same-second decisions without GraphQL database IDs", async () => {
+  const stamp = "2026-07-09T01:10:00Z";
+  const superseded = {
+    ...reconciliationDecision({
+      prNumber: 1465,
+      headSha: HEAD_SHA,
+      evaluatedAt: stamp,
+    }),
+    id: 103_493_700_001,
+    node_id: "CR_kwDORdIFwM8AAAAYGLR2oQ",
+    graphql_database_id: null,
+    conclusion: "success",
+  };
+  const current = {
+    ...reconciliationDecision({
+      prNumber: 1465,
+      headSha: HEAD_SHA,
+      evaluatedAt: stamp,
+    }),
+    id: 103_493_700_002,
+    node_id: "CR_kwDORdIFwM8AAAAYGLR2og",
+    graphql_database_id: null,
+  };
+  assert.equal(superseded.completed_at, current.completed_at, "the decisions must really tie");
+  assert.equal(superseded.conclusion, "success", "the losing response-order entry must skip");
+
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          superseded,
+          current,
+          reconciliationRequiredCheck("Build", "2026-07-09T01:11:00Z"),
+        ],
+      },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+});
+
+test("scheduled reconciliation breaks same-second check-run ties by generation", async () => {
+  const stamp = "2026-07-09T01:11:00Z";
+  const superseded = checkRun({
+    id: 103_493_710_001,
+    nodeId: "CR_kwDORdIFwM8AAAAYGLT9MQ",
+    name: "Build",
+    conclusion: "failure",
+  });
+  const current = checkRun({
+    id: 103_493_710_002,
+    nodeId: "CR_kwDORdIFwM8AAAAYGLT9Mg",
+    name: "Build",
+    conclusion: "success",
+  });
+  superseded.completed_at = stamp;
+  current.completed_at = stamp;
+  const decision = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T01:10:00Z",
+    reason: `required check Build (app ${ACTIONS_APP_ID}) is failing`,
+    observedChecks: [{
+      name: "Build",
+      appId: ACTIONS_APP_ID,
+      observed: {
+        kind: "check_run",
+        id: superseded.node_id,
+        status: "completed",
+        conclusion: "failure",
+      },
+    }],
+  });
+
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: { [HEAD_SHA]: [decision, superseded, current] },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+});
+
+test("scheduled reconciliation breaks same-second commit-status ties by generation", async () => {
+  const stamp = "2026-07-09T01:11:00Z";
+  const superseded = commitStatus({
+    id: 103_493_720_001,
+    nodeId: "SC_kwDORdIFwM8AAAAYGLWgAQ",
+    context: "Build",
+    state: "failure",
+    createdAt: stamp,
+  });
+  const current = commitStatus({
+    id: 103_493_720_002,
+    nodeId: "SC_kwDORdIFwM8AAAAYGLWgAg",
+    context: "Build",
+    state: "success",
+    createdAt: stamp,
+  });
+  const decision = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T01:10:00Z",
+    reason: "required check Build commit status is failing",
+    observedChecks: [{
+      name: "Build",
+      appId: null,
+      observed: {
+        kind: "commit_status",
+        id: superseded.node_id,
+        status: "failure",
+        conclusion: null,
+      },
+    }],
+  });
+  const statusReads = [];
+
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: { [HEAD_SHA]: [decision] },
+      statusesByHead: { [HEAD_SHA]: [superseded, current] },
+      statusReads,
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+  assert.deepEqual(statusReads, [HEAD_SHA], "only an actual timestamp tie earns a REST read");
+});
+
+test("scheduled reconciliation refreshes a cross-kind timestamp tie exactly once", async () => {
+  const stamp = "2026-07-09T01:11:00Z";
+  const build = checkRun({
+    id: 103_493_730_001,
+    nodeId: "CR_kwDORdIFwM8AAAAYGLY2UQ",
+    name: "Build",
+    conclusion: "failure",
+  });
+  build.completed_at = stamp;
+  const status = commitStatus({
+    id: 103_493_730_002,
+    nodeId: "SC_kwDORdIFwM8AAAAYGLY2Ug",
+    context: "Build",
+    state: "success",
+    createdAt: stamp,
+  });
+  const observedBuild = {
+    kind: "check_run",
+    id: build.node_id,
+    status: "completed",
+    conclusion: "failure",
+  };
+  const observedStatus = {
+    kind: "commit_status",
+    id: status.node_id,
+    status: "success",
+    conclusion: null,
+  };
+  const prior = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T01:10:00Z",
+    reason: "required check Build is failing",
+    observedChecks: [{ name: "Build", appId: null, observed: observedBuild }],
+  });
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const snapshot = (decision) => scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, HEAD_SHA)],
+    checksByHead: { [HEAD_SHA]: [decision, build] },
+    statusesByHead: { [HEAD_SHA]: [status] },
+  });
+
+  const stale = await autoGate.resolveTargets({
+    github: snapshot(prior),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(stale, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+
+  const refreshed = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T01:12:00Z",
+    reason: "required check Build is failing",
+    snapshotVersion: 2,
+    observedChecks: [{
+      name: "Build",
+      appId: null,
+      observed: observedBuild,
+      generation: [observedBuild, observedStatus],
+    }],
+  });
+  const unchanged = await autoGate.resolveTargets({
+    github: snapshot(refreshed),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(unchanged, [], "a snapshot that records both tied kinds must stay settled");
+});
+
+test("scheduled reconciliation round-trips source-less commit-status observations", async () => {
+  const build = checkRun({ id: 701, name: "Build", conclusion: "success" });
+  const lint = checkRun({ id: 702, name: "Lint", conclusion: "success" });
+  const failingStatus = commitStatus({
+    id: 103_493_700_001,
+    nodeId: "SC_kwDORdIFwM8AAAAYGLR2oQ",
+    context: "Build",
+    state: "failure",
+    createdAt: "2026-07-09T01:11:00Z",
+  });
+  const github = fakeGateGithub({
+    checkRuns: [build, lint],
+    statuses: [failingStatus],
+    requiredChecks: [{ context: "Build" }, { context: "Lint" }],
+  });
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /required check Build.*commit status failure/);
+  await autoGate.reportDecision({ github, context: fakeContext(), core: fakeCore(), result });
+  const written = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+  const decision = {
+    id: 703,
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    ...written,
+  };
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const unchangedStatusReads = [];
+
+  const unchanged = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: { [HEAD_SHA]: [decision, build, lint] },
+      statusesByHead: { [HEAD_SHA]: [failingStatus] },
+      statusReads: unchangedStatusReads,
+    }),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(unchanged, [], "the status recorded by evaluation must compare equal");
+  assert.deepEqual(unchangedStatusReads, [], "an untied status must stay on the batched read");
+
+  const succeedingStatus = commitStatus({
+    id: 103_493_700_002,
+    nodeId: "SC_kwDORdIFwM8AAAAYGLR2og",
+    context: "Build",
+    state: "success",
+    createdAt: "2026-07-09T01:12:00Z",
+  });
+  const changedStatusReads = [];
+  const changed = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: { [HEAD_SHA]: [decision, build, lint] },
+      statusesByHead: { [HEAD_SHA]: [failingStatus, succeedingStatus] },
+      statusReads: changedStatusReads,
+    }),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(changed, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+  assert.deepEqual(changedStatusReads, [], "different timestamp generations need no REST tie-break");
+});
+
+test("scheduled reconciliation retains source-less required-check observations", async () => {
+  const build = checkRun({ id: 601, name: "Build", conclusion: "failure" });
+  const lint = checkRun({ id: 602, name: "Lint", conclusion: "success" });
+  const github = fakeGateGithub({
+    checkRuns: [build, lint],
+    requiredChecks: [{ context: "Build" }, { context: "Lint" }],
+  });
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /required check Build did not succeed/);
+  await autoGate.reportDecision({ github, context: fakeContext(), core: fakeCore(), result });
+  const written = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [{
+          id: 603,
+          app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+          ...written,
+        }, build, lint],
+      },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(targets, [], "an unchanged source-less check must not wake every sweep");
+});
+
+test("scheduled reconciliation distinguishes source-less blockers from other apps", async () => {
+  const foreignHead = "a".repeat(40);
+  const foreignDecision = reconciliationDecision({
+    prNumber: 1465,
+    headSha: foreignHead,
+    evaluatedAt: "2026-07-09T01:10:00Z",
+    reason: "required check Build (app 999) is failing",
+    observedChecks: [],
+  });
+  const foreignBuild = checkRun({
+    id: 801,
+    name: "Build",
+    conclusion: "success",
+    appId: 999,
+    appSlug: "other-app",
+  });
+  const foreignSnapshot = () => scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, foreignHead)],
+    checksByHead: { [foreignHead]: [foreignDecision, foreignBuild] },
+  });
+  const context = { ...fakeContext(), eventName: "schedule" };
+
+  assert.deepEqual(await autoGate.resolveTargets({
+    github: foreignSnapshot(),
+    context,
+    core: fakeCore(),
+  }), []);
+  assert.deepEqual(await autoGate.resolveTargets({
+    github: foreignSnapshot(),
+    context,
+    core: fakeCore(),
+  }), [], "an unrelated app-bound blocker must not consume the cap on repeat sweeps");
+
+  const sourceLessHead = "b".repeat(40);
+  const sourceLessDecision = reconciliationDecision({
+    prNumber: 1466,
+    headSha: sourceLessHead,
+    evaluatedAt: "2026-07-09T01:10:00Z",
+    reason: "required check Build is failing",
+    observedChecks: [],
+  });
+  const sourceLessBuild = commitStatus({
+    id: 802,
+    context: "Build",
+    state: "success",
+    createdAt: "2026-07-09T01:11:00Z",
+  });
+  assert.deepEqual(await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1466, sourceLessHead)],
+      checksByHead: { [sourceLessHead]: [sourceLessDecision] },
+      statusesByHead: { [sourceLessHead]: [sourceLessBuild] },
+    }),
+    context,
+    core: fakeCore(),
+  }), [{
+    prNumber: 1466,
+    headSha: sourceLessHead,
+    decisionKey: `pr-1466-head-${sourceLessHead}`,
+  }], "a genuinely source-less blocker must remain eligible for reconciliation");
+});
+
+test("scheduled reconciliation batches head inspection and caps reevaluations", async () => {
+  const pulls = [];
+  const checksByHead = {};
+  for (let number = 1; number <= 23; number += 1) {
+    const sha = number.toString(16).padStart(40, "0");
+    pulls.push(reconciliationPull(number, sha));
+    checksByHead[sha] = [
+      reconciliationDecision({
+        prNumber: number,
+        headSha: sha,
+        evaluatedAt: "2026-07-09T20:00:00Z",
+      }),
+      reconciliationRequiredCheck("Build", "2026-07-09T21:00:00Z"),
+    ];
+  }
+
+  const inspectedHeads = [];
+  const graphqlReads = [];
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls,
+      checksByHead,
+      inspectedHeads,
+      graphqlReads,
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+
+  assert.equal(graphqlReads.length, 1, "up to 100 PR/check rollups share one API read");
+  assert.equal(new Set(inspectedHeads).size, 23, "the batch does not hide later PRs");
+  assert.equal(targets.length, 10, "one sweep still starts at most ten reevaluations");
+});
+
+test("scheduled reconciliation skips a truncated check rollup fail-closed", async () => {
+  const core = fakeCore();
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          reconciliationDecision({
+            prNumber: 1465,
+            headSha: HEAD_SHA,
+            evaluatedAt: "2026-07-09T20:00:00Z",
+          }),
+          reconciliationRequiredCheck("Build", "2026-07-09T21:00:00Z"),
+        ],
+      },
+      truncatedHeads: [HEAD_SHA],
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core,
+  });
+
+  assert.deepEqual(targets, []);
+  assert.ok(core.warnings.some((warning) => /exceeded 100 contexts/.test(warning)));
+});
+
+test("scheduled reconciliation rotates past the first pull-request page", async () => {
+  const pulls = [];
+  const checksByHead = {};
+  for (let number = 1; number <= 101; number += 1) {
+    const sha = number.toString(16).padStart(40, "0");
+    pulls.push(reconciliationPull(number, sha));
+    checksByHead[sha] = [];
+  }
+
+  const inspectedHeads = [];
+  const graphqlReads = [];
+  await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls,
+      checksByHead,
+      inspectedHeads,
+      graphqlReads,
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+
+  assert.ok(
+    inspectedHeads.includes((101).toString(16).padStart(40, "0")),
+    "the least-recently-listed PR is inspected in the same sweep",
+  );
+  assert.equal(graphqlReads.length, 2, "101 PRs require exactly two batched reads");
+});
+
+test("scheduled reconciliation does not map PR eligibility to cron time", async () => {
+  const pulls = [];
+  const checksByHead = {};
+  for (let number = 1; number <= 120; number += 1) {
+    const sha = number.toString(16).padStart(40, "0");
+    pulls.push(reconciliationPull(number, sha));
+    checksByHead[sha] = [];
+  }
+
+  const inspectedHeads = [];
+  const graphqlReads = [];
+  // The minute-zero delivery was dropped. The next run occupies the wall-clock
+  // slot that used to select page 2 and must still inspect page 1's PRs.
+  const deliveredSlot = 1;
+  await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls,
+      checksByHead,
+      inspectedHeads,
+      graphqlReads,
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+    // The only delivered run occupies a wall-clock slot that used to select
+    // page 2. Batched enumeration has no clock or cursor to skip page 1.
+    reconciliationNowMs: deliveredSlot * 5 * 60 * 1000,
+  });
+
+  assert.ok(
+    inspectedHeads.includes((1).toString(16).padStart(40, "0")),
+    "a dropped minute-zero run must not starve page 1",
+  );
+  assert.equal(new Set(inspectedHeads).size, 120, "one delivered sweep inspects every PR");
+  assert.equal(graphqlReads.length, 2, "120 PRs use two batched reads");
+});
+
+test("scheduled reconciliation caps one sweep at ten PRs", async () => {
+  const pulls = [];
+  const checksByHead = {};
+  for (let number = 1; number <= 12; number += 1) {
+    const sha = number.toString(16).padStart(40, "0");
+    pulls.push(reconciliationPull(number, sha));
+    checksByHead[sha] = [
+      reconciliationDecision({
+        prNumber: number,
+        headSha: sha,
+        evaluatedAt: "2026-07-09T20:00:00Z",
+      }),
+      reconciliationRequiredCheck(
+        "Build",
+        `2026-07-09T21:${String(number).padStart(2, "0")}:00Z`,
+      ),
+    ];
+  }
+
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({ pulls, checksByHead }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+
+  assert.equal(targets.length, 10, "runner work is bounded even when more stale PRs exist");
+  assert.equal(new Set(targets.map((target) => target.prNumber)).size, targets.length);
+});
+
 test("the happy path squash-merges the exact evaluated head", async () => {
   const github = fakeGateGithub({
     checkRuns: [
@@ -9288,12 +10077,13 @@ test("a sweep that stops at its page cap says so", async () => {
   assert.deepEqual(wholeCore.warnings, []);
 });
 
-test("the gate runs the sweep once per run, whether or not anything merged", () => {
+test("the gate runs the sweep once per non-reconciliation run", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
 
-  // The resolver job, which every subscribed event reaches — NOT apply-gate,
-  // which is a per-aggregate-head matrix that does not run at all when nothing
-  // was invalidated, and would sweep once per head when it does.
+  // The resolver job — NOT apply-gate, which is a per-aggregate-head matrix that
+  // does not run at all when nothing was invalidated, and would sweep once per
+  // head when it does. The scheduled reconciliation is the one exception: its
+  // quota is reserved for repairing required-check decisions.
   const resolver = workflow.slice(
     workflow.indexOf("  auto-gate:"),
     workflow.indexOf("  invalidate-gate:"),
@@ -9307,7 +10097,10 @@ test("the gate runs the sweep once per run, whether or not anything merged", () 
   // Housekeeping must never red the gate, and must still run on a gate run whose
   // evaluation failed — but deleting a ref is the gate writing to the repository
   // on its own, so the switch that turns that off has to reach it.
-  assert.match(resolver, /if: always\(\) && vars\.AUTO_GATE_ENABLED == 'true'\n\s+uses: actions\/github-script/);
+  assert.match(
+    resolver,
+    /if: always\(\) && vars\.AUTO_GATE_ENABLED == 'true' && github\.event_name != 'schedule'\n\s+uses: actions\/github-script/,
+  );
   assert.match(resolver, /catch \(error\) \{[\s\S]{0,300}core\.warning\(/);
 });
 
@@ -11297,6 +12090,154 @@ function fakeContext(payload = {}) {
   };
 }
 
+function reconciliationPull(number, headSha) {
+  return {
+    number,
+    state: "open",
+    base: { ref: "master" },
+    head: { sha: headSha },
+  };
+}
+
+function reconciliationRequiredCheck(name, completedAt) {
+  return {
+    id: name === "Build" ? 9001 : 9002,
+    name,
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "completed",
+    conclusion: "success",
+    completed_at: completedAt,
+  };
+}
+
+function reconciliationDecision({
+  prNumber,
+  headSha,
+  evaluatedAt,
+  reason = `required check Build (app ${ACTIONS_APP_ID}) is missing on ${headSha}`,
+  snapshotVersion = 1,
+  observedChecks = [{
+    name: "Build",
+    appId: ACTIONS_APP_ID,
+    observed: { kind: "missing", id: null, status: null, conclusion: null },
+  }],
+}) {
+  return {
+    id: prNumber,
+    name: decisionName(prNumber, headSha),
+    external_id: decisionExternalId(prNumber, headSha),
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "completed",
+    conclusion: "failure",
+    completed_at: evaluatedAt,
+    output: {
+      title: `WAITING: ${reason}`,
+      summary: `evaluated: ${evaluatedAt}\n\nBLOCKED: ${reason}`,
+      text: `<!-- auto-gate-required-check-snapshot:${JSON.stringify({
+        version: snapshotVersion,
+        checks: observedChecks,
+      })} -->`,
+    },
+  };
+}
+
+function scheduledReconciliationGithub({
+  pulls,
+  checksByHead,
+  statusesByHead = {},
+  statusReads = [],
+  inspectedHeads = [],
+  graphqlReads = [],
+  truncatedHeads = [],
+}) {
+  const truncated = new Set(truncatedHeads);
+  const listCommitStatusesForRef = async ({ ref }) => {
+    statusReads.push(ref);
+    return { data: statusesByHead[ref] || [] };
+  };
+  return {
+    rest: { repos: { listCommitStatusesForRef } },
+    paginate: async (operation, options) => (await operation(options)).data,
+    graphql: async (query, { after }) => {
+      graphqlReads.push(after);
+      const requestsCheckRunNodeId = /\.\.\. on CheckRun\s*\{\s*id(?:\s|$)/.test(query);
+      const requestsCheckRunPermalink = /\.\.\. on CheckRun\s*\{[\s\S]*?\bpermalink\b/.test(query);
+      const requestsStatusContexts = /\.\.\. on StatusContext\s*\{/.test(query);
+      const start = after == null ? 0 : Number(after);
+      const page = pulls.slice(start, start + 100);
+      const end = start + page.length;
+      for (const pull of page) {
+        inspectedHeads.push(pull.head.sha);
+      }
+      return {
+        repository: {
+          pullRequests: {
+            pageInfo: {
+              hasNextPage: end < pulls.length,
+              endCursor: end < pulls.length ? String(end) : null,
+            },
+            nodes: page.map((pull) => ({
+              number: pull.number,
+              state: "OPEN",
+              baseRefName: pull.base.ref,
+              headRefOid: pull.head.sha,
+              commits: {
+                nodes: [{
+                  commit: {
+                    oid: pull.head.sha,
+                    statusCheckRollup: {
+                      contexts: {
+                        pageInfo: { hasNextPage: truncated.has(pull.head.sha) },
+                        nodes: (checksByHead[pull.head.sha] || []).map((run) => ({
+                          __typename: "CheckRun",
+                          id: requestsCheckRunNodeId ? run.node_id : undefined,
+                          databaseId: run.graphql_database_id === undefined
+                            ? run.id
+                            : run.graphql_database_id,
+                          name: run.name,
+                          status: String(run.status).toUpperCase(),
+                          conclusion: run.conclusion == null
+                            ? null
+                            : String(run.conclusion).toUpperCase(),
+                          startedAt: run.started_at,
+                          completedAt: run.completed_at,
+                          externalId: run.external_id,
+                          permalink: requestsCheckRunPermalink
+                            ? `https://github.com/sachiniyer/agent-factory/runs/${run.id}`
+                            : undefined,
+                          title: run.output?.title,
+                          summary: run.output?.summary,
+                          text: run.output?.text,
+                          checkSuite: {
+                            app: {
+                              databaseId: run.app?.id,
+                              slug: run.app?.slug,
+                            },
+                          },
+                        })).concat(
+                          requestsStatusContexts
+                            ? (statusesByHead[pull.head.sha] || []).map((status) => ({
+                                __typename: "StatusContext",
+                                id: status.node_id,
+                                context: status.context,
+                                state: String(status.state).toUpperCase(),
+                                createdAt: status.created_at,
+                              }))
+                            : [],
+                        ),
+                      },
+                    },
+                  },
+                }],
+              },
+            })),
+          },
+        },
+      };
+    },
+  };
+}
+
 function fakeCore() {
   // Recording, not silent. The sweep's whole contract with a reader is the
   // reason it prints beside each keep, and a core that swallowed those could
@@ -11340,6 +12281,8 @@ function requiredSuccessRuns() {
 
 function checkRun({
   id = 100,
+  nodeId = null,
+  graphqlDatabaseId,
   name,
   status = "completed",
   conclusion,
@@ -11349,6 +12292,8 @@ function checkRun({
 }) {
   return {
     id,
+    node_id: nodeId,
+    graphql_database_id: graphqlDatabaseId,
     name,
     external_id: externalId,
     app: { id: appId, slug: appSlug },
@@ -11356,6 +12301,16 @@ function checkRun({
     conclusion,
     started_at: "2026-07-09T01:06:00Z",
     completed_at: status === "completed" ? "2026-07-09T01:10:00Z" : null,
+  };
+}
+
+function commitStatus({ id, nodeId, context, state, createdAt }) {
+  return {
+    id,
+    node_id: nodeId,
+    context,
+    state,
+    created_at: createdAt,
   };
 }
 
