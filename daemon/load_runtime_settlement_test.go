@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -78,6 +79,38 @@ func TestPersistLoadAgentRuntimeReplacementPublishesInterruptedTaskRun(t *testin
 	got, err := task.GetTask(tsk.ID)
 	require.NoError(t, err)
 	require.Equal(t, TaskStatusInterrupted, got.LastRunStatus)
+}
+
+func TestPersistLoadAgentRuntimeReplacementWriteFailureRefusesReplacement(t *testing.T) {
+	_, repoID, repoPath := newStatusTestManager(t)
+	runAt := time.Date(2026, 9, 11, 9, 15, 0, 0, time.UTC)
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "load-write-failure", Path: repoPath, Program: "claude", TaskID: "load-task",
+		TaskGenerationID: "load-generation", CreatedAt: runAt, TaskRunAt: runAt,
+		TaskRunSequence: 1,
+	})
+	require.NoError(t, err)
+	seeded, err := json.Marshal([]session.InstanceData{inst.ToInstanceData()})
+	require.NoError(t, err)
+	require.NoError(t, config.LoadState().SaveInstances(repoID, seeded))
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	inst.MarkLoadRuntimeReplacedForTest(true)
+
+	diskFull := errors.New("no space left on device")
+	failedWrites, _, _ := fullDiskFor(t, inst.Title, diskFull)
+	key := daemonInstanceKey(repoID, inst.Title)
+	owed := persistLoadRuntimeReplacements(map[string]*session.Instance{key: inst})
+	require.Positive(t, failedWrites(), "the witness must fail the load-time close checkpoint")
+	require.Len(t, owed, 1)
+	require.True(t, owed[0].persistInstance)
+	require.NotNil(t, owed[0].interruptedTaskRun)
+	require.Equal(t, session.LiveLost, inst.GetLiveness())
+	require.Equal(t, session.OpRestoring, inst.GetInFlightOp(),
+		"without proof the replacement stopped, it must remain non-live and fenced")
+	require.True(t, inst.ToInstanceData().RuntimeCleanupStateUnknown)
+	require.True(t, persistedInstanceByTitle(t, repoID, inst.Title).TaskRunActive,
+		"the failed write leaves the predecessor run active on disk, which is why replacement visibility is refused")
 }
 
 // The session regression drives real sibling RestoreWithResult bookkeeping;

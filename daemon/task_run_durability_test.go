@@ -231,6 +231,42 @@ func TestInterruptedTaskSessionWriteFailureKeepsReplacementFenced(t *testing.T) 
 	require.False(t, persistedInstanceByTitle(t, repoID, inst.Title).TaskRunActive)
 }
 
+func TestRepeatedRuntimeReplacementKeepsPendingInterruptionFenced(t *testing.T) {
+	manager, _, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	tsk := addStatusTestTask(t, enabledCronTask("retry005", repoPath))
+	runAt := time.Date(2026, 9, 11, 12, 30, 0, 0, time.UTC)
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "repeated-fenced-interruption", Path: repoPath, Program: "claude", TaskID: tsk.ID,
+		TaskGenerationID: tsk.GenerationID, CreatedAt: runAt, TaskRunAt: runAt,
+		TaskRunSequence: 1,
+	})
+	require.NoError(t, err)
+	key := daemonInstanceKey(repoID, inst.Title)
+	seedDiskInstance(t, repoID, inst.Title, repoPath)
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveLost)))
+	require.NoError(t, inst.Transition(session.MarkRestoring()))
+
+	diskFull := errors.New("no space left on device")
+	failedWrites, _, _ := fullDiskFor(t, inst.Title, diskFull)
+	require.ErrorIs(t, manager.prepareRuntimeReplacement(repoID, key, inst), diskFull)
+	require.Positive(t, failedWrites())
+	require.True(t, inst.ReleaseRuntimeReplacementHoldAfterTeardown(),
+		"the first replacement was proved gone")
+	require.True(t, inst.EndRecoverFence())
+	_, pending := inst.PendingTaskRunInterruption()
+	require.True(t, pending, "the failed checkpoint must leave the close owed")
+
+	require.NoError(t, inst.BeginRecoverFence())
+	err = manager.prepareRuntimeReplacement(repoID, key, inst)
+	var unsafe *runtimeReplacementDurabilityError
+	require.ErrorAs(t, err, &unsafe,
+		"an already-pending close is unsafe for every later replacement too")
+	require.NoError(t, inst.Transition(session.ConfirmLive()))
+	require.Equal(t, session.OpRestoring, inst.GetInFlightOp())
+	require.Equal(t, session.LiveLost, inst.GetLiveness(),
+		"the second replacement must remain hidden while disk still owns the predecessor run")
+}
+
 func TestRemovedTaskTerminatesInterruptedStatusRetry(t *testing.T) {
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	runAt := time.Date(2026, 9, 11, 13, 0, 0, 0, time.UTC)

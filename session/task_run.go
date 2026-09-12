@@ -1,8 +1,11 @@
 package session
 
 import (
+	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // TaskRunIdentity is the durable association between a task delivery and the
@@ -95,6 +98,53 @@ func (i *Instance) HoldRuntimeReplacementUntilSettlement() bool {
 	}
 	i.runtimeReplacementSettlementBlocked = true
 	return true
+}
+
+// FenceLoadRuntimeReplacementUntilSettlement moves a load-time replacement
+// behind the same non-live durability fence as a restore-time replacement. Load
+// has already created the process before the daemon can checkpoint the closed
+// predecessor run, so this boundary is established from the exact
+// RestoreRespawned marker while the reconstructed instance is still unpublished.
+func (i *Instance) FenceLoadRuntimeReplacementUntilSettlement() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.taskRunInterruptionPending {
+		return fmt.Errorf("load-time replacement has no interrupted task run to fence")
+	}
+	if err := i.transitionLocked(ObserveLiveness(LiveLost)); err != nil {
+		return fmt.Errorf("mark load-time replacement lost: %w", err)
+	}
+	if err := i.transitionLocked(MarkRestoring()); err != nil {
+		return fmt.Errorf("fence load-time replacement: %w", err)
+	}
+	i.runtimeReplacementSettlementBlocked = true
+	return nil
+}
+
+// TeardownFencedLoadRuntimeReplacement removes a freshly respawned local agent
+// after its interrupted-run checkpoint failed. Only that agent pane is reaped;
+// the session record, worktree, and sibling tabs remain for inspection and a
+// later restore. An absent or unobservable pane is not proof of teardown, so it
+// keeps the replacement non-live and records durable cleanup uncertainty.
+func (i *Instance) TeardownFencedLoadRuntimeReplacement() error {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts == nil {
+		i.markRuntimeCleanupStateUnknown()
+		return fmt.Errorf("load-time replacement has no observable agent pane")
+	}
+	state, err := ts.CloseAndWaitForPaneExit()
+	if state != tmux.PaneStateKnown {
+		i.markRuntimeCleanupStateUnknown()
+		return fmt.Errorf("could not confirm load-time replacement stopped: %w", err)
+	}
+	i.ReleaseRuntimeReplacementHoldAfterTeardown()
+	i.EndRecoverFence()
+	if err != nil {
+		return fmt.Errorf("stop load-time replacement after confirmed teardown: %w", err)
+	}
+	return nil
 }
 
 // RuntimeReplacementSettlementBlocked reports whether a failed interrupted-run

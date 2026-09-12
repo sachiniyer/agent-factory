@@ -291,6 +291,27 @@ func TestRuntimeReplacementSettlementHoldOwnsRestoreFenceUntilRelease(t *testing
 	require.Equal(t, LiveRunning, inst.GetLiveness())
 }
 
+func TestLoadRuntimeReplacementFenceRefusesUnobservableReplacement(t *testing.T) {
+	inst := &Instance{
+		ID: "session-id", TaskID: "task-id", taskGenerationID: "generation-id",
+		Title: "load-replacement", liveness: LiveRunning, inFlightOp: OpNone,
+		taskRunActive: true, started: true,
+	}
+	_, interrupted := inst.InterruptTaskRunAtRuntimeReplacement()
+	require.True(t, interrupted)
+	require.NoError(t, inst.FenceLoadRuntimeReplacementUntilSettlement())
+	require.Equal(t, LiveLost, inst.GetLiveness())
+	require.Equal(t, OpRestoring, inst.GetInFlightOp())
+	require.True(t, inst.RuntimeReplacementSettlementBlocked())
+
+	require.Error(t, inst.TeardownFencedLoadRuntimeReplacement(),
+		"an absent pane handle is not proof that the replacement stopped")
+	require.Equal(t, LiveLost, inst.GetLiveness())
+	require.Equal(t, OpRestoring, inst.GetInFlightOp(),
+		"unknown cleanup must keep the replacement behind the durability fence")
+	require.True(t, inst.ToInstanceData().RuntimeCleanupStateUnknown)
+}
+
 func TestRuntimeReplacementSettlementReleasesRestoreFenceAfterUnknownCleanup(t *testing.T) {
 	inst := &Instance{
 		ID: "session-id", TaskID: "task-id", taskGenerationID: "generation-id",

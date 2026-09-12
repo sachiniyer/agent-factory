@@ -12,8 +12,10 @@ import (
 // that exited between the session and task writes. The session layer has already
 // distinguished an agent respawn from a sibling-tab respawn and applied the same
 // unprompted-runtime task-run rule used by restore-time replacement. A failed
-// instance write joins that task outcome in the same retry entry; abandoning the
-// spawned process would be worse than retaining it with a loudly tracked gap.
+// instance write joins that task outcome in the same retry entry. An unprompted
+// agent replacement is kept behind a non-live fence until the close lands; if
+// that first write fails, its process is torn down rather than exposed over a
+// disk row that still assigns the predecessor's active run to it.
 func persistLoadRuntimeReplacements(instances map[string]*session.Instance) []settleOwedEntry {
 	var owed []settleOwedEntry
 	for key, instance := range instances {
@@ -36,10 +38,43 @@ func persistLoadRuntimeReplacements(instances map[string]*session.Instance) []se
 				"session %q has a task %s interruption outcome left by an earlier daemon; queued last_run_status for durable publication",
 				instance.Title, pendingRun.TaskID)
 		}
+		fenced := false
+		if replacement.TaskRunInterrupted {
+			if err := instance.FenceLoadRuntimeReplacementUntilSettlement(); err != nil {
+				cleanupErr := instance.TeardownFencedLoadRuntimeReplacement()
+				log.WarningLog.Printf(
+					"load-time agent replacement for %q could not establish its interrupted-run durability fence (%v); refused the replacement (cleanup: %v) and queued the session checkpoint for retry",
+					instance.Title, err, cleanupErr)
+				entry.persistInstance = true
+			} else {
+				fenced = true
+			}
+		}
 		if replacement.Replaced {
 			if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
-				log.WarningLog.Printf("load-time runtime replacement for %q could not persist its timestamp and idle evidence; the daemon will retry: %v", instance.Title, err)
+				if fenced {
+					cleanupErr := instance.TeardownFencedLoadRuntimeReplacement()
+					log.WarningLog.Printf(
+						"load-time agent replacement for %q could not persist the interrupted run; refused the replacement and queued the checkpoint for retry (write: %v; cleanup: %v)",
+						instance.Title, err, cleanupErr)
+				} else {
+					log.WarningLog.Printf("load-time runtime replacement for %q could not persist its timestamp and idle evidence; the daemon will retry: %v", instance.Title, err)
+				}
 				entry.persistInstance = true
+			} else if fenced {
+				released, err := instance.ReleaseRuntimeReplacementAfterSettlement()
+				if err != nil {
+					log.WarningLog.Printf("load-time agent replacement for %q could not lower its durability fence after checkpointing the interrupted run; the daemon will retry: %v", instance.Title, err)
+					entry.persistInstance = true
+				} else if released {
+					// The first write made the run close restart-durable. Persist the
+					// now-visible replacement separately; failure here is conservative
+					// because disk still says Lost with the run already closed.
+					if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
+						log.WarningLog.Printf("load-time agent replacement for %q is safe and live but its visible state could not be checkpointed; the daemon will retry: %v", instance.Title, err)
+						entry.persistInstance = true
+					}
+				}
 			}
 		}
 		if entry.persistInstance || entry.interruptedTaskRun != nil {

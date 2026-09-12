@@ -111,6 +111,15 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 // those in-memory observations, while this settlement makes the fence safe.
 func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *session.Instance) error {
 	run, interrupted := instance.InterruptTaskRunAtRuntimeReplacement()
+	// A prior refused replacement may already have closed this run in memory while
+	// its checkpoint remained owed. That is the same unsafe boundary as a close
+	// first observed by this attempt: until disk records it, either replacement
+	// could be reloaded as the runtime that owns the still-active predecessor run.
+	// Read the outbox, not only the edge result, so every retry remains fenced.
+	if pending, ok := instance.PendingTaskRunInterruption(); ok {
+		run = pending
+		interrupted = true
+	}
 	m.noteRuntimeReplaced(repoID, instance)
 	settlementErr := m.persistSettlement(repoID, key, instance)
 	if settlementErr != nil {
