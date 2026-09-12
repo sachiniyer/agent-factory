@@ -20,6 +20,7 @@ func TestValidateAccountEnvironmentCommand_RefusesUnprovableStraceChildEnvironme
 		{"strace attached env option", "strace -ECODEX_HOME=/other codex"},
 		{"strace long env option", "strace --env=CODEX_HOME=/other codex"},
 		{"strace abbreviated long env option", "strace --en=CODEX_HOME=/other codex"},
+		{"strace expression option", "strace --expr trace=all env CODEX_HOME=/other codex"},
 		{"strace unsets protected env", "strace -E CODEX_HOME codex"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -209,6 +210,29 @@ func TestValidateAccountEnvironmentCommand_StraceAlternativeSpellings(t *testing
 				scopedProcessTabAccount(),
 			),
 			"bare optional-value alias %s must leave the child executable visible", option)
+	}
+}
+
+func TestValidateAccountEnvironmentCommand_StraceEquivalentAliasPrefixes(t *testing.T) {
+	for option, value := range map[string]string{
+		"--decode-pi": "comm",
+		"--signa":     "none",
+		"--trace-f":   "3",
+	} {
+		t.Run(option, func(t *testing.T) {
+			require.NoError(t,
+				ValidateAccountEnvironmentCommand(
+					"strace "+option+" "+value+" npm run dev",
+					scopedProcessTabAccount(),
+				),
+				"equivalent aliases must not make %s ambiguous", option)
+			require.Error(t,
+				ValidateAccountEnvironmentCommand(
+					"strace "+option+" "+value+" env CODEX_HOME=/other codex",
+					scopedProcessTabAccount(),
+				),
+				"%s must consume its value and leave the mutating child visible", option)
+		})
 	}
 }
 

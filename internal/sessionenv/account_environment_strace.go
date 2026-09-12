@@ -44,6 +44,7 @@ var straceLongOptionsWithSeparateValue = map[string]struct{}{
 	"--decode-pids":              {},
 	"--detach-on":                {},
 	"--env":                      {},
+	"--expr":                     {},
 	"--fault":                    {},
 	"--inject":                   {},
 	"--interruptible":            {},
@@ -67,6 +68,15 @@ var straceLongOptionsWithSeparateValue = map[string]struct{}{
 	"--user":                     {},
 	"--verbose":                  {},
 	"--write":                    {},
+}
+
+// All entries above have required_argument and a nil flag in strace's
+// getopt_long table. These cross-version spellings also share the same val, so
+// glibc treats a common prefix as one match rather than as an ambiguity.
+var straceLongEquivalentAliases = map[string]string{
+	"--decode-pid": "--decode-pids",
+	"--signal":     "--signals",
+	"--trace-fd":   "--trace-fds",
 }
 
 // getopt_long gives an exact name precedence over abbreviations. These are the
@@ -155,42 +165,60 @@ func classifyStraceLongOption(option string) (string, straceOptionResult) {
 		return option, straceOptionStops
 	}
 	if _, takesSeparateValue := straceLongOptionsWithSeparateValue[option]; takesSeparateValue {
-		return option, straceOptionContinue
+		return straceLongOptionFamily(option), straceOptionContinue
 	}
 	if _, exactSelfContained := straceLongSelfContainedPrefixCollisions[option]; exactSelfContained {
 		return "", straceOptionContinue
 	}
 
-	// GNU long options accept an unambiguous prefix. An unfamiliar spelling
-	// that abbreviates a separate-value option is therefore not self-contained:
-	// it can consume the following word just like the canonical name. Multiple
-	// boundary-relevant matches fail closed; strace will either reject the
-	// ambiguity or a known match could otherwise hide the real child.
-	match := ""
-	matches := 0
+	// Prefix decision table:
+	//   - no boundary-relevant family: self-contained, consume only this word;
+	//   - one family (possibly several equivalent aliases): consume its value;
+	//   - multiple inequivalent families: fail closed because arity/semantics
+	//     cannot be selected safely.
+	//
+	// The open first result would accept a missing separate-value option, which
+	// is why the installed-strace oracle test mechanically checks the table. The
+	// closed last result can reject a prefix that is unique on a strace release
+	// whose option set is smaller than this cross-version union; that is the
+	// deliberate residual when the parser cannot prove which family applies.
+	matchFamily := ""
+	matchResult := straceOptionContinue
+	conflict := false
+	addMatch := func(family string, result straceOptionResult) {
+		if matchFamily == "" {
+			matchFamily = family
+			matchResult = result
+			return
+		}
+		if matchFamily != family || matchResult != result {
+			conflict = true
+		}
+	}
 	for candidate := range straceLongOptionsWithSeparateValue {
 		if strings.HasPrefix(candidate, option) {
-			match = candidate
-			matches++
+			addMatch(straceLongOptionFamily(candidate), straceOptionContinue)
 		}
 	}
 	for _, candidate := range []string{"--help", "--version"} {
 		if strings.HasPrefix(candidate, option) {
-			match = candidate
-			matches++
+			addMatch(candidate, straceOptionStops)
 		}
 	}
-	switch matches {
-	case 0:
-		return "", straceOptionContinue
-	case 1:
-		if match == "--help" || match == "--version" {
-			return match, straceOptionStops
-		}
-		return match, straceOptionContinue
-	default:
+	if conflict {
 		return "", straceOptionUnsafe
 	}
+	if matchFamily == "" {
+		return "", straceOptionContinue
+	}
+	return matchFamily, matchResult
+}
+
+func straceLongOptionFamily(option string) string {
+	if family, alias := straceLongEquivalentAliases[option]; alias {
+		return family
+	}
+	return option
 }
 
 func parseStraceShortOptions(words []*syntax.Word, names map[string]struct{}) (int, straceOptionResult) {
