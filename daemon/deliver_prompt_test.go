@@ -18,6 +18,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -121,6 +122,46 @@ func TestDeliverPrompt_TaskBindingSurvivesPathRebindBeforeAutoCreate(t *testing.
 	require.Error(t, err, "final create admission must recheck the task binding")
 	assert.Contains(t, err.Error(), "bound")
 	assert.Empty(t, rec.snapshot(), "binding refusal must precede agent startup and prompt delivery")
+}
+
+func TestControlServerDeliverPromptBindsTargetSendToTaskGeneration(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	recorder := &promptRecorder{}
+	registerStarted(t, manager, repoID, repoPath, "worker", recordingBackend{
+		readyFakeBackend: readyFakeBackend{FakeBackend: session.NewFakeBackend()},
+		rec:              recorder,
+	}, true, session.Ready)
+	server := archiveTaskControlServer(manager)
+	tsk := enabledCronTask("target-generation", repoPath)
+	tsk.TargetSession = "worker"
+	tsk = addStatusTestTask(t, tsk)
+
+	origHook := testHookDeliverAfterTargetLock
+	t.Cleanup(func() { testHookDeliverAfterTargetLock = origHook })
+	testHookDeliverAfterTargetLock = func() {
+		require.False(t, server.scheduler.controlMu.TryLock(),
+			"the task-mutation lock must remain held through the irreversible target send")
+	}
+	var resp DeliverPromptResponse
+	err := server.DeliverPrompt(DeliverPromptRequest{
+		Title: "worker", RepoPath: repoPath, Program: "claude", Prompt: "current run",
+		TaskID: tsk.ID, TaskGenerationID: tsk.GenerationID, TaskRepoID: tsk.RepoID, TaskOrigin: true,
+	}, &resp)
+	require.NoError(t, err)
+	require.Equal(t, []string{"current run"}, recorder.snapshot())
+
+	require.NoError(t, task.RemoveTask(tsk.ID, task.ProjectExpectation{}))
+	replacement := addStatusTestTask(t, tsk)
+	require.NotEqual(t, tsk.GenerationID, replacement.GenerationID)
+	testHookDeliverAfterTargetLock = origHook
+	err = server.DeliverPrompt(DeliverPromptRequest{
+		Title: "worker", RepoPath: repoPath, Program: "claude", Prompt: "stale run",
+		TaskID: tsk.ID, TaskGenerationID: tsk.GenerationID, TaskRepoID: tsk.RepoID, TaskOrigin: true,
+	}, &resp)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "was replaced")
+	require.Equal(t, []string{"current run"}, recorder.snapshot(),
+		"a watcher admitted by the removed generation must not send into its replacement")
 }
 
 func (r *promptRecorder) add(prompt string) {

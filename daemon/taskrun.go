@@ -148,12 +148,14 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (ta
 		// byte-for-byte. Titles are not canonicalized globally and the daemon keys
 		// instances on exact bytes, so this lookup must never be trimmed: a task
 		// aimed at the legal title " build " has to keep looking for " build ".
-		Title:      target,
-		RepoPath:   t.ProjectPath,
-		Program:    t.Program,
-		Prompt:     prompt,
-		TaskRepoID: t.RepoID,
-		TaskOrigin: true,
+		Title:            target,
+		RepoPath:         t.ProjectPath,
+		Program:          t.Program,
+		Prompt:           prompt,
+		TaskID:           t.ID,
+		TaskGenerationID: t.GenerationID,
+		TaskRepoID:       t.RepoID,
+		TaskOrigin:       true,
 		// An automated delivery (cron fire or watch event): hold it while a TUI is
 		// attached to the target so it never pastes into and submits the user's
 		// in-progress input (#1586). The caller decides how a hold is handled.

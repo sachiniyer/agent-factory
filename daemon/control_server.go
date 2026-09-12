@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 type controlServer struct {
@@ -745,6 +746,23 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
+	}
+	if req.TaskID != "" {
+		unlock, err := s.lockTaskControl()
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		current, err := task.GetTask(req.TaskID)
+		if err != nil {
+			return fmt.Errorf("load task %s at target delivery boundary: %w", req.TaskID, err)
+		}
+		if current.GenerationID != req.TaskGenerationID {
+			return fmt.Errorf("task %s was replaced before its target prompt could be delivered", req.TaskID)
+		}
+		if !current.Enabled {
+			return fmt.Errorf("task %s was disabled before its target prompt could be delivered", req.TaskID)
+		}
 	}
 	managerDelegated = true
 	status, deliveryStatus, err := s.manager.DeliverPromptWithStatus(req)

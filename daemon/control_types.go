@@ -371,14 +371,19 @@ type DeliverPromptRequest struct {
 	RepoPath string `json:"repo_path"`
 	Program  string `json:"program"`
 	Prompt   string `json:"prompt"`
-	// TaskRepoID is the task's retained project binding. Like CreateSession's
-	// TaskID, it is daemon-internal provenance carried over GOB and excluded from
-	// HTTP/JSON so a client cannot forge task authority. DeliverPrompt compares it
-	// with RepoPath's current resolution at the final daemon boundary. TaskOrigin
-	// is the identity-independent marker that lets a legacy targeted auto-create
-	// retain a provable not-attempted outcome without claiming TaskID ownership.
-	TaskRepoID string `json:"-"`
-	TaskOrigin bool   `json:"-"`
+	// TaskID, TaskGenerationID, and TaskRepoID are daemon-internal provenance
+	// carried over GOB and excluded from HTTP/JSON so a client cannot forge task
+	// authority. The control server holds the task-mutation lock while it verifies
+	// the current generation and performs the irreversible target send; a watcher
+	// admitted by a removed task therefore cannot deliver into its replacement.
+	// TaskRepoID separately binds the project at the final manager boundary.
+	// TaskOrigin is the identity-independent marker that lets a legacy targeted
+	// auto-create retain a provable not-attempted outcome without claiming TaskID
+	// ownership.
+	TaskID           string `json:"-"`
+	TaskGenerationID string `json:"-"`
+	TaskRepoID       string `json:"-"`
+	TaskOrigin       bool   `json:"-"`
 	// DeferWhileAttached is set by the automated task-delivery path (cron +
 	// watch) so DeliverPrompt holds the send when a TUI is attached full-screen
 	// to an existing target session, rather than pasting a prompt + Enter into a
