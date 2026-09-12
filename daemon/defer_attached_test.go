@@ -423,7 +423,7 @@ func TestWatcher_DefersDeliveryWhileTargetAttached(t *testing.T) {
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab158601", script, dir)))
 	bd := &busyDeliver{}
 	bd.attached.Store(true) // a TUI is attached to the target for now
-	s.deliver = bd.deliver
+	s.deliver = adaptWatchDelivery(bd.deliver)
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)

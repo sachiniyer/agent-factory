@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -475,7 +476,7 @@ func TestAgedBacklogObservesTargetLimitBeforeExpiringHead(t *testing.T) {
 	}
 	s := newWatcherSupervisor()
 	s.observeTargetLimit = manager.observeTaskTargetLimit
-	s.deliver = func(string, string) error { return errTargetLimitReached }
+	s.deliver = adaptWatchDelivery(func(string, string) error { return errTargetLimitReached })
 	s.queueMaxAge = 72 * time.Hour
 	s.drainBaseBackoff = time.Hour
 	stopCh := make(chan struct{})
@@ -483,9 +484,9 @@ func TestAgedBacklogObservesTargetLimitBeforeExpiringHead(t *testing.T) {
 	w.wg.Add(1)
 	delivered := make(chan struct{})
 	originalDeliver := s.deliver
-	s.deliver = func(taskID, line string) error {
+	s.deliver = func(taskID, line string, options watchDeliveryOptions) error {
 		close(delivered)
-		return originalDeliver(taskID, line)
+		return originalDeliver(taskID, line, options)
 	}
 	go w.drainLoop()
 	select {
@@ -505,8 +506,9 @@ func TestAgedBacklogObservesTargetLimitBeforeExpiringHead(t *testing.T) {
 	}
 }
 
-func TestRepeatedParkOfSameWatchEventDoesNotRestampLastRun(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+func TestParkedQueueHeadDoesNotRewriteTaskStoreAfterWatcherStops(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
 	repoPath := setupTaskRepo(t)
 	if err := task.AddTask(task.Task{
 		ID: "a4223109", Name: "watch-park-timestamp", Prompt: "event: {{line}}",
@@ -520,16 +522,54 @@ func TestRepeatedParkOfSameWatchEventDoesNotRestampLastRun(t *testing.T) {
 		return taskPromptDeliveryResult{status: TaskStatusLimitParked}, nil
 	}
 	t.Cleanup(func() { deliverPromptForTask = original })
+	originalUpdate := updateWatchTaskStatus
+	statusWrites := 0
+	updateWatchTaskStatus = func(taskID string, at *time.Time, status string) (task.Task, error) {
+		statusWrites++
+		return originalUpdate(taskID, at, status)
+	}
+	t.Cleanup(func() { updateWatchTaskStatus = originalUpdate })
 
-	if err := deliverWatchEvent("a4223109", "one occurrence"); !errors.Is(err, errTargetLimitReached) {
+	queueDir := t.TempDir()
+	queue := newEventQueue(queueDir, "a4223109")
+	if err := queue.enqueue("one occurrence"); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	ev, cursor, ok, err := queue.peek()
+	if err != nil || !ok {
+		t.Fatalf("peek seeded event: ok=%v err=%v", ok, err)
+	}
+	s := newWatcherSupervisor()
+	w := &taskWatcher{taskID: "a4223109", sup: s, queue: queue}
+	if err := w.deliverQueuedEvent(ev, cursor); !errors.Is(err, errTargetLimitReached) {
 		t.Fatalf("first park = %v, want replay request", err)
 	}
 	first, err := task.GetTask("a4223109")
 	if err != nil || first.LastRunAt == nil {
 		t.Fatalf("first parked status: task=%+v err=%v", first, err)
 	}
-	time.Sleep(10 * time.Millisecond)
-	if err := deliverWatchEvent("a4223109", "one occurrence"); !errors.Is(err, errTargetLimitReached) {
+	if statusWrites != 1 {
+		t.Fatalf("first parked occurrence wrote task store %d times, want 1", statusWrites)
+	}
+	storeInfo, err := os.Stat(filepath.Join(home, "tasks.json"))
+	if err != nil {
+		t.Fatalf("stat task store: %v", err)
+	}
+
+	// Reopen the durable queue as a restarted watcher would. Its lifecycle
+	// report must not replace the still-actionable parked status, and retrying
+	// the same head must perform zero task-store writes.
+	reopened := newEventQueue(queueDir, "a4223109")
+	ev, cursor, ok, err = reopened.peek()
+	if err != nil || !ok {
+		t.Fatalf("peek reopened event: ok=%v err=%v", ok, err)
+	}
+	restarted := &taskWatcher{taskID: "a4223109", sup: s, queue: reopened}
+	restarted.persistSupervisorStatus("stopped")
+	if statusWrites != 1 {
+		t.Fatalf("parked watcher stop rewrote %d-byte task store: writes=%d, want 1", storeInfo.Size(), statusWrites)
+	}
+	if err := restarted.deliverQueuedEvent(ev, cursor); !errors.Is(err, errTargetLimitReached) {
 		t.Fatalf("parked replay = %v, want replay request", err)
 	}
 	second, err := task.GetTask("a4223109")
@@ -538,5 +578,61 @@ func TestRepeatedParkOfSameWatchEventDoesNotRestampLastRun(t *testing.T) {
 	}
 	if second.LastRunAt == nil || !second.LastRunAt.Equal(*first.LastRunAt) {
 		t.Fatalf("same parked occurrence restamped LastRunAt: first=%v second=%v", first.LastRunAt, second.LastRunAt)
+	}
+	if second.LastRunStatus != TaskStatusLimitParked {
+		t.Fatalf("watcher stop hid parked status: got %q", second.LastRunStatus)
+	}
+	if statusWrites != 1 {
+		t.Fatalf("parked retry rewrote %d-byte task store: writes=%d, want 1 total", storeInfo.Size(), statusWrites)
+	}
+}
+
+func TestUnattemptedProtectedBacklogStillRecordsWatcherStop(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "a4223111")
+	if err := queue.enqueue("not attempted yet", true); err != nil {
+		t.Fatalf("seed protected event: %v", err)
+	}
+	s := newWatcherSupervisor()
+	var got string
+	s.setStatus = func(_ string, status string) { got = status }
+	w := &taskWatcher{taskID: "a4223111", sup: s, queue: queue}
+	w.persistSupervisorStatus("stopped")
+	if got != "stopped" {
+		t.Fatalf("generic retention marker suppressed watcher status: got %q", got)
+	}
+}
+
+func TestWatchQueueAdmissionProtectsInFlightLimitResume(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "resuming-limit", readyFakeBackend{session.NewFakeBackend()}, true, session.Running)
+	manager.setLimitReached(inst, time.Now().Add(time.Hour))
+	if err := inst.BeginLimitResume(); err != nil {
+		t.Fatalf("BeginLimitResume: %v", err)
+	}
+	if err := inst.Transition(session.ConfirmLive()); err != nil {
+		t.Fatalf("ConfirmLive: %v", err)
+	}
+	view := inst.LifecycleView()
+	if view.Liveness != session.LiveRunning || view.InFlightOp != session.OpRespawning {
+		t.Fatalf("resume interleaving = %v/%v, want Running/Respawning", view.Liveness, view.InFlightOp)
+	}
+	if err := task.AddTask(task.Task{
+		ID: "a4223110", Name: "watch-resume-window", Prompt: "event: {{line}}",
+		WatchCmd: "watch.sh", TargetSession: "resuming-limit", ProjectPath: repoPath,
+		Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+
+	limited, err := manager.observeTaskTargetLimit("a4223110")
+	if err == nil || limited {
+		t.Fatalf("in-flight resume observation = limited=%v err=%v, want unknown", limited, err)
+	}
+	s := newWatcherSupervisor()
+	s.observeTargetLimit = manager.observeTaskTargetLimit
+	w := &taskWatcher{taskID: "a4223110", sup: s}
+	if !w.targetLimitRequiresRetention() {
+		t.Fatal("in-flight limit resume was treated as clean queue state")
 	}
 }

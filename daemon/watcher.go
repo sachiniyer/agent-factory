@@ -127,7 +127,7 @@ type watcherSupervisor struct {
 	// lifecycle statuses without a task store, and queueDir redirects the
 	// durable event queues to a scratch directory.
 	loadTasks func() ([]task.Task, error)
-	deliver   func(taskID, line string) error
+	deliver   func(taskID, line string, options watchDeliveryOptions) error
 	setStatus func(taskID, status string)
 	logPath   func(taskID string) (string, error)
 	queueDir  func() (string, error)
@@ -152,7 +152,7 @@ func newWatcherSupervisor() *watcherSupervisor {
 	return &watcherSupervisor{
 		watchers:  make(map[string]*taskWatcher),
 		loadTasks: task.LoadTasks,
-		deliver:   deliverWatchEvent,
+		deliver:   deliverWatchEventWithOptions,
 		setStatus: persistWatcherStatus,
 		logPath:   watcherLogPath,
 		queueDir:  eventQueueDir,
@@ -346,7 +346,7 @@ func (w *taskWatcher) run() {
 			// The condition, stated so an operator can act on it: this stop
 			// holds until something names THIS task (#3837).
 			log.InfoLog.Printf("watch task %s: watch command exited cleanly; stopped until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts", w.taskID, w.taskID)
-			w.sup.setStatus(w.taskID, "stopped")
+			w.persistSupervisorStatus("stopped")
 			return
 		}
 
@@ -374,7 +374,7 @@ func (w *taskWatcher) run() {
 		failures = failures[cut:]
 		if len(failures) >= w.sup.crashMaxExits {
 			log.ErrorLog.Printf("watch task %s: %d failures within %s (last: %v); giving up until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts%s", w.taskID, len(failures), w.sup.crashWindow, runErr, w.taskID, tail.logSuffix())
-			w.sup.setStatus(w.taskID, failureSummary(runErr, tail))
+			w.persistSupervisorStatus(failureSummary(runErr, tail))
 			return
 		}
 
@@ -710,16 +710,18 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 		return
 	}
 
-	err := w.sup.deliver(w.taskID, line)
+	err := w.sup.deliver(w.taskID, line, watchDeliveryOptions{})
 	w.recordDeliveryResult(time.Now(), err)
 	if err != nil {
 		limitParked := false
+		parkedStatusRecorded := false
 		switch {
 		case errors.Is(err, errTargetLimitReached):
 			// The target is at a known usage-limit wall. Preserve the event and
 			// refund its unused rate slot, but do not raise a delivery-failure
 			// alarm: the pipeline is intentionally parked until liveness clears.
 			limitParked = true
+			parkedStatusRecorded = watchParkedStatusRecorded(err)
 			w.releaseEventSlot()
 			log.InfoLog.Printf("watch task %s: target session is at a usage limit; deferring event until the limit clears", w.taskID)
 		case errors.Is(err, errTargetBusy):
@@ -754,7 +756,7 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 			}
 			log.ErrorLog.Printf("watch task %s: failed to deliver event: %v", w.taskID, err)
 		}
-		w.enqueueEvent(line, tail, limitParked)
+		w.enqueueEvent(line, tail, limitParked, parkedStatusRecorded)
 	}
 }
 
@@ -808,12 +810,14 @@ func (w *taskWatcher) releaseEventSlot() {
 // The line also lands in the run's failure tail — it did not become a
 // delivered event this run (#797). When the queue is unavailable or the append
 // fails, this degrades to the pre-#1129 behavior: logged and dropped.
-func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer, limitParked bool) {
+func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer, limitParked bool, parkedStatusRecorded ...bool) {
 	tail.add(line)
 	if w.queue == nil {
 		return
 	}
-	if err := w.queue.enqueue(line, limitParked); err != nil {
+	statusRecorded := len(parkedStatusRecorded) > 0 && parkedStatusRecorded[0]
+	err := w.queue.enqueueWithParkedStatus(line, limitParked, statusRecorded)
+	if err != nil {
 		log.ErrorLog.Printf("watch task %s: failed to queue event for replay; dropping it: %v", w.taskID, err)
 		return
 	}
@@ -842,11 +846,17 @@ func (w *taskWatcher) stopDraining() {
 	w.mu.Unlock()
 }
 
-// deliverWatchEvent is the production delivery hook: it re-loads the task (so
-// prompt/target_session edits apply without restarting the script), renders
-// {{line}}, and routes through the same delivery path cron fires use, then
-// records the run status (#664 path).
+// deliverWatchEvent is the queue-less entry used by focused delivery tests.
+// Production supplies its queue-head identity through the options-aware half.
 func deliverWatchEvent(taskID, line string) error {
+	return deliverWatchEventWithOptions(taskID, line, watchDeliveryOptions{})
+}
+
+// deliverWatchEventWithOptions is the production delivery hook: it re-loads the
+// task (so prompt/target_session edits apply without restarting the script),
+// renders {{line}}, routes through the same delivery path cron fires use, and
+// records the run status (#664 path).
+func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOptions) error {
 	// The three pre-flight checks below fail before anything is created or sent,
 	// so they are tagged notAttempted and the caller refunds their rate slot
 	// (#2102). Everything past them can fail with the delivery already in
@@ -875,23 +885,49 @@ func deliverWatchEvent(taskID, line string) error {
 		// logged quietly, since a deferral is expected, not an outage.
 		return errTargetBusy
 	}
-	// A parked replay retries the same queue head on the base cadence. Once the
-	// task already says parked, rewriting LastRunAt would manufacture a fresh run
-	// every few seconds even though no prompt landed. A later success still writes
-	// normally, and the first park after any other status records the occurrence.
-	if status != TaskStatusLimitParked || t.LastRunStatus != TaskStatusLimitParked {
+	// A parked replay retries the same queue head on the base cadence. The queue
+	// sequence, not mutable LastRunStatus presentation, says whether this exact
+	// occurrence was already recorded. A later success still writes normally.
+	statusRecorded := status == TaskStatusLimitParked && options.parkedStatusRecorded
+	if status != TaskStatusLimitParked || !statusRecorded {
+		if status == TaskStatusLimitParked && options.prepareParkedStatus != nil {
+			if err := options.prepareParkedStatus(); err != nil {
+				log.ErrorLog.Printf("failed to prepare parked watch status: %v", err)
+			}
+		}
 		now := time.Now()
-		if _, err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
+		if _, err := updateWatchTaskStatus(taskID, &now, status); err != nil {
 			log.ErrorLog.Printf("failed to update task status: %v", err)
+		} else if status == TaskStatusLimitParked {
+			statusRecorded = true
 		}
 	}
 	if status == TaskStatusLimitParked && !promptRetained {
 		// A targeted watch owns distinct external data, so its queue must replay.
 		// A create-per-run watch already stored this prompt on the one parked
 		// session; queueing it too would create duplicate sessions on every retry.
-		return errTargetLimitReached
+		return &watchTargetLimitError{statusRecorded: statusRecorded}
 	}
 	return nil
+}
+
+// persistSupervisorStatus keeps a confirmed usage-limit occurrence as the
+// task's visible status while its queue head is still held. The command's stop
+// or crash is logged independently; overwriting the task row here would both
+// hide the park and force the drainer to reconstruct occurrence identity from a
+// presentation field. Queue replay eventually replaces the status on success.
+func (w *taskWatcher) persistSupervisorStatus(status string) {
+	if w.queue != nil {
+		recorded, err := w.queue.headParkedStatusRecorded()
+		if err != nil {
+			log.WarningLog.Printf("watch task %s: cannot verify parked queue-head status; preserving it rather than publishing %q: %v", w.taskID, status, err)
+			return
+		}
+		if recorded {
+			return
+		}
+	}
+	w.sup.setStatus(w.taskID, status)
 }
 
 // persistWatcherStatus records a watcher lifecycle status on the task:
@@ -904,7 +940,7 @@ func deliverWatchEvent(taskID, line string) error {
 // Program enum validation so legacy task records still receive status bumps
 // (#664).
 func persistWatcherStatus(taskID, status string) {
-	if _, err := task.UpdateTaskStatus(taskID, nil, status); err != nil {
+	if _, err := updateWatchTaskStatus(taskID, nil, status); err != nil {
 		log.WarningLog.Printf("failed to record watcher status %q on task %s: %v", status, taskID, err)
 	}
 }

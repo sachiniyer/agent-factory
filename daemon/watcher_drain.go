@@ -193,7 +193,7 @@ func (w *taskWatcher) drainLoop() {
 			}
 			continue
 		}
-		if err := w.sup.deliver(w.taskID, ev.Line); err != nil {
+		if err := w.deliverQueuedEvent(ev, cursor); err != nil {
 			w.recordDeliveryResult(time.Now(), err)
 			if errors.Is(err, errTargetLimitReached) {
 				// A known limit park is not an outage and delivered nothing. Retain

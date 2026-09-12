@@ -3,6 +3,8 @@ package daemon
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -15,6 +17,7 @@ func (q *eventQueue) loadLimitParkedLocked() error {
 	if err != nil {
 		if os.IsNotExist(err) {
 			q.limitParked = false
+			q.parkedStatusSeq = 0
 			return nil
 		}
 		return fmt.Errorf("inspect usage-limit queue marker: %w", err)
@@ -25,7 +28,18 @@ func (q *eventQueue) loadLimitParkedLocked() error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("usage-limit queue marker %s is not a regular file", q.limitPath)
 	}
+	raw, err := os.ReadFile(q.limitPath)
+	if err != nil {
+		return fmt.Errorf("read usage-limit queue marker: %w", err)
+	}
 	q.limitParked = true
+	q.parkedStatusSeq = 0
+	fields := strings.Fields(string(raw))
+	if len(fields) == 2 && fields[0] == "parked" {
+		if seq, parseErr := strconv.ParseInt(fields[1], 10, 64); parseErr == nil && seq > 0 {
+			q.parkedStatusSeq = seq
+		}
+	}
 	if q.pending == 0 {
 		return q.clearLimitParkedLocked()
 	}
@@ -33,10 +47,19 @@ func (q *eventQueue) loadLimitParkedLocked() error {
 }
 
 func (q *eventQueue) markLimitParkedLocked() error {
-	if err := config.AtomicWriteFileRefusingLink(q.limitPath, []byte("parked\n"), 0644); err != nil {
+	return q.persistLimitParkedLocked(q.parkedStatusSeq)
+}
+
+func (q *eventQueue) persistLimitParkedLocked(statusSeq int64) error {
+	data := []byte("parked\n")
+	if statusSeq > 0 {
+		data = []byte("parked " + strconv.FormatInt(statusSeq, 10) + "\n")
+	}
+	if err := config.AtomicWriteFileRefusingLink(q.limitPath, data, 0644); err != nil {
 		return err
 	}
 	q.limitParked = true
+	q.parkedStatusSeq = statusSeq
 	return nil
 }
 
@@ -57,7 +80,73 @@ func (q *eventQueue) clearLimitParkedLocked() error {
 		return err
 	}
 	q.limitParked = false
+	q.parkedStatusSeq = 0
 	return nil
+}
+
+// parkedStatusRecorded reports whether cursor still names the queue head whose
+// parked task-store occurrence was already committed. The head sequence is the
+// identity; LastRunStatus is only presentation and may be replaced by watcher
+// lifecycle reporting while this event remains queued.
+func (q *eventQueue) parkedStatusRecorded(cursor eventQueueCursor) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	_ = q.retryLoadLocked()
+	return q.loadErr == nil && q.offset == cursor.offset && q.parkedStatusSeq == cursor.seq
+}
+
+// recordParkedStatus binds a successfully committed parked status to the exact
+// queue head that caused it. A concurrent head move makes the cursor stale and
+// leaves the new head unmarked, so its distinct occurrence is recorded later.
+func (q *eventQueue) recordParkedStatus(cursor eventQueueCursor) (bool, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if err := q.retryLoadNowLocked(); err != nil {
+		return false, err
+	}
+	if q.pending == 0 || q.offset != cursor.offset {
+		return false, nil
+	}
+	ev, n, err := q.readEventAtLocked(q.offset)
+	if err != nil {
+		return false, err
+	}
+	if ev.Seq != cursor.seq || n != cursor.length {
+		return false, nil
+	}
+	if q.limitParked && q.parkedStatusSeq == cursor.seq {
+		return true, nil
+	}
+	if err := q.persistLimitParkedLocked(cursor.seq); err != nil {
+		// The task-store write already committed. Remember that fact in this
+		// process even if its durable queue annotation failed, so a transient
+		// marker fault cannot revive the ten-second rewrite loop. A restart may
+		// conservatively repeat the write once, then retry persistence.
+		q.parkedStatusSeq = cursor.seq
+		return false, err
+	}
+	return true, nil
+}
+
+// headParkedStatusRecorded reports whether the current queue head is the exact
+// occurrence whose parked task status was committed. It is intentionally
+// narrower than retainLimitParked: a generic protection marker may precede the
+// first delivery attempt, and an old recorded sequence may remain while later
+// events drain.
+func (q *eventQueue) headParkedStatusRecorded() (bool, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if err := q.retryLoadLocked(); err != nil {
+		return false, err
+	}
+	if q.pending == 0 || q.parkedStatusSeq == 0 {
+		return false, nil
+	}
+	ev, _, err := q.readEventAtLocked(q.offset)
+	if err != nil {
+		return false, err
+	}
+	return ev.Seq == q.parkedStatusSeq, nil
 }
 
 // retainLimitParked reports whether the current backlog belongs to a known

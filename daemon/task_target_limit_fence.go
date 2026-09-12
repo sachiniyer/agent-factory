@@ -75,10 +75,18 @@ func (m *Manager) observeTaskTargetLimit(taskID string) (bool, error) {
 			// A replacement during admission is unknown until observed in full.
 			return false, fmt.Errorf("target session changed during usage-limit observation")
 		}
-		limited := instance.GetLiveness() == session.LiveLimitReached
+		view := instance.LifecycleView()
 		m.mu.Unlock()
 		m.accountLimitMu.Unlock()
 		releaseObservationFence()
-		return limited, nil
+		if view.InFlightOp != session.OpNone {
+			// Queue retention depends on the settled pair, not liveness alone. A
+			// limit resume deliberately passes through Running+Respawning before it
+			// re-parks and submits the retained prompt; calling that transient clean
+			// can expire or evict distinct events if the submission fails. Every
+			// in-flight operation is therefore unknown/protected until it settles.
+			return false, fmt.Errorf("target session has an in-flight operation (%v)", view.InFlightOp)
+		}
+		return view.Liveness == session.LiveLimitReached, nil
 	}
 }

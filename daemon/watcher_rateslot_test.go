@@ -26,7 +26,7 @@ func newRateSlotWatcher(t *testing.T, taskID string, deliver func(string, string
 	t.Helper()
 	s := newWatcherSupervisor()
 	s.eventsPerMinute = 10
-	s.deliver = deliver
+	s.deliver = adaptWatchDelivery(deliver)
 	return &taskWatcher{
 		sup:      s,
 		taskID:   taskID,

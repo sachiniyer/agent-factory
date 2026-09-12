@@ -132,6 +132,11 @@ type eventQueue struct {
 	// backpressures at the ordinary cap instead, preserving distinct watch events
 	// across a multi-day limit window without unbounded AF-managed disk growth.
 	limitParked bool
+	// parkedStatusSeq identifies the queue head whose one parked occurrence was
+	// already written to the task store. It lives with the durable queue cursor,
+	// not LastRunStatus: watcher lifecycle reporting may legitimately replace the
+	// display status without turning a retry of this head into a new occurrence.
+	parkedStatusSeq int64
 
 	dropped     int // events dropped to the overflow caps, for the drop log
 	lastDropLog time.Time
@@ -432,8 +437,15 @@ func (q *eventQueue) loadFailed() bool {
 }
 
 // enqueue appends one event and enforces the overflow caps by dropping oldest
-// pending events past them.
+// pending events past them. The optional flag marks a usage-limit-held event;
+// callers that have also recorded this exact occurrence use
+// enqueueWithParkedStatus so the queue persists both facts together.
 func (q *eventQueue) enqueue(line string, limitParked ...bool) error {
+	parkThisEvent := len(limitParked) > 0 && limitParked[0]
+	return q.enqueueWithParkedStatus(line, parkThisEvent, false)
+}
+
+func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusRecorded bool) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -445,14 +457,21 @@ func (q *eventQueue) enqueue(line string, limitParked ...bool) error {
 	if err := q.retryLoadNowLocked(); err != nil {
 		return fmt.Errorf("%w; refusing to append: %w", errEventQueueLoadFailed, err)
 	}
-	parkThisEvent := len(limitParked) > 0 && limitParked[0]
 	if q.pending == 0 && q.limitParked && !parkThisEvent {
 		if err := q.clearLimitParkedLocked(); err != nil {
 			return fmt.Errorf("failed to clear stale usage-limit queue marker: %w", err)
 		}
 	}
-	if parkThisEvent && !q.limitParked {
-		if err := q.markLimitParkedLocked(); err != nil {
+	// A direct delivery can discover the limit before the event has a queue
+	// sequence. The queue is empty on that path, so the next sequence is the
+	// durable identity of the occurrence whose task status was just recorded.
+	// Never attach that fact to a tail behind an existing head.
+	parkedStatusSeq := q.parkedStatusSeq
+	if parkThisEvent && statusRecorded && q.pending == 0 {
+		parkedStatusSeq = q.seq + 1
+	}
+	if parkThisEvent && (!q.limitParked || parkedStatusSeq != q.parkedStatusSeq) {
+		if err := q.persistLimitParkedLocked(parkedStatusSeq); err != nil {
 			return fmt.Errorf("failed to persist usage-limit queue marker: %w", err)
 		}
 	}

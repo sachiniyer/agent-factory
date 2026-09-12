@@ -25,6 +25,12 @@ type watchRecorder struct {
 	statuses []string // "<taskID>:<status>"
 }
 
+func adaptWatchDelivery(deliver func(taskID, line string) error) func(string, string, watchDeliveryOptions) error {
+	return func(taskID, line string, _ watchDeliveryOptions) error {
+		return deliver(taskID, line)
+	}
+}
+
 func (r *watchRecorder) deliver(taskID, line string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -59,7 +65,7 @@ func newTestSupervisor(t *testing.T, tasks func() ([]task.Task, error)) (*watche
 	logDir := t.TempDir()
 	s := newWatcherSupervisor()
 	s.loadTasks = tasks
-	s.deliver = rec.deliver
+	s.deliver = adaptWatchDelivery(rec.deliver)
 	s.setStatus = rec.setStatus
 	s.logPath = func(taskID string) (string, error) {
 		return filepath.Join(logDir, "task-"+taskID+".log"), nil
@@ -692,10 +698,10 @@ func TestWatcherTailCapturesNonDeliveredStdout(t *testing.T) {
 	dir := t.TempDir()
 	script := `echo "lock contention detected"; printf "death rattle"; exit 1`
 	s, rec := newTestSupervisor(t, staticTasks(watchTask("ab970002", script, dir)))
-	s.deliver = func(taskID, line string) error {
+	s.deliver = adaptWatchDelivery(func(taskID, line string) error {
 		_ = rec.deliver(taskID, line)
 		return errors.New("session spawn failed")
-	}
+	})
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
