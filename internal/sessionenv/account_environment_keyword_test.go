@@ -40,6 +40,12 @@ func TestValidateAccountEnvironmentCommand_RefusesKeywordMode(t *testing.T) {
 		"set +u -k; codex CODEX_HOME=/other",
 		"set +e -ek; codex CODEX_HOME=/other",
 		"set +e -o keyword; codex CODEX_HOME=/other",
+		// `-o` has conditional arity: it only consumes the next word as a mode
+		// name when that word does not start with `-` or `+`. When the next
+		// word is another option (like `-k`), bash processes `-o` as bare (it
+		// prints settings) and then processes `-k` normally — enabling keyword
+		// mode. The scanner must NOT swallow `-k` as the mode name here.
+		"set +e -o -k; codex CODEX_HOME=/other",
 		// The lone form (no compound) is refused for the same contract reason
 		// as a lone `set -k`: keyword mode outlives the call that set it.
 		"set +e -k",

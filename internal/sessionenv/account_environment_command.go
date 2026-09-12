@@ -465,6 +465,15 @@ func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struc
 //
 // Deliberately narrow: a process tab runs an arbitrary user command, and an
 // ordinary `set -e` prologue must keep working. Only keyword mode is refused.
+//
+// Option arity modelled by this scanner:
+//
+//	-o / +o   conditional arity — consumes the next word as a mode name ONLY
+//	          when that word does not start with `-` or `+`. Real mode names
+//	          (pipefail, noclobber, keyword, …) never start with either; when
+//	          the next word does start with one it is another option that the
+//	          scan must keep examining. This is the only conditional-arity
+//	          option; all others have fixed arity (zero).
 func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 	for idx := 0; idx < len(words); idx++ {
 		value, literal := literalShellWord(words[idx])
@@ -485,6 +494,15 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 		}
 		// A long-form switch names its mode in the next word. `+o keyword` turns
 		// the mode OFF, so only the minus form is a switch on.
+		//
+		// `-o` has conditional arity: it consumes the following word as a mode
+		// name ONLY when that word does not start with `-` or `+`. A real mode
+		// name (pipefail, noclobber, keyword, …) never starts with either; a
+		// word that does start with one is another option that the scan must
+		// continue examining. When the next word is another option, `-o` behaves
+		// as bare `-o` (prints current settings) and the shell processes the
+		// following option normally — so `set +e -o -k` does enable keyword mode
+		// via the `-k` that the `-o` branch must NOT swallow.
 		if value == "-o" || value == "+o" {
 			if idx+1 >= len(words) {
 				// A bare `set -o` prints the current settings.
@@ -493,6 +511,13 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 			mode, ok := literalShellWord(words[idx+1])
 			if !ok {
 				return true
+			}
+			// Only treat the next word as the mode name when it cannot itself
+			// be an option token. Mode names (pipefail, noclobber, …) never
+			// start with `-` or `+`; a word that does start with one is an
+			// option that must be examined on the next iteration.
+			if strings.HasPrefix(mode, "-") || strings.HasPrefix(mode, "+") {
+				continue
 			}
 			if value == "-o" && mode == "keyword" {
 				return true
