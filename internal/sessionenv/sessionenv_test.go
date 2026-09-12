@@ -17,11 +17,6 @@ func TestAgentForCommandRequiresLiteralAgentInvocation(t *testing.T) {
 		{name: "literal assignment", command: "CODEX_HOME=/tmp/codex codex", want: "codex"},
 		{name: "exec", command: "exec -- gemini --model flash", want: "gemini"},
 		{name: "env", command: "env -i HOME=/tmp aider --model sonnet", want: "aider"},
-		{
-			name:    "generated agent server",
-			command: "/srv/af agent-server --listen :43110 --repo /workspace --title test --program 'opencode --model test' --program-resolved --session-env CUSTOM_TOKEN",
-			want:    "opencode",
-		},
 		{name: "agent name used as data", command: "./collect codex"},
 		{name: "agent server title lookalike", command: "/srv/af agent-server --listen :43110 --repo /workspace --title codex"},
 		{name: "compound command", command: "collect; codex"},
@@ -35,6 +30,34 @@ func TestAgentForCommandRequiresLiteralAgentInvocation(t *testing.T) {
 				t.Fatalf("AgentForCommand(%q) = %q, want %q", test.command, got, test.want)
 			}
 		})
+	}
+}
+
+func TestAgentForCommandRejectsUntrustedAgentServerHandoff(t *testing.T) {
+	for _, executable := range []string{"./af", "/tmp/af", "af"} {
+		command := executable + " agent-server --listen :1 --repo /r --title t --program codex --program-resolved --session-env FOO"
+		if got := AgentForCommand(command); got != "" {
+			t.Errorf("AgentForCommand(%q) = %q, want no agent for an unauthenticated af-looking executable", command, got)
+		}
+	}
+}
+
+func TestAgentForCommandRejectsPathQualifiedEnvLookalike(t *testing.T) {
+	if got := AgentForCommand("./env codex"); got != "" {
+		t.Fatalf("AgentForCommand accepted a repository executable named env as %q", got)
+	}
+}
+
+func TestAgentForCommandAcceptsLaunchersTrustedAgentServerHandoff(t *testing.T) {
+	const (
+		wrapper = "/srv/af"
+		command = wrapper + " agent-server --listen :43110 --repo /workspace --title test --program 'opencode --model test' --program-resolved --session-env CUSTOM_TOKEN"
+	)
+	if got := agentForTrustedAgentServerCommand(command, wrapper); got != "opencode" {
+		t.Fatalf("trusted agent-server handoff resolved to %q, want opencode", got)
+	}
+	if got := agentForTrustedAgentServerCommand(command, "/other/af"); got != "" {
+		t.Fatalf("handoff authenticated by a different executable resolved to %q, want no agent", got)
 	}
 }
 
@@ -120,15 +143,13 @@ func TestFilterForCommandHonorsLiteralClaudeCloudModeSelectors(t *testing.T) {
 		"AWS_SECRET_ACCESS_KEY=fixture",
 		"AZURE_CLIENT_SECRET=fixture",
 	}
-	commands := []string{
+	directCommands := []string{
 		"CLAUDE_CODE_USE_BEDROCK=1 claude",
 		"env CLAUDE_CODE_USE_BEDROCK=true claude",
 		"env PATH=/opt/claude CLAUDE_CODE_USE_BEDROCK=1 claude",
 		"env -i CLAUDE_CODE_USE_BEDROCK=1 claude",
-		"/srv/af agent-server --listen :43110 --repo /workspace --title test --program 'CLAUDE_CODE_USE_BEDROCK=1 claude' --program-resolved",
-		"exec /srv/af agent-server --listen 127.0.0.1:0 --repo /workspace --title test --program 'CLAUDE_CODE_USE_BEDROCK=1 claude' --program-resolved --session-env CUSTOM_TOKEN",
 	}
-	for _, command := range commands {
+	for _, command := range directCommands {
 		got := FilterForCommand(source, "claude", command, nil)
 		for _, want := range []string{"AWS_ACCESS_KEY_ID=fixture", "AWS_SECRET_ACCESS_KEY=fixture"} {
 			if !slices.Contains(got, want) {
@@ -138,6 +159,31 @@ func TestFilterForCommandHonorsLiteralClaudeCloudModeSelectors(t *testing.T) {
 		if slices.Contains(got, "AZURE_CLIENT_SECRET=fixture") {
 			t.Fatal("Bedrock command admitted an inactive Foundry credential")
 		}
+	}
+
+	const wrapper = "/srv/af"
+	trustedHandoffs := []string{
+		wrapper + " agent-server --listen :43110 --repo /workspace --title test --program 'CLAUDE_CODE_USE_BEDROCK=1 claude' --program-resolved",
+		"exec " + wrapper + " agent-server --listen 127.0.0.1:0 --repo /workspace --title test --program 'CLAUDE_CODE_USE_BEDROCK=1 claude' --program-resolved --session-env CUSTOM_TOKEN",
+	}
+	for _, command := range trustedHandoffs {
+		got := filterForTrustedAgentServerCommand(source, "claude", command, nil, wrapper)
+		for _, want := range []string{"AWS_ACCESS_KEY_ID=fixture", "AWS_SECRET_ACCESS_KEY=fixture"} {
+			if !slices.Contains(got, want) {
+				t.Fatalf("trusted cloud-mode handoff omitted %s", strings.SplitN(want, "=", 2)[0])
+			}
+		}
+		if slices.Contains(got, "AZURE_CLIENT_SECRET=fixture") {
+			t.Fatal("trusted Bedrock handoff admitted an inactive Foundry credential")
+		}
+	}
+}
+
+func TestFilterForCommandDoesNotTrustAgentServerArgv(t *testing.T) {
+	command := "./af agent-server --listen :1 --repo /r --title t --program 'CLAUDE_CODE_USE_BEDROCK=1 claude' --program-resolved"
+	got := FilterForCommand([]string{"AWS_ACCESS_KEY_ID=fixture"}, "claude", command, nil)
+	if slices.Contains(got, "AWS_ACCESS_KEY_ID=fixture") {
+		t.Fatal("unauthenticated agent-server argv widened the credential filter")
 	}
 }
 

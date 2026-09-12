@@ -258,9 +258,18 @@ func Filter(source []string, agent string, extras []string) []string {
 
 // FilterForCommand is Filter with command-local cloud-mode assignments folded
 // into the selected-agent policy. The command is parsed without evaluation;
-// dynamic or unsupported syntax fails closed.
+// dynamic or unsupported syntax fails closed. Generic calls carry no authority
+// to inspect a nested agent-server program.
 func FilterForCommand(source []string, agent, command string, extras []string) []string {
-	allowed := allowedNames(source, agent, command, extras)
+	return filterForCommand(source, agent, command, extras, "")
+}
+
+func filterForTrustedAgentServerCommand(source []string, agent, command string, extras []string, trustedWrapper string) []string {
+	return filterForCommand(source, agent, command, extras, trustedWrapper)
+}
+
+func filterForCommand(source []string, agent, command string, extras []string, trustedWrapper string) []string {
+	allowed := allowedNames(source, agent, command, extras, trustedWrapper)
 	return filterAllowed(source, allowed)
 }
 
@@ -297,7 +306,7 @@ func filterAllowed(source []string, allowed map[string]struct{}) []string {
 //
 // It applies the same command-local cloud-mode policy as FilterForCommand.
 func ImportNamesForCommand(source []string, agent, command string, extras []string) []string {
-	allowed := allowedNames(source, agent, command, extras)
+	allowed := allowedNames(source, agent, command, extras, "")
 	for _, entry := range source {
 		name, _, ok := strings.Cut(entry, "=")
 		if ok && strings.HasPrefix(name, "LC_") && validName(name) {
@@ -368,8 +377,8 @@ func DockerForwardNames(source []string, _ string, extras []string) []string {
 	return out
 }
 
-func allowedNames(source []string, agent, command string, extras []string) map[string]struct{} {
-	return allowedNamesWithAuthSelectors(agent, ResolveAuthSelectors(source, agent, command), extras)
+func allowedNames(source []string, agent, command string, extras []string, trustedWrapper string) map[string]struct{} {
+	return allowedNamesWithAuthSelectors(agent, resolveAuthSelectors(source, agent, command, trustedWrapper), extras)
 }
 
 func allowedNamesWithAuthSelectors(agent string, selectors, extras []string) map[string]struct{} {
@@ -453,10 +462,16 @@ func CommandEnablesCloudCredentials(command string) (string, bool) {
 // own environment. The one layer a repository controls is filtered before it can
 // become a command — see CommandEnablesCloudCredentials.
 func ResolveAuthSelectors(source []string, agent, command string) []string {
+	return resolveAuthSelectors(source, agent, command, "")
+}
+
+func resolveAuthSelectors(source []string, agent, command, trustedWrapper string) []string {
 	var selectors []string
 	for _, group := range conditionalAgentNames[agent] {
 		enabled := environmentFlagEnabled(source, group.selector)
-		if found, commandEnabled := commandEnvironmentFlagState(command, agent, group.selector); found {
+		if found, commandEnabled := commandEnvironmentFlagStateForTrustedAgentServer(
+			command, agent, group.selector, trustedWrapper,
+		); found {
 			enabled = commandEnabled
 		}
 		if enabled {

@@ -480,6 +480,7 @@ func TestApplyAccount_FailsClosedOnAnUnprovableCommand(t *testing.T) {
 		// A repository file that merely SHARES a name with a modelled wrapper.
 		"./env codex",
 		"./af agent-server --program codex --program-resolved",
+		"af agent-server --listen x --repo r --title t --program codex --program-resolved",
 		// An agent's own flags redirect its identity as effectively as the
 		// environment: codex -c cli_auth_credentials_store="keyring" ignores the
 		// account directory's auth.json entirely.

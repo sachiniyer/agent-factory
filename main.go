@@ -34,8 +34,8 @@ func main() {
 		executable, err := os.Executable()
 		if err != nil {
 			// Not fatal: TrustedWrapper only widens what the command guard accepts,
-			// so an unknown path means a bare `af` is still recognised and anything
-			// else is refused. Failing closed is the correct direction.
+			// so an unknown path means every nested handoff is refused. Failing
+			// closed is the correct direction.
 			executable = ""
 		}
 		return agentaccount.Selected(home, agent, name, executable)

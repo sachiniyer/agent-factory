@@ -61,6 +61,18 @@ func wrapCommandWithMarker(executable, marker, agent, account string, proof Acco
 	if err != nil {
 		return "", err
 	}
+	// A generated agent-server handoff is the one command whose child agent is
+	// not its executable. Authenticate that recursion against the independent af
+	// path this wrapper is about to execute, never against the nested argv's name.
+	// Generic repository commands cannot choose executable at any production call
+	// site; Docker/SSH supply the binary path they copied or staged themselves.
+	if call, ok := singleSimpleCall(command); ok {
+		if _, handoff := trustedAgentServerProgram(call, executable); handoff {
+			if nestedAgent := agentForTrustedAgentServerCommand(command, executable); nestedAgent == "" || nestedAgent != agent {
+				return "", fmt.Errorf("agent-server handoff does not match the trusted af launcher")
+			}
+		}
+	}
 	args := []string{executable, marker, agent, strconv.Itoa(len(normalized))}
 	if account != "" {
 		// Both COUNTS are length-prefixed rather than delimiter-separated, for the
@@ -145,7 +157,17 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 		return err
 	}
 	command := args[len(args)-1]
-	environ := FilterForCommand(os.Environ(), agent, command, extras)
+	trustedWrapper, _ := os.Executable()
+	filterAgent := agent
+	if !environmentOnly && agentForTrustedAgentServerCommand(command, trustedWrapper) != agent {
+		// The argv protocol names an agent, but it is not authority by itself: a
+		// repository can invoke the private marker too. Re-derive the grant from
+		// the command plus this running af binary's identity, and on disagreement
+		// retain only the common/explicit environment. Account validation below
+		// still receives the original agent so it can refuse with its own reason.
+		filterAgent = ""
+	}
+	environ := filterForTrustedAgentServerCommand(os.Environ(), filterAgent, command, extras, trustedWrapper)
 	// The account boundary is applied HERE, in the pane, after filtering and
 	// immediately before exec — the last point where anything can still change
 	// what the agent will see. A failure REFUSES the launch rather than falling

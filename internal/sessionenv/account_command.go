@@ -96,12 +96,11 @@ func callOverridesName(call *syntax.CallExpr, proof commandProof, depth int) (ov
 
 	// A nested agent-server program carries its own command, and is the one
 	// wrapper this package already models.
-	// A bare `af`, or the EXACT path the launcher generated this handoff with.
-	// docker emits /usr/local/bin/af and ssh a staged absolute path, so requiring
-	// a bare name refuses af's own launch on those backends — the same
-	// name-is-not-provenance problem in reverse: here the path IS trusted and the
-	// spelling cannot say so, which is why the caller supplies it.
-	if nested, ok := literalAgentServerProgram(call); ok && isTrustedAfBinary(words[0], proof.trustedWrapper) {
+	// Only the EXACT absolute path the launcher generated this handoff with is
+	// accepted. Docker emits /usr/local/bin/af and ssh a staged absolute path;
+	// the caller supplies that provenance because the command spelling cannot.
+	// A bare `af` is still a PATH lookup a repository can influence, not identity.
+	if nested, ok := trustedAgentServerProgram(call, proof.trustedWrapper); ok {
 		inner, ok := singleSimpleCall(nested)
 		if !ok {
 			return false, false
@@ -318,17 +317,14 @@ func isBareName(word *syntax.Word, want string) bool {
 	return value == want
 }
 
-// isTrustedAfBinary reports whether a word is af's own binary: a bare `af`, or
-// the exact path the launcher generated the handoff with.
+// isTrustedAfBinary reports whether a word is the exact absolute af path the
+// launcher generated the handoff with.
 //
-// Exact, never a basename. `./af` and `/repo/af` are arbitrary repository files
-// that would receive the selected account root; the trusted path is compared
-// whole precisely so a shared name proves nothing.
+// Exact, never a basename or a bare PATH lookup. `af`, `./af`, and `/repo/af`
+// can all select repository-controlled executables; the separately supplied
+// launcher path is the identity, and a command string cannot manufacture it.
 func isTrustedAfBinary(word *syntax.Word, trustedWrapper string) bool {
-	if isBareName(word, "af") {
-		return true
-	}
-	if trustedWrapper == "" {
+	if !filepath.IsAbs(trustedWrapper) {
 		return false
 	}
 	value, ok := literalShellWord(word)

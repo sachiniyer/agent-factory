@@ -4,8 +4,11 @@ package sessionenv
 
 import (
 	"errors"
+	"os"
 	"slices"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 )
 
 func TestExecInvocationPreservesPOSIXShellSemantics(t *testing.T) {
@@ -57,5 +60,39 @@ func TestExecInvocationHonorsInlineClaudeCloudMode(t *testing.T) {
 	}
 	if slices.Contains(gotEnvironment, "AZURE_CLIENT_SECRET=fixture") {
 		t.Fatal("filtered Bedrock exec environment admitted an inactive Foundry credential")
+	}
+}
+
+func TestExecInvocationAuthenticatesAgentServerHandoff(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "fixture")
+	wantErr := errors.New("stop before exec")
+	var gotEnvironment []string
+	previous := processExec
+	processExec = func(_ string, _ []string, environ []string) error {
+		gotEnvironment = append([]string(nil), environ...)
+		return wantErr
+	}
+	t.Cleanup(func() { processExec = previous })
+
+	currentExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoffArgs := " agent-server --listen :1 --repo /r --title t --program codex --program-resolved"
+	trusted := shellquote.Quote(currentExecutable) + handoffArgs
+	if err := execInvocation([]string{"codex", "0", trusted}, false); !errors.Is(err, wantErr) {
+		t.Fatalf("trusted handoff error = %v, want test sentinel", err)
+	}
+	if !slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture") {
+		t.Fatal("the running af binary's own handoff lost the selected agent credential")
+	}
+
+	gotEnvironment = nil
+	untrusted := "./af" + handoffArgs
+	if err := execInvocation([]string{"codex", "0", untrusted}, false); !errors.Is(err, wantErr) {
+		t.Fatalf("untrusted handoff error = %v, want test sentinel", err)
+	}
+	if slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture") {
+		t.Fatal("an af-looking repository binary authenticated the argv protocol's agent claim")
 	}
 }
