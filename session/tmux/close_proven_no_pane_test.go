@@ -162,3 +162,48 @@ func TestCloseAndWaitForPaneExit_InconclusiveDoesNotLatchProvenNoPane(t *testing
 	require.False(t, s.ProvenNoPane(),
 		"an inconclusive teardown proves nothing and must not latch the pane-gone proof")
 }
+
+// TestCloseAndWaitForPaneExit_RetryAfterConclusiveClearsStaleProof guards the
+// direct-recheck path: a second call to closeAndWaitForPaneExit on the same
+// object must not inherit a ProvenNoPane latch from the first call if the second
+// attempt is inconclusive. The stale latch would let a subsequent kill/archive
+// skip liveness checks at teardown.go:247 for a pane that is genuinely alive.
+func TestCloseAndWaitForPaneExit_RetryAfterConclusiveClearsStaleProof(t *testing.T) {
+	// Phase 1: conclusive non-blind close latches ProvenNoPane.
+	pid := exitedProcess(t).PID
+	conclusiveExec := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "display-message") {
+				return []byte(fmt.Sprintf("%d\n", pid)), nil
+			}
+			// list-panes: empty set → no descendants, blind=false.
+			return []byte(""), nil
+		},
+	}
+	s := newTmuxSession(toTmuxName("close-retry-clears-latch", ""), "claude", NewMockPtyFactory(t), conclusiveExec)
+	require.False(t, s.ProvenNoPane(), "fresh session has proved nothing")
+
+	state1, blind1, err1 := s.CloseAndWaitForPaneExitReportingBlindness()
+	require.NoError(t, err1)
+	require.Equal(t, PaneStateKnown, state1)
+	require.False(t, blind1)
+	require.True(t, s.ProvenNoPane(), "conclusive non-blind close latches the proof")
+
+	// Phase 2: a retry that encounters an inconclusive outcome (unparseable pane
+	// set) must clear the stale latch. Without the clear-on-entry fix, the latch
+	// from phase 1 survives and lets teardown skip probing a live pane.
+	inconclusiveExec := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			return []byte("not-a-pane-pid\n"), nil
+		},
+	}
+	s.cmdExec = inconclusiveExec
+
+	state2, _, err2 := s.CloseAndWaitForPaneExitReportingBlindness()
+	require.Error(t, err2)
+	require.Equal(t, PaneStateUnknown, state2, "inconclusive retry must refuse")
+	require.False(t, s.ProvenNoPane(),
+		"a second inconclusive close must clear the stale latch from the first conclusive close")
+}

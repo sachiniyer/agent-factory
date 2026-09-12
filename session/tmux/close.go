@@ -299,6 +299,14 @@ func (t *TmuxSession) CloseAndWaitForPaneExitTrustingOwnGeneration() (PaneState,
 }
 
 func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneState, bool, error) {
+	// Invalidate any prior proof before starting a fresh close attempt. A
+	// previously latched true persists through a blind refusal or a
+	// PaneStateUnknown return — neither of those re-routes through the latch
+	// clearing entry points (Start or RestoreWithResult's live-session branch) —
+	// so the stale latch could skip teardown on a subsequent kill/archive while a
+	// real pane is still running (#703b4a70 follow-up). Clear here and re-latch
+	// below only on conclusive non-blind success.
+	t.setProvenNoPane(false)
 	pid, pidErr := t.panePID()
 	var (
 		paneProcess proctree.Process
