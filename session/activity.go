@@ -179,6 +179,9 @@ type LifecycleView struct {
 	Liveness   Liveness
 	InFlightOp InFlightOp
 	Status     Status
+	// StateEpoch is captured with the lifecycle axes. Any transition derived from
+	// this snapshot must be scoped to it so newer lifecycle truth wins.
+	StateEpoch uint64
 	Started    bool
 	UserKilled bool
 	// PendingAccountSwap is a committed identity move whose replacement notice
@@ -222,6 +225,7 @@ func (i *Instance) lifecycleViewLocked() LifecycleView {
 		Liveness:            i.liveness,
 		InFlightOp:          i.inFlightOp,
 		Status:              i.statusLocked(),
+		StateEpoch:          i.stateEpoch,
 		Started:             i.started,
 		UserKilled:          i.userKilled,
 		PendingAccountSwap:  i.pendingAccountSwap != nil,
