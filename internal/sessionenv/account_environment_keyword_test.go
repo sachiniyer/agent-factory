@@ -32,6 +32,23 @@ func TestValidateAccountEnvironmentCommand_RefusesKeywordMode(t *testing.T) {
 		"npm run build; set -k; codex CODEX_HOME=/other",
 		// An unprovable operand could expand to -k.
 		"set $AF_FLAGS; codex CODEX_HOME=/other",
+		// A `+`-prefixed flag is a turn-OFF option word, not a non-option
+		// operand, so it does not end option parsing: a trailing `-k` still
+		// switches keyword mode on. `set +e -k` and `set -k` are equivalent in
+		// effect on keyword mode under bash.
+		"set +e -k; codex CODEX_HOME=/other",
+		"set +u -k; codex CODEX_HOME=/other",
+		"set +e -ek; codex CODEX_HOME=/other",
+		"set +e -o keyword; codex CODEX_HOME=/other",
+		// `-o` has conditional arity: it only consumes the next word as a mode
+		// name when that word does not start with `-` or `+`. When the next
+		// word is another option (like `-k`), bash processes `-o` as bare (it
+		// prints settings) and then processes `-k` normally — enabling keyword
+		// mode. The scanner must NOT swallow `-k` as the mode name here.
+		"set +e -o -k; codex CODEX_HOME=/other",
+		// The lone form (no compound) is refused for the same contract reason
+		// as a lone `set -k`: keyword mode outlives the call that set it.
+		"set +e -k",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
 		require.Error(t, err, "command %q must not silently enable keyword mode", command)
@@ -65,6 +82,13 @@ func TestValidateAccountEnvironmentCommand_AllowsOrdinaryShellOptions(t *testing
 		// After `--`, and after any non-option operand, the words are positional
 		// parameters rather than options: this does NOT enable keyword mode.
 		"set -- -k; npm run dev",
+		// A `+`-prefixed flag does not end option parsing, but `--` still does:
+		// the `-k` after `--` is the positional parameter $1, not an option.
+		"set +e -- -k; npm run dev",
+		// A lone `-` is also a bash option terminator: bash documents it as
+		// "assign any remaining arguments to the positional parameters", so
+		// `-k` after `-` is $1, not an option that enables keyword mode.
+		"set +e - -k; npm run dev",
 		"hash -r; npm run dev",
 		"hash npm; npm run dev",
 		"npm run dev",
