@@ -109,3 +109,52 @@ func TestRestoreLostSessionAdmissionWaitIsBoundedBeforeFence(t *testing.T) {
 	assert.Equal(t, session.OpNone, inst.GetInFlightOp(), "a wait refusal must precede the recover fence")
 	assert.Equal(t, session.Lost, inst.GetStatus())
 }
+
+func TestCreateAdmissionWaitIsBoundedBeforeReservation(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	admission := manager.worktreeAdmissionLockForRepo(repoID)
+	admission.Lock()
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			admission.Unlock()
+		}
+	})
+	shortenWorktreeAdmissionWait(t)
+
+	type result struct {
+		renamed *session.InstanceData
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		_, _, release, renamed, err := manager.reserveCreateForSession(CreateSessionRequest{
+			RepoPath: repoPath,
+			Title:    "bounded-create-admission",
+			Program:  "claude",
+		})
+		if release != nil {
+			release()
+		}
+		done <- result{renamed: renamed, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		require.ErrorContains(t, got.err, "timed out")
+		require.ErrorContains(t, got.err, "worktree operation")
+		assert.Nil(t, got.renamed, "an admission timeout must precede archived-title mutation")
+	case <-time.After(time.Second):
+		// Release and join the waiter before failing: the pre-fix Lock call is
+		// unbounded, and leaving its goroutine alive would mutate manager state
+		// after the test's temporary home is gone.
+		locked = false
+		admission.Unlock()
+		<-done
+		t.Fatal("create waited indefinitely for worktree admission")
+	}
+
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	assert.Empty(t, manager.reservedTitles, "an admission timeout must not reserve a session title")
+}

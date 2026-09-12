@@ -710,8 +710,17 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	releaseWorktreeAdmission := func() {}
 	worktreeAdmissionHeld := false
 	if holdWorktreeAdmission && nameNamespace == runtimeNamespaceLocalTmux {
-		lock := m.worktreeAdmissionLockForRepo(repo.ID)
-		lock.Lock()
+		// Recovery may hold admission across an intentionally unbounded worktree
+		// add and operator hook. Bound this wait before manager reservations or an
+		// archived-title rename, so one stuck rebuild cannot wedge every later
+		// create in the repository and a timeout leaves no mutation to undo.
+		lock, waited, acquired := m.lockWorktreeAdmissionWithin(repo.ID)
+		if !acquired {
+			return nil, "", nil, nil, fmt.Errorf(
+				"cannot create session: timed out after %s waiting for another worktree operation in this repository; retry after that operation finishes",
+				waited,
+			)
+		}
 		releaseWorktreeAdmission = lock.Unlock
 		worktreeAdmissionHeld = true
 	}

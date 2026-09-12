@@ -3,9 +3,21 @@ package daemon
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 )
+
+// lockWorktreeAdmissionWithin is the waiting form of repository worktree
+// admission. Every holder may run an intentionally unbounded Git worktree add
+// and its operator hook, so no peer may use a bare Mutex.Lock and inherit that
+// unbounded wait. Callers acquire before their own mutation or reservation and
+// can therefore return untouched when this bound expires.
+func (m *Manager) lockWorktreeAdmissionWithin(repoID string) (*sync.Mutex, time.Duration, bool) {
+	lock := m.worktreeAdmissionLockForRepo(repoID)
+	acquired, waited := lockWithin(lock, opLockTimeout)
+	return lock, waited, acquired
+}
 
 // lockLocalWorktreeAdmissionWithin joins a user-requested local restore to the
 // same per-repository admission boundary as create. The mutex is acquired only
@@ -20,8 +32,7 @@ func (m *Manager) lockLocalWorktreeAdmissionWithin(
 	if instance.Capabilities().Workspace != session.WorkspaceLocalWorktree {
 		return nil, nil
 	}
-	lock := m.worktreeAdmissionLockForRepo(repoID)
-	acquired, waited := lockWithin(lock, opLockTimeout)
+	lock, waited, acquired := m.lockWorktreeAdmissionWithin(repoID)
 	if !acquired {
 		return nil, fmt.Errorf(
 			"cannot %s session %q: timed out after %s waiting for another worktree operation in this repository; retry after that operation finishes",
