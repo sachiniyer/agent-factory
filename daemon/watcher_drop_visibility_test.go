@@ -27,7 +27,7 @@ func TestWatcherRateDropIsVisibleOnTaskAndListAPI(t *testing.T) {
 
 	s := newWatcherSupervisor()
 	s.eventsPerMinute = 1
-	s.deliver = func(_, _ string) error { return nil }
+	s.deliver = func(_, _ string, _ watchDeliveryOptions) error { return nil }
 	logDir := t.TempDir()
 	s.logPath = func(taskID string) (string, error) {
 		return filepath.Join(logDir, "task-"+taskID+".log"), nil
