@@ -227,55 +227,16 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 					return nil, true
 				}
 			}
-		case isAccountCommandName(words[0], "nohup"):
-			var unsafe bool
-			words, unsafe = unwrapNohup(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isAccountCommandName(words[0], "nice"):
-			var unsafe bool
-			words, unsafe = unwrapNice(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isAccountCommandName(words[0], "timeout"):
-			var unsafe bool
-			words, unsafe = unwrapTimeout(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isAccountCommandName(words[0], "setsid"):
-			var unsafe bool
-			words, unsafe = unwrapSetsid(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isAccountCommandName(words[0], "stdbuf"):
-			var unsafe bool
-			words, unsafe = unwrapStdbuf(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isAccountCommandName(words[0], "ionice"):
-			var unsafe bool
-			words, unsafe = unwrapIonice(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isAccountCommandName(words[0], "taskset"):
-			var unsafe bool
-			words, unsafe = unwrapTaskset(words[1:])
-			if unsafe {
-				return nil, true
-			}
-		case isAccountCommandName(words[0], "strace"):
-			var unsafe bool
-			words, unsafe = unwrapStrace(words[1:], names)
-			if unsafe {
-				return nil, true
-			}
 		default:
+			spec, wrapper := accountCommandWrapper(words[0])
+			if wrapper {
+				var unsafe bool
+				words, unsafe = unwrapAccountCommandWrapper(words[1:], spec, names)
+				if unsafe {
+					return nil, true
+				}
+				continue
+			}
 			// Residual accepted set: a literal executable not classified above as a
 			// shell mutator or command-executing wrapper, with its remaining words
 			// treated as that executable's data. Process tabs intentionally run
