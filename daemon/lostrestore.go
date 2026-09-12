@@ -552,10 +552,8 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// raises no lifecycle fence of its own — the op-lock above serializes daemon
 	// operations, not the status poll, which skips on the op AXIS — so the fence
 	// has to come from the recovery itself.
-	if err := inst.RecoverFencedWithLiveBoundary(func() {
-		if perr := m.prepareRuntimeReplacement(repoID, key, inst); perr != nil {
-			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", inst.Title, perr)
-		}
+	if err := inst.RecoverFencedWithLiveBoundary(func() error {
+		return m.prepareRuntimeReplacementLiveBoundary(repoID, key, inst, "restore")
 	}); err != nil {
 		// Persist the instance even on failure, matching the manual restore path
 		// (restore.go): Recover can mutate durable worktree state before it fails

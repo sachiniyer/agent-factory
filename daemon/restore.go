@@ -389,10 +389,8 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// instead of re-entering RuntimeActionRecoverLost, which still requires OpNone
 	// and would now refuse its own operation's fence. ConfirmLive clears the fence
 	// on success; the deferred EndRecoverFence above lowers it on failure.
-	if err := instance.RecoverHeldFencedWithLiveBoundary(func() {
-		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
-			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
-		}
+	if err := instance.RecoverHeldFencedWithLiveBoundary(func() error {
+		return m.prepareRuntimeReplacementLiveBoundary(repoID, key, instance, "restore")
 	}); err != nil {
 		// The fence stays up through the bookkeeping below and comes down in the
 		// deferred release, which is what announces it. Nothing here is distorted by

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -22,6 +23,16 @@ type settleOwedEntry struct {
 	persistInstance    bool
 	interruptedTaskRun *session.TaskRunIdentity
 }
+
+// runtimeReplacementDurabilityError means the replacement must not remain
+// alive: disk still describes an active task run owned by its predecessor, so a
+// daemon restart could reattach the replacement and let its idle edge execute
+// that run's on_complete action. Other settlement errors remain retryable while
+// the replacement runs because they cannot resurrect a prompted run.
+type runtimeReplacementDurabilityError struct{ err error }
+
+func (e *runtimeReplacementDurabilityError) Error() string { return e.err.Error() }
+func (e *runtimeReplacementDurabilityError) Unwrap() error { return e.err }
 
 // A SETTLEMENT is the write that records the outcome of an irreversible step —
 // the class of persist in this package that may not be best-effort.
@@ -114,13 +125,41 @@ func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *sessio
 				m.recordInterruptedTaskRunWrite(repoID, key, instance, &run)
 			}
 		}
-		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", settlementErr)
+		err := fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", settlementErr)
+		if interrupted {
+			return &runtimeReplacementDurabilityError{err: err}
+		}
+		return err
 	}
 	// The session settlement comes first. A task-file lock or disk fault must not
 	// keep predecessor-owned remote-loss evidence live after the replacement is
 	// already running, or a restart plus one blip could re-provision it again.
 	if interrupted && run.TaskID != "" {
 		m.recordInterruptedTaskRun(repoID, key, instance, run)
+	}
+	return nil
+}
+
+// prepareRuntimeReplacementLiveBoundary is the one policy boundary between a
+// settlement failure and a newly-created runtime. Ordinary evidence retirement
+// remains owed and does not tear down useful work. An active-run close that did
+// not reach disk is different: the backend must receive that error so it can
+// remove the replacement rather than leave a process that becomes unsafe after
+// a daemon restart.
+func (m *Manager) prepareRuntimeReplacementLiveBoundary(
+	repoID, key string,
+	instance *session.Instance,
+	operation string,
+) error {
+	err := m.prepareRuntimeReplacement(repoID, key, instance)
+	if err == nil {
+		return nil
+	}
+	m.warn().Printf("%s for %q reached its live boundary before predecessor evidence was durable: %v",
+		operation, instance.Title, err)
+	var unsafe *runtimeReplacementDurabilityError
+	if errors.As(err, &unsafe) {
+		return err
 	}
 	return nil
 }

@@ -106,6 +106,22 @@ func (i *Instance) RuntimeReplacementSettlementBlocked() bool {
 	return i.runtimeReplacementSettlementBlocked
 }
 
+// ReleaseRuntimeReplacementHoldAfterTeardown drops the process-local live
+// boundary hold after the backend has proved that the replacement runtime was
+// torn down. It deliberately leaves the interruption outbox intact: the lost
+// predecessor's run still ended and its task outcome remains owed, but no live
+// replacement exists whose idle edge could consume that run before the close is
+// durable. The recovery owner can therefore lower OpRestoring and retry later.
+func (i *Instance) ReleaseRuntimeReplacementHoldAfterTeardown() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.runtimeReplacementSettlementBlocked || i.inFlightOp != OpRestoring {
+		return false
+	}
+	i.runtimeReplacementSettlementBlocked = false
+	return true
+}
+
 // ReleaseRuntimeReplacementAfterSettlement exposes a replacement only after a
 // successful write made the predecessor run's close durable. It applies
 // ConfirmLive under the same lock that removes the hold, so neither a poll nor a
@@ -123,6 +139,13 @@ func (i *Instance) ReleaseRuntimeReplacementAfterSettlement() (bool, error) {
 		return false, nil
 	}
 	i.runtimeReplacementSettlementBlocked = false
+	if i.runtimeCleanupStateUnknown {
+		// Cleanup of the refused replacement did not establish that the process is
+		// gone. Make the interrupted outcome durable, but never turn that uncertainty
+		// into LiveRunning. A daemon restart reloads the durable cleanup fence with
+		// transient OpRestoring stripped and retries from the retained backend handle.
+		return false, nil
+	}
 	if err := i.transitionLocked(ConfirmLive()); err != nil {
 		i.runtimeReplacementSettlementBlocked = true
 		return false, err

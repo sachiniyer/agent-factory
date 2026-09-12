@@ -584,7 +584,9 @@ func SetIllegalTransitionHook(fn func(msg string)) (restore func()) {
 // is out-of-set is a silent no-op. INERT until Phase 2d migrates the writers.
 func (i *Instance) Transition(ev TransitionEvent) error {
 	if ev.kind == tkConfirmLive && ev.runtimeReplaced {
-		i.runLiveBoundary()
+		if err := i.runLiveBoundary(); err != nil {
+			return fmt.Errorf("retire predecessor runtime before confirming replacement: %w", err)
+		}
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()

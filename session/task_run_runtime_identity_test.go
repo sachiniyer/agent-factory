@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -57,9 +58,10 @@ func TestTaskRunEndsOnlyForRuntimeThatReceivedPrompt(t *testing.T) {
 			taskRunActive: true,
 		}
 		boundaryCalled := false
-		require.NoError(t, inst.withLiveBoundary(func() {
+		require.NoError(t, inst.withLiveBoundary(func() error {
 			boundaryCalled = true
 			inst.InterruptTaskRunAtRuntimeReplacement()
+			return nil
 		}, func() error {
 			return inst.Transition(ConfirmLive())
 		}))
@@ -67,6 +69,38 @@ func TestTaskRunEndsOnlyForRuntimeThatReceivedPrompt(t *testing.T) {
 			"reattachment is not runtime replacement provenance")
 		require.True(t, inst.TaskRunActive(),
 			"the original prompted runtime still owns and may complete its run")
+	})
+
+	t.Run("failed durable close refuses replacement visibility", func(t *testing.T) {
+		inst := &Instance{
+			Title:         "unsafe-replacement",
+			TaskID:        "task-id",
+			liveness:      LiveLost,
+			inFlightOp:    OpRestoring,
+			taskRunActive: true,
+			started:       true,
+		}
+		diskErr := errors.New("disk full")
+		calls := 0
+		err := inst.withLiveBoundary(func() error {
+			calls++
+			inst.InterruptTaskRunAtRuntimeReplacement()
+			inst.HoldRuntimeReplacementUntilSettlement()
+			return diskErr
+		}, func() error {
+			first := inst.Transition(ConfirmRuntimeReplacementLive())
+			second := inst.Transition(ConfirmRuntimeReplacementLive())
+			return errors.Join(first, second)
+		})
+		require.ErrorIs(t, err, diskErr)
+		require.Equal(t, 1, calls, "the failed settlement boundary remains one-shot")
+		require.Equal(t, OpRestoring, inst.GetInFlightOp())
+		require.Equal(t, LiveLost, inst.GetLiveness())
+		require.True(t, inst.ReleaseRuntimeReplacementHoldAfterTeardown(),
+			"a backend-proven teardown releases only the process-local hold")
+		require.True(t, inst.EndRecoverFence())
+		_, pending := inst.PendingTaskRunInterruption()
+		require.True(t, pending, "teardown must not discard the interrupted outcome")
 	})
 
 	t.Run("prompt redelivery fence preserves the run", func(t *testing.T) {

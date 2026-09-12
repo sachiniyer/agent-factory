@@ -175,7 +175,21 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	if restoreResult == tmux.RestoreRespawned {
 		live = ConfirmRuntimeReplacementLive()
 	}
-	_ = i.Transition(live)
+	if err := i.Transition(live); err != nil {
+		liveErr := fmt.Errorf("recover: confirm replacement session %q live: %w", i.Title, err)
+		if restoreResult == tmux.RestoreRespawned {
+			cleanupState, cleanupErr := ts.CloseAndWaitForPaneExit()
+			if cleanupState != tmux.PaneStateKnown {
+				i.markRuntimeCleanupStateUnknown()
+				return markRecoverRebuilt(rebuilt, fmt.Errorf("%w (cleanup error: %v)", liveErr, cleanupErr))
+			}
+			i.ReleaseRuntimeReplacementHoldAfterTeardown()
+			if cleanupErr != nil {
+				return markRecoverRebuilt(rebuilt, fmt.Errorf("%w (cleanup error after confirmed teardown: %v)", liveErr, cleanupErr))
+			}
+		}
+		return markRecoverRebuilt(rebuilt, liveErr)
+	}
 
 	// The re-spawned tmux is a new pane process; a PTY broker that was still holding
 	// the dead pane's clientless capture must drop it so the next Subscribe streams

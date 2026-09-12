@@ -199,7 +199,14 @@ func recoverSandbox(i *Instance) error {
 	// reprovisionRemote always creates a fresh sandbox. Carry that backend-owned
 	// identity proof into the lifecycle boundary so predecessor evidence is
 	// retired; a plain ConfirmLive is reserved for paths that may only reattach.
-	_ = i.Transition(ConfirmRuntimeReplacementLive())
+	if err := i.Transition(ConfirmRuntimeReplacementLive()); err != nil {
+		if cleanupErr := i.teardownAfterStartFailure(); cleanupErr != nil {
+			return fmt.Errorf("replacement live boundary failed and the replacement sandbox's cleanup state is unknown: %w",
+				errors.Join(err, cleanupErr))
+		}
+		i.ReleaseRuntimeReplacementHoldAfterTeardown()
+		return err
+	}
 	return nil
 }
 
