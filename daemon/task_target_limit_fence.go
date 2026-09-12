@@ -43,6 +43,14 @@ func (m *Manager) observeTaskTargetLimit(taskID string) (bool, error) {
 	}
 
 	key := daemonInstanceKey(t.RepoID, target)
+	// Manager lock hierarchy, outer to inner:
+	//
+	//	configApplyMu -> accountLimitMu -> m.mu
+	//
+	// Both roster rechecks below deliberately take accountLimitMu before m.mu.
+	// Never acquire accountLimitMu while holding m.mu, or configApplyMu while
+	// holding accountLimitMu: either inversion can deadlock limit publication
+	// against config admission or session registration.
 	for {
 		m.mu.Lock()
 		instance := m.instances[key]
