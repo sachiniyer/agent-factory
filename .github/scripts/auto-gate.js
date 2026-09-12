@@ -3556,6 +3556,7 @@ const REQUIRED_CHECK_RECONCILIATION_QUERY = `
                         startedAt
                         completedAt
                         externalId
+                        permalink
                         title
                         summary
                         text
@@ -3579,9 +3580,21 @@ const REQUIRED_CHECK_RECONCILIATION_QUERY = `
   }
 `;
 
+function reconciliationCheckRunDatabaseID(run) {
+  if (Number.isSafeInteger(run.databaseId) && run.databaseId > 0) {
+    return run.databaseId;
+  }
+  const permalinkID = /\/runs\/([1-9]\d*)(?:[/?#]|$)/.exec(String(run.permalink || ""))?.[1];
+  const parsed = Number(permalinkID);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
 function reconciliationCheckRun(run) {
   return {
-    id: run.databaseId,
+    // CheckRun.databaseId is a nullable GraphQL Int even though REST check-run
+    // IDs are wider. The non-null permalink names that same numeric run, so it
+    // retains the monotonic tiebreak when databaseId cannot represent it.
+    id: reconciliationCheckRunDatabaseID(run),
     // GraphQL's non-null Node ID is the REST check run's node_id. Keep that
     // common identity for snapshots; databaseId has a narrower/nullable
     // GraphQL type even though REST exposes the database key as a full number.
@@ -3649,13 +3662,18 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
         );
         continue;
       }
+      const checkRuns = (contexts?.nodes || [])
+        .filter((node) => node?.__typename === "CheckRun")
+        .map(reconciliationCheckRun);
+      if (checkRuns.some((run) => !Number.isSafeInteger(run.id))) {
+        core.warning(
+          `Required-check reconciliation skipped PR #${pull.number}: a check run had no ` +
+            "safe numeric generation ID.",
+        );
+        continue;
+      }
       pulls.push(pull);
-      checkRunsByHead.set(
-        headSha,
-        (contexts?.nodes || [])
-          .filter((node) => node?.__typename === "CheckRun")
-          .map(reconciliationCheckRun),
-      );
+      checkRunsByHead.set(headSha, checkRuns);
       statusesByHead.set(
         headSha,
         (contexts?.nodes || [])

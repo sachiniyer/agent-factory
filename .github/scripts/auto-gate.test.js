@@ -6025,6 +6025,54 @@ test("scheduled reconciliation matches full-width check identities across APIs",
   );
 });
 
+test("scheduled reconciliation orders same-second decisions without GraphQL database IDs", async () => {
+  const stamp = "2026-07-09T01:10:00Z";
+  const superseded = {
+    ...reconciliationDecision({
+      prNumber: 1465,
+      headSha: HEAD_SHA,
+      evaluatedAt: stamp,
+    }),
+    id: 103_493_700_001,
+    node_id: "CR_kwDORdIFwM8AAAAYGLR2oQ",
+    graphql_database_id: null,
+    conclusion: "success",
+  };
+  const current = {
+    ...reconciliationDecision({
+      prNumber: 1465,
+      headSha: HEAD_SHA,
+      evaluatedAt: stamp,
+    }),
+    id: 103_493_700_002,
+    node_id: "CR_kwDORdIFwM8AAAAYGLR2og",
+    graphql_database_id: null,
+  };
+  assert.equal(superseded.completed_at, current.completed_at, "the decisions must really tie");
+  assert.equal(superseded.conclusion, "success", "the losing response-order entry must skip");
+
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          superseded,
+          current,
+          reconciliationRequiredCheck("Build", "2026-07-09T01:11:00Z"),
+        ],
+      },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+});
+
 test("scheduled reconciliation round-trips source-less commit-status observations", async () => {
   const build = checkRun({ id: 701, name: "Build", conclusion: "success" });
   const lint = checkRun({ id: 702, name: "Lint", conclusion: "success" });
@@ -11843,6 +11891,7 @@ function scheduledReconciliationGithub({
     graphql: async (query, { after }) => {
       graphqlReads.push(after);
       const requestsCheckRunNodeId = /\.\.\. on CheckRun\s*\{\s*id(?:\s|$)/.test(query);
+      const requestsCheckRunPermalink = /\.\.\. on CheckRun\s*\{[\s\S]*?\bpermalink\b/.test(query);
       const requestsStatusContexts = /\.\.\. on StatusContext\s*\{/.test(query);
       const start = after == null ? 0 : Number(after);
       const page = pulls.slice(start, start + 100);
@@ -11883,6 +11932,9 @@ function scheduledReconciliationGithub({
                           startedAt: run.started_at,
                           completedAt: run.completed_at,
                           externalId: run.external_id,
+                          permalink: requestsCheckRunPermalink
+                            ? `https://github.com/sachiniyer/agent-factory/runs/${run.id}`
+                            : undefined,
                           title: run.output?.title,
                           summary: run.output?.summary,
                           text: run.output?.text,
