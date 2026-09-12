@@ -33,17 +33,21 @@ var (
 
 var agentServerCmd = &cobra.Command{
 	Use:   "agent-server",
-	Short: "Run a headless single-workspace backend (not the web UI — that is 'af daemon')",
+	Short: "Run a headless single-workspace backend (not the daemon-hosted web UI)",
 	Long: `Run a headless agent-server for exactly one session's workspace, served over
 the same REST + WebSocket protocol the daemon speaks, behind a plain-HTTP
 listener that requires a bearer token on every request.
 
 This does not start the web UI, and serves no frontend at all — opening its port
-in a browser returns a 404 saying so. If you want the browser app, run the
-daemon with 'af daemon' and open http://localhost:8443. The web UI is bundled
-into the daemon and served from its network.listen_addr; agent-server is only
-the headless per-workspace backend that a daemon drives, and it exists to be
-consumed by a daemon rather than opened by a person.
+in a browser returns a 404 saying so. The browser app starts with the local
+daemon lifecycle: a bare 'af' launch on the default local target ensures the
+daemon, and any bare launch also starts the local daemon when its task store has
+an enabled task. 'af daemon install' starts it under the user service manager
+and keeps it available without an open TUI. Once the daemon is running, open
+http://localhost:8443. The web UI is bundled into the daemon and served from its
+network.listen_addr; agent-server is only the headless per-workspace backend that
+a daemon drives, and it exists to be consumed by a daemon rather than opened by
+a person.
 
 This is the process that runs inside a docker container or on an ssh remote
 (#1592 Phase 4): the owning daemon dials the authed URL it exposes and drives

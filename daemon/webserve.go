@@ -63,7 +63,8 @@ const webCSP = "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-src 
 // port exists for a daemon to drive, so a human who lands on it is lost and should
 // be handed the real address rather than a bare 404 or a 401.
 const noWebShellMessage = "this is an af agent-server (a headless single-workspace backend) and it serves no web UI. " +
-	"The web UI is served by the daemon: run 'af daemon' and open http://localhost:8443. " +
+	"The web UI is served by the daemon: open bare 'af' on the default local target to start it on demand, " +
+	"or run 'af daemon install' to start and supervise it; then open http://localhost:8443. " +
 	"This server speaks only the /v1/agent/* API that a daemon drives."
 
 // noPreviewContentMessage is what the preview origin answers a request whose Host
