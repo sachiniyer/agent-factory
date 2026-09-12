@@ -185,6 +185,16 @@ const (
 // Uncertainty wins over failure if a malformed caller sets both: once the reply
 // is lost, the client cannot honestly claim the daemon kept its previous config.
 func (o ApplyOutcome) StatusForKey(key string) ApplyStatus {
+	// Match EffectNotice's key-first rule. A startup-only setting is deferred
+	// regardless of whether a daemon happened to receive this save; that apply
+	// call cannot make the key live. The same holds for client-side settings,
+	// which take effect on the next af launch rather than in the daemon.
+	switch KeyEffectClass(key) {
+	case EffectNextDaemonStart, EffectNextAfLaunch:
+		return ApplyStatusDeferred
+	case EffectUnknown:
+		return ApplyStatusUnknown
+	}
 	if o.DaemonApplyUnconfirmed {
 		return ApplyStatusUnconfirmed
 	}

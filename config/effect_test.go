@@ -235,6 +235,35 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			want: ApplyStatusApplied,
 		},
 		{
+			name:    "next daemon start",
+			outcome: ApplyOutcome{DaemonApplied: true},
+			key:     "branch_prefix",
+			want:    ApplyStatusDeferred,
+		},
+		{
+			name:    "next client start",
+			outcome: ApplyOutcome{DaemonApplied: true},
+			key:     "update_channel",
+			want:    ApplyStatusDeferred,
+		},
+		{
+			name: "startup-only key remains deferred without daemon",
+			key:  "debug_pprof",
+			want: ApplyStatusDeferred,
+		},
+		{
+			name:    "startup-only key remains deferred despite unrelated apply failure",
+			outcome: ApplyOutcome{DaemonApplyFailed: true},
+			key:     "root_agents",
+			want:    ApplyStatusDeferred,
+		},
+		{
+			name:    "unclassified key is unknown",
+			outcome: ApplyOutcome{DaemonApplied: true},
+			key:     "future_unclassified_key",
+			want:    ApplyStatusUnknown,
+		},
+		{
 			name: "uncertainty outranks a conflicting failure bit",
 			outcome: ApplyOutcome{
 				DaemonApplyFailed:      true,
