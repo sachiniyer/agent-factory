@@ -978,5 +978,3 @@ func (i *Instance) SetBackend(b Backend) {
 	i.backend = b
 	i.touchLocked()
 }
-
-
