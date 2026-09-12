@@ -182,8 +182,10 @@ func TestUnreadableQueueBackpressuresUntilStateIsKnown(t *testing.T) {
 		draining: true, // keep the recovered backlog stable for the assertion
 	}
 	readerDone := make(chan struct{})
+	writersStopped := make(chan struct{})
+	close(writersStopped)
 	go func() {
-		w.consumeLines(strings.NewReader("must-survive-unreadable-state\n"), &tailBuffer{}, make(chan struct{}))
+		w.consumeLines(strings.NewReader("must-survive-unreadable-state\n"), &tailBuffer{}, writersStopped)
 		close(readerDone)
 	}()
 
@@ -225,5 +227,29 @@ func TestUnreadableQueueBackpressuresUntilStateIsKnown(t *testing.T) {
 	want := []string{"parked-before-restart", "must-survive-unreadable-state"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("recovered backlog = %v, want %v", got, want)
+	}
+}
+
+func TestRateFullProtectedEventWithoutQueueRecordsDrop(t *testing.T) {
+	s := newWatcherSupervisorWithEventsPerMinute(1)
+	s.observeTargetLimit = func(string) (bool, error) { return true, nil }
+	recorded := 0
+	s.recordDrops = func(_ string, total int, _ time.Time) error {
+		recorded = total
+		return nil
+	}
+	w := &taskWatcher{
+		taskID: "limit-without-queue", sup: s,
+		eventTimes: []time.Time{time.Now()},
+		stopCh:     make(chan struct{}),
+	}
+
+	w.handleEvent("must-be-accounted", &tailBuffer{})
+
+	if w.dropped != 1 {
+		t.Fatalf("queue-less protected event disappeared without drop accounting: dropped=%d", w.dropped)
+	}
+	if recorded != 1 {
+		t.Fatalf("queue-less protected event did not reach durable drop accounting: recorded=%d", recorded)
 	}
 }

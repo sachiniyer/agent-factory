@@ -286,6 +286,69 @@ func TestTaskPromptLimitTransitionIsSerializedWithFinalSend(t *testing.T) {
 	}
 }
 
+func TestSlowTaskPromptDoesNotBlockAnUnrelatedTarget(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	firstRecorder := &promptRecorder{}
+	firstBackend := &blockingSendKillBackend{
+		readyFakeBackend: readyFakeBackend{session.NewFakeBackend()},
+		rec:              firstRecorder,
+		sendStarted:      make(chan struct{}),
+		releaseSend:      make(chan struct{}),
+		killStarted:      make(chan struct{}),
+		killBlock:        make(chan struct{}),
+	}
+	registerStarted(t, manager, repoID, repoPath, "slow-target", firstBackend, true, session.Running)
+	secondRecorder := &promptRecorder{}
+	registerStarted(t, manager, repoID, repoPath, "independent-target", recordingBackend{
+		readyFakeBackend{session.NewFakeBackend()}, secondRecorder,
+	}, true, session.Running)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := manager.SendPromptWithStatus(SendPromptRequest{
+			Title: "slow-target", RepoID: repoID, Prompt: "first", TaskOrigin: true,
+		})
+		firstDone <- err
+	}()
+	select {
+	case <-firstBackend.sendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first prompt did not reach its blocking transport")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := manager.SendPromptWithStatus(SendPromptRequest{
+			Title: "independent-target", RepoID: repoID, Prompt: "second", TaskOrigin: true,
+		})
+		secondDone <- err
+	}()
+	secondBlocked := false
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			close(firstBackend.releaseSend)
+			<-firstDone
+			t.Fatalf("unrelated prompt failed: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		secondBlocked = true
+	}
+	close(firstBackend.releaseSend)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first prompt failed after release: %v", err)
+	}
+	if secondBlocked {
+		if err := <-secondDone; err != nil {
+			t.Fatalf("unrelated prompt failed after slow transport released: %v", err)
+		}
+		t.Fatal("unrelated task prompt was serialized behind another target's transport I/O")
+	}
+	if got := secondRecorder.snapshot(); len(got) != 1 || got[0] != "second" {
+		t.Fatalf("unrelated target received prompts %v, want [second]", got)
+	}
+}
+
 func TestExistingBacklogIsProtectedBeforeLimitBurstCanEvict(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	manager, repoID, repoPath := newStatusTestManager(t)
