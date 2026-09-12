@@ -94,6 +94,85 @@ test("phone picker return follows its current desktop owner", () => {
   assert.deepEqual(calls, ["session", "new-tab"]);
 });
 
+for (const action of ["openTab", "switchTab", "closeTab"] as const) {
+  for (const sessionFirst of [true, false]) {
+    test(`${action} dismisses carried actions before its tab transition from sessionFirst=${sessionFirst}`, () => {
+      const calls: string[] = [];
+      const shell = {
+        el: { classList: { contains: () => sessionFirst } },
+        terminalChrome: { menu: { dismiss: () => calls.push("session-dismiss") } },
+        appControls: { dismiss: () => calls.push("app-dismiss") },
+        actions: { [action]: (index: number) => calls.push(`${action}:${index}`) },
+        dismissCarriedActions: (AppShell.prototype as unknown as {
+          dismissCarriedActions(this: AppShell): void;
+        }).dismissCarriedActions,
+      } as unknown as AppShell;
+      AppShell.prototype[action].call(shell, 2);
+      assert.deepEqual(calls, [sessionFirst ? "app-dismiss" : "session-dismiss", `${action}:2`]);
+    });
+  }
+}
+
+const compositionCases = [
+  [null, ["sessions", "a", "tab-0", 0], false],
+  [["sessions", "a", "tab-0", 0], ["sessions", "a", "tab-0", 0], false],
+  [["sessions", "a", "tab-0", 0], ["sessions", "a", "tab-1", 1], true],
+  [["sessions", "a", "tab-1", 3], ["sessions", "a", "tab-2", 4], true],
+  [["sessions", "a", "tab-1", 1], ["sessions", "a", "tab-2", 1], true],
+  [["sessions", "a", "tab-0", 0], ["sessions", "b", "tab-0", 0], true],
+  [["sessions", "a", "tab-0", 0], ["tasks", "a", "tab-0", 0], true],
+] as const;
+for (const [previous, next, dismiss] of compositionCases) {
+  test(`session composition observer dismisses previous=${previous}, next=${next}`, () => {
+    const calls: string[] = [];
+    const shell = {
+      sessionComposition: previous && {
+        view: previous[0], selectedId: previous[1], focusedTab: previous[2], focusedKind: previous[3],
+      },
+      terminalSelected: false,
+      dismissCarriedActions: () => calls.push("dismiss"),
+    } as unknown as AppShell;
+    const observeSessionComposition = (AppShell.prototype as unknown as {
+      observeSessionComposition(
+        this: AppShell, view: "sessions" | "tasks" | "config", selectedId: string | null,
+        focusedTab: string | null, focusedKind: number | null,
+      ): void;
+    }).observeSessionComposition;
+
+    observeSessionComposition.call(shell, next[0], next[1], next[2], next[3]);
+
+    assert.deepEqual(calls, dismiss ? ["dismiss"] : []);
+    assert.deepEqual(
+      (shell as unknown as { sessionComposition: unknown }).sessionComposition,
+      { view: next[0], selectedId: next[1], focusedTab: next[2], focusedKind: next[3] },
+    );
+    assert.equal(
+      (shell as unknown as { terminalSelected: boolean }).terminalSelected,
+      next[0] === "sessions" && next[3] >= 0 && next[3] <= 2,
+    );
+  });
+}
+
+for (const paneAcceptsDrop of [true, false]) {
+  test(`a touch pane drop dismisses carried actions only when accepted=${paneAcceptsDrop}`, () => {
+    const calls: string[] = [];
+    const drag = { id: "web", index: 1, tabs: ["agent", "web"] };
+    const shell = {
+      actions: {
+        paneDropHintAt: () => { calls.push("pane"); return paneAcceptsDrop; },
+        dropTabOnPaneAt: () => { calls.push("drop"); return true; },
+      },
+      dismissCarriedActions: () => calls.push("dismiss"),
+    } as unknown as AppShell;
+    const dropTabOnPaneAt = (AppShell.prototype as unknown as {
+      dropTabOnPaneAt(this: AppShell, x: number, y: number, payload: typeof drag): boolean;
+    }).dropTabOnPaneAt;
+
+    assert.equal(dropTabOnPaneAt.call(shell, 20, 30, drag), paneAcceptsDrop);
+    assert.deepEqual(calls, paneAcceptsDrop ? ["pane", "dismiss", "drop"] : ["pane"]);
+  });
+}
+
 for (const userOpened of [false, true]) {
   for (const cancelBeforeRecomposition of [false, true]) {
     test(`responsive shortcut cancellation preserves userOpened=${userOpened}, cancelBeforeRecomposition=${cancelBeforeRecomposition}`, () => {

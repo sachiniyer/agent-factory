@@ -2432,13 +2432,14 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
       selectedId = null;
     }
   }
-  // An unchanged selection keeps its active tab; one the snapshot MOVED (the selected
-  // session was archived/killed, so pickSelection landed elsewhere) takes the tab its
-  // retained layout will settle on rather than asserting 0 (#1855, as moveSelection).
-  const settled =
-    selectedId === prevSel
-      ? store.get().activeTab
-      : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
+  // The split layout owns which TAB is focused; resolve its retained identity against
+  // this roster before store.set synchronously rerenders AppShell. Keeping the old
+  // ordinal for an unchanged selection is wrong when another client reordered tabs:
+  // until syncSplit remaps the layout, that ordinal names a neighbour. A changed
+  // selection uses the same retained-layout rule (#1855, as moveSelection).
+  const settled = selectedId
+    ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId))
+    : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
   // Evidence distinguishes causal completion from delayed updates/cache repaints.
@@ -2679,7 +2680,8 @@ function onKeydown(e: KeyboardEvent): void {
       focusRail();
       break;
     case "switchTab":
-      switchTab(action.index);
+      if (shell) shell.switchTab(action.index);
+      else switchTab(action.index);
       break;
     case "newTab": {
       const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -2705,10 +2707,12 @@ function onKeydown(e: KeyboardEvent): void {
       break;
     }
     case "closeTab":
-      closeSessionTab(store.get().activeTab);
+      if (shell) shell.closeTab(store.get().activeTab);
+      else closeSessionTab(store.get().activeTab);
       break;
     case "switchView":
-      switchView(action.view);
+      if (shell) shell.switchView(action.view);
+      else switchView(action.view);
       break;
     case "cyclePane":
       splitView.cyclePane(action.delta);

@@ -796,6 +796,15 @@ export class AppShell {
   private readonly viewNav: HTMLElement;
   private sessionFirst: ReturnType<typeof sessionFirstComposition> | null = null;
   private terminalSelected = false;
+  // The disclosure context from the previous state update. Derived composition
+  // and focused kind are both too coarse: switching between same-kind panes must
+  // still invalidate carried actions, while viewport-only recomposition must not.
+  private sessionComposition: {
+    view: View;
+    selectedId: string | null;
+    focusedTab: string | null;
+    focusedKind: number | null;
+  } | null = null;
   private newTabPickerPosition: (() => void) | null = null;
   private phoneSyncQueued = false;
   private readonly schedulePhoneSync = (): void => {
@@ -807,7 +816,7 @@ export class AppShell {
     });
   };
   private syncPhone(): void {
-    const active = this.phone.matches && this.terminalSelected;
+    const active = this.phone.matches && this.terminalSelected === true;
     const compositionChanged = this.el.classList.contains("af-session-first") !== active;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
     // appbarControls captures this before its media listener closes the phone
@@ -1040,7 +1049,7 @@ export class AppShell {
     // The view switcher: one tab per top-level view, left-to-right in the [ / ] cycle
     // order (nav.ts VIEWS), the active one highlighted in update(). A click routes
     // through actions.switchView, exactly like the keyboard path.
-    const { el: viewNav, tabs } = viewNavigation((view) => this.actions.switchView(view));
+    const { el: viewNav, tabs } = viewNavigation((view) => this.switchView(view));
     this.viewTabs = tabs;
     this.viewNav = viewNav;
 
@@ -1090,7 +1099,12 @@ export class AppShell {
     // in creation order and close the disclosure after syncPhone reopened it.
     this.appControls = appbarControls([
       ...(this.installEl ? [this.installEl] : []), themeToggle, disconnect,
-    ], this.phone, this.captureNewTabCancelReturn);
+    ], this.phone, this.captureNewTabCancelReturn, () => {
+      // The phone disclosure owns the carried desktop actions. A user dismissal
+      // retires that state, unlike layout and picker-return programmatic closes.
+      const slot = this.terminalChrome?.newTabSlot;
+      if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
+    });
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     disconnect.addEventListener("click", () => {
       this.appControls.close();
@@ -1111,10 +1125,12 @@ export class AppShell {
     // Run after every owner-specific media listener. That guarantees the app-controls
     // disclosure has finished its own close/reflow before an open picker is restored.
     this.phone.addEventListener("change", this.schedulePhoneSync);
+    // Nested controls stop propagation so opening them does not dismiss their owner.
+    // Other panel actions that reach this boundary are user dismissals.
     this.appControls.panel.addEventListener("click", event => {
       const target = (event.target as HTMLElement).closest("button, a");
       if (this.el.classList.contains("af-session-first") && target &&
-        !target.closest(".af-theme-toggle")) this.appControls.close();
+        !target.closest(".af-theme-toggle, .af-viewnav")) this.appControls.dismiss();
     });
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");
@@ -1272,6 +1288,16 @@ export class AppShell {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
+    const selectedForPhone = selectedSession(state);
+    const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
+    const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
+    const focusedTab = focusedForPhone ? tabIdentity(focusedForPhone) : null;
+    const focusedKind = focusedForPhone?.kind ?? null;
+    // Observe the semantic owner before this update can replace or reparent its DOM.
+    // Viewport-only recomposition leaves this context alone and therefore preserves
+    // a user-opened disclosure; changing its view, session, or focused tab invalidates
+    // carried state no matter which present or future action produced the store update.
+    this.observeSessionComposition(state.view, state.selectedId, focusedTab, focusedKind);
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
     // terminal only "holds" it while a session is actually selected; with none
@@ -1458,9 +1484,6 @@ export class AppShell {
     // instead of using the now-known stable id. Adding ids to the signature would fix
     // the cache by reintroducing exactly the #1737 rebuild — so the cache is synced
     // independently of the render instead.
-    const selectedForPhone = selectedSession(state);
-    const kind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
-    this.terminalSelected = isSessionFirst(true, state.view, kind);
     this.syncPhone();
     this.syncTabIdentityCaches(state);
   }
@@ -1590,7 +1613,7 @@ export class AppShell {
     menu.trigger.replaceChildren("…");
     menu.panel.append(...buttons);
     menu.el.addEventListener("click", (event) => event.stopPropagation());
-    menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
+    menu.panel.addEventListener("click", () => menu.dismiss(true), { capture: true });
     host.append(menu.el);
     return host;
   }
@@ -1617,6 +1640,7 @@ export class AppShell {
         if (surface === "rail") {
           this.runRailExit(run);
         } else {
+          this.appControls.dismiss();
           run();
         }
       });
@@ -1647,6 +1671,7 @@ export class AppShell {
         if (surface === "rail") {
           this.runRailExit(() => this.actions.kill(killSession));
         } else {
+          this.appControls.dismiss();
           this.actions.kill(killSession);
         }
       });
@@ -1804,7 +1829,7 @@ export class AppShell {
     add.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
-      this.appControls.close();
+      this.appControls.dismiss();
       this.actions.addProject();
     });
     footChildren.push(add);
@@ -1835,7 +1860,7 @@ export class AppShell {
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
-          this.appControls.close();
+          this.appControls.dismiss();
           this.actions.deleteProject(currentSummary.root, currentSummary.name);
         });
       }
@@ -1868,10 +1893,72 @@ export class AppShell {
     item.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
-      this.appControls.close();
+      this.appControls.dismiss();
       this.actions.switchProject(p.root);
     });
     return item;
+  }
+
+  /** Invalidates carried disclosure state when its owning context changes. */
+  private observeSessionComposition(
+    view: View,
+    selectedId: string | null,
+    focusedTab: string | null,
+    focusedKind: number | null,
+  ): void {
+    const previous = this.sessionComposition;
+    if (previous && (
+      previous.view !== view
+      || previous.selectedId !== selectedId
+      || previous.focusedTab !== focusedTab
+      || previous.focusedKind !== focusedKind
+    )) {
+      this.dismissCarriedActions();
+    }
+    this.sessionComposition = { view, selectedId, focusedTab, focusedKind };
+    this.terminalSelected = isSessionFirst(true, view, focusedKind);
+  }
+
+  /** Retires carried actions before a user-owned transition can recompose them. */
+  private dismissCarriedActions(): void {
+    // Dismiss through the owner in the CURRENT composition. A Web/VS Code tab is
+    // not session-first, but its desktop Session actions disclosure can still be
+    // carried open when a phone user selects a terminal tab.
+    if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
+    else this.terminalChrome?.menu.dismiss();
+  }
+
+  /** One user-owned view transition for both appbar tabs and document shortcuts. */
+  switchView(view: View): void {
+    // The store update can synchronously reparent the phone panel. Notify its
+    // disclosure first, while it still owns the carried Session actions state.
+    this.dismissCarriedActions();
+    this.actions.switchView(view);
+  }
+
+  /** Tab buttons and 1-9 shortcuts share the same pre-recomposition dismissal. */
+  openTab(index: number): void {
+    this.dismissCarriedActions();
+    this.actions.openTab(index);
+  }
+
+  switchTab(index: number): void {
+    this.dismissCarriedActions();
+    this.actions.switchTab(index);
+  }
+
+  closeTab(index: number): void {
+    this.dismissCarriedActions();
+    this.actions.closeTab(index);
+  }
+
+  /** A touch pane drop is a user-owned tab transition, but only if a pane accepts it. */
+  private dropTabOnPaneAt(clientX: number, clientY: number, drag: DragPayload): boolean {
+    // Hit-test before dismissal so a release outside both the bar and every pane
+    // remains a cancel. The drop itself can synchronously recompose the active kind.
+    if (!this.actions.paneDropHintAt(clientX, clientY)) return false;
+    this.dismissCarriedActions();
+    return this.actions.dropTabOnPaneAt(clientX, clientY, drag);
   }
 
   /** Keyboard twin of the New tab button, including its per-kind availability. */
@@ -2268,7 +2355,8 @@ export class AppShell {
     // them on every snapshot instead — see syncTabIdentityCaches (#1779).
 
     const children: HTMLElement[] = tabs.map((tab, i) =>
-      tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions, () => this.liveTabIdentity(i), selected.id ?? ""),
+      tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions,
+        () => this.openTab(i), () => this.closeTab(i), () => this.liveTabIdentity(i), selected.id ?? ""),
     );
     const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
@@ -2493,7 +2581,7 @@ export class AppShell {
       if (!held) {
         return; // a tap: the button's own click handler owns it
       }
-      if (!bar.contains(document.elementFromPoint(x, y)) && this.actions.dropTabOnPaneAt(x, y, drag)) {
+      if (!bar.contains(document.elementFromPoint(x, y)) && this.dropTabOnPaneAt(x, y, drag)) {
         return; // landed in a pane: split or replaced
       }
       // Outside the bar is a CANCEL. The mouse path only reorders when the drop lands
@@ -2944,6 +3032,8 @@ function tabButton(
   canRename: boolean,
   canClose: boolean,
   actions: Actions,
+  openTab: () => void,
+  closeTab: () => void,
   /** This tab's identity as of the LATEST snapshot — see AppShell.liveTabIdentity.
    *  A getter rather than a value because this button outlives the render that built
    *  it: it is called when a GESTURE fires, so the identity is the one the roster the
@@ -2970,7 +3060,7 @@ function tabButton(
   // read. tabDisplayLabel() supplies the plain-text title without leaking an icon
   // name into the accessible surface.
   btn.append(icon(tabIcon(tab.kind), "af-tab-glyph"), h("span", { class: "af-tab-label" }, tabLabel(tab)));
-  btn.addEventListener("click", () => actions.openTab(index));
+  btn.addEventListener("click", openTab);
   // Rename-in-place (#1813), offered ONLY where a name is actually rendered: an
   // agent/shell tab draws a fixed label and ignores its name, so an edit there could
   // only appear to work (see isRenameableTab). A tab-managed session is required for
@@ -2998,7 +3088,7 @@ function tabButton(
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
       e.stopPropagation();
-      actions.closeTab(index);
+      closeTab();
     });
     btn.append(close);
   }
