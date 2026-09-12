@@ -3293,6 +3293,69 @@ test("config: the editor renders from the manifest and writes through the real p
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 
+test("config: a refresh landing mid-edit preserves focus, caret, and later typing (#4244)", REAL_FIXTURE, async ({ browser }) => {
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the delayed checkbox response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // Hold an unrelated save response so its rebuild lands only after this field
+    // has become the active edit. The daemon is not mutated: the intercepted reply
+    // is enough to drive configStatus and the same ConfigPane.update/render path.
+    await pane.locator('.af-config-row[data-key="auto_update"] input').click();
+    await saveStarted;
+
+    const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    await field.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "abcdef";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "abcdef", inputType: "insertText" }));
+      input.setSelectionRange(3, 3);
+    });
+
+    releaseSave!();
+    await expect(pane.locator('.af-config-row[data-key="auto_update"] .af-config-echo')).toBeVisible();
+    await expect(field).toBeFocused();
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.selectionStart)).toBe(3);
+
+    // This is the user-visible contract: after the rebuild, typing still reaches
+    // the replacement input at the preserved caret instead of falling onto body
+    // and being discarded (or interpreted as a view shortcut).
+    await p.keyboard.type("Z");
+    await expect(field).toHaveValue("abcZdef");
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
 // typeIntoAssistantAndExpectEcho is the config assistant's live-output proof. The
 // assistant runs the fake agent (`cat`), so a keystroke makes the full round trip —
 // OpInput → daemon → tmux PTY → `cat` echo → /v1/config-assistant/stream → xterm — and

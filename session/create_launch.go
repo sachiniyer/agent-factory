@@ -15,6 +15,9 @@ type CreateLaunchPlan struct {
 	launcher Backend
 	prepared bool
 	program  string
+	// baseProgram is the override-resolved command before AF-authored launch
+	// arguments. It becomes durable runtime evidence only after launch succeeds.
+	baseProgram string
 	// accountProof is frozen WITH program so the launch declares only the
 	// executable/arguments af authored (#3083, #3108). Re-resolving at launch
 	// could read a different override and make the proof describe a command other

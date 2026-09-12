@@ -693,12 +693,22 @@ func PreviewSessionSnapshot(req PreviewRequest) (PreviewResponse, error) {
 }
 
 // KillSession asks the daemon to kill a session and remove it from storage.
+//
+// callDaemon classifies the committed outcome generically. On the committed
+// path the kill's durable tombstone landed but a post-commit
+// teardown/storage/delete follow-up failed, and the tombstoned row is retained
+// for the asynchronous reap — that is NOT a clean failure a caller may freely
+// retry. Preserve the committed error (do not swallow it as nil) so the CLI's
+// apiclient.IsMutationCommitted branch reports it as success-with-warning,
+// the way ArchiveSession preserves its committed error for the same outcome
+// class (#3252).
 func KillSession(req KillSessionRequest) error {
 	var resp KillSessionResponse
-	if err := callDaemon("KillSession", req, &resp); err != nil {
-		return err
+	err := callDaemon("KillSession", req, &resp)
+	if err != nil && !isMutationCommitted(err) {
+		return err // clean failure → caller hard-fails
 	}
-	return nil
+	return err // success (nil) OR committed path → caller classifies via IsMutationCommitted
 }
 
 // ArchiveSession asks the daemon to archive a session (#1028) and returns the

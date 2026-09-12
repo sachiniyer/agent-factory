@@ -98,15 +98,23 @@ func (i *Instance) SupportsAutomaticAccountSwap() bool {
 // account creation remains supported, but a crash-safe automatic reprovision
 // needs a durable container identity and immutable provision plan of its own.
 func (i *Instance) ValidateAccountSwap(name string) error {
-	return i.validateAccountSwap(name, "", false)
+	return i.validateAccountSwap(name, "", false, true)
 }
 
 // ValidateManualAccountSwap uses the same launch proof with an operator-selected identity.
 func (i *Instance) ValidateManualAccountSwap(name, agent string) error {
-	return i.validateAccountSwap(name, agent, true)
+	return i.validateAccountSwap(name, agent, true, true)
 }
 
-func (i *Instance) validateAccountSwap(name, agent string, manual bool) error {
+// CheckManualAccountSwap performs the manual launch proof without recording a
+// launch plan. The daemon uses it before a project-lock identity probe so an
+// independent domain refusal can remain visible; a successful check grants no
+// authority to mutate and is repeated under the proven policy lock.
+func (i *Instance) CheckManualAccountSwap(name, agent string) error {
+	return i.validateAccountSwap(name, agent, true, false)
+}
+
+func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch bool) error {
 	backend := i.currentBackend()
 	i.mu.RLock()
 	program := i.Program
@@ -151,10 +159,11 @@ func (i *Instance) validateAccountSwap(name, agent string, manual bool) error {
 		conversationID = pending.ConversationID
 	}
 	launchProgram, conversation := planLaunchConversation(conversationID, resolvedProgram)
-	// The CANDIDATE, not i.Account: the recorded account is still the identity
-	// being replaced, and the af skill has to land in the root the replacement
-	// pane will actually read (see resolveSkillTargetForAccount).
-	launchProgram = injectSystemPrompt(launchProgram, resolveSkillTargetForAccount(i, launchProgram, name))
+	// The CANDIDATE account and program, not the still-recorded fields: validation
+	// must leave the outgoing identity intact, while the af skill has to land in
+	// the root the replacement pane will actually read.
+	launchProgram = injectSystemPrompt(launchProgram,
+		resolveSkillTargetForAccount(launchProgram, program, name))
 	workDir := i.GetWorktreePath()
 	// Same-agent manual swaps with a worktree always preflight, including an
 	// unchanged command whose binary disappeared after the current process
@@ -237,6 +246,9 @@ func (i *Instance) validateAccountSwap(name, agent string, manual bool) error {
 		}
 		conversationCapture = beginConversationCaptureAtCodexHomeAndWorkingDir(
 			accountScope.Dir, captureWorkingDir)
+	}
+	if !recordLaunch {
+		return nil
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()

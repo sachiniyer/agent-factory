@@ -104,7 +104,7 @@ func unregisteredDefaultAccountWarning(agent, name string) string {
 		}
 	}
 	warning := fmt.Sprintf(
-		"WARNING: no %s account named %q is registered on this machine, so a session using this default will "+
+		"no %s account named %q is registered on this machine, so a session using this default will "+
 			"be refused rather than started. Register it with `af accounts add %s %s` and log in",
 		agent, name, agent, name)
 	if len(names) > 0 {

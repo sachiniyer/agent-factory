@@ -40,7 +40,10 @@ type ApplyConfigResult struct {
 	// Pending names changed keys this daemon build reads only at startup, so they
 	// take effect on the next daemon start: root_agents / root_agent (their
 	// next-daemon-start contract, carved out pending #2216) and branch_prefix (read
-	// from the FROZEN startup config in the title-reservation helpers).
+	// from the FROZEN startup config in the title-reservation helpers). Save
+	// surfaces append the root-only half of that contract: an already-running root
+	// is adopted as-is, so changing its program, disabling it, or removing its
+	// enabling entry also requires killing it.
 	Pending []string
 	// Warnings are operator/user-facing notices produced while applying (#2480 PR2):
 	// the tokenless-network exposure notice (#2168 — warn, never refuse) and a
@@ -166,7 +169,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// branch_prefix rides along in the swapped config, but its runtime consumers
 	// read frozen m.cfg so an unrelated apply cannot advance that generation behind
 	// the next-start notice.
-	m.live.Store(newCfg)
+	m.applyLiveConfigAndInvalidateRootProgramDrift(newCfg)
 
 	// limit_patterns snapshots at construction, so the swap alone would be a silent
 	// no-op — rebuild the detector in place.
@@ -238,7 +241,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// need a credential to reach it. Only re-enabling the key restores it.
 	if old.RequireToken && !newCfg.RequireToken {
 		if n := m.sandboxTokens.revokeAll(); n > 0 {
-			warning := fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. NOTE: this does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable network.require_token to restore the boundary", n)
+			warning := fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. This does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable network.require_token to restore the boundary", n)
 			m.warn().Printf("%s", warning)
 			result.Warnings = append(result.Warnings, warning)
 		}
