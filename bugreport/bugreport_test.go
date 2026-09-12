@@ -235,12 +235,13 @@ func TestRedactTaskDropsTargetSession(t *testing.T) {
 		TargetSession: target,
 		Program:       "claude",
 		Enabled:       true,
+		DroppedEvents: 7,
 	})
 
 	if got.TargetSession != redactedMarker {
 		t.Fatalf("task target session leaked: got %q, want %q", got.TargetSession, redactedMarker)
 	}
-	if got.ID != "task-2201" || got.CronExpr != "0 9 * * *" || got.Program != "claude" || !got.Enabled {
+	if got.ID != "task-2201" || got.CronExpr != "0 9 * * *" || got.Program != "claude" || !got.Enabled || got.DroppedEvents != 7 {
 		t.Fatalf("safe structural task fields changed: %+v", got)
 	}
 }

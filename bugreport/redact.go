@@ -875,6 +875,7 @@ type redactedTask struct {
 	Program       string `json:"program,omitempty"`
 	Enabled       bool   `json:"enabled"`
 	LastRunStatus string `json:"last_run_status,omitempty"`
+	DroppedEvents int    `json:"dropped_events,omitempty"`
 }
 
 // redactTask maps a task.Task to its redacted projection. Recording the target
@@ -890,6 +891,7 @@ func (r *redactor) redactTask(t task.Task) redactedTask {
 		Program:       redactProgram(t.Program),
 		Enabled:       t.Enabled,
 		LastRunStatus: r.scrubUnstructured(t.LastRunStatus),
+		DroppedEvents: t.DroppedEvents,
 	}
 	if t.TargetSession != "" {
 		rt.TargetSession = redactedMarker
