@@ -227,9 +227,18 @@ const archiveLeafDigestLen = 16
 // mirroring NewGitWorktree's safeSessionName handling (strip "..", "/"→"-",
 // trim leading separators), falling back to "session" when nothing remains.
 //
-// When the sanitized form exceeds archiveLeafNameMax, the leaf becomes
-// <prefix>-<digest> where the digest is a short SHA-256 of the full sanitized
-// form. This guarantees four properties simultaneously:
+// When the sanitized form is strictly shorter than archiveLeafNameMax, it is
+// returned as-is (the "direct" namespace). When the sanitized form is
+// archiveLeafNameMax or longer, the leaf becomes <prefix>-<digest> where the
+// digest is a short SHA-256 of the full sanitized form (the "digest"
+// namespace). Using a strict boundary keeps the two namespaces disjoint: a
+// direct leaf is always < archiveLeafNameMax bytes, and a digest leaf is always
+// exactly archiveLeafNameMax bytes. Without this separation, the digest output
+// for a long title L could equal the direct output for a short title S —
+// sanitizeArchiveTitle(L) == S == sanitizeArchiveTitle(S) — producing a silent
+// collision without any prefix or digest coincidence.
+//
+// This guarantees four properties simultaneously:
 //
 //   - Non-empty: the "session" fallback and the digest alone path ensure a
 //     non-empty result for any input, including all-continuation-byte titles.
@@ -248,7 +257,7 @@ func sanitizeArchiveTitle(title string) string {
 	if s == "" {
 		s = "session"
 	}
-	if len(s) <= archiveLeafNameMax {
+	if len(s) < archiveLeafNameMax {
 		return s
 	}
 	// Title exceeds NAME_MAX. Produce <prefix>-<digest> where digest is a

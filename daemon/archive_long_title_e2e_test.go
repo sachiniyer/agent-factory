@@ -154,3 +154,27 @@ func TestArchiveLongTitleInjectivity(t *testing.T) {
 	require.NotEqual(t, leaf2, leaf3, "archived-suffix rungs must produce distinct leaves")
 	require.LessOrEqual(t, len(leaf1), archiveLeafNameMax, "archived-suffix leaf over NAME_MAX")
 }
+
+// TestArchiveLongShortFixedPointCollision is the regression for the long/short
+// fixed-point collision: if L is a long title and S = sanitizeArchiveTitle(L),
+// then a direct comparison of sanitizeArchiveTitle(L) and sanitizeArchiveTitle(S)
+// would collide when the boundary test used <= (≤ archiveLeafNameMax) because S
+// is exactly archiveLeafNameMax bytes and the early return hands it back unchanged.
+// With a strict < boundary, S (which is exactly archiveLeafNameMax bytes) also
+// passes through the digest path and derives a different leaf, so L and S map to
+// different archive destinations.
+func TestArchiveLongShortFixedPointCollision(t *testing.T) {
+	// L is a long title that sanitizes past NAME_MAX.
+	L := "a/" + strings.Repeat("x", 300) // sanitizes to "a-" + "x"*300 (302 bytes)
+	// S is the digest-form leaf produced for L — exactly archiveLeafNameMax bytes.
+	S := sanitizeArchiveTitle(L)
+	require.Equal(t, archiveLeafNameMax, len(S), "expected S to be exactly archiveLeafNameMax bytes")
+
+	// sanitizeArchiveTitle(S) must NOT equal S: the two namespaces must be disjoint.
+	// Before the fix (len(s) <= archiveLeafNameMax), S would be returned unchanged
+	// by the early return, making both L and S map to S.
+	leafOfS := sanitizeArchiveTitle(S)
+	require.NotEqual(t, S, leafOfS,
+		"a 255-byte title equal to a digest-form leaf must not collide with the original long title")
+	require.LessOrEqual(t, len(leafOfS), archiveLeafNameMax, "leafOfS over NAME_MAX")
+}
