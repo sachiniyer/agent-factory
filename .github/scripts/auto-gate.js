@@ -3447,6 +3447,37 @@ async function sweepMergedHeadRefs({
   };
 }
 
+// A scheduled reconciliation may act only on the two source shapes the normal
+// evaluation snapshots below: GitHub Actions and legacy source-less checks. An
+// explicit different app is not source-less; treating it that way leaves no
+// matching snapshot and makes the PR consume the bounded wake budget forever.
+// Unknown parenthetical syntax is likewise not evidence of a source-less check.
+function blockedPRValidationSpec(body, context) {
+  const marker = `required check ${context}`;
+  let searchFrom = 0;
+  while (searchFrom < body.length) {
+    const foundAt = body.indexOf(marker, searchFrom);
+    if (foundAt < 0) {
+      return null;
+    }
+    const suffix = body.slice(foundAt + marker.length);
+    const app = suffix.match(/^ \(app ([1-9][0-9]*)\)(?: |$)/);
+    if (app) {
+      const sourceAppId = Number(app[1]);
+      if (Number.isSafeInteger(sourceAppId) && sourceAppId === GITHUB_ACTIONS_APP_ID) {
+        return { context, sourceAppId };
+      }
+      searchFrom = foundAt + marker.length;
+      continue;
+    }
+    if (suffix.startsWith(" ") && !suffix.startsWith(" (")) {
+      return { context, sourceAppId: null };
+    }
+    searchFrom = foundAt + marker.length;
+  }
+  return null;
+}
+
 function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead, statusesByHead }) {
   const candidates = [];
   for (const pull of pulls || []) {
@@ -3491,12 +3522,8 @@ function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead, statusesB
       : "";
     const blockedSpecs = decision
       ? PR_VALIDATION_REQUIRED_CHECK_NAMES.flatMap((name) => {
-          if (body.includes(`required check ${name} (app ${GITHUB_ACTIONS_APP_ID})`)) {
-            return [{ context: name, sourceAppId: GITHUB_ACTIONS_APP_ID }];
-          }
-          return body.includes(`required check ${name} `)
-            ? [{ context: name, sourceAppId: null }]
-            : [];
+          const spec = blockedPRValidationSpec(body, name);
+          return spec ? [spec] : [];
         })
       : PR_VALIDATION_REQUIRED_CHECK_NAMES.map((context) => ({
           context,

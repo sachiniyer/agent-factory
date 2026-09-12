@@ -6381,6 +6381,68 @@ test("scheduled reconciliation retains source-less required-check observations",
   assert.deepEqual(targets, [], "an unchanged source-less check must not wake every sweep");
 });
 
+test("scheduled reconciliation distinguishes source-less blockers from other apps", async () => {
+  const foreignHead = "a".repeat(40);
+  const foreignDecision = reconciliationDecision({
+    prNumber: 1465,
+    headSha: foreignHead,
+    evaluatedAt: "2026-07-09T01:10:00Z",
+    reason: "required check Build (app 999) is failing",
+    observedChecks: [],
+  });
+  const foreignBuild = checkRun({
+    id: 801,
+    name: "Build",
+    conclusion: "success",
+    appId: 999,
+    appSlug: "other-app",
+  });
+  const foreignSnapshot = () => scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, foreignHead)],
+    checksByHead: { [foreignHead]: [foreignDecision, foreignBuild] },
+  });
+  const context = { ...fakeContext(), eventName: "schedule" };
+
+  assert.deepEqual(await autoGate.resolveTargets({
+    github: foreignSnapshot(),
+    context,
+    core: fakeCore(),
+  }), []);
+  assert.deepEqual(await autoGate.resolveTargets({
+    github: foreignSnapshot(),
+    context,
+    core: fakeCore(),
+  }), [], "an unrelated app-bound blocker must not consume the cap on repeat sweeps");
+
+  const sourceLessHead = "b".repeat(40);
+  const sourceLessDecision = reconciliationDecision({
+    prNumber: 1466,
+    headSha: sourceLessHead,
+    evaluatedAt: "2026-07-09T01:10:00Z",
+    reason: "required check Build is failing",
+    observedChecks: [],
+  });
+  const sourceLessBuild = commitStatus({
+    id: 802,
+    context: "Build",
+    state: "success",
+    createdAt: "2026-07-09T01:11:00Z",
+  });
+  assert.deepEqual(await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1466, sourceLessHead)],
+      checksByHead: { [sourceLessHead]: [sourceLessDecision] },
+      statusesByHead: { [sourceLessHead]: [sourceLessBuild] },
+    }),
+    context,
+    core: fakeCore(),
+  }), [{
+    prNumber: 1466,
+    headSha: sourceLessHead,
+    decisionKey: `pr-1466-head-${sourceLessHead}`,
+  }], "a genuinely source-less blocker must remain eligible for reconciliation");
+});
+
 test("scheduled reconciliation batches head inspection and caps reevaluations", async () => {
   const pulls = [];
   const checksByHead = {};
