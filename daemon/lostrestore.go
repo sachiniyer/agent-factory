@@ -731,6 +731,13 @@ func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
 	}
 	st.consecutiveFailures = 0
 	st.awaitingConfirm = false
+	// Clear per-episode diagnostic dedupe flags so that the replacement sandbox's
+	// failures log at their natural first occurrence rather than being suppressed
+	// by a flag left from the predecessor episode. armRestoreConfirmation
+	// deliberately retains these across the ConfirmLive edge for the confirmation
+	// window, so they are not cleared there — only at the episode boundary here.
+	st.remoteUnknownLogged = false
+	st.preserveFailureLogged = false
 	m.mu.Unlock()
 }
 
