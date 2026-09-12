@@ -8,8 +8,10 @@ lives.
 The Agent Factory daemon exposes a small JSON API — a 1:1 mirror of the session
 and task operations the `af` CLI performs — over a **local Unix socket**. It is
 the same daemon core (`#960` single-writer model) the TUI and `af sessions` /
-`af tasks` commands already drive, reached over HTTP instead of the internal
-`net/rpc` control socket, so the two surfaces can never diverge.
+`af tasks` commands already drive. TUI and CLI callers use both HTTP and the
+internal `net/rpc` control socket, depending on the operation and target; HTTP
+is not a separate state owner. See [Daemon sockets](daemon.md#sockets) for live
+examples of the transport split.
 
 This page is a hand-written guide to the transport, auth, and envelope; the
 enumerated endpoint table is generated from the route catalog (see

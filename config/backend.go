@@ -4,16 +4,18 @@ import "strings"
 
 // Backend selection (#1592 Phase 4 PR3). A repo declares which runtime its
 // sessions run on via the in-repo `backend` key, alongside the settings that
-// parameterize the off-box runtimes. The canonical values are the registered
+// parameterize the runtimes. The canonical values are the registered
 // runtimes below; validation of the VALUE lives at
 // backend-resolution time in the session package (mirroring how RemoteHooks are
 // validated when a backend is resolved, not at config load), so the config
 // layer only carries the raw strings and structs.
 //
 // The canonical `backend` values. `local` (or empty) is the default —
-// today's in-process tmux+worktree runtime, unchanged. `hook` is the existing
-// remote-hook backend. `docker`, `ssh`, and `sandbox` are the first-class
-// off-box runtimes.
+// the in-process tmux+worktree runtime on the daemon's machine. `docker` runs a
+// container on that machine's Docker host and connects over loopback. `ssh` and
+// `sandbox` reach the host selected by their SSH settings or command; these are
+// the built-in paths to another machine. `hook` runs wherever the operator's
+// provisioner puts it, which may be a container, this machine, or a remote host.
 const (
 	BackendLocal   = "local"
 	BackendDocker  = "docker"
@@ -27,7 +29,7 @@ const (
 // SOURCE OF TRUTH every surface renders from: the `--backend` flag help, the
 // ListBackends RPC (and through it the web's create form), and ParseBackend's
 // validation. Order is presentation order: local (the default) first, then the
-// sandboxed runtimes, then the BYO-provisioner escape hatch.
+// container and SSH runtimes, then the BYO-provisioner escape hatch.
 //
 // Adding a backend means adding it here and registering its runtime; a drift
 // guard test in the session package proves this list and the runtime registry

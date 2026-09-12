@@ -186,9 +186,10 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 // (internalHTTPRoutes). Every route has a POST /v1/<Method> handler dispatching
 // to the matching controlServer method; GET /v1/health is a liveness alias for
 // Ping. The public catalog (#1029 PR 5) still mirrors only client-facing session
-// and task ops; the internal routes (#1592 Phase 2 PR3) let the TUI drop net/rpc
-// and reach ResumeFromLimit and the Pause/ResumeStatusPoll attach-coordination
-// over HTTP without advertising them in `af api`. Shutdown, ReloadTasks, and
+// and task ops; the internal routes (#1592 Phase 2 PR3) carry the TUI's
+// Pause/ResumeStatusPoll attach coordination over HTTP without advertising it
+// in `af api`. Their presence does not move unrelated local account, config, or
+// config-agent callers off the gob control socket. Shutdown, ReloadTasks, and
 // bare Ping remain absent from both — daemon lifecycle, not a client verb.
 func newHTTPMux(cs *controlServer) *http.ServeMux {
 	mux := http.NewServeMux()

@@ -3,9 +3,14 @@
 // targeted clients may instead reach a remote daemon. It carries the TUI's
 // session/task projection reads and a large set of control operations, including
 // session lifecycle, tabs, tasks, projects, accounts, and configuration. The
-// local account-management paths (list, register, and login) and the local-only
-// config-agent spawn and reap are exceptions: they still use the daemon's gob
-// control client. The CLI/API layers contain both HTTP and gob callers as well.
+// transport is chosen by the caller and target, not by whether an operation
+// reads or writes. Local account management (list, register, login), config-agent
+// spawn/reap, and config-editor writes still use the daemon's gob control client.
+// The local config editor reads config in-process and saves through
+// daemon.SetGlobalConfigValue, which may fall back to a local-file write
+// if the daemon is unreachable (ui/config_target.go); a remote-target editor
+// reads and writes through HTTP.
+// The CLI/API layers contain both HTTP and gob callers as well.
 //
 // HTTP calls decode the shared `{data,error}` envelope into the same daemon
 // request/response types used by the control plane. The envelope is not

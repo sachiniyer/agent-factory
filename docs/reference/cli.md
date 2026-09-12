@@ -351,15 +351,17 @@ listener that requires a bearer token on every request.
 
 This does not start the web UI, and serves no frontend at all — opening its port
 in a browser returns a 404 saying so. If you want the browser app, run the
-daemon — any 'af' command starts it — and open http://localhost:8443. The web UI
-is bundled into the daemon and served from its network.listen_addr; agent-server is only
+daemon with 'af daemon' and open http://localhost:8443. The web UI is bundled
+into the daemon and served from its network.listen_addr; agent-server is only
 the headless per-workspace backend that a daemon drives, and it exists to be
 consumed by a daemon rather than opened by a person.
 
 This is the process that runs inside a docker container or on an ssh remote
-(#1592 Phase 4): a remote daemon dials the authed URL it exposes and drives the
-workspace exactly as it drives a local in-process session. Run it directly only
-to host one workspace as a backend for a daemon on another machine.
+(#1592 Phase 4): the owning daemon dials the authed URL it exposes and drives
+the workspace exactly as it drives a local in-process session. Docker publishes
+that URL on the daemon host's loopback; SSH tunnels it from another machine. Run
+agent-server directly only to expose one separately provisioned workspace to a
+daemon.
 
 The listener always requires the token and serves plain HTTP (no TLS) — reach it
 over a private network or a tunnel (the docker/ssh runtimes forward a loopback
@@ -1062,7 +1064,7 @@ peers; on the default loopback listener same-host callers stay exempt, so the
 UI keeps opening with no login on this machine. Add network.require_loopback_token =
 true to require the token from localhost as well.
 Note that 'af agent-server' does not serve the web UI: it is the headless
-per-workspace backend a daemon drives on a remote machine.
+per-workspace server a daemon drives inside a separately provisioned workspace.
 
 Clients reach the daemon over a local Unix socket by default. To drive one from
 another machine, either ssh to that host and run 'af' there, or give network.listen_addr

@@ -89,7 +89,14 @@ unavailable manager or older daemon is reported as unknown rather than guessed.
 ## Sockets
 
 The daemon listens on two local Unix sockets under `$AGENT_FACTORY_HOME`
-(default `~/.agent-factory`): an internal control socket the TUI and CLI use, and
-the HTTP/JSON socket (`daemon-http.sock`) for the public API. Both are
-owner-only (`0600`) and local — never a TCP port, never the network. See the
+(default `~/.agent-factory`): the gob control socket (`daemon.sock`) and the
+HTTP/JSON socket (`daemon-http.sock`). The TUI uses HTTP for session/task reads
+and many controls. Callers choose the transport by operation and target: local
+account management, config-agent spawn/reap, and config-editor writes still use
+gob. The local config editor reads config in-process and writes through
+`daemon.SetGlobalConfigValue`, which may fall back to a local-file write if no
+daemon is reachable; a remote-target editor reads and writes through HTTP. CLI
+callers also use both transports. The HTTP socket serves public and internal
+routes. Both Unix sockets are owner-only (`0600`) and local — never a TCP port,
+never the network. See the
 [HTTP API guide](http-api.md) for the transport and auth details.

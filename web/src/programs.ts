@@ -20,10 +20,10 @@
 //
 // Note what is deliberately absent: availability. backends.ts carries a tri-state
 // status because a backend's preconditions are repo-config facts the daemon can
-// check. Whether an agent binary is installed is a fact about the machine the agent
-// will run on, which for a docker or ssh backend is not the daemon's machine — so
-// the daemon does not claim it and this module has nothing to render (see
-// daemon/programs.go). Programs are therefore a plain list, never blocked.
+// check. Whether an agent binary is installed depends on its execution environment:
+// Docker uses the container's filesystem and PATH; SSH uses the configured host's.
+// The daemon cannot infer either from its own PATH, so this module does not render
+// availability (see daemon/programs.go). Programs are a plain list, never blocked.
 
 /** One agent as the daemon reports it (daemon.ProgramOption). */
 export interface ProgramOption {

@@ -399,11 +399,12 @@ export function restoreRequiresConfirmation(session: SessionData): boolean {
   return session.backend_type !== undefined && session.backend_type !== "" && session.backend_type !== "local";
 }
 
-/** The backend types whose workspace lives off-box (session/archive_sandbox.go
- *  backendKindForType: docker, ssh, and "remote" — the hook runtime). None of
- *  them can service tab management: every Add*Tab path needs a daemon-side git
- *  worktree they do not have, so the daemon's Capabilities().TabManagement is
- *  false for all three (#1874).
+/** Backend types with separately provisioned workspaces: docker, ssh, sandbox,
+ *  and "remote" (hook). "Off-box" names the capability boundary, not physical
+ *  locality: Docker runs on the daemon's Docker host; hook placement is up to the
+ *  provisioner. See session/backend.go's WorkspaceRemote definition.
+ *  These lack daemon-side worktree/tmux operations, so TabManagement is false.
+ *  External HTTPS web tabs are metadata-only and remain supported.
  *
  *  This list is the ONE place the web names backend types. It exists only because
  *  the session envelope carries `backend_type` but not the daemon's capability

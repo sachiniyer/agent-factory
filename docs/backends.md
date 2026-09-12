@@ -1,9 +1,16 @@
 # Backends (runtimes)
 
-For anyone who wants a session's agent to run somewhere other than this machine.
+For anyone choosing between a local worktree, a container, and a remote host.
 After this page you will know what each backend needs, how to point a repository
-at one, and what changes about tabs, archive, and restore when a session is
-off-box.
+at one, and what changes about tabs, archive, and restore.
+
+Docker runs on the daemon's Docker host: af publishes the agent port on
+`127.0.0.1` and connects over loopback. SSH and sandbox reach the host selected
+by their SSH settings or command; these are the built-in paths to another
+machine. A hook runs wherever its provisioner puts it, including the daemon host.
+The code's legacy "off-box" category (`WorkspaceRemote` and
+`backendProvisionsOffBox`) means a separately provisioned workspace with an
+agent-server, not necessarily another machine.
 
 A session's **backend** decides *where* its workspace and agent run. Every
 backend exposes the same session surface — attach, preview, prompt delivery, the
@@ -11,10 +18,10 @@ live PTY stream — so the TUI, CLI, and daemon drive a containerised session mu
 like a local one. Tab admission follows what each kind needs: shell/process tabs
 need a local PTY and process, and VS Code needs a daemon-side worktree/editor, so
 those remain local-only. A metadata-only web tab spawns neither and can be added
-to an off-box session (docker, ssh, sandbox, hook) when its target is an external
-HTTPS URL. Loopback targets still need an agent-side relay and are refused for
-now; plain HTTP cannot be framed by the HTTPS web UI. Admitted remote web tabs
-can be closed, renamed, and reordered like local web tabs.
+to a separately provisioned session (docker, ssh, sandbox, hook) when its target
+is an external HTTPS URL. Loopback targets still need an agent-side relay and
+are refused for now; plain HTTP cannot be framed by the HTTPS web UI. Admitted
+web tabs can be closed, renamed, and reordered like local web tabs.
 
 | Backend | Where the agent runs | Selected with |
 |---------|----------------------|---------------|
@@ -42,11 +49,12 @@ surface — each overrides the repo config for that one session:
 - **Web** — the backend select in the new-session modal, same list, same rule.
 
 !!! note "`af agent-server` is a backend, not the web UI"
-    The non-local backends work by running an **`af agent-server`** in the remote
-    workspace — a headless, single-workspace process that a daemon dials and
-    drives. It serves **no frontend**: opening its port in a browser gets you a
-    404 telling you so. The **web UI is served by the daemon** — run `af daemon`
-    and open <http://localhost:8443>. See [The web client](web.md).
+    The non-local backends work by running an **`af agent-server`** in a
+    separately provisioned workspace — a headless, single-workspace process
+    that a daemon dials and drives. It serves **no frontend**: opening its port
+    in a browser gets you a 404 telling you so. The **web UI is served by the
+    daemon** — run `af daemon` and open <http://localhost:8443>. See [The web
+    client](web.md).
 
 ---
 
@@ -651,8 +659,8 @@ repo on your infra, starts an **`af agent-server`** there, and echoes that
 server's authed endpoint (`{url, token}`); the daemon then
 drives the session over that `ws://` stream — so a hook session matches a local,
 docker, or ssh one on attach, type, resize, preview, archive/restore, and kill.
-Like the other off-box backends it admits only external HTTPS web tabs; shell,
-process, and VS Code tabs need a daemon-side worktree.
+Like the other separately provisioned backends it admits only external HTTPS
+web tabs; shell, process, and VS Code tabs need a daemon-side worktree.
 
 ```json
 {
@@ -701,16 +709,16 @@ GitHub (`origin`), not the sandbox:
   clones the pushed branch back, restarts the `af agent-server`, and relaunches
   the agent. The session resumes from the pushed branch state.
 
-This is the same flow for every off-box backend (it is written once against the runtime
-seam), and it is why `docker`/`ssh`/`sandbox`/`hook` match `local` on the lifecycle
-capabilities — `Archive` and `Recover` are both supported. All four are declared
-off-box in one place (`backendProvisionsOffBox`), and all four share a single
-capability declaration, so none of them can differ from the others here without
-that being a deliberate change. Parity is not total: they declare
-`TabManagement` and `Handoff` off, which is why an off-box session carries only
-its agent tab plus any external HTTPS web tabs (the one metadata-only kind
-admitted off-box). A **Lost** sandbox session (one whose
-sandbox answered that its agent is gone) is reachable, so recovery pushes its
+This is the same flow for every separately provisioned backend (it is written
+once against the runtime seam), and it is why `docker`/`ssh`/`sandbox`/`hook`
+match `local` on the lifecycle capabilities — `Archive` and `Recover` are both
+supported. All four are declared as separately provisioned in one place
+(`backendProvisionsOffBox`), and all four share a single capability declaration,
+so none can differ from the others here without a deliberate change. Parity is
+not total: they declare `TabManagement` and `Handoff` off, which is why these
+sessions carry only their agent tab plus any external HTTPS web tabs (the one
+metadata-only kind admitted in these workspaces). A **Lost** sandbox session
+(one whose sandbox answered that its agent is gone) is reachable, so recovery pushes its
 work to `origin` before replacing it (anything unpushed would be destroyed by
 the re-clone) — and refuses to replace if that push fails. Unreachability alone
 is not death — it does not mark a sandbox Lost, and restore refuses to replace a
