@@ -15,6 +15,11 @@ import (
 // advertises and admits while a restore is parked in front of that lock.
 var beforeRestoreOperationLock = func() {}
 
+// afterRestoreLivenessSnapshot fires after manual Lost/Dead restore has taken
+// the lifecycle snapshot it will act on. No-op in production; the #4249 test
+// uses it to land a poll observation at this exact boundary without timing.
+var afterRestoreLivenessSnapshot = func() {}
+
 // claimRestoreOperation makes restore admission atomic with DeleteProject's
 // per-repo lifecycle fence. If restore wins, killsInFlight makes deletion see
 // the session even while an archived row has not yet entered OpRestoring. If
@@ -215,13 +220,21 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		return "", fmt.Errorf("session %q changed state before restore could start", title)
 	}
 	view := instance.LifecycleView()
+	afterRestoreLivenessSnapshot()
 	if err := view.ValidateRuntimeAction(session.RuntimeActionRestoreLostOrDead); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
 	switch view.Liveness {
 	case session.LiveLost:
 	case session.LiveDead:
-		_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
+		// Dead is legacy input that recovery normalizes to Lost. The decision comes
+		// from view, so scope it to the epoch captured in that same snapshot: a poll
+		// that has since found the runtime alive is newer truth. Preserve the default
+		// refusal above when that newer observation wins.
+		_ = instance.Transition(session.ObserveLiveness(session.LiveLost).AtEpoch(view.StateEpoch))
+		if instance.GetLiveness() != session.LiveLost {
+			return "", fmt.Errorf("session %q changed state before restore could start", title)
+		}
 	default:
 		return "", fmt.Errorf("session %q changed state before restore could start", title)
 	}
