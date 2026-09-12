@@ -104,7 +104,7 @@ func TestFindSessionDiscardsDuplicateWhenCanonicalRaced(t *testing.T) {
 
 	var calls atomic.Int32
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		switch calls.Add(1) {
 		case 1:
 			// The initial refreshLocked inside findSession: model the
@@ -173,7 +173,7 @@ func TestFindSessionRegistersRestoredInstanceWhenUntracked(t *testing.T) {
 
 	var calls atomic.Int32
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		switch calls.Add(1) {
 		case 1:
 			return nil, fmt.Errorf("transient restore failure")
@@ -232,9 +232,9 @@ func TestFindSessionReturnsTrackedInstanceWithoutDiskBuild(t *testing.T) {
 
 	var diskBuilds atomic.Int32
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(repoID string, d session.InstanceData) (*session.Instance, error) {
 		diskBuilds.Add(1)
-		return prev(d)
+		return prev(repoID, d)
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
 

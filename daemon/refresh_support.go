@@ -28,7 +28,11 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 // see TestManagerCreateSessionAtomicWithRefresh, which uses it to detect
 // whether refresh ever raced CreateSession and tried to construct a
 // duplicate Instance from disk.
-var fromInstanceDataForRefresh = session.FromInstanceData
+var fromInstanceDataForRefresh = func(repoID string, data session.InstanceData) (*session.Instance, error) {
+	return session.FromInstanceDataWithLoadRuntimeCheckpoint(data, func(closed session.InstanceData) error {
+		return persistInstanceData(repoID, closed)
+	})
+}
 
 // persistLegacyInstanceID is the durable half of daemon-load ID backfill. A
 // seam keeps the unknown-outcome branch testable: if this write cannot be

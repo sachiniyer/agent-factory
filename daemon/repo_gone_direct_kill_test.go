@@ -25,11 +25,11 @@ func ghostFor(t *testing.T, manager *Manager, repoID, title string) {
 	delete(manager.instances, daemonInstanceKey(repoID, title))
 	manager.mu.Unlock()
 	previousRestore := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(data session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(repoID string, data session.InstanceData) (*session.Instance, error) {
 		if data.Title == title {
 			return nil, errors.New("forced ghost: record cannot be materialized")
 		}
-		return previousRestore(data)
+		return previousRestore(repoID, data)
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = previousRestore })
 	previousTmux := ghostKillTmuxByName

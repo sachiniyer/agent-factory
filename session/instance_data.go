@@ -262,8 +262,19 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 	return data, nil
 }
 
-// FromInstanceData creates a new Instance from serialized data
+// FromInstanceData creates a new Instance from serialized data.
 func FromInstanceData(data InstanceData) (*Instance, error) {
+	return FromInstanceDataWithLoadRuntimeCheckpoint(data, nil)
+}
+
+// FromInstanceDataWithLoadRuntimeCheckpoint creates an Instance and invokes
+// checkpoint after a missing persisted agent pane is proven absent but before
+// its replacement is started. The daemon supplies the durable session writer;
+// standalone readers pass nil through FromInstanceData.
+func FromInstanceDataWithLoadRuntimeCheckpoint(
+	data InstanceData,
+	checkpoint func(InstanceData) error,
+) (*Instance, error) {
 	data = data.RestoreArchiveRollbackFence()
 	var err error
 	data, err = data.RestoreRelocationRecoveryOriginals()
@@ -573,7 +584,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		return instance, nil
 	}
 
-	if err := instance.Start(false); err != nil {
+	instance.loadRuntimeReplacementCheckpoint = checkpoint
+	err = instance.Start(false)
+	instance.loadRuntimeReplacementCheckpoint = nil
+	if err != nil {
 		if retainsInertInstance(err) {
 			// A sibling probe or the live agent's in-place scope upgrade did not
 			// establish a safe runtime boundary. Keep the row inert and explicitly

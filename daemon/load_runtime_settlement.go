@@ -13,9 +13,10 @@ import (
 // distinguished an agent respawn from a sibling-tab respawn and applied the same
 // unprompted-runtime task-run rule used by restore-time replacement. A failed
 // instance write joins that task outcome in the same retry entry. An unprompted
-// agent replacement is kept behind a non-live fence until the close lands; if
-// that first write fails, its process is torn down rather than exposed over a
-// disk row that still assigns the predecessor's active run to it.
+// agent replacement reaches this function with its close already checkpointed:
+// the loader writes it after tmux proves the old pane absent and before tmux may
+// spawn. The fallback fence remains for injected/standalone constructors that do
+// not supply that daemon checkpoint.
 func persistLoadRuntimeReplacements(instances map[string]*session.Instance) []settleOwedEntry {
 	var owed []settleOwedEntry
 	for key, instance := range instances {
@@ -29,7 +30,7 @@ func persistLoadRuntimeReplacements(instances map[string]*session.Instance) []se
 		if interruptionPending {
 			entry.interruptedTaskRun = &pendingRun
 		}
-		if replacement.TaskRunInterrupted {
+		if replacement.TaskRunInterrupted && !replacement.TaskRunInterruptionCheckpointed {
 			log.WarningLog.Printf(
 				"load-time agent replacement for %q did not receive task %s's run prompt; closed the run, retained the session, skipped on_complete, and queued last_run_status for durable publication",
 				instance.Title, pendingRun.TaskID)

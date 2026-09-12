@@ -521,7 +521,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				}
 			}
 
-			instance, err := fromInstanceDataForRefresh(item)
+			instance, err := fromInstanceDataForRefresh(repoID, item)
 			if err != nil {
 				log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
 				// The row is invisible to everything that walks m.instances from here on

@@ -312,6 +312,54 @@ func TestLoadRuntimeReplacementFenceRefusesUnobservableReplacement(t *testing.T)
 	require.True(t, inst.ToInstanceData().RuntimeCleanupStateUnknown)
 }
 
+func TestPrepareLoadAgentReplacementCheckpointsInterruptedRun(t *testing.T) {
+	inst := &Instance{
+		ID: "session-id", TaskID: "task-id", taskGenerationID: "generation-id",
+		Title: "load-replacement", liveness: LiveRunning, taskRunActive: true, started: true,
+	}
+	var checkpoint InstanceData
+	inst.loadRuntimeReplacementCheckpoint = func(data InstanceData) error {
+		checkpoint = data
+		return nil
+	}
+
+	require.NoError(t, inst.prepareLoadAgentRuntimeReplacement())
+	require.False(t, checkpoint.TaskRunActive,
+		"the predecessor run close must reach the checkpoint before a replacement can start")
+	require.True(t, checkpoint.TaskRunInterruptionPending)
+	replacement := inst.ConsumeLoadRuntimeReplacement()
+	require.True(t, replacement.TaskRunInterrupted)
+	require.True(t, replacement.TaskRunInterruptionCheckpointed)
+}
+
+func TestPrepareLoadAgentReplacementRefusesFailedCheckpoint(t *testing.T) {
+	inst := &Instance{
+		ID: "session-id", TaskID: "task-id", taskGenerationID: "generation-id",
+		Title: "load-replacement", liveness: LiveRunning, taskRunActive: true, started: true,
+	}
+	wantErr := errors.New("checkpoint unavailable")
+	inst.loadRuntimeReplacementCheckpoint = func(InstanceData) error { return wantErr }
+
+	require.ErrorIs(t, inst.prepareLoadAgentRuntimeReplacement(), wantErr)
+	replacement := inst.ConsumeLoadRuntimeReplacement()
+	require.True(t, replacement.TaskRunInterrupted)
+	require.False(t, replacement.TaskRunInterruptionCheckpointed,
+		"a failed write is not durable proof")
+}
+
+func TestPrepareLoadAgentReplacementRequiresDurableWriter(t *testing.T) {
+	inst := &Instance{
+		ID: "session-id", TaskID: "task-id", taskGenerationID: "generation-id",
+		Title: "load-replacement", liveness: LiveRunning, taskRunActive: true, started: true,
+	}
+
+	require.ErrorContains(t, inst.prepareLoadAgentRuntimeReplacement(),
+		"without a durable interruption checkpoint")
+	replacement := inst.ConsumeLoadRuntimeReplacement()
+	require.True(t, replacement.TaskRunInterrupted)
+	require.False(t, replacement.TaskRunInterruptionCheckpointed)
+}
+
 func TestRuntimeReplacementSettlementReleasesRestoreFenceAfterUnknownCleanup(t *testing.T) {
 	inst := &Instance{
 		ID: "session-id", TaskID: "task-id", taskGenerationID: "generation-id",

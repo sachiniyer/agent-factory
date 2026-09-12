@@ -821,7 +821,7 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 	if err != nil {
 		return nil, "", nil, err
 	}
-	instance, restoreErr := fromInstanceDataForRefresh(*data)
+	instance, restoreErr := fromInstanceDataForRefresh(rid, *data)
 	if restoreErr != nil {
 		return nil, rid, data, nil
 	}

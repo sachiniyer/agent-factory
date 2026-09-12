@@ -250,7 +250,10 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase))
 		}
-		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
+		restoreResult, err := tmuxSession.RestoreWithResultBeforeRespawn(
+			workDir,
+			i.prepareLoadAgentRuntimeReplacement,
+		)
 		if err != nil {
 			preserveAgentHandle = retainsInertInstance(err)
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
@@ -260,14 +263,6 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			if strings.TrimSpace(runtimeProgram) != "" {
 				i.setRuntimeProgram(runtimeProgram)
 			}
-			// The persisted delivery verdict and pane age belonged to the process
-			// that disappeared with the old tmux server. A pure reattach preserves
-			// them; a confirmed respawn must not attribute them to its replacement.
-			i.ClearIdleEvidence()
-			// This also calls noteAgentRuntimeReplaced, which touches UpdatedAt
-			// unconditionally, even when there was no idle evidence to clear.
-			resetAgentBrokerCaptures(i)
-			i.markLoadRuntimeReplaced(true)
 		} else {
 			// A tmux name surviving across daemon downtime does not prove that it
 			// still names the process AF launched: an operator can remove and recreate

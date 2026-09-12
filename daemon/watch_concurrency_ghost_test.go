@@ -33,11 +33,11 @@ func failLoadFor(t *testing.T, titles ...string) {
 		broken[title] = true
 	}
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(data session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(repoID string, data session.InstanceData) (*session.Instance, error) {
 		if broken[data.Title] {
 			return nil, errors.New("worktree path is empty")
 		}
-		return prev(data)
+		return prev(repoID, data)
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
 }

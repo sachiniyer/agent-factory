@@ -493,7 +493,13 @@ func TestLiveInstance_RespawnsMissingSessionOnLoad(t *testing.T) {
 	data.LastPromptAttemptAt = attemptedAt
 	data.LastPromptDeliveryStatus = PromptDelivered
 	data.LastPaneChurnAt = attemptedAt.Add(time.Minute)
-	restored, err := FromInstanceData(data)
+	var checkpoint InstanceData
+	restored, err := FromInstanceDataWithLoadRuntimeCheckpoint(data, func(closed InstanceData) error {
+		require.Zero(t, newSessions,
+			"the interrupted close must be checkpointed before tmux starts the replacement")
+		checkpoint = closed
+		return nil
+	})
 	require.NoError(t, err)
 
 	assert.Greater(t, newSessions, 0,
@@ -509,9 +515,13 @@ func TestLiveInstance_RespawnsMissingSessionOnLoad(t *testing.T) {
 		"the daemon loader must be told to persist the replacement's evidence clear")
 	assert.True(t, replacement.Agent)
 	assert.True(t, replacement.TaskRunInterrupted)
+	assert.True(t, replacement.TaskRunInterruptionCheckpointed)
 	assert.Equal(t, "task-live-load", replacement.InterruptedTaskRun.TaskID)
 	assert.False(t, restored.TaskRunActive(),
 		"a load-time replacement did not receive the vanished runtime's task prompt and cannot finish its run")
+	assert.False(t, checkpoint.TaskRunActive,
+		"the interrupted close must be checkpointed before the replacement tmux process starts")
+	assert.True(t, checkpoint.TaskRunInterruptionPending)
 }
 
 func TestLiveInstance_ReattachesExistingSessionWithIdleEvidence(t *testing.T) {

@@ -508,7 +508,7 @@ func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
 
 	// Stub the session restore so we don't need a live tmux/PTY backend.
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -570,7 +570,7 @@ func TestRefreshDaemonInstances_BackfillsLegacyIDBeforeMaterialize(t *testing.T)
 	}
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		return &session.Instance{ID: d.ID, Title: d.Title}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -627,7 +627,7 @@ func TestRefreshDaemonInstances_DoesNotMaterializeUnpersistedLegacyID(t *testing
 	t.Cleanup(func() { persistLegacyInstanceID = prevPersist })
 	materialized := false
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		materialized = true
 		return &session.Instance{ID: d.ID, Title: d.Title}, nil
 	}
@@ -654,7 +654,7 @@ func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testi
 	silenceWarnings(t)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -689,7 +689,7 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *tes
 	warnBuf := teeWarnings(t)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -771,7 +771,7 @@ func TestRefreshDaemonInstancesRetainsTaskRunSequenceFromUnloadedRow(t *testing.
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	silenceWarnings(t)
 	previousRestore := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(string, session.InstanceData) (*session.Instance, error) {
 		return nil, errors.New("fixture cannot materialize")
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = previousRestore })

@@ -1,6 +1,9 @@
 package session
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // IdleReason is the daemon's mechanically established explanation for why a
 // session is not doing visible work. It deliberately excludes semantic guesses
@@ -223,10 +226,11 @@ func (i *Instance) ClearIdleEvidence() bool {
 // of the task-owning runtime from both evidence retirement and a sibling tab;
 // InterruptedTaskRun is set only when that agent replacement closed an active run.
 type LoadRuntimeReplacement struct {
-	Replaced           bool
-	Agent              bool
-	InterruptedTaskRun TaskRunIdentity
-	TaskRunInterrupted bool
+	Replaced                        bool
+	Agent                           bool
+	InterruptedTaskRun              TaskRunIdentity
+	TaskRunInterrupted              bool
+	TaskRunInterruptionCheckpointed bool
 }
 
 // markLoadRuntimeReplaced records that Start(false) created a replacement agent
@@ -248,6 +252,34 @@ func (i *Instance) markLoadRuntimeReplaced(agent bool) {
 		i.loadRuntimeReplacement.InterruptedTaskRun = run
 		i.loadRuntimeReplacement.TaskRunInterrupted = true
 	}
+}
+
+// prepareLoadAgentRuntimeReplacement retires evidence owned by a definitively
+// absent agent pane and checkpoints an interrupted task run before tmux may
+// create its replacement. This ordering makes a spawned-but-uncheckpointed
+// replacement unrepresentable on the daemon load path.
+func (i *Instance) prepareLoadAgentRuntimeReplacement() error {
+	i.ClearIdleEvidence()
+	resetAgentBrokerCaptures(i)
+	i.markLoadRuntimeReplaced(true)
+
+	i.mu.RLock()
+	interrupted := i.loadRuntimeReplacement.TaskRunInterrupted
+	checkpoint := i.loadRuntimeReplacementCheckpoint
+	i.mu.RUnlock()
+	if !interrupted {
+		return nil
+	}
+	if checkpoint == nil {
+		return fmt.Errorf("cannot replace a task runtime without a durable interruption checkpoint")
+	}
+	if err := checkpoint(i.ToInstanceData()); err != nil {
+		return err
+	}
+	i.mu.Lock()
+	i.loadRuntimeReplacement.TaskRunInterruptionCheckpointed = true
+	i.mu.Unlock()
+	return nil
 }
 
 // ConsumeLoadRuntimeReplacement reports one load-time replacement exactly once.

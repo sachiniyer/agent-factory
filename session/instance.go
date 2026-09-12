@@ -162,6 +162,11 @@ type Instance struct {
 	lastPromptDeliveryStatus PromptDeliveryStatus
 	lastPaneChurnAt          time.Time
 	loadRuntimeReplacement   LoadRuntimeReplacement
+	// loadRuntimeReplacementCheckpoint is installed only while a persisted local
+	// instance is being reconstructed. The daemon uses it to make an interrupted
+	// task-run close durable after tmux proves the old pane absent and before tmux
+	// starts its replacement. It is cleared before the Instance is published.
+	loadRuntimeReplacementCheckpoint func(InstanceData) error
 	// stateEpoch is the generation counter for lifecycle state and prompt-observation
 	// boundaries, bumped by every writer that changes one (#2135, #3168). It is how
 	// an observer learns whether its captured-pane decision was superseded before it applies it;
