@@ -26,7 +26,7 @@ func TestWriteExecutableInPlace_RefusesASymlinkedDestination(t *testing.T) {
 	link := filepath.Join(t.TempDir(), "af")
 	require.NoError(t, os.Symlink(real, link))
 
-	err := writeExecutableInPlace(link, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag)
+	err := writeExecutableInPlaceAllowing(link, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, config.ErrManagedFileSymlink)
 	assert.Contains(t, err.Error(), link, "the error names the link")

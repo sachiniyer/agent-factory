@@ -957,24 +957,3 @@ func finishRootAgentProgram(program string) string {
 	}
 	return program
 }
-
-// RootAgentProgramForProfileInspection exposes the daemon's exact command
-// interpretation to read-only diagnostics. The caller resolves the repository
-// under its own deadline; config resolution suppresses the durable in-repo load
-// observation that runtime callers intentionally record.
-func RootAgentProgramForProfileInspection(repo *config.RepoContext, ra config.RootAgent, global *config.Config) (string, error) {
-	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
-		return config.ResolveConfigForRepoInspectionWithGlobal(repo, global)
-	}
-	return rootAgentProgramForResolvedRepo(repo, ra, resolve)
-}
-
-// RootAgentProgramForProfileInspectionContext is the bounded form used by
-// doctor. Its deadline covers the config files needed to turn a bare agent name
-// into the exact command AF would launch, not only the preceding Git probes.
-func RootAgentProgramForProfileInspectionContext(ctx context.Context, repo *config.RepoContext, ra config.RootAgent, global *config.Config) (string, error) {
-	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
-		return config.ResolveConfigForRepoInspectionWithGlobalContext(ctx, repo, global)
-	}
-	return rootAgentProgramForResolvedRepo(repo, ra, resolve)
-}

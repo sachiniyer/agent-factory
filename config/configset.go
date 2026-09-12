@@ -159,10 +159,13 @@ var settableKeySpecs = map[string]settableKeySpec{
 		return validateLimitRetryIntervalValue(v)
 	}},
 	"daemon_poll_interval": {kind: cfgDuration, validate: func(_, v string) error { return validateDaemonPollIntervalValue(v) }},
-	"log_max_size_mb":      {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("log_max_size_mb", v) }},
-	"log_max_backups":      {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
-	"branch_prefix":        {kind: cfgString},
-	"on_archive_command":   {kind: cfgString},
+	"watcher_events_per_minute": {kind: cfgInt, validate: func(_, v string) error {
+		return requirePositiveInt("watcher_events_per_minute", v)
+	}},
+	"log_max_size_mb":    {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("log_max_size_mb", v) }},
+	"log_max_backups":    {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
+	"branch_prefix":      {kind: cfgString},
+	"on_archive_command": {kind: cfgString},
 	"worktree_root": {kind: cfgString, validate: func(_, v string) error {
 		if !validateWorktreeRootValue(v) {
 			return fmt.Errorf("worktree_root must be one of [%s, %s], got %q", WorktreeRootSubdirectory, WorktreeRootSibling, v)
