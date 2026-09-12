@@ -279,6 +279,12 @@ type taskWatcher struct {
 	deliverFailErr   string
 	loadFailSince    time.Time
 	loadFailErr      string
+
+	// statusMu makes the task-store parked status and its queue-head identity
+	// one publication with respect to watcher stop/crash reporting. It is
+	// deliberately separate from mu: a parked drainer may live indefinitely,
+	// while only this short two-store commit must exclude supervisor status.
+	statusMu sync.Mutex
 }
 
 // stop requests termination and blocks until the run goroutine returns. The
@@ -576,9 +582,9 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 func (w *taskWatcher) consumeLines(r io.Reader, tail *tailBuffer, stdoutWritersStopped <-chan struct{}) {
 	br := bufio.NewReaderSize(r, maxWatchLineBytes)
 	for {
-		proceed, stoppedDuringLimitBackpressure := w.waitForLimitQueueCapacity()
+		proceed, drainFinitePipe := w.waitForLimitQueueCapacity(stdoutWritersStopped)
 		if !proceed {
-			if stoppedDuringLimitBackpressure {
+			if drainFinitePipe {
 				// Do not close the read end until the stopped process group has
 				// relinquished every write end. Bytes already accepted by the kernel
 				// belong to emitted events just as much as bytes bufio prefetched.
@@ -890,16 +896,20 @@ func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOpti
 	// occurrence was already recorded. A later success still writes normally.
 	statusRecorded := status == TaskStatusLimitParked && options.parkedStatusRecorded
 	if status != TaskStatusLimitParked || !statusRecorded {
-		if status == TaskStatusLimitParked && options.prepareParkedStatus != nil {
-			if err := options.prepareParkedStatus(); err != nil {
-				log.ErrorLog.Printf("failed to prepare parked watch status: %v", err)
-			}
-		}
 		now := time.Now()
-		if _, err := updateWatchTaskStatus(taskID, &now, status); err != nil {
+		writeStatus := func() error {
+			_, err := updateWatchTaskStatus(taskID, &now, status)
+			return err
+		}
+		var err error
+		if status == TaskStatusLimitParked && options.commitParkedStatus != nil {
+			statusRecorded, err = options.commitParkedStatus(writeStatus)
+		} else {
+			err = writeStatus()
+			statusRecorded = status == TaskStatusLimitParked && err == nil
+		}
+		if err != nil {
 			log.ErrorLog.Printf("failed to update task status: %v", err)
-		} else if status == TaskStatusLimitParked {
-			statusRecorded = true
 		}
 	}
 	if status == TaskStatusLimitParked && !promptRetained {
@@ -917,6 +927,8 @@ func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOpti
 // hide the park and force the drainer to reconstruct occurrence identity from a
 // presentation field. Queue replay eventually replaces the status on success.
 func (w *taskWatcher) persistSupervisorStatus(status string) {
+	w.statusMu.Lock()
+	defer w.statusMu.Unlock()
 	if w.queue != nil {
 		recorded, err := w.queue.headParkedStatusRecorded()
 		if err != nil {

@@ -219,7 +219,7 @@ func TestLimitParkedWatchQueueBackpressuresAtCapacity(t *testing.T) {
 	}
 	waitDone := make(chan waitResult, 1)
 	go func() {
-		proceed, stopped := w.waitForLimitQueueCapacity()
+		proceed, stopped := w.waitForLimitQueueCapacity(nil)
 		waitDone <- waitResult{proceed: proceed, stoppedDuringLimitBackpressure: stopped}
 	}()
 	select {

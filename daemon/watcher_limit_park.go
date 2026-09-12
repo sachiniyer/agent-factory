@@ -20,11 +20,16 @@ var watcherLimitBackpressurePoll = 100 * time.Millisecond
 // multi-day limit park both lossless and bounded: AF stops reading stdout, so
 // the subprocess blocks on the pipe instead of AF dropping distinct events or
 // growing its own queue without limit. A stop always breaks the wait so watcher
-// reload and daemon shutdown remain bounded.
-func (w *taskWatcher) waitForLimitQueueCapacity() (proceed, stoppedDuringLimitBackpressure bool) {
+// reload and daemon shutdown remain bounded. Writer shutdown breaks it too:
+// once no process can add bytes, the finite pipe must be drained even though
+// no queue capacity became available, or runOnce would wait on a reader that
+// can never reach the EOF already sitting behind this pre-read gate.
+func (w *taskWatcher) waitForLimitQueueCapacity(stdoutWritersStopped <-chan struct{}) (proceed, drainFinitePipe bool) {
 	for w.queue != nil && w.queue.limitParkedAtCapacity() {
 		select {
 		case <-w.stopCh:
+			return false, true
+		case <-stdoutWritersStopped:
 			return false, true
 		case <-time.After(watcherLimitBackpressurePoll):
 		}

@@ -17,7 +17,11 @@ var updateWatchTaskStatus = task.UpdateTaskStatus
 // value and binds a successful parked write to the event when it enqueues it.
 type watchDeliveryOptions struct {
 	parkedStatusRecorded bool
-	prepareParkedStatus  func() error
+	// commitParkedStatus makes the task-store write and queue-head annotation
+	// one publication against supervisor lifecycle status. The callback is
+	// admitted only for replay with a durable cursor; live delivery publishes
+	// synchronously on the reader path before runOnce can report process exit.
+	commitParkedStatus func(writeStatus func() error) (bool, error)
 }
 
 // watchTargetLimitError preserves the ordinary sentinel contract while telling
@@ -35,21 +39,34 @@ func watchParkedStatusRecorded(err error) bool {
 	return errors.As(err, &parked) && parked.statusRecorded
 }
 
-// deliverQueuedEvent supplies the durable queue-head identity to delivery and,
-// after a successful task-store write, records that identity beside the queue.
-// The preparation marker lands before the task write so a watcher exit cannot
-// overwrite the parked presentation in the narrow gap between those writes.
+// deliverQueuedEvent supplies the durable queue-head identity and its atomic
+// publication callback to delivery.
 func (w *taskWatcher) deliverQueuedEvent(ev queuedEvent, cursor eventQueueCursor) error {
 	options := watchDeliveryOptions{
 		parkedStatusRecorded: w.queue.parkedStatusRecorded(cursor),
-		prepareParkedStatus:  w.queue.markLimitParked,
+		commitParkedStatus: func(writeStatus func() error) (bool, error) {
+			return w.commitParkedStatus(cursor, writeStatus)
+		},
 	}
-	err := w.sup.deliver(w.taskID, ev.Line, options)
-	if !errors.Is(err, errTargetLimitReached) || !watchParkedStatusRecorded(err) || options.parkedStatusRecorded {
-		return err
+	return w.sup.deliver(w.taskID, ev.Line, options)
+}
+
+// commitParkedStatus publishes the user-visible parked occurrence and the
+// queue-head identity that suppresses retries as one transaction with respect
+// to supervisor status. The durable stores remain individually crash-safe; the
+// mutex closes only the in-process interleaving where "stopped" or "errored"
+// could land between them and stay visible for the entire parked episode.
+func (w *taskWatcher) commitParkedStatus(cursor eventQueueCursor, writeStatus func() error) (bool, error) {
+	w.statusMu.Lock()
+	defer w.statusMu.Unlock()
+	if err := w.queue.markLimitParked(); err != nil {
+		log.ErrorLog.Printf("failed to prepare parked watch status: %v", err)
 	}
-	if _, recordErr := w.queue.recordParkedStatus(cursor); recordErr != nil {
-		log.ErrorLog.Printf("watch task %s: failed to record parked queue-head identity: %v", w.taskID, recordErr)
+	if err := writeStatus(); err != nil {
+		return false, err
 	}
-	return err
+	if _, err := w.queue.recordParkedStatus(cursor); err != nil {
+		log.ErrorLog.Printf("watch task %s: failed to record parked queue-head identity: %v", w.taskID, err)
+	}
+	return true, nil
 }
