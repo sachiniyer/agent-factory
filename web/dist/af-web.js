@@ -17731,6 +17731,10 @@ function closeOverlays() {
   closeConfigAssistant();
   closeAccountLogin();
 }
+function mountOverlay(open) {
+  closeOverlays();
+  return open(modalHost);
+}
 function captureModalInvoker() {
   const focused = document.activeElement;
   const row = focused?.closest(".af-row");
@@ -17741,65 +17745,64 @@ function captureModalInvoker() {
   };
 }
 function openModal(m, focusCard = false, explicitInvoker) {
-  closeOverlays();
-  const focused = document.activeElement;
-  const invoker = explicitInvoker ?? captureModalInvoker();
-  const { sessionId, actionLabel } = invoker;
-  const row = explicitInvoker ? !invoker.header && sessionId : focused?.closest(".af-row");
-  const header = invoker.header ? root?.querySelector(".af-term-head") : null;
-  if (focusCard || row) {
-    restoreModalFocus = () => {
-      const canFocus = (el2) => !!el2 && el2.isConnected && el2 !== document.body && !el2.matches(":disabled") && el2.getClientRects().length > 0 && getComputedStyle(el2).visibility === "visible";
-      if (!row && !explicitInvoker && canFocus(focused)) {
-        focused.focus({ preventScroll: true });
-        return;
-      }
-      if (!row && header?.isConnected) {
-        const action2 = actionLabel ? header.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
-        const target2 = canFocus(action2) ? action2 : header.querySelector(".af-term-more");
-        if (canFocus(target2)) {
-          target2.focus({ preventScroll: true });
+  mountOverlay((mountHost) => {
+    const focused = document.activeElement;
+    const invoker = explicitInvoker ?? captureModalInvoker();
+    const { sessionId, actionLabel } = invoker;
+    const row = explicitInvoker ? !invoker.header && sessionId : focused?.closest(".af-row");
+    const header = invoker.header ? root?.querySelector(".af-term-head") : null;
+    if (focusCard || row) {
+      restoreModalFocus = () => {
+        const canFocus = (el2) => !!el2 && el2.isConnected && el2 !== document.body && !el2.matches(":disabled") && el2.getClientRects().length > 0 && getComputedStyle(el2).visibility === "visible";
+        if (!row && !explicitInvoker && canFocus(focused)) {
+          focused.focus({ preventScroll: true });
           return;
         }
-      }
-      const toggle = root?.querySelector(".af-nav-toggle");
-      if (!root?.querySelector(".af-app.af-nav-open") && canFocus(toggle)) {
-        focusRail();
-        toggle.focus({ preventScroll: true });
-        return;
-      }
-      focusRail();
-      const menu = sessionId ? root?.querySelector(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
-      const action = actionLabel ? menu?.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
-      const target = canFocus(action) ? action : menu?.querySelector("button");
-      if (canFocus(target)) target.focus({ preventScroll: true });
-      else {
-        const rail = root?.querySelector(".af-rail");
-        if (canFocus(rail)) {
-          rail.tabIndex = -1;
-          rail.focus({ preventScroll: true });
+        if (!row && header?.isConnected) {
+          const action2 = actionLabel ? header.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+          const target2 = canFocus(action2) ? action2 : header.querySelector(".af-term-more");
+          if (canFocus(target2)) {
+            target2.focus({ preventScroll: true });
+            return;
+          }
         }
-      }
-    };
-  }
-  modal = m;
-  modalHost.replaceChildren(m.el);
-  if (focusCard) m.el.querySelector(".af-modal-card")?.focus({ preventScroll: true });
+        const toggle = root?.querySelector(".af-nav-toggle");
+        if (!root?.querySelector(".af-app.af-nav-open") && canFocus(toggle)) {
+          focusRail();
+          toggle.focus({ preventScroll: true });
+          return;
+        }
+        focusRail();
+        const menu = sessionId ? root?.querySelector(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
+        const action = actionLabel ? menu?.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+        const target = canFocus(action) ? action : menu?.querySelector("button");
+        if (canFocus(target)) target.focus({ preventScroll: true });
+        else {
+          const rail = root?.querySelector(".af-rail");
+          if (canFocus(rail)) {
+            rail.tabIndex = -1;
+            rail.focus({ preventScroll: true });
+          }
+        }
+      };
+    }
+    modal = m;
+    mountHost.replaceChildren(m.el);
+    if (focusCard) m.el.querySelector(".af-modal-card")?.focus({ preventScroll: true });
+  });
 }
 function doOpenConfigAssistant() {
   const tok = token;
   if (tok === null) {
     return;
   }
-  closeModal();
-  closeConfigAssistant();
-  configAssistant = openConfigAssistant({
+  configAssistant = mountOverlay((mountHost) => openConfigAssistant({
     token: tok,
-    mountHost: modalHost,
+    mountHost,
     onClosed: () => {
       configAssistant = null;
     }
-  });
+  }));
 }
 function newSession() {
   const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
@@ -18330,17 +18333,15 @@ function doOpenAccountLogin(agent, name) {
     }
     const notices = login.notices?.length ? ` \xB7 ${login.notices.join(" \xB7 ")}` : "";
     setAccountStatus(agent, name, `Running ${login.program}${notices}`, false);
-    closeModal();
-    closeAccountLogin();
-    accountLogin = openAccountLogin({
+    accountLogin = mountOverlay((mountHost) => openAccountLogin({
       token: tok,
-      mountHost: modalHost,
+      mountHost,
       login,
       onClosed: () => {
         accountLogin = null;
         refreshAccounts();
       }
-    });
+    }));
   }).catch((err) => {
     setAccountStatus(agent, name, errorText(err), true);
   });
