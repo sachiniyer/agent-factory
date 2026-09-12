@@ -286,22 +286,36 @@ func TestTaskPromptLimitTransitionIsSerializedWithFinalSend(t *testing.T) {
 	}
 }
 
+type blockingTaskPromptBackend struct {
+	readyFakeBackend
+	recorder *promptRecorder
+	started  chan struct{}
+	release  chan struct{}
+}
+
+func (b *blockingTaskPromptBackend) SendPromptCommandWithStatus(_ *session.Instance, prompt string) (session.PromptDeliveryStatus, error) {
+	close(b.started)
+	<-b.release
+	b.recorder.add(prompt)
+	return session.PromptDelivered, nil
+}
+
 func TestSlowTaskPromptDoesNotBlockAnUnrelatedTarget(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	firstRecorder := &promptRecorder{}
-	firstBackend := &blockingSendKillBackend{
+	firstBackend := &blockingTaskPromptBackend{
 		readyFakeBackend: readyFakeBackend{session.NewFakeBackend()},
-		rec:              firstRecorder,
-		sendStarted:      make(chan struct{}),
-		releaseSend:      make(chan struct{}),
-		killStarted:      make(chan struct{}),
-		killBlock:        make(chan struct{}),
+		recorder:         firstRecorder,
+		started:          make(chan struct{}),
+		release:          make(chan struct{}),
 	}
 	registerStarted(t, manager, repoID, repoPath, "slow-target", firstBackend, true, session.Running)
 	secondRecorder := &promptRecorder{}
 	registerStarted(t, manager, repoID, repoPath, "independent-target", recordingBackend{
 		readyFakeBackend{session.NewFakeBackend()}, secondRecorder,
 	}, true, session.Running)
+	limitTarget := registerStarted(t, manager, repoID, repoPath, "limit-target",
+		readyFakeBackend{session.NewFakeBackend()}, true, session.Running)
 
 	firstDone := make(chan error, 1)
 	go func() {
@@ -311,10 +325,15 @@ func TestSlowTaskPromptDoesNotBlockAnUnrelatedTarget(t *testing.T) {
 		firstDone <- err
 	}()
 	select {
-	case <-firstBackend.sendStarted:
+	case <-firstBackend.started:
 	case <-time.After(time.Second):
 		t.Fatal("first prompt did not reach its blocking transport")
 	}
+	limitDone := make(chan struct{})
+	go func() {
+		manager.setLimitReached(limitTarget, time.Now().Add(time.Hour))
+		close(limitDone)
+	}()
 
 	secondDone := make(chan error, 1)
 	go func() {
@@ -323,26 +342,41 @@ func TestSlowTaskPromptDoesNotBlockAnUnrelatedTarget(t *testing.T) {
 		})
 		secondDone <- err
 	}()
+	limitBlocked := false
+	select {
+	case <-limitDone:
+	case <-time.After(100 * time.Millisecond):
+		limitBlocked = true
+	}
 	secondBlocked := false
 	select {
 	case err := <-secondDone:
 		if err != nil {
-			close(firstBackend.releaseSend)
+			close(firstBackend.release)
 			<-firstDone
 			t.Fatalf("unrelated prompt failed: %v", err)
 		}
 	case <-time.After(100 * time.Millisecond):
 		secondBlocked = true
 	}
-	close(firstBackend.releaseSend)
+	close(firstBackend.release)
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first prompt failed after release: %v", err)
+	}
+	if limitBlocked {
+		<-limitDone
 	}
 	if secondBlocked {
 		if err := <-secondDone; err != nil {
 			t.Fatalf("unrelated prompt failed after slow transport released: %v", err)
 		}
 		t.Fatal("unrelated task prompt was serialized behind another target's transport I/O")
+	}
+	if limitBlocked {
+		t.Fatal("unrelated limit publication was serialized behind another target's transport I/O")
+	}
+	if got := limitTarget.GetLiveness(); got != session.LiveLimitReached {
+		t.Fatalf("unrelated limit publication left liveness %v, want LimitReached", got)
 	}
 	if got := secondRecorder.snapshot(); len(got) != 1 || got[0] != "second" {
 		t.Fatalf("unrelated target received prompts %v, want [second]", got)
