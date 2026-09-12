@@ -795,9 +795,11 @@ export class AppShell {
   private readonly header: HTMLElement;
   private readonly viewNav: HTMLElement;
   private sessionFirst: ReturnType<typeof sessionFirstComposition> | null = null;
-  // The semantic input to session-first composition from the previous state update.
-  // null distinguishes the initial render from a real focused-kind/view transition.
-  private terminalSelected: boolean | null = null;
+  private terminalSelected = false;
+  // The actual semantic inputs from the previous state update. The derived
+  // session-first boolean is too coarse: terminal→process and Web→VS Code focus
+  // changes must still invalidate a disclosure even though composition stays put.
+  private sessionComposition: { view: View; focusedKind: number | null } | null = null;
   private newTabPickerPosition: (() => void) | null = null;
   private phoneSyncQueued = false;
   private readonly schedulePhoneSync = (): void => {
@@ -1287,7 +1289,7 @@ export class AppShell {
     // Viewport-only recomposition leaves this value alone and therefore preserves a
     // user-opened disclosure; a focused-kind/view change invalidates carried state no
     // matter which present or future action produced the store update.
-    this.observeSessionComposition(isSessionFirst(true, state.view, focusedKind));
+    this.observeSessionComposition(state.view, focusedKind);
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
     // terminal only "holds" it while a session is actually selected; with none
@@ -1889,12 +1891,14 @@ export class AppShell {
     return item;
   }
 
-  /** Invalidates carried disclosure state when its semantic composition owner changes. */
-  private observeSessionComposition(terminalSelected: boolean): void {
-    if (this.terminalSelected !== null && this.terminalSelected !== terminalSelected) {
+  /** Invalidates carried disclosure state when the view or focused tab kind changes. */
+  private observeSessionComposition(view: View, focusedKind: number | null): void {
+    const previous = this.sessionComposition;
+    if (previous && (previous.view !== view || previous.focusedKind !== focusedKind)) {
       this.dismissCarriedActions();
     }
-    this.terminalSelected = terminalSelected;
+    this.sessionComposition = { view, focusedKind };
+    this.terminalSelected = isSessionFirst(true, view, focusedKind);
   }
 
   /** Retires carried actions before a user-owned transition can recompose them. */

@@ -113,24 +113,39 @@ for (const action of ["openTab", "switchTab", "closeTab"] as const) {
   }
 }
 
-for (const previous of [null, false, true]) {
-  for (const next of [false, true]) {
-    test(`session composition observer dismisses previous=${previous}, next=${next}`, () => {
-      const calls: string[] = [];
-      const shell = {
-        terminalSelected: previous,
-        dismissCarriedActions: () => calls.push("dismiss"),
-      } as unknown as AppShell;
-      const observeSessionComposition = (AppShell.prototype as unknown as {
-        observeSessionComposition(this: AppShell, terminalSelected: boolean): void;
-      }).observeSessionComposition;
+const compositionCases = [
+  [null, ["sessions", 0], false],
+  [["sessions", 0], ["sessions", 0], false],
+  [["sessions", 0], ["sessions", 1], true],
+  [["sessions", 3], ["sessions", 4], true],
+  [["sessions", 0], ["tasks", 0], true],
+] as const;
+for (const [previous, next, dismiss] of compositionCases) {
+  test(`session composition observer dismisses previous=${previous}, next=${next}`, () => {
+    const calls: string[] = [];
+    const shell = {
+      sessionComposition: previous && { view: previous[0], focusedKind: previous[1] },
+      terminalSelected: false,
+      dismissCarriedActions: () => calls.push("dismiss"),
+    } as unknown as AppShell;
+    const observeSessionComposition = (AppShell.prototype as unknown as {
+      observeSessionComposition(
+        this: AppShell, view: "sessions" | "tasks" | "config", focusedKind: number | null,
+      ): void;
+    }).observeSessionComposition;
 
-      observeSessionComposition.call(shell, next);
+    observeSessionComposition.call(shell, next[0], next[1]);
 
-      assert.deepEqual(calls, previous !== null && previous !== next ? ["dismiss"] : []);
-      assert.equal((shell as unknown as { terminalSelected: boolean }).terminalSelected, next);
-    });
-  }
+    assert.deepEqual(calls, dismiss ? ["dismiss"] : []);
+    assert.deepEqual(
+      (shell as unknown as { sessionComposition: unknown }).sessionComposition,
+      { view: next[0], focusedKind: next[1] },
+    );
+    assert.equal(
+      (shell as unknown as { terminalSelected: boolean }).terminalSelected,
+      next[0] === "sessions" && next[1] >= 0 && next[1] <= 2,
+    );
+  });
 }
 
 for (const paneAcceptsDrop of [true, false]) {

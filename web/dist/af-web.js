@@ -15701,9 +15701,11 @@ var AppShell = class {
   header;
   viewNav;
   sessionFirst = null;
-  // The semantic input to session-first composition from the previous state update.
-  // null distinguishes the initial render from a real focused-kind/view transition.
-  terminalSelected = null;
+  terminalSelected = false;
+  // The actual semantic inputs from the previous state update. The derived
+  // session-first boolean is too coarse: terminal→process and Web→VS Code focus
+  // changes must still invalidate a disclosure even though composition stays put.
+  sessionComposition = null;
   newTabPickerPosition = null;
   phoneSyncQueued = false;
   schedulePhoneSync = () => {
@@ -15935,7 +15937,7 @@ var AppShell = class {
     this.syncDocumentTitle(state);
     const selectedForPhone = selectedSession(state);
     const focusedKind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
-    this.observeSessionComposition(isSessionFirst(true, state.view, focusedKind));
+    this.observeSessionComposition(state.view, focusedKind);
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
     if (this.lastKb !== kb) {
       this.lastKb = kb;
@@ -16415,12 +16417,14 @@ var AppShell = class {
     });
     return item;
   }
-  /** Invalidates carried disclosure state when its semantic composition owner changes. */
-  observeSessionComposition(terminalSelected) {
-    if (this.terminalSelected !== null && this.terminalSelected !== terminalSelected) {
+  /** Invalidates carried disclosure state when the view or focused tab kind changes. */
+  observeSessionComposition(view, focusedKind) {
+    const previous = this.sessionComposition;
+    if (previous && (previous.view !== view || previous.focusedKind !== focusedKind)) {
       this.dismissCarriedActions();
     }
-    this.terminalSelected = terminalSelected;
+    this.sessionComposition = { view, focusedKind };
+    this.terminalSelected = isSessionFirst(true, view, focusedKind);
   }
   /** Retires carried actions before a user-owned transition can recompose them. */
   dismissCarriedActions() {
