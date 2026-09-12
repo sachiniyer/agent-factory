@@ -5978,6 +5978,53 @@ test("scheduled reconciliation compares the check state observed before decision
   }]);
 });
 
+test("scheduled reconciliation matches full-width check identities across APIs", async () => {
+  const checkRunId = 103_493_658_129;
+  const checkRunNodeId = "CR_kwDORdIFwM8AAAAYGLPmEQ";
+  const build = checkRun({
+    id: checkRunId,
+    nodeId: checkRunNodeId,
+    graphqlDatabaseId: null,
+    name: "Build",
+    conclusion: "failure",
+  });
+  const lint = checkRun({ id: 502, name: "Lint", conclusion: "success" });
+  const github = fakeGateGithub({ checkRuns: [build, lint] });
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(result.shouldMerge, false);
+  await autoGate.reportDecision({ github, context: fakeContext(), core: fakeCore(), result });
+  const written = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [{
+          id: 503,
+          app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+          ...written,
+        }, build, lint],
+      },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(
+    targets,
+    [],
+    "an unchanged check must match even when its GraphQL database ID is absent",
+  );
+});
+
 test("scheduled reconciliation retains source-less required-check observations", async () => {
   const build = checkRun({ id: 601, name: "Build", conclusion: "failure" });
   const lint = checkRun({ id: 602, name: "Lint", conclusion: "success" });
@@ -11723,8 +11770,9 @@ function scheduledReconciliationGithub({
 }) {
   const truncated = new Set(truncatedHeads);
   return {
-    graphql: async (_query, { after }) => {
+    graphql: async (query, { after }) => {
       graphqlReads.push(after);
+      const requestsCheckRunNodeId = /\.\.\. on CheckRun\s*\{\s*id(?:\s|$)/.test(query);
       const start = after == null ? 0 : Number(after);
       const page = pulls.slice(start, start + 100);
       const end = start + page.length;
@@ -11752,7 +11800,10 @@ function scheduledReconciliationGithub({
                         pageInfo: { hasNextPage: truncated.has(pull.head.sha) },
                         nodes: (checksByHead[pull.head.sha] || []).map((run) => ({
                           __typename: "CheckRun",
-                          databaseId: run.id,
+                          id: requestsCheckRunNodeId ? run.node_id : undefined,
+                          databaseId: run.graphql_database_id === undefined
+                            ? run.id
+                            : run.graphql_database_id,
                           name: run.name,
                           status: String(run.status).toUpperCase(),
                           conclusion: run.conclusion == null
@@ -11827,6 +11878,8 @@ function requiredSuccessRuns() {
 
 function checkRun({
   id = 100,
+  nodeId = null,
+  graphqlDatabaseId,
   name,
   status = "completed",
   conclusion,
@@ -11836,6 +11889,8 @@ function checkRun({
 }) {
   return {
     id,
+    node_id: nodeId,
+    graphql_database_id: graphqlDatabaseId,
     name,
     external_id: externalId,
     app: { id: appId, slug: appSlug },

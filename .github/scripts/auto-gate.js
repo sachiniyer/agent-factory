@@ -3532,6 +3532,7 @@ const REQUIRED_CHECK_RECONCILIATION_QUERY = `
                     nodes {
                       __typename
                       ... on CheckRun {
+                        id
                         databaseId
                         name
                         status
@@ -3559,6 +3560,10 @@ const REQUIRED_CHECK_RECONCILIATION_QUERY = `
 function reconciliationCheckRun(run) {
   return {
     id: run.databaseId,
+    // GraphQL's non-null Node ID is the REST check run's node_id. Keep that
+    // common identity for snapshots; databaseId has a narrower/nullable
+    // GraphQL type even though REST exposes the database key as a full number.
+    node_id: run.id,
     name: run.name,
     external_id: run.externalId,
     app: {
@@ -4348,7 +4353,9 @@ function latestRequiredState(spec, checkRuns, statuses) {
       date: parseTimestamp(run.completed_at || run.started_at || run.created_at) || 0,
       observation: {
         kind: "check_run",
-        id: String(run.id || ""),
+        // REST calls this node_id; the reconciliation GraphQL query calls it
+        // id. Its opaque string is non-null in both APIs, unlike databaseId.
+        id: String(run.node_id || run.id || ""),
         status: String(run.status || ""),
         conclusion: run.conclusion == null ? null : String(run.conclusion),
       },
