@@ -219,15 +219,19 @@ type TmuxSession struct {
 	// text is not enough to claim that a prior delivery was stranded (#2225).
 	// Protected by inputMu; it never gates delivery.
 	lastPastedTail string
-	// provenNoPane records that a Start attempt PROVED this name had no tmux
-	// session and then returned before running new-session, so nothing can be
-	// running behind it. Guarded by provenMu; read through ProvenNoPane.
+	// provenNoPane records that no live pane is running behind this handle.
+	// Set in two ways: (1) Start PROVED this name had no tmux session and
+	// returned before running new-session; (2) closeAndWaitForPaneExit
+	// completed a conclusive non-blind close. Cleared (false) whenever this
+	// object is associated with a session again — by Start unconditionally, by
+	// RestoreWithResult's live-session branch, and at the top of every
+	// closeAndWaitForPaneExit call before re-latching. Guarded by provenMu;
+	// read through ProvenNoPane.
 	//
 	// The default is false and that direction is the safety property: every other
 	// way a TmuxSession comes into being — a restore binding a persisted name, a
 	// pending-cleanup handle, a sibling tab, an adoption — may have a live pane
-	// behind it, and a teardown must gate on liveness for all of them. Only Start
-	// can establish otherwise, and only at the two points below.
+	// behind it, and a teardown must gate on liveness for all of them.
 	provenNoPane bool
 	provenMu     sync.RWMutex
 	// ptyFactory is used to create a PTY for the tmux session.
@@ -392,8 +396,23 @@ func NewTmuxSessionFromSanitizedNameWithDeps(sanitizedName, program string, ptyF
 	return newTmuxSession(sanitizedName, program, ptyFactory, cmdExec)
 }
 
-// ProvenNoPane reports that this session object provably never created a pane:
-// Start found the name positively absent and failed before running new-session.
+// ProvenNoPane reports that this session object has no live pane behind it.
+// The proof is established in two ways:
+//
+//  1. Start found the name positively absent and failed before running
+//     new-session — the session provably never created a pane.
+//  2. closeAndWaitForPaneExit completed a conclusive non-blind close — the
+//     pane that existed was observed to exit (#703b4a70).
+//
+// Either way, no pane is running behind this handle at the instant the proof
+// was taken, and a redundant teardown can skip its liveness probe safely.
+//
+// The proof is invalidated (reset to false) whenever this object is associated
+// with a session again: Start clears it unconditionally, RestoreWithResult
+// clears it on the live-session branch, and closeAndWaitForPaneExit clears it
+// at the top of every call before re-latching only on conclusive non-blind
+// success. Those are the only three paths that can put this object in front of
+// a (potentially live) session, so no sibling path can inherit a stale proof.
 //
 // It is NOT "Start did not succeed", and the difference is the whole point. A
 // create whose spawn worked and whose later setup failed has a live pane and an
