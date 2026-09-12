@@ -3626,6 +3626,31 @@ function reconciliationStatusContext(status) {
   };
 }
 
+function statusContextsHaveTimestampTie(statuses) {
+  const seen = new Set();
+  for (const status of statuses) {
+    const key = `${status.context}\0${status.created_at || ""}`;
+    if (seen.has(key)) {
+      return true;
+    }
+    seen.add(key);
+  }
+  return false;
+}
+
+function tiedStatusGenerationIsOrdered(statuses) {
+  const groups = new Map();
+  for (const status of statuses) {
+    const key = `${status.context}\0${status.created_at || ""}`;
+    const group = groups.get(key) || [];
+    group.push(status);
+    groups.set(key, group);
+  }
+  return [...groups.values()].every((group) =>
+    group.length < 2 || group.every((status) => Number.isSafeInteger(status.id) && status.id > 0),
+  );
+}
+
 async function requiredCheckReconciliationSnapshot({ github, context, core }) {
   const { owner, repo } = context.repo;
   const pulls = [];
@@ -3672,14 +3697,33 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
         );
         continue;
       }
+      let statuses = (contexts?.nodes || [])
+        .filter((node) => node?.__typename === "StatusContext")
+        .map(reconciliationStatusContext);
+      // StatusContext exposes only its opaque node ID in GraphQL. A REST read is
+      // needed only for the rare same-context/same-second tie, where its numeric
+      // database ID is the one documented generation order available to us.
+      if (statusContextsHaveTimestampTie(statuses)) {
+        statuses = await retryRead(
+          `could not order tied commit statuses at ${headSha}`,
+          () => github.paginate(github.rest.repos.listCommitStatusesForRef, {
+            owner,
+            repo,
+            ref: headSha,
+            per_page: 100,
+          }),
+        );
+        if (!tiedStatusGenerationIsOrdered(statuses)) {
+          core.warning(
+            `Required-check reconciliation skipped PR #${pull.number}: tied commit statuses ` +
+              "had no safe numeric generation IDs.",
+          );
+          continue;
+        }
+      }
       pulls.push(pull);
       checkRunsByHead.set(headSha, checkRuns);
-      statusesByHead.set(
-        headSha,
-        (contexts?.nodes || [])
-          .filter((node) => node?.__typename === "StatusContext")
-          .map(reconciliationStatusContext),
-      );
+      statusesByHead.set(headSha, statuses);
     }
     if (!connection.pageInfo?.hasNextPage) {
       break;
@@ -4408,6 +4452,7 @@ function latestRequiredState(spec, checkRuns, statuses) {
     const state = checkRunState(run);
     candidates.push({
       date: parseTimestamp(run.completed_at || run.started_at || run.created_at) || 0,
+      generationID: Number.isSafeInteger(run.id) ? run.id : null,
       observation: {
         kind: "check_run",
         // REST calls this node_id; the reconciliation GraphQL query calls it
@@ -4427,6 +4472,7 @@ function latestRequiredState(spec, checkRuns, statuses) {
       }
       candidates.push({
         date: parseTimestamp(status.created_at) || 0,
+        generationID: Number.isSafeInteger(status.id) ? status.id : null,
         observation: {
           kind: "commit_status",
           // The same cross-API identity rule as check runs: GraphQL id is the
@@ -4442,7 +4488,20 @@ function latestRequiredState(spec, checkRuns, statuses) {
     }
   }
 
-  candidates.sort((a, b) => b.date - a.date);
+  candidates.sort((a, b) => {
+    const timeDifference = b.date - a.date;
+    if (timeDifference !== 0) {
+      return timeDifference;
+    }
+    if (
+      a.observation.kind === b.observation.kind &&
+      a.generationID != null &&
+      b.generationID != null
+    ) {
+      return b.generationID - a.generationID;
+    }
+    return 0;
+  });
   return candidates[0] || null;
 }
 

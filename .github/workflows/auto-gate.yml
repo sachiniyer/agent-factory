@@ -50,6 +50,16 @@ permissions:
   statuses: read
   issues: write
 
+# A scheduled run carries no unique event: each one scans every open master PR,
+# so a newer pending schedule may replace an older pending copy without losing an
+# invalidation. Keep the active run alive through its aggregate transaction so
+# the next scan cannot select the same per-PR decisions while they are queued.
+# Every webhook/comment run gets its own run-id group and still reaches the
+# ungrouped invalidation below; those events are not fungible and never coalesce.
+concurrency:
+  group: auto-gate-${{ github.event_name == 'schedule' && 'required-check-reconciliation' || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   auto-gate:
     name: Resolve event heads
