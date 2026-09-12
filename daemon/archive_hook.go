@@ -32,7 +32,14 @@ var onArchiveHookTimeout = 30 * time.Minute
 // point between the shell's exit and the context cancellation, enabling a
 // deterministic race between process exit and deadline without relying on
 // wall-clock timing. Production always leaves it nil.
-var onArchiveHookAfterStart func(cancel context.CancelFunc)
+var onArchiveHookAfterStart func(cmd *exec.Cmd, cancel context.CancelFunc)
+
+// onArchiveHookMakeContext, if non-nil, overrides the context used to run the
+// hook command. Tests set it to supply a context whose deadline can be triggered
+// at a precise moment — specifically after the shell has confirmed its own exit
+// — so that the spliced error is context.DeadlineExceeded rather than
+// context.Canceled. Production always leaves it nil.
+var onArchiveHookMakeContext func() (context.Context, context.CancelFunc)
 
 const onArchiveHookWaitDelay = 2 * time.Second
 
@@ -101,7 +108,13 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), onArchiveHookTimeout)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if onArchiveHookMakeContext != nil {
+		ctx, cancel = onArchiveHookMakeContext()
+	} else {
+		ctx, cancel = context.WithTimeout(context.Background(), onArchiveHookTimeout)
+	}
 	defer cancel()
 
 	outputFile, err := hooklog.Open(hooklog.OnArchive)
@@ -152,7 +165,7 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 
 	if err = cmd.Start(); err == nil {
 		if onArchiveHookAfterStart != nil {
-			onArchiveHookAfterStart(cancel)
+			onArchiveHookAfterStart(cmd, cancel)
 		}
 		err = cmd.Wait()
 	}
