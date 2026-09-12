@@ -376,7 +376,7 @@ func exposureWarning(cfg *Config, key string) string {
 	if !ListenerServesUnauthenticatedNetwork(addr, cfg.RequireToken) {
 		return ""
 	}
-	return fmt.Sprintf("WARNING: network.listen_addr %q is reachable from the network and network.require_token is false, which puts a "+
+	return fmt.Sprintf("network.listen_addr %q is reachable from the network and network.require_token is false, which puts a "+
 		"plain-HTTP control plane with no authentication in front of anyone who can reach it — including "+
 		"DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. "+
 		"Run `af config set network.require_token true` to require a token (`af token show` prints it), or set network.listen_addr "+
