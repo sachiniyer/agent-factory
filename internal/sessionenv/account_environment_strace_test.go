@@ -274,22 +274,61 @@ func TestValidateAccountEnvironmentCommand_FailClosedBoundaryStaysNarrow(t *test
 	}
 }
 
-func TestValidateAccountEnvironmentCommand_AllowsQuotedDynamicStraceAttachPID(t *testing.T) {
-	for _, command := range []string{
-		`strace -p "$PID"`,
-		`strace --attach "$PID"`,
-	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
-			"attach-only command %q launches no child whose account environment could be changed", command)
+func TestValidateAccountEnvironmentCommand_StraceAttachPIDForms(t *testing.T) {
+	options := []struct {
+		name      string
+		separated string
+		attached  string
+	}{
+		{name: "short", separated: "-p ", attached: "-p"},
+		{name: "clustered short", separated: "-fp ", attached: "-fp"},
+		{name: "long", separated: "--attach ", attached: "--attach="},
+		{name: "abbreviated long", separated: "--att ", attached: "--att="},
+	}
+	operands := []struct {
+		name  string
+		value string
+	}{
+		{name: "bare", value: "1234"},
+		{name: "quoted", value: `"$PID"`},
+	}
+	for _, option := range options {
+		for _, layout := range []struct {
+			name   string
+			prefix string
+		}{
+			{name: "separated", prefix: option.separated},
+			{name: "attached", prefix: option.attached},
+		} {
+			for _, operand := range operands {
+				command := "strace " + layout.prefix + operand.value
+				t.Run(option.name+"/"+layout.name+"/"+operand.name, func(t *testing.T) {
+					require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+						"attach-only command %q launches no child whose account environment could be changed", command)
+					require.Error(t,
+						ValidateAccountEnvironmentCommand(
+							command+" env CODEX_HOME=/other codex",
+							scopedProcessTabAccount(),
+						),
+						"attach option in %q must not conceal a trailing child", command,
+					)
+				})
+			}
+		}
 	}
 
 	for _, command := range []string{
-		`strace -p "$PID" env CODEX_HOME=/other codex`,
-		`strace --attach "$PID" env CODEX_HOME=/other codex`,
 		`strace -p $PID`,
+		`strace -p$PID`,
+		`strace -fp $PID`,
+		`strace -fp$PID`,
+		`strace --attach $PID`,
+		`strace --attach=$PID`,
+		`strace --att $PID`,
+		`strace --att=$PID`,
 		`strace --attach "$@"`,
 	} {
 		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
-			"dynamic PID operand in %q must not conceal a trailing child", command)
+			"expanding PID in %q can change the argv boundary and must fail closed", command)
 	}
 }

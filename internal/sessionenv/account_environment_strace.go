@@ -8,6 +8,11 @@ import (
 
 type straceOptionResult uint8
 
+type straceOptionToken struct {
+	literalPrefix       string
+	quotedAttachOperand bool
+}
+
 const (
 	straceOptionContinue straceOptionResult = iota
 	straceOptionStops
@@ -97,10 +102,11 @@ var straceLongSelfContainedPrefixCollisions = map[string]struct{}{
 func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
 	deferredUnsafe := false
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
-		if !literal {
+		token, parsed := parseStraceOptionToken(words[0])
+		if !parsed {
 			return nil, true
 		}
+		option := token.literalPrefix
 		if option == "--" {
 			return words[1:], deferredUnsafe
 		}
@@ -111,9 +117,9 @@ func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Wo
 		var consumed int
 		var result straceOptionResult
 		if strings.HasPrefix(option, "--") {
-			consumed, result = parseStraceLongOption(words, names)
+			consumed, result = parseStraceLongOption(words, token, names)
 		} else {
-			consumed, result = parseStraceShortOptions(words, names)
+			consumed, result = parseStraceShortOptions(words, token, names)
 		}
 		switch result {
 		case straceOptionContinue:
@@ -132,8 +138,12 @@ func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Wo
 	return nil, deferredUnsafe
 }
 
-func parseStraceLongOption(words []*syntax.Word, names map[string]struct{}) (int, straceOptionResult) {
-	value, _ := literalShellWord(words[0])
+func parseStraceLongOption(
+	words []*syntax.Word,
+	token straceOptionToken,
+	names map[string]struct{},
+) (int, straceOptionResult) {
+	value := token.literalPrefix
 	option, attachedValue, attached := strings.Cut(value, "=")
 	canonical, result := classifyStraceLongOption(option)
 	switch result {
@@ -149,13 +159,13 @@ func parseStraceLongOption(words []*syntax.Word, names map[string]struct{}) (int
 	if canonical == "" {
 		return 1, straceOptionContinue
 	}
-	operand, consumed, ok := straceOptionValue(words, attachedValue, attached)
-	if !ok && canonical == "--attach" && !attached && len(words) > 1 &&
-		isSimpleQuotedParameterWord(words[1]) {
-		// A read-only scalar expansion inside double quotes is exactly one argv
-		// word. It therefore fills -p's operand without hiding the next word;
-		// continue scanning because strace may also have a trailing child.
-		consumed, ok = 2, true
+	var operand string
+	var consumed int
+	var ok bool
+	if canonical == "--attach" {
+		operand, consumed, ok = straceAttachOptionValue(words, token, attachedValue, attached)
+	} else {
+		operand, consumed, ok = straceOptionValue(words, attachedValue, attached)
 	}
 	if !ok {
 		return 0, straceOptionUnsafe
@@ -235,8 +245,12 @@ func straceLongOptionFamily(option string) string {
 	return option
 }
 
-func parseStraceShortOptions(words []*syntax.Word, names map[string]struct{}) (int, straceOptionResult) {
-	value, _ := literalShellWord(words[0])
+func parseStraceShortOptions(
+	words []*syntax.Word,
+	token straceOptionToken,
+	names map[string]struct{},
+) (int, straceOptionResult) {
+	value := token.literalPrefix
 	for idx := 1; idx < len(value); idx++ {
 		flag := value[idx]
 		switch {
@@ -250,11 +264,13 @@ func parseStraceShortOptions(words []*syntax.Word, names map[string]struct{}) (i
 			if attached {
 				attachedValue = value[idx+1:]
 			}
-			operand, consumed, ok := straceOptionValue(words, attachedValue, attached)
-			if !ok && flag == 'p' && !attached && len(words) > 1 &&
-				isSimpleQuotedParameterWord(words[1]) {
-				// See the matching --attach case above.
-				consumed, ok = 2, true
+			var operand string
+			var consumed int
+			var ok bool
+			if flag == 'p' {
+				operand, consumed, ok = straceAttachOptionValue(words, token, attachedValue, attached)
+			} else {
+				operand, consumed, ok = straceOptionValue(words, attachedValue, attached)
 			}
 			if !ok {
 				return 0, straceOptionUnsafe
@@ -275,11 +291,56 @@ func parseStraceShortOptions(words []*syntax.Word, names map[string]struct{}) (i
 	return 1, straceOptionContinue
 }
 
+func parseStraceOptionToken(word *syntax.Word) (straceOptionToken, bool) {
+	if value, literal := literalShellWord(word); literal {
+		return straceOptionToken{literalPrefix: value}, true
+	}
+	if word == nil || len(word.Parts) < 2 || !isSimpleQuotedParameterPart(word.Parts[len(word.Parts)-1]) {
+		return straceOptionToken{}, false
+	}
+	var prefix strings.Builder
+	for _, part := range word.Parts[:len(word.Parts)-1] {
+		if !appendLiteralShellPart(&prefix, part) {
+			return straceOptionToken{}, false
+		}
+	}
+	if !straceAttachConsumesQuotedSuffix(prefix.String()) {
+		return straceOptionToken{}, false
+	}
+	return straceOptionToken{literalPrefix: prefix.String(), quotedAttachOperand: true}, true
+}
+
+func straceAttachConsumesQuotedSuffix(prefix string) bool {
+	if strings.HasPrefix(prefix, "--") {
+		option, _, attached := strings.Cut(prefix, "=")
+		canonical, result := classifyStraceLongOption(option)
+		return attached && result == straceOptionContinue && canonical == "--attach"
+	}
+	if len(prefix) < 2 || prefix[0] != '-' {
+		return false
+	}
+	for idx := 1; idx < len(prefix); idx++ {
+		flag := prefix[idx]
+		if flag == straceShortHelpOption || flag == straceShortVersionOption ||
+			flag == straceShortOptionValueSeparator {
+			return false
+		}
+		if strings.ContainsRune(straceShortOptionsWithSeparateValue, rune(flag)) {
+			return flag == 'p'
+		}
+	}
+	return false
+}
+
 func isSimpleQuotedParameterWord(word *syntax.Word) bool {
 	if word == nil || len(word.Parts) != 1 {
 		return false
 	}
-	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
+	return isSimpleQuotedParameterPart(word.Parts[0])
+}
+
+func isSimpleQuotedParameterPart(part syntax.WordPart) bool {
+	quoted, ok := part.(*syntax.DblQuoted)
 	if !ok || quoted.Dollar || len(quoted.Parts) != 1 {
 		return false
 	}
@@ -288,6 +349,25 @@ func isSimpleQuotedParameterWord(word *syntax.Word) bool {
 		exp.Flags == nil && exp.NestedParam == nil && exp.Index == nil &&
 		len(exp.Modifiers) == 0 && exp.Slice == nil && exp.Repl == nil && exp.Exp == nil &&
 		!exp.Excl && !exp.Length && !exp.Width && !exp.IsSet && exp.Names == 0
+}
+
+func straceAttachOptionValue(
+	words []*syntax.Word,
+	token straceOptionToken,
+	attachedValue string,
+	attached bool,
+) (string, int, bool) {
+	if token.quotedAttachOperand {
+		return "", 1, true
+	}
+	operand, consumed, ok := straceOptionValue(words, attachedValue, attached)
+	if ok || attached || len(words) < 2 || !isSimpleQuotedParameterWord(words[1]) {
+		return operand, consumed, ok
+	}
+	// A read-only scalar expansion inside double quotes is exactly one argv
+	// word. It fills -p's operand without hiding the next word; the caller keeps
+	// scanning because strace may also have a trailing child.
+	return "", 2, true
 }
 
 func straceOptionValue(words []*syntax.Word, attachedValue string, attached bool) (string, int, bool) {
