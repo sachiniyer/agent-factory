@@ -139,8 +139,7 @@ func TestControlServerDeliverPromptBindsTargetSendToTaskGeneration(t *testing.T)
 	origHook := testHookDeliverAfterTargetLock
 	t.Cleanup(func() { testHookDeliverAfterTargetLock = origHook })
 	testHookDeliverAfterTargetLock = func() {
-		require.False(t, server.scheduler.deliveryMu.TryLock(),
-			"the task-delivery lock must remain held through the irreversible target send")
+		assertTaskDeliveryFenceHeldAndScoped(t, server.scheduler, tsk.ID)
 		require.True(t, server.scheduler.controlMu.TryLock(),
 			"target delivery must not need the watcher stop/join lock")
 		server.scheduler.controlMu.Unlock()
@@ -215,10 +214,7 @@ func TestControlServerCreateSessionBindsPromptSendToTaskGeneration(t *testing.T)
 			readyFakeBackend: readyFakeBackend{FakeBackend: fake},
 			observe: func() {
 				promptObserved = true
-				if server.scheduler.deliveryMu.TryLock() {
-					server.scheduler.deliveryMu.Unlock()
-					t.Fatal("task create released the generation fence before its prompt side effect")
-				}
+				assertTaskDeliveryFenceHeldAndScoped(t, server.scheduler, tsk.ID)
 				require.True(t, server.scheduler.controlMu.TryLock(),
 					"task create must not need the watcher stop/join lock")
 				server.scheduler.controlMu.Unlock()
@@ -234,6 +230,22 @@ func TestControlServerCreateSessionBindsPromptSendToTaskGeneration(t *testing.T)
 	}, &resp)
 	require.NoError(t, err)
 	require.True(t, promptObserved, "the witness must reach the irreversible prompt side effect")
+}
+
+func assertTaskDeliveryFenceHeldAndScoped(
+	t *testing.T, scheduler *taskScheduler, taskID string,
+) {
+	t.Helper()
+	if unlock, ok := scheduler.tryLockDelivery(taskID); ok {
+		unlock()
+		t.Fatal("task delivery released its generation fence before the irreversible prompt send")
+	}
+
+	otherUnlock, ok := scheduler.tryLockDelivery("unrelated-task")
+	if !ok {
+		t.Fatal("one task delivery blocked an unrelated task's generation fence")
+	}
+	otherUnlock()
 }
 
 type observedPromptBackend struct {

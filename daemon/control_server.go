@@ -136,12 +136,41 @@ func (s *controlServer) lockTaskControl() (func(), error) {
 	return s.scheduler.controlMu.Unlock, nil
 }
 
-func (s *controlServer) lockTaskDelivery() (func(), error) {
+func (s *controlServer) lockTaskDelivery(taskID string) (func(), error) {
 	if s.scheduler == nil {
 		return nil, fmt.Errorf("this daemon does not host a task scheduler")
 	}
-	s.scheduler.deliveryMu.Lock()
-	return s.scheduler.deliveryMu.Unlock, nil
+	return s.scheduler.lockDelivery(taskID), nil
+}
+
+// lockTaskMutation acquires the store-wide control lock and one task's delivery
+// fence without ever waiting on either while holding the other. A full reload
+// holds controlMu while joining watchers, and a watcher may be waiting on its
+// task fence; a fixed lock order would therefore either deadlock that join or
+// let one slow task block unrelated CRUD behind controlMu. Try/retry keeps both
+// invariants: same-task mutation cannot cross a delivery, while unrelated task
+// operations remain independent.
+func (s *controlServer) lockTaskMutation(taskID string) (func(), func(), error) {
+	if s.scheduler == nil {
+		return nil, nil, fmt.Errorf("this daemon does not host a task scheduler")
+	}
+	for {
+		s.scheduler.controlMu.Lock()
+		if deliveryUnlock, ok := s.scheduler.tryLockDelivery(taskID); ok {
+			return s.scheduler.controlMu.Unlock, deliveryUnlock, nil
+		}
+		s.scheduler.controlMu.Unlock()
+
+		// Wait without controlMu. If it is free when this task fence becomes ours,
+		// take it without waiting; otherwise release and retry from the other side.
+		// At no point can a full reload's watcher join wait behind a fence whose
+		// owner is itself waiting for controlMu.
+		deliveryUnlock := s.scheduler.lockDelivery(taskID)
+		if s.scheduler.controlMu.TryLock() {
+			return s.scheduler.controlMu.Unlock, deliveryUnlock, nil
+		}
+		deliveryUnlock()
+	}
 }
 
 // scope is how much of the watcher supervisor this refresh may touch: the CRUD
@@ -375,7 +404,7 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 		// prompt side effect, under the same fence targeted delivery uses. Task
 		// CRUD releases this lock before watcher reconciliation, so this does not
 		// participate in the controlMu -> watcher join cycle.
-		unlock, err := s.lockTaskDelivery()
+		unlock, err := s.lockTaskDelivery(req.TaskID)
 		if err != nil {
 			return err
 		}
@@ -768,7 +797,7 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 		return err
 	}
 	if req.TaskID != "" {
-		unlock, err := s.lockTaskDelivery()
+		unlock, err := s.lockTaskDelivery(req.TaskID)
 		if err != nil {
 			return err
 		}

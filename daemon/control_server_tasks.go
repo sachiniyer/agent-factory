@@ -72,15 +72,11 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	unlock, err := s.lockTaskControl()
+	unlock, deliveryUnlock, err := s.lockTaskMutation(req.Task.ID)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	deliveryUnlock, err := s.lockTaskDelivery()
-	if err != nil {
-		return err
-	}
 	deliveryLocked := true
 	defer func() {
 		if deliveryLocked {
@@ -139,15 +135,11 @@ func (s *controlServer) updateTask(ctx context.Context, req UpdateTaskRequest, r
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	unlock, err := s.lockTaskControl()
+	unlock, deliveryUnlock, err := s.lockTaskMutation(req.ID)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	deliveryUnlock, err := s.lockTaskDelivery()
-	if err != nil {
-		return err
-	}
 	deliveryLocked := true
 	defer func() {
 		if deliveryLocked {
@@ -249,20 +241,22 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	unlock, err := s.lockTaskControl()
+	unlock, deliveryUnlock, err := s.lockTaskMutation(req.ID)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	deliveryUnlock, err := s.lockTaskDelivery()
-	if err != nil {
-		return err
-	}
+	deliveryLocked := true
+	defer func() {
+		if deliveryLocked {
+			deliveryUnlock()
+		}
+	}()
 	if err := task.RemoveTask(req.ID, req.Expect); err != nil {
-		deliveryUnlock()
 		return err
 	}
 	deliveryUnlock()
+	deliveryLocked = false
 	resp.OK = true
 	// Removal is already durable at this point. Announce that commit even when
 	// the scheduler/watch reload cannot apply it in-process.

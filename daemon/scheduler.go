@@ -22,17 +22,18 @@ type taskScheduler struct {
 	// distinct objects but share this scheduler, so the lock must live here
 	// rather than on either transport wrapper.
 	controlMu sync.Mutex
-	// deliveryMu closes the task-generation check-to-send gap without making an
-	// in-flight watcher delivery depend on controlMu. Task CRUD holds it only
-	// through the durable tasks.json mutation, then releases it before watcher
-	// reconciliation stops and joins the old watcher. Target delivery holds it
-	// from its authoritative generation/enabled read through the irreversible
-	// prompt send. Keeping these concerns on separate locks prevents the cycle
-	// controlMu -> watcher stop/join -> delivery -> controlMu.
-	deliveryMu sync.Mutex
-	mu         sync.Mutex
-	cron       *cron.Cron
-	entries    map[string]scheduledEntry // task ID → what the cron is holding for it
+	// deliveryMu guards deliveryFences; each task ID has its own fence closing the
+	// generation check-to-send gap without serializing unrelated automation.
+	// Task CRUD atomically acquires controlMu plus its task fence without waiting
+	// on either while holding the other, holds the fence only through the durable
+	// tasks.json mutation, then releases it before watcher reconciliation stops
+	// and joins the old watcher. Delivery holds the same task fence from its
+	// authoritative generation/enabled read through the irreversible prompt send.
+	deliveryMu     sync.Mutex
+	deliveryFences map[string]*taskDeliveryFence
+	mu             sync.Mutex
+	cron           *cron.Cron
+	entries        map[string]scheduledEntry // task ID → what the cron is holding for it
 	// armed latches on the first completed reload. Before it, an empty entry set
 	// means "arming has not run yet", not "nothing is armed" — the daemon accepts
 	// control RPCs while it is still warming up, and reporting every task as
@@ -59,6 +60,53 @@ type taskScheduler struct {
 	applyTasks func([]task.Task) error
 	parse      func(expr string) (cron.Schedule, error)
 	runTask    func(taskID string)
+}
+
+type taskDeliveryFence struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (s *taskScheduler) lockDelivery(taskID string) func() {
+	fence := s.retainDeliveryFence(taskID)
+	fence.mu.Lock()
+	return func() { s.releaseDeliveryFence(taskID, fence, true) }
+}
+
+func (s *taskScheduler) tryLockDelivery(taskID string) (func(), bool) {
+	fence := s.retainDeliveryFence(taskID)
+	if !fence.mu.TryLock() {
+		s.releaseDeliveryFence(taskID, fence, false)
+		return nil, false
+	}
+	return func() { s.releaseDeliveryFence(taskID, fence, true) }, true
+}
+
+func (s *taskScheduler) retainDeliveryFence(taskID string) *taskDeliveryFence {
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+	if s.deliveryFences == nil {
+		s.deliveryFences = make(map[string]*taskDeliveryFence)
+	}
+	fence := s.deliveryFences[taskID]
+	if fence == nil {
+		fence = &taskDeliveryFence{}
+		s.deliveryFences[taskID] = fence
+	}
+	fence.refs++
+	return fence
+}
+
+func (s *taskScheduler) releaseDeliveryFence(taskID string, fence *taskDeliveryFence, held bool) {
+	if held {
+		fence.mu.Unlock()
+	}
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+	fence.refs--
+	if fence.refs == 0 && s.deliveryFences[taskID] == fence {
+		delete(s.deliveryFences, taskID)
+	}
 }
 
 // scheduledEntry pairs a live cron entry with the DEFINITION it was built from.
