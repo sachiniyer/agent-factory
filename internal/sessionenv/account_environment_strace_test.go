@@ -98,6 +98,77 @@ func TestValidateAccountEnvironmentCommand_StraceKVMValue(t *testing.T) {
 		"--kvm's attached value must be consumed before inspecting the child")
 }
 
+func TestValidateAccountEnvironmentCommand_StraceStackTraceSpellings(t *testing.T) {
+	for _, spelling := range []string{"--stack-trace", "--stack-traces"} {
+		t.Run(spelling, func(t *testing.T) {
+			require.NoError(t,
+				ValidateAccountEnvironmentCommand(
+					"strace "+spelling+" npm run dev",
+					scopedProcessTabAccount(),
+				),
+				"bare %s must leave the child executable visible", spelling)
+			require.NoError(t,
+				ValidateAccountEnvironmentCommand(
+					"strace "+spelling+"=symbol npm run dev",
+					scopedProcessTabAccount(),
+				),
+				"%s's optional value must remain attached", spelling)
+			require.Error(t,
+				ValidateAccountEnvironmentCommand(
+					"strace "+spelling+" env CODEX_HOME=/other codex",
+					scopedProcessTabAccount(),
+				),
+				"bare %s must not consume the env executable", spelling)
+		})
+	}
+}
+
+func TestValidateAccountEnvironmentCommand_StraceAlternativeSpellings(t *testing.T) {
+	for _, option := range []string{"--failing-only", "--pidns-translation"} {
+		require.Error(t,
+			ValidateAccountEnvironmentCommand(
+				"strace "+option+" env CODEX_HOME=/other codex",
+				scopedProcessTabAccount(),
+			),
+			"argument-free alias %s must leave the child executable visible", option)
+	}
+
+	for option, value := range map[string]string{
+		"--decode-pid": "comm",
+		"--signals":    "none",
+		"--trace-fd":   "3",
+	} {
+		require.NoError(t,
+			ValidateAccountEnvironmentCommand(
+				"strace "+option+"="+value+" npm run dev",
+				scopedProcessTabAccount(),
+			),
+			"required-value alias %s must consume its own value", option)
+	}
+
+	for option, value := range map[string]string{
+		"--daemonised": "grandchild",
+		"--daemonized": "grandchild",
+		"--decode-fd":  "path",
+		"--silence":    "none",
+		"--silent":     "none",
+		"--timestamps": "time",
+	} {
+		require.NoError(t,
+			ValidateAccountEnvironmentCommand(
+				"strace "+option+"="+value+" npm run dev",
+				scopedProcessTabAccount(),
+			),
+			"optional-value alias %s must keep an attached value", option)
+		require.Error(t,
+			ValidateAccountEnvironmentCommand(
+				"strace "+option+" env CODEX_HOME=/other codex",
+				scopedProcessTabAccount(),
+			),
+			"bare optional-value alias %s must leave the child executable visible", option)
+	}
+}
+
 func TestValidateAccountEnvironmentCommand_FailClosedBoundaryStaysNarrow(t *testing.T) {
 	for _, command := range []string{
 		"echo CODEX_HOME=/tmp",

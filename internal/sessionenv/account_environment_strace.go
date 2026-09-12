@@ -59,6 +59,10 @@ func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Wo
 func parseStraceLongOption(words []*syntax.Word, names map[string]struct{}) (int, straceOptionResult) {
 	value, _ := literalShellWord(words[0])
 	option, attachedValue, attached := strings.Cut(value, "=")
+	// Keep accepted cross-version aliases in the same arity branch as their
+	// canonical spelling. A spelling unsupported by the installed strace exits
+	// before launching a child, while omitting one that another release accepts
+	// would reject a valid scoped process command.
 	switch option {
 	case "--help", "--version":
 		if attached {
@@ -77,24 +81,25 @@ func parseStraceLongOption(words []*syntax.Word, names map[string]struct{}) (int
 			return 0, straceOptionUnsafe
 		}
 		return consumed, straceOptionContinue
-	case "--debug", "--follow-forks", "--instruction-pointer", "--kill-on-exit",
+	case "--debug", "--failing-only", "--follow-forks", "--instruction-pointer", "--kill-on-exit",
 		"--no-abbrev", "--output-append-mode", "--output-separately", "--seccomp-bpf",
-		"--successful-only", "--failed-only", "--summary", "--summary-only",
+		"--successful-only", "--failed-only", "--pidns-translation", "--summary", "--summary-only",
 		"--summary-wall-clock", "--syscall-number":
 		if attached {
 			return 0, straceOptionUnsafe
 		}
 		return 1, straceOptionContinue
-	case "--absolute-timestamps", "--daemonize", "--decode-fds", "--quiet",
-		"--relative-timestamps", "--stack-trace", "--strings-in-hex", "--syscall-times", "--tips":
+	case "--absolute-timestamps", "--daemonize", "--daemonised", "--daemonized",
+		"--decode-fd", "--decode-fds", "--quiet", "--relative-timestamps", "--silence", "--silent",
+		"--stack-trace", "--stack-traces", "--strings-in-hex", "--syscall-times", "--timestamps", "--tips":
 		// These options take an optional value only in attached `=value` form.
 		return 1, straceOptionContinue
 	case "--abbrev", "--argv0", "--attach", "--columns", "--const-print-style",
-		"--decode-pids", "--detach-on", "--fault", "--inject", "--interruptible",
-		"--kvm", "--raw", "--read", "--signal", "--stack-trace-frame-limit",
+		"--decode-pid", "--decode-pids", "--detach-on", "--fault", "--inject", "--interruptible",
+		"--kvm", "--raw", "--read", "--signal", "--signals", "--stack-trace-frame-limit",
 		"--status", "--string-limit", "--summary-columns", "--summary-sort-by",
 		"--summary-syscall-overhead", "--syscall-limit", "--trace", "--trace-fds",
-		"--trace-path", "--user", "--verbose", "--write":
+		"--trace-fd", "--trace-path", "--user", "--verbose", "--write":
 		_, consumed, ok := straceOptionValue(words, attachedValue, attached)
 		if !ok {
 			return 0, straceOptionUnsafe
