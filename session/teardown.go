@@ -241,9 +241,9 @@ func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName s
 	// weaker statement that includes a create whose pane spawned and whose setup
 	// then failed, and skipping the gate for THAT would delete a worktree under a
 	// live agent — see ProvenNoPane.
-	// Not blind either: a session that provably never created a pane has no
-	// forgotten ancestry to stand in for, so there is nothing for the occupancy
-	// check to look for (#2998).
+	// Not blind either: neither case (never-created-a-pane nor conclusive
+	// non-blind close) can have forgotten ancestry to stand in for, so there
+	// is nothing for the occupancy check to look for (#2998).
 	if ts.ProvenNoPane() {
 		return stateKnown, false, nil
 	}

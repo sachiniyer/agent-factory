@@ -299,6 +299,14 @@ func (t *TmuxSession) CloseAndWaitForPaneExitTrustingOwnGeneration() (PaneState,
 }
 
 func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneState, bool, error) {
+	// Invalidate any prior proof before starting a fresh close attempt. A
+	// previously latched true persists through a blind refusal or a
+	// PaneStateUnknown return — neither of those re-routes through the latch
+	// clearing entry points (Start or RestoreWithResult's live-session branch) —
+	// so the stale latch could skip teardown on a subsequent kill/archive while a
+	// real pane is still running (#703b4a70 follow-up). Clear here and re-latch
+	// below only on conclusive non-blind success.
+	t.setProvenNoPane(false)
 	pid, pidErr := t.panePID()
 	var (
 		paneProcess proctree.Process
@@ -410,6 +418,24 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 	// comes from Close, and the nothing-still-writing fact comes from the captured
 	// process set, which INCLUDES the pane leader. Neither depends on the PID
 	// query, so it has nothing left to tell the caller.
+	//
+	// A conclusive teardown that OBSERVED the pane (blind is false) leaves nothing
+	// behind this name, so latch the pane-gone proof. A redundant teardown can
+	// then skip re-closing an already-dead session via the ProvenNoPane guard
+	// instead of re-classifying it as blind and wrapping
+	// ErrAccountSwapAgentTeardownBlind onto an unrelated error — the
+	// respawnFresh path, whose inner finishRecoverTabFailure already closed the
+	// pane conclusively before its outer stopForAccountSwap runs (#703b4a70).
+	//
+	// Only the non-blind branch latches. A blind conclusive close (session gone
+	// with no pane observed, ancestry lost) keeps the proof false so a later
+	// destructive teardown still runs its marker occupancy scan (#2998), and an
+	// inconclusive close (PaneStateUnknown) stays false so the backstop close in
+	// stopForAccountSwap still runs on the ts.Start-failure path where no inner
+	// close ever ran (#703b4a70).
+	if !blind {
+		t.setProvenNoPane(true)
+	}
 	return PaneStateKnown, blind, nil
 }
 
