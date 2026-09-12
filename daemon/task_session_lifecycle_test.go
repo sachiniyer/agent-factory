@@ -296,6 +296,36 @@ func TestTaskSessionLifecycle_ReplacementGenerationCannotReapPredecessorSession(
 		"a replacement generation must not apply its destructive on_complete policy to its predecessor")
 }
 
+func TestTaskSessionLifecycle_PreGenerationOwnershipKeepsTheSession(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSessionForGeneration(
+		t, manager, repoID, repoPath, "legacy-run", "legacy-task", "",
+	)
+
+	prev := loadTasksForRepoID
+	loadTasksForRepoID = func(string) ([]task.Task, []task.Task, error) {
+		return []task.Task{{
+			ID: "legacy-task", GenerationID: "", OnComplete: task.OnCompleteKill,
+		}}, nil, nil
+	}
+	t.Cleanup(func() { loadTasksForRepoID = prev })
+
+	verb, err := manager.taskSessionLifecycle(repoID, "legacy-task", "")
+	require.NoError(t, err, "a legacy identity is an ownership refusal, not a store failure")
+	require.Equal(t, task.OnCompleteKeep, verb,
+		"an absent generation cannot authorize a destructive lifecycle action")
+
+	was := endRunOnIdleEdge(t, inst)
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, was)
+
+	time.Sleep(200 * time.Millisecond)
+	manager.mu.Lock()
+	_, stillRegistered := manager.instances[daemonInstanceKey(repoID, inst.Title)]
+	manager.mu.Unlock()
+	require.True(t, stillRegistered,
+		"a pre-generation task session must remain available after its run ends")
+}
+
 // TestTaskSessionLifecycle_IgnoresSessionsNoTaskSpawned: a session a user made by
 // hand has no TaskID, so no policy can reach it however it settles.
 func TestTaskSessionLifecycle_IgnoresSessionsNoTaskSpawned(t *testing.T) {
