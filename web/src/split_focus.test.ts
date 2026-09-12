@@ -89,6 +89,29 @@ test("focus() returns false when the tree is empty (focusedId null)", () => {
   assert.equal(view.focus(), false);
 });
 
+test("settledTab follows the focused identity through a pending roster reorder", async () => {
+  const { resetIds, singleLeaf } = await import("./layout.js");
+  resetIds();
+  const focused = singleLeaf(1);
+  const view = new SplitView(null as unknown as HTMLElement, noopCallbacks());
+  const internals = view as unknown as {
+    sessionId: string | null;
+    tree: unknown;
+    focusedId: string | null;
+    tabIds: string[];
+  };
+  internals.sessionId = "session-a";
+  internals.tree = focused;
+  internals.focusedId = focused.id;
+  internals.tabIds = ["agent", "focused", "other"];
+
+  assert.equal(
+    view.settledTab("session-a", ["agent", "other", "focused"]),
+    2,
+    "the new roster ordinal must be resolved before AppShell observes the update",
+  );
+});
+
 // --- cyclePane (Alt+j/k) must honor the same boolean -------------------------
 //
 // nav.ts fires Alt+j/k in EITHER mode, resolved BEFORE the terminal branch, so a user

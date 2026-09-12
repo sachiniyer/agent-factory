@@ -2432,13 +2432,14 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
       selectedId = null;
     }
   }
-  // An unchanged selection keeps its active tab; one the snapshot MOVED (the selected
-  // session was archived/killed, so pickSelection landed elsewhere) takes the tab its
-  // retained layout will settle on rather than asserting 0 (#1855, as moveSelection).
-  const settled =
-    selectedId === prevSel
-      ? store.get().activeTab
-      : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
+  // The split layout owns which TAB is focused; resolve its retained identity against
+  // this roster before store.set synchronously rerenders AppShell. Keeping the old
+  // ordinal for an unchanged selection is wrong when another client reordered tabs:
+  // until syncSplit remaps the layout, that ordinal names a neighbour. A changed
+  // selection uses the same retained-layout rule (#1855, as moveSelection).
+  const settled = selectedId
+    ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId))
+    : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
   // Evidence distinguishes causal completion from delayed updates/cache repaints.

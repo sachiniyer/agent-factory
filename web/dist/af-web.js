@@ -12923,7 +12923,11 @@ var SplitView = class {
    *  settled tab keeps the store's claim and the pane's binding the same statement. */
   settledTab(sessionId, tabIds) {
     if (sessionId === this.sessionId) {
-      return this.tree && this.focusedId ? findLeaf(this.tree, this.focusedId)?.tab ?? 0 : 0;
+      if (!this.tree || !this.focusedId) {
+        return 0;
+      }
+      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds);
+      return findLeaf(remapped, this.focusedId)?.tab ?? 0;
     }
     const retained = this.retainedTree(sessionId, tabIds);
     return retained ? leaves(retained)[0]?.tab ?? 0 : 0;
@@ -18839,7 +18843,7 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
       selectedId = null;
     }
   }
-  const settled = selectedId === prevSel ? store.get().activeTab : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
+  const settled = selectedId ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId)) : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
   if (evidence) pendingRestores.observe(authoritative.map((s) => ({

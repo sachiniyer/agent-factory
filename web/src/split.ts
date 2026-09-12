@@ -500,7 +500,15 @@ export class SplitView {
    *  settled tab keeps the store's claim and the pane's binding the same statement. */
   settledTab(sessionId: string, tabIds: string[]): number {
     if (sessionId === this.sessionId) {
-      return this.tree && this.focusedId ? (findLeaf(this.tree, this.focusedId)?.tab ?? 0) : 0;
+      if (!this.tree || !this.focusedId) {
+        return 0;
+      }
+      // The store can receive a reordered roster before setSession gets its turn in
+      // rerender. Resolve the focused leaf against that incoming identity list now;
+      // reading its old ordinal would briefly name a neighbour and make observers
+      // mistake a roster repaint for a user focus change.
+      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds);
+      return findLeaf(remapped, this.focusedId)?.tab ?? 0;
     }
     // Read the REMAPPED tree, exactly as setSession will: this answers "which tab will
     // that pane show once selected?", and the two must agree or the bar highlights one
