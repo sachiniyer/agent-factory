@@ -77,6 +77,16 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 		return err
 	}
 	defer unlock()
+	deliveryUnlock, err := s.lockTaskDelivery()
+	if err != nil {
+		return err
+	}
+	deliveryLocked := true
+	defer func() {
+		if deliveryLocked {
+			deliveryUnlock()
+		}
+	}()
 	var validate func(task.Task) error
 	targetLocked := false
 	if s.manager != nil {
@@ -100,6 +110,8 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 		s.manager.taskTargetMu.Unlock()
 		targetLocked = false
 	}
+	deliveryUnlock()
+	deliveryLocked = false
 	if err != nil {
 		return err
 	}
@@ -132,6 +144,16 @@ func (s *controlServer) updateTask(ctx context.Context, req UpdateTaskRequest, r
 		return err
 	}
 	defer unlock()
+	deliveryUnlock, err := s.lockTaskDelivery()
+	if err != nil {
+		return err
+	}
+	deliveryLocked := true
+	defer func() {
+		if deliveryLocked {
+			deliveryUnlock()
+		}
+	}()
 	var validate func(task.Task) (string, error)
 	targetLocked := false
 	if s.manager != nil {
@@ -193,6 +215,8 @@ func (s *controlServer) updateTask(ctx context.Context, req UpdateTaskRequest, r
 		s.manager.taskTargetMu.Unlock()
 		targetLocked = false
 	}
+	deliveryUnlock()
+	deliveryLocked = false
 	if err != nil {
 		return err
 	}
@@ -230,9 +254,15 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 		return err
 	}
 	defer unlock()
-	if err := task.RemoveTask(req.ID, req.Expect); err != nil {
+	deliveryUnlock, err := s.lockTaskDelivery()
+	if err != nil {
 		return err
 	}
+	if err := task.RemoveTask(req.ID, req.Expect); err != nil {
+		deliveryUnlock()
+		return err
+	}
+	deliveryUnlock()
 	resp.OK = true
 	// Removal is already durable at this point. Announce that commit even when
 	// the scheduler/watch reload cannot apply it in-process.

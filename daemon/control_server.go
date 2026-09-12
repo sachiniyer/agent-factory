@@ -136,6 +136,14 @@ func (s *controlServer) lockTaskControl() (func(), error) {
 	return s.scheduler.controlMu.Unlock, nil
 }
 
+func (s *controlServer) lockTaskDelivery() (func(), error) {
+	if s.scheduler == nil {
+		return nil, fmt.Errorf("this daemon does not host a task scheduler")
+	}
+	s.scheduler.deliveryMu.Lock()
+	return s.scheduler.deliveryMu.Unlock, nil
+}
+
 // scope is how much of the watcher supervisor this refresh may touch: the CRUD
 // callers name the one task they wrote, ReloadTasks and daemon start pass the
 // full re-arm. See watchScope (#3837).
@@ -748,7 +756,7 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 		return err
 	}
 	if req.TaskID != "" {
-		unlock, err := s.lockTaskControl()
+		unlock, err := s.lockTaskDelivery()
 		if err != nil {
 			return err
 		}

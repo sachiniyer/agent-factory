@@ -373,9 +373,11 @@ type DeliverPromptRequest struct {
 	Prompt   string `json:"prompt"`
 	// TaskID, TaskGenerationID, and TaskRepoID are daemon-internal provenance
 	// carried over GOB and excluded from HTTP/JSON so a client cannot forge task
-	// authority. The control server holds the task-mutation lock while it verifies
-	// the current generation and performs the irreversible target send; a watcher
-	// admitted by a removed task therefore cannot deliver into its replacement.
+	// authority. The control server holds the task-delivery lock while it verifies
+	// the current generation and performs the irreversible target send; task CRUD
+	// holds that same lock only through its durable mutation, so a watcher admitted
+	// by a removed task cannot deliver into its replacement without making watcher
+	// shutdown depend on the lock held by that delivery.
 	// TaskRepoID separately binds the project at the final manager boundary.
 	// TaskOrigin is the identity-independent marker that lets a legacy targeted
 	// auto-create retain a provable not-attempted outcome without claiming TaskID

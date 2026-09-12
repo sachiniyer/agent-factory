@@ -22,9 +22,17 @@ type taskScheduler struct {
 	// distinct objects but share this scheduler, so the lock must live here
 	// rather than on either transport wrapper.
 	controlMu sync.Mutex
-	mu        sync.Mutex
-	cron      *cron.Cron
-	entries   map[string]scheduledEntry // task ID → what the cron is holding for it
+	// deliveryMu closes the task-generation check-to-send gap without making an
+	// in-flight watcher delivery depend on controlMu. Task CRUD holds it only
+	// through the durable tasks.json mutation, then releases it before watcher
+	// reconciliation stops and joins the old watcher. Target delivery holds it
+	// from its authoritative generation/enabled read through the irreversible
+	// prompt send. Keeping these concerns on separate locks prevents the cycle
+	// controlMu -> watcher stop/join -> delivery -> controlMu.
+	deliveryMu sync.Mutex
+	mu         sync.Mutex
+	cron       *cron.Cron
+	entries    map[string]scheduledEntry // task ID → what the cron is holding for it
 	// armed latches on the first completed reload. Before it, an empty entry set
 	// means "arming has not run yet", not "nothing is armed" — the daemon accepts
 	// control RPCs while it is still warming up, and reporting every task as

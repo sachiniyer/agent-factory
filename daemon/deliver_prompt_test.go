@@ -139,8 +139,11 @@ func TestControlServerDeliverPromptBindsTargetSendToTaskGeneration(t *testing.T)
 	origHook := testHookDeliverAfterTargetLock
 	t.Cleanup(func() { testHookDeliverAfterTargetLock = origHook })
 	testHookDeliverAfterTargetLock = func() {
-		require.False(t, server.scheduler.controlMu.TryLock(),
-			"the task-mutation lock must remain held through the irreversible target send")
+		require.False(t, server.scheduler.deliveryMu.TryLock(),
+			"the task-delivery lock must remain held through the irreversible target send")
+		require.True(t, server.scheduler.controlMu.TryLock(),
+			"target delivery must not need the watcher stop/join lock")
+		server.scheduler.controlMu.Unlock()
 	}
 	var resp DeliverPromptResponse
 	err := server.DeliverPrompt(DeliverPromptRequest{
