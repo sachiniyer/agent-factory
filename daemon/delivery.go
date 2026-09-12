@@ -219,7 +219,7 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 	defer unlock()
 	testHookDeliverAfterTargetLock()
 
-	exists, deleting, liveness, err := m.targetSessionState(repo.ID, req.Title)
+	exists, deleting, err := m.targetSessionState(repo.ID, req.Title)
 	if err != nil {
 		// A pre-flight state refresh that failed sent nothing (#2501): the watch
 		// path must refund the rate slot this attempt reserved, not charge it.
@@ -227,12 +227,6 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 	}
 	if deleting {
 		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("target session %q is being deleted; %s", req.Title, notDeliveredMarker))
-	}
-	if err := taskPromptTargetLivenessError(req.Title, liveness, req.TaskOrigin); err != nil {
-		if errors.Is(err, errTargetLimitReached) {
-			return TaskStatusLimitParked, session.PromptNotDelivered, false, nil
-		}
-		return "", session.PromptCouldNotConfirm, false, notAttempted(err)
 	}
 	if exists {
 		// A TUI is attached full-screen to this session (#1160 pause lease), so
@@ -279,12 +273,9 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 		// send into it. Genuine conflicts (branch collisions, config errors)
 		// are not retryable and surface as-is.
 		if isConcurrentCreateErr(err) {
-			if werr := m.waitForTargetSession(repo.ID, req.Title, req.TaskOrigin); werr != nil {
-				if errors.Is(werr, errTargetLimitReached) {
-					return TaskStatusLimitParked, session.PromptNotDelivered, false, nil
-				}
-				// The target never materialized within the wait (its liveness went
-				// bad, it was deleted, or targetDeliverWait elapsed): nothing was
+			if werr := m.waitForTargetSession(repo.ID, req.Title); werr != nil {
+				// The target never materialized within the wait (it was deleted or
+				// targetDeliverWait elapsed): nothing was
 				// sent, so this is pre-flight and must refund (#2501). This is the
 				// outage path — a 30s wait that times out repeatedly would otherwise
 				// drain the budget the recovery needs.
@@ -361,39 +352,42 @@ func (m *Manager) lockTarget(repoID, title string) func() {
 }
 
 // targetSessionState reports whether a session with the given title exists for
-// the repo (in memory or persisted), whether it is mid-teardown, and the live
-// daemon instance's liveness when one is tracked. Deleting is transient
+// the repo (in memory or persisted) and whether it is mid-teardown. It does not
+// expose liveness: that point-in-time sample is not safe for delivery admission;
+// SendPromptWithStatus decides it under the per-instance observation fence.
+// Deleting is transient
 // in-memory state that is never persisted (#844/#847); the daemon's KillSession
 // path records it in killsInFlight, while TUI-initiated teardown is reflected on
 // the live instance as OpKilling.
-func (m *Manager) targetSessionState(repoID, title string) (exists, deleting bool, liveness session.Liveness, err error) {
+func (m *Manager) targetSessionState(repoID, title string) (exists, deleting bool, err error) {
 	m.mu.Lock()
 	if rerr := m.refreshLocked(); rerr != nil {
 		m.mu.Unlock()
-		return false, false, session.LivenessUnset, rerr
+		return false, false, rerr
 	}
 	key := daemonInstanceKey(repoID, title)
 	inst := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing {
-		return true, true, session.LivenessUnset, nil
+		return true, true, nil
 	}
 	if inst != nil {
-		return true, inst.IsTearingDown(), inst.GetLiveness(), nil
+		return true, inst.IsTearingDown(), nil
 	}
 
 	exists, err = repoHasSessionTitle(repoID, title)
-	return exists, false, session.LivenessUnset, err
+	return exists, false, err
 }
 
-// waitForTargetSession blocks until the target session exists, surfacing
-// undeliverable liveness states rather than delivering into them, bounded by
-// targetDeliverWait.
-func (m *Manager) waitForTargetSession(repoID, title string, taskOrigin bool) error {
+// waitForTargetSession blocks until the target session exists, bounded by
+// targetDeliverWait. Liveness is deliberately left to SendPromptWithStatus's
+// final per-instance observation fence: refusing from this point-in-time sample
+// can skip an occurrence while an already-captured healthy snapshot is settling.
+func (m *Manager) waitForTargetSession(repoID, title string) error {
 	deadline := time.Now().Add(targetDeliverWait)
 	for {
-		exists, deleting, liveness, err := m.targetSessionState(repoID, title)
+		exists, deleting, err := m.targetSessionState(repoID, title)
 		if err != nil {
 			// Carry notDeliveredMarker on EVERY error path so a wait that ends
 			// without delivering is refundable across the RPC hop (#2501). The
@@ -404,9 +398,6 @@ func (m *Manager) waitForTargetSession(repoID, title string, taskOrigin bool) er
 		}
 		if deleting {
 			return fmt.Errorf("target session %q is being deleted; %s", title, notDeliveredMarker)
-		}
-		if err := taskPromptTargetLivenessError(title, liveness, taskOrigin); err != nil {
-			return err
 		}
 		if exists {
 			return nil
