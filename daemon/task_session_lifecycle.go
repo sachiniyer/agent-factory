@@ -247,6 +247,14 @@ func (m *Manager) taskSessionLifecycle(repoID, taskID, taskGenerationID string) 
 	if err != nil {
 		return "", err
 	}
+	// Empty denotes a session and task row written before generations existed,
+	// not a shared generation. There is no token proving that a same-ID row owns
+	// the session, so keep it rather than applying archive/kill. Legacy task
+	// sessions may therefore remain for inspection after completion; that is the
+	// deliberate fail-closed side of an unprovable destructive lifecycle action.
+	if taskGenerationID == "" {
+		return task.OnCompleteKeep, nil
+	}
 	for _, t := range tasks {
 		if t.ID == taskID && t.GenerationID == taskGenerationID {
 			return t.SessionLifecycle(), nil

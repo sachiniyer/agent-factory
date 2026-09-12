@@ -16,6 +16,8 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
+const taskLifecycleTestGeneration = "task-lifecycle-test-generation"
+
 func TestTaskSessionLifecycle_CommittedArchiveWarningIsSuccessfulReap(t *testing.T) {
 	// This Manager's own warnings, not the process's: the assertions below are
 	// about what THIS lifecycle run said (#3787 part 2).
@@ -40,7 +42,9 @@ func TestTaskSessionLifecycle_CommittedArchiveWarningIsSuccessfulReap(t *testing
 // The TaskID must go through NewInstance rather than being poked in afterwards —
 // taskRunActive is derived from it at construction and is the whole subject here.
 func registerTaskSpawnedSession(t *testing.T, m *Manager, repoID, repoPath, title, taskID string) *session.Instance {
-	return registerTaskSpawnedSessionForGeneration(t, m, repoID, repoPath, title, taskID, "")
+	return registerTaskSpawnedSessionForGeneration(
+		t, m, repoID, repoPath, title, taskID, taskLifecycleTestGeneration,
+	)
 }
 
 func registerTaskSpawnedSessionForGeneration(
@@ -85,7 +89,9 @@ func stubTaskLifecycle(t *testing.T, taskID, onComplete string) {
 	t.Helper()
 	prev := loadTasksForRepoID
 	loadTasksForRepoID = func(string) ([]task.Task, []task.Task, error) {
-		return []task.Task{{ID: taskID, OnComplete: onComplete}}, nil, nil
+		return []task.Task{{
+			ID: taskID, GenerationID: taskLifecycleTestGeneration, OnComplete: onComplete,
+		}}, nil, nil
 	}
 	t.Cleanup(func() { loadTasksForRepoID = prev })
 }
@@ -101,9 +107,9 @@ func endRunOnIdleEdge(t *testing.T, inst *session.Instance) bool {
 	return was
 }
 
-// TestTaskSessionLifecycle_KeepLeavesTheFinishedSessionAlone is the compatibility
-// case, and the one that matters most: every task written before #2595 declares
-// nothing, and a finished run must still leave its session exactly where it was.
+// TestTaskSessionLifecycle_KeepLeavesTheFinishedSessionAlone is the default-policy
+// case: a current-generation task that declares nothing must still leave its
+// finished session exactly where it was.
 func TestTaskSessionLifecycle_KeepLeavesTheFinishedSessionAlone(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-keep")
