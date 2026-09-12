@@ -669,7 +669,10 @@ func alignStructMapForComparison(left, right any) (any, any, bool) {
 		return left, right, false
 	}
 
-	raw := mapSide.(map[string]any)
+	raw, ok := mapSide.(map[string]any)
+	if !ok {
+		return left, right, false
+	}
 	trimmed := make(map[string]any, len(raw))
 	for k, v := range raw {
 		trimmed[k] = v
