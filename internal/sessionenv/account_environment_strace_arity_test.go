@@ -28,30 +28,34 @@ type elfSectionImage struct {
 	data    []byte
 }
 
-func TestStraceSeparateValueTableCoversInstalledBinary(t *testing.T) {
+func TestStraceSeparateValueProofsMatchInstalledBinary(t *testing.T) {
 	stracePath := installedStracePath(t)
 	options := readInstalledStraceLongOptions(t, stracePath)
 	probe := filepath.Join(t.TempDir(), "missing", "child")
-	missing := make([]string, 0)
-	separateCount := 0
-	for _, option := range options {
-		if option.hasArg != 1 { // required_argument in getopt.h
+	checked := 0
+	for name := range straceLongOptionsWithSeparateValue {
+		var option installedStraceLongOption
+		found := false
+		for _, candidate := range options {
+			if "--"+candidate.name == name {
+				option, found = candidate, true
+				break
+			}
+		}
+		if !found {
+			// A cross-version proof unused by this binary cannot move its child:
+			// getopt rejects the unknown spelling before launch.
 			continue
 		}
-		separateCount++
-		name := "--" + option.name
+		checked++
+		require.Equal(t, uint32(1), option.hasArg,
+			"installed strace must require the operand claimed by %s", name)
 		output, _ := exec.Command(stracePath, name, probe).CombinedOutput()
 		require.NotContains(t, string(output), "Cannot stat '"+probe+"'",
 			"installed strace did not consume %s's required operand", name)
-		if _, covered := straceLongOptionsWithSeparateValue[name]; !covered {
-			missing = append(missing, name)
-		}
 	}
-	sort.Strings(missing)
-	t.Logf("strace arity oracle ran: derived %d long options and probed %d separate-value options from %s",
-		len(options), separateCount, stracePath)
-	require.Empty(t, missing,
-		"installed strace has separate-value long options missing from the child-boundary table")
+	t.Logf("strace arity oracle ran: derived %d long options and verified %d separate-value proofs against %s",
+		len(options), checked, stracePath)
 }
 
 func TestStraceEquivalentAliasPrefixesMatchInstalledOracle(t *testing.T) {
@@ -98,7 +102,7 @@ func TestStracePrefixResolverMatchesInstalledGetoptTable(t *testing.T) {
 				continue
 			}
 			checked++
-			canonical, result := classifyStraceLongOption(prefix)
+			canonical, result, _ := classifyStraceLongOption(prefix)
 			if result == straceOptionUnsafe {
 				// A cross-version union can contain an inequivalent option that
 				// makes a host-unique prefix undecidable (for example, strace 6.8's
@@ -114,15 +118,10 @@ func TestStracePrefixResolverMatchesInstalledGetoptTable(t *testing.T) {
 			}
 			require.Equal(t, straceOptionContinue, result,
 				"installed strace accepts prefix %s without ambiguity", prefix)
-			if expected.hasArg == 1 {
-				require.NotEmpty(t, canonical,
-					"installed strace consumes a separate value for prefix %s", prefix)
-			} else {
-				if canonical != "" {
-					require.Contains(t, straceLongOptionsWithVersionedArity, canonical,
-						"only an explicit cross-version arity conflict may differ from installed strace")
-					continue
-				}
+			if canonical != "" {
+				require.Equal(t, uint32(1), expected.hasArg,
+					"an arity proof for prefix %s must not skip an installed self-contained option", prefix)
+			} else if expected.hasArg != 1 {
 				require.Empty(t, canonical,
 					"installed strace keeps the next word as the child for prefix %s", prefix)
 			}

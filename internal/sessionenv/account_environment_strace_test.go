@@ -396,6 +396,30 @@ func TestValidateAccountEnvironmentCommand_StraceOutputAppendModeArity(t *testin
 	}
 }
 
+func TestValidateAccountEnvironmentCommand_StraceUnmodeledBareOptionChecksBothBoundaries(t *testing.T) {
+	for _, command := range []string{
+		"strace -A append env CODEX_HOME=/other codex",
+		"strace --some-future-flag value env CODEX_HOME=/other codex",
+	} {
+		t.Run("unsafe/"+command, func(t *testing.T) {
+			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"an unmodeled bare option in %q must expose either possible child boundary", command)
+		})
+	}
+
+	for _, command := range []string{
+		"strace -A npm run dev",
+		"strace -A append npm run dev",
+		"strace --some-future-flag npm run dev",
+		"strace --some-future-flag value npm run dev",
+	} {
+		t.Run("safe/"+command, func(t *testing.T) {
+			require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"every possible child boundary in %q is an ordinary command", command)
+		})
+	}
+}
+
 func TestValidateAccountEnvironmentCommand_StraceNoChildHazards(t *testing.T) {
 	for _, command := range []string{
 		"strace -E CODEX_HOME=/other -p 123",
@@ -448,5 +472,63 @@ func TestValidateAccountEnvironmentCommand_StraceStaticSafeDynamicSemanticPrefix
 			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 				"dynamic security-sensitive prefix in %q must fail closed", command)
 		})
+	}
+}
+
+func TestValidateAccountEnvironmentCommand_StraceQuotedSelfContainedValues(t *testing.T) {
+	for _, command := range []string{
+		`strace --decode-fds="$SET" npm run dev`,
+		`strace --some-future-flag="$VALUE" npm run dev`,
+	} {
+		t.Run("safe/"+command, func(t *testing.T) {
+			require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"the attached quoted value in %q cannot move the child boundary", command)
+		})
+	}
+
+	for _, command := range []string{
+		`strace --decode-fds="$SET" env CODEX_HOME=/other codex`,
+		`strace --some-future-flag="$VALUE" env CODEX_HOME=/other codex`,
+	} {
+		t.Run("unsafe/"+command, func(t *testing.T) {
+			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"the attached quoted value in %q must leave the mutating child visible", command)
+		})
+	}
+}
+
+func TestValidateAccountEnvironmentCommand_StraceQuotedScalarAttachPIDs(t *testing.T) {
+	for _, option := range []struct {
+		name      string
+		separated string
+		attached  string
+	}{
+		{name: "short", separated: "-p ", attached: "-p"},
+		{name: "long", separated: "--attach ", attached: "--attach="},
+	} {
+		for _, parameter := range []string{
+			`"$1"`,
+			`"$!"`,
+			`"$?"`,
+			`"$#"`,
+			`"$$"`,
+			`"$-"`,
+			`"$*"`,
+		} {
+			for _, spelling := range []string{option.separated + parameter, option.attached + parameter} {
+				command := "strace " + spelling
+				t.Run(option.name+"/"+spelling, func(t *testing.T) {
+					require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+						"quoted scalar PID in %q remains one argv word and launches no child", command)
+					require.Error(t,
+						ValidateAccountEnvironmentCommand(
+							command+" env CODEX_HOME=/other codex",
+							scopedProcessTabAccount(),
+						),
+						"attach option in %q must leave any trailing mutating child visible", command,
+					)
+				})
+			}
+		}
 	}
 }

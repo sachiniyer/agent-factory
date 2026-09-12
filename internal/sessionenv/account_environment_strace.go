@@ -14,6 +14,11 @@ type straceOptionToken struct {
 	quotedOperandMayConsumeNext bool
 }
 
+type straceOptionAction struct {
+	consumed int
+	result   straceOptionResult
+}
+
 type straceDeferredHazards struct {
 	environment bool
 	output      bool
@@ -29,11 +34,15 @@ const (
 	straceOptionUnsafe
 	straceOptionDeferredEnvironmentUnsafe
 	straceOptionDeferredOutputUnsafe
-	straceOptionAmbiguousValueBoundary
 	// Help and version stop parsing separately because they never execute a
-	// child. Every other short option that can consume the next argv word is in
-	// this set; options absent from it are self-contained in their argv word.
+	// child. Entries in this set are stable arity proofs, not an exhaustive
+	// parser: an absent short option produces both possible boundaries instead
+	// of being guessed self-contained.
 	straceShortOptionsWithSeparateValue = "abeEIoOpPsSuUX"
+	// This proof keeps clustered -fp usable when p's quoted operand is the last
+	// word. Omitting an argument-free flag merely preserves an extra boundary;
+	// only a cross-version value-taking flag may not be added here.
+	straceShortOptionsProvenSelfContained = "f"
 	// A '=' ends a short-option cluster and begins an attached value. Nothing
 	// after it can consume the following argv word.
 	straceShortOptionValueSeparator = '='
@@ -41,13 +50,12 @@ const (
 	straceShortVersionOption        = 'V'
 )
 
-// This is the complete long-option set whose required-value arity is stable
-// across the modeled versions. The child boundary depends on these names
-// (including GNU-style abbreviations), so an unresolved value fails closed.
-// Every literal option that neither names nor abbreviates a modeled family is
-// self-contained and advances one word: accepting an unfamiliar spelling can
-// then only let strace accept it or reject it before launch; it cannot hide or
-// replace the following child.
+// These are stable required-value arity proofs, not the accepted option model.
+// A proof narrows a token to the boundary after its operand. Every bare option
+// absent from this set keeps both the self-contained and separate-value
+// boundaries alive, so omitting a new strace option can cause a conservative
+// refusal but cannot hide its child. The installed-strace oracle verifies that
+// these proofs agree with the host binary.
 //
 // Keep environment/output in this arity table too. Their attached values do not
 // move the child boundary, but they have security semantics of their own and
@@ -89,13 +97,6 @@ var straceLongOptionsWithSeparateValue = map[string]struct{}{
 	"--write":                    {},
 }
 
-// This option is argument-free in strace 6.8 but has a required mode operand in
-// a newer contract. Without an attached '=', both child boundaries must be
-// checked; treating either arity as universal can hide the other one's executable.
-var straceLongOptionsWithVersionedArity = map[string]struct{}{
-	"--output-append-mode": {},
-}
-
 // All entries in straceLongOptionsWithSeparateValue have required_argument and
 // a nil flag in strace's getopt_long table. These cross-version spellings also
 // share the same val, so glibc treats a common prefix as one match rather than
@@ -117,9 +118,10 @@ var straceLongSelfContainedPrefixCollisions = map[string]struct{}{
 // unwrapStrace returns the command strace executes. Unlike an unclassified
 // literal process, strace assigns executable meaning to one of its operands,
 // so every word up to that operand must be understood before the child can be
-// inspected. Unreduced words and separate option values fail closed; literal
-// self-contained options cannot move the executable boundary and stay open to
-// spellings added by other strace versions.
+// inspected. Unreduced words fail closed. A token with no stable arity proof is
+// not represented as an "unknown self-contained option": the parser checks
+// every child boundary it could have, while syntactically attached values keep
+// their single fixed boundary without requiring an option catalogue.
 func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
 	return unwrapStraceState(words, straceDeferredHazards{}, names)
 }
@@ -142,16 +144,24 @@ func unwrapStraceState(
 			return words, hazards.affectChild()
 		}
 
-		var consumed int
-		var result straceOptionResult
+		var actions []straceOptionAction
 		if strings.HasPrefix(option, "--") {
-			consumed, result = parseStraceLongOption(words, token, names)
+			actions = parseStraceLongOption(words, token, names)
 		} else {
-			consumed, result = parseStraceShortOptions(words, token, names)
+			actions = parseStraceShortOptions(words, token, names)
 		}
-		switch result {
+		if len(actions) != 1 {
+			return nil, straceOptionActionsUnsafe(words, actions, hazards, names)
+		}
+		action := actions[0]
+		if action.consumed > len(words) {
+			// A required operand is absent, so option parsing exits before any
+			// child or executable output target can be launched.
+			return nil, false
+		}
+		switch action.result {
 		case straceOptionContinue:
-			words = words[consumed:]
+			words = words[action.consumed:]
 		case straceOptionStops:
 			// A terminal option exits during option parsing. Earlier semantic
 			// hazards whose complete argv boundaries were known never take effect.
@@ -160,12 +170,10 @@ func unwrapStraceState(
 			return nil, true
 		case straceOptionDeferredEnvironmentUnsafe:
 			hazards.environment = true
-			words = words[consumed:]
+			words = words[action.consumed:]
 		case straceOptionDeferredOutputUnsafe:
 			hazards.output = true
-			words = words[consumed:]
-		case straceOptionAmbiguousValueBoundary:
-			return nil, straceAmbiguousValueBoundaryUnsafe(words, hazards, names)
+			words = words[action.consumed:]
 		}
 	}
 	// Environment options apply only to an executed tracee. With no child there
@@ -178,55 +186,58 @@ func parseStraceLongOption(
 	words []*syntax.Word,
 	token straceOptionToken,
 	names map[string]struct{},
-) (int, straceOptionResult) {
+) []straceOptionAction {
 	value := token.literalPrefix
 	option, attachedValue, attached := strings.Cut(value, "=")
-	canonical, result := classifyStraceLongOption(option)
+	canonical, result, exact := classifyStraceLongOption(option)
 	switch result {
 	case straceOptionStops:
 		// These terminal options never launch the trailing command. An attached
 		// value is either accepted by that strace version or rejected before
 		// launch, so neither spelling needs a child-boundary decision.
-		return 0, straceOptionStops
+		actions := []straceOptionAction{{result: straceOptionStops}}
+		if !exact {
+			actions = append(actions, straceOptionAction{consumed: 1, result: straceOptionContinue})
+		}
+		return actions
 	case straceOptionUnsafe:
-		return 0, straceOptionUnsafe
+		return []straceOptionAction{{result: straceOptionUnsafe}}
 	}
 
 	if canonical == "" {
-		return 1, straceOptionContinue
-	}
-	if _, versionedArity := straceLongOptionsWithVersionedArity[canonical]; versionedArity {
 		if attached {
-			return 1, straceOptionContinue
+			return []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
 		}
-		return 0, straceOptionAmbiguousValueBoundary
+		if exact {
+			return []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
+		}
+		return stracePossibleValueBoundaries()
 	}
+	var action straceOptionAction
 	if canonical == "--env" || canonical == "--output" {
-		return parseStraceSemanticOptionValue(words, token, attachedValue, attached, canonical, names)
+		action = parseStraceSemanticOptionValue(words, token, attachedValue, attached, canonical, names)
+	} else if token.quotedOperand {
+		action = straceOptionAction{consumed: 1, result: straceOptionContinue}
+	} else {
+		_, consumed, ok := straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
+		if !ok {
+			return []straceOptionAction{{result: straceOptionUnsafe}}
+		}
+		action = straceOptionAction{consumed: consumed, result: straceOptionContinue}
 	}
-	if token.quotedOperand {
-		return 1, straceOptionContinue
-	}
-	_, consumed, ok := straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
-	if !ok {
-		return 0, straceOptionUnsafe
-	}
-	return consumed, straceOptionContinue
+	return []straceOptionAction{action}
 }
 
-func classifyStraceLongOption(option string) (string, straceOptionResult) {
+func classifyStraceLongOption(option string) (string, straceOptionResult, bool) {
 	switch option {
 	case "--help", "--version":
-		return option, straceOptionStops
-	}
-	if _, versionedArity := straceLongOptionsWithVersionedArity[option]; versionedArity {
-		return option, straceOptionContinue
+		return option, straceOptionStops, true
 	}
 	if _, takesSeparateValue := straceLongOptionsWithSeparateValue[option]; takesSeparateValue {
-		return straceLongOptionFamily(option), straceOptionContinue
+		return straceLongOptionFamily(option), straceOptionContinue, true
 	}
 	if _, exactSelfContained := straceLongSelfContainedPrefixCollisions[option]; exactSelfContained {
-		return "", straceOptionContinue
+		return "", straceOptionContinue, true
 	}
 
 	// Prefix decision table:
@@ -259,23 +270,18 @@ func classifyStraceLongOption(option string) (string, straceOptionResult) {
 			addMatch(straceLongOptionFamily(candidate), straceOptionContinue)
 		}
 	}
-	for candidate := range straceLongOptionsWithVersionedArity {
-		if strings.HasPrefix(candidate, option) {
-			addMatch(candidate, straceOptionContinue)
-		}
-	}
 	for _, candidate := range []string{"--help", "--version"} {
 		if strings.HasPrefix(candidate, option) {
 			addMatch(candidate, straceOptionStops)
 		}
 	}
 	if conflict {
-		return "", straceOptionUnsafe
+		return "", straceOptionUnsafe, false
 	}
 	if matchFamily == "" {
-		return "", straceOptionContinue
+		return "", straceOptionContinue, false
 	}
-	return matchFamily, matchResult
+	return matchFamily, matchResult, false
 }
 
 func straceLongOptionFamily(option string) string {
@@ -289,49 +295,90 @@ func parseStraceShortOptions(
 	words []*syntax.Word,
 	token straceOptionToken,
 	names map[string]struct{},
-) (int, straceOptionResult) {
+) []straceOptionAction {
+	return parseStraceShortOptionAt(words, token, names, 1)
+}
+
+func parseStraceShortOptionAt(
+	words []*syntax.Word,
+	token straceOptionToken,
+	names map[string]struct{},
+	idx int,
+) []straceOptionAction {
 	value := token.literalPrefix
-	for idx := 1; idx < len(value); idx++ {
-		flag := value[idx]
-		switch {
-		case flag == straceShortOptionValueSeparator:
-			return 1, straceOptionContinue
-		case flag == straceShortHelpOption || flag == straceShortVersionOption:
-			return 0, straceOptionStops
-		case strings.ContainsRune(straceShortOptionsWithSeparateValue, rune(flag)):
-			attached := idx+1 < len(value)
-			attachedValue := ""
-			if attached {
-				attachedValue = value[idx+1:]
+	if idx >= len(value) {
+		return []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
+	}
+	flag := value[idx]
+	switch {
+	case flag == straceShortOptionValueSeparator:
+		return []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
+	case flag == straceShortHelpOption || flag == straceShortVersionOption:
+		return []straceOptionAction{{result: straceOptionStops}}
+	case strings.ContainsRune(straceShortOptionsProvenSelfContained, rune(flag)):
+		return parseStraceShortOptionAt(words, token, names, idx+1)
+	case strings.ContainsRune(straceShortOptionsWithSeparateValue, rune(flag)):
+		attached := idx+1 < len(value)
+		attachedValue := ""
+		if attached {
+			attachedValue = value[idx+1:]
+		}
+		if flag == 'E' {
+			return []straceOptionAction{parseStraceSemanticOptionValue(
+				words, token, attachedValue, attached, "--env", names,
+			)}
+		}
+		if flag == 'o' {
+			return []straceOptionAction{parseStraceSemanticOptionValue(
+				words, token, attachedValue, attached, "--output", names,
+			)}
+		}
+		if token.quotedOperand {
+			if token.quotedOperandMayConsumeNext {
+				return stracePossibleValueBoundaries()
 			}
-			if flag == 'E' {
-				return parseStraceSemanticOptionValue(
-					words, token, attachedValue, attached, "--env", names,
-				)
-			}
-			if flag == 'o' {
-				return parseStraceSemanticOptionValue(
-					words, token, attachedValue, attached, "--output", names,
-				)
-			}
-			if token.quotedOperand {
-				if token.quotedOperandMayConsumeNext {
-					return 0, straceOptionAmbiguousValueBoundary
-				}
-				return 1, straceOptionContinue
-			}
-			_, consumed, ok := straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
-			if !ok {
-				return 0, straceOptionUnsafe
-			}
-			return consumed, straceOptionContinue
-		default:
-			// Argument-free and unfamiliar flags are both self-contained. Keep
-			// scanning because a later flag in the same cluster may take a value.
-			continue
+			return []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
+		}
+		_, consumed, ok := straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
+		if !ok {
+			return []straceOptionAction{{result: straceOptionUnsafe}}
+		}
+		return []straceOptionAction{{consumed: consumed, result: straceOptionContinue}}
+	default:
+		// An unmodeled short flag is never assigned a guessed arity. One branch
+		// treats it as argument-free and keeps parsing the cluster; the other
+		// treats the rest of this word, or the following word when it is last,
+		// as its operand. Stable arity proofs above only remove impossible
+		// branches; omissions therefore fail closed rather than hiding a child.
+		actions := parseStraceShortOptionAt(words, token, names, idx+1)
+		consumed := 1
+		if idx+1 == len(value) {
+			consumed = 2
+		}
+		return appendUniqueStraceAction(actions, straceOptionAction{
+			consumed: consumed,
+			result:   straceOptionContinue,
+		})
+	}
+}
+
+func stracePossibleValueBoundaries() []straceOptionAction {
+	return []straceOptionAction{
+		{consumed: 1, result: straceOptionContinue},
+		{consumed: 2, result: straceOptionContinue},
+	}
+}
+
+func appendUniqueStraceAction(
+	actions []straceOptionAction,
+	action straceOptionAction,
+) []straceOptionAction {
+	for _, existing := range actions {
+		if existing == action {
+			return actions
 		}
 	}
-	return 1, straceOptionContinue
+	return append(actions, action)
 }
 
 func parseStraceOptionToken(word *syntax.Word) (straceOptionToken, bool) {
@@ -368,9 +415,12 @@ func literalPrefixBeforeSimpleQuotedParameter(word *syntax.Word) (string, bool) 
 
 func straceOptionConsumesQuotedSuffix(prefix string) (bool, bool) {
 	if strings.HasPrefix(prefix, "--") {
-		option, _, attached := strings.Cut(prefix, "=")
-		canonical, result := classifyStraceLongOption(option)
-		return attached && result == straceOptionContinue && canonical != "", false
+		_, _, attached := strings.Cut(prefix, "=")
+		// Residual accepted set: any long option with a literal '=' followed by
+		// one simple quoted scalar. The '=' fixes the next-word boundary even
+		// when the expansion is empty. Long words without that literal boundary,
+		// and dynamic option names, remain unparsed and fail closed.
+		return attached, false
 	}
 	if len(prefix) < 2 || prefix[0] != '-' {
 		return false, false
@@ -402,10 +452,25 @@ func isSimpleQuotedParameterPart(part syntax.WordPart) bool {
 		return false
 	}
 	exp, ok := quoted.Parts[0].(*syntax.ParamExp)
-	return ok && exp.Param != nil && validName(exp.Param.Value) &&
+	return ok && exp.Param != nil && shellParameterExpandsToOneWord(exp.Param.Value) &&
 		exp.Flags == nil && exp.NestedParam == nil && exp.Index == nil &&
 		len(exp.Modifiers) == 0 && exp.Slice == nil && exp.Repl == nil && exp.Exp == nil &&
 		!exp.Excl && !exp.Length && !exp.Width && !exp.IsSet && exp.Names == 0
+}
+
+func shellParameterExpandsToOneWord(name string) bool {
+	if validName(name) {
+		return true
+	}
+	if name != "" && strings.IndexFunc(name, func(r rune) bool { return r < '0' || r > '9' }) < 0 {
+		return true
+	}
+	// Residual accepted set: scalar shell parameters whose double-quoted
+	// expansion always occupies exactly one argv word, including when empty.
+	// "$*" joins positional values into one word; "$@" is deliberately absent
+	// because it expands to zero or many words. Structured/modifying parameter
+	// expansions are rejected by the caller's remaining shape checks.
+	return strings.Contains("!#$*-?", name) && len(name) == 1
 }
 
 func parseStraceSemanticOptionValue(
@@ -415,25 +480,37 @@ func parseStraceSemanticOptionValue(
 	attached bool,
 	semantic string,
 	names map[string]struct{},
-) (int, straceOptionResult) {
+) straceOptionAction {
 	if token.quotedOperand {
 		if token.quotedOperandMayConsumeNext {
-			return 0, straceOptionUnsafe
+			return straceOptionAction{result: straceOptionUnsafe}
 		}
-		return 1, straceDynamicSemanticResult(semantic, attachedValue, names)
+		return straceOptionAction{
+			consumed: 1,
+			result:   straceDynamicSemanticResult(semantic, attachedValue, names),
+		}
 	}
 	operand, consumed, literal := straceOptionValue(words, attachedValue, attached)
 	if literal {
-		return consumed, straceLiteralSemanticResult(semantic, operand, names)
+		return straceOptionAction{
+			consumed: consumed,
+			result:   straceLiteralSemanticResult(semantic, operand, names),
+		}
 	}
-	if attached || len(words) < 2 {
-		return 0, straceOptionUnsafe
+	if len(words) < 2 {
+		return straceOptionAction{consumed: 2, result: straceOptionContinue}
+	}
+	if attached {
+		return straceOptionAction{result: straceOptionUnsafe}
 	}
 	prefix, dynamic := literalPrefixBeforeSimpleQuotedParameter(words[1])
 	if !dynamic {
-		return 0, straceOptionUnsafe
+		return straceOptionAction{result: straceOptionUnsafe}
 	}
-	return 2, straceDynamicSemanticResult(semantic, prefix, names)
+	return straceOptionAction{
+		consumed: 2,
+		result:   straceDynamicSemanticResult(semantic, prefix, names),
+	}
 }
 
 func straceLiteralSemanticResult(
@@ -490,6 +567,11 @@ func straceOptionValueAllowQuotedScalar(
 	attached bool,
 ) (string, int, bool) {
 	operand, consumed, ok := straceOptionValue(words, attachedValue, attached)
+	if !attached && len(words) < 2 {
+		// Preserve the missing-operand boundary. The action evaluator recognizes
+		// that it lies past argv and therefore launches no child.
+		return "", 2, true
+	}
 	if ok || attached || len(words) < 2 || !isSimpleQuotedParameterWord(words[1]) {
 		return operand, consumed, ok
 	}
@@ -498,27 +580,32 @@ func straceOptionValueAllowQuotedScalar(
 	return "", 2, true
 }
 
-func straceAmbiguousValueBoundaryUnsafe(
+func straceOptionActionsUnsafe(
 	words []*syntax.Word,
+	actions []straceOptionAction,
 	hazards straceDeferredHazards,
 	names map[string]struct{},
 ) bool {
-	// An attached value that is literal is self-contained. An attached value
-	// produced solely by an expansion may be empty; a short option then consumes
-	// the next argv word, so the token is not self-contained. Check both runtime
-	// boundaries.
-	if straceTailMutatesAccountEnvironment(words[1:], hazards, names) {
-		return true
+	for _, action := range actions {
+		if action.consumed > len(words) {
+			continue
+		}
+		branchHazards := hazards
+		switch action.result {
+		case straceOptionStops:
+			continue
+		case straceOptionUnsafe:
+			return true
+		case straceOptionDeferredEnvironmentUnsafe:
+			branchHazards.environment = true
+		case straceOptionDeferredOutputUnsafe:
+			branchHazards.output = true
+		}
+		if straceTailMutatesAccountEnvironment(words[action.consumed:], branchHazards, names) {
+			return true
+		}
 	}
-	if len(words) < 2 {
-		// The empty branch leaves a required option value missing, so strace
-		// exits before it can launch a child.
-		return false
-	}
-	if _, literal := literalShellWord(words[1]); !literal && !isSimpleQuotedParameterWord(words[1]) {
-		return true
-	}
-	return straceTailMutatesAccountEnvironment(words[2:], hazards, names)
+	return false
 }
 
 func straceTailMutatesAccountEnvironment(
