@@ -781,8 +781,11 @@ Two things the gate insists on, and both matter:
   parent, the content head, because nothing about the reviewed change moved.
   Without that the gate's own update-branch voided the approval it had just
   acted on, and #3799 livelocked: approve, update-branch, anchors reset, approve
-  again. Any other head resets as before. Reading it by hand (this is the shape
-  pre-filter; the tree proof runs in `auto-gate.js`):
+  again. Any other head resets as before. Differing blob SHAs between the PR's
+  files and the content head rule carry out immediately (cheap negative); the
+  shape check and tree proof in `auto-gate.js` are only needed when blobs
+  match. Reading it by hand (this is the shape pre-filter; the tree proof runs
+  in `auto-gate.js`):
 
 ```bash
 set -euo pipefail
