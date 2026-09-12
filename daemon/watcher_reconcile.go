@@ -139,7 +139,7 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 	// Wait for stale watchers to die before starting replacements so two
 	// processes for the same task never overlap. Bounded by stopGrace via
 	// the per-watcher SIGKILL escalation.
-	stopWatchers(stale)
+	flushedDrops := stopWatchers(stale)
 
 	for id, t := range desired {
 		if !scope.covers(id) {
@@ -149,6 +149,9 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 		// the loop above already dropped every one this reconcile may replace.
 		if _, running := s.watchers[id]; running {
 			continue
+		}
+		if dropped := flushedDrops[id]; dropped > t.DroppedEvents {
+			t.DroppedEvents = dropped
 		}
 		w := s.newTaskWatcher(t)
 		s.watchers[id] = w

@@ -865,8 +865,8 @@ Settable keys:
   keys                       compact JSON object of TUI action-to-key rebinds
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
-                             DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and network.require_token defaults to FALSE —
+                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
+                             full control plane on the network, and network.require_token defaults to false —
                              set network.require_token = true in the same breath, or anyone who can reach the
                              address controls this machine. af serves plain HTTP, so front a routable
                              listener with a TLS-terminating proxy or a private network.
@@ -877,6 +877,7 @@ Settable keys:
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
+  watcher_events_per_minute  positive integer (per-task watch delivery cap; default 10; next daemon start)
   debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
                              unix control socket only, never on the web address. A profile dumps live daemon
                              memory — session titles, worktree paths, prompt text — so turn it off again.

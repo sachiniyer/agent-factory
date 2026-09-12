@@ -95,6 +95,9 @@ var keyEffectClasses = map[string]EffectClass{
 	"root_agents":   EffectNextDaemonStart,
 	"root_agent":    EffectNextDaemonStart,
 	"branch_prefix": EffectNextDaemonStart,
+	// The watcher supervisor snapshots this cap when the daemon constructs it;
+	// existing supervisors are not rebuilt by ApplyConfig.
+	"watcher_events_per_minute": EffectNextDaemonStart,
 	// debug_pprof selects the daemon's route table, which is built once when the
 	// HTTP listeners bind (daemon/httpserver.go). Nothing re-reads it per request,
 	// so a save must say "next daemon start" rather than claim it took effect.

@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -180,6 +182,42 @@ func TestRestoreSession_RecoversDeadInstanceOnDemand(t *testing.T) {
 	if got := inst.GetStatus(); got != session.Running {
 		t.Fatalf("status = %v, want Running after manual restore", got)
 	}
+}
+
+func TestRestoreSession_DeadSnapshotYieldsToConcurrentSelfHeal(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "dead-healed", backend, true, session.Ready)
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveDead)))
+
+	snapshotTaken := make(chan struct{})
+	continueRestore := make(chan struct{})
+	previousHook := afterRestoreLivenessSnapshot
+	afterRestoreLivenessSnapshot = func() {
+		close(snapshotTaken)
+		<-continueRestore
+	}
+	t.Cleanup(func() {
+		afterRestoreLivenessSnapshot = previousHook
+	})
+
+	restoreDone := make(chan error, 1)
+	go func() {
+		_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "dead-healed", RepoID: repoID})
+		restoreDone <- err
+	}()
+
+	<-snapshotTaken
+	_, pollEpoch := inst.InFlightOpAndEpoch()
+	selfHealErr := inst.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(pollEpoch))
+	close(continueRestore)
+	require.NoError(t, selfHealErr, "the poll's self-heal must land after restore's stale Dead snapshot")
+
+	err := <-restoreDone
+	require.ErrorContains(t, err, "changed state before restore could start")
+	require.Zero(t, backend.recoverCalls(), "manual restore must not recover a session the poll found running")
+	require.Equal(t, session.LiveRunning, inst.GetLiveness(), "the stale Dead snapshot must not overwrite the self-heal")
+	require.Equal(t, session.OpNone, inst.GetInFlightOp(), "a refused restore must not raise a fence")
 }
 
 // TestRestoreLostSessions_GivesUpAtAttemptBudget pins the terminal half of the
