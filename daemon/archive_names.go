@@ -231,12 +231,15 @@ const archiveLeafDigestLen = 16
 // returned as-is (the "direct" namespace). When the sanitized form is
 // archiveLeafNameMax or longer, the leaf becomes <prefix>-<digest> where the
 // digest is a short SHA-256 of the full sanitized form (the "digest"
-// namespace). Using a strict boundary keeps the two namespaces disjoint: a
-// direct leaf is always < archiveLeafNameMax bytes, and a digest leaf is always
-// exactly archiveLeafNameMax bytes. Without this separation, the digest output
-// for a long title L could equal the direct output for a short title S —
-// sanitizeArchiveTitle(L) == S == sanitizeArchiveTitle(S) — producing a silent
-// collision without any prefix or digest coincidence.
+// namespace). Digest-form leaves are always padded to exactly archiveLeafNameMax
+// bytes, keeping the two namespaces disjoint by length alone:
+//
+//   - Direct leaves:  always < archiveLeafNameMax bytes (strict boundary above).
+//   - Digest leaves: always exactly archiveLeafNameMax bytes (padded below).
+//
+// Without this length-based separation, a rune-boundary rollback during prefix
+// truncation can shorten a digest leaf to < archiveLeafNameMax bytes, making it
+// re-entrant as a direct-form leaf and reopening the namespace collision.
 //
 // This guarantees four properties simultaneously:
 //
@@ -260,12 +263,11 @@ func sanitizeArchiveTitle(title string) string {
 	if len(s) < archiveLeafNameMax {
 		return s
 	}
-	// Title exceeds NAME_MAX. Produce <prefix>-<digest> where digest is a
-	// short SHA-256 of the full sanitized form. The digest makes the leaf
-	// injective across titles that share a long prefix, and captures any
-	// disambiguating suffix (e.g. " (archived N)") that prefix-cutting would
-	// remove. This mirrors the approach at session/git/hooks.go:399 and
-	// session/tmux/session.go:299.
+	// Title is >= NAME_MAX. Produce <prefix>-<digest> where digest is a short
+	// SHA-256 of the full sanitized form. The digest makes the leaf injective
+	// across titles that share a long prefix, and captures any disambiguating
+	// suffix (e.g. " (archived N)") that prefix-cutting would remove. This
+	// mirrors the approach at session/git/hooks.go:399 and session/tmux/session.go:299.
 	sum := sha256.Sum256([]byte(s))
 	digest := hex.EncodeToString(sum[:archiveLeafDigestLen/2])
 	// Budget: NAME_MAX minus "-" separator minus digest length.
@@ -283,9 +285,17 @@ func sanitizeArchiveTitle(title string) string {
 	}
 	prefix = strings.TrimLeft(prefix, "-.")
 	if prefix == "" {
-		// All bytes were continuation bytes or separators; use the digest alone.
-		// It is well within NAME_MAX and uniquely identifies the original title.
-		return digest
+		// All bytes were continuation bytes or separators. Return the digest
+		// padded to archiveLeafNameMax to stay in the digest namespace.
+		return digest + strings.Repeat("x", archiveLeafNameMax-len(digest))
+	}
+	// Pad the prefix back to budget so the leaf is always exactly
+	// archiveLeafNameMax bytes. A rune-boundary rollback or leading-separator
+	// trim can leave prefix shorter than budget; padding keeps digest-form
+	// leaves in a fixed-length namespace that cannot overlap direct-form leaves
+	// (which are all < archiveLeafNameMax bytes).
+	if len(prefix) < budget {
+		prefix += strings.Repeat("x", budget-len(prefix))
 	}
 	return prefix + "-" + digest
 }

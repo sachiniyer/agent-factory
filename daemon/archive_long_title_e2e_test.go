@@ -163,12 +163,18 @@ func TestArchiveLongTitleInjectivity(t *testing.T) {
 // With a strict < boundary, S (which is exactly archiveLeafNameMax bytes) also
 // passes through the digest path and derives a different leaf, so L and S map to
 // different archive destinations.
+//
+// A secondary variant: when the 238-byte budget lands inside a multibyte rune, the
+// rune-boundary rollback shortens the prefix, producing a digest leaf shorter than
+// archiveLeafNameMax. That shorter leaf re-enters the direct namespace even with the
+// strict < boundary. The fix pads digest leaves to always be exactly archiveLeafNameMax
+// bytes, keeping direct and digest namespaces disjoint by length.
 func TestArchiveLongShortFixedPointCollision(t *testing.T) {
-	// L is a long title that sanitizes past NAME_MAX.
+	// ASCII fixed-point: L is a long title that sanitizes past NAME_MAX.
 	L := "a/" + strings.Repeat("x", 300) // sanitizes to "a-" + "x"*300 (302 bytes)
-	// S is the digest-form leaf produced for L — exactly archiveLeafNameMax bytes.
+	// S is the digest-form leaf produced for L — must be exactly archiveLeafNameMax bytes.
 	S := sanitizeArchiveTitle(L)
-	require.Equal(t, archiveLeafNameMax, len(S), "expected S to be exactly archiveLeafNameMax bytes")
+	require.Equal(t, archiveLeafNameMax, len(S), "digest-form leaf must be exactly archiveLeafNameMax bytes")
 
 	// sanitizeArchiveTitle(S) must NOT equal S: the two namespaces must be disjoint.
 	// Before the fix (len(s) <= archiveLeafNameMax), S would be returned unchanged
@@ -177,4 +183,21 @@ func TestArchiveLongShortFixedPointCollision(t *testing.T) {
 	require.NotEqual(t, S, leafOfS,
 		"a 255-byte title equal to a digest-form leaf must not collide with the original long title")
 	require.LessOrEqual(t, len(leafOfS), archiveLeafNameMax, "leafOfS over NAME_MAX")
+
+	// Rune-boundary rollback variant: a title whose 238-byte budget lands inside a
+	// multibyte rune causes the prefix to be shortened. The resulting digest leaf must
+	// still be exactly archiveLeafNameMax bytes (padded) so it remains in the digest
+	// namespace and cannot collide with a direct-form leaf of the same length.
+	//
+	// 235 ASCII bytes + a 4-byte rune (U+10348 𐍈) lands the 238-byte cut mid-rune.
+	// The rollback shortens the prefix from 238 to 235 bytes.
+	const emoji = "𐍈"
+	LRune := "a/" + strings.Repeat("x", 235) + emoji + strings.Repeat("y", 100) // > 255 bytes
+	SRune := sanitizeArchiveTitle(LRune)
+	require.Equal(t, archiveLeafNameMax, len(SRune),
+		"digest leaf with rune-boundary rollback must be padded to archiveLeafNameMax bytes")
+	// SRune is 255 bytes, so it enters the digest path and derives a different leaf.
+	leafOfSRune := sanitizeArchiveTitle(SRune)
+	require.NotEqual(t, SRune, leafOfSRune,
+		"a 255-byte rune-truncated digest leaf must not collide with the original long title")
 }
