@@ -7909,6 +7909,7 @@ var ConfigPane = class {
     input.addEventListener("input", () => {
       this.editing = e.key;
       this.draft = input.value;
+      this.editingInput = input;
       syncSave();
     });
     input.addEventListener("keydown", (ev) => {
