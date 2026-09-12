@@ -12,18 +12,67 @@ const (
 	straceOptionContinue straceOptionResult = iota
 	straceOptionStops
 	straceOptionUnsafe
-
-	// These sets mirror the short-option arity in strace(1). Help and version
-	// stop parsing separately because they never execute a child.
-	straceShortOptionsNoValue   = "ACDcdfiknqrtTvwxyYzZ"
-	straceShortOptionsWithValue = "abeEIoOpPsSuUX"
+	// Help and version stop parsing separately because they never execute a
+	// child. Every other short option that can consume the next argv word is in
+	// this set; options absent from it are self-contained in their argv word.
+	straceShortOptionsWithSeparateValue = "abeEIoOpPsSuUX"
+	// A '=' ends a short-option cluster and begins an attached value. Nothing
+	// after it can consume the following argv word.
+	straceShortOptionValueSeparator = '='
+	straceShortHelpOption           = 'h'
+	straceShortVersionOption        = 'V'
 )
+
+// This is the complete long-option set that may take its value from the next
+// argv word. The child boundary depends on these names, so an unresolved value
+// fails closed. Every other literal option is self-contained and advances one
+// word: accepting an unfamiliar spelling can then only let strace accept it or
+// reject it before launch; it cannot hide or replace the following child.
+//
+// Keep environment/output in this arity table too. Their attached values do not
+// move the child boundary, but they have security semantics of their own and
+// are checked after the shared value parser below.
+var straceLongOptionsWithSeparateValue = map[string]struct{}{
+	"--abbrev":                   {},
+	"--argv0":                    {},
+	"--attach":                   {},
+	"--columns":                  {},
+	"--const-print-style":        {},
+	"--decode-pid":               {},
+	"--decode-pids":              {},
+	"--detach-on":                {},
+	"--env":                      {},
+	"--fault":                    {},
+	"--inject":                   {},
+	"--interruptible":            {},
+	"--kvm":                      {},
+	"--output":                   {},
+	"--raw":                      {},
+	"--read":                     {},
+	"--signal":                   {},
+	"--signals":                  {},
+	"--stack-trace-frame-limit":  {},
+	"--status":                   {},
+	"--string-limit":             {},
+	"--summary-columns":          {},
+	"--summary-sort-by":          {},
+	"--summary-syscall-overhead": {},
+	"--syscall-limit":            {},
+	"--trace":                    {},
+	"--trace-fd":                 {},
+	"--trace-fds":                {},
+	"--trace-path":               {},
+	"--user":                     {},
+	"--verbose":                  {},
+	"--write":                    {},
+}
 
 // unwrapStrace returns the command strace executes. Unlike an unclassified
 // literal process, strace assigns executable meaning to one of its operands,
 // so every word up to that operand must be understood before the child can be
-// inspected. Unknown options and unreduced words fail closed; treating either
-// as "not an option" would silently move the executable boundary.
+// inspected. Unreduced words and separate option values fail closed; literal
+// self-contained options cannot move the executable boundary and stay open to
+// spellings added by other strace versions.
 func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
@@ -59,55 +108,32 @@ func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Wo
 func parseStraceLongOption(words []*syntax.Word, names map[string]struct{}) (int, straceOptionResult) {
 	value, _ := literalShellWord(words[0])
 	option, attachedValue, attached := strings.Cut(value, "=")
-	// Keep accepted cross-version aliases in the same arity branch as their
-	// canonical spelling. A spelling unsupported by the installed strace exits
-	// before launching a child, while omitting one that another release accepts
-	// would reject a valid scoped process command.
 	switch option {
 	case "--help", "--version":
-		if attached {
-			return 0, straceOptionUnsafe
-		}
+		// These terminal options never launch the trailing command. An attached
+		// value is either accepted by that strace version or rejected before
+		// launch, so neither spelling needs a child-boundary decision.
 		return 0, straceOptionStops
-	case "--env":
-		operand, consumed, ok := straceOptionValue(words, attachedValue, attached)
-		if !ok || straceEnvironmentMutationUnsafe(operand, names) {
-			return 0, straceOptionUnsafe
-		}
-		return consumed, straceOptionContinue
-	case "--output":
-		operand, consumed, ok := straceOptionValue(words, attachedValue, attached)
-		if !ok || straceOutputTargetUnsafe(operand) {
-			return 0, straceOptionUnsafe
-		}
-		return consumed, straceOptionContinue
-	case "--debug", "--failing-only", "--follow-forks", "--instruction-pointer", "--kill-on-exit",
-		"--no-abbrev", "--output-append-mode", "--output-separately", "--seccomp-bpf",
-		"--successful-only", "--failed-only", "--pidns-translation", "--summary", "--summary-only",
-		"--summary-wall-clock", "--syscall-number":
-		if attached {
-			return 0, straceOptionUnsafe
-		}
+	}
+
+	if _, takesSeparateValue := straceLongOptionsWithSeparateValue[option]; !takesSeparateValue {
 		return 1, straceOptionContinue
-	case "--absolute-timestamps", "--daemonize", "--daemonised", "--daemonized",
-		"--decode-fd", "--decode-fds", "--quiet", "--relative-timestamps", "--silence", "--silent",
-		"--stack-trace", "--stack-traces", "--strings-in-hex", "--syscall-times", "--timestamps", "--tips":
-		// These options take an optional value only in attached `=value` form.
-		return 1, straceOptionContinue
-	case "--abbrev", "--argv0", "--attach", "--columns", "--const-print-style",
-		"--decode-pid", "--decode-pids", "--detach-on", "--fault", "--inject", "--interruptible",
-		"--kvm", "--raw", "--read", "--signal", "--signals", "--stack-trace-frame-limit",
-		"--status", "--string-limit", "--summary-columns", "--summary-sort-by",
-		"--summary-syscall-overhead", "--syscall-limit", "--trace", "--trace-fds",
-		"--trace-fd", "--trace-path", "--user", "--verbose", "--write":
-		_, consumed, ok := straceOptionValue(words, attachedValue, attached)
-		if !ok {
-			return 0, straceOptionUnsafe
-		}
-		return consumed, straceOptionContinue
-	default:
+	}
+	operand, consumed, ok := straceOptionValue(words, attachedValue, attached)
+	if !ok {
 		return 0, straceOptionUnsafe
 	}
+	switch option {
+	case "--env":
+		if straceEnvironmentMutationUnsafe(operand, names) {
+			return 0, straceOptionUnsafe
+		}
+	case "--output":
+		if straceOutputTargetUnsafe(operand) {
+			return 0, straceOptionUnsafe
+		}
+	}
+	return consumed, straceOptionContinue
 }
 
 func parseStraceShortOptions(words []*syntax.Word, names map[string]struct{}) (int, straceOptionResult) {
@@ -115,11 +141,11 @@ func parseStraceShortOptions(words []*syntax.Word, names map[string]struct{}) (i
 	for idx := 1; idx < len(value); idx++ {
 		flag := value[idx]
 		switch {
-		case flag == 'h' || flag == 'V':
+		case flag == straceShortOptionValueSeparator:
+			return 1, straceOptionContinue
+		case flag == straceShortHelpOption || flag == straceShortVersionOption:
 			return 0, straceOptionStops
-		case strings.ContainsRune(straceShortOptionsNoValue, rune(flag)):
-			continue
-		case strings.ContainsRune(straceShortOptionsWithValue, rune(flag)):
+		case strings.ContainsRune(straceShortOptionsWithSeparateValue, rune(flag)):
 			attached := idx+1 < len(value)
 			attachedValue := ""
 			if attached {
@@ -137,7 +163,9 @@ func parseStraceShortOptions(words []*syntax.Word, names map[string]struct{}) (i
 			}
 			return consumed, straceOptionContinue
 		default:
-			return 0, straceOptionUnsafe
+			// Argument-free and unfamiliar flags are both self-contained. Keep
+			// scanning because a later flag in the same cluster may take a value.
+			continue
 		}
 	}
 	return 1, straceOptionContinue

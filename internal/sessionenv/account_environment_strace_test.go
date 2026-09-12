@@ -28,18 +28,57 @@ func TestValidateAccountEnvironmentCommand_RefusesUnprovableStraceChildEnvironme
 	}
 }
 
-func TestValidateAccountEnvironmentCommand_StraceUnknownSyntaxFailsClosed(t *testing.T) {
+func TestValidateAccountEnvironmentCommand_StraceUnresolvedInputsFailClosed(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		command string
 	}{
-		{"unknown option", "strace --future-option npm run dev"},
 		{"dynamic option operand", `strace -o "$AF_TRACE_FILE" npm run dev`},
 		{"dynamic executable", `strace "$AF_TRACE_PROGRAM"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			require.Error(t, ValidateAccountEnvironmentCommand(test.command, scopedProcessTabAccount()),
-				"unrecognised strace input %q must not default to safe", test.command)
+				"unresolved strace input %q must not default to safe", test.command)
+		})
+	}
+}
+
+func TestValidateAccountEnvironmentCommand_StraceSelfContainedOptionsLeaveChildVisible(t *testing.T) {
+	for _, option := range []string{
+		"-T=ns",
+		"--always-show-pid",
+		"--some-future-flag",
+		"--some-future-flag=v",
+	} {
+		t.Run(option, func(t *testing.T) {
+			require.NoError(t,
+				ValidateAccountEnvironmentCommand(
+					"strace "+option+" npm run dev",
+					scopedProcessTabAccount(),
+				),
+				"a self-contained option cannot consume the child executable")
+			require.Error(t,
+				ValidateAccountEnvironmentCommand(
+					"strace "+option+" env CODEX_HOME=/other codex",
+					scopedProcessTabAccount(),
+				),
+				"a self-contained option must leave the mutating child visible")
+		})
+	}
+}
+
+func TestValidateAccountEnvironmentCommand_StraceSeparateValueUncertaintyFailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		command string
+	}{
+		{"unresolved value", `strace --columns "$AF_TRACE_COLUMNS" npm run dev`},
+		{"mutating child after literal value", "strace --columns 120 env CODEX_HOME=/other codex"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			require.Error(t,
+				ValidateAccountEnvironmentCommand(test.command, scopedProcessTabAccount()),
+				"a separate-value option must not lose the child boundary")
 		})
 	}
 }
