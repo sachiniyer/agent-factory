@@ -8325,8 +8325,13 @@ var TerminalSoftInput = class {
         continue;
       }
       matchedComposition = true;
-      prefix += rest.slice(0, length);
-      rest = rest.slice(length);
+      if (queued) {
+        prefix += this.applyQueuedInput(range, applyModifiers);
+        rest = rest.slice(length);
+      } else {
+        prefix += rest.slice(0, length);
+        rest = rest.slice(length);
+      }
       const flush = range.trailingFlush;
       if (flush && rest.startsWith(flush.text)) {
         this.cancelTrailingFlush(flush);
