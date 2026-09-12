@@ -7907,6 +7907,7 @@ var ConfigPane = class {
     input.addEventListener("input", () => {
       this.editing = e.key;
       this.draft = input.value;
+      this.editingInput = input;
       syncSave();
     });
     input.addEventListener("keydown", (ev) => {
@@ -17463,8 +17464,7 @@ function rerender() {
       shell = null;
     }
     disposeSplit();
-    closeModal();
-    closeConfigAssistant();
+    closeOverlays();
     renderLogin(root, state, actions);
     return;
   }
@@ -17566,8 +17566,7 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
   pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
-  closeModal();
-  closeConfigAssistant();
+  closeOverlays();
   token = null;
   clearToken();
   store.set({
@@ -17723,6 +17722,15 @@ function closeConfigAssistant() {
     configAssistant = null;
   }
 }
+function closeAccountLogin() {
+  accountLogin?.close();
+  accountLogin = null;
+}
+function closeOverlays() {
+  closeModal();
+  closeConfigAssistant();
+  closeAccountLogin();
+}
 function captureModalInvoker() {
   const focused = document.activeElement;
   const row = focused?.closest(".af-row");
@@ -17733,8 +17741,7 @@ function captureModalInvoker() {
   };
 }
 function openModal(m, focusCard = false, explicitInvoker) {
-  closeModal();
-  closeConfigAssistant();
+  closeOverlays();
   const focused = document.activeElement;
   const invoker = explicitInvoker ?? captureModalInvoker();
   const { sessionId, actionLabel } = invoker;
@@ -18337,10 +18344,6 @@ function doOpenAccountLogin(agent, name) {
   }).catch((err) => {
     setAccountStatus(agent, name, errorText(err), true);
   });
-}
-function closeAccountLogin() {
-  accountLogin?.close();
-  accountLogin = null;
 }
 var queueConfigSave = createKeyedQueue();
 function applyConfigValue(key, value) {
