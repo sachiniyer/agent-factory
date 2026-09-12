@@ -23,7 +23,10 @@ var watcherLimitBackpressurePoll = 100 * time.Millisecond
 // reload and daemon shutdown remain bounded. Writer shutdown breaks it too:
 // once no process can add bytes, the finite pipe must be drained even though
 // no queue capacity became available, or runOnce would wait on a reader that
-// can never reach the EOF already sitting behind this pre-read gate.
+// can never reach the EOF already sitting behind this pre-read gate. A stop
+// below capacity needs the same drain whenever the queue is limit-protected:
+// capacity controls when reads pause, but ownership of bytes already accepted
+// by the pipe does not depend on whether the disk backlog reached that bound.
 func (w *taskWatcher) waitForLimitQueueCapacity(stdoutWritersStopped <-chan struct{}) (proceed, drainFinitePipe bool) {
 	for w.queue != nil && w.queue.limitParkedAtCapacity() {
 		select {
@@ -34,7 +37,10 @@ func (w *taskWatcher) waitForLimitQueueCapacity(stdoutWritersStopped <-chan stru
 		case <-time.After(watcherLimitBackpressurePoll):
 		}
 	}
-	return !w.stopRequested(), false
+	if !w.stopRequested() {
+		return true, false
+	}
+	return false, w.queue != nil && w.queue.retainLimitParked()
 }
 
 // targetLimitRequiresRetention applies the fail-closed side of queue safety:

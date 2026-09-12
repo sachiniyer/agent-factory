@@ -19,8 +19,9 @@ type watchDeliveryOptions struct {
 	parkedStatusRecorded bool
 	// commitParkedStatus makes the task-store write and queue-head annotation
 	// one publication against supervisor lifecycle status. The callback is
-	// admitted only for replay with a durable cursor; live delivery publishes
-	// synchronously on the reader path before runOnce can report process exit.
+	// admitted only for replay with a durable cursor. A live targeted park has
+	// no queue identity yet, so it defers the task-store write until enqueue
+	// succeeds and the drainer supplies this callback on its immediate replay.
 	commitParkedStatus func(writeStatus func() error) (bool, error)
 }
 

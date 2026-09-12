@@ -894,8 +894,14 @@ func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOpti
 	// A parked replay retries the same queue head on the base cadence. The queue
 	// sequence, not mutable LastRunStatus presentation, says whether this exact
 	// occurrence was already recorded. A later success still writes normally.
+	// A live targeted park has no sequence until handleEvent durably enqueues it;
+	// writing the visible status here would leave a false park if that append
+	// fails. Defer only that shape: the drainer immediately retries the queued
+	// head with a cursor and publishes through commitParkedStatus. Create-per-run
+	// parks retain their prompt on the created session and still write here.
 	statusRecorded := status == TaskStatusLimitParked && options.parkedStatusRecorded
-	if status != TaskStatusLimitParked || !statusRecorded {
+	deferParkedStatus := status == TaskStatusLimitParked && !promptRetained && options.commitParkedStatus == nil
+	if !deferParkedStatus && (status != TaskStatusLimitParked || !statusRecorded) {
 		now := time.Now()
 		writeStatus := func() error {
 			_, err := updateWatchTaskStatus(taskID, &now, status)
