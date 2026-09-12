@@ -172,6 +172,11 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if account, automatic := instance.AccountSelection(); account != "" && !automatic {
 		return HandoffSessionResponse{}, fmt.Errorf("session %q is pinned to %s account %q; specify a target account with --account before handing it off to %s", req.Title, instance.CurrentAgentName(), account, target)
 	}
+	// An automatic account belongs to one agent's identity and cannot be
+	// inherited by the incoming agent. Clear it before SwapAgent, which
+	// unconditionally rejects any non-empty i.Account to prevent silent
+	// cross-agent identity collisions (session/backend_local.go).
+	instance.ClearAutoSelectedAccount()
 	plan, err := instance.PrepareAgentSwap(target)
 	if err != nil {
 		return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", req.Title, target, err)

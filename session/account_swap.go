@@ -391,6 +391,30 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto boo
 	return nil
 }
 
+// ClearAutoSelectedAccount removes a scheduler-selected account so an
+// ambient (agent-only) handoff can proceed through SwapAgent, which rejects
+// any non-empty i.Account regardless of how the account was chosen. This is
+// safe only for automatic accounts: the scheduler picked the account, not the
+// user, and the new agent cannot inherit an account that belongs to a
+// different agent's identity space. Returns false and is a no-op if the
+// account is a manual pin.
+func (i *Instance) ClearAutoSelectedAccount() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.accountAutoSelected {
+		return false
+	}
+	if i.Account != "" {
+		i.Account = ""
+		i.touchLocked()
+	}
+	if i.accountAutoSelected {
+		i.accountAutoSelected = false
+		i.touchLocked()
+	}
+	return true
+}
+
 // ClearPendingAccountSwap retires exactly the delivery obligation the caller
 // completed, without allowing a stale attempt to erase a later swap.
 func (i *Instance) ClearPendingAccountSwap(from, to string) bool {
