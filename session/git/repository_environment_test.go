@@ -45,7 +45,7 @@ func TestRepositoryNamedProbes(t *testing.T) {
 			g.worktreePath = wt
 			assert.NoError(t, probeRepoGoneOrigin(context.Background(), g), "live origin must remain live under ambient selectors")
 			r := &cleanupRun{g: g}
-			assert.NoError(t, r.requireRegisteredBranchMatch(true), "archive branch authorization")
+			assert.NoError(t, r.requireRegisteredBranchMatch(), "archive branch authorization")
 			held, err := BranchesHeldByWorktrees(repo)
 			require.NoError(t, err)
 			assert.Equal(t, []string{normalizeWorktreePath(wt)}, held[branch])

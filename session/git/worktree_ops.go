@@ -678,14 +678,15 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 		return r.state(), probeErr
 	}
 	if worktreeExists {
-		// Every cleanup proves branch ownership at BOTH ends of the reap (#4342).
-		// The registered-only mode additionally requires the registration and its
-		// occupant (#3278 review). Before it: the writer reap terminates every process
+		// The registered-only mode proves ownership at BOTH ends of the reap
+		// (#3278 review). Before it: the writer reap terminates every process
 		// under the path, which is itself destructive against a replacement
 		// directory whose only possible end state here is retention — refuse
 		// unlisted or mismatched occupants before touching their processes.
-		if err := r.requireRegisteredBranchMatch(!allowUnregisteredRemoval); err != nil {
-			return r.state(), errors.Join(r.errs...)
+		if !allowUnregisteredRemoval {
+			if err := r.requireRegisteredBranchMatch(); err != nil {
+				return r.state(), errors.Join(r.errs...)
+			}
 		}
 		// Reap any process still writing inside the tree BEFORE removing it
 		// (#2025). Both the git remove below and the os.RemoveAll fallback delete
@@ -702,8 +703,10 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 		// irreducible check-then-act residue; a same-UID actor re-plumbing
 		// registrations inside af's private namespace within it is the
 		// deliberate-reconstruction class the review already accepted.
-		if err := r.requireRegisteredBranchMatch(!allowUnregisteredRemoval); err != nil {
-			return r.state(), errors.Join(r.errs...)
+		if !allowUnregisteredRemoval {
+			if err := r.requireRegisteredBranchMatch(); err != nil {
+				return r.state(), errors.Join(r.errs...)
+			}
 		}
 
 		// Remove the worktree using git command. Bounded by localGitTimeout

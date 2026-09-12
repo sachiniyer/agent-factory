@@ -314,7 +314,11 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// endpoint's error even when the sandbox teardown SUCCEEDED, so the
 		// workspace is already gone — tombstoning a row, holding the title and
 		// telling the user a workspace may remain would all be false.
-		killErr := instance.Kill()
+		// Local launch already made this same decision in its defer, but the
+		// manager retries cleanup for every backend. Preserve the setup refusal
+		// across that second boundary too: it proves the candidate created no
+		// workspace, not that the foreign occupant is now safe to kill.
+		killErr := instance.CleanupFailedCreate(serr)
 		if killErr != nil && !session.TeardownStateUnknown(killErr) {
 			m.warn().Printf("create of session %q: cleanup reported an error that does not leave its workspace state unknown; discarding the session as normal: %v", title, killErr)
 		}
