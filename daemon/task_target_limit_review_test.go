@@ -301,6 +301,87 @@ func (b *blockingTaskPromptBackend) SendPromptCommandWithStatus(_ *session.Insta
 	return session.PromptDelivered, nil
 }
 
+type clearingLimitSnapshotBackend struct {
+	readyFakeBackend
+	recorder *promptRecorder
+	started  chan struct{}
+	release  chan struct{}
+}
+
+func (b *clearingLimitSnapshotBackend) HasUpdated(*session.Instance) (bool, bool, string) {
+	close(b.started)
+	<-b.release
+	return false, false, "ready\n❯"
+}
+
+func (b *clearingLimitSnapshotBackend) SendPromptCommandWithStatus(_ *session.Instance, prompt string) (session.PromptDeliveryStatus, error) {
+	b.recorder.add(prompt)
+	return session.PromptDelivered, nil
+}
+
+func TestTaskDeliveryWaitsForHealthySnapshotToClearLimit(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	recorder := &promptRecorder{}
+	backend := &clearingLimitSnapshotBackend{
+		readyFakeBackend: readyFakeBackend{session.NewFakeBackend()},
+		recorder:         recorder,
+		started:          make(chan struct{}),
+		release:          make(chan struct{}),
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "clearing-limit", backend, true, session.Running)
+	manager.setLimitReached(inst, time.Now().Add(time.Hour))
+
+	pollDone := make(chan struct{})
+	go func() {
+		manager.refreshInstanceStatus(repoID, inst)
+		close(pollDone)
+	}()
+	select {
+	case <-backend.started:
+	case <-time.After(time.Second):
+		t.Fatal("status poll did not enter its healthy snapshot")
+	}
+
+	type result struct {
+		status string
+		err    error
+	}
+	deliveryDone := make(chan result, 1)
+	go func() {
+		status, _, _, err := manager.deliverPromptWithOutcome(DeliverPromptRequest{
+			Title: "clearing-limit", RepoPath: repoPath, Program: "claude",
+			Prompt: "scheduled", TaskRepoID: repoID, TaskOrigin: true,
+		})
+		deliveryDone <- result{status: status, err: err}
+	}()
+	var early *result
+	select {
+	case got := <-deliveryDone:
+		early = &got
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(backend.release)
+	select {
+	case <-pollDone:
+	case <-time.After(time.Second):
+		t.Fatal("status poll did not publish its healthy snapshot")
+	}
+	if early != nil {
+		t.Fatalf("task delivery skipped before its in-flight healthy snapshot settled: status=%q err=%v", early.status, early.err)
+	}
+	select {
+	case got := <-deliveryDone:
+		if got.err != nil || got.status != "sent" {
+			t.Fatalf("delivery after healthy settlement = status %q err %v, want sent", got.status, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("task delivery stayed blocked after healthy snapshot settlement")
+	}
+	if got := recorder.snapshot(); len(got) != 1 || got[0] != "scheduled" {
+		t.Fatalf("healthy target received prompts %v, want [scheduled]", got)
+	}
+}
+
 func TestSlowTaskPromptDoesNotBlockAnUnrelatedTarget(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	firstRecorder := &promptRecorder{}
