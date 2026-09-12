@@ -143,19 +143,71 @@ func KeyEffectClass(key string) EffectClass {
 // new value now." over a warning saying the daemon was still serving the old
 // address. Carrying the outcome makes EffectNotice the one owner of the decision.
 //
-// The zero value is the honest "nothing applied it": no daemon was running, or its
-// apply returned an error. A caller with no apply result stays expressible.
+// The zero value means no daemon was reached to apply the save. An apply
+// failure must set DaemonApplyFailed instead of claiming that no daemon ran.
 type ApplyOutcome struct {
 	// DaemonApplied reports that a running daemon applied the on-disk config
 	// (daemon.Manager.ApplyConfig returned without error). It does NOT report that
 	// every changed key took effect — FailedListenerKeys is the rest of the answer.
 	DaemonApplied bool
+	// DaemonApplyFailed means the daemon returned a failure response instead of
+	// applying the saved config.
+	DaemonApplyFailed bool
+	// DaemonApplyUnconfirmed distinguishes a lost RPC response from a daemon
+	// error: the daemon may have applied the config before the connection failed.
+	DaemonApplyUnconfirmed bool
 	// FailedListenerKeys names the socket keys (network.listen_addr /
 	// network.preview_listen_addr) whose live rebind failed, so bind-new-before-close
 	// left the OLD listener serving. Both daemon.ApplyConfigResult and
 	// daemon.ApplyConfigResponse carry this; config owns no daemon types and must not
 	// import daemon (daemon imports config), so it travels as the plain slice.
 	FailedListenerKeys []string
+}
+
+// ApplyStatus is the machine-readable result for the key a save wrote. A
+// completed ApplyConfig can still be deferred for one listener key whose rebind
+// failed, so this is deliberately key-specific rather than merely the RPC's
+// success bit.
+type ApplyStatus string
+
+const (
+	// ApplyStatusUnknown is what a newer client reports when an older daemon's
+	// response predates the additive apply_outcome field.
+	ApplyStatusUnknown     ApplyStatus = "unknown"
+	ApplyStatusApplied     ApplyStatus = "applied"
+	ApplyStatusNoDaemon    ApplyStatus = "no_daemon"
+	ApplyStatusFailed      ApplyStatus = "failed"
+	ApplyStatusUnconfirmed ApplyStatus = "unconfirmed"
+	ApplyStatusDeferred    ApplyStatus = "deferred"
+)
+
+// StatusForKey projects the whole apply onto one saved key's stable wire value.
+// Uncertainty wins over failure if a malformed caller sets both: once the reply
+// is lost, the client cannot honestly claim the daemon kept its previous config.
+func (o ApplyOutcome) StatusForKey(key string) ApplyStatus {
+	// Match EffectNotice's key-first rule. A startup-only setting is deferred
+	// regardless of whether a daemon happened to receive this save; that apply
+	// call cannot make the key live. The same holds for client-side settings,
+	// which take effect on the next af launch rather than in the daemon.
+	switch KeyEffectClass(key) {
+	case EffectNextDaemonStart, EffectNextAfLaunch:
+		return ApplyStatusDeferred
+	case EffectUnknown:
+		return ApplyStatusUnknown
+	}
+	if o.DaemonApplyUnconfirmed {
+		return ApplyStatusUnconfirmed
+	}
+	if o.DaemonApplyFailed {
+		return ApplyStatusFailed
+	}
+	if o.listenerRebindFailed(key) {
+		return ApplyStatusDeferred
+	}
+	if o.DaemonApplied {
+		return ApplyStatusApplied
+	}
+	return ApplyStatusNoDaemon
 }
 
 // listenerRebindFailed reports whether key is one of the socket keys whose live
@@ -203,6 +255,12 @@ func EffectNotice(key string, outcome ApplyOutcome) string {
 	}
 	switch KeyEffectClass(key) {
 	case EffectAppliedLive:
+		if outcome.DaemonApplyUnconfirmed {
+			return "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
+		}
+		if outcome.DaemonApplyFailed {
+			return "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
+		}
 		if outcome.DaemonApplied {
 			return "Applied — the running daemon is using the new value now."
 		}

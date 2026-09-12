@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -66,6 +67,33 @@ var (
 	configSetProjectFlag   string
 	configUnsetProjectFlag string
 )
+
+// configSaveJSONResult adds the live-apply outcome to SetResult/UnsetResult
+// without changing the established order of either payload. A map-based merge
+// would alphabetize every pre-existing member; AppendJSONMember makes the new
+// machine contract literally additive and last.
+type configSaveJSONResult struct {
+	result       any
+	applyOutcome config.ApplyStatus
+}
+
+func (r configSaveJSONResult) MarshalJSON() ([]byte, error) {
+	object, err := json.Marshal(r.result)
+	if err != nil {
+		return nil, err
+	}
+	status := r.applyOutcome
+	if status == "" {
+		// An older daemon can serve SetConfigValue without this newer response
+		// field. Absence is not evidence that its live apply succeeded.
+		status = config.ApplyStatusUnknown
+	}
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		return nil, err
+	}
+	return session.AppendJSONMember(object, "apply_outcome", encoded)
+}
 
 // configEntry is one config key and its effective value. Value is
 // heterogeneous — scalars for simple keys, maps for structural values.
@@ -600,7 +628,9 @@ owns.`, tmux.SupportedProgramsString()),
 		}
 		res := resp.Result
 		if configJSONFlag {
-			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
+			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(configSaveJSONResult{
+				result: res, applyOutcome: resp.ApplyOutcome,
+			}))
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s in %s\n", res.Key, echoValue(res.Value), configWriteLocation(res.Path))
 		// Writer warnings (validation) before the apply note: what the value MEANS
@@ -613,6 +643,13 @@ owns.`, tmux.SupportedProgramsString()),
 		fmt.Fprintln(cmd.OutOrStdout(), resp.RestartNotice)
 		printListenerAddr(cmd, resp.ListenerAddr)
 		for _, w := range resp.Warnings {
+			// Failed/unconfirmed applies carry the complete warning set on the
+			// response so single-carrier renderers cannot lose write warnings.
+			// This CLI already printed Result.Warnings above; do not print an
+			// exact duplicate again from the complete response set.
+			if slices.Contains(res.Warnings, w) {
+				continue
+			}
 			fmt.Fprintln(cmd.ErrOrStderr(), w)
 		}
 		return nil
@@ -765,7 +802,9 @@ override file it clears is this machine's.`,
 			}
 			res := resp.Result
 			if configJSONFlag {
-				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
+				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(configSaveJSONResult{
+					result: res, applyOutcome: resp.ApplyOutcome,
+				}))
 			}
 			if !res.Removed {
 				fmt.Fprintf(cmd.OutOrStdout(), "no %s value to clear in %s\n", res.Key, configWriteLocation(res.Path))

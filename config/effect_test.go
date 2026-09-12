@@ -177,11 +177,107 @@ func TestEffectNoticeAppliedLiveSurvivesASuccessfulRebind(t *testing.T) {
 }
 
 // TestEffectNoticeZeroOutcomeIsTheDaemonlessSentence: a caller with no apply result
-// at all — no daemon ran, or its apply errored — stays expressible, and gets the
+// at all — no daemon was reached — stays expressible, and gets the
 // pre-#3397 sentence verbatim.
 func TestEffectNoticeZeroOutcomeIsTheDaemonlessSentence(t *testing.T) {
 	const want = "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
 	if got := EffectNotice("network.listen_addr", ApplyOutcome{}); got != want {
 		t.Errorf("daemonless notice changed\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// A confirmed reload failure keeps the previous live configuration; a lost
+// response cannot establish that fact. Neither outcome means no daemon ran.
+func TestEffectNoticeDaemonApplyFailed(t *testing.T) {
+	const want = "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
+	for _, key := range []string{"network.require_token", "require_token", "default_program"} {
+		if got := EffectNotice(key, ApplyOutcome{DaemonApplyFailed: true}); got != want {
+			t.Errorf("%s: got %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestEffectNoticeDaemonApplyUnconfirmed(t *testing.T) {
+	const want = "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
+	outcome := ApplyOutcome{DaemonApplyFailed: true, DaemonApplyUnconfirmed: true}
+	if got := EffectNotice("network.require_token", outcome); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestApplyOutcomeStatusForKey(t *testing.T) {
+	tests := []struct {
+		name    string
+		outcome ApplyOutcome
+		key     string
+		want    ApplyStatus
+	}{
+		{name: "no daemon", key: "default_program", want: ApplyStatusNoDaemon},
+		{name: "applied", outcome: ApplyOutcome{DaemonApplied: true}, key: "default_program", want: ApplyStatusApplied},
+		{name: "failed", outcome: ApplyOutcome{DaemonApplyFailed: true}, key: "default_program", want: ApplyStatusFailed},
+		{name: "unconfirmed", outcome: ApplyOutcome{DaemonApplyUnconfirmed: true}, key: "default_program", want: ApplyStatusUnconfirmed},
+		{
+			name: "failed listener key is deferred",
+			outcome: ApplyOutcome{
+				DaemonApplied:      true,
+				FailedListenerKeys: []string{"network.listen_addr"},
+			},
+			key:  "network.listen_addr",
+			want: ApplyStatusDeferred,
+		},
+		{
+			name: "unrelated key still applied",
+			outcome: ApplyOutcome{
+				DaemonApplied:      true,
+				FailedListenerKeys: []string{"network.listen_addr"},
+			},
+			key:  "network.require_token",
+			want: ApplyStatusApplied,
+		},
+		{
+			name:    "next daemon start",
+			outcome: ApplyOutcome{DaemonApplied: true},
+			key:     "branch_prefix",
+			want:    ApplyStatusDeferred,
+		},
+		{
+			name:    "next client start",
+			outcome: ApplyOutcome{DaemonApplied: true},
+			key:     "update_channel",
+			want:    ApplyStatusDeferred,
+		},
+		{
+			name: "startup-only key remains deferred without daemon",
+			key:  "debug_pprof",
+			want: ApplyStatusDeferred,
+		},
+		{
+			name:    "startup-only key remains deferred despite unrelated apply failure",
+			outcome: ApplyOutcome{DaemonApplyFailed: true},
+			key:     "root_agents",
+			want:    ApplyStatusDeferred,
+		},
+		{
+			name:    "unclassified key is unknown",
+			outcome: ApplyOutcome{DaemonApplied: true},
+			key:     "future_unclassified_key",
+			want:    ApplyStatusUnknown,
+		},
+		{
+			name: "uncertainty outranks a conflicting failure bit",
+			outcome: ApplyOutcome{
+				DaemonApplyFailed:      true,
+				DaemonApplyUnconfirmed: true,
+			},
+			key:  "default_program",
+			want: ApplyStatusUnconfirmed,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.outcome.StatusForKey(tc.key); got != tc.want {
+				t.Errorf("StatusForKey(%q) = %q, want %q", tc.key, got, tc.want)
+			}
+		})
 	}
 }
