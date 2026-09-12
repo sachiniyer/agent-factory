@@ -166,9 +166,9 @@ func exitedPanePID(t *testing.T) int {
 //     replacement pane, which is conclusive and observed (PaneStateKnown,
 //     blind=false, nil) on a responsive server.
 //  2. respawnFresh's outer stopForAccountSwap on the now-dead session, which the
-//     fix's ProvenNoPane latch skips - instead of re-closing the dead session,
-//     re-classifying it blind (pane PID empty + session vanished), and wrapping
-//     ErrAccountSwapAgentTeardownBlind onto the setupTabs error.
+//     fix's ClosedConclusively latch skips - instead of re-closing the dead
+//     session, re-classifying it blind (pane PID empty + session vanished), and
+//     wrapping ErrAccountSwapAgentTeardownBlind onto the setupTabs error.
 //
 // Before the fix, step 2 re-closed the dead session and tripped the
 // idx==0 && blind guard at account_swap.go:416-419, so this test fails RED
@@ -234,8 +234,8 @@ func TestRespawnFreshRedundantStopSkipsAfterConclusiveInnerClose(t *testing.T) {
 	require.Equal(t, tmux.PaneStateKnown, state, "the inner close on the live replacement pane is conclusive")
 	require.False(t, blind, "the inner close observed the pane's process set, so it is not blind")
 	require.NoError(t, closeErr, "the inner close returns no error on a responsive tmux server")
-	require.True(t, inst.Tabs[0].tmux.ProvenNoPane(),
-		"a conclusive non-blind teardown latches the pane-gone proof so the redundant outer stop is skipped")
+	require.True(t, inst.Tabs[0].tmux.ClosedConclusively(),
+		"a conclusive non-blind teardown latches ClosedConclusively so the redundant outer stop is skipped")
 
 	// Phase 2: respawnFresh's outer stopForAccountSwap on the now-dead session.
 	stopErr := inst.StopForAccountSwap()

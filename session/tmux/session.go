@@ -219,21 +219,32 @@ type TmuxSession struct {
 	// text is not enough to claim that a prior delivery was stranded (#2225).
 	// Protected by inputMu; it never gates delivery.
 	lastPastedTail string
-	// provenNoPane records that no live pane is running behind this handle.
-	// Set in two ways: (1) Start PROVED this name had no tmux session and
-	// returned before running new-session; (2) closeAndWaitForPaneExit
-	// completed a conclusive non-blind close. Cleared (false) whenever this
-	// object is associated with a session again — by Start unconditionally, by
-	// RestoreWithResult's live-session branch, and at the top of every
-	// closeAndWaitForPaneExit call before re-latching. Guarded by provenMu;
-	// read through ProvenNoPane.
+	// provenNoPane records that a Start attempt PROVED this name had no tmux
+	// session and then returned before running new-session, so nothing can be
+	// running behind it. Guarded by provenMu; read through ProvenNoPane.
 	//
 	// The default is false and that direction is the safety property: every other
 	// way a TmuxSession comes into being — a restore binding a persisted name, a
 	// pending-cleanup handle, a sibling tab, an adoption — may have a live pane
-	// behind it, and a teardown must gate on liveness for all of them.
+	// behind it, and a teardown must gate on liveness for all of them. Only Start
+	// can establish otherwise, and only at the two points below.
 	provenNoPane bool
-	provenMu     sync.RWMutex
+	// closedConclusively records that closeAndWaitForPaneExit completed a
+	// conclusive non-blind close — the pane was observed to exit. It is scoped to
+	// the account-swap redundant-stop path: a redundant stopForAccountSwap can skip
+	// re-closing an already-dead session rather than re-classifying it blind and
+	// wrapping ErrAccountSwapAgentTeardownBlind onto an unrelated error (#703b4a70).
+	//
+	// It is NOT used by closeTabForDestructiveTeardown because that path consumes
+	// the flag before any of the three clearing paths run — Start, RestoreWithResult's
+	// live-session branch, or a second closeAndWaitForPaneExit call — so a proof
+	// taken at close time could be stale by the time teardown checks it (an external
+	// process could have recreated the session in between). Cleared at the top of
+	// every closeAndWaitForPaneExit call; re-latched only on conclusive non-blind
+	// success. Also cleared by Start and RestoreWithResult's live-session branch.
+	// Guarded by provenMu.
+	closedConclusively bool
+	provenMu           sync.RWMutex
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.
@@ -396,23 +407,8 @@ func NewTmuxSessionFromSanitizedNameWithDeps(sanitizedName, program string, ptyF
 	return newTmuxSession(sanitizedName, program, ptyFactory, cmdExec)
 }
 
-// ProvenNoPane reports that this session object has no live pane behind it.
-// The proof is established in two ways:
-//
-//  1. Start found the name positively absent and failed before running
-//     new-session — the session provably never created a pane.
-//  2. closeAndWaitForPaneExit completed a conclusive non-blind close — the
-//     pane that existed was observed to exit (#703b4a70).
-//
-// Either way, no pane is running behind this handle at the instant the proof
-// was taken, and a redundant teardown can skip its liveness probe safely.
-//
-// The proof is invalidated (reset to false) whenever this object is associated
-// with a session again: Start clears it unconditionally, RestoreWithResult
-// clears it on the live-session branch, and closeAndWaitForPaneExit clears it
-// at the top of every call before re-latching only on conclusive non-blind
-// success. Those are the only three paths that can put this object in front of
-// a (potentially live) session, so no sibling path can inherit a stale proof.
+// ProvenNoPane reports that this session object provably never created a pane:
+// Start found the name positively absent and failed before running new-session.
 //
 // It is NOT "Start did not succeed", and the difference is the whole point. A
 // create whose spawn worked and whose later setup failed has a live pane and an
@@ -423,6 +419,24 @@ func (t *TmuxSession) ProvenNoPane() bool {
 	t.provenMu.RLock()
 	defer t.provenMu.RUnlock()
 	return t.provenNoPane
+}
+
+// ClosedConclusively reports that the most recent closeAndWaitForPaneExit call
+// completed with the pane observed to have exited (blind=false, PaneStateKnown).
+// This is used by the account-swap redundant-stop path (stopForAccountSwap) to
+// skip re-closing a session that finishRecoverTabFailure's inner close already
+// killed, rather than re-classifying it blind and wrapping
+// ErrAccountSwapAgentTeardownBlind onto an unrelated error (#703b4a70).
+//
+// It is NOT used by closeTabForDestructiveTeardown: that path checks the flag
+// before any of the three invalidation paths (Start, RestoreWithResult's
+// live-session branch, or a second closeAndWaitForPaneExit) have a chance to
+// clear it, so a proof taken at close time could be stale if an external process
+// recreated the session in between.
+func (t *TmuxSession) ClosedConclusively() bool {
+	t.provenMu.RLock()
+	defer t.provenMu.RUnlock()
+	return t.closedConclusively
 }
 
 // proveNoPaneIfDeterminatelyAbsent records "nothing is running behind this name",
@@ -451,6 +465,12 @@ func (t *TmuxSession) proveNoPaneIfDeterminatelyAbsent() {
 func (t *TmuxSession) setProvenNoPane(proven bool) {
 	t.provenMu.Lock()
 	t.provenNoPane = proven
+	t.provenMu.Unlock()
+}
+
+func (t *TmuxSession) setClosedConclusively(closed bool) {
+	t.provenMu.Lock()
+	t.closedConclusively = closed
 	t.provenMu.Unlock()
 }
 
