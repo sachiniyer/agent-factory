@@ -15936,8 +15936,11 @@ var AppShell = class {
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
     const selectedForPhone = selectedSession(state);
-    const focusedKind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
-    this.observeSessionComposition(state.view, state.selectedId, state.activeTab, focusedKind);
+    const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
+    const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
+    const focusedTab = focusedForPhone ? tabIdentity(focusedForPhone) : null;
+    const focusedKind = focusedForPhone?.kind ?? null;
+    this.observeSessionComposition(state.view, state.selectedId, focusedTab, focusedKind);
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
     if (this.lastKb !== kb) {
       this.lastKb = kb;
@@ -16418,12 +16421,12 @@ var AppShell = class {
     return item;
   }
   /** Invalidates carried disclosure state when its owning context changes. */
-  observeSessionComposition(view, selectedId, activeTab, focusedKind) {
+  observeSessionComposition(view, selectedId, focusedTab, focusedKind) {
     const previous = this.sessionComposition;
-    if (previous && (previous.view !== view || previous.selectedId !== selectedId || previous.activeTab !== activeTab || previous.focusedKind !== focusedKind)) {
+    if (previous && (previous.view !== view || previous.selectedId !== selectedId || previous.focusedTab !== focusedTab || previous.focusedKind !== focusedKind)) {
       this.dismissCarriedActions();
     }
-    this.sessionComposition = { view, selectedId, activeTab, focusedKind };
+    this.sessionComposition = { view, selectedId, focusedTab, focusedKind };
     this.terminalSelected = isSessionFirst(true, view, focusedKind);
   }
   /** Retires carried actions before a user-owned transition can recompose them. */

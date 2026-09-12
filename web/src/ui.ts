@@ -802,7 +802,7 @@ export class AppShell {
   private sessionComposition: {
     view: View;
     selectedId: string | null;
-    activeTab: number;
+    focusedTab: string | null;
     focusedKind: number | null;
   } | null = null;
   private newTabPickerPosition: (() => void) | null = null;
@@ -1289,12 +1289,15 @@ export class AppShell {
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
     const selectedForPhone = selectedSession(state);
-    const focusedKind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
+    const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
+    const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
+    const focusedTab = focusedForPhone ? tabIdentity(focusedForPhone) : null;
+    const focusedKind = focusedForPhone?.kind ?? null;
     // Observe the semantic owner before this update can replace or reparent its DOM.
     // Viewport-only recomposition leaves this context alone and therefore preserves
     // a user-opened disclosure; changing its view, session, or focused tab invalidates
     // carried state no matter which present or future action produced the store update.
-    this.observeSessionComposition(state.view, state.selectedId, state.activeTab, focusedKind);
+    this.observeSessionComposition(state.view, state.selectedId, focusedTab, focusedKind);
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
     // terminal only "holds" it while a session is actually selected; with none
@@ -1900,19 +1903,19 @@ export class AppShell {
   private observeSessionComposition(
     view: View,
     selectedId: string | null,
-    activeTab: number,
+    focusedTab: string | null,
     focusedKind: number | null,
   ): void {
     const previous = this.sessionComposition;
     if (previous && (
       previous.view !== view
       || previous.selectedId !== selectedId
-      || previous.activeTab !== activeTab
+      || previous.focusedTab !== focusedTab
       || previous.focusedKind !== focusedKind
     )) {
       this.dismissCarriedActions();
     }
-    this.sessionComposition = { view, selectedId, activeTab, focusedKind };
+    this.sessionComposition = { view, selectedId, focusedTab, focusedKind };
     this.terminalSelected = isSessionFirst(true, view, focusedKind);
   }
 
