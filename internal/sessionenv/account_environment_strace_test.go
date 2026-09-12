@@ -19,6 +19,7 @@ func TestValidateAccountEnvironmentCommand_RefusesUnprovableStraceChildEnvironme
 		{"strace separate env option", "strace -E CODEX_HOME=/other codex"},
 		{"strace attached env option", "strace -ECODEX_HOME=/other codex"},
 		{"strace long env option", "strace --env=CODEX_HOME=/other codex"},
+		{"strace abbreviated long env option", "strace --en=CODEX_HOME=/other codex"},
 		{"strace unsets protected env", "strace -E CODEX_HOME codex"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -47,6 +48,7 @@ func TestValidateAccountEnvironmentCommand_StraceSelfContainedOptionsLeaveChildV
 	for _, option := range []string{
 		"-T=ns",
 		"--always-show-pid",
+		"--summary",
 		"--some-future-flag",
 		"--some-future-flag=v",
 	} {
@@ -74,6 +76,8 @@ func TestValidateAccountEnvironmentCommand_StraceSeparateValueUncertaintyFailsCl
 	}{
 		{"unresolved value", `strace --columns "$AF_TRACE_COLUMNS" npm run dev`},
 		{"mutating child after literal value", "strace --columns 120 env CODEX_HOME=/other codex"},
+		{"abbreviated option keeps child boundary", "strace --colum 120 env CODEX_HOME=/other codex"},
+		{"current upstream option keeps child boundary", "strace --color always env CODEX_HOME=/other codex"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			require.Error(t,

@@ -24,10 +24,11 @@ const (
 )
 
 // This is the complete long-option set that may take its value from the next
-// argv word. The child boundary depends on these names, so an unresolved value
-// fails closed. Every other literal option is self-contained and advances one
-// word: accepting an unfamiliar spelling can then only let strace accept it or
-// reject it before launch; it cannot hide or replace the following child.
+// argv word. The child boundary depends on these names (including GNU-style
+// abbreviations), so an unresolved value fails closed. Every literal option
+// that neither names nor abbreviates one of them is self-contained and advances
+// one word: accepting an unfamiliar spelling can then only let strace accept it
+// or reject it before launch; it cannot hide or replace the following child.
 //
 // Keep environment/output in this arity table too. Their attached values do not
 // move the child boundary, but they have security semantics of their own and
@@ -37,6 +38,7 @@ var straceLongOptionsWithSeparateValue = map[string]struct{}{
 	"--argv0":                    {},
 	"--attach":                   {},
 	"--columns":                  {},
+	"--color":                    {},
 	"--const-print-style":        {},
 	"--decode-pid":               {},
 	"--decode-pids":              {},
@@ -65,6 +67,14 @@ var straceLongOptionsWithSeparateValue = map[string]struct{}{
 	"--user":                     {},
 	"--verbose":                  {},
 	"--write":                    {},
+}
+
+// getopt_long gives an exact name precedence over abbreviations. These are the
+// self-contained exact names that are also prefixes of a separate-value option;
+// preserving that precedence keeps their following word visible as the child.
+var straceLongSelfContainedPrefixCollisions = map[string]struct{}{
+	"--stack-trace": {},
+	"--summary":     {},
 }
 
 // unwrapStrace returns the command strace executes. Unlike an unclassified
@@ -108,22 +118,25 @@ func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Wo
 func parseStraceLongOption(words []*syntax.Word, names map[string]struct{}) (int, straceOptionResult) {
 	value, _ := literalShellWord(words[0])
 	option, attachedValue, attached := strings.Cut(value, "=")
-	switch option {
-	case "--help", "--version":
+	canonical, result := classifyStraceLongOption(option)
+	switch result {
+	case straceOptionStops:
 		// These terminal options never launch the trailing command. An attached
 		// value is either accepted by that strace version or rejected before
 		// launch, so neither spelling needs a child-boundary decision.
 		return 0, straceOptionStops
+	case straceOptionUnsafe:
+		return 0, straceOptionUnsafe
 	}
 
-	if _, takesSeparateValue := straceLongOptionsWithSeparateValue[option]; !takesSeparateValue {
+	if canonical == "" {
 		return 1, straceOptionContinue
 	}
 	operand, consumed, ok := straceOptionValue(words, attachedValue, attached)
 	if !ok {
 		return 0, straceOptionUnsafe
 	}
-	switch option {
+	switch canonical {
 	case "--env":
 		if straceEnvironmentMutationUnsafe(operand, names) {
 			return 0, straceOptionUnsafe
@@ -134,6 +147,50 @@ func parseStraceLongOption(words []*syntax.Word, names map[string]struct{}) (int
 		}
 	}
 	return consumed, straceOptionContinue
+}
+
+func classifyStraceLongOption(option string) (string, straceOptionResult) {
+	switch option {
+	case "--help", "--version":
+		return option, straceOptionStops
+	}
+	if _, takesSeparateValue := straceLongOptionsWithSeparateValue[option]; takesSeparateValue {
+		return option, straceOptionContinue
+	}
+	if _, exactSelfContained := straceLongSelfContainedPrefixCollisions[option]; exactSelfContained {
+		return "", straceOptionContinue
+	}
+
+	// GNU long options accept an unambiguous prefix. An unfamiliar spelling
+	// that abbreviates a separate-value option is therefore not self-contained:
+	// it can consume the following word just like the canonical name. Multiple
+	// boundary-relevant matches fail closed; strace will either reject the
+	// ambiguity or a known match could otherwise hide the real child.
+	match := ""
+	matches := 0
+	for candidate := range straceLongOptionsWithSeparateValue {
+		if strings.HasPrefix(candidate, option) {
+			match = candidate
+			matches++
+		}
+	}
+	for _, candidate := range []string{"--help", "--version"} {
+		if strings.HasPrefix(candidate, option) {
+			match = candidate
+			matches++
+		}
+	}
+	switch matches {
+	case 0:
+		return "", straceOptionContinue
+	case 1:
+		if match == "--help" || match == "--version" {
+			return match, straceOptionStops
+		}
+		return match, straceOptionContinue
+	default:
+		return "", straceOptionUnsafe
+	}
 }
 
 func parseStraceShortOptions(words []*syntax.Word, names map[string]struct{}) (int, straceOptionResult) {
