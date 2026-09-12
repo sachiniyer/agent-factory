@@ -125,7 +125,11 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 		}
 	}
 
-	words, unsafe := unwrapAccountCommand(call.Args, names)
+	return accountCommandWordsMutateEnvironment(call.Args, names)
+}
+
+func accountCommandWordsMutateEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
+	words, unsafe := unwrapAccountCommand(words, names)
 	if unsafe || len(words) == 0 {
 		return unsafe
 	}

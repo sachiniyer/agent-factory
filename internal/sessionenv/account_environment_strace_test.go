@@ -70,12 +70,11 @@ func TestValidateAccountEnvironmentCommand_StraceSelfContainedOptionsLeaveChildV
 	}
 }
 
-func TestValidateAccountEnvironmentCommand_StraceSeparateValueUncertaintyFailsClosed(t *testing.T) {
+func TestValidateAccountEnvironmentCommand_StraceSeparateValuesLeaveChildVisible(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		command string
 	}{
-		{"unresolved value", `strace --columns "$AF_TRACE_COLUMNS" npm run dev`},
 		{"mutating child after literal value", "strace --columns 120 env CODEX_HOME=/other codex"},
 		{"abbreviated option keeps child boundary", "strace --colum 120 env CODEX_HOME=/other codex"},
 		{"current upstream option keeps child boundary", "strace --color always env CODEX_HOME=/other codex"},
@@ -330,5 +329,46 @@ func TestValidateAccountEnvironmentCommand_StraceAttachPIDForms(t *testing.T) {
 	} {
 		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"expanding PID in %q can change the argv boundary and must fail closed", command)
+	}
+}
+
+func TestValidateAccountEnvironmentCommand_StraceDynamicValueBoundaries(t *testing.T) {
+	t.Run("empty attached value moves child boundary", func(t *testing.T) {
+		require.Error(t,
+			ValidateAccountEnvironmentCommand(
+				`PID=; strace -p"$PID" 123 env CODEX_HOME=/other codex`,
+				scopedProcessTabAccount(),
+			),
+			"an empty attached PID consumes 123, leaving env as the mutating child",
+		)
+	})
+
+	for _, command := range []string{
+		`strace -p"$PID" npm run dev`,
+		`strace -p"$PID" 123 npm run dev`,
+		`strace -p0"$PID" npm run dev`,
+		`strace -e "$FILTER" npm run dev`,
+		`strace -e"$FILTER" npm run dev`,
+		`strace -eall"$FILTER" npm run dev`,
+		`strace --expr "$FILTER" npm run dev`,
+		`strace --expr="$FILTER" npm run dev`,
+		`strace --columns "$AF_TRACE_COLUMNS" npm run dev`,
+	} {
+		t.Run("safe/"+command, func(t *testing.T) {
+			require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"every possible child boundary in %q is an ordinary command", command)
+		})
+	}
+
+	for _, command := range []string{
+		`strace -E"$ENV_CHANGE" codex`,
+		`strace -o"$OUTPUT" codex`,
+		`strace -e$FILTER codex`,
+		`strace --expr=$FILTER codex`,
+	} {
+		t.Run("unsafe/"+command, func(t *testing.T) {
+			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"unprovable value in %q must remain fail-closed", command)
+		})
 	}
 }

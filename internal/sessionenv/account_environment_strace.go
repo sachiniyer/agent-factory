@@ -9,8 +9,9 @@ import (
 type straceOptionResult uint8
 
 type straceOptionToken struct {
-	literalPrefix       string
-	quotedAttachOperand bool
+	literalPrefix               string
+	quotedOperand               bool
+	quotedOperandMayConsumeNext bool
 }
 
 const (
@@ -18,6 +19,7 @@ const (
 	straceOptionStops
 	straceOptionUnsafe
 	straceOptionDeferredUnsafe
+	straceOptionAmbiguousValueBoundary
 	// Help and version stop parsing separately because they never execute a
 	// child. Every other short option that can consume the next argv word is in
 	// this set; options absent from it are self-contained in their argv word.
@@ -100,7 +102,14 @@ var straceLongSelfContainedPrefixCollisions = map[string]struct{}{
 // self-contained options cannot move the executable boundary and stay open to
 // spellings added by other strace versions.
 func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
-	deferredUnsafe := false
+	return unwrapStraceState(words, false, names)
+}
+
+func unwrapStraceState(
+	words []*syntax.Word,
+	deferredUnsafe bool,
+	names map[string]struct{},
+) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		token, parsed := parseStraceOptionToken(words[0])
 		if !parsed {
@@ -133,6 +142,8 @@ func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Wo
 		case straceOptionDeferredUnsafe:
 			deferredUnsafe = true
 			words = words[consumed:]
+		case straceOptionAmbiguousValueBoundary:
+			return nil, straceAmbiguousValueBoundaryUnsafe(words, deferredUnsafe, names)
 		}
 	}
 	return nil, deferredUnsafe
@@ -159,13 +170,19 @@ func parseStraceLongOption(
 	if canonical == "" {
 		return 1, straceOptionContinue
 	}
+	if token.quotedOperand {
+		if canonical == "--env" || canonical == "--output" {
+			return 0, straceOptionUnsafe
+		}
+		return 1, straceOptionContinue
+	}
 	var operand string
 	var consumed int
 	var ok bool
-	if canonical == "--attach" {
-		operand, consumed, ok = straceAttachOptionValue(words, token, attachedValue, attached)
-	} else {
+	if canonical == "--env" || canonical == "--output" {
 		operand, consumed, ok = straceOptionValue(words, attachedValue, attached)
+	} else {
+		operand, consumed, ok = straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
 	}
 	if !ok {
 		return 0, straceOptionUnsafe
@@ -264,13 +281,22 @@ func parseStraceShortOptions(
 			if attached {
 				attachedValue = value[idx+1:]
 			}
+			if token.quotedOperand {
+				if flag == 'E' || flag == 'o' {
+					return 0, straceOptionUnsafe
+				}
+				if token.quotedOperandMayConsumeNext {
+					return 0, straceOptionAmbiguousValueBoundary
+				}
+				return 1, straceOptionContinue
+			}
 			var operand string
 			var consumed int
 			var ok bool
-			if flag == 'p' {
-				operand, consumed, ok = straceAttachOptionValue(words, token, attachedValue, attached)
-			} else {
+			if flag == 'E' || flag == 'o' {
 				operand, consumed, ok = straceOptionValue(words, attachedValue, attached)
+			} else {
+				operand, consumed, ok = straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
 			}
 			if !ok {
 				return 0, straceOptionUnsafe
@@ -304,32 +330,40 @@ func parseStraceOptionToken(word *syntax.Word) (straceOptionToken, bool) {
 			return straceOptionToken{}, false
 		}
 	}
-	if !straceAttachConsumesQuotedSuffix(prefix.String()) {
+	consumes, mayConsumeNext := straceOptionConsumesQuotedSuffix(prefix.String())
+	if !consumes {
 		return straceOptionToken{}, false
 	}
-	return straceOptionToken{literalPrefix: prefix.String(), quotedAttachOperand: true}, true
+	return straceOptionToken{
+		literalPrefix:               prefix.String(),
+		quotedOperand:               true,
+		quotedOperandMayConsumeNext: mayConsumeNext,
+	}, true
 }
 
-func straceAttachConsumesQuotedSuffix(prefix string) bool {
+func straceOptionConsumesQuotedSuffix(prefix string) (bool, bool) {
 	if strings.HasPrefix(prefix, "--") {
 		option, _, attached := strings.Cut(prefix, "=")
 		canonical, result := classifyStraceLongOption(option)
-		return attached && result == straceOptionContinue && canonical == "--attach"
+		return attached && result == straceOptionContinue && canonical != "", false
 	}
 	if len(prefix) < 2 || prefix[0] != '-' {
-		return false
+		return false, false
 	}
 	for idx := 1; idx < len(prefix); idx++ {
 		flag := prefix[idx]
 		if flag == straceShortHelpOption || flag == straceShortVersionOption ||
 			flag == straceShortOptionValueSeparator {
-			return false
+			return false, false
 		}
 		if strings.ContainsRune(straceShortOptionsWithSeparateValue, rune(flag)) {
-			return flag == 'p'
+			// A literal suffix after the option makes the attached value
+			// provably nonempty. Without one, the quoted expansion may vanish;
+			// getopt then consumes the following argv word as the value instead.
+			return true, idx+1 == len(prefix)
 		}
 	}
-	return false
+	return false, false
 }
 
 func isSimpleQuotedParameterWord(word *syntax.Word) bool {
@@ -351,23 +385,53 @@ func isSimpleQuotedParameterPart(part syntax.WordPart) bool {
 		!exp.Excl && !exp.Length && !exp.Width && !exp.IsSet && exp.Names == 0
 }
 
-func straceAttachOptionValue(
+func straceOptionValueAllowQuotedScalar(
 	words []*syntax.Word,
-	token straceOptionToken,
 	attachedValue string,
 	attached bool,
 ) (string, int, bool) {
-	if token.quotedAttachOperand {
-		return "", 1, true
-	}
 	operand, consumed, ok := straceOptionValue(words, attachedValue, attached)
 	if ok || attached || len(words) < 2 || !isSimpleQuotedParameterWord(words[1]) {
 		return operand, consumed, ok
 	}
-	// A read-only scalar expansion inside double quotes is exactly one argv
-	// word. It fills -p's operand without hiding the next word; the caller keeps
-	// scanning because strace may also have a trailing child.
+	// A read-only scalar expansion inside double quotes is exactly one argv word,
+	// even when empty, so it cannot move the child boundary.
 	return "", 2, true
+}
+
+func straceAmbiguousValueBoundaryUnsafe(
+	words []*syntax.Word,
+	deferredUnsafe bool,
+	names map[string]struct{},
+) bool {
+	// An attached value that is literal is self-contained. An attached value
+	// produced solely by an expansion may be empty; a short option then consumes
+	// the next argv word, so the token is not self-contained. Check both runtime
+	// boundaries.
+	if straceTailMutatesAccountEnvironment(words[1:], deferredUnsafe, names) {
+		return true
+	}
+	if len(words) < 2 {
+		// The empty branch leaves a required option value missing, so strace
+		// exits before it can launch a child.
+		return false
+	}
+	if _, literal := literalShellWord(words[1]); !literal && !isSimpleQuotedParameterWord(words[1]) {
+		return true
+	}
+	return straceTailMutatesAccountEnvironment(words[2:], deferredUnsafe, names)
+}
+
+func straceTailMutatesAccountEnvironment(
+	words []*syntax.Word,
+	deferredUnsafe bool,
+	names map[string]struct{},
+) bool {
+	child, unsafe := unwrapStraceState(words, deferredUnsafe, names)
+	if unsafe {
+		return true
+	}
+	return accountCommandWordsMutateEnvironment(child, names)
 }
 
 func straceOptionValue(words []*syntax.Word, attachedValue string, attached bool) (string, int, bool) {
