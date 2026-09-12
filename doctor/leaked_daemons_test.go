@@ -6,9 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
@@ -554,4 +556,183 @@ func TestOnlyARealSocketCountsAsADeadSocketDirectory(t *testing.T) {
 
 	require.False(t, holdsOnlyADaemonSocket(filepath.Join(dir, "does-not-exist")),
 		"a directory that cannot be listed is never this shape")
+}
+
+// countDaemonSocketReads returns a counter of every directory entry
+// holdsOnlyADaemonSocket actually reads, through the readDaemonSocketDir seam
+// that exists so the bounding of the dead-socket check is observable at all.
+//
+// This is the quantity the bug under #3845 is about: a return-value-based test
+// cannot tell a check that read 64 entries from one that read a million, both
+// return false. The counter is what makes "bounded" vs "unbounded" visible —
+// and the two-sided assertions below (> 0 AND < total) are what stop a future
+// reversion to os.ReadDir from reading nothing through this seam and passing
+// trivially.
+func countDaemonSocketReads(t *testing.T) *int {
+	t.Helper()
+	read := 0
+	prev := readDaemonSocketDir
+	readDaemonSocketDir = func(f *os.File, n int) ([]os.DirEntry, error) {
+		entries, err := prev(f, n)
+		read += len(entries)
+		return entries, err
+	}
+	t.Cleanup(func() { readDaemonSocketDir = prev })
+	return &read
+}
+
+// The positive shape at the unit level: a directory holding nothing but a dead
+// daemon socket is decided true. The existing integration test
+// (TestADirectoryHoldingOnlyADeadDaemonSocketIsReported) proves this through the
+// whole Run; this locks it at the predicate, since the streaming reimplementation
+// changed how the single entry is gathered.
+func TestHoldsOnlyADaemonSocketDetectsASingleDeadSocket(t *testing.T) {
+	tempRoot := socketTempHome(t)
+	dir := deadSocketDir(t, tempRoot, "af-dead")
+	read := countDaemonSocketReads(t)
+
+	require.True(t, holdsOnlyADaemonSocket(dir),
+		"a directory holding only a dead daemon socket is the shape")
+	// The positive shape holds exactly one entry, and it is the only directory
+	// this function ever reads to the end.
+	assert.Equal(t, 1, *read,
+		"a single-socket directory is read to its end and no further")
+}
+
+// The bug, as a unit test on the real predicate. A single candidate holding a
+// huge number of non-socket entries used to be re-materialized in full by
+// os.ReadDir, allocating memory proportional to that count — on exactly the
+// candidate set the bounded sweep went out of its way not to read in full. The
+// streaming read must decide this shape within the first batch.
+//
+// Both bounds matter. "> 0" catches a reversion to os.ReadDir, which would read
+// nothing through the seam (and everything behind it). "< total" catches the
+// original unbounded read. Together they pin "read some, but not all".
+func TestHoldsOnlyADaemonSocketDoesNotReadAHugeNonMatchingDirectoryInFull(t *testing.T) {
+	dir := t.TempDir()
+	const total = 1000
+	for i := 0; i < total; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%04d", i)), nil, 0644))
+	}
+	read := countDaemonSocketReads(t)
+
+	require.False(t, holdsOnlyADaemonSocket(dir),
+		"a directory with no socket is not the shape")
+	assert.Greater(t, *read, 0,
+		"the bounded seam must be used; a direct os.ReadDir would read nothing "+
+			"through it and everything behind it")
+	assert.Less(t, *read, total,
+		"a huge non-matching candidate must be decided within one batch, "+
+			"not re-materialized in full")
+	assert.LessOrEqual(t, *read, daemonSocketReadBatch,
+		"the common non-match bails inside the first batch")
+}
+
+// The socket may be the first entry the listing hands back, so the function
+// cannot bail on "first entry is not the socket" — it must stop at count > 1
+// instead. This forces that ordering through the seam (filesystem order is not
+// under the test's control) so the "socket first, then something else" path is
+// exercised deterministically rather than by chance.
+func TestHoldsOnlyADaemonSocketStopsAtASecondEntryEvenWhenTheSocketComesFirst(t *testing.T) {
+	dir := socketTempHome(t)
+	socket := filepath.Join(dir, daemon.HTTPSocketName())
+	l, err := net.Listen("unix", socket)
+	require.NoError(t, err)
+	l.(*net.UnixListener).SetUnlinkOnClose(false)
+	require.NoError(t, l.Close())
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "extra-file"), []byte("x"), 0644))
+
+	prev := readDaemonSocketDir
+	readDaemonSocketDir = func(f *os.File, n int) ([]os.DirEntry, error) {
+		entries, err := prev(f, n)
+		ordered := make([]os.DirEntry, 0, len(entries))
+		for _, e := range entries {
+			if e.Name() == daemon.HTTPSocketName() {
+				ordered = append(ordered, e)
+			}
+		}
+		for _, e := range entries {
+			if e.Name() != daemon.HTTPSocketName() {
+				ordered = append(ordered, e)
+			}
+		}
+		return ordered, err
+	}
+	t.Cleanup(func() { readDaemonSocketDir = prev })
+
+	require.False(t, holdsOnlyADaemonSocket(dir),
+		"a directory holding the socket AND something else is not the shape, "+
+			"even when the socket is the first entry listed")
+}
+
+// A directory (not a socket) wearing the socket's name must not qualify. The
+// mode check is what makes the removal safe, and it survived the rewrite — but
+// the existing TestOnlyARealSocketCountsAsADeadSocketDirectory only stages a
+// regular file, not a directory, so this covers the remaining mode.
+func TestHoldsOnlyADaemonSocketRejectsASubdirectoryBorrowingTheSocketName(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, daemon.HTTPSocketName()), 0755))
+	require.False(t, holdsOnlyADaemonSocket(dir),
+		"a directory wearing the socket's name is not a socket")
+}
+
+// holdsOnlyADaemonSocket must return promptly when the candidate path has been
+// replaced by a FIFO between the temp-home sweep and this check. A plain
+// os.Open of a FIFO blocks until a writer appears; opening with O_DIRECTORY
+// (and O_NONBLOCK) rejects the FIFO immediately, so the scan cannot hang.
+func TestHoldsOnlyADaemonSocketDoesNotBlockOnAFIFO(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "candidate-turned-fifo")
+	require.NoError(t, syscall.Mkfifo(fifo, 0o600))
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- holdsOnlyADaemonSocket(fifo) // must not block
+	}()
+	select {
+	case result := <-done:
+		require.False(t, result, "a FIFO is not a dead-socket directory")
+	case <-time.After(5 * time.Second):
+		t.Fatal("holdsOnlyADaemonSocket blocked on a FIFO; O_DIRECTORY open required")
+	}
+}
+
+// The threat model end-to-end: a small level-1 parent holds one level-2 child
+// with a huge number of entries. The sweep reads only the parent (its listing is
+// tiny), records the child as a candidate, and never opens the child — so the
+// sweep is NOT truncated and emits no incompleteness notice. The only reader of
+// the child's contents is holdsOnlyADaemonSocket, which must bound that read, or
+// the bound the sweep enacted is undone by the consumer wired alongside it.
+//
+// This is the level-2 reachability path from the report: a huge directory
+// reaches the unbounded read with no INCOMPLETE notice of any kind preceding it.
+// After the fix the read is bounded AND the run stays complete.
+func TestCheckDeadSocketHomesDoesNotReReadAHugeCandidateTheSweepLeftUnbounded(t *testing.T) {
+	tempRoot := t.TempDir()
+	parent := filepath.Join(tempRoot, "TestFoo")
+	require.NoError(t, os.MkdirAll(parent, 0755))
+	child := filepath.Join(parent, "001")
+	require.NoError(t, os.MkdirAll(child, 0755))
+	const childEntries = 1000
+	for i := 0; i < childEntries; i++ {
+		require.NoError(t, os.WriteFile(
+			filepath.Join(child, fmt.Sprintf("f%04d", i)), nil, 0644))
+	}
+	read := countDaemonSocketReads(t)
+
+	opts := macLikeTempHomeOptions(t, tempRoot, false)
+	ctx, err := newScanContext(opts)
+	require.NoError(t, err)
+	report := &Report{}
+	checkDeadSocketHomes(ctx, report)
+
+	assert.Empty(t, findByCheck(report, checkDeadSocketHome),
+		"the huge child is not a dead-socket home, so no finding is produced")
+	assert.NotContains(t, report.Incomplete, checkDeadSocketHome,
+		"the sweep finished, so no incompleteness notice precedes the dead-socket read")
+	assert.Greater(t, *read, 0,
+		"the dead-socket check must read through the bounded seam, not os.ReadDir")
+	assert.Less(t, *read, childEntries,
+		"a candidate whose contents the sweep never bounded must not be "+
+			"re-materialized by the consumer")
 }

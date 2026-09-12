@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/spf13/cobra"
@@ -52,6 +53,8 @@ func jsonWrapError(cmd *cobra.Command, jsonMode bool, err error) error {
 // {data,error} envelope. Local to this group (like `af api`'s --json) since
 // there is no bare-vs-envelope legacy to preserve here.
 var configJSONFlag bool
+
+var configValidateLoadReadOnly = config.LoadConfigReadOnly
 
 var (
 	configGetExplainFlag   bool
@@ -470,6 +473,8 @@ Settable keys:
   session_env_passthrough    compact JSON array of exact environment variable names
   root_agents                compact JSON object keyed by repository path
   root_agent                 compact JSON object with enabled and optional program
+  root_agent.enabled         true | false
+  root_agent.program         full command string for the singleton root agent
   keys                       compact JSON object of TUI action-to-key rebinds
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
@@ -522,7 +527,7 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command); a global-only key
 is rejected with the location it actually belongs to. Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
@@ -531,6 +536,8 @@ Examples:
   af config set auto_update false
   af config set appearance dark
   af config set session_env_passthrough '["HTTP_PROXY","NO_PROXY"]'
+  af config set root_agent.enabled true --project .
+  af config set root_agent.program "codex --profile work" --project .
   af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
@@ -573,8 +580,7 @@ owns.`, tmux.SupportedProgramsString()),
 			fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s for project %s in %s\n",
 				res.Key, echoValue(res.Value), configSetProjectFlag, prettyPath(res.Path))
 			if res.RequiresRestart {
-				fmt.Fprintln(cmd.OutOrStdout(),
-					"note: af and the daemon read config at startup — restart them to apply (same as a hand-edit)")
+				fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
 			}
 			return nil
 		}
@@ -634,8 +640,25 @@ func printListenerAddr(cmd *cobra.Command, addr string) {
 // checked. The value is deliberately not returned — the point is the verdict,
 // and a config that fails to load has no value to report.
 type configValidateResult struct {
-	OK   bool   `json:"ok"`
-	Path string `json:"path"`
+	OK        bool   `json:"ok"`
+	Path      string `json:"path"`
+	Warning   string `json:"warning,omitempty"`
+	Uncertain bool   `json:"-"`
+}
+
+// MarshalJSON preserves the established ok/path/warning member order and
+// appends uncertainty only when the read-only directory probe could not answer.
+// Re-encoding through a map would alphabetize the existing public payload.
+func (r configValidateResult) MarshalJSON() ([]byte, error) {
+	type alias configValidateResult
+	object, err := json.Marshal(alias(r))
+	if err != nil {
+		return nil, err
+	}
+	if !r.Uncertain {
+		return object, nil
+	}
+	return session.AppendJSONMember(object, "uncertain", []byte("true"))
 }
 
 var configValidateCmd = &cobra.Command{
@@ -647,8 +670,10 @@ materializes nothing — a read-only check.
 
 This is the companion to a raw hand-edit. "af config set" validates every scalar
 and structured key before it writes and so cannot leave a broken file. A manual
-edit bypasses that protection: exit 0 means af can load it, while a non-zero exit
-names what must be fixed before the next launch.
+edit bypasses that protection: exit 0 means no config defect was found, while a
+non-zero exit names what must be fixed before the next launch. An inconclusive
+read-only directory-access probe does not prove that a later startup can
+regenerate an empty stub; text output warns, and JSON appends uncertain=true.
 
 Local-only: it checks the config on the machine it runs on, so
 --daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
@@ -670,16 +695,25 @@ host to check that host.`,
 		// defaults, so an empty stub is OK — the very state this command claims
 		// to mirror (the "same parse+validate af runs at startup") must not
 		// reject it.
-		loaded, err := config.LoadConfigReadOnly()
+		loaded, err := configValidateLoadReadOnly()
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
 		}
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(),
-				apiproto.Success(configValidateResult{OK: true, Path: loaded.Path}))
+				apiproto.Success(configValidateResult{
+					OK:        true,
+					Path:      loaded.Path,
+					Warning:   loaded.DirectoryAccessWarning,
+					Uncertain: loaded.DirectoryAccessWarning != "",
+				}))
+		}
+		if loaded.DirectoryAccessWarning != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "config warning: %s\n", loaded.DirectoryAccessWarning)
+			return nil
 		}
 		if loaded.EmptyStub {
-			fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s is an empty stub — af will regenerate defaults on the next start\n", prettyPath(loaded.Path))
+			fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s is an empty stub — af will attempt to regenerate defaults on the next start\n", prettyPath(loaded.Path))
 			return nil
 		}
 		if loaded.Missing {
@@ -764,11 +798,24 @@ override file it clears is this machine's.`,
 		fmt.Fprintf(cmd.OutOrStdout(), "cleared %s override for project %s in %s\n",
 			res.Key, configUnsetProjectFlag, prettyPath(res.Path))
 		if res.RequiresRestart {
-			fmt.Fprintln(cmd.OutOrStdout(),
-				"saved. It applies to sessions created in this project from now on.")
+			if rootAgentConfigKey(res.Key) {
+				fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(),
+					"saved. It applies to sessions created in this project from now on.")
+			}
 		}
 		return nil
 	},
+}
+
+func rootAgentConfigKey(key string) bool {
+	return key == "root_agent" || strings.HasPrefix(key, "root_agent.")
+}
+
+func projectConfigRestartNotice(key string) string {
+	notice := "note: af and the daemon read config at startup — restart them to apply (same as a hand-edit)"
+	return config.WithRootAgentAdoptionNotice(key, notice)
 }
 
 // echoValue renders a just-set value for the `set <key> = <value>` echo. An

@@ -146,8 +146,19 @@ type Instance struct {
 	// recovery merely because the Instance pointer (or even agent name) matches.
 	// In-memory only: no capture goroutine survives a daemon restart.
 	agentRuntimeGeneration uint64
+	// runtimeEvidenceGeneration is the lock-free invalidation token for an
+	// asynchronous consumer that snapshots runtimeProgram and later commits a
+	// result under its own lock. It advances with both runtime-command changes
+	// and lifecycle transitions, so a replacement fence invalidates predecessor
+	// evidence before the new command is installed.
+	runtimeEvidenceGeneration atomic.Uint64
 	// Program is the program to run in the instance.
 	Program string
+	// runtimeProgram is the override-resolved command that the last positively
+	// established agent runtime launched from, before AF's generated resume and
+	// system-prompt arguments. Unlike Program (the requested agent label), this is
+	// durable evidence about the process being adopted after a daemon restart.
+	runtimeProgram string
 	// Account is the credential account this instance's agent runs as, or empty
 	// for the ambient identity — which is the behaviour every session had before
 	// #3051 and remains the default.

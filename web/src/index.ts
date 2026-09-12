@@ -356,8 +356,7 @@ function rerender(): void {
       shell = null; // dropped from the tree by renderLogin below
     }
     disposeSplit();
-    closeModal();
-    closeConfigAssistant();
+    closeOverlays();
     renderLogin(root, state, actions);
     return;
   }
@@ -490,8 +489,7 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
   pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
-  closeModal();
-  closeConfigAssistant();
+  closeOverlays();
   token = null;
   clearToken();
   store.set({
@@ -749,6 +747,20 @@ function closeConfigAssistant(): void {
   }
 }
 
+/** Closes any open account-login overlay and its terminal stream. */
+function closeAccountLogin(): void {
+  accountLogin?.close();
+  accountLogin = null;
+}
+
+/** Reaps every imperative overlay owned by modalHost. Keep the complete owner list
+ *  here so host teardown and replacement cannot orphan a controller by omission. */
+function closeOverlays(): void {
+  closeModal();
+  closeConfigAssistant();
+  closeAccountLogin();
+}
+
 interface ModalInvoker {
   sessionId?: string;
   actionLabel: string | null;
@@ -766,12 +778,10 @@ function captureModalInvoker(): ModalInvoker {
   };
 }
 
-/** Mounts a fresh modal, replacing any currently open overlay (a form modal OR the
- *  config-assistant chat) — one overlay at a time, and the assistant is torn down
- *  (terminal disposed, session reaped) rather than left streaming behind the modal. */
+/** Mounts a fresh modal, replacing any currently open overlay. Controllers are
+ *  reaped before their DOM is replaced so no hidden terminal keeps streaming. */
 function openModal(m: ModalHandle, focusCard = false, explicitInvoker?: ModalInvoker): void {
-  closeModal();
-  closeConfigAssistant();
+  closeOverlays();
   const focused = document.activeElement as HTMLElement | null;
   const invoker = explicitInvoker ?? captureModalInvoker();
   const { sessionId, actionLabel } = invoker;
@@ -1740,12 +1750,6 @@ function doOpenAccountLogin(agent: string, name: string): void {
     .catch((err: unknown) => {
       setAccountStatus(agent, name, errorText(err), true);
     });
-}
-
-/** Closes any open login overlay. One at a time, like the assistant. */
-function closeAccountLogin(): void {
-  accountLogin?.close();
-  accountLogin = null;
 }
 
 /** Writes one config key and reports the outcome.

@@ -4500,6 +4500,357 @@ test("an approved degraded pass survives the gate's own update-branch", async ()
   );
 });
 
+// #4239. A reply can land on one gate merge just before another base update.
+// Every link is independently tree-proven, so the intermediate head is as valid
+// an evidence name as the terminal content head; walking past it must not erase
+// the reviewer's answer.
+test("an inline usage-limit reply survives a verified chain of update-branch merges", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const LAP1 = "9e27c60100000000000000000000000000000000";
+  const BASE1 = "ba5e000100000000000000000000000000000000";
+  const BASE2 = "ba5e000200000000000000000000000000000000";
+  const MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+  const reply = {
+    ...codexRateLimit("2026-07-09T10:45:00Z"),
+    id: 4239001,
+    pull_request_review_id: 4239002,
+    in_reply_to_id: 4239000,
+    commit_id: LAP1,
+  };
+
+  const landed = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: LAP1, committedDate: "2026-07-09T10:40:00Z" },
+      { oid: BASE2, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    baseContainedShas: [BASE1, BASE2],
+    mergeBaseSha: MERGE_BASE,
+    parentsByOid: {
+      [LAP1]: [
+        { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+        { oid: BASE1, committedDate: "2026-07-09T10:39:00Z" },
+      ],
+    },
+    commitDatesByOid: {
+      [LAP1]: "2026-07-09T10:40:00Z",
+      [CONTENT]: "2026-07-09T10:30:00Z",
+    },
+    treeEntriesByCommit: {
+      [MERGE_BASE]: {},
+      [CONTENT]: { "pr.txt": "1".repeat(40) },
+      [BASE1]: { "base-one.txt": "2".repeat(40) },
+      [LAP1]: { "pr.txt": "1".repeat(40), "base-one.txt": "2".repeat(40) },
+      [BASE2]: { "base-two.txt": "3".repeat(40) },
+      [HEAD_SHA]: {
+        "pr.txt": "1".repeat(40),
+        "base-one.txt": "2".repeat(40),
+        "base-two.txt": "3".repeat(40),
+      },
+    },
+    issueComments: [
+      prComment("sachiniyer", "## Review — approve\n\nRead it.", "2026-07-09T10:46:00Z"),
+    ],
+    reviews: [],
+    reviewComments: [reply],
+  });
+
+  assert.equal(landed.degradedForUnavailableReviewer, true, landed.reasons.join("; "));
+  assert.equal(landed.shouldMerge, true, `must carry the intermediate reply: ${landed.reasons.join("; ")}`);
+  assert.match([...landed.notes, ...landed.reasons].join("\n"), /4239001/);
+});
+
+test("an inline usage-limit reply does not carry across a content-changing merge", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+  const MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+  const reply = {
+    ...codexRateLimit("2026-07-09T10:45:00Z"),
+    id: 4239011,
+    pull_request_review_id: 4239012,
+    in_reply_to_id: 4239010,
+    commit_id: CONTENT,
+  };
+
+  const blocked = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    mergeBaseSha: MERGE_BASE,
+    treeEntriesByCommit: {
+      [MERGE_BASE]: {},
+      [CONTENT]: { "pr.txt": "1".repeat(40) },
+      [BASE_TIP]: { "base.txt": "2".repeat(40) },
+      // A hand resolution silently drops the base-side change.
+      [HEAD_SHA]: { "pr.txt": "1".repeat(40) },
+    },
+    issueComments: [
+      prComment("sachiniyer", "## Review — approve\n\nRead it.", "2026-07-09T10:46:00Z"),
+    ],
+    reviews: [],
+    reviewComments: [reply],
+  });
+
+  assert.equal(blocked.degradedForUnavailableReviewer, false);
+  assert.equal(blocked.shouldMerge, false, "changed content must require fresh availability evidence");
+  assert.doesNotMatch(blocked.notes.join("\n"), /content head/);
+});
+
+test("an intermediate commit cited as finding context stays unbound across update merges", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const LAP1 = "9e27c60100000000000000000000000000000000";
+  const BASE1 = "ba5e000100000000000000000000000000000000";
+  const BASE2 = "ba5e000200000000000000000000000000000000";
+  const MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+  const finding = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    citing: LAP1,
+    id: 4239021,
+    timestamp: "2026-07-09T10:44:00Z",
+  });
+
+  const updateChain = {
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: LAP1, committedDate: "2026-07-09T10:40:00Z" },
+      { oid: BASE2, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    baseContainedShas: [BASE1, BASE2],
+    mergeBaseSha: MERGE_BASE,
+    parentsByOid: {
+      [LAP1]: [
+        { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+        { oid: BASE1, committedDate: "2026-07-09T10:39:00Z" },
+      ],
+    },
+    commitDatesByOid: {
+      [LAP1]: "2026-07-09T10:40:00Z",
+      [CONTENT]: "2026-07-09T10:30:00Z",
+    },
+    treeEntriesByCommit: {
+      [MERGE_BASE]: {},
+      [CONTENT]: { "pr.txt": "1".repeat(40) },
+      [BASE1]: { "base-one.txt": "2".repeat(40) },
+      [LAP1]: { "pr.txt": "1".repeat(40), "base-one.txt": "2".repeat(40) },
+      [BASE2]: { "base-two.txt": "3".repeat(40) },
+      [HEAD_SHA]: {
+        "pr.txt": "1".repeat(40),
+        "base-one.txt": "2".repeat(40),
+        "base-two.txt": "3".repeat(40),
+      },
+    },
+    reviews: [],
+  };
+  const blocked = await evaluateGate({
+    ...updateChain,
+    issueComments: [finding, codexVerdict(LAP1, "2026-07-09T10:46:00Z")],
+  });
+
+  assert.equal(blocked.shouldMerge, false, "a contextual link must not become a head assertion");
+  assert.ok(
+    blocked.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${blocked.reasons.join("; ")}`,
+  );
+  assert.ok(
+    blocked.reasons.some((reason) => reason.includes(finding.html_url)),
+    `the blocker must name the unbound finding: ${blocked.reasons.join("; ")}`,
+  );
+
+  // The opposite policy applies to GitHub's commit_id: it states which commit
+  // the review is about, so a finding authenticated to the same intermediate
+  // head remains part of the carried review rather than becoming unbound.
+  const authenticated = await evaluateGate({
+    ...updateChain,
+    issueComments: [
+      codexReview(LAP1, "P2: authenticated intermediate finding.", "2026-07-09T10:46:00Z"),
+    ],
+  });
+  assert.equal(authenticated.shouldMerge, false, "an authenticated finding must carry");
+  assert.ok(
+    authenticated.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${authenticated.reasons.join("; ")}`,
+  );
+  assert.ok(
+    !authenticated.reasons.some((reason) => reason.includes("name no commit")),
+    `an authenticated commit_id is classified: ${authenticated.reasons.join("; ")}`,
+  );
+});
+
+// #4235. Unlike the degraded path above, an ordinary verdict is bound by the
+// commit SHA it names. The gate already identifies the first parent as the
+// unchanged PR-content head; the verdict must follow that identity just as the
+// timestamp-based evidence follows its freshness anchor.
+test("an ordinary verdict survives the gate's own update-branch", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+  const MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+
+  const landed = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    mergeBaseSha: MERGE_BASE,
+    treeEntriesByCommit: {
+      [MERGE_BASE]: { "shared.txt": "1".repeat(40) },
+      [CONTENT]: { "shared.txt": "1".repeat(40), "pr.txt": "2".repeat(40) },
+      [BASE_TIP]: { "shared.txt": "1".repeat(40), "base.txt": "3".repeat(40) },
+      [HEAD_SHA]: {
+        "shared.txt": "1".repeat(40),
+        "pr.txt": "2".repeat(40),
+        "base.txt": "3".repeat(40),
+      },
+    },
+    issueComments: [codexVerdict(CONTENT, "2026-07-09T10:40:31Z")],
+  });
+
+  assert.equal(
+    landed.shouldMerge,
+    true,
+    `must carry the content-head verdict: ${landed.reasons.join("; ")}`,
+  );
+  assert.match(landed.notes.join("\n"), /Codex verdict matches content head 71c42134/);
+  assert.match(
+    landed.notes.join("\n"),
+    /merge that preserves the reviewed content.*approval and Codex evidence stay bound/,
+    "the decision says which evidence the verified tree carries",
+  );
+});
+
+test("a corroborated summary verdict survives the gate's own update-branch", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+
+  const landed = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    issueComments: [
+      codexSummaryTable(CONTENT, {
+        rowTime: "2026-07-09T10:40:31Z",
+        commentTime: "2026-07-09T10:40:31Z",
+      }),
+    ],
+    reviews: [automaticReview(CONTENT, "2026-07-09T10:40:30Z")],
+  });
+
+  assert.equal(
+    landed.shouldMerge,
+    true,
+    `must carry the content-head summary verdict: ${landed.reasons.join("; ")}`,
+  );
+  assert.match(landed.notes.join("\n"), /Codex verdict matches content head 71c42134/);
+  assert.match(landed.notes.join("\n"), /Codex verdict corroborated by review 3606/);
+});
+
+// The permissive direction is the load-bearing half: a hand-written conflict
+// resolution has the same two-parent/base-contained shape as update-branch, but
+// its committed tree is not the automatic three-way result. It must not inherit
+// the first parent's verdict.
+test("an ordinary verdict does not carry across a conflict-resolution merge", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+  const MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+
+  const blocked = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    mergeBaseSha: MERGE_BASE,
+    treeEntriesByCommit: {
+      [MERGE_BASE]: { "shared.txt": "1".repeat(40) },
+      [CONTENT]: { "shared.txt": "2".repeat(40) },
+      [BASE_TIP]: { "shared.txt": "3".repeat(40) },
+      [HEAD_SHA]: { "shared.txt": "4".repeat(40) },
+    },
+    issueComments: [codexVerdict(CONTENT, "2026-07-09T10:40:31Z")],
+  });
+
+  assert.equal(blocked.shouldMerge, false, "a conflict resolution must require a fresh verdict");
+  assert.match(blocked.reasons.join("\n"), new RegExp(`Codex has not reviewed head ${HEAD_SHA}`));
+  assert.doesNotMatch(blocked.notes.join("\n"), /content head/);
+});
+
+test("a committed-tree mismatch cannot carry a content-head verdict", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+  const MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+
+  const blocked = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    mergeBaseSha: MERGE_BASE,
+    treeEntriesByCommit: {
+      [MERGE_BASE]: {},
+      [CONTENT]: { "pr.txt": "1".repeat(40) },
+      [BASE_TIP]: { "base.txt": "2".repeat(40) },
+      // The committed merge silently dropped the base-side addition.
+      [HEAD_SHA]: { "pr.txt": "1".repeat(40) },
+    },
+    issueComments: [codexVerdict(CONTENT, "2026-07-09T10:40:31Z")],
+  });
+
+  assert.equal(blocked.shouldMerge, false, "a different committed tree is unreviewed content");
+  assert.doesNotMatch(blocked.notes.join("\n"), /content head/);
+});
+
+test("a truncated tree cannot carry a content-head verdict", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+
+  const blocked = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    truncatedTreeCommits: [CONTENT],
+    issueComments: [codexVerdict(CONTENT, "2026-07-09T10:40:31Z")],
+  });
+
+  assert.equal(blocked.shouldMerge, false, "an incomplete manifest proves nothing");
+  assert.doesNotMatch(blocked.notes.join("\n"), /content head/);
+});
+
+// Carrying the verdict but not the review body would be fail-open: a review can
+// have a valid verdict marker and a P0-P3 finding in the same artifact. Every
+// SHA-bound part of that artifact follows the content head together.
+test("a content-head verdict cannot carry without its finding", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+
+  const blocked = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    issueComments: [
+      codexReview(CONTENT, "P2: this still needs attention.", "2026-07-09T10:40:31Z"),
+    ],
+  });
+
+  assert.equal(blocked.shouldMerge, false, "carrying a verdict must carry its finding too");
+  assert.match(blocked.reasons.join("\n"), /latest exact-head Codex review body.*P0-P3 finding/);
+});
+
 // Exactly two parents, and the count is load-bearing on its own. An octopus
 // merge whose second parent happens to be base history is not an update-branch:
 // the other parents bring in content nothing here has looked at, and taking
@@ -4558,6 +4909,7 @@ test("the content head is found through a chain of the gate's own merges", async
     github,
     context: fakeContext(),
     baseRefName: "master",
+    headSha: HEAD_SHA,
     headParents: [
       { oid: LAP2, committedDate: "2026-07-09T14:17:00Z" },
       { oid: BASE, committedDate: "2026-07-09T14:16:00Z" },
@@ -4571,6 +4923,11 @@ test("the content head is found through a chain of the gate's own merges", async
     "…and carry its date, so evidence written at 13:09 still binds",
   );
   assert.equal(found?.chainLength, 3, "the decision names how many gate merges were walked");
+  assert.deepEqual(
+    found?.evidenceHeadOids,
+    [LAP2, LAP1, CONTENT],
+    "every tree-proven predecessor remains a valid name for evidence posted between laps",
+  );
 });
 
 // The bound is load-bearing, not decoration: this walks one API read per link, and
@@ -4595,6 +4952,7 @@ test("the content-head walk is bounded, even on a cycle", async () => {
     github,
     context: fakeContext(),
     baseRefName: "master",
+    headSha: HEAD_SHA,
     headParents: [{ oid: A, committedDate: "2026-07-09T13:02:00Z" }, { oid: BASE }],
     maxDepth: 5,
   });
@@ -4621,6 +4979,7 @@ test("a push inside the chain stops the walk and anchors on it", async () => {
     github,
     context: fakeContext(),
     baseRefName: "master",
+    headSha: HEAD_SHA,
     headParents: [
       { oid: LAP1, committedDate: "2026-07-09T13:35:00Z" },
       { oid: BASE, committedDate: "2026-07-09T13:34:00Z" },
@@ -4643,6 +5002,7 @@ test("a merge with more than two parents is not an update-branch", async () => {
     github: alwaysContained,
     context: fakeContext(),
     baseRefName: "master",
+    headSha: HEAD_SHA,
     headParents: [
       { oid: "71c4213400000000000000000000000000000000", committedDate: "2026-07-09T10:30:00Z" },
       { oid: "9ac0ffee00000000000000000000000000000000", committedDate: "2026-07-09T10:49:00Z" },
@@ -4659,6 +5019,7 @@ test("a merge with more than two parents is not an update-branch", async () => {
         github: alwaysContained,
         context: fakeContext(),
         baseRefName: "master",
+        headSha: HEAD_SHA,
         headParents: parents,
       }),
       null,
@@ -9620,16 +9981,25 @@ async function runApplyGateStep({
 // and containment always answers YES so only the SHAPE decides where the walk
 // stops — otherwise the compare stub would end it for an unrelated reason.
 function chainGithub(parentsByOid, datesByOid) {
+  const mergeBaseSha = "ba5eba5e00000000000000000000000000000000";
   return {
     rest: {
       repos: {
-        compareCommitsWithBasehead: async () => ({ data: { status: "behind" } }),
+        compareCommitsWithBasehead: async () => ({
+          data: { status: "behind", merge_base_commit: { sha: mergeBaseSha } },
+        }),
         getCommit: async ({ ref }) => ({
           data: {
+            sha: ref,
             // The commit's own date, which is what the anchor becomes.
-            commit: { committer: { date: (datesByOid || {})[ref] } },
+            commit: { committer: { date: (datesByOid || {})[ref] }, tree: { sha: ref } },
             parents: (parentsByOid[ref] || []).map((p) => ({ sha: p.oid })),
           },
+        }),
+      },
+      git: {
+        getTree: async ({ tree_sha }) => ({
+          data: { sha: tree_sha, truncated: false, tree: [] },
         }),
       },
     },
@@ -9663,6 +10033,12 @@ function fakeGateGithub({
   // branch, is what `PUT update-branch` produces (#3803).
   headParents = [],
   secondParentInBase = true,
+  // Historical second parents from earlier links in a repeated update chain.
+  // The live comparison recognizes each as contained in today's base branch.
+  baseContainedShas = [],
+  mergeBaseSha = "ba5eba5e00000000000000000000000000000000",
+  treeEntriesByCommit = {},
+  truncatedTreeCommits = [],
   // Workflow runs the repo reports for a head, and the head the branch moves to
   // when the gate update-branches it (#3807).
   runsByHeadSha = {},
@@ -9970,6 +10346,18 @@ function fakeGateGithub({
         },
       },
       git: {
+        getTree: async ({ tree_sha }) => ({
+          data: {
+            sha: tree_sha,
+            truncated: truncatedTreeCommits.includes(tree_sha),
+            tree: Object.entries(treeEntriesByCommit[tree_sha] || {}).map(([path, entry]) => ({
+              path,
+              mode: typeof entry === "string" ? "100644" : entry.mode,
+              type: typeof entry === "string" ? "blob" : entry.type,
+              sha: typeof entry === "string" ? entry : entry.sha,
+            })),
+          },
+        }),
         getRef: async ({ ref }) => {
           github.refReads.push(ref);
           if (refReadError) {
@@ -10012,7 +10400,11 @@ function fakeGateGithub({
         listPullRequestsAssociatedWithCommit,
         getCommit: async ({ ref }) => ({
           data: {
-            commit: { committer: { date: (commitDatesByOid || {})[ref] } },
+            sha: ref,
+            commit: {
+              committer: { date: (commitDatesByOid || {})[ref] },
+              tree: { sha: ref },
+            },
             // Default: an ordinary one-parent commit, so the first-parent walk
             // stops at the first link unless a fixture describes a chain.
             parents: (parentsByOid[ref] || [{ oid: "0".repeat(40) }]).map((p) => ({ sha: p.oid })),
@@ -10031,8 +10423,15 @@ function fakeGateGithub({
           // declares: keying on `length === 2` meant an octopus fixture fell
           // through to the default "ahead" answer, so a truncating query looked
           // safe for a reason that had nothing to do with the guard under test.
-          if (target && target === headParents[1]?.oid) {
-            return { data: { behind_by: 0, ahead_by: 0, status: secondParentInBase ? "behind" : "diverged" } };
+          if (target && (target === headParents[1]?.oid || baseContainedShas.includes(target))) {
+            return {
+              data: {
+                behind_by: 0,
+                ahead_by: 0,
+                status: secondParentInBase ? "behind" : "diverged",
+                merge_base_commit: { sha: mergeBaseSha },
+              },
+            };
           }
           return {
             data: {
