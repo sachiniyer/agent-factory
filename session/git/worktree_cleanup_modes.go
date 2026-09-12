@@ -53,8 +53,8 @@ func (r *cleanupRun) shouldRemoveWorktreeDir(removeErr error) bool {
 }
 
 // requireRegisteredBranchMatch proves the registered worktree at the recorded
-// path is THIS session's before the registered-only mode acts on it (#3278
-// review). `git worktree remove -f` trusts the registration alone, so a
+// path is THIS session's before the registered-only archive mode acts on it
+// (#3278 review). `git worktree remove -f` trusts the registration alone, so a
 // different worktree of the same still-present origin parked at the archived
 // path would be accepted and deleted, dirty changes included. The
 // registration's branch is the session-identifying fact git itself maintains;
@@ -73,6 +73,14 @@ func (r *cleanupRun) requireRegisteredBranchMatch() error {
 		refusal := fmt.Errorf(
 			"cannot verify that the registered worktree at %s belongs to this session: %v",
 			r.g.worktreePath, err,
+		)
+		r.errs = append(r.errs, refusal)
+		return refusal
+	}
+	if err := requireCompleteWorktreeListing(output); err != nil {
+		r.unknown = true
+		refusal := fmt.Errorf(
+			"cannot verify the complete worktree listing for %s: %v", r.g.worktreePath, err,
 		)
 		r.errs = append(r.errs, refusal)
 		return refusal

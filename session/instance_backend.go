@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -44,6 +45,20 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 // (#1632). The agent-server then kills the underlying session.
 func (i *Instance) Kill() error {
 	return i.AgentServer().Kill(false)
+}
+
+// CleanupFailedCreate tears down resources a failed create may have started.
+// Setup's ownership refusal is the exception: it occurs before Setup mutates
+// the selected path, so there is no candidate workspace to reap. Following it
+// with ordinary Kill would reinterpret "that occupant is not ours" as explicit
+// deletion authority and destroy the worktree the setup guard protected
+// (#4342/#4352). The error identity, rather than process-local instance state,
+// carries that fact through both failed-create cleanup attempts.
+func (i *Instance) CleanupFailedCreate(startErr error) error {
+	if errors.Is(startErr, git.ErrSetupRemovalOwnershipUnproven) {
+		return nil
+	}
+	return i.Kill()
 }
 
 // KillTrustingOwnLifecycleLock is Kill for the callers that hold this session's

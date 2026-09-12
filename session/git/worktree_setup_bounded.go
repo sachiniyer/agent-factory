@@ -77,9 +77,18 @@ var ErrWorktreeSetupStalled = errors.New("worktree setup cleanup timed out")
 //     still tracks the worktree, so `branch -D` fails with "branch is checked
 //     out" and leaves an orphaned branch blocking `worktree add -b`.
 //
-// Returns a non-nil error ONLY when a command tripped its deadline; the caller
-// must abort setup on it rather than continue into `worktree add`.
+// Returns a non-nil error when ownership cannot be established or a command
+// trips its deadline; the caller must abort rather than continue into `worktree
+// add`.
 func (g *GitWorktree) clearStaleWorktreePath() error {
+	// `-f` exists so setup can clear this session's own stale registration; it
+	// does not prove that whichever worktree currently occupies the path belongs
+	// to this session. Verify the registered branch at the destructive boundary.
+	// A same-branch stale worktree still reaches `-f`; a different or unreadable
+	// owner refuses, so force never turns an unproven path into deletion authority.
+	if err := g.requireSetupRemovalOwnership(); err != nil {
+		return err
+	}
 	if err := g.setupCleanupGit(
 		"remove a worktree still registered at that path",
 		"worktree", "remove", "-f", g.worktreePath,
