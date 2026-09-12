@@ -270,10 +270,49 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 				return nil, true
 			}
 		default:
+			if unrecognizedWrapperHidesAccountAssignment(words, names) {
+				return nil, true
+			}
 			return words, false
 		}
 	}
 	return nil, false
+}
+
+// unrecognizedWrapperHidesAccountAssignment reports whether the literal tail
+// words of an unrecognized argv-passthrough wrapper carry a NAME=... assignment
+// whose NAME is one af removes for the selected account, specifically by
+// nesting an env invocation inside the wrapper's argument list.
+//
+// unwrapAccountCommand peels a CLOSED list of wrappers (exec/command/builtin/
+// nohup/nice/timeout/setsid/stdbuf/ionice/taskset); every other binary that runs
+// a child command and passes argv through (strace/perf/valgrind/gdb --args/
+// xargs/...) falls to the default arm and was returned opaque. Wrapping the
+// modelled `env NAME=value <agent>` mutation — which the guard already refuses
+// bare and under every modelled wrapper — in an unmodeled wrapper hid the inner
+// assignment from the walk, so `strace env CODEX_HOME=/other codex` was accepted
+// while `nohup env CODEX_HOME=/other codex` was refused.
+//
+// This lifts envCallMutatesAccountEnvironment's NAME= rule one level: scan
+// the wrapper's literal argv tail for an `env` invocation and delegate to
+// envCallMutatesAccountEnvironment when one is found. Commands that do not
+// contain a nested env invocation are not refused even when an argument
+// resembles a NAME=value token, so noun-uses such as `echo CODEX_HOME=/tmp`,
+// `rg 'OPENAI_API_KEY='`, `man env`, `make env`, `git grep env`, `ls env/bin`,
+// `pip show env`, or `strace -p 1234 env` (none of which carries a nested env
+// invocation with a denied assignment) stay allowed.
+func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}) bool {
+	for i, word := range words[1:] {
+		if !isAccountCommandName(word, "env") {
+			continue
+		}
+		// Found an `env` word in the tail. Delegate to envCallMutatesAccountEnvironment
+		// for the arguments following it. The dynamic-name branch in
+		// unwrappedAccountCommandMutates already refuses non-literal command names,
+		// so a dynamic wrapper like $WRAPPER is still caught at the call site.
+		return envCallMutatesAccountEnvironment(words[2+i:], names)
+	}
+	return false
 }
 
 func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {
