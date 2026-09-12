@@ -817,11 +817,42 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 	}
 	m.mu.Unlock()
 
-	data, rid, err := findInstanceDataByTitle(title, repoID)
+	_, rid, err := findInstanceDataByTitle(title, repoID)
 	if err != nil {
 		return nil, "", nil, err
 	}
-	instance, restoreErr := fromInstanceDataForRefresh(*data)
+	key := daemonInstanceKey(rid, title)
+	opLock, _, err := m.lockSessionOperationWithin(key, "restore lookup", title)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	defer opLock.Unlock()
+
+	// Construction may checkpoint a closed task run before replacing a missing
+	// runtime. It therefore belongs inside the same per-session transaction as
+	// archive, handoff, kill, and restore — not merely before the duplicate-map
+	// check below. Re-check registration after acquiring the lock, then re-read
+	// disk so a lifecycle writer that won the lock first cannot be overwritten by
+	// the stale snapshot that motivated this fallback.
+	m.mu.Lock()
+	if tracked, trackedRepoID := m.trackedSessionByIDLocked(stableID); tracked != nil {
+		m.mu.Unlock()
+		return tracked, trackedRepoID, nil, nil
+	}
+	if tracked := m.instances[key]; tracked != nil {
+		m.mu.Unlock()
+		return tracked, rid, nil, nil
+	}
+	m.mu.Unlock()
+	data, freshRepoID, err := findInstanceDataByTitle(title, repoID)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if freshRepoID != rid {
+		return nil, "", nil, fmt.Errorf(
+			"session %q changed project identity while its restore was waiting; retry the operation", title)
+	}
+	instance, restoreErr := fromInstanceDataForRefresh(rid, *data)
 	if restoreErr != nil {
 		return nil, rid, data, nil
 	}
@@ -843,7 +874,6 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 	//     tracked one; otherwise
 	//   - register our Instance so callers operate on a tracked Instance, just
 	//     as the refresh loop would have, instead of an orphan.
-	key := daemonInstanceKey(rid, title)
 	m.mu.Lock()
 	if tracked := m.instances[key]; tracked != nil {
 		m.mu.Unlock()

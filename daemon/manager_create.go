@@ -75,6 +75,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	if err := applyDefaultAccount(cfg, &req); err != nil {
 		return session.InstanceData{}, err
 	}
+	taskRunAdmission, err := m.nextTaskRunAdmission(req.TaskID, req.TaskGenerationID)
+	if err != nil {
+		return session.InstanceData{}, err
+	}
 	reservationBoundaryDelegated = true
 	repo, title, release, renamedArchived, err := m.reserveCreateForSession(req)
 	if err != nil {
@@ -101,20 +105,25 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// the completed Instance inherits below, so clients upsert rather than replacing
 	// one identity with another.
 	createdAt := time.Now()
+	taskRunAt := time.Time{}
+	if req.TaskID != "" {
+		taskRunAt = createdAt
+	}
 	pending := session.InstanceData{
-		ID:            session.NewInstanceID(),
-		TaskID:        req.TaskID,
-		Title:         title,
-		Path:          workspace,
-		Status:        session.Loading,
-		Liveness:      session.LiveReady,
-		InFlightOp:    session.OpCreating,
-		TaskRunActive: req.TaskID != "",
-		CreatedAt:     createdAt,
-		UpdatedAt:     createdAt,
-		Prompt:        req.Prompt,
-		Program:       req.Program,
-		Worktree:      session.GitWorktreeData{RepoPath: repo.IdentityPath()},
+		ID:     session.NewInstanceID(),
+		TaskID: req.TaskID, TaskGenerationID: taskRunAdmission.generationID,
+		Title:           title,
+		Path:            workspace,
+		Status:          session.Loading,
+		Liveness:        session.LiveReady,
+		InFlightOp:      session.OpCreating,
+		TaskRunActive:   req.TaskID != "",
+		TaskRunAt:       taskRunAt,
+		TaskRunSequence: taskRunAdmission.sequence, TaskRunRevision: taskRunAdmission.revision,
+		CreatedAt: createdAt, UpdatedAt: createdAt,
+		Prompt:   req.Prompt,
+		Program:  req.Program,
+		Worktree: session.GitWorktreeData{RepoPath: repo.IdentityPath()},
 	}
 	key := daemonInstanceKey(repo.ID, title)
 	m.mu.Lock()
@@ -159,10 +168,13 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// was picked up on the next create; now it applies on save/ApplyConfig like
 	// every other key — a deliberate, uniform change (see the #2480 release note).
 	instance, err := session.NewInstance(session.InstanceOptions{
-		ID:                             pending.ID,
-		CreatedAt:                      pending.CreatedAt,
-		Title:                          title,
-		TaskID:                         req.TaskID,
+		ID:        pending.ID,
+		CreatedAt: pending.CreatedAt,
+		Title:     title,
+		TaskID:    req.TaskID, TaskGenerationID: pending.TaskGenerationID,
+		TaskRunAt:                      pending.TaskRunAt,
+		TaskRunSequence:                pending.TaskRunSequence,
+		TaskRunRevision:                pending.TaskRunRevision,
 		Path:                           workspace,
 		Program:                        req.Program,
 		Account:                        req.Account,
@@ -349,6 +361,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	}
 	data := instance.ToInstanceData()
 	conversationToken := instance.AgentRuntimeToken()
+	taskRunStatus := task.RunStatusStarted
+	if data.Liveness == session.LiveLimitReached {
+		taskRunStatus = TaskStatusLimitParked
+	}
 
 	// Register the in-memory instance and persist it to disk inside the
 	// same critical section. The daemon refresh loop rebuilds
@@ -361,6 +377,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// fence acquired before finishCreateStart stays held through this insertion,
 	// so the candidate is either absent for the whole commit or visible as
 	// limited.
+	var taskStatusErr error
 	persistErr := func() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -370,6 +387,17 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 			return err
 		}
 		instance.PinStorageRepoID(repo.ID)
+		// Publish a task-created session's run identity while Manager.mu still
+		// hides the new row from recovery. The session record landed first, so a
+		// task-store failure cannot advertise a run whose session never committed;
+		// the post-RPC repair handles that failure after publication. Holding the
+		// manager lock across this small file update is intentional: releasing it
+		// here recreates the window where recovery can observe an unidentified run.
+		if req.TaskID != "" {
+			_, _, taskStatusErr = task.BeginTaskRun(
+				req.TaskID, data.TaskGenerationID, instance.ID, data.TaskRunSequence,
+				data.TaskRunRevision, instance.CreatedAt, taskRunStatus)
+		}
 		// Register the provider discovery in the same manager-lock critical
 		// section that makes the instance visible. A concurrent status poll can
 		// therefore never observe a newly created root without also seeing that
@@ -378,6 +406,9 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return nil
 	}()
 	releaseLimitPublicationFence()
+	if taskStatusErr != nil {
+		log.ErrorLog.Printf("failed to publish task run identity for task %s: %v", req.TaskID, taskStatusErr)
+	}
 	if persistErr != nil {
 		// Same rule as the start-failure path above, minus the remedy: the record
 		// write is what just failed, so keeping a record is not available. Report the
@@ -460,10 +491,10 @@ func projectDeleteRefusal(repoID string, inProgress bool) error {
 // that does not hold m.mu. It returns the SAME errAtConcurrencyLimit sentinel as
 // the authoritative check, so the watch-delivery path cannot tell the two apart
 // and parks the event either way.
-func (m *Manager) admitTaskRunFast(repoID, taskID string, limit int) error {
+func (m *Manager) admitTaskRunFast(repoID, taskID, taskGenerationID string, limit int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.admitTaskRunLocked(repoID, taskID, limit)
+	return m.admitTaskRunLocked(repoID, taskID, taskGenerationID, limit)
 }
 
 // projectDeleteStateFor answers, in ONE acquisition, whether this repo has a
@@ -677,7 +708,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	// can be high as well as low, and a spurious refusal here costs one park and
 	// retry — the same tradeoff releaseTaskRunLocked already documents for its
 	// momentary over-count, and the opposite of admitting one too many.
-	if err := m.admitTaskRunFast(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
+	if err := m.admitTaskRunFast(repo.ID, req.TaskID, req.TaskGenerationID, req.MaxConcurrentRuns); err != nil {
 		return nil, "", nil, nil, err
 	}
 
@@ -758,7 +789,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	// succeeding; m.mu is held unbroken between the two, so the count cannot move in
 	// the gap. On refusal the watch-task delivery path parks the event on the
 	// durable queue and retries when a slot frees, so nothing is dropped by the cap.
-	if err := m.admitTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
+	if err := m.admitTaskRunLocked(repo.ID, req.TaskID, req.TaskGenerationID, req.MaxConcurrentRuns); err != nil {
 		return nil, "", nil, nil, err
 	}
 
@@ -886,7 +917,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	if remoteName != "" {
 		m.reservedRemoteNames[remoteName] = struct{}{}
 	}
-	m.reserveTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns)
+	m.reserveTaskRunLocked(repo.ID, req.TaskID, req.TaskGenerationID, req.MaxConcurrentRuns)
 	release := func() {
 		m.mu.Lock()
 		delete(m.reservedTitles, key)
@@ -901,7 +932,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 		// is registered in m.instances and counts against the cap on its own —
 		// handing the slot over with no gap. On a failed create nothing was
 		// registered, and dropping the reservation is exactly the right refund.
-		m.releaseTaskRunLocked(repo.ID, req.TaskID)
+		m.releaseTaskRunLocked(repo.ID, req.TaskID, req.TaskGenerationID)
 		m.mu.Unlock()
 		releaseWorktreeAdmission()
 	}

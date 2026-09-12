@@ -16,6 +16,8 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
+const taskLifecycleTestGeneration = "task-lifecycle-test-generation"
+
 func TestTaskSessionLifecycle_CommittedArchiveWarningIsSuccessfulReap(t *testing.T) {
 	// This Manager's own warnings, not the process's: the assertions below are
 	// about what THIS lifecycle run said (#3787 part 2).
@@ -40,6 +42,16 @@ func TestTaskSessionLifecycle_CommittedArchiveWarningIsSuccessfulReap(t *testing
 // The TaskID must go through NewInstance rather than being poked in afterwards —
 // taskRunActive is derived from it at construction and is the whole subject here.
 func registerTaskSpawnedSession(t *testing.T, m *Manager, repoID, repoPath, title, taskID string) *session.Instance {
+	return registerTaskSpawnedSessionForGeneration(
+		t, m, repoID, repoPath, title, taskID, taskLifecycleTestGeneration,
+	)
+}
+
+func registerTaskSpawnedSessionForGeneration(
+	t *testing.T,
+	m *Manager,
+	repoID, repoPath, title, taskID, taskGenerationID string,
+) *session.Instance {
 	t.Helper()
 	wtPath := filepath.Join(filepath.Dir(repoPath), "wt-"+sanitizeArchiveTitle(title))
 	branch := "af/" + sanitizeArchiveTitle(title)
@@ -52,6 +64,7 @@ func registerTaskSpawnedSession(t *testing.T, m *Manager, repoID, repoPath, titl
 
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: title, Path: repoPath, Program: "claude", TaskID: taskID,
+		TaskGenerationID: taskGenerationID,
 	})
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
@@ -76,7 +89,9 @@ func stubTaskLifecycle(t *testing.T, taskID, onComplete string) {
 	t.Helper()
 	prev := loadTasksForRepoID
 	loadTasksForRepoID = func(string) ([]task.Task, []task.Task, error) {
-		return []task.Task{{ID: taskID, OnComplete: onComplete}}, nil, nil
+		return []task.Task{{
+			ID: taskID, GenerationID: taskLifecycleTestGeneration, OnComplete: onComplete,
+		}}, nil, nil
 	}
 	t.Cleanup(func() { loadTasksForRepoID = prev })
 }
@@ -92,9 +107,9 @@ func endRunOnIdleEdge(t *testing.T, inst *session.Instance) bool {
 	return was
 }
 
-// TestTaskSessionLifecycle_KeepLeavesTheFinishedSessionAlone is the compatibility
-// case, and the one that matters most: every task written before #2595 declares
-// nothing, and a finished run must still leave its session exactly where it was.
+// TestTaskSessionLifecycle_KeepLeavesTheFinishedSessionAlone is the default-policy
+// case: a current-generation task that declares nothing must still leave its
+// finished session exactly where it was.
 func TestTaskSessionLifecycle_KeepLeavesTheFinishedSessionAlone(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-keep")
@@ -260,6 +275,61 @@ func TestTaskSessionLifecycle_DeletedTaskKeepsItsSessions(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 	assert.Equal(t, session.LiveReady, inst.GetLiveness())
+}
+
+func TestTaskSessionLifecycle_ReplacementGenerationCannotReapPredecessorSession(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSessionForGeneration(
+		t, manager, repoID, repoPath, "predecessor-run", "reused-task", "old-generation",
+	)
+
+	prev := loadTasksForRepoID
+	loadTasksForRepoID = func(string) ([]task.Task, []task.Task, error) {
+		return []task.Task{{
+			ID: "reused-task", GenerationID: "replacement-generation", OnComplete: task.OnCompleteKill,
+		}}, nil, nil
+	}
+	t.Cleanup(func() { loadTasksForRepoID = prev })
+
+	was := endRunOnIdleEdge(t, inst)
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, was)
+
+	time.Sleep(200 * time.Millisecond)
+	manager.mu.Lock()
+	_, stillRegistered := manager.instances[daemonInstanceKey(repoID, inst.Title)]
+	manager.mu.Unlock()
+	require.True(t, stillRegistered,
+		"a replacement generation must not apply its destructive on_complete policy to its predecessor")
+}
+
+func TestTaskSessionLifecycle_PreGenerationOwnershipKeepsTheSession(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSessionForGeneration(
+		t, manager, repoID, repoPath, "legacy-run", "legacy-task", "",
+	)
+
+	prev := loadTasksForRepoID
+	loadTasksForRepoID = func(string) ([]task.Task, []task.Task, error) {
+		return []task.Task{{
+			ID: "legacy-task", GenerationID: "", OnComplete: task.OnCompleteKill,
+		}}, nil, nil
+	}
+	t.Cleanup(func() { loadTasksForRepoID = prev })
+
+	verb, err := manager.taskSessionLifecycle(repoID, "legacy-task", "")
+	require.NoError(t, err, "a legacy identity is an ownership refusal, not a store failure")
+	require.Equal(t, task.OnCompleteKeep, verb,
+		"an absent generation cannot authorize a destructive lifecycle action")
+
+	was := endRunOnIdleEdge(t, inst)
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, was)
+
+	time.Sleep(200 * time.Millisecond)
+	manager.mu.Lock()
+	_, stillRegistered := manager.instances[daemonInstanceKey(repoID, inst.Title)]
+	manager.mu.Unlock()
+	require.True(t, stillRegistered,
+		"a pre-generation task session must remain available after its run ends")
 }
 
 // TestTaskSessionLifecycle_IgnoresSessionsNoTaskSpawned: a session a user made by

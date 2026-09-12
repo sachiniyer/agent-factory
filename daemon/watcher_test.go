@@ -25,14 +25,14 @@ type watchRecorder struct {
 	statuses []string // "<taskID>:<status>"
 }
 
-func (r *watchRecorder) deliver(taskID, line string) error {
+func (r *watchRecorder) deliver(taskID, _ string, line string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events = append(r.events, taskID+":"+line)
 	return nil
 }
 
-func (r *watchRecorder) setStatus(taskID, status string) {
+func (r *watchRecorder) setStatus(taskID, _ string, status string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.statuses = append(r.statuses, taskID+":"+status)
@@ -562,7 +562,11 @@ func TestDeliverWatchEvent_RendersTemplateAndRecordsStatus(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	if err := deliverWatchEvent("cafe0001", "new issue #9"); err != nil {
+	created, err := task.GetTask("cafe0001")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if err := deliverWatchEvent("cafe0001", created.GenerationID, "new issue #9"); err != nil {
 		t.Fatalf("deliverWatchEvent: %v", err)
 	}
 	if len(*sends) != 1 || (*sends)[0].Prompt != "Triage: new issue #9" {
@@ -582,11 +586,64 @@ func TestDeliverWatchEvent_RendersTemplateAndRecordsStatus(t *testing.T) {
 	if _, err := task.UpdateTask("cafe0001", task.TaskUpdate{Enabled: &disabled}, task.ProjectExpectation{}); err != nil {
 		t.Fatalf("disable task: %v", err)
 	}
-	if err := deliverWatchEvent("cafe0001", "late event"); err == nil {
+	if err := deliverWatchEvent("cafe0001", created.GenerationID, "late event"); err == nil {
 		t.Fatalf("expected delivery to a disabled task to error")
 	}
 	if len(*sends) != 1 {
 		t.Fatalf("disabled task still received an event: %+v", *sends)
+	}
+}
+
+func TestWatchDeliveryAndQueueDoNotCrossTaskGeneration(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repo := setupTaskRepo(t)
+	_, sends := stubTaskDelivery(t)
+	seedTargetSession(t, repo, "captain")
+	definition := task.Task{
+		ID: "cafe0042", Name: "first", Prompt: "Triage: {{line}}",
+		WatchCmd: "watch.sh", TargetSession: "captain", ProjectPath: repo,
+		Enabled: true, CreatedAt: time.Now(),
+	}
+	first, err := task.AddTaskChecked(definition, task.ActorUnknown, nil)
+	if err != nil {
+		t.Fatalf("seed first task: %v", err)
+	}
+	queueDir := t.TempDir()
+	oldQueue := newEventQueueForGeneration(queueDir, first.ID, first.GenerationID)
+	if err := oldQueue.enqueue("old queued event"); err != nil {
+		t.Fatalf("seed old queue: %v", err)
+	}
+
+	if err := task.RemoveTask(first.ID, task.ProjectExpectation{}); err != nil {
+		t.Fatalf("remove first task: %v", err)
+	}
+	definition.Name = "replacement"
+	replacement, err := task.AddTaskChecked(definition, task.ActorUnknown, nil)
+	if err != nil {
+		t.Fatalf("seed replacement task: %v", err)
+	}
+	if replacement.GenerationID == first.GenerationID {
+		t.Fatal("precondition: replacement reused the removed task generation")
+	}
+
+	if err := deliverWatchEvent(first.ID, first.GenerationID, "old live event"); err == nil {
+		t.Fatal("an old watcher delivered into a replacement task row")
+	}
+	if len(*sends) != 0 {
+		t.Fatalf("old watcher reached the replacement target: %+v", *sends)
+	}
+	newQueue := newEventQueueForGeneration(queueDir, replacement.ID, replacement.GenerationID)
+	if newQueue.pendingCount() != 0 {
+		t.Fatal("replacement watcher reopened its predecessor's queued events")
+	}
+	if newQueue.path == oldQueue.path {
+		t.Fatal("task generations share an event-queue namespace")
+	}
+	if err := deliverWatchEvent(replacement.ID, replacement.GenerationID, "new event"); err != nil {
+		t.Fatalf("replacement delivery: %v", err)
+	}
+	if len(*sends) != 1 || (*sends)[0].Prompt != "Triage: new event" {
+		t.Fatalf("replacement event was not delivered exactly once: %+v", *sends)
 	}
 }
 
@@ -616,7 +673,11 @@ func TestPersistWatcherStatus_PreservesLastRunAt(t *testing.T) {
 	}
 
 	// An event delivery stamps a fresh LastRunAt.
-	if err := deliverWatchEvent("cafe0002", "new issue #9"); err != nil {
+	created, err := task.GetTask("cafe0002")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if err := deliverWatchEvent("cafe0002", created.GenerationID, "new issue #9"); err != nil {
 		t.Fatalf("deliverWatchEvent: %v", err)
 	}
 	_ = sends
@@ -630,7 +691,7 @@ func TestPersistWatcherStatus_PreservesLastRunAt(t *testing.T) {
 	deliveredAt := *delivered.LastRunAt
 
 	// A supervision-status persist must not revert that timestamp.
-	persistWatcherStatus("cafe0002", "stopped")
+	persistWatcherStatus("cafe0002", delivered.GenerationID, "stopped")
 
 	got, err := task.GetTask("cafe0002")
 	if err != nil {
@@ -692,8 +753,8 @@ func TestWatcherTailCapturesNonDeliveredStdout(t *testing.T) {
 	dir := t.TempDir()
 	script := `echo "lock contention detected"; printf "death rattle"; exit 1`
 	s, rec := newTestSupervisor(t, staticTasks(watchTask("ab970002", script, dir)))
-	s.deliver = func(taskID, line string) error {
-		_ = rec.deliver(taskID, line)
+	s.deliver = func(taskID, generationID, line string) error {
+		_ = rec.deliver(taskID, generationID, line)
 		return errors.New("session spawn failed")
 	}
 

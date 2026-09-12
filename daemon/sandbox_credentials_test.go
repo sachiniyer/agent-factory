@@ -37,7 +37,7 @@ func TestRefresh_AttachesCredentialsToDiskLoadedInstances(t *testing.T) {
 	// Stands in for a disk-materialized instance: built with no SandboxCredentials,
 	// exactly as FromInstanceData leaves one.
 	bornWithout := false
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		inst, err := session.NewInstance(session.InstanceOptions{ID: d.ID, Title: d.Title, Path: d.Path, Program: "claude"})
 		if err != nil {
 			return nil, err

@@ -182,7 +182,7 @@ func (w *taskWatcher) drainLoop() {
 			}
 			continue
 		}
-		if err := w.sup.deliver(w.taskID, ev.Line); err != nil {
+		if err := w.sup.deliver(w.taskID, w.generationID, ev.Line); err != nil {
 			w.recordDeliveryResult(time.Now(), err)
 			if errors.Is(err, errAtConcurrencyLimit) {
 				// The task is at its max_concurrent_runs cap (#1892): nothing was

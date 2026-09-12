@@ -170,7 +170,7 @@ func TestWatchConcurrencyLostSessionKeepsItsSlot(t *testing.T) {
 	m.mu.Unlock()
 	tombstoned.MarkUserKilled()
 	m.mu.Lock()
-	err = m.admitTaskRunLocked(repo.ID, "task1", limit)
+	err = m.admitTaskRunLocked(repo.ID, "task1", taskGenerationForTest(t, "task1"), limit)
 	m.mu.Unlock()
 	if err != nil {
 		t.Fatalf("admit after a lost session was killed: want the slot released, got %v", err)
@@ -292,7 +292,7 @@ func TestCompletedRunDoesNotReacquireSlotWhenLost(t *testing.T) {
 		t.Fatalf("transition to ready: %v", err)
 	}
 	manager.mu.Lock()
-	err = manager.admitTaskRunLocked(repo.ID, "task1", limit)
+	err = manager.admitTaskRunLocked(repo.ID, "task1", data.TaskGenerationID, limit)
 	manager.mu.Unlock()
 	if err != nil {
 		t.Fatalf("a finished run must release its slot: %v", err)
@@ -579,7 +579,7 @@ func TestRestoredArchiveDoesNotReclaimSlot(t *testing.T) {
 
 	// The consequence: exactly one run is counted — the replacement — not two.
 	manager.mu.Lock()
-	n := manager.countTaskRunsLocked(repo.ID, "task1")
+	n := manager.countTaskRunsLocked(repo.ID, "task1", data.TaskGenerationID)
 	manager.mu.Unlock()
 	if n != 1 {
 		t.Fatalf("the cap is 1 and one replacement run is live; counted %d (a restored archive re-took a slot it had given up)", n)
@@ -771,7 +771,7 @@ func TestCapHoldsAcrossConcurrentRestore(t *testing.T) {
 	admitted := 0
 	for i := 0; i < rounds; i++ {
 		manager.mu.Lock()
-		err := manager.admitTaskRunLocked(repo.ID, "task1", limit)
+		err := manager.admitTaskRunLocked(repo.ID, "task1", data.TaskGenerationID, limit)
 		manager.mu.Unlock()
 		if err == nil {
 			admitted++
@@ -786,7 +786,7 @@ func TestCapHoldsAcrossConcurrentRestore(t *testing.T) {
 
 	// And the session is counted exactly once, not twice, once it settles.
 	manager.mu.Lock()
-	n := manager.countTaskRunsLocked(repo.ID, "task1")
+	n := manager.countTaskRunsLocked(repo.ID, "task1", data.TaskGenerationID)
 	manager.mu.Unlock()
 	if n != 1 {
 		t.Fatalf("a single session must be counted exactly once; got %d", n)

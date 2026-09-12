@@ -60,7 +60,10 @@ const taskLifecycleHookWait = 10 * time.Minute
 //     true forever, including for the session someone is typing into right now.
 //
 //   - the session settled into LiveReady. CommitArchive also ends a run, and that
-//     session is already archived with nothing left to do.
+//     session is already archived with nothing left to do. ConfirmLive after a
+//     Lost-runtime replacement closes an interrupted run into LiveRunning instead;
+//     its later idle tick arrives with taskRunWasActive=false. Both routes therefore
+//     stay outside the completion-only lifecycle hook.
 //
 //   - startup did not settle terminal-unknown. This one is checked explicitly
 //     even though the poll cannot currently deliver such a session here, and the
@@ -192,7 +195,8 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 	if !runEndedIntoIdle(instance, taskRunWasActive) {
 		return
 	}
-	taskID := instance.TaskID
+	run := instance.TaskRun()
+	taskID := run.TaskID
 	if taskID == "" {
 		return
 	}
@@ -210,7 +214,7 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 	// inside it. This is a read of a value that is already fixed.
 	adoptedAt := instance.AdoptionDeliveriesAtRunEnd()
 	hooksDone := instance.PostWorktreeHooksDone()
-	verb, err := m.taskSessionLifecycle(repoID, taskID)
+	verb, err := m.taskSessionLifecycle(repoID, taskID, run.TaskGenerationID)
 	if err != nil {
 		// An unreadable or unscopable task store is not permission to tear a
 		// session down. Keep it — the conservative outcome, and the same one an
@@ -228,10 +232,11 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 	})
 }
 
-// taskSessionLifecycle resolves the on_complete verb for one task in a repo.
-// A task that no longer exists yields keep: its sessions outlive it, and deleting
-// a task must not retroactively authorize destroying the work its runs produced.
-func (m *Manager) taskSessionLifecycle(repoID, taskID string) (string, error) {
+// taskSessionLifecycle resolves the on_complete verb for one task generation in
+// a repo. A task that no longer exists, or whose ID was reused by a replacement
+// generation, yields keep: its sessions outlive it, and deleting the task must
+// not retroactively authorize destroying the work its runs produced.
+func (m *Manager) taskSessionLifecycle(repoID, taskID, taskGenerationID string) (string, error) {
 	tasks, bindingUpdates, err := loadTasksForRepoID(repoID)
 	// Publish before propagating, for the reason loadEnabledTaskTargets documents:
 	// the load commits backfilled bindings durably even when it then returns a
@@ -242,8 +247,16 @@ func (m *Manager) taskSessionLifecycle(repoID, taskID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Empty denotes a session and task row written before generations existed,
+	// not a shared generation. There is no token proving that a same-ID row owns
+	// the session, so keep it rather than applying archive/kill. Legacy task
+	// sessions may therefore remain for inspection after completion; that is the
+	// deliberate fail-closed side of an unprovable destructive lifecycle action.
+	if taskGenerationID == "" {
+		return task.OnCompleteKeep, nil
+	}
 	for _, t := range tasks {
-		if t.ID == taskID {
+		if t.ID == taskID && t.GenerationID == taskGenerationID {
 			return t.SessionLifecycle(), nil
 		}
 	}

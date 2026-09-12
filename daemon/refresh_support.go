@@ -28,9 +28,33 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 // see TestManagerCreateSessionAtomicWithRefresh, which uses it to detect
 // whether refresh ever raced CreateSession and tried to construct a
 // duplicate Instance from disk.
-var fromInstanceDataForRefresh = session.FromInstanceData
+var fromInstanceDataForRefresh = func(repoID string, data session.InstanceData) (*session.Instance, error) {
+	return session.FromInstanceDataWithLoadRuntimeCheckpoint(data, func(closed session.InstanceData) error {
+		return persistInstanceData(repoID, closed)
+	})
+}
 
 // persistLegacyInstanceID is the durable half of daemon-load ID backfill. A
 // seam keeps the unknown-outcome branch testable: if this write cannot be
 // confirmed, refresh must not materialize the legacy row under an ephemeral ID.
 var persistLegacyInstanceID = persistInstanceData
+
+func (m *Manager) refreshLocked() error {
+	refreshed, ghosts, taskRunSequence, err := refreshDaemonInstances(m.instances)
+	if err != nil {
+		return err
+	}
+	owed := persistLoadRuntimeReplacements(refreshed)
+	m.attachCredentialsToAll(refreshed)
+	m.instances = refreshed
+	// Replaced wholesale, never merged: the ghost set is a projection of what is on
+	// disk RIGHT NOW (#1892). A row that starts loading again must stop being a
+	// ghost, or its slot would be held twice — once by the ghost and once by the
+	// instance it became.
+	m.ghostTaskRuns = ghosts
+	if taskRunSequence > m.taskRunSequence {
+		m.taskRunSequence = taskRunSequence
+	}
+	m.registerLoadRuntimeSettlementsLocked(owed)
+	return nil
+}

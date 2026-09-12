@@ -25,20 +25,21 @@ import (
 //   - PreviewTabSnapshotByID — snapshots the backend while its stable tab target
 //     is selected under i.mu, then performs the potentially blocking capture
 //     after releasing the lock.
-//   - FromInstanceData — a constructor. It populates a local *Instance that no
-//     other goroutine can observe yet, so there is nothing to synchronize with.
+//   - FromInstanceDataWithLoadRuntimeCheckpoint — the shared constructor. It
+//     populates a local *Instance that no other goroutine can observe yet, so
+//     there is nothing to synchronize with.
 var backendReadersUnderLock = map[string]bool{
-	"currentBackend":               true,
-	"capabilitiesLocked":           true,
-	"SetBackend":                   true,
-	"bindProvisionResult":          true,
-	"retainProvisionResultCleanup": true,
-	"AgentServer":                  true,
-	"agentServerLocked":            true,
-	"reprovisionRemote":            true,
-	"toInstanceDataLocked":         true,
-	"PreviewTabSnapshotByID":       true,
-	"FromInstanceData":             true,
+	"currentBackend":                            true,
+	"capabilitiesLocked":                        true,
+	"SetBackend":                                true,
+	"bindProvisionResult":                       true,
+	"retainProvisionResultCleanup":              true,
+	"AgentServer":                               true,
+	"agentServerLocked":                         true,
+	"reprovisionRemote":                         true,
+	"toInstanceDataLocked":                      true,
+	"PreviewTabSnapshotByID":                    true,
+	"FromInstanceDataWithLoadRuntimeCheckpoint": true,
 }
 
 // TestBackendFieldIsOnlyReadUnderLock is a source-level guard for #2096/#2165.

@@ -85,14 +85,12 @@ func (i *Instance) KillTrustingOwnLifecycleLock() error {
 	return i.AgentServer().Kill(true)
 }
 
-// runtimeLiveBoundary lets the daemon settle predecessor-owned evidence at the
-// exact lifecycle edge that exposes a replacement. The callback runs outside
-// Instance.mu, immediately before ConfirmLive takes that lock and clears the
-// restore fence. A pointer plus sync.Once keeps the boundary one-shot while the
-// registration remains installed for the whole backend call.
+// runtimeLiveBoundary settles predecessor evidence before a backend-proven
+// replacement becomes live; plain reattachments do not consume it.
 type runtimeLiveBoundary struct {
-	fn   func()
+	fn   func() error
 	once sync.Once
+	err  error
 }
 
 // Recover re-establishes a Lost instance's backing session (#1108).
@@ -106,8 +104,15 @@ func (i *Instance) Recover() error {
 //
 // The callback exists for lifecycle facts that must be settled after a backend
 // has successfully created the runtime but before the restore fence is dropped.
-// It cannot veto recovery: settlement failures remain owed for retry, and a full
-// disk must not turn a running replacement back into Lost.
+// An ordinary settlement failure cannot veto recovery: it remains owed for
+// retry, and a full disk must not tear down a running replacement. There is one
+// stricter boundary. When replacement closed an active task run and that close
+// is not durable, the callback refuses ConfirmLive and the backend tears down
+// the replacement. Otherwise a daemon restart could reattach it, reload the run
+// as active, and let its idle edge execute the predecessor's on_complete. The
+// process-local OpRestoring hold remains raised until that teardown is proved;
+// an indeterminate teardown is never converted into a live replacement by a
+// later settlement retry.
 //
 // The fence is raised for the whole backend call so clients see the operation
 // and hide Kill, and so the status poll — which skips any session with an op in
@@ -122,7 +127,7 @@ func (i *Instance) Recover() error {
 // and the automatic loop's only other protection is that it happens to run on
 // the poll goroutine. A precondition that holds because of where its caller runs
 // is not a precondition the next caller inherits.
-func (i *Instance) RecoverFencedWithLiveBoundary(beforeLive func()) error {
+func (i *Instance) RecoverFencedWithLiveBoundary(beforeLive func() error) error {
 	if err := i.BeginRecoverFence(); err != nil {
 		return err
 	}
@@ -152,14 +157,14 @@ func (i *Instance) RecoverFencedWithLiveBoundary(beforeLive func()) error {
 // the pending-kill and startup-unknown vetoes that fence every other runtime entry
 // point cover this one too. The caller owns the release: on failure the fence
 // stays up for EndRecoverFence, and on success ConfirmLive clears it.
-func (i *Instance) RecoverHeldFencedWithLiveBoundary(beforeLive func()) error {
+func (i *Instance) RecoverHeldFencedWithLiveBoundary(beforeLive func() error) error {
 	if err := i.ValidateRuntimeAction(RuntimeActionRecoverFenced); err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}
 	return i.recoverUnderHeldFence(beforeLive)
 }
 
-func (i *Instance) recoverUnderHeldFence(beforeLive func()) error {
+func (i *Instance) recoverUnderHeldFence(beforeLive func() error) error {
 	return i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Recover(i) })
 }
 
@@ -177,10 +182,16 @@ func (i *Instance) recoverUnderHeldFence(beforeLive func()) error {
 //
 // ClearOp is unconditionally legal, so the OpRestoring check is not about legality:
 // it makes sure a kill or archive overlay that SUPERSEDED this fence is not cleared
-// out from under its own owner — which is why the check and the clear share one
-// critical section in clearOpIfHeld rather than being read-then-write.
+// out from under its own owner. The interrupted-run settlement hold is checked in
+// that same critical section: a deferred release cannot bypass the live-boundary
+// veto while disk still describes the predecessor run as active.
 func (i *Instance) EndRecoverFence() bool {
-	return i.clearOpIfHeld(OpRestoring, "restore", nil)
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.runtimeReplacementSettlementBlocked && i.inFlightOp == OpRestoring {
+		return false
+	}
+	return i.clearOpIfHeldLocked(OpRestoring, "restore", nil)
 }
 
 // BeginRecoverFence validates the recover precondition and raises the restore
@@ -218,7 +229,7 @@ func (i *Instance) BeginRecoverFence() error {
 	return nil
 }
 
-func (i *Instance) withLiveBoundary(beforeLive func(), run func() error) error {
+func (i *Instance) withLiveBoundary(beforeLive func() error, run func() error) error {
 	if beforeLive == nil {
 		return run()
 	}
@@ -240,13 +251,15 @@ func (i *Instance) withLiveBoundary(beforeLive func(), run func() error) error {
 	return run()
 }
 
-func (i *Instance) runLiveBoundary() {
+func (i *Instance) runLiveBoundary() error {
 	i.liveBoundaryMu.Lock()
 	boundary := i.liveBoundary
 	i.liveBoundaryMu.Unlock()
 	if boundary != nil {
-		boundary.once.Do(boundary.fn)
+		boundary.once.Do(func() { boundary.err = boundary.fn() })
+		return boundary.err
 	}
+	return nil
 }
 
 // Respawn re-establishes the instance's backing session in place without a
@@ -333,6 +346,13 @@ func (i *Instance) EndLimitResume() bool {
 func (i *Instance) clearOpIfHeld(held InFlightOp, operation string, cleared func()) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	return i.clearOpIfHeldLocked(held, operation, cleared)
+}
+
+// clearOpIfHeldLocked is the already-locked half used by EndRecoverFence, whose
+// interrupted-run settlement hold must be checked in the same critical section
+// as the release it can veto. Caller holds i.mu.
+func (i *Instance) clearOpIfHeldLocked(held InFlightOp, operation string, cleared func()) bool {
 	if i.inFlightOp != held {
 		return false
 	}
@@ -360,7 +380,7 @@ func (i *Instance) Respawn() error {
 // RespawnWithLiveBoundary is Respawn with the same pre-ConfirmLive callback as
 // RecoverFencedWithLiveBoundary. Limit recovery uses it to retire facts owned by the
 // exited, limit-blocked process before its replacement becomes visible.
-func (i *Instance) RespawnWithLiveBoundary(beforeLive func()) error {
+func (i *Instance) RespawnWithLiveBoundary(beforeLive func() error) error {
 	if op := i.GetInFlightOp(); op != OpRespawning {
 		return fmt.Errorf("respawn of %q requires the limit-resume fence (in-flight op is %s)", i.Title, opLabel(op))
 	}
@@ -379,7 +399,7 @@ func (i *Instance) RespawnForAccountSwap() error {
 // replacement with the same pre-ConfirmLive callback used by ordinary respawn.
 // The idle-evidence mechanism owns that boundary; account swapping only routes
 // its distinct launch through it.
-func (i *Instance) RespawnForAccountSwapWithLiveBoundary(beforeLive func()) error {
+func (i *Instance) RespawnForAccountSwapWithLiveBoundary(beforeLive func() error) error {
 	if op := i.GetInFlightOp(); op != OpRespawning {
 		return fmt.Errorf("account respawn of %q requires the limit-resume fence (in-flight op is %s)", i.Title, opLabel(op))
 	}

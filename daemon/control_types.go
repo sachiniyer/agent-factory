@@ -46,9 +46,10 @@ type CreateSessionRequest struct {
 	// all. encoding/json drops a "-" field on decode, and jsonFields skips it, so
 	// it is neither accepted nor advertised in the route catalog.
 	//
-	// TaskRepoID carries the same retained project binding used by targeted task
+	// TaskRepoID carries the retained project binding used by targeted task
 	// delivery, so reserveCreate can reject a path that was rebound between the
-	// task runner and final create admission.
+	// task runner and final create admission. TaskGenerationID similarly binds the
+	// reusable task ID to the exact row that admitted this delivery.
 	//
 	// That boundary is the point: provenance is an assertion the daemon makes
 	// about its own delivery, never a claim a client gets to make. Were it
@@ -56,8 +57,9 @@ type CreateSessionRequest struct {
 	// capped task's id and have countTaskRunsLocked charge it against that task —
 	// consuming its slots and parking its events, from a session that task never
 	// spawned.
-	TaskID     string `json:"-"`
-	TaskRepoID string `json:"-"`
+	TaskID           string `json:"-"`
+	TaskRepoID       string `json:"-"`
+	TaskGenerationID string `json:"-"`
 	// TaskOrigin marks every daemon-internal automated create, including a
 	// legacy targeted task with neither retained RepoID nor per-run ownership.
 	// Unlike TaskID it is not persisted on the session and never affects
@@ -369,14 +371,21 @@ type DeliverPromptRequest struct {
 	RepoPath string `json:"repo_path"`
 	Program  string `json:"program"`
 	Prompt   string `json:"prompt"`
-	// TaskRepoID is the task's retained project binding. Like CreateSession's
-	// TaskID, it is daemon-internal provenance carried over GOB and excluded from
-	// HTTP/JSON so a client cannot forge task authority. DeliverPrompt compares it
-	// with RepoPath's current resolution at the final daemon boundary. TaskOrigin
-	// is the identity-independent marker that lets a legacy targeted auto-create
-	// retain a provable not-attempted outcome without claiming TaskID ownership.
-	TaskRepoID string `json:"-"`
-	TaskOrigin bool   `json:"-"`
+	// TaskID, TaskGenerationID, and TaskRepoID are daemon-internal provenance
+	// carried over GOB and excluded from HTTP/JSON so a client cannot forge task
+	// authority. The control server holds the task-delivery lock while it verifies
+	// the current generation and performs the irreversible target send; task CRUD
+	// holds that same lock only through its durable mutation, so a watcher admitted
+	// by a removed task cannot deliver into its replacement without making watcher
+	// shutdown depend on the lock held by that delivery.
+	// TaskRepoID separately binds the project at the final manager boundary.
+	// TaskOrigin is the identity-independent marker that lets a legacy targeted
+	// auto-create retain a provable not-attempted outcome without claiming TaskID
+	// ownership.
+	TaskID           string `json:"-"`
+	TaskGenerationID string `json:"-"`
+	TaskRepoID       string `json:"-"`
+	TaskOrigin       bool   `json:"-"`
 	// DeferWhileAttached is set by the automated task-delivery path (cron +
 	// watch) so DeliverPrompt holds the send when a TUI is attached full-screen
 	// to an existing target session, rather than pasting a prompt + Enter into a

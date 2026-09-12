@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
@@ -13,6 +14,39 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Task add/update invokes validateEnabledTaskTarget while holding the tasks-file
+// lock. The validator therefore must not acquire Manager.mu: session creation
+// publishes its task identity while holding Manager.mu and then takes that file
+// lock, so the inverse order deadlocks both operations and the daemon with them.
+// Capture the target state before the store callback instead.
+func TestTaskTargetValidatorDoesNotAcquireManagerLock(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	candidate := archiveTargetTask("lockfree", "Lock Free", repoPath, "missing-target", true)
+	candidate.RepoID = repoID
+	validation := manager.prepareTaskTargetValidation(
+		candidate.RepoID, candidate.TargetSession, candidate.Enabled)
+
+	manager.mu.Lock()
+	validated := make(chan error, 1)
+	go func() {
+		validated <- manager.validateEnabledTaskTarget(candidate, validation)
+	}()
+
+	select {
+	case err := <-validated:
+		manager.mu.Unlock()
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		manager.mu.Unlock()
+		select {
+		case <-validated:
+		case <-time.After(5 * time.Second):
+			t.Fatal("validator stayed wedged after Manager.mu was released")
+		}
+		t.Fatal("task-store validator waited for Manager.mu, completing the task-store/manager lock cycle")
+	}
+}
 
 func TestArchiveSession_UnresolvedLegacyTaskScopeFailsClosed(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
@@ -201,11 +235,14 @@ func TestTaskArming_RefusedWatchTaskKeepsDurableQueue(t *testing.T) {
 	unsafe.TargetSession = session.RootSessionTitle
 	require.NoError(t, task.AddTask(unsafe),
 		"seed a task accepted while root-agent policy was enabled by the previous daemon")
+	stored, err := task.GetTask(unsafe.ID)
+	require.NoError(t, err)
 
 	watchers, _ := newTestSupervisor(t, task.LoadTasks)
 	queueDir, err := watchers.queueDir()
 	require.NoError(t, err)
-	require.NoError(t, newEventQueue(queueDir, unsafe.ID).enqueue("pending"))
+	queue := newEventQueueForGeneration(queueDir, stored.ID, stored.GenerationID)
+	require.NoError(t, queue.enqueue("pending"))
 
 	scheduler := newTaskScheduler()
 	scheduler.controlMu.Lock()
@@ -213,7 +250,47 @@ func TestTaskArming_RefusedWatchTaskKeepsDurableQueue(t *testing.T) {
 	scheduler.controlMu.Unlock()
 	require.NoError(t, reloadErr)
 	require.NotEmpty(t, refused, "unsafe task must be refused instead of armed")
-	_, statErr := os.Stat(filepath.Join(queueDir, unsafe.ID+".jsonl"))
+	_, statErr := os.Stat(queue.path)
 	require.NoError(t, statErr,
 		"a refused task still exists in tasks.json, so its repairable backlog must not be treated as orphaned")
+}
+
+func TestTaskArming_PreGenerationTaskKeepsLegacyDurableQueue(t *testing.T) {
+	_, repoID, repoPath := newStatusTestManager(t)
+	legacy := watchTask("ab422401", "sleep 60", repoPath)
+	legacy.RepoID = repoID
+	require.Empty(t, legacy.GenerationID, "the fixture must model a task row written before generations existed")
+	raw, err := json.Marshal([]task.Task{legacy})
+	require.NoError(t, err)
+	tasksPath, err := task.MigrateOnLoadPath()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(tasksPath, raw, 0o600))
+	stored, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	require.Empty(t, stored[0].GenerationID,
+		"loading an upgrade row must not manufacture a new queue ownership identity")
+
+	watchers, _ := newTestSupervisor(t, task.LoadTasks)
+	queueDir, err := watchers.queueDir()
+	require.NoError(t, err)
+	queue := newEventQueueForGeneration(queueDir, legacy.ID, stored[0].GenerationID)
+	require.NoError(t, queue.enqueue("already-delivered"))
+	require.NoError(t, queue.enqueue("pending-across-upgrade"))
+	_, cursor, ok, err := queue.peek()
+	require.NoError(t, err)
+	require.True(t, ok)
+	advanceEventQueue(t, queue, cursor)
+
+	watchers.cleanOrphanQueues(stored, nil, everyWatchTask())
+	for _, path := range []string{queue.path, queue.curPath} {
+		_, statErr := os.Stat(path)
+		require.NoError(t, statErr,
+			"generation-aware cleanup must retain a pre-generation task's legacy queue state")
+	}
+	reopened := newEventQueueForGeneration(queueDir, legacy.ID, stored[0].GenerationID)
+	event, _, ok, err := reopened.peek()
+	require.NoError(t, err)
+	require.True(t, ok, "the legacy backlog must remain pending after orphan cleanup")
+	require.Equal(t, "pending-across-upgrade", event.Line)
 }

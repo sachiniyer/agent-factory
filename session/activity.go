@@ -169,10 +169,11 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 // repo while holding the manager lock, the same reason Snapshot keeps its
 // serialization outside that lock.
 type LifecycleView struct {
-	// Title and TaskID are immutable after construction; carried so a caller can
-	// judge a session entirely from the view.
-	Title  string
-	TaskID string
+	// Title, TaskID, and TaskGenerationID are immutable after construction;
+	// carried so a caller can judge a session entirely from the view.
+	Title            string
+	TaskID           string
+	TaskGenerationID string
 	// Liveness and InFlightOp are the two canonical axes (#1195); Status is their
 	// composed legacy value, resolved under the same lock so a caller reading the
 	// composed form cannot disagree with one reading the axes.
@@ -222,6 +223,7 @@ func (i *Instance) lifecycleViewLocked() LifecycleView {
 	return LifecycleView{
 		Title:               i.Title,
 		TaskID:              i.TaskID,
+		TaskGenerationID:    i.taskGenerationID,
 		Liveness:            i.liveness,
 		InFlightOp:          i.inFlightOp,
 		Status:              i.statusLocked(),

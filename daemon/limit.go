@@ -764,10 +764,8 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		resetAt, _ := instance.LimitResetAt()
 		var rerr error
 		var accountConversationCapture session.ConversationCaptureSnapshot
-		beforeLive := func() {
-			if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
-				m.warn().Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
-			}
+		beforeLive := func() error {
+			return m.prepareRuntimeReplacementLiveBoundary(repoID, key, instance, "limit resume")
 		}
 		if accountSwap != nil {
 			accountConversationCapture, rerr = instance.AccountSwapConversationCapture()
@@ -977,6 +975,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	}
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
+	m.recordResumedTaskRun(instance)
 	if persistErr != nil {
 		m.warn().Printf("failed to persist instance %q: %v", instance.Title, persistErr)
 		if manual {

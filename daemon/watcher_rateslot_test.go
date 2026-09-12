@@ -22,18 +22,23 @@ import (
 // newRateSlotWatcher builds a watcher wired to deliver, with a real queue in a
 // temp dir. stopRequested is pre-armed so ensureDrainer never spawns a drainer
 // behind the assertions; the drain-path test drives drainLoop itself.
-func newRateSlotWatcher(t *testing.T, taskID string, deliver func(string, string) error) *taskWatcher {
+func newRateSlotWatcher(t *testing.T, taskID string, deliver func(string, string, string) error) *taskWatcher {
 	t.Helper()
 	s := newWatcherSupervisor()
 	s.eventsPerMinute = 10
 	s.deliver = deliver
+	var generationID string
+	if stored, err := task.GetTask(taskID); err == nil {
+		generationID = stored.GenerationID
+	}
 	return &taskWatcher{
-		sup:      s,
-		taskID:   taskID,
-		queue:    newEventQueue(t.TempDir(), taskID),
-		stopCh:   make(chan struct{}),
-		doneCh:   make(chan struct{}),
-		draining: false,
+		sup:          s,
+		taskID:       taskID,
+		generationID: generationID,
+		queue:        newEventQueueForGeneration(t.TempDir(), taskID, generationID),
+		stopCh:       make(chan struct{}),
+		doneCh:       make(chan struct{}),
+		draining:     false,
 	}
 }
 
@@ -184,8 +189,8 @@ func TestWatcherDrain_RefundsRateSlotWhenNothingWasDelivered(t *testing.T) {
 
 	attempted := make(chan struct{})
 	var once sync.Once
-	w := newRateSlotWatcher(t, "cafe2105", func(taskID, line string) error {
-		err := deliverWatchEvent(taskID, line)
+	w := newRateSlotWatcher(t, "cafe2105", func(taskID, generationID, line string) error {
+		err := deliverWatchEvent(taskID, generationID, line)
 		once.Do(func() { close(attempted) })
 		return err
 	})
@@ -223,7 +228,7 @@ func TestWatcherDrain_RefundsRateSlotWhenNothingWasDelivered(t *testing.T) {
 // so an ambiguous failure stays charged.
 func TestWatcherHandleEvent_KeepsRateSlotWhenDeliveryMayHaveLanded(t *testing.T) {
 	sendErr := fmt.Errorf("failed to deliver prompt to target session %q: %w", "captain", errors.New("connection reset by peer"))
-	w := newRateSlotWatcher(t, "cafe2103", func(string, string) error { return sendErr })
+	w := newRateSlotWatcher(t, "cafe2103", func(string, string, string) error { return sendErr })
 	close(w.stopCh)
 
 	w.handleEvent("new issue #9", &tailBuffer{})
@@ -237,7 +242,7 @@ func TestWatcherHandleEvent_KeepsRateSlotWhenDeliveryMayHaveLanded(t *testing.T)
 // over-refunding: a delivery that actually landed spends its slot, which is the
 // whole point of the per-minute budget.
 func TestWatcherHandleEvent_SuccessfulDeliveryConsumesRateSlot(t *testing.T) {
-	w := newRateSlotWatcher(t, "cafe2104", func(string, string) error { return nil })
+	w := newRateSlotWatcher(t, "cafe2104", func(string, string, string) error { return nil })
 	close(w.stopCh)
 
 	w.handleEvent("new issue #9", &tailBuffer{})

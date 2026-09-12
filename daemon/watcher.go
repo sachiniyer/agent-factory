@@ -127,8 +127,8 @@ type watcherSupervisor struct {
 	// lifecycle statuses without a task store, and queueDir redirects the
 	// durable event queues to a scratch directory.
 	loadTasks func() ([]task.Task, error)
-	deliver   func(taskID, line string) error
-	setStatus func(taskID, status string)
+	deliver   func(taskID, taskGenerationID, line string) error
+	setStatus func(taskID, taskGenerationID, status string)
 	logPath   func(taskID string) (string, error)
 	queueDir  func() (string, error)
 
@@ -182,6 +182,7 @@ func (s *watcherSupervisor) Stop() {
 func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 	w := &taskWatcher{
 		taskID:        t.ID,
+		generationID:  t.GenerationID,
 		name:          t.Name,
 		cmdStr:        t.WatchCmd,
 		dir:           t.ProjectPath,
@@ -207,13 +208,15 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 	if dir, err := s.queueDir(); err != nil {
 		log.WarningLog.Printf("watch task %s: event queue unavailable (failed deliveries will be dropped): %v", t.ID, err)
 	} else {
-		w.queue = newEventQueue(dir, t.ID)
+		w.queue = newEventQueueForGeneration(dir, t.ID, t.GenerationID)
 	}
 	return w
 }
 
-// watcherSignature captures the fields that define the watch process itself;
-// a change to any of them restarts the script on reload.
+// watcherSignature captures the task generation and fields that define the
+// watch process itself; a change to any restarts the script on reload. Generation
+// is ownership, not configuration: a same-shaped task re-added under a reused ID
+// must not inherit the removed generation's watcher or its later status writes.
 // tailBuffer and its failure-summary helpers live in tailbuffer.go (extracted
 // to keep watcher.go under its file-length ceiling, #1145).
 
@@ -223,11 +226,12 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 // delivers synchronously, so a slow delivery backpressures the script's
 // stdout pipe rather than reordering events.
 type taskWatcher struct {
-	taskID string
-	name   string
-	cmdStr string
-	dir    string
-	sig    string
+	taskID       string
+	generationID string
+	name         string
+	cmdStr       string
+	dir          string
+	sig          string
 	// repoID/targetSession are captured at construction to label a delivery
 	// alarm (#1238) without disk I/O on the snapshot hot path. repoID scopes
 	// the alarm to a repo's snapshot; targetSession names where events are
@@ -339,7 +343,7 @@ func (w *taskWatcher) run() {
 			// The condition, stated so an operator can act on it: this stop
 			// holds until something names THIS task (#3837).
 			log.InfoLog.Printf("watch task %s: watch command exited cleanly; stopped until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts", w.taskID, w.taskID)
-			w.sup.setStatus(w.taskID, "stopped")
+			w.sup.setStatus(w.taskID, w.generationID, "stopped")
 			return
 		}
 
@@ -367,7 +371,7 @@ func (w *taskWatcher) run() {
 		failures = failures[cut:]
 		if len(failures) >= w.sup.crashMaxExits {
 			log.ErrorLog.Printf("watch task %s: %d failures within %s (last: %v); giving up until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts%s", w.taskID, len(failures), w.sup.crashWindow, runErr, w.taskID, tail.logSuffix())
-			w.sup.setStatus(w.taskID, failureSummary(runErr, tail))
+			w.sup.setStatus(w.taskID, w.generationID, failureSummary(runErr, tail))
 			return
 		}
 
@@ -678,7 +682,7 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 		return
 	}
 
-	err := w.sup.deliver(w.taskID, line)
+	err := w.sup.deliver(w.taskID, w.generationID, line)
 	w.recordDeliveryResult(time.Now(), err)
 	if err != nil {
 		switch {
@@ -806,7 +810,7 @@ func (w *taskWatcher) stopDraining() {
 // prompt/target_session edits apply without restarting the script), renders
 // {{line}}, and routes through the same delivery path cron fires use, then
 // records the run status (#664 path).
-func deliverWatchEvent(taskID, line string) error {
+func deliverWatchEvent(taskID, taskGenerationID, line string) error {
 	// The three pre-flight checks below fail before anything is created or sent,
 	// so they are tagged notAttempted and the caller refunds their rate slot
 	// (#2102). Everything past them can fail with the delivery already in
@@ -815,6 +819,10 @@ func deliverWatchEvent(taskID, line string) error {
 	if err != nil {
 		return notAttempted(fmt.Errorf("failed to load task: %w", err))
 	}
+	if t.GenerationID != taskGenerationID {
+		return notAttempted(fmt.Errorf(
+			"task %s was replaced before its watcher event could be delivered", taskID))
+	}
 	if !t.Enabled {
 		return notAttempted(fmt.Errorf("task %s is disabled", taskID))
 	}
@@ -822,11 +830,11 @@ func deliverWatchEvent(taskID, line string) error {
 	if strings.TrimSpace(prompt) == "" {
 		return notAttempted(fmt.Errorf("event rendered an empty prompt (line %q)", line))
 	}
-	status, err := deliverTaskPrompt(t, prompt, true)
+	delivery, err := deliverTaskPrompt(t, prompt, true)
 	if err != nil {
 		return err
 	}
-	if status == StatusDeferredAttached {
+	if delivery.status == StatusDeferredAttached {
 		// A TUI is attached full-screen to the target session; the delivery was
 		// held so it can't paste into and submit the user's in-progress input
 		// (#1586). Signal the caller (handleEvent / drainLoop) to re-queue and
@@ -835,8 +843,7 @@ func deliverWatchEvent(taskID, line string) error {
 		// logged quietly, since a deferral is expected, not an outage.
 		return errTargetBusy
 	}
-	now := time.Now()
-	if _, err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
+	if err := recordDeliveredTaskRun(taskID, delivery); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 	return nil
@@ -851,8 +858,8 @@ func deliverWatchEvent(taskID, line string) error {
 // committed in the gap — the TOCTOU race in #1215. UpdateTaskStatus skips
 // Program enum validation so legacy task records still receive status bumps
 // (#664).
-func persistWatcherStatus(taskID, status string) {
-	if _, err := task.UpdateTaskStatus(taskID, nil, status); err != nil {
+func persistWatcherStatus(taskID, taskGenerationID, status string) {
+	if _, _, err := task.UpdateTaskStatusForGeneration(taskID, taskGenerationID, nil, status); err != nil {
 		log.WarningLog.Printf("failed to record watcher status %q on task %s: %v", status, taskID, err)
 	}
 }

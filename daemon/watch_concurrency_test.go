@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // The watch-task concurrency limit (#1892) is enforced inside the manager's
@@ -19,13 +20,72 @@ import (
 // createForTask issues one task-attributed create against the manager, exactly as
 // the watch delivery path does.
 func createForTask(m *Manager, repoPath, taskID, base string, limit int) (session.InstanceData, error) {
+	taskFixtureMu.Lock()
+	stored, err := task.GetTask(taskID)
+	var generationID string
+	if task.IsTaskNotFound(err) {
+		var created task.Task
+		created, err = task.AddTaskChecked(enabledCronTask(taskID, repoPath), task.ActorUnknown, nil)
+		generationID = created.GenerationID
+	} else if err == nil {
+		generationID = stored.GenerationID
+	}
+	taskFixtureMu.Unlock()
+	if err != nil {
+		return session.InstanceData{}, fmt.Errorf("prepare task fixture: %w", err)
+	}
 	return m.CreateSession(context.Background(), CreateSessionRequest{
 		TitleBase:         base,
 		RepoPath:          repoPath,
 		Program:           "claude",
 		TaskID:            taskID,
+		TaskGenerationID:  generationID,
+		TaskOrigin:        true,
 		MaxConcurrentRuns: limit,
 	})
+}
+
+var taskFixtureMu sync.Mutex
+
+func taskGenerationForTest(t *testing.T, taskID string) string {
+	t.Helper()
+	tsk, err := task.GetTask(taskID)
+	if err != nil {
+		t.Fatalf("read task %s generation: %v", taskID, err)
+	}
+	return tsk.GenerationID
+}
+
+func TestWatchConcurrencyScopesEveryRunSourceToTaskGeneration(t *testing.T) {
+	const (
+		repoID = "repo-id"
+		taskID = "reused-task"
+		oldGen = "old-generation"
+		newGen = "new-generation"
+	)
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "predecessor", Path: t.TempDir(), Program: "claude",
+		TaskID: taskID, TaskGenerationID: oldGen,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetStatusForTest(session.Running)
+	manager := &Manager{
+		instances:        map[string]*session.Instance{daemonInstanceKey(repoID, inst.Title): inst},
+		reservedTaskRuns: map[string]int{taskRunReservationKey(repoID, taskID, oldGen): 1},
+		ghostTaskRuns:    map[string]int{taskRunReservationKey(repoID, taskID, oldGen): 1},
+	}
+
+	if got := manager.countTaskRunsLocked(repoID, taskID, oldGen); got != 3 {
+		t.Fatalf("predecessor generation count = %d, want live + reservation + ghost", got)
+	}
+	if got := manager.countTaskRunsLocked(repoID, taskID, newGen); got != 0 {
+		t.Fatalf("replacement generation count = %d, want zero; predecessor work must not consume its capacity", got)
+	}
+	if err := manager.admitTaskRunLocked(repoID, taskID, newGen, 1); err != nil {
+		t.Fatalf("replacement generation was blocked by predecessor capacity: %v", err)
+	}
 }
 
 // settle drives a created session to idle, the transition that releases its
@@ -270,7 +330,7 @@ func TestWatchConcurrencyCountsAlreadyLiveSessions(t *testing.T) {
 
 	// No reservation exists on the restarted manager — only the rebuilt instances.
 	restarted.mu.Lock()
-	err = restarted.admitTaskRunLocked(repo.ID, "task1", limit)
+	err = restarted.admitTaskRunLocked(repo.ID, "task1", taskGenerationForTest(t, "task1"), limit)
 	restarted.mu.Unlock()
 	if !errors.Is(err, errAtConcurrencyLimit) {
 		t.Fatalf("admit after restart: want the at-limit refusal (the cap must survive a restart), got %v", err)

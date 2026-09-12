@@ -232,6 +232,32 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 		strings.Join(ptyFactory.cmds[0].Args, " "))
 }
 
+func TestRestoreCheckpointFailurePreventsReplacementSpawn(t *testing.T) {
+	ptyFactory := NewMockPtyFactory(t)
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "has-session") {
+				return fmt.Errorf("can't find session")
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return []byte("output"), nil },
+	}
+	session := newTmuxSession(toTmuxName("missing-checkpoint", ""), "claude", ptyFactory, cmdExec)
+	wantErr := errors.New("session checkpoint unavailable")
+	called := false
+
+	result, err := session.RestoreWithResultBeforeRespawn(t.TempDir(), func() error {
+		called = true
+		return wantErr
+	})
+	require.ErrorIs(t, err, wantErr)
+	require.Equal(t, RestoreReattached, result)
+	require.True(t, called, "definitive absence must reach the pre-spawn checkpoint")
+	require.Empty(t, ptyFactory.cmds,
+		"a failed checkpoint must return before any replacement process is started")
+}
+
 // TestRestoreReturnsErrorWhenSessionMissingAndNoWorkDir guards the contract
 // used by Start()'s internal Restore("") call: when no workDir is provided, a
 // missing session is a real error and must not silently re-spawn (which would

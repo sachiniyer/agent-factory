@@ -31,6 +31,20 @@ type InstanceOptions struct {
 	// a user-created session. It is what lets the daemon count a task's in-flight
 	// sessions for the watch-task concurrency limit without guessing from titles.
 	TaskID string
+	// TaskGenerationID binds TaskID to the exact task row incarnation whose
+	// delivery created the session. Empty retains legacy compatibility.
+	TaskGenerationID string
+	// TaskRunAt is the display timestamp persisted for this delivery. The session
+	// ID is its stable identity. Daemon task creation supplies the timestamp before
+	// publishing the session; zero is retained for direct constructors and records
+	// created by older binaries.
+	TaskRunAt time.Time
+	// TaskRunSequence is the daemon-assigned ordering proof for delayed task-row
+	// publication. Zero is retained for direct constructors and older records.
+	TaskRunSequence uint64
+	// TaskRunRevision is the task row's last-run revision at create admission.
+	// The publisher compares it before writing so later supervision wins.
+	TaskRunRevision uint64
 	// SandboxCredentials mints and revokes the per-session credential a provisioned
 	// sandbox uses to call back into the daemon (#2999, #3068). An INTERFACE rather
 	// than a pair of values so it runs only for off-box kinds — session cannot
@@ -586,6 +600,10 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		// (#1892). Only a task-spawned session has a run to bound; a user's session
 		// is never counted against a cap.
 		taskRunActive:         opts.TaskID != "",
+		taskGenerationID:      opts.TaskGenerationID,
+		taskRunAt:             opts.TaskRunAt,
+		taskRunSequence:       opts.TaskRunSequence,
+		taskRunRevision:       opts.TaskRunRevision,
 		liveness:              LiveReady,
 		Path:                  absPath,
 		Program:               opts.Program,
