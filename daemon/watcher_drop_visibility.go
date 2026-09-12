@@ -22,6 +22,44 @@ func persistWatcherStatus(taskID, status string) {
 	}
 }
 
+// tryReserveEventSlot applies the per-task delivery rate limit: prune the
+// sliding window, then reserve one slot if the window has room. Live deliveries
+// and drainer replays share the window, so their combined pressure never
+// exceeds eventsPerMinute.
+//
+// This rate limit and the max_concurrent_runs cap (#1892) are orthogonal. This
+// one drops excess events from a chatty source; the cap queues them. Once the
+// first cap refusal creates a backlog, handleEvent's FIFO gate queues every
+// later event without consulting this limiter, so they cannot both be the
+// binding constraint.
+func (w *taskWatcher) tryReserveEventSlot() bool {
+	now := time.Now()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	cut := 0
+	for cut < len(w.eventTimes) && now.Sub(w.eventTimes[cut]) >= time.Minute {
+		cut++
+	}
+	w.eventTimes = w.eventTimes[cut:]
+	if len(w.eventTimes) >= w.sup.eventsPerMinute {
+		return false
+	}
+	w.eventTimes = append(w.eventTimes, now)
+	return true
+}
+
+// releaseEventSlot refunds a rate slot when a deferral or a pre-flight failure
+// delivered nothing. The live path and drainer share the window, but it counts
+// reservations rather than identity, so removing one newest timestamp per
+// refund keeps the total exact regardless of which goroutine reserved it.
+func (w *taskWatcher) releaseEventSlot() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if n := len(w.eventTimes); n > 0 {
+		w.eventTimes = w.eventTimes[:n-1]
+	}
+}
+
 // persistTerminalStatus publishes the terminal outcome to live readers before
 // writing it to the task store. A terminal watcher deliberately remains in the
 // supervisor map until an explicit re-arm; without this latch, its older drop

@@ -40,7 +40,43 @@ func (w *taskWatcher) waitForLimitQueueCapacity(stdoutWritersStopped <-chan stru
 	if !w.stopRequested() {
 		return true, false
 	}
-	return false, w.queue != nil && w.queue.retainLimitParked()
+	return false, w.retainFinitePipeOnStop()
+}
+
+// retainFinitePipeOnStop decides whether complete events already accepted by
+// stdout belong in protected storage. It waits for a delivery already in the
+// drainer's limit-publication critical section, then consults both durable queue
+// state and the current target. Holding the same fence prevents a later drainer
+// from starting after this decision: it will observe stop and decline delivery.
+func (w *taskWatcher) retainFinitePipeOnStop() bool {
+	if w.queue == nil {
+		return false
+	}
+	w.limitPublicationMu.Lock()
+	defer w.limitPublicationMu.Unlock()
+	if w.queue.retainLimitParked() {
+		return true
+	}
+	return w.targetLimitRequiresRetention()
+}
+
+// deliverQueuedEventPublishingLimit performs the only drainer delivery that
+// can establish limit retention. The marker lands before the publication fence
+// opens. If stop won the fence, no delivery is attempted: the stdout reader has
+// already made (or is about to make) its final decision from settled state.
+func (w *taskWatcher) deliverQueuedEventPublishingLimit(ev queuedEvent, cursor eventQueueCursor) (err error, attempted bool) {
+	w.limitPublicationMu.Lock()
+	defer w.limitPublicationMu.Unlock()
+	if w.stopRequested() {
+		return nil, false
+	}
+	err = w.deliverQueuedEvent(ev, cursor)
+	if errors.Is(err, errTargetLimitReached) {
+		if markErr := w.queue.markLimitParked(); markErr != nil {
+			log.ErrorLog.Printf("watch task %s: failed to protect usage-limit backlog from retention bounds: %v", w.taskID, markErr)
+		}
+	}
+	return err, true
 }
 
 // targetLimitRequiresRetention applies the fail-closed side of queue safety:

@@ -36,7 +36,7 @@ func (m *Manager) observeTaskTargetLimit(taskID string) (bool, error) {
 	}
 	target := task.CanonicalTargetSession(t.TargetSession)
 	if target == "" {
-		return false, nil
+		return m.revalidateTaskTargetLimitBinding(taskID, t.RepoID, target, false)
 	}
 	if t.RepoID == "" {
 		return false, fmt.Errorf("task has no retained repository identity")
@@ -65,7 +65,7 @@ func (m *Manager) observeTaskTargetLimit(taskID string) (bool, error) {
 			m.mu.Unlock()
 			m.accountLimitMu.Unlock()
 			if current == nil {
-				return false, nil
+				return m.revalidateTaskTargetLimitBinding(taskID, t.RepoID, target, false)
 			}
 			continue
 		}
@@ -95,6 +95,28 @@ func (m *Manager) observeTaskTargetLimit(taskID string) (bool, error) {
 			// in-flight operation is therefore unknown/protected until it settles.
 			return false, fmt.Errorf("target session has an in-flight operation (%v)", view.InFlightOp)
 		}
-		return view.Liveness == session.LiveLimitReached, nil
+		return m.revalidateTaskTargetLimitBinding(
+			taskID, t.RepoID, target, view.Liveness == session.LiveLimitReached,
+		)
 	}
+}
+
+// revalidateTaskTargetLimitBinding makes the final task read the observation's
+// identity boundary. Delivery-only edits intentionally do not restart a watch
+// process, so a target/repository change can cross the manager liveness fences
+// above. Such an observation is unknown, never permission to expire, evict, or
+// rate-drop an event; the next admission retries against the new binding.
+func (m *Manager) revalidateTaskTargetLimitBinding(taskID, repoID, target string, limited bool) (bool, error) {
+	current, err := task.GetTask(taskID)
+	if err != nil {
+		return false, fmt.Errorf("reload task after target observation: %w", err)
+	}
+	currentTarget := task.CanonicalTargetSession(current.TargetSession)
+	if current.RepoID != repoID || currentTarget != target {
+		return false, fmt.Errorf(
+			"task target changed during usage-limit observation (repo %q target %q to repo %q target %q)",
+			repoID, target, current.RepoID, currentTarget,
+		)
+	}
+	return limited, nil
 }

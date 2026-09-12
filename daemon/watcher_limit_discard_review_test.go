@@ -1,7 +1,7 @@
 package daemon
 
 import (
-	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -147,12 +147,19 @@ func TestTargetLimitObservationRejectsConcurrentTaskRebind(t *testing.T) {
 
 func TestUnreadableQueueBackpressuresUntilStateIsKnown(t *testing.T) {
 	dir := t.TempDir()
+	seed := newEventQueue(dir, "unknown-limit-state")
+	if err := seed.enqueue("parked-before-restart", true); err != nil {
+		t.Fatalf("seed protected event: %v", err)
+	}
+	realQueuePath := seed.path
+	backupPath := realQueuePath + ".readable"
+	if err := os.Rename(realQueuePath, backupPath); err != nil {
+		t.Fatalf("move queue behind unreadable fixture: %v", err)
+	}
+	if err := os.Mkdir(realQueuePath, 0o755); err != nil {
+		t.Fatalf("replace queue file with unreadable directory: %v", err)
+	}
 	queue := newEventQueue(dir, "unknown-limit-state")
-	realQueuePath := queue.path
-	queue.mu.Lock()
-	queue.path = dir // scanning a directory gives the constructor's unreadable-file state
-	queue.mu.Unlock()
-	queue.load()
 	if !queue.loadFailed() {
 		t.Fatal("fixture did not make queue state unreadable")
 	}
@@ -160,26 +167,19 @@ func TestUnreadableQueueBackpressuresUntilStateIsKnown(t *testing.T) {
 	oldPoll := watcherLimitBackpressurePoll
 	watcherLimitBackpressurePoll = time.Millisecond
 	t.Cleanup(func() { watcherLimitBackpressurePoll = oldPoll })
-	storageReady := make(chan struct{})
 	attemptedBeforeRecovery := make(chan struct{}, 1)
-	delivered := make(chan string, 1)
 	s := newWatcherSupervisor()
-	s.deliver = func(_ string, line string, _ watchDeliveryOptions) error {
+	s.deliver = func(_ string, _ string, _ watchDeliveryOptions) error {
 		select {
-		case <-storageReady:
-			delivered <- line
-			return nil
+		case attemptedBeforeRecovery <- struct{}{}:
 		default:
-			select {
-			case attemptedBeforeRecovery <- struct{}{}:
-			default:
-			}
-			return errors.New("delivery unavailable while queue state is unknown")
 		}
+		return errTargetLimitReached
 	}
 	stopCh := make(chan struct{})
 	w := &taskWatcher{
 		taskID: "unknown-limit-state", sup: s, queue: queue, stopCh: stopCh,
+		draining: true, // keep the recovered backlog stable for the assertion
 	}
 	readerDone := make(chan struct{})
 	go func() {
@@ -193,27 +193,27 @@ func TestUnreadableQueueBackpressuresUntilStateIsKnown(t *testing.T) {
 		earlyAttempt = true
 	case <-time.After(50 * time.Millisecond):
 	}
-	queue.mu.Lock()
-	queue.path = realQueuePath
-	queue.mu.Unlock()
-	queue.load()
-	close(storageReady)
-
-	if !earlyAttempt {
+	if earlyAttempt {
 		select {
-		case got := <-delivered:
-			if got != "must-survive-unreadable-state" {
-				t.Fatalf("delivered line = %q", got)
-			}
+		case <-readerDone:
 		case <-time.After(time.Second):
-			t.Fatal("reader did not resume after queue state recovered")
+			t.Fatal("reader did not finish discarding the event admitted during unreadable state")
 		}
 	}
-	select {
-	case <-readerDone:
-	case <-time.After(time.Second):
-		close(stopCh)
-		t.Fatal("stdout reader did not finish")
+	if err := os.Remove(realQueuePath); err != nil {
+		t.Fatalf("remove unreadable queue fixture: %v", err)
+	}
+	if err := os.Rename(backupPath, realQueuePath); err != nil {
+		t.Fatalf("restore readable queue: %v", err)
+	}
+	queue.load()
+	if !earlyAttempt {
+		select {
+		case <-readerDone:
+		case <-time.After(time.Second):
+			close(stopCh)
+			t.Fatal("stdout reader did not finish after queue recovery")
+		}
 	}
 	if earlyAttempt {
 		t.Fatal("unreadable queue state admitted a delivery whose failed enqueue discarded the event")
@@ -221,7 +221,9 @@ func TestUnreadableQueueBackpressuresUntilStateIsKnown(t *testing.T) {
 	if queue.loadFailed() {
 		t.Fatal("queue did not recover to a known state")
 	}
-	if got := queue.pendingCount(); got != 0 {
-		t.Fatalf("queue pending after successful delivery = %d", got)
+	got := drainAllEvents(t, queue)
+	want := []string{"parked-before-restart", "must-survive-unreadable-state"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("recovered backlog = %v, want %v", got, want)
 	}
 }

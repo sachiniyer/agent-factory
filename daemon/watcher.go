@@ -304,6 +304,13 @@ type taskWatcher struct {
 	// deliberately separate from mu: a parked drainer may live indefinitely,
 	// while only this short two-store commit must exclude supervisor status.
 	statusMu sync.Mutex
+	// limitPublicationMu makes a drainer's delivery verdict and durable limit
+	// marker one publication with respect to stdout shutdown. Without it, stop
+	// can discard prefetched/pipe-buffered events after the delivery has found a
+	// limit but before the drainer has marked the queue. A drainer rechecks stop
+	// after entering this fence, so none can begin a new unpublished verdict
+	// after the reader makes its final retention decision.
+	limitPublicationMu sync.Mutex
 }
 
 // stop requests termination and blocks until the run goroutine returns. The
@@ -792,52 +799,6 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 			log.ErrorLog.Printf("watch task %s: failed to deliver event: %v", w.taskID, err)
 		}
 		w.enqueueEvent(line, tail, limitParked, parkedStatusRecorded)
-	}
-}
-
-// tryReserveEventSlot applies the per-task delivery rate limit: prune the
-// sliding window, then reserve one slot if the window has room. Live
-// deliveries and the drainer's replays reserve through the same window, so
-// combined delivery pressure on the target session never exceeds
-// eventsPerMinute — a burst replay after an outage trickles in.
-//
-// This rate limit and the max_concurrent_runs cap (#1892) are orthogonal and do
-// not double-limit, so neither needs to know about the other. This one is
-// protective policy against a chatty script and DROPS excess events by design;
-// the cap is a resource bound and QUEUES them, never dropping. They compose
-// without any reconciliation because of handleEvent's FIFO gate above: the first
-// event the cap parks creates a backlog, and from then on every new event is
-// enqueued without ever consulting this limiter. So the moment concurrency is the
-// binding constraint, the rate limiter stops dropping — the two are never the
-// binding constraint at the same time.
-func (w *taskWatcher) tryReserveEventSlot() bool {
-	now := time.Now()
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	cut := 0
-	for cut < len(w.eventTimes) && now.Sub(w.eventTimes[cut]) >= time.Minute {
-		cut++
-	}
-	w.eventTimes = w.eventTimes[cut:]
-	if len(w.eventTimes) >= w.sup.eventsPerMinute {
-		return false
-	}
-	w.eventTimes = append(w.eventTimes, now)
-	return true
-}
-
-// releaseEventSlot refunds a rate slot reserved by tryReserveEventSlot when the
-// attempt did not actually deliver — a deferral (errTargetBusy, #1586) sends
-// nothing, so it must not spend the target's per-minute budget. It drops the
-// newest reservation; the live path and the drainer share the window, but the
-// limiter counts reservations rather than tracking identity, so removing one
-// per refunded attempt keeps the count exactly right regardless of which
-// goroutine's timestamp is dropped.
-func (w *taskWatcher) releaseEventSlot() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if n := len(w.eventTimes); n > 0 {
-		w.eventTimes = w.eventTimes[:n-1]
 	}
 }
 

@@ -163,12 +163,18 @@ func (q *eventQueue) retainLimitParked() bool {
 // protected backlog reaches the ordinary queue bound. The watch subprocess then
 // blocks on its pipe, so AF retains bounded disk use without dropping distinct
 // events. One final record may cross the byte cap; event lines are themselves
-// bounded, and the reader checks again before reading another.
+// bounded, and the reader checks again before reading another. Unknown state
+// backpressures too: a failed load is not proof that the durable marker is
+// absent, and consuming another event while enqueue refuses that state would
+// discard it.
 func (q *eventQueue) limitParkedAtCapacity() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	_ = q.retryLoadLocked()
-	if q.loadErr != nil || !q.limitParked {
+	if q.loadErr != nil {
+		return true
+	}
+	if !q.limitParked {
 		return false
 	}
 	return q.pending >= watcherQueueMaxEvents || q.size-q.offset >= watcherQueueMaxBytes

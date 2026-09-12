@@ -193,16 +193,19 @@ func (w *taskWatcher) drainLoop() {
 			}
 			continue
 		}
-		if err := w.deliverQueuedEvent(ev, cursor); err != nil {
+		err, attempted := w.deliverQueuedEventPublishingLimit(ev, cursor)
+		if !attempted {
+			w.releaseEventSlot()
+			w.stopDraining()
+			return
+		}
+		if err != nil {
 			w.recordDeliveryResult(time.Now(), err)
 			if errors.Is(err, errTargetLimitReached) {
 				// A known limit park is not an outage and delivered nothing. Retain
 				// the head past ordinary age/cap eviction, refund this attempt's rate
 				// slot, and retry on the base cadence until liveness clears.
 				w.releaseEventSlot()
-				if markErr := w.queue.markLimitParked(); markErr != nil {
-					log.ErrorLog.Printf("watch task %s: failed to protect usage-limit backlog from retention bounds: %v", w.taskID, markErr)
-				}
 				if parkLog.allow("usage-limit", time.Now()) {
 					log.InfoLog.Printf("watch task %s: target session is at a usage limit; holding %d queued event(s) until the limit clears — repeats at most every %s while this holds", w.taskID, w.queue.pendingCount(), watcherParkLogInterval)
 				}

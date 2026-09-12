@@ -442,8 +442,9 @@ func TestOrdinaryStopDoesNotPromotePrefetchedLinesToLimitBacklog(t *testing.T) {
 	}
 	stopCh := make(chan struct{})
 	s := newWatcherSupervisor()
+	var stopOnce sync.Once
 	s.observeTargetLimit = func(string) (bool, error) {
-		close(stopCh)
+		stopOnce.Do(func() { close(stopCh) })
 		return false, nil
 	}
 	w := &taskWatcher{taskID: "a4223105", sup: s, queue: queue, stopCh: stopCh}
