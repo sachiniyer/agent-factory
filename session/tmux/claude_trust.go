@@ -343,19 +343,21 @@ var claudeMCPOptionLabels = []string{"yes", "no"}
 // claudeMCPTrustFooterIsLast reports whether the MCP trust modal's "Enter to
 // confirm" affordance is the last non-blank content in the pane AND the option
 // block above the footer (skipping any blank chrome between them) contains the
-// MCP question AND the modal's own exact option labels ("yes" / "no"). A live
-// MCP modal is the last thing on screen, so its footer is the final row; a
-// quoted mention of the MCP phrase has the agent's composer or further output
-// below it, so the footer is not last. This is the same footer-is-last
-// discipline claudeTrustPickerStructure applies to the folder-trust branch and
-// that CodexTrustPromptPresent applies as its `affordance == last` rule: "a
-// working agent paints its composer beneath its output, so a quoted dialog has
-// something after it and a live one does not."
+// modal's own exact option labels ("yes" / "no"), AND the MCP question appears
+// either in that same option block or in the block immediately above it
+// (skipping any blank chrome between them). A live MCP modal is the last thing
+// on screen, so its footer is the final row; a quoted mention of the MCP phrase
+// has the agent's composer or further output below it, so the footer is not
+// last. This is the same footer-is-last discipline claudeTrustPickerStructure
+// applies to the folder-trust branch and that CodexTrustPromptPresent applies
+// as its `affordance == last` rule: "a working agent paints its composer
+// beneath its output, so a quoted dialog has something after it and a live one
+// does not."
 //
-// The blank-row skip between the option block and the footer is required because
-// the Claude picker layout already measured in this file is: option rows, a
-// blank row, then "Enter to confirm". claudeTrustPickerStructure applies the
-// same blank-skipping discipline via claudeTrustNextContentRow.
+// The blank-row skips are required because the Claude picker layout places blank
+// rows as separators: between the option rows and the footer, and between the
+// question and the option rows. Both gaps are bridged the same way
+// claudeTrustPickerStructure bridges blank chrome via claudeTrustNextContentRow.
 //
 // Validating the option labels EXACTLY — not just blank-line adjacency and not
 // with suffix matching — is what closes the cross-dialog injection class: an
@@ -407,18 +409,18 @@ func claudeMCPTrustFooterIsLast(content string) bool {
 	}
 
 	// Walk back to find the start of the contiguous option block.
-	blockStart := optBlockEnd
-	for blockStart > 0 && !rows[blockStart-1].blank {
-		blockStart--
+	optBlockStart := optBlockEnd
+	for optBlockStart > 0 && !rows[optBlockStart-1].blank {
+		optBlockStart--
 	}
 
-	// The block must contain the MCP question AND both known option labels.
-	// Requiring the options — not just the question — is what tells an agent-
-	// controlled-text quote from an actual dialog: the attacker can emit the
-	// question above any picker, but both option rows must also appear inside
-	// the same blank-line-delimited block as the footer for the predicate to
-	// fire. A generic picker cannot satisfy that without also reproducing the
-	// MCP option wording, which would then be answerable in good faith anyway.
+	// The option block must contain both known option labels. Requiring the
+	// options — not just the question — is what tells an agent-controlled-text
+	// quote from an actual dialog: the attacker can emit the question above any
+	// picker, but both option rows must also appear inside the same
+	// blank-line-delimited block as the footer for the predicate to fire. A
+	// generic picker cannot satisfy that without also reproducing the MCP option
+	// wording, which would then be answerable in good faith anyway.
 	//
 	// Options are matched EXACTLY against the normalised label: claudeTrustRowOf
 	// already strips numeric ordinals ("1. Yes" → "Yes"), so exact match on the
@@ -426,7 +428,7 @@ func claudeMCPTrustFooterIsLast(content string) bool {
 	// HasSuffix(lower, " yes") would accept "Always yes"; exact match does not.
 	hasQuestion := false
 	optionFound := make([]bool, len(claudeMCPOptionLabels))
-	for i := blockStart; i <= optBlockEnd; i++ {
+	for i := optBlockStart; i <= optBlockEnd; i++ {
 		lower := strings.ToLower(rows[i].label)
 		if strings.Contains(lower, question) {
 			hasQuestion = true
@@ -437,13 +439,42 @@ func claudeMCPTrustFooterIsLast(content string) bool {
 			}
 		}
 	}
-	if !hasQuestion {
-		return false
-	}
 	for _, found := range optionFound {
 		if !found {
 			return false
 		}
+	}
+
+	// The question may appear in the block immediately above the option block,
+	// separated by blank chrome — the Claude picker layout places a blank row
+	// between the question and its options as well as between the options and the
+	// footer. Apply the same blank-skipping discipline upward: if the question
+	// was not found in the option block, look in the preceding content block.
+	// This is the "Bridge the separator above MCP options" fix: without it, the
+	// backward scan stops at the blank row between question and options, leaving
+	// hasQuestion false and blocking a genuine dialog.
+	if !hasQuestion {
+		// Walk back past the blank chrome above the option block.
+		questionBlockEnd := optBlockStart - 1
+		for questionBlockEnd >= 0 && rows[questionBlockEnd].blank {
+			questionBlockEnd--
+		}
+		if questionBlockEnd >= 0 {
+			// Walk back to the start of the preceding content block.
+			questionBlockStart := questionBlockEnd
+			for questionBlockStart > 0 && !rows[questionBlockStart-1].blank {
+				questionBlockStart--
+			}
+			for i := questionBlockStart; i <= questionBlockEnd; i++ {
+				if strings.Contains(strings.ToLower(rows[i].label), question) {
+					hasQuestion = true
+					break
+				}
+			}
+		}
+	}
+	if !hasQuestion {
+		return false
 	}
 	return true
 }

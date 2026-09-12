@@ -964,6 +964,31 @@ func TestCheckAndHandleTrustPrompt_RealMCPTrustDialogWithBlankBeforeFooterStillF
 		"the real MCP modal still fires Enter regardless of a blank row before the footer")
 }
 
+// The Claude picker layout may place a blank row between the question and the
+// option rows as well as between the option rows and the footer
+// (question, blank row, options, blank row, footer). The blank-row skip in
+// claudeMCPTrustFooterIsLast must bridge BOTH gaps so the question is found
+// even when it sits in the block above the options.
+//
+// This is the "Bridge the separator above MCP options" P1: without the upward
+// skip, the backward scan stops at the blank row above the options, the option
+// block holds Yes and No but not the question, hasQuestion stays false, and the
+// real dialog is treated as absent — allowing prompt delivery into a fully
+// rendered trust dialog.
+func TestCheckAndHandleTrustPrompt_RealMCPTrustDialogWithBlankAboveAndBelowOptionsStillFiresEnter(t *testing.T) {
+	// Layout: question, blank row, option rows, blank row, footer.
+	mcpModal := "New MCP server found. Do you trust this new MCP server?\n" +
+		"\n" +
+		"❯ 1. Yes\n" +
+		"  2. No\n" +
+		"\n" +
+		"Enter to confirm"
+	handled, cmds := runTrustPromptCheck(t, ProgramClaude, mcpModal)
+	require.True(t, handled, "the live MCP modal with blanks above and below options is still in the way")
+	require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)),
+		"the real MCP modal still fires Enter regardless of blank rows around the option block")
+}
+
 // An already-running Claude pane whose last output block mentions
 // "New MCP server found" and whose last non-blank row is the Claude composer
 // cursor "❯" must NOT be classified as a partially rendered MCP dialog.
