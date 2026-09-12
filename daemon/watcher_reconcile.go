@@ -165,7 +165,7 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 	// deleted task's backlog must not replay into a recreated namesake. A
 	// merely-disabled task keeps its backlog for re-enable (#1129). Runs after
 	// stopWatchers so no stale drainer is mid-replay on a file being removed.
-	s.cleanOrphanQueues(allTasks, scope)
+	s.cleanOrphanQueues(allTasks, desired, scope)
 	return nil
 }
 
@@ -177,7 +177,11 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 // otherwise have the file its drainer is replaying deleted underneath it. The
 // removal or replacement a scoped write cares about — its own task's — is
 // always in scope, and the full re-arm still sweeps everything.
-func (s *watcherSupervisor) cleanOrphanQueues(tasks []task.Task, scope watchScope) {
+func (s *watcherSupervisor) cleanOrphanQueues(
+	tasks []task.Task,
+	desired map[string]task.Task,
+	scope watchScope,
+) {
 	dir, err := s.queueDir()
 	if err != nil {
 		return
@@ -187,6 +191,14 @@ func (s *watcherSupervisor) cleanOrphanQueues(tasks []task.Task, scope watchScop
 		if _, duplicate := known[t.ID]; !duplicate {
 			known[t.ID] = eventQueueStem(t.ID, t.GenerationID)
 		}
+	}
+	// A malformed duplicate-ID store can select a later enabled watch row after
+	// an earlier disabled/non-watch row was filtered out. That selected row owns
+	// the live drainer, so its generation-qualified queue outranks the inventory's
+	// first row for cleanup. Normal task arming de-duplicates before this boundary;
+	// keeping the rule here makes direct reloads and future callers safe too.
+	for id, selected := range desired {
+		known[id] = eventQueueStem(selected.ID, selected.GenerationID)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {

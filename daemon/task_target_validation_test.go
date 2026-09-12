@@ -282,7 +282,7 @@ func TestTaskArming_PreGenerationTaskKeepsLegacyDurableQueue(t *testing.T) {
 	require.True(t, ok)
 	advanceEventQueue(t, queue, cursor)
 
-	watchers.cleanOrphanQueues(stored, everyWatchTask())
+	watchers.cleanOrphanQueues(stored, nil, everyWatchTask())
 	for _, path := range []string{queue.path, queue.curPath} {
 		_, statErr := os.Stat(path)
 		require.NoError(t, statErr,

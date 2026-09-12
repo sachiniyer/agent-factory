@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -275,6 +276,31 @@ func TestWatcherSupervisor_DuplicateIDsWatchTheFirst(t *testing.T) {
 	require.NotNil(t, w)
 	assert.Equal(t, watcherSignature(first), w.sig,
 		"the first occurrence is the one watched, matching the cron scheduler's rule")
+}
+
+func TestWatcherSupervisor_DuplicateCleanupKeepsSelectedWatcherQueue(t *testing.T) {
+	dir := t.TempDir()
+	supervisor := newWatcherSupervisor()
+	supervisor.queueDir = func() (string, error) { return dir, nil }
+	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
+	supervisor.deliver = func(string, string, string) error { return nil }
+	supervisor.setStatus = func(string, string, string) {}
+	t.Cleanup(supervisor.Stop)
+
+	first := watchTask("dupe0003", "sleep 30", dir)
+	first.Enabled = false
+	first.GenerationID = "disabled-generation"
+	selected := watchTask("dupe0003", "sleep 30", dir)
+	selected.GenerationID = "selected-generation"
+	queue := newEventQueueForGeneration(dir, selected.ID, selected.GenerationID)
+	require.NoError(t, queue.enqueue("pending"))
+
+	require.NoError(t, supervisor.reconcile(
+		[]task.Task{first, selected}, []task.Task{first, selected}, everyWatchTask(),
+	))
+	_, err := os.Stat(queue.path)
+	require.NoError(t, err,
+		"orphan cleanup must retain the queue owned by the duplicate row selected as the live watcher")
 }
 
 // TestFirstOccurrencePerID_ResolvesMixedTriggerDuplicates is the case the
