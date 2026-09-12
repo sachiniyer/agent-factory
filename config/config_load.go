@@ -266,11 +266,11 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 // It models secureAFHomeForPath's repair decision — concreteDefaultAFHome
 // returns the chmod target precisely for the concrete default (a regular
 // directory) and for alias symlinks whose target is the concrete default — plus
-// an ownership pre-check that mirrors the OUTCOME of startup's chmod (would it
-// succeed?) rather than merely whether startup attempts it. secureAFHomeForPath
-// chmods unconditionally and lets os.Chmod fail for non-owners; predicting that
-// failure here keeps a non-owner diagnostic from skipping the gate and claiming
-// "healthy" while startup errors — the opposite divergence.
+// a live chmod probe that mirrors the OUTCOME of startup's chmod (would it
+// succeed?) rather than merely whether startup attempts it. Probing with the
+// current mode (a no-op change in file content) establishes whether the kernel
+// would accept the call, surfacing read-only filesystems, immutable flags, and
+// security-policy rejections that UID equality cannot detect.
 func startupWouldRepairHome(configDir string) bool {
 	absHome, err := filepath.Abs(configDir)
 	if err != nil {
@@ -288,7 +288,11 @@ func startupWouldRepairHome(configDir string) bool {
 	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return false
 	}
-	return uint32(os.Getuid()) == st.Uid
+	// Probe chmod with the current permissions (a no-op change in content) to
+	// verify the kernel would accept it. This catches read-only filesystems,
+	// immutable flags, and security policies that ownership alone cannot predict.
+	currentPerm := os.FileMode(st.Mode & 0o7777)
+	return os.Chmod(repairPath, currentPerm) == nil
 }
 
 // fileExists reports whether path exists (any stat error other than
