@@ -133,14 +133,6 @@ func (r *redactor) genericBaseTextSpans(s string) []redactionSpan {
 	return r.appendUsernameSpans(spans, s)
 }
 
-// knownTextSpans resolves every contextual/name/path match against one original
-// string. Priority only chooses a semantic marker for equal-length matches;
-// applyRedactionSpans always covers the union.
-func (r *redactor) knownTextSpans(s string) []redactionSpan {
-	spans := r.knownBaseTextSpans(s)
-	return r.appendURIPathSpans(spans, s, r.knownURIPathTextSpans)
-}
-
 func (r *redactor) knownBaseTextSpans(s string) []redactionSpan {
 	spans := make([]redactionSpan, 0)
 	spans = r.appendKnownLabelSpans(spans, s)
@@ -487,6 +479,8 @@ func appendTokenSpans(
 	return spans
 }
 
+// applyRedactionSpans always covers the union of spans. Priority only chooses a
+// semantic marker for equal-length matches.
 func applyRedactionSpans(s string, spans []redactionSpan) string {
 	shared := make([]redactspan.Span, 0, len(spans))
 	for _, span := range spans {
