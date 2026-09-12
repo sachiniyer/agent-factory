@@ -254,6 +254,84 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 			req.Agent, req.Name, pane.SanitizedName())
 	}
 
+	// LEGACY-PANE MIGRATION: before starting a new pane, check whether a
+	// still-running pane from an older binary holds the legacy name for this
+	// account. The legacy format is "af-login-<agent>-<rawname>"; the new format
+	// is "af-loginx-<agent>-<hexname>". Making the namespaces disjoint (the P1
+	// fix) guarantees adopt cannot silently reuse the wrong pane — but it also
+	// means a live legacy pane is invisible to adopt, so a new pane would start
+	// against the same account directory, and both processes would race over
+	// auth.json. That breaks the single-login guarantee the name derivation exists
+	// to provide (#3384).
+	//
+	// The safe answer is to REFUSE when the legacy pane belongs to THIS home: a
+	// login is explicit and user-initiated, so a clear refusal costs the user one
+	// command (kill the legacy pane), while a silent second pane costs them a
+	// corrupted auth.json. The refusal names the legacy session so it is actionable.
+	//
+	// Ownership is decided by the AF_HOME session-environment marker, not by the
+	// sanitized title alone. Two account names that differ only in a sanitized-away
+	// character (e.g. `work.proj` and `work_proj`) produce the same legacy title,
+	// so an existence-only check would falsely refuse a login for one account
+	// because the OTHER account has a live legacy pane. The marker is set by the
+	// legacy binary at pane creation, so it carries the authoritative home.
+	//
+	// Absent marker (pane created by a binary predating env markers, or tmux < 3.2)
+	// means ownership cannot be proven: proceed rather than blocking the new login
+	// on a pane that may belong to an unrelated home. The new pane will either
+	// collide (tmux "session already exists") or start cleanly.
+	//
+	// Unknown probe (!legacyKnown): tmux did not answer, so we cannot tell whether
+	// a legacy pane exists. Proceeding risks starting a second pane if one is
+	// there; return a retryable error instead so the operator can try again once
+	// tmux has settled.
+	legacyPane := tmux.NewTmuxSession(agentaccount.LegacyLoginSessionName(req.Agent, req.Name), program)
+	legacyExists, legacyKnown := legacyPane.ProbeSession()
+	if !legacyKnown {
+		return Session{}, fmt.Errorf(
+			"cannot start the %s login flow for account %q: tmux did not respond while probing for a legacy "+
+				"login pane — try again once the tmux server has settled",
+			req.Agent, req.Name)
+	}
+	if legacyExists {
+		// Verify ownership before refusing: read the AF_HOME marker set at pane
+		// creation. If it names a different home, the collision is in the sanitized
+		// title only — not a race risk for this home — so proceed.
+		legacySName := legacyPane.SanitizedName()
+		legacyOwner, legacyOwnerPresent, legacyOwnerErr := tmux.SessionHomeMarker(cmd.MakeExecutor(), legacySName)
+		if legacyOwnerErr != nil {
+			// tmux didn't answer the marker query: treat as unknown, refuse to be safe.
+			return Session{}, fmt.Errorf(
+				"cannot start the %s login flow for account %q: tmux did not respond while checking the "+
+					"legacy login pane %s — try again once the tmux server has settled",
+				req.Agent, req.Name, legacySName)
+		}
+		if legacyOwnerPresent {
+			ownerCanon, err := canonicalHome(legacyOwner)
+			if err != nil {
+				return Session{}, fmt.Errorf(
+					"cannot start the %s login flow for account %q: could not resolve the legacy pane home %q: %w",
+					req.Agent, req.Name, legacyOwner, err)
+			}
+			homeCanon, err := canonicalHome(req.Home)
+			if err != nil {
+				return Session{}, fmt.Errorf(
+					"cannot start the %s login flow for account %q: could not resolve this home %q: %w",
+					req.Agent, req.Name, req.Home, err)
+			}
+			if ownerCanon == homeCanon {
+				// Confirmed same home: this is our pane, refuse to create a second one.
+				return Session{}, fmt.Errorf(
+					"cannot start the %s login flow for account %q: a login pane from an older agent-factory binary "+
+						"is still running under the legacy session name %s — finish or kill it first "+
+						"(tmux kill-session -t %s), then run this command again",
+					req.Agent, req.Name, legacySName, legacySName)
+			}
+			// Confirmed different home: title collision, not a race risk for us.
+		}
+		// Absent marker: ownership unknown, proceed (see comment above).
+	}
+
 	if err := pane.SetEnvPassthrough(req.Passthrough); err != nil {
 		return Session{}, fmt.Errorf("invalid session environment pass-through for the login pane: %w", err)
 	}
