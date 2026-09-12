@@ -30,7 +30,11 @@ func persistLoadRuntimeReplacements(instances map[string]*session.Instance) []se
 		if interruptionPending {
 			entry.interruptedTaskRun = &pendingRun
 		}
-		if replacement.TaskRunInterrupted && !replacement.TaskRunInterruptionCheckpointed {
+		if replacement.StartupFailure != nil {
+			log.WarningLog.Printf(
+				"session %q could not start after its interrupted task run was made durable; retained it for Lost recovery and queued last_run_status publication: %v",
+				instance.Title, replacement.StartupFailure)
+		} else if replacement.TaskRunInterrupted && !replacement.TaskRunInterruptionCheckpointed {
 			log.WarningLog.Printf(
 				"load-time agent replacement for %q did not receive task %s's run prompt; closed the run, retained the session, skipped on_complete, and queued last_run_status for durable publication",
 				instance.Title, pendingRun.TaskID)
@@ -40,7 +44,7 @@ func persistLoadRuntimeReplacements(instances map[string]*session.Instance) []se
 				instance.Title, pendingRun.TaskID)
 		}
 		fenced := false
-		if replacement.TaskRunInterrupted {
+		if replacement.Replaced && replacement.TaskRunInterrupted {
 			if err := instance.FenceLoadRuntimeReplacementUntilSettlement(); err != nil {
 				cleanupErr := instance.TeardownFencedLoadRuntimeReplacement()
 				log.WarningLog.Printf(

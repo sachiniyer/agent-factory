@@ -126,11 +126,12 @@ func lockWithin(mu *sync.Mutex, d time.Duration) (bool, time.Duration) {
 }
 
 // lockSessionOperationWithin takes the per-session operation lock with the same
-// bound for archive and both manual restore paths. No caller has mutated the
-// session yet, so timeout is a known no-op: the requested action did not start
-// and a later kill or retry remains possible (#2641).
+// bound for archive, both manual restore paths, and fallback materialization.
+// No caller has mutated the session yet, so timeout is a known no-op: the
+// requested action did not start and a later kill or retry remains possible
+// (#2641).
 //
-// All three callers take this lock BEFORE claiming anything, so their wait holds
+// Every caller takes this lock BEFORE claiming anything, so its wait holds
 // no lifecycle state: the row is unclaimed and unfenced for its whole duration,
 // which is what keeps the Kill it advertises admissible. It returns how long it
 // waited so those callers can say so in a refusal decided at the END of the wait.

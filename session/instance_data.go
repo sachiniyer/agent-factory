@@ -595,6 +595,16 @@ func FromInstanceDataWithLoadRuntimeCheckpoint(
 			instance.MarkStartupStateUnknown()
 			return instance, nil
 		}
+		// A task-run close already present on disk, or checkpointed by this
+		// attempt before tmux startup, is an outbox — not disposable constructor
+		// state. Retain the exact runtime/worktree handles so the daemon can publish
+		// the task outcome and ordinary Lost recovery can retry the failed start.
+		// A failed checkpoint does not qualify: disk still owns the active run, so
+		// returning an instance would mistake an in-memory guess for durability.
+		if data.TaskRunInterruptionPending || instance.loadRuntimeInterruptionCheckpointed() {
+			instance.retainLoadFailureWithPendingTaskOutcome(err)
+			return instance, nil
+		}
 		return nil, err
 	}
 

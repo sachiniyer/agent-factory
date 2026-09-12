@@ -255,11 +255,13 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			i.prepareLoadAgentRuntimeReplacement,
 		)
 		if err != nil {
-			preserveAgentHandle = retainsInertInstance(err)
+			_, pendingTaskOutcome := i.PendingTaskRunInterruption()
+			preserveAgentHandle = retainsInertInstance(err) || pendingTaskOutcome
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
 			return setupErr
 		}
 		if restoreResult == tmux.RestoreRespawned {
+			i.confirmLoadAgentRuntimeReplacement()
 			if strings.TrimSpace(runtimeProgram) != "" {
 				i.setRuntimeProgram(runtimeProgram)
 			}
@@ -359,7 +361,8 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 	if err := b.setupTabs(i); err != nil {
 		// A retained failure leaves the agent RUNNING, so keep the handle that
 		// names it: nilling the ref here would orphan the pane. See the predicate.
-		preserveAgentHandle = retainsInertInstance(err)
+		_, pendingTaskOutcome := i.PendingTaskRunInterruption()
+		preserveAgentHandle = retainsInertInstance(err) || pendingTaskOutcome
 		setupErr = finishLaunchTabFailure(firstTimeSetup, tmuxSession, err)
 		return setupErr
 	}
