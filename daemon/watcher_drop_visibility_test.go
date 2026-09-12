@@ -81,3 +81,26 @@ func TestLiveDropOverlayPreservesANewerSuccessfulDelivery(t *testing.T) {
 	require.Equal(t, 4, record.DroppedEvents)
 	require.Equal(t, "sent", record.LastRunStatus)
 }
+
+func TestLiveDropOverlayPreservesTerminalWatcherStatus(t *testing.T) {
+	droppedAt := time.Date(2026, time.September, 11, 12, 0, 0, 0, time.UTC)
+	for _, terminal := range []string{"stopped", "errored: exit status 1"} {
+		t.Run(terminal, func(t *testing.T) {
+			var persisted string
+			w := &taskWatcher{taskID: "d4357004", dropped: 4, lastDroppedAt: droppedAt}
+			s := &watcherSupervisor{
+				watchers:  map[string]*taskWatcher{w.taskID: w},
+				setStatus: func(_, status string) { persisted = status },
+			}
+			w.sup = s
+			w.persistTerminalStatus(terminal)
+			record := task.Task{ID: "d4357004", LastRunStatus: terminal}
+
+			s.applyLiveDropState(&record)
+
+			require.Equal(t, 4, record.DroppedEvents)
+			require.Equal(t, terminal, record.LastRunStatus)
+			require.Equal(t, terminal, persisted)
+		})
+	}
+}

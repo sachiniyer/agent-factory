@@ -22,6 +22,17 @@ func persistWatcherStatus(taskID, status string) {
 	}
 }
 
+// persistTerminalStatus publishes the terminal outcome to live readers before
+// writing it to the task store. A terminal watcher deliberately remains in the
+// supervisor map until an explicit re-arm; without this latch, its older drop
+// timestamp would overwrite the newer stopped/errored status on every list.
+func (w *taskWatcher) persistTerminalStatus(status string) {
+	w.mu.Lock()
+	w.terminalStatus = status
+	w.mu.Unlock()
+	w.sup.setStatus(w.taskID, status)
+}
+
 // persistDroppedEvents checkpoints an absolute counter rather than one delta
 // per line. The first drop after a successful delivery and then at most one per
 // log window touch tasks.json, so the visibility fix cannot turn consecutive
@@ -61,10 +72,15 @@ func (s *watcherSupervisor) applyLiveDropState(t *task.Task) {
 		return
 	}
 	w.mu.Lock()
-	dropped, droppedAt, deliveredAt := w.dropped, w.lastDroppedAt, w.lastDeliveredAt
+	dropped, droppedAt, deliveredAt, terminalStatus :=
+		w.dropped, w.lastDroppedAt, w.lastDeliveredAt, w.terminalStatus
 	w.mu.Unlock()
 	if dropped > t.DroppedEvents {
 		t.DroppedEvents = dropped
+	}
+	if terminalStatus != "" {
+		t.LastRunStatus = terminalStatus
+		return
 	}
 	if !droppedAt.IsZero() && !deliveredAt.After(droppedAt) &&
 		(t.LastRunAt == nil || !droppedAt.Before(*t.LastRunAt)) {

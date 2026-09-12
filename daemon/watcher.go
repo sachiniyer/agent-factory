@@ -276,6 +276,7 @@ type taskWatcher struct {
 	lastDropLog     time.Time
 	lastDroppedAt   time.Time
 	lastDeliveredAt time.Time
+	terminalStatus  string
 	// draining marks a live drainLoop goroutine, so at most one drains the
 	// queue at a time and replay order is preserved.
 	draining bool
@@ -295,12 +296,16 @@ type taskWatcher struct {
 // stop requests termination and blocks until the run goroutine returns. The
 // drainer is joined too: Reload starts a replacement watcher for the same task
 // only after stop returns, so two drainers can never interleave one task's
-// replay.
-func (w *taskWatcher) stop() {
+// replay. It returns the exact post-flush drop total so a caller that starts a
+// replacement cannot seed it from the older task snapshot taken before stop.
+func (w *taskWatcher) stop() int {
 	w.stopOnce.Do(func() { close(w.stopCh) })
 	<-w.doneCh
 	w.wg.Wait()
 	w.flushDroppedEvents()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.dropped
 }
 
 func (w *taskWatcher) finished() bool {
@@ -358,7 +363,7 @@ func (w *taskWatcher) run() {
 			// The condition, stated so an operator can act on it: this stop
 			// holds until something names THIS task (#3837).
 			log.InfoLog.Printf("watch task %s: watch command exited cleanly; stopped until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts", w.taskID, w.taskID)
-			w.sup.setStatus(w.taskID, "stopped")
+			w.persistTerminalStatus("stopped")
 			return
 		}
 
@@ -386,7 +391,7 @@ func (w *taskWatcher) run() {
 		failures = failures[cut:]
 		if len(failures) >= w.sup.crashMaxExits {
 			log.ErrorLog.Printf("watch task %s: %d failures within %s (last: %v); giving up until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts%s", w.taskID, len(failures), w.sup.crashWindow, runErr, w.taskID, tail.logSuffix())
-			w.sup.setStatus(w.taskID, failureSummary(runErr, tail))
+			w.persistTerminalStatus(failureSummary(runErr, tail))
 			return
 		}
 
