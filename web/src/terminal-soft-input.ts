@@ -316,8 +316,17 @@ export class TerminalSoftInput {
         continue;
       }
       matchedComposition = true;
-      prefix += rest.slice(0, length);
-      rest = rest.slice(length);
+      // When a queued release owns the trailing text (Backspace during trailing
+      // input), xterm's _isComposing path may emit only the bounded commit
+      // without the trailing suffix.  Apply the full queued sequence so the
+      // trailing chars and the DEL are not silently dropped.
+      if (queued) {
+        prefix += this.applyQueuedInput(range, applyModifiers);
+        rest = rest.slice(length);
+      } else {
+        prefix += rest.slice(0, length);
+        rest = rest.slice(length);
+      }
       const flush = range.trailingFlush;
       if (flush && rest.startsWith(flush.text)) {
         this.cancelTrailingFlush(flush);

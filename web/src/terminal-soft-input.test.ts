@@ -920,6 +920,51 @@ test("Backspace during multi-char trailing input does not re-emit the deleted ta
   assert.equal(modifiers.state("Ctrl"), "off");
 });
 
+test("xterm _isComposing commit-only payload keeps queued trailing state alive", t => {
+  // When a partially-deleted trailing tail is followed immediately by a new
+  // composition, xterm's _isComposing path can emit just the bounded old commit
+  // (e.g. "字") via transform() before the queued release fires.  Simulate
+  // this by having the compositionend callback send only the old commit rather
+  // than the current textarea value.  The queued release owns the trailing
+  // text: transform() must apply the full queued sequence (commit + surviving
+  // trailing + DEL) and must not re-emit the trailing chars from the timer.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  const writes: string[] = [];
+  const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value)));
+  // Simulate xterm's _isComposing path: it emits the old bounded commit ("字")
+  // rather than the current textarea value ("字" after deletion of "x").
+  // In the real flow this is the same timer path, so we capture `oldCommit`
+  // at compositionend time and send that fixed string after the delay.
+  let oldCommit = "";
+  textarea.addEventListener("compositionend", (e) => {
+    oldCommit = (e as CompositionEvent).data ?? "";
+    setTimeout(() => { if (oldCommit) send(oldCommit); }, 0);
+  });
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, send);
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "字";
+  textarea.dispatchEvent(composition("compositionend", "字"));
+  textarea.value = "字x";
+  host.dispatchEvent(insertText("x")); // trailing latin char after CJK commit
+  textarea.dispatchEvent(Object.assign(new Event("keydown"), { keyCode: 229 }));
+  host.dispatchEvent(deleteBackward("beforeinput"));
+  textarea.value = "字"; // Backspace deletes the trailing "x"
+  host.dispatchEvent(deleteBackward("input"));
+  textarea.dispatchEvent(new Event("compositionstart")); // new composition before release timer
+
+  // tick(0): xterm's _isComposing path fires send("字").
+  // transform() must expand it to commit "字" + trailing "x" + DEL "\x7f".
+  t.mock.timers.tick(0);
+
+  assert.deepEqual(writes, ["字x\x7f"]);
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
 test("composing insertText without lifecycle stays native and preserves Alt", () => {
   const host = new EventTarget();
   const textarea = Object.assign(new EventTarget(), { value: "" });
