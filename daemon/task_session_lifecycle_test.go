@@ -40,6 +40,14 @@ func TestTaskSessionLifecycle_CommittedArchiveWarningIsSuccessfulReap(t *testing
 // The TaskID must go through NewInstance rather than being poked in afterwards —
 // taskRunActive is derived from it at construction and is the whole subject here.
 func registerTaskSpawnedSession(t *testing.T, m *Manager, repoID, repoPath, title, taskID string) *session.Instance {
+	return registerTaskSpawnedSessionForGeneration(t, m, repoID, repoPath, title, taskID, "")
+}
+
+func registerTaskSpawnedSessionForGeneration(
+	t *testing.T,
+	m *Manager,
+	repoID, repoPath, title, taskID, taskGenerationID string,
+) *session.Instance {
 	t.Helper()
 	wtPath := filepath.Join(filepath.Dir(repoPath), "wt-"+sanitizeArchiveTitle(title))
 	branch := "af/" + sanitizeArchiveTitle(title)
@@ -52,6 +60,7 @@ func registerTaskSpawnedSession(t *testing.T, m *Manager, repoID, repoPath, titl
 
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: title, Path: repoPath, Program: "claude", TaskID: taskID,
+		TaskGenerationID: taskGenerationID,
 	})
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
@@ -260,6 +269,31 @@ func TestTaskSessionLifecycle_DeletedTaskKeepsItsSessions(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 	assert.Equal(t, session.LiveReady, inst.GetLiveness())
+}
+
+func TestTaskSessionLifecycle_ReplacementGenerationCannotReapPredecessorSession(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSessionForGeneration(
+		t, manager, repoID, repoPath, "predecessor-run", "reused-task", "old-generation",
+	)
+
+	prev := loadTasksForRepoID
+	loadTasksForRepoID = func(string) ([]task.Task, []task.Task, error) {
+		return []task.Task{{
+			ID: "reused-task", GenerationID: "replacement-generation", OnComplete: task.OnCompleteKill,
+		}}, nil, nil
+	}
+	t.Cleanup(func() { loadTasksForRepoID = prev })
+
+	was := endRunOnIdleEdge(t, inst)
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, was)
+
+	time.Sleep(200 * time.Millisecond)
+	manager.mu.Lock()
+	_, stillRegistered := manager.instances[daemonInstanceKey(repoID, inst.Title)]
+	manager.mu.Unlock()
+	require.True(t, stillRegistered,
+		"a replacement generation must not apply its destructive on_complete policy to its predecessor")
 }
 
 // TestTaskSessionLifecycle_IgnoresSessionsNoTaskSpawned: a session a user made by

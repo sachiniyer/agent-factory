@@ -487,10 +487,10 @@ func projectDeleteRefusal(repoID string, inProgress bool) error {
 // that does not hold m.mu. It returns the SAME errAtConcurrencyLimit sentinel as
 // the authoritative check, so the watch-delivery path cannot tell the two apart
 // and parks the event either way.
-func (m *Manager) admitTaskRunFast(repoID, taskID string, limit int) error {
+func (m *Manager) admitTaskRunFast(repoID, taskID, taskGenerationID string, limit int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.admitTaskRunLocked(repoID, taskID, limit)
+	return m.admitTaskRunLocked(repoID, taskID, taskGenerationID, limit)
 }
 
 // projectDeleteStateFor answers, in ONE acquisition, whether this repo has a
@@ -704,7 +704,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	// can be high as well as low, and a spurious refusal here costs one park and
 	// retry — the same tradeoff releaseTaskRunLocked already documents for its
 	// momentary over-count, and the opposite of admitting one too many.
-	if err := m.admitTaskRunFast(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
+	if err := m.admitTaskRunFast(repo.ID, req.TaskID, req.TaskGenerationID, req.MaxConcurrentRuns); err != nil {
 		return nil, "", nil, nil, err
 	}
 
@@ -776,7 +776,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	// succeeding; m.mu is held unbroken between the two, so the count cannot move in
 	// the gap. On refusal the watch-task delivery path parks the event on the
 	// durable queue and retries when a slot frees, so nothing is dropped by the cap.
-	if err := m.admitTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
+	if err := m.admitTaskRunLocked(repo.ID, req.TaskID, req.TaskGenerationID, req.MaxConcurrentRuns); err != nil {
 		return nil, "", nil, nil, err
 	}
 
@@ -904,7 +904,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	if remoteName != "" {
 		m.reservedRemoteNames[remoteName] = struct{}{}
 	}
-	m.reserveTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns)
+	m.reserveTaskRunLocked(repo.ID, req.TaskID, req.TaskGenerationID, req.MaxConcurrentRuns)
 	release := func() {
 		m.mu.Lock()
 		delete(m.reservedTitles, key)
@@ -919,7 +919,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 		// is registered in m.instances and counts against the cap on its own —
 		// handing the slot over with no gap. On a failed create nothing was
 		// registered, and dropping the reservation is exactly the right refund.
-		m.releaseTaskRunLocked(repo.ID, req.TaskID)
+		m.releaseTaskRunLocked(repo.ID, req.TaskID, req.TaskGenerationID)
 		m.mu.Unlock()
 		releaseWorktreeAdmission()
 	}

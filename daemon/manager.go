@@ -197,7 +197,9 @@ type Manager struct {
 	reservedRemoteNames map[string]struct{}
 	// reservedTaskRuns counts a task's session creates that have been admitted
 	// against its max_concurrent_runs cap but have not yet registered an instance
-	// in m.instances, keyed by task id (#1892).
+	// in m.instances, keyed by repo, task id, and task generation (#1892). The
+	// generation is ownership: a removed task's create cannot consume capacity
+	// from a later task that reuses its ID.
 	//
 	// Like reservedRemoteNames it is IN-FLIGHT only — populated at admit, dropped
 	// in release, never rebuilt from disk. It has to exist because a create holds

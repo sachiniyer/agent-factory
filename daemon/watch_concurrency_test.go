@@ -47,6 +47,47 @@ func createForTask(m *Manager, repoPath, taskID, base string, limit int) (sessio
 
 var taskFixtureMu sync.Mutex
 
+func taskGenerationForTest(t *testing.T, taskID string) string {
+	t.Helper()
+	tsk, err := task.GetTask(taskID)
+	if err != nil {
+		t.Fatalf("read task %s generation: %v", taskID, err)
+	}
+	return tsk.GenerationID
+}
+
+func TestWatchConcurrencyScopesEveryRunSourceToTaskGeneration(t *testing.T) {
+	const (
+		repoID = "repo-id"
+		taskID = "reused-task"
+		oldGen = "old-generation"
+		newGen = "new-generation"
+	)
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "predecessor", Path: t.TempDir(), Program: "claude",
+		TaskID: taskID, TaskGenerationID: oldGen,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetStatusForTest(session.Running)
+	manager := &Manager{
+		instances:        map[string]*session.Instance{daemonInstanceKey(repoID, inst.Title): inst},
+		reservedTaskRuns: map[string]int{taskRunReservationKey(repoID, taskID, oldGen): 1},
+		ghostTaskRuns:    map[string]int{taskRunReservationKey(repoID, taskID, oldGen): 1},
+	}
+
+	if got := manager.countTaskRunsLocked(repoID, taskID, oldGen); got != 3 {
+		t.Fatalf("predecessor generation count = %d, want live + reservation + ghost", got)
+	}
+	if got := manager.countTaskRunsLocked(repoID, taskID, newGen); got != 0 {
+		t.Fatalf("replacement generation count = %d, want zero; predecessor work must not consume its capacity", got)
+	}
+	if err := manager.admitTaskRunLocked(repoID, taskID, newGen, 1); err != nil {
+		t.Fatalf("replacement generation was blocked by predecessor capacity: %v", err)
+	}
+}
+
 // settle drives a created session to idle, the transition that releases its
 // concurrency slot. It goes through the same ObserveLiveness edge the daemon's
 // status poll uses, so the test exercises the real release path rather than
@@ -289,7 +330,7 @@ func TestWatchConcurrencyCountsAlreadyLiveSessions(t *testing.T) {
 
 	// No reservation exists on the restarted manager — only the rebuilt instances.
 	restarted.mu.Lock()
-	err = restarted.admitTaskRunLocked(repo.ID, "task1", limit)
+	err = restarted.admitTaskRunLocked(repo.ID, "task1", taskGenerationForTest(t, "task1"), limit)
 	restarted.mu.Unlock()
 	if !errors.Is(err, errAtConcurrencyLimit) {
 		t.Fatalf("admit after restart: want the at-limit refusal (the cap must survive a restart), got %v", err)

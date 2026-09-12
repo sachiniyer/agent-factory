@@ -437,7 +437,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 // replacements past max_concurrent_runs on every daemon restart, which is exactly
 // the restart-survival guarantee the cap is built on.
 //
-// Keyed by taskRunReservationKey(repoID, taskID) → count, so the cap can add them
+// Keyed by taskRunReservationKey(repoID, taskID, generationID) → count, so the cap can add them
 // to its projection without re-reading disk. Recomputed on every refresh, so a
 // row that starts loading again stops being a ghost — the same self-healing
 // projection discipline as the rest of the count.
@@ -509,7 +509,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 						}
 					}
 					if rawTaskRunHoldsSlot(item) {
-						ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
+						ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID, item.TaskGenerationID)]++
 					}
 					continue
 				}
@@ -545,7 +545,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				// released the slot after giving up, so an unloadable copy cannot reclaim
 				// it as a ghost on the next daemon start (#3310).
 				if rawTaskRunHoldsSlot(item) {
-					ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
+					ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID, item.TaskGenerationID)]++
 					log.WarningLog.Printf("watch task %s: session %q failed to load but its run is still counted against max_concurrent_runs (#1892); kill or repair the session to release its slot", item.TaskID, item.Title)
 				}
 				continue

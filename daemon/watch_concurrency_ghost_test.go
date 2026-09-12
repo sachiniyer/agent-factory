@@ -86,7 +86,7 @@ func TestGhostTaskRunIsCountedAfterRestart(t *testing.T) {
 	// It is genuinely invisible to the in-memory map — that is the whole premise.
 	restarted.mu.Lock()
 	_, live := restarted.instances[daemonInstanceKey(repo.ID, data.Title)]
-	counted := restarted.countTaskRunsLocked(repo.ID, "task1")
+	counted := restarted.countTaskRunsLocked(repo.ID, "task1", data.TaskGenerationID)
 	restarted.mu.Unlock()
 	if live {
 		t.Fatal("precondition: the row must have failed to materialize for this to test anything")
@@ -98,7 +98,7 @@ func TestGhostTaskRunIsCountedAfterRestart(t *testing.T) {
 
 	// The consequence that matters: the cap still binds.
 	restarted.mu.Lock()
-	err = restarted.admitTaskRunLocked(repo.ID, "task1", limit)
+	err = restarted.admitTaskRunLocked(repo.ID, "task1", data.TaskGenerationID, limit)
 	restarted.mu.Unlock()
 	if !isAtConcurrencyLimitErr(err) {
 		t.Fatalf("create while the task's only run is an unloadable row: want the at-limit refusal, got %v", err)
@@ -148,8 +148,8 @@ func TestGhostTaskRunReleasesWhenItsRunIsOver(t *testing.T) {
 	}
 
 	restarted.mu.Lock()
-	counted := restarted.countTaskRunsLocked(repo.ID, "task1")
-	err = restarted.admitTaskRunLocked(repo.ID, "task1", limit)
+	counted := restarted.countTaskRunsLocked(repo.ID, "task1", data.TaskGenerationID)
+	err = restarted.admitTaskRunLocked(repo.ID, "task1", data.TaskGenerationID, limit)
 	restarted.mu.Unlock()
 	if counted != 0 {
 		t.Fatalf("a finished run holds no slot, loadable or not; counted %d", counted)
@@ -196,8 +196,8 @@ func TestStartupUnknownGhostDoesNotHoldTaskRunSlot(t *testing.T) {
 		t.Fatalf("RestoreInstances: %v", err)
 	}
 	manager.mu.Lock()
-	counted := manager.countTaskRunsLocked(repo.ID, "task1")
-	admitErr := manager.admitTaskRunLocked(repo.ID, "task1", 1)
+	counted := manager.countTaskRunsLocked(repo.ID, "task1", "")
+	admitErr := manager.admitTaskRunLocked(repo.ID, "task1", "", 1)
 	manager.mu.Unlock()
 	if counted != 0 {
 		t.Fatalf("startup-unknown ghost consumed %d task slot(s); terminal startup outcomes must release the cap", counted)
@@ -259,8 +259,8 @@ func TestUserKilledGhostDoesNotHoldTaskRunSlot(t *testing.T) {
 	}
 	manager.mu.Lock()
 	_, live := manager.instances[daemonInstanceKey(repo.ID, title)]
-	counted := manager.countTaskRunsLocked(repo.ID, "task1")
-	admitErr := manager.admitTaskRunLocked(repo.ID, "task1", 1)
+	counted := manager.countTaskRunsLocked(repo.ID, "task1", "")
+	admitErr := manager.admitTaskRunLocked(repo.ID, "task1", "", 1)
 	manager.mu.Unlock()
 	if live {
 		t.Fatal("precondition: the row must have failed to materialize for this to test a ghost")
@@ -331,8 +331,8 @@ func TestRestoreGaveUpGhostDoesNotHoldTaskRunSlot(t *testing.T) {
 			}
 			manager.mu.Lock()
 			_, live := manager.instances[daemonInstanceKey(repo.ID, title)]
-			counted := manager.countTaskRunsLocked(repo.ID, "task1")
-			admitErr := manager.admitTaskRunLocked(repo.ID, "task1", 1)
+			counted := manager.countTaskRunsLocked(repo.ID, "task1", "")
+			admitErr := manager.admitTaskRunLocked(repo.ID, "task1", "", 1)
 			manager.mu.Unlock()
 			if live {
 				t.Fatal("precondition: terminal row unexpectedly materialized")
@@ -385,7 +385,7 @@ func TestGhostTaskRunClearsWhenTheRowLoadsAgain(t *testing.T) {
 		t.Fatalf("RestoreInstances: %v", err)
 	}
 	restarted.mu.Lock()
-	ghosted := restarted.countTaskRunsLocked(repo.ID, "task1")
+	ghosted := restarted.countTaskRunsLocked(repo.ID, "task1", data.TaskGenerationID)
 	restarted.mu.Unlock()
 	if ghosted != 1 {
 		t.Fatalf("the unloadable row must be counted once; got %d", ghosted)
@@ -399,7 +399,7 @@ func TestGhostTaskRunClearsWhenTheRowLoadsAgain(t *testing.T) {
 		restarted.mu.Unlock()
 		t.Fatalf("refresh: %v", err)
 	}
-	healed := restarted.countTaskRunsLocked(repo.ID, "task1")
+	healed := restarted.countTaskRunsLocked(repo.ID, "task1", data.TaskGenerationID)
 	restarted.mu.Unlock()
 	if healed != 1 {
 		t.Fatalf("a row that loads again is counted once, not twice (ghost + instance); got %d", healed)
