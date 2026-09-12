@@ -369,6 +369,18 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	if req.TaskID != "" {
+		// The manager's nextTaskRunAdmission read is the authoritative task-row
+		// check for session-per-run delivery. Keep that proof valid through the
+		// prompt side effect, under the same fence targeted delivery uses. Task
+		// CRUD releases this lock before watcher reconciliation, so this does not
+		// participate in the controlMu -> watcher join cycle.
+		unlock, err := s.lockTaskDelivery()
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
 	// Reject a program that runs no recognized agent BEFORE the create proceeds —
 	// the one boundary a raw RPC caller (token-holding automation over the
 	// listener, any local process over the unix socket) can reach without the

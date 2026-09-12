@@ -192,6 +192,50 @@ func (b recordingBackend) SendPromptCommand(_ *session.Instance, prompt string) 
 	return nil
 }
 
+type observingPromptBackend struct {
+	readyFakeBackend
+	observe func()
+}
+
+func (b observingPromptBackend) SendPromptCommand(_ *session.Instance, _ string) error {
+	b.observe()
+	return nil
+}
+
+func TestControlServerCreateSessionBindsPromptSendToTaskGeneration(t *testing.T) {
+	manager, _, repoPath := newStatusTestManager(t)
+	server := archiveTaskControlServer(manager)
+	tsk := addStatusTestTask(t, enabledCronTask("create-generation", repoPath))
+
+	promptObserved := false
+	restore := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
+		fake := session.NewFakeBackend()
+		fake.CompleteStart()
+		return observingPromptBackend{
+			readyFakeBackend: readyFakeBackend{FakeBackend: fake},
+			observe: func() {
+				promptObserved = true
+				if server.scheduler.deliveryMu.TryLock() {
+					server.scheduler.deliveryMu.Unlock()
+					t.Fatal("task create released the generation fence before its prompt side effect")
+				}
+				require.True(t, server.scheduler.controlMu.TryLock(),
+					"task create must not need the watcher stop/join lock")
+				server.scheduler.controlMu.Unlock()
+			},
+		}, nil
+	})
+	t.Cleanup(restore)
+
+	var resp CreateSessionResponse
+	err := server.CreateSession(CreateSessionRequest{
+		Title: "create-generation-run", RepoPath: repoPath, Program: "claude", Prompt: "run it",
+		TaskID: tsk.ID, TaskGenerationID: tsk.GenerationID, TaskRepoID: tsk.RepoID, TaskOrigin: true,
+	}, &resp)
+	require.NoError(t, err)
+	require.True(t, promptObserved, "the witness must reach the irreversible prompt side effect")
+}
+
 type observedPromptBackend struct {
 	readyFakeBackend
 	status session.PromptDeliveryStatus
