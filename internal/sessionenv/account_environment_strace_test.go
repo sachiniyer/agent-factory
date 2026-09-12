@@ -44,6 +44,33 @@ func TestValidateAccountEnvironmentCommand_StraceUnknownSyntaxFailsClosed(t *tes
 	}
 }
 
+func TestValidateAccountEnvironmentCommand_RefusesExecutableStraceOutputTarget(t *testing.T) {
+	for _, command := range []string{
+		`strace --output='|env CODEX_HOME=/other codex' true`,
+		`strace --output '!env CODEX_HOME=/other codex' true`,
+		`strace -o'|env CODEX_HOME=/other codex' true`,
+		`strace -o '!env CODEX_HOME=/other codex' true`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"executable strace output target %q inherits the selected account environment", command)
+		})
+	}
+}
+
+func TestValidateAccountEnvironmentCommand_StraceShortOptionArity(t *testing.T) {
+	t.Run("Y takes no value", func(t *testing.T) {
+		require.Error(t,
+			ValidateAccountEnvironmentCommand("strace -Y env CODEX_HOME=/other codex", scopedProcessTabAccount()),
+			"argument-free -Y must not consume the env executable")
+	})
+	t.Run("s takes a value", func(t *testing.T) {
+		require.NoError(t,
+			ValidateAccountEnvironmentCommand("strace -s 256 npm run dev", scopedProcessTabAccount()),
+			"value-taking -s must consume its string-limit operand")
+	})
+}
+
 func TestValidateAccountEnvironmentCommand_FailClosedBoundaryStaysNarrow(t *testing.T) {
 	for _, command := range []string{
 		"echo CODEX_HOME=/tmp",

@@ -12,6 +12,11 @@ const (
 	straceOptionContinue straceOptionResult = iota
 	straceOptionStops
 	straceOptionUnsafe
+
+	// These sets mirror the short-option arity in strace(1). Help and version
+	// stop parsing separately because they never execute a child.
+	straceShortOptionsNoValue   = "ACDcdfiknqrtTvwxyYzZ"
+	straceShortOptionsWithValue = "abeEIoOpPsSuUX"
 )
 
 // unwrapStrace returns the command strace executes. Unlike an unclassified
@@ -66,6 +71,12 @@ func parseStraceLongOption(words []*syntax.Word, names map[string]struct{}) (int
 			return 0, straceOptionUnsafe
 		}
 		return consumed, straceOptionContinue
+	case "--output":
+		operand, consumed, ok := straceOptionValue(words, attachedValue, attached)
+		if !ok || straceOutputTargetUnsafe(operand) {
+			return 0, straceOptionUnsafe
+		}
+		return consumed, straceOptionContinue
 	case "--debug", "--follow-forks", "--instruction-pointer", "--kill-on-exit",
 		"--no-abbrev", "--output-append-mode", "--output-separately", "--seccomp-bpf",
 		"--successful-only", "--failed-only", "--summary", "--summary-only",
@@ -80,7 +91,7 @@ func parseStraceLongOption(words []*syntax.Word, names map[string]struct{}) (int
 		return 1, straceOptionContinue
 	case "--abbrev", "--argv0", "--attach", "--columns", "--const-print-style",
 		"--decode-pids", "--detach-on", "--fault", "--inject", "--interruptible",
-		"--output", "--raw", "--read", "--signal", "--stack-trace-frame-limit",
+		"--raw", "--read", "--signal", "--stack-trace-frame-limit",
 		"--status", "--string-limit", "--summary-columns", "--summary-sort-by",
 		"--summary-syscall-overhead", "--syscall-limit", "--trace", "--trace-fds",
 		"--trace-path", "--user", "--verbose", "--write":
@@ -101,9 +112,9 @@ func parseStraceShortOptions(words []*syntax.Word, names map[string]struct{}) (i
 		switch {
 		case flag == 'h' || flag == 'V':
 			return 0, straceOptionStops
-		case strings.ContainsRune("ACDcdfiknqrtTvwxyzZ", rune(flag)):
+		case strings.ContainsRune(straceShortOptionsNoValue, rune(flag)):
 			continue
-		case strings.ContainsRune("IbeaEoOXSPpuUY", rune(flag)):
+		case strings.ContainsRune(straceShortOptionsWithValue, rune(flag)):
 			attached := idx+1 < len(value)
 			attachedValue := ""
 			if attached {
@@ -114,6 +125,9 @@ func parseStraceShortOptions(words []*syntax.Word, names map[string]struct{}) (i
 				return 0, straceOptionUnsafe
 			}
 			if flag == 'E' && straceEnvironmentMutationUnsafe(operand, names) {
+				return 0, straceOptionUnsafe
+			}
+			if flag == 'o' && straceOutputTargetUnsafe(operand) {
 				return 0, straceOptionUnsafe
 			}
 			return consumed, straceOptionContinue
@@ -133,6 +147,10 @@ func straceOptionValue(words []*syntax.Word, attachedValue string, attached bool
 	}
 	value, literal := literalShellWord(words[1])
 	return value, 2, literal
+}
+
+func straceOutputTargetUnsafe(operand string) bool {
+	return strings.HasPrefix(operand, "|") || strings.HasPrefix(operand, "!")
 }
 
 func straceEnvironmentMutationUnsafe(operand string, names map[string]struct{}) bool {
