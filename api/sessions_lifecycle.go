@@ -46,11 +46,28 @@ be lost. Archive instead to keep the session restorable.
 		// --force is accepted for backward compatibility but
 		// is a no-op: it is intentionally NOT forwarded to the daemon, whose
 		// KillSessionRequest no longer carries a force field (#1579).
-		if err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID}); err != nil {
+		//
+		// A kill whose durable tombstone committed but whose post-commit
+		// teardown/storage follow-up failed is reported as success-with-
+		// warning, exactly as archive/restore do for the same committed-
+		// mutation outcome. The tombstone is durable and the row is retained
+		// for the asynchronous finishUserKill/ghost-worker reap, so a non-zero
+		// exit would tell automation a committed kill "failed" and invite a
+		// retry that races the in-flight guard or re-tombstones an already-
+		// UserKilled row (#3252).
+		err = killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID})
+		warning := ""
+		if err != nil && apiclient.IsMutationCommitted(err) {
+			warning = err.Error()
+		} else if err != nil {
 			return jsonError(err)
 		}
 
-		return jsonOut(map[string]bool{"ok": true})
+		result := map[string]any{"ok": true}
+		if warning != "" {
+			result["warning"] = warning
+		}
+		return jsonOut(result)
 	},
 }
 
