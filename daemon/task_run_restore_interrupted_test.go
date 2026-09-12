@@ -142,6 +142,30 @@ func TestRestoredOlderTaskRuntimeDoesNotOverwriteNewerRunStatus(t *testing.T) {
 	assert.Contains(t, logs.warnings.String(), "the task row does not identify this run")
 }
 
+func TestSupersededInterruptedRunDoesNotScanUnreadableSessionStores(t *testing.T) {
+	manager, _, repoPath := newStatusTestManager(t)
+	tsk := addStatusTestTask(t, enabledCronTask("dead0010", repoPath))
+	newerAt := time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC)
+	_, _, err := task.BeginTaskRun(
+		tsk.ID, tsk.GenerationID, "newer-session", 2, 0, newerAt, task.RunStatusStarted,
+	)
+	require.NoError(t, err)
+
+	previous := loadPersistedTaskRunsForAttribution
+	loadPersistedTaskRunsForAttribution = func(string) ([]session.InstanceData, error) {
+		return nil, assert.AnError
+	}
+	t.Cleanup(func() { loadPersistedTaskRunsForAttribution = previous })
+
+	_, applied, err := manager.claimUnidentifiedInterruptedTaskRun("repo", session.TaskRunIdentity{
+		TaskID: tsk.ID, TaskGenerationID: tsk.GenerationID,
+		SessionID: "older-session", Sequence: 1, RunAt: newerAt.Add(-time.Minute),
+	})
+	require.NoError(t, err,
+		"a task row that already supersedes the outcome must not depend on unrelated session storage")
+	require.False(t, applied)
+}
+
 func TestRestoredTaskRuntimeOutcomeWinsRaceWithStartedStatus(t *testing.T) {
 	manager, _, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	tsk := enabledCronTask("dead0003", repoPath)

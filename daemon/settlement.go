@@ -257,36 +257,6 @@ func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session
 	if stored.GenerationID != run.TaskGenerationID {
 		return task.Task{}, false, nil
 	}
-
-	// A committed session is durable before it enters m.instances, and an
-	// unloadable record never enters that map at all. Read the persisted universe,
-	// then add the only rows not there yet: pending creates. Candidate order uses
-	// the manager sequence when both records carry it and falls back to CreatedAt
-	// only for the bounded pre-field compatibility case.
-	persisted, err := persistedTaskRunsForAttribution(repoID)
-	if err != nil {
-		return task.Task{}, false, err
-	}
-	for i := range persisted {
-		if taskRunMayFollow(persisted[i], run) {
-			return task.Task{}, false, nil
-		}
-	}
-	m.mu.Lock()
-	for _, candidate := range m.instances {
-		if taskRunIdentityMayFollow(candidate.TaskRun(), run) {
-			m.mu.Unlock()
-			return task.Task{}, false, nil
-		}
-	}
-	for _, candidate := range m.pendingCreates {
-		if taskRunMayFollow(candidate, run) {
-			m.mu.Unlock()
-			return task.Task{}, false, nil
-		}
-	}
-	m.mu.Unlock()
-
 	// A task currently configured for a shared target cannot have produced this
 	// older per-run session's present row. This also protects `started` target
 	// rows written by older binaries, before target auto-creation was normalized
@@ -312,9 +282,40 @@ func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session
 			stored.LastRunStatus != TaskStatusLimitParked) {
 		// A later/equal ordered run or a watcher supervision status cannot be
 		// attributed safely. Preserve it rather than turning evidence into an
-		// interruption.
+		// interruption. Decide before scanning session stores: unrelated unreadable
+		// storage cannot make a row that already refused this outcome retry forever.
 		return task.Task{}, false, nil
 	}
+
+	// A committed session is durable before it enters m.instances, and an
+	// unloadable record never enters that map at all. Read the persisted universe,
+	// then add the only rows not there yet: pending creates. Candidate order uses
+	// the manager sequence when both records carry it and falls back to CreatedAt
+	// only for the bounded pre-field compatibility case.
+	persisted, err := loadPersistedTaskRunsForAttribution(repoID)
+	if err != nil {
+		return task.Task{}, false, err
+	}
+	for i := range persisted {
+		if taskRunMayFollow(persisted[i], run) {
+			return task.Task{}, false, nil
+		}
+	}
+	m.mu.Lock()
+	for _, candidate := range m.instances {
+		if taskRunIdentityMayFollow(candidate.TaskRun(), run) {
+			m.mu.Unlock()
+			return task.Task{}, false, nil
+		}
+	}
+	for _, candidate := range m.pendingCreates {
+		if taskRunMayFollow(candidate, run) {
+			m.mu.Unlock()
+			return task.Task{}, false, nil
+		}
+	}
+	m.mu.Unlock()
+
 	return task.ClaimUnidentifiedTaskRunOutcome(
 		run.TaskID, run.SessionID, stored.LastRunAt, stored.LastRunStatus,
 		stored.LastRunSessionID, stored.LastRunSequence, stored.LastRunRevision,
@@ -322,6 +323,8 @@ func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session
 		desiredSequence, TaskStatusInterrupted,
 	)
 }
+
+var loadPersistedTaskRunsForAttribution = persistedTaskRunsForAttribution
 
 func persistedTaskRunsForAttribution(restoringRepoID string) ([]session.InstanceData, error) {
 	all, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
