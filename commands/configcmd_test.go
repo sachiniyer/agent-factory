@@ -226,6 +226,17 @@ func TestConfigSetHelpQualifiesStructuredCommentPreservation(t *testing.T) {
 	}
 }
 
+func TestConfigSetHelpUsesSentenceCaseSecurityWarning(t *testing.T) {
+	if !strings.Contains(configSetCmd.Long, "warning: a non-loopback address") {
+		t.Errorf("config set help must use the established lowercase warning marker:\n%s", configSetCmd.Long)
+	}
+	for _, shouted := range []string{"DANGER:", "defaults to FALSE"} {
+		if strings.Contains(configSetCmd.Long, shouted) {
+			t.Errorf("config set help contains caps-shouting %q:\n%s", shouted, configSetCmd.Long)
+		}
+	}
+}
+
 func TestConfigListLabelsRootAgentMigrationShapes(t *testing.T) {
 	tempAFHome(t)
 	var out bytes.Buffer

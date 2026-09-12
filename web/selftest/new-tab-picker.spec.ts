@@ -88,6 +88,7 @@ for (const width of [1280, 390]) {
     await expect(code).toBeFocused();
     await page.keyboard.press("Enter");
     await expect.poll(() => creates.map(c => c.kind)).toEqual(["vscode"]);
+    await expect(page.locator(".af-toast")).toContainText("picker test refusal");
     await expect(page.locator(".af-term-title")).toHaveText(session.title);
     expect(page.url()).toContain(encodeURIComponent(session.id));
     await page.keyboard.press("Control+]");
@@ -102,9 +103,15 @@ for (const width of [1280, 390]) {
     }
     await page.keyboard.press("Space");
     // The existing shell API uses shell: true and omits kind.
-    await expect.poll(() => creates.map(c => c.kind)).toEqual(["vscode", undefined]);
-    expect(creates.map(c => c.id)).toEqual([session.id, session.id]);
-    expect(creates[1].shell).toBe(true);
+    await expect.poll(() => ({
+      kinds: creates.map(c => c.kind),
+      ids: creates.map(c => c.id),
+      shell: creates[1]?.shell,
+    })).toEqual({
+      kinds: ["vscode", undefined],
+      ids: [session.id, session.id],
+      shell: true,
+    });
     await expect(page.locator(".af-term-title")).toHaveText(session.title);
   });
 }
