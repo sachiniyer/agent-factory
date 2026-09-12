@@ -21,6 +21,7 @@ func (s *TaskPane) SetTasks(tasks []task.Task) {
 		s.originals[t.ID] = t
 	}
 	s.deleted = nil
+	s.restoredDeletes = nil
 	s.editing = false
 	// A reload replaces the create-form buffers a pending create was captured
 	// against, so a create left un-consumed by a failed save must be dropped —
@@ -143,8 +144,17 @@ func (s *TaskPane) RestoreFailedEdit(id string) {
 // s.deleted retries the removal on the next save. The record still exists on
 // disk (the removal did not commit), so retrying RemoveTask is not the
 // already-deleted re-run ConsumeDeleted drains to avoid (fixes #763).
+//
+// restoredDeletes deduplicates repeated failures: the second retry failure must
+// not append another visible copy of the same row, only re-queue the delete.
 func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
-	s.tasks = append(s.tasks, tsk)
+	if s.restoredDeletes == nil {
+		s.restoredDeletes = make(map[string]bool)
+	}
+	if !s.restoredDeletes[tsk.ID] {
+		s.tasks = append(s.tasks, tsk)
+		s.restoredDeletes[tsk.ID] = true
+	}
 	s.deleted = append(s.deleted, tsk)
 	s.dirty = true
 }
@@ -155,10 +165,13 @@ func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
 // reload succeeds or a later save retries them. The deletion loop in
 // saveContentPaneState removes task records as a side effect, so re-running it
 // would call RemoveTask on records that no longer exist and log spurious errors
-// (fixes #763).
+// (fixes #763). restoredDeletes is cleared here too so RestoreFailedDelete
+// may re-append a row on the next round if needed (the tasks slice is rebuilt
+// by a fresh ConsumeDeleted → RestoreFailedDelete cycle, not carried forward).
 func (s *TaskPane) ConsumeDeleted() []task.Task {
 	deleted := s.deleted
 	s.deleted = nil
+	s.restoredDeletes = nil
 	s.dirty = len(s.dirtyIDs) > 0
 	return deleted
 }
