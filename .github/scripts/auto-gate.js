@@ -992,6 +992,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     headRepository: pr.headRepository,
     headSha: pr.headRefOid,
     workflowsChanged,
+    requiredCheckObservations: requiredChecks.observations,
     reasons,
     notes,
   });
@@ -1011,6 +1012,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
 // stamp as the blocking reason — which is exactly what it did before this
 // constant existed.
 const DECISION_STAMP_PREFIX = "evaluated: ";
+const REQUIRED_CHECK_SNAPSHOT_PREFIX = "<!-- auto-gate-required-check-snapshot:";
 
 // A decision summary with the evaluation stamp removed, for readers that want the
 // REASON. The stamp is metadata about the write, not part of the decision.
@@ -1023,15 +1025,36 @@ function decisionSummaryBody(summary) {
   return newline === -1 ? "" : text.slice(newline + 1).replace(/^\n+/, "");
 }
 
-function decisionEvaluationTime(decision) {
-  const summary = String(decision?.output?.summary || decision?.summary || "");
-  const firstLine = summary.split("\n", 1)[0];
-  if (!firstLine.startsWith(DECISION_STAMP_PREFIX)) {
-    return 0;
+function requiredCheckSnapshotText(observations) {
+  const payload = JSON.stringify({ version: 1, checks: observations || [] });
+  return `${REQUIRED_CHECK_SNAPSHOT_PREFIX}${payload} -->`;
+}
+
+function decisionRequiredCheckSnapshot(decision) {
+  const text = String(decision?.output?.text || "");
+  const line = text.split("\n").find((candidate) =>
+    candidate.startsWith(REQUIRED_CHECK_SNAPSHOT_PREFIX) && candidate.endsWith(" -->"),
+  );
+  if (!line) {
+    return null;
   }
-  // The optional run id is provenance, not part of the ISO timestamp.
-  const timestamp = firstLine.slice(DECISION_STAMP_PREFIX.length).split(" (run ", 1)[0];
-  return parseTimestamp(timestamp) || 0;
+  try {
+    const payload = JSON.parse(
+      line.slice(REQUIRED_CHECK_SNAPSHOT_PREFIX.length, -" -->".length),
+    );
+    return payload?.version === 1 && Array.isArray(payload.checks) ? payload.checks : null;
+  } catch {
+    return null;
+  }
+}
+
+function sameRequiredCheckObservation(left, right) {
+  return (
+    left?.kind === right?.kind &&
+    left?.id === right?.id &&
+    left?.status === right?.status &&
+    left?.conclusion === right?.conclusion
+  );
 }
 
 function firstUnmetRequirement(result) {
@@ -1173,6 +1196,11 @@ async function reportDecision({ github, context, core, result, manual = false })
     output: {
       title,
       summary,
+      // This is evidence about the state evaluateRequiredChecks actually read,
+      // not when this later write happened. The scheduled reconciler compares
+      // this identity/state tuple with the current check run and never needs to
+      // order clocks owned by different observations (#4242).
+      text: requiredCheckSnapshotText(result.requiredCheckObservations),
     },
   };
   try {
@@ -2308,10 +2336,9 @@ const GATE_WORKFLOW = "auto-gate.yml";
 // deliver. It never fans one workflow's matrix out into one gate run per check:
 // completed Build/Lint checks select only decisions that name them as blockers,
 // each PR/head appears once, and one sweep selects at most this many stale
-// decisions. The next sweep drains the rest.
+// decisions. Ten-PR pages rotate in creation order; skipped pages remain red.
 const REQUIRED_CHECK_REEVALUATION_LIMIT = 10;
-const REQUIRED_CHECK_RECONCILIATION_SCAN_LIMIT = 100;
-const REQUIRED_CHECK_RECONCILIATION_HEAD_LIMIT = 10;
+const REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE = 10;
 const REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
 const PR_VALIDATION_REQUIRED_CHECK_NAMES = ["Build", "Lint"];
 
@@ -3428,7 +3455,6 @@ function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead }) {
       }
     }
 
-    const evaluatedAt = decision ? decisionEvaluationTime(decision) : 0;
     const body = decision
       ? decisionSummaryBody(
           decision.output?.summary || decision.summary || decision.output?.title || "",
@@ -3439,125 +3465,92 @@ function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead }) {
           body.includes(`required check ${name} `) || body.includes(`required check ${name}(`),
         )
       : PR_VALIDATION_REQUIRED_CHECK_NAMES;
-    const completedAt = blockedNames.reduce((latest, name) => {
-      const check = newestCheckGeneration(
-        headChecks.filter(
-          (run) => run.name === name && run.app?.id === GITHUB_ACTIONS_APP_ID,
-        ),
-      );
-      if (check?.status !== "completed") {
-        return latest;
+    const snapshot = decision ? decisionRequiredCheckSnapshot(decision) : null;
+    const completedCheckChanged = blockedNames.some((name) => {
+      const current = latestRequiredState(
+        { context: name, sourceAppId: GITHUB_ACTIONS_APP_ID },
+        headChecks,
+        [],
+      )?.observation;
+      if (current?.kind !== "check_run" || current.status !== "completed") {
+        return false;
       }
-      return Math.max(latest, parseTimestamp(check.completed_at || check.updated_at) || 0);
-    }, 0);
-    // Check-run timestamps lose milliseconds in GitHub's API. A completion
-    // later in the decision's second otherwise looks older forever, because no
-    // second terminal transition will arrive. A same-second tie therefore earns
-    // one conservative reevaluation; its new stamp makes later sweeps skip it.
-    if (
-      completedAt === 0 ||
-      Math.floor(completedAt / 1000) < Math.floor(evaluatedAt / 1000)
-    ) {
+      const observed = snapshot?.find(
+        (entry) => entry?.name === name && entry?.appId === GITHUB_ACTIONS_APP_ID,
+      )?.observed;
+      // An older or malformed decision has no snapshot. Reconcile it once and
+      // replace it with direct evidence rather than inventing another clock
+      // comparison. Ambiguity chooses a redundant read over a permanent freeze.
+      return !observed || !sameRequiredCheckObservation(observed, current);
+    });
+    if (!completedCheckChanged) {
       continue;
     }
     candidates.push({
       prNumber,
       headSha,
       decisionKey: identity.key,
-      evaluatedAt,
-      completedAt,
     });
   }
 
-  // Oldest frozen decision first, so a backlog drains instead of the newest ten
-  // monopolising every sweep. PR number makes equal timestamps deterministic.
+  // The page is already quota-bounded; PR order only makes a shared-head tie
+  // deterministic.
   return candidates
-    .sort((left, right) =>
-      left.evaluatedAt - right.evaluatedAt ||
-      left.completedAt - right.completedAt ||
-      left.prNumber - right.prNumber,
-    )
+    .sort((left, right) => left.prNumber - right.prNumber)
     .map(({ prNumber, headSha, decisionKey }) => ({ prNumber, headSha, decisionKey }));
 }
 
-function requiredCheckReconciliationWindow(pulls, nowMs) {
-  const heads = new Map();
-  for (const pull of pulls || []) {
-    const headSha = normalizeHeadSha(pull?.head?.sha || pull?.headRefOid);
-    const baseRefName = pull?.base?.ref || pull?.baseRefName;
-    const state = String(pull?.state || "").toLowerCase();
-    const prNumber = Number(pull?.number);
-    if (
-      !headSha ||
-      !Number.isSafeInteger(prNumber) ||
-      prNumber <= 0 ||
-      state !== "open" ||
-      baseRefName !== "master"
-    ) {
-      continue;
-    }
-    const existing = heads.get(headSha);
-    if (!existing || prNumber < existing.prNumber) {
-      heads.set(headSha, { headSha, prNumber });
-    }
+function pullRequestPageCount(response) {
+  const last = String(response?.headers?.link || "")
+    .split(",")
+    .find((part) => /;\s*rel="last"\s*$/.test(part));
+  const target = last?.match(/<([^>]+)>/)?.[1];
+  if (!target) {
+    return 1;
   }
-
-  const orderedHeads = [...heads.values()].sort(
-    (left, right) => left.prNumber - right.prNumber || left.headSha.localeCompare(right.headSha),
-  );
-  if (orderedHeads.length === 0) {
-    return { pulls: [], heads: [], totalHeads: 0, windowIndex: 0, windowCount: 0 };
+  try {
+    const page = Number(new URL(target).searchParams.get("page"));
+    return Number.isSafeInteger(page) && page > 0 ? page : 1;
+  } catch {
+    return 1;
   }
-  const windowCount = Math.ceil(
-    orderedHeads.length / REQUIRED_CHECK_RECONCILIATION_HEAD_LIMIT,
-  );
-  const slot = Math.floor(nowMs / REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS);
-  const windowIndex = ((slot % windowCount) + windowCount) % windowCount;
-  const selectedHeads = orderedHeads.slice(
-    windowIndex * REQUIRED_CHECK_RECONCILIATION_HEAD_LIMIT,
-    (windowIndex + 1) * REQUIRED_CHECK_RECONCILIATION_HEAD_LIMIT,
-  );
-  const selected = new Set(selectedHeads.map(({ headSha }) => headSha));
-  return {
-    pulls: (pulls || []).filter((pull) =>
-      selected.has(normalizeHeadSha(pull?.head?.sha || pull?.headRefOid)),
-    ),
-    heads: selectedHeads.map(({ headSha }) => headSha),
-    totalHeads: orderedHeads.length,
-    windowIndex,
-    windowCount,
-  };
 }
 
 async function listRequiredCheckReevaluationTargets({ github, context, core, nowMs }) {
   const { owner, repo } = context.repo;
-  const listedPulls = await retryRead(
-    "could not list open PRs for required-check reconciliation",
+  const listPullPage = (page) => retryRead(
+    `could not list open PR page ${page} for required-check reconciliation`,
     () =>
       github.rest.pulls.list({
         owner,
         repo,
         state: "open",
         base: "master",
-        sort: "updated",
-        direction: "desc",
-        per_page: REQUIRED_CHECK_RECONCILIATION_SCAN_LIMIT,
+        // Created/ascending makes new PRs append instead of reshuffling every
+        // page when unrelated comments change updated_at.
+        sort: "created",
+        direction: "asc",
+        per_page: REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE,
+        page,
       }),
   );
+  const firstPage = await listPullPage(1);
+  const pageCount = pullRequestPageCount(firstPage);
+  const slot = Math.floor(nowMs / REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS);
+  const page = ((slot % pageCount) + pageCount) % pageCount + 1;
+  const listedPulls = page === 1 ? firstPage : await listPullPage(page);
   const pulls = listedPulls?.data || [];
-  if (pulls.length >= REQUIRED_CHECK_RECONCILIATION_SCAN_LIMIT) {
-    core.warning(
-      `Required-check reconciliation inspected only the first ` +
-        `${REQUIRED_CHECK_RECONCILIATION_SCAN_LIMIT} open master PRs.`,
-    );
-  }
-  // Head reads dominate the fallback's quota cost. Walk one stable, rotating
-  // PR-number window per schedule slot so a burst cannot consume the API budget
-  // needed by ordinary gate events. Deferred heads remain blocked; if the set
-  // stays stable, each appears in a later five-minute window.
-  const window = requiredCheckReconciliationWindow(pulls, nowMs);
+  // One stable PR-number page per schedule slot bounds head reads without making
+  // the first page a permanent eligibility boundary. With a stable open set,
+  // every PR is inspected within pageCount five-minute sweeps. A skipped page
+  // stays blocked; rotation delays recovery but cannot authorize a merge.
+  const heads = [...new Set(
+    pulls
+      .map((pull) => normalizeHeadSha(pull?.head?.sha || pull?.headRefOid))
+      .filter(Boolean),
+  )];
   const checkRunsByHead = new Map();
-  for (const headSha of window.heads) {
+  for (const headSha of heads) {
     const response = await retryRead(
       `could not read reconciliation checks at ${headSha}`,
       () => github.rest.checks.listForRef({
@@ -3572,7 +3565,7 @@ async function listRequiredCheckReevaluationTargets({ github, context, core, now
   }
 
   const stale = requiredCheckReevaluationCandidates({
-    pulls: window.pulls,
+    pulls,
     checkRunsByHead,
   });
   const targets = stale.slice(0, REQUIRED_CHECK_REEVALUATION_LIMIT);
@@ -3583,8 +3576,8 @@ async function listRequiredCheckReevaluationTargets({ github, context, core, now
     );
   }
   core.notice(
-    `Required-check reconciliation inspected window ${window.windowIndex + 1}/` +
-      `${window.windowCount} (${window.heads.length}/${window.totalHeads} head(s)), found ` +
+    `Required-check reconciliation inspected PR page ${page}/${pageCount} ` +
+      `(${heads.length} head(s)), found ` +
       `${stale.length} stale decision(s), and selected ${targets.length}.`,
   );
   return targets;
@@ -4073,6 +4066,7 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
   );
   const notes = [];
   const reasons = [...required.errors];
+  const observations = [];
 
   if (syntheticDecisionSpecs.length > 0) {
     notes.push("Synthetic Auto Gate decisions are excluded from their own prerequisites");
@@ -4130,6 +4124,21 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
 
   for (const spec of specs) {
     const state = latestRequiredState(spec, checkRuns, statuses);
+    if (
+      PR_VALIDATION_REQUIRED_CHECK_NAMES.includes(spec.context) &&
+      spec.sourceAppId === GITHUB_ACTIONS_APP_ID
+    ) {
+      observations.push({
+        name: spec.context,
+        appId: spec.sourceAppId,
+        observed: state?.observation || {
+          kind: "missing",
+          id: null,
+          status: null,
+          conclusion: null,
+        },
+      });
+    }
     if (!state) {
       if (parkedRuns.length > 0) {
         const named = parkedRuns.map((run) => `${run.name} (${run.id})`).join(", ");
@@ -4150,7 +4159,7 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
     }
   }
 
-  return { ok: reasons.length === 0, reasons, notes };
+  return { ok: reasons.length === 0, reasons, notes, observations };
 }
 
 function isSyntheticDecisionContext(contextName) {
@@ -4270,6 +4279,12 @@ function latestRequiredState(spec, checkRuns, statuses) {
     const state = checkRunState(run);
     candidates.push({
       date: parseTimestamp(run.completed_at || run.started_at || run.created_at) || 0,
+      observation: {
+        kind: "check_run",
+        id: String(run.id || ""),
+        status: String(run.status || ""),
+        conclusion: run.conclusion == null ? null : String(run.conclusion),
+      },
       ...state,
     });
   }
@@ -4281,6 +4296,12 @@ function latestRequiredState(spec, checkRuns, statuses) {
       }
       candidates.push({
         date: parseTimestamp(status.created_at) || 0,
+        observation: {
+          kind: "commit_status",
+          id: String(status.id || ""),
+          status: String(status.state || ""),
+          conclusion: null,
+        },
         ok: status.state === "success",
         waiting: status.state === "pending",
         description: `commit status ${status.state}`,

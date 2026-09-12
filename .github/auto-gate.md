@@ -387,19 +387,24 @@ GitHub suppresses `check_suite` recursion for suites created by Actions. The
 required `Lint` and `Build` jobs both belong to **PR Validation**, so Auto Gate
 also subscribes to that workflow's terminal `workflow_run` event. GitHub has
 intermittently omitted that event, so a five-minute reconciliation pass backs it
-up: it wakes only a failed or absent exact decision older than a completed PR
-Validation `Build` or `Lint` check and, for an existing decision, only when the
-decision names that completed check as a blocker. Runs are coalesced per
-PR/head and a same-second timestamp tie is conservatively reevaluated because
-GitHub drops check-run milliseconds. Each pass reads one rotating window of at
-most ten heads, ordered by PR number; the remaining heads stay blocked and move
-into later five-minute windows rather than consuming the API budget needed by
-ordinary gate events. A stable set of 20 heads is therefore covered in two
-passes, while the first 100 open PRs are covered in at most ten. Each head read
-is one page, so the scan costs at most 11 requests per pass (132/hour), or 396
-if every read exhausts both retries. Scheduled passes also skip unrelated
-branch-sweep housekeeping. This avoids both the frozen-decision failure and one
-gate evaluation per completed matrix job (#4242).
+up: it wakes only an absent exact decision, or a failed decision that names
+`Build` or `Lint` as a blocker and recorded a different state for the now-complete
+check. Runs are coalesced per PR/head. The decision records the check-run ID,
+status and conclusion that its
+required-check read actually observed; the reconciler compares that tuple with
+the current completed run rather than ordering check and publication clocks.
+Missing or malformed legacy evidence is reconciled conservatively once.
+
+Each pass reads one rotating ten-PR page in creation order; the remaining PRs
+stay blocked and move into later five-minute pages rather than consuming the API
+budget needed by ordinary gate events. For a stable set of N open PRs, including
+the least recently updated one, the worst-case delay is
+`5 × ceil(N / 10)` minutes (45 minutes for 83 PRs). Reading page count costs one
+request and a non-first selected page costs one more; ten single-page head reads
+make the scan at most 12 requests per pass (144/hour), or 432 if every read
+exhausts both retries. Scheduled passes also skip unrelated branch-sweep
+housekeeping. This avoids both the frozen-decision failure and one gate
+evaluation per completed matrix job (#4242).
 
 GitHub also suppresses `push` workflows when Auto Gate merges with its
 `GITHUB_TOKEN`. After a merge, the gate therefore dispatches the five

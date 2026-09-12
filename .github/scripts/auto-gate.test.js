@@ -5855,6 +5855,16 @@ test("scheduled reconciliation wakes a Build-blocked decision once after validat
             prNumber: 1465,
             headSha: HEAD_SHA,
             evaluatedAt: "2026-07-09T21:14:30Z",
+            observedChecks: [{
+              name: "Build",
+              appId: ACTIONS_APP_ID,
+              observed: {
+                kind: "check_run",
+                id: "9001",
+                status: "completed",
+                conclusion: "success",
+              },
+            }],
           }),
           reconciliationRequiredCheck("Build", validationCompletedAt),
         ],
@@ -5916,6 +5926,59 @@ test("scheduled reconciliation treats a same-second check completion as newer", 
   }]);
 });
 
+test("scheduled reconciliation compares the check state observed before decision publication", async () => {
+  const build = checkRun({
+    id: 501,
+    name: "Build",
+    status: "in_progress",
+    conclusion: null,
+  });
+  const lint = checkRun({ id: 502, name: "Lint", conclusion: "success" });
+  const github = fakeGateGithub({ checkRuns: [build, lint] });
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /required check Build.*still settling/);
+
+  // The required-check snapshot is now stale, but the decision has not been
+  // published yet. Publication time is later than this completion and cannot
+  // tell the reconciler which state evaluateRequiredChecks actually observed.
+  build.status = "completed";
+  build.conclusion = "success";
+  build.completed_at = "2026-07-09T01:10:00Z";
+  await autoGate.reportDecision({ github, context: fakeContext(), core: fakeCore(), result });
+  const written = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+  assert.ok(written, "the frozen per-PR decision must be published");
+
+  const decision = {
+    id: 503,
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    ...written,
+  };
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: { [HEAD_SHA]: [decision, build, lint] },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+    reconciliationNowMs: 0,
+  });
+
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+});
+
 test("scheduled reconciliation rotates a ten-head inspection window", async () => {
   const pulls = [];
   const checksByHead = {};
@@ -5946,6 +6009,31 @@ test("scheduled reconciliation rotates a ten-head inspection window", async () =
   }
 
   assert.equal(new Set(inspectedBySweep).size, 23, "later sweeps inspect every deferred head");
+});
+
+test("scheduled reconciliation rotates past the first pull-request page", async () => {
+  const pulls = [];
+  const checksByHead = {};
+  for (let number = 1; number <= 101; number += 1) {
+    const sha = number.toString(16).padStart(40, "0");
+    pulls.push(reconciliationPull(number, sha));
+    checksByHead[sha] = [];
+  }
+
+  const inspectedHeads = [];
+  for (let slot = 0; slot < 11; slot += 1) {
+    await autoGate.resolveTargets({
+      github: scheduledReconciliationGithub({ pulls, checksByHead, inspectedHeads }),
+      context: { ...fakeContext(), eventName: "schedule" },
+      core: fakeCore(),
+      reconciliationNowMs: slot * 5 * 60 * 1000,
+    });
+  }
+
+  assert.ok(
+    inspectedHeads.includes((101).toString(16).padStart(40, "0")),
+    "the least-recently-listed PR is inspected within ceil(101/10) sweeps",
+  );
 });
 
 test("scheduled reconciliation caps one sweep at ten PRs", async () => {
@@ -11497,6 +11585,11 @@ function reconciliationDecision({
   headSha,
   evaluatedAt,
   reason = `required check Build (app ${ACTIONS_APP_ID}) is missing on ${headSha}`,
+  observedChecks = [{
+    name: "Build",
+    appId: ACTIONS_APP_ID,
+    observed: { kind: "missing", id: null, status: null, conclusion: null },
+  }],
 }) {
   return {
     id: prNumber,
@@ -11509,6 +11602,10 @@ function reconciliationDecision({
     output: {
       title: `WAITING: ${reason}`,
       summary: `evaluated: ${evaluatedAt}\n\nBLOCKED: ${reason}`,
+      text: `<!-- auto-gate-required-check-snapshot:${JSON.stringify({
+        version: 1,
+        checks: observedChecks,
+      })} -->`,
     },
   };
 }
@@ -11523,7 +11620,17 @@ function scheduledReconciliationGithub({ pulls, checksByHead, inspectedHeads = [
         },
       },
       pulls: {
-        list: async () => ({ data: pulls, headers: {} }),
+        list: async ({ per_page: perPage, page = 1 }) => {
+          const lastPage = Math.max(1, Math.ceil(pulls.length / perPage));
+          const start = (page - 1) * perPage;
+          const link = lastPage > 1
+            ? `<https://api.github.test/pulls?per_page=${perPage}&page=${lastPage}>; rel="last"`
+            : "";
+          return {
+            data: pulls.slice(start, start + perPage),
+            headers: { link },
+          };
+        },
       },
     },
   };
