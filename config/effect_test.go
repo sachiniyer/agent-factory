@@ -189,7 +189,7 @@ func TestEffectNoticeZeroOutcomeIsTheDaemonlessSentence(t *testing.T) {
 // A confirmed reload failure keeps the previous live configuration; a lost
 // response cannot establish that fact. Neither outcome means no daemon ran.
 func TestEffectNoticeDaemonApplyFailed(t *testing.T) {
-	const want = "Saved — the running daemon could not apply the new configuration and is still using its previous value. Fix the reload error in the warning, then restart the daemon to apply the saved value."
+	const want = "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
 	for _, key := range []string{"network.require_token", "require_token", "default_program"} {
 		if got := EffectNotice(key, ApplyOutcome{DaemonApplyFailed: true}); got != want {
 			t.Errorf("%s: got %q, want %q", key, got, want)

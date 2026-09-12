@@ -433,6 +433,17 @@ func requestApplyConfigAttempt() (ApplyConfigResponse, daemonCallAttempt) {
 	return resp, attempt
 }
 
+// failedConfigApplyOutcome keeps a daemon's explicit refusal distinct from a
+// lost RPC reply. The former proves that the saved config was not applied; the
+// latter proves only that the client cannot tell whether it was applied.
+func failedConfigApplyOutcome(err error) (config.ApplyOutcome, string) {
+	var serverErr rpc.ServerError
+	if errors.As(err, &serverErr) {
+		return config.ApplyOutcome{DaemonApplyFailed: true}, "saved config, but live apply failed: " + err.Error()
+	}
+	return config.ApplyOutcome{DaemonApplyUnconfirmed: true}, "saved config, but live apply could not be confirmed: " + err.Error()
+}
+
 // SetGlobalConfigValue writes one global config key through a running daemon's
 // SetConfigValue — the same admission-gated handler the web form posts to — so
 // every first-class save surface consults the same lifecycle predicate
@@ -511,10 +522,9 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 		resp.Warnings = applyResp.Warnings
 		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
 	} else if applyAttempt.requestStarted {
-		resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+applyAttempt.err.Error())
-		outcome.DaemonApplyFailed = true
-		var serverErr rpc.ServerError
-		outcome.DaemonApplyUnconfirmed = !errors.As(applyAttempt.err, &serverErr)
+		var warning string
+		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
+		resp.Warnings = append(resp.Warnings, warning)
 	}
 	// The notice logic is no longer mirrored from controlServer.SetConfigValue — it
 	// is the same code, in config.EffectNotice (#3397). Mirroring is what let the
@@ -572,10 +582,9 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 		resp.Warnings = applyResp.Warnings
 		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
 	} else if applyAttempt.requestStarted {
-		resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+applyAttempt.err.Error())
-		outcome.DaemonApplyFailed = true
-		var serverErr rpc.ServerError
-		outcome.DaemonApplyUnconfirmed = !errors.As(applyAttempt.err, &serverErr)
+		var warning string
+		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
+		resp.Warnings = append(resp.Warnings, warning)
 	}
 	resp.RestartNotice = config.EffectNotice(result.Key, outcome)
 	return resp, nil

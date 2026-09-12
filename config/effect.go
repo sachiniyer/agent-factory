@@ -150,7 +150,8 @@ type ApplyOutcome struct {
 	// (daemon.Manager.ApplyConfig returned without error). It does NOT report that
 	// every changed key took effect — FailedListenerKeys is the rest of the answer.
 	DaemonApplied bool
-	// DaemonApplyFailed means apply returned an error after reaching the daemon.
+	// DaemonApplyFailed means the daemon returned a failure response instead of
+	// applying the saved config.
 	DaemonApplyFailed bool
 	// DaemonApplyUnconfirmed distinguishes a lost RPC response from a daemon
 	// error: the daemon may have applied the config before the connection failed.
@@ -212,7 +213,7 @@ func EffectNotice(key string, outcome ApplyOutcome) string {
 			return "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
 		}
 		if outcome.DaemonApplyFailed {
-			return "Saved — the running daemon could not apply the new configuration and is still using its previous value. Fix the reload error in the warning, then restart the daemon to apply the saved value."
+			return "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
 		}
 		if outcome.DaemonApplied {
 			return "Applied — the running daemon is using the new value now."

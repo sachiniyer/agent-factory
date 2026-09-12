@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"net/rpc"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,11 +15,35 @@ import (
 
 func requireReloadFailureNotice(t *testing.T, notice string, warnings, applied []string) {
 	t.Helper()
-	require.Equal(t, "Saved — the running daemon could not apply the new configuration and is still using its previous value. Fix the reload error in the warning, then restart the daemon to apply the saved value.", notice)
+	require.Equal(t, "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value.", notice)
 	require.NotContains(t, notice, "no daemon")
 	require.NotContains(t, notice, "using the new value now")
 	require.Empty(t, applied)
 	require.Contains(t, strings.Join(warnings, "\n"), "reload config:")
+}
+
+func TestFailedConfigApplyOutcomeDistinguishesLostReply(t *testing.T) {
+	t.Run("daemon refusal", func(t *testing.T) {
+		outcome, warning := failedConfigApplyOutcome(rpc.ServerError("apply refused during upgrade"))
+		require.True(t, outcome.DaemonApplyFailed)
+		require.False(t, outcome.DaemonApplyUnconfirmed)
+		require.Contains(t, warning, "live apply failed")
+		require.Contains(t, warning, "apply refused during upgrade")
+		require.Equal(t,
+			"Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value.",
+			config.EffectNotice("network.require_token", outcome))
+	})
+
+	t.Run("lost reply", func(t *testing.T) {
+		outcome, warning := failedConfigApplyOutcome(errors.New("unexpected EOF"))
+		require.False(t, outcome.DaemonApplyFailed)
+		require.True(t, outcome.DaemonApplyUnconfirmed)
+		require.Contains(t, warning, "live apply could not be confirmed")
+		require.NotContains(t, warning, "live apply failed")
+		require.Equal(t,
+			"Saved — the daemon’s live config apply could not be confirmed. See warnings for details.",
+			config.EffectNotice("network.require_token", outcome))
+	})
 }
 
 // Hold the existing apply mutex so the real save completes before a concurrent
