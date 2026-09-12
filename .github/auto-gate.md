@@ -395,16 +395,21 @@ required-check read actually observed; the reconciler compares that tuple with
 the current completed run rather than ordering check and publication clocks.
 Missing or malformed legacy evidence is reconciled conservatively once.
 
-Each pass reads one rotating ten-PR page in creation order; the remaining PRs
-stay blocked and move into later five-minute pages rather than consuming the API
-budget needed by ordinary gate events. For a stable set of N open PRs, including
-the least recently updated one, the worst-case delay is
-`5 × ceil(N / 10)` minutes (45 minutes for 83 PRs). Reading page count costs one
-request and a non-first selected page costs one more; ten single-page head reads
-make the scan at most 12 requests per pass (144/hour), or 432 if every read
-exhausts both retries. Scheduled passes also skip unrelated branch-sweep
-housekeeping. This avoids both the frozen-decision failure and one gate
-evaluation per completed matrix job (#4242).
+Each pass paginates every open PR in creation order and carries its current check
+rollup in the same GraphQL snapshot, 100 PRs per request. Eligibility therefore
+depends on neither `updated_at` ordering nor a wall-clock page assignment: every
+PR, including the least recently updated one, is inspected in the next delivered
+sweep. The nominal scheduling bound is five minutes; a scheduler outage or delay
+adds directly to that bound instead of permanently skipping a page. At most ten
+stale decisions are reevaluated per sweep, so S simultaneously stale decisions
+drain in at most `ceil(S / 10)` delivered sweeps. A truncated per-head rollup is
+skipped fail-closed rather than treated as complete.
+
+The scan costs `ceil(N / 100)` GraphQL requests per pass: one request (12/hour)
+through the 83-head REST-quota threshold, or two (24/hour) for 120 PRs, before
+bounded retries. It performs no per-head REST reads. Scheduled passes also skip
+unrelated branch-sweep housekeeping. This avoids both the frozen-decision
+failure and one gate evaluation per completed matrix job (#4242).
 
 GitHub also suppresses `push` workflows when Auto Gate merges with its
 `GITHUB_TOKEN`. After a merge, the gate therefore dispatches the five

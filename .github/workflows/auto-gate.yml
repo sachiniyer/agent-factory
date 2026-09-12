@@ -27,8 +27,8 @@ on:
     workflows: [PR Validation]
     types: [completed]
   # GitHub has intermittently omitted that terminal workflow_run event. Reconcile
-  # only stale decisions that name a PR Validation blocker; the helper coalesces
-  # by PR/head and rotates through at most ten head inspections per sweep (#4242).
+  # only stale decisions that name a PR Validation blocker; one paginated query
+  # batches PR heads/check rollups and at most ten reevaluations start (#4242).
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:

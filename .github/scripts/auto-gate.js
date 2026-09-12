@@ -2335,11 +2335,9 @@ const GATE_WORKFLOW = "auto-gate.yml";
 // A schedule is the backstop for terminal workflow_run events GitHub does not
 // deliver. It never fans one workflow's matrix out into one gate run per check:
 // completed Build/Lint checks select only decisions that name them as blockers,
-// each PR/head appears once, and one sweep selects at most this many stale
-// decisions. Ten-PR pages rotate in creation order; skipped pages remain red.
+// each PR/head appears once, and one sweep starts at most this many evaluations.
 const REQUIRED_CHECK_REEVALUATION_LIMIT = 10;
-const REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE = 10;
-const REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
+const REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE = 100;
 const PR_VALIDATION_REQUIRED_CHECK_NAMES = ["Build", "Lint"];
 
 // Reruns the successor of an accepted update, whichever lane failed to finish
@@ -3460,15 +3458,23 @@ function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead }) {
           decision.output?.summary || decision.summary || decision.output?.title || "",
         )
       : "";
-    const blockedNames = decision
-      ? PR_VALIDATION_REQUIRED_CHECK_NAMES.filter((name) =>
-          body.includes(`required check ${name} `) || body.includes(`required check ${name}(`),
-        )
-      : PR_VALIDATION_REQUIRED_CHECK_NAMES;
+    const blockedSpecs = decision
+      ? PR_VALIDATION_REQUIRED_CHECK_NAMES.flatMap((name) => {
+          if (body.includes(`required check ${name} (app ${GITHUB_ACTIONS_APP_ID})`)) {
+            return [{ context: name, sourceAppId: GITHUB_ACTIONS_APP_ID }];
+          }
+          return body.includes(`required check ${name} `)
+            ? [{ context: name, sourceAppId: null }]
+            : [];
+        })
+      : PR_VALIDATION_REQUIRED_CHECK_NAMES.map((context) => ({
+          context,
+          sourceAppId: GITHUB_ACTIONS_APP_ID,
+        }));
     const snapshot = decision ? decisionRequiredCheckSnapshot(decision) : null;
-    const completedCheckChanged = blockedNames.some((name) => {
+    const completedCheckChanged = blockedSpecs.some((spec) => {
       const current = latestRequiredState(
-        { context: name, sourceAppId: GITHUB_ACTIONS_APP_ID },
+        spec,
         headChecks,
         [],
       )?.observation;
@@ -3476,7 +3482,7 @@ function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead }) {
         return false;
       }
       const observed = snapshot?.find(
-        (entry) => entry?.name === name && entry?.appId === GITHUB_ACTIONS_APP_ID,
+        (entry) => entry?.name === spec.context && entry?.appId === spec.sourceAppId,
       )?.observed;
       // An older or malformed decision has no snapshot. Reconcile it once and
       // replace it with direct evidence rather than inventing another clock
@@ -3500,73 +3506,140 @@ function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead }) {
     .map(({ prNumber, headSha, decisionKey }) => ({ prNumber, headSha, decisionKey }));
 }
 
-function pullRequestPageCount(response) {
-  const last = String(response?.headers?.link || "")
-    .split(",")
-    .find((part) => /;\s*rel="last"\s*$/.test(part));
-  const target = last?.match(/<([^>]+)>/)?.[1];
-  if (!target) {
-    return 1;
+const REQUIRED_CHECK_RECONCILIATION_QUERY = `
+  query RequiredCheckReconciliation($owner: String!, $repo: String!, $after: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequests(
+        first: ${REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE}
+        after: $after
+        states: OPEN
+        baseRefName: "master"
+        orderBy: {field: CREATED_AT, direction: ASC}
+      ) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          number
+          state
+          baseRefName
+          headRefOid
+          commits(last: 1) {
+            nodes {
+              commit {
+                oid
+                statusCheckRollup {
+                  contexts(first: 100) {
+                    pageInfo { hasNextPage }
+                    nodes {
+                      __typename
+                      ... on CheckRun {
+                        databaseId
+                        name
+                        status
+                        conclusion
+                        startedAt
+                        completedAt
+                        externalId
+                        title
+                        summary
+                        text
+                        checkSuite { app { databaseId slug } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   }
-  try {
-    const page = Number(new URL(target).searchParams.get("page"));
-    return Number.isSafeInteger(page) && page > 0 ? page : 1;
-  } catch {
-    return 1;
-  }
+`;
+
+function reconciliationCheckRun(run) {
+  return {
+    id: run.databaseId,
+    name: run.name,
+    external_id: run.externalId,
+    app: {
+      id: run.checkSuite?.app?.databaseId,
+      slug: run.checkSuite?.app?.slug,
+    },
+    status: String(run.status || "").toLowerCase(),
+    conclusion: run.conclusion == null ? null : String(run.conclusion).toLowerCase(),
+    started_at: run.startedAt,
+    completed_at: run.completedAt,
+    output: {
+      title: run.title,
+      summary: run.summary,
+      text: run.text,
+    },
+  };
 }
 
-async function listRequiredCheckReevaluationTargets({ github, context, core, nowMs }) {
+async function requiredCheckReconciliationSnapshot({ github, context, core }) {
   const { owner, repo } = context.repo;
-  const listPullPage = (page) => retryRead(
-    `could not list open PR page ${page} for required-check reconciliation`,
-    () =>
-      github.rest.pulls.list({
-        owner,
-        repo,
-        state: "open",
-        base: "master",
-        // Created/ascending makes new PRs append instead of reshuffling every
-        // page when unrelated comments change updated_at.
-        sort: "created",
-        direction: "asc",
-        per_page: REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE,
-        page,
-      }),
-  );
-  const firstPage = await listPullPage(1);
-  const pageCount = pullRequestPageCount(firstPage);
-  const slot = Math.floor(nowMs / REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS);
-  const page = ((slot % pageCount) + pageCount) % pageCount + 1;
-  const listedPulls = page === 1 ? firstPage : await listPullPage(page);
-  const pulls = listedPulls?.data || [];
-  // One stable PR-number page per schedule slot bounds head reads without making
-  // the first page a permanent eligibility boundary. With a stable open set,
-  // every PR is inspected within pageCount five-minute sweeps. A skipped page
-  // stays blocked; rotation delays recovery but cannot authorize a merge.
-  const heads = [...new Set(
-    pulls
-      .map((pull) => normalizeHeadSha(pull?.head?.sha || pull?.headRefOid))
-      .filter(Boolean),
-  )];
+  const pulls = [];
   const checkRunsByHead = new Map();
-  for (const headSha of heads) {
+  let after = null;
+  let pages = 0;
+  for (;;) {
     const response = await retryRead(
-      `could not read reconciliation checks at ${headSha}`,
-      () => github.rest.checks.listForRef({
-        owner,
-        repo,
-        ref: headSha,
-        filter: "all",
-        per_page: 100,
-      }),
+      `could not read required-check reconciliation page after ${after || "start"}`,
+      () => github.graphql(REQUIRED_CHECK_RECONCILIATION_QUERY, { owner, repo, after }),
     );
-    checkRunsByHead.set(headSha, response?.data?.check_runs || []);
+    pages += 1;
+    const connection = response?.repository?.pullRequests;
+    if (!connection || !Array.isArray(connection.nodes)) {
+      throw new Error("Required-check reconciliation returned an invalid pull-request page");
+    }
+    for (const pull of connection.nodes) {
+      const headSha = normalizeHeadSha(pull?.headRefOid);
+      const commit = pull?.commits?.nodes?.[0]?.commit;
+      const commitSha = normalizeHeadSha(commit?.oid);
+      const contexts = commit?.statusCheckRollup?.contexts;
+      if (!headSha || commitSha !== headSha) {
+        core.warning(
+          `Required-check reconciliation skipped PR #${pull?.number || "?"}: ` +
+            "its head and status-rollup commit did not match.",
+        );
+        continue;
+      }
+      if (contexts?.pageInfo?.hasNextPage) {
+        core.warning(
+          `Required-check reconciliation skipped PR #${pull.number}: its status rollup ` +
+            "exceeded 100 contexts.",
+        );
+        continue;
+      }
+      pulls.push(pull);
+      checkRunsByHead.set(
+        headSha,
+        (contexts?.nodes || [])
+          .filter((node) => node?.__typename === "CheckRun")
+          .map(reconciliationCheckRun),
+      );
+    }
+    if (!connection.pageInfo?.hasNextPage) {
+      break;
+    }
+    if (!connection.pageInfo.endCursor || connection.pageInfo.endCursor === after) {
+      throw new Error("Required-check reconciliation pagination did not advance");
+    }
+    after = connection.pageInfo.endCursor;
   }
+  return { pulls, checkRunsByHead, pages };
+}
 
+async function listRequiredCheckReevaluationTargets({ github, context, core }) {
+  // One GraphQL page carries 100 PRs and each head's current check rollup. This
+  // makes every open PR eligible on every sweep without one REST read per head,
+  // wall-clock page assignment, or mutable cursor state. A truncated rollup is
+  // skipped fail-closed rather than combined with incomplete evidence.
+  const snapshot = await requiredCheckReconciliationSnapshot({ github, context, core });
   const stale = requiredCheckReevaluationCandidates({
-    pulls,
-    checkRunsByHead,
+    pulls: snapshot.pulls,
+    checkRunsByHead: snapshot.checkRunsByHead,
   });
   const targets = stale.slice(0, REQUIRED_CHECK_REEVALUATION_LIMIT);
   if (stale.length > targets.length) {
@@ -3576,9 +3649,9 @@ async function listRequiredCheckReevaluationTargets({ github, context, core, now
     );
   }
   core.notice(
-    `Required-check reconciliation inspected PR page ${page}/${pageCount} ` +
-      `(${heads.length} head(s)), found ` +
-      `${stale.length} stale decision(s), and selected ${targets.length}.`,
+    `Required-check reconciliation read ${snapshot.pulls.length} PR(s) in ` +
+      `${snapshot.pages} GraphQL page(s), found ${stale.length} stale decision(s), and ` +
+      `selected ${targets.length}.`,
   );
   return targets;
 }
@@ -3588,15 +3661,9 @@ async function resolveTargets({
   headPollAttempts = 6,
   headPollDelayMs = 5000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  reconciliationNowMs = Date.now(),
 }) {
   if (context.eventName === "schedule") {
-    return listRequiredCheckReevaluationTargets({
-      github,
-      context,
-      core,
-      nowMs: reconciliationNowMs,
-    });
+    return listRequiredCheckReevaluationTargets({ github, context, core });
   }
   const numbers = [];
   const payload = context.payload;
@@ -4126,7 +4193,7 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
     const state = latestRequiredState(spec, checkRuns, statuses);
     if (
       PR_VALIDATION_REQUIRED_CHECK_NAMES.includes(spec.context) &&
-      spec.sourceAppId === GITHUB_ACTIONS_APP_ID
+      (spec.sourceAppId === GITHUB_ACTIONS_APP_ID || spec.sourceAppId == null)
     ) {
       observations.push({
         name: spec.context,

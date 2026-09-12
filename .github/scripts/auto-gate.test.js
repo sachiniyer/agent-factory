@@ -5969,7 +5969,6 @@ test("scheduled reconciliation compares the check state observed before decision
     }),
     context: { ...fakeContext(), eventName: "schedule" },
     core: fakeCore(),
-    reconciliationNowMs: 0,
   });
 
   assert.deepEqual(targets, [{
@@ -5979,7 +5978,46 @@ test("scheduled reconciliation compares the check state observed before decision
   }]);
 });
 
-test("scheduled reconciliation rotates a ten-head inspection window", async () => {
+test("scheduled reconciliation retains source-less required-check observations", async () => {
+  const build = checkRun({ id: 601, name: "Build", conclusion: "failure" });
+  const lint = checkRun({ id: 602, name: "Lint", conclusion: "success" });
+  const github = fakeGateGithub({
+    checkRuns: [build, lint],
+    requiredChecks: [{ context: "Build" }, { context: "Lint" }],
+  });
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /required check Build did not succeed/);
+  await autoGate.reportDecision({ github, context: fakeContext(), core: fakeCore(), result });
+  const written = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [{
+          id: 603,
+          app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+          ...written,
+        }, build, lint],
+      },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(targets, [], "an unchanged source-less check must not wake every sweep");
+});
+
+test("scheduled reconciliation batches head inspection and caps reevaluations", async () => {
   const pulls = [];
   const checksByHead = {};
   for (let number = 1; number <= 23; number += 1) {
@@ -5995,20 +6033,47 @@ test("scheduled reconciliation rotates a ten-head inspection window", async () =
     ];
   }
 
-  const inspectedBySweep = [];
-  for (let window = 0; window < 3; window += 1) {
-    const inspectedHeads = [];
-    await autoGate.resolveTargets({
-      github: scheduledReconciliationGithub({ pulls, checksByHead, inspectedHeads }),
-      context: { ...fakeContext(), eventName: "schedule" },
-      core: fakeCore(),
-      reconciliationNowMs: window * 5 * 60 * 1000,
-    });
-    assert.ok(inspectedHeads.length <= 10, "one sweep must make at most ten head reads");
-    inspectedBySweep.push(...inspectedHeads);
-  }
+  const inspectedHeads = [];
+  const graphqlReads = [];
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls,
+      checksByHead,
+      inspectedHeads,
+      graphqlReads,
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
 
-  assert.equal(new Set(inspectedBySweep).size, 23, "later sweeps inspect every deferred head");
+  assert.equal(graphqlReads.length, 1, "up to 100 PR/check rollups share one API read");
+  assert.equal(new Set(inspectedHeads).size, 23, "the batch does not hide later PRs");
+  assert.equal(targets.length, 10, "one sweep still starts at most ten reevaluations");
+});
+
+test("scheduled reconciliation skips a truncated check rollup fail-closed", async () => {
+  const core = fakeCore();
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          reconciliationDecision({
+            prNumber: 1465,
+            headSha: HEAD_SHA,
+            evaluatedAt: "2026-07-09T20:00:00Z",
+          }),
+          reconciliationRequiredCheck("Build", "2026-07-09T21:00:00Z"),
+        ],
+      },
+      truncatedHeads: [HEAD_SHA],
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core,
+  });
+
+  assert.deepEqual(targets, []);
+  assert.ok(core.warnings.some((warning) => /exceeded 100 contexts/.test(warning)));
 });
 
 test("scheduled reconciliation rotates past the first pull-request page", async () => {
@@ -6021,19 +6086,59 @@ test("scheduled reconciliation rotates past the first pull-request page", async 
   }
 
   const inspectedHeads = [];
-  for (let slot = 0; slot < 11; slot += 1) {
-    await autoGate.resolveTargets({
-      github: scheduledReconciliationGithub({ pulls, checksByHead, inspectedHeads }),
-      context: { ...fakeContext(), eventName: "schedule" },
-      core: fakeCore(),
-      reconciliationNowMs: slot * 5 * 60 * 1000,
-    });
-  }
+  const graphqlReads = [];
+  await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls,
+      checksByHead,
+      inspectedHeads,
+      graphqlReads,
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
 
   assert.ok(
     inspectedHeads.includes((101).toString(16).padStart(40, "0")),
-    "the least-recently-listed PR is inspected within ceil(101/10) sweeps",
+    "the least-recently-listed PR is inspected in the same sweep",
   );
+  assert.equal(graphqlReads.length, 2, "101 PRs require exactly two batched reads");
+});
+
+test("scheduled reconciliation does not map PR eligibility to cron time", async () => {
+  const pulls = [];
+  const checksByHead = {};
+  for (let number = 1; number <= 120; number += 1) {
+    const sha = number.toString(16).padStart(40, "0");
+    pulls.push(reconciliationPull(number, sha));
+    checksByHead[sha] = [];
+  }
+
+  const inspectedHeads = [];
+  const graphqlReads = [];
+  // The minute-zero delivery was dropped. The next run occupies the wall-clock
+  // slot that used to select page 2 and must still inspect page 1's PRs.
+  const deliveredSlot = 1;
+  await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls,
+      checksByHead,
+      inspectedHeads,
+      graphqlReads,
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+    // The only delivered run occupies a wall-clock slot that used to select
+    // page 2. Batched enumeration has no clock or cursor to skip page 1.
+    reconciliationNowMs: deliveredSlot * 5 * 60 * 1000,
+  });
+
+  assert.ok(
+    inspectedHeads.includes((1).toString(16).padStart(40, "0")),
+    "a dropped minute-zero run must not starve page 1",
+  );
+  assert.equal(new Set(inspectedHeads).size, 120, "one delivered sweep inspects every PR");
+  assert.equal(graphqlReads.length, 2, "120 PRs use two batched reads");
 });
 
 test("scheduled reconciliation caps one sweep at ten PRs", async () => {
@@ -6059,7 +6164,6 @@ test("scheduled reconciliation caps one sweep at ten PRs", async () => {
     github: scheduledReconciliationGithub({ pulls, checksByHead }),
     context: { ...fakeContext(), eventName: "schedule" },
     core: fakeCore(),
-    reconciliationNowMs: 0,
   });
 
   assert.equal(targets.length, 10, "runner work is bounded even when more stale PRs exist");
@@ -11610,28 +11714,72 @@ function reconciliationDecision({
   };
 }
 
-function scheduledReconciliationGithub({ pulls, checksByHead, inspectedHeads = [] }) {
+function scheduledReconciliationGithub({
+  pulls,
+  checksByHead,
+  inspectedHeads = [],
+  graphqlReads = [],
+  truncatedHeads = [],
+}) {
+  const truncated = new Set(truncatedHeads);
   return {
-    rest: {
-      checks: {
-        listForRef: async (options) => {
-          inspectedHeads.push(options.ref);
-          return { data: { check_runs: checksByHead[options.ref] || [] } };
+    graphql: async (_query, { after }) => {
+      graphqlReads.push(after);
+      const start = after == null ? 0 : Number(after);
+      const page = pulls.slice(start, start + 100);
+      const end = start + page.length;
+      for (const pull of page) {
+        inspectedHeads.push(pull.head.sha);
+      }
+      return {
+        repository: {
+          pullRequests: {
+            pageInfo: {
+              hasNextPage: end < pulls.length,
+              endCursor: end < pulls.length ? String(end) : null,
+            },
+            nodes: page.map((pull) => ({
+              number: pull.number,
+              state: "OPEN",
+              baseRefName: pull.base.ref,
+              headRefOid: pull.head.sha,
+              commits: {
+                nodes: [{
+                  commit: {
+                    oid: pull.head.sha,
+                    statusCheckRollup: {
+                      contexts: {
+                        pageInfo: { hasNextPage: truncated.has(pull.head.sha) },
+                        nodes: (checksByHead[pull.head.sha] || []).map((run) => ({
+                          __typename: "CheckRun",
+                          databaseId: run.id,
+                          name: run.name,
+                          status: String(run.status).toUpperCase(),
+                          conclusion: run.conclusion == null
+                            ? null
+                            : String(run.conclusion).toUpperCase(),
+                          startedAt: run.started_at,
+                          completedAt: run.completed_at,
+                          externalId: run.external_id,
+                          title: run.output?.title,
+                          summary: run.output?.summary,
+                          text: run.output?.text,
+                          checkSuite: {
+                            app: {
+                              databaseId: run.app?.id,
+                              slug: run.app?.slug,
+                            },
+                          },
+                        })),
+                      },
+                    },
+                  },
+                }],
+              },
+            })),
+          },
         },
-      },
-      pulls: {
-        list: async ({ per_page: perPage, page = 1 }) => {
-          const lastPage = Math.max(1, Math.ceil(pulls.length / perPage));
-          const start = (page - 1) * perPage;
-          const link = lastPage > 1
-            ? `<https://api.github.test/pulls?per_page=${perPage}&page=${lastPage}>; rel="last"`
-            : "";
-          return {
-            data: pulls.slice(start, start + perPage),
-            headers: { link },
-          };
-        },
-      },
+      };
     },
   };
 }
