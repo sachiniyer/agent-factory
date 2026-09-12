@@ -44,6 +44,26 @@ func TestWatchWriterExitBreaksLimitCapacityWait(t *testing.T) {
 	}
 }
 
+func TestProtectedQueueStopBelowCapacityDrainsFiniteInput(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "stop-below-capacity")
+	if err := queue.enqueue("already-parked", true); err != nil {
+		t.Fatalf("seed parked event: %v", err)
+	}
+	stopCh := make(chan struct{})
+	close(stopCh)
+	writersStopped := make(chan struct{})
+	close(writersStopped)
+	w := &taskWatcher{
+		taskID: "stop-below-capacity", sup: newWatcherSupervisor(),
+		queue: queue, stopCh: stopCh,
+	}
+	w.consumeLines(strings.NewReader("accepted-one\naccepted-two\n"), &tailBuffer{}, writersStopped)
+
+	if got := queue.pendingCount(); got != 3 {
+		t.Fatalf("protected stop retained %d events, want parked event plus 2 accepted events", got)
+	}
+}
+
 func TestParkedStatusPublicationExcludesSupervisorStatus(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)

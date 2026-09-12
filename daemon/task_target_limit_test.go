@@ -135,32 +135,55 @@ func TestTaskDeliveryIntoHealthyTargetIsUnchanged(t *testing.T) {
 	}
 }
 
-func TestDeliverWatchEventRecordsLimitParkAndRequestsReplay(t *testing.T) {
+func TestLiveWatchLimitParkRequiresDurableQueue(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupTaskRepo(t)
-	if err := task.AddTask(task.Task{
-		ID: "a4223003", Name: "watch-limit", Prompt: "event: {{line}}",
-		WatchCmd: "watch.sh", TargetSession: "limited", ProjectPath: repoPath,
-		Program: "claude", Enabled: true, CreatedAt: time.Now(),
-	}); err != nil {
-		t.Fatalf("AddTask: %v", err)
-	}
 	original := deliverPromptForTask
 	deliverPromptForTask = func(DeliverPromptRequest) (taskPromptDeliveryResult, error) {
 		return taskPromptDeliveryResult{status: TaskStatusLimitParked}, nil
 	}
 	t.Cleanup(func() { deliverPromptForTask = original })
 
-	err := deliverWatchEvent("a4223003", "issue 4223")
-	if !errors.Is(err, errTargetLimitReached) {
-		t.Fatalf("watch delivery error = %v, want usage-limit replay sentinel", err)
-	}
-	stored, getErr := task.GetTask("a4223003")
-	if getErr != nil {
-		t.Fatalf("GetTask: %v", getErr)
-	}
-	if stored.LastRunStatus != TaskStatusLimitParked || stored.LastRunAt == nil {
-		t.Fatalf("watch park recorded status=%q at=%v, want %q", stored.LastRunStatus, stored.LastRunAt, TaskStatusLimitParked)
+	for _, tc := range []struct {
+		name   string
+		taskID string
+		queue  func() *eventQueue
+	}{
+		{name: "missing queue", taskID: "a4223003"},
+		{name: "failed append", taskID: "a4223005", queue: func() *eventQueue {
+			queue := newEventQueue(t.TempDir(), "a4223005")
+			queue.appendRecord = func(string, []byte) (int, error) {
+				return 0, errors.New("injected append failure")
+			}
+			return queue
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := task.AddTask(task.Task{
+				ID: tc.taskID, Name: "watch-limit", Prompt: "event: {{line}}",
+				WatchCmd: "watch.sh", TargetSession: "limited", ProjectPath: repoPath,
+				Program: "claude", Enabled: true, CreatedAt: time.Now(),
+			}); err != nil {
+				t.Fatalf("AddTask: %v", err)
+			}
+			var queue *eventQueue
+			if tc.queue != nil {
+				queue = tc.queue()
+			}
+			w := &taskWatcher{
+				taskID: tc.taskID, sup: newWatcherSupervisor(), queue: queue,
+				stopCh: make(chan struct{}),
+			}
+			w.handleEvent("issue 4223", &tailBuffer{})
+
+			stored, getErr := task.GetTask(tc.taskID)
+			if getErr != nil {
+				t.Fatalf("GetTask: %v", getErr)
+			}
+			if stored.LastRunStatus == TaskStatusLimitParked || stored.LastRunAt != nil {
+				t.Fatalf("unretained event published status=%q at=%v", stored.LastRunStatus, stored.LastRunAt)
+			}
+		})
 	}
 }
 
