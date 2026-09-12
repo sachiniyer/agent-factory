@@ -16,28 +16,63 @@ import (
 // process, so an agent-looking argument to an arbitrary executable must never
 // match.
 func AgentForCommand(command string) string {
-	if strings.TrimSpace(command) == "" {
+	invocation, ok := literalAgentCommand(command)
+	if !ok {
 		return ""
+	}
+	return invocation.agent
+}
+
+type agentCommand struct {
+	agent      string
+	executable string
+}
+
+func literalAgentCommand(command string) (agentCommand, bool) {
+	if strings.TrimSpace(command) == "" {
+		return agentCommand{}, false
 	}
 	call, ok := singleSimpleCall(command)
 	if !ok || !callIsLiteral(call) {
-		return ""
+		return agentCommand{}, false
 	}
 	// Detection, so the separator is ignored: `exec -- claude` is still a command
 	// about claude, and the account boundary refuses it with its own message.
 	words, _ := stripExecPrefix(call.Args)
 	args, _ := literalCommandArgs(words)
 	if len(args) == 0 {
-		return ""
+		return agentCommand{}, false
 	}
+	executable := args[0]
 	if isTrustedEnvExecutable(args[0]) {
 		invocation, err := envcommand.Parse(args[1:], envcommand.Policy{AllowAssignments: true})
 		if err != nil || invocation.CommandIndex < 0 {
-			return ""
+			return agentCommand{}, false
 		}
-		return supportedAgent(args[1+invocation.CommandIndex])
+		executable = args[1+invocation.CommandIndex]
 	}
-	return supportedAgent(args[0])
+	agent := supportedAgent(executable)
+	return agentCommand{agent: agent, executable: executable}, agent != ""
+}
+
+// credentialAgentForCommand is the fail-closed classifier for an untrusted
+// resolved program. Unlike AgentForCommand it preserves the executable token as
+// identity-bearing data and admits only a bare supported-agent name. A slash
+// means the caller selected a particular file, and neither its basename nor the
+// path spelling proves that file is the agent.
+//
+// The residual accepted set is a literal bare agent invocation, optionally
+// preceded by exec or one of the modelled system env spellings. Every
+// path-qualified form is deliberately credential-free, including legitimate
+// custom installs such as /opt/bin/codex: this boundary receives no trusted
+// provenance for that file. The command still launches, and an operator can
+// explicitly authorize required names through session_env_passthrough.
+func credentialAgentForCommand(command string) string {
+	invocation, ok := literalAgentCommand(command)
+	if !ok || strings.Contains(invocation.executable, "/") {
+		return ""
+	}
+	return invocation.agent
 }
 
 func supportedAgent(command string) string {

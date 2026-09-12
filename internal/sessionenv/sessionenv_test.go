@@ -59,6 +59,25 @@ func TestAgentForCommandAuthenticatesEnvWrapper(t *testing.T) {
 	}
 }
 
+func TestCredentialAgentForCommandRequiresBareExecutable(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		want    string
+	}{
+		{command: "codex --model o3", want: "codex"},
+		{command: "exec -- codex", want: "codex"},
+		{command: "/usr/bin/env codex", want: "codex"},
+		{command: "./codex"},
+		{command: "/opt/bin/codex"},
+		{command: "exec -- ./codex"},
+		{command: "/usr/bin/env /opt/bin/codex"},
+	} {
+		if got := credentialAgentForCommand(test.command); got != test.want {
+			t.Errorf("credentialAgentForCommand(%q) = %q, want %q", test.command, got, test.want)
+		}
+	}
+}
+
 func TestAbsoluteSystemEnvPreservesAgentCredentials(t *testing.T) {
 	const credential = "OPENAI_API_KEY=fixture"
 	for _, command := range []string{"/usr/bin/env codex", "/bin/env codex"} {

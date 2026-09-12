@@ -224,7 +224,11 @@ func agentServerExecInvocation(args []string) error {
 	if !ok {
 		return fmt.Errorf("malformed internal agent-server environment invocation")
 	}
-	agent := AgentForCommand(program)
+	// agent-server receives the resolved program string but no trusted identity
+	// for a path-qualified child. Keep that state structurally distinct from a
+	// bare supported-agent invocation: reducing ./codex to the basename "codex"
+	// would grant credentials to a repository-controlled executable.
+	agent := credentialAgentForCommand(program)
 	environ := FilterForCommand(os.Environ(), agent, program, extras)
 	executable, err := os.Executable()
 	if err != nil {

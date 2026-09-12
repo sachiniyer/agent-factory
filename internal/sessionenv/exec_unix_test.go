@@ -99,6 +99,49 @@ func TestAgentServerExecInvocationBindsGrantToCurrentBinary(t *testing.T) {
 	}
 }
 
+func TestAgentServerExecInvocationDoesNotGrantPathQualifiedAgentLookalike(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "fixture")
+	wantErr := errors.New("stop before exec")
+	var gotEnvironment []string
+	previous := processExec
+	processExec = func(_ string, _ []string, environ []string) error {
+		gotEnvironment = append([]string(nil), environ...)
+		return wantErr
+	}
+	t.Cleanup(func() { processExec = previous })
+
+	serverArgs := []string{"agent-server", "--listen", ":1", "--repo", "/r", "--title", "t",
+		"--program", "./codex", "--program-resolved"}
+	if err := agentServerExecInvocation(append([]string{"0"}, serverArgs...)); !errors.Is(err, wantErr) {
+		t.Fatalf("path-qualified handoff error = %v, want test sentinel", err)
+	}
+	if slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture") {
+		t.Fatal("repository-controlled ./codex received the Codex credential")
+	}
+}
+
+func TestAgentServerExecInvocationAllowsExplicitGrantForPathQualifiedProgram(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "fixture")
+	wantErr := errors.New("stop before exec")
+	var gotEnvironment []string
+	previous := processExec
+	processExec = func(_ string, _ []string, environ []string) error {
+		gotEnvironment = append([]string(nil), environ...)
+		return wantErr
+	}
+	t.Cleanup(func() { processExec = previous })
+
+	serverArgs := []string{"agent-server", "--listen", ":1", "--repo", "/r", "--title", "t",
+		"--program", "/opt/bin/codex", "--program-resolved"}
+	args := append([]string{"1", "OPENAI_API_KEY"}, serverArgs...)
+	if err := agentServerExecInvocation(args); !errors.Is(err, wantErr) {
+		t.Fatalf("explicitly authorized handoff error = %v, want test sentinel", err)
+	}
+	if !slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture") {
+		t.Fatal("operator-authorized credential was stripped from the path-qualified program")
+	}
+}
+
 func TestAgentServerExecInvocationDoesNotGrantNestedFakeAf(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "fixture")
 	wantErr := errors.New("stop before exec")
