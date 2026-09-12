@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"net"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -440,10 +442,27 @@ func environmentValue(environ []string, name string) string {
 }
 
 func localDockerEndpoint(endpoint string) bool {
-	endpoint = strings.ToLower(strings.TrimSpace(endpoint))
-	return strings.HasPrefix(endpoint, "unix://") ||
-		strings.HasPrefix(endpoint, "npipe://") ||
-		strings.HasPrefix(endpoint, "fd://")
+	endpoint = strings.TrimSpace(endpoint)
+	lower := strings.ToLower(endpoint)
+	if strings.HasPrefix(lower, "unix://") ||
+		strings.HasPrefix(lower, "npipe://") ||
+		strings.HasPrefix(lower, "fd://") {
+		return true
+	}
+	// A TCP endpoint whose host resolves to the loopback range is local by
+	// definition — the daemon can reach it regardless of transport scheme.
+	// tcp://127.0.0.1:2375, tcp://127.x.x.x:*, and tcp://[::1]:* are all local;
+	// any other host (including a resolvable remote hostname over TCP) is remote.
+	if strings.HasPrefix(lower, "tcp://") {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			return false
+		}
+		host := u.Hostname() // strips port and brackets from IPv6
+		ip := net.ParseIP(host)
+		return ip != nil && ip.IsLoopback()
+	}
+	return false
 }
 
 // remoteDockerEngineError is the one wording for "the Docker engine is not on this

@@ -256,3 +256,35 @@ func TestBackendUnusableReason_DockerFailsClosedOnProbeError(t *testing.T) {
 	require.Error(t, err, "an unprovable locality must not be offered as usable")
 	assert.Contains(t, err.Error(), "local", "the reason must name the locality check that failed")
 }
+
+// TestLocalDockerEndpoint_LoopbackTCP checks that loopback TCP endpoints are
+// treated as local (tcp://127.0.0.1 and tcp://[::1]) while a genuinely remote
+// TCP host is still refused.
+func TestLocalDockerEndpoint_LoopbackTCP(t *testing.T) {
+	cases := []struct {
+		endpoint string
+		want     bool
+	}{
+		// loopback IPv4 — must be accepted as local
+		{"tcp://127.0.0.1:2375", true},
+		// loopback IPv4 — whole 127.0.0.0/8 range
+		{"tcp://127.0.2.3:2376", true},
+		// loopback IPv6 — must be accepted as local
+		{"tcp://[::1]:2375", true},
+		// remote IPv4 — must be refused
+		{"tcp://192.168.1.1:2375", false},
+		// remote hostname over TCP — must be refused
+		{"tcp://remote.example.invalid:2376", false},
+		// existing local schemes still work
+		{"unix:///var/run/docker.sock", true},
+		{"npipe:////./pipe/docker_engine", true},
+		{"fd://", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			got := localDockerEndpoint(tc.endpoint)
+			assert.Equalf(t, tc.want, got,
+				"localDockerEndpoint(%q): got %v, want %v", tc.endpoint, got, tc.want)
+		})
+	}
+}
