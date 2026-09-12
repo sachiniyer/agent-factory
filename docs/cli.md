@@ -187,7 +187,7 @@ The background daemon hosts task cron schedules, watch-task scripts, session mon
 af daemon install      # register autostart at login
 af daemon restart      # restart a running daemon and re-adopt live sessions
 af daemon adopt        # hand a detached daemon back to the installed autostart unit
-af daemon uninstall    # remove the unit (the local daemon still starts on demand for local operations)
+af daemon uninstall    # remove the unit (lifecycle-owning operations for the default local target still start the daemon on demand)
 af daemon status       # read-only health, supervision, and config freshness (+ --json)
 ```
 

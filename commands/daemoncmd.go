@@ -102,7 +102,7 @@ var daemonUninstallCmd = &cobra.Command{
 			return nil
 		}
 		fmt.Printf("daemon autostart removed: %s\n", unitPath)
-		fmt.Println("the local daemon still starts on demand for local operations; bare af also checks local enabled tasks")
+		fmt.Println("lifecycle-owning operations for the default local target still start the daemon on demand; bare af also checks local enabled tasks")
 		return nil
 	},
 }
