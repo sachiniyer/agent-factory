@@ -525,7 +525,7 @@ func (c *scanContext) liveWorkingDirs() map[int]string {
 	c.cwds = map[int]string{}
 	for pid := range c.snap {
 		if dir, ok := daemonProcessCwd(pid); ok && dir != "" {
-			c.cwds[pid] = filepath.Clean(dir)
+			c.cwds[pid] = normalizeHome(dir)
 		}
 	}
 	return c.cwds

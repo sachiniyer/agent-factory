@@ -890,7 +890,7 @@ func processReferencedHomes(snap map[int]proctree.Process) map[string]bool {
 	homes := map[string]bool{}
 	for pid := range snap {
 		if home, status := proctree.LookupEnv(pid, "AGENT_FACTORY_HOME"); status == proctree.EnvFound && home != "" {
-			homes[filepath.Clean(home)] = true
+			homes[normalizeHome(home)] = true
 		}
 	}
 	return homes
