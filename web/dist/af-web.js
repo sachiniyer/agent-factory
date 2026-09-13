@@ -18323,8 +18323,10 @@ function doOpenAccountLogin(agent, name) {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   setAccountStatus(agent, name, `Starting the ${agent} login\u2026`, false);
   void startAccountLogin(agent, name, tok).then((login) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     if (login.finished || login.session_name === "") {
       const copy = loginWithoutPaneCopy(login);
       setAccountStatus(agent, name, `${copy.status} \xB7 ${copy.detail}`, !login.logged_in);

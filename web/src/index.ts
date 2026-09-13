@@ -1731,9 +1731,16 @@ function doOpenAccountLogin(agent: string, name: string): void {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   setAccountStatus(agent, name, `Starting the ${agent} login…`, false);
   void startAccountLogin(agent, name, tok)
     .then((login) => {
+      // A disconnect during AccountLogin's RPC leaves accountLogin null for the
+      // reaper; a stale response would mount an orphan overlay bound to tok into
+      // the detached modalHost (reused by the next AppShell), which reappears on
+      // reconnect. Commit only while the same connection generation and credential
+      // are still installed — the same gate openConfirm's restore branch uses.
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
       if (login.finished || login.session_name === "") {
         const copy = loginWithoutPaneCopy(login);
         setAccountStatus(agent, name, `${copy.status} · ${copy.detail}`, !login.logged_in);
