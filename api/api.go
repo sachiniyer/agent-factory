@@ -482,7 +482,17 @@ func repoHasInstanceTitle(repoID, title string) (bool, error) {
 		return false, err
 	}
 	for i := range instances {
-		if instances[i].Title == title {
+		// Skip archived rows: the daemon intentionally reclaims an archived-only
+		// title by renaming the archived record to "<title> (archived)" and
+		// proceeding with the create (renameArchivedForReuseLocked). Counting
+		// an archived row as "already exists" would abort a create the daemon
+		// would allow, with the wrong error. RecordedLiveness resolves both
+		// the explicit Liveness field and the legacy Status fallback so a row
+		// persisted before the Liveness field existed is still detected. The
+		// authoritative race-safe check still happens inside the daemon under
+		// the per-repo file lock, so letting these through is safe — the daemon
+		// performs its own refusal or reclaim.
+		if instances[i].Title == title && session.RecordedLiveness(instances[i]) != session.LiveArchived {
 			return true, nil
 		}
 	}
