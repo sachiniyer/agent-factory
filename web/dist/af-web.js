@@ -7897,6 +7897,9 @@ var ConfigPane = class {
     if (this.editing === e.key) {
       this.editingInput = input;
     }
+    if (this.status && !this.status.error && this.status.key === e.key && this.editingInput === null) {
+      this.editingInput = input;
+    }
     input.setAttribute("aria-label", e.key);
     const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
     const dirty = h("span", { class: "af-config-dirty", role: "status" }, "Unsaved");
