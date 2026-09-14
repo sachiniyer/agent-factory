@@ -413,25 +413,60 @@ func accountSwapPrompt(swap *autoAccountSwap, prompt string) string {
 	return notice + "\n\n" + strings.TrimSpace(prompt)
 }
 
+// accountSwapTrustDismissInterval paces the guarded trust-dialog dismissal a
+// replacement Codex's conversation capture runs while it waits. The interval
+// must stay a fraction of conversationCaptureTimeout: the dialog has to be
+// answered early enough that Codex can still finish its session file inside
+// the capture window.
+var accountSwapTrustDismissInterval = 200 * time.Millisecond
+
 // captureAccountSwapConversation binds Codex discovery to the replacement
 // runtime while the limit-resume operation still owns its fence. Account swaps
 // cannot use the ordinary asynchronous capture: that goroutine serializes its
 // write through the same per-session operation lock held by the caller, so the
 // pending recovery marker could otherwise be cleared and checkpointed before
 // the conversation id became durable.
+//
+// The wait is where the trap in #4393 sits: a fresh account home has not yet
+// trusted the worktree, so the replacement Codex can open its directory-trust
+// dialog and mint no rollout (#4392). The status poll skips a pending-swap row
+// entirely, and delivery's own dismissal runs only after this returns — so
+// nobody else ever answers it, no conversation id can appear, and every retry
+// re-mints the same wedged pane. Pump the existing guarded recognizer for the
+// whole capture window so the rollout that makes this session recoverable can
+// actually be written.
 func captureAccountSwapConversation(instance *session.Instance, snap session.ConversationCaptureSnapshot) error {
 	token := instance.AgentRuntimeToken()
 	if token.Agent() != tmux.ProgramCodex {
 		return nil
 	}
-	conversation, err := session.CaptureAgentConversation(token.Agent(), snap, conversationCaptureTimeout)
-	if err != nil {
-		return fmt.Errorf("capture replacement Codex conversation: %w", err)
+	type captureResult struct {
+		conversation session.AgentConversationData
+		err          error
 	}
-	if !conversation.HasID() {
+	resultCh := make(chan captureResult, 1)
+	go func() {
+		conversation, err := session.CaptureAgentConversation(token.Agent(), snap, conversationCaptureTimeout)
+		resultCh <- captureResult{conversation, err}
+	}()
+	var res captureResult
+	ticker := time.NewTicker(accountSwapTrustDismissInterval)
+	for done := false; !done; {
+		select {
+		case res = <-resultCh:
+			done = true
+		case <-ticker.C:
+			instance.CheckAndHandleTrustPrompt()
+		}
+	}
+	ticker.Stop()
+	if res.err != nil {
+		return fmt.Errorf("capture replacement Codex conversation: %w", res.err)
+	}
+	if !res.conversation.HasID() {
 		return errors.New("replacement Codex runtime did not expose a conversation id")
 	}
-	if !instance.SetAgentConversationForRuntime(token, conversation) {
+	if !instance.SetAgentConversationForRuntime(token, res.conversation) {
 		return errors.New("replacement Codex runtime changed before its conversation id could be recorded")
 	}
 	return nil

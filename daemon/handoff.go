@@ -124,7 +124,12 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// see it, and only discovered the refusal after the user chose an agent and
 	// confirmed. Moving it into the predicate both sides already call is what stops
 	// the two from disagreeing about the same session again.
-	if err := instance.ValidateRuntimeAction(session.RuntimeActionHandoff); err != nil {
+	//
+	// The check sees the request's target: a handoff that names the account a
+	// committed swap already moved this session to is the retry that refusal
+	// advertises, not a second lifecycle action (#4393). Every other target —
+	// and every other lifecycle axis — still refuses.
+	if err := instance.ValidateHandoffRuntimeAction(req.To, req.Account); err != nil {
 		return HandoffSessionResponse{}, err
 	}
 	if strings.TrimSpace(req.Account) != "" {
