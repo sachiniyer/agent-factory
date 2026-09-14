@@ -3107,11 +3107,30 @@ function beginTabRename(
   input.select();
 }
 
+/** Why a managed-but-inert row cannot be opened, appended to its title (#4394).
+ *  Killable without lifecycle_action means lifecycleActionFor withheld the verb
+ *  for a durable cause the projection still names: a kill tombstone finishing
+ *  teardown, a startup whose runtime was never confirmed, or a committed
+ *  account swap still in flight. An unrecognized cause still gets the bare
+ *  refusal rather than going silent again. */
+function inertRowReason(s: SessionData): string {
+  let cause = "";
+  if (s.user_killed === true) {
+    cause = "kill in progress";
+  } else if (s.startup_state_unknown === true) {
+    cause = "startup could not be confirmed";
+  } else if (s.pending_account_swap !== undefined) {
+    cause = "account swap in progress";
+  }
+  return cause === "" ? "cannot be opened" : `cannot be opened · ${cause}`;
+}
+
 /** One session row: a status dot, the (prefixed) title, the branch line, and a reserved
  *  slot for its daemon-projected management actions (#2186, #2223). Clicking opens
  *  only a lifecycle-actionable session by stable id; a kill-only startup-unknown row
- *  retains its button without becoming attachable. */
-function sessionRow(
+ *  retains its button without becoming attachable. Every inert row carries
+ *  aria-disabled, and a managed-but-inert one's title says why (#4394). */
+export function sessionRow(
   s: SessionData,
   selected: boolean,
   openSession: (id: string) => void,
@@ -3177,19 +3196,26 @@ function sessionRow(
     : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
+  // A managed-but-inert row keeps its Kill button but cannot be opened; its
+  // title says why. The reason rides a dataset fragment like the other title
+  // parts so refreshIdleReasonAges preserves it on an idle-age repaint.
+  const inertReason = managed && !actionable ? `; ${inertRowReason(s)}` : "";
   row.dataset.idleTitleBase = `${s.title} — ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
+  row.dataset.idleTitleInert = inertReason;
   row.setAttribute(
     "title",
-    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}`,
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${inertReason}`,
   );
-  if (!actionable && !managed) {
-    // The server withheld both capabilities: a creating row has no session yet,
-    // while an id-less row has no unambiguous mutation target.
-    row.setAttribute("aria-disabled", "true");
-  } else if (actionable) {
+  if (actionable) {
     row.onclick = () => openSession(s.id);
+  } else {
+    // Every inert row says so (#4394). An unmanaged row is a creating row with
+    // no session yet or an id-less row with no unambiguous mutation target; a
+    // managed-but-inert one still draws its Kill button, so without this it
+    // looked live while swallowing every click.
+    row.setAttribute("aria-disabled", "true");
   }
   return row;
 }
@@ -3211,7 +3237,7 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}`,
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`,
       );
     }
   }
