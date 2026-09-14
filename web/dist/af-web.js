@@ -11755,6 +11755,24 @@ var InstallAffordance = class {
   }
 };
 
+// src/shortcut-focus.ts
+function restoreShortcutFocus(navigationTarget, rail) {
+  if (navigationTarget?.isConnected && navigationTarget !== document.body) {
+    navigationTarget.focus({ preventScroll: true });
+  }
+  if (document.activeElement === navigationTarget && navigationTarget !== document.body) {
+    return;
+  }
+  if (rail) {
+    rail.tabIndex = -1;
+    rail.focus({ preventScroll: true });
+    if (document.activeElement === rail) {
+      return;
+    }
+  }
+  document.activeElement?.blur();
+}
+
 // src/time.ts
 function formatDuration(ms) {
   const age = Math.max(0, ms);
@@ -18947,18 +18965,7 @@ function onKeydown(e) {
       const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       shell?.openNewTabPicker(() => {
         focusRail();
-        if (navigationTarget?.isConnected && navigationTarget !== document.body) {
-          navigationTarget.focus({ preventScroll: true });
-        }
-        if (document.activeElement !== navigationTarget || navigationTarget === document.body) {
-          const rail = root?.querySelector(".af-rail");
-          if (rail) {
-            rail.tabIndex = -1;
-            rail.focus({ preventScroll: true });
-          } else {
-            document.activeElement?.blur();
-          }
-        }
+        restoreShortcutFocus(navigationTarget, root?.querySelector(".af-rail") ?? null);
       });
       break;
     }
