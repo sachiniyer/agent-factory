@@ -408,6 +408,12 @@ new account starts a fresh conversation. Use `--brief` to replace the prompt,
 or combine `--to claude --account work` to change both agent and account.
 The recorded handoff includes the outgoing and incoming accounts and branch tip.
 
+The reserved `root` agent accepts the account form too — `af sessions handoff
+root --account personal` moves which identity the same agent authenticates as,
+while its worktree, branch, and singleton status are untouched. `af sessions
+handoff root --to <agent>` stays refused: changing the agent changes what root
+is, which no handoff may do.
+
 If an agent or account handoff starts its replacement but cannot confirm whether
 the mission was submitted, af suppresses automatic redelivery because the first
 submission may already have landed. Inspect the replacement pane, then choose
