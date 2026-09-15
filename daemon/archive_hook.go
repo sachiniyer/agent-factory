@@ -41,6 +41,15 @@ var onArchiveHookAfterStart func(cmd *exec.Cmd, cancel context.CancelFunc)
 // context.Canceled. Production always leaves it nil.
 var onArchiveHookMakeContext func() (context.Context, context.CancelFunc)
 
+// onArchiveHookBeforeStart, if non-nil, is called with the fully configured
+// hook command immediately before cmd.Start(). Tests use it to attach an
+// exit-observation pipe through cmd.ExtraFiles — the hook shell inherits the
+// write end and the kernel closes it only when the process image is destroyed,
+// so an EOF on the read side proves the shell terminated rather than guessing
+// it has had time to — and to observe cmd.Cancel running, which is what proves
+// os/exec's watchCtx took its ctx.Done() arm. Production always leaves it nil.
+var onArchiveHookBeforeStart func(cmd *exec.Cmd)
+
 const onArchiveHookWaitDelay = 2 * time.Second
 
 type onArchiveHookContext struct {
@@ -163,6 +172,9 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 		return nil
 	}
 
+	if onArchiveHookBeforeStart != nil {
+		onArchiveHookBeforeStart(cmd)
+	}
 	if err = cmd.Start(); err == nil {
 		if onArchiveHookAfterStart != nil {
 			onArchiveHookAfterStart(cmd, cancel)
