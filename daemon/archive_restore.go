@@ -43,7 +43,7 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 	m.noteRuntimeReplaced(repoID, instance)
 	m.persistRuntimeReplacement(repoID, title, instance)
 	m.info().Printf("restored remote session %q (repo %s): fresh sandbox provisioned, branch cloned back, agent relaunched", title, repoID)
-	return title, nil
+	return restoredArchiveResult(instance, instance.GetWorktreePath())
 }
 
 // RestoreArchived restores an archived session (#1028): it moves the worktree
