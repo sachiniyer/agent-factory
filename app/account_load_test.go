@@ -28,6 +28,11 @@ func remoteAccountLoadHome(t *testing.T) *home {
 			}))
 		case "/v1/QuotaReport":
 			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.QuotaReportResponse{}))
+		case "/v1/ListAccounts":
+			// remoteSectionsLoadCmd reads Accounts and Usage in one command, so
+			// a remote Usage test still owes this route a stub even when the
+			// accounts seam is the one under test (#4361).
+			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.ListAccountsResponse{}))
 		default:
 			t.Errorf("unexpected remote request: %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
