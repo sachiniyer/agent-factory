@@ -229,7 +229,25 @@ type TmuxSession struct {
 	// behind it, and a teardown must gate on liveness for all of them. Only Start
 	// can establish otherwise, and only at the two points below.
 	provenNoPane bool
-	provenMu     sync.RWMutex
+	// closedConclusively records that closeAndWaitForPaneExit completed a
+	// conclusive non-blind close — the pane was observed to exit. It is scoped to
+	// the account-swap redundant-stop path: a redundant stopForAccountSwap can skip
+	// re-closing an already-dead session rather than re-classifying it blind and
+	// wrapping ErrAccountSwapAgentTeardownBlind onto an unrelated error (#703b4a70).
+	//
+	// It is NOT used by closeTabForDestructiveTeardown because that path consumes
+	// the flag before any of the three clearing paths run — Start, RestoreWithResult's
+	// live-session branch, or a second closeAndWaitForPaneExit call — so a proof
+	// taken at close time could be stale by the time teardown checks it (an external
+	// process could have recreated the session in between). Cleared at the top of
+	// every closeAndWaitForPaneExit call; re-latched only on conclusive non-blind
+	// success. Also cleared by Start and RestoreWithResult's live-session branch.
+	// Its one consumer, stopForAccountSwap, reads it through
+	// ClosedConclusivelyAndStillAbsent, which re-proves the name absent at skip
+	// time so a stale latch cannot pass a recreated session.
+	// Guarded by provenMu.
+	closedConclusively bool
+	provenMu           sync.RWMutex
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.
@@ -406,6 +424,62 @@ func (t *TmuxSession) ProvenNoPane() bool {
 	return t.provenNoPane
 }
 
+// ClosedConclusively reports that the most recent closeAndWaitForPaneExit call
+// completed with the pane observed to have exited (blind=false, PaneStateKnown).
+// This is used by the account-swap redundant-stop path (stopForAccountSwap) to
+// skip re-closing a session that finishRecoverTabFailure's inner close already
+// killed, rather than re-classifying it blind and wrapping
+// ErrAccountSwapAgentTeardownBlind onto an unrelated error (#703b4a70).
+//
+// It is NOT used by closeTabForDestructiveTeardown: that path checks the flag
+// before any of the three invalidation paths (Start, RestoreWithResult's
+// live-session branch, or a second closeAndWaitForPaneExit) have a chance to
+// clear it, so a proof taken at close time could be stale if an external process
+// recreated the session in between.
+//
+// Callers acting on the latch use ClosedConclusivelyAndStillAbsent, which
+// re-proves the name absent at decision time; the bare getter stays available
+// for tests and diagnostics that only need the recorded proof.
+func (t *TmuxSession) ClosedConclusively() bool {
+	t.provenMu.RLock()
+	defer t.provenMu.RUnlock()
+	return t.closedConclusively
+}
+
+// ClosedConclusivelyAndStillAbsent reports whether the closed-conclusively
+// proof still holds NOW: the latch says the last closeAndWaitForPaneExit killed
+// this session's whole process set, and a fresh strict has-session probe still
+// proves the name absent.
+//
+// The latch alone is a point-in-time fact. Every path that re-binds this object
+// to a live session clears it — Start, RestoreWithResult's live-session branch,
+// and a fresh closeAndWaitForPaneExit — but a session recreated OUTSIDE those
+// paths (another handle or an external tmux client minting the same name
+// between the close and a later account swap) leaves it stale, and
+// stopForAccountSwap's skip is the one consumer that would then pass a live
+// credential-bearing pane without probing. The skip therefore re-proves absence
+// here rather than trusting the stored bit.
+//
+// The probe is the strict form: only tmux's determinate "can't find session"
+// answer — or a definitive no-server answer — counts as absent. An unanswered
+// probe returns false, so the caller runs the real close and fails closed; a
+// probe that finds the session again clears the stale latch on the way out.
+func (t *TmuxSession) ClosedConclusivelyAndStillAbsent() bool {
+	if !t.ClosedConclusively() {
+		return false
+	}
+	exists, known, _ := probeSessionStrict(t.cmdExec, t.sanitizedName)
+	switch {
+	case known && exists:
+		// The name is live again: the stored proof is superseded, not stale-
+		// but-still-usable. Drop it so no later consumer re-checks it.
+		t.setClosedConclusively(false)
+		return false
+	default:
+		return known && !exists
+	}
+}
+
 // proveNoPaneIfDeterminatelyAbsent records "nothing is running behind this name",
 // but ONLY on tmux's determinate answer that the session is not there.
 //
@@ -432,6 +506,12 @@ func (t *TmuxSession) proveNoPaneIfDeterminatelyAbsent() {
 func (t *TmuxSession) setProvenNoPane(proven bool) {
 	t.provenMu.Lock()
 	t.provenNoPane = proven
+	t.provenMu.Unlock()
+}
+
+func (t *TmuxSession) setClosedConclusively(closed bool) {
+	t.provenMu.Lock()
+	t.closedConclusively = closed
 	t.provenMu.Unlock()
 }
 
