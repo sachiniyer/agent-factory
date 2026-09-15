@@ -20,7 +20,9 @@ import (
 var worktreeListTimeout = 10 * time.Second
 
 // WorktreeBranchBinding is one registered worktree's branch observation.
-// Detached is structural because "(detached)" is also a legal branch name.
+// Path is kept exactly as Git reports it for diagnostics; callers resolving
+// identity across symlinked roots must normalize only for comparison. Detached
+// is structural because "(detached)" is also a legal branch name.
 type WorktreeBranchBinding struct {
 	Path     string
 	Branch   string
@@ -68,10 +70,16 @@ func BranchesHeldByWorktrees(repoRoot string) (map[string][]string, error) {
 // WorktreeBranchBindings reads path, branch, HEAD, and detached state for every
 // registered worktree in one bounded Git invocation.
 func WorktreeBranchBindings(repoRoot string) ([]WorktreeBranchBinding, error) {
+	return WorktreeBranchBindingsContext(context.Background(), repoRoot)
+}
+
+// WorktreeBranchBindingsContext is WorktreeBranchBindings with caller
+// cancellation for shutdown-aware integrity scans.
+func WorktreeBranchBindingsContext(parent context.Context, repoRoot string) ([]WorktreeBranchBinding, error) {
 	if strings.TrimSpace(repoRoot) == "" {
 		return nil, fmt.Errorf("cannot list worktrees: repo path is empty")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), worktreeListTimeout)
+	ctx, cancel := context.WithTimeout(parent, worktreeListTimeout)
 	defer cancel()
 
 	// -z: NUL-delimited records (#3524). A newline is legal in a POSIX path and
@@ -81,11 +89,16 @@ func WorktreeBranchBindings(repoRoot string) ([]WorktreeBranchBinding, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "worktree", "list", "--porcelain", "-z")
 	// Keep repository selection bound to -C without changing runtime settings.
 	cmd.Env = append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	// This admission probe has the same helper-spawn shape as the integrity
+	// status/reflog probes. Its deadline must terminate the whole Git command
+	// tree, not abandon a hook or fsmonitor process after killing git itself.
+	isolateGitCommandTree(cmd)
 	// Bound the post-exit wait so a child that inherited the capture pipe cannot
 	// hold Output() open past the deadline (#856).
 	cmd.WaitDelay = gitWaitDelay
 
 	output, err := cmd.Output()
+	terminateGitCommandTree(cmd, err)
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// git itself exited successfully (a non-zero exit surfaces as an
 		// ExitError); only a pipe-holder outlived it, so the output is complete.

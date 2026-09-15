@@ -1,11 +1,50 @@
 package daemon
 
 import (
+	"context"
 	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
+
+// worktreeIntegrityInterval keeps the three read-only Git probes per live local
+// lane out of the ordinary sub-second status cadence.
+var worktreeIntegrityInterval = 10 * time.Second
+
+// startWorktreeIntegrityLoop runs diagnostics independently of the operational
+// status poll. A slow checkout may delay its own next inspection, but it cannot
+// delay liveness refresh, recovery, settlement, or limit resumption.
+func startWorktreeIntegrityLoop(manager *Manager, interval time.Duration, stopCh <-chan struct{}, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelDone := make(chan struct{})
+		go func() {
+			defer close(cancelDone)
+			select {
+			case <-stopCh:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		defer func() {
+			cancel()
+			<-cancelDone
+		}()
+		for {
+			manager.refreshWorktreeIntegrityWarningsContext(ctx)
+			timer := time.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+	}()
+}
 
 // startInstancePollLoop runs the daemon's status poll for the lifetime of the
 // daemon: the tick that refreshes instances, computes liveness, and drives the

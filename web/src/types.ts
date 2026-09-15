@@ -159,6 +159,8 @@ export interface SessionData {
    *  It remains on restored rows so an automatic Lost recovery cannot make the
    *  omitted files disappear from subsequent snapshots. */
   archive_warning?: string;
+  /** Read-only daemon warning for a dangerous live worktree/index shape. */
+  worktree_warning?: string;
   /** Daemon-derived explanation for a non-working row. Every value is established
    *  from lifecycle/delivery/churn facts; absence means af cannot say why. */
   idle_reason?: IdleReason;

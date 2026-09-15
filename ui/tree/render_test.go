@@ -86,6 +86,20 @@ func TestInstanceRendererKeepsRetainedSourceAtNormalWidth(t *testing.T) {
 		"a normal-width rail must show where the complete source remains, not only the warning preamble")
 }
 
+func TestInstanceRendererShowsWorktreeSafetyWarning(t *testing.T) {
+	const warning = "DANGER: HEAD moved without a worktree-local reflog entry; do not commit"
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "idle-lane", Path: t.TempDir(), Program: "test"})
+	require.NoError(t, err)
+	inst.Branch = "live-pr"
+	inst.SetStatusForTest(session.Ready)
+	inst.ReconcileWorktreeWarning(warning)
+	r := NewInstanceRenderer()
+	r.SetWidth(100)
+	out := ansiEscape.ReplaceAllString(r.Render(inst, 1, false, false, false), "")
+	assert.Contains(t, out, "[worktree unsafe] idle-lane")
+	assert.Contains(t, out, "do not commit")
+}
+
 // TestInstanceRendererNamePlaceholder pins the autocreate-name shadow text
 // (#2470): the row of the instance being named shows the suggested name while its
 // title is empty, and only that row, and only while empty.
