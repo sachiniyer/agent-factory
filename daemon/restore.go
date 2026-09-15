@@ -323,24 +323,26 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			return "", err
 		}
 		m.warn().Printf("restore of %q: --force-reap given past an indeterminate probe; af could not reach the sandbox to push it, so anything it holds unpushed is discarded", title)
-		// Seed the in-memory entry now — before Recover runs — so that if Recover
-		// fails before the old sandbox is actually retired (i.e. before
-		// reapRemoteRuntimeForReplacement succeeds inside reprovisionRemote),
-		// recordLostRestoreFailure finds an existing entry and does NOT inherit
-		// consecutiveFailures from the persisted terminal failure. An entry that
-		// already exists is left untouched; a new entry starts at zero, so the
-		// first new-sandbox failure is attempt 1.
-		//
 		// The episode resets — the push-failure budget and the Recover-flap budget
 		// alike — are registered as a one-shot hook that reprovisionRemote fires
 		// only after reapRemoteRuntimeForReplacement returns without error — the
 		// point where the old sandbox is provably gone and the new episode genuinely
-		// begins. If reprovisionRemote fails before the reap (e.g. unresolvable
-		// account, invalid runtime config, agent-account drift), the hook is cleared
-		// without firing and the budgets stay charged, so the surviving sandbox's
-		// preserve episode continues instead of restarting, and repeated pre-reap
-		// failures cannot reset either budget indefinitely.
-		m.seedRestoreStateEntry(repoID, instance)
+		// begins.
+		//
+		// A Recover failure BEFORE that point belongs to the surviving sandbox's
+		// episode, so it is deliberately NOT shielded from recordLostRestoreFailure's
+		// restart seed: with no in-memory entry the failure continues the persisted
+		// count (terminal stays terminal), exactly the verdict an existing entry
+		// produces. Pre-seeding an empty entry here would make the same failure log
+		// "retrying in" after a daemon restart — a promise the durable
+		// LostRestoreGaveUp gate refuses to keep — so the same input would take a
+		// different verdict depending on whether the daemon had restarted.
+		//
+		// If reprovisionRemote fails before the reap (e.g. unresolvable account,
+		// invalid runtime config, agent-account drift), the hook is cleared without
+		// firing and the budgets stay charged, so the surviving sandbox's preserve
+		// episode continues instead of restarting, and repeated pre-reap failures
+		// cannot reset either budget indefinitely.
 		instance.SetOnSandboxRetired(func() {
 			m.resetPreserveBudget(repoID, instance)
 			m.resetRecoverBudget(repoID, instance)
@@ -377,12 +379,12 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			// before reapRemoteRuntimeForReplacement retires the old sandbox —
 			// letting repeated pre-reap failures restart the budgets indefinitely,
 			// and for the preserve budget restarting a surviving sandbox's push
-			// episode as if it were fresh. seedRestoreStateEntry ensures the entry
-			// exists so a pre-reap failure is charged as attempt 1 (not
-			// maxAttempts+1), and the hook fires only after the sandbox is provably
-			// gone, ending its preserve episode and starting the replacement's
-			// Recover budget fresh.
-			m.seedRestoreStateEntry(repoID, instance)
+			// episode as if it were fresh. A pre-reap failure belongs to the
+			// surviving sandbox's episode and keeps charging its existing count —
+			// seeded from the persisted terminal failure after a restart, so the
+			// verdict is identical whether or not the daemon restarted. The hook
+			// fires only after the sandbox is provably gone, ending its preserve
+			// episode and starting the replacement's Recover budget fresh.
 			instance.SetOnSandboxRetired(func() {
 				m.resetPreserveBudget(repoID, instance)
 				m.resetRecoverBudget(repoID, instance)

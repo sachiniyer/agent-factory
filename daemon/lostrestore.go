@@ -684,24 +684,6 @@ func (m *Manager) resetPreserveBudget(repoID string, inst *session.Instance) {
 	m.mu.Unlock()
 }
 
-// seedRestoreStateEntry ensures a lostRestoreState entry exists for the session
-// without touching any existing episode counters. Call this before a Recover
-// attempt that follows a force-reap, so that if the Recover fails before the old
-// sandbox is retired, recordLostRestoreFailure finds a live entry and does NOT
-// seed consecutiveFailures from the persisted terminal failure — which would
-// count the first new-sandbox failure as attempt maxAttempts+1 and trigger
-// immediate give-up. A newly created entry starts at zero, so the first failure
-// is counted as attempt 1; an already-present entry keeps its current count,
-// which is the correct basis for the new attempt.
-func (m *Manager) seedRestoreStateEntry(repoID string, inst *session.Instance) {
-	stateKey := stableSessionKey(repoID, inst)
-	m.mu.Lock()
-	if m.lostRestoreStates[stateKey] == nil {
-		m.lostRestoreStates[stateKey] = &lostRestoreState{}
-	}
-	m.mu.Unlock()
-}
-
 // resetRecoverBudget clears the Recover-flap episode counter for the session
 // identified by repoID and inst. Call this after the old sandbox is provably
 // retired (i.e. after a successful force-replace): the old sandbox is gone, so
