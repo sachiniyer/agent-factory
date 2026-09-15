@@ -21,14 +21,17 @@ func remoteAccountLoadHome(t *testing.T) *home {
 	t.Helper()
 	h := newTestHome(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/GetConfig" {
+		switch r.URL.Path {
+		case "/v1/GetConfig":
+			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.GetConfigResponse{
+				Path: "/remote/config.toml", Entries: []config.ConfigEntry{{Key: "default_program", Value: "codex", Tier: 1}},
+			}))
+		case "/v1/QuotaReport":
+			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.QuotaReportResponse{}))
+		default:
 			t.Errorf("unexpected remote request: %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
-			return
 		}
-		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.GetConfigResponse{
-			Path: "/remote/config.toml", Entries: []config.ConfigEntry{{Key: "default_program", Value: "codex", Tier: 1}},
-		}))
 	}))
 	t.Cleanup(server.Close)
 	previousURL := apiclient.FlagDaemonURL

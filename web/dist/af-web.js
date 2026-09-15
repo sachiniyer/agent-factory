@@ -6861,6 +6861,10 @@ async function listAccounts(token2, repoPath = "") {
   const resp = await af("ListAccounts", body, token2);
   return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {} };
 }
+async function quotaReport(token2) {
+  const resp = await af("QuotaReport", {}, token2);
+  return { rows: resp?.rows ?? [], note: resp?.note ?? "", caveats: resp?.caveats ?? [] };
+}
 async function registerAccount(agent, name, token2) {
   return af("RegisterAccount", { agent, name }, token2);
 }
@@ -7584,6 +7588,66 @@ function appendStatus(row, status, agent, name) {
   row.append(h("div", { class: "af-accounts-echo" }, status.message));
 }
 
+// src/usage.ts
+function emptyUsageState() {
+  return { loaded: false, rows: [], note: "", caveats: [], error: "" };
+}
+function renderUsageSection(state) {
+  const section = h("section", { class: "af-usage" });
+  section.setAttribute("aria-label", "Usage");
+  if (!state.loaded && state.error === "") {
+    section.append(h("p", { class: "af-usage-note" }, "Loading usage\u2026"));
+    return section;
+  }
+  const head = h(
+    "div",
+    { class: "af-usage-head" },
+    h("span", { class: "af-usage-title" }, "Usage"),
+    h("span", { class: "af-view-count" }, String(state.rows.length))
+  );
+  section.append(head);
+  if (state.error !== "") {
+    section.append(
+      h("p", { class: "af-usage-error", role: "alert" }, `The usage report could not be read: ${state.error}`)
+    );
+    return section;
+  }
+  if (state.rows.length === 0) {
+    section.append(
+      h("p", { class: "af-usage-note" }, "No agent CLIs are configured, so there is nothing to report.")
+    );
+    return section;
+  }
+  if (state.note !== "") {
+    section.append(h("p", { class: "af-usage-note" }, state.note));
+  }
+  const list = h("div", { class: "af-usage-list" });
+  for (const row of state.rows) {
+    list.append(renderUsageRow(row));
+  }
+  section.append(list);
+  for (const caveat of state.caveats) {
+    section.append(h("p", { class: "af-usage-error", role: "alert" }, `warning: ${caveat}`));
+  }
+  return section;
+}
+function renderUsageRow(row) {
+  const el2 = h("div", { class: "af-usage-row" });
+  el2.setAttribute("data-agent", row.agent);
+  el2.append(
+    h(
+      "div",
+      { class: "af-usage-label" },
+      h("span", { class: "af-usage-agent" }, row.agent),
+      h("span", { class: "af-usage-verdict" }, `${row.quota} \xB7 ${row.observed}`)
+    )
+  );
+  if (row.detail !== "") {
+    el2.append(h("div", { class: "af-usage-detail" }, row.detail));
+  }
+  return el2;
+}
+
 // src/scrollkeep.ts
 function listToken(parts) {
   return parts.map((p) => p ?? "none").join("\0");
@@ -7664,6 +7728,9 @@ var ConfigPane = class {
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
   accounts = emptyAccountsState();
+  /** The Usage section's data (#4361) — the daemon's own usage-limit report,
+   *  rendered above Accounts. Evidence, not config: see usage.ts. */
+  usage = emptyUsageState();
   showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
    *  write is per-key (like `af config set`), so a multi-row "save all" would
@@ -7677,10 +7744,11 @@ var ConfigPane = class {
   lastEntries = null;
   lastStatus = null;
   lastAccounts = null;
+  lastUsage = null;
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries, path, status, accounts) {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
+  update(entries, path, status, accounts, usage) {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastUsage === usage) {
       return;
     }
     const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status && accounts.status.name === "" && !accounts.status.error;
@@ -7691,10 +7759,12 @@ var ConfigPane = class {
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
+    this.lastUsage = usage;
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
     this.accounts = accounts;
+    this.usage = usage;
     if (status && !status.error && status.key === this.editing) {
       this.editing = null;
       this.draft = "";
@@ -7834,6 +7904,7 @@ var ConfigPane = class {
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...content),
+      renderUsageSection(this.usage),
       renderAccountsSection(this.accounts, this.actions.accounts, this.registration)
     );
   }
@@ -16044,7 +16115,7 @@ var AppShell = class {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.usage);
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
@@ -17480,6 +17551,7 @@ var store = new Store({
   configPath: "",
   configStatus: null,
   accounts: emptyAccountsState(),
+  usage: emptyUsageState(),
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -17801,6 +17873,7 @@ function switchView(view) {
   }
   if (view === "config") {
     refreshConfig();
+    refreshUsage();
     refreshAccounts();
   }
 }
@@ -18434,6 +18507,21 @@ var accountsRefetcher = createFencedRefetcher({
 });
 function refreshAccounts() {
   accountsRefetcher.refresh();
+}
+var usageRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: quotaReport,
+  commit: (resp) => {
+    store.set({
+      usage: { loaded: true, rows: resp.rows ?? [], note: resp.note ?? "", caveats: resp.caveats ?? [], error: "" }
+    });
+  },
+  onError: (err) => {
+    store.set({ usage: { ...store.get().usage, error: errorText(err) } });
+  }
+});
+function refreshUsage() {
+  usageRefetcher.refresh();
 }
 function setAccountStatus(agent, name, message, error) {
   store.set({ accounts: { ...store.get().accounts, status: { agent, name, message, error } } });

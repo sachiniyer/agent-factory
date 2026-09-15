@@ -53,6 +53,7 @@ import {
   rowTitle,
 } from "./status.js";
 import type { AccountsState } from "./accounts.js";
+import type { UsageState } from "./usage.js";
 import { ConfigPane, type ConfigStatus } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
@@ -224,6 +225,10 @@ export interface AppState {
    *  daemon host, not a manifest key, and merging the two would be the category
    *  error #3385 asks this surface to avoid. */
   accounts: AccountsState;
+  /** the daemon's usage-limit report (#4361), rendered in the config view above
+   *  Accounts. It rides here rather than in `config` for the same reason:
+   *  usage is evidence about the daemon host's sessions, not a manifest key. */
+  usage: UsageState;
   /** the persisted theme preference (redesign PR1): System follows the OS, Light/Dark
    *  force a mode. The appbar toggle sets it; theme.ts stamps data-theme on <html>
    *  and re-themes the live terminals. */
@@ -1394,7 +1399,7 @@ export class AppShell {
     // The config pane mirrors the manifest. Global config is NOT project-scoped —
     // config.toml applies to every repo — so unlike the tasks pane it re-renders on
     // the data alone, with no project in the change check.
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.usage);
 
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;

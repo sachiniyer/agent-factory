@@ -221,6 +221,9 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	// Readiness found the incoming identity's wall just now — a real sighting,
+	// so the observation clock is now (#4361).
+	i.limitObservedAt = instanceNow()
 	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
 		i.limitAgent = agent
 		i.touchLocked()

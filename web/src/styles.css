@@ -3199,6 +3199,96 @@ button:disabled,
   padding: var(--af-space-1) var(--af-space-2);
 }
 
+/* The Usage section of the config view (#4361) — the daemon's usage-limit
+ * report, rendered above Accounts.
+ *
+ * It sits INSIDE the config view and must not read as part of it: a row styled
+ * like a config row would imply a setting that participates in the precedence
+ * chain, while this is evidence — what af has seen parked at a usage wall on
+ * the daemon host, and when it saw it. So the section takes a rule above it,
+ * its own heading, and rows that carry verdicts rather than controls. */
+.af-usage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-2);
+  padding: var(--af-space-2) var(--af-space-3) var(--af-space-4);
+  border-top: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+}
+
+.af-usage-head {
+  display: flex;
+  align-items: center;
+  gap: var(--af-space-2);
+}
+
+.af-usage-title {
+  font-size: var(--af-type-body);
+  font-weight: 600;
+  color: var(--af-ink);
+}
+
+/* The framing note and the detail sentence both carry the load-bearing words —
+ * "not reported" is af declining to guess, and the observation's age is what
+ * lets a reader distrust it — so they get a full line each and wrap rather than
+ * truncate. */
+.af-usage-note,
+.af-usage-detail {
+  margin: 0;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.af-usage-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-1);
+}
+
+.af-usage-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-1);
+  padding: var(--af-space-1) 0;
+}
+
+.af-usage-label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--af-space-2);
+  min-width: 0;
+}
+
+.af-usage-agent {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-body);
+  color: var(--af-ink);
+}
+
+/* The two verdicts are one claim, joined the way the CLI prints them. */
+.af-usage-verdict {
+  font-size: var(--af-type-caption);
+  font-weight: 600;
+  color: var(--af-ink);
+}
+
+/* The detail sentence — counts, reset, when af recorded the wall — sits under
+ * the row so its length never crowds the agent name. */
+.af-usage-detail {
+  padding-left: var(--af-space-3);
+  font-family: var(--af-font-mono);
+}
+
+/* The same red the Accounts section's failure line uses: an under-read report
+ * and a failed read are both "do not trust what you see" signals. */
+.af-usage-error {
+  margin: 0;
+  font-size: var(--af-type-caption);
+  color: var(--af-dead);
+  line-height: 1.5;
+}
+
 /* The Accounts section of the config view (#3385).
  *
  * It sits INSIDE the config view and must not read as part of it: an account is a

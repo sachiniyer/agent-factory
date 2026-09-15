@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/quotahost"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -200,6 +201,23 @@ func (s *controlServer) GetConfig(_ GetConfigRequest, resp *GetConfigResponse) e
 	}
 	resp.Entries = config.ManifestWithValues(cfg)
 	resp.Path = filepath.Join(configDir, config.TomlConfigFileName)
+	return nil
+}
+
+// QuotaReport answers the usage-limit report for THIS host (#4361). Like
+// GetConfig it is deliberately not gated on requireManagerReady: the records
+// live on disk and are read fresh per call, so the answer is safe and current
+// even while the daemon is warming up — and it is the same quotahost.Report a
+// daemonless `af quota` runs in-process, so a remote caller and a local one
+// read identical evidence worded identically.
+func (s *controlServer) QuotaReport(_ QuotaReportRequest, resp *QuotaReportResponse) error {
+	result, err := quotahost.Report(time.Now())
+	if err != nil {
+		return err
+	}
+	resp.Rows = result.Rows
+	resp.Note = result.Note
+	resp.Caveats = result.Caveats
 	return nil
 }
 

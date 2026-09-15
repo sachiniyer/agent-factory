@@ -110,6 +110,14 @@ type Instance struct {
 	// carried in the daemon snapshot so the badge survives a restart; PR3's
 	// auto-resume scheduler reads it. Mutex-protected.
 	limitResetAt time.Time
+	// limitObservedAt is WHEN af recorded the current wall (#4361): stamped on
+	// the real sightings (limit-banner detection, a handoff or account swap
+	// that parks at the incoming identity's wall) and deliberately NOT on a
+	// resume's re-park, which restores the same episode's state rather than
+	// re-observing it. Persisted and carried in the snapshot with the reset
+	// time so a reader can see how old the claim is — a reset that outlived
+	// the identity it was observed under must show its age.
+	limitObservedAt time.Time
 	// limitAgent and limitAccount attribute the current limit after Program or
 	// Account changes. Account labels are scoped to an agent, so neither field
 	// alone identifies the provider identity that produced the wall.

@@ -569,20 +569,20 @@
       "id": "quota.usage-report",
       "title": "Report usage-limit status per agent CLI",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/config_pane_usage.go usageSection (Usage section above Accounts in the config overlay); app/quota_load.go loadUsageIntoPane; app/quota_target.go targetedQuotaReportForPane (remote target via POST /v1/QuotaReport, local via quotahost.Report — no daemon spawn, no local fallback on remote failure)"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/usage.ts renderUsageSection (Usage section above Accounts in the config view); web/src/api.ts quotaReport -> POST /v1/QuotaReport; web/src/index.ts usage refetcher on config view open"
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/quotacmd.go:29"
+        "pointer": "commands/quotacmd.go; remote --daemon-url targets ride POST /v1/QuotaReport with a version-skew refusal on daemons that predate the route"
       },
-      "verdict": "real-gap",
-      "issue": "#2983",
-      "notes": "#2983 Part 1 ships the CLI only; the issue also asks for a TUI/web panel, so tui and web are a real GAP rather than n/a and are recorded as such. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall, so a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid."
+      "verdict": "parity",
+      "issue": "#2983, #4361",
+      "notes": "#4361 closed the gap: the read model `af quota` grew in #2983 was lifted into quotahost.Report, and the daemon serves it verbatim as the QuotaReport control method and POST /v1/QuotaReport, so the CLI (local or --daemon-url), the TUI's config-overlay Usage section, and the web's config-view Usage section all print the same rows worded identically instead of re-deriving the policy. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall, and #4361 added session.LimitObservedAt so each parked row names WHEN af recorded the wall — a stale observation shows its age rather than reading as current. Surfaces render the daemon's already-worded cells plus the report note and under-read caveats verbatim; none of them reimplements the semantics."
     },
     {
       "id": "session.account-login",
@@ -1609,6 +1609,7 @@
       "POST /v1/ListOnComplete": "task.on-complete",
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
+      "POST /v1/QuotaReport": "quota.usage-report",
       "POST /v1/RegisterAccount": "session.accounts",
       "POST /v1/RegisterProject": "project.add",
       "POST /v1/RemoveTask": "task.remove",
@@ -1698,6 +1699,7 @@
       "ListProjects": "project.list",
       "ListTasks": "task.list",
       "PauseStatusPoll": "-",
+      "QuotaReport": "quota.usage-report",
       "RegisterProject": "project.add",
       "RemoveTask": "task.remove",
       "RenameTab": "session.tab.rename",
