@@ -494,10 +494,9 @@ func (m *home) suggestSessionName(naming *session.Instance) string {
 	}
 	return namegen.Suggest(func(name string) bool {
 		// The same admission question the submit gate asks, for the same reason:
-		// a suggestion the create would refuse is not a suggestion. namegen emits
-		// no whitespace, so the two predicates cannot differ on anything it can
-		// produce today — but one file holding two answers to one question is the
-		// drift #3756 is about.
+		// a suggestion the create would refuse is not a suggestion. Since #4396
+		// the identity and admission predicates share one normalization, so this
+		// is also what the daemon would project as the root agent.
 		if session.ReservedTitleCollision(name) != "" {
 			return true
 		}

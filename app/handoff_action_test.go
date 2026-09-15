@@ -106,9 +106,9 @@ func TestHandleHandoff_RefusesReservedRootBeforePicker(t *testing.T) {
 }
 
 // A session merely NAMED like the reserved one in a different case is still the
-// reserved one — IsReservedTitle matches case-insensitively on the trimmed title
-// precisely so " ROOT " cannot masquerade as a separate session. The guard has to
-// use that predicate rather than comparing against the literal.
+// reserved one — IsReservedTitle folds case on the derived tmux name precisely
+// so " ROOT " cannot masquerade as a separate session. The guard has to use
+// that predicate rather than comparing against the literal.
 func TestHandleHandoff_RefusesReservedRootRegardlessOfCase(t *testing.T) {
 	h := newTestHome(t)
 	h.store.AddInstance(handoffActionInstance(t, "Root", tmux.ProgramClaude))

@@ -683,13 +683,15 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 		return "", session.PromptCouldNotConfirm, false, nil
 	}
 	if req.Title != session.RootSessionTitle {
-		// A reserved-title VARIANT ("Root", " root ") can never be delivered
-		// to: the ensure loop creates only the exact title, so no root-agent
-		// policy fix makes this spelling deliverable. Fall through to the
-		// reserved-name guard, whose "pick another name" is the right advice —
-		// answering with a policy cause here would promise a remedy that
-		// cannot work (#3264 review). This also stops the wait path from
-		// waiting out targetDeliverWait for a title that will never appear.
+		// A reserved-title VARIANT ("Root", " root ", "ro ot" — the derived
+		// name is what is reserved, so the variants include every spelling
+		// claiming it) can never be delivered to: the ensure loop creates only
+		// the exact title, so no root-agent policy fix makes this spelling
+		// deliverable. Fall through to the reserved-name guard, whose "pick
+		// another name" is the right advice — answering with a policy cause
+		// here would promise a remedy that cannot work (#3264 review). This
+		// also stops the wait path from waiting out targetDeliverWait for a
+		// title that will never appear.
 		return "", session.PromptCouldNotConfirm, false, nil
 	}
 	verdict := m.rootAgentMaterializeVerdictFor(repo.ID)

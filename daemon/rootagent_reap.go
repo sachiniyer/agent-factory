@@ -38,12 +38,15 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 	// must not be adopted as live), and for a LiveArchived instance
 	// findArchivedOnlyCollisionLocked does NOT refuse — it SELECTS it, and
 	// renameArchivedForReuseLocked then moves it to a new key so a colliding
-	// create can take the name. The title need not even be "root": toTmuxName
-	// DELETES whitespace while IsReservedTitle only trims it, so the perfectly
-	// creatable title "ro ot" derives the identical tmux name and its create can
-	// start a replacement under the exact name this sweep is sweeping. A trusted
-	// sweep would then adopt that replacement's generation and reap it — #3309,
-	// reopened, which is the one outcome worse than the bug being fixed.
+	// create can take the name. And "colliding" is wider than the reserved
+	// title: admission refuses every title that claims the root's tmux name
+	// (#3732, unified in #4396), but the rename also fires on the BRANCH axis —
+	// "root!" derives the same git branch as "root" while claiming a tmux name
+	// of its own, so it is admissible, and its create would relocate this
+	// row's worktree and retitle its durable record in the middle of the
+	// teardown below. What the claim prevents is that interference: teardown
+	// and deleteSessionRecord must run against the record this pass re-
+	// confirmed, not against a row a concurrent create has already moved.
 	//
 	// killsInFlight is that path's own fence (manager_create_titles.go refuses
 	// the reuse outright while it is set), so registering closes it. Doing the

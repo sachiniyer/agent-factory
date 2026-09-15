@@ -86,9 +86,10 @@ func TestRuntimeAction_HandoffRejectsTheReservedTitle(t *testing.T) {
 		t.Fatalf("refusal must name the session; got %v", err)
 	}
 
-	// Case-insensitive on the trimmed title, matching IsReservedTitle — otherwise
-	// " ROOT " would route around the guard the daemon still enforces.
-	for _, title := range []string{"Root", " ROOT ", "rOoT"} {
+	// Case-insensitive on the derived tmux name, matching IsReservedTitle —
+	// otherwise " ROOT " (or "ro ot", which derives the reserved name
+	// outright) would route around the guard the daemon still enforces.
+	for _, title := range []string{"Root", " ROOT ", "rOoT", "ro ot"} {
 		variant := LifecycleView{Title: title, Liveness: LiveRunning, Started: true}
 		if err := variant.ValidateRuntimeAction(RuntimeActionHandoff); err == nil {
 			t.Fatalf("handoff accepted reserved-title variant %q", title)

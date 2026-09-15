@@ -13,47 +13,48 @@ import (
 // opted in via the [root_agent] project profile, and re-creates when it dies.
 const RootSessionTitle = "root"
 
-// IsReservedTitle reports whether a session title IS the root agent's — the
-// identity question, asked of records that already exist: whether to pin the row
-// to the top of the sidebar, to skip Lost-restore, to arm the re-create grace
-// window. Matching is case-insensitive on the trimmed title so "Root"/" ROOT "
-// cannot masquerade as a distinct session next to the reserved one.
+// reservedTmuxName is the tmux session name the reserved title claims in the
+// repo-free namespace (the repo prefix cancels on both sides of the
+// comparison, so a caller with no repo path handy asks the identical
+// question). Both reserved-title predicates normalize a candidate to the name
+// it would claim and compare it against this — one normalization, so the
+// identity question and the admission question can no longer diverge the way
+// they did before #4396.
+var reservedTmuxName = tmux.SanitizedNameForRepo(RootSessionTitle, "")
+
+// IsReservedTitle reports whether a session title IS the root agent's. What is
+// reserved is the DERIVED tmux session name, not the spelling (#3732):
+// toTmuxName DELETES whitespace, so "ro ot" claims the identical tmux session
+// name as "root" — and the tmux name, not the title, is what markers,
+// generation cohorts and scope prefixes key on. The comparison folds case on
+// the derived name, so " Root ", "ROOT" and "Ro ot" cannot masquerade as a
+// distinct session beside the reserved one.
 //
-// It is deliberately NOT the admission question — see ReservedTitleCollision.
-// Widening this predicate would hand an ordinary session that merely derives the
-// root's runtime name the root agent's whole lifecycle (kill grace, limit
-// resume, archive refusal, IsRoot in every client), which is not what it is.
+// It is asked of records that already exist — whether to pin the row to the
+// top of the sidebar, to skip Lost-restore, to arm the re-create grace window
+// — and it is equally the admission question (see ReservedTitleCollision).
+// The two share this normalization on purpose: a session af admits under a
+// title it calls the root is exactly the incoherence the admission rule exists
+// to prevent, so a create may not take a title the daemon would project as the
+// root agent.
+//
+// The widened identity is deliberate for the shapes it adds over the old
+// trim-and-fold rule. A record titled "ro ot" can only predate the #3732
+// admission rule — the create gate has refused it since — and its tmux name
+// already collides with the root's, so every tmux-keyed mechanism treated it
+// as the same session anyway. Reading it as the reserved session is the
+// coherent answer for that record.
 func IsReservedTitle(title string) bool {
-	return strings.EqualFold(strings.TrimSpace(title), RootSessionTitle)
+	return strings.EqualFold(tmux.SanitizedNameForRepo(title, ""), reservedTmuxName)
 }
 
-// ReservedTitleCollision returns the reserved title a candidate would take the
-// name of, or "" when the candidate claims nothing reserved. It is the
-// ADMISSION question — "may a create claim this title?" — which is strictly
-// wider than IsReservedTitle, because a title can claim the reserved session's
-// runtime name without being spelled like it (#3732).
-//
-// Two rules, and both are load-bearing:
-//
-//   - The spelling. "Root"/" ROOT " derive DIFFERENT tmux names (toTmuxName
-//     preserves case), so only the fold below catches them — and they must be
-//     caught, because IsReservedTitle already treats such a session as the root
-//     agent everywhere else.
-//   - The derived name. toTmuxName DELETES interior whitespace while the fold
-//     above only trims it, so "ro ot" is not the reserved spelling yet derives
-//     the identical tmux session name as "root" — and the tmux name, not the
-//     title, is what markers, generation cohorts and scope prefixes are keyed
-//     on. Two titles that derive one name are two sessions the daemon keys as
-//     one.
-//
-// The comparison is repo-free on purpose: both sides would take the same repo
-// prefix, so it cancels, and a caller that has no repo path handy (the API's
-// fail-fast pre-check, the TUI naming overlay) asks the identical question.
+// ReservedTitleCollision returns the reserved title a candidate would claim,
+// or "" when the candidate claims nothing reserved. It is the ADMISSION
+// question — "may a create claim this title?" — asked of a title that does not
+// exist yet, and since #4396 it is the same question IsReservedTitle asks of a
+// record that does. The string result names the reserved title in refusals.
 func ReservedTitleCollision(title string) string {
 	if IsReservedTitle(title) {
-		return RootSessionTitle
-	}
-	if tmux.SanitizedNameForRepo(title, "") == tmux.SanitizedNameForRepo(RootSessionTitle, "") {
 		return RootSessionTitle
 	}
 	return ""
@@ -65,9 +66,9 @@ func ReservedTitleCollision(title string) string {
 // same titles a round trip earlier; both call this so the wording cannot drift
 // apart the way two copies of the message already had.
 //
-// The derived-name refusal names BOTH titles and says why they are one name:
-// "ro ot" and "root" look nothing alike on a sidebar row, so a refusal that
-// only said "reserved" would read as a bug.
+// The refusal names BOTH titles and says why they are one name: "ro ot" and
+// "root" look nothing alike on a sidebar row, so a refusal that only said
+// "reserved" would read as a bug.
 func ReservedTitleRefusal(title string) error {
 	return ReservedTitleRefusalFor(title, "")
 }
@@ -88,9 +89,6 @@ func ReservedTitleRefusalFor(title, repoPath string) error {
 	remedy := fmt.Sprintf("pick another name (on the daemon host, with AF_DAEMON_URL unset and without --daemon-url, %srun "+
 		"`af projects add %s`, then enable its personal [root_agent] profile with "+
 		"`af config set --project %s root_agent '{\"enabled\":true}'`; restart the daemon to apply)", context, pathArg, pathArg)
-	if IsReservedTitle(title) {
-		return fmt.Errorf("session title %q is reserved for the daemon-managed root agent; %s", title, remedy)
-	}
-	return fmt.Errorf("session title %q is reserved for the daemon-managed root agent: tmux session names drop whitespace, so %q and the reserved title %q are the same session to tmux; %s",
+	return fmt.Errorf("session title %q is reserved for the daemon-managed root agent: af reserves the tmux session name a title derives, not its spelling — tmux session names drop whitespace and the comparison folds case — so %q claims the reserved name %q; %s",
 		title, title, reserved, remedy)
 }
