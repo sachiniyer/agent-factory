@@ -15,6 +15,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// A fresh attempt supersedes any earlier proof: whatever an aborted Start
 	// established about this name, it is about to be re-established or replaced.
 	t.setProvenNoPane(false)
+	t.setClosedConclusively(false)
 	// Check if the session already exists. This is a POSITIVE existence gate, so
 	// it must not read the lossy bool: a wedged/timed-out has-session is NOT proof
 	// the name is taken, and ExistsOrUnknown would launder it into "already
@@ -558,6 +559,14 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	// with a workDir is reattaching persisted state, so its first capture only
 	// establishes the monitor baseline; Start's inner Restore("") keeps the fresh
 	// process behavior where first output is an update.
+	//
+	// Clear the ProvenNoPane and ClosedConclusively flags: reattaching to a LIVE
+	// session means this object is now in front of a pane that genuinely exists,
+	// so any earlier absence proof is invalidated. Without this clear, a reattach
+	// through this branch inherits a stale flag and stopForAccountSwap skips its
+	// liveness check for a pane that is still running.
+	t.setProvenNoPane(false)
+	t.setClosedConclusively(false)
 	monitor := newStatusMonitor()
 	if workDir != "" {
 		monitor = newReattachStatusMonitor()
