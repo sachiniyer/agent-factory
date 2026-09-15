@@ -75,12 +75,19 @@ It is bound by `headCurrentSince` like a Codex artifact, so a push after the
 sign-off returns the PR to the manual pass. It waives the review requirement and
 nothing else.
 
-An update-branch is not such a push (#3803). When the head is a merge with exactly
-two parents whose second is contained in the base branch, the approval and every
-Codex artifact bind to the merge's FIRST parent — the content head — because the
-reviewed change did not move. Otherwise the gate's own update-branch would void
-the approval it had just acted on, which is the livelock #3799 hit minutes after
-#3796 landed. The decision names both heads.
+An update-branch is not such a push (#3803, #4235). Exactly two parents with the
+second contained in the base branch is the shape `PUT update-branch` produces, but
+a cheap pre-filter only; a hand-written conflict resolution has the same parents.
+The carry check is the complete-tree proof itself: it reads the merge base and
+both parent trees, derives the only path-level three-way result from each
+path's leaf entry (mode, type and object id — the only place blob identity
+enters the decision), and requires the merge commit's tree to match it exactly —
+a truncated, malformed, same-path-conflicting or mismatched tree refuses carry.
+When the proof passes, the approval and every Codex artifact bind
+to the merge's FIRST parent — the content head — because the reviewed change did
+not move. Otherwise the gate's own update-branch would void the approval it had
+just acted on, which is the livelock #3799 hit minutes after #3796 landed. The
+decision names both heads.
 
 **The runs that update-branch triggers arrive parked, and the gate approves them
 (#3807).** The merge commit `PUT update-branch` writes is authored by the workflow
@@ -295,7 +302,8 @@ backdate a recovery or erase an earlier degraded merge.
 Reviewer-unavailable evidence includes Codex inline review replies
 (`in_reply_to_id` set), including replies carried by an empty `COMMENTED` review
 (#3900). The reply's
-`commit_id` must match the head, and its `created_at` must be strictly later than
+`commit_id` must match the head, the content head, or any verified intermediate
+update-branch merge, and its `created_at` must be strictly later than
 `headCurrentSince`; an edit cannot refresh an old answer. The latest artifact
 across issue comments, reviews and eligible replies wins (the reply wins a tie
 with its empty enclosing review), and a later real verdict supersedes the

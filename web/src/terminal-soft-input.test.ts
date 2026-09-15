@@ -853,6 +853,129 @@ for (const [locked, expected, finalState] of [
   assert.equal(modifiers.state("Ctrl"), finalState);
 });
 
+test("Backspace during trailing input does not re-emit the deleted char before a new composition", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  // Unarmed StickyModifiers: the queued Backspace emission is \x7f (DEL) and the
+  // trailing latin char passes through unmodified, isolating the trailing-flush
+  // duplication from any modifier folding.
+  const modifiers = new StickyModifiers();
+  const writes: string[] = [];
+  const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value)));
+  textarea.addEventListener("compositionend", () => setTimeout(() => {
+    if (textarea.value) send(textarea.value);
+  }, 0));
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, send);
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "字";
+  textarea.dispatchEvent(composition("compositionend", "字"));
+  textarea.value = "字x";
+  host.dispatchEvent(insertText("x")); // trailing latin char after the CJK commit
+  textarea.dispatchEvent(Object.assign(new Event("keydown"), { keyCode: 229 }));
+  host.dispatchEvent(deleteBackward("beforeinput"));
+  textarea.value = "字"; // Backspace deletes the trailing "x"
+  host.dispatchEvent(deleteBackward("input"));
+  textarea.dispatchEvent(new Event("compositionstart")); // new composition before the release timer
+  t.mock.timers.tick(0);
+
+  // The queued release emits commit "字" + trailing "x" + DEL "\x7f" once. The
+  // trailing flush must not re-emit the already-deleted "x" a second time.
+  assert.deepEqual(writes, ["字x\x7f"]);
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("Backspace during multi-char trailing input does not re-emit the deleted tail before a new composition", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  const writes: string[] = [];
+  const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value)));
+  textarea.addEventListener("compositionend", () => setTimeout(() => {
+    if (textarea.value) send(textarea.value);
+  }, 0));
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, send);
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "字";
+  textarea.dispatchEvent(composition("compositionend", "字"));
+  textarea.value = "字x";
+  host.dispatchEvent(insertText("x"));
+  textarea.value = "字xy";
+  host.dispatchEvent(insertText("y")); // two-char trailing tail "xy"
+  textarea.dispatchEvent(Object.assign(new Event("keydown"), { keyCode: 229 }));
+  host.dispatchEvent(deleteBackward("beforeinput"));
+  textarea.value = "字x"; // Backspace deletes only "y", keeping "x"
+  host.dispatchEvent(deleteBackward("input"));
+  textarea.dispatchEvent(new Event("compositionstart"));
+  t.mock.timers.tick(0);
+
+  // The queued release emits commit "字" + trailing "xy" + DEL "\x7f" once. The
+  // flush slices frozenText.slice(-2) = "xy" and would re-emit both chars.
+  assert.deepEqual(writes, ["字xy\x7f"]);
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
+test("xterm _isComposing commit-only payload keeps queued trailing state alive", t => {
+  // When a partially-deleted trailing tail is followed immediately by a new
+  // composition, xterm's _isComposing path can emit just the bounded old commit
+  // (e.g. "字") via transform() before the queued release fires.  Simulate
+  // this by having the compositionend callback send only the old commit rather
+  // than the current textarea value.  The queued release owns the trailing
+  // text: transform() must apply the full queued sequence (commit + surviving
+  // trailing + DEL) and must not re-emit the trailing chars from the timer.
+  //
+  // The trailing tail is two chars ("xy"); Backspace deletes only "y", leaving
+  // afterText = "字x".  The old bounded commit send("字") does NOT start with
+  // afterText, so the pre-existing queued.afterText branch (transform() line 287)
+  // cannot match, and the new commit-only fallback (line 323) is the only path
+  // that can handle it.  Removing the new `if (queued)` block causes this test
+  // to fail, proving it covers the new branch rather than the old one.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = new EventTarget();
+  const textarea = Object.assign(new EventTarget(), { value: "" });
+  const modifiers = new StickyModifiers();
+  const writes: string[] = [];
+  const send = (text: string) => writes.push(soft.transform(text, value => modifiers.input(value)));
+  // Simulate xterm's _isComposing path: it emits the old bounded commit ("字")
+  // rather than the current textarea value ("字x" after deletion of "y").
+  // In the real flow this is the same timer path, so we capture `oldCommit`
+  // at compositionend time and send that fixed string after the delay.
+  let oldCommit = "";
+  textarea.addEventListener("compositionend", (e) => {
+    oldCommit = (e as CompositionEvent).data ?? "";
+    setTimeout(() => { if (oldCommit) send(oldCommit); }, 0);
+  });
+  const soft = new TerminalSoftInput(host, textarea, () => true, () => false, send);
+  t.after(() => soft.dispose());
+
+  textarea.dispatchEvent(new Event("compositionstart"));
+  textarea.value = "字";
+  textarea.dispatchEvent(composition("compositionend", "字"));
+  textarea.value = "字x";
+  host.dispatchEvent(insertText("x")); // first trailing latin char after CJK commit
+  textarea.value = "字xy";
+  host.dispatchEvent(insertText("y")); // second trailing char; tail is now "xy"
+  textarea.dispatchEvent(Object.assign(new Event("keydown"), { keyCode: 229 }));
+  host.dispatchEvent(deleteBackward("beforeinput"));
+  textarea.value = "字x"; // Backspace deletes "y", keeping "x"; afterText = "字x"
+  host.dispatchEvent(deleteBackward("input"));
+  textarea.dispatchEvent(new Event("compositionstart")); // new composition before release timer
+
+  // tick(0): xterm's _isComposing path fires send("字") — the OLD commit, not
+  // the current value.  "字" does not start with afterText "字x", so line 287
+  // cannot match.  The new if (queued) branch at line 323 applies the full
+  // queued sequence: commit "字" + trailing "xy" + DEL "\x7f".
+  t.mock.timers.tick(0);
+
+  assert.deepEqual(writes, ["字xy\x7f"]);
+  assert.equal(modifiers.state("Ctrl"), "off");
+});
+
 test("composing insertText without lifecycle stays native and preserves Alt", () => {
   const host = new EventTarget();
   const textarea = Object.assign(new EventTarget(), { value: "" });
