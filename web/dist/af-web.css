@@ -3101,7 +3101,7 @@ textarea[class] {
 }
 
 /* src/sessions-thesis.css */
-.af-view-sessions :is(.af-appbar .af-ghost, .af-project-switch, .af-nav-toggle, .af-appbar-more, .af-rail-filter, .af-row-actions > .af-term-more-wrap > .af-term-more, .af-term-more, .af-pane-close, .af-copy-link):not(:disabled) {
+.af-app.af-view-sessions :is(.af-appbar .af-ghost, .af-project-switch, .af-nav-toggle, .af-appbar-more, .af-rail-filter, .af-row-actions > .af-term-more-wrap > .af-term-more, .af-term-more, .af-pane-close, .af-copy-link):not(:disabled) {
   border-color: transparent;
   background: var(--af-surface-raised);
   color: var(--af-ink);

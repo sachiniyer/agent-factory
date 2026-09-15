@@ -1,7 +1,7 @@
 /* #4065 exemplar: changes belong to the visible Sessions composition. The
  * token source owns type/colour; this file owns their component application.
  * Tasks, Config and modal fields retain their recipes for Phase 2. */
-.af-view-sessions :is(
+.af-app.af-view-sessions :is(
   .af-appbar .af-ghost, .af-project-switch, .af-nav-toggle, .af-appbar-more,
   .af-rail-filter, .af-row-actions > .af-term-more-wrap > .af-term-more,
   .af-term-more, .af-pane-close, .af-copy-link

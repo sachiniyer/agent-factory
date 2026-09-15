@@ -34,12 +34,12 @@
   "budgets": "Numeric performance budgets and visual tolerance unchanged. Desktop header geometry intentionally expands from <64px to <144px for two rows of identity and controls; phone remains 48px.",
   "source_sha256": {
     "design/tokens.json": "b2ff239143d4b23d8d5ad9c15e893e1d0d3b9a6ce3a25dcaed646c57fc1db693",
-    "design/style-guide.tmpl": "ef3de7e30751c263f8b49491d3d0c28b9934af71e7165d87819fd0252a496063",
+    "design/style-guide.tmpl": "86843ab370ca530722d8022d4dc55227ae757603a8dc471b33103756e9d1a24f",
     "internal/designtokens/generate.go": "b4c4b57515dc3c62b2e62479d826ab2818201ef6bc59400cedd5307244e9942e",
-    "web/src/sessions-thesis.css": "50de2f6b7268fa6b4ed88425072df74209e172e2d2109e1ad2a1ac3db2d96d80",
+    "web/src/sessions-thesis.css": "22205efd55edd4fc0de18910ff36a9122e4c9dff49b7df5e0930deaad4dbca74",
     "web/src/session-identity.ts": "07f5736bf5b5affd6ba9a2943fd279dda036d1c8a909463c876109a4fc4bb543",
-    "web/src/components.ts": "158cdfbc292c22648323b15a04e8613cd42ae8f5c8e94384a76ebf40b8f8a394",
-    "web/src/ui.ts": "d027cd0fe0bc9ae990319c1a231f286eb2c90a2fead05231f3fd59070df052a7"
+    "web/src/components.ts": "c31cfde1ca91fe7b9ed45ddf3899c7f5f49573c3cf17a05d19860e0cdf1b5f8c",
+    "web/src/ui.ts": "b8846609d732802681b4da5ef6b6c0d38729f39c8a336f33d003e2da392da901"
   },
   "revision_before_commit": "0a47c3f080af8aab1343ba58d6fe174535c30876",
   "revision_before_run": "2865088-77e8e3",
