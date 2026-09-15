@@ -174,7 +174,7 @@ func TestCreateSessionCheckpointKeepsFirstWriteBareIdentity(t *testing.T) {
 		t.Fatalf("fixture did not change identity after removing linked worktree: %s", identityID)
 	}
 
-	if err := manager.SaveInstances(); err != nil {
+	if err := manager.storage.SaveInstances(manager.InstancesSnapshot()); err != nil {
 		t.Fatalf("SaveInstances: %v", err)
 	}
 	identityRows, err := loadRepoInstanceData(identityID)
