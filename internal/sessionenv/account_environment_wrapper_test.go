@@ -7,8 +7,8 @@ import (
 )
 
 // Unmodeled argv-passthrough wrappers (strace, perf, valgrind, gdb --args,
-// xargs, ...) run a child command and pass argv through, exactly like the
-// modeled nohup/nice/timeout/setsid/stdbuf/ionice/taskset do. Before the fix,
+// ...) run a child command and pass argv through, exactly like the modeled
+// nohup/nice/timeout/setsid/stdbuf/ionice/taskset/xargs do. Before the fix,
 // unwrapAccountCommand's closed wrapper list left such a binary in its default
 // arm, returned its argv opaque, and unwrappedAccountCommandMutates's own
 // default called it safe — so wrapping the modelled `env NAME=value <agent>`
@@ -62,6 +62,15 @@ func TestValidateAccountEnvironmentCommand_RefusesUnmodeledWrapperHiddenAssignme
 		// Nested behind exec and the command builtin the same way.
 		"exec strace env CODEX_HOME=/other codex",
 		"command strace env CODEX_HOME=/other codex",
+		// A non-literal word in the wrapper's tail can expand to `env` (or to
+		// a multiword env invocation after word splitting); the denied NAME=
+		// that follows it is then a real override.
+		"strace $W env CODEX_HOME=/other codex",
+		"strace $W CODEX_HOME=/other codex",
+		// An unrecognized wrapper's option can itself mutate the child's
+		// environment — the --opt=DENIED shape mirrors xargs's
+		// --process-slot-var=NAME and strace's -E var=val.
+		"strace --setenv=CODEX_HOME codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
 		require.Error(t, err, "command %q hides a denied NAME= assignment behind an unmodeled wrapper", command)
@@ -152,6 +161,21 @@ func TestValidateAccountEnvironmentCommand_WrapperGuardStaysNarrow(t *testing.T)
 		"rg OPENAI_API_KEY= .",
 		"grep CODEX_HOME= /etc/environment",
 		"cat CODEX_HOME=/other",
+		// A nested env with no command word is env's print mode: it mutates
+		// only its own process's environment and execs nothing, so the tail
+		// assignment overrides no running agent.
+		"strace env CODEX_HOME=/other",
+		// A dynamic tail word could expand to `env`, but with no command word
+		// after the assignment the result is still print mode.
+		"strace $W CODEX_HOME=/other",
+		// xargs with a literal command whose argv cannot reach env: items and
+		// substitutions land in the command's own arguments.
+		"xargs",
+		"xargs -0p echo",
+		"xargs -n 2 env codex",
+		"xargs -I{} env codex {}",
+		"xargs --process-slot-var=PORT env codex",
+		"xargs -I{} env PORT={} codex",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"command %q carries no denied NAME= word and must stay allowed", command)
@@ -229,5 +253,64 @@ func TestApplyAccountEnvironment_RefusesUnmodeledWrapperHiddenAssignment(t *test
 		_, err := ApplyAccountEnvironment(nil, command, account)
 		require.Error(t, err, "command %q must not replace the sibling account environment", command)
 		require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
+	}
+}
+
+// xargs feeds content the static walk cannot see into the child's argv: input
+// items append after the initial arguments, and -I/-i/--replace substitutes
+// each marker occurrence with an input line. The modeled unwrap therefore
+// refuses an env invocation whose operand region either mechanism can reach —
+// env re-parses the supplied word, so an item spelling NAME=value is an
+// override even when the marker occupied env's command slot.
+func TestCommandMutatesAccountEnvironment_XargsModel(t *testing.T) {
+	codex := accountScopedNames("codex", "CODEX_HOME")
+	for name := range accountShellStartupNames {
+		codex[name] = struct{}{}
+	}
+	for _, test := range []struct {
+		command string
+		want    bool
+	}{
+		// A non-literal command word is unprovable: it can name env at
+		// runtime and the tail is then env's argv.
+		{"xargs $TOOL CODEX_HOME=/other codex", true},
+		// Without substitution, input items append after the initial
+		// arguments; env argv naming no command hands them env's operand
+		// region.
+		{"xargs env CODEX_HOME=/other", true},
+		{"xargs env -uCODEX_HOME", true},
+		// A literal denied assignment under the modeled env arm still refuses.
+		{"xargs env CODEX_HOME=/other codex", true},
+		{"xargs -n 2 env CODEX_HOME=/other codex", true},
+		// -I/-i/--replace substitute each marker occurrence with an input
+		// line, so a marker in env's operand region — including its command
+		// slot — can expand to a NAME=value override.
+		{"xargs -I{} env {} codex", true},
+		{"xargs -I{} env {}=x codex", true},
+		{"xargs -i env {} codex", true},
+		{"xargs --replace={} env -u{} codex", true},
+		{"xargs -I{} cmd env {} z", true},
+		// A marker spelled by a non-literal option argument is unprovable.
+		{`xargs -I "$M" env x codex`, true},
+		// --process-slot-var sets a variable on every exec'd command.
+		{"xargs --process-slot-var=CODEX_HOME env codex", true},
+		{"xargs --process-slot-var CODEX_HOME env codex", true},
+		{"xargs --process-slot-var=$VAR env codex", true},
+		// An env nested inside the command's own argv is checked the same
+		// way: appended items land at the end of the whole argv, which is
+		// env's operand region when env names no command.
+		{"xargs strace env", true},
+		// Safe shapes: a literal command whose argv cannot feed env an
+		// operand.
+		{"xargs", false},
+		{"xargs echo hi", false},
+		{"xargs env codex", false},
+		{"xargs -I{} env codex {}", false},
+		{"xargs -I{} env PORT={} codex", false},
+		{"xargs --process-slot-var=PORT env codex", false},
+		{"xargs --version", false},
+	} {
+		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, codex),
+			"command %q", test.command)
 	}
 }

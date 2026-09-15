@@ -140,7 +140,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 	}
 	switch {
 	case isAccountCommandName(words[0], "env"):
-		return envCallMutatesAccountEnvironment(words[1:], names)
+		return envCallMutatesAccountEnvironment(words[1:], names, false)
 	case isBareName(words[0], "unset"):
 		return unsetMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "set"):
@@ -269,6 +269,12 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 			if unsafe {
 				return nil, true
 			}
+		case isAccountCommandName(words[0], "xargs"):
+			var unsafe bool
+			words, unsafe = unwrapXargs(words[1:], names)
+			if unsafe {
+				return nil, true
+			}
 		default:
 			if unrecognizedWrapperHidesAccountAssignment(words, names) {
 				return nil, true
@@ -285,9 +291,9 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 // nesting an env invocation inside the wrapper's argument list.
 //
 // unwrapAccountCommand peels a CLOSED list of wrappers (exec/command/builtin/
-// nohup/nice/timeout/setsid/stdbuf/ionice/taskset); every other binary that runs
-// a child command and passes argv through (strace/perf/valgrind/gdb --args/
-// xargs/...) falls to the default arm and was returned opaque. Wrapping the
+// nohup/nice/timeout/setsid/stdbuf/ionice/taskset/xargs); every other binary
+// that runs a child command and passes argv through (strace/perf/valgrind/
+// gdb --args/...) falls to the default arm and was returned opaque. Wrapping the
 // modelled `env NAME=value <agent>` mutation — which the guard already refuses
 // bare and under every modelled wrapper — in an unmodeled wrapper hid the inner
 // assignment from the walk, so `strace env CODEX_HOME=/other codex` was accepted
@@ -303,14 +309,37 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 // invocation with a denied assignment) stay allowed.
 func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}) bool {
 	for i, word := range words[1:] {
-		if !isAccountCommandName(word, "env") {
+		if isAccountCommandName(word, "env") {
+			// A nested env only mutates the child it execs; requireCommand
+			// keeps an `env CODEX_HOME=/tmp` whose argv ends there — env's
+			// print mode, which overrides nothing — allowed.
+			if envCallMutatesAccountEnvironment(words[2+i:], names, true) {
+				return true
+			}
 			continue
 		}
-		// Found an `env` word in the tail. Delegate to envCallMutatesAccountEnvironment
-		// for the arguments following it. The dynamic-name branch in
-		// unwrappedAccountCommandMutates already refuses non-literal command names,
-		// so a dynamic wrapper like $WRAPPER is still caught at the call site.
-		return envCallMutatesAccountEnvironment(words[2+i:], names)
+		if literal, ok := literalShellWord(word); !ok {
+			// An unprovable tail word can itself expand to `env` (or to a
+			// multiword `env NAME=value` after word splitting); judge the
+			// words after it as that invocation's argv.
+			if envCallMutatesAccountEnvironment(words[2+i:], names, true) {
+				return true
+			}
+			continue
+		} else if strings.HasPrefix(literal, "-") {
+			// An unrecognized wrapper may expose options that mutate its
+			// child's environment in option-value form — xargs's
+			// --process-slot-var=NAME sets NAME on every exec'd command, and
+			// strace's -E var=val is analogous. A literal `--opt=DENIED`
+			// (or `-o DENIED=value`, caught by the NAME= shape above only
+			// when the whole word is assignment-shaped) is refused when its
+			// value names a denied variable.
+			if _, value, ok := strings.Cut(literal, "="); ok {
+				if _, denied := names[value]; denied {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }
@@ -380,22 +409,39 @@ func unwrapCommandBuiltin(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return words, false
 }
 
-func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
+// envCallArgvParse literalizes env's operand words the way env itself parses
+// them: a non-literal word that still spells a NAME= assignment keeps its name
+// (the value is dynamic), and anything else is unprovable so the parse fails.
+func envCallArgvParse(words []*syntax.Word) (envcommand.Invocation, error) {
 	literals := make([]string, 0, len(words))
 	for _, word := range words {
 		value, literal := literalShellWord(word)
 		if !literal {
 			name, assignment := shellWordAssignmentName(word)
 			if !assignment {
-				return true
+				return envcommand.Invocation{}, envcommand.ErrUnsupported
 			}
 			value = name + "=AF_DYNAMIC_VALUE"
 		}
 		literals = append(literals, value)
 	}
-	invocation, err := envcommand.Parse(literals, envcommand.Policy{AllowAssignments: true})
+	return envcommand.Parse(literals, envcommand.Policy{AllowAssignments: true})
+}
+
+// envCallMutatesAccountEnvironment reports whether the env invocation formed by
+// words mutates a denied name or execs something unprovable. requireCommand
+// restricts that verdict to env invocations carrying a command word: print-mode
+// env mutates only its own process, which is the right reading when the words
+// sit in an unrecognized wrapper's tail rather than forming the command itself —
+// an `env CODEX_HOME=/tmp` with nothing after it runs env's print path, not an
+// override of a running agent.
+func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}, requireCommand bool) bool {
+	invocation, err := envCallArgvParse(words)
 	if err != nil || invocation.ClearEnvironment {
 		return true
+	}
+	if requireCommand && invocation.CommandIndex < 0 {
+		return false
 	}
 	for _, mutation := range invocation.Mutations {
 		if _, denied := names[mutation.Name]; denied {
