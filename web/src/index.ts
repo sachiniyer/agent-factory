@@ -44,6 +44,7 @@ import {
   listTasks,
   setConfigValue,
   listAccounts,
+  quotaReport,
   registerAccount as registerAccountRPC,
   startAccountLogin,
   loadToken,
@@ -60,6 +61,7 @@ import {
 } from "./api.js";
 import { createKeyedQueue, saveNotice } from "./config.js";
 import { emptyAccountsState } from "./accounts.js";
+import { emptyUsageState } from "./usage.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
@@ -147,6 +149,7 @@ const store = new Store<AppState>({
   configPath: "",
   configStatus: null,
   accounts: emptyAccountsState(),
+  usage: emptyUsageState(),
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -646,9 +649,11 @@ function switchView(view: View): void {
   }
   if (view === "config") {
     refreshConfig();
-    // The accounts read rides with the config read for the same reason: the
-    // section shows them as they are NOW, including an account registered from
-    // the CLI or logged in from the TUI since this tab was opened.
+    // The usage and accounts reads ride with the config read for the same
+    // reason: the sections show them as they are NOW — a session parked at a
+    // wall, or an account registered or logged in on another surface, since
+    // this tab was opened.
+    refreshUsage();
     refreshAccounts();
   }
 }
@@ -1680,6 +1685,31 @@ const accountsRefetcher = createFencedRefetcher({
 
 function refreshAccounts(): void {
   accountsRefetcher.refresh();
+}
+
+/** The usage read (#4361), fenced like the config and accounts reads beside it:
+ *  entering the config view fetches the daemon's report, and a slower earlier
+ *  response must never land after a newer one and repaint stale evidence.
+ *
+ *  A failure becomes the SECTION's own message rather than a tab error, for the
+ *  same reason the accounts failure does: an empty section would read as "no
+ *  limits anywhere" — a different thing, needing a different action, from "af
+ *  could not look". */
+const usageRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: quotaReport,
+  commit: (resp) => {
+    store.set({
+      usage: { loaded: true, rows: resp.rows ?? [], note: resp.note ?? "", caveats: resp.caveats ?? [], error: "" },
+    });
+  },
+  onError: (err: unknown) => {
+    store.set({ usage: { ...store.get().usage, error: errorText(err) } });
+  },
+});
+
+function refreshUsage(): void {
+  usageRefetcher.refresh();
 }
 
 /** Records the outcome of an account action on the row that produced it. */

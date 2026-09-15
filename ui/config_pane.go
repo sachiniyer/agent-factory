@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/quota"
 )
 
 // ConfigPane is the direct config editor: a form over the config manifest,
@@ -77,6 +78,13 @@ type ConfigPane struct {
 	// inventing a second writer.
 	save func(key, value string) (result *config.SetResult, notice string, err error)
 
+	// usage is the Usage section (#4361): the attached host's usage-limit
+	// evidence, rendered above Accounts and read-only. Its rows arrive already
+	// worded — quota.Row is the daemon's wire shape — so this pane, the CLI,
+	// and the web cannot drift into three readings of one policy. Its state
+	// lives in config_pane_usage.go.
+	usage usageSection
+
 	// accounts is the Accounts section (#3385): agent identities, rendered below
 	// the config tiers and visibly not config rows. It is a separate struct rather
 	// than more fields here because it is a separate domain — nothing in it goes
@@ -99,9 +107,13 @@ type configRow struct {
 	heading string
 	entry   *config.ConfigEntry
 	// account is set for a row of the Accounts section (#3385) — an agent
-	// identity, not a config key. Exactly one of heading, entry and account is
-	// meaningful on any row.
+	// identity, not a config key. Exactly one of heading, entry, usage and
+	// account is meaningful on any row.
 	account *AccountRow
+	// usage is set for a row of the Usage section (#4361) — one rendered
+	// quota.Row. Usage rows are evidence, so unlike entry and account they are
+	// not selectable: there is nothing here to edit or invoke.
+	usage *quota.Row
 }
 
 // isSelectable reports whether the cursor may land on this row. Every manifest
@@ -231,6 +243,10 @@ func (c *ConfigPane) rebuildRows() {
 			c.rows = append(c.rows, configRow{entry: &entry})
 		}
 	}
+	// Usage sits between the tiers and Accounts (#4361): like Accounts it is
+	// daemon-reported state rather than config, and "is anything parked at a
+	// limit" is the answer an operator opening this overlay is looking for.
+	c.appendUsageRows()
 	// Accounts last: the config keys are what this overlay is for, and a
 	// credential section above them would push them off the first screen.
 	c.appendAccountRows()
@@ -538,11 +554,17 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 		case row.account != nil:
 			rendered := c.renderAccountRow(i, *row.account)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
+		case row.usage != nil:
+			rendered := c.renderUsageRow(*row.usage)
+			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
 		case row.entry != nil:
 			rendered := c.renderEntryRow(i, row, *row.entry)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
 		default:
 			lines = append(lines, configHeadingStyle.Render(row.heading))
+			if row.heading == usageHeading {
+				lines = append(lines, c.renderUsageHeadingLines()...)
+			}
 			if row.heading == accountsHeading {
 				if c.accounts.loading {
 					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("Loading accounts…", configHintStyle), "\n"), "\n")...)
