@@ -139,14 +139,16 @@ func (s *TaskPane) RestoreFailedEdit(id string) {
 // from s.tasks at delete time, so without this restore it would vanish from the
 // pane while the disk reload that would re-show it (SetTasks) is gated on
 // !failedEdit — and a concurrent failed edit leaves failedEdit true, skipping
-// that reload. Re-appending to s.tasks keeps the row visible (the pane and
-// sidebar can never diverge, per saveContentPaneState), and re-queueing in
+// that reload. Re-appending to s.tasks keeps the row visible and re-queueing in
 // s.deleted retries the removal on the next save. The record still exists on
 // disk (the removal did not commit), so retrying RemoveTask is not the
 // already-deleted re-run ConsumeDeleted drains to avoid (fixes #763).
 //
 // restoredDeletes deduplicates repeated failures: the second retry failure must
 // not append another visible copy of the same row, only re-queue the delete.
+// restoredDeletes persists across ConsumeDeleted passes and is only cleared by
+// SetTasks (a successful reload) or AcknowledgeDeletedRestored (a successful
+// retry), so the dedupe key is live for the entire retry sequence.
 func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
 	if s.restoredDeletes == nil {
 		s.restoredDeletes = make(map[string]bool)
@@ -159,19 +161,38 @@ func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
 	s.dirty = true
 }
 
+// AcknowledgeDeletedRestored removes a previously-restored row from s.tasks
+// when its deletion retry succeeds. Without this, a restored row remains
+// visible until SetTasks runs — which is skipped while failedEdit is true — so
+// a task deleted from disk would stay in the pane for the remainder of the
+// retry sequence.
+func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
+	if !s.restoredDeletes[id] {
+		return
+	}
+	delete(s.restoredDeletes, id)
+	for i, t := range s.tasks {
+		if t.ID == id {
+			s.tasks = append(s.tasks[:i], s.tasks[i+1:]...)
+			return
+		}
+	}
+}
+
 // ConsumeDeleted returns the tasks pending deletion and clears the pane's
-// deletion state so a subsequent save can't reprocess already-deleted tasks.
+// deletion queue so a subsequent save can't reprocess already-deleted tasks.
 // Failed edits restored after ConsumeDirty keep the pane dirty until the final
 // reload succeeds or a later save retries them. The deletion loop in
 // saveContentPaneState removes task records as a side effect, so re-running it
 // would call RemoveTask on records that no longer exist and log spurious errors
-// (fixes #763). restoredDeletes is cleared here too so RestoreFailedDelete
-// may re-append a row on the next round if needed (the tasks slice is rebuilt
-// by a fresh ConsumeDeleted → RestoreFailedDelete cycle, not carried forward).
+// (fixes #763). restoredDeletes is NOT cleared here: it persists across passes
+// so RestoreFailedDelete's dedupe check fires on the second (and later) retry
+// failure, preventing a second visible copy of the same row from being appended
+// to s.tasks. restoredDeletes is cleared by SetTasks on a successful reload and
+// by AcknowledgeDeletedRestored when a retry succeeds.
 func (s *TaskPane) ConsumeDeleted() []task.Task {
 	deleted := s.deleted
 	s.deleted = nil
-	s.restoredDeletes = nil
 	s.dirty = len(s.dirtyIDs) > 0
 	return deleted
 }

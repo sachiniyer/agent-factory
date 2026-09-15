@@ -129,33 +129,50 @@ func (m *home) saveContentPaneState() error {
 				// it. Keep the schedule failure visible without telling the user
 				// to retry a deletion that already happened.
 				log.WarningLog.Printf("task removal committed but schedule refresh failed: %v", err)
+				sp.AcknowledgeDeletedRestored(tsk.ID)
 				saveErr = errors.Join(saveErr, fmt.Errorf(
 					"task %q was removed, but the daemon could not refresh its schedules: %w", tsk.Name, err))
 				continue
 			}
 			log.ErrorLog.Printf("failed to remove task: %v", err)
-			// Only restore when the record still exists: a "not found" error
-			// means another client already removed it, and a project-expectation
-			// error means it was rebound to a different project — in both cases
-			// the record is gone from this repo and re-queuing the delete would
-			// retry an operation that can never satisfy its original expectation.
-			// For any other failure (lock contention, transient I/O) the removal
-			// did not commit, so re-appending the row and re-queuing is correct.
+			// Only restore when the record still exists. Two cases indicate the
+			// record is gone from this repo and re-queuing would retry an
+			// operation that can never satisfy its original expectation:
+			//   - task.RemoveTask returned "not found": another client already
+			//     deleted the record.
+			//   - task.ProjectExpectation.Verify returned a project-rebind
+			//     error: the record was moved to a different project.
+			// An UnconfirmedHTTPResponseError is deliberately excluded: its 404
+			// status cannot prove the task handler ran (apiclient/skew.go:159),
+			// so it does not prove the record is gone — restore and retry.
+			// For any other failure (lock contention, transient I/O) the
+			// removal did not commit; re-appending and re-queueing is correct.
 			// sp.SetTasks below is gated on !failedEdit; without this restore a
 			// concurrent failed edit would make the row disappear from the pane.
-			errMsg := err.Error()
-			recordGone := strings.Contains(errMsg, "not found") ||
-				strings.Contains(errMsg, "re-bound to a different project")
+			var unconfirmed *apiclient.UnconfirmedHTTPResponseError
+			recordGone := !errors.As(err, &unconfirmed) &&
+				(strings.Contains(err.Error(), "not found") ||
+					strings.Contains(err.Error(), "re-bound to a different project"))
 			if !recordGone {
 				sp.RestoreFailedDelete(tsk)
 			}
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to remove task %q: %w", tsk.Name, err))
+		} else {
+			// Deletion committed cleanly: if this task was previously restored
+			// into s.tasks after a failed attempt, remove it now so it does not
+			// stay visible while SetTasks is gated on !failedEdit.
+			sp.AcknowledgeDeletedRestored(tsk.ID)
 		}
 	}
 	// Reload the sidebar unconditionally from disk. The TaskPane reload is
-	// gated on !failedEdit so user edits survive for retry (#934). When
-	// failedEdit is true the TaskPane retains its in-memory state; the two
-	// panes may temporarily diverge until the edit is saved or discarded.
+	// gated on !failedEdit so user edits survive for retry. This deliberately
+	// narrows the #934 invariant ("the two panes can never diverge"): when a
+	// save fails and the user's draft must be preserved, keeping the TaskPane
+	// in its draft state is the right trade — the sidebar shows committed state
+	// while the editor retains the pending edit. The divergence is bounded: it
+	// ends when the edit is saved (SetTasks runs) or discarded (SetFocus(false)
+	// drops the draft). Any restored-but-deleted row is removed synchronously by
+	// AcknowledgeDeletedRestored above, so that class of divergence is closed.
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err == nil {
 		m.store.SetTasks(tasks)
