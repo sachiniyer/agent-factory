@@ -52,6 +52,7 @@ func TestArchiveHookOutputSurvivesRunnerExit(t *testing.T) {
 		"AF_TEST_RESTART_HOME="+home,
 		"AF_TEST_RESTART_WORKTREE="+worktree,
 		"AF_TEST_RESTART_COMMAND="+command,
+		testguard.ExpectedParentEnv+"="+strconv.Itoa(os.Getpid()),
 	)
 	testguard.StartGroupProcess(t, runner)
 

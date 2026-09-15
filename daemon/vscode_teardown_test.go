@@ -85,6 +85,13 @@ func startOwnedSleepWithNonce(t *testing.T, processNonce string) (*exec.Cmd, pro
 	cmd := exec.Command("/bin/sh", "-c", "exec sleep 60")
 	cmd.Env = append(os.Environ(), vscodeOwnerNonceEnv+"="+processNonce)
 	testguard.StartGroupProcess(t, cmd)
+	// Reap the moment the leader dies, not only at cleanup: the tests signal
+	// this group MID-test through the supervisor's own seam, and the
+	// escalation path then re-verifies the leader's identity in proctree. An
+	// uncollected leader is a zombie, which proctree rightly reports as
+	// "exited and awaiting collection" — the old code's immediate Wait
+	// goroutine is what kept that window closed.
+	go func() { _, _ = cmd.Process.Wait() }()
 	deadline := time.Now().Add(2 * time.Second)
 	var process proctree.Process
 	for {

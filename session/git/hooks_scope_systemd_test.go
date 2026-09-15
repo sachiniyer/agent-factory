@@ -276,7 +276,8 @@ func TestRestoreAdoptsAHookRunStillLiveInItsRealScope(t *testing.T) {
 	previous.Env = append(os.Environ(),
 		"AF_TEST_REAL_SCOPE_HELPER=1", "AF_TEST_REAL_SCOPE_HOME="+home,
 		"AF_TEST_REAL_SCOPE_REPO="+repoPath, "AF_TEST_REAL_SCOPE_TREE="+worktreePath,
-		"AF_TEST_REAL_SCOPE_SESSION="+sessionID)
+		"AF_TEST_REAL_SCOPE_SESSION="+sessionID,
+		testguard.ExpectedParentEnv+"="+strconv.Itoa(os.Getpid()))
 	previous.Stdout, previous.Stderr = os.Stdout, os.Stderr
 	testguard.StartGroupProcess(t, previous)
 	previousReaped := false

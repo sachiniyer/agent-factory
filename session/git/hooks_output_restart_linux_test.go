@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -54,6 +55,7 @@ func TestPostWorktreeHookOutputSurvivesRunnerExit(t *testing.T) {
 		"AF_TEST_RESTART_REPO="+repo,
 		"AF_TEST_RESTART_WORKTREE="+worktree,
 		"AF_TEST_RESTART_COMMAND="+command,
+		testguard.ExpectedParentEnv+"="+strconv.Itoa(os.Getpid()),
 	)
 	testguard.StartGroupProcess(t, runner)
 

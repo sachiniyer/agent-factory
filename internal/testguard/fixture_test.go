@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
 // #4412: every fixture loop these builders emit must self-terminate — the
@@ -122,8 +124,11 @@ func TestExitWhenOrphaned(t *testing.T) {
 		t.Fatal(err)
 	}
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	// $$ is the shell's pid, which `exec sleep 60` keeps — i.e. the child's
+	// real parent — so the watchdog still fires when this process only boots
+	// after the wrapper already died and a captured ppid would name a reaper.
 	wrapper := exec.Command("sh", "-c", fmt.Sprintf(
-		"%q -test.run=^TestExitWhenOrphaned$ & echo $! > %q; exec sleep 60", self, pidFile))
+		ExpectedParentEnv+"=$$ %q -test.run=^TestExitWhenOrphaned$ & echo $! > %q; exec sleep 60", self, pidFile))
 	wrapper.Env = append(os.Environ(), "AF_TEST_ORPHAN_WATCHDOG_CHILD=1")
 	StartGroupProcess(t, wrapper)
 
@@ -147,10 +152,14 @@ func TestExitWhenOrphaned(t *testing.T) {
 	}
 }
 
+// waitForProcessDeath asks proctree, not kill(pid, 0): signal-0 answers for a
+// ZOMBIE, and a watchdog-killed orphan stays one until whatever it reparented
+// to collects it — on that reaper's schedule, which a container init may never
+// keep. Lookup reports zombies and gone processes alike as dead (#4412).
 func waitForProcessDeath(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); err != nil {
+		if _, err := proctree.Lookup(pid); err != nil {
 			return true
 		}
 		time.Sleep(5 * time.Millisecond)

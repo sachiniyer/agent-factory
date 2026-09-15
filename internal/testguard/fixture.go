@@ -62,6 +62,14 @@ func BoundedLoop(period, lifetime time.Duration, body string) string {
 		spinIterations(period, lifetime), body)
 }
 
+// ExpectedParentEnv names the environment variable a spawner uses to tell a
+// re-exec'd fixture its INTENDED parent pid (the spawner's own os.Getpid()).
+// ExitWhenOrphaned prefers it over the process's current ppid: a fixture can
+// still be booting when its owner dies — especially on a loaded runner — and
+// a ppid captured AFTER the reparent is init or a subreaper, a parent that
+// never goes away, which leaves the watchdog watching nothing forever.
+const ExpectedParentEnv = "AF_TESTGUARD_EXPECTED_PPID"
+
 // ExitWhenOrphaned starts a watchdog that exits the current process once its
 // original parent is gone. It exists for fixtures that are re-exec'd copies
 // of the test binary (exec.Command(os.Args[0], ...)): the test binary is
@@ -69,8 +77,17 @@ func BoundedLoop(period, lifetime time.Duration, body string) string {
 // will ever signal or reap them — which is how `daemon.test --socket`
 // fixtures survived for weeks (#4412). Call it at the top of the re-exec'd
 // fixture main. poll is the getppid sampling interval.
+//
+// The watched parent is ExpectedParentEnv when the spawner exported it, else
+// the ppid captured HERE, at call time. The capture fallback is also the
+// right answer for a fixture spawned through an intermediary (a tmux pane, a
+// supervising shell): its legitimate owner IS that immediate parent, which
+// no env value could name anyway.
 func ExitWhenOrphaned(poll time.Duration) {
 	parent := os.Getppid()
+	if expected, err := strconv.Atoi(os.Getenv(ExpectedParentEnv)); err == nil && expected > 0 {
+		parent = expected
+	}
 	go func() {
 		for {
 			time.Sleep(poll)

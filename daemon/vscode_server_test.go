@@ -281,6 +281,11 @@ func writeFakeVSCodeBinary(t *testing.T, name string, env map[string]string) str
 	// blurs them would let a broken argv pass.
 	exports.WriteString(fakeVSCodeFlavorEnv + "=" + shellQuote(name) + " ")
 	exports.WriteString(fakeVSCodePgidDirEnv + "=" + shellQuote(pgidDir) + " ")
+	// The fake's owner is THIS process: every spawn layer between the
+	// supervisor and the re-exec execs, so the pid survives. Telling the
+	// watchdog its expected parent keeps it armed even when the editor only
+	// boots after the test binary already died (#4412).
+	exports.WriteString(testguard.ExpectedParentEnv + "=" + strconv.Itoa(os.Getpid()) + " ")
 	for k, v := range env {
 		exports.WriteString(k + "=" + shellQuote(v) + " ")
 	}
