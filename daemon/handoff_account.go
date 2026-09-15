@@ -37,6 +37,17 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 		return HandoffSessionResponse{}, fmt.Errorf("session %q was replaced or removed", instance.Title)
 	}
 	instance = current
+	// A local account handoff can rebuild a vanished persisted worktree through
+	// the shared respawn path. Acquire repository admission before the handoff can
+	// commit an identity or stop a pane; a timeout therefore remains an untouched,
+	// retryable refusal rather than a half-applied replacement.
+	worktreeAdmission, err := m.lockLocalWorktreeAdmissionWithin(repoID, instance.Title, "hand off", instance)
+	if err != nil {
+		return HandoffSessionResponse{}, err
+	}
+	if worktreeAdmission != nil {
+		defer worktreeAdmission.Unlock()
+	}
 	// An account-only request follows the agent selected by the preceding
 	// operation, including a handoff that finished while we waited for the lock.
 	target := strings.TrimSpace(req.To)
@@ -79,11 +90,24 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 // Manual admission uses the same registered and limit evidence sources as the
 // scheduler, under its account-limit fence, without requiring rotation policy.
 func (m *Manager) admitManualAccountSwap(instance *session.Instance, swap *autoAccountSwap) (*autoAccountSwap, error) {
+	return m.evaluateManualAccountSwap(instance, swap, true)
+}
+
+// checkManualAccountSwap preserves domain refusals that do not depend on the
+// project-config lock, without recording a launch plan or authorizing mutation.
+// A successful result is only advisory: admission repeats the whole proof under
+// the personal-policy lock immediately before the identity checkpoint.
+func (m *Manager) checkManualAccountSwap(instance *session.Instance, swap *autoAccountSwap) error {
+	_, err := m.evaluateManualAccountSwap(instance, swap, false)
+	return err
+}
+
+func (m *Manager) evaluateManualAccountSwap(instance *session.Instance, swap *autoAccountSwap, recordLaunch bool) (*autoAccountSwap, error) {
 	home, err := config.GetConfigDir()
 	if err != nil {
 		return nil, err
 	}
-	if _, err := agentaccount.Selected(home, swap.agent, swap.to, ""); err != nil {
+	if _, err := agentaccount.Selected(home, swap.agent, swap.to); err != nil {
 		return nil, err
 	}
 	limited, err := m.limitedAccountsForSwap(swap.agent, loadAccountLimitEvidenceForSwap)
@@ -98,7 +122,11 @@ func (m *Manager) admitManualAccountSwap(instance *session.Instance, swap *autoA
 	if instanceHasVSCodeTab(instance) {
 		return nil, fmt.Errorf("cannot switch accounts for %q while it has a VS Code tab", instance.Title)
 	}
-	if err := instance.ValidateManualAccountSwap(swap.to, swap.agent); err != nil {
+	validate := instance.CheckManualAccountSwap
+	if recordLaunch {
+		validate = instance.ValidateManualAccountSwap
+	}
+	if err := validate(swap.to, swap.agent); err != nil {
 		return nil, err
 	}
 	admitted := *swap

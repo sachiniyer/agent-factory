@@ -118,6 +118,12 @@ Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch scr
   af tasks remove <id>
 Without --target-session each run creates a fresh session; {{line}} in a watch prompt is replaced by the emitted stdout line. On update, setting one trigger clears the other, --target-session "" reverts to session-per-run, and --project-path moves the task to another project (--repo still scopes its current project). A task is bound to one project at creation and "tasks add" echoes the binding as project_path — check it matches the project you meant, and never create a task from a scratch clone of a repo, which binds the automation to the clone instead of the real project. The background daemon runs all schedules; "af daemon install" / "af daemon uninstall" manage its login autostart.
 
+Root-agent configuration (global unless --project <id-or-path> selects a personal project override):
+  af config set root_agent <compact-json>             Merge the enabled/program profile as one table
+  af config set root_agent.enabled <bool>             Enable or disable the singleton profile
+  af config set root_agent.program <command>          Set the command while preserving enabled
+Root-agent configuration is frozen at daemon start. An already-running root session is adopted as-is; after changing its program, disabling it, or removing its enabling entry, restart the daemon first and then kill that session.
+
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".`
 
 // afUsageOutroInside is the wrap-up for an agent that IS an af session: it can

@@ -332,6 +332,7 @@ type promptDeliveryStatusBackend interface {
 // from the one that was checked while the outgoing agent was still alive.
 type AgentSwapPlan struct {
 	target              string
+	baseProgram         string
 	program             string
 	conversation        AgentConversationData
 	conversationCapture ConversationCaptureSnapshot

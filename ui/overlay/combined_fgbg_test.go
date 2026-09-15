@@ -14,7 +14,7 @@ import (
 // with bgColorRegex and replaced it with a background-only gray, dropping the
 // foreground entirely.
 func TestPlaceOverlayCombinedFgBgFade(t *testing.T) {
-	lipgloss.SetColorProfile(termenv.ANSI256)
+	forceProfile(t, termenv.ANSI256)
 
 	style := lipgloss.NewStyle().
 		Background(lipgloss.Color("#dde4f0")).

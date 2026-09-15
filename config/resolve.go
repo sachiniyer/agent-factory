@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -114,6 +115,83 @@ func ResolveConfigForRepoInspection(repo *RepoContext) (*ResolvedConfig, error) 
 	return resolveConfigForRepo(repo, suppressInRepoLoadObservation)
 }
 
+// ResolveConfigForRepoInspectionWithGlobal is the fully read-only, complete
+// inspection path for callers that already loaded the global layer without
+// migrations or materialization. Passing that snapshot prevents a nested
+// resolve from re-entering LoadConfig while preserving the same repo/personal
+// precedence. An unreadable personal lookup is unknown, never an empty layer.
+func ResolveConfigForRepoInspectionWithGlobal(repo *RepoContext, global *Config) (*ResolvedConfig, error) {
+	return resolveConfigForRepoInspectionWithGlobalAndPersonal(repo, global, nil)
+}
+
+func resolveConfigForRepoInspectionWithGlobalAndPersonal(repo *RepoContext, global *Config, personal *sourceDocument) (*ResolvedConfig, error) {
+	if repo == nil {
+		return nil, fmt.Errorf("repo context is required")
+	}
+	if global == nil {
+		return nil, fmt.Errorf("global config snapshot is required for read-only repo inspection")
+	}
+	prepared, err := prepareGlobalConfigSnapshot(global)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := resolveConfigRootsWithOptions(
+		repo.IdentityPath(), repo.WorkspacePath(), suppressInRepoLoadObservation,
+		resolveOptions{global: prepared, requirePersonalPolicy: true, personalDocument: personal},
+	)
+	if err != nil {
+		return nil, err
+	}
+	warnRetainedLegacyBareRepoConfig(repo)
+	return resolved, nil
+}
+
+// ResolveConfigForRepoInspectionWithGlobalContext bounds the complete read-only
+// resolution, including filesystem-backed legacy, checked-in, and personal
+// config loads. Repository subprocesses already receive their own deadlines,
+// but an unavailable mount can stall an ordinary file read too; inspection
+// callers must be able to return an unknown result when that happens.
+func ResolveConfigForRepoInspectionWithGlobalContext(ctx context.Context, repo *RepoContext, global *Config) (*ResolvedConfig, error) {
+	return resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx, repo, global, nil)
+}
+
+func resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx context.Context, repo *RepoContext, global *Config, personal *sourceDocument) (*ResolvedConfig, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is required for bounded repo inspection")
+	}
+	if repo == nil {
+		return nil, fmt.Errorf("repo context is required")
+	}
+	if global == nil {
+		return nil, fmt.Errorf("global config snapshot is required for read-only repo inspection")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("inspect repository config: %w", err)
+	}
+	type result struct {
+		resolved *ResolvedConfig
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resolved, err := resolveConfigForRepoInspectionWithGlobalAndPersonal(repo, global, personal)
+		done <- result{resolved: resolved, err: err}
+	}()
+	select {
+	case outcome := <-done:
+		return outcome.resolved, outcome.err
+	case <-ctx.Done():
+		// A completed read is an answer even if its caller's deadline became ready
+		// at the same instant. Prefer it before classifying the observation unknown.
+		select {
+		case outcome := <-done:
+			return outcome.resolved, outcome.err
+		default:
+			return nil, fmt.Errorf("inspect repository config: %w", ctx.Err())
+		}
+	}
+}
+
 // ResolveConfigForIdentityDecisionFromGlobal resolves the same effective config
 // as ResolveConfigForRepoInspection over an already-loaded global snapshot, but
 // refuses to ignore an unreadable personal-project layer.
@@ -196,6 +274,10 @@ type resolveOptions struct {
 	// requirePersonalPolicy fails the resolve when the personal project layer
 	// cannot be read, instead of degrading to "no personal layer".
 	requirePersonalPolicy bool
+	// personalDocument, when non-nil, is a personal-project layer already read
+	// by a larger inspection. Reusing it keeps related decisions on one file
+	// generation instead of reopening the source between them.
+	personalDocument *sourceDocument
 }
 
 func resolveConfigRoots(identityRoot, workspaceRoot string, observation inRepoLoadObservation) (*ResolvedConfig, error) {
@@ -264,9 +346,14 @@ func resolveConfigRootsWithOptions(
 	// resolveManifest's requireAllSources check always finds the candidate a
 	// personal-admitting key names in its precedence, exactly like the empty
 	// in-repo document above.
-	personalDoc, err := projectPersonalDocumentForRoots(identityRoot, workspaceRoot, opts.requirePersonalPolicy)
-	if err != nil {
-		return nil, err
+	var personalDoc sourceDocument
+	if opts.personalDocument != nil {
+		personalDoc = *opts.personalDocument
+	} else {
+		personalDoc, err = projectPersonalDocumentForRoots(identityRoot, workspaceRoot, opts.requirePersonalPolicy)
+		if err != nil {
+			return nil, err
+		}
 	}
 	documents = append(documents, personalDoc)
 
@@ -362,11 +449,15 @@ func projectPersonalDocumentFromLookup(project Project, found bool, err error, s
 	if !found {
 		return emptyProjectPersonalDocument(), nil
 	}
-	path, err := ProjectConfigTomlPath(project.ID)
+	personal, err := LoadProjectConfig(project.ID)
 	if err != nil {
 		return sourceDocument{}, err
 	}
-	personal, err := LoadProjectConfig(project.ID)
+	return projectPersonalDocumentFromLoaded(project, personal)
+}
+
+func projectPersonalDocumentFromLoaded(project Project, personal *ProjectConfig) (sourceDocument, error) {
+	path, err := ProjectConfigTomlPath(project.ID)
 	if err != nil {
 		return sourceDocument{}, err
 	}

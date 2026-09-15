@@ -129,7 +129,19 @@ func localConfigSet(key, value string) (*config.SetResult, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	return resp.Result, paneNotice(resp.RestartNotice, resp.ListenerAddr, resp.Warnings), nil
+	// resp.Warnings is the apply-time notice (the daemon's
+	// ListenerExposureNotice) and is only populated when a daemon actually
+	// applied the write. With no daemon reachable the apply fails and
+	// resp.Warnings is nil, while resp.Result.Warnings still carries the
+	// per-write exposureWarning config.SetGlobalConfigValue produced — the one
+	// paneNotice's doc comment promises the pane surfaces. Use it only on that
+	// fallback so a daemon-running edit shows exactly one notice, not the two
+	// differently-worded ones both fields carry there.
+	warnings := resp.Warnings
+	if len(warnings) == 0 && resp.Result != nil {
+		warnings = resp.Result.Warnings
+	}
+	return resp.Result, paneNotice(resp.RestartNotice, resp.ListenerAddr, warnings), nil
 }
 
 // remoteConfigSet writes the key on the targeted daemon over HTTP, through the
@@ -173,7 +185,17 @@ func remoteConfigSet(key, value string) (*config.SetResult, string, error) {
 			"check that the URL names an af daemon", apiclient.RemoteTargetURL())
 	}
 	resp.Result.Key = config.CanonicalConfigKey(resp.Result.Key)
-	return resp.Result, paneNotice(resp.RestartNotice, resp.ListenerAddr, resp.Warnings), nil
+	// Same fallback as localConfigSet: resp.Warnings carries the apply-time
+	// ListenerExposureNotice when the daemon applied the write, and
+	// resp.Result.Warnings carries the per-write exposureWarning it did not. A
+	// daemon that actually applied is the remote case, so this is dormant today,
+	// but it makes the contract explicit — one notice, from whichever field the
+	// daemon populated — rather than relying on the remote daemon always applying.
+	warnings := resp.Warnings
+	if len(warnings) == 0 {
+		warnings = resp.Result.Warnings
+	}
+	return resp.Result, paneNotice(resp.RestartNotice, resp.ListenerAddr, warnings), nil
 }
 
 // paneNotice builds the one line the pane shows after a write: the daemon's

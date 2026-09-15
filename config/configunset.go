@@ -32,7 +32,7 @@ func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	section, leaf, spec, err := resolveProjectSettable(key)
+	section, leaf, spec, err := resolveProjectSettable(selector, key)
 	if err != nil {
 		return nil, err
 	}

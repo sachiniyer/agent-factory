@@ -334,3 +334,32 @@ func TestRestoreArchived_RemoteRouteRaisesNoEarlyFence(t *testing.T) {
 				"scoped to the local route, whose relocate is the only prefix long enough to matter")
 	}
 }
+
+// TestRestoreArchived_RemoteRouteReturnsEmptyWorktreePath pins the return
+// contract: a remote (docker/ssh/hook) session has no local worktree —
+// GetWorktreePath() is "" for every off-box backend (gitWorktree is nil) — so
+// the restored worktree path the RestoreArchived contract ("Returns the restored
+// worktree path.") documents and the CLI surfaces as worktree_path must be
+// empty, not the session's display title. The local and Lost/Dead routes already
+// return instance.GetWorktreePath() via restoredArchiveResult; the remote route
+// must do the same, or every `af sessions restore <title>` of an archived
+// remote session prints the title under the worktree_path key (a
+// documented-contract mismatch).
+func TestRestoreArchived_RemoteRouteReturnsEmptyWorktreePath(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-archived", "http://127.0.0.1:1", session.Running)
+	inst.SetStatusForTest(session.Archived)
+
+	require.Equal(t, "", inst.GetWorktreePath(), "fixture: a remote instance has no local worktree")
+
+	worktreePath, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "remote-archived", RepoID: repoID})
+	require.NoError(t, err)
+	require.Equal(t, 1, backend.recoverCalls(), "the remote route re-provisions through RestoreFromArchive")
+
+	assert.Equal(t, "", worktreePath, "a remote restore has no on-disk worktree, so the restored worktree path must be empty")
+	assert.NotEqual(t, "remote-archived", worktreePath, "the session display title must not surface as the worktree path")
+	// The restored runtime is live again, and still has no local worktree to report.
+	assert.Equal(t, session.Running, inst.GetStatus())
+	assert.Equal(t, "", inst.GetWorktreePath(), "the restored remote instance still has no local worktree")
+}

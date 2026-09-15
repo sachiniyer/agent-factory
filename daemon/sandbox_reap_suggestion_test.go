@@ -109,3 +109,64 @@ func TestRestoreSession_ReapAdviceRequiresDurableBranch(t *testing.T) {
 		})
 	}
 }
+
+// A successful archive response with no branch is another refusal, not a new
+// basis for choosing an off-ramp. It must retain the advice already classified
+// from the durable-record guard: otherwise it can replace executable force-reap
+// advice with an unnecessarily destructive kill, or advertise a title-only kill
+// while storage or identity state makes that command fail or target a successor.
+func TestRestoreSession_EmptyArchiveBranchKeepsGuardDerivedAdvice(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		memoryBranch string
+		storedBranch string
+		storedID     string
+		unreadable   bool
+		wantForce    bool
+		repairHint   string
+	}{
+		{name: "unknown_branch", storedID: "current"},
+		{name: "unrecorded_branch", memoryBranch: "af/current", storedID: "current"},
+		{name: "reused_title", memoryBranch: "af/current", storedBranch: "af/current", storedID: "previous", repairHint: "different session"},
+		{name: "record_read_error", memoryBranch: "af/current", unreadable: true, repairHint: "could not read its stored record"},
+		{name: "durable_matching_branch", memoryBranch: "af/current", storedBranch: "af/current", storedID: "current", wantForce: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			srv := newSandboxProbeServer(t, "")
+			inst, backend, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "empty-archive-branch", srv.url, session.Lost)
+			inst.ID = "current"
+			inst.SetSandboxBranch(tc.memoryBranch)
+			rec := inst.ToInstanceData()
+			rec.ID, rec.Branch = tc.storedID, tc.storedBranch
+			raw, err := json.Marshal([]session.InstanceData{rec})
+			require.NoError(t, err)
+			if tc.unreadable {
+				raw = []byte(`{`)
+			}
+			require.NoError(t, config.SaveRepoInstances(repoID, raw))
+
+			// Start after resolution so a corrupt record reaches the refusal whose
+			// guidance was classified before the archive attempt.
+			_, err = manager.restoreLostOrDeadSession(repoID, inst.Title, inst, false)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "push reported no branch name")
+			require.EqualValues(t, 1, srv.archiveCalls.Load())
+			require.Zero(t, backend.recoverCalls())
+			requireSandboxSurvived(t, reap, "an empty archive branch cannot license replacement")
+
+			if tc.repairHint != "" {
+				require.Contains(t, err.Error(), tc.repairHint)
+				require.NotContains(t, err.Error(), "sessions kill")
+				require.NotContains(t, err.Error(), "--force-reap")
+				return
+			}
+			want, unwanted := killSuggestionFor(inst), forceReapSuggestionFor(inst)
+			if tc.wantForce {
+				want, unwanted = unwanted, want
+			}
+			require.Contains(t, err.Error(), want)
+			require.NotContains(t, err.Error(), unwanted)
+		})
+	}
+}

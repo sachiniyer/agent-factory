@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,7 +78,7 @@ func TestSearchOverlayEmptyStatesUseSentenceCase(t *testing.T) {
 		s.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 
-	out := xansi.Strip(s.Render())
+	out := renderedText(s.Render())
 	require.Contains(t, out, "No matches found",
 		"the empty result state renders in sentence case:\n%s", out)
 	require.NotContains(t, out, "no matches found",

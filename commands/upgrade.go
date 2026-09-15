@@ -225,7 +225,7 @@ func shouldUpgrade(latestTag, current, channel string, allowDowngrade bool) (pro
 // is not running the version they just installed.
 func runUpgrade(out, errOut io.Writer, downloadURL string, noRestart bool) error {
 	// Refuse before spending a download on a swap we are not going to perform.
-	// writeExecutableInPlace below is the actual guard; this only buys the user a
+	// writeExecutableInPlaceAllowing below is the actual guard; this only buys the user a
 	// faster, cheaper refusal (#2212).
 	if !upgradeIgnoreActiveUpgrade {
 		if active := activeUpgradeOwningExecutable(); active != nil {

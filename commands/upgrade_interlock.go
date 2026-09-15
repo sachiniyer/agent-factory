@@ -243,17 +243,6 @@ func clearUnverifiableStagedArtifacts() bool {
 	return loaded.Config.UpgradeClearUnverifiableArtifacts
 }
 
-// writeExecutableInPlace is the ONE guarded in-place binary swap. Both installers
-// go through it, so the interlock cannot be bypassed by adding a call site — the
-// entrypoint checks elsewhere exist to give a better message and to skip a
-// pointless download, not to be the guard.
-//
-// override is the caller's explicit "install anyway"; it is honoured, and logged,
-// because an unoverridable auto-upgrade safeguard is its own hazard.
-func writeExecutableInPlace(resolvedPath string, binary []byte, override bool, flag string) error {
-	return writeExecutableInPlaceAllowing(resolvedPath, binary, override, flag, false)
-}
-
 // writeExecutableInPlaceAllowing is the guarded swap with the REJECTED-CANDIDATE
 // override made explicit and separate from the interlock's.
 //
@@ -427,5 +416,18 @@ func upgradeOwningThisExecutable() *activeUpgrade {
 	// while another process may be staging one is exactly the race the locks
 	// exist for. Debris still does not BLOCK here — it simply stays until a
 	// locked path sweeps it.
-	return foreignUpgradeStagingOver(resolved, ownID, upgradetxn.ArtifactScanOptions{})
+	//
+	// ClearUnverifiable IS read here, however: this probe's verdict is the one
+	// that opens or holds the throttle window, and an operator who set
+	// upgrade_clear_unverifiable_artifacts = true did so precisely because a
+	// stale unverifiable artifact is refusing the install. The locked swap
+	// honours the same config; a probe that blocks where the swap would clear
+	// is the over-block this gate exists to prevent — it suppresses the
+	// launch-time install until someone runs `af upgrade` once. Honoring the
+	// config does not let this probe write: clearable returns false when Clear
+	// is false, so setting ClearUnverifiable here only stops it from
+	// suppressing an install the locked swap will allow.
+	return foreignUpgradeStagingOver(resolved, ownID, upgradetxn.ArtifactScanOptions{
+		ClearUnverifiable: clearUnverifiableStagedArtifacts(),
+	})
 }

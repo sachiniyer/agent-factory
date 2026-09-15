@@ -303,7 +303,7 @@ func TestSandboxAgentServersCarryPassThroughNamesIntoFilteredExec(t *testing.T) 
 		t.Fatal(err)
 	}
 	for backend, command := range map[string]string{"docker": dockerCommand, "ssh": sshCommand} {
-		for _, want := range []string{"__af-session-env-exec", "agent-server", "--session-env", customName} {
+		for _, want := range []string{sessionenv.AgentServerExecMarker, "agent-server", "--session-env", customName} {
 			if !strings.Contains(command, want) {
 				t.Fatalf("%s agent-server command omitted %q", backend, want)
 			}
@@ -315,21 +315,21 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 	spec := ProvisionSpec{Title: "override", Program: tmux.ProgramClaude}
 	tests := map[string]struct {
 		executable    string
-		inner         string
+		args          []string
 		commandResult func() (string, error)
 	}{
 		"docker": {
 			executable: dockerAfBinaryPath,
-			inner: fmt.Sprintf("%s agent-server --listen :%s --repo %s --title %s --program %s --program-resolved",
-				shellQuote(dockerAfBinaryPath), dockerAgentPort, shellQuote(dockerWorkspaceDir), shellQuote(spec.Title), shellQuote(tmux.ProgramCodex)),
+			args: []string{"agent-server", "--listen", ":" + dockerAgentPort, "--repo", dockerWorkspaceDir,
+				"--title", spec.Title, "--program", tmux.ProgramCodex, "--program-resolved"},
 			commandResult: func() (string, error) {
 				return (&dockerProvisioner{spec: spec, program: tmux.ProgramCodex}).agentServerCommand()
 			},
 		},
 		"ssh": {
 			executable: "/srv/af-session/af",
-			inner: fmt.Sprintf("exec %s agent-server --listen 127.0.0.1:0 --repo %s --title %s --program %s --program-resolved",
-				shellQuote("/srv/af-session/af"), shellQuote("/srv/af-session/workspace"), shellQuote(spec.Title), shellQuote(tmux.ProgramCodex)),
+			args: []string{"agent-server", "--listen", "127.0.0.1:0", "--repo", "/srv/af-session/workspace",
+				"--title", spec.Title, "--program", tmux.ProgramCodex, "--program-resolved"},
 			commandResult: func() (string, error) {
 				return (&sandboxWorkspace{spec: spec, program: tmux.ProgramCodex, SessionDir: "/srv/af-session"}).agentServerCommand()
 			},
@@ -340,13 +340,53 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		want, err := sessionenv.WrapCommand(test.executable, tmux.ProgramCodex, nil, test.inner)
+		want, err := sessionenv.WrapAgentServerCommand(test.executable, nil, test.args)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if command != want {
 			t.Fatalf("%s agent-server command = %q, want the resolved Codex command inside the Codex filter %q", backend, command, want)
 		}
+	}
+}
+
+// The backend-owned af path and structured agent-server args are produced
+// together here. This pins the real seam: the generated marker derives policy
+// from the command it must exec instead of accepting an agent claim or treating
+// a discoverable path as proof. `cat` is deliberate: a valid non-agent program
+// selects no credential allowlist and must still launch. The empty program is
+// the other generated grammar and derives agent-server's Claude default.
+func TestSandboxAgentServerBuildsEffectBoundWrapperVariants(t *testing.T) {
+	for name, program := range map[string]string{"non-agent": "cat", "default": ""} {
+		t.Run(name, func(t *testing.T) {
+			spec := ProvisionSpec{Title: "authenticated", Program: program}
+			tests := map[string]struct {
+				wrapper string
+				build   func() (string, error)
+			}{
+				"docker": {
+					wrapper: dockerAfBinaryPath,
+					build: func() (string, error) {
+						return (&dockerProvisioner{spec: spec, program: spec.Program}).agentServerCommand()
+					},
+				},
+				"ssh": {
+					wrapper: "/srv/af-session/af",
+					build: func() (string, error) {
+						return (&sandboxWorkspace{spec: spec, program: spec.Program, SessionDir: "/srv/af-session"}).agentServerCommand()
+					},
+				},
+			}
+			for backend, test := range tests {
+				command, err := test.build()
+				if err != nil {
+					t.Fatalf("%s handoff did not authenticate its backend-owned wrapper %q: %v", backend, test.wrapper, err)
+				}
+				if !strings.Contains(command, test.wrapper) {
+					t.Fatalf("%s handoff omitted its backend-owned wrapper %q: %q", backend, test.wrapper, command)
+				}
+			}
+		})
 	}
 }
 
@@ -378,9 +418,9 @@ func TestSSHAgentServerCommandExecsAtRecordedPID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inner := fmt.Sprintf("exec %s agent-server --listen 127.0.0.1:0 --repo %s --title %s --program %s --program-resolved",
-		shellQuote(w.AfPath()), shellQuote(w.WorkspacePath()), shellQuote(spec.Title), shellQuote(spec.Program))
-	want, err := sessionenv.WrapCommand(w.AfPath(), tmux.ProgramCodex, nil, inner)
+	args := []string{"agent-server", "--listen", "127.0.0.1:0", "--repo", w.WorkspacePath(),
+		"--title", spec.Title, "--program", spec.Program, "--program-resolved"}
+	want, err := sessionenv.WrapAgentServerCommand(w.AfPath(), nil, args)
 	if err != nil {
 		t.Fatal(err)
 	}

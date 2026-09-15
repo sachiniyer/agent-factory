@@ -4,11 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -43,6 +46,89 @@ func TestHandoffAccountMissingTargetRefusesBeforeTeardown(t *testing.T) {
 			require.Zero(t, respawns)
 			require.Empty(t, prompts)
 		})
+	}
+}
+
+func TestHandoffAccountMissingTargetRefusesWhenCheckoutMarkerProbeTimesOut(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	gitShim := filepath.Join(binDir, "git")
+	shim := fmt.Sprintf(`#!/bin/sh
+if [ "$3" = "rev-parse" ] && [ "$4" = "--git-common-dir" ]; then
+  exec /bin/sleep 5
+fi
+exec %q "$@"
+`, realGit)
+	require.NoError(t, os.WriteFile(gitShim, []byte(shim), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+"/usr/bin:/bin")
+	backend.onRespawn = func(i *session.Instance) {
+		i.SetTmuxSession(tmux.NewTmuxSession(i.Title, i.AgentProgram()))
+	}
+	inst.Program = "codex"
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "codex"))
+	inst.ClearLimitReached()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+
+	_, err = m.HandoffSession(HandoffSessionRequest{
+		Title: inst.Title, RepoID: repo, To: "claude", Account: "personal",
+	})
+	require.ErrorContains(t, err, "launch preflight")
+	require.False(t, isMutationCommitted(err))
+	require.Equal(t, "codex", inst.AgentProgram())
+	_, respawns, prompts := backend.snapshot()
+	require.Zero(t, respawns)
+	require.Empty(t, prompts)
+}
+
+func TestHandoffAccountRechecksChangedProgramOverrideUnderProjectLock(t *testing.T) {
+	m, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	project, err := config.RegisterProject(inst.Path)
+	require.NoError(t, err)
+	_, err = config.SetProjectConfigValue(project.ID, "program_overrides.claude", filepath.Join(t.TempDir(), "missing-claude"))
+	require.NoError(t, err)
+	prepareHandoffTargetPreflight(t, inst)
+	inst.Account = "work"
+	inst.ClearLimitReached()
+
+	precheckDone := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releasePrecheck := func() { releaseOnce.Do(func() { close(release) }) }
+	m.accountSwapAfterManualPrecheckForTest = func() {
+		close(precheckDone)
+		<-release
+	}
+	t.Cleanup(func() {
+		releasePrecheck()
+		m.accountSwapAfterManualPrecheckForTest = nil
+	})
+
+	handoffDone := make(chan error, 1)
+	go func() {
+		_, err := m.HandoffSession(HandoffSessionRequest{
+			Title: inst.Title, RepoID: repoID, Account: "personal",
+		})
+		handoffDone <- err
+	}()
+	select {
+	case <-precheckDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("manual handoff did not reach the precheck-to-lock window")
+	}
+	_, err = config.SetProjectConfigValue(project.ID, "program_overrides.claude", "claude")
+	require.NoError(t, err)
+	releasePrecheck()
+	select {
+	case err := <-handoffDone:
+		require.NoError(t, err, "the locked admission must re-evaluate the newly committed program override")
+	case <-time.After(5 * time.Second):
+		t.Fatal("manual handoff did not finish")
 	}
 }
 

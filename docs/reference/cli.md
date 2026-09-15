@@ -860,11 +860,13 @@ Settable keys:
   session_env_passthrough    compact JSON array of exact environment variable names
   root_agents                compact JSON object keyed by repository path
   root_agent                 compact JSON object with enabled and optional program
+  root_agent.enabled         true | false
+  root_agent.program         full command string for the singleton root agent
   keys                       compact JSON object of TUI action-to-key rebinds
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
-                             DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and network.require_token defaults to FALSE —
+                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
+                             full control plane on the network, and network.require_token defaults to false —
                              set network.require_token = true in the same breath, or anyone who can reach the
                              address controls this machine. af serves plain HTTP, so front a routable
                              listener with a TLS-terminating proxy or a private network.
@@ -875,6 +877,7 @@ Settable keys:
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
+  watcher_events_per_minute  positive integer (per-task watch delivery cap; default 10; next daemon start)
   debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
                              unix control socket only, never on the web address. A profile dumps live daemon
                              memory — session titles, worktree paths, prompt text — so turn it off again.
@@ -912,7 +915,7 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command); a global-only key
 is rejected with the location it actually belongs to. Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
@@ -921,6 +924,8 @@ Examples:
   af config set auto_update false
   af config set appearance dark
   af config set session_env_passthrough '["HTTP_PROXY","NO_PROXY"]'
+  af config set root_agent.enabled true --project .
+  af config set root_agent.program "codex --profile work" --project .
   af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
@@ -1349,6 +1354,10 @@ or the rebind from the [keys] table in config.toml (#1026). Fixed bindings —
 structural keys config cannot touch — are listed last. Contextual pane
 actions such as pane_prev/pane_next are included; their default arrow keys
 apply only while a workspace pane has focus.
+
+Every default key removed by a user rebind is named in SOURCE with its taker.
+The affected row keeps any remaining keys; when none remain, it shows an em
+dash instead. JSON appends the same key/taker pairs in suppressed_by.
 
 Key values use config spellings you can paste into [keys]. With --json,
 bindings are wrapped in {data,error}; keys/default keep those spellings.

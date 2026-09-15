@@ -95,6 +95,9 @@ var keyEffectClasses = map[string]EffectClass{
 	"root_agents":   EffectNextDaemonStart,
 	"root_agent":    EffectNextDaemonStart,
 	"branch_prefix": EffectNextDaemonStart,
+	// The watcher supervisor snapshots this cap when the daemon constructs it;
+	// existing supervisors are not rebuilt by ApplyConfig.
+	"watcher_events_per_minute": EffectNextDaemonStart,
 	// debug_pprof selects the daemon's route table, which is built once when the
 	// HTTP listeners bind (daemon/httpserver.go). Nothing re-reads it per request,
 	// so a save must say "next daemon start" rather than claim it took effect.
@@ -208,12 +211,23 @@ func EffectNotice(key string, outcome ApplyOutcome) string {
 		}
 		return "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
 	case EffectNextDaemonStart:
-		return "Saved — this setting takes effect on the next daemon start."
+		notice := "Saved — this setting takes effect on the next daemon start."
+		return WithRootAgentAdoptionNotice(key, notice)
 	case EffectNextAfLaunch:
 		return "Saved — this setting takes effect the next time you launch af."
 	default:
 		return "Saved."
 	}
+}
+
+// WithRootAgentAdoptionNotice appends the half of restart guidance unique to
+// always-ensured roots. Global and per-project save surfaces use this one copy.
+func WithRootAgentAdoptionNotice(key, notice string) string {
+	key = canonicalConfigKey(key)
+	if key != "root_agent" && !strings.HasPrefix(key, "root_agent.") && key != "root_agents" {
+		return notice
+	}
+	return notice + " · An already-running root session is adopted as-is, so after changing its program, disabling it, or removing its enabling entry, restart the daemon first and then kill that session."
 }
 
 // listenerRebindDeferredNotice is the honest notice when a network.listen_addr /

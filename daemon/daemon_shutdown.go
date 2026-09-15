@@ -56,6 +56,11 @@ func drainDaemon(
 	// during their deferred teardown.
 	close(stopCh)
 	wg.Wait()
+	// The poll is out, so no new root-program inspection can start. Those reads
+	// are side-effect-free and may be blocked forever in uncancellable filesystem
+	// I/O: discard any late result, but never make shutdown wait for the reader.
+	// Active result consumers (notably tests) join explicitly.
+	m.abandonRootProgramDriftInspectionsForShutdown()
 	// The poll loop is out, so no further root-agent create can be launched; wait
 	// for one that already is (#3721). JOINED, never cancelled — a create torn
 	// down mid-provision is the half-created session the always-ensure loop has no

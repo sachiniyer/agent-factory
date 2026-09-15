@@ -96,6 +96,7 @@ var globalConfigReadOrder = []string{
 	"network.preview_listen_addr",
 	"network.cors_allowed_origins",
 	"daemon_poll_interval",
+	"watcher_events_per_minute",
 	"debug_pprof",
 	"log_max_size_mb",
 	"log_max_backups",
@@ -473,11 +474,13 @@ Settable keys:
   session_env_passthrough    compact JSON array of exact environment variable names
   root_agents                compact JSON object keyed by repository path
   root_agent                 compact JSON object with enabled and optional program
+  root_agent.enabled         true | false
+  root_agent.program         full command string for the singleton root agent
   keys                       compact JSON object of TUI action-to-key rebinds
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
-                             DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and network.require_token defaults to FALSE —
+                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
+                             full control plane on the network, and network.require_token defaults to false —
                              set network.require_token = true in the same breath, or anyone who can reach the
                              address controls this machine. af serves plain HTTP, so front a routable
                              listener with a TLS-terminating proxy or a private network.
@@ -488,6 +491,7 @@ Settable keys:
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
+  watcher_events_per_minute  positive integer (per-task watch delivery cap; default 10; next daemon start)
   debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
                              unix control socket only, never on the web address. A profile dumps live daemon
                              memory — session titles, worktree paths, prompt text — so turn it off again.
@@ -525,7 +529,7 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command); a global-only key
 is rejected with the location it actually belongs to. Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
@@ -534,6 +538,8 @@ Examples:
   af config set auto_update false
   af config set appearance dark
   af config set session_env_passthrough '["HTTP_PROXY","NO_PROXY"]'
+  af config set root_agent.enabled true --project .
+  af config set root_agent.program "codex --profile work" --project .
   af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
@@ -576,8 +582,15 @@ owns.`, tmux.SupportedProgramsString()),
 			fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s for project %s in %s\n",
 				res.Key, echoValue(res.Value), configSetProjectFlag, prettyPath(res.Path))
 			if res.RequiresRestart {
-				fmt.Fprintln(cmd.OutOrStdout(),
-					"note: af and the daemon read config at startup — restart them to apply (same as a hand-edit)")
+				if config.KeyEffectClass(res.Key) == config.EffectNextDaemonStart {
+					fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
+				} else if res.Key == "on_archive_command" {
+					fmt.Fprintln(cmd.OutOrStdout(),
+						"saved. It applies to archive operations in this project from now on.")
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(),
+						"saved. It applies to sessions created in this project from now on.")
+				}
 			}
 			return nil
 		}
@@ -795,11 +808,24 @@ override file it clears is this machine's.`,
 		fmt.Fprintf(cmd.OutOrStdout(), "cleared %s override for project %s in %s\n",
 			res.Key, configUnsetProjectFlag, prettyPath(res.Path))
 		if res.RequiresRestart {
-			fmt.Fprintln(cmd.OutOrStdout(),
-				"saved. It applies to sessions created in this project from now on.")
+			if rootAgentConfigKey(res.Key) {
+				fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(),
+					"saved. It applies to sessions created in this project from now on.")
+			}
 		}
 		return nil
 	},
+}
+
+func rootAgentConfigKey(key string) bool {
+	return key == "root_agent" || strings.HasPrefix(key, "root_agent.")
+}
+
+func projectConfigRestartNotice(key string) string {
+	notice := "note: af and the daemon read config at startup — restart them to apply (same as a hand-edit)"
+	return config.WithRootAgentAdoptionNotice(key, notice)
 }
 
 // echoValue renders a just-set value for the `set <key> = <value>` echo. An

@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -239,7 +238,7 @@ func overlayProse(rendered string) string {
 	frame := strings.NewReplacer(
 		"│", " ", "─", " ", "╭", " ", "╮", " ", "╰", " ", "╯", " ",
 	)
-	return strings.Join(strings.Fields(frame.Replace(xansi.Strip(rendered))), " ")
+	return strings.Join(strings.Fields(frame.Replace(renderedText(rendered))), " ")
 }
 
 // TestConfirmationOverlay_GuardedMessageIsNeverClipped: a guarded overlay (one
@@ -271,7 +270,7 @@ func TestConfirmationOverlay_ClippedDetailIsAnnounced(t *testing.T) {
 	c.SetWidth(50)
 	c.SetMaxSize(40, 10)
 
-	rendered := c.Render()
+	rendered := renderedText(c.Render())
 	assert.Contains(t, rendered, "resize to read",
 		"clipped detail must name itself; silence reads as completeness")
 	assert.Regexp(t, `more line`, rendered, "the notice must say how much is hidden")
@@ -350,7 +349,7 @@ func TestConfirmationOverlay_UnguardedKeepsConfirming(t *testing.T) {
 	confirmed := false
 	c.OnConfirm = func() { confirmed = true }
 
-	assert.NotContains(t, c.Render(), "Too small to confirm safely",
+	assert.NotContains(t, renderedText(c.Render()), "Too small to confirm safely",
 		"an unguarded overlay must not start refusing")
 	assert.True(t, c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}))
 	assert.True(t, confirmed, "unguarded confirms keep working exactly as before")

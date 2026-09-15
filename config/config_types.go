@@ -21,6 +21,10 @@ const (
 	TomlConfigFileName        = "config.toml"
 	defaultProgram            = tmux.ProgramClaude
 	defaultDaemonPollInterval = 1000
+	// DefaultWatcherEventsPerMinute preserves the original hard-coded watch-task
+	// delivery cap while making it available to the daemon and the config
+	// manifest from one source of truth.
+	DefaultWatcherEventsPerMinute = 10
 	// defaultListenAddr is the daemon's default web/API/WS bind address: the
 	// loopback interface on 8443. The web UI is bundled with the daemon and
 	// served here by default (plain HTTP, no TLS) — a same-machine browser at
@@ -250,6 +254,10 @@ type Config struct {
 	// stored internally in milliseconds. Config accepts a Go duration string such
 	// as "1500ms" or "30m"; the legacy integer-millisecond form remains valid.
 	DaemonPollInterval int `json:"daemon_poll_interval" toml:"daemon_poll_interval"`
+	// WatcherEventsPerMinute caps how many events each watch task may deliver in
+	// one rolling minute. Excess source events are discarded deliberately; the
+	// task's DroppedEvents counter makes that loss visible. Must be positive.
+	WatcherEventsPerMinute int `json:"watcher_events_per_minute" toml:"watcher_events_per_minute"`
 	// LogMaxSizeMB is the size cap (MB) for agent-factory.log. When the log
 	// exceeds it, the file is rotated (renamed to .1, older backups shifted
 	// up). Must be positive; non-positive values fall back to the default.
@@ -629,6 +637,7 @@ func DefaultConfig() *Config {
 		RequireLoopbackToken:   false,
 		ListenAddr:             defaultListenAddr,
 		DaemonPollInterval:     defaultDaemonPollInterval,
+		WatcherEventsPerMinute: DefaultWatcherEventsPerMinute,
 		LimitAutoResume:        false,
 		GlobalAgentSkills:      false,
 		LimitRetryInterval:     defaultLimitRetryInterval,

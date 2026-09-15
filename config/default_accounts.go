@@ -104,7 +104,7 @@ func unregisteredDefaultAccountWarning(agent, name string) string {
 		}
 	}
 	warning := fmt.Sprintf(
-		"WARNING: no %s account named %q is registered on this machine, so a session using this default will "+
+		"no %s account named %q is registered on this machine, so a session using this default will "+
 			"be refused rather than started. Register it with `af accounts add %s %s` and log in",
 		agent, name, agent, name)
 	if len(names) > 0 {
@@ -322,7 +322,7 @@ func CheckDefaultAccount(home, repoPath string, selection DefaultAccountSelectio
 		return fmt.Errorf("%s selects account %q, but %s. Clear the default with `%s`",
 			selection.Source(), selection.Name, reason, selection.ClearHint(repoPath))
 	}
-	if _, err := agentaccount.Selected(home, selection.Agent, selection.Name, ""); err != nil {
+	if _, err := agentaccount.Selected(home, selection.Agent, selection.Name); err != nil {
 		return fmt.Errorf(
 			"%s selects account %q, and the session was NOT created: %w. Register it, or clear the default "+
 				"with `%s` to run this project's %s sessions on the ambient identity",

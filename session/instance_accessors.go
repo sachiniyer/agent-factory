@@ -243,6 +243,10 @@ func (i *Instance) MarkUserKilled() {
 	defer i.mu.Unlock()
 	lv, op, resetAt := i.lifecycleStateLocked()
 	if !i.userKilled {
+		// RuntimeProgram stops being proof of a current runtime once teardown is
+		// committed. Invalidate lock-free drift observers before publishing the
+		// tombstone, including when OpNone means noteStateChangeLocked is a no-op.
+		i.runtimeEvidenceGeneration.Add(1)
 		i.userKilled = true
 		i.touchLocked()
 	}
@@ -264,6 +268,7 @@ func (i *Instance) ReconcileUserKilledSnapshot(userKilled bool) bool {
 	lv, op, resetAt := i.lifecycleStateLocked()
 	changed := false
 	if userKilled && !i.userKilled {
+		i.runtimeEvidenceGeneration.Add(1)
 		i.userKilled = true
 		i.touchLocked()
 		if i.inFlightOp != OpKilling {
@@ -291,6 +296,10 @@ func (i *Instance) MarkStartupStateUnknown() {
 	defer i.mu.Unlock()
 	lv, op, resetAt := i.lifecycleStateLocked()
 	if !i.startupStateUnknown {
+		// RuntimeProgram stops being proof of a current runtime at this edge.
+		// Advance the lock-free evidence generation before publishing the fence so
+		// an asynchronous drift check cannot latch the previously known command.
+		i.runtimeEvidenceGeneration.Add(1)
 		i.startupStateUnknown = true
 		i.touchLocked()
 	}
@@ -530,12 +539,115 @@ func (i *Instance) ResolvedPaneProgram() string {
 	return ts.Program()
 }
 
+// RuntimeProgram returns durable evidence of the override-resolved base command
+// used by the last positively established agent runtime. It is intentionally
+// empty for legacy or uncertain records; Program is intent, not runtime proof.
+func (i *Instance) RuntimeProgram() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.runtimeProgram
+}
+
+// RuntimeProgramEvidence binds one runtime command to the lifecycle generation
+// in which it was observed. Its generation is deliberately opaque outside the
+// session package; callers can only validate it through Instance.
+type RuntimeProgramEvidence struct {
+	program    string
+	generation uint64
+}
+
+// Program returns the resolved command captured by this evidence.
+func (e RuntimeProgramEvidence) Program() string { return e.program }
+
+// ObserveRuntimeProgram captures the command and its invalidation generation
+// under the same instance lock.
+func (i *Instance) ObserveRuntimeProgram() RuntimeProgramEvidence {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return RuntimeProgramEvidence{
+		program:    i.runtimeProgram,
+		generation: i.runtimeEvidenceGeneration.Load(),
+	}
+}
+
+// RuntimeProgramEvidenceCurrent reports whether no runtime-command or
+// lifecycle transition has superseded evidence since it was observed. It is
+// lock-free so daemon callers can validate inside Manager.mu without reversing
+// the manager/instance lock order.
+func (i *Instance) RuntimeProgramEvidenceCurrent(evidence RuntimeProgramEvidence) bool {
+	return evidence.generation == i.runtimeEvidenceGeneration.Load()
+}
+
+// CommitRuntimeProgramEvidence runs commit only while evidence still describes
+// this instance's current runtime generation. The read lock is the commit
+// boundary: every lifecycle or runtime replacement that invalidates evidence
+// owns i.mu for writing, so either that invalidation lands first and commit is
+// refused, or it waits until commit returns.
+//
+// commit must not call methods that acquire i.mu. It is intended for a small
+// external side effect whose truth depends on this evidence, such as emitting a
+// diagnostic about the runtime command.
+func (i *Instance) CommitRuntimeProgramEvidence(evidence RuntimeProgramEvidence, commit func()) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if evidence.generation != i.runtimeEvidenceGeneration.Load() {
+		return false
+	}
+	commit()
+	return true
+}
+
+// setRuntimeProgram records a command only after a launch boundary positively
+// established the replacement runtime. The surrounding lifecycle transition
+// owns UpdatedAt and the durable checkpoint; touching here would count one
+// runtime replacement twice.
+func (i *Instance) setRuntimeProgram(program string) {
+	if strings.TrimSpace(program) == "" {
+		return
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.setRuntimeProgramLocked(program)
+}
+
+func (i *Instance) setRuntimeProgramLocked(program string) {
+	if i.runtimeProgram == program {
+		return
+	}
+	// Invalidate lock-free consumers before publishing the replacement value.
+	// A consumer may validate while holding a different owner lock and therefore
+	// cannot take i.mu to close this ordering edge.
+	i.runtimeEvidenceGeneration.Add(1)
+	i.runtimeProgram = program
+}
+
+// clearRuntimeProgramForUnverifiedReattach retires a persisted launch-command
+// claim when load can establish only that a tmux name exists, not that it still
+// names the process AF launched. It reports whether durable state changed so a
+// load caller can checkpoint the clear before publishing the restored row.
+func (i *Instance) clearRuntimeProgramForUnverifiedReattach() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.runtimeProgram == "" {
+		return false
+	}
+	i.runtimeEvidenceGeneration.Add(1)
+	i.runtimeProgram = ""
+	return true
+}
+
 // SetTmuxSession sets the agent tab's tmux session for testing purposes,
 // materializing the single Agent tab if needed.
 func (i *Instance) SetTmuxSession(session *tmux.TmuxSession) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.setTmuxLocked(session)
+	// This method exists only for tests. Installing a concrete test pane is their
+	// positive launch boundary, so carry the same runtime evidence production
+	// launch paths record after Start/Restore succeeds.
+	if session != nil && strings.TrimSpace(session.Program()) != "" {
+		i.setRuntimeProgramLocked(session.Program())
+	}
 }
 
 // SetStartedForTest toggles the started flag for testing purposes. Prefer

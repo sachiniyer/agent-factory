@@ -81,8 +81,9 @@ type ManifestEntry struct {
 	// Tier ranks the key for ordering and for what an agent surfaces first.
 	Tier ConfigTier
 	// Settable reports whether the current global `af config set` accepts this
-	// whole key. Dynamic families (program_overrides, limit_patterns) additionally
-	// retain their leaf form, e.g. `af config set program_overrides.claude …`.
+	// whole key. Dynamic families (program_overrides, limit_patterns) and selected
+	// structured tables additionally retain leaf forms, e.g. `af config set
+	// program_overrides.claude …` and `af config set root_agent.enabled …`.
 	// It is pinned against the real allowlist by TestManifestAgreesWithSettableKeys,
 	// so it can never become a claim the CLI does not honor. Global entries are
 	// uniformly true; false is reserved for repo-only keys outside these panes.
@@ -244,6 +245,18 @@ var configManifest = []ManifestEntry{
 		Type:       "duration",
 		Default:    "1000",
 		Purpose:    "How often the background service checks sessions for new output · use a duration such as 1500ms or 30m; legacy integer milliseconds remain accepted.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
+		Key:        "watcher_events_per_minute",
+		Type:       "int",
+		Default:    "10",
+		Purpose:    "Maximum events each watch task may deliver per rolling minute · excess source events are discarded and counted on the task record.",
 		Tier:       TierAdvanced,
 		Settable:   true,
 		Sources:    sourceGlobalOnly,
@@ -510,7 +523,7 @@ var configManifest = []ManifestEntry{
 		Key:        "root_agent",
 		Type:       "table",
 		Default:    "not enabled",
-		Purpose:    "Current project profile: whether a registered project keeps a session named root running, and the command it runs · the singleton successor to the legacy root_agents path map, settable per project.",
+		Purpose:    "Current project profile: whether a registered project keeps a session named root running, and the command it runs · set the whole table with compact JSON, or set enabled and program directly.",
 		Tier:       TierAdvanced,
 		Settable:   true,
 		Sources:    sourceGlobalPersonal,

@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -14,7 +15,37 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+)
+
+type rootAgentProgramInspection struct {
+	resolveProfile func(context.Context, *config.RepoContext) (config.ResolvedValue, error)
+	resolveConfig  func(context.Context, *config.RepoContext) (*config.ResolvedConfig, error)
+}
+
+var (
+	rootAgentProgramProbeTimeout  = binaryProbeTimeout
+	resolveRootAgentForInspection = func(ctx context.Context, global *config.Config, projectSelector string, strictProjectLookup bool) (rootAgentProgramInspection, error) {
+		snapshot, err := config.ResolveRootAgentInspectionSnapshotWithConfigContext(ctx, global, projectSelector, strictProjectLookup)
+		if err != nil {
+			return rootAgentProgramInspection{}, err
+		}
+		return rootAgentProgramInspection{
+			resolveProfile: snapshot.ResolveRootAgentForRepoContext,
+			resolveConfig:  snapshot.ResolveConfigForRepoContext,
+		}, nil
+	}
+	inspectRootAgentProgram = func(ctx context.Context, repo *config.RepoContext, profile config.RootAgent, inspection rootAgentProgramInspection) (string, error) {
+		if !daemon.RootAgentProfileNeedsRepoConfig(profile) {
+			return daemon.RootAgentProgramForProfileResolvedConfig(profile, nil)
+		}
+		resolved, err := inspection.resolveConfig(ctx, repo)
+		if err != nil {
+			return "", err
+		}
+		return daemon.RootAgentProgramForProfileResolvedConfig(profile, resolved)
+	}
 )
 
 func selfPID() int { return os.Getpid() }
@@ -155,8 +186,17 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 			},
 		)
 	}
-	if h.PingErr == nil && cfg != nil {
-		checkRunningDaemonConfig(report, h, cfg)
+	daemonConfig := cfg
+	if h.PingErr == nil && daemonConfig == nil && ctx.globalConfigMissing {
+		// A deleted or never-materialized file has a known next-start posture,
+		// but it does not make every default a user-configured requirement. Apply
+		// defaults only to diagnostics about the daemon that is demonstrably still
+		// running with an older snapshot; other checks retain nil/unconfigured.
+		daemonConfig = config.DefaultConfig()
+	}
+	if h.PingErr == nil && daemonConfig != nil {
+		checkRunningDaemonConfig(report, h, daemonConfig)
+		checkRootAgentPrograms(ctx, report, daemonConfig)
 	}
 	// The #2090 exposure is INFORMATIONAL since #2168 Phase 0: a tokenless
 	// network listener is an allowed, deliberate configuration, so this is a Warn
@@ -214,6 +254,191 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 	if h.BinaryDeleted {
 		report.Warn(sectionDaemon, "daemon binary", fmt.Sprintf("pid %d is running a binary that was replaced on disk", h.PIDFilePID),
 			"run `af daemon restart` to pick up the current binary", true)
+	}
+}
+
+// checkRootAgentPrograms compares every adopted live root with the profile the
+// current on-disk config resolves for its repository. The daemon-side warning
+// compares against its frozen startup snapshot; doctor's disk view is
+// deliberately complementary, so a post-start edit is visible here even before
+// a restarted daemon can enforce it.
+func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config) {
+	instances, err := ctx.opts.sessionInventory()
+	if err != nil {
+		report.Warn(sectionDaemon, "root agent program",
+			"could not compare live root sessions with the configured profiles: "+oneLine(err),
+			"rerun `af doctor` when the daemon session inventory is available", false)
+		report.markIncomplete("root agent program")
+		return
+	}
+	compared, drifted, unresolved := 0, 0, 0
+	for _, inst := range instances {
+		if !session.IsReservedTitle(inst.Title) || rootSessionIsInert(inst) {
+			continue
+		}
+		if inst.InFlightOp != session.OpNone || inst.Status == session.Loading || inst.Status == session.Deleting {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not compare the root agent program for %s because a lifecycle operation is in-flight", rootSessionDisplayPath(inst)),
+				"wait for the operation to settle, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		if inst.StartupStateUnknown {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not compare the root agent program for %s because its startup state is unknown", rootSessionDisplayPath(inst)),
+				"kill the startup-unknown root, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		identityPath := inst.Worktree.RepoPath
+		if identityPath == "" {
+			identityPath = inst.Worktree.WorktreePath
+		}
+		if identityPath == "" {
+			identityPath = inst.Path
+		}
+		if identityPath == "" {
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not inspect the root agent program for %s because its repository path is missing", rootSessionDisplayPath(inst)),
+				"repair or remove the retained root session record, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		// Reuse doctor's binaryProbeTimeout independently for each root: one stale
+		// mount is an unknown answer about that root, not permission to spend the
+		// probe budget of every healthy root that follows it in the inventory.
+		probeCtx, cancel := context.WithTimeout(context.Background(), rootAgentProgramProbeTimeout)
+		inspection, resolveErr := resolveRootAgentForInspection(probeCtx, cfg, identityPath, false)
+		if resolveErr != nil {
+			cancel()
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not resolve the configured profile for live root at %s: %s", identityPath, oneLine(resolveErr)),
+				"restore the checkout or mount, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		commandPath := inst.Worktree.WorktreePath
+		if commandPath == "" {
+			commandPath = inst.Path
+		}
+		if commandPath == "" {
+			commandPath = identityPath
+		}
+		commandRepo, resolveErr := config.RepoFromPathContext(probeCtx, commandPath)
+		if resolveErr != nil {
+			cancel()
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not revalidate the configured profile for live root at %s: %s", commandPath, oneLine(resolveErr)),
+				"restore the checkout or mount, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		resolved, resolveErr := inspection.resolveProfile(probeCtx, commandRepo)
+		if resolveErr != nil {
+			cancel()
+			unresolved++
+			remediation := "repair the named config source, then rerun `af doctor`"
+			if errors.Is(resolveErr, config.ErrRootAgentInspectionIdentityChanged) {
+				remediation = "rerun `af doctor`; if the checkout is being replaced, wait for that operation to finish first"
+			}
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not revalidate the configured profile for live root at %s: %s", commandPath, oneLine(resolveErr)),
+				remediation, false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		if config.RootAgentValueFailsClosed(resolved) {
+			cancel()
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not inspect the configured profile for live root at %s: %s", identityPath, config.RootAgentFailClosedReason(resolved)),
+				"repair the named config source, then rerun `af doctor`", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		profile, ok := resolved.Value.(config.RootAgent)
+		if !ok {
+			cancel()
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not inspect the configured profile for live root at %s: unexpected root_agent resolution type %T", identityPath, resolved.Value),
+				"rerun `af doctor`; if this persists, report the incompatible config result", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		if !profile.Enabled {
+			cancel()
+			drifted++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("live root at %s remains running although its configured profile is disabled · the live root was adopted as-is", identityPath),
+				"restart the daemon to load the disabled profile, then kill the root; restarting alone does not stop an adopted live root", true)
+			continue
+		}
+		runningProgram := inst.RuntimeProgram
+		if strings.TrimSpace(runningProgram) == "" {
+			cancel()
+			unresolved++
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not compare the root agent program for %s because its resolved runtime command was not recorded", rootSessionDisplayPath(inst)),
+				"restart the daemon, then kill the root to record a fresh launch command", false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		configuredProgram, programErr := inspectRootAgentProgram(probeCtx, commandRepo, profile, inspection)
+		cancel()
+		if programErr != nil {
+			unresolved++
+			remediation := "repair the named config source, then rerun `af doctor`"
+			if errors.Is(programErr, config.ErrRootAgentInspectionIdentityChanged) {
+				remediation = "rerun `af doctor`; if the checkout is being replaced, wait for that operation to finish first"
+			}
+			report.Warn(sectionDaemon, "root agent program",
+				fmt.Sprintf("could not inspect the configured command for live root at %s: %s", commandPath, oneLine(programErr)),
+				remediation, false)
+			report.markIncomplete("root agent program")
+			continue
+		}
+		compared++
+		if configuredProgram == runningProgram {
+			continue
+		}
+		drifted++
+		report.Warn(sectionDaemon, "root agent program",
+			fmt.Sprintf("root agent program drift for %s: configured command %q · running command %q · the live root was adopted as-is", commandPath, configuredProgram, runningProgram),
+			"restart the daemon, then kill the root", true)
+	}
+	if drifted == 0 && unresolved == 0 {
+		detail := "no enabled live root sessions to compare"
+		if compared > 0 {
+			detail = fmt.Sprintf("%d live root session(s) match the configured command", compared)
+		}
+		report.Pass(sectionDaemon, "root agent program", detail)
+	}
+}
+
+func rootSessionDisplayPath(inst session.InstanceData) string {
+	for _, path := range []string{inst.Worktree.WorktreePath, inst.Path, inst.Worktree.RepoPath} {
+		if path != "" {
+			return path
+		}
+	}
+	return inst.Title
+}
+
+func rootSessionIsInert(inst session.InstanceData) bool {
+	if inst.UserKilled {
+		return true
+	}
+	switch session.EffectiveLiveness(inst) {
+	case session.LiveLost, session.LiveDead, session.LiveArchived:
+		return true
+	default:
+		return false
 	}
 }
 

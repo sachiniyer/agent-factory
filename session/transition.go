@@ -597,6 +597,13 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	}
 
 	to := spec.target(from, ev)
+	if to != from {
+		// Invalidate async runtime evidence before publishing a replacement fence
+		// or a liveness change. noteStateChangeLocked advances it again after the
+		// full mutation; the two increments deliberately bracket the write so a
+		// lock-free validator cannot accept a half-applied transition.
+		i.runtimeEvidenceGeneration.Add(1)
+	}
 	if ev.kind == tkBeginArchive {
 		i.archiveSettled = make(chan struct{})
 	}

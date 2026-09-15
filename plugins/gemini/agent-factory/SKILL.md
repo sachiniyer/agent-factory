@@ -41,6 +41,12 @@ Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch scr
   af tasks remove <id>
 Without --target-session each run creates a fresh session; {{line}} in a watch prompt is replaced by the emitted stdout line. On update, setting one trigger clears the other, --target-session "" reverts to session-per-run, and --project-path moves the task to another project (--repo still scopes its current project). A task is bound to one project at creation and "tasks add" echoes the binding as project_path — check it matches the project you meant, and never create a task from a scratch clone of a repo, which binds the automation to the clone instead of the real project. The background daemon runs all schedules; "af daemon install" / "af daemon uninstall" manage its login autostart.
 
+Root-agent configuration (global unless --project <id-or-path> selects a personal project override):
+  af config set root_agent <compact-json>             Merge the enabled/program profile as one table
+  af config set root_agent.enabled <bool>             Enable or disable the singleton profile
+  af config set root_agent.program <command>          Set the command while preserving enabled
+Root-agent configuration is frozen at daemon start. An already-running root session is adopted as-is; after changing its program, disabling it, or removing its enabling entry, restart the daemon first and then kill that session.
+
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".
 
 Finishing up: the sessions you create keep running after this conversation ends — they are separate agents in their own worktrees, not part of this one. When work in a session is done and reviewed, archive it with "af sessions archive <title>": non-destructive, the worktree is moved out, nothing is deleted, and it comes back with "af sessions restore <title>". Prefer archiving over "af sessions kill <title>", which permanently removes af-owned workspaces; uncommitted changes and unpushed commits there can be lost. "af sessions whoami" and "af sessions archive --self" resolve the CALLING session, so they only work from inside a session af launched — from here, always name the session.
