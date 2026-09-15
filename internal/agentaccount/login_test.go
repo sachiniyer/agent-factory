@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
@@ -302,12 +303,34 @@ func TestLoginSessionName_HexNamespaceSeparation(t *testing.T) {
 	}
 }
 
+// mirrorTmuxSanitize reproduces the rune mapping session/tmux's toTmuxName
+// applies (session/tmux/session.go: stableTmuxNameRune) — letters, numbers and
+// marks plus '_' and '-' survive, whitespace is dropped, everything else
+// becomes '_'. This package cannot import session/tmux, so the positive policy
+// is duplicated here; the pre-sanitizer titles it is applied to are the ones
+// LoginSessionName produces.
+func mirrorTmuxSanitize(title string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || r == '_' || r == '-':
+			return r
+		case unicode.IsSpace(r):
+			return -1
+		default:
+			return '_'
+		}
+	}, title)
+}
+
 // TestLoginSessionName_IsInjectiveAcrossDotVersusUnderscore is the collision this
 // package cannot see at the tmux boundary but must prevent regardless: the titles
 // it produces reach tmux's sanitizer (toTmuxName), which rewrites '.' to '_', so
 // two names that differ only by '.' vs '_' must not collapse onto one title. This
 // package cannot import session/tmux, so the stable-rune policy is mirrored here
-// rather than cross-checked — the policy is "letters, digits, '_', '-' only".
+// rather than cross-checked — and the comparison runs on the SANITIZED names,
+// because the raw titles were already distinct on the buggy raw-name baseline:
+// the collision only exists after sanitization, so comparing pre-sanitizer
+// output would pass against the broken implementation too.
 func TestLoginSessionName_IsInjectiveAcrossDotVersusUnderscore(t *testing.T) {
 	for _, tc := range []struct{ a, b string }{
 		{"work.proj", "work_proj"},
@@ -316,10 +339,10 @@ func TestLoginSessionName_IsInjectiveAcrossDotVersusUnderscore(t *testing.T) {
 		{"x.", "x_"},
 		{".x", "_x"},
 	} {
-		gotA := LoginSessionName("codex", tc.a)
-		gotB := LoginSessionName("codex", tc.b)
+		gotA := mirrorTmuxSanitize(LoginSessionName("codex", tc.a))
+		gotB := mirrorTmuxSanitize(LoginSessionName("codex", tc.b))
 		if gotA == gotB {
-			t.Fatalf("%q and %q produce the same login session name %q", tc.a, tc.b, gotA)
+			t.Fatalf("%q and %q collapse onto the same login session name %q after tmux sanitization", tc.a, tc.b, gotA)
 		}
 	}
 }
