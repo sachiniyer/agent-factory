@@ -803,6 +803,7 @@ export class AppShell {
     view: View;
     selectedId: string | null;
     focusedTab: string | null;
+    focusedTabSynth: string | null;
     focusedKind: number | null;
   } | null = null;
   private newTabPickerPosition: (() => void) | null = null;
@@ -1071,7 +1072,10 @@ export class AppShell {
     this.projectSwitchBtn.setAttribute("aria-label", "Switch project");
     this.projectSwitchBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      this.appControls.close();
+      // A keyboard-activated Switch project stops propagation, so the panel's
+      // delegated dismissal never sees it; dismiss (not close) retires a carried
+      // Session actions disclosure like every other panel action.
+      this.appControls.dismiss();
       this.toggleProjectMenu();
     });
     this.projectMenu = h("div", { class: "af-project-menu" });
@@ -1292,12 +1296,16 @@ export class AppShell {
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
     const focusedTab = focusedForPhone ? tabIdentity(focusedForPhone) : null;
+    // The synthesized kind:name fallback, tracked separately from the resolved
+    // identity: a snapshot that backfills a real id onto the same tab changes
+    // tabIdentity but no pixel (#1779), and must not read as a context change.
+    const focusedTabSynth = focusedForPhone ? `${focusedForPhone.kind}:${focusedForPhone.name}` : null;
     const focusedKind = focusedForPhone?.kind ?? null;
     // Observe the semantic owner before this update can replace or reparent its DOM.
     // Viewport-only recomposition leaves this context alone and therefore preserves
     // a user-opened disclosure; changing its view, session, or focused tab invalidates
     // carried state no matter which present or future action produced the store update.
-    this.observeSessionComposition(state.view, state.selectedId, focusedTab, focusedKind);
+    this.observeSessionComposition(state.view, state.selectedId, focusedTab, focusedKind, focusedTabSynth);
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
     // terminal only "holds" it while a session is actually selected; with none
@@ -1905,17 +1913,26 @@ export class AppShell {
     selectedId: string | null,
     focusedTab: string | null,
     focusedKind: number | null,
+    focusedTabSynth: string | null,
   ): void {
     const previous = this.sessionComposition;
+    // An id-less tab tracked by its synthesized kind:name keeps the same context
+    // when a later snapshot backfills its real id — the adoption is the same tab,
+    // so only a genuine focused-tab change retires a carried disclosure.
+    const sameFocusedTab = previous !== null && (
+      previous.focusedTab === focusedTab
+      || (previous.focusedTab === previous.focusedTabSynth
+        && focusedTabSynth !== null && previous.focusedTabSynth === focusedTabSynth)
+    );
     if (previous && (
       previous.view !== view
       || previous.selectedId !== selectedId
-      || previous.focusedTab !== focusedTab
+      || !sameFocusedTab
       || previous.focusedKind !== focusedKind
     )) {
       this.dismissCarriedActions();
     }
-    this.sessionComposition = { view, selectedId, focusedTab, focusedKind };
+    this.sessionComposition = { view, selectedId, focusedTab, focusedTabSynth, focusedKind };
     this.terminalSelected = isSessionFirst(true, view, focusedKind);
   }
 

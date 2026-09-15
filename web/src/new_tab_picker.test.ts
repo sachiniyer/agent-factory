@@ -114,20 +114,29 @@ for (const action of ["openTab", "switchTab", "closeTab"] as const) {
 }
 
 const compositionCases = [
-  [null, ["sessions", "a", "tab-0", 0], false],
-  [["sessions", "a", "tab-0", 0], ["sessions", "a", "tab-0", 0], false],
-  [["sessions", "a", "tab-0", 0], ["sessions", "a", "tab-1", 1], true],
-  [["sessions", "a", "tab-1", 3], ["sessions", "a", "tab-2", 4], true],
-  [["sessions", "a", "tab-1", 1], ["sessions", "a", "tab-2", 1], true],
-  [["sessions", "a", "tab-0", 0], ["sessions", "b", "tab-0", 0], true],
-  [["sessions", "a", "tab-0", 0], ["tasks", "a", "tab-0", 0], true],
+  [null, ["sessions", "a", "tab-0", 0, "0:shell"], false],
+  [["sessions", "a", "tab-0", 0, "0:shell"], ["sessions", "a", "tab-0", 0, "0:shell"], false],
+  [["sessions", "a", "tab-0", 0, "0:shell"], ["sessions", "a", "tab-1", 1, "1:editor"], true],
+  [["sessions", "a", "tab-1", 3, "3:web"], ["sessions", "a", "tab-2", 4, "4:code"], true],
+  [["sessions", "a", "tab-1", 1, "1:editor"], ["sessions", "a", "tab-2", 1, "1:shell"], true],
+  [["sessions", "a", "tab-0", 0, "0:shell"], ["sessions", "b", "tab-0", 0, "0:shell"], true],
+  [["sessions", "a", "tab-0", 0, "0:shell"], ["tasks", "a", "tab-0", 0, "0:shell"], true],
+  // An id-less tab tracked by its synthesized kind:name adopting a real id is the
+  // same tab: a pixel-identical snapshot must not retire the carried disclosure.
+  [["sessions", "a", "0:shell", 0, "0:shell"], ["sessions", "a", "tab-9", 0, "0:shell"], false],
+  // ...but adoption is not a disguise: a different synthesized key, a real-id tab
+  // reverting to synthesized, or a same-synth different-id focus all still dismiss.
+  [["sessions", "a", "0:shell", 0, "0:shell"], ["sessions", "a", "tab-9", 0, "0:editor"], true],
+  [["sessions", "a", "tab-9", 0, "0:shell"], ["sessions", "a", "0:shell", 0, "0:shell"], true],
+  [["sessions", "a", "tab-8", 0, "0:shell"], ["sessions", "a", "tab-9", 0, "0:shell"], true],
 ] as const;
 for (const [previous, next, dismiss] of compositionCases) {
   test(`session composition observer dismisses previous=${previous}, next=${next}`, () => {
     const calls: string[] = [];
     const shell = {
       sessionComposition: previous && {
-        view: previous[0], selectedId: previous[1], focusedTab: previous[2], focusedKind: previous[3],
+        view: previous[0], selectedId: previous[1], focusedTab: previous[2],
+        focusedKind: previous[3], focusedTabSynth: previous[4],
       },
       terminalSelected: false,
       dismissCarriedActions: () => calls.push("dismiss"),
@@ -135,16 +144,16 @@ for (const [previous, next, dismiss] of compositionCases) {
     const observeSessionComposition = (AppShell.prototype as unknown as {
       observeSessionComposition(
         this: AppShell, view: "sessions" | "tasks" | "config", selectedId: string | null,
-        focusedTab: string | null, focusedKind: number | null,
+        focusedTab: string | null, focusedKind: number | null, focusedTabSynth: string | null,
       ): void;
     }).observeSessionComposition;
 
-    observeSessionComposition.call(shell, next[0], next[1], next[2], next[3]);
+    observeSessionComposition.call(shell, next[0], next[1], next[2], next[3], next[4]);
 
     assert.deepEqual(calls, dismiss ? ["dismiss"] : []);
     assert.deepEqual(
       (shell as unknown as { sessionComposition: unknown }).sessionComposition,
-      { view: next[0], selectedId: next[1], focusedTab: next[2], focusedKind: next[3] },
+      { view: next[0], selectedId: next[1], focusedTab: next[2], focusedKind: next[3], focusedTabSynth: next[4] },
     );
     assert.equal(
       (shell as unknown as { terminalSelected: boolean }).terminalSelected,

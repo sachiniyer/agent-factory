@@ -15570,7 +15570,7 @@ var AppShell = class {
     this.projectSwitchBtn.setAttribute("aria-label", "Switch project");
     this.projectSwitchBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      this.appControls.close();
+      this.appControls.dismiss();
       this.toggleProjectMenu();
     });
     this.projectMenu = h("div", { class: "af-project-menu" });
@@ -15943,8 +15943,9 @@ var AppShell = class {
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
     const focusedTab = focusedForPhone ? tabIdentity(focusedForPhone) : null;
+    const focusedTabSynth = focusedForPhone ? `${focusedForPhone.kind}:${focusedForPhone.name}` : null;
     const focusedKind = focusedForPhone?.kind ?? null;
-    this.observeSessionComposition(state.view, state.selectedId, focusedTab, focusedKind);
+    this.observeSessionComposition(state.view, state.selectedId, focusedTab, focusedKind, focusedTabSynth);
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
     if (this.lastKb !== kb) {
       this.lastKb = kb;
@@ -16425,12 +16426,13 @@ var AppShell = class {
     return item;
   }
   /** Invalidates carried disclosure state when its owning context changes. */
-  observeSessionComposition(view, selectedId, focusedTab, focusedKind) {
+  observeSessionComposition(view, selectedId, focusedTab, focusedKind, focusedTabSynth) {
     const previous = this.sessionComposition;
-    if (previous && (previous.view !== view || previous.selectedId !== selectedId || previous.focusedTab !== focusedTab || previous.focusedKind !== focusedKind)) {
+    const sameFocusedTab = previous !== null && (previous.focusedTab === focusedTab || previous.focusedTab === previous.focusedTabSynth && focusedTabSynth !== null && previous.focusedTabSynth === focusedTabSynth);
+    if (previous && (previous.view !== view || previous.selectedId !== selectedId || !sameFocusedTab || previous.focusedKind !== focusedKind)) {
       this.dismissCarriedActions();
     }
-    this.sessionComposition = { view, selectedId, focusedTab, focusedKind };
+    this.sessionComposition = { view, selectedId, focusedTab, focusedTabSynth, focusedKind };
     this.terminalSelected = isSessionFirst(true, view, focusedKind);
   }
   /** Retires carried actions before a user-owned transition can recompose them. */

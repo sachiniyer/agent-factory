@@ -589,3 +589,19 @@ for (const shortcut of ["Alt+j", "Alt+k", "Alt+w"] as const) {
     await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
   });
 }
+
+for (const key of ["Enter", "Space"] as const) {
+  test(`phone Switch project ${key} dismisses carried Session actions`, async ({ page, request }) => {
+    const { controls, sessionActions } = await carrySessionActionsToPhone(page, request);
+    const switcher = page.getByRole("button", { name: "Switch project", exact: true });
+    await switcher.focus();
+    await page.keyboard.press(key);
+    await expect(switcher).toHaveAttribute("aria-expanded", "true");
+    await expect(controls).toHaveAttribute("aria-expanded", "false");
+    await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+    // The carried state is retired, not merely hidden: returning to desktop must
+    // not restore a disclosure the user's nested action already replaced.
+    await page.setViewportSize({ width: 1280, height: 844 });
+    await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+  });
+}
