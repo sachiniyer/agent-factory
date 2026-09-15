@@ -454,7 +454,7 @@ pointing at one).`,
 			if herr != nil {
 				return jsonError(herr)
 			}
-			if _, aerr := agentaccount.Selected(home, sessionenv.AgentForCommand(program), createAccountFlag, ""); aerr != nil {
+			if _, aerr := agentaccount.Selected(home, sessionenv.AgentForCommand(program), createAccountFlag); aerr != nil {
 				return jsonError(aerr)
 			}
 		}

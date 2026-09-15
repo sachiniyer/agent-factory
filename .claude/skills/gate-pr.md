@@ -771,13 +771,21 @@ Two things the gate insists on, and both matter:
   Codex artifacts are held to (#3702). Push after approving and the PR returns to
   the manual pass; a sign-off is about the code it was written against.
 
-  **An update-branch is not such a push (#3803).** When the head is a merge commit
-  with exactly two parents whose SECOND is contained in `master`, the anchors —
-  the approval and every Codex artifact — bind to the merge's FIRST parent, the
-  content head, because nothing about the reviewed change moved. Without that the
-  gate's own update-branch voided the approval it had just acted on, and #3799
-  livelocked: approve, update-branch, anchors reset, approve again. Any other head
-  resets as before. Reading it by hand:
+  **An update-branch is not such a push (#3803, #4235).** A merge commit with
+  exactly two parents whose SECOND is contained in `master` is the shape `PUT
+  update-branch` produces — but a cheap pre-filter only, since a hand-written
+  conflict resolution has the same parents. The full gate also reads the merge
+  base and both parent trees and requires the merge commit's tree to equal the
+  path-level three-way result, or carry is refused. When the proof passes, the
+  anchors — the approval and every Codex artifact — bind to the merge's FIRST
+  parent, the content head, because nothing about the reviewed change moved.
+  Without that the gate's own update-branch voided the approval it had just
+  acted on, and #3799 livelocked: approve, update-branch, anchors reset, approve
+  again. Any other head resets as before. Differing blob SHAs between the PR's
+  files and the content head rule carry out immediately (cheap negative); the
+  shape check and tree proof in `auto-gate.js` are only needed when blobs
+  match. Reading it by hand (this is the shape pre-filter; the tree proof runs
+  in `auto-gate.js`):
 
 ```bash
 set -euo pipefail
@@ -794,7 +802,7 @@ else
   # Contained in base? "identical" or "behind" means yes.
   ST=$(gh api "repos/{owner}/{repo}/compare/$BASE...$2" --jq '.status')
   if [[ "$ST" == "identical" || "$ST" == "behind" ]]; then
-    echo "update-branch: content head $1, current head $HEAD — bind evidence to $1"
+    echo "update-branch shape: content head $1, current head $HEAD — bind evidence to $1 only if the merge tree preserves the reviewed content (auto-gate.js verifies)"
   else
     echo "merge of something other than $BASE — anchors bind to $HEAD"
   fi

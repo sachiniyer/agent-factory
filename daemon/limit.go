@@ -755,6 +755,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 		shouldRespawn = true
 	}
+	var accountConversationCapture session.ConversationCaptureSnapshot
 	if shouldRespawn {
 		// Capture the limit window BEFORE the re-spawn: Respawn ends in ConfirmLive,
 		// which drops both the LiveLimitReached liveness and its reset time, and
@@ -763,7 +764,6 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// auto-resume scheduler schedules off it (reset + grace).
 		resetAt, _ := instance.LimitResetAt()
 		var rerr error
-		var accountConversationCapture session.ConversationCaptureSnapshot
 		beforeLive := func() error {
 			return m.prepareRuntimeReplacementLiveBoundary(repoID, key, instance, "limit resume")
 		}
@@ -795,14 +795,6 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// The runtime this session's failure history was about is gone; the fresh
 		// sandbox must not inherit it (#1794).
 		m.noteRuntimeReplaced(repoID, instance)
-		// Account-swap preflight captured the selected account's provider store
-		// before launch. Discover Codex synchronously under this operation fence:
-		// the ordinary async writer cannot take the same op lock until this resume
-		// returns, which would let the pending crash-recovery marker retire first.
-		var accountCaptureErr error
-		if accountSwap != nil {
-			accountCaptureErr = captureAccountSwapConversation(instance, accountConversationCapture)
-		}
 		// SendPromptWithEvidence below resolves the agent-server only after Respawn;
 		// the `as` captured above belongs to the remote sandbox just torn down (#1786).
 		// Re-apply the limit block Respawn's ConfirmLive just cleared. A re-spawned
@@ -863,13 +855,6 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		if settleErr != nil {
 			m.warn().Printf("limit resume for %q: %v", instance.Title, settleErr)
 		}
-		if accountCaptureErr != nil {
-			captureErr := fmt.Errorf("failed to preserve the replacement conversation for %q: %w", requestedTitle, accountCaptureErr)
-			if settleErr != nil {
-				return resumeNotPerformed, errors.Join(captureErr, settleErr)
-			}
-			return resumeNotPerformed, captureErr
-		}
 	}
 	if accountSwap != nil {
 		if err := instance.ValidateAccountSwapReplacementPanes(); err != nil {
@@ -880,6 +865,15 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			return resumeNotPerformed, boundaryErr
 		}
 		if err := instance.SynchronizeAccountSwapRuntimeMetadata(); err != nil {
+			return resumeNotPerformed, err
+		}
+		// The fresh runtime may be parked on Codex's directory-trust modal — alive
+		// but idle, writing no rollout. Run the shared readiness/dismissal
+		// contract before capture and the send (#4392).
+		if err := m.settleReplacementRuntime(repoID, key, requestedTitle, instance, accountSwap, shouldRespawn, accountConversationCapture); err != nil {
+			if settleErr != nil {
+				return resumeNotPerformed, errors.Join(err, settleErr)
+			}
 			return resumeNotPerformed, err
 		}
 	}

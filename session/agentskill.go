@@ -511,7 +511,7 @@ func resolveSkillTargetForAccount(program, requestedProgram, name string) skillT
 		log.WarningLog.Printf("af skill: cannot locate the agent-factory home to resolve account %q for %s: %v", name, agent, err)
 		return skillTarget{unresolved: true}
 	}
-	account, err := agentaccount.Selected(home, agent, name, "")
+	account, err := agentaccount.Selected(home, agent, name)
 	if err != nil {
 		log.WarningLog.Printf("af skill: cannot resolve account %q for %s: %v", name, agent, err)
 		return skillTarget{unresolved: true}

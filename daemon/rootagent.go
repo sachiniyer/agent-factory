@@ -853,14 +853,6 @@ func rootEnsureEscalationCause(st *rootEnsureState) string {
 	}
 }
 
-// rootAgentProgram resolves the command the root agent runs from a legacy
-// per-repo entry. Retained as the thin adapter the direct-map program test and
-// any legacy-only caller use; it delegates to rootAgentProgramForProfile so the
-// resolution rule lives in exactly one place.
-func rootAgentProgram(repoRoot string, rc config.RootAgentConfig) string {
-	return rootAgentProgramForProfile(repoRoot, config.RootAgent{Program: rc.Program})
-}
-
 // rootAgentProgramForProfile resolves the command the root agent runs from a
 // resolved root-agent profile. An explicit program wins verbatim (a bare agent
 // name resolves through program_overrides downstream, exactly like any session
@@ -956,25 +948,4 @@ func finishRootAgentProgram(program string) string {
 		program += " " + rootDangerouslySkipPermissionsFlag
 	}
 	return program
-}
-
-// RootAgentProgramForProfileInspection exposes the daemon's exact command
-// interpretation to read-only diagnostics. The caller resolves the repository
-// under its own deadline; config resolution suppresses the durable in-repo load
-// observation that runtime callers intentionally record.
-func RootAgentProgramForProfileInspection(repo *config.RepoContext, ra config.RootAgent, global *config.Config) (string, error) {
-	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
-		return config.ResolveConfigForRepoInspectionWithGlobal(repo, global)
-	}
-	return rootAgentProgramForResolvedRepo(repo, ra, resolve)
-}
-
-// RootAgentProgramForProfileInspectionContext is the bounded form used by
-// doctor. Its deadline covers the config files needed to turn a bare agent name
-// into the exact command AF would launch, not only the preceding Git probes.
-func RootAgentProgramForProfileInspectionContext(ctx context.Context, repo *config.RepoContext, ra config.RootAgent, global *config.Config) (string, error) {
-	resolve := func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
-		return config.ResolveConfigForRepoInspectionWithGlobalContext(ctx, repo, global)
-	}
-	return rootAgentProgramForResolvedRepo(repo, ra, resolve)
 }

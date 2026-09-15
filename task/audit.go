@@ -128,8 +128,9 @@ func auditUpdate(before, after *Task, actor Actor, at time.Time) bool {
 //
 // It mirrors DiffTask's field list deliberately: those are exactly the fields a
 // surface can patch, so a field that gains an editor must be added to both. The
-// scheduler-owned LastRunAt/LastRunStatus/LastRunSessionID/LastRunSequence are
-// absent because they are not mutations anyone made — auditing every run's status bump would push the
+// scheduler-owned LastRunAt/LastRunStatus/LastRunSessionID/LastRunSequence/
+// LastRunRevision and watcher-owned DroppedEvents are absent because they are
+// not mutations anyone made — auditing every delivery outcome would push the
 // enable/disable entries this exists for straight out of the bounded window.
 // RepoID is absent for the same reason: it is derived from ProjectPath, which is
 // already listed, and the daemon also backfills it on legacy rows without any
@@ -168,11 +169,13 @@ func changedFields(before, after Task) []string {
 //     reference past now and switches overdue detection off for that task forever.
 //   - GenerationID / LastRunAt / LastRunStatus / LastRunSessionID /
 //     LastRunSequence / LastRunRevision:
-//     scheduler-owned by contract (see the status helpers and the surface-parity
-//     inventory, which already declared them "never a client input").
-//     scheduleReference prefers a nonzero LastRunAt over CreatedAt, so a
+//     daemon-owned by contract (see UpdateTaskStatus and the status helpers, and
+//     the surface-parity inventory, which already declared them "never a client
+//     input"). scheduleReference prefers a nonzero LastRunAt over CreatedAt, so a
 //     forged future run time suppresses detection the same way — a task that has
 //     never run claiming it just did.
+//   - DroppedEvents: watcher-owned delivery history. A forged value would claim
+//     af discarded source events that it never observed.
 //   - CreatedAt: the fallback reference for a task that has never run. Absent, no
 //     verdict can be derived at all and the task reports healthy forever; dated in
 //     the future, detection is off until then.
@@ -200,6 +203,7 @@ func (t *Task) resetStoreOwnedFields(now time.Time) error {
 	t.LastRunSessionID = ""
 	t.LastRunSequence = 0
 	t.LastRunRevision = 0
+	t.DroppedEvents = 0
 	if t.CreatedAt.IsZero() || t.CreatedAt.After(now) {
 		t.CreatedAt = now
 	}

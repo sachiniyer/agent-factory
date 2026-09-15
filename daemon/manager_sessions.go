@@ -882,7 +882,15 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 		}
 		return tracked, rid, data, nil
 	}
+	// Construction above can checkpoint a closed task run ahead of replacing a
+	// missing runtime, leaving the instance carrying TaskRunInterruptionPending
+	// and an unconsumed LoadRuntimeReplacement. Consume and register that
+	// load-time settlement before the instance becomes reachable — registering
+	// without it never publishes the interrupted outcome, and the unconsumed
+	// durability fence would refuse session deletion until the next restart.
+	owed := persistLoadRuntimeReplacements(map[string]*session.Instance{key: instance})
 	m.instances[key] = instance
+	m.registerLoadRuntimeSettlementsLocked(owed)
 	m.mu.Unlock()
 	return instance, rid, data, nil
 }

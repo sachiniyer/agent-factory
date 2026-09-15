@@ -142,6 +142,11 @@ type Task struct {
 	// stable session ID, and sequence for identity and order. Zero denotes no
 	// task-wide status writes yet.
 	LastRunRevision uint64 `json:"last_run_revision,omitempty"`
+	// DroppedEvents is the cumulative count of watch-source events discarded by
+	// the per-minute delivery cap. It is daemon-owned history, not a task
+	// definition field: create clears a client-supplied value and updates cannot
+	// patch it. Queue overflow/expiry has separate semantics and is not included.
+	DroppedEvents int `json:"dropped_events,omitempty"`
 	// Audit is the bounded trail of mutations to this task — the one field here
 	// that is a HISTORY rather than a current value, and the only way to answer
 	// "did someone turn this off?" (#3623). Written by the store inside the same

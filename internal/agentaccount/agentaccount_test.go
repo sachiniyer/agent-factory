@@ -31,12 +31,12 @@ func TestSelected_TwoAccountsSeeDifferentDirectories(t *testing.T) {
 		"PATH=/usr/bin",
 	}
 
-	accountA, err := Selected(home, "codex", "work", "")
+	accountA, err := Selected(home, "codex", "work")
 	require.NoError(t, err)
 	scopedA, err := sessionenv.ApplyAccount(ambient, "codex", accountA)
 	require.NoError(t, err)
 
-	accountB, err := Selected(home, "codex", "personal", "")
+	accountB, err := Selected(home, "codex", "personal")
 	require.NoError(t, err)
 	scopedB, err := sessionenv.ApplyAccount(ambient, "codex", accountB)
 	require.NoError(t, err)
@@ -69,7 +69,7 @@ func TestSelected_NoSelectionIsNotAnAccount(t *testing.T) {
 	_, err := Register(home, "codex", "work")
 	require.NoError(t, err)
 
-	account, err := Selected(home, "codex", "", "")
+	account, err := Selected(home, "codex", "")
 	require.NoError(t, err)
 	require.Equal(t, sessionenv.Account{}, account,
 		"an unselected session must carry no account, not the first registered one")
@@ -80,7 +80,7 @@ func TestSelected_NoSelectionIsNotAnAccount(t *testing.T) {
 // unauthenticated agent while the UI reported the selected account.
 func TestSelected_RefusesAnUnregisteredAccount(t *testing.T) {
 	home := t.TempDir()
-	_, err := Selected(home, "codex", "never-registered", "")
+	_, err := Selected(home, "codex", "never-registered")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not registered")
 	require.Contains(t, err.Error(), "af accounts add", "the error must say how to fix it")
@@ -242,7 +242,7 @@ func TestRegister_RefusesASymlinkedAccountPath(t *testing.T) {
 
 	// And Selected must agree with List that it is not an account, rather than
 	// authenticating through a path the registry never created.
-	if _, err := Selected(home, "codex", "linked", ""); err == nil {
+	if _, err := Selected(home, "codex", "linked"); err == nil {
 		t.Fatal("Selected must refuse a symlinked account, matching List which cannot see it")
 	}
 }
@@ -287,7 +287,7 @@ func TestSelectedAndList_RefuseAnAncestorSwappedAfterRegistration(t *testing.T) 
 	if _, err := Register(home, "codex", "work"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if _, err := Selected(home, "codex", "work", ""); err != nil {
+	if _, err := Selected(home, "codex", "work"); err != nil {
 		t.Fatalf("precondition: a freshly registered account must select cleanly: %v", err)
 	}
 
@@ -305,7 +305,7 @@ func TestSelectedAndList_RefuseAnAncestorSwappedAfterRegistration(t *testing.T) 
 		t.Skipf("symlinks unavailable on this platform: %v", err)
 	}
 
-	if _, err := Selected(home, "codex", "work", ""); err == nil {
+	if _, err := Selected(home, "codex", "work"); err == nil {
 		t.Fatal("Selected accepted an account whose ancestor is now a symlink: the " +
 			"session would authenticate through a path outside the registry")
 	}

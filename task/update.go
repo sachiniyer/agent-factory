@@ -21,10 +21,10 @@ import (
 // clobbering a concurrent edit another client made to a different field.
 //
 // Only the user-editable fields are patchable. The scheduler-owned LastRunAt,
-// LastRunStatus, LastRunSessionID, and LastRunSequence and the immutable
-// CreatedAt never appear here — the status helpers stay their canonical writers
-// (#731/#1215), and preserving them is inherent to the merge (the record starts
-// from the on-disk copy).
+// LastRunStatus, LastRunSessionID, LastRunSequence, and LastRunRevision, the
+// daemon-owned DroppedEvents, and the immutable CreatedAt never appear here —
+// the status helpers stay their canonical writers (#731/#1215), and preserving
+// them is inherent to the merge (the record starts from the on-disk copy).
 //
 // The json tags define the HTTP JSON body shape for the daemon's /v1/UpdateTask
 // route; a nil pointer serializes as an absent key (omitempty), so the wire form
@@ -81,9 +81,9 @@ func (u TaskUpdate) IsEmpty() bool {
 }
 
 // apply merges the non-nil fields of u onto t and returns the result. It never
-// touches CreatedAt/LastRunAt/LastRunStatus/LastRunSessionID/LastRunSequence,
-// so a merge onto the freshly-loaded record preserves those scheduler-owned
-// values automatically.
+// touches CreatedAt, LastRunAt, LastRunStatus, LastRunSessionID,
+// LastRunSequence, LastRunRevision, or DroppedEvents, so a merge onto the
+// freshly-loaded record preserves those daemon-owned values automatically.
 func (u TaskUpdate) apply(t Task) Task {
 	if u.Name != nil {
 		t.Name = *u.Name
@@ -218,10 +218,10 @@ func DiffTask(old, cur Task) TaskUpdate {
 //
 // The merged task is validated (ValidateTrigger, plus the program enum when the
 // patch sets Program) before it is written, so a patch that would leave the task
-// in an invalid state is rejected. Scheduler-owned fields (LastRunAt/
-// LastRunStatus) and CreatedAt are never patchable — UpdateTaskStatus remains
-// their canonical writer (#731/#1215). Returns the not-found error when no task
-// with the given id exists.
+// in an invalid state is rejected. Daemon-owned fields (LastRunAt/LastRunStatus/
+// DroppedEvents) and CreatedAt are never patchable — their dedicated store
+// operations remain canonical (#731/#1215). Returns the not-found error when no
+// task with the given id exists.
 // UpdateTask applies a field-level patch. expect optionally asserts, inside the
 // same locked operation, that the task is still bound to the project the caller
 // authorized it against — see ProjectExpectation.

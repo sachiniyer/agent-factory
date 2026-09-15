@@ -17,6 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/require"
 )
 
@@ -630,6 +631,136 @@ func TestResumeLimitedSessionsCapturesReplacementCodexConversation(t *testing.T)
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("replacement Codex conversation was never captured: %+v", inst.AgentConversation())
+}
+
+// codexReplacementTrustModal is the real Codex first-run directory-trust frame
+// (mirrors codexDirectoryTrustDialog in session/tmux/doc_trust_prompt_test.go):
+// the guarded detector requires the selected '› 1. Yes, continue' row and the
+// 'Press enter to continue' affordance as the last non-empty line.
+const codexReplacementTrustModal = `> You are in /tmp/af-home
+
+  Do you trust the contents of this directory? Working with untrusted contents
+  comes with higher risk of prompt injection.
+
+› 1. Yes, continue
+  2. No, quit
+
+  Press enter to continue`
+
+// accountTrustModalBackend models a replacement Codex pane parked on the
+// directory-trust modal: the pane reads as the modal until the guarded
+// dismissal runs, and Codex writes its rollout file only once the modal is
+// answered. Coupling the rollout to the dismissal is what makes this a #4392
+// regression fixture — before the fix the launch path never ran the check, so
+// the capture timed out waiting for a file a modal-blocked Codex never wrote,
+// and the swap retried the same wedge forever.
+type accountTrustModalBackend struct {
+	*limitResumeBackend
+	mu           sync.Mutex
+	modal        bool
+	trustChecks  int
+	afterDismiss func()
+}
+
+func (b *accountTrustModalBackend) Preview(*session.Instance) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.modal {
+		return codexReplacementTrustModal, nil
+	}
+	return "› \n", nil
+}
+
+func (b *accountTrustModalBackend) CheckAndHandleTrustPrompt(*session.Instance) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.trustChecks++
+	if !b.modal {
+		return false
+	}
+	b.modal = false
+	if b.afterDismiss != nil {
+		b.afterDismiss()
+	}
+	return true
+}
+
+func (b *accountTrustModalBackend) dismissed() (checks int, modalUp bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.trustChecks, b.modal
+}
+
+// TestResumeLimitedSessions_DismissesReplacementCodexTrustModal is the #4392
+// regression: an automatic account replacement launches a fresh provider
+// runtime, and a fresh Codex account home has not trusted the worktree, so the
+// pane parks on the directory-trust modal. The replacement path never ran the
+// readiness/trust contract the create and handoff paths share, so nothing
+// answered the modal — the conversation capture timed out, the mission was
+// never delivered, and the pending swap respawned into the same modal on every
+// retry. The wait must run before the capture and the send.
+func TestResumeLimitedSessions_DismissesReplacementCodexTrustModal(t *testing.T) {
+	t.Cleanup(task.SetTrustPromptTimingForTest(time.Millisecond))
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	manager, _, inst, backend := newAutoResumeManager(t, "", false, "finish the migration", base.Add(time.Hour))
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountHome, err := agentaccount.Register(home, tmux.ProgramCodex, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeLimitAccountCandidates(t, "limit_account_candidates = [\"work\"]\n")
+	manager.Config().LimitAccountCandidates = []string{"work"}
+	inst.Program = tmux.ProgramCodex
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	worktree := filepath.Join(t.TempDir(), "codex-worktree")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		inst.Path, worktree, inst.Title, "codex-branch", "", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetGitWorktreeForTest(gw)
+
+	modal := &accountTrustModalBackend{limitResumeBackend: backend, modal: true}
+	modal.afterDismiss = func() {
+		// Codex creates the rollout file only after the modal is answered, so a
+		// captured conversation is itself proof the dismissal ran first.
+		writeDaemonCodexRolloutFileWithCwd(t, accountHome,
+			"rollout-2026-08-10T12-00-00-7b3c1d2e-4f5a-6b7c-8d9e-0f1a2b3c4d5e.jsonl", worktree)
+	}
+	inst.SetBackend(modal)
+
+	advance(time.Second)
+	manager.ResumeLimitedSessions()
+
+	checks, modalUp := modal.dismissed()
+	if checks == 0 {
+		t.Fatal("the replacement launch never checked the pane for a trust modal (#4392)")
+	}
+	if modalUp {
+		t.Fatal("the trust modal was still up when the resume finished")
+	}
+	if _, _, prompts := backend.snapshot(); len(prompts) != 1 ||
+		!strings.Contains(prompts[0], `codex account "work"`) ||
+		!strings.Contains(prompts[0], "finish the migration") {
+		t.Fatalf("swap prompt must name the identity change and retain the task, got %v", prompts)
+	}
+	if _, _, pending := inst.PendingAccountSwap(); pending {
+		t.Fatal("a completed replacement must clear the pending swap marker")
+	}
+	if conv := inst.AgentConversation(); conv.Agent != tmux.ProgramCodex ||
+		conv.ID != "7b3c1d2e-4f5a-6b7c-8d9e-0f1a2b3c4d5e" {
+		t.Fatalf("replacement Codex conversation = %+v, want the rollout written after the modal was answered", conv)
+	}
+	if inst.LimitReached() {
+		t.Fatal("successful account replacement must clear the old limit wall")
+	}
 }
 
 func TestResumeFromLimit_LiveCommittedCodexSwapRecapturesBeforeClearingMarker(t *testing.T) {

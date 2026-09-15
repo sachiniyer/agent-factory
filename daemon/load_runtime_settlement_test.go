@@ -113,6 +113,63 @@ func TestPersistLoadAgentRuntimeReplacementWriteFailureRefusesReplacement(t *tes
 		"the failed write leaves the predecessor run active on disk, which is why replacement visibility is refused")
 }
 
+// TestFindSessionFallbackRegistersLoadTimeInterruptionSettlement pins the
+// review finding on findSessionByStableID: when the refresh pass skips a row
+// on a transient reconstruction failure but the fallback's own rebuild
+// succeeds, the registered instance must not carry an unconsumed interruption
+// outcome — otherwise last_run_status is never published and the durable
+// marker would refuse session deletion until a daemon restart.
+func TestFindSessionFallbackRegistersLoadTimeInterruptionSettlement(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	tsk := addStatusTestTask(t, enabledCronTask("load0002", repoPath))
+	runAt := time.Date(2026, 9, 11, 9, 30, 0, 0, time.UTC)
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "fallback-interrupted", Path: repoPath, Program: "claude", TaskID: tsk.ID,
+		TaskGenerationID: tsk.GenerationID, CreatedAt: runAt, TaskRunAt: runAt,
+		TaskRunSequence: 1,
+	})
+	require.NoError(t, err)
+	data := inst.ToInstanceData()
+	data.TaskRunInterruptionPending = true
+	seeded, err := json.Marshal([]session.InstanceData{data})
+	require.NoError(t, err)
+	require.NoError(t, config.LoadState().SaveInstances(repoID, seeded))
+
+	// The refresh pass's reconstruction fails transiently; the fallback's own
+	// retry succeeds — the exact seam the finding names.
+	var calls int
+	original := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(repoID string, d session.InstanceData) (*session.Instance, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("transient reconstruction failure")
+		}
+		return original(repoID, d)
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = original })
+
+	got, gotRepoID, _, err := manager.findSessionByStableID(inst.ID, inst.Title, repoID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, repoID, gotRepoID)
+	key := daemonInstanceKey(repoID, inst.Title)
+	manager.mu.Lock()
+	tracked := manager.instances[key]
+	entry, owed := manager.settleOwed[key]
+	manager.mu.Unlock()
+	require.Same(t, got, tracked, "the fallback instance must be the tracked one")
+	if _, pending := got.PendingTaskRunInterruption(); pending {
+		t.Fatal("registered instance still carries an unconsumed interruption outcome")
+	}
+	require.True(t, owed, "the interrupted task outcome must be queued for publication")
+	require.NotNil(t, entry.interruptedTaskRun)
+
+	manager.FlushOwedSettlements()
+	stored, err := task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	require.Equal(t, TaskStatusInterrupted, stored.LastRunStatus)
+}
+
 // The session regression drives real sibling RestoreWithResult bookkeeping;
 // this test pins the daemon half of that contract without clearing agent evidence.
 func TestPersistLoadRuntimeReplacementsCheckpointsSiblingTimestamp(t *testing.T) {

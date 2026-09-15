@@ -188,7 +188,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	defer manager.configAssistants.stop()
 
 	scheduler := newTaskScheduler()
-	watchers := newWatcherSupervisor()
+	watchers := newWatcherSupervisorWithEventsPerMinute(cfg.WatcherEventsPerMinute)
 
 	shutdownCh := make(chan struct{})
 	closeControl, alreadyRunning, err := bindControlServerExclusive(manager, scheduler, watchers, shutdownCh)

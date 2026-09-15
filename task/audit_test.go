@@ -305,8 +305,8 @@ func TestAddTask_ClampsAFutureCreatedAt(t *testing.T) {
 		"and overdue detection reaches the task again")
 }
 
-// TestAddTask_DiscardsClientSuppliedRunHistory: LastRunAt/LastRunStatus are
-// scheduler-owned by contract, and `scheduleReference` prefers a nonzero
+// TestAddTask_DiscardsClientSuppliedRunHistory: run status and dropped-event
+// history are daemon-owned by contract, and `scheduleReference` prefers a nonzero
 // LastRunAt over CreatedAt — so a create carrying a future run time claims the
 // task just ran and switches overdue detection off until that date. Third
 // variant of one defect: the request carries a whole task.Task, so the store
@@ -321,6 +321,7 @@ func TestAddTask_DiscardsClientSuppliedRunHistory(t *testing.T) {
 		ProjectPath: dir, Program: "claude", Enabled: true,
 		GenerationID: "forged-generation", LastRunAt: &forged, LastRunStatus: "started",
 		LastRunSessionID: "forged-session", LastRunSequence: 99, LastRunRevision: 99,
+		DroppedEvents: 99,
 	}, ActorAPI, nil)
 	require.NoError(t, err)
 	assert.Nil(t, created.LastRunAt, "a task that has never run has no run time")
@@ -330,6 +331,7 @@ func TestAddTask_DiscardsClientSuppliedRunHistory(t *testing.T) {
 	assert.NotEmpty(t, created.GenerationID)
 	assert.NotEqual(t, "forged-generation", created.GenerationID)
 	assert.Zero(t, created.LastRunRevision)
+	assert.Zero(t, created.DroppedEvents)
 
 	stored, err := GetTask("history1")
 	require.NoError(t, err)
@@ -356,7 +358,7 @@ func TestAddTask_ResetsEveryStoreOwnedField(t *testing.T) {
 		ProjectPath: dir, Program: "claude", Enabled: true,
 		CreatedAt: future, GenerationID: "forged-generation", LastRunAt: &future,
 		LastRunStatus: "started", LastRunSessionID: "forged-session",
-		LastRunSequence: 99, LastRunRevision: 99,
+		LastRunSequence: 99, LastRunRevision: 99, DroppedEvents: 99,
 		Audit:   []AuditEntry{{At: future, Actor: ActorCLI, Action: AuditEnabled}},
 		Overdue: true, MissedOccurrences: 99, MissedOccurrencesCapped: true,
 		Unschedulable: true, Arming: ArmingArmed, NextRunAt: &next,
@@ -371,6 +373,7 @@ func TestAddTask_ResetsEveryStoreOwnedField(t *testing.T) {
 	assert.NotEmpty(t, created.GenerationID)
 	assert.NotEqual(t, "forged-generation", created.GenerationID)
 	assert.Zero(t, created.LastRunRevision)
+	assert.Zero(t, created.DroppedEvents)
 	require.Len(t, created.Audit, 1, "only the store's own create entry")
 	assert.Equal(t, AuditCreated, created.Audit[0].Action)
 	assert.False(t, created.Overdue, "the response must not echo a health verdict the client invented")
