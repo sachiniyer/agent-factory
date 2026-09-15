@@ -47,6 +47,7 @@ function stage(): {
   accountStatusCalls: number;
   refreshAccountsCalls: number;
   resolveStart(login: unknown): void;
+  rejectStart(err: unknown): void;
 } {
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
   const handlers = topLevelFunctions(source, new Set([
@@ -59,10 +60,13 @@ function stage(): {
     "mountOverlay",
   ]));
 
-  // The controllable AccountLogin RPC: resolves only when the test calls resolveStart.
+  // The controllable AccountLogin RPC: settles only when the test calls
+  // resolveStart or rejectStart.
   let resolveStart!: (login: unknown) => void;
-  const startPromise = new Promise<unknown>((resolve) => {
+  let rejectStart!: (err: unknown) => void;
+  const startPromise = new Promise<unknown>((resolve, reject) => {
     resolveStart = resolve;
+    rejectStart = reject;
   });
 
   const counters = { openAccountLoginCalls: 0, accountStatusCalls: 0, refreshAccountsCalls: 0 };
@@ -136,6 +140,7 @@ function stage(): {
       return counters.refreshAccountsCalls;
     },
     resolveStart,
+    rejectStart,
   };
 }
 
@@ -227,4 +232,39 @@ test("a finished login arriving after disconnect is dropped (row-only path guard
     "only the pre-await Starting… status was set; the stale finished response wrote nothing more",
   );
   assert.equal(s.refreshAccountsCalls, 0, "the stale response did not trigger an accounts refresh");
+});
+
+// The complementary await-exit takes the same gate: a rejection that lands after
+// a disconnect must not write the dead connection's error status onto the row.
+test("a rejection landing after disconnect is dropped (catch path guarded)", async () => {
+  const s = stage();
+
+  s.app.doOpenAccountLogin("codex", "primary"); // pre-await "Starting…" status: accountStatusCalls=1
+  s.app.disconnect();
+  assert.equal(s.accountStatusCalls, 1);
+
+  s.rejectStart(new Error("connection reset"));
+  // Two microtask hops: the rejection propagates through the .then link first,
+  // then the .catch handler runs — one tick alone could pass vacuously.
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(
+    s.accountStatusCalls,
+    1,
+    "the stale rejection wrote no error status — the .catch takes the same generation+token gate",
+  );
+});
+
+// Soundness control for the guard above: on the same connection a rejection
+// still reaches setAccountStatus, so the gate is not suppressing live errors.
+test("without a disconnect a rejection writes the error status", async () => {
+  const s = stage();
+
+  s.app.doOpenAccountLogin("codex", "primary");
+  s.rejectStart(new Error("flow refused"));
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(s.accountStatusCalls, 2, "Starting… then the error status line both set");
 });
