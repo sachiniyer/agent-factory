@@ -155,7 +155,8 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 	// Fail-open — only a provably live upgrade stops the spawn, as a typed
 	// retryable error; a stale, corrupt, or absent journal proceeds. The gate is
 	// bounded, so a bad journal can never wedge this launch path (which fronts
-	// every af invocation).
+	// every on-demand start of the default local daemon; remote targets never
+	// enter this lifecycle path).
 	if homeDir, ok := configHomeDir(); ok {
 		switch decision, gateErr := checkUpgradeGateUntil(homeDir, false, deadline); decision {
 		case upgradeGateInProgress, upgradeGateRestoringPrevious:
@@ -653,10 +654,11 @@ func ReorderTab(req ReorderTabRequest) (string, int, error) {
 	return resp.Name, resp.Index, nil
 }
 
-// The TUI's control + read path moved onto the HTTP apiclient in #1592 Phase 2
-// PR3, so the net/rpc client wrappers only the TUI called — PauseStatusPoll, ResumeStatusPoll
-// (here) and ResumeFromLimit /
-// SnapshotWithAlarms (in limit.go / snapshot.go) — are gone.
+// The TUI's session/task reads and many controls moved onto HTTP apiclient in
+// #1592 Phase 2 PR3; local account management, config-agent spawn/reap, and
+// config-editor writes still use gob. The net/rpc wrappers only the TUI called —
+// PauseStatusPoll, ResumeStatusPoll (here), ResumeFromLimit, and SnapshotWithAlarms
+// (in limit.go / snapshot.go) — are gone.
 // The controlServer handlers stay: the gob control socket still SERVES every
 // verb for CLI/internal callers; only the TUI-only Go client wrappers were
 // removed. The sessions read (SnapshotNoSpawn) moved to apiclient in Phase 2

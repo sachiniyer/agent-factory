@@ -13,7 +13,7 @@ import (
 
 // `af agent-server` (#1592 Phase 4 PR1) runs a headless, single-workspace
 // agent-server over the HTTP/WS+token protocol — the process that runs inside
-// each docker/SSH/hook workspace and is driven by a remote daemon over an authed
+// each docker/SSH/hook workspace and is driven by the owning daemon over an authed
 // URL. It is the standalone, out-of-process form of the daemon's
 // in-process local agent-server: one session's workspace (worktree + tmux),
 // exposed over the exact wire the daemon already speaks, behind a bearer token on
@@ -33,22 +33,28 @@ var (
 
 var agentServerCmd = &cobra.Command{
 	Use:   "agent-server",
-	Short: "Run a headless single-workspace backend (not the web UI — that is 'af daemon')",
+	Short: "Run a headless single-workspace backend (not the daemon-hosted web UI)",
 	Long: `Run a headless agent-server for exactly one session's workspace, served over
 the same REST + WebSocket protocol the daemon speaks, behind a plain-HTTP
 listener that requires a bearer token on every request.
 
 This does not start the web UI, and serves no frontend at all — opening its port
-in a browser returns a 404 saying so. If you want the browser app, run the
-daemon — any 'af' command starts it — and open http://localhost:8443. The web UI
-is bundled into the daemon and served from its network.listen_addr; agent-server is only
-the headless per-workspace backend that a daemon drives, and it exists to be
-consumed by a daemon rather than opened by a person.
+in a browser returns a 404 saying so. The browser app starts with the local
+daemon lifecycle: a bare 'af' launch on the default local target ensures the
+daemon, and any bare launch also starts the local daemon when its task store has
+an enabled task. 'af daemon install' starts it under the user service manager
+and keeps it available without an open TUI. Once the daemon is running, open
+http://localhost:8443. The web UI is bundled into the daemon and served from its
+network.listen_addr; agent-server is only the headless per-workspace backend that
+a daemon drives, and it exists to be consumed by a daemon rather than opened by
+a person.
 
 This is the process that runs inside a docker container or on an ssh remote
-(#1592 Phase 4): a remote daemon dials the authed URL it exposes and drives the
-workspace exactly as it drives a local in-process session. Run it directly only
-to host one workspace as a backend for a daemon on another machine.
+(#1592 Phase 4): the owning daemon dials the authed URL it exposes and drives
+the workspace exactly as it drives a local in-process session. Docker publishes
+that URL on the daemon host's loopback; SSH tunnels it from another machine. Run
+agent-server directly only to expose one separately provisioned workspace to a
+daemon.
 
 The listener always requires the token and serves plain HTTP (no TLS) — reach it
 over a private network or a tunnel (the docker/ssh runtimes forward a loopback

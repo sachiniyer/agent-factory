@@ -318,6 +318,10 @@ func TestCollectDaemonStatusReportsExposureWithoutClaimingItCannotStart(t *testi
 	cmd.SetOut(&out)
 	printDaemonStatusHuman(cmd, info)
 	got := out.String()
+	require.Contains(t, got, "read-only checks do not start it",
+		"status must not imply that rerunning this no-spawn command starts the daemon")
+	require.Contains(t, got, "lifecycle-owning operations",
+		"the on-demand promise must be scoped to callers that own daemon startup")
 	require.Contains(t, got, "starts on demand",
 		"the on-demand promise is true again — this config starts fine")
 	require.NotContains(t, got, "cannot start",
@@ -341,6 +345,8 @@ func TestCollectDaemonStatusSafeConfigIsUnwarned(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	printDaemonStatusHuman(cmd, info)
+	require.Contains(t, out.String(), "read-only checks do not start it")
+	require.Contains(t, out.String(), "lifecycle-owning operations")
 	require.Contains(t, out.String(), "starts on demand")
 	require.NotContains(t, out.String(), "warning:")
 }

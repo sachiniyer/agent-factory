@@ -21,7 +21,7 @@ import (
 //
 // A WARNING, never a refusal. Which /bin/sh runs the value is not knowable here:
 // it is dash on this host, bash on macOS, busybox ash in a container, and for the
-// docker/ssh backends a shell on another machine entirely — all of which accept
+// SSH backend a shell on its configured host — all of which accept
 // the separator. Refusing would break configurations that are correct as written.
 // af also does not rewrite the value: the operator wrote it, and #3563 records
 // why silently editing it is the wrong answer.
@@ -157,8 +157,8 @@ func (s shellValueSet) warnExecSeparator(prettyPath string) {
 				"`--` as the command name and the command exits 127 with `exec: --: not found`. Remove the "+
 				"`--`: af runs the same command written `exec <program> …`. This is a warning, not an error — "+
 				"bash (/bin/sh on macOS), busybox ash and zsh in sh mode all accept the separator, so the value "+
-				"is correct as written on those shells, and a docker or ssh backend runs it on another machine's "+
-				"shell entirely.%s",
+				"is correct as written on those shells. A Docker backend uses the container's shell on the daemon's "+
+				"Docker host; an SSH backend uses the configured host's shell.%s",
 			lead, value.note)
 	}
 }
