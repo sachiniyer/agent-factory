@@ -3639,7 +3639,7 @@ const REQUIRED_CHECK_RECONCILIATION_QUERY = `
                         title
                         summary
                         text
-                        checkSuite { createdAt app { databaseId slug } }
+                        checkSuite { app { databaseId slug } }
                       }
                       ... on StatusContext {
                         id
@@ -3686,13 +3686,11 @@ function reconciliationCheckRun(run) {
     },
     status: String(run.status || "").toLowerCase(),
     conclusion: run.conclusion == null ? null : String(run.conclusion).toLowerCase(),
-    // A queued run has no startedAt/completedAt, so it needs a third timestamp
-    // to keep a newer queued generation ordered above an older completed one —
-    // the ordering latestRequiredState reads off created_at during normal REST
-    // evaluation. GraphQL's CheckRun type has no createdAt field (selecting it
-    // fails the whole query), so take it from the enclosing CheckSuite, which
-    // does expose one and is created with the run.
-    created_at: run.checkSuite?.createdAt,
+    // GraphQL's CheckRun exposes no createdAt (selecting it fails the whole
+    // query), and the suite's createdAt is wrong for a rerun inside an
+    // existing suite — every generation there shares the original timestamp.
+    // A queued run therefore arrives with no usable date at all, and
+    // latestRequiredState orders it by the per-run id above.
     started_at: run.startedAt,
     completed_at: run.completedAt,
     output: {
@@ -4639,15 +4637,22 @@ function latestRequiredState(spec, checkRuns, statuses) {
   }
 
   candidates.sort((a, b) => {
+    const sameKind = a.observation.kind === b.observation.kind;
+    const comparableGenerations = a.generationID != null && b.generationID != null;
+    // A run with no usable date — a queued rerun reports neither started nor
+    // completed, and no API exposes its creation time — still has a per-run id
+    // that strictly increases with creation, so it decides the order whenever
+    // a timestamp cannot: a newer queued generation outranks the older
+    // completed run it replaces (#4427). Cross-kind pairs have no shared id
+    // space and dated pairs keep the timestamp ordering.
+    if (sameKind && comparableGenerations && (a.date === 0 || b.date === 0)) {
+      return b.generationID - a.generationID;
+    }
     const timeDifference = b.date - a.date;
     if (timeDifference !== 0) {
       return timeDifference;
     }
-    if (
-      a.observation.kind === b.observation.kind &&
-      a.generationID != null &&
-      b.generationID != null
-    ) {
+    if (sameKind && comparableGenerations) {
       return b.generationID - a.generationID;
     }
     return 0;

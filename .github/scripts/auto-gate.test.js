@@ -6783,6 +6783,77 @@ test("scheduled reconciliation keeps a newer queued generation ahead of an older
   }), [], "a still-queued newer generation is not fresh terminal evidence");
 });
 
+test("scheduled reconciliation keeps a queued rerun inside an existing suite ahead of the generation it replaces", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  // A rerun inside an existing check suite inherits the suite's ORIGINAL
+  // createdAt — earlier than the prior generation's completedAt — so no
+  // timestamp the GraphQL CheckRun shape can carry orders it above the run it
+  // replaces. The monotonic per-run databaseId has to (#4427).
+  const suiteCreatedAt = "2026-07-09T21:00:00Z";
+  const queuedRerun = {
+    id: 9002,
+    node_id: "CR_queued_rerun",
+    name: "Build",
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "queued",
+    conclusion: null,
+    created_at: suiteCreatedAt,
+    started_at: null,
+    completed_at: null,
+  };
+  const priorCompletedBuild = {
+    id: 9001,
+    node_id: "CR_prior_build",
+    name: "Build",
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "completed",
+    conclusion: "failure",
+    created_at: suiteCreatedAt,
+    started_at: "2026-07-09T21:00:30Z",
+    completed_at: "2026-07-09T21:05:00Z",
+  };
+  const settlingDecision = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T21:11:30Z",
+    reason:
+      `required check Build (app ${ACTIONS_APP_ID}) is still settling ` +
+      "(check run queued/no conclusion from github-actions (15368))",
+    snapshotVersion: 2,
+    observedChecks: [{
+      name: "Build",
+      appId: ACTIONS_APP_ID,
+      observed: {
+        kind: "check_run",
+        id: "CR_queued_rerun",
+        status: "queued",
+        conclusion: null,
+      },
+      generation: [{
+        kind: "check_run",
+        id: "CR_queued_rerun",
+        status: "queued",
+        conclusion: null,
+      }],
+    }],
+  });
+  const snapshot = () => scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, HEAD_SHA)],
+    checksByHead: { [HEAD_SHA]: [settlingDecision, queuedRerun, priorCompletedBuild] },
+  });
+
+  assert.deepEqual(await autoGate.resolveTargets({
+    github: snapshot(),
+    context,
+    core: fakeCore(),
+  }), []);
+  assert.deepEqual(await autoGate.resolveTargets({
+    github: snapshot(),
+    context,
+    core: fakeCore(),
+  }), [], "a queued rerun is not stale terminal evidence for the generation it replaces");
+});
+
 test("scheduled reconciliation batches head inspection and caps reevaluations", async () => {
   const pulls = [];
   const checksByHead = {};
@@ -12512,6 +12583,7 @@ function scheduledReconciliationGithub({
       graphqlReads.push(after);
       const requestsCheckRunNodeId = /\.\.\. on CheckRun\s*\{\s*id(?:\s|$)/.test(query);
       const requestsCheckRunPermalink = /\.\.\. on CheckRun\s*\{[\s\S]*?\bpermalink\b/.test(query);
+      const requestsCheckSuiteCreatedAt = /\bcheckSuite\s*\{[^}]*\bcreatedAt\b/.test(query);
       const requestsStatusContexts = /\.\.\. on StatusContext\s*\{/.test(query);
       const start = after == null ? 0 : Number(after);
       const page = pulls.slice(start, start + 100);
@@ -12559,10 +12631,13 @@ function scheduledReconciliationGithub({
                           summary: run.output?.summary,
                           text: run.output?.text,
                           // GraphQL's CheckRun exposes no createdAt; the suite
-                          // carries it. Mirroring the real shape here is what
-                          // would have caught the invalid selection (#4427).
+                          // carries it, and only when the query selects it.
+                          // Mirroring the real shape here is what would have
+                          // caught the invalid selection (#4427).
                           checkSuite: {
-                            createdAt: run.created_at,
+                            createdAt: requestsCheckSuiteCreatedAt
+                              ? run.created_at
+                              : undefined,
                             app: {
                               databaseId: run.app?.id,
                               slug: run.app?.slug,
