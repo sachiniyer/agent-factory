@@ -265,6 +265,10 @@ func TestLimitObservedAtPersistRoundTrip(t *testing.T) {
 
 	back.Path = t.TempDir()
 	back.Worktree = GitWorktreeData{RepoPath: back.Path, WorktreePath: back.Path, SessionName: back.Title}
+	// An uncertain startup loads INERT — without this, FromInstanceData drives
+	// Start(false) and re-spawns the recorded program under real tmux, which a
+	// CI runner cannot do for a program it does not install.
+	back.StartupStateUnknown = true
 	rebuilt, err := FromInstanceData(back)
 	require.NoError(t, err)
 	require.True(t, rebuilt.limitObservedAt.Equal(observed),
@@ -278,6 +282,9 @@ func TestLimitObservedAtAbsentInOldRecordLoadsAsUnknown(t *testing.T) {
 	back := InstanceData{
 		Title: "old-record", Path: t.TempDir(), Program: "claude",
 		Liveness: LiveLimitReached, LimitResetAt: reset,
+		// Load inert: a live local record would drive Start(false) and try to
+		// re-spawn the recorded program under real tmux.
+		StartupStateUnknown: true,
 	}
 	back.Worktree = GitWorktreeData{RepoPath: back.Path, WorktreePath: back.Path, SessionName: back.Title}
 	rebuilt, err := FromInstanceData(back)
