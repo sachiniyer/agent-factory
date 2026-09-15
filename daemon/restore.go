@@ -323,9 +323,6 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			return "", err
 		}
 		m.warn().Printf("restore of %q: --force-reap given past an indeterminate probe; af could not reach the sandbox to push it, so anything it holds unpushed is discarded", title)
-		// End the push-failure episode so a later failure against the new sandbox
-		// earns a fresh budget rather than inheriting the old one's escalation.
-		m.resetPreserveBudget(repoID, instance)
 		// Seed the in-memory entry now — before Recover runs — so that if Recover
 		// fails before the old sandbox is actually retired (i.e. before
 		// reapRemoteRuntimeForReplacement succeeds inside reprovisionRemote),
@@ -334,16 +331,18 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// already exists is left untouched; a new entry starts at zero, so the
 		// first new-sandbox failure is attempt 1.
 		//
-		// The actual episode-counter reset (consecutiveFailures = 0, awaitingConfirm
-		// = false) is registered as a one-shot hook that reprovisionRemote fires
+		// The episode resets — the push-failure budget and the Recover-flap budget
+		// alike — are registered as a one-shot hook that reprovisionRemote fires
 		// only after reapRemoteRuntimeForReplacement returns without error — the
 		// point where the old sandbox is provably gone and the new episode genuinely
 		// begins. If reprovisionRemote fails before the reap (e.g. unresolvable
 		// account, invalid runtime config, agent-account drift), the hook is cleared
-		// without firing and the budget stays charged, preventing repeated pre-reap
-		// failures from resetting the budget indefinitely.
+		// without firing and the budgets stay charged, so the surviving sandbox's
+		// preserve episode continues instead of restarting, and repeated pre-reap
+		// failures cannot reset either budget indefinitely.
 		m.seedRestoreStateEntry(repoID, instance)
 		instance.SetOnSandboxRetired(func() {
+			m.resetPreserveBudget(repoID, instance)
 			m.resetRecoverBudget(repoID, instance)
 		})
 	case probeAbsent:
@@ -372,22 +371,20 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 				return "", err
 			}
 			m.warn().Printf("restore of %q: --force-reap given, replacing its reachable sandbox without pushing; anything it has not pushed is discarded", title)
-			// The sandbox is being replaced: end the push-failure episode so that a
-			// later failure against the new sandbox earns a fresh budget rather than
-			// inheriting the old one's escalation — the same reset the non-forced arm
-			// applies after a successful preserve push.
-			m.resetPreserveBudget(repoID, instance)
-			// Gate the Recover-budget reset on sandbox retirement, using the same
-			// hook pattern as the probeUnknown arm above. A direct resetRecoverBudget
-			// here would zero-seed on a daemon-restart (lostRestoreStates empty) even
-			// if reprovisionRemote then fails before reapRemoteRuntimeForReplacement
-			// retires the old sandbox — allowing repeated pre-reap failures to restart
-			// the budget indefinitely. seedRestoreStateEntry ensures the entry exists
-			// so a pre-reap failure is charged as attempt 1 (not maxAttempts+1), and
-			// the hook fires only after the sandbox is provably gone, resetting the
-			// counter for a genuinely fresh episode.
+			// Gate the push-failure and Recover-budget resets on sandbox retirement,
+			// using the same hook pattern as the probeUnknown arm above. A direct
+			// reset here would zero the budget even if reprovisionRemote then fails
+			// before reapRemoteRuntimeForReplacement retires the old sandbox —
+			// letting repeated pre-reap failures restart the budgets indefinitely,
+			// and for the preserve budget restarting a surviving sandbox's push
+			// episode as if it were fresh. seedRestoreStateEntry ensures the entry
+			// exists so a pre-reap failure is charged as attempt 1 (not
+			// maxAttempts+1), and the hook fires only after the sandbox is provably
+			// gone, ending its preserve episode and starting the replacement's
+			// Recover budget fresh.
 			m.seedRestoreStateEntry(repoID, instance)
 			instance.SetOnSandboxRetired(func() {
+				m.resetPreserveBudget(repoID, instance)
 				m.resetRecoverBudget(repoID, instance)
 			})
 			break
