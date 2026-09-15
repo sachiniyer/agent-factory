@@ -16,7 +16,7 @@ func checkCodexAccounts(home string, report *Report) {
 		return
 	}
 	for _, name := range names {
-		account, err := agentaccount.Selected(home, "codex", name, "")
+		account, err := agentaccount.Selected(home, "codex", name)
 		if err != nil {
 			report.addActionableFinding(Finding{Check: "codex-account-settings", Section: sectionConfig, Detail: err.Error()})
 			continue

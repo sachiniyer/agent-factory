@@ -85,7 +85,7 @@ func lockFileStat(t *testing.T, executable string) (os.FileMode, uint32) {
 //
 // It was created 0600. In a group-writable install directory the first user to
 // upgrade owns a lock nobody else can open, and a second user who can still
-// rename the binary gets EACCES. writeExecutableInPlace treats that as "cannot
+// rename the binary gets EACCES. writeExecutableInPlaceWaiting treats that as "cannot
 // take the lock" and installs UNLOCKED, so the exact interleaving this lock was
 // added to prevent is back — silently, and only for the users who did not get
 // there first.

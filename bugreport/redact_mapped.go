@@ -24,41 +24,15 @@ func identitySourceMappedText(s string) sourceMappedText {
 	return sourceMappedText{value: s, source: source}
 }
 
-func (r *redactor) appendSourceMappedPathSpans(
-	spans []redactionSpan,
-	text sourceMappedText,
-	worktreeBoundary pathBoundary,
-	rootBoundary pathBoundary,
-) []redactionSpan {
-	if len(text.value) == 0 || len(text.source) != len(text.value) {
-		return spans
-	}
-	inner := r.appendWorktreePathTitleSpansWithBoundary(nil, text.value, worktreeBoundary)
-	inner = r.appendWorktreeSubdirectoryTitleSpansWithBoundary(inner, text.value, worktreeBoundary)
-	inner = r.appendKnownRootSpansWithBoundary(inner, text.value, rootBoundary)
-	return appendSourceMappedSpans(spans, text, inner)
-}
-
 func appendSourceMappedTextSpans(
 	spans []redactionSpan,
 	text sourceMappedText,
 	produce textSpanProducer,
 ) []redactionSpan {
-	if produce == nil {
+	if produce == nil || len(text.value) == 0 || len(text.source) != len(text.value) {
 		return spans
 	}
-	return appendSourceMappedSpans(spans, text, produce(text.value))
-}
-
-func appendSourceMappedSpans(
-	spans []redactionSpan,
-	text sourceMappedText,
-	inner []redactionSpan,
-) []redactionSpan {
-	if len(text.value) == 0 || len(text.source) != len(text.value) {
-		return spans
-	}
-	for _, span := range inner {
+	for _, span := range produce(text.value) {
 		if span.start < 0 || span.end <= span.start || span.end > len(text.source) {
 			continue
 		}

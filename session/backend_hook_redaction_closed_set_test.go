@@ -24,6 +24,11 @@ func TestRedactHookOutputTokensClosesOverParseOutcome(t *testing.T) {
 			want:   `{"message":"quota exceeded","token":"[REDACTED]"}`,
 		},
 		{
+			name:   "HTML characters in a diagnostic survive alongside token redaction",
+			output: `{"error":"pod <ns>/<name> not found & retrying","token":"sek"}`,
+			want:   `{"error":"pod <ns>/<name> not found & retrying","token":"[REDACTED]"}`,
+		},
+		{
 			name:   "unparseable payload with token-like bytes is replaced",
 			output: `{"message":"quota exceeded","token":"secret"} trailing bytes`,
 			want:   "[REDACTED]",
@@ -111,6 +116,22 @@ func TestRedactHookOutputTokensPreservesDiagnosticsWithoutObjectOpeners(t *testi
 		{
 			name:   "serialized array of scalars keeps its spacing",
 			output: `{"list":"[1, 2, 3]"}`,
+		},
+		{
+			name:   "less-than and greater-than survival",
+			output: `{"message":"a < b > c"}`,
+		},
+		{
+			name:   "ampersand survival",
+			output: `{"message":"connect & retry"}`,
+		},
+		{
+			name:   "all three HTML characters together",
+			output: `{"message":"a < b > c & d"}`,
+		},
+		{
+			name:   "angle brackets around a resource name",
+			output: `{"message":"pod <ns>/<name> not found"}`,
 		},
 	}
 

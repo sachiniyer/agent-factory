@@ -70,21 +70,6 @@ func ResolveRootAgentForInspection(projectSelector string, strictProjectLookup b
 	return resolveRootAgentInspectionAssembly(assembly, projectSelector != ""), nil
 }
 
-// ResolveRootAgentForInspectionWithConfig is the read-only diagnostic form of
-// ResolveRootAgentForInspection. The caller supplies the already-loaded global
-// snapshot, avoiding LoadConfig's create/migrate behavior while preserving the
-// same legacy and personal layer resolution used by --explain.
-func ResolveRootAgentForInspectionWithConfig(global *Config, projectSelector string, strictProjectLookup bool) (ResolvedValue, error) {
-	if global == nil {
-		return ResolvedValue{}, fmt.Errorf("cannot resolve root_agent without a global config snapshot")
-	}
-	assembly, err := assembleRootAgentInspectionInputsFromConfig(global, projectSelector, strictProjectLookup)
-	if err != nil {
-		return ResolvedValue{}, err
-	}
-	return resolveRootAgentInspectionAssembly(assembly, projectSelector != ""), nil
-}
-
 // ResolveRootAgentForInspectionWithConfigContext is the bounded diagnostic
 // form used by non-interactive inspections. Unlike the human-invoked explain
 // path above, every repository probe shares the caller's deadline and an
