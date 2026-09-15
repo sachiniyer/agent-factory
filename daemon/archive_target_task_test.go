@@ -646,7 +646,7 @@ func TestDeleteProject_TargetedExternalSessionsArePreflightBlockers(t *testing.T
 			manager.mu.Lock()
 			manager.instances[daemonInstanceKey(repoID, title)] = inst
 			manager.mu.Unlock()
-			require.NoError(t, manager.SaveInstances())
+			require.NoError(t, manager.storage.SaveInstances(manager.InstancesSnapshot()))
 			require.NoError(t, task.AddTask(archiveTargetTask("external1", "External Target", repoPath, title, true)))
 
 			seed := config.DefaultConfig()

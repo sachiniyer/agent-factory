@@ -51,8 +51,15 @@ var afHomeMarkers = []string{
 // daemon.pid (if any) is verified absent/dead/stale rather than merely
 // unreadable, and it has not been touched for MinTempHomeAge.
 func checkStaleTempHomes(ctx *scanContext, report *Report) {
-	tempDir := filepath.Clean(ctx.opts.TempDir)
-	activeHome := filepath.Clean(ctx.opts.ConfigDir)
+	// normalizeHome (filepath.EvalSymlinks) rather than filepath.Clean: a
+	// symlinked AGENT_FACTORY_HOME whose target is a differently-named sibling
+	// under the temp dir must compare equal to the sweep's real-target
+	// candidate, or the active-home guard misses and --fix deletes it. The
+	// sibling checkLeakedDaemonBinaries already canonicalises this way; the
+	// temp dir is resolved too so macOS /tmp -> /private/tmp does not split the
+	// candidate from the home it is inside.
+	tempDir := normalizeHome(ctx.opts.TempDir)
+	activeHome := normalizeHome(ctx.opts.ConfigDir)
 	processHomes := processReferencedHomes(ctx.snap)
 	// An unavailable tmux claim set is not an empty one. A temp home with live
 	// tmux sessions and a dead daemon holds no lock, so this set is the only
@@ -91,7 +98,7 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 	reportTempHomeSweepTruncation(report, tempDir, sweep, ctx.opts.MaxTempHomeCandidates)
 
 	for _, dir := range sweep.candidates {
-		dir = filepath.Clean(dir)
+		dir = normalizeHome(dir)
 		if dir == activeHome || !isAFHome(dir) {
 			continue
 		}
@@ -883,7 +890,7 @@ func processReferencedHomes(snap map[int]proctree.Process) map[string]bool {
 	homes := map[string]bool{}
 	for pid := range snap {
 		if home, status := proctree.LookupEnv(pid, "AGENT_FACTORY_HOME"); status == proctree.EnvFound && home != "" {
-			homes[filepath.Clean(home)] = true
+			homes[normalizeHome(home)] = true
 		}
 	}
 	return homes

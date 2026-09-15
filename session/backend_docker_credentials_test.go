@@ -38,6 +38,10 @@ func argsHave(args []string, sub string) bool {
 // argv through the test seam (which then errors to stop provisioning).
 func provisionDockerCapturingRun(t *testing.T, program string) []string {
 	t.Helper()
+	// A local engine so the pre-run locality guard passes without a docker call;
+	// these tests capture `docker run`, which a remote engine never reaches.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	repoRoot := initTempGitRepo(t)
 	writeInRepoConfig(t, repoRoot, map[string]any{
 		"backend": "docker",

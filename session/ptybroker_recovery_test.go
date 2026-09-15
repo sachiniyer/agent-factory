@@ -597,3 +597,138 @@ func TestPTYBrokerReconnectRepaintsWhenRecoveryDiscardedItsCursor(t *testing.T) 
 	}
 	mustRepaintContains(t, b, "SCREEN-AFTER-RECOVERY")
 }
+
+// TestPTYBrokerReconnectRepaintsWhenCaughtUpAfterDiscard is the caught-up counterpart to
+// TestPTYBrokerReconnectRepaintsWhenRecoveryDiscardedItsCursor: a reconnect whose cursor
+// lands EXACTLY at the post-discard base must STILL be repainted, even though
+// `since < b.base` is false.
+//
+// The behind-client test emits a NEVER-RENDERED chunk the client never consumes, so the
+// discard advances base PAST the cursor and `since < b.base` fires. This test OMITS that
+// emit: the pane is idle, the client is caught up at the live tail (cursor == head) when
+// its socket drops, and the no-subscriber discard sets `base = head == cursor`. With the
+// pre-fix strict `<` that landed inside a pane-replacing recovery, `since == b.base`
+// took the seamless branch and the client got NO event — its emulator kept the dead
+// pane's last screen until the recovered pane happened to emit, and that emit arrived as
+// bare PTYData on the un-cleared frame. recoveryDiscardAt marks that the current base
+// came from a pane-replacing discard (not a same-pane clamp), so subscribe repaints the
+// caught-up reconnect the same way it repaints the behind one.
+//
+// Fail-before/pass-after: before the fix the 500ms nextWithin below times out with no
+// repaint; after the fix mustRepaintContains passes.
+func TestPTYBrokerReconnectRepaintsWhenCaughtUpAfterDiscard(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("SCREEN-BEFORE-DEATH")}
+	br := newPTYBroker(ch)
+
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	mustRepaintContains(t, a, "SCREEN-BEFORE-DEATH")
+
+	// The client renders some output, so it holds a real (non-zero) replay cursor —
+	// NOT the `since == 0` fresh-subscriber sentinel, which would repaint anyway.
+	ch.emit(t, []byte("seen"))
+	mustData(t, a, "seen")
+	cursor := a.Seq()
+
+	// NO further emit: the pane is idle, so the client is caught up at the live tail
+	// (cursor == head) when its socket drops. The last subscriber leaving stops the
+	// capture; nothing is emitted between the drop and the discard below.
+	_ = a.Close()
+
+	// tmux dies and is re-spawned while nobody is attached. The no-subscriber discard
+	// sets base = head == cursor (the idle-pane case the behind-client test does NOT
+	// construct — there `cursor < base`), and the early return skips the re-seed.
+	ch.mu.Lock()
+	ch.snapshot = []byte("SCREEN-AFTER-RECOVERY")
+	ch.mu.Unlock()
+	br.resetCapture()
+
+	// The client reconnects on the cursor it left on — EXACTLY the post-discard base.
+	// The replay is empty (base == head == cursor), and the pane behind the cursor was
+	// REPLACED, so a repaint of the RECOVERED screen is the only thing that can resync
+	// it: bare PTYData on the dead pane's last frame would leave the screen
+	// stale-changed, not reset.
+	b, err := br.subscribe(cursor)
+	if err != nil {
+		t.Fatalf("reconnect subscribe: %v", err)
+	}
+	mustRepaintContains(t, b, "SCREEN-AFTER-RECOVERY")
+	// The repaint already reflects the (empty) live tail, so nothing follows it and the
+	// cursor sits at the tail, not below base.
+	if got := b.Seq(); got != cursor {
+		t.Fatalf("reconnect cursor = %d, want %d (the live tail; the recovered screen "+
+			"repaint already reflects the empty replay, so the cursor must advance to it)", got, cursor)
+	}
+	if ev, err := nextWithin(t, b, 250*time.Millisecond); err == nil {
+		t.Fatalf("after the repaint B got Kind=%d Data=%q, want no event: the replay "+
+			"is empty (base == head == cursor), so anything here is a duplicate", ev.Kind, ev.Data)
+	}
+
+	// The recovered pane still streams: repainting must not wedge the ring.
+	ch.emit(t, []byte("post-recovery-output"))
+	mustData(t, b, "post-recovery-output")
+}
+
+// TestPTYBrokerReconnectAtBaseAfterEvictionStaysSeamless is the no-regression guard for
+// the recoveryDiscardAt watermark: a same-pane eviction that leaves a reconnect at
+// `since == base` (the cursor an eviction clamp announced via PTYCursor) must take the
+// SEAMLESS replay path — NOT repaint. The strict-`<` in subscribe exists precisely to
+// avoid a clear-and-redraw flicker on this clamp-to-base reconnect; switching to `<=`
+// would regress it. The watermark is the reason the fix can repaint the
+// pane-replacing `since == base` case (above) WITHOUT repainting this one: an eviction
+// advances base via `b.base += drop` in feed(), which never sets recoveryDiscardAt, so
+// `recoveryDiscardAt == b.base` is false and the caught-up repaint condition does not
+// fire. This test fails (B gets a PTYRepaint) if the fix naively uses `<=`.
+func TestPTYBrokerReconnectAtBaseAfterEvictionStaysSeamless(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("S")}
+	br := newPTYBroker(ch)
+	br.maxBytes = 4 // tiny ring so base advances via eviction while the ring stays nonempty
+
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	mustRepaintContains(t, a, "S")
+
+	// Overflow the ring: base advances to 4 and the retained window is [4,8)="efgh".
+	ch.emit(t, []byte("abcdefgh"))
+	// A fell behind its own eviction (cursor 0 < base 4), so NextEvent fast-forwards it
+	// to base with a PTYCursor — the server-side jump #1845 announces — then hands back
+	// the retained tail. Consume ONLY the cursor re-seed, modelling a client that
+	// adopted the re-seed and then dropped before rendering the retained bytes: its
+	// tracked cursor is now exactly the post-eviction base.
+	ev, err := nextWithin(t, a, 2*time.Second)
+	if err != nil {
+		t.Fatalf("NextEvent (want the cursor re-seed): %v", err)
+	}
+	if ev.Kind != PTYCursor || ev.Seq != 4 {
+		t.Fatalf("event = %+v, want PTYCursor Seq=4 (eviction clamp to base)", ev)
+	}
+	cursor := ev.Seq
+	_ = a.Close()
+
+	// The client reconnects at exactly the post-eviction base. This is a SAME-PANE
+	// eviction — no recovery discard replaced the pane — so recoveryDiscardAt is unset
+	// and the caught-up repaint condition must NOT fire. subscribe takes the seamless
+	// path: replay [base, head) as PTYData, with no clear-and-redraw flicker.
+	b, err := br.subscribe(cursor)
+	if err != nil {
+		t.Fatalf("reconnect subscribe: %v", err)
+	}
+	ev, err = nextWithin(t, b, 2*time.Second)
+	if err != nil {
+		t.Fatalf("B NextEvent: %v", err)
+	}
+	if ev.Kind == PTYRepaint {
+		t.Fatalf("B got a PTYRepaint at since==base after a same-pane eviction: the " +
+			"recovery-discard watermark must NOT fire for a base the discard did not set " +
+			"(a same-pane eviction clamp), or the seamless clamp-to-tail reconnect " +
+			"regresses to a clear-and-redraw flicker")
+	}
+	if ev.Kind != PTYData || string(ev.Data) != "efgh" {
+		t.Fatalf("B first event = %+v, want PTYData %q (seamless replay of the "+
+			"retained window [base, head))", ev, "efgh")
+	}
+}
