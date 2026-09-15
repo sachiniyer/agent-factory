@@ -295,7 +295,8 @@ backdate a recovery or erase an earlier degraded merge.
 Reviewer-unavailable evidence includes Codex inline review replies
 (`in_reply_to_id` set), including replies carried by an empty `COMMENTED` review
 (#3900). The reply's
-`commit_id` must match the head, and its `created_at` must be strictly later than
+`commit_id` must match the head, the content head, or any verified intermediate
+update-branch merge, and its `created_at` must be strictly later than
 `headCurrentSince`; an edit cannot refresh an old answer. The latest artifact
 across issue comments, reviews and eligible replies wins (the reply wins a tie
 with its empty enclosing review), and a later real verdict supersedes the
