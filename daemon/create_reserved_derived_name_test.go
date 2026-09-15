@@ -33,9 +33,13 @@ func newTitleAdmissionManager() *Manager {
 }
 
 // TestValidateTitleRefusesReservedDerivedName is the #3732 red. The reserved
-// guard asked IsReservedTitle, which only TRIMS whitespace, while toTmuxName
-// DELETES it — so "ro ot" was creatable and derived the identical tmux session
-// name as the reserved "root", giving the daemon two sessions it keys as one.
+// guard then asked IsReservedTitle, which only TRIMMED whitespace, while
+// toTmuxName DELETES it — so "ro ot" was creatable and derived the identical
+// tmux session name as the reserved "root", giving the daemon two sessions it
+// keys as one. Since #4396 the identity and admission predicates share the
+// derived-name normalization outright, which also refuses "Ro ot": tmux names
+// are case-sensitive so it derives a DISTINCT name, but the reserved check
+// folds case and a session admitted under it would read as the root anyway.
 // Nothing needs to exist for this refusal: the reserved name is reserved even
 // on a repo whose root agent has not been created yet, which is exactly the
 // window the record scan cannot cover.
@@ -44,7 +48,7 @@ func TestValidateTitleRefusesReservedDerivedName(t *testing.T) {
 	const repoID = "repo-id"
 	repoPath := t.TempDir()
 
-	for _, title := range []string{"ro ot", "r o o t", "  ro ot  "} {
+	for _, title := range []string{"ro ot", "r o o t", "  ro ot  ", "Ro ot"} {
 		t.Run(title, func(t *testing.T) {
 			m := newTitleAdmissionManager()
 			err := m.validateTitleAvailableLocked(repoID, repoPath, title, "claude", runtimeNamespaceLocalTmux, false, nil, false)

@@ -11,7 +11,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The #3699 regression suite: a root agent whose tmux vanished leaving ANY
@@ -43,10 +42,13 @@ const (
 	vanishedRootGeneration  = "8d6d4cf664efb073354d5f41b3e5f207"
 	vanishedRootSurvivorPID = 1091038
 
-	// collidingRootTitle is NOT reserved (IsReservedTitle only TrimSpaces) yet
-	// derives the root's exact tmux name (toTmuxName deletes interior
-	// whitespace). It is the shape that makes the archived-rename hole reachable.
-	collidingRootTitle = "ro ot"
+	// collidingRootTitle is ADMISSIBLE — toTmuxName maps "!" to "_", so it
+	// claims a tmux name of its own and the reserved-title rule leaves it
+	// alone — yet it collides with the root on the BRANCH axis ("root!" and
+	// "root" sanitize to the same git branch). Every tmux-name collider is
+	// refused at admission since #3732, so a branch-axis collider is the shape
+	// that keeps the archived-rename hole reachable.
+	collidingRootTitle = "root!"
 )
 
 // markedSurvivorBackend models, at the daemon's teardown boundary, the one thing
@@ -257,12 +259,15 @@ func TestReapDeadRootRetainsTheRecordWhenTrustCannotSettleTheTeardown(t *testing
 // does not refuse — it SELECTS it, and renameArchivedForReuseLocked re-keys it so a
 // colliding create can have the name.
 //
-// And the colliding title need not be "root". IsReservedTitle only TrimSpaces,
-// while toTmuxName DELETES interior whitespace, so "ro ot" is creatable and derives
-// the identical tmux session name. Its create could therefore start a replacement
-// under the exact name the trusted blind sweep is sweeping, and the sweep would
-// adopt that replacement's generation and reap it — #3309 reopened, which is worse
-// than the bug #3700 fixes.
+// And the colliding title need not be "root". Every title claiming the root's
+// tmux name is refused at admission (#3732, and since #4396 the identity and
+// admission predicates share one normalization), but the rename also fires on
+// the BRANCH axis: "root!" derives the same git branch as "root" while keeping
+// a tmux name of its own, so it is admissible — and its create would rename the
+// archived row out from under this teardown. That is the interference the fence
+// exists for: the record must still own its (repo, title) slot for the whole
+// reap, or teardown and deleteSessionRecord run against a row a create has
+// already retitled and relocated.
 //
 // The fence is the killsInFlight claim reapDeadRoot now registers for its whole
 // call. This drives the real window: the create is attempted from INSIDE the
@@ -287,10 +292,10 @@ func TestReapDeadRootFencesArchivedNameReuseDuringItsTeardown(t *testing.T) {
 	first.SetStatusForTest(session.Archived)
 	require.Equal(t, session.LiveArchived, first.GetLiveness(),
 		"precondition: the rename path only selects a LiveArchived instance")
-	require.Equal(t,
-		tmux.SanitizedNameForRepo(session.RootSessionTitle, repoPath),
-		tmux.SanitizedNameForRepo(collidingRootTitle, repoPath),
-		"precondition: %q must derive the root's tmux name, or this proves nothing", collidingRootTitle)
+	require.True(t, manager.titlesCollide(session.RootSessionTitle, collidingRootTitle),
+		"precondition: %q must collide with the root on the branch axis, or this proves nothing", collidingRootTitle)
+	require.Empty(t, session.ReservedTitleCollision(collidingRootTitle),
+		"precondition: %q must be admissible — a title refused at admission never reaches the rename this fence covers", collidingRootTitle)
 
 	var createErr error
 	var createAttempted, claimedDuringKill, slotHeldDuringKill bool
