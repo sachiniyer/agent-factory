@@ -79,7 +79,11 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	m.handoffChoices = choices
 	m.handoffAccounts = nil
 	m.handoffWarnings = nil
-	if account, _ := selected.AccountSelection(); account != "" {
+	// Only an explicit --account pin forces the account picker; an
+	// auto-selected (limit-scheduler) account is reversible, so ambient
+	// (agent-only) handoff stays available, mirroring the daemon's
+	// `account != "" && !automatic` gate in daemon/handoff.go.
+	if account, automatic := selected.AccountSelection(); account != "" && !automatic {
 		m.handoffChoices = nil
 		choices = []string{"Loading accounts…"}
 	}

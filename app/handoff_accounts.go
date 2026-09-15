@@ -33,11 +33,18 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 	if msg.err != nil {
 		return m, m.handleNotice(fmt.Errorf("load handoff accounts: %w", msg.err))
 	}
-	current, _ := selected.AccountSelection()
+	// An auto-selected (limit-scheduler) account is reversible, so
+	// agent-only ("ambient") handoff rows must stay available — mirroring
+	// the daemon's `account != "" && !automatic` gate. Track ambient
+	// eligibility separately so the real account is still used to exclude
+	// the active account from the picker (preventing a same-agent,
+	// same-account row that the daemon would reject as "already uses").
+	current, automatic := selected.AccountSelection()
+	ambientEligible := automatic || current == ""
 	agents, accounts, labels, warnings := []string{}, []string{}, []string{}, []string{}
 	preselected := -1
 	for _, agent := range append([]string{msg.agent}, handoffAgentChoices(msg.agent)...) {
-		if agent != msg.agent && current == "" {
+		if agent != msg.agent && ambientEligible {
 			if preselected < 0 {
 				preselected = len(labels)
 			}
