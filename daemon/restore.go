@@ -423,6 +423,14 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// that ordering — persistInstanceData scrubs the in-flight op before it
 		// writes, and recordLostRestoreFailure touches only the retry state.
 		//
+		// A retirement hook registered by a force-reap arm above must not outlive
+		// this attempt: if Recover returned before reprovisionRemote reached the
+		// reap (e.g. the recover-fence validation refused a superseded op), the
+		// hook is still armed and would fire at the NEXT call's retirement,
+		// resetting a budget that belongs to a different episode. A hook that did
+		// fire, or that reprovisionRemote's defer already cleared, reads nil here
+		// — so clearing unconditionally costs nothing.
+		instance.SetOnSandboxRetired(nil)
 		// Error-returning, not the logging wrapper: the committed arm below must
 		// not claim "recorded" for a write that failed (#3353 review), so the
 		// outcome of this persist is part of the message. The plain arm keeps the
