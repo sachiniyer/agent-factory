@@ -280,6 +280,14 @@ func TestLocalDockerEndpoint_LoopbackTCP(t *testing.T) {
 		{"tcp://localhost.:2375", true},
 		// a genuinely remote named host must still be refused
 		{"tcp://buildhost:2375", false},
+		// SSH endpoints aimed at this host are local — docker supports ssh://
+		// endpoints, and ssh to loopback terminates on this host's sshd
+		{"ssh://user@localhost", true},
+		{"ssh://user@127.0.0.1", true},
+		{"ssh://localhost:22", true},
+		// an SSH endpoint aimed elsewhere is remote
+		{"ssh://build@10.0.0.7", false},
+		{"ssh://user@remote.example.invalid", false},
 		// existing local schemes still work
 		{"unix:///var/run/docker.sock", true},
 		{"npipe:////./pipe/docker_engine", true},
@@ -290,6 +298,36 @@ func TestLocalDockerEndpoint_LoopbackTCP(t *testing.T) {
 			got := localDockerEndpoint(tc.endpoint)
 			assert.Equalf(t, tc.want, got,
 				"localDockerEndpoint(%q): got %v, want %v", tc.endpoint, got, tc.want)
+		})
+	}
+}
+
+// TestDockerEndpointOnThisHost_LoopbackTCP pins the stricter host-identity
+// proof: a tcp:// endpoint is not accepted even on loopback (ssh -L can put a
+// remote daemon's port there), while socket schemes and ssh://-to-loopback —
+// which terminate on this host — are.
+func TestDockerEndpointOnThisHost_LoopbackTCP(t *testing.T) {
+	cases := []struct {
+		endpoint string
+		want     bool
+	}{
+		{"unix:///var/run/docker.sock", true},
+		{"npipe:////./pipe/docker_engine", true},
+		{"fd://", true},
+		{"ssh://user@localhost", true},
+		{"ssh://user@127.0.0.1", true},
+		// loopback TCP is reachable-local but NOT proven on this host
+		{"tcp://127.0.0.1:2375", false},
+		{"tcp://[::1]:2375", false},
+		{"tcp://localhost:2375", false},
+		{"tcp://192.168.1.1:2375", false},
+		{"ssh://build@10.0.0.7", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			got := dockerEndpointOnThisHost(tc.endpoint)
+			assert.Equalf(t, tc.want, got,
+				"dockerEndpointOnThisHost(%q): got %v, want %v", tc.endpoint, got, tc.want)
 		})
 	}
 }
