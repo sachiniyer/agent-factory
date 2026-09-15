@@ -62,6 +62,15 @@ func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionReque
 		// configured default still applies and refuses exactly as before.
 		return applyResolvedDefaultAccount(req, selection)
 	}
+	if sessionenv.AgentForCommand(resolvedCreateProgram(cfg, req.RepoPath, req.Program)) != agent {
+		// program_overrides redirects this label to a different agent's command —
+		// or to no agent's command at all, as a fixture shim does. The launch
+		// boundary refuses ANY account whose validation namespace disagrees with
+		// the resolved command, so there is no account this create could carry.
+		// Route nothing; the configured default still applies and refuses by
+		// name, which is the same outcome a pinned --account gets.
+		return applyResolvedDefaultAccount(req, selection)
+	}
 	if config.DefaultAccountAmbientOptOut(cfg, req.RepoPath, agent) {
 		return nil
 	}
@@ -110,6 +119,21 @@ func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionReque
 			agent)
 	}
 	return nil
+}
+
+// resolvedCreateProgram answers the command a create's program label will
+// actually launch, resolved through the same repo-over-global program_overrides
+// layering the launch boundary reads (session.refuseUnsupportedAccountAgent).
+// An unresolvable repo falls back to the op-entry global snapshot, which
+// resolves to the label unchanged when it names no override either — so the
+// router and the boundary cannot disagree about which agent the command runs.
+func resolvedCreateProgram(cfg *config.Config, repoPath, program string) string {
+	if repo, err := config.RepoFromPath(repoPath); err == nil {
+		if resolved, rerr := config.ResolveConfigForRepoInspectionWithGlobal(repo, cfg); rerr == nil {
+			return config.ResolveProgram(&resolved.Config, program)
+		}
+	}
+	return config.ResolveProgram(cfg, program)
 }
 
 // accountSessionLoads counts the sessions currently holding each candidate

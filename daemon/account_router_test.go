@@ -143,6 +143,23 @@ func TestRouteCreateAccountKeepsAmbientWhenNoAccountsAreRegistered(t *testing.T)
 	assert.Empty(t, req.Account, "no registry means no pool to route across")
 }
 
+// The web-selftest shape: program_overrides points the agent's label at a shim
+// command, so the session does not actually RUN that agent — and the launch
+// boundary refuses any account in the label's namespace. The router must see
+// the same resolution and leave the create ambient.
+func TestRouteCreateAccountDoesNotRouteACrossAgentOverride(t *testing.T) {
+	home, repoPath, project := defaultAccountFixture(t, "codex", "codex1")
+	registerAccounts(t, home, "codex", "codex2")
+	writeProjectAccounts(t, project, "[program_overrides]\ncodex = \"/bin/fake-agent\"\n")
+	stubAccountLimitEvidence(t, nil)
+
+	req := CreateSessionRequest{Title: "shimmed", RepoPath: repoPath, Program: "codex"}
+	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	assert.Empty(t, req.Account,
+		"the label resolves to a non-codex command — no codex account can ride this launch")
+	assert.False(t, req.accountAutoSelected)
+}
+
 func TestRouteCreateAccountAppliesTheDefaultOnANonCarryingBackend(t *testing.T) {
 	_, repoPath, project := defaultAccountFixture(t, "codex", "codex1")
 	writeProjectAccounts(t, project, "[default_accounts]\ncodex = \"codex1\"\n")
