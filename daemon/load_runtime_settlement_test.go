@@ -129,14 +129,17 @@ func TestFindSessionFallbackRegistersLoadTimeInterruptionSettlement(t *testing.T
 		TaskRunSequence: 1,
 	})
 	require.NoError(t, err)
-	data := inst.ToInstanceData()
-	data.TaskRunInterruptionPending = true
-	seeded, err := json.Marshal([]session.InstanceData{data})
+	_, _, err = task.BeginTaskRun(tsk.ID, tsk.GenerationID, inst.ID, 1, 0, runAt, task.RunStatusStarted)
+	require.NoError(t, err)
+	seeded, err := json.Marshal([]session.InstanceData{inst.ToInstanceData()})
 	require.NoError(t, err)
 	require.NoError(t, config.LoadState().SaveInstances(repoID, seeded))
+	// The replacement the loader is about to settle: the reconstructed agent
+	// replaced a runtime that owned this in-flight task run.
+	inst.MarkLoadRuntimeReplacedForTest(true)
 
 	// The refresh pass's reconstruction fails transiently; the fallback's own
-	// retry succeeds — the exact seam the finding names.
+	// build succeeds — the exact seam the finding names.
 	var calls int
 	original := fromInstanceDataForRefresh
 	fromInstanceDataForRefresh = func(repoID string, d session.InstanceData) (*session.Instance, error) {
@@ -144,13 +147,13 @@ func TestFindSessionFallbackRegistersLoadTimeInterruptionSettlement(t *testing.T
 		if calls == 1 {
 			return nil, errors.New("transient reconstruction failure")
 		}
-		return original(repoID, d)
+		return inst, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = original })
 
 	got, gotRepoID, _, err := manager.findSessionByStableID(inst.ID, inst.Title, repoID)
 	require.NoError(t, err)
-	require.NotNil(t, got)
+	require.Same(t, inst, got)
 	require.Equal(t, repoID, gotRepoID)
 	key := daemonInstanceKey(repoID, inst.Title)
 	manager.mu.Lock()
@@ -158,16 +161,24 @@ func TestFindSessionFallbackRegistersLoadTimeInterruptionSettlement(t *testing.T
 	entry, owed := manager.settleOwed[key]
 	manager.mu.Unlock()
 	require.Same(t, got, tracked, "the fallback instance must be the tracked one")
-	if _, pending := got.PendingTaskRunInterruption(); pending {
-		t.Fatal("registered instance still carries an unconsumed interruption outcome")
-	}
+	require.False(t, inst.ConsumeLoadRuntimeReplacement().Replaced,
+		"the load-time replacement marker must be consumed before the instance is exposed")
 	require.True(t, owed, "the interrupted task outcome must be queued for publication")
 	require.NotNil(t, entry.interruptedTaskRun)
+	// The outbox marker survives registration; only the published outcome
+	// retires it. A registered-but-unpublished interruption is exactly the
+	// durable loss the finding describes.
+	if _, pending := inst.PendingTaskRunInterruption(); !pending {
+		t.Fatal("the interruption outbox was dropped instead of queued")
+	}
 
 	manager.FlushOwedSettlements()
 	stored, err := task.GetTask(tsk.ID)
 	require.NoError(t, err)
 	require.Equal(t, TaskStatusInterrupted, stored.LastRunStatus)
+	if _, pending := inst.PendingTaskRunInterruption(); pending {
+		t.Fatal("publication did not retire the interruption outbox")
+	}
 }
 
 // The session regression drives real sibling RestoreWithResult bookkeeping;
