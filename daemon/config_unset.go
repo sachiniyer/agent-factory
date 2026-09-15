@@ -28,8 +28,16 @@ func (s *controlServer) UnsetConfigValue(req UnsetConfigValueRequest, resp *Unse
 			resp.Pending = applied.Pending
 			resp.Warnings = applied.Warnings
 			outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applied.FailedListenerKeys}
+			// Same race as SetConfigValue: an unset's live value is the default,
+			// so a competing write between the file-lock release and the apply's
+			// load leaves the daemon serving that write instead (#4247).
+			outcome.SavedValueSuperseded = liveValueDiverged(s.manager.Config(), result.Key, unsetExpectedValue(result.Key))
+		} else {
+			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+applyErr.Error())
+			outcome.DaemonApplyFailed = true
 		}
 	}
+	resp.ApplyOutcome = outcome.StatusForKey(result.Key)
 	resp.RestartNotice = config.EffectNotice(result.Key, outcome)
 	// Where the daemon is accepting now, for a listener key (#3722). Same read as
 	// SetConfigValue's, after the apply for the same reason: clearing

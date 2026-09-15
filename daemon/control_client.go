@@ -421,9 +421,27 @@ func (e *rpcMutationCommittedError) MutationCommitted() bool { return true }
 // start, so this uses the no-ensure path and returns the dial error when none is
 // reachable (the caller treats that as "saved, nothing running to apply").
 func RequestApplyConfig() (ApplyConfigResponse, error) {
+	resp, attempt := requestApplyConfigAttempt()
+	return resp, attempt.err
+}
+
+// requestApplyConfigAttempt preserves whether the RPC started so save callers
+// can distinguish an unreachable daemon from a failed apply.
+func requestApplyConfigAttempt() (ApplyConfigResponse, daemonCallAttempt) {
 	var resp ApplyConfigResponse
-	err := callDaemonNoEnsure("ApplyConfig", ApplyConfigRequest{}, &resp)
-	return resp, err
+	attempt := callDaemonNoEnsureAttemptBefore("ApplyConfig", ApplyConfigRequest{}, &resp, time.Time{}, false)
+	return resp, attempt
+}
+
+// failedConfigApplyOutcome keeps a daemon's explicit refusal distinct from a
+// lost RPC reply. The former proves that the saved config was not applied; the
+// latter proves only that the client cannot tell whether it was applied.
+func failedConfigApplyOutcome(err error) (config.ApplyOutcome, string) {
+	var serverErr rpc.ServerError
+	if errors.As(err, &serverErr) {
+		return config.ApplyOutcome{DaemonApplyFailed: true}, "saved config, but live apply failed: " + err.Error()
+	}
+	return config.ApplyOutcome{DaemonApplyUnconfirmed: true}, "saved config, but live apply could not be confirmed: " + err.Error()
 }
 
 // SetGlobalConfigValue writes one global config key through a running daemon's
@@ -494,14 +512,28 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 		return SetConfigValueResponse{}, err
 	}
 	resp = SetConfigValueResponse{Result: result}
-	applyResp, applyErr := RequestApplyConfig()
+	// Keep dial failure distinct from an RPC error: only the former means
+	// no daemon was reached. A started RPC may have failed or lost its reply.
+	applyResp, applyAttempt := requestApplyConfigAttempt()
 	var outcome config.ApplyOutcome
-	if applyErr == nil {
+	if applyAttempt.err == nil {
 		resp.Applied = applyResp.Applied
 		resp.Pending = applyResp.Pending
 		resp.Warnings = applyResp.Warnings
 		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
+		// A daemon this old cannot report its live config back (GetConfig arrived
+		// with SetConfigValue in #1960), so verify against the file the apply
+		// loaded: if a competing write landed between the local write's lock
+		// release and the daemon's load, disk no longer holds this save's value
+		// and "applied" would be a claim the client cannot make (#4247).
+		outcome.SavedValueSuperseded = diskValueDiverged(result.Key, result.Value)
+	} else if applyAttempt.requestStarted {
+		var warning string
+		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
+		resp.Warnings = append(resp.Warnings, warning)
 	}
+	resp.Warnings = completeConfigSaveWarnings(outcome, result.Warnings, resp.Warnings)
+	resp.ApplyOutcome = outcome.StatusForKey(result.Key)
 	// The notice logic is no longer mirrored from controlServer.SetConfigValue — it
 	// is the same code, in config.EffectNotice (#3397). Mirroring is what let the
 	// unset surfaces be written without the socket-key branch at all; passing the
@@ -548,14 +580,25 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 	// The whole apply outcome, not just "the apply poke returned nil" (#3397): a
 	// network.listen_addr / network.preview_listen_addr rebind that failed left the
 	// OLD listener serving, and this surface used to report that as "Applied".
-	applyResp, applyErr := RequestApplyConfig()
+	// Keep dial failure distinct from an RPC error: only the former means
+	// no daemon was reached. A started RPC may have failed or lost its reply.
+	applyResp, applyAttempt := requestApplyConfigAttempt()
 	var outcome config.ApplyOutcome
-	if applyErr == nil {
+	if applyAttempt.err == nil {
 		resp.Applied = applyResp.Applied
 		resp.Pending = applyResp.Pending
 		resp.Warnings = applyResp.Warnings
 		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
+		// Same race as the set fallback: the unset's live value is the default,
+		// and a post-apply disk read is the only readback a pre-GetConfig daemon
+		// offers (#4247).
+		outcome.SavedValueSuperseded = diskValueDiverged(result.Key, unsetExpectedValue(result.Key))
+	} else if applyAttempt.requestStarted {
+		var warning string
+		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
+		resp.Warnings = append(resp.Warnings, warning)
 	}
+	resp.ApplyOutcome = outcome.StatusForKey(result.Key)
 	resp.RestartNotice = config.EffectNotice(result.Key, outcome)
 	return resp, nil
 }

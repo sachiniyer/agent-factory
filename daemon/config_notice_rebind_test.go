@@ -128,6 +128,7 @@ func TestServerUnsetReportsDeferredWhenListenerRebindFails(t *testing.T) {
 
 	require.NotEmpty(t, resp.Warnings, "a failed rebind must warn — the notice is what must agree with the warning")
 	requireDeferredNotice(t, resp.RestartNotice, "network.listen_addr")
+	require.Equal(t, config.ApplyStatusDeferred, resp.ApplyOutcome)
 }
 
 // TestServerSetPreviewListenAddrReportsDeferredWhenRebindFails covers the OTHER
@@ -145,6 +146,7 @@ func TestServerSetPreviewListenAddrReportsDeferredWhenRebindFails(t *testing.T) 
 	require.NoError(t, server.SetConfigValue(
 		SetConfigValueRequest{Key: "network.preview_listen_addr", Value: target}, &resp))
 	requireDeferredNotice(t, resp.RestartNotice, "network.preview_listen_addr")
+	require.Equal(t, config.ApplyStatusDeferred, resp.ApplyOutcome)
 }
 
 // TestServerUnsetPreviewListenAddrReportsAppliedBecauseTeardownCannotFail is the
@@ -190,6 +192,7 @@ func TestClientFallbackUnsetReportsDeferredWhenListenerRebindFails(t *testing.T)
 
 	require.NotEmpty(t, resp.Warnings, "the client must surface the daemon's rebind warning")
 	requireDeferredNotice(t, resp.RestartNotice, "network.listen_addr")
+	require.Equal(t, config.ApplyStatusDeferred, resp.ApplyOutcome)
 }
 
 // --- Surface 3: server-side set. GREEN on master — regression guard. ---
@@ -210,6 +213,7 @@ func TestServerSetReportsDeferredWhenListenerRebindFails(t *testing.T) {
 
 	require.NotEmpty(t, resp.Warnings, "a failed rebind must warn")
 	requireDeferredNotice(t, resp.RestartNotice, "network.listen_addr")
+	require.Equal(t, config.ApplyStatusDeferred, resp.ApplyOutcome)
 }
 
 // --- Surface 4: client fallback set. GREEN on master — regression guard. ---
@@ -226,6 +230,7 @@ func TestClientFallbackSetReportsDeferredWhenListenerRebindFails(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp.Result)
 	requireDeferredNotice(t, resp.RestartNotice, "network.listen_addr")
+	require.Equal(t, config.ApplyStatusDeferred, resp.ApplyOutcome)
 }
 
 // --- The alias-spelling case. GREEN on master — it pins an invariant, not a fix. ---
@@ -285,6 +290,7 @@ func TestServerSetReportsAppliedWhenListenerRebindSucceeds(t *testing.T) {
 		SetConfigValueRequest{Key: "network.listen_addr", Value: target}, &resp))
 	require.Contains(t, resp.RestartNotice, "using the new value now",
 		"a rebind that SUCCEEDED must still report the change as live")
+	require.Equal(t, config.ApplyStatusApplied, resp.ApplyOutcome)
 }
 
 // TestServerUnsetReportsAppliedWhenNothingRebinds unsets network.require_token, an
