@@ -550,6 +550,9 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	// This call site is a real sighting — the detector or a create-time limit
+	// error just observed the wall — so the observation's clock is now (#4361).
+	i.limitObservedAt = instanceNow()
 	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
 		i.limitAgent = agent
 		i.touchLocked()
@@ -570,16 +573,16 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 	for idx := range i.accountLimitObservations {
 		observation := &i.accountLimitObservations[idx]
 		if observation.Agent == agent && observation.Account == account {
-			retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
-			if !observation.ResetAt.Equal(retained) {
-				observation.ResetAt = retained
-				i.touchLocked()
-			}
+			// A repeat sighting refreshes WHEN af last saw this wall (#4361);
+			// the conservative reset merge keeps the safer boundary.
+			observation.ResetAt = RetainedAccountLimitReset(observation.ResetAt, resetAt)
+			observation.ObservedAt = instanceNow()
+			i.touchLocked()
 			return
 		}
 	}
 	i.accountLimitObservations = append(i.accountLimitObservations, AccountLimitObservationData{
-		Agent: agent, Account: account, ResetAt: resetAt,
+		Agent: agent, Account: account, ResetAt: resetAt, ObservedAt: instanceNow(),
 	})
 	i.touchLocked()
 }
@@ -656,6 +659,7 @@ func (i *Instance) ClearLimitReached() {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveRunning
 	i.limitResetAt = time.Time{}
+	i.limitObservedAt = time.Time{}
 	i.limitAgent = ""
 	i.limitAccount = ""
 	// The epoch bump here is what a racing poll checks: it is the resume's

@@ -59,7 +59,11 @@ func TestRecoveryDriverScenes(t *testing.T) {
 					t.Cleanup(SetAccountSeamsForTest(func(daemon.ListAccountsRequest) (daemon.ListAccountsResponse, error) {
 						return daemon.ListAccountsResponse{Entries: []daemon.AccountEntry{{Agent: "codex", Name: "remote-work"}}, Agents: []string{"codex"}}, nil
 					}, registerAccount, startAccountLogin))
-					load := h.loadAccountsIntoPane()
+					t.Cleanup(SetUsageSeamForTest(func(daemon.QuotaReportRequest) (daemon.QuotaReportResponse, error) {
+						return daemon.QuotaReportResponse{}, nil
+					}))
+					h.loadAccountsIntoPane()
+					load := h.remoteSectionsLoadCmd()
 					h.configPane.SetFocus(true)
 					require.NotNil(t, load)
 					_, _ = h.Update(load())

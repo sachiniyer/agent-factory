@@ -35,6 +35,7 @@ import type {
   ConfigSetResponse,
   RegisterAccountResponse,
   ProjectExpectation,
+  QuotaReportResponse,
   SessionData,
   SnapshotResponse,
   TaskData,
@@ -1207,6 +1208,18 @@ export async function listAccounts(token: string, repoPath = ""): Promise<Accoun
   const body = repoPath === "" ? {} : { repo_path: repoPath };
   const resp = await af<AccountsResponse>("ListAccounts", body, token);
   return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {} };
+}
+
+/** Reads the daemon's usage-limit report (POST /v1/QuotaReport, #4361) — the
+ *  same read model `af quota` prints and the TUI's config overlay shows. The
+ *  rows arrive already rendered by the daemon, so this surface cannot drift
+ *  into its own wording of the evidence.
+ *
+ *  Returns empty lists rather than null for a daemon that omits them; throws
+ *  ApiError on transport/auth failure so callers share one error path. */
+export async function quotaReport(token: string): Promise<QuotaReportResponse> {
+  const resp = await af<QuotaReportResponse>("QuotaReport", {}, token);
+  return { rows: resp?.rows ?? [], note: resp?.note ?? "", caveats: resp?.caveats ?? [] };
 }
 
 /** Creates an account's credential directory without logging in. Idempotent.

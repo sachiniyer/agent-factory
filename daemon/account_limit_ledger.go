@@ -176,6 +176,12 @@ func mergeAccountLimitObservations(current, added []session.AccountLimitObservat
 		prior, exists := merged[key]
 		if exists {
 			observation.ResetAt = session.RetainedAccountLimitReset(prior.ResetAt, observation.ResetAt)
+			// The sighting time answers "when did af last see this wall": keep
+			// the newest KNOWN one. A carried-over row with no timestamp is not
+			// a fresh sighting and must not erase one (#4361).
+			if observation.ObservedAt.Before(prior.ObservedAt) {
+				observation.ObservedAt = prior.ObservedAt
+			}
 		}
 		merged[key] = observation
 		return nil

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/quota"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -794,6 +795,28 @@ type GetConfigResponse struct {
 	// user which file it is editing (a user with AF_HOME set is otherwise left
 	// guessing).
 	Path string `json:"path"`
+}
+
+// QuotaReportRequest asks for the usage-limit report (#4361): what af has
+// observed about each agent CLI on the answering daemon's host — sessions
+// parked at a provider wall, with when that wall was recorded — and what it
+// cannot observe, the provider's own entitlement answer. There are no
+// arguments: the report covers every repo's records on the host, exactly as
+// `af quota` does locally.
+type QuotaReportRequest struct{}
+
+// QuotaReportResponse is the report as already-rendered cells, so the CLI's
+// remote readout, the TUI's Usage section, and the web's all print the same
+// wording of the same evidence instead of each growing a private reading.
+type QuotaReportResponse struct {
+	// Rows is one rendered row per agent — the four cells `af quota` prints.
+	Rows []quota.Row `json:"rows"`
+	// Note is the report's standing framing (quota.ReportNote): the two axes
+	// must never be conflated, and an observation carries its age.
+	Note string `json:"note"`
+	// Caveats reports how the read was incomplete — record files that could
+	// not be read or parsed. An under-read report must never look complete.
+	Caveats []string `json:"caveats,omitempty"`
 }
 
 // SetConfigValueRequest sets one key, exactly as `af config set key value` does.

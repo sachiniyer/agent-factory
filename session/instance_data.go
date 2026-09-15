@@ -90,6 +90,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// in-memory field lingers after ClearLimitReached but is never serialized.
 	if i.liveness == LiveLimitReached {
 		data.LimitResetAt = i.limitResetAt
+		data.LimitObservedAt = i.limitObservedAt
 		data.LimitAgent = i.limitAgent
 		data.LimitAccount = i.limitAccount
 	}
@@ -324,6 +325,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// finished run from an interrupted one.
 		taskRunActive:            data.TaskRunActive,
 		limitResetAt:             data.LimitResetAt,
+		limitObservedAt:          data.LimitObservedAt,
 		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,
 		accountLimitObservations: accountLimitObservations,

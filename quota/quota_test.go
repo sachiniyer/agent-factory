@@ -126,6 +126,108 @@ func TestBuild_UnconfiguredAgentWithLiveSessionsIsStillReported(t *testing.T) {
 	}
 }
 
+// The wall's recorded time is the reader's cue to distrust a stale claim
+// (#4361): a parked session carries when af recorded that wall, and the latest
+// such time is the row's observation age. The incident this guards was a reset
+// time carried over from an ambient identity that nobody had re-observed — the
+// claim looked fresh because nothing said when it was made.
+func TestBuild_ParkedSessionsCarryTheLatestObservationTime(t *testing.T) {
+	older := time.Unix(1_700_000_000, 0)
+	newer := older.Add(2 * time.Hour)
+	report := Build([]string{"codex"}, []SessionState{
+		{Program: "codex", LimitReached: true, ResetAt: older, ObservedAt: older},
+		{Program: "codex", LimitReached: true, ResetAt: older, ObservedAt: newer},
+		// A running session's own timestamp is not a wall observation and must
+		// not freshen the row's evidence.
+		{Program: "codex", ObservedAt: newer.Add(time.Hour)},
+	})
+	codex := agentNamed(t, report, "codex")
+	if codex.ObservedAt == nil || !codex.ObservedAt.Equal(newer) {
+		t.Fatalf("ObservedAt = %v, want the latest parked observation %v", codex.ObservedAt, newer)
+	}
+}
+
+// A row with no parked session has no wall observation to show — nil, never a
+// zero time that would render as 1970.
+func TestBuild_NoParkedSessionHasNoObservationTime(t *testing.T) {
+	report := Build([]string{"claude"}, []SessionState{{Program: "claude", ObservedAt: time.Unix(1_700_000_000, 0)}})
+	if agentNamed(t, report, "claude").ObservedAt != nil {
+		t.Fatal("a row with no parked session reported an observation time")
+	}
+}
+
+// The detail names WHEN af recorded the wall, so a claim that predates the
+// reset it predicts reads as stale on its face.
+func TestRender_LimitDetailNamesWhenTheWallWasObserved(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	observed := now.Add(-6 * 24 * time.Hour)
+	report := Build([]string{"codex"}, []SessionState{
+		{Program: "codex", LimitReached: true, ResetAt: now.Add(5 * 24 * time.Hour), ObservedAt: observed},
+	})
+	var out bytes.Buffer
+	if err := Render(&out, report, now); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	line := lineFor(t, out.String(), "codex")
+	if !strings.Contains(line, "observed "+observed.UTC().Format(time.RFC3339)) {
+		t.Fatalf("the detail must name when af recorded the wall, got: %q", line)
+	}
+	if !strings.Contains(line, "6d ago") {
+		t.Fatalf("the detail must carry the observation's age so a stale one shows, got: %q", line)
+	}
+}
+
+// A wall recorded before this field existed must say its observation time is
+// unknown rather than render a blank cell or a 1970.
+func TestRender_LimitWithoutObservationTimeSaysSo(t *testing.T) {
+	report := Build([]string{"codex"}, []SessionState{
+		{Program: "codex", LimitReached: true, ResetAt: time.Unix(1_800_000_000, 0)},
+	})
+	var out bytes.Buffer
+	if err := Render(&out, report, time.Unix(1_700_000_000, 0)); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	line := lineFor(t, out.String(), "codex")
+	if !strings.Contains(line, "no record of when") {
+		t.Fatalf("a wall with no recorded observation time must say so, got: %q", line)
+	}
+	if strings.Contains(line, "1970") {
+		t.Fatalf("a missing observation time rendered as the zero time: %q", line)
+	}
+}
+
+// Report.Rows is the wire shape every surface renders — the same cells the CLI
+// prints, so the TUI, the web and a remote `af quota` cannot drift into a second
+// wording of the policy.
+func TestRows_AreTheSameCellsTheTablePrints(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	report := Build([]string{"claude"}, []SessionState{
+		{Program: "claude", LimitReached: true, ResetAt: now.Add(5 * time.Hour), ObservedAt: now.Add(-time.Hour)},
+	})
+	rows := report.Rows(now)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.Agent != "claude" || row.Quota != "not reported" || row.Observed != "limit reached" {
+		t.Fatalf("row = %+v; the cells must be the rendered column values", row)
+	}
+	if !strings.Contains(row.Detail, "observed") {
+		t.Fatalf("detail must carry the observation wording, got %q", row.Detail)
+	}
+
+	// RenderRows renders exactly those cells — it is what a remote daemon's
+	// answer hands the CLI.
+	var out bytes.Buffer
+	if err := RenderRows(&out, rows); err != nil {
+		t.Fatalf("RenderRows: %v", err)
+	}
+	rendered := out.String()
+	if !strings.Contains(rendered, "limit reached") || !strings.Contains(rendered, "not reported") {
+		t.Fatalf("RenderRows must render the wire cells, got:\n%s", rendered)
+	}
+}
+
 func agentNamed(t *testing.T, report Report, program string) AgentQuota {
 	t.Helper()
 	for _, agent := range report.Agents {

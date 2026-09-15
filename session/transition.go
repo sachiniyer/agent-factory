@@ -649,6 +649,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	switch spec.limitReset {
 	case limitResetClear:
 		i.limitResetAt = time.Time{}
+		i.limitObservedAt = time.Time{}
 	case limitResetFromEvent:
 		i.limitResetAt = ev.resetAt
 	}
@@ -665,6 +666,9 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 			i.limitAccount = i.Account
 			i.touchLocked()
 		}
+		// Parking IS the sighting: the incoming runtime just hit its wall, so
+		// the observation clock is now (#4361).
+		i.limitObservedAt = instanceNow()
 		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, ev.resetAt)
 	}
 	// Every real change to the lifecycle state advances the epoch, so an observer
