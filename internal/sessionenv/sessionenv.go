@@ -12,6 +12,14 @@ import (
 // filtered session process. It is intentionally not a user-facing subcommand.
 const ExecMarker = "__af-session-env-exec"
 
+// AgentServerExecMarker is the effect-bound variant used by af's Docker and SSH
+// launchers. It accepts only agent-server arguments, derives the credential
+// policy from the program those arguments will actually launch, and then execs
+// the CURRENT af binary. Repository content can spell this marker, but cannot
+// redirect its executable or decouple the credential grant from the child it
+// names; the trusted code performs both operations as one transition.
+const AgentServerExecMarker = "__af-agent-server-env-exec"
+
 // AccountExecMarker is the account-scoped variant of ExecMarker.
 //
 // A SEPARATE marker rather than an extra argument, because the shim may be a
@@ -258,7 +266,8 @@ func Filter(source []string, agent string, extras []string) []string {
 
 // FilterForCommand is Filter with command-local cloud-mode assignments folded
 // into the selected-agent policy. The command is parsed without evaluation;
-// dynamic or unsupported syntax fails closed.
+// dynamic or unsupported syntax fails closed. Generic calls carry no authority
+// to inspect a nested agent-server program.
 func FilterForCommand(source []string, agent, command string, extras []string) []string {
 	allowed := allowedNames(source, agent, command, extras)
 	return filterAllowed(source, allowed)

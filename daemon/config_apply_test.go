@@ -187,6 +187,7 @@ func TestApplyConfig_DisablingRequireTokenRevokesSandboxCredentials(t *testing.T
 	joined := strings.Join(result.Warnings, "\n")
 	assert.Contains(t, joined, "network.require_token is now false")
 	assert.Contains(t, joined, "does not re-isolate")
+	assert.NotContains(t, joined, "NOTE:", "warning prose must not use a shouted emphasis prefix")
 }
 
 // The converse: an unrelated config change must leave credentials alone, or every

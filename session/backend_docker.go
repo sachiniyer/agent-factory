@@ -608,16 +608,18 @@ func (p *dockerProvisioner) startAgentServer() error {
 }
 
 func (p *dockerProvisioner) agentServerCommand() (string, error) {
-	inner := fmt.Sprintf("%s agent-server --listen :%s --repo %s --title %s",
-		shellQuote(dockerAfBinaryPath), dockerAgentPort, shellQuote(dockerWorkspaceDir), shellQuote(p.spec.Title))
+	args := []string{"agent-server", "--listen", ":" + dockerAgentPort,
+		"--repo", dockerWorkspaceDir, "--title", p.spec.Title}
 	if strings.TrimSpace(p.program) != "" {
-		inner += " --program " + shellQuote(p.program)
-		inner += " --program-resolved"
+		args = append(args, "--program", p.program, "--program-resolved")
 	}
 	for _, name := range p.spec.SessionEnvPassthrough {
-		inner += " --session-env " + shellQuote(name)
+		args = append(args, "--session-env", name)
 	}
-	filteredInner, err := sessionenv.WrapCommand(dockerAfBinaryPath, p.agentName(), p.spec.SessionEnvPassthrough, inner)
+	// This is an execution binding, not a path proof. The copied af enters a
+	// dedicated mode that derives the allowlist from these exact args and execs
+	// its current binary into agent-server; no argv spelling authorizes recursion.
+	filteredInner, err := sessionenv.WrapAgentServerCommand(dockerAfBinaryPath, p.spec.SessionEnvPassthrough, args)
 	if err != nil {
 		return "", fmt.Errorf("backend=docker: preparing filtered agent-server environment failed: %w", err)
 	}

@@ -159,10 +159,11 @@ func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch 
 		conversationID = pending.ConversationID
 	}
 	launchProgram, conversation := planLaunchConversation(conversationID, resolvedProgram)
-	// The CANDIDATE, not i.Account: the recorded account is still the identity
-	// being replaced, and the af skill has to land in the root the replacement
-	// pane will actually read (see resolveSkillTargetForAccount).
-	launchProgram = injectSystemPrompt(launchProgram, resolveSkillTargetForAccount(i, launchProgram, name))
+	// The CANDIDATE account and program, not the still-recorded fields: validation
+	// must leave the outgoing identity intact, while the af skill has to land in
+	// the root the replacement pane will actually read.
+	launchProgram = injectSystemPrompt(launchProgram,
+		resolveSkillTargetForAccount(launchProgram, program, name))
 	workDir := i.GetWorktreePath()
 	// Same-agent manual swaps with a worktree always preflight, including an
 	// unchanged command whose binary disappeared after the current process

@@ -719,11 +719,14 @@ func (b *ptyBroker) wakeAllLocked() {
 	}
 }
 
-// remove drops a subscriber and stops the clientless capture once the last one
-// leaves — never touching the PTY/session itself. The stop goes through
-// maybeStopCapture, which re-checks the subscriber count under captureMu so a
-// subscriber that connects while this teardown is deciding is not stranded on a
-// disabled pipe (#1661).
+// remove drops a subscriber and requests an asynchronous clientless-capture stop
+// once the last one leaves — never touching the PTY/session itself. A capture
+// reader may be parked indefinitely in a blocking syscall while its pane is idle,
+// so subscription Close must not join that reader (#4319). The asynchronous stop
+// still goes through maybeStopCapture, which holds captureMu through the join and
+// re-checks the subscriber count there: a reconnect cannot be stranded on a
+// disabled pipe, and a fresh capture cannot be started until the old read loop is
+// fully gone (#1661).
 func (b *ptyBroker) remove(id uint64) {
 	b.mu.Lock()
 	if _, ok := b.subs[id]; !ok {
@@ -747,7 +750,7 @@ func (b *ptyBroker) remove(id uint64) {
 	lastLeft := len(b.subs) == 0
 	b.mu.Unlock()
 	if lastLeft {
-		b.maybeStopCapture()
+		go b.maybeStopCapture()
 	}
 }
 
@@ -930,7 +933,8 @@ func (s *ptySub) Seq() Seq {
 	return s.cursor
 }
 
-// Close removes the subscriber from the broker's fan-out. Idempotent.
+// Close removes the subscriber from the broker's fan-out and requests capture
+// teardown without waiting for its blocking reader to exit. Idempotent.
 func (s *ptySub) Close() error {
 	s.closeOnce.Do(func() { s.br.remove(s.id) })
 	return nil

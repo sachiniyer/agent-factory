@@ -215,7 +215,7 @@ func TestWriteExecutableInPlace_RefusesDuringALiveTransaction(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "af")
 	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
 
-	err := writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag)
+	err := writeExecutableInPlaceAllowing(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag, false)
 	require.Error(t, err)
 
 	var blocked *blockedInPlaceInstallError
@@ -237,7 +237,7 @@ func TestWriteExecutableInPlace_WritesWhenNoTransactionIsActive(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "af")
 	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
 
-	require.NoError(t, writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag))
+	require.NoError(t, writeExecutableInPlaceAllowing(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag, false))
 
 	on, err := os.ReadFile(target)
 	require.NoError(t, err)
@@ -258,7 +258,7 @@ func TestWriteExecutableInPlace_OverrideInstallsAnyway(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "af")
 	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
 
-	require.NoError(t, writeExecutableInPlace(target, []byte("new binary"), true, "--"+ignoreActiveUpgradeFlag))
+	require.NoError(t, writeExecutableInPlaceAllowing(target, []byte("new binary"), true, "--"+ignoreActiveUpgradeFlag, false))
 
 	on, err := os.ReadFile(target)
 	require.NoError(t, err)
@@ -387,7 +387,7 @@ func TestWriteExecutableInPlace_HoldsThePreparationLockAgainstPrepare(t *testing
 
 	done := make(chan error, 1)
 	go func() {
-		done <- writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag)
+		done <- writeExecutableInPlaceAllowing(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag, false)
 	}()
 
 	select {
@@ -421,7 +421,7 @@ func TestWriteExecutableInPlace_BrokenLockStorageStillInstalls(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "af")
 	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
 
-	require.NoError(t, writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag),
+	require.NoError(t, writeExecutableInPlaceAllowing(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag, false),
 		"broken lock storage must not stand between a user and their upgrade")
 
 	on, err := os.ReadFile(target)
@@ -439,7 +439,7 @@ func TestWriteExecutableInPlace_BrokenLockStorageStillRefusesALiveTransaction(t 
 	target := filepath.Join(t.TempDir(), "af")
 	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
 
-	err := writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag)
+	err := writeExecutableInPlaceAllowing(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag, false)
 	var blocked *blockedInPlaceInstallError
 	require.ErrorAs(t, err, &blocked, "an unlockable install must still honour the journal")
 
@@ -458,7 +458,7 @@ func TestWriteExecutableInPlace_BrokenLockStorageHonoursTheOverride(t *testing.T
 	target := filepath.Join(t.TempDir(), "af")
 	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
 
-	require.NoError(t, writeExecutableInPlace(target, []byte("new binary"), true, "--"+ignoreActiveUpgradeFlag))
+	require.NoError(t, writeExecutableInPlaceAllowing(target, []byte("new binary"), true, "--"+ignoreActiveUpgradeFlag, false))
 
 	on, err := os.ReadFile(target)
 	require.NoError(t, err)
@@ -477,7 +477,7 @@ func TestWriteExecutableInPlace_LeavesAnExistingUpgradeDirectoryUntouched(t *tes
 
 	target := filepath.Join(t.TempDir(), "af")
 	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
-	require.NoError(t, writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag))
+	require.NoError(t, writeExecutableInPlaceAllowing(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag, false))
 
 	info, err := os.Stat(existing)
 	require.NoError(t, err)
@@ -505,7 +505,7 @@ func TestWriteExecutableInPlace_RefusesAnotherHomesStagedUpgrade(t *testing.T) {
 	staged := filepath.Join(dir, ".af.af-upgrade-upgrade-otherhome.previous")
 	require.NoError(t, os.WriteFile(staged, []byte("preserved by another home"), 0o755))
 
-	err := writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag)
+	err := writeExecutableInPlaceAllowing(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag, false)
 	var blocked *blockedInPlaceInstallError
 	require.ErrorAs(t, err, &blocked,
 		"a transaction staged over this executable by another home must still block the swap")
@@ -528,7 +528,7 @@ func TestWriteExecutableInPlace_OverrideBeatsAnotherHomesStagedUpgrade(t *testin
 	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".af.af-upgrade-upgrade-leftover.previous"), []byte("x"), 0o755))
 
-	require.NoError(t, writeExecutableInPlace(target, []byte("new binary"), true, "--"+ignoreActiveUpgradeFlag))
+	require.NoError(t, writeExecutableInPlaceAllowing(target, []byte("new binary"), true, "--"+ignoreActiveUpgradeFlag, false))
 
 	on, err := os.ReadFile(target)
 	require.NoError(t, err)
@@ -587,7 +587,7 @@ func TestWriteExecutableInPlace_SerialisesAgainstAnotherHomesLock(t *testing.T) 
 
 	done := make(chan error, 1)
 	go func() {
-		done <- writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag)
+		done <- writeExecutableInPlaceAllowing(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag, false)
 	}()
 	select {
 	case <-done:
@@ -683,7 +683,7 @@ func TestWriteExecutableInPlace_RefusesACandidateRejectedAfterTheEntrypointRead(
 		"the candidate failed validation and was rolled back"))
 
 	// 3. The install must now refuse, on the ledger read taken under the lock.
-	err = writeExecutableInPlace(target, candidate, false, "--"+ignoreActiveUpgradeFlag)
+	err = writeExecutableInPlaceAllowing(target, candidate, false, "--"+ignoreActiveUpgradeFlag, false)
 	require.Error(t, err, "a candidate disqualified after the entrypoint read must still be refused")
 	require.Contains(t, err.Error(), "rolled back")
 
@@ -739,7 +739,7 @@ func TestWriteExecutableInPlace_ClearsAnInertLeftoverInsteadOfRefusing(t *testin
 	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
 	previous := stagedLeftoverFor(t, target, "upgrade-leftover")
 
-	require.NoError(t, writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag),
+	require.NoError(t, writeExecutableInPlaceAllowing(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag, false),
 		"debris nothing owns must not refuse an install")
 
 	on, err := os.ReadFile(target)

@@ -350,12 +350,26 @@ func TestPTYBrokerCaptureEndedIsOnlyMeaningfulWithCapturing(t *testing.T) {
 		t.Fatalf("live capture = {capturing:%v ended:%v}, want {true false}", capturing, ended)
 	}
 
-	// The last subscriber leaves: maybeStopCapture tears the capture down and
-	// JOINS the readLoop, whose defer latches the flag on its way out.
+	// The last subscriber leaves: the asynchronous maybeStopCapture tears the
+	// capture down and JOINS the readLoop, whose defer latches the flag on its way
+	// out. Close itself does not wait for that join (#4319), so observe completion
+	// through the broker state rather than assuming it happened before Close
+	// returned.
 	if err := a.Close(); err != nil {
 		t.Fatalf("close A: %v", err)
 	}
-	capturing, ended := state(br)
+	deadline := time.Now().Add(2 * time.Second)
+	var capturing, ended bool
+	for {
+		capturing, ended = state(br)
+		if !capturing && ended {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("capture teardown did not finish: state = {capturing:%v ended:%v}", capturing, ended)
+		}
+		time.Sleep(time.Millisecond)
+	}
 	if capturing {
 		t.Fatalf("capturing = true after the last subscriber left, want false")
 	}
