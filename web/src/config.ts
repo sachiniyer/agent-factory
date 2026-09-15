@@ -516,6 +516,28 @@ export class ConfigPane {
     if (this.editing === e.key) {
       this.editingInput = input;
     }
+    // A same-key Enter-save closes this field (update() clears `editing` before the
+    // rerender), so the gate above does not re-point `editingInput` at the rebuilt
+    // input — and `rerenderKeepingUserState`'s `if (wasEditing && this.editingInput)`
+    // restoration then no-ops, dropping focus to <body>. The user's next keystrokes
+    // become document shortcuts (`[`/`]` cycle the view) or, for any other printable
+    // key, are silently swallowed (`decideKey` returns `{kind:"none"}` without
+    // preventDefault for a body-focused key in config view). #2955's gate covered
+    // only the unrelated-rebuild case; the same-key variation was never analyzed.
+    //
+    // Keep the handle live for the just-saved row so the existing restoration branch
+    // hands focus (and the caret) back to the rebuilt input. The `=== null` guard
+    // means an actively-edited row's capture above always wins (it overwrites this
+    // handle); this only fires for the row the save closed, which is exactly the
+    // control that had focus when Enter was pressed. Holds across the refreshConfig
+    // re-read: `configRefetcher.commit` does not touch `configStatus`, so
+    // `this.status.key === e.key` still matches the rebuilt field on the second
+    // render and the same gate re-points the handle — and thus focus — a second
+    // time. Does not re-open the edit: `editing` stays null and the Save button
+    // stays disabled via `canCommit` against the refreshed `e.value`.
+    if (this.status && !this.status.error && this.status.key === e.key && this.editingInput === null) {
+      this.editingInput = input;
+    }
     input.setAttribute("aria-label", e.key);
 
     const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");

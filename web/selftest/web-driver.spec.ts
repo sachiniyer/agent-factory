@@ -3386,6 +3386,93 @@ test("config: a refresh landing mid-edit preserves focus, caret, and later typin
   }
 });
 
+test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXTURE, async ({ browser }) => {
+  // The sibling of #4244. #4244 pins the UNRELATED-rebuild case: a different key's
+  // save landing while a field is mid-edit. This pins the SAME-key case: the user
+  // commits the field they are editing with Enter. Enter does not blur (config.ts
+  // preventDefault()s it), so the input genuinely holds focus through the whole
+  // save round-trip, and rerenderKeepingUserState's `wasEditing` is true coming in.
+  // But update()'s close-on-save clears `this.editing` BEFORE the rerender, so the
+  // `if (this.editing === e.key)` gate in renderControl no longer re-points
+  // `editingInput` at the rebuilt input — `editingInput` stays null, the
+  // `if (wasEditing && this.editingInput)` restoration branch no-ops, and focus
+  // falls to <body>. The user's next keystrokes then become document shortcuts
+  // (`[`/`]` cycle the view) or, for any other printable key, are silently
+  // swallowed (decideKey returns {kind:"none"} without preventDefault for a
+  // body-focused key in config view). The fix re-points editingInput for the
+  // just-saved row so the existing restoration branch keeps focus on the rebuilt
+  // input — without re-opening the edit.
+  //
+  // The route is intercepted, so the daemon is NOT mutated: network.listen_addr
+  // applies live and would otherwise rebind this very daemon's listener. Only the
+  // canned reply drives configStatus + ConfigPane.update/render.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // network.listen_addr — a text row. Mark it dirty with a nonce the daemon does
+    // not hold, set the caret at offset 3, then commit with Enter so the save is
+    // for the SAME key the field is editing.
+    const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    await field.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "abcdef";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "abcdef", inputType: "insertText" }));
+      input.setSelectionRange(3, 3);
+    });
+    await field.press("Enter");
+    await saveStarted;
+    releaseSave!();
+
+    // The echo proves configStatus drove ConfigPane.update (the close-on-save
+    // clear + the rebuild ran), which is the exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="network.listen_addr"] .af-config-echo')).toBeVisible();
+    // RED without the fix: focus fell to <body> when the rebuilt input replaced the
+    // focused one and the restoration gate no-oped on `this.editingInput === null`.
+    await expect(field).toBeFocused();
+    // The caret survived the rebuild — direct evidence the restoration branch
+    // (the only site that re-applies setSelectionRange) drove the rebuilt input.
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.selectionStart)).toBe(3);
+
+    // Typing reaches the rebuilt input at the restored caret instead of falling
+    // onto <body> (where it would be discarded or interpreted as a view shortcut).
+    // The rebuilt input's value is the daemon's freshly re-read value, not the
+    // nonce: the intercepted save did not mutate the daemon, so refreshConfig
+    // repopulates the field from e.value and Z is inserted at the restored caret.
+    await p.keyboard.type("Z");
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.value)).toContain("Z");
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
 // typeIntoAssistantAndExpectEcho is the config assistant's live-output proof. The
 // assistant runs the fake agent (`cat`), so a keystroke makes the full round trip —
 // OpInput → daemon → tmux PTY → `cat` echo → /v1/config-assistant/stream → xterm — and
