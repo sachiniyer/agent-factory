@@ -305,8 +305,8 @@ func TestAddTask_ClampsAFutureCreatedAt(t *testing.T) {
 		"and overdue detection reaches the task again")
 }
 
-// TestAddTask_DiscardsClientSuppliedRunHistory: LastRunAt/LastRunStatus are
-// scheduler-owned by contract, and `scheduleReference` prefers a nonzero
+// TestAddTask_DiscardsClientSuppliedRunHistory: run status and dropped-event
+// history are daemon-owned by contract, and `scheduleReference` prefers a nonzero
 // LastRunAt over CreatedAt — so a create carrying a future run time claims the
 // task just ran and switches overdue detection off until that date. Third
 // variant of one defect: the request carries a whole task.Task, so the store
@@ -319,11 +319,12 @@ func TestAddTask_DiscardsClientSuppliedRunHistory(t *testing.T) {
 	created, err := AddTaskChecked(Task{
 		ID: "history1", Name: "Forged history", Prompt: "p", CronExpr: "20 * * * *",
 		ProjectPath: dir, Program: "claude", Enabled: true,
-		LastRunAt: &forged, LastRunStatus: "started",
+		LastRunAt: &forged, LastRunStatus: "started", DroppedEvents: 99,
 	}, ActorAPI, nil)
 	require.NoError(t, err)
 	assert.Nil(t, created.LastRunAt, "a task that has never run has no run time")
 	assert.Empty(t, created.LastRunStatus)
+	assert.Zero(t, created.DroppedEvents)
 
 	stored, err := GetTask("history1")
 	require.NoError(t, err)
@@ -345,8 +346,9 @@ func TestAddTask_ResetsEveryStoreOwnedField(t *testing.T) {
 		ID: "kitchen1", Name: "Everything at once", Prompt: "p", CronExpr: "20 * * * *",
 		ProjectPath: dir, Program: "claude", Enabled: true,
 		CreatedAt: future, LastRunAt: &future, LastRunStatus: "started",
-		Audit:   []AuditEntry{{At: future, Actor: ActorCLI, Action: AuditEnabled}},
-		Overdue: true, MissedOccurrences: 99, MissedOccurrencesCapped: true,
+		DroppedEvents: 99,
+		Audit:         []AuditEntry{{At: future, Actor: ActorCLI, Action: AuditEnabled}},
+		Overdue:       true, MissedOccurrences: 99, MissedOccurrencesCapped: true,
 		Unschedulable: true, Arming: ArmingArmed, NextRunAt: &next,
 	}, ActorAPI, nil)
 	require.NoError(t, err)
@@ -354,6 +356,7 @@ func TestAddTask_ResetsEveryStoreOwnedField(t *testing.T) {
 	assert.False(t, created.CreatedAt.After(time.Now().Add(time.Minute)), "created_at clamped")
 	assert.Nil(t, created.LastRunAt)
 	assert.Empty(t, created.LastRunStatus)
+	assert.Zero(t, created.DroppedEvents)
 	require.Len(t, created.Audit, 1, "only the store's own create entry")
 	assert.Equal(t, AuditCreated, created.Audit[0].Action)
 	assert.False(t, created.Overdue, "the response must not echo a health verdict the client invented")

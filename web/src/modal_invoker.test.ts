@@ -12,7 +12,9 @@ for (const operation of ["kill", "archive"]) {
   test(`rejected optimistic ${operation} retains the original row invoker`, async () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
-    const names = new Set(["openModal", "closeModal", "closeOverlays", "openConfirm", "captureModalInvoker"]);
+    const names = new Set([
+      "openModal", "mountOverlay", "closeModal", "closeOverlays", "openConfirm", "captureModalInvoker",
+    ]);
     const handlers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text ?? ""))
       .map(node => node.getText(ast)).join("\n");
     const doc = { activeElement: null as any, body: { closest: () => null, getAttribute: () => null, isConnected: true, getClientRects: () => [{}] } };
@@ -91,7 +93,7 @@ for (const [name, committed, optimisticConfirmed] of [
   test(name, async () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
-    const names = new Set(["openModal", "closeModal", "closeOverlays", "openConfirm"]);
+    const names = new Set(["openModal", "mountOverlay", "closeModal", "closeOverlays", "openConfirm"]);
     const handlers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text ?? ""))
       .map(node => node.getText(ast)).join("\n");
     let confirms: { onConfirm(): void };
@@ -145,7 +147,7 @@ for (const connectionReplaced of [false, true]) {
 test(`a definitive restore refusal waits for accepted resync (replaced=${connectionReplaced})`, async () => {
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
   const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
-  const names = new Set(["openModal", "closeModal", "closeOverlays", "openConfirm"]);
+  const names = new Set(["openModal", "mountOverlay", "closeModal", "closeOverlays", "openConfirm"]);
   const handlers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text ?? ""))
     .map(node => node.getText(ast)).join("\n");
   const session = { id: "session", title: "Session", is_root: false, backend_type: "local", lifecycle_action: "restore" };

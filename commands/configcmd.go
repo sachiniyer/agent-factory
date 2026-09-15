@@ -124,6 +124,7 @@ var globalConfigReadOrder = []string{
 	"network.preview_listen_addr",
 	"network.cors_allowed_origins",
 	"daemon_poll_interval",
+	"watcher_events_per_minute",
 	"debug_pprof",
 	"log_max_size_mb",
 	"log_max_backups",
@@ -518,6 +519,7 @@ Settable keys:
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
+  watcher_events_per_minute  positive integer (per-task watch delivery cap; default 10; next daemon start)
   debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
                              unix control socket only, never on the web address. A profile dumps live daemon
                              memory — session titles, worktree paths, prompt text — so turn it off again.
@@ -608,7 +610,15 @@ owns.`, tmux.SupportedProgramsString()),
 			fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s for project %s in %s\n",
 				res.Key, echoValue(res.Value), configSetProjectFlag, prettyPath(res.Path))
 			if res.RequiresRestart {
-				fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
+				if config.KeyEffectClass(res.Key) == config.EffectNextDaemonStart {
+					fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
+				} else if res.Key == "on_archive_command" {
+					fmt.Fprintln(cmd.OutOrStdout(),
+						"saved. It applies to archive operations in this project from now on.")
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(),
+						"saved. It applies to sessions created in this project from now on.")
+				}
 			}
 			return nil
 		}
