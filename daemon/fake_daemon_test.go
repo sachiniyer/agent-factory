@@ -5,6 +5,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // shSingleQuote wraps s in single quotes for safe embedding in a `bash -c`
@@ -32,14 +34,7 @@ func shSingleQuote(s string) string {
 func spawnFakeDaemonProc(t *testing.T, argv0, script string, extraArgs ...string) *exec.Cmd {
 	t.Helper()
 	cmd := fakeDaemonCmd(t, argv0, script, extraArgs...)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start fake daemon proc: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
-	})
-	return cmd
+	return testguard.StartGroupProcess(t, cmd)
 }
 
 // fakeDaemonCmd builds (but does not start) the fake-daemon command described

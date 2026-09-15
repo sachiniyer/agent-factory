@@ -10,11 +10,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // installSurvivorSystemctl scripts systemctl so a test can decide what the
@@ -275,20 +275,8 @@ func startStubHookLauncher(t *testing.T, unit, body string) {
 			"systemd-run", "-c", fmt.Sprintf("printf '%%s' \"$$\" > %q; %s", pidFile, body),
 			"--user", "--scope", "--quiet", "--collect", "--unit=" + unit, "--", "sh", "-c", "make dev_install",
 		},
-		SysProcAttr: &syscall.SysProcAttr{Setpgid: true},
 	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start stub launcher: %v", err)
-	}
-	reaped := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(reaped)
-	}()
-	t.Cleanup(func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-reaped
-	})
+	testguard.StartGroupProcess(t, cmd)
 	// Until execve completes the child's /proc entry still carries the TEST
 	// binary's argv, so the sweep must not start before the pid file appears.
 	deadline := time.Now().Add(20 * time.Second)
@@ -320,7 +308,7 @@ func TestRebuildPathWaitsForALauncherThatHasNotRegisteredItsScope(t *testing.T) 
 	// assertion is short by that gap and flakes (measured in CI at 1.987s
 	// against a 2s floor).
 	gate := filepath.Join(t.TempDir(), "release")
-	startStubHookLauncher(t, prefix+"-g0-0.scope", fmt.Sprintf("while [ ! -f %q ]; do sleep 1; done", gate))
+	startStubHookLauncher(t, prefix+"-g0-0.scope", testguard.BoundedGateWait(gate, time.Second, 5*time.Minute))
 
 	gw := worktreeWithRecordedScope(t, prefix)
 	done := make(chan error, 1)

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -118,7 +119,7 @@ if [ "$version" = v2 ] && [ -f pid-v1 ]; then
 fi
 echo $$ > "pid-$version"
 echo "$version" >> starts
-while :; do sleep 1; done
+` + testguard.BoundedSpin(time.Second, 5*time.Minute) + `
 `
 	if err := os.WriteFile(filepath.Join(dir, "watch.sh"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)

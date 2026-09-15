@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // requireRealUserManager gates the real-systemd tests below on a reachable
@@ -198,7 +200,8 @@ func TestStopHookScopesKillsATermIgnoringSurvivorWithinTheBound(t *testing.T) {
 	t.Cleanup(func() { stopUnit(unit) })
 	pidFile := filepath.Join(t.TempDir(), "hook.pid")
 	_, reaped := startSleeper(t, NewUnboundScopeCommand(unit, "sh", "-c",
-		fmt.Sprintf("trap '' TERM; printf '%%s' \"$$\" > %q; while :; do sleep 5; done", pidFile)), pidFile)
+		fmt.Sprintf("trap '' TERM; printf '%%s' \"$$\" > %q; %s", pidFile,
+			testguard.BoundedSpin(5*time.Second, 10*time.Minute))), pidFile)
 
 	units, err := RunningHookScopes(prefix)
 	if err != nil {

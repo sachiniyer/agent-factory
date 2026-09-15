@@ -132,7 +132,8 @@ func TestHomeLock_FreesAfterHolderKilledDashNine(t *testing.T) {
 	// re-sandboxes AGENT_FACTORY_HOME, so we hand it this home explicitly via
 	// AF_HELPER_HOME and it re-points at it before acquiring.
 	cmd := exec.Command(os.Args[0], "-test.run=TestHelperHoldsHomeLock")
-	cmd.Env = append(os.Environ(), "AF_HELPER_HOLD_LOCK=1", "AF_HELPER_HOME="+home)
+	cmd.Env = append(os.Environ(), "AF_HELPER_HOLD_LOCK=1", "AF_HELPER_HOME="+home,
+		testguard.ExpectedParentEnv+"="+strconv.Itoa(os.Getpid()))
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatalf("StdoutPipe: %v", err)
@@ -223,7 +224,9 @@ func TestHelperHoldsHomeLock(t *testing.T) {
 	}
 	_ = os.WriteFile(filepath.Join(dir, "daemon.pid"), []byte(strconv.Itoa(os.Getpid())), 0600)
 	fmt.Println("READY")
-	// Block until the parent kills us.
+	// Block until the parent kills us. If the parent dies first, the watchdog
+	// exits rather than holding the lock forever as an orphan (#4412).
+	testguard.ExitWhenOrphaned(50 * time.Millisecond)
 	select {}
 }
 

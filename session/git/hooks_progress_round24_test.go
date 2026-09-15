@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 func TestHookProgressBailoutRetriesWithoutRestart(t *testing.T) {
@@ -96,15 +97,12 @@ func TestHookProgressNeverResumesClaimedEntryAfterPreCommandCrash(t *testing.T) 
 	}
 	bin := t.TempDir()
 	syncEntered := filepath.Join(t.TempDir(), "sync-entered")
-	if err := os.WriteFile(filepath.Join(bin, "sync"), []byte("#!/bin/sh\ntouch \"$SYNC_ENTERED\"\nwhile :; do sleep 1; done\n"), 0755); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "sync"), []byte("#!/bin/sh\ntouch \"$SYNC_ENTERED\"\n"+testguard.BoundedSpin(time.Second, 5*time.Minute)+"\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	claim := exec.Command("sh", p.command(0, p.Commands[0])...)
 	claim.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "SYNC_ENTERED="+syncEntered)
-	claim.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := claim.Start(); err != nil {
-		t.Fatal(err)
-	}
+	testguard.StartGroupProcess(t, claim)
 	waitForPath(t, syncEntered, 5*time.Second)
 	if state, err := p.entryState(0); err != nil || state != hookEntryStarted {
 		t.Fatalf("pre-command crash fixture state = %v, %v; want durable started claim", state, err)
