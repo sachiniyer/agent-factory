@@ -12549,7 +12549,6 @@ function scheduledReconciliationGithub({
                           conclusion: run.conclusion == null
                             ? null
                             : String(run.conclusion).toUpperCase(),
-                          createdAt: run.created_at,
                           startedAt: run.started_at,
                           completedAt: run.completed_at,
                           externalId: run.external_id,
@@ -12559,7 +12558,11 @@ function scheduledReconciliationGithub({
                           title: run.output?.title,
                           summary: run.output?.summary,
                           text: run.output?.text,
+                          // GraphQL's CheckRun exposes no createdAt; the suite
+                          // carries it. Mirroring the real shape here is what
+                          // would have caught the invalid selection (#4427).
                           checkSuite: {
+                            createdAt: run.created_at,
                             app: {
                               databaseId: run.app?.id,
                               slug: run.app?.slug,
