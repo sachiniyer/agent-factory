@@ -17,6 +17,7 @@ func TestRuntimeAction_EveryActionHasAnEligibleState(t *testing.T) {
 		RuntimeActionRecoverFenced:         {Title: "fenced", Liveness: LiveLost, Started: true, InFlightOp: OpRestoring},
 		RuntimeActionResumeLimit:           {Title: "limited", Liveness: LiveLimitReached, Started: true},
 		RuntimeActionHandoff:               {Title: "live", Liveness: LiveRunning, Started: true},
+		RuntimeActionHandoffAccount:        {Title: "live-account", Liveness: LiveRunning, Started: true},
 	}
 	for action := RuntimeAction(0); action < numRuntimeActions; action++ {
 		view, ok := valid[action]
@@ -44,6 +45,7 @@ func TestRuntimeAction_PendingKillVetoesEveryAction(t *testing.T) {
 		{Title: "fenced", Liveness: LiveLost, Started: true, InFlightOp: OpRestoring},
 		{Title: "limited", Liveness: LiveLimitReached, Started: true},
 		{Title: "live", Liveness: LiveRunning, Started: true},
+		{Title: "live-account", Liveness: LiveRunning, Started: true},
 	}
 	for action := RuntimeAction(0); action < numRuntimeActions; action++ {
 		view := valid[action]
@@ -56,10 +58,12 @@ func TestRuntimeAction_PendingKillVetoesEveryAction(t *testing.T) {
 }
 
 func TestRuntimeAction_HandoffRejectsTerminalStates(t *testing.T) {
-	for _, liveness := range []Liveness{LiveArchived, LiveLost, LiveDead} {
-		view := LifecycleView{Title: "terminal", Liveness: liveness, Started: true}
-		if err := view.ValidateRuntimeAction(RuntimeActionHandoff); err == nil {
-			t.Fatalf("handoff accepted terminal liveness %v", liveness)
+	for _, action := range []RuntimeAction{RuntimeActionHandoff, RuntimeActionHandoffAccount} {
+		for _, liveness := range []Liveness{LiveArchived, LiveLost, LiveDead} {
+			view := LifecycleView{Title: "terminal", Liveness: liveness, Started: true}
+			if err := view.ValidateRuntimeAction(action); err == nil {
+				t.Fatalf("handoff action %d accepted terminal liveness %v", action, liveness)
+			}
 		}
 	}
 }
@@ -99,5 +103,38 @@ func TestRuntimeAction_HandoffRejectsTheReservedTitle(t *testing.T) {
 	ordinary := LifecycleView{Title: "rootcause", Liveness: LiveRunning, Started: true}
 	if err := ordinary.ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
 		t.Fatalf("an ordinary session whose name contains the reserved word must still hand off: %v", err)
+	}
+}
+
+// TestRuntimeAction_AccountHandoffAdmitsTheReservedTitle is the other half of
+// the #4395 split: the account-only handoff asks the same predicate a different
+// question, and for the reserved root the answer is yes — the move changes
+// which account the same agent authenticates as, never which agent runs, so the
+// singleton, its worktree, and its branch are all untouched.
+//
+// Every OTHER precondition is shared verbatim with the agent form: a root that
+// is archived, dead, lost, mid-operation, or never started stays out of reach
+// on exactly the same terms.
+func TestRuntimeAction_AccountHandoffAdmitsTheReservedTitle(t *testing.T) {
+	for _, liveness := range []Liveness{LiveRunning, LiveReady, LiveLimitReached} {
+		view := LifecycleView{Title: RootSessionTitle, Liveness: liveness, Started: true}
+		if err := view.ValidateRuntimeAction(RuntimeActionHandoffAccount); err != nil {
+			t.Fatalf("liveness %v: an account move must admit the reserved root: %v", liveness, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		view LifecycleView
+	}{
+		{name: "archived", view: LifecycleView{Title: RootSessionTitle, Liveness: LiveArchived}},
+		{name: "lost", view: LifecycleView{Title: RootSessionTitle, Liveness: LiveLost}},
+		{name: "dead", view: LifecycleView{Title: RootSessionTitle, Liveness: LiveDead}},
+		{name: "busy", view: LifecycleView{Title: RootSessionTitle, Liveness: LiveRunning, Started: true, InFlightOp: OpReplacing}},
+		{name: "not started", view: LifecycleView{Title: RootSessionTitle, Liveness: LiveRunning}},
+	} {
+		if err := tc.view.ValidateRuntimeAction(RuntimeActionHandoffAccount); err == nil {
+			t.Fatalf("%s: an account handoff must refuse a non-live reserved root", tc.name)
+		}
 	}
 }

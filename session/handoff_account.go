@@ -15,7 +15,10 @@ func (i *Instance) BeginManualAccountSwap() error {
 		// Recovery owns this exact committed transaction, including healthy checkpoints.
 		view.PendingAccountSwap = false
 	}
-	if err := view.ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
+	// The account form of the shared gate: an identity move keeps the session's
+	// agent, so the reserved root — which an agent swap can never take — is
+	// eligible here (#4395).
+	if err := view.ValidateRuntimeAction(RuntimeActionHandoffAccount); err != nil {
 		return err
 	}
 	return i.transitionLocked(BeginRespawn())

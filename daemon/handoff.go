@@ -124,7 +124,17 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// see it, and only discovered the refusal after the user chose an agent and
 	// confirmed. Moving it into the predicate both sides already call is what stops
 	// the two from disagreeing about the same session again.
-	if err := instance.ValidateRuntimeAction(session.RuntimeActionHandoff); err != nil {
+	//
+	// An account request asks the account form of the same guard: moving which
+	// identity the agent authenticates as does not change what the reserved root
+	// IS, so root is admitted this far — and handoffAccount then refuses any
+	// --to that names a different agent, which is the axis the refusal covers
+	// (#4395).
+	action := session.RuntimeActionHandoff
+	if strings.TrimSpace(req.Account) != "" {
+		action = session.RuntimeActionHandoffAccount
+	}
+	if err := instance.ValidateRuntimeAction(action); err != nil {
 		return HandoffSessionResponse{}, err
 	}
 	if strings.TrimSpace(req.Account) != "" {
