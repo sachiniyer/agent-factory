@@ -553,20 +553,20 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 				if !ok {
 					return true
 				}
-			if !strings.HasPrefix(mode, "-") && !strings.HasPrefix(mode, "+") {
-				// The following word is a mode name; consume it.
-				if mode == "keyword" {
-					keywordMode = prefix == '-'
+				if !strings.HasPrefix(mode, "-") && !strings.HasPrefix(mode, "+") {
+					// The following word is a mode name; consume it.
+					if mode == "keyword" {
+						keywordMode = prefix == '-'
+					}
+					idx++
+					// Fall through to the `k` check: the cluster may contain `k`
+					// in addition to `o` (e.g. `-ko pipefail`), and bash applies
+					// all cluster characters — those before `o` and those after `o`
+					// when the consumed name is valid. Skipping the check here
+					// would miss a `k` in the same cluster.
 				}
-				idx++
-				// Fall through to the `k` check: the cluster may contain `k`
-				// in addition to `o` (e.g. `-ko pipefail`), and bash applies
-				// all cluster characters — those before `o` and those after `o`
-				// when the consumed name is valid. Skipping the check here
-				// would miss a `k` in the same cluster.
-			}
-			// The following word is another option (or we just consumed the
-			// mode name); fall through to the `k` check below.
+				// The following word is another option (or we just consumed the
+				// mode name); fall through to the `k` check below.
 			}
 		}
 		if strings.ContainsRune(tail, 'k') {
