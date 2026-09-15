@@ -128,6 +128,18 @@ type ptyBroker struct {
 	mu   sync.Mutex
 	buf  []byte // ring: recent output bytes, buf[0] is at seq `base`
 	base Seq    // seq of buf[0]; head == base + len(buf)
+	// recoveryDiscardAt marks that the CURRENT base was set by a recovery discard
+	// that emptied the ring (recoverCapture's `b.base = b.headLocked(); b.buf = nil`),
+	// replacing the pane behind the cursor. subscribe() repaints a reconnect whose
+	// `since` lands at EXACTLY this base — a caught-up client whose cursor the discard
+	// stranded with no replay (the recovered pane's first emit would otherwise arrive
+	// as bare PTYData on the dead pane's last screen, stale-changed rather than reset)
+	// — while a same-pane eviction clamp that leaves a reconnect at `since == base`
+	// stays seamless (no clear-and-redraw flicker). The mark is tied to the CURRENT
+	// base: any later advance of base (an eviction's `b.base += drop`, or a second
+	// discard's `b.base = head`) invalidates it, so it cannot fire for a base the
+	// discard did not set. Read and written under mu.
+	recoveryDiscardAt Seq
 
 	subs      map[uint64]*ptySub
 	nextSubID uint64
@@ -250,7 +262,20 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// clamps (down, to the live tail), but that client is not missing any byte the
 	// broker holds, and repainting it would add flicker to the documented
 	// clamp-to-tail path. Only a cursor below base means bytes are missing.
-	needRepaint := since == 0 || since < b.base
+	//
+	// The caught-up recovery reconnect is the one shape the strict `<` misses: a client
+	// that was caught up at the live tail when it dropped, while the pane stayed idle
+	// through the no-subscriber discard, reconnects with cursor == post-discard base ==
+	// head — the replay is empty, but `since < b.base` is false. The pane behind the
+	// cursor was still REPLACED (the recovery discard emptied the ring), so leaving it
+	// seamless renders the recovered pane's next emit as bare PTYData on the dead pane's
+	// frozen screen. recoveryDiscardAt marks that the current base came from such a
+	// discard (not a same-pane eviction clamp), and asks for the same repaint the behind
+	// reconnect gets. The mark is tied to base, so a same-pane eviction clamp reconnect
+	// at `since == base` (no discard) stays seamless — the `<=` regression the strict `<`
+	// exists to avoid.
+	needRepaint := since == 0 || since < b.base ||
+		(since == b.base && b.recoveryDiscardAt == b.base)
 	var cursor Seq
 	if needRepaint {
 		// Start at the live tail, NOT at base. The repaint below reconstructs the WHOLE
@@ -319,9 +344,14 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	//     repaint" and leaves it rendering its pre-death screen.
 	//
 	// base is monotonic and the cursor only moves forward, so the decision can only
-	// flip false→true here, never back.
+	// flip false→true here, never back. The recovery-discard watermark is re-read
+	// here too: a subscriber that registered BEFORE a no-subscriber discard (with
+	// cursor == the pre-discard base and the mark unset) is stranded at ==base by
+	// the discard the same way a post-discard reconnect is, and the re-check must
+	// catch it just as the initial decision catches the post-discard reconnect.
 	b.mu.Lock()
-	needRepaint = needRepaint || sub.cursor < b.base
+	needRepaint = needRepaint || sub.cursor < b.base ||
+		(sub.cursor == b.base && b.recoveryDiscardAt == b.base)
 	// Where a repainted subscriber resumes — read HERE, before the snapshot below, so
 	// bytes the pane produces during the capture-pane exec land above it and are
 	// replayed rather than dropped. Committed only if a repaint is actually built.
