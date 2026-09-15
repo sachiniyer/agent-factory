@@ -105,7 +105,8 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   };
   const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
   title.setAttribute("aria-label", opts.title);
-  const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " · "));
+  const identity = h("div", { class: "af-session-identity" });
+  const titleBox = h("div", { class: "af-term-head-main" }, title, identity);
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
   const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
@@ -128,7 +129,7 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   closePane.hidden = true;
   menu.panel.append(newTabSlot, copy, handoff, actions, closePane);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
-  return { head, title, tabs, keyboard, retry, handoff, closePane, actions, newTabSlot, menu, dispose: menu.dispose };
+  return { head, title, titleBox, identity, tabs, keyboard, retry, handoff, closePane, actions, newTabSlot, menu, dispose: menu.dispose };
 }
 
 /** Split leaves share the same title/close treatment as the main tab row. */

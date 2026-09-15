@@ -11,6 +11,7 @@
 // /v1/sessions/{id}/stream WebSocket.
 
 import "./styles.css";
+import "./sessions-thesis.css";
 import "./tokens.css";
 import "./recovery.css";
 import { appendMutationOutcome, type MutationOutcomeNotice } from "./recovery.js";
