@@ -399,3 +399,47 @@ func appendLiteralShellPart(value *strings.Builder, part syntax.WordPart) bool {
 		return false
 	}
 }
+func literalPrefixBeforeSimpleQuotedParameter(word *syntax.Word) (string, bool) {
+	if word == nil || len(word.Parts) == 0 || !isSimpleQuotedParameterPart(word.Parts[len(word.Parts)-1]) {
+		return "", false
+	}
+	var prefix strings.Builder
+	for _, part := range word.Parts[:len(word.Parts)-1] {
+		if !appendLiteralShellPart(&prefix, part) {
+			return "", false
+		}
+	}
+	return prefix.String(), true
+}
+
+func isSimpleQuotedParameterWord(word *syntax.Word) bool {
+	prefix, dynamic := literalPrefixBeforeSimpleQuotedParameter(word)
+	return dynamic && prefix == ""
+}
+
+func isSimpleQuotedParameterPart(part syntax.WordPart) bool {
+	quoted, ok := part.(*syntax.DblQuoted)
+	if !ok || quoted.Dollar || len(quoted.Parts) != 1 {
+		return false
+	}
+	exp, ok := quoted.Parts[0].(*syntax.ParamExp)
+	return ok && exp.Param != nil && shellParameterExpandsToOneWord(exp.Param.Value) &&
+		exp.Flags == nil && exp.NestedParam == nil && exp.Index == nil &&
+		len(exp.Modifiers) == 0 && exp.Slice == nil && exp.Repl == nil && exp.Exp == nil &&
+		!exp.Excl && !exp.Length && !exp.Width && !exp.IsSet && exp.Names == 0
+}
+
+func shellParameterExpandsToOneWord(name string) bool {
+	if validName(name) {
+		return true
+	}
+	if name != "" && strings.IndexFunc(name, func(r rune) bool { return r < '0' || r > '9' }) < 0 {
+		return true
+	}
+	// Residual accepted set: scalar shell parameters whose double-quoted
+	// expansion always occupies exactly one argv word, including when empty.
+	// "$*" joins positional values into one word; "$@" is deliberately absent
+	// because it expands to zero or many words. Structured/modifying parameter
+	// expansions are rejected by the caller's remaining shape checks.
+	return strings.Contains("!#$*-?", name) && len(name) == 1
+}

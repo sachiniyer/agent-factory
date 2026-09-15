@@ -432,10 +432,11 @@ func TestValidateAccountEnvironmentCommand_StraceAmbiguousBoundariesHaveLinearCo
 	call, ok := singleCallIgnoringRedirections(command)
 	require.True(t, ok)
 
-	evaluation := &straceBoundaryEvaluation{}
-	_, unsafe := unwrapStraceState(
+	evaluation := &wrapperBoundaryEvaluation{}
+	_, unsafe := unwrapWrapperState(
 		call.Args[1:],
-		straceDeferredHazards{},
+		straceWrapperSpec,
+		wrapperDeferredHazards{},
 		map[string]struct{}{"CODEX_HOME": {}},
 		evaluation,
 	)
