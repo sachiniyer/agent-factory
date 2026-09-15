@@ -3632,7 +3632,6 @@ const REQUIRED_CHECK_RECONCILIATION_QUERY = `
                         name
                         status
                         conclusion
-                        createdAt
                         startedAt
                         completedAt
                         externalId
@@ -3640,7 +3639,7 @@ const REQUIRED_CHECK_RECONCILIATION_QUERY = `
                         title
                         summary
                         text
-                        checkSuite { app { databaseId slug } }
+                        checkSuite { createdAt app { databaseId slug } }
                       }
                       ... on StatusContext {
                         id
@@ -3687,11 +3686,13 @@ function reconciliationCheckRun(run) {
     },
     status: String(run.status || "").toLowerCase(),
     conclusion: run.conclusion == null ? null : String(run.conclusion).toLowerCase(),
-    // A queued run has no startedAt/completedAt; createdAt is the only
-    // timestamp that keeps a newer queued generation ordered above an older
-    // completed one, which is the ordering latestRequiredState reads off
-    // created_at during normal REST evaluation.
-    created_at: run.createdAt,
+    // A queued run has no startedAt/completedAt, so it needs a third timestamp
+    // to keep a newer queued generation ordered above an older completed one —
+    // the ordering latestRequiredState reads off created_at during normal REST
+    // evaluation. GraphQL's CheckRun type has no createdAt field (selecting it
+    // fails the whole query), so take it from the enclosing CheckSuite, which
+    // does expose one and is created with the run.
+    created_at: run.checkSuite?.createdAt,
     started_at: run.startedAt,
     completed_at: run.completedAt,
     output: {
