@@ -391,6 +391,34 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto boo
 	return nil
 }
 
+// RefuseIfCredentialSiblingsExist refuses an ambient handoff when a
+// credential-bearing sibling tab (shell or process) is still running under the
+// current automatic account. SwapAgent stops only the agent tab; those siblings
+// would keep the cleared account's credentials alive after the swap, leaving
+// the row claiming an ambient identity while a runtime still exposes the
+// previous one. Call this BEFORE ClearAutoSelectedAccount and PrepareAgentSwap.
+func (i *Instance) RefuseIfCredentialSiblingsExist() error {
+	i.mu.RLock()
+	tabs := append([]*Tab(nil), i.Tabs...)
+	i.mu.RUnlock()
+	for idx, tab := range tabs {
+		if idx == 0 {
+			// Agent tab — SwapAgent handles this one.
+			continue
+		}
+		if tab == nil || !tab.Kind.HasTmux() || tab.tmux == nil {
+			continue
+		}
+		if tab.tmux.ProvenNoPane() {
+			continue
+		}
+		return fmt.Errorf(
+			"cannot hand session %q off to an ambient agent while credential-bearing tab %q is still running under the current account; close that tab first",
+			i.Title, tab.Name)
+	}
+	return nil
+}
+
 // ClearAutoSelectedAccount removes a scheduler-selected account so an
 // ambient (agent-only) handoff can proceed through SwapAgent, which rejects
 // any non-empty i.Account regardless of how the account was chosen. This is
@@ -408,10 +436,8 @@ func (i *Instance) ClearAutoSelectedAccount() bool {
 		i.Account = ""
 		i.touchLocked()
 	}
-	if i.accountAutoSelected {
-		i.accountAutoSelected = false
-		i.touchLocked()
-	}
+	i.accountAutoSelected = false
+	i.touchLocked()
 	return true
 }
 

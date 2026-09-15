@@ -496,6 +496,38 @@ func TestClearAutoSelectedAccount_AllowsSwapAgentAccountCheck(t *testing.T) {
 		"the post-clear error must not be the account-scope refusal")
 }
 
+// TestRefuseIfCredentialSiblingsExist is the regression lock for the P1 finding
+// that an ambient handoff from an auto-accounted session must be refused while
+// credential-bearing sibling tabs (shell/process) are still running. SwapAgent
+// stops only the agent tab; those siblings keep the old account's credentials
+// alive after the swap, leaving the row claiming ambient identity while a real
+// runtime still exposes the previous account.
+func TestRefuseIfCredentialSiblingsExist(t *testing.T) {
+	agentTs := tmux.NewTmuxSession("agent-session", tmux.ProgramClaude)
+	shellTs := tmux.NewTmuxSession("shell-session", "/bin/bash")
+
+	inst := &Instance{
+		Title:               "auto-account-sibling",
+		Program:             tmux.ProgramClaude,
+		Account:             "work",
+		accountAutoSelected: true,
+		Tabs: []*Tab{
+			{ID: "tab-agent", Name: "agent", Kind: TabKindAgent, tmux: agentTs},
+			{ID: "tab-shell", Name: "shell", Kind: TabKindShell, tmux: shellTs},
+		},
+	}
+
+	// A live sibling shell tab must cause refusal.
+	err := inst.RefuseIfCredentialSiblingsExist()
+	require.Error(t, err, "RefuseIfCredentialSiblingsExist must refuse when a credential-bearing sibling tab exists")
+	require.Contains(t, err.Error(), "shell", "refusal must name the tab")
+
+	// With only the agent tab, there is nothing to refuse.
+	inst.Tabs = inst.Tabs[:1]
+	err = inst.RefuseIfCredentialSiblingsExist()
+	require.NoError(t, err, "RefuseIfCredentialSiblingsExist must pass with only the agent tab")
+}
+
 // TestClearAutoSelectedAccount_NoOpForManualPin verifies the safety predicate:
 // ClearAutoSelectedAccount is inert for a manually-pinned account, so the
 // daemon cannot accidentally admit a hand-fixed identity as a side effect.
