@@ -95,7 +95,7 @@ func TestUpdatedAtUnchangedWritesAndCaches(t *testing.T) {
 			i.PinStorageRepoID("remembered")
 			require.Equal(t, "remembered", i.repoIDForStorage())
 		},
-		"load coordination": func(i *Instance) { i.markLoadRuntimeReplaced(); i.ConsumeLoadRuntimeReplacement() },
+		"load coordination": func(i *Instance) { i.markLoadRuntimeReplaced(false); i.ConsumeLoadRuntimeReplacement() },
 		"adoption fence":    func(i *Instance) { i.CloseAdoptionFence(); i.ReopenAdoptionFence() },
 		"credential wiring": func(i *Instance) { i.SetSandboxCredentials(nil); SetRuntimeTeardownForTest(i, nil) },
 	}

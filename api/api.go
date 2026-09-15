@@ -525,23 +525,6 @@ func findInstanceByTitleInScope(repoID, title string) (*session.InstanceData, st
 	return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
 }
 
-// findLiveInstanceByTitleInScope finds an instance by title within the resolved
-// repo scope and restores it as a live *Instance (#891). Used by attach and
-// preview so `--repo` confines them to that repo's session instead of acting on
-// a same-titled session in another repo. With no repo scope it resolves a unique
-// title and reports ErrAmbiguousTitle when several repos hold it.
-func findLiveInstanceByTitleInScope(repoID, title string) (*session.Instance, string, error) {
-	data, repoID, err := findInstanceByTitleInScope(repoID, title)
-	if err != nil {
-		return nil, "", err
-	}
-	instance, err := session.FromInstanceData(*data)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to restore session %q: %w", title, err)
-	}
-	return instance, repoID, nil
-}
-
 // instanceTitleExistsInScope reports whether a session with the given title
 // exists within the resolved repo scope (#776). An empty repoID preserves the
 // prior all-repo search; a non-empty one confines the check to that repo so a

@@ -252,6 +252,8 @@ func TestLocalBackendStartUnverifiedReattachClearsRuntimeProgram(t *testing.T) {
 		Title:          "recreated-same-name",
 		Path:           repoRoot,
 		Program:        "claude",
+		TaskID:         "task-with-unverified-runtime",
+		taskRunActive:  true,
 		runtimeProgram: "/old/claude",
 		backend:        &LocalBackend{},
 		liveness:       LiveReady,
@@ -265,8 +267,14 @@ func TestLocalBackendStartUnverifiedReattachClearsRuntimeProgram(t *testing.T) {
 		"reattachment by sanitized name cannot prove that the pane is the runtime whose command was persisted")
 	require.False(t, inst.RuntimeProgramEvidenceCurrent(stale),
 		"clearing the unverified persisted command must invalidate concurrent drift observers")
-	require.True(t, inst.ConsumeLoadRuntimeReplacement(),
+	replacement := inst.ConsumeLoadRuntimeReplacement()
+	require.True(t, replacement.Replaced,
 		"the loader must checkpoint the retired runtime command before publishing the restored row")
+	require.False(t, replacement.Agent,
+		"same-name reattachment is not proof that the prompted agent runtime was replaced")
+	require.False(t, replacement.TaskRunInterrupted)
+	require.True(t, inst.TaskRunActive(),
+		"ambiguous same-name reattachment must not manufacture an interrupted-run outcome")
 }
 
 // --- remote terminal capability (#1592 Phase 4 PR7) ---

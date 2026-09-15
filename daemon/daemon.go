@@ -437,21 +437,22 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 // replacements past max_concurrent_runs on every daemon restart, which is exactly
 // the restart-survival guarantee the cap is built on.
 //
-// Keyed by taskRunReservationKey(repoID, taskID) → count, so the cap can add them
+// Keyed by taskRunReservationKey(repoID, taskID, generationID) → count, so the cap can add them
 // to its projection without re-reading disk. Recomputed on every refresh, so a
 // row that starts loading again stops being a ghost — the same self-healing
 // projection discipline as the rest of the count.
-func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, error) {
+func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, uint64, error) {
 	if err := config.MigrateAllRepoInstancesForDaemonLoad(); err != nil {
-		return existing, nil, err
+		return existing, nil, 0, err
 	}
 	allInstances, err := config.LoadAllRepoInstances()
 	if err != nil {
-		return existing, nil, err
+		return existing, nil, 0, err
 	}
 
 	next := make(map[string]*session.Instance)
 	ghostTaskRuns := make(map[string]int)
+	var taskRunSequence uint64
 	for repoID, raw := range allInstances {
 		if raw == nil || string(raw) == "[]" || string(raw) == "null" {
 			continue
@@ -488,6 +489,9 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		}
 
 		for _, item := range data {
+			if item.TaskRunSequence > taskRunSequence {
+				taskRunSequence = item.TaskRunSequence
+			}
 			key := daemonInstanceKey(repoID, item.Title)
 			if item.ID == "" && !isLegacyTransientGhost(item) {
 				item.ID = session.NewInstanceID()
@@ -505,7 +509,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 						}
 					}
 					if rawTaskRunHoldsSlot(item) {
-						ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
+						ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID, item.TaskGenerationID)]++
 					}
 					continue
 				}
@@ -517,7 +521,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				}
 			}
 
-			instance, err := fromInstanceDataForRefresh(item)
+			instance, err := fromInstanceDataForRefresh(repoID, item)
 			if err != nil {
 				log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
 				// The row is invisible to everything that walks m.instances from here on
@@ -541,7 +545,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				// released the slot after giving up, so an unloadable copy cannot reclaim
 				// it as a ghost on the next daemon start (#3310).
 				if rawTaskRunHoldsSlot(item) {
-					ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
+					ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID, item.TaskGenerationID)]++
 					log.WarningLog.Printf("watch task %s: session %q failed to load but its run is still counted against max_concurrent_runs (#1892); kill or repair the session to release its slot", item.TaskID, item.Title)
 				}
 				continue
@@ -574,7 +578,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		}
 	}
 
-	return next, ghostTaskRuns, nil
+	return next, ghostTaskRuns, taskRunSequence, nil
 }
 
 func daemonInstanceKey(repoID, title string) string {

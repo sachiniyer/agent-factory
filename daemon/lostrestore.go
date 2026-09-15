@@ -554,17 +554,17 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 
 	// Settle predecessor evidence at the exact ConfirmLive edge: late enough that
 	// a failed recovery leaves its evidence intact, but before the backend can
-	// lower the restore fence and expose the replacement. A failed write remains
-	// owed and does not veto a replacement that is already running (#2883).
+	// lower the restore fence and expose the replacement. Ordinary failed writes
+	// remain owed without tearing down a replacement that is already running
+	// (#2883); a failed active-run close keeps OpRestoring until retry makes the
+	// interruption durable.
 	//
 	// The same fenced entry point the manual restore RPC uses (#3555). This loop
 	// raises no lifecycle fence of its own — the op-lock above serializes daemon
 	// operations, not the status poll, which skips on the op AXIS — so the fence
 	// has to come from the recovery itself.
-	if err := inst.RecoverFencedWithLiveBoundary(func() {
-		if perr := m.prepareRuntimeReplacement(repoID, key, inst); perr != nil {
-			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", inst.Title, perr)
-		}
+	if err := inst.RecoverFencedWithLiveBoundary(func() error {
+		return m.prepareRuntimeReplacementLiveBoundary(repoID, key, inst, "restore")
 	}); err != nil {
 		// Persist the instance even on failure, matching the manual restore path
 		// (restore.go): Recover can mutate durable worktree state before it fails

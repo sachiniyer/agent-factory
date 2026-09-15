@@ -104,7 +104,7 @@ func TestFindSessionDiscardsDuplicateWhenCanonicalRaced(t *testing.T) {
 
 	var calls atomic.Int32
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		switch calls.Add(1) {
 		case 1:
 			// The initial refreshLocked inside findSession: model the
@@ -173,7 +173,7 @@ func TestFindSessionRegistersRestoredInstanceWhenUntracked(t *testing.T) {
 
 	var calls atomic.Int32
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		switch calls.Add(1) {
 		case 1:
 			return nil, fmt.Errorf("transient restore failure")
@@ -207,6 +207,52 @@ func TestFindSessionRegistersRestoredInstanceWhenUntracked(t *testing.T) {
 	}
 }
 
+// TestFindSessionFallbackBuildHoldsLifecycleLock pins the checkpoint side of
+// the disk fallback. A constructor may persist a whole-row runtime-replacement
+// checkpoint, so it must run under the same per-session operation lock as
+// archive, handoff, kill, and restore. Otherwise a stale fallback snapshot can
+// overwrite a newer lifecycle settlement before duplicate registration is
+// noticed.
+func TestFindSessionFallbackBuildHoldsLifecycleLock(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	seedDiskInstance(t, repo.ID, "serialized", repoPath)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	key := daemonInstanceKey(repo.ID, "serialized")
+	opLock := manager.opLockFor(key)
+	restored, _ := newCountingInstance(t, "serialized", repoPath)
+	var calls atomic.Int32
+	prev := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
+		if calls.Add(1) == 1 {
+			return nil, fmt.Errorf("transient restore failure")
+		}
+		if opLock.TryLock() {
+			opLock.Unlock()
+			t.Fatal("fallback constructor ran outside the session lifecycle lock")
+		}
+		return restored, nil
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
+
+	got, _, _, err := manager.findSession("serialized", repo.ID)
+	if err != nil {
+		t.Fatalf("findSession: %v", err)
+	}
+	if got != restored {
+		t.Fatal("findSession did not return the serialized fallback instance")
+	}
+}
+
 // TestFindSessionReturnsTrackedInstanceWithoutDiskBuild asserts the common,
 // non-racing path is unchanged: when the canonical Instance is already tracked,
 // findSession returns it without ever building an Instance from disk.
@@ -232,9 +278,9 @@ func TestFindSessionReturnsTrackedInstanceWithoutDiskBuild(t *testing.T) {
 
 	var diskBuilds atomic.Int32
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(repoID string, d session.InstanceData) (*session.Instance, error) {
 		diskBuilds.Add(1)
-		return prev(d)
+		return prev(repoID, d)
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
 

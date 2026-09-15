@@ -162,9 +162,12 @@ func (m *Manager) recordArmingStatus(t task.Task, status string) {
 	if t.LastRunStatus == status {
 		return
 	}
-	updated, err := task.UpdateTaskStatus(t.ID, nil, status)
+	updated, applied, err := task.UpdateTaskStatusForGeneration(t.ID, t.GenerationID, nil, status)
 	if err != nil {
 		m.warn().Printf("could not record the arming status for task %q: %v", t.ID, err)
+		return
+	}
+	if !applied {
 		return
 	}
 	// The record the WRITE produced, not the copy this walked in with. That copy

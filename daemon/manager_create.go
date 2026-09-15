@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -75,6 +73,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	if err := applyDefaultAccount(cfg, &req); err != nil {
 		return session.InstanceData{}, err
 	}
+	taskRunAdmission, err := m.nextTaskRunAdmission(req.TaskID, req.TaskGenerationID)
+	if err != nil {
+		return session.InstanceData{}, err
+	}
 	reservationBoundaryDelegated = true
 	repo, title, release, renamedArchived, err := m.reserveCreateForSession(req)
 	if err != nil {
@@ -101,20 +103,25 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// the completed Instance inherits below, so clients upsert rather than replacing
 	// one identity with another.
 	createdAt := time.Now()
+	taskRunAt := time.Time{}
+	if req.TaskID != "" {
+		taskRunAt = createdAt
+	}
 	pending := session.InstanceData{
-		ID:            session.NewInstanceID(),
-		TaskID:        req.TaskID,
-		Title:         title,
-		Path:          workspace,
-		Status:        session.Loading,
-		Liveness:      session.LiveReady,
-		InFlightOp:    session.OpCreating,
-		TaskRunActive: req.TaskID != "",
-		CreatedAt:     createdAt,
-		UpdatedAt:     createdAt,
-		Prompt:        req.Prompt,
-		Program:       req.Program,
-		Worktree:      session.GitWorktreeData{RepoPath: repo.IdentityPath()},
+		ID:     session.NewInstanceID(),
+		TaskID: req.TaskID, TaskGenerationID: taskRunAdmission.generationID,
+		Title:           title,
+		Path:            workspace,
+		Status:          session.Loading,
+		Liveness:        session.LiveReady,
+		InFlightOp:      session.OpCreating,
+		TaskRunActive:   req.TaskID != "",
+		TaskRunAt:       taskRunAt,
+		TaskRunSequence: taskRunAdmission.sequence, TaskRunRevision: taskRunAdmission.revision,
+		CreatedAt: createdAt, UpdatedAt: createdAt,
+		Prompt:   req.Prompt,
+		Program:  req.Program,
+		Worktree: session.GitWorktreeData{RepoPath: repo.IdentityPath()},
 	}
 	key := daemonInstanceKey(repo.ID, title)
 	m.mu.Lock()
@@ -159,10 +166,13 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// was picked up on the next create; now it applies on save/ApplyConfig like
 	// every other key — a deliberate, uniform change (see the #2480 release note).
 	instance, err := session.NewInstance(session.InstanceOptions{
-		ID:                             pending.ID,
-		CreatedAt:                      pending.CreatedAt,
-		Title:                          title,
-		TaskID:                         req.TaskID,
+		ID:        pending.ID,
+		CreatedAt: pending.CreatedAt,
+		Title:     title,
+		TaskID:    req.TaskID, TaskGenerationID: pending.TaskGenerationID,
+		TaskRunAt:                      pending.TaskRunAt,
+		TaskRunSequence:                pending.TaskRunSequence,
+		TaskRunRevision:                pending.TaskRunRevision,
 		Path:                           workspace,
 		Program:                        req.Program,
 		Account:                        req.Account,
@@ -349,6 +359,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	}
 	data := instance.ToInstanceData()
 	conversationToken := instance.AgentRuntimeToken()
+	taskRunStatus := task.RunStatusStarted
+	if data.Liveness == session.LiveLimitReached {
+		taskRunStatus = TaskStatusLimitParked
+	}
 
 	// Register the in-memory instance and persist it to disk inside the
 	// same critical section. The daemon refresh loop rebuilds
@@ -361,6 +375,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// fence acquired before finishCreateStart stays held through this insertion,
 	// so the candidate is either absent for the whole commit or visible as
 	// limited.
+	var taskStatusErr error
 	persistErr := func() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -370,6 +385,17 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 			return err
 		}
 		instance.PinStorageRepoID(repo.ID)
+		// Publish a task-created session's run identity while Manager.mu still
+		// hides the new row from recovery. The session record landed first, so a
+		// task-store failure cannot advertise a run whose session never committed;
+		// the post-RPC repair handles that failure after publication. Holding the
+		// manager lock across this small file update is intentional: releasing it
+		// here recreates the window where recovery can observe an unidentified run.
+		if req.TaskID != "" {
+			_, _, taskStatusErr = task.BeginTaskRun(
+				req.TaskID, data.TaskGenerationID, instance.ID, data.TaskRunSequence,
+				data.TaskRunRevision, instance.CreatedAt, taskRunStatus)
+		}
 		// Register the provider discovery in the same manager-lock critical
 		// section that makes the instance visible. A concurrent status poll can
 		// therefore never observe a newly created root without also seeing that
@@ -378,6 +404,9 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return nil
 	}()
 	releaseLimitPublicationFence()
+	if taskStatusErr != nil {
+		log.ErrorLog.Printf("failed to publish task run identity for task %s: %v", req.TaskID, taskStatusErr)
+	}
 	if persistErr != nil {
 		// Same rule as the start-failure path above, minus the remedy: the record
 		// write is what just failed, so keeping a record is not available. Report the
@@ -460,10 +489,10 @@ func projectDeleteRefusal(repoID string, inProgress bool) error {
 // that does not hold m.mu. It returns the SAME errAtConcurrencyLimit sentinel as
 // the authoritative check, so the watch-delivery path cannot tell the two apart
 // and parks the event either way.
-func (m *Manager) admitTaskRunFast(repoID, taskID string, limit int) error {
+func (m *Manager) admitTaskRunFast(repoID, taskID, taskGenerationID string, limit int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.admitTaskRunLocked(repoID, taskID, limit)
+	return m.admitTaskRunLocked(repoID, taskID, taskGenerationID, limit)
 }
 
 // projectDeleteStateFor answers, in ONE acquisition, whether this repo has a
@@ -482,102 +511,6 @@ func (m *Manager) projectDeleteStateFor(repoID string, since uint64) (active, mo
 // window where reserveCreate does not yet know which repo it is talking about —
 // a window nothing repo-keyed can be sampled in, which is what #2947 is about.
 // Production never reassigns it.
-var repoFromPathForCreate = config.RepoFromPath
-
-// warnLegacyBareCloneSessions makes the #3358 identity transition explicit.
-// Old rows cannot be migrated safely: the old writer persisted the unrelated
-// parent as both Path and Worktree.RepoPath, discarding the linked worktree the
-// user originally requested. That parent may itself own real sessions, and
-// several bare repositories may share it. Preserve those rows under their old
-// key, where all-repo listing and stable-ID actions still reach them, and name
-// the compatibility path instead of silently pretending the new identity has
-// no history.
-func warnLegacyBareCloneSessions(repo *config.RepoContext) {
-	legacyRoot, legacyID := repo.LegacyBareRepoIdentity()
-	if legacyID == "" || legacyID == repo.ID {
-		return
-	}
-	rows, err := loadRepoInstanceData(legacyID)
-	if err != nil {
-		log.WarningLog.Printf("bare repository %s now uses repo identity %s, but its pre-#3358 parent-keyed session store %s could not be read: %v; inspect that repo ID before assuming it is empty", repo.IdentityPath(), repo.ID, legacyID, err)
-		return
-	}
-	if len(rows) == 0 {
-		return
-	}
-	log.WarningLog.Printf("bare repository %s now uses repo identity %s; preserving %d pre-#3358 session record(s) under former parent identity %s (%s) because those records discarded the requesting worktree and cannot be re-attributed safely — they remain available through all-repo listing and stable session IDs", repo.IdentityPath(), repo.ID, len(rows), legacyID, legacyRoot)
-}
-
-// warnLegacyBareCloneTasks is the automation half of the same #3358 transition.
-// A task created from a bare linked worktree before the fix retained the
-// unrelated parent in BOTH ProjectPath and RepoID, so the corrected project no
-// longer lists it — while an enabled cron/watch task keeps firing under the old
-// identity. When that parent is itself a repository, each delivery keeps making
-// sessions in it, invisible from the bare project the user now works in.
-//
-// Sessions are inert once preserved; automation is not, so this names the tasks
-// and what to do about them. Rebinding them here would be the same unsafe
-// re-attribution the session rows are preserved to avoid: the old rows discarded
-// the requesting worktree, several bare clones can share one parent, and a real
-// repository may live there and legitimately own these tasks.
-//
-// The scan is a pure read of the task file — no ProjectPath resolution and no
-// binding backfill (LoadTasksForRepoID durably rewrites bindings and hands the
-// caller a publish obligation, neither of which belongs on a create path).
-// Matching is therefore textual: the retained RepoID, or a legacy row whose
-// RepoID was never written and whose ProjectPath still spells the old parent.
-func warnLegacyBareCloneTasks(repo *config.RepoContext) {
-	legacyRoot, legacyID := repo.LegacyBareRepoIdentity()
-	if legacyID == "" || legacyID == repo.ID {
-		return
-	}
-	all, err := loadTasksForLegacyScan()
-	if err != nil {
-		log.WarningLog.Printf("bare repository %s now uses repo identity %s, but its pre-#3358 tasks could not be read: %v; inspect `af tasks list --all` for tasks still bound to former parent identity %s (%s) before assuming there are none", repo.IdentityPath(), repo.ID, err, legacyID, legacyRoot)
-		return
-	}
-	var stranded []task.Task
-	for _, t := range all {
-		if t.RepoID != "" {
-			if t.RepoID == legacyID {
-				stranded = append(stranded, t)
-			}
-			continue
-		}
-		if t.ProjectPath != "" && filepath.Clean(t.ProjectPath) == filepath.Clean(legacyRoot) {
-			stranded = append(stranded, t)
-		}
-	}
-	if len(stranded) == 0 {
-		return
-	}
-	enabled := 0
-	for _, t := range stranded {
-		if t.Enabled {
-			enabled++
-		}
-	}
-	log.WarningLog.Printf("bare repository %s now uses repo identity %s; %d pre-#3358 task(s) (%d enabled) remain bound to former parent identity %s (%s) and are NOT listed by this project: %s; enabled cron/watch deliveries keep creating sessions under that identity — inspect them with `af tasks list --all`, then disable or explicitly rebind each one to this project", repo.IdentityPath(), repo.ID, len(stranded), enabled, legacyID, legacyRoot, describeLegacyTasks(stranded))
-}
-
-// describeLegacyTasks names the stranded tasks so the warning is actionable
-// without a second lookup: an id is what `af tasks` acts on, a name is what the
-// user recognizes.
-func describeLegacyTasks(tasks []task.Task) string {
-	parts := make([]string, 0, len(tasks))
-	for _, t := range tasks {
-		if t.Name != "" {
-			parts = append(parts, fmt.Sprintf("%s (%q)", t.ID, t.Name))
-			continue
-		}
-		parts = append(parts, t.ID)
-	}
-	return strings.Join(parts, ", ")
-}
-
-// loadTasksForLegacyScan is a package var so the warning above can be tested
-// without a task file on disk. Production never reassigns it.
-var loadTasksForLegacyScan = task.LoadTasks
 
 func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, holdWorktreeAdmission bool) (_ *config.RepoContext, _ string, _ func(), _ *session.InstanceData, retErr error) {
 	reservationCommitted := false
@@ -677,7 +610,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	// can be high as well as low, and a spurious refusal here costs one park and
 	// retry — the same tradeoff releaseTaskRunLocked already documents for its
 	// momentary over-count, and the opposite of admitting one too many.
-	if err := m.admitTaskRunFast(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
+	if err := m.admitTaskRunFast(repo.ID, req.TaskID, req.TaskGenerationID, req.MaxConcurrentRuns); err != nil {
 		return nil, "", nil, nil, err
 	}
 
@@ -758,7 +691,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	// succeeding; m.mu is held unbroken between the two, so the count cannot move in
 	// the gap. On refusal the watch-task delivery path parks the event on the
 	// durable queue and retries when a slot frees, so nothing is dropped by the cap.
-	if err := m.admitTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
+	if err := m.admitTaskRunLocked(repo.ID, req.TaskID, req.TaskGenerationID, req.MaxConcurrentRuns); err != nil {
 		return nil, "", nil, nil, err
 	}
 
@@ -886,7 +819,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	if remoteName != "" {
 		m.reservedRemoteNames[remoteName] = struct{}{}
 	}
-	m.reserveTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns)
+	m.reserveTaskRunLocked(repo.ID, req.TaskID, req.TaskGenerationID, req.MaxConcurrentRuns)
 	release := func() {
 		m.mu.Lock()
 		delete(m.reservedTitles, key)
@@ -901,7 +834,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 		// is registered in m.instances and counts against the cap on its own —
 		// handing the slot over with no gap. On a failed create nothing was
 		// registered, and dropping the reservation is exactly the right refund.
-		m.releaseTaskRunLocked(repo.ID, req.TaskID)
+		m.releaseTaskRunLocked(repo.ID, req.TaskID, req.TaskGenerationID)
 		m.mu.Unlock()
 		releaseWorktreeAdmission()
 	}

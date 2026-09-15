@@ -424,11 +424,15 @@ func TestTheRespawnFenceIsProjectedSoItsReleaseOrderMatters(t *testing.T) {
 // watch-task concurrency cap.
 func TestConfirmLiveKeepsTheResumeFenceForPromptDelivery(t *testing.T) {
 	i := limitBlockedInstance(t, newRespawnProbe())
+	i.TaskID = "task-id"
+	i.taskRunActive = true
 	require.NoError(t, i.BeginLimitResume())
 
 	require.NoError(t, i.Transition(ConfirmLive()))
 	require.Equal(t, LiveRunning, i.GetLiveness(), "the runtime is up")
 	require.Equal(t, OpRespawning, i.GetInFlightOp(), "and the resume still owns the session")
+	require.True(t, i.TaskRunActive(),
+		"the resume replacement retains the run until its queued prompt is delivered")
 
 	require.True(t, i.EndLimitResume())
 	require.Equal(t, OpNone, i.GetInFlightOp())

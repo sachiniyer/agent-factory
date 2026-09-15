@@ -16,8 +16,8 @@ import (
 // committed in the gap — the TOCTOU race in #1215. UpdateTaskStatus skips
 // Program enum validation so legacy task records still receive status bumps
 // (#664).
-func persistWatcherStatus(taskID, status string) {
-	if _, err := task.UpdateTaskStatus(taskID, nil, status); err != nil {
+func persistWatcherStatus(taskID, taskGenerationID, status string) {
+	if _, _, err := task.UpdateTaskStatusForGeneration(taskID, taskGenerationID, nil, status); err != nil {
 		log.WarningLog.Printf("failed to record watcher status %q on task %s: %v", status, taskID, err)
 	}
 }
@@ -30,7 +30,7 @@ func (w *taskWatcher) persistTerminalStatus(status string) {
 	w.mu.Lock()
 	w.terminalStatus = status
 	w.mu.Unlock()
-	w.sup.setStatus(w.taskID, status)
+	w.sup.setStatus(w.taskID, w.generationID, status)
 }
 
 // persistDroppedEvents checkpoints an absolute counter rather than one delta

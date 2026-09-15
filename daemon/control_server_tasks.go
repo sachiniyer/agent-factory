@@ -72,11 +72,17 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	unlock, err := s.lockTaskControl()
+	unlock, deliveryUnlock, err := s.lockTaskMutation(req.Task.ID)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	deliveryLocked := true
+	defer func() {
+		if deliveryLocked {
+			deliveryUnlock()
+		}
+	}()
 	var validate func(task.Task) error
 	targetLocked := false
 	if s.manager != nil {
@@ -100,6 +106,8 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 		s.manager.taskTargetMu.Unlock()
 		targetLocked = false
 	}
+	deliveryUnlock()
+	deliveryLocked = false
 	if err != nil {
 		return err
 	}
@@ -127,11 +135,17 @@ func (s *controlServer) updateTask(ctx context.Context, req UpdateTaskRequest, r
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	unlock, err := s.lockTaskControl()
+	unlock, deliveryUnlock, err := s.lockTaskMutation(req.ID)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	deliveryLocked := true
+	defer func() {
+		if deliveryLocked {
+			deliveryUnlock()
+		}
+	}()
 	var validate func(task.Task) (string, error)
 	targetLocked := false
 	if s.manager != nil {
@@ -193,6 +207,8 @@ func (s *controlServer) updateTask(ctx context.Context, req UpdateTaskRequest, r
 		s.manager.taskTargetMu.Unlock()
 		targetLocked = false
 	}
+	deliveryUnlock()
+	deliveryLocked = false
 	if err != nil {
 		return err
 	}
@@ -225,14 +241,22 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	unlock, err := s.lockTaskControl()
+	unlock, deliveryUnlock, err := s.lockTaskMutation(req.ID)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	deliveryLocked := true
+	defer func() {
+		if deliveryLocked {
+			deliveryUnlock()
+		}
+	}()
 	if err := task.RemoveTask(req.ID, req.Expect); err != nil {
 		return err
 	}
+	deliveryUnlock()
+	deliveryLocked = false
 	resp.OK = true
 	// Removal is already durable at this point. Announce that commit even when
 	// the scheduler/watch reload cannot apply it in-process.

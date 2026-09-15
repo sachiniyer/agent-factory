@@ -18,11 +18,12 @@ func (i *Instance) ToInstanceData() InstanceData {
 // CreatedAt and UpdatedAt are copied unchanged; reading does not mutate a session.
 func (i *Instance) toInstanceDataLocked() InstanceData {
 	data := InstanceData{
-		ID:     i.ID,
-		TaskID: i.TaskID,
-		Title:  i.Title,
-		Path:   i.Path,
-		Branch: i.Branch,
+		ID:               i.ID,
+		TaskID:           i.TaskID,
+		TaskGenerationID: i.taskGenerationID,
+		Title:            i.Title,
+		Path:             i.Path,
+		Branch:           i.Branch,
 		// Serialize the two-axis state plus the legacy composed Status. Liveness is
 		// the daemon truth; InFlightOp rides daemon snapshots so secondary TUIs can
 		// cold-start into archive/restore operations without lossy Status
@@ -99,6 +100,10 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// reintroduce the bug it fixes — a session whose run is live must read as active
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
+	data.TaskRunInterruptionPending = i.taskRunInterruptionPending
+	data.TaskRunAt = i.taskRunAt
+	data.TaskRunSequence = i.taskRunSequence
+	data.TaskRunRevision = i.taskRunRevision
 
 	// Persist each tab so the full local agent+shell tab list survives a restart
 	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
@@ -257,8 +262,19 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 	return data, nil
 }
 
-// FromInstanceData creates a new Instance from serialized data
+// FromInstanceData creates a new Instance from serialized data.
 func FromInstanceData(data InstanceData) (*Instance, error) {
+	return FromInstanceDataWithLoadRuntimeCheckpoint(data, nil)
+}
+
+// FromInstanceDataWithLoadRuntimeCheckpoint creates an Instance and invokes
+// checkpoint after a missing persisted agent pane is proven absent but before
+// its replacement is started. The daemon supplies the durable session writer;
+// standalone readers pass nil through FromInstanceData.
+func FromInstanceDataWithLoadRuntimeCheckpoint(
+	data InstanceData,
+	checkpoint func(InstanceData) error,
+) (*Instance, error) {
 	data = data.RestoreArchiveRollbackFence()
 	var err error
 	data, err = data.RestoreRelocationRecoveryOriginals()
@@ -311,42 +327,50 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		data.UpdatedAt = data.CreatedAt
 	}
 	instance := &Instance{
-		ID:         id,
-		TaskID:     data.TaskID,
-		Title:      data.Title,
-		Path:       data.Path,
-		Branch:     data.Branch,
-		liveness:   liveness,
-		inFlightOp: inFlightOp,
+		ID:               id,
+		TaskID:           data.TaskID,
+		taskGenerationID: data.TaskGenerationID,
+		Title:            data.Title,
+		Path:             data.Path,
+		Branch:           data.Branch,
+		liveness:         liveness,
+		inFlightOp:       inFlightOp,
 		// Carried across the restart (#1892). An outage that loses sessions is the
 		// same event that restarts the daemon, so this fact has to come back from
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
-		taskRunActive:            data.TaskRunActive,
-		limitResetAt:             data.LimitResetAt,
-		limitAgent:               limitAgent,
-		limitAccount:             limitAccount,
-		accountLimitObservations: accountLimitObservations,
-		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
-		archiveWarning:           data.ArchiveWarning,
-		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
-		lastPromptAttemptAt:      data.LastPromptAttemptAt,
-		lastPromptDeliveryStatus: data.LastPromptDeliveryStatus,
-		lastPaneChurnAt:          data.LastPaneChurnAt,
-		Height:                   data.Height,
-		Width:                    data.Width,
-		CreatedAt:                data.CreatedAt,
-		UpdatedAt:                data.UpdatedAt,
-		Program:                  data.Program,
-		runtimeProgram:           data.RuntimeProgram,
-		Account:                  data.Account,
-		accountAutoSelected:      data.AccountAutoSelected,
-		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
-		Prompt:                   data.Prompt,
-		pendingHandoffMission:    data.PendingHandoffMission,
-		handoffDeliveryStatus:    data.HandoffDeliveryStatus,
-		userKilled:               data.UserKilled,
-		startupStateUnknown:      data.StartupStateUnknown,
+		// A pending interruption is durable proof that replacement already closed
+		// the run. If a hand-edited row claims both, the outbox wins rather than
+		// holding a concurrency slot for work whose terminal outcome is queued.
+		taskRunActive:              data.TaskRunActive && !data.TaskRunInterruptionPending,
+		taskRunInterruptionPending: data.TaskRunInterruptionPending,
+		taskRunAt:                  data.TaskRunAt,
+		taskRunSequence:            data.TaskRunSequence,
+		taskRunRevision:            data.TaskRunRevision,
+		limitResetAt:               data.LimitResetAt,
+		limitAgent:                 limitAgent,
+		limitAccount:               limitAccount,
+		accountLimitObservations:   accountLimitObservations,
+		agentModelChange:           agentModelChangeForLiveness(data.ModelChange, liveness),
+		archiveWarning:             data.ArchiveWarning,
+		lostRestoreFailure:         lostRestoreFailureFromData(data.LostRestoreFailure),
+		lastPromptAttemptAt:        data.LastPromptAttemptAt,
+		lastPromptDeliveryStatus:   data.LastPromptDeliveryStatus,
+		lastPaneChurnAt:            data.LastPaneChurnAt,
+		Height:                     data.Height,
+		Width:                      data.Width,
+		CreatedAt:                  data.CreatedAt,
+		UpdatedAt:                  data.UpdatedAt,
+		Program:                    data.Program,
+		runtimeProgram:             data.RuntimeProgram,
+		Account:                    data.Account,
+		accountAutoSelected:        data.AccountAutoSelected,
+		pendingAccountSwap:         cloneAccountSwapData(data.PendingAccountSwap),
+		Prompt:                     data.Prompt,
+		pendingHandoffMission:      data.PendingHandoffMission,
+		handoffDeliveryStatus:      data.HandoffDeliveryStatus,
+		userKilled:                 data.UserKilled,
+		startupStateUnknown:        data.StartupStateUnknown,
 		// Survives the restart on purpose (#2629): a root that came back amnesiac
 		// is still amnesiac, and a daemon restart is a likely part of the same
 		// outage. An unrecognized value from a newer binary loads as-is and
@@ -560,12 +584,25 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		return instance, nil
 	}
 
-	if err := instance.Start(false); err != nil {
+	instance.loadRuntimeReplacementCheckpoint = checkpoint
+	err = instance.Start(false)
+	instance.loadRuntimeReplacementCheckpoint = nil
+	if err != nil {
 		if retainsInertInstance(err) {
 			// A sibling probe or the live agent's in-place scope upgrade did not
 			// establish a safe runtime boundary. Keep the row inert and explicitly
 			// killable so storage retains every exact tmux cleanup handle.
 			instance.MarkStartupStateUnknown()
+			return instance, nil
+		}
+		// A task-run close already present on disk, or checkpointed by this
+		// attempt before tmux startup, is an outbox — not disposable constructor
+		// state. Retain the exact runtime/worktree handles so the daemon can publish
+		// the task outcome and ordinary Lost recovery can retry the failed start.
+		// A failed checkpoint does not qualify: disk still owns the active run, so
+		// returning an instance would mistake an in-memory guess for durability.
+		if data.TaskRunInterruptionPending || instance.loadRuntimeInterruptionCheckpointed() {
+			instance.retainLoadFailureWithPendingTaskOutcome(err)
 			return instance, nil
 		}
 		return nil, err

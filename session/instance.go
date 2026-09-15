@@ -44,6 +44,9 @@ type Instance struct {
 	// construction, so cross-goroutine readers may read it without the mutex
 	// (like ID and Title).
 	TaskID string
+	// taskGenerationID binds TaskID to the exact task row incarnation that
+	// spawned this session. Empty is the legacy pre-field generation.
+	taskGenerationID string
 	// Title is the title of the instance.
 	Title string
 	// Path is the path to the workspace.
@@ -68,11 +71,12 @@ type Instance struct {
 	// runtime and clear it at the live boundary.
 	lostRestoreFailure LostRestoreFailure
 	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
-	// has this session's task run finished yet? It is true from creation for a
-	// task-spawned session and flips false — once, permanently — when the AGENT
-	// first goes idle, or when startup settles terminal-unknown without ever
-	// establishing a runnable session. Either outcome means no run remains that a
-	// later poll could observe finishing.
+	// is this session's task run still in flight? It is true from creation for a
+	// task-spawned session and flips false — once, permanently — when the prompted
+	// runtime first goes idle, when startup settles terminal-unknown without ever
+	// establishing a runnable session, or when a Lost runtime is replaced without
+	// replaying its prompt. Each outcome means no run remains that a later poll may
+	// classify as completed.
 	//
 	// It is a stored fact rather than something derived at read time because every
 	// neighbouring signal answers a DIFFERENT question, and reconstructing the run
@@ -88,16 +92,44 @@ type Instance struct {
 	//     AbortArchiveToLost) look like an interrupted run and claim a slot.
 	//
 	// So the run's own lifetime is recorded on the run's own edges: it begins when
-	// the session is created for a delivery and ends when the agent goes idle or
-	// startup reaches its explicit terminal-unknown boundary. Neither has to be
-	// inferred later from a neighbouring state. Persisted, because an outage that
-	// loses sessions is the same event that restarts the daemon.
+	// the session is created for a delivery and closes when the prompted agent goes
+	// idle, startup reaches its explicit terminal-unknown boundary, or restore
+	// crosses onto a runtime that never received the prompt. None has to be inferred
+	// later from a neighbouring state. Persisted, because an outage that loses
+	// sessions is the same event that restarts the daemon.
 	//
 	// It never flips back to true: a capped task creates one session per event (a
 	// cap and a target_session are mutually exclusive — see task.ValidateTrigger),
 	// so a session has exactly one run. Work a user starts in that session
 	// afterwards is theirs, not the task's, and must not consume the task's cap.
 	taskRunActive bool
+	// taskRunAt is the durable timestamp shared with the owning task's LastRunAt.
+	// The stable session ID is the run's identity; this timestamp is display data
+	// and distinguishes current records from ones written before run publication
+	// moved inside the manager boundary. Zero selects the daemon's deliberately
+	// conservative compatibility decision for those older records.
+	taskRunAt time.Time
+	// taskRunSequence is the daemon-assigned, clock-independent order of this
+	// session-backed delivery. The stable session ID remains its identity; this
+	// sequence decides which delayed start publication is newer. Zero predates
+	// the ordering field.
+	taskRunSequence uint64
+	// taskRunRevision is the owning task row's last-run revision captured before
+	// provisioning. Publication is admitted only while that revision is unchanged.
+	taskRunRevision uint64
+	// taskRunInterruptionPending is the durable outbox bit for an interrupted
+	// session-backed run. Runtime replacement raises it in the same critical
+	// section that closes taskRunActive; the daemon clears it only after the exact
+	// task outcome lands or a newer task row proves it no longer applies. Persisted
+	// so a daemon exit between those two store writes cannot lose the obligation.
+	taskRunInterruptionPending bool
+	// runtimeReplacementSettlementBlocked is a process-local hold on the restore
+	// fence. It is raised only when a replacement closed an active task run but
+	// that close failed to reach the session store. ConfirmLive and the restore
+	// owner's deferred release both yield until a later settlement persists the
+	// close; otherwise a restart could reload the run as active and let the
+	// replacement's idle edge execute on_complete.
+	runtimeReplacementSettlementBlocked bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.
@@ -129,7 +161,12 @@ type Instance struct {
 	lastPromptAttemptAt      time.Time
 	lastPromptDeliveryStatus PromptDeliveryStatus
 	lastPaneChurnAt          time.Time
-	loadRuntimeReplaced      bool
+	loadRuntimeReplacement   LoadRuntimeReplacement
+	// loadRuntimeReplacementCheckpoint is installed only while a persisted local
+	// instance is being reconstructed. The daemon uses it to make an interrupted
+	// task-run close durable after tmux proves the old pane absent and before tmux
+	// starts its replacement. It is cleared before the Instance is published.
+	loadRuntimeReplacementCheckpoint func(InstanceData) error
 	// stateEpoch is the generation counter for lifecycle state and prompt-observation
 	// boundaries, bumped by every writer that changes one (#2135, #3168). It is how
 	// an observer learns whether its captured-pane decision was superseded before it applies it;

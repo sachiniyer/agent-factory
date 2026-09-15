@@ -528,6 +528,23 @@ func (t *TmuxSession) Restore(workDir string) error {
 // branch successfully created a replacement process. Callers that retain facts
 // about one concrete pane use this result to retire them only on replacement.
 func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
+	return t.restoreWithResult(workDir, nil)
+}
+
+// RestoreWithResultBeforeRespawn is RestoreWithResult with a callback at the
+// definitive-absence boundary, before any replacement process is started. A
+// callback error leaves the name untouched and returns without spawning.
+func (t *TmuxSession) RestoreWithResultBeforeRespawn(
+	workDir string,
+	beforeRespawn func() error,
+) (RestoreResult, error) {
+	return t.restoreWithResult(workDir, beforeRespawn)
+}
+
+func (t *TmuxSession) restoreWithResult(
+	workDir string,
+	beforeRespawn func() error,
+) (RestoreResult, error) {
 	// !ExistsOrUnknown is the definitively-absent branch (#1962): only a session
 	// tmux CONFIRMED gone triggers the re-spawn. A wedged→"exists" falls through
 	// to the pure rebind below, which is the safe direction — re-spawning against
@@ -537,6 +554,11 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	if !t.ExistsOrUnknown() {
 		if workDir == "" {
 			return RestoreReattached, fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
+		}
+		if beforeRespawn != nil {
+			if err := beforeRespawn(); err != nil {
+				return RestoreReattached, fmt.Errorf("prepare replacement for tmux session %q: %w", t.sanitizedName, err)
+			}
 		}
 		log.InfoLog.Printf("tmux session %q missing on Restore; re-spawning in %s", t.sanitizedName, workDir)
 		// Program AND declaration together: the resume flags are af-authored, so a

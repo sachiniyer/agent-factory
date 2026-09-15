@@ -1,6 +1,9 @@
 package session
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // IdleReason is the daemon's mechanically established explanation for why a
 // session is not doing visible work. It deliberately excludes semantic guesses
@@ -216,25 +219,120 @@ func (i *Instance) ClearIdleEvidence() bool {
 	return changed
 }
 
-// markLoadRuntimeReplaced records that Start(false) created a replacement
-// process or retired an unverified reattachment's persisted runtime command.
-// The daemon loader consumes this after FromInstanceData returns so the
-// timestamp or evidence clear is checkpointed before the row is installed.
-// Marking a sibling replacement does not clear agent evidence.
-func (i *Instance) markLoadRuntimeReplaced() {
+// LoadRuntimeReplacement carries the process-local settlement produced while a
+// persisted session is reconstructed. Replaced says some runtime fact needs a
+// checkpoint: a process was replaced or an unverified reattachment retired its
+// persisted launch-command evidence. Agent distinguishes a confirmed replacement
+// of the task-owning runtime from both evidence retirement and a sibling tab;
+// InterruptedTaskRun is set only when that agent replacement closed an active run.
+type LoadRuntimeReplacement struct {
+	Replaced                        bool
+	Agent                           bool
+	InterruptedTaskRun              TaskRunIdentity
+	TaskRunInterrupted              bool
+	TaskRunInterruptionCheckpointed bool
+	StartupFailure                  error
+}
+
+// markLoadRuntimeReplaced records that Start(false) created a replacement agent
+// or sibling process, or retired unverified runtime-command evidence. A confirmed
+// agent replacement also reaches the shared task-run replacement rule while
+// provenance is exact; the other cases deliberately do not. The daemon loader
+// consumes this after FromInstanceData returns so every affected fact can be
+// settled before the restored map is authoritative.
+func (i *Instance) markLoadRuntimeReplaced(agent bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.loadRuntimeReplaced = true
+	i.loadRuntimeReplacement.Replaced = true
+	if !agent {
+		return
+	}
+	i.loadRuntimeReplacement.Agent = true
+	run, interrupted := i.interruptTaskRunAtRuntimeReplacementLocked()
+	if interrupted {
+		i.loadRuntimeReplacement.InterruptedTaskRun = run
+		i.loadRuntimeReplacement.TaskRunInterrupted = true
+	}
+}
+
+// confirmLoadAgentRuntimeReplacement records the positive half of the load
+// boundary. prepareLoadAgentRuntimeReplacement runs before tmux Start so it can
+// make an interrupted close durable; only RestoreRespawned proves the process
+// was actually created and may be reported to daemon settlement as replaced.
+func (i *Instance) confirmLoadAgentRuntimeReplacement() {
+	i.mu.Lock()
+	i.loadRuntimeReplacement.Replaced = true
+	i.loadRuntimeReplacement.Agent = true
+	i.mu.Unlock()
+}
+
+// prepareLoadAgentRuntimeReplacement retires evidence owned by a definitively
+// absent agent pane and checkpoints an interrupted task run before tmux may
+// create its replacement. This ordering makes a spawned-but-uncheckpointed
+// replacement unrepresentable on the daemon load path.
+func (i *Instance) prepareLoadAgentRuntimeReplacement() error {
+	i.ClearIdleEvidence()
+	resetAgentBrokerCaptures(i)
+	i.mu.Lock()
+	i.loadRuntimeReplacement.Agent = true
+	run, interrupted := i.interruptTaskRunAtRuntimeReplacementLocked()
+	if interrupted {
+		i.loadRuntimeReplacement.InterruptedTaskRun = run
+		i.loadRuntimeReplacement.TaskRunInterrupted = true
+	}
+	checkpoint := i.loadRuntimeReplacementCheckpoint
+	i.mu.Unlock()
+	if !interrupted {
+		return nil
+	}
+	if checkpoint == nil {
+		return fmt.Errorf("cannot replace a task runtime without a durable interruption checkpoint")
+	}
+	if err := checkpoint(i.ToInstanceData()); err != nil {
+		return err
+	}
+	i.mu.Lock()
+	i.loadRuntimeReplacement.TaskRunInterruptionCheckpointed = true
+	i.mu.Unlock()
+	return nil
+}
+
+func (i *Instance) loadRuntimeInterruptionCheckpointed() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.loadRuntimeReplacement.TaskRunInterruptionCheckpointed
+}
+
+// retainLoadFailureWithPendingTaskOutcome keeps a durable outbox reachable when
+// runtime reconstruction fails after the predecessor close was checkpointed.
+// A failed respawn remains ordinary Lost recovery; a later failure after tmux
+// positively created the replacement is conservatively startup-unknown instead.
+// Either way the failed constructor is no longer allowed to discard the only
+// in-memory object through which the daemon drains the pending task outcome.
+func (i *Instance) retainLoadFailureWithPendingTaskOutcome(cause error) {
+	i.mu.Lock()
+	replacementMayBeLive := i.loadRuntimeReplacement.Replaced
+	i.loadRuntimeReplacement.Replaced = false
+	i.loadRuntimeReplacement.StartupFailure = cause
+	i.started = true
+	if replacementMayBeLive {
+		i.startupStateUnknown = true
+	} else {
+		i.liveness = LiveLost
+		i.inFlightOp = OpNone
+	}
+	i.touchLocked()
+	i.mu.Unlock()
 }
 
 // ConsumeLoadRuntimeReplacement reports one load-time replacement exactly once.
 // It is process-local coordination, never a persisted fact about the session.
-func (i *Instance) ConsumeLoadRuntimeReplacement() bool {
+func (i *Instance) ConsumeLoadRuntimeReplacement() LoadRuntimeReplacement {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	replaced := i.loadRuntimeReplaced
-	i.loadRuntimeReplaced = false
-	return replaced
+	replacement := i.loadRuntimeReplacement
+	i.loadRuntimeReplacement = LoadRuntimeReplacement{}
+	return replacement
 }
 
 // ReconcileIdleEvidence mirrors the daemon's evidence onto a client row model.

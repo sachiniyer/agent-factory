@@ -252,31 +252,28 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase))
 		}
-		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
+		restoreResult, err := tmuxSession.RestoreWithResultBeforeRespawn(
+			workDir,
+			i.prepareLoadAgentRuntimeReplacement,
+		)
 		if err != nil {
-			preserveAgentHandle = retainsInertInstance(err)
+			_, pendingTaskOutcome := i.PendingTaskRunInterruption()
+			preserveAgentHandle = retainsInertInstance(err) || pendingTaskOutcome
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
 			return setupErr
 		}
 		if restoreResult == tmux.RestoreRespawned {
+			i.confirmLoadAgentRuntimeReplacement()
 			if strings.TrimSpace(runtimeProgram) != "" {
 				i.setRuntimeProgram(runtimeProgram)
 			}
-			// The persisted delivery verdict and pane age belonged to the process
-			// that disappeared with the old tmux server. A pure reattach preserves
-			// them; a confirmed respawn must not attribute them to its replacement.
-			i.ClearIdleEvidence()
-			// This also calls noteAgentRuntimeReplaced, which touches UpdatedAt
-			// unconditionally, even when there was no idle evidence to clear.
-			resetAgentBrokerCaptures(i)
-			i.markLoadRuntimeReplaced()
 		} else {
 			// A tmux name surviving across daemon downtime does not prove that it
 			// still names the process AF launched: an operator can remove and recreate
 			// the session under the same sanitized name. Keep the live pane, but retire
 			// its persisted launch-command claim and checkpoint that loss of evidence.
 			if i.clearRuntimeProgramForUnverifiedReattach() {
-				i.markLoadRuntimeReplaced()
+				i.markLoadRuntimeReplaced(false)
 			}
 		}
 	} else {
@@ -366,7 +363,8 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 	if err := b.setupTabs(i); err != nil {
 		// A retained failure leaves the agent RUNNING, so keep the handle that
 		// names it: nilling the ref here would orphan the pane. See the predicate.
-		preserveAgentHandle = retainsInertInstance(err)
+		_, pendingTaskOutcome := i.PendingTaskRunInterruption()
+		preserveAgentHandle = retainsInertInstance(err) || pendingTaskOutcome
 		setupErr = finishLaunchTabFailure(firstTimeSetup, tmuxSession, err)
 		return setupErr
 	}
@@ -598,7 +596,7 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				i.mu.Lock()
 				i.touchLocked()
 				i.mu.Unlock()
-				i.markLoadRuntimeReplaced()
+				i.markLoadRuntimeReplaced(false)
 				if account != "" {
 					respawnedAccountTabs = append(respawnedAccountTabs, tab.tmux)
 				}

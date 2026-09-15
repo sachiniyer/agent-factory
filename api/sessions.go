@@ -661,7 +661,7 @@ parse it rather than render it.`,
 //
 // The remote branch is #1974. Attach runs over the apiclient transport, so it
 // follows --daemon-url to another machine — but it was resolving the session on
-// THIS machine's disk first (resolveRepoID + findLiveInstanceByTitleInScope),
+// THIS machine's disk first (resolveRepoID + findInstanceByTitleInScope),
 // which fails "session not found" before any remote call for a session that
 // only exists on the daemon. Both halves were wrong against a remote: the repo
 // ID hashes the CLIENT's cwd, naming a repo the daemon has never heard of, and
@@ -670,10 +670,10 @@ parse it rather than render it.`,
 // (by id from memory, then by title from its own disk) — mirroring the preview
 // command's remote branch above, the other apiclient-transport read.
 //
-// The LOCAL path is deliberately unchanged: resolveRepoIDForLookup is identical
-// to resolveRepoID when no remote target is set, and the disk lookup still
-// restores the instance, which is what gives the local daemon a session to
-// attach to.
+// The LOCAL path still proves the title exists in the requested project before
+// dialing, but it resolves IDENTITY ONLY. Runtime restoration belongs to the
+// daemon started below: only that process owns the durable interruption
+// checkpoint and outbox drain required when reboot removed a task runtime.
 func resolveAttachTarget(title string) (string, string, error) {
 	repoID, err := resolveRepoIDForLookup()
 	if err != nil {
@@ -682,11 +682,11 @@ func resolveAttachTarget(title string) (string, string, error) {
 	if apiclient.IsRemoteTarget() {
 		return title, repoID, nil
 	}
-	instance, _, err := findLiveInstanceByTitleInScope(repoID, title)
+	data, _, err := findInstanceByTitleInScope(repoID, title)
 	if err != nil {
 		return "", "", err
 	}
-	return instance.Title, repoID, nil
+	return data.Title, repoID, nil
 }
 
 var sessionsAttachCmd = &cobra.Command{

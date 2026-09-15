@@ -44,7 +44,7 @@ func TestUpdatedAtLoadRuntimeBoundary(t *testing.T) {
 			require.True(t, i.lastPromptAttemptAt.IsZero())
 			require.Empty(t, i.lastPromptDeliveryStatus)
 			require.True(t, i.lastPaneChurnAt.IsZero())
-			require.Equal(t, !existing, i.ConsumeLoadRuntimeReplacement())
+			require.Equal(t, !existing, i.ConsumeLoadRuntimeReplacement().Replaced)
 			if existing {
 				require.Equal(t, before, i.ToInstanceData().UpdatedAt)
 				require.Zero(t, clockCalls, "reattachment is reconstruction, not activity")
@@ -109,6 +109,7 @@ func TestUpdatedAtLoadSiblingRuntimeBoundary(t *testing.T) {
 				tab := &Tab{ID: "sibling", Name: "sibling", Kind: kind, Command: "sh", tmux: sibling}
 				i := &Instance{Title: "updated-at-sibling", Path: repo, Program: "claude", backend: &LocalBackend{},
 					liveness: LiveReady, CreatedAt: before, UpdatedAt: before, gitWorktree: gw, Tabs: []*Tab{newAgentTab(agent), tab},
+					TaskID: "task-sibling", taskRunActive: true,
 					lastPromptAttemptAt: before, lastPromptDeliveryStatus: PromptDelivered, lastPaneChurnAt: before}
 				// Seed the durable record before load, then checkpoint only when the
 				// daemon settlement predicate includes this instance.
@@ -125,12 +126,15 @@ func TestUpdatedAtLoadSiblingRuntimeBoundary(t *testing.T) {
 				require.Equal(t, before, i.lastPromptAttemptAt)
 				require.Equal(t, PromptDelivered, i.lastPromptDeliveryStatus)
 				require.Equal(t, before, i.lastPaneChurnAt)
-				enrolled := i.ConsumeLoadRuntimeReplacement()
-				require.Equal(t, !existing, enrolled)
-				if enrolled {
+				require.True(t, i.TaskRunActive(),
+					"replacing a sibling tab does not replace the agent runtime that received the task prompt")
+				replacement := i.ConsumeLoadRuntimeReplacement()
+				require.Equal(t, !existing, replacement.Replaced)
+				require.False(t, replacement.Agent)
+				if replacement.Replaced {
 					require.NoError(t, storage.SaveInstances([]*Instance{i}))
 				}
-				require.False(t, i.ConsumeLoadRuntimeReplacement(), "settlement is consumed once")
+				require.False(t, i.ConsumeLoadRuntimeReplacement().Replaced, "settlement is consumed once")
 				want := before
 				if !existing {
 					want = now

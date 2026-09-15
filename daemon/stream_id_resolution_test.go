@@ -91,7 +91,7 @@ func TestResolveStreamSessionByIDRehydratesOnMiss(t *testing.T) {
 	decoy.ID = decoyID
 	var diskBuilds atomic.Int32
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(data session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, data session.InstanceData) (*session.Instance, error) {
 		diskBuilds.Add(1)
 		switch data.ID {
 		case stableID:
@@ -239,7 +239,7 @@ func TestResolveStreamSessionRepoScopedTitleBeatsForeignStableIDAfterRefresh(t *
 	foreign, _ := newCountingInstance(t, "foreign", repoB)
 	foreign.ID = rows[rb.ID].ID
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(data session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, data session.InstanceData) (*session.Instance, error) {
 		switch data.ID {
 		case scoped.ID:
 			return scoped, nil
@@ -292,7 +292,7 @@ func TestResolveStreamSessionTrackedTitleSkipsDiskRefresh(t *testing.T) {
 	seedDiskInstance(t, repo.ID, "disk-only", repoPath)
 	var diskBuilds atomic.Int32
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(string, session.InstanceData) (*session.Instance, error) {
 		diskBuilds.Add(1)
 		return nil, errors.New("unexpected preview-path disk materialization")
 	}

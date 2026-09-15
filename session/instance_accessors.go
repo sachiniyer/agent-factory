@@ -663,9 +663,20 @@ func (i *Instance) SetStartedForTest(started bool) {
 }
 
 // MarkLoadRuntimeReplacedForTest seeds the loader settlement owed by a
-// confirmed Start(false) respawn. Production sets it only from LocalBackend.
-func (i *Instance) MarkLoadRuntimeReplacedForTest() {
-	i.markLoadRuntimeReplaced()
+// confirmed Start(false) respawn. Agent reports whether the task-owning runtime,
+// rather than a sibling tab, was replaced. Production sets it only from LocalBackend.
+func (i *Instance) MarkLoadRuntimeReplacedForTest(agent bool) {
+	i.markLoadRuntimeReplaced(agent)
+}
+
+// MarkLoadRuntimeInterruptionCheckpointedForTest seeds the durable-close proof
+// the loader records once its pre-spawn checkpoint write has succeeded.
+// Test-only: production reaches it only through prepareLoadAgentRuntimeReplacement.
+func (i *Instance) MarkLoadRuntimeInterruptionCheckpointedForTest() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.loadRuntimeReplacement.TaskRunInterruptionCheckpointed = true
+	i.touchLocked()
 }
 
 // SetPendingTabCleanupForTest seeds the unconfirmed tab-teardown handles a

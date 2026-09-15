@@ -221,6 +221,8 @@ func TestGetTaskNotFound(t *testing.T) {
 	_, err := GetTask("missing")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
+	assert.True(t, IsTaskNotFound(err),
+		"a successful store read with an absent row must be distinguishable from transient storage failure")
 }
 
 // ptr returns the address of v, for building the pointer fields of a TaskUpdate
@@ -354,19 +356,23 @@ func TestUpdateTaskNotFound(t *testing.T) {
 // UpdateTask is a user-edit path; its caller may hold a stale copy of the
 // scheduler-owned status fields (read before a concurrent scheduler run or
 // manual trigger bumped them via UpdateTaskStatus). UpdateTask must NOT
-// clobber the fresher on-disk LastRunAt/LastRunStatus (nor the immutable
-// CreatedAt) when applying a user edit.
+// clobber the fresher on-disk LastRunAt/LastRunStatus/LastRunSessionID/
+// LastRunSequence/LastRunRevision or GenerationID (nor the immutable CreatedAt)
+// when applying a user edit.
 func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	created := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
 	tasks := []Task{
-		{ID: "u1", Name: "Old Name", Prompt: "old prompt", CronExpr: "0 * * * *", Enabled: true, CreatedAt: created, LastRunAt: &t1, LastRunStatus: "started"},
+		{ID: "u1", Name: "Old Name", Prompt: "old prompt", CronExpr: "0 * * * *", Enabled: true,
+			CreatedAt: created, GenerationID: "generation-a", LastRunAt: &t1, LastRunStatus: "started"},
 	}
 	setupTestTasks(t, tasks)
 
 	// Scheduler bumps the status to a fresher value via the canonical path.
 	t2 := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
-	_, statusErr := UpdateTaskStatus("u1", &t2, "completed")
+	_, _, statusErr := BeginTaskRun("u1", "generation-a", "session-new", 1, 0, t2, "started")
+	require.NoError(t, statusErr)
+	_, statusErr = UpdateTaskStatus("u1", nil, "completed")
 	require.NoError(t, statusErr)
 
 	// A user edit patches only user-editable fields; the scheduler-owned status
@@ -391,6 +397,10 @@ func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 	require.NotNil(t, s.LastRunAt)
 	assert.True(t, s.LastRunAt.Equal(t2), "LastRunAt must retain the fresher scheduler value t2, not regress to stale t1")
 	assert.Equal(t, "completed", s.LastRunStatus, "LastRunStatus must retain the fresher scheduler value, not regress to stale")
+	assert.Equal(t, "session-new", s.LastRunSessionID, "LastRunSessionID must retain the fresher scheduler identity")
+	assert.Equal(t, uint64(1), s.LastRunSequence, "LastRunSequence must retain the scheduler ordering proof")
+	assert.Equal(t, uint64(1), s.LastRunRevision, "LastRunRevision must retain the task-wide status barrier")
+	assert.Equal(t, "generation-a", s.GenerationID, "GenerationID is immutable across task edits")
 	assert.True(t, s.CreatedAt.Equal(created), "CreatedAt is immutable and must be preserved from disk")
 }
 
@@ -426,6 +436,22 @@ func TestGenerateIDEntropyFailure(t *testing.T) {
 	require.Error(t, err, "GenerateID must surface the entropy failure")
 	assert.Empty(t, id, "no ID may be returned when entropy is unavailable")
 	assert.NotEqual(t, "00000000", id, "GenerateID must never emit the all-zero ID")
+}
+
+func TestAddTaskGenerationEntropyFailureDoesNotWrite(t *testing.T) {
+	setupTestTasks(t, []Task{})
+	orig := randReader
+	randReader = failingReader{}
+	t.Cleanup(func() { randReader = orig })
+
+	err := AddTask(Task{
+		ID: "entropy1", Prompt: "p", CronExpr: "0 9 * * *", ProjectPath: "/tmp", Enabled: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "task generation ID")
+	stored, loadErr := LoadTasks()
+	require.NoError(t, loadErr)
+	assert.Empty(t, stored, "an add without a durable incarnation token must not create a task")
 }
 
 // TestLoadTaskWithoutProgramFieldFallsBackToEmpty verifies that a task record
@@ -611,6 +637,124 @@ func TestUpdateTaskStatus_NilLastRunAtPreservesTimestamp(t *testing.T) {
 	assert.Equal(t, "stopped", got.LastRunStatus, "LastRunStatus must still update")
 }
 
+func TestTaskRunIdentitySeparatesEqualTimestampSessions(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	setupTestTasks(t, []Task{{
+		ID: "w1", Name: "Watcher", Prompt: "p", WatchCmd: "tail -f x",
+		ProjectPath: "/tmp", Enabled: true,
+	}})
+
+	_, _, err := BeginTaskRun("w1", "", "session-a", 1, 0, runAt, "started")
+	require.NoError(t, err)
+	_, _, err = BeginTaskRun("w1", "", "session-b", 2, 0, runAt, "started")
+	require.NoError(t, err)
+
+	_, applied, err := UpdateTaskRunStart("w1", "", "session-a", 1, 0, runAt, "started")
+	require.NoError(t, err)
+	assert.False(t, applied, "a delayed older start cannot replace the manager-published successor")
+	_, applied, err = UpdateTaskRunOutcome("w1", "", "session-a", "interrupted: agent runtime lost")
+	require.NoError(t, err)
+	assert.False(t, applied, "equal timestamps do not let one session claim another's row")
+	_, applied, err = UpdateTaskRunOutcome("w1", "", "session-b", "interrupted: agent runtime lost")
+	require.NoError(t, err)
+	require.True(t, applied)
+
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	assert.Equal(t, "session-b", got.LastRunSessionID)
+	assert.Equal(t, uint64(2), got.LastRunSequence)
+	assert.Equal(t, "interrupted: agent runtime lost", got.LastRunStatus)
+}
+
+func TestNonSessionStatusRetainsTaskRunSequenceHighWater(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
+	_, _, err := BeginTaskRun("w1", "", "session-a", 7, 0, runAt, RunStatusStarted)
+	require.NoError(t, err)
+	targetAt := runAt.Add(time.Minute)
+	_, err = UpdateTaskStatus("w1", &targetAt, "sent")
+	require.NoError(t, err)
+
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	assert.Empty(t, got.LastRunSessionID)
+	assert.Equal(t, uint64(7), got.LastRunSequence,
+		"a target delivery clears ownership but must not let a restarted manager reuse an old order")
+}
+
+func TestTaskRunOutcomePreservesLaterWatcherSupervisionStatus(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	for _, runStatus := range []string{RunStatusStarted, RunStatusLimitParked} {
+		for _, supervisionStatus := range []string{"stopped", "errored: watcher exited"} {
+			t.Run(runStatus+"/"+supervisionStatus, func(t *testing.T) {
+				setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
+				_, _, err := BeginTaskRun("w1", "", "session-a", 1, 0, runAt, runStatus)
+				require.NoError(t, err)
+				_, err = UpdateTaskStatus("w1", nil, supervisionStatus)
+				require.NoError(t, err)
+
+				_, applied, err := UpdateTaskRunOutcome("w1", "", "session-a", "interrupted: agent runtime lost")
+				require.NoError(t, err)
+				assert.False(t, applied)
+				got, err := GetTask("w1")
+				require.NoError(t, err)
+				assert.Equal(t, supervisionStatus, got.LastRunStatus)
+				assert.Equal(t, "session-a", got.LastRunSessionID,
+					"status-only supervision must preserve the run identity it superseded")
+			})
+		}
+	}
+}
+
+func TestTaskRunOutcomeClosesResumedParkedRun(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
+	_, _, err := BeginTaskRun("w1", "", "session-a", 1, 0, runAt, "parked: usage limit")
+	require.NoError(t, err)
+
+	_, applied, err := UpdateTaskRunOutcome("w1", "", "session-a", "interrupted: agent runtime lost")
+	require.NoError(t, err)
+	require.True(t, applied,
+		"a resumed run retains its session identity when the parked status write survives its prompt delivery")
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	assert.Equal(t, "interrupted: agent runtime lost", got.LastRunStatus)
+}
+
+func TestTaskRunStartRepairsOverPriorIdentifiedRow(t *testing.T) {
+	oldRunAt := time.Date(2026, 9, 11, 8, 0, 0, 0, time.UTC)
+	newRunAt := oldRunAt.Add(time.Hour)
+	setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
+	_, _, err := BeginTaskRun("w1", "", "session-old", 1, 0, oldRunAt, "started")
+	require.NoError(t, err)
+
+	_, applied, err := UpdateTaskRunStart("w1", "", "session-new", 2, 0, newRunAt, "started")
+	require.NoError(t, err)
+	require.True(t, applied,
+		"repairing a committed new session must not require the previous run identity to be empty")
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	assert.Equal(t, "session-new", got.LastRunSessionID)
+	assert.Equal(t, uint64(2), got.LastRunSequence)
+}
+
+func TestTaskRunStartRepairsOnlyAnUnidentifiedRow(t *testing.T) {
+	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	setupTestTasks(t, []Task{{ID: "w1", LastRunStatus: "started"}})
+
+	_, applied, err := UpdateTaskRunStart("w1", "", "session-a", 1, 0, runAt, "started")
+	require.NoError(t, err)
+	require.True(t, applied)
+	_, applied, err = UpdateTaskRunStart("w1", "", "session-a", 1, 0, runAt, "started")
+	require.NoError(t, err)
+	assert.False(t, applied)
+
+	got, err := GetTask("w1")
+	require.NoError(t, err)
+	assert.Equal(t, "session-a", got.LastRunSessionID)
+	assert.Equal(t, uint64(1), got.LastRunSequence)
+}
+
 // TestUpdateTaskStatus_NotFound verifies the not-found error path that the
 // runner / TUI rely on to log a meaningful failure when a task is deleted
 // mid-run.
@@ -621,6 +765,7 @@ func TestUpdateTaskStatus_NotFound(t *testing.T) {
 	_, err := UpdateTaskStatus("missing", &now, "started")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
+	assert.True(t, IsTaskNotFound(err))
 }
 
 // TestUpdateTask_RejectsBadProgram is the regression guard that #664's fix

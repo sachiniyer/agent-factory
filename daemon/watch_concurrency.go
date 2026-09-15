@@ -84,14 +84,19 @@ func isAtConcurrencyLimitErr(err error) bool {
 // limit exists to fix. The agent's own work outlasts the hook in the reported
 // case anyway.
 
-// taskRunReservationKey scopes an in-flight reservation to the task AND its repo,
+// taskRunReservationKey scopes an in-flight reservation to one task generation
+// AND its repo,
 // matching how countTaskRunsLocked filters live sessions. Keying by task id alone
 // would be correct today — task ids are globally unique and a task maps to one
 // repo — but a bare-id key would silently start counting across repos the instant
 // that invariant changed, so the reservation and the live count use the same
-// (repo, task) scope.
-func taskRunReservationKey(repoID, taskID string) string {
-	return repoID + "\x00" + taskID
+// (repo, task, generation) scope. Task IDs are reusable after removal; the
+// generation keeps predecessor sessions and unloadable rows from consuming the
+// replacement task's capacity. Empty remains its own legacy generation rather
+// than being guessed to belong to a later minted one; ambiguous pre-generation
+// rows therefore cannot charge a replacement task for work it may not own.
+func taskRunReservationKey(repoID, taskID, taskGenerationID string) string {
+	return repoID + "\x00" + taskID + "\x00" + taskGenerationID
 }
 
 // holdsTaskRunSlot reports whether one of a task's sessions still occupies a
@@ -178,11 +183,18 @@ func holdsTaskRunSlot(v session.LifecycleView) bool {
 // session MOVES. This covers where a run can BE. A row that never becomes an
 // Instance makes no transitions at all, so the table cannot see it — which is
 // exactly how it got missed.
-func (m *Manager) countTaskRunsLocked(repoID, taskID string) int {
-	key := taskRunReservationKey(repoID, taskID)
+func (m *Manager) countTaskRunsLocked(repoID, taskID, taskGenerationID string) int {
+	key := taskRunReservationKey(repoID, taskID, taskGenerationID)
 	inFlight := m.reservedTaskRuns[key] + m.ghostTaskRuns[key]
 	for key, inst := range m.instances {
-		if inst == nil || inst.TaskID != taskID {
+		if inst == nil {
+			continue
+		}
+		// Ownership and activity come from one snapshot. A restore mutates outside
+		// m.mu, so splitting these reads would reopen the interleaving this view
+		// exists to prevent.
+		view := inst.LifecycleView()
+		if view.TaskID != taskID || view.TaskGenerationID != taskGenerationID {
 			continue
 		}
 		if rid, _ := splitDaemonInstanceKey(key); rid != repoID {
@@ -193,7 +205,7 @@ func (m *Manager) countTaskRunsLocked(repoID, taskID string) int {
 		// One snapshot per session, taken once and judged once: the restore loop
 		// mutates instances without m.mu, so re-reading the instance inside the
 		// predicate would let a session slip between its arms and go uncounted.
-		if holdsTaskRunSlot(inst.LifecycleView()) {
+		if holdsTaskRunSlot(view) {
 			inFlight++
 		}
 	}
@@ -206,14 +218,14 @@ func (m *Manager) countTaskRunsLocked(repoID, taskID string) int {
 // leaving a half-applied create behind. reserveTaskRunLocked records the slot
 // only once the create is committed to succeeding. reserveCreate holds m.mu
 // unbroken between the two, so no other create can change the count in the gap.
-func (m *Manager) admitTaskRunLocked(repoID, taskID string, limit int) error {
+func (m *Manager) admitTaskRunLocked(repoID, taskID, taskGenerationID string, limit int) error {
 	if taskID == "" || limit <= 0 {
 		// No provenance or no cap: unlimited, exactly as before #1892. Zero is the
 		// default for every task written before this field existed, so an absent
 		// cap can never change an existing task's behavior.
 		return nil
 	}
-	if m.countTaskRunsLocked(repoID, taskID) >= limit {
+	if m.countTaskRunsLocked(repoID, taskID, taskGenerationID) >= limit {
 		return errAtConcurrencyLimit
 	}
 	return nil
@@ -223,11 +235,11 @@ func (m *Manager) admitTaskRunLocked(repoID, taskID string, limit int) error {
 // instance in m.instances, so a burst cannot count the same zero N times and
 // admit them all. It runs only on the committed-to-succeed path, after
 // admitTaskRunLocked passed under the same lock hold. Callers hold m.mu.
-func (m *Manager) reserveTaskRunLocked(repoID, taskID string, limit int) {
+func (m *Manager) reserveTaskRunLocked(repoID, taskID, taskGenerationID string, limit int) {
 	if taskID == "" || limit <= 0 {
 		return
 	}
-	m.reservedTaskRuns[taskRunReservationKey(repoID, taskID)]++
+	m.reservedTaskRuns[taskRunReservationKey(repoID, taskID, taskGenerationID)]++
 }
 
 // releaseTaskRunLocked drops a slot reserved by reserveTaskRunLocked. It runs
@@ -236,11 +248,11 @@ func (m *Manager) reserveTaskRunLocked(repoID, taskID string, limit int) {
 // and has begun holding the slot on its own. The momentary overlap (reservation
 // and session both counted) is deliberate: over-counting for an instant refuses
 // one extra event, while a gap would admit one too many. Callers hold m.mu.
-func (m *Manager) releaseTaskRunLocked(repoID, taskID string) {
+func (m *Manager) releaseTaskRunLocked(repoID, taskID, taskGenerationID string) {
 	if taskID == "" {
 		return
 	}
-	key := taskRunReservationKey(repoID, taskID)
+	key := taskRunReservationKey(repoID, taskID, taskGenerationID)
 	if n := m.reservedTaskRuns[key]; n > 1 {
 		m.reservedTaskRuns[key] = n - 1
 		return

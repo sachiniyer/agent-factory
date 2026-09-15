@@ -26,7 +26,7 @@ type cappedDeliver struct {
 	pauseRelease chan struct{}
 }
 
-func (d *cappedDeliver) deliver(taskID, line string) error {
+func (d *cappedDeliver) deliver(taskID, _ string, line string) error {
 	d.mu.Lock()
 	if d.atLimit {
 		d.refused++

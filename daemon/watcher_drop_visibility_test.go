@@ -27,7 +27,7 @@ func TestWatcherRateDropIsVisibleOnTaskAndListAPI(t *testing.T) {
 
 	s := newWatcherSupervisor()
 	s.eventsPerMinute = 1
-	s.deliver = func(_, _ string) error { return nil }
+	s.deliver = func(_, _, _ string) error { return nil }
 	logDir := t.TempDir()
 	s.logPath = func(taskID string) (string, error) {
 		return filepath.Join(logDir, "task-"+taskID+".log"), nil
@@ -90,7 +90,7 @@ func TestLiveDropOverlayPreservesTerminalWatcherStatus(t *testing.T) {
 			w := &taskWatcher{taskID: "d4357004", dropped: 4, lastDroppedAt: droppedAt}
 			s := &watcherSupervisor{
 				watchers:  map[string]*taskWatcher{w.taskID: w},
-				setStatus: func(_, status string) { persisted = status },
+				setStatus: func(_, _, status string) { persisted = status },
 			}
 			w.sup = s
 			w.persistTerminalStatus(terminal)

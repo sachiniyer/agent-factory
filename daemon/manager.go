@@ -197,7 +197,9 @@ type Manager struct {
 	reservedRemoteNames map[string]struct{}
 	// reservedTaskRuns counts a task's session creates that have been admitted
 	// against its max_concurrent_runs cap but have not yet registered an instance
-	// in m.instances, keyed by task id (#1892).
+	// in m.instances, keyed by repo, task id, and task generation (#1892). The
+	// generation is ownership: a removed task's create cannot consume capacity
+	// from a later task that reuses its ID.
 	//
 	// Like reservedRemoteNames it is IN-FLIGHT only — populated at admit, dropped
 	// in release, never rebuilt from disk. It has to exist because a create holds
@@ -219,7 +221,12 @@ type Manager struct {
 	// cap's count — then behaves as if that session does not exist. Its agent may
 	// still be running, so the cap must keep counting it or a failed LOAD becomes a
 	// licence to exceed max_concurrent_runs after every restart.
-	ghostTaskRuns                          map[string]int
+	ghostTaskRuns map[string]int
+	// taskRunSequence is the greatest clock-independent delivery order observed
+	// in a task row or any persisted session (including unloadable ghosts). New
+	// session-per-run creates increment it under mu, so delayed publication can
+	// never confuse manager order with wall-clock order.
+	taskRunSequence                        uint64
 	repoStartLocks, worktreeAdmissionLocks map[string]*sync.Mutex
 	// aliveObservations counts POSITIVE liveness observations per session (keyed by
 	// stableSessionKey, so a same-title successor never inherits its predecessor's).
@@ -433,13 +440,13 @@ type Manager struct {
 	// stable instance identity so a same-title successor cannot inherit an old
 	// retry delay. Guarded by m.mu.
 	handoffRetryDue map[string]time.Time
-	// settleOwed holds sessions whose SETTLEMENT write failed — the write that
-	// records the outcome of an irreversible step (a delivered handoff mission, a
-	// recovery that rebuilt a branch). Keyed like handoffRetryDue by stable
-	// instance identity. It exists because nothing else repairs those writes: the
-	// status poll's change detection does not look at what they carry, so a lost
-	// one survives to the next daemon (#2781, #2883). flushOwedSettlements drains
-	// it on the poll. Guarded by m.mu.
+	// settleOwed holds durable outcomes of irreversible steps that have not yet
+	// reached every owning store: whole session rows (a delivered handoff mission,
+	// a recovery that rebuilt a branch) and the exact task-run interruption caused
+	// by an unprompted runtime replacement. Keyed like handoffRetryDue by stable
+	// instance identity. Neither fact is reconstructed by ordinary poll change
+	// detection, so FlushOwedSettlements retries it until it lands or a newer owner
+	// supersedes it (#2781, #2883, #4222). Guarded by m.mu.
 	settleOwed map[string]settleOwedEntry
 	// remoteLossStates debounces the remote Lost transition (#1794), keyed by
 	// stableSessionKey — the stable instance ID, which is what every writer and
@@ -804,7 +811,7 @@ func (m *Manager) RestoreInstances() error {
 // RunDaemon binds its control socket first (#829), performs this load, then keeps
 // state RPCs gated until the startup orphan sweep is complete (#2632).
 func (m *Manager) restoreInstances() error {
-	instances, ghosts, err := refreshDaemonInstances(nil)
+	instances, ghosts, taskRunSequence, err := refreshDaemonInstances(nil)
 	if err != nil {
 		return err
 	}
@@ -825,8 +832,13 @@ func (m *Manager) restoreInstances() error {
 	m.mu.Lock()
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
+	m.taskRunSequence = taskRunSequence
 	m.registerLoadRuntimeSettlementsLocked(owed)
 	m.mu.Unlock()
+	// Task outcome publication needs the authoritative restored map for legacy
+	// successor checks. Drain it immediately after installation; transient task or
+	// instance storage failures remain in the same ledger for the ordinary poll.
+	m.FlushOwedSettlements()
 	return nil
 }
 
@@ -939,23 +951,6 @@ func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 		data = append(data, projected)
 	}
 	return data
-}
-
-func (m *Manager) refreshLocked() error {
-	refreshed, ghosts, err := refreshDaemonInstances(m.instances)
-	if err != nil {
-		return err
-	}
-	owed := persistLoadRuntimeReplacements(refreshed)
-	m.attachCredentialsToAll(refreshed)
-	m.instances = refreshed
-	// Replaced wholesale, never merged: the ghost set is a projection of what is on
-	// disk RIGHT NOW (#1892). A row that starts loading again must stop being a
-	// ghost, or its slot would be held twice — once by the ghost and once by the
-	// instance it became.
-	m.ghostTaskRuns = ghosts
-	m.registerLoadRuntimeSettlementsLocked(owed)
-	return nil
 }
 
 // startLockForRepo returns the per-repo lock serializing session/tab creation

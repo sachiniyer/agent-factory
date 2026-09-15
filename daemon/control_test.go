@@ -192,9 +192,9 @@ func TestManagerCreateSessionAtomicWithRefresh(t *testing.T) {
 
 	var fromInstanceDataCalls atomic.Int32
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(repoID string, d session.InstanceData) (*session.Instance, error) {
 		fromInstanceDataCalls.Add(1)
-		return prev(d)
+		return prev(repoID, d)
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
 
