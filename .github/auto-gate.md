@@ -33,8 +33,11 @@ gate compares complete Git tree snapshots of the tested commit and current
 head, restricted to the same gated paths and excluding `_test.go` files.
 Evidence survives a master merge or rebase when those files are unchanged.
 Content, path, or file-mode changes require another play-test and a new comment;
-merge shape alone cannot exempt a conflict resolution. Missing or truncated
-trees block verification. Removing the label also blocks the automatic gate.
+merge shape alone cannot exempt a conflict resolution. A gated file edited and
+then reverted to its original content inside the window keeps the attestation:
+the comparison is over bytes, so the tested bytes are the current bytes. Missing
+or truncated trees block verification. Removing the label also blocks the
+automatic gate.
 The existing manual-path advisory policy for the TUI requirement is unchanged.
 For non-allowlisted authors, snapshot read failures remain advisory as well;
 they do not suppress the manual path's independent review blockers.
