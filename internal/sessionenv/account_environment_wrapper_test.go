@@ -221,16 +221,38 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace env PORT=3000 npm start", false},
 		{"strace echo CODEX_HOME", false},
 		{"strace env CODEX_HOME codex", false},
-		// Class B (mutation inside a quoted -c script string) is a fundamental
-		// limitation of static argv analysis and stays out of scope: an
-		// unmodeled wrapper around `sh -c '...'` does NOT trip the NAME= rule
-		// (there is no literal NAME= word — the override lives inside the quoted
-		// script), and `strace` is not a known shell so the -c path does not fire
-		// either. This documents the intentional boundary the fix leaves, per
-		// the report. The modelled `sh -c 'unset CODEX_HOME; codex'` (no
-		// wrapper) IS refused via shellCommandIsUnproven — verified separately.
-		{"strace sh -c 'unset CODEX_HOME; codex'", false},
+		// A shell word in an unmodeled wrapper's tail is judged by the same
+		// shellCommandIsUnproven rule the modeled path applies at command
+		// position, so a literal -c script is refused even inside the quotes —
+		// `strace sh -c '...'` execs exactly what `nice sh -c '...'` does.
+		{"strace sh -c 'unset CODEX_HOME; codex'", true},
+		{"strace sh -c 'export CODEX_HOME=/x; codex'", true},
+		{"strace bash -c 'CODEX_HOME=/x codex'", true},
 		{"sh -c 'unset CODEX_HOME; codex'", true}, // control: bare shell form is caught
+		// A trailing shell name with no argv after it has nothing to prove
+		// against, so noun-uses stay allowed.
+		{"strace sh", false},
+		{"echo sh", false},
+		{"man sh", false},
+		{"strace -p 1234 sh", false},
+		// A tail that parses as a real unproven shell invocation refuses even
+		// under a non-wrapper head — the same trade `echo env X=y cmd` takes.
+		{"echo sh -c 'unset CODEX_HOME'", true},
+		// strace's own -E/--env option injects or removes the variable in the
+		// traced child's environment — the mutation without an env word. The
+		// separate-word, attached, and long forms all refuse; -E is matched
+		// only under strace because it means extended-regexp elsewhere.
+		{"strace -E CODEX_HOME=/other codex", true},
+		{"strace -E CODEX_HOME codex", true},
+		{"strace -ECODEX_HOME=/other codex", true},
+		{"strace --env=CODEX_HOME=/other codex", true},
+		{"strace --env CODEX_HOME=/other codex", true},
+		{"grep -E 'CODEX_HOME=' /etc/environment", false},
+		{"strace -E FOO=1 codex", false},
+		{"strace --env=PORT=3000 codex", false},
+		// An option word whose value is a denied NAME= assignment mutates the
+		// child's environment even when the option is not strace's.
+		{"unrecognized --setenv=CODEX_HOME=/other codex", true},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, codex)

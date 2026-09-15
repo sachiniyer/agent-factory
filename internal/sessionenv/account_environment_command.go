@@ -307,37 +307,82 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 // `rg 'OPENAI_API_KEY='`, `man env`, `make env`, `git grep env`, `ls env/bin`,
 // `pip show env`, or `strace -p 1234 env` (none of which carries a nested env
 // invocation with a denied assignment) stay allowed.
+//
+// The same tail scan applies the modeled path's other two rules one level
+// down: a shell word with argv is judged by shellCommandIsUnproven exactly as
+// a bare `sh -c '...'` command is, and a literal option word whose VALUE is a
+// denied name or assignment (xargs --process-slot-var=NAME, strace -E var=val
+// and --env=var=val) is refused — a wrapper's own options can place the
+// mutation without any env word.
 func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}) bool {
-	for i, word := range words[1:] {
+	strace := isAccountCommandName(words[0], "strace")
+	for i := 1; i < len(words); i++ {
+		word := words[i]
 		if isAccountCommandName(word, "env") {
 			// A nested env only mutates the child it execs; requireCommand
 			// keeps an `env CODEX_HOME=/tmp` whose argv ends there — env's
 			// print mode, which overrides nothing — allowed.
-			if envCallMutatesAccountEnvironment(words[2+i:], names, true) {
+			if envCallMutatesAccountEnvironment(words[i+1:], names, true) {
 				return true
 			}
 			continue
 		}
-		if literal, ok := literalShellWord(word); !ok {
+		literal, ok := literalShellWord(word)
+		if !ok {
 			// An unprovable tail word can itself expand to `env` (or to a
 			// multiword `env NAME=value` after word splitting); judge the
 			// words after it as that invocation's argv.
-			if envCallMutatesAccountEnvironment(words[2+i:], names, true) {
+			if envCallMutatesAccountEnvironment(words[i+1:], names, true) {
 				return true
 			}
 			continue
-		} else if strings.HasPrefix(literal, "-") {
-			// An unrecognized wrapper may expose options that mutate its
-			// child's environment in option-value form — xargs's
-			// --process-slot-var=NAME sets NAME on every exec'd command, and
-			// strace's -E var=val is analogous. A literal `--opt=DENIED`
-			// (or `-o DENIED=value`, caught by the NAME= shape above only
-			// when the whole word is assignment-shaped) is refused when its
-			// value names a denied variable.
-			if _, value, ok := strings.Cut(literal, "="); ok {
-				if _, denied := names[value]; denied {
+		}
+		if !strings.HasPrefix(literal, "-") {
+			// A shell in the wrapper's tail gets the same verdict a bare
+			// shell command gets: `strace sh -c 'unset CODEX_HOME; codex'`
+			// execs the literal script the modeled path already refuses
+			// under `nice sh -c ...`. Only the trusted account-shell form
+			// proves out. A trailing shell name with no argv (echo sh,
+			// strace -p 1 sh) has nothing to judge and stays allowed.
+			if i+1 < len(words) && knownShellName(filepath.Base(literal)) &&
+				shellCommandIsUnproven(words[i:]) {
+				return true
+			}
+			continue
+		}
+		if strace {
+			switch {
+			case literal == "-E" || literal == "--env":
+				// strace's env option takes var[=val] as a separate word and
+				// injects or REMOVES the variable in the traced child's
+				// environment — the same mutation the env arm refuses, in
+				// option spelling. It is strace-only because -E means
+				// extended-regexp to grep and friends.
+				i++
+				if i >= len(words) {
 					return true
 				}
+				value, ok := literalShellWord(words[i])
+				if !ok || accountEnvironmentOperandDenied(value, names) {
+					return true
+				}
+				continue
+			case strings.HasPrefix(literal, "-E"):
+				if accountEnvironmentOperandDenied(literal[2:], names) {
+					return true
+				}
+				continue
+			}
+		}
+		// An unrecognized wrapper may expose options that mutate its
+		// child's environment in option-value form — xargs's
+		// --process-slot-var=NAME sets NAME on every exec'd command, and
+		// strace's --env=var=val is analogous. A literal `--opt=DENIED` or
+		// `--opt=DENIED=value` is refused when its value names a denied
+		// variable or carries a denied assignment.
+		if _, value, ok := strings.Cut(literal, "="); ok {
+			if accountEnvironmentOperandDenied(value, names) {
+				return true
 			}
 		}
 	}
