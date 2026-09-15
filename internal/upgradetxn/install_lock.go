@@ -148,7 +148,7 @@ func executableLockPath(executable string) string {
 // (#2948). Created 0600, it was openable by its creator alone: on a shared
 // install the first user to upgrade owned a lock nobody else could open, the
 // second user got EACCES, and — because a lock failure must never block an
-// install — writeExecutableInPlace logged it and swapped the binary UNLOCKED.
+// install — writeExecutableInPlaceWaiting logged it and swapped the binary UNLOCKED.
 // The cross-user interleave the executable key exists to prevent came back
 // silently, for everyone except the user who got there first.
 //

@@ -243,17 +243,6 @@ func clearUnverifiableStagedArtifacts() bool {
 	return loaded.Config.UpgradeClearUnverifiableArtifacts
 }
 
-// writeExecutableInPlace is the ONE guarded in-place binary swap. Both installers
-// go through it, so the interlock cannot be bypassed by adding a call site — the
-// entrypoint checks elsewhere exist to give a better message and to skip a
-// pointless download, not to be the guard.
-//
-// override is the caller's explicit "install anyway"; it is honoured, and logged,
-// because an unoverridable auto-upgrade safeguard is its own hazard.
-func writeExecutableInPlace(resolvedPath string, binary []byte, override bool, flag string) error {
-	return writeExecutableInPlaceAllowing(resolvedPath, binary, override, flag, false)
-}
-
 // writeExecutableInPlaceAllowing is the guarded swap with the REJECTED-CANDIDATE
 // override made explicit and separate from the interlock's.
 //
