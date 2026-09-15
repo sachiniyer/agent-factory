@@ -2,7 +2,10 @@ package tmux
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -139,6 +142,61 @@ func TestTmuxProvedSessionAbsentCorroboratesWithTheSessionListing(t *testing.T) 
 			require.Equal(t, tc.expected, tmuxProvedSessionAbsent(cmdExec, tc.failure, name))
 		})
 	}
+}
+
+// The #2875 orphan state itself, end to end: a live server whose socket was
+// removed answers ENOENT to every client, but SIGUSR1 — tmux's documented
+// recreate-socket signal — is the recovery, so the strict probe signals the
+// live server, watches the socket reappear, and gets the REAL answer rather
+// than reporting unknown forever. The pin restricts the signal to the test's
+// own private server: without it the probe would SIGUSR1 every same-uid tmux
+// server on the host, which is the correct behaviour in production but not
+// something a test should do to a developer's sessions.
+func TestProbeSessionStrictRevivesAnOrphanedSocket(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	const name = "af_orphaned_socket_probe"
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "sleep 300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+
+	out, err = exec.Command("tmux", "display-message", "-p", "#{pid}").CombinedOutput()
+	require.NoError(t, err, "tmux display-message: %s", out)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	require.NoError(t, err, "the private server's pid must be parseable: %q", out)
+	t.Cleanup(PinServerProbeForTest(pid))
+
+	socket := filepath.Join(os.Getenv("TMUX_TMPDIR"), fmt.Sprintf("tmux-%d", os.Getuid()), "default")
+	require.NoError(t, os.Remove(socket), "stage the unlinked socket")
+
+	exists, known, err := probeSessionStrict(cmd.MakeExecutor(), name)
+	require.NoError(t, err, "a revived server answers for real, not with an unclassifiable error")
+	require.True(t, known, "the orphaned server was found by revival, so its answer is determinate")
+	require.True(t, exists, "the session is alive on the orphaned server and must be reported")
+}
+
+// The other half of the same mechanism: a socket NO live server claims is a
+// determinate empty, even while unrelated tmux servers run for this uid — the
+// `tmux -L`-user case that used to report unknown forever. The neighbour
+// server is real (it must be signalable, or the probe honestly stays unknown);
+// it lives on its own named socket inside the same private dir.
+func TestProbeSessionStrictConfirmsAbsenceWhenNoServerClaimsTheSocket(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	out, err := exec.Command("tmux", "-L", "af_neighbour", "new-session", "-d", "-s", "x", "sleep 300").CombinedOutput()
+	require.NoError(t, err, "tmux -L new-session: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-L", "af_neighbour", "kill-server").Run() })
+	out, err = exec.Command("tmux", "-L", "af_neighbour", "display-message", "-p", "#{pid}").CombinedOutput()
+	require.NoError(t, err, "tmux display-message: %s", out)
+	neighbour, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	require.NoError(t, err)
+	t.Cleanup(PinServerProbeForTest(neighbour))
+
+	// The default socket inside the private world has never had a server: the
+	// only live server owns the named socket next to it.
+	exists, known, err := probeSessionStrict(cmd.MakeExecutor(), "af_never_existed")
+	require.NoError(t, err, "an unclaimed socket is proved absent, not left unknown")
+	require.True(t, known)
+	require.False(t, exists)
 }
 
 // The unclassifiable answer must still surface WHAT tmux said. An
