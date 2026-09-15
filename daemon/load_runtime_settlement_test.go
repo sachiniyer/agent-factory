@@ -181,6 +181,41 @@ func TestFindSessionFallbackRegistersLoadTimeInterruptionSettlement(t *testing.T
 	}
 }
 
+// The loader's own pre-spawn checkpoint already makes the interrupted close
+// durable, so settlement must not fence that replacement again: a transient
+// visibility-write failure would otherwise tear down a safe agent and strand
+// the session Lost. Only an uncheckpointed interruption owns the fallback.
+func TestPersistLoadAgentRuntimeReplacementCheckpointedSkipsFence(t *testing.T) {
+	_, repoID, repoPath := newStatusTestManager(t)
+	runAt := time.Date(2026, 9, 11, 9, 45, 0, 0, time.UTC)
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "load-checkpointed", Path: repoPath, Program: "claude", TaskID: "load-task",
+		TaskGenerationID: "load-generation", CreatedAt: runAt, TaskRunAt: runAt,
+		TaskRunSequence: 1,
+	})
+	require.NoError(t, err)
+	seeded, err := json.Marshal([]session.InstanceData{inst.ToInstanceData()})
+	require.NoError(t, err)
+	require.NoError(t, config.LoadState().SaveInstances(repoID, seeded))
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	inst.MarkLoadRuntimeReplacedForTest(true)
+	inst.MarkLoadRuntimeInterruptionCheckpointedForTest()
+
+	diskFull := errors.New("no space left on device")
+	failedWrites, _, _ := fullDiskFor(t, inst.Title, diskFull)
+	key := daemonInstanceKey(repoID, inst.Title)
+	owed := persistLoadRuntimeReplacements(map[string]*session.Instance{key: inst})
+	require.Positive(t, failedWrites(), "the witness must fail the visibility write")
+	require.Len(t, owed, 1)
+	require.True(t, owed[0].persistInstance, "the failed visibility write is still owed a retry")
+	require.NotNil(t, owed[0].interruptedTaskRun)
+	require.NotEqual(t, session.LiveLost, inst.GetLiveness(),
+		"the checkpointed close is already durable; a failed metadata write must not tear down the replacement")
+	require.NotEqual(t, session.OpRestoring, inst.GetInFlightOp(),
+		"no fence was established, so none may hold the session non-live")
+}
+
 // The session regression drives real sibling RestoreWithResult bookkeeping;
 // this test pins the daemon half of that contract without clearing agent evidence.
 func TestPersistLoadRuntimeReplacementsCheckpointsSiblingTimestamp(t *testing.T) {

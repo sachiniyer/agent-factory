@@ -44,7 +44,14 @@ func persistLoadRuntimeReplacements(instances map[string]*session.Instance) []se
 				instance.Title, pendingRun.TaskID)
 		}
 		fenced := false
-		if replacement.Replaced && replacement.TaskRunInterrupted {
+		// The normal loader checkpoints the interrupted close before the
+		// replacement may spawn (TaskRunInterruptionCheckpointed), so the run
+		// close is already durable and fencing the fresh runtime is redundant —
+		// a transient failure on the visibility write below would tear down a
+		// safe replacement and leave the session Lost for no durability gain.
+		// Only an uncheckpointed interruption (injected or standalone
+		// constructors) needs the fallback fence.
+		if replacement.Replaced && replacement.TaskRunInterrupted && !replacement.TaskRunInterruptionCheckpointed {
 			if err := instance.FenceLoadRuntimeReplacementUntilSettlement(); err != nil {
 				cleanupErr := instance.TeardownFencedLoadRuntimeReplacement()
 				log.WarningLog.Printf(

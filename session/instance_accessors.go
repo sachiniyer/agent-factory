@@ -669,6 +669,16 @@ func (i *Instance) MarkLoadRuntimeReplacedForTest(agent bool) {
 	i.markLoadRuntimeReplaced(agent)
 }
 
+// MarkLoadRuntimeInterruptionCheckpointedForTest seeds the durable-close proof
+// the loader records once its pre-spawn checkpoint write has succeeded.
+// Test-only: production reaches it only through prepareLoadAgentRuntimeReplacement.
+func (i *Instance) MarkLoadRuntimeInterruptionCheckpointedForTest() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.loadRuntimeReplacement.TaskRunInterruptionCheckpointed = true
+	i.touchLocked()
+}
+
 // SetPendingTabCleanupForTest seeds the unconfirmed tab-teardown handles a
 // previous daemon would have left behind (#2669). Test-only: the real flow
 // writes them from CloseTab's commit and reads them back through
