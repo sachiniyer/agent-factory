@@ -129,7 +129,13 @@ type TaskPane struct {
 	// another writer changed out-of-band while the editor was open (#1700).
 	originals map[string]task.Task
 	deleted   []task.Task
-	hasFocus  bool
+	// restoredDeletes tracks task IDs that RestoreFailedDelete has already
+	// re-appended to s.tasks, keyed by task ID. When a deletion retry also
+	// fails, the second call must not append another visible copy — the first
+	// restore already has the row in the pane. Cleared by SetTasks (successful
+	// reload) and ConsumeDeleted (starting a fresh delete pass).
+	restoredDeletes map[string]bool
+	hasFocus        bool
 
 	// now is inherited from the owning AutomationsPane and passed to each
 	// schedule picker for its custom-cron next-run preview.
