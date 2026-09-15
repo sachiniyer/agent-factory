@@ -522,10 +522,60 @@ func TestRefuseIfCredentialSiblingsExist(t *testing.T) {
 	require.Error(t, err, "RefuseIfCredentialSiblingsExist must refuse when a credential-bearing sibling tab exists")
 	require.Contains(t, err.Error(), "shell", "refusal must name the tab")
 
+	// A VS Code tab owns no tmux pane, but its daemon-managed editor is
+	// account-scoped (#3876): the account-swap gates refuse it outright, and an
+	// ambient handoff must take the same posture rather than leave the editor
+	// running under the cleared account.
+	inst.Tabs = append(inst.Tabs[:1], &Tab{ID: "tab-vscode", Name: "vscode", Kind: TabKindVSCode})
+	err = inst.RefuseIfCredentialSiblingsExist()
+	require.Error(t, err, "RefuseIfCredentialSiblingsExist must refuse while a VS Code tab is open")
+	require.Contains(t, err.Error(), "VS Code", "refusal must name the editor kind")
+
+	// A web tab is a pure URL projection with no process — not credential-bearing.
+	inst.Tabs = append(inst.Tabs[:1], &Tab{ID: "tab-web", Name: "web", Kind: TabKindWeb, URL: "http://localhost:8080"})
+	err = inst.RefuseIfCredentialSiblingsExist()
+	require.NoError(t, err, "RefuseIfCredentialSiblingsExist must not refuse a web tab")
+
 	// With only the agent tab, there is nothing to refuse.
 	inst.Tabs = inst.Tabs[:1]
 	err = inst.RefuseIfCredentialSiblingsExist()
 	require.NoError(t, err, "RefuseIfCredentialSiblingsExist must pass with only the agent tab")
+}
+
+// TestRecordHandoffSwap_RecordsFromAccount pins the audit-trail half of the P2
+// finding: for an ambient handoff out of an auto-accounted session, the ledger
+// entry must retain the outgoing account as FromAccount. The daemon clears the
+// selection only AFTER this record exists, so the account in force at record
+// time is the honest source identity.
+func TestRecordHandoffSwap_RecordsFromAccount(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.Account = "work"
+	inst.accountAutoSelected = true
+
+	require.NoError(t, inst.Transition(BeginHandoff()))
+	entry, err := inst.RecordHandoffSwap(tmux.ProgramGemini, HandoffReasonManual, "", false)
+	require.NoError(t, err)
+	require.Equal(t, "work", entry.FromAccount,
+		"the ledger entry must name the account the outgoing runtime was scoped to")
+	require.Empty(t, entry.ToAccount, "an ambient target carries no account")
+	require.Equal(t, "work", inst.Handoffs()[0].FromAccount,
+		"the persisted ledger, not only the returned token, must carry FromAccount")
+}
+
+// TestRestoreAutoSelectedAccount pins the rollback half of the P1 ordering
+// finding: when a swap fails after ClearAutoSelectedAccount ran, the selection
+// is restored so the session model returns to the identity the still-running
+// pane was launched under.
+func TestRestoreAutoSelectedAccount_RestoresSelection(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.Account = "work"
+	inst.accountAutoSelected = true
+
+	require.True(t, inst.ClearAutoSelectedAccount())
+	inst.RestoreAutoSelectedAccount("work")
+	account, automatic := inst.AccountSelection()
+	require.Equal(t, "work", account)
+	require.True(t, automatic)
 }
 
 // TestClearAutoSelectedAccount_NoOpForManualPin verifies the safety predicate:

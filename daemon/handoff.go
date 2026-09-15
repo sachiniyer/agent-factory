@@ -175,9 +175,10 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	}
 	// An automatic account belongs to one agent's identity and cannot be
 	// inherited by the incoming agent. Before clearing it, confirm that no
-	// credential-bearing sibling tabs (shell, process) are still running under
-	// the old account: SwapAgent stops only the agent tab, so those siblings
-	// would keep the cleared account's credentials alive after the swap.
+	// credential-bearing sibling (shell, process, or the account-scoped VS Code
+	// editor) is still running under the old account: SwapAgent stops only the
+	// agent tab, so those siblings would keep the cleared account's credentials
+	// alive after the swap.
 	if outgoingAccount != "" {
 		if err := instance.RefuseIfCredentialSiblingsExist(); err != nil {
 			return HandoffSessionResponse{}, err
@@ -191,10 +192,6 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err != nil {
 		return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", req.Title, target, err)
 	}
-	// Preflight succeeded — it is now safe to clear the automatic account.
-	// SwapAgent unconditionally rejects any non-empty i.Account to prevent
-	// silent cross-agent identity collisions (session/backend_local.go).
-	instance.ClearAutoSelectedAccount()
 
 	outgoing := instance.CurrentAgentName()
 
@@ -217,6 +214,13 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, err
 	}
+	// The durable record now carries the outgoing account as FromAccount, so it
+	// is safe to clear the selection: SwapAgent unconditionally rejects any
+	// non-empty i.Account to prevent silent cross-agent identity collisions
+	// (session/backend_local.go). Clearing here — after the record, before the
+	// runtime teardown — also means a Transition or record failure above left
+	// the account untouched; a SwapAgent failure below restores it.
+	cleared := instance.ClearAutoSelectedAccount()
 
 	plan = plan.WithPostStopCapture(func() error {
 		var captureErr error
@@ -234,6 +238,12 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		if rbErr := instance.RevertHandoff(entry); rbErr != nil {
 			m.err().Printf("handoff %q: swap failed (%v) AND the record could not be reverted (%v); "+
 				"the session's recorded agent may not match its running one", req.Title, swapErr, rbErr)
+		}
+		if cleared {
+			// The record and transition are rolled back; the account selection
+			// rolls back with them so the model does not claim ambient while the
+			// still-running pane exposes the old account's credentials.
+			instance.RestoreAutoSelectedAccount(outgoingAccount)
 		}
 		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, fmt.Errorf("failed to hand %q off to %s: %w", req.Title, target, swapErr)

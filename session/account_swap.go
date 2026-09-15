@@ -392,11 +392,18 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto boo
 }
 
 // RefuseIfCredentialSiblingsExist refuses an ambient handoff when a
-// credential-bearing sibling tab (shell or process) is still running under the
-// current automatic account. SwapAgent stops only the agent tab; those siblings
-// would keep the cleared account's credentials alive after the swap, leaving
-// the row claiming an ambient identity while a runtime still exposes the
-// previous one. Call this BEFORE ClearAutoSelectedAccount and PrepareAgentSwap.
+// credential-bearing sibling tab (shell, process, or VS Code editor) is still
+// running under the current automatic account. SwapAgent stops only the agent
+// tab; those siblings would keep the cleared account's credentials alive after
+// the swap, leaving the row claiming an ambient identity while a runtime still
+// exposes the previous one. Call this BEFORE ClearAutoSelectedAccount and
+// PrepareAgentSwap.
+//
+// A VS Code tab owns no tmux pane, but its daemon-managed editor is
+// account-scoped — vscodeAccountScopeForInstance bakes the selected account
+// into the child's environ at exec (#3876) — so it is refused on tab presence,
+// the same posture admitAccountSwap and the manual account handoff take. A web
+// tab is a pure URL projection with no process and stays skipped.
 func (i *Instance) RefuseIfCredentialSiblingsExist() error {
 	i.mu.RLock()
 	tabs := append([]*Tab(nil), i.Tabs...)
@@ -406,7 +413,15 @@ func (i *Instance) RefuseIfCredentialSiblingsExist() error {
 			// Agent tab — SwapAgent handles this one.
 			continue
 		}
-		if tab == nil || !tab.Kind.HasTmux() || tab.tmux == nil {
+		if tab == nil {
+			continue
+		}
+		if tab.Kind == TabKindVSCode {
+			return fmt.Errorf(
+				"cannot hand session %q off to an ambient agent while a VS Code tab is still open under the current account: its daemon-managed editor keeps the account-scoped credentials it was spawned with; close that tab first",
+				i.Title)
+		}
+		if !tab.Kind.HasTmux() || tab.tmux == nil {
 			continue
 		}
 		if tab.tmux.ProvenNoPane() {
@@ -417,6 +432,19 @@ func (i *Instance) RefuseIfCredentialSiblingsExist() error {
 			i.Title, tab.Name)
 	}
 	return nil
+}
+
+// RestoreAutoSelectedAccount rolls back ClearAutoSelectedAccount when the
+// ambient handoff it enabled fails before the incoming runtime is confirmed.
+// The session's pane can still be running under the cleared account's
+// credentials, so the model must return to the identity that pane was launched
+// with rather than claim ambient while a live process exposes the old one.
+func (i *Instance) RestoreAutoSelectedAccount(account string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.Account = account
+	i.accountAutoSelected = true
+	i.touchLocked()
 }
 
 // ClearAutoSelectedAccount removes a scheduler-selected account so an
