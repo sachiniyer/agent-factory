@@ -1072,8 +1072,8 @@ export class AppShell {
     this.projectSwitchBtn.setAttribute("aria-label", "Switch project");
     this.projectSwitchBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      // A keyboard-activated Switch project stops propagation, so the panel's
-      // delegated dismissal never sees it; dismiss (not close) retires a carried
+      // Switch project stops propagation, so the panel's delegated dismissal
+      // never sees the activation; dismiss (not close) retires a carried
       // Session actions disclosure like every other panel action.
       this.appControls.dismiss();
       this.toggleProjectMenu();
