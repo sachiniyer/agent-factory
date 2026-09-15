@@ -582,7 +582,15 @@ owns.`, tmux.SupportedProgramsString()),
 			fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s for project %s in %s\n",
 				res.Key, echoValue(res.Value), configSetProjectFlag, prettyPath(res.Path))
 			if res.RequiresRestart {
-				fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
+				if config.KeyEffectClass(res.Key) == config.EffectNextDaemonStart {
+					fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
+				} else if res.Key == "on_archive_command" {
+					fmt.Fprintln(cmd.OutOrStdout(),
+						"saved. It applies to archive operations in this project from now on.")
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(),
+						"saved. It applies to sessions created in this project from now on.")
+				}
 			}
 			return nil
 		}
