@@ -719,6 +719,45 @@ func (i *Instance) AccountLimitObservations() []AccountLimitObservationData {
 	return append([]AccountLimitObservationData(nil), i.accountLimitObservations...)
 }
 
+// RefuteAccountLimitObservationAtEpoch removes this session's stored limit
+// observation for the identity it is running as RIGHT NOW, after the pane
+// produced affirmative work evidence under it (#4404). A wall recorded against
+// an account that is demonstrably answering is stale — the live repro had a
+// reset carried over from the ambient identity's wall still excluding an
+// account that was serving prompts for days. Only the entry keyed by the
+// session's own current {agent, account} is removed; a sibling account's
+// evidence is unrelated and stays.
+//
+// The epoch fence is the same one every poll-applied decision carries (#2135):
+// the refutation was decided from a pane captured at observedEpoch, so a newer
+// authoritative transition — above all a resume or a handoff that changed which
+// identity the session runs as — invalidates it, and the next tick re-decides.
+//
+// The identity is returned even when nothing changed so the caller can also
+// retract the retained-ledger copy a deleted session may have left behind.
+func (i *Instance) RefuteAccountLimitObservationAtEpoch(observedEpoch uint64) (agent, account string, changed bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.stateEpoch != observedEpoch {
+		return "", "", false
+	}
+	agent = i.currentAgentNameLocked()
+	account = i.Account
+	if agent == "" || account == "" {
+		return "", "", false
+	}
+	for idx := range i.accountLimitObservations {
+		observation := i.accountLimitObservations[idx]
+		if observation.Agent == agent && observation.Account == account {
+			i.accountLimitObservations = append(
+				i.accountLimitObservations[:idx], i.accountLimitObservations[idx+1:]...)
+			i.touchLocked()
+			return agent, account, true
+		}
+	}
+	return agent, account, false
+}
+
 // livenessFromData resolves the liveness a persisted or snapshot record should
 // take, applying the same rollforward FromInstanceData uses: prefer the
 // `liveness` field, fall back to the legacy `status` int for pre-#1195 records,

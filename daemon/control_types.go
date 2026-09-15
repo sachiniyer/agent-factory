@@ -30,7 +30,14 @@ type CreateSessionRequest struct {
 	// backend, a cross-agent program_overrides — can tell a user who never typed
 	// --account which config key put an account on their session.
 	AccountSource string `json:"-"`
-	Prompt        string `json:"prompt"`
+	// accountAutoSelected marks an account the daemon's pool router chose for
+	// this create (#4404) — as opposed to one the client pinned or the ambient
+	// identity. It lands on the instance so the session's record can tell a
+	// scheduler choice from a pin, which is what the auto-swap path keys off.
+	// Unexported like the other provenance fields: a client-settable one would
+	// let a caller launder a pinned identity into a routable one.
+	accountAutoSelected bool
+	Prompt              string `json:"prompt"`
 	// TaskID records which task's delivery spawned this session, and
 	// MaxConcurrentRuns carries that task's cap so the manager can decide
 	// admission under its own lock — the only place a burst cannot race the check

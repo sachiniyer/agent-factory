@@ -164,6 +164,83 @@ func retainAccountLimitObservations(observations []session.AccountLimitObservati
 	})
 }
 
+// retractAccountLimitObservation removes one {agent, account}'s retained
+// evidence — the refutation half of the ledger (#4404). A session that answered
+// under an account has proven the observation stale, and an entry left behind
+// by a deleted session would otherwise keep excluding that account until its
+// recorded reset passed.
+func retractAccountLimitObservation(agent, account string) error {
+	agent = strings.TrimSpace(agent)
+	account = strings.TrimSpace(account)
+	if agent == "" || account == "" {
+		return nil
+	}
+	path, err := accountLimitLedgerPath()
+	if err != nil {
+		return err
+	}
+	return config.WithFileLockTimeout(path, config.RepoInstancesLockTimeout, func() error {
+		current, err := readAccountLimitLedger(path)
+		if err != nil {
+			return err
+		}
+		kept := make([]session.AccountLimitObservationData, 0, len(current))
+		removed := false
+		for _, observation := range current {
+			if observation.Agent == agent && observation.Account == account {
+				removed = true
+				continue
+			}
+			kept = append(kept, observation)
+		}
+		if !removed {
+			return nil
+		}
+		raw, err := json.MarshalIndent(accountLimitLedger{
+			SchemaVersion: accountLimitLedgerSchemaVersion,
+			Observations:  kept,
+		}, "", "  ")
+		if err != nil {
+			return err
+		}
+		return config.AtomicWriteFile(path, raw, 0o600)
+	})
+}
+
+// refuteAccountLimitEvidence retires durable negative-quota evidence for the
+// account a session is demonstrably running under — the poll calls it on the
+// same affirmative-work evidence that settles a session Running (#4404). It
+// removes the session's own stored observation and, once per identity per
+// daemon, retracts the retained-ledger copy a deleted session may have left.
+// The ledger check is bounded rather than per-tick because it is a locked file
+// read on a path the poll reaches every time a pane produces output.
+//
+// Returns whether the session's own row changed, so the caller can checkpoint
+// the cleared evidence through the settlement write path.
+func (m *Manager) refuteAccountLimitEvidence(instance *session.Instance, epoch uint64) bool {
+	agent, account, changed := instance.RefuteAccountLimitObservationAtEpoch(epoch)
+	if agent == "" || account == "" {
+		return false
+	}
+	key := agent + "\x00" + account
+	m.mu.Lock()
+	_, checked := m.refutedLedgerAccounts[key]
+	if !checked {
+		if m.refutedLedgerAccounts == nil {
+			m.refutedLedgerAccounts = make(map[string]struct{})
+		}
+		m.refutedLedgerAccounts[key] = struct{}{}
+	}
+	m.mu.Unlock()
+	if !checked {
+		if err := retractAccountLimitObservation(agent, account); err != nil {
+			m.warn().Printf("could not retract the retained limit evidence for %s account %q — it may keep excluding the account until restart: %v",
+				agent, account, err)
+		}
+	}
+	return changed
+}
+
 func mergeAccountLimitObservations(current, added []session.AccountLimitObservationData) ([]session.AccountLimitObservationData, error) {
 	merged := make(map[string]session.AccountLimitObservationData)
 	merge := func(observation session.AccountLimitObservationData) error {

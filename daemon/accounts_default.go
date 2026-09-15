@@ -34,7 +34,9 @@ import (
 // through the environment.
 //
 // It runs BEFORE reserveCreate, so a refusal costs no worktree, no branch and no
-// tmux session.
+// tmux session. Since #4404 it is only the fallback path: for a backend that
+// carries accounts, routeCreateAccount resolves the same default first and
+// treats it as the pool's preference rather than the answer.
 func applyDefaultAccount(cfg *config.Config, req *CreateSessionRequest) error {
 	if strings.TrimSpace(req.Account) != "" {
 		// An explicit account wins and is already validated by the surface that
@@ -58,33 +60,52 @@ func applyDefaultAccount(cfg *config.Config, req *CreateSessionRequest) error {
 		// it already names, where it would be a choice rather than a consequence.
 		return nil
 	}
-	// The LABEL's agent, which is what an account name is validated against
-	// everywhere else (api/sessions.go, app/account_picker.go). A program_overrides
-	// entry that points the label at another agent is refused by
-	// session.refuseUnsupportedAccountAgent with a message naming both — and, since
-	// #3386, naming this config key too when the account came from here.
 	agent := sessionenv.AgentForCommand(req.Program)
 	if agent == "" {
 		return nil
 	}
-	project, global := config.DefaultAccountLayersFor(cfg, req.RepoPath, agent)
-	name := agentaccount.Resolve(req.Account, project.Name, global.Name)
+	return applyResolvedDefaultAccount(req, defaultAccountSelectionFor(cfg, req.RepoPath, agent))
+}
+
+// defaultAccountSelectionFor resolves the layered `default_accounts` entry for
+// agent the way applyDefaultAccount always has, returning the winning selection
+// with its provenance — the zero value when neither layer names an account.
+//
+// The LABEL's agent is what an account name is validated against everywhere
+// else (api/sessions.go, app/account_picker.go). A program_overrides entry that
+// points the label at another agent is refused by
+// session.refuseUnsupportedAccountAgent with a message naming both — and, since
+// #3386, naming this config key too when the account came from here.
+func defaultAccountSelectionFor(cfg *config.Config, repoPath, agent string) config.DefaultAccountSelection {
+	project, global := config.DefaultAccountLayersFor(cfg, repoPath, agent)
+	name := agentaccount.Resolve("", project.Name, global.Name)
 	if name == "" {
-		return nil
+		return config.DefaultAccountSelection{}
 	}
 	selection := project
 	if selection.Name != name {
 		selection = global
 	}
+	return selection
+}
+
+// applyResolvedDefaultAccount validates and applies an already-resolved
+// default selection. The refusal is unchanged from when this lived inside
+// applyDefaultAccount: a configured default that cannot be honoured fails the
+// create by name rather than silently falling back to ambient.
+func applyResolvedDefaultAccount(req *CreateSessionRequest, selection config.DefaultAccountSelection) error {
+	if selection.Name == "" {
+		return nil
+	}
 	home, err := config.GetConfigDir()
 	if err != nil {
 		return fmt.Errorf("%s selects account %q, but af cannot resolve its agent-factory home to check it: %w",
-			selection.Source(), name, err)
+			selection.Source(), selection.Name, err)
 	}
 	if err := config.CheckDefaultAccount(home, req.RepoPath, selection); err != nil {
 		return err
 	}
-	req.Account = name
+	req.Account = selection.Name
 	req.AccountSource = defaultAccountProvenance(selection, req.RepoPath)
 	return nil
 }
