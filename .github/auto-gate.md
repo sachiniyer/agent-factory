@@ -10,6 +10,42 @@ Auto Gate publishes two kinds of check run:
   app. It passes only when every open pull request to `master` at the commit has
   a passing composite decision.
 
+## Play-test evidence
+
+A PR touching production files under `app/`, `ui/`, or `session/tmux/`
+requires the `play-tested` label and a comment from an account in the gate's
+`ALLOWED_AUTHORS` set. After testing, start the comment with this exact line,
+using the full 40-character SHA of the commit actually tested:
+
+```text
+Play-tested commit: <full tested commit SHA>
+```
+
+Put the command, result, and signature on subsequent lines. The latest matching
+comment is the attestation; the label alone no longer satisfies the gate.
+Comments are ordered by their update time, then descending numeric comment ID
+when timestamps share a second.
+Existing labeled PRs need a comment identifying their actual tested commit.
+Do not substitute the current head unless that is the code you exercised.
+
+An attestation for the current head passes directly. For an older commit, the
+gate compares complete Git tree snapshots of the tested commit and current
+head, restricted to the same gated paths and excluding `_test.go` files.
+Evidence survives a master merge or rebase when those files are unchanged.
+Content, path, or file-mode changes require another play-test and a new comment;
+merge shape alone cannot exempt a conflict resolution. A gated file edited and
+then reverted to its original content inside the window keeps the attestation:
+the comparison is over bytes, so the tested bytes are the current bytes. Missing
+or truncated trees block verification. Removing the label also blocks the
+automatic gate.
+The existing manual-path advisory policy for the TUI requirement is unchanged.
+For non-allowlisted authors, snapshot read failures remain advisory as well;
+they do not suppress the manual path's independent review blockers.
+
+This uses snapshot equality rather than the compare API's merge-base diff,
+which can omit differences between rebased heads and truncate its file list.
+The decision names both the tested SHA and the head it covers.
+
 ## Shared heads
 
 Two pull requests can point at the same commit. Their composite decisions remain
@@ -75,12 +111,19 @@ It is bound by `headCurrentSince` like a Codex artifact, so a push after the
 sign-off returns the PR to the manual pass. It waives the review requirement and
 nothing else.
 
-An update-branch is not such a push (#3803). When the head is a merge with exactly
-two parents whose second is contained in the base branch, the approval and every
-Codex artifact bind to the merge's FIRST parent — the content head — because the
-reviewed change did not move. Otherwise the gate's own update-branch would void
-the approval it had just acted on, which is the livelock #3799 hit minutes after
-#3796 landed. The decision names both heads.
+An update-branch is not such a push (#3803, #4235). Exactly two parents with the
+second contained in the base branch is the shape `PUT update-branch` produces, but
+a cheap pre-filter only; a hand-written conflict resolution has the same parents.
+The carry check is the complete-tree proof itself: it reads the merge base and
+both parent trees, derives the only path-level three-way result from each
+path's leaf entry (mode, type and object id — the only place blob identity
+enters the decision), and requires the merge commit's tree to match it exactly —
+a truncated, malformed, same-path-conflicting or mismatched tree refuses carry.
+When the proof passes, the approval and every Codex artifact bind
+to the merge's FIRST parent — the content head — because the reviewed change did
+not move. Otherwise the gate's own update-branch would void the approval it had
+just acted on, which is the livelock #3799 hit minutes after #3796 landed. The
+decision names both heads.
 
 **The runs that update-branch triggers arrive parked, and the gate approves them
 (#3807).** The merge commit `PUT update-branch` writes is authored by the workflow
@@ -295,7 +338,8 @@ backdate a recovery or erase an earlier degraded merge.
 Reviewer-unavailable evidence includes Codex inline review replies
 (`in_reply_to_id` set), including replies carried by an empty `COMMENTED` review
 (#3900). The reply's
-`commit_id` must match the head, and its `created_at` must be strictly later than
+`commit_id` must match the head, the content head, or any verified intermediate
+update-branch merge, and its `created_at` must be strictly later than
 `headCurrentSince`; an edit cannot refresh an old answer. The latest artifact
 across issue comments, reviews and eligible replies wins (the reply wins a tie
 with its empty enclosing review), and a later real verdict supersedes the
@@ -385,8 +429,31 @@ writes.
 
 GitHub suppresses `check_suite` recursion for suites created by Actions. The
 required `Lint` and `Build` jobs both belong to **PR Validation**, so Auto Gate
-also subscribes to that workflow's terminal `workflow_run` event. This ensures
-their completed state is reevaluated without subscribing Auto Gate to itself.
+also subscribes to that workflow's terminal `workflow_run` event. GitHub has
+intermittently omitted that event, so a five-minute reconciliation pass backs it
+up: it wakes only an absent exact decision, or a failed decision that names
+`Build` or `Lint` as a blocker and recorded a different state for the now-complete
+check. Runs are coalesced per PR/head. The decision records the check-run ID,
+status and conclusion that its
+required-check read actually observed; the reconciler compares that tuple with
+the current completed run rather than ordering check and publication clocks.
+Missing or malformed legacy evidence is reconciled conservatively once.
+
+Each pass paginates every open PR in creation order and carries its current check
+rollup in the same GraphQL snapshot, 100 PRs per request. Eligibility therefore
+depends on neither `updated_at` ordering nor a wall-clock page assignment: every
+PR, including the least recently updated one, is inspected in the next delivered
+sweep. The nominal scheduling bound is five minutes; a scheduler outage or delay
+adds directly to that bound instead of permanently skipping a page. At most ten
+stale decisions are reevaluated per sweep, so S simultaneously stale decisions
+drain in at most `ceil(S / 10)` delivered sweeps. A truncated per-head rollup is
+skipped fail-closed rather than treated as complete.
+
+The scan costs `ceil(N / 100)` GraphQL requests per pass: one request (12/hour)
+through the 83-head REST-quota threshold, or two (24/hour) for 120 PRs, before
+bounded retries. It performs no per-head REST reads. Scheduled passes also skip
+unrelated branch-sweep housekeeping. This avoids both the frozen-decision
+failure and one gate evaluation per completed matrix job (#4242).
 
 GitHub also suppresses `push` workflows when Auto Gate merges with its
 `GITHUB_TOKEN`. After a merge, the gate therefore dispatches the five

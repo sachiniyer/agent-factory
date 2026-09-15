@@ -855,14 +855,6 @@ func rootEnsureEscalationCause(st *rootEnsureState) string {
 	}
 }
 
-// rootAgentProgram resolves the command the root agent runs from a legacy
-// per-repo entry. Retained as the thin adapter the direct-map program test and
-// any legacy-only caller use; it delegates to rootAgentProgramForProfile so the
-// resolution rule lives in exactly one place.
-func rootAgentProgram(repoRoot string, rc config.RootAgentConfig) string {
-	return rootAgentProgramForProfile(repoRoot, config.RootAgent{Program: rc.Program})
-}
-
 // rootAgentProgramForProfile resolves the command the root agent runs from a
 // resolved root-agent profile. An explicit program wins verbatim (a bare agent
 // name resolves through program_overrides downstream, exactly like any session

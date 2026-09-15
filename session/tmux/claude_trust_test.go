@@ -784,3 +784,346 @@ func TestCheckAndHandleTrustPrompt_RealClaudeFolderTrustDialogIsStillDriven(t *t
 	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels())
 	require.Equal(t, []string{"Down", "Enter"}, injectedKeyNames(keys))
 }
+
+// The MCP-server trust prompt is anchored on its unique question AND the
+// modal's "Enter to confirm" footer being the LAST non-blank content on screen,
+// the same footer-is-last discipline the folder-trust branch applies. Output
+// that quotes the MCP phrase — including this repo's own source, where the
+// phrase appears verbatim — must inject nothing, however long it stays on
+// screen, because a spurious Enter lands on the agent's composer.
+func TestCheckAndHandleTrustPrompt_QuotedMCPTrustDialogInjectsNothing(t *testing.T) {
+	mcpModal := "New MCP server found. Do you trust this new MCP server?\n" +
+		"❯ 1. Yes\n  2. No\nEnter to confirm"
+
+	for _, tt := range []struct{ name, content string }{
+		{
+			// The modal chrome is quoted above the agent's composer — the shape
+			// every live pane has, and the exact shape the folder-trust branch
+			// refuses. The footer is NOT last, so the MCP branch must refuse too.
+			name: "quoted above the agent's composer",
+			content: mcpModal + "\n\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ > Type your message here           │\n" +
+				"╰────────────────────────────────────╯\n" +
+				"? for shortcuts\n",
+		},
+		{
+			// The phrase in agent prose with trailing content below it.
+			name:    "quoted with trailing prose",
+			content: mcpModal + "\nThat is the MCP trust dialog af answers.\n",
+		},
+		{
+			// The phrase appears verbatim with no modal chrome at all — the shape
+			// of a code review or explanation that mentions the dialog.
+			name: "phrase in agent prose without chrome",
+			content: "I see the New MCP server found prompt. Do you trust this new MCP server?\n" +
+				"❯ I will select Yes for you\n? for shortcuts\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.False(t, handled, "a quoted MCP phrase is not a live modal, so af must not report one in the way")
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may be injected into a pane that only quotes the MCP dialog; got %v", cmds)
+		})
+	}
+}
+
+// The same guard from the other side: a pane showing the REAL MCP modal — the
+// footer last, nothing painted below it — still fires Enter, so the guard
+// does not stop af answering a genuine launch gate.
+func TestCheckAndHandleTrustPrompt_RealMCPTrustDialogStillFiresEnter(t *testing.T) {
+	mcpModal := "New MCP server found. Do you trust this new MCP server?\n" +
+		"❯ 1. Yes\n  2. No\nEnter to confirm"
+	handled, cmds := runTrustPromptCheck(t, ProgramClaude, mcpModal)
+	require.True(t, handled, "the live MCP modal is in the way")
+	require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)),
+		"the real MCP modal keeps the historical Enter tap on Claude Code's preselection")
+}
+
+// Claude Code paints the MCP modal top-to-bottom: question first, then options,
+// then the footer. A capture taken between the question and the footer shows a
+// partially rendered dialog. This capture must block (return true) — "I could
+// not confirm the dialog structure" and "the pane is dialog-free" are different
+// answers and must not map to the same return value. The latter permits prompt
+// delivery; the former does not.
+//
+// This is the start.go:503 finding: the pane is NOT dialog-free just because
+// the footer hasn't painted yet.
+func TestCheckAndHandleTrustPrompt_PartiallyRenderedMCPDialogBlocks(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{
+			// Question painted, options and footer not yet rendered.
+			name:    "question only, footer not yet painted",
+			content: "New MCP server found. Do you trust this new MCP server?\n\n\n\n",
+		},
+		{
+			// Question and first option painted, footer not yet rendered.
+			name:    "question and first option, footer not yet painted",
+			content: "New MCP server found. Do you trust this new MCP server?\n❯ 1. Yes\n\n\n",
+		},
+		{
+			// Question and both options painted, footer not yet rendered.
+			name:    "question and both options, footer not yet painted",
+			content: "New MCP server found. Do you trust this new MCP server?\n❯ 1. Yes\n  2. No\n\n\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.True(t, handled,
+				"a partially rendered MCP dialog must block; reporting false lets the caller paste into it")
+			require.Empty(t, sentKeystrokes(cmds),
+				"a partially rendered dialog must not receive a key; got %v", cmds)
+		})
+	}
+}
+
+// An agent can quote the MCP question in its output — for example when
+// explaining what it did or reproducing a transcript. Even if the quoted output
+// sits immediately above an unrelated live picker (with or without an
+// intervening blank row), af must not send Enter to that picker: the Enter
+// would accept whatever it had preselected, not the MCP trust answer.
+//
+// These are the cross-dialog injection cases the option-label validation closes.
+// Each must be watched fail first to confirm the fix is real: before the
+// validation, a quoted question above an unrelated picker with no blank row
+// produced a block match and injected Enter.
+func TestCheckAndHandleTrustPrompt_MCPQuoteAboveUnrelatedPickerInjectsNothing(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{
+			// Quoted MCP question immediately above an unrelated picker, no blank
+			// row between them. The footer ("Enter to confirm") ends the block, so
+			// the block-membership check passes — but the option labels are wrong.
+			name: "quoted question above unrelated picker, no blank row",
+			content: "New MCP server found. Do you trust this new MCP server?\n" +
+				"❯ Resume previous conversation\n" +
+				"  Start new conversation\n" +
+				"Enter to confirm",
+		},
+		{
+			// Same adversarial arrangement, with a blank row between the quoted
+			// question and the unrelated picker. The blank row puts them in
+			// different blocks, so the block-membership check already fails; this
+			// case is included to confirm the blank-row path is also safe.
+			name: "quoted question above unrelated picker, with blank row",
+			content: "New MCP server found. Do you trust this new MCP server?\n\n" +
+				"❯ Resume previous conversation\n" +
+				"  Start new conversation\n" +
+				"Enter to confirm",
+		},
+		{
+			// Unrelated picker whose options happen to end in "yes" and "no" but
+			// are not the exact MCP option labels. HasSuffix would accept these;
+			// exact match after ordinal stripping does not.
+			// Watched fail before exact-match guard: the suffix test accepted
+			// "Always yes" and "Definitely no" and sent Enter to the unrelated picker.
+			name: "unrelated picker with suffix-matching options, no blank row",
+			content: "New MCP server found. Do you trust this new MCP server?\n" +
+				"❯ Always yes\n" +
+				"  Definitely no\n" +
+				"Enter to confirm",
+		},
+		{
+			// Same adversarial arrangement with a blank separator.
+			name: "unrelated picker with suffix-matching options, with blank row",
+			content: "New MCP server found. Do you trust this new MCP server?\n\n" +
+				"❯ Always yes\n" +
+				"  Definitely no\n" +
+				"Enter to confirm",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.False(t, handled,
+				"a quoted MCP question above an unrelated picker is not a trust prompt; af must not report one in the way")
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may be injected into an unrelated picker; got %v", cmds)
+		})
+	}
+}
+
+// The Claude picker layout places a blank row between the option rows and the
+// "Enter to confirm" footer (option rows, blank row, footer). The blank-row
+// skip in claudeMCPTrustFooterIsLast must bridge that gap so the option block
+// is found and validated, letting the real dialog still fire Enter.
+//
+// This is the "Allow the modal's blank separator before its footer" P1: without
+// the skip, the backward scan stops at the blank row, the option block is not
+// found, and the real dialog is treated as absent — allowing prompt delivery
+// into a fully rendered trust dialog.
+func TestCheckAndHandleTrustPrompt_RealMCPTrustDialogWithBlankBeforeFooterStillFiresEnter(t *testing.T) {
+	// Layout matching the Claude picker format: option rows, blank row, footer.
+	mcpModal := "New MCP server found. Do you trust this new MCP server?\n" +
+		"❯ 1. Yes\n" +
+		"  2. No\n" +
+		"\n" +
+		"Enter to confirm"
+	handled, cmds := runTrustPromptCheck(t, ProgramClaude, mcpModal)
+	require.True(t, handled, "the live MCP modal with blank before footer is still in the way")
+	require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)),
+		"the real MCP modal still fires Enter regardless of a blank row before the footer")
+}
+
+// The Claude picker layout may place a blank row between the question and the
+// option rows as well as between the option rows and the footer
+// (question, blank row, options, blank row, footer). The blank-row skip in
+// claudeMCPTrustFooterIsLast must bridge BOTH gaps so the question is found
+// even when it sits in the block above the options.
+//
+// This is the "Bridge the separator above MCP options" P1: without the upward
+// skip, the backward scan stops at the blank row above the options, the option
+// block holds Yes and No but not the question, hasQuestion stays false, and the
+// real dialog is treated as absent — allowing prompt delivery into a fully
+// rendered trust dialog.
+func TestCheckAndHandleTrustPrompt_RealMCPTrustDialogWithBlankAboveAndBelowOptionsStillFiresEnter(t *testing.T) {
+	// Layout: question, blank row, option rows, blank row, footer.
+	mcpModal := "New MCP server found. Do you trust this new MCP server?\n" +
+		"\n" +
+		"❯ 1. Yes\n" +
+		"  2. No\n" +
+		"\n" +
+		"Enter to confirm"
+	handled, cmds := runTrustPromptCheck(t, ProgramClaude, mcpModal)
+	require.True(t, handled, "the live MCP modal with blanks above and below options is still in the way")
+	require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)),
+		"the real MCP modal still fires Enter regardless of blank rows around the option block")
+}
+
+// An already-running Claude pane whose last output block mentions
+// "New MCP server found" and whose last non-blank row is the Claude composer
+// cursor "❯" must NOT be classified as a partially rendered MCP dialog.
+// Claude's composer uses the same glyph; treating any selected row as
+// unambiguous dialog content would block every handoff into such a pane,
+// exhausting DismissTrustPrompt's 20 retries and surfacing an error for
+// legitimate sessions.
+//
+// This is the "Do not treat the Claude composer glyph as modal content" P2.
+func TestCheckAndHandleTrustPrompt_ComposerGlyphAfterMCPMentionDoesNotTriggerPartialRender(t *testing.T) {
+	// A pane that mentioned the MCP server message earlier in its output, then
+	// returned to normal operation; the last non-blank row is the Claude composer.
+	content := "New MCP server found.\n" +
+		"Configured server: my-server\n" +
+		"\n" +
+		"❯ "
+	handled, cmds := pollStaticPane(t, content, 4)
+	require.False(t, handled,
+		"a composer cursor after an MCP mention in scrollback is not a partial dialog; af must not block")
+	require.Empty(t, sentKeystrokes(cmds),
+		"no key may be injected into a pane that only shows a composer cursor; got %v", cmds)
+}
+
+// When Claude Code paints the preamble and question on separate consecutive
+// rows and the capture lands before the first option, the last non-blank row is
+// the question itself ("Do you trust this new MCP server?") — not the preamble.
+// The partial-render check must recognise the question row as dialog content
+// and return true (blocking), not false (which would allow prompt delivery).
+//
+// This is the "Treat the separate MCP question row as partial" P1.
+func TestCheckAndHandleTrustPrompt_SeparateQuestionRowIsPartial(t *testing.T) {
+	// Preamble and question on separate rows; capture before first option.
+	content := "New MCP server found.\n" +
+		"Do you trust this new MCP server?\n" +
+		"\n\n"
+	handled, cmds := pollStaticPane(t, content, 4)
+	require.True(t, handled,
+		"preamble and question on separate rows, before first option, must block")
+	require.Empty(t, sentKeystrokes(cmds),
+		"no key may be sent into a partially rendered dialog; got %v", cmds)
+}
+
+// When the Claude picker layout places a blank row between the preamble/question
+// block and the option block, a capture taken after the options are painted but
+// before the footer shows the options as the LAST contiguous block — the preamble
+// is in the preceding block. The partial-render detector must recognise this
+// layout and return true (blocking), not false (which would allow prompt delivery
+// into a live, partially painted MCP picker).
+//
+// This is the sachiniyer verdict finding: claudeMCPDialogPartiallyRendered was
+// only checking the last block for the preamble, missing the case where the
+// Claude picker layout puts a blank separator between preamble/question and options.
+func TestCheckAndHandleTrustPrompt_PartiallyRenderedMCPDialogWithBlankAboveOptionsBlocks(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{
+			// Layout: preamble+question / blank / first option only (footer not yet painted).
+			// The option block is the last block; preamble is in the preceding block.
+			name: "preamble in preceding block, first option only, footer not painted",
+			content: "New MCP server found. Do you trust this new MCP server?\n" +
+				"\n" +
+				"❯ 1. Yes\n" +
+				"\n\n",
+		},
+		{
+			// Layout: preamble+question / blank / both options (footer not yet painted).
+			// The most dangerous partial frame: options are fully painted but footer is not.
+			name: "preamble in preceding block, both options, footer not painted",
+			content: "New MCP server found. Do you trust this new MCP server?\n" +
+				"\n" +
+				"❯ 1. Yes\n" +
+				"  2. No\n" +
+				"\n\n",
+		},
+		{
+			// Layout: preamble on its own row / question on its own row / blank /
+			// both options (footer not yet painted). Preamble and question are both
+			// in the preceding block.
+			name: "preamble and question on separate rows in preceding block, both options, footer not painted",
+			content: "New MCP server found.\n" +
+				"Do you trust this new MCP server?\n" +
+				"\n" +
+				"❯ 1. Yes\n" +
+				"  2. No\n" +
+				"\n\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.True(t, handled,
+				"a partially rendered MCP dialog with options in a separate block must block; "+
+					"reporting false lets the caller paste into the live picker")
+			require.Empty(t, sentKeystrokes(cmds),
+				"a partially rendered dialog must not receive a key; got %v", cmds)
+		})
+	}
+}
+
+// An agent that prints the exact MCP question above an unrelated yes/no picker
+// — but WITHOUT the MCP preamble ("New MCP server found") — must not fire
+// Enter. The separator bridge in claudeMCPTrustFooterIsLast requires the
+// preamble to appear in the preceding block alongside the question; a question-
+// only preceding block does not satisfy it.
+//
+// This is the thread 2 finding (claude_trust.go:470): the separator bridge
+// extended the search to the preceding block but only required the question
+// there, leaving an attacker-controlled path via the exact question string above
+// any yes/no picker with a blank row between them.
+func TestCheckAndHandleTrustPrompt_QuestionOnlyAboveYesNoPickerInjectsNothing(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{
+			// Question (without preamble) in preceding block, then blank, then
+			// an unrelated yes/no picker with footer last.
+			name: "question only above yes/no picker, blank separator",
+			content: "Do you trust this new MCP server?\n" +
+				"\n" +
+				"❯ 1. Yes\n" +
+				"  2. No\n" +
+				"Enter to confirm",
+		},
+		{
+			// Same without any blank separator: question immediately above picker.
+			name: "question only above yes/no picker, no blank separator",
+			content: "Do you trust this new MCP server?\n" +
+				"❯ 1. Yes\n" +
+				"  2. No\n" +
+				"Enter to confirm",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.False(t, handled,
+				"a question without the MCP preamble above a yes/no picker is not a trust prompt; "+
+					"af must not report one in the way")
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may be injected into an unrelated picker; got %v", cmds)
+		})
+	}
+}

@@ -14,10 +14,6 @@ func (m *Manager) InstancesSnapshot() []*session.Instance {
 	return daemonInstances(m.instances)
 }
 
-func (m *Manager) SaveInstances() error {
-	return m.storage.SaveInstances(m.InstancesSnapshot())
-}
-
 func (m *Manager) SaveInstancesForShutdown() error {
 	return m.storage.SaveInstancesForShutdown(m.InstancesSnapshot())
 }
