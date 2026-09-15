@@ -316,8 +316,9 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 		// not just home ownership — the legacy binary set it to the account's actual
 		// directory, so a different directory means a different account's title
 		// collision. Absent credential-root (pre-variable binary or variable not
-		// readable): ownership is unverifiable, proceed rather than block on an
-		// ambiguous pane.
+		// readable): account identity is unverifiable, so legacyPaneBelongsToAccount
+		// fails closed — a false refusal costs one kill command, while proceeding
+		// risks a second pane racing a live login over the same auth.json.
 		legacySName := legacyPane.SanitizedName()
 		legacyOwner, legacyOwnerPresent, legacyOwnerErr := tmux.SessionHomeMarker(cmd.MakeExecutor(), legacySName)
 		if legacyOwnerErr != nil {
@@ -577,14 +578,13 @@ func canonicalHome(path string) (string, error) {
 // it is the unforgeable per-account discriminator.
 //
 // When the credential-root variable is absent (pane created by an older binary
-// that did not set it), we fall back to the name's sanitization stability. If
-// `name` contains no characters that tmux's sanitizer would fold away — that is,
-// `name` contains only letters, digits, `_` and `-` — then the legacy probe name
-// is unambiguous: no other valid account name could produce the same sanitized
-// title, so this is provably the same account and we refuse. If `name` DOES
-// contain characters that sanitize (like `.`), another account with `_` at those
-// positions could have produced the same title, so we cannot be certain and proceed
-// rather than risking a false refusal.
+// that did not set it), account identity is unknowable: another account whose
+// name sanitizes to the same legacy title (e.g. `work.proj` vs `work_proj`,
+// both `work_proj` after tmux sanitization) could own this pane. We fail closed
+// — refuse — for every such pane, including names that contain no sanitizable
+// characters: refusing an unverifiable pane costs the operator one kill
+// command, while starting a second pane against a live account's credential
+// directory corrupts auth.json.
 func legacyPaneBelongsToAccount(agent, name, legacySName, dir string) (sameAccount bool, refuseErr error) {
 	configVar, hasConfigVar := sessionenv.SupportsAccounts(agent)
 	if !hasConfigVar {

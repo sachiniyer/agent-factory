@@ -16,6 +16,18 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
+// isolateLoginTmux declares the private-socket world for a login test AND pins
+// the tmux server-process probe to empty. The private world holds no server
+// until the test creates one, so a socket-absent probe is definitive without
+// consulting the host's process table — which matters on a developer box that
+// has real tmux servers running, where the probe would otherwise report
+// "unknown" (and SIGUSR1 those real servers) on every fresh-socket Start.
+func isolateLoginTmux(t *testing.T) {
+	t.Helper()
+	testguard.IsolateTmux(t)
+	t.Cleanup(tmux.PinServerProbeForTest())
+}
+
 // The sentinel values staged into the daemon's own environment before a login
 // pane is spawned. They are recognizable strings rather than plausible ones so
 // an assertion can look for the VALUE anywhere in the pane's environment, not
@@ -110,7 +122,7 @@ func loginPaneCases() []loginPaneCase {
 func TestLoginPaneRunsTheAgentsOwnFlowInTheAccountEnvironment(t *testing.T) {
 	for _, tc := range loginPaneCases() {
 		t.Run(tc.agent, func(t *testing.T) {
-			testguard.IsolateTmux(t)
+			isolateLoginTmux(t)
 			home := testguard.SocketTempDir(t)
 			t.Setenv("AGENT_FACTORY_HOME", home)
 
@@ -233,7 +245,7 @@ func TestLoginPaneRunsTheAgentsOwnFlowInTheAccountEnvironment(t *testing.T) {
 // over one auth.json, and the second pane would also be invisible to the
 // operator sitting in the first.
 func TestLoginPaneIsReusedRatherThanDuplicated(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
@@ -275,7 +287,7 @@ func TestLoginPaneIsReusedRatherThanDuplicated(t *testing.T) {
 // TestLoginRefusesAgentsWithNoVerifiedFlow keeps the roster refusal at the verb,
 // not only in the table: an agent af cannot log in must never reach tmux.
 func TestLoginRefusesAgentsWithNoVerifiedFlow(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	supervisor := New()
@@ -291,7 +303,7 @@ func TestLoginRefusesAgentsWithNoVerifiedFlow(t *testing.T) {
 // that must be enforced where it is detectable. A login whose result codex would
 // ignore must not be run at all, and it must certainly not leave a pane behind.
 func TestLoginRefusesAKeyringBackedCodexAccountBeforeSpawning(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	dir, err := agentaccount.Register(home, "codex", "work")
@@ -319,7 +331,7 @@ func TestLoginRefusesAKeyringBackedCodexAccountBeforeSpawning(t *testing.T) {
 // TestLoginRefusesWhenTheAgentIsNotInstalled turns a pane that would exit 127
 // with no explanation into a sentence naming what is missing.
 func TestLoginRefusesWhenTheAgentIsNotInstalled(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	t.Setenv("PATH", t.TempDir())
@@ -338,7 +350,7 @@ func TestLoginRefusesWhenTheAgentIsNotInstalled(t *testing.T) {
 // user's side: logging in to an account nobody has registered yet is the
 // ordinary first use, not an error.
 func TestLoginRegistersTheAccountItIsAskedFor(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	binDir := t.TempDir()
@@ -371,7 +383,7 @@ func TestLoginRegistersTheAccountItIsAskedFor(t *testing.T) {
 // the daemon that spawned it. A login pane has no Instance, so nothing else
 // knows it exists — the #1093/#1104 orphan class.
 func TestStopClosesEveryLoginPane(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	binDir := t.TempDir()
@@ -476,7 +488,7 @@ func waitForLogin(t *testing.T, home, agent, name string) bool {
 // reports that as a pane that vanished, worded for a broken install; af has to
 // tell the two apart by the ACCOUNT, not by the launch error.
 func TestLoginReportsAFlowThatEndedBeforeTheHandover(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
@@ -515,7 +527,7 @@ func TestLoginReportsAFlowThatEndedBeforeTheHandover(t *testing.T) {
 // alternative is a registered account that looks fine and fails much later, at
 // session start, naming none of this.
 func TestLoginReportsANoOpAsFailure(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
@@ -547,7 +559,7 @@ func TestLoginReportsANoOpAsFailure(t *testing.T) {
 // would fail with "tmux session already exists" and, worse, be diagnosed as a
 // login that left no credential.
 func TestLoginJoinsAPaneThisSupervisorDidNotSpawn(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	binDir := t.TempDir()
@@ -596,7 +608,7 @@ func TestLoginJoinsAPaneThisSupervisorDidNotSpawn(t *testing.T) {
 // home B falls through to its own flow (here failing: the home-blind name is
 // already taken by home A, so it reports a failure rather than a silent reuse).
 func TestLoginDoesNotAdoptAnotherHomesPane(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	homeA := testguard.SocketTempDir(t)
 	homeB := testguard.SocketTempDir(t)
 	binDir := t.TempDir()
@@ -656,7 +668,7 @@ func TestLoginDoesNotAdoptAnotherHomesPane(t *testing.T) {
 // auth.json and breaking the single-login guarantee. The fix probes the legacy
 // name and refuses with an actionable message when it is still live.
 func TestLoginRefusesWhenALegacyPaneIsStillRunning(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
@@ -706,7 +718,7 @@ func TestLoginRefusesWhenALegacyPaneIsStillRunning(t *testing.T) {
 // agent-factory home must not block a new login for `work.proj` in THIS home —
 // the AF_HOME marker on the legacy pane distinguishes them.
 func TestLoginDoesNotRefuseWhenALegacyPaneFromADifferentHomeHasACollidingTitle(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	otherHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", otherHome)
 
@@ -759,7 +771,7 @@ func TestLoginDoesNotRefuseWhenALegacyPaneFromADifferentHomeHasACollidingTitle(t
 // because the two accounts live in different directories, the pane's directory
 // reveals which account it belongs to, and only the matching one triggers a refusal.
 func TestLoginDoesNotRefuseWhenALegacyPaneFromTheSameHomeHasACollidingTitle(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
@@ -815,7 +827,7 @@ func TestLoginDoesNotRefuseWhenALegacyPaneFromTheSameHomeHasACollidingTitle(t *t
 // credential directory. The fix hex-encodes the name inside LoginSessionName, so
 // the two produce distinct, tmux-stable session names and each gets its own pane.
 func TestLoginPaneCollisionDotVsUnderscoreGetsDistinctPanes(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
