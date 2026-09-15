@@ -106,6 +106,26 @@ func (w *taskWatcher) parkedHeadSupersedesSupervisorStatus(status string) bool {
 	return recorded
 }
 
+// countEventDrop records one event that will be neither delivered nor durably
+// retained and returns the values the caller needs to rate-limit its warning
+// and decide whether to checkpoint. Every refusal that loses an event goes
+// through this so dropped_events cannot diverge by which branch produced it:
+// the rate-full drop, a limit park with no durable queue, and any later loss
+// all increment the same counter under the same lock discipline.
+func (w *taskWatcher) countEventDrop(now time.Time) (dropped int, outcomeChanged, logIt bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.dropped++
+	dropped = w.dropped
+	outcomeChanged = w.lastDroppedAt.IsZero() || w.lastDeliveredAt.After(w.lastDroppedAt)
+	w.lastDroppedAt = now
+	logIt = now.Sub(w.lastDropLog) >= time.Minute
+	if logIt {
+		w.lastDropLog = now
+	}
+	return dropped, outcomeChanged, logIt
+}
+
 // persistDroppedEvents checkpoints an absolute counter rather than one delta
 // per line. The first drop after a successful delivery and then at most one per
 // log window touch tasks.json, so the visibility fix cannot turn consecutive

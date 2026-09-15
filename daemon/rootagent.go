@@ -713,6 +713,9 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 	// before sending — otherwise this path pastes into an attached pane the
 	// "exists" path would have deferred (#1638).
 	if m.deferWhileAttached(repo.ID, req) {
+		if req.TaskOrigin && m.taskTargetAtUsageLimit(repo.ID, req.Title) {
+			return TaskStatusLimitParked, session.PromptNotDelivered, true, nil
+		}
 		return StatusDeferredAttached, session.PromptNotDelivered, true, nil
 	}
 	status, err := m.SendPromptWithStatus(SendPromptRequest{

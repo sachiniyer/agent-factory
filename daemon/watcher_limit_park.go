@@ -30,6 +30,8 @@ var watcherLimitBackpressurePoll = 100 * time.Millisecond
 func (w *taskWatcher) waitForLimitQueueCapacity(stdoutWritersStopped <-chan struct{}) (proceed, drainFinitePipe bool) {
 	writersStopped := stdoutWritersStopped
 	writerFinished := false
+	stopping := false
+	stopCh := w.stopCh
 	for w.queue != nil {
 		blocked, unknown := w.queue.limitBackpressureState()
 		if !blocked {
@@ -38,9 +40,24 @@ func (w *taskWatcher) waitForLimitQueueCapacity(stdoutWritersStopped <-chan stru
 		if writerFinished && !unknown {
 			return false, true
 		}
-		select {
-		case <-w.stopCh:
+		if stopping && (writerFinished || writersStopped == nil) {
+			// Stop arrived while queue state was unreadable. It is still
+			// unreadable and there is no live writer left to wait on, so the
+			// pipe is finite; drain it. The drain itself re-checks state and
+			// keeps lines in the run tail if the queue never recovered.
 			return false, true
+		}
+		select {
+		case <-stopCh:
+			if !unknown {
+				return false, true
+			}
+			// Queue state is unreadable, so handing the pipe's complete events
+			// to the queue now can only produce refused enqueues. Keep recovering
+			// until the writers are actually gone — the stop watchdog bounds that
+			// wait — so a queue that heals during teardown still receives them.
+			stopping = true
+			stopCh = nil
 		case <-writersStopped:
 			if !unknown {
 				return false, true
@@ -114,12 +131,23 @@ func (w *taskWatcher) targetLimitRequiresRetention() bool {
 // has been killed, so this drains both bufio-prefetched bytes and the now-finite
 // kernel pipe without reopening production. The queue is limit-protected, so
 // these already-emitted events may cross its ordinary cap without eviction.
+//
+// The destination is chosen at drain time: while queue load state is still
+// unreadable every enqueue is required to refuse, so the lines go straight to
+// the run tail — the only remaining place they can be seen — rather than each
+// producing a "failed to queue" error that implies they reached storage.
 func (w *taskWatcher) persistRemainingLimitEvents(br *bufio.Reader, tail *tailBuffer) {
+	emit := func(line string) { w.enqueueEvent(line, tail, true) }
+	if w.queue == nil {
+		emit = tail.add
+	} else if _, unknown := w.queue.limitBackpressureState(); unknown {
+		emit = tail.add
+	}
 	for {
 		chunk, err := br.ReadSlice('\n')
 		switch {
 		case err == nil:
-			w.enqueueEvent(strings.TrimRight(string(chunk), "\r\n"), tail, true)
+			emit(strings.TrimRight(string(chunk), "\r\n"))
 		case errors.Is(err, bufio.ErrBufferFull):
 			line := string(chunk)
 			discarded := 0
@@ -137,7 +165,7 @@ func (w *taskWatcher) persistRemainingLimitEvents(br *bufio.Reader, tail *tailBu
 				return
 			}
 			log.WarningLog.Printf("watch task %s: stdout line exceeded %d bytes during stop drain; truncated (%d bytes discarded)", w.taskID, maxWatchLineBytes, discarded)
-			w.enqueueEvent(line, tail, true)
+			emit(line)
 		case errors.Is(err, io.EOF):
 			if len(chunk) > 0 {
 				log.WarningLog.Printf("watch task %s: discarding %d bytes of unterminated stdout output during stop drain", w.taskID, len(chunk))

@@ -230,6 +230,129 @@ func TestUnreadableQueueBackpressuresAfterWriterExitUntilStateIsKnown(t *testing
 	}
 }
 
+// TestStopWithUnreadableQueueHoldsPipeUntilWritersStop covers the stop side of
+// the unknown-state contract the writer-exit path already honors: a stop that
+// interrupts backpressure while queue load state is unreadable must not hand
+// the finite pipe to enqueues that are required to refuse it. The reader waits
+// — bounded by the stop watchdog's kill chain — until the writers are actually
+// gone, then keeps the complete lines in the run tail.
+func TestStopWithUnreadableQueueHoldsPipeUntilWritersStop(t *testing.T) {
+	dir := t.TempDir()
+	seed := newEventQueue(dir, "stop-unreadable-hold")
+	if err := seed.enqueue("parked-before-restart", true); err != nil {
+		t.Fatalf("seed protected event: %v", err)
+	}
+	realQueuePath := seed.path
+	backupPath := realQueuePath + ".readable"
+	if err := os.Rename(realQueuePath, backupPath); err != nil {
+		t.Fatalf("move queue behind unreadable fixture: %v", err)
+	}
+	if err := os.Mkdir(realQueuePath, 0o755); err != nil {
+		t.Fatalf("replace queue file with unreadable directory: %v", err)
+	}
+	queue := newEventQueue(dir, "stop-unreadable-hold")
+	if !queue.loadFailed() {
+		t.Fatal("fixture did not make queue state unreadable")
+	}
+
+	oldPoll := watcherLimitBackpressurePoll
+	watcherLimitBackpressurePoll = time.Millisecond
+	t.Cleanup(func() { watcherLimitBackpressurePoll = oldPoll })
+
+	stopCh := make(chan struct{})
+	close(stopCh)
+	w := &taskWatcher{
+		taskID: "stop-unreadable-hold", sup: newWatcherSupervisor(), queue: queue, stopCh: stopCh,
+	}
+	tail := &tailBuffer{}
+	writersStopped := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		w.consumeLines(strings.NewReader("accepted-before-stop\n"), tail, writersStopped)
+		close(readerDone)
+	}()
+
+	// While a writer could still be draining the kernel pipe, the stop must not
+	// race the unreadable queue for these events.
+	select {
+	case <-readerDone:
+		t.Fatal("stop drained the pipe while writers were still live and queue state unreadable")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(writersStopped)
+	select {
+	case <-readerDone:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not finish after the writers stopped")
+	}
+	if !strings.Contains(tail.logSuffix(), "accepted-before-stop") {
+		t.Fatalf("unreadable-state stop did not keep the accepted event in the run tail: %q", tail.logSuffix())
+	}
+}
+
+// TestStopWithUnreadableQueueStillEnqueuesAfterRecovery proves the hold above
+// is a recovery window, not just a delay: when the queue heals before the
+// writers finish, the stopped pipe's complete events are durably enqueued
+// rather than dropped to the tail.
+func TestStopWithUnreadableQueueStillEnqueuesAfterRecovery(t *testing.T) {
+	dir := t.TempDir()
+	seed := newEventQueue(dir, "stop-unreadable-recover")
+	if err := seed.enqueue("parked-before-restart", true); err != nil {
+		t.Fatalf("seed protected event: %v", err)
+	}
+	realQueuePath := seed.path
+	backupPath := realQueuePath + ".readable"
+	if err := os.Rename(realQueuePath, backupPath); err != nil {
+		t.Fatalf("move queue behind unreadable fixture: %v", err)
+	}
+	if err := os.Mkdir(realQueuePath, 0o755); err != nil {
+		t.Fatalf("replace queue file with unreadable directory: %v", err)
+	}
+	queue := newEventQueue(dir, "stop-unreadable-recover")
+	if !queue.loadFailed() {
+		t.Fatal("fixture did not make queue state unreadable")
+	}
+
+	oldPoll := watcherLimitBackpressurePoll
+	watcherLimitBackpressurePoll = time.Millisecond
+	t.Cleanup(func() { watcherLimitBackpressurePoll = oldPoll })
+
+	stopCh := make(chan struct{})
+	close(stopCh)
+	s := newWatcherSupervisor()
+	s.observeTargetLimit = func(string) (bool, error) { return true, nil }
+	w := &taskWatcher{
+		taskID: "stop-unreadable-recover", sup: s, queue: queue, stopCh: stopCh,
+	}
+	tail := &tailBuffer{}
+	writersStopped := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		w.consumeLines(strings.NewReader("accepted-during-teardown\n"), tail, writersStopped)
+		close(readerDone)
+	}()
+
+	// Give the reader a poll window to observe the stop and register that the
+	// queue state is still unreadable, then heal the queue before the writers
+	// die.
+	time.Sleep(20 * time.Millisecond)
+	if err := os.Remove(realQueuePath); err != nil {
+		t.Fatalf("remove unreadable queue fixture: %v", err)
+	}
+	if err := os.Rename(backupPath, realQueuePath); err != nil {
+		t.Fatalf("restore readable queue: %v", err)
+	}
+	close(writersStopped)
+	select {
+	case <-readerDone:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not finish after the writers stopped")
+	}
+	if got := queue.pendingCount(); got != 2 {
+		t.Fatalf("recovered queue did not receive the stopped pipe's event: pending=%d, want seed + accepted", got)
+	}
+}
+
 func TestRateFullProtectedEventWithoutQueueRecordsDrop(t *testing.T) {
 	s := newWatcherSupervisorWithEventsPerMinute(1)
 	s.observeTargetLimit = func(string) (bool, error) { return true, nil }
@@ -251,5 +374,42 @@ func TestRateFullProtectedEventWithoutQueueRecordsDrop(t *testing.T) {
 	}
 	if recorded != 1 {
 		t.Fatalf("queue-less protected event did not reach durable drop accounting: recorded=%d", recorded)
+	}
+}
+
+// TestLimitParkedEventWithoutQueueRecordsDrop covers the sibling hole to the
+// rate-full case above: an event that reserves a rate slot and then fails only
+// at the limit fence refunds the slot and asks enqueueEvent to retain it — but
+// with no durable queue that enqueue silently retains nothing, so the event
+// vanished from every counter. It must reach dropped_events instead.
+func TestLimitParkedEventWithoutQueueRecordsDrop(t *testing.T) {
+	s := newWatcherSupervisor()
+	s.deliver = func(string, string, watchDeliveryOptions) error {
+		return errTargetLimitReached
+	}
+	recorded := 0
+	s.recordDrops = func(_ string, total int, _ time.Time) error {
+		recorded = total
+		return nil
+	}
+	w := &taskWatcher{
+		taskID: "parked-without-queue", sup: s,
+		stopCh: make(chan struct{}),
+	}
+	tail := &tailBuffer{}
+
+	w.handleEvent("parked-nowhere", tail)
+
+	if w.dropped != 1 {
+		t.Fatalf("queue-less limit park disappeared without drop accounting: dropped=%d", w.dropped)
+	}
+	if recorded != 1 {
+		t.Fatalf("queue-less limit park did not reach durable drop accounting: recorded=%d", recorded)
+	}
+	if !strings.Contains(tail.logSuffix(), "parked-nowhere") {
+		t.Fatalf("queue-less limit park did not reach the run tail: %q", tail.logSuffix())
+	}
+	if len(w.eventTimes) != 0 {
+		t.Fatalf("limit park did not refund its rate slot: %d reservations remain", len(w.eventTimes))
 	}
 }

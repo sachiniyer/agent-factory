@@ -66,6 +66,41 @@ func TestDeliverPrompt_DefersWhileTargetAttached(t *testing.T) {
 	}
 }
 
+// TestDeliverPrompt_AttachedLimitedTargetParks covers the overlap of the defer
+// lease and the limit fence: a task-origin delivery into a session that is
+// both attached AND limit-reached must park, not defer. Deferring would let a
+// cron occurrence slip through as deliverable-after-detach and would keep a
+// watch backlog in ordinary retention instead of the durable limit park.
+func TestDeliverPrompt_AttachedLimitedTargetParks(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	rec := &promptRecorder{}
+	backend := recordingBackend{readyFakeBackend{session.NewFakeBackend()}, rec}
+	instance := registerStarted(t, manager, repoID, repoPath, "captain", backend, true, session.Running)
+	manager.setLimitReached(instance, time.Now().Add(time.Hour))
+
+	// Attached to a limit-reached target: attachment alone defers, but the
+	// usage limit is the blocker the task record owns.
+	manager.PauseStatusPoll(repoID, "captain", "")
+
+	status, err := manager.DeliverPrompt(DeliverPromptRequest{
+		Title:              "captain",
+		RepoPath:           repoPath,
+		Program:            "claude",
+		Prompt:             "scheduled-event",
+		TaskOrigin:         true,
+		DeferWhileAttached: true,
+	})
+	if err != nil {
+		t.Fatalf("a parked delivery must not error: %v", err)
+	}
+	if status != TaskStatusLimitParked {
+		t.Fatalf("status = %q, want %q — a limit-reached target must park even while attached", status, TaskStatusLimitParked)
+	}
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("a parked delivery must NOT paste into the attached pane, got %v", got)
+	}
+}
+
 // TestDeliverPrompt_ManualSendDeliversWhileTargetAttached pins that the defer
 // is scoped to automated deliveries: a manual send (DeferWhileAttached unset,
 // as `af sessions send-prompt` leaves it) is an explicit user action and still

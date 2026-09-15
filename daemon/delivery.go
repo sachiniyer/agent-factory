@@ -164,6 +164,40 @@ func (m *Manager) deferWhileAttached(repoID string, req DeliverPromptRequest) bo
 	return m.isPollPaused(repoID, req.Title, id)
 }
 
+// taskTargetAtUsageLimit reports under the same observation-settlement and
+// account-limit fences the send boundary uses whether the tracked target is
+// limit-reached. An attached target still has to ask: deferral protects the
+// user's typing, but a limit-reached session cannot accept the work either, and
+// the task record plus queue retention belong to the parked contract — a
+// deferral would let a cron occurrence slip through as deliverable-after-detach
+// and would keep a multi-day watch backlog in ordinary 72-hour retention
+// instead of the durable limit park.
+func (m *Manager) taskTargetAtUsageLimit(repoID, title string) bool {
+	key := daemonInstanceKey(repoID, title)
+	m.mu.Lock()
+	instance := m.instances[key]
+	m.mu.Unlock()
+	if instance == nil {
+		return false
+	}
+	opLock := m.opLockFor(key)
+	opLock.Lock()
+	defer opLock.Unlock()
+	releaseObservation := instance.HoldAgentObservationSettlement()
+	defer releaseObservation()
+	m.accountLimitMu.Lock()
+	defer m.accountLimitMu.Unlock()
+	m.mu.Lock()
+	current := m.instances[key]
+	m.mu.Unlock()
+	if current != instance {
+		// A replacement mid-observation is unknown: do not park on the old
+		// runtime's state. The deferred retry re-derives against the new one.
+		return false
+	}
+	return instance.GetLiveness() == session.LiveLimitReached
+}
+
 // DeliverPrompt delivers a prompt to a target session, auto-creating that
 // session when it does not exist. The whole create-or-send decision runs under
 // a per-(repo, title) lock, so concurrent deliveries to the same shared target
@@ -238,6 +272,13 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 		// automated deliveries set DeferWhileAttached — a manual send-prompt is an
 		// explicit user action and still lands immediately.
 		if m.deferWhileAttached(repo.ID, req) {
+			// Attached AND limit-reached is a park, not a deferral: the limit is
+			// the blocker the task record owns. Deferring would let a cron
+			// occurrence deliver after the reset instead of being skipped, and
+			// would leave a watch backlog in ordinary retention.
+			if req.TaskOrigin && m.taskTargetAtUsageLimit(repo.ID, req.Title) {
+				return TaskStatusLimitParked, session.PromptNotDelivered, false, nil
+			}
 			return StatusDeferredAttached, session.PromptNotDelivered, false, nil
 		}
 		deliveryStatus, err := m.SendPromptWithStatus(SendPromptRequest{
@@ -285,6 +326,9 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 			// before sending — otherwise this path pastes into an attached pane the
 			// "exists" path would have deferred (#1638).
 			if m.deferWhileAttached(repo.ID, req) {
+				if req.TaskOrigin && m.taskTargetAtUsageLimit(repo.ID, req.Title) {
+					return TaskStatusLimitParked, session.PromptNotDelivered, false, nil
+				}
 				return StatusDeferredAttached, session.PromptNotDelivered, false, nil
 			}
 			deliveryStatus, serr := m.SendPromptWithStatus(SendPromptRequest{

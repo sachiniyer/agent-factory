@@ -730,16 +730,7 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 			return
 		}
 		now := time.Now()
-		w.mu.Lock()
-		w.dropped++
-		dropped := w.dropped
-		outcomeChanged := w.lastDroppedAt.IsZero() || w.lastDeliveredAt.After(w.lastDroppedAt)
-		w.lastDroppedAt = now
-		logIt := now.Sub(w.lastDropLog) >= time.Minute
-		if logIt {
-			w.lastDropLog = now
-		}
-		w.mu.Unlock()
+		dropped, outcomeChanged, logIt := w.countEventDrop(now)
 		// One warning per window, not per drop — a flooding script must not
 		// also flood the daemon log. The counter keeps the exact total.
 		// Rate-dropped events are deliberately NOT queued: the limiter is
@@ -767,6 +758,21 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 			limitParked = true
 			parkedStatusRecorded = watchParkedStatusRecorded(err)
 			w.releaseEventSlot()
+			if w.queue == nil {
+				// enqueueEvent below retains the line only in the run tail when
+				// there is no durable queue, so this park is otherwise invisible:
+				// the event reserved a rate slot, failed only at the limit fence,
+				// and then vanished without reaching dropped_events. Count it
+				// through the same drop accounting the rate-full path uses.
+				now := time.Now()
+				dropped, outcomeChanged, logIt := w.countEventDrop(now)
+				if logIt {
+					log.WarningLog.Printf("watch task %s: usage-limit event cannot be retained; durable queue unavailable (%d dropped so far)", w.taskID, dropped)
+				}
+				if logIt || outcomeChanged {
+					w.persistDroppedEvents(dropped, now)
+				}
+			}
 			log.InfoLog.Printf("watch task %s: target session is at a usage limit; deferring event until the limit clears", w.taskID)
 		case errors.Is(err, errTargetBusy):
 			// Not a failure: a TUI is attached to the target, so the event is
