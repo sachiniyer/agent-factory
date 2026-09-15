@@ -6160,7 +6160,7 @@ test("scheduled reconciliation breaks same-second commit-status ties by generati
     prNumber: 1465,
     headSha: HEAD_SHA,
     evaluatedAt: "2026-07-09T01:10:00Z",
-    reason: "required check Build commit status is failing",
+    reason: "required check Build did not succeed (commit status failure)",
     observedChecks: [{
       name: "Build",
       appId: null,
@@ -6441,6 +6441,131 @@ test("scheduled reconciliation distinguishes source-less blockers from other app
     headSha: sourceLessHead,
     decisionKey: `pr-1466-head-${sourceLessHead}`,
   }], "a genuinely source-less blocker must remain eligible for reconciliation");
+});
+
+test("scheduled reconciliation requires an exact context boundary for source-less blockers", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  // `Build & verify` is a real check name in this repository, and it shares the
+  // `required check Build ` prefix the reason parser keys on. A blocker naming
+  // it is not evidence about the exact-name `Build` check.
+  const prefixedDecision = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T01:10:00Z",
+    reason:
+      `required check Build & verify (app ${ACTIONS_APP_ID}) did not succeed ` +
+      "(check run completed/failure from github-actions (15368))",
+    observedChecks: [],
+  });
+  const completedBuild = reconciliationRequiredCheck("Build", "2026-07-09T01:11:00Z");
+  const snapshot = () => scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, HEAD_SHA)],
+    checksByHead: { [HEAD_SHA]: [prefixedDecision, completedBuild] },
+  });
+
+  assert.deepEqual(await autoGate.resolveTargets({
+    github: snapshot(),
+    context,
+    core: fakeCore(),
+  }), []);
+  assert.deepEqual(await autoGate.resolveTargets({
+    github: snapshot(),
+    context,
+    core: fakeCore(),
+  }), [], "a shared name prefix must not consume the reevaluation cap on repeat sweeps");
+});
+
+test("scheduled reconciliation checks source-less statuses when the decision is absent", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const sourceLessBuild = commitStatus({
+    id: 802,
+    nodeId: "SC_decisionless_build",
+    context: "Build",
+    state: "success",
+    createdAt: "2026-07-09T01:11:00Z",
+  });
+
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: { [HEAD_SHA]: [] },
+      statusesByHead: { [HEAD_SHA]: [sourceLessBuild] },
+    }),
+    context,
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }], "a terminal source-less status must be able to recover a lost decision");
+});
+
+test("scheduled reconciliation keeps a newer queued generation ahead of an older completed run", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const queuedBuild = {
+    id: 9002,
+    node_id: "CR_queued_build",
+    name: "Build",
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "queued",
+    conclusion: null,
+    created_at: "2026-07-09T21:12:00Z",
+    started_at: null,
+    completed_at: null,
+  };
+  const olderCompletedBuild = {
+    id: 9001,
+    node_id: "CR_older_build",
+    name: "Build",
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "completed",
+    conclusion: "failure",
+    created_at: "2026-07-09T21:00:00Z",
+    started_at: "2026-07-09T21:00:30Z",
+    completed_at: "2026-07-09T21:05:00Z",
+  };
+  const settlingDecision = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T21:11:30Z",
+    reason:
+      `required check Build (app ${ACTIONS_APP_ID}) is still settling ` +
+      "(check run queued/no conclusion from github-actions (15368))",
+    snapshotVersion: 2,
+    observedChecks: [{
+      name: "Build",
+      appId: ACTIONS_APP_ID,
+      observed: {
+        kind: "check_run",
+        id: "CR_queued_build",
+        status: "queued",
+        conclusion: null,
+      },
+      generation: [{
+        kind: "check_run",
+        id: "CR_queued_build",
+        status: "queued",
+        conclusion: null,
+      }],
+    }],
+  });
+  const snapshot = () => scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, HEAD_SHA)],
+    checksByHead: { [HEAD_SHA]: [settlingDecision, queuedBuild, olderCompletedBuild] },
+  });
+
+  assert.deepEqual(await autoGate.resolveTargets({
+    github: snapshot(),
+    context,
+    core: fakeCore(),
+  }), []);
+  assert.deepEqual(await autoGate.resolveTargets({
+    github: snapshot(),
+    context,
+    core: fakeCore(),
+  }), [], "a still-queued newer generation is not fresh terminal evidence");
 });
 
 test("scheduled reconciliation batches head inspection and caps reevaluations", async () => {
@@ -12199,6 +12324,7 @@ function scheduledReconciliationGithub({
                           conclusion: run.conclusion == null
                             ? null
                             : String(run.conclusion).toUpperCase(),
+                          createdAt: run.created_at,
                           startedAt: run.started_at,
                           completedAt: run.completed_at,
                           externalId: run.external_id,
@@ -12289,6 +12415,9 @@ function checkRun({
   appId = ACTIONS_APP_ID,
   appSlug = "github-actions",
   externalId = null,
+  createdAt = "2026-07-09T01:05:00Z",
+  startedAt = "2026-07-09T01:06:00Z",
+  completedAt,
 }) {
   return {
     id,
@@ -12299,8 +12428,11 @@ function checkRun({
     app: { id: appId, slug: appSlug },
     status,
     conclusion,
-    started_at: "2026-07-09T01:06:00Z",
-    completed_at: status === "completed" ? "2026-07-09T01:10:00Z" : null,
+    created_at: createdAt,
+    started_at: startedAt,
+    completed_at: completedAt === undefined
+      ? (status === "completed" ? "2026-07-09T01:10:00Z" : null)
+      : completedAt,
   };
 }
 

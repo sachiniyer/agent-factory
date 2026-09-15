@@ -3470,7 +3470,11 @@ function blockedPRValidationSpec(body, context) {
       searchFrom = foundAt + marker.length;
       continue;
     }
-    if (suffix.startsWith(" ") && !suffix.startsWith(" (")) {
+    // The source-less form carries no app suffix, so the context must end where
+    // the reason verb begins: a longer check name sharing the prefix ("required
+    // check Build & verify …") is not evidence for "Build". Only the delimiters
+    // this gate generates — ` has`, ` is`, ` did` — close the context boundary.
+    if (/^ (?:has|is|did) /.test(suffix)) {
       return { context, sourceAppId: null };
     }
     searchFrom = foundAt + marker.length;
@@ -3525,10 +3529,14 @@ function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead, statusesB
           const spec = blockedPRValidationSpec(body, name);
           return spec ? [spec] : [];
         })
-      : PR_VALIDATION_REQUIRED_CHECK_NAMES.map((context) => ({
-          context,
-          sourceAppId: GITHUB_ACTIONS_APP_ID,
-        }));
+      : PR_VALIDATION_REQUIRED_CHECK_NAMES.flatMap((context) => [
+          // With no decision to recover the blocked source from, check every
+          // shape evaluation can snapshot: forcing the Actions app here would
+          // leave a terminal source-less commit status forever unable to wake
+          // the PR whose decision was lost or never published.
+          { context, sourceAppId: GITHUB_ACTIONS_APP_ID },
+          { context, sourceAppId: null },
+        ]);
     const snapshot = decision ? decisionRequiredCheckSnapshot(decision) : null;
     const completedCheckChanged = blockedSpecs.some((spec) => {
       const currentState = latestRequiredState(
@@ -3612,6 +3620,7 @@ const REQUIRED_CHECK_RECONCILIATION_QUERY = `
                         name
                         status
                         conclusion
+                        createdAt
                         startedAt
                         completedAt
                         externalId
@@ -3666,6 +3675,11 @@ function reconciliationCheckRun(run) {
     },
     status: String(run.status || "").toLowerCase(),
     conclusion: run.conclusion == null ? null : String(run.conclusion).toLowerCase(),
+    // A queued run has no startedAt/completedAt; createdAt is the only
+    // timestamp that keeps a newer queued generation ordered above an older
+    // completed one, which is the ordering latestRequiredState reads off
+    // created_at during normal REST evaluation.
+    created_at: run.createdAt,
     started_at: run.startedAt,
     completed_at: run.completedAt,
     output: {
