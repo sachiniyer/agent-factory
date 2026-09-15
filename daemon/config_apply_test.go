@@ -211,3 +211,45 @@ func TestApplyConfig_UnrelatedChangeKeepsSandboxCredentials(t *testing.T) {
 	assert.True(t, ok, "an unrelated save must not revoke callback credentials")
 	assert.Equal(t, "sess-a", owner)
 }
+
+// TestApplyConfig_UnrelatedChangeWhileExposedDoesNotResurfaceExposureNotice is the
+// regression for the warning-fatigue bug at the apply-time exposure-notice emitter:
+// config.ListenerExposureNotice is a stateless predicate of the CURRENT posture, so
+// calling it unconditionally on every ApplyConfig re-surfaces the notice on every
+// unrelated save (default_program, etc.) while the daemon already holds a
+// tokenless non-loopback bind — training an operator to ignore the one notice that
+// says their control API is reachable with no auth. The other two emitters
+// (exposureWarning per-write, the bind-time caller in listener_reload.go) both gate
+// the notice to the transition that creates the exposure; the apply-time caller must
+// match them and emit only on the transition INTO the exposed posture.
+func TestApplyConfig_UnrelatedChangeWhileExposedDoesNotResurfaceExposureNotice(t *testing.T) {
+	m := applyConfigTestManager(t)
+
+	// Enter the exposed posture: non-loopback listen_addr + require_token=false.
+	_, err := config.SetGlobalConfigValue("network.listen_addr", "0.0.0.0:8443")
+	require.NoError(t, err)
+	_, err = config.SetGlobalConfigValue("network.require_token", "false")
+	require.NoError(t, err)
+	first, applyErr := m.ApplyConfig()
+	require.NoError(t, applyErr)
+	// Anti-vacuous: the transition into exposure MUST surface the notice here, or
+	// the gate below could pass by never emitting at all.
+	joinedFirst := strings.Join(first.Warnings, "\n")
+	require.True(t, strings.Contains(joinedFirst, "reachable from the network"),
+		"the transition into the exposed posture must surface the exposure notice, got: %s", joinedFirst)
+
+	// Now make an UNRELATED change: default_program.
+	_, err = config.SetGlobalConfigValue("default_program", "codex")
+	require.NoError(t, err)
+	result, applyErr := m.ApplyConfig()
+	require.NoError(t, applyErr)
+
+	require.Contains(t, result.Applied, "default_program")
+	require.NotContains(t, result.Applied, "network.listen_addr")
+	require.NotContains(t, result.Applied, "network.require_token")
+
+	joined := strings.Join(result.Warnings, "\n")
+	if strings.Contains(joined, "reachable from the network") {
+		t.Fatalf("BUG: exposure notice resurfaced on an unrelated change while exposed. Warnings:\n%s", joined)
+	}
+}
