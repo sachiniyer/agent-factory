@@ -68,6 +68,57 @@ type fakeClientlessChannel struct {
 	snapshotHook func()
 }
 
+// parkedCaptureChannel models a capture whose teardown has signaled its reader
+// but whose in-flight blocking Read has not returned yet. This is the ordering
+// Darwin exposed in #4319; the broker-level ordering is platform-independent.
+type parkedCaptureChannel struct {
+	reader     *parkedCaptureReader
+	stopCalled chan struct{}
+	stopOnce   sync.Once
+}
+
+type parkedCaptureReader struct {
+	readEntered chan struct{}
+	closeCalled chan struct{}
+	readDone    chan struct{}
+	releaseRead chan struct{}
+	readOnce    sync.Once
+	closeOnce   sync.Once
+}
+
+func newParkedCaptureChannel() *parkedCaptureChannel {
+	return &parkedCaptureChannel{
+		reader: &parkedCaptureReader{
+			readEntered: make(chan struct{}),
+			closeCalled: make(chan struct{}),
+			readDone:    make(chan struct{}),
+			releaseRead: make(chan struct{}),
+		},
+		stopCalled: make(chan struct{}),
+	}
+}
+
+func (c *parkedCaptureChannel) StartCapture() (io.ReadCloser, error) { return c.reader, nil }
+func (c *parkedCaptureChannel) StopCapture() error {
+	c.stopOnce.Do(func() { close(c.stopCalled) })
+	return nil
+}
+func (*parkedCaptureChannel) SendRaw([]byte) error            { return nil }
+func (*parkedCaptureChannel) Resize(uint16, uint16) error     { return nil }
+func (*parkedCaptureChannel) Snapshot() (PaneSnapshot, error) { return PaneSnapshot{}, nil }
+
+func (r *parkedCaptureReader) Read([]byte) (int, error) {
+	r.readOnce.Do(func() { close(r.readEntered) })
+	<-r.releaseRead
+	close(r.readDone)
+	return 0, io.EOF
+}
+
+func (r *parkedCaptureReader) Close() error {
+	r.closeOnce.Do(func() { close(r.closeCalled) })
+	return nil
+}
+
 func (f *fakeClientlessChannel) StartCapture() (io.ReadCloser, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -98,6 +149,12 @@ func (f *fakeClientlessChannel) StopCapture() error {
 		f.stopDone <- struct{}{}
 	}
 	return nil
+}
+
+func (f *fakeClientlessChannel) counts() (starts, stops int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.starts, f.stops
 }
 
 func (f *fakeClientlessChannel) SendRaw(b []byte) error {
@@ -716,23 +773,88 @@ func TestPTYBrokerTeardownDoesNotClobberReconnect(t *testing.T) {
 }
 
 func TestPTYBrokerStopsCaptureWhenLastSubscriberLeaves(t *testing.T) {
-	ch := &fakeClientlessChannel{}
+	ch := &fakeClientlessChannel{stopDone: make(chan struct{}, 1)}
 	br := newPTYBroker(ch)
 	a, _ := br.subscribe(0)
 	b, _ := br.subscribe(0)
 	_ = a.Close()
-	if ch.stops != 0 {
-		t.Fatalf("StopCapture after 1 of 2 leaves = %d, want 0 (capture stays up)", ch.stops)
+	if _, stops := ch.counts(); stops != 0 {
+		t.Fatalf("StopCapture after 1 of 2 leaves = %d, want 0 (capture stays up)", stops)
 	}
 	_ = b.Close()
-	if ch.stops != 1 {
-		t.Fatalf("StopCapture after last leaves = %d, want 1", ch.stops)
+	select {
+	case <-ch.stopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopCapture did not run after the last subscriber left")
+	}
+	if _, stops := ch.counts(); stops != 1 {
+		t.Fatalf("StopCapture after last leaves = %d, want 1", stops)
 	}
 	// A later subscribe restarts the capture (lazy, again).
 	if _, err := br.subscribe(0); err != nil {
 		t.Fatalf("re-subscribe: %v", err)
 	}
-	if ch.starts != 2 {
-		t.Fatalf("StartCapture calls = %d, want 2 (restarted)", ch.starts)
+	if starts, _ := ch.counts(); starts != 2 {
+		t.Fatalf("StartCapture calls = %d, want 2 (restarted)", starts)
+	}
+}
+
+// TestPTYSubscriptionCloseDoesNotJoinCaptureReader pins #4319's close ordering:
+// stopping the last subscriber must request capture teardown without waiting for
+// the capture read loop to finish. A FIFO reader may be parked indefinitely in a
+// blocking syscall while the pane is idle; joining it makes an ordinary
+// subscription Close hang with it.
+func TestPTYSubscriptionCloseDoesNotJoinCaptureReader(t *testing.T) {
+	ch := newParkedCaptureChannel()
+	br := newPTYBroker(ch)
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	select {
+	case <-ch.reader.readEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture reader never entered its blocking read")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- sub.Close() }()
+
+	select {
+	case <-ch.stopCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture teardown never started")
+	}
+	select {
+	case <-ch.reader.closeCalled:
+		// Teardown has signaled the reader, but the pinned Read has not returned.
+		// Subscription Close must not join that read loop.
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture reader was not signaled")
+	}
+
+	var closeBlocked bool
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close subscription: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		closeBlocked = true
+	}
+
+	close(ch.reader.releaseRead)
+	select {
+	case <-ch.reader.readDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture reader did not return after release")
+	}
+	if closeBlocked {
+		select {
+		case <-closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("subscription Close did not return even after capture teardown was released")
+		}
+		t.Fatal("subscription Close waited for the capture reader teardown")
 	}
 }

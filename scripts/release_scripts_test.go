@@ -557,6 +557,12 @@ esac
 	if err != nil {
 		t.Fatalf("install.sh failed: %v\n%s", err, out)
 	}
+	if !strings.Contains(string(out), "warning: "+installDir+" is not on your PATH") {
+		t.Errorf("install path notice must use the established lowercase warning marker:\n%s", out)
+	}
+	if strings.Contains(string(out), "NOTE:") {
+		t.Errorf("install path notice contains caps-shouting:\n%s", out)
+	}
 
 	assertScriptRestartCall(t, callsFile)
 }

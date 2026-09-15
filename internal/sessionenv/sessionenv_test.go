@@ -17,11 +17,6 @@ func TestAgentForCommandRequiresLiteralAgentInvocation(t *testing.T) {
 		{name: "literal assignment", command: "CODEX_HOME=/tmp/codex codex", want: "codex"},
 		{name: "exec", command: "exec -- gemini --model flash", want: "gemini"},
 		{name: "env", command: "env -i HOME=/tmp aider --model sonnet", want: "aider"},
-		{
-			name:    "generated agent server",
-			command: "/srv/af agent-server --listen :43110 --repo /workspace --title test --program 'opencode --model test' --program-resolved --session-env CUSTOM_TOKEN",
-			want:    "opencode",
-		},
 		{name: "agent name used as data", command: "./collect codex"},
 		{name: "agent server title lookalike", command: "/srv/af agent-server --listen :43110 --repo /workspace --title codex"},
 		{name: "compound command", command: "collect; codex"},
@@ -35,6 +30,96 @@ func TestAgentForCommandRequiresLiteralAgentInvocation(t *testing.T) {
 				t.Fatalf("AgentForCommand(%q) = %q, want %q", test.command, got, test.want)
 			}
 		})
+	}
+}
+
+func TestAgentForCommandRejectsUntrustedAgentServerHandoff(t *testing.T) {
+	for _, executable := range []string{"./af", "/tmp/af", "af"} {
+		command := executable + " agent-server --listen :1 --repo /r --title t --program codex --program-resolved --session-env FOO"
+		if got := AgentForCommand(command); got != "" {
+			t.Errorf("AgentForCommand(%q) = %q, want no agent for an unauthenticated af-looking executable", command, got)
+		}
+	}
+}
+
+func TestAgentForCommandAuthenticatesEnvWrapper(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		want    string
+	}{
+		{command: "env codex", want: "codex"},
+		{command: "/usr/bin/env codex", want: "codex"},
+		{command: "/bin/env codex", want: "codex"},
+		{command: "./env codex"},
+		{command: "/tmp/env codex"},
+	} {
+		if got := AgentForCommand(test.command); got != test.want {
+			t.Errorf("AgentForCommand(%q) = %q, want %q", test.command, got, test.want)
+		}
+	}
+}
+
+func TestCredentialAgentForCommandRequiresBareExecutable(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		want    string
+	}{
+		{command: "codex --model o3", want: "codex"},
+		{command: "exec -- codex", want: "codex"},
+		{command: "/usr/bin/env codex", want: "codex"},
+		{command: "TERM=xterm-256color codex", want: "codex"},
+		{command: "env LANG=C codex", want: "codex"},
+		{command: "CLAUDE_CODE_USE_BEDROCK=1 claude", want: "claude"},
+		{command: "env CLAUDE_CODE_USE_VERTEX=1 claude", want: "claude"},
+		{command: "./codex"},
+		{command: "/opt/bin/codex"},
+		{command: "exec -- ./codex"},
+		{command: "/usr/bin/env /opt/bin/codex"},
+		{command: "PATH=/workspace codex"},
+		{command: "env PATH=/workspace codex"},
+		{command: "env -u PATH codex"},
+		{command: "env --unset=PATH codex"},
+		{command: "env -i codex"},
+		{command: "env -C /workspace codex"},
+	} {
+		if got := credentialAgentForCommand(test.command); got != test.want {
+			t.Errorf("credentialAgentForCommand(%q) = %q, want %q", test.command, got, test.want)
+		}
+	}
+}
+
+func TestAbsoluteSystemEnvPreservesAgentCredentials(t *testing.T) {
+	const credential = "OPENAI_API_KEY=fixture"
+	for _, command := range []string{"/usr/bin/env codex", "/bin/env codex"} {
+		agent := AgentForCommand(command)
+		if got := FilterForCommand([]string{credential}, agent, command, nil); !slices.Contains(got, credential) {
+			t.Errorf("authenticated system env command %q lost the Codex credential", command)
+		}
+	}
+
+	command := "./env codex"
+	if got := FilterForCommand([]string{credential}, AgentForCommand(command), command, nil); slices.Contains(got, credential) {
+		t.Fatal("repository env lookalike received the Codex credential")
+	}
+}
+
+func TestAgentServerProgramAcceptsOnlyGeneratedGrammar(t *testing.T) {
+	base := []string{"agent-server", "--listen", ":43110", "--repo", "/workspace", "--title", "test"}
+	withProgram := append(append([]string(nil), base...),
+		"--program", "opencode --model test", "--program-resolved", "--session-env", "CUSTOM_TOKEN")
+	if got, ok := agentServerProgram(withProgram); !ok || got != "opencode --model test" {
+		t.Fatalf("generated explicit-program handoff = (%q, %v), want (opencode command, true)", got, ok)
+	}
+	if got, ok := agentServerProgram(base); !ok || got != "claude" {
+		t.Fatalf("generated default-program handoff = (%q, %v), want (claude, true)", got, ok)
+	}
+	withEnv := append(append([]string(nil), base...), "--session-env", "CUSTOM_TOKEN")
+	if got, ok := agentServerProgram(withEnv); !ok || got != "claude" {
+		t.Fatalf("generated default handoff with session env = (%q, %v), want (claude, true)", got, ok)
+	}
+	malformed := append(append([]string(nil), base...), "--program-resolved")
+	if got, ok := agentServerProgram(malformed); ok || got != "" {
+		t.Fatalf("malformed handoff = (%q, %v), want no program", got, ok)
 	}
 }
 
@@ -120,15 +205,14 @@ func TestFilterForCommandHonorsLiteralClaudeCloudModeSelectors(t *testing.T) {
 		"AWS_SECRET_ACCESS_KEY=fixture",
 		"AZURE_CLIENT_SECRET=fixture",
 	}
-	commands := []string{
+	directCommands := []string{
 		"CLAUDE_CODE_USE_BEDROCK=1 claude",
 		"env CLAUDE_CODE_USE_BEDROCK=true claude",
+		"/usr/bin/env CLAUDE_CODE_USE_BEDROCK=true claude",
 		"env PATH=/opt/claude CLAUDE_CODE_USE_BEDROCK=1 claude",
 		"env -i CLAUDE_CODE_USE_BEDROCK=1 claude",
-		"/srv/af agent-server --listen :43110 --repo /workspace --title test --program 'CLAUDE_CODE_USE_BEDROCK=1 claude' --program-resolved",
-		"exec /srv/af agent-server --listen 127.0.0.1:0 --repo /workspace --title test --program 'CLAUDE_CODE_USE_BEDROCK=1 claude' --program-resolved --session-env CUSTOM_TOKEN",
 	}
-	for _, command := range commands {
+	for _, command := range directCommands {
 		got := FilterForCommand(source, "claude", command, nil)
 		for _, want := range []string{"AWS_ACCESS_KEY_ID=fixture", "AWS_SECRET_ACCESS_KEY=fixture"} {
 			if !slices.Contains(got, want) {
@@ -138,6 +222,15 @@ func TestFilterForCommandHonorsLiteralClaudeCloudModeSelectors(t *testing.T) {
 		if slices.Contains(got, "AZURE_CLIENT_SECRET=fixture") {
 			t.Fatal("Bedrock command admitted an inactive Foundry credential")
 		}
+	}
+
+}
+
+func TestFilterForCommandDoesNotTrustAgentServerArgv(t *testing.T) {
+	command := "./af agent-server --listen :1 --repo /r --title t --program 'CLAUDE_CODE_USE_BEDROCK=1 claude' --program-resolved"
+	got := FilterForCommand([]string{"AWS_ACCESS_KEY_ID=fixture"}, "claude", command, nil)
+	if slices.Contains(got, "AWS_ACCESS_KEY_ID=fixture") {
+		t.Fatal("unauthenticated agent-server argv widened the credential filter")
 	}
 }
 

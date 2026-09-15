@@ -543,6 +543,7 @@ export class ConfigPane {
     input.addEventListener("input", () => {
       this.editing = e.key;
       this.draft = input.value;
+      this.editingInput = input;
       syncSave();
     });
     input.addEventListener("keydown", (ev: KeyboardEvent) => {
