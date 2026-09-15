@@ -436,6 +436,16 @@ func (q *eventQueue) loadFailed() bool {
 	return q.loadErr != nil
 }
 
+// loadFailedFresh is loadFailed behind an unthrottled recovery attempt, for
+// one-time terminal decisions that must not route on a stale outage: a healed
+// queue observed through the throttle would still answer "unknown" for up to
+// eventQueueLoadRetryInterval and divert its events to the run tail.
+func (q *eventQueue) loadFailedFresh() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.retryLoadNowLocked() != nil
+}
+
 // enqueue appends one event and enforces the overflow caps by dropping oldest
 // pending events past them. The optional flag marks a usage-limit-held event;
 // callers that have also recorded this exact occurrence use

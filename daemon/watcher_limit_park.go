@@ -132,15 +132,15 @@ func (w *taskWatcher) targetLimitRequiresRetention() bool {
 // kernel pipe without reopening production. The queue is limit-protected, so
 // these already-emitted events may cross its ordinary cap without eviction.
 //
-// The destination is chosen at drain time: while queue load state is still
-// unreadable every enqueue is required to refuse, so the lines go straight to
-// the run tail — the only remaining place they can be seen — rather than each
-// producing a "failed to queue" error that implies they reached storage.
+// The destination is chosen at drain time behind one unthrottled load attempt:
+// a queue whose state is still unreadable refuses every enqueue, so the lines
+// go straight to the run tail — the only remaining place they can be seen —
+// rather than each producing a "failed to queue" error that implies they
+// reached storage. A queue that healed during teardown takes the enqueue path
+// and keeps the events durable.
 func (w *taskWatcher) persistRemainingLimitEvents(br *bufio.Reader, tail *tailBuffer) {
 	emit := func(line string) { w.enqueueEvent(line, tail, true) }
-	if w.queue == nil {
-		emit = tail.add
-	} else if _, unknown := w.queue.limitBackpressureState(); unknown {
+	if w.queue == nil || w.queue.loadFailedFresh() {
 		emit = tail.add
 	}
 	for {
