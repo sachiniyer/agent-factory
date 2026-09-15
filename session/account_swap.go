@@ -415,13 +415,13 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) 
 		return fmt.Errorf("account swap: session %q has no local agent runtime", i.Title)
 	}
 	for idx, tab := range tabs {
-		if agentAlreadyAbsent && idx == 0 && tab != nil && tab.tmux != nil && (tab.tmux.ProvenNoPane() || tab.tmux.ClosedConclusively()) {
+		if agentAlreadyAbsent && idx == 0 && tab != nil && tab.tmux != nil && (tab.tmux.ProvenNoPane() || tab.tmux.ClosedConclusivelyAndStillAbsent()) {
 			continue
 		}
 		if tab == nil || !tab.Kind.HasTmux() || tab.tmux == nil {
 			continue
 		}
-		if tab.tmux.ProvenNoPane() || tab.tmux.ClosedConclusively() {
+		if tab.tmux.ProvenNoPane() || tab.tmux.ClosedConclusivelyAndStillAbsent() {
 			continue
 		}
 		state, blind, err := tab.tmux.CloseAndWaitForPaneExitReportingBlindness()

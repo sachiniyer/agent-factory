@@ -200,6 +200,14 @@ func TestRespawnFreshRedundantStopSkipsAfterConclusiveInnerClose(t *testing.T) {
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			s := c.String()
+			if strings.Contains(s, "has-session") {
+				if alive {
+					return nil, nil
+				}
+				// probeSessionStrict reads the exit-1 diagnostic, so the dead
+				// session must answer with tmux's exact "can't find session".
+				return nil, missing
+			}
 			if strings.Contains(s, "display-message") {
 				if alive {
 					return []byte(fmt.Sprintf("%d\n", livePID)), nil
@@ -243,4 +251,84 @@ func TestRespawnFreshRedundantStopSkipsAfterConclusiveInnerClose(t *testing.T) {
 		"the redundant outer stop after a conclusive inner close is skipped, not re-classified blind")
 	require.False(t, errors.Is(stopErr, ErrAccountSwapAgentTeardownBlind),
 		"no phantom blind sentinel may be wrapped when the teardown was conclusively observed")
+}
+
+// TestStopForAccountSwapReprobesClosedConclusivelyWhenSessionReappears pins the
+// stale-latch guard: a conclusive close latches ClosedConclusively, but if the
+// same-named session is recreated OUTSIDE this object's Start/Restore paths
+// (another handle or an external tmux client) before a later swap, the skip must
+// not trust the stored bit — it re-proves the name absent first, finds the
+// session live again, and runs the real close instead of passing a live
+// credential-bearing pane without probing.
+func TestStopForAccountSwapReprobesClosedConclusivelyWhenSessionReappears(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	const agentName = "af_swap_recreated_agent"
+	alive := true
+	kills := 0
+	var missing *exec.ExitError
+	require.ErrorAs(t, exec.Command("sh", "-c", "exit 1").Run(), &missing)
+	missing.Stderr = []byte("can't find session: " + agentName)
+	livePID := exitedPanePID(t)
+	executor := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(c.String(), "has-session") {
+				if alive {
+					return nil
+				}
+				return errors.New("session does not exist")
+			}
+			if strings.Contains(c.String(), "kill-session") {
+				kills++
+				alive = false
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			s := c.String()
+			if strings.Contains(s, "has-session") {
+				if alive {
+					return nil, nil
+				}
+				return nil, missing
+			}
+			if strings.Contains(s, "display-message") {
+				if alive {
+					return []byte(fmt.Sprintf("%d\n", livePID)), nil
+				}
+				return nil, nil
+			}
+			if strings.Contains(s, "list-panes") {
+				if alive {
+					return []byte(""), nil
+				}
+				return nil, missing
+			}
+			return nil, nil
+		},
+	}
+	inst := accountSwapTestInstance("claude")
+	repo := initTempGitRepo(t)
+	gw, err := git.NewGitWorktreeFromStorage(repo, repo, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.gitWorktree = gw
+	inst.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", nil, executor))}
+
+	// Phase 1: a conclusive non-blind close latches ClosedConclusively.
+	state, blind, closeErr := inst.Tabs[0].tmux.CloseAndWaitForPaneExitReportingBlindness()
+	require.Equal(t, tmux.PaneStateKnown, state)
+	require.False(t, blind)
+	require.NoError(t, closeErr)
+	require.True(t, inst.Tabs[0].tmux.ClosedConclusively())
+	require.Equal(t, 1, kills)
+
+	// An external client recreates the same-named session before the swap.
+	alive = true
+
+	// Phase 2: the stale latch must not skip the live replacement — the swap
+	// re-proves the name, finds it live, and runs the real close.
+	stopErr := inst.StopForAccountSwap()
+	require.NoError(t, stopErr)
+	require.Equal(t, 2, kills,
+		"a same-named session recreated after a conclusive close must be stopped, not skipped on the stale latch")
 }
