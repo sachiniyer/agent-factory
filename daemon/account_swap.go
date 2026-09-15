@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/quota"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // autoAccountSwap is only a scheduling opportunity until admitAccountSwap
@@ -433,6 +435,69 @@ func captureAccountSwapConversation(instance *session.Instance, snap session.Con
 	}
 	if !instance.SetAgentConversationForRuntime(token, conversation) {
 		return errors.New("replacement Codex runtime changed before its conversation id could be recorded")
+	}
+	return nil
+}
+
+// settleReplacementRuntime brings an account replacement's fresh provider
+// runtime to a usable state before its mission is sent: the shared
+// readiness/trust contract first, then — only when this attempt launched the
+// pane — the synchronous Codex conversation capture.
+//
+// The readiness wait is load-bearing, not cosmetic. A replacement launches
+// under the incoming account's own home, which has not trusted the worktree:
+// Codex parks on its directory-trust modal — alive, idle, and writing no
+// rollout — and Claude lands on the same class of first-run dialog. Nothing
+// else on this path ran the dismissal loop the create and handoff paths share,
+// so the pane sat answerable-but-untouched while the capture below timed out
+// and every retry respawned into the same modal (#4392). Passing an empty
+// prompt runs exactly WaitForReady plus the guarded trust-dismissal loop and
+// types nothing.
+//
+// Its failure classes settle the way the delivery paths classify them, because
+// the runtime boundary was already crossed: an incoming usage-limit wall parks
+// the pending transaction at the REPLACEMENT identity's reset window so the
+// retry fires after the wall lifts, while a runtime that never reached
+// readiness leaves the row inert — a vanished pane may still have a detached
+// child writing the worktree, so an automatic retry is not safe. Both markers
+// are persisted before the error returns.
+func (m *Manager) settleReplacementRuntime(
+	repoID, key, requestedTitle string,
+	instance *session.Instance,
+	swap *autoAccountSwap,
+	launched bool,
+	snap session.ConversationCaptureSnapshot,
+) error {
+	_, err := task.WaitForReadyAndSendPromptWithStatus(context.Background(), instance, "")
+	var limitErr *task.LimitReachedError
+	switch {
+	case err == nil:
+	case errors.As(err, &limitErr):
+		// The incoming identity is itself at a wall — the same classification
+		// deliverManualAccountMission applies when its send-path wait sees one.
+		var parkErr error
+		if swap.manual {
+			m.accountLimitMu.Lock()
+			parkErr = instance.ParkManualAccountSwapAtLimit(limitErr.ResetAt)
+			m.accountLimitMu.Unlock()
+		} else {
+			parkErr = m.reparkLimitUnderResumeFence(instance, limitErr.ResetAt)
+		}
+		return errors.Join(
+			fmt.Errorf("account replacement for %q reached a usage limit on the incoming identity before its runtime became usable: %w", requestedTitle, err),
+			parkErr, m.persistSettlement(repoID, key, instance))
+	case errors.Is(err, task.ErrAgentReadiness):
+		instance.MarkStartupStateUnknown()
+		return errors.Join(
+			fmt.Errorf("account replacement for %q never reached a usable runtime: %w", requestedTitle, err),
+			m.persistSettlement(repoID, key, instance))
+	default:
+		return fmt.Errorf("account replacement for %q did not become ready: %w", requestedTitle, err)
+	}
+	if launched {
+		if err := captureAccountSwapConversation(instance, snap); err != nil {
+			return fmt.Errorf("failed to preserve the replacement conversation for %q: %w", requestedTitle, err)
+		}
 	}
 	return nil
 }
