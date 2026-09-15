@@ -15,14 +15,19 @@ import (
 )
 
 // These tests pin the bug fix for "CLI: `af sessions create` incorrectly
-// blocks reusing a title from an archived session". The client-side pre-check
-// repoHasInstanceTitle (api/api.go) used a naive Title==title match with no
-// liveness filter, so it reported an archived session as "already exists",
-// aborting creates the daemon would allow (the archived-name-reuse feature,
-// renameArchivedForReuseLocked). The fix skips archived rows so the create
-// reaches the daemon, which performs its own race-safe refusal or reclaim.
+// blocks reusing a title from an archived session". The sessions-create
+// pre-check now uses repoHasLiveInstanceTitle (api/api.go), which skips
+// archived rows so the create reaches the daemon, which performs its own
+// race-safe refusal or reclaim (renameArchivedForReuseLocked).
+//
+// The unfiltered repoHasInstanceTitle is preserved for callers that need full
+// row visibility, notably instanceTitleExistsInScope used by send-prompt: a
+// scoped send-prompt to an archived session must fall through to the daemon,
+// which returns the actionable "session is Archived; restore it first" error
+// (promptTargetLivenessError) rather than the generic "not found" the filtered
+// predicate would produce.
 
-func TestRepoHasInstanceTitle_ArchivedRowSkippedForReuse(t *testing.T) {
+func TestRepoHasLiveInstanceTitle_ArchivedRowSkippedForReuse(t *testing.T) {
 	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 	repoID := "repo-archived"
@@ -36,19 +41,19 @@ func TestRepoHasInstanceTitle_ArchivedRowSkippedForReuse(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	exists, err := repoHasInstanceTitle(repoID, "foo")
+	exists, err := repoHasLiveInstanceTitle(repoID, "foo")
 	if err != nil {
-		t.Fatalf("repoHasInstanceTitle: %v", err)
+		t.Fatalf("repoHasLiveInstanceTitle: %v", err)
 	}
 	if exists {
-		t.Fatalf("repoHasInstanceTitle reports archived row %q as existing; the CLI create pre-check must skip archived rows so the daemon can rename the archived row aside and allow reuse", "foo")
+		t.Fatalf("repoHasLiveInstanceTitle reports archived row %q as existing; the CLI create pre-check must skip archived rows so the daemon can rename the archived row aside and allow reuse", "foo")
 	}
 }
 
-func TestRepoHasInstanceTitle_LegacyArchivedRowSkippedForReuse(t *testing.T) {
+func TestRepoHasLiveInstanceTitle_LegacyArchivedRowSkippedForReuse(t *testing.T) {
 	// A row persisted before #1195 added the Liveness field carries only the
 	// legacy Status integer. RecordedLiveness must still resolve it as archived
-	// so the pre-check skips it, matching the daemon's own behavior.
+	// so the create pre-check skips it, matching the daemon's own behavior.
 	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 	repoID := "repo-legacy-archived"
@@ -62,19 +67,19 @@ func TestRepoHasInstanceTitle_LegacyArchivedRowSkippedForReuse(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	exists, err := repoHasInstanceTitle(repoID, "bar")
+	exists, err := repoHasLiveInstanceTitle(repoID, "bar")
 	if err != nil {
-		t.Fatalf("repoHasInstanceTitle: %v", err)
+		t.Fatalf("repoHasLiveInstanceTitle: %v", err)
 	}
 	if exists {
-		t.Fatalf("repoHasInstanceTitle reports legacy archived row (Status=Archived, no Liveness) %q as existing; RecordedLiveness must resolve the legacy status to LiveArchived and skip it", "bar")
+		t.Fatalf("repoHasLiveInstanceTitle reports legacy archived row (Status=Archived, no Liveness) %q as existing; RecordedLiveness must resolve the legacy status to LiveArchived and skip it", "bar")
 	}
 }
 
-func TestRepoHasInstanceTitle_MixedArchivedAndLiveSameTitle(t *testing.T) {
+func TestRepoHasLiveInstanceTitle_MixedArchivedAndLiveSameTitle(t *testing.T) {
 	// When both an archived and a live row hold the same title, the live row is
-	// a genuine collision the daemon would refuse. The pre-check must report it
-	// rather than skipping it because one of the rows is archived.
+	// a genuine collision the daemon would refuse. The create pre-check must
+	// report it rather than skipping it because one of the rows is archived.
 	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 	repoID := "repo-mixed"
@@ -88,12 +93,41 @@ func TestRepoHasInstanceTitle_MixedArchivedAndLiveSameTitle(t *testing.T) {
 	if err := config.SaveRepoInstances(repoID, raw); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	exists, err := repoHasInstanceTitle(repoID, "dup")
+	exists, err := repoHasLiveInstanceTitle(repoID, "dup")
+	if err != nil {
+		t.Fatalf("repoHasLiveInstanceTitle: %v", err)
+	}
+	if !exists {
+		t.Fatalf("repoHasLiveInstanceTitle must report a title held by both an archived and a live row; the live row is a real collision")
+	}
+}
+
+func TestRepoHasInstanceTitle_ArchivedRowVisible(t *testing.T) {
+	// The unfiltered repoHasInstanceTitle must still report archived rows as
+	// present. instanceTitleExistsInScope (used by send-prompt) calls this
+	// function for the scoped path; it must see the archived row so the request
+	// reaches the daemon, which returns the actionable "session is Archived;
+	// restore it first" error (promptTargetLivenessError) rather than the
+	// generic "not found" the filtered predicate would produce.
+	tmp := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+	repoID := "repo-archived-visible"
+	raw, err := json.Marshal([]session.InstanceData{
+		{Title: "baz", Liveness: session.LiveArchived, Path: "/tmp/repo"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoID, raw); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	exists, err := repoHasInstanceTitle(repoID, "baz")
 	if err != nil {
 		t.Fatalf("repoHasInstanceTitle: %v", err)
 	}
 	if !exists {
-		t.Fatalf("repoHasInstanceTitle must report a title held by both an archived and a live row; the live row is a real collision")
+		t.Fatalf("repoHasInstanceTitle must report archived row %q as existing; the unfiltered predicate is used by send-prompt's existence pre-check so a scoped send-prompt to an archived session falls through to the daemon's liveness error", "baz")
 	}
 }
 
