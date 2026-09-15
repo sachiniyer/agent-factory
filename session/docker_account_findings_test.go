@@ -237,6 +237,30 @@ func TestDockerAccount_RefusesRemoteDockerEngine(t *testing.T) {
 	require.False(t, runCalled, "a local account path must never be sent to a remote daemon")
 }
 
+// TestDockerAccount_RefusesLoopbackTCPDockerEngine is the Codex P1 on this PR:
+// tcp://127.0.0.1:2375 can be an SSH local-forward (`ssh -L`, Docker's
+// documented remote-access transport) to a remote daemon, under which a bind
+// mount resolves on the REMOTE host. Loopback connectivity is enough for a
+// non-account session's dial-back but is not host-identity proof, so the
+// account path must refuse it rather than risk mounting an unrelated
+// same-named remote path under this account's name.
+func TestDockerAccount_RefusesLoopbackTCPDockerEngine(t *testing.T) {
+	f := newDockerAccountFixture(t, "", "codex", nil)
+	t.Setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
+	runCalled := false
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "run" {
+			runCalled = true
+		}
+		return fakeLocalDockerResponse(args)
+	}))
+
+	_, err := createDockerAccountSession(f, "codex", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "remote Docker")
+	require.False(t, runCalled, "a local account path must never be sent to a possibly-remote daemon")
+}
+
 func TestDockerAccount_ReprovisionCarriesThePersistedAccount(t *testing.T) {
 	f := newDockerAccountFixture(t, "", "codex", nil)
 	var runArgs []string
@@ -443,6 +467,11 @@ func TestDockerAccount_ReadBannerLogReadRunsAsTheAccountOwner(t *testing.T) {
 // either name a nonexistent uid or shadow the image's default USER.
 func TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// A local engine so the non-account pre-run locality guard passes without a
+	// docker call; this test exercises the banner-read exec, not the remote-engine
+	// refusal.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
 	repo := initTempGitRepo(t)
 	runGit(t, repo, "remote", "add", "origin", "https://example.invalid/fixture.git")

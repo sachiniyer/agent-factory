@@ -229,6 +229,173 @@ func tasksetCommandAfterMask(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return words[1:], false
 }
 
+// unwrapXargs removes a GNU `xargs` prefix so the command it execs is what
+// gets inspected. Unlike the other modeled wrappers, xargs splices content
+// this walk cannot see into the child's argv: input items are appended after
+// the initial arguments, and -I/-i/--replace substitutes every marker
+// occurrence with an input line. An env invocation whose operand region can
+// receive either is unprovable, because env re-parses the substituted word —
+// an item spelling NAME=value becomes an assignment even when the marker sat
+// in env's command slot.
+func unwrapXargs(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
+	substituting := false
+	markerKnown := true
+	marker := "{}"
+options:
+	for len(words) > 0 {
+		option, literal := literalShellWord(words[0])
+		if !literal {
+			return nil, true
+		}
+		switch {
+		case option == "--":
+			words = words[1:]
+			break options
+		case !strings.HasPrefix(option, "-") || option == "-":
+			break options
+		case strings.HasPrefix(option, "--"):
+			name, value, attached := strings.Cut(option[2:], "=")
+			switch name {
+			case "help", "version":
+				return nil, false
+			case "null", "interactive", "no-run-if-empty", "open-tty", "verbose", "exit", "show-limits":
+				if attached {
+					return nil, true
+				}
+				words = words[1:]
+			case "eof", "max-lines":
+				// Optional-argument long options take a value only via =.
+				words = words[1:]
+			case "replace":
+				substituting = true
+				if attached {
+					marker = value
+				}
+				words = words[1:]
+			case "arg-file", "delimiter", "max-args", "max-procs", "max-chars":
+				if !attached {
+					if len(words) < 2 {
+						return nil, true
+					}
+					// The argument value itself is inert to this analysis.
+					words = words[1:]
+				}
+				words = words[1:]
+			case "process-slot-var":
+				var arg string
+				var argLiteral bool
+				if attached {
+					arg, argLiteral = value, true
+				} else {
+					if len(words) < 2 {
+						return nil, true
+					}
+					arg, argLiteral = literalShellWord(words[1])
+					words = words[1:]
+				}
+				if !argLiteral || accountEnvironmentOperandDenied(arg, names) {
+					return nil, true
+				}
+				words = words[1:]
+			default:
+				return nil, true
+			}
+		default:
+			flags := option[1:]
+			for idx := 0; idx < len(flags); idx++ {
+				switch flags[idx] {
+				case '0', 'o', 'p', 'r', 't', 'x':
+				case 'e', 'l':
+					// -e/-l take an optional attached argument; whatever
+					// remains in this word is the value.
+					idx = len(flags)
+				case 'i':
+					substituting = true
+					if idx+1 < len(flags) {
+						marker = flags[idx+1:]
+					}
+					idx = len(flags)
+				case 'a', 'd', 'E', 'I', 'L', 'n', 'P', 's':
+					var arg string
+					var argLiteral bool
+					if idx+1 < len(flags) {
+						arg, argLiteral = flags[idx+1:], true
+					} else {
+						if len(words) < 2 {
+							return nil, true
+						}
+						arg, argLiteral = literalShellWord(words[1])
+						words = words[1:]
+					}
+					if flags[idx] == 'I' {
+						substituting = true
+						if argLiteral {
+							marker = arg
+						} else {
+							markerKnown = false
+						}
+					}
+					idx = len(flags)
+				default:
+					return nil, true
+				}
+			}
+			words = words[1:]
+		}
+	}
+	if len(words) == 0 {
+		// With no command operand xargs runs its default echo on each input
+		// item — nothing here to unwrap.
+		return nil, false
+	}
+	if _, literal := literalShellWord(words[0]); !literal {
+		return nil, true
+	}
+	for j := 0; j < len(words); j++ {
+		if !isAccountCommandName(words[j], "env") {
+			continue
+		}
+		invocation, err := envCallArgvParse(words[j+1:])
+		if err != nil || invocation.ClearEnvironment {
+			return nil, true
+		}
+		operandEnd := invocation.CommandIndex
+		if operandEnd < 0 {
+			operandEnd = len(words[j+1:])
+		} else {
+			// The command word counts as operand region: a substituted item
+			// landing there is re-parsed by env, and an item spelling
+			// NAME=value becomes an assignment rather than a program name.
+			operandEnd++
+		}
+		if substituting {
+			if !markerKnown {
+				return nil, true
+			}
+			for k := 0; k < operandEnd; k++ {
+				lit, ok := literalShellWord(words[j+1+k])
+				if !ok {
+					return nil, true
+				}
+				// Only the part before the first '=' is parsed as a name or
+				// option; a marker in an assignment's value feeds data env
+				// cannot reinterpret as a mutation.
+				namePart, _, _ := strings.Cut(lit, "=")
+				if strings.Contains(namePart, marker) {
+					return nil, true
+				}
+			}
+		} else if invocation.CommandIndex < 0 {
+			// Without substitution, input items append after the initial
+			// arguments — straight into env's operand region when env's own
+			// argv names no command, so `xargs env` can run `env ITEM` with
+			// ITEM spelling NAME=value.
+			return nil, true
+		}
+	}
+	return words, false
+}
+
 // isLastBackgroundPidWord reports whether a word is exactly `$!`, bare or
 // double-quoted. The shell owns that parameter — it is not assignable — so it
 // always expands to a decimal pid and can never become an option word.

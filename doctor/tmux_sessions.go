@@ -327,7 +327,7 @@ func tmuxHomesFor(ctx *scanContext, names []string) (map[string]bool, error) {
 			continue
 		}
 		if present && home != "" {
-			homes[filepath.Clean(home)] = true
+			homes[normalizeHome(home)] = true
 		}
 	}
 	if len(unreadable) > 0 {
