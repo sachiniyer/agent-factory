@@ -274,7 +274,7 @@ test("web-selftest.yml is callable AND runs on master", () => {
 const { PERF_PATHS, scopePerf } = require("./web-selftest-scope.js");
 
 test("performance path list is pinned to the reviewed client and harness scope", () => {
-  assert.deepEqual(PERF_PATHS, ["web/**", "app/**", "ui/**", "scripts/perf/**", "scripts/container/**"]);
+  assert.deepEqual(PERF_PATHS, ["web/**", "app/**", "ui/**", "config/**", "scripts/perf/**", "scripts/container/**"]);
   for (const changed of [
     "web/src/ui.ts", "web/dist/af-web.js", "web/playwright.demo.config.ts",
     "web/playwright.perf.config.ts", "web/playwright.visual.config.ts",
@@ -284,6 +284,20 @@ test("performance path list is pinned to the reviewed client and harness scope",
     assert.equal(scopePerf([changed]).run, true, changed);
   }
   assert.deepEqual(scopePerf(["docs/dev/perf-baselines.md", "app/app.go"]), { run: true, matched: ["app/app.go"] });
+});
+
+test("config changes run the visual baselines — the Config pane renders the manifest", () => {
+  // #4362: the web Config pane's rows come from the config manifest over RPC, so
+  // a key added in config/ moves the stills while matching none of the old
+  // PERF_PATHS globs — the drift then surfaced on the next unrelated web PR
+  // (#4231). The whole directory is watched, not only the file that happened to
+  // drift: config_parse.go/config_types.go/resolve.go decide what the pane
+  // renders too.
+  for (const changed of ["config/manifest.go", "config/config_types.go", "config/resolve.go"]) {
+    assert.deepEqual(scopePerf([changed]), { run: true, matched: [changed] }, changed);
+  }
+  // Same-prefixed siblings must not match: config/** means under config/.
+  assert.deepEqual(scopePerf(["configs/other.go"]), { run: false, matched: [] });
 });
 
 test("docs-only, gate-only, empty, and similarly prefixed paths skip performance", () => {
@@ -332,4 +346,24 @@ test("performance preflight does not duplicate the Web job's application checks"
   assert.doesNotMatch(entry, /npm (test|run typecheck)/);
   assert.match(entry, /npx tsc -p tsconfig\.selftest\.json/);
   assert.match(entry, /node --test \/work\/scripts\/perf\/check\.test\.mjs/);
+});
+
+test("the visual gate diffs stills against committed goldens and cannot regenerate in CI", () => {
+  // The drift gate is a diff, not a rerun: the visual spec pixel-diffs each
+  // capture against the committed golden, so a stale artifact fails the job.
+  // That property only holds if CI can never reach update mode — a run that
+  // rewrites the snapshots passes whatever the browser painted, which turns
+  // the oracle into a tautology (#3984). Both guards are pinned: the entry
+  // script refuses update/record under CI, and the config throws on the same
+  // combination instead of trusting the environment — so the committed
+  // artifact is always compared, never regenerated-and-blessed.
+  const entry = fs.readFileSync(path.join(__dirname, "..", "..", "scripts/container/web-demo-entry.sh"), "utf8");
+  assert.match(entry, /CI cannot update baselines or goldens/);
+  const visual = fs.readFileSync(path.join(__dirname, "..", "..", "web/playwright.visual.config.ts"), "utf8");
+  assert.match(visual, /process\.env\.CI && process\.env\.AF_UPDATE_GOLDENS === "1"\) throw/);
+  assert.match(
+    visual,
+    /updateSnapshots: process\.env\.AF_UPDATE_GOLDENS === "1" \? "all" : "none"/,
+    "CI must always diff against the committed goldens (updateSnapshots: none) — update mode belongs to AF_UPDATE_GOLDENS runs a human reviews",
+  );
 });
