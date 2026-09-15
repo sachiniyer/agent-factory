@@ -550,21 +550,24 @@ func straceDynamicSemanticResult(
 ) straceOptionResult {
 	// Accepted dynamic semantic values are deliberately bounded: environment
 	// values need a complete literal NAME= prefix, and output targets need a
-	// literal first byte. Anything else fails closed, intentionally refusing
-	// forms such as --env="$SPEC" and -o"$PATH" whose security-sensitive portion
-	// is dynamic.
+	// literal first byte. Anything else is deferred rather than refused here:
+	// an unprovable value is a hazard only when a child (or, for an output
+	// target, an attach) actually launches, so a later terminal option or a
+	// childless attach must still clear it, exactly like the literal hazard
+	// forms. A surviving deferred hazard still fails closed on any executed
+	// child, keeping forms such as --env="$SPEC" and -o"$PATH" refused.
 	switch semantic {
 	case "--env":
 		name, _, fixedName := strings.Cut(literalPrefix, "=")
 		if !fixedName || !validName(name) {
-			return straceOptionUnsafe
+			return straceOptionDeferredEnvironmentUnsafe
 		}
 		if accountEnvironmentNameDenied(name, names) {
 			return straceOptionDeferredEnvironmentUnsafe
 		}
 	case "--output":
 		if literalPrefix == "" {
-			return straceOptionUnsafe
+			return straceOptionDeferredOutputUnsafe
 		}
 		if straceOutputTargetUnsafe(literalPrefix) {
 			return straceOptionDeferredOutputUnsafe

@@ -109,6 +109,11 @@ func TestValidateAccountEnvironmentCommand_StraceTerminalOptionsOverrideEarlierR
 		"strace -E CODEX_HOME=/other --help",
 		"strace --env=CODEX_HOME=/other -h",
 		"strace -o '|env CODEX_HOME=/other codex' -V",
+		`strace -E "$SPEC" --version`,
+		`strace -E "$SPEC" -h`,
+		`strace --env="$ENV_CHANGE" --version`,
+		`strace --output="$OUTPUT" -V`,
+		`strace -o "$OUT" --help`,
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"terminal strace command %q launches no child or output helper", command)
@@ -447,6 +452,8 @@ func TestValidateAccountEnvironmentCommand_StraceNoChildHazards(t *testing.T) {
 		"strace -E CODEX_HOME=/other -p 123",
 		"strace --env=CODEX_HOME=/other --attach=123",
 		`strace -ECODEX_HOME="$OTHER_HOME" -p 123`,
+		`strace -E "$SPEC" -p 123`,
+		`strace --env="$ENV_CHANGE" --attach=123`,
 	} {
 		t.Run("environment/"+command, func(t *testing.T) {
 			require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
@@ -456,7 +463,9 @@ func TestValidateAccountEnvironmentCommand_StraceNoChildHazards(t *testing.T) {
 
 	for _, command := range []string{
 		"strace -E CODEX_HOME=/other env PORT=3000 npm run dev",
+		`strace -E "$SPEC" env PORT=3000 npm run dev`,
 		"strace -o '|env CODEX_HOME=/other codex' -p 123",
+		`strace -o "$OUT" -p 123`,
 	} {
 		t.Run("active/"+command, func(t *testing.T) {
 			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
@@ -487,8 +496,10 @@ func TestValidateAccountEnvironmentCommand_StraceStaticSafeDynamicSemanticPrefix
 		`strace -ECODEX_HOME="$OTHER_HOME" codex`,
 		`strace --env="$ENV_CHANGE" codex`,
 		`strace -E"$ENV_CHANGE" codex`,
+		`strace -E "$ENV_CHANGE" codex`,
 		`strace --output="$OUTPUT" codex`,
 		`strace -o"$OUTPUT" codex`,
+		`strace -o "$OUTPUT" codex`,
 	} {
 		t.Run("unsafe/"+command, func(t *testing.T) {
 			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
