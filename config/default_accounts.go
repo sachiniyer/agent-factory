@@ -322,7 +322,7 @@ func CheckDefaultAccount(home, repoPath string, selection DefaultAccountSelectio
 		return fmt.Errorf("%s selects account %q, but %s. Clear the default with `%s`",
 			selection.Source(), selection.Name, reason, selection.ClearHint(repoPath))
 	}
-	if _, err := agentaccount.Selected(home, selection.Agent, selection.Name, ""); err != nil {
+	if _, err := agentaccount.Selected(home, selection.Agent, selection.Name); err != nil {
 		return fmt.Errorf(
 			"%s selects account %q, and the session was NOT created: %w. Register it, or clear the default "+
 				"with `%s` to run this project's %s sessions on the ambient identity",
