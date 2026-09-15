@@ -5,6 +5,7 @@ package accountlogin
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The sentinel values staged into the daemon's own environment before a login
@@ -469,6 +471,27 @@ func waitForLogin(t *testing.T, home, agent, name string) bool {
 	}
 }
 
+// occupyLoginPaneName holds the login pane's tmux session name on the isolated
+// server, so the supervisor's own pane.Start fails with "tmux session already
+// exists" before it spawns anything. That is the deterministic stand-in for a
+// flow that did not survive to the handover: finishedOrFailed decides on the
+// account's artifact and reads the launch error only as prose, so every Start
+// failure exercises the same decision — while a real instant-exit pane's death
+// lands wherever it lands inside Start's own probe sequence, and on a loaded
+// runner that can be after the last one, reporting a live handover for a
+// finished flow (the #4217 sightings at :502 and :533).
+//
+// The session is created by hand rather than through af, so it carries no
+// AF_HOME/AF_SESSION_GEN markers: adopt cannot prove it belongs to this home,
+// declines to reuse it, and the collision is what reaches pane.Start.
+func occupyLoginPaneName(t *testing.T, agent, name string) {
+	t.Helper()
+	sName := tmux.SanitizedNameForRepo(agentaccount.LoginSessionName(agent, name), "")
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", sName, "sleep", "300").CombinedOutput(); err != nil {
+		t.Fatalf("occupy login pane name %q: %v (%s)", sName, err, out)
+	}
+}
+
 // TestLoginReportsAFlowThatEndedBeforeTheHandover covers the login that
 // completes without ever needing the terminal — `codex login` against a
 // credential that is already there, or a flow that answers itself. tmux.Start
@@ -484,13 +507,19 @@ func TestLoginReportsAFlowThatEndedBeforeTheHandover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register account: %v", err)
 	}
-	// Writes the credential and exits at once — a completed login that never
-	// asked the human anything.
-	script := "#!/bin/sh\nprintf '{}' > " + shellquote.Quote(filepath.Join(dir, "auth.json")) + "\n"
-	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte(script), 0o700); err != nil {
+	// The credential a self-answering flow would have left. af only stats the
+	// artifact — it never opens it — so staging it here is the same evidence
+	// the pane's own write would leave.
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("stage credential: %v", err)
+	}
+	// codex has to resolve on PATH for Start's agent check, but the pane's
+	// name is already taken, so the program never runs.
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	occupyLoginPaneName(t, "codex", "work")
 
 	supervisor := New()
 	t.Cleanup(supervisor.Stop)
@@ -520,11 +549,15 @@ func TestLoginReportsANoOpAsFailure(t *testing.T) {
 
 	binDir := t.TempDir()
 	// Exits 0 and writes nothing: the shape of an OAuth flow the user abandoned
-	// at the browser step, which several of these CLIs report as success.
+	// at the browser step, which several of these CLIs report as success. The
+	// pane never runs — the name is already taken — because what is pinned here
+	// is finishedOrFailed's answer to a Start failure against an empty account,
+	// and staging that failure as a collision takes pane-exit timing out of it.
 	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	occupyLoginPaneName(t, "codex", "work")
 
 	supervisor := New()
 	t.Cleanup(supervisor.Stop)
