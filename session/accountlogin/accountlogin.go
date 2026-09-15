@@ -630,7 +630,6 @@ func legacyPaneBelongsToAccount(agent, name, legacySName, dir string) (sameAccou
 	return legacyDirCanon == dirCanon, nil
 }
 
-
 func (s *Supervisor) track(agent, name string, pane *tmux.TmuxSession) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
