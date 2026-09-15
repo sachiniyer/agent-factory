@@ -713,7 +713,7 @@ Precedence for a key that admits every layer is:
 app default → global → in-repo (shared) → personal per-project
 ```
 
-Inspect exactly which layer wins, and why, with `af config get <key> --repo <path> --explain` (or `af config list --repo <path> --explain`): the trace shows the personal-project candidate alongside the others, marked won, shadowed, absent, or — for a key that cannot be overridden per project — disallowed. Changes apply on the next `af`/daemon start, the same as a hand-edit.
+Inspect exactly which layer wins, and why, with `af config get <key> --repo <path> --explain` (or `af config list --repo <path> --explain`): the trace shows the personal-project candidate alongside the others, marked won, shadowed, absent, or — for a key that cannot be overridden per project — disallowed. Changes take effect the next time the relevant operation resolves that project's config, the same as a hand-edit.
 
 ## Migrating from JSON
 
