@@ -89,6 +89,18 @@ func (t *TmuxSession) ProbeSession() (exists bool, known bool) {
 	return probeSession(t.cmdExec, t.sanitizedName)
 }
 
+// ProbeSessionStrict reports whether this session exists with the same
+// three-valued contract as SessionHomeMarker: (true, true, nil) when the session
+// exists, (false, true, nil) when tmux positively reported it absent, and
+// (false, false, non-nil error) for any other outcome — timeout OR a non-timeout
+// failure that did not carry tmux's "can't find session" diagnostic. Unlike
+// ProbeSession, a socket-policy failure or transient wrapper error is not
+// collapsed into confirmed absence, so only a positively confirmed absence
+// permits the caller to proceed safely.
+func (t *TmuxSession) ProbeSessionStrict() (exists bool, known bool, err error) {
+	return probeSessionStrict(t.cmdExec, t.sanitizedName)
+}
+
 // probeSession is sessionExists WITHOUT the lossy collapse: it reports whether
 // the session exists AND whether tmux actually answered.
 //

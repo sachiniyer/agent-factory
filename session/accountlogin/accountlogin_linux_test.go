@@ -665,8 +665,13 @@ func TestLoginRefusesWhenALegacyPaneIsStillRunning(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Start a legacy-format pane directly by constructing it with the old name.
+	// SetAccountLoginForAgent scopes it to codex/work (stamping CODEX_HOME) so it
+	// represents a real production legacy login pane and exercises the
+	// credential-root comparison path rather than the absent-credential-root
+	// fallback.
 	legacyName := agentaccount.LegacyLoginSessionName("codex", "work")
 	legacyPane := tmux.NewTmuxSession(legacyName, "codex login --device-auth")
+	legacyPane.SetAccountLoginForAgent("codex", "work")
 	dir, err := agentaccount.Register(home, "codex", "work")
 	if err != nil {
 		t.Fatalf("register account: %v", err)
@@ -764,12 +769,17 @@ func TestLoginDoesNotRefuseWhenALegacyPaneFromTheSameHomeHasACollidingTitle(t *t
 
 	// Register work_proj and start a legacy-format pane for it in THIS home.
 	// Its AF_HOME marker points at home, just as work.proj's would.
+	// SetAccountLoginForAgent scopes the pane to work_proj's credential directory
+	// (CODEX_HOME) so the ownership check can distinguish it from work.proj —
+	// without it, absent CODEX_HOME causes the check to fail closed and refuse
+	// work.proj's login, the same as if this were work.proj's own legacy pane.
 	workProjDir, err := agentaccount.Register(home, "codex", "work_proj")
 	if err != nil {
 		t.Fatalf("register work_proj: %v", err)
 	}
 	legacyName := agentaccount.LegacyLoginSessionName("codex", "work_proj")
 	legacyPane := tmux.NewTmuxSession(legacyName, "codex login --device-auth")
+	legacyPane.SetAccountLoginForAgent("codex", "work_proj")
 	if err := legacyPane.Start(workProjDir); err != nil {
 		t.Fatalf("start legacy pane for work_proj: %v", err)
 	}
