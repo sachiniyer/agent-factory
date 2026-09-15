@@ -169,19 +169,27 @@ const claudeMCPDialogPreamble = "new mcp server found"
 const claudeMCPDialogQuestion = "do you trust this new mcp server"
 
 // claudeMCPDialogPartiallyRendered reports whether the pane shows the MCP
-// trust dialog in a state consistent with Claude Code still painting it — the
-// preamble ("New MCP server found") appears in the last contiguous block of
-// non-blank content AND the last non-blank row of that block looks like MCP
-// dialog content (the preamble, the question, or a known option label with the
-// selection cursor) rather than agent prose.
+// trust dialog in a state consistent with Claude Code still painting it. The
+// MCP preamble ("New MCP server found") must appear in the last block OR in
+// the block immediately above it (skipping blank chrome), AND the last
+// non-blank row of the last block must look like MCP dialog content (the
+// preamble, the question, or a known option label) rather than agent prose.
 //
 // When Claude Code paints the MCP modal it renders top-to-bottom: preamble +
-// question first, then options, then the footer. A capture taken mid-paint
-// shows the preamble in the block and the last non-blank row is whatever was
-// painted last — the question itself, or a partial option ("❯ 1. Yes"). Agent
-// prose or UI chrome (e.g. "? for shortcuts", trailing explanatory text)
+// question first, then options, then the footer. The layout may place blank
+// rows as separators: preamble/question in one block, then a blank row, then
+// the option rows in the next block. A capture taken after the options are
+// painted but before the footer shows the option block as the LAST block —
+// the preamble is in the preceding block, not the last one. This function
+// must recognise both layouts:
+//   - preamble + question + options in one contiguous block (no blank between)
+//   - preamble/question in one block, options in the next (blank separator)
+//
+// Agent prose or UI chrome (e.g. "? for shortcuts", trailing explanatory text)
 // appears in a different block or makes the last row non-dialog, so the
-// predicate stays false.
+// predicate stays false. The preamble check (not just the question) is what
+// prevents an agent-quoted question string above an unrelated picker from
+// satisfying this predicate.
 //
 // This is the "unconfirmed" sentinel: the dialog looks real but is not yet
 // complete. The caller must not proceed to deliver the user's prompt; it must
@@ -212,12 +220,37 @@ func claudeMCPDialogPartiallyRendered(content string) bool {
 		blockStart--
 	}
 
-	// The preamble must appear somewhere in the last block.
+	// The preamble must appear in the last block OR in the block immediately
+	// above it (skipping blank chrome). The Claude picker layout places a blank
+	// separator between the preamble/question block and the option block, so a
+	// capture taken after the options are painted has the options as the last
+	// block and the preamble in the preceding block. Applying the same
+	// blank-skipping discipline as claudeMCPTrustFooterIsLast covers both
+	// layouts without widening the window further.
 	hasPreamble := false
 	for i := blockStart; i <= lastIdx; i++ {
 		if strings.Contains(strings.ToLower(rows[i].label), claudeMCPDialogPreamble) {
 			hasPreamble = true
 			break
+		}
+	}
+	if !hasPreamble {
+		// Look in the block immediately above, skipping blank chrome.
+		prevBlockEnd := blockStart - 1
+		for prevBlockEnd >= 0 && rows[prevBlockEnd].blank {
+			prevBlockEnd--
+		}
+		if prevBlockEnd >= 0 {
+			prevBlockStart := prevBlockEnd
+			for prevBlockStart > 0 && !rows[prevBlockStart-1].blank {
+				prevBlockStart--
+			}
+			for i := prevBlockStart; i <= prevBlockEnd; i++ {
+				if strings.Contains(strings.ToLower(rows[i].label), claudeMCPDialogPreamble) {
+					hasPreamble = true
+					break
+				}
+			}
 		}
 	}
 	if !hasPreamble {
@@ -445,15 +478,30 @@ func claudeMCPTrustFooterIsLast(content string) bool {
 		}
 	}
 
-	// The question may appear in the block immediately above the option block,
-	// separated by blank chrome — the Claude picker layout places a blank row
-	// between the question and its options as well as between the options and the
-	// footer. Apply the same blank-skipping discipline upward: if the question
-	// was not found in the option block, look in the preceding content block.
-	// This is the "Bridge the separator above MCP options" fix: without it, the
-	// backward scan stops at the blank row between question and options, leaving
-	// hasQuestion false and blocking a genuine dialog.
-	if !hasQuestion {
+	// The question and preamble may appear in the block immediately above the
+	// option block, separated by blank chrome — the Claude picker layout places
+	// a blank row between the question and its options as well as between the
+	// options and the footer. Apply the same blank-skipping discipline upward:
+	// if the question was not found in the option block, look in the preceding
+	// content block. This is the "Bridge the separator above MCP options" fix:
+	// without it, the backward scan stops at the blank row between question and
+	// options, leaving hasQuestion false and blocking a genuine dialog.
+	//
+	// Requiring the preamble in the preceding block (not only the question) is
+	// what closes the cross-dialog injection path for the separator-bridge case:
+	// an agent can print the exact question string above an unrelated yes/no
+	// picker, but the real MCP preamble ("New MCP server found") is not
+	// attacker-supplied prose — it is a fixed string the modal itself renders.
+	// Checking the preamble alongside the question makes the preceding-block
+	// search as strong as the inline-block search.
+	hasPreamble := false
+	for i := optBlockStart; i <= optBlockEnd; i++ {
+		if strings.Contains(strings.ToLower(rows[i].label), claudeMCPDialogPreamble) {
+			hasPreamble = true
+			break
+		}
+	}
+	if !hasQuestion || !hasPreamble {
 		// Walk back past the blank chrome above the option block.
 		questionBlockEnd := optBlockStart - 1
 		for questionBlockEnd >= 0 && rows[questionBlockEnd].blank {
@@ -466,14 +514,17 @@ func claudeMCPTrustFooterIsLast(content string) bool {
 				questionBlockStart--
 			}
 			for i := questionBlockStart; i <= questionBlockEnd; i++ {
-				if strings.Contains(strings.ToLower(rows[i].label), question) {
+				lower := strings.ToLower(rows[i].label)
+				if strings.Contains(lower, question) {
 					hasQuestion = true
-					break
+				}
+				if strings.Contains(lower, claudeMCPDialogPreamble) {
+					hasPreamble = true
 				}
 			}
 		}
 	}
-	if !hasQuestion {
+	if !hasQuestion || !hasPreamble {
 		return false
 	}
 	return true
