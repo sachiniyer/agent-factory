@@ -197,6 +197,15 @@ func TestEffectNoticeDaemonApplyFailed(t *testing.T) {
 	}
 }
 
+func TestEffectNoticeSavedValueSuperseded(t *testing.T) {
+	const want = "Saved — a newer write raced this save, so the running daemon may be using a different value."
+	n := EffectNotice("default_program", ApplyOutcome{DaemonApplied: true, SavedValueSuperseded: true})
+	if n == want {
+		return
+	}
+	t.Errorf("got %q, want %q", n, want)
+}
+
 func TestEffectNoticeDaemonApplyUnconfirmed(t *testing.T) {
 	const want = "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
 	outcome := ApplyOutcome{DaemonApplyFailed: true, DaemonApplyUnconfirmed: true}
@@ -262,6 +271,24 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			outcome: ApplyOutcome{DaemonApplied: true},
 			key:     "future_unclassified_key",
 			want:    ApplyStatusUnknown,
+		},
+		{
+			name: "applied but carrying a competing write is superseded",
+			outcome: ApplyOutcome{
+				DaemonApplied:        true,
+				SavedValueSuperseded: true,
+			},
+			key:  "default_program",
+			want: ApplyStatusSuperseded,
+		},
+		{
+			name: "superseded never overrides a deferred class",
+			outcome: ApplyOutcome{
+				DaemonApplied:        true,
+				SavedValueSuperseded: true,
+			},
+			key:  "branch_prefix",
+			want: ApplyStatusDeferred,
 		},
 		{
 			name: "uncertainty outranks a conflicting failure bit",

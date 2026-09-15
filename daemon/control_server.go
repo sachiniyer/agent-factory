@@ -240,6 +240,11 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 			resp.Pending = applied.Pending
 			resp.Warnings = applied.Warnings
 			outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applied.FailedListenerKeys}
+			// A successful apply claims "applied" only if the daemon is serving
+			// THIS save's value: a competing write can land between the writer's
+			// file-lock release and the apply's load, so the applied config may
+			// carry a different value for the same key (#4247).
+			outcome.SavedValueSuperseded = liveValueDiverged(s.manager.Config(), result.Key, result.Value)
 		} else {
 			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+aerr.Error())
 			outcome.DaemonApplyFailed = true

@@ -165,6 +165,11 @@ type ApplyOutcome struct {
 	// daemon.ApplyConfigResponse carry this; config owns no daemon types and must not
 	// import daemon (daemon imports config), so it travels as the plain slice.
 	FailedListenerKeys []string
+	// SavedValueSuperseded is set when the apply completed but the key's live
+	// value is not the one this save wrote: a competing write landed between the
+	// save's file-lock release and the apply's load, so the apply carried the
+	// other value (#4247). Meaningful only alongside DaemonApplied.
+	SavedValueSuperseded bool
 }
 
 // ApplyStatus is the machine-readable result for the key a save wrote. A
@@ -182,6 +187,10 @@ const (
 	ApplyStatusFailed      ApplyStatus = "failed"
 	ApplyStatusUnconfirmed ApplyStatus = "unconfirmed"
 	ApplyStatusDeferred    ApplyStatus = "deferred"
+	// ApplyStatusSuperseded reports a save whose write reached disk but lost the
+	// race to the apply: a newer write landed in between, so the daemon is not
+	// serving the value this save reported.
+	ApplyStatusSuperseded ApplyStatus = "superseded"
 )
 
 // StatusForKey projects the whole apply onto one saved key's stable wire value.
@@ -206,6 +215,9 @@ func (o ApplyOutcome) StatusForKey(key string) ApplyStatus {
 	}
 	if o.listenerRebindFailed(key) {
 		return ApplyStatusDeferred
+	}
+	if o.SavedValueSuperseded {
+		return ApplyStatusSuperseded
 	}
 	if o.DaemonApplied {
 		return ApplyStatusApplied
@@ -263,6 +275,9 @@ func EffectNotice(key string, outcome ApplyOutcome) string {
 		}
 		if outcome.DaemonApplyFailed {
 			return "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
+		}
+		if outcome.SavedValueSuperseded {
+			return "Saved — a newer write raced this save, so the running daemon may be using a different value."
 		}
 		if outcome.DaemonApplied {
 			return "Applied — the running daemon is using the new value now."

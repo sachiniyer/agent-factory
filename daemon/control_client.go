@@ -521,6 +521,12 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 		resp.Pending = applyResp.Pending
 		resp.Warnings = applyResp.Warnings
 		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
+		// A daemon this old cannot report its live config back (GetConfig arrived
+		// with SetConfigValue in #1960), so verify against the file the apply
+		// loaded: if a competing write landed between the local write's lock
+		// release and the daemon's load, disk no longer holds this save's value
+		// and "applied" would be a claim the client cannot make (#4247).
+		outcome.SavedValueSuperseded = diskValueDiverged(result.Key, result.Value)
 	} else if applyAttempt.requestStarted {
 		var warning string
 		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
@@ -583,6 +589,10 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 		resp.Pending = applyResp.Pending
 		resp.Warnings = applyResp.Warnings
 		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
+		// Same race as the set fallback: the unset's live value is the default,
+		// and a post-apply disk read is the only readback a pre-GetConfig daemon
+		// offers (#4247).
+		outcome.SavedValueSuperseded = diskValueDiverged(result.Key, unsetExpectedValue(result.Key))
 	} else if applyAttempt.requestStarted {
 		var warning string
 		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
