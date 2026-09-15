@@ -53,6 +53,9 @@ func TestConfigAgentCodexFixtureProcess(t *testing.T) {
 	if os.Getenv(configAgentCodexFixtureEnv) != "1" {
 		t.Skip("Codex terminal fixture; re-exec'd by config-agent delivery tests")
 	}
+	// If the pane's tmux server dies, this fixture's ReadByte would block forever
+	// as an orphan (#4412).
+	testguard.ExitWhenOrphaned(50 * time.Millisecond)
 	if err := runConfigAgentCodexFixture(os.Getenv(configAgentCodexFixtureModeEnv)); err != nil {
 		t.Fatal(err)
 	}

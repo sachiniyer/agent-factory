@@ -16,6 +16,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -232,6 +233,9 @@ func TestRestoreAdoptsAHookRunStillLiveInItsRealScope(t *testing.T) {
 	requireSystemdUserManager(t)
 	claimDaemonMarker(t)
 	if os.Getenv("AF_TEST_REAL_SCOPE_HELPER") == "1" {
+		// Re-exec'd test binary owned by the spawning test — if that parent
+		// dies, nothing else will ever reap this process (#4412).
+		testguard.ExitWhenOrphaned(50 * time.Millisecond)
 		t.Setenv("AGENT_FACTORY_HOME", os.Getenv("AF_TEST_REAL_SCOPE_HOME"))
 		previous := &GitWorktree{
 			repoPath:     os.Getenv("AF_TEST_REAL_SCOPE_REPO"),
@@ -260,7 +264,8 @@ func TestRestoreAdoptsAHookRunStillLiveInItsRealScope(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "hook.pid")
 	order := filepath.Join(t.TempDir(), "order")
 	writeLegacyRepoConfig(t, config.RepoIDFromRoot(repoPath), &config.RepoConfig{PostWorktreeCommands: []string{
-		fmt.Sprintf("printf '%%s' \"$$\" > %q; while [ ! -f %q ]; do sleep 0.2; done; printf 'first\\n' >> %q", pidFile, gate, order),
+		fmt.Sprintf("printf '%%s' \"$$\" > %q; %s; printf 'first\\n' >> %q", pidFile,
+			testguard.BoundedGateWait(gate, 200*time.Millisecond, 10*time.Minute), order),
 		fmt.Sprintf("printf 'second\\n' >> %q", order),
 	}})
 
@@ -273,9 +278,7 @@ func TestRestoreAdoptsAHookRunStillLiveInItsRealScope(t *testing.T) {
 		"AF_TEST_REAL_SCOPE_REPO="+repoPath, "AF_TEST_REAL_SCOPE_TREE="+worktreePath,
 		"AF_TEST_REAL_SCOPE_SESSION="+sessionID)
 	previous.Stdout, previous.Stderr = os.Stdout, os.Stderr
-	if err := previous.Start(); err != nil {
-		t.Fatal(err)
-	}
+	testguard.StartGroupProcess(t, previous)
 	previousReaped := false
 	t.Cleanup(func() {
 		if !previousReaped {

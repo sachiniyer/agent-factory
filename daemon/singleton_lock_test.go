@@ -223,7 +223,9 @@ func TestHelperHoldsHomeLock(t *testing.T) {
 	}
 	_ = os.WriteFile(filepath.Join(dir, "daemon.pid"), []byte(strconv.Itoa(os.Getpid())), 0600)
 	fmt.Println("READY")
-	// Block until the parent kills us.
+	// Block until the parent kills us. If the parent dies first, the watchdog
+	// exits rather than holding the lock forever as an orphan (#4412).
+	testguard.ExitWhenOrphaned(50 * time.Millisecond)
 	select {}
 }
 

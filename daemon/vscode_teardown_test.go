@@ -15,6 +15,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
@@ -83,21 +84,7 @@ func startOwnedSleepWithNonce(t *testing.T, processNonce string) (*exec.Cmd, pro
 	t.Helper()
 	cmd := exec.Command("/bin/sh", "-c", "exec sleep 60")
 	cmd.Env = append(os.Environ(), vscodeOwnerNonceEnv+"="+processNonce)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	require.NoError(t, cmd.Start())
-	waited := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(waited)
-	}()
-	t.Cleanup(func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		select {
-		case <-waited:
-		case <-time.After(2 * time.Second):
-			t.Errorf("owned sleep pid %d did not exit", cmd.Process.Pid)
-		}
-	})
+	testguard.StartGroupProcess(t, cmd)
 	deadline := time.Now().Add(2 * time.Second)
 	var process proctree.Process
 	for {

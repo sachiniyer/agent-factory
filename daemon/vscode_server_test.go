@@ -57,6 +57,11 @@ const (
 	// behave like THAT editor. The fake is re-exec'd as the test binary, so it
 	// cannot read its own name from argv the way flavorForBinary reads the path.
 	fakeVSCodeFlavorEnv = "AF_TEST_FAKE_CODE_SERVER_FLAVOR"
+	// fakeVSCodePgidDirEnv names a directory the fake publishes its process-group
+	// id into on startup, so the spawning test's cleanup can SIGKILL every group
+	// the binary ever led — including an editor the supervisor dropped while its
+	// TERM-ignoring stop was still inside the grace (#4412).
+	fakeVSCodePgidDirEnv = "AF_TEST_FAKE_CODE_SERVER_PGID_DIR"
 	// fakeVSCodeMarker is served at the root so a test can prove the response
 	// came from the editor and through the proxy.
 	fakeVSCodeMarker = "AF_FAKE_CODE_SERVER_OK"
@@ -67,6 +72,19 @@ const (
 // it binds the socket it is given, serves the worktree it is given, and upgrades
 // WebSockets on any path (as code-server does).
 func fakeVSCodeServerMain() {
+	// Two orphan defenses (#4412). We are a re-exec of the test binary whose
+	// only owner is the test process that spawned us: once it dies nothing is
+	// left to signal or reap this process — which is exactly how the 59-60-day
+	// `daemon.test --socket` orphans on the issue box were born. The watchdog
+	// exits the moment our ppid changes; the pgid registration lets the
+	// spawning test's cleanup SIGKILL this whole group even when the
+	// supervisor has already dropped us mid-stop-grace.
+	testguard.ExitWhenOrphaned(50 * time.Millisecond)
+	if dir := os.Getenv(fakeVSCodePgidDirEnv); dir != "" {
+		if pgid, err := syscall.Getpgid(0); err == nil && pgid == os.Getpid() {
+			_ = os.WriteFile(filepath.Join(dir, strconv.Itoa(pgid)), nil, 0o600)
+		}
+	}
 	args := os.Args[1:]
 	if path := os.Getenv(fakeVSCodeArgsEnv); path != "" {
 		_ = os.WriteFile(path, []byte(strings.Join(args, "\n")), 0o600)
@@ -166,8 +184,8 @@ func fakeVSCodeServerMain() {
 		// polite kill. (Found live on this box: a stranded child from a run 7.4h
 		// earlier, its TempDir long gone.) The test needs it for ~0.15s; the cap is
 		// pure margin, and it makes the worst case self-healing.
-		script := "trap '' TERM; echo $$ > " + pidFile +
-			"; i=0; while [ $i -lt 300 ]; do sleep 0.2; i=$((i+1)); done"
+		script := "trap '' TERM; echo $$ > " + pidFile + "; " +
+			testguard.BoundedSpin(200*time.Millisecond, 60*time.Second)
 		child := exec.Command("sh", "-c", script)
 		if err := child.Start(); err == nil {
 			go func() { _ = child.Wait() }()
@@ -239,12 +257,30 @@ func writeFakeVSCodeBinary(t *testing.T, name string, env map[string]string) str
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
 	}
+	// Registry of every editor group this binary launches: the fake records
+	// its pgid at startup (fakeVSCodeServerMain), and the cleanup below
+	// SIGKILLs each recorded group — including an editor the supervisor
+	// dropped mid-stop-grace, which the supervisor's own reap can no longer
+	// reach (#4412). The fake also dies with its parent on its own.
+	pgidDir := testguard.SocketTempDir(t)
+	t.Cleanup(func() {
+		entries, readErr := os.ReadDir(pgidDir)
+		if readErr != nil {
+			return
+		}
+		for _, e := range entries {
+			if pgid, aerr := strconv.Atoi(e.Name()); aerr == nil {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			}
+		}
+	})
 	var exports strings.Builder
 	exports.WriteString(fakeVSCodeEnv + "=1 ")
 	// Tell the fake which editor it is standing in for: the dialects differ in
 	// ways that matter (openvscode ignores a positional worktree), and a fake that
 	// blurs them would let a broken argv pass.
 	exports.WriteString(fakeVSCodeFlavorEnv + "=" + shellQuote(name) + " ")
+	exports.WriteString(fakeVSCodePgidDirEnv + "=" + shellQuote(pgidDir) + " ")
 	for k, v := range env {
 		exports.WriteString(k + "=" + shellQuote(v) + " ")
 	}

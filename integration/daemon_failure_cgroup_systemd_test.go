@@ -82,11 +82,13 @@ func TestAbruptDaemonFailureReapsOwnedChildrenAndPreservesTmux(t *testing.T) {
 set -eu
 trap '' TERM
 printf '%%s\n' "$$" >> %s
-sh -c 'trap "" TERM; while :; do sleep 600; done' &
+sh -c 'trap "" TERM; %s' &
 child=$!
 printf '%%s\n' "$child" >> %s
 wait "$child"
-`, shellSingleQuote(watchRootLog), shellSingleQuote(watchChildLog)), 0o700)
+`, shellSingleQuote(watchRootLog),
+		testguard.BoundedSpin(10*time.Minute, 30*time.Minute),
+		shellSingleQuote(watchChildLog)), 0o700)
 	writeTasksFile(t, h.home, []map[string]interface{}{
 		{
 			"id":           watchTaskID,

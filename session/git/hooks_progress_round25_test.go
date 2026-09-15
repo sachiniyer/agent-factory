@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 func TestHookProgressInconclusiveLivenessKeepsSuffixPending(t *testing.T) {
@@ -72,7 +73,7 @@ set -eu
 if [ "${1:-}" = "--help" ]; then printf '%s\n' '    --expand-environment=BOOL'; exit 0; fi
 if [ ! -f ` + shellQuoteForShim(launcherEntered) + ` ]; then
     : > ` + shellQuoteForShim(launcherEntered) + `
-    while [ ! -f ` + shellQuoteForShim(releaseLauncher) + ` ]; do sleep 1; done
+    ` + testguard.BoundedGateWait(releaseLauncher, time.Second, 5*time.Minute) + `
     exit 1
 fi
 while [ "$#" -gt 0 ]; do

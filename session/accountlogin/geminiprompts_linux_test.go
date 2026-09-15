@@ -168,7 +168,7 @@ func writeGeminiPromptFixture(t *testing.T, dir string) {
 		// Then WAIT, because every one of those three states is a flow holding the
 		// terminal for its human. A fixture that exited would exercise the
 		// flow-ended-early path instead.
-		"while :; do sleep 1; done\n"
+		testguard.BoundedSpin(time.Second, 5*time.Minute) + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "gemini"), []byte(script), 0o700); err != nil {
 		t.Fatalf("write the gemini prompt fixture: %v", err)
 	}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 const postWorktreeRestartHelperEnv = "AF_TEST_POST_WORKTREE_RESTART_HELPER"
@@ -54,17 +55,7 @@ func TestPostWorktreeHookOutputSurvivesRunnerExit(t *testing.T) {
 		"AF_TEST_RESTART_WORKTREE="+worktree,
 		"AF_TEST_RESTART_COMMAND="+command,
 	)
-	if err := runner.Start(); err != nil {
-		t.Fatalf("start hook-runner helper: %v", err)
-	}
-	runnerStopped := false
-	t.Cleanup(func() {
-		if runnerStopped {
-			return
-		}
-		_ = runner.Process.Kill()
-		_ = runner.Wait()
-	})
+	testguard.StartGroupProcess(t, runner)
 
 	hookPID := waitForPidFile(t, pidFile, 20*time.Second)
 	t.Cleanup(func() { _ = killProcessGroup(hookPID) })
@@ -72,7 +63,6 @@ func TestPostWorktreeHookOutputSurvivesRunnerExit(t *testing.T) {
 		t.Fatalf("stop helper daemon generation: %v", err)
 	}
 	_ = runner.Wait()
-	runnerStopped = true
 	if err := os.WriteFile(releaseFile, nil, 0o600); err != nil {
 		t.Fatalf("release hook writer: %v", err)
 	}
@@ -103,6 +93,9 @@ func TestPostWorktreeHookOutputSurvivesRunnerExit(t *testing.T) {
 }
 
 func runPostWorktreeRestartHelper(t *testing.T) {
+	// This process is a re-exec'd test binary owned by the test that spawned
+	// it; if that parent dies there is nothing left to reap it (#4412).
+	testguard.ExitWhenOrphaned(50 * time.Millisecond)
 	home := os.Getenv("AF_TEST_RESTART_HOME")
 	repo := os.Getenv("AF_TEST_RESTART_REPO")
 	worktree := os.Getenv("AF_TEST_RESTART_WORKTREE")
