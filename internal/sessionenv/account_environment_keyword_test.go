@@ -51,6 +51,13 @@ func TestValidateAccountEnvironmentCommand_RefusesKeywordMode(t *testing.T) {
 		// start with `-` or `+`. `set +e -eo keyword` enables `-e` and then
 		// `-o keyword`, which enables keyword mode — the guard must catch this.
 		"set +e -eo keyword; codex CODEX_HOME=/other",
+		// When a cluster contains both `o` and `k`, bash applies all cluster
+		// characters left to right; `o` consumes the following word as a mode
+		// name AND `k` still enables keyword mode. The guard must check for `k`
+		// in the cluster even after consuming the `o` mode name.
+		"set -ok pipefail; codex CODEX_HOME=/other",
+		"set -ko pipefail; codex CODEX_HOME=/other",
+		"set -ekxo pipefail; codex CODEX_HOME=/other",
 		// The lone form (no compound) is refused for the same contract reason
 		// as a lone `set -k`: keyword mode outlives the call that set it.
 		"set +e -k",
