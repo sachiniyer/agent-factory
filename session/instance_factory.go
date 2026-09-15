@@ -59,6 +59,12 @@ type InstanceOptions struct {
 	// refusal is the same refusal; only the remedy differs, so only the remedy is
 	// carried.
 	AccountSource string
+	// AccountAutoSelected records that af — not the caller — chose Account:
+	// the create-time pool router (#4404) or the limit-swap scheduler. The flag
+	// is what keeps a pinned identity a pin: the swap path only ever re-chooses
+	// an account af selected. Persisted via the instance record's
+	// account_auto_selected field.
+	AccountAutoSelected bool
 	// ProgramResolved marks Program as the final command selected by an outer
 	// runtime. It is internal to the sandbox agent-server handoff; ordinary
 	// callers pass an agent enum and leave this false.
@@ -590,6 +596,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		Path:                  absPath,
 		Program:               opts.Program,
 		Account:               opts.Account,
+		accountAutoSelected:   opts.AccountAutoSelected,
 		Height:                0,
 		Width:                 0,
 		CreatedAt:             t,

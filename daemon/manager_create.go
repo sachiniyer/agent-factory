@@ -66,13 +66,14 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// cannot disagree with the one a real create picks.
 		req.Program = defaultProgramFor(cfg.DefaultProgram, req.RepoPath)
 	}
-	// The project's default credential account (#3386), from the same op-entry
-	// snapshot. It runs after the program is settled — an account belongs to ONE
-	// agent, so which registry the default is read from depends on the program this
-	// create actually resolved to — and BEFORE reserveCreate, so a default that
-	// cannot be honoured costs no worktree, branch or tmux session. An explicit
-	// Account is left exactly as the client sent it.
-	if err := applyDefaultAccount(cfg, &req); err != nil {
+	// Which credential account the session launches under (#3386 + #4404), from
+	// the same op-entry snapshot. It runs after the program is settled — an
+	// account belongs to ONE agent, so which registry is read depends on the
+	// program this create actually resolved to — and BEFORE reserveCreate, so a
+	// default that cannot be honoured, or a pool with no healthy account, costs
+	// no worktree, branch or tmux session. An explicit Account is left exactly
+	// as the client sent it.
+	if err := m.routeCreateAccount(cfg, &req); err != nil {
 		return session.InstanceData{}, err
 	}
 	reservationBoundaryDelegated = true
@@ -114,7 +115,12 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		UpdatedAt:     createdAt,
 		Prompt:        req.Prompt,
 		Program:       req.Program,
-		Worktree:      session.GitWorktreeData{RepoPath: repo.IdentityPath()},
+		// The account the router chose is part of the projection from the first
+		// event — a pending row showing ambient while the launch lands elsewhere
+		// is exactly the "what identity is this" lie #4404 set out to remove.
+		Account:             req.Account,
+		AccountAutoSelected: req.accountAutoSelected,
+		Worktree:            session.GitWorktreeData{RepoPath: repo.IdentityPath()},
 	}
 	key := daemonInstanceKey(repo.ID, title)
 	m.mu.Lock()
@@ -167,6 +173,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		Program:                        req.Program,
 		Account:                        req.Account,
 		AccountSource:                  req.AccountSource,
+		AccountAutoSelected:            req.accountAutoSelected,
 		InPlace:                        req.InPlace,
 		ForceRemote:                    req.ForceRemote,
 		Backend:                        session.BackendKind(req.Backend),

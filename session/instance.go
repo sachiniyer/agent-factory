@@ -164,7 +164,8 @@ type Instance struct {
 	// spend the wrong quota while still displaying the account it was created
 	// with.
 	Account string `json:"account,omitempty"`
-	// accountAutoSelected distinguishes a scheduler choice; false keeps pre-#3127 accounts pinned.
+	// accountAutoSelected distinguishes an af choice — the limit scheduler's swap
+	// or the create-time pool router (#4404); false keeps pre-#3127 accounts pinned.
 	accountAutoSelected bool
 	// pendingAccountSwap survives until the replacement notice and task land.
 	pendingAccountSwap *AccountSwapData

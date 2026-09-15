@@ -15,10 +15,10 @@ import (
 // #3386: the project's default account, applied on the create so TUI, web, CLI
 // and task deliveries all honour it without re-implementing the precedence.
 //
-// These drive applyDefaultAccount directly — the function CreateSession calls
-// before it reserves anything — because the ORDER and the REFUSAL are the whole
-// contract, and both are decided before a worktree, a branch or a tmux session
-// exists.
+// These drive applyDefaultAccount directly — the fallback routeCreateAccount
+// delegates to for a create the pool cannot route (#4404) — because the ORDER
+// and the REFUSAL are the whole contract, and both are decided before a
+// worktree, a branch or a tmux session exists.
 
 // defaultAccountFixture gives a temp AF home, a registered project, and a
 // registered account directory when name is non-empty.

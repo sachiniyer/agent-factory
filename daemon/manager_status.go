@@ -349,6 +349,9 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	churnCheckpoint := false
 	if obs.Updated {
 		_, churnCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
+		if m.refuteAccountLimitEvidence(instance, epoch) {
+			churnCheckpoint = true
+		}
 	}
 	if obs.Baseline || obs.Updated || obs.HasPrompt {
 		// Updated/prompt proves the run remains active; a baseline cannot establish
@@ -359,7 +362,9 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// Idle output. The normal poll would probe liveness here to tell a healthy idle
 	// session from a vanished one; this path deliberately does not, because it must
 	// never conclude death. The attach already answers that question.
-	m.resolveIdleLiveness(instance, obs.Content, epoch)
+	if m.resolveIdleLiveness(instance, obs.Content, epoch) {
+		churnCheckpoint = true
+	}
 	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, churnCheckpoint)
 	// The run may have just ended here, on the one path that cannot act on it: the
 	// attach owns this session's tmux. Park the declared lifecycle so the first
@@ -638,6 +643,12 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// Fresh output. Only a live pane produces bytes, and a dead one yields "" —
 		// so this is affirmative on its own, no probe needed.
 		observedAlive = true
+		// An account whose pane is producing agent output has refuted any stored
+		// usage-limit evidence against it (#4404). Before the transition: a
+		// parked session unparking bumps the epoch this refutation is scoped to.
+		if m.refuteAccountLimitEvidence(instance, epoch) {
+			settlementCheckpoint = true
+		}
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
 	case hasPrompt:
 		// A matched prompt means the CAPTURE SUCCEEDED: hasPrompt is a substring test
@@ -674,7 +685,9 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			// Idle output: settle to Ready, or LimitReached when the pane shows a
 			// usage-limit banner for a claude/codex session (#1146). content is
 			// HasUpdated's capture (no re-capture); see resolveIdleLiveness.
-			m.resolveIdleLiveness(instance, content, epoch)
+			if m.resolveIdleLiveness(instance, content, epoch) {
+				settlementCheckpoint = true
+			}
 		}
 	}
 	if observedAlive {

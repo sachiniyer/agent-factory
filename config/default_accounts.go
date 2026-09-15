@@ -252,6 +252,45 @@ func DefaultAccountLayersFor(global *Config, repoPath, agent string) (project, g
 	return project, DefaultAccountSelection{}
 }
 
+// DefaultAccountAmbientOptOut reports whether the resolved config for repoPath
+// carries a PRESENT-but-empty `default_accounts` entry for agent — the only
+// spelling of "this project runs on the ambient identity" (#4404).
+//
+// DefaultAccountLayersFor cannot answer this: it returns the same empty
+// selections for "no entry" and "entry explicitly cleared", and the create-time
+// account router needs the difference. Routing past the opt-out would scope a
+// session to a registered account whose identity the project deliberately
+// refused — the silent wrong-identity outcome in the other direction.
+//
+// The same present-empty entry in the global layer is honored identically: it
+// is how a global default is cleared, and a user who wrote it chose ambient.
+// An agent with no entry anywhere is not an opt-out — the pool may route.
+func DefaultAccountAmbientOptOut(global *Config, repoPath, agent string) bool {
+	if strings.TrimSpace(agent) == "" {
+		return false
+	}
+	globalOptOut := func() bool {
+		if global == nil {
+			return false
+		}
+		value, present := global.DefaultAccounts[agent]
+		return present && strings.TrimSpace(value) == ""
+	}
+	if strings.TrimSpace(repoPath) == "" {
+		return globalOptOut()
+	}
+	repo, err := RepoFromPath(repoPath)
+	if err != nil {
+		return globalOptOut()
+	}
+	resolved, err := ResolveConfigForRepoInspection(repo)
+	if err != nil {
+		return globalOptOut()
+	}
+	value, present := resolved.DefaultAccounts[agent]
+	return present && strings.TrimSpace(value) == ""
+}
+
 // ResolvedDefaultAccountsFor reports the effective `default_accounts` map for
 // repoPath — every agent's configured default, with the personal per-project
 // layer merged over the global one exactly as a create resolves it.
