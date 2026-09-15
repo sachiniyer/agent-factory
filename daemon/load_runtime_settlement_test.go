@@ -158,7 +158,8 @@ func TestFindSessionFallbackRegistersLoadTimeInterruptionSettlement(t *testing.T
 	key := daemonInstanceKey(repoID, inst.Title)
 	manager.mu.Lock()
 	tracked := manager.instances[key]
-	entry, owed := manager.settleOwed[key]
+	// Owed settlements key on the stable session ID, not the title key.
+	entry, owed := manager.settleOwed[stableSessionKey(repoID, inst)]
 	manager.mu.Unlock()
 	require.Same(t, got, tracked, "the fallback instance must be the tracked one")
 	require.False(t, inst.ConsumeLoadRuntimeReplacement().Replaced,
