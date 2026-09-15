@@ -1702,13 +1702,16 @@ function doRegisterAccount(agent: string, name: string): void {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   void registerAccountRPC(agent, name, tok)
     .then((resp) => {
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
       const notices = resp.notices?.length ? ` · ${resp.notices.join(" · ")}` : "";
       setAccountStatus(agent, "", `Registered ${agent} account "${resp.entry.name}"${notices}`, false);
       refreshAccounts();
     })
     .catch((err: unknown) => {
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
       setAccountStatus(agent, "", errorText(err), true);
     });
 }
@@ -1760,6 +1763,10 @@ function doOpenAccountLogin(agent: string, name: string): void {
       }));
     })
     .catch((err: unknown) => {
+      // The complementary await-exit takes the same gate: a rejection that
+      // lands across a disconnect must not write the dead connection's error
+      // onto the row.
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
       setAccountStatus(agent, name, errorText(err), true);
     });
 }
@@ -1789,8 +1796,10 @@ function applyConfigValue(key: string, value: string): void {
 }
 
 function applyConfigValueNow(key: string, value: string, tok: string): Promise<void> {
+  const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok)
     .then((resp) => {
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
       store.set({
         configStatus: {
           key: resp.result.key,
@@ -1803,6 +1812,7 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
       refreshConfig();
     })
     .catch((err: unknown) => {
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
       store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
     });
 }
@@ -1954,12 +1964,14 @@ function openAddTask(): void {
         m.setBusy(true);
         void addTask(buildTask(input), tok)
           .then(() => {
-            closeModal();
+            // An RPC that resolves across a reconnect must not close whatever
+            // modal the NEW connection has open — only ours.
+            if (modal === m) closeModal();
             refreshTasks();
           })
           .catch((e) => {
             if (isMutationCommittedError(e)) {
-              closeModal();
+              if (modal === m) closeModal();
               refreshTasks();
               surfaceTabError(e);
               return;
@@ -2014,12 +2026,12 @@ function openEditTask(task: TaskData): void {
           tok,
         )
           .then(() => {
-            closeModal();
+            if (modal === m) closeModal();
             refreshTasks();
           })
           .catch((e) => {
             if (isMutationCommittedError(e)) {
-              closeModal();
+              if (modal === m) closeModal();
               refreshTasks();
               surfaceTabError(e);
               return;
@@ -2135,7 +2147,9 @@ function doHandoff(): void {
         const m = modal;
         m.setBusy(true);
         void handoffSession(target.id, target.title, to, tok, account)
-          .then(closeModal)
+          .then(() => {
+            if (modal === m) closeModal();
+          })
           .catch((e) => {
             if (isMutationCommittedError(e)) {
               if (modal === m) closeModal();
@@ -2162,7 +2176,7 @@ function doRemoveTask(task: TaskData): void {
     if (!modal || token !== tok) return;
     const handle = modal;
     handle.setBusy(true);
-    void removeTask(task, tok).then(() => { closeModal(); return refreshTasks(); })
+    void removeTask(task, tok).then(() => { if (modal === handle) closeModal(); return refreshTasks(); })
       .catch((error) => { handle.setBusy(false); handle.setError(errorText(error)); });
   }, closeModal));
 }
