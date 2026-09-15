@@ -297,6 +297,15 @@ func startupWouldRepairHome(configDir string) bool {
 	// from the raw Unix mode, including setuid/setgid/sticky, to avoid
 	// silently stripping those bits from the directory during restoration.
 	rawPerm := st.Mode & 0o7777
+	if !canRestoreMode(&st) {
+		// A mode we cannot reinstate bit-for-bit must not be probed at all:
+		// chmod silently drops S_ISGID for a caller outside the file's group,
+		// so the restore below could "succeed" while permanently losing the
+		// bit — an alteration this read-only path must never make. Answer
+		// "unknown" instead of a proven repair; startup's own chmod still runs
+		// (and strips the bit itself) when af actually starts.
+		return false
+	}
 	origMode := os.FileMode(rawPerm & 0o777)
 	if rawPerm&unix.S_ISUID != 0 {
 		origMode |= os.ModeSetuid
@@ -312,6 +321,34 @@ func startupWouldRepairHome(configDir string) bool {
 	}
 	_ = os.Chmod(repairPath, origMode) // restore; probe already answered the question
 	return true
+}
+
+// canRestoreMode reports whether a post-probe os.Chmod can reinstate st's full
+// mode bit-for-bit. chmod(2) silently clears S_ISGID when the caller is neither
+// privileged nor a member of the file's group — restoring 02750 then "succeeds"
+// yet leaves 0750. The other special bits have no such rule: an owner can always
+// set setuid/sticky on their own directory. Where restoration is not provable,
+// the probe must not run.
+func canRestoreMode(st *unix.Stat_t) bool {
+	if st.Mode&unix.S_ISGID == 0 {
+		return true
+	}
+	if os.Geteuid() == 0 {
+		return true // CAP_FSETID: the restore can always set the bit
+	}
+	if st.Gid == uint32(os.Getegid()) {
+		return true
+	}
+	groups, err := os.Getgroups()
+	if err != nil {
+		return false
+	}
+	for _, g := range groups {
+		if uint32(g) == st.Gid {
+			return true
+		}
+	}
+	return false
 }
 
 // fileExists reports whether path exists (any stat error other than

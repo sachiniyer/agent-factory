@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 // seedHome writes content to config.toml in a fresh AGENT_FACTORY_HOME and
@@ -418,5 +419,69 @@ func TestStartupWouldRepairHome(t *testing.T) {
 			_ = os.Chown(afHome, 0, 0)
 		})
 		assert.True(t, startupWouldRepairHome(afHome), "root can chmod a foreign-owned default home, so it is repairable")
+	})
+
+	t.Run("setgid default home keeps its bit through the probe", func(t *testing.T) {
+		// A setgid home in OUR OWN group is still probeable: the restore chmod
+		// can reinstate S_ISGID because the group matches. Pin both the verdict
+		// and the bit-for-bit restoration — a probe that stripped the bit would
+		// alter the directory from a read-only path.
+		afHome := stageDefaultAFHome(t, "", 0o2750)
+		var before unix.Stat_t
+		require.NoError(t, unix.Stat(afHome, &before))
+		if before.Mode&unix.S_ISGID == 0 {
+			t.Skip("this filesystem did not hold S_ISGID on the staged home")
+		}
+		assert.True(t, startupWouldRepairHome(afHome),
+			"an owner-owned setgid home whose group we are in is chmod-repairable")
+		var after unix.Stat_t
+		require.NoError(t, unix.Stat(afHome, &after))
+		assert.Equal(t, before.Mode&0o7777, after.Mode&0o7777,
+			"the probe must restore the mode bit-for-bit, including setgid")
+	})
+}
+
+// foreignGid returns a gid the current process is provably not a member of
+// (not the egid, not a supplementary group), for the cannot-restore case.
+func foreignGid(t *testing.T) uint32 {
+	t.Helper()
+	ours := map[uint32]bool{uint32(os.Getegid()): true}
+	groups, err := os.Getgroups()
+	require.NoError(t, err)
+	for _, g := range groups {
+		ours[uint32(g)] = true
+	}
+	for candidate := uint32(60000); ; candidate++ {
+		if !ours[candidate] {
+			return candidate
+		}
+	}
+}
+
+// TestCanRestoreMode pins the probe gate: a setgid directory whose group the
+// caller is not in cannot have its mode reinstated bit-for-bit — chmod silently
+// drops S_ISGID there — so startupWouldRepairHome must refuse to run the
+// mutating probe rather than risk a permanent alteration.
+func TestCanRestoreMode(t *testing.T) {
+	egid := uint32(os.Getegid())
+	t.Run("plain directory is restorable", func(t *testing.T) {
+		st := &unix.Stat_t{Mode: unix.S_IFDIR | 0o750, Gid: egid}
+		assert.True(t, canRestoreMode(st))
+	})
+	t.Run("setgid with our effective group is restorable", func(t *testing.T) {
+		st := &unix.Stat_t{Mode: unix.S_IFDIR | unix.S_ISGID | 0o750, Gid: egid}
+		assert.True(t, canRestoreMode(st))
+	})
+	t.Run("setuid and sticky are restorable", func(t *testing.T) {
+		st := &unix.Stat_t{Mode: unix.S_IFDIR | unix.S_ISUID | unix.S_ISVTX | 0o750, Gid: foreignGid(t)}
+		assert.True(t, canRestoreMode(st), "setuid/sticky have no group-membership rule")
+	})
+	t.Run("setgid with a foreign group is not restorable", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root holds CAP_FSETID, so every group is restorable")
+		}
+		st := &unix.Stat_t{Mode: unix.S_IFDIR | unix.S_ISGID | 0o750, Gid: foreignGid(t)}
+		assert.False(t, canRestoreMode(st),
+			"chmod would silently drop S_ISGID for a group we are not in")
 	})
 }
