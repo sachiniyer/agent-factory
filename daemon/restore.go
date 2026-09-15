@@ -348,6 +348,20 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	case probeAbsent:
 		// af's own not-provisioned sentinel: nothing to preserve, so replacement is
 		// unconditional. The only arm that licenses that.
+		//
+		// If the session has a terminal LostRestoreFailure (LostRestoreGaveUp), a
+		// manual restore is the operator's explicit request for a fresh episode.
+		// Seed the in-memory entry now — before Recover runs — so that if Recover
+		// fails, recordLostRestoreFailure finds an existing entry at zero rather
+		// than seeding consecutiveFailures from the persisted terminal failure
+		// (which would charge the first new failure as attempt maxAttempts+1 and
+		// trigger immediate give-up). Then reset the Recover budget: the sandbox is
+		// provably absent, so there is no predecessor episode to protect and no
+		// retirement boundary to wait for — unlike the force-reap arms, where the
+		// hook pattern is required because the sandbox may still be alive until the
+		// reap succeeds.
+		m.seedRestoreStateEntry(repoID, instance)
+		m.resetRecoverBudget(repoID, instance)
 	case probeAnsweredDead:
 		// It ANSWERED: the agent is gone, the sandbox is not. Push its work to origin
 		// before anything replaces it, and refuse outright if that push does not
