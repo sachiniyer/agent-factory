@@ -161,6 +161,19 @@ func StartAndSendPromptWithConversationCapture(
 // pane-poll instead of spinning to the timeout (see WaitForReady). A nil ctx is
 // treated as context.Background().
 func WaitForReadyAndSendPrompt(ctx context.Context, instance *session.Instance, prompt string) error {
+	_, err := WaitForReadyAndSendPromptWithStatus(ctx, instance, prompt)
+	return err
+}
+
+// WaitForReadyAndSendPromptWithStatus is the status-bearing form of
+// WaitForReadyAndSendPrompt. Callers with a durable delivery obligation must
+// inspect the returned verdict: a nil error says the submission call completed,
+// while only PromptDelivered proves the prompt landed.
+func WaitForReadyAndSendPromptWithStatus(
+	ctx context.Context,
+	instance *session.Instance,
+	prompt string,
+) (session.PromptDeliveryStatus, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -169,23 +182,24 @@ func WaitForReadyAndSendPrompt(ctx context.Context, instance *session.Instance, 
 	// drive the agent's PTY locally; a backend without interactive input (remote
 	// hook) handles readiness and prompts on its own host, so skip them.
 	if !instance.Capabilities().InteractiveInput {
-		return nil
+		return session.PromptDelivered, nil
 	}
 
 	if err := WaitForReady(ctx, instance); err != nil {
-		return fmt.Errorf("%w: %w", ErrAgentReadiness, err)
+		return session.PromptCouldNotConfirm, fmt.Errorf("%w: %w", ErrAgentReadiness, err)
 	}
 
 	if err := DismissTrustPrompt(ctx, instanceTrustTarget{instanceReadinessTarget{inst: instance}}); err != nil {
-		return fmt.Errorf("%w: %w", ErrAgentReadiness, err)
+		return session.PromptCouldNotConfirm, fmt.Errorf("%w: %w", ErrAgentReadiness, err)
 	}
 
 	if prompt != "" {
-		_, err := instance.SendPromptWithEvidence(prompt, time.Now)
+		status, err := instance.SendPromptWithEvidence(prompt, time.Now)
 		if err != nil {
-			return fmt.Errorf("%w: %w", ErrPromptDelivery, err)
+			return status, fmt.Errorf("%w: %w", ErrPromptDelivery, err)
 		}
+		return status, nil
 	}
 
-	return nil
+	return session.PromptDelivered, nil
 }

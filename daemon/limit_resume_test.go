@@ -83,6 +83,16 @@ func (b *limitResumeBackend) SendPromptCommand(_ *session.Instance, prompt strin
 	return nil
 }
 
+func (b *limitResumeBackend) SendPromptCommandWithStatus(
+	i *session.Instance, prompt string,
+) (session.PromptDeliveryStatus, error) {
+	err := b.SendPromptCommand(i, prompt)
+	if err != nil {
+		return session.PromptCouldNotConfirm, err
+	}
+	return session.PromptDelivered, nil
+}
+
 func (b *limitResumeBackend) snapshot() (recover, respawn int, prompts []string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -446,4 +456,8 @@ func TestResumeFromLimit_NotLimited_Errors(t *testing.T) {
 	if inst.LimitReached() {
 		t.Fatal("a Ready session must not become limit-blocked")
 	}
+}
+
+func (b *limitResumeBackend) Preview(*session.Instance) (string, error) {
+	return "ready\n❯\n›\n> \n╰", nil
 }

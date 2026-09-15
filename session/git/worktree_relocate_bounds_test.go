@@ -216,9 +216,7 @@ func TestRelocate_SourceIdentityProbeIsBounded(t *testing.T) {
 		<-probeDone
 		relocationPathIdentity = previousIdentity
 	})
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { relocationIdentityTimeout = previousTimeout })
+	useRelocationIdentityTimeoutForTest(t, 100*time.Millisecond)
 
 	done := make(chan error, 1)
 	go func() { done <- gw.MoveWorktree(dest) }()
@@ -226,7 +224,7 @@ func TestRelocate_SourceIdentityProbeIsBounded(t *testing.T) {
 	case err := <-done:
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		assert.True(t, gw.cleanupHasStalled())
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(3 * relocationIdentityTimeout):
 		t.Fatal("the pre-move source identity probe ignored the relocation bound")
 	}
 }

@@ -84,7 +84,15 @@ var runEntrypointGate = func(ctx context.Context, homeDir string, skipWake bool)
 // service-manager exec that Wake runs, so a wedged systemctl cannot hang the
 // launch.
 func checkUpgradeGate(homeDir string, skipWake bool) (upgradeGateDecision, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), upgradeGateTimeout)
+	return checkUpgradeGateUntil(homeDir, skipWake, time.Time{})
+}
+
+// checkUpgradeGateUntil applies the gate's own timeout within an optional
+// earlier caller deadline. The admission retry loop uses the earlier deadline
+// so a gate takeover wait cannot extend the user-visible hand-off budget.
+func checkUpgradeGateUntil(homeDir string, skipWake bool, deadline time.Time) (upgradeGateDecision, error) {
+	gateDeadline := admissionBoundedDeadline(deadline, upgradeGateTimeout)
+	ctx, cancel := context.WithDeadline(context.Background(), gateDeadline)
 	defer cancel()
 
 	err := runEntrypointGate(ctx, homeDir, skipWake)

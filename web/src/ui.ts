@@ -36,6 +36,7 @@ import {
   type StatusFilter,
 } from "./filter.js";
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
+import { replaceProjectMenuChildren } from "./project-menu-focus.js";
 import {
   archiveWarningText,
   canHandoff,
@@ -44,6 +45,8 @@ import {
   isCreating,
   idleReasonDetail,
   isLimitReached,
+  isPendingAgentHandoffDeliveryUnconfirmed,
+  isPendingManualHandoffDeliveryUnconfirmed,
   OPERATOR_KIND_LABELS,
   type OperatorKind,
   operatorKind,
@@ -98,6 +101,39 @@ export function isActionableSession(s: SessionData): s is ActionableSession {
   );
 }
 
+export type RetryActionPresentation = {
+  kind: "limit" | "handoff";
+  label: string;
+  title: string;
+};
+
+/** The selected row's explicit recovery action. A delivery-unconfirmed handoff
+ * keeps a distinct label so Retry never looks like an unrelated quota control. */
+export function retryActionForSession(s: SessionData): RetryActionPresentation | null {
+  if (
+    isPendingManualHandoffDeliveryUnconfirmed(s) ||
+    isPendingAgentHandoffDeliveryUnconfirmed(s)
+  ) {
+    return {
+      kind: "handoff",
+      label: "Retry handoff",
+      title: "Retry the handoff after inspecting the pane",
+    };
+  }
+  if (isLimitReached(s)) {
+    return { kind: "limit", label: "Retry limit", title: "Retry after the usage limit" };
+  }
+  return null;
+}
+
+function patchRetryButton(button: HTMLElement, action: RetryActionPresentation | null): void {
+  button.hidden = action === null;
+  if (action) {
+    button.textContent = action.label;
+    button.title = action.title;
+  }
+}
+
 /** Fail-closed narrowing for the daemon's independent teardown capability. */
 export function isKillableSession(s: SessionData): s is KillableSession {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
@@ -107,6 +143,7 @@ export function isKillableSession(s: SessionData): s is KillableSession {
  *  authed — the live session projection plus the current selection. */
 export interface AppState {
   phase: "login" | "app";
+  pendingRestores?: ReadonlySet<string>;
   /** the top-level view: the live sessions rail+terminal, or the tasks (scheduled
    *  automations) pane — both SCOPED to the selected project (redesign PR2). The
    *  appbar view tabs and the [ / ] keys switch it; it selects which body shows. */
@@ -355,6 +392,12 @@ export interface Actions {
   /** Sets the theme preference (redesign PR1): persists it, stamps data-theme on
    *  <html>, and re-themes the live terminals. */
   setTheme(choice: ThemeChoice): void;
+}
+
+/** Only known local restores can skip consent. Empty is the legacy local encoding
+ *  (session.InstanceData.UsesLocalTmux); unknown future backends keep consent. */
+export function restoreRequiresConfirmation(session: SessionData): boolean {
+  return session.backend_type !== undefined && session.backend_type !== "" && session.backend_type !== "local";
 }
 
 /** The backend types whose workspace lives off-box (session/archive_sandbox.go
@@ -766,14 +809,7 @@ export class AppShell {
   };
   private syncPhone(): void {
     const active = this.phone.matches && this.terminalSelected;
-    if (this.el.classList.contains("af-session-first") === active) {
-      // The capture belongs only to this media-change transaction. A Web/VS Code
-      // tab needs no responsive reparent, so retaining its snapshot would let a
-      // later terminal selection consume stale picker-open state.
-      this.responsiveNewTabState = null;
-      return;
-    }
-    const focus = document.activeElement as HTMLElement | null;
+    const compositionChanged = this.el.classList.contains("af-session-first") !== active;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
     // appbarControls captures this before its media listener closes the phone
     // disclosure. The composition pass is deliberately deferred until every
@@ -786,20 +822,38 @@ export class AppShell {
       : pickerTrigger?.getAttribute("aria-expanded") === "true";
     const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ??
       (responsiveState?.trigger === pickerTrigger ? responsiveState.cancel : undefined) : undefined;
-    this.appControls.close();
-    this.terminalChrome?.menu.close();
-    this.closeProjectMenu();
-    this.sessionFirst?.setActive(active);
-    this.el.classList.toggle("af-session-first", active);
-    // Reparenting closes the old enclosing disclosure. Reopen through the new
-    // owner and capture its return state before restoring the focused item.
-    if (pickerOpen) {
+    const reopenPicker = (): void => {
       this.openNewTabPicker();
       // Closing the old owner can synchronously close the picker and clear its
       // return. Preserve a shortcut transaction across this intentional reparent.
       if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
         this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
       }
+    };
+    if (!compositionChanged) {
+      // A store update can observe the new media-query value and recompose before
+      // the query's change listeners run. The owner listener then closes the picker,
+      // leaving this deferred pass with no composition work but a real open capture.
+      if (responsiveState?.trigger === pickerTrigger && responsiveState.open &&
+          pickerTrigger?.getAttribute("aria-expanded") !== "true") reopenPicker();
+      return;
+    }
+    const focus = document.activeElement as HTMLElement | null;
+    // Escape can finish the shortcut before this deferred composition pass. Its
+    // return has already closed an incidental Session actions disclosure, while
+    // leaving a user-opened one expanded. Carry that settled state through the
+    // move even when there is no longer an open picker to restore it for us.
+    const sessionActionsOpen = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
+    this.appControls.close();
+    this.terminalChrome?.menu.close();
+    this.closeProjectMenu();
+    this.sessionFirst?.setActive(active);
+    this.el.classList.toggle("af-session-first", active);
+    if (sessionActionsOpen) this.terminalChrome?.menu.open();
+    // Reparenting closes the old enclosing disclosure. Reopen through the new
+    // owner and capture its return state before restoring the focused item.
+    if (pickerOpen) {
+      reopenPicker();
     }
     // openNewTabPicker has restored focus to its first item. Do not overwrite it
     // with the app-controls trigger focused by the preceding media listener: that
@@ -877,7 +931,7 @@ export class AppShell {
   // limit wall — or is resumed off it — WITHOUT a selection change, which is the
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
   private retryBtn: HTMLElement | null = null;
-  private retryVisible = false;
+  private retryKind: RetryActionPresentation["kind"] | null = null;
   // The Handoff button and whether it is currently shown (#2013). Same in-place
   // treatment as retryBtn: a session becomes (or stops being) handoff-capable —
   // e.g. it goes Ready, or is archived from another client — WITHOUT a selection
@@ -930,6 +984,7 @@ export class AppShell {
   private dragFromIndex: number | null = null;
 
   // Last-applied state, for cheap change detection between updates.
+  private pendingRestores?: ReadonlySet<string>;
   private lastSessions: SessionData[] | null = null;
   private lastSelectedId: string | null = null;
   private lastLive: EventStreamStatus | null = null;
@@ -1215,6 +1270,8 @@ export class AppShell {
 
   /** Applies the latest state, touching only what changed. */
   update(state: AppState, prioritizeTerminal = false): void {
+    const restoresChanged = this.pendingRestores !== state.pendingRestores;
+    this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
@@ -1346,7 +1403,7 @@ export class AppShell {
     // the terminal host (it lives in the main pane), so events never blur it.
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged) {
       // Mount/bind a routed terminal before spending the first frame on the rail.
       // Further updates coalesce into that first paint; later gestures stay immediate.
       if (!this.railPainted && prioritizeTerminal) {
@@ -1478,7 +1535,7 @@ export class AppShell {
     let restoreChangedFocus: (() => void) | undefined;
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [], sessionKey,
-      s => JSON.stringify([s, s.id === state.selectedId]),
+      s => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true]),
       (s, previous) => {
         const key = sessionKey(s);
         const oldMenu = this.railMenus.get(key);
@@ -1565,6 +1622,7 @@ export class AppShell {
         }
       });
       this.patchLifecycleButton(lifecycleBtn, lifecycleSession.lifecycle_action, lifecycleSession.title, surface);
+      lifecycleBtn.disabled = lifecycleSession.lifecycle_action === "restore" && this.pendingRestores?.has(session.id) === true;
       if (surface === "rail" && selected) {
         this.lifecycleBtn = lifecycleBtn;
         this.lifecycleAction = lifecycleSession.lifecycle_action;
@@ -1742,6 +1800,7 @@ export class AppShell {
     const footChildren: HTMLElement[] = [];
 
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
+    add.dataset.projectFocus = "add";
     add.setAttribute("title", "Register a git checkout by path as a project");
     add.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1754,6 +1813,7 @@ export class AppShell {
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
+      del.dataset.projectFocus = "delete";
       const isRegistered = state.registeredProjects.includes(currentSummary.root);
       // Delete-project ARCHIVES the project's regular live sessions (#1735) AND, for
       // a registered project, removes its durable registry record (#2456) so it leaves
@@ -1784,7 +1844,8 @@ export class AppShell {
     }
 
     children.push(h("div", { class: "af-project-menu-foot" }, ...footChildren));
-    this.projectMenu.replaceChildren(...children);
+    const focusFallback = this.projectSwitchBtn.getClientRects().length ? this.projectSwitchBtn : this.appControls.trigger;
+    replaceProjectMenuChildren(this.projectMenu, children, focusFallback);
   }
 
   /** One project row in the switcher menu: a check on the current project, the name +
@@ -1802,6 +1863,7 @@ export class AppShell {
     );
     const meta = h("span", { class: "af-project-item-meta" }, projectMeta(p));
     const item = h("button", { type: "button", class: cls }, check, label, meta);
+    item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", current ? "true" : "false");
     item.addEventListener("click", (e) => {
@@ -2062,7 +2124,7 @@ export class AppShell {
       this.headActions = null;
       this.headActionSig = "";
       this.retryBtn = null;
-      this.retryVisible = false;
+      this.retryKind = null;
       this.tabBar = null;
       // Detaches the terminal host if it was mounted; index.ts disposes the terminal.
       this.main.className = "af-main af-main-empty";
@@ -2095,8 +2157,9 @@ export class AppShell {
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
     this.retryBtn = chrome.retry;
-    this.retryVisible = isLimitReached(selected);
-    chrome.retry.hidden = !this.retryVisible;
+    const retryAction = retryActionForSession(selected);
+    this.retryKind = retryAction?.kind ?? null;
+    patchRetryButton(chrome.retry, retryAction);
     this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
     chrome.handoff.hidden = !this.handoffVisible;
@@ -2693,16 +2756,14 @@ export class AppShell {
       this.lifecycleAction = nowAction;
     }
 
-    // Show/hide Retry as the selected session enters or leaves the usage-limit wall
-    // (#1934). This is the load-bearing half of the button: a session almost always
-    // hits the limit while it is the one you are watching, and that is not a
-    // selection change, so renderMain never runs. Deciding visibility only at build
-    // time would leave a limit-blocked session with no way out until the user
-    // clicked away and back.
-    const nowLimited = isLimitReached(selected);
-    if (this.retryBtn && nowLimited !== this.retryVisible) {
-      this.retryVisible = nowLimited;
-      this.retryBtn.hidden = !nowLimited;
+    // Patch Retry as the selected session enters/leaves a limit wall or retains an
+    // ambiguous handoff mission. Either transition can happen without a selection
+    // change, so deciding once in renderMain would strand the recovery action.
+    const retryAction = retryActionForSession(selected);
+    const retryKind = retryAction?.kind ?? null;
+    if (this.retryBtn && retryKind !== this.retryKind) {
+      this.retryKind = retryKind;
+      patchRetryButton(this.retryBtn, retryAction);
     }
 
     // Show/hide Handoff as the selected session becomes (or stops being)
@@ -2742,6 +2803,7 @@ export class AppShell {
       managed.lifecycle_action ?? null,
       managed.can_kill === true,
       managed.is_root === true,
+      this.pendingRestores?.has(managed.id) === true,
     ]);
     if (sig !== this.headActionSig) {
       host.replaceChildren(...this.sessionActionButtons(managed, "head"));

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -70,9 +71,10 @@ func DaemonHTTPSocketPath() (string, error) {
 }
 
 // startHTTPServer binds the HTTP/JSON server on its own Unix socket and serves
-// it in the background, returning a cleanup function that shuts the server down
-// and unlinks the socket. It shares the daemon's live *Manager (via a
-// controlServer built the same way startControlServer builds its own), so both
+// it in the background, returning a cleanup function that closes its listeners,
+// joins dispatched RPC-shaped requests, and unlinks the socket. It shares the
+// daemon's live *Manager (via a controlServer built the same way
+// startControlServer builds its own), so both
 // transports dispatch through one core. The Shutdown RPC is deliberately NOT
 // wired here (shutdownCh nil): HTTP mirrors only the client-facing surface, not
 // daemon lifecycle control.
@@ -98,7 +100,10 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		manager.lifecycle.setHTTPUnixBound(true)
 	}
 
-	cs := &controlServer{manager: manager, scheduler: scheduler, watchers: watchers}
+	cs := &controlServer{
+		manager: manager, scheduler: scheduler, watchers: watchers,
+		httpRequests: newHTTPRequestDrain(),
+	}
 	// One mux, shared by both listeners, so the REST/RPC/WS handler graph is
 	// single-sourced and the two transports can never drift (§1.1).
 	mux := newHTTPMux(cs)
@@ -147,20 +152,32 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		log.WarningLog.Printf("daemon web listener(s): %v", err)
 	}
 
+	var closeOnce sync.Once
+	var closeErr error
 	return func() error {
-		// Close stops the listeners (a listener unlinks its own Unix socket file,
-		// net's default for a listener it created) and terminates active
-		// connections. Deliberately no explicit os.Remove: mirrors
-		// startControlServer's #718/#767 reasoning — a Remove could race a freshly
-		// bound socket.
-		if manager.lifecycle != nil {
-			manager.lifecycle.clearHTTPListeners()
-		}
-		listenersErr := wl.close()
-		if err := srv.Close(); err != nil {
-			return err
-		}
-		return listenersErr
+		closeOnce.Do(func() {
+			// Stop route admission before closing the listeners. Close cancels
+			// context-aware calls immediately; the request drain below joins every
+			// already-dispatched ordinary RPC, including context-free archive/kill
+			// calls, before the daemon takes its terminal checkpoint.
+			cs.httpRequests.closeAdmission()
+			if manager.lifecycle != nil {
+				manager.lifecycle.clearHTTPListeners()
+			}
+			listenersErr := wl.close()
+			unixErr := srv.Close()
+			cs.httpRequests.wait()
+			// ApplyConfig is itself in the drain. If it passed admission before
+			// shutdown, it can rebind a TCP listener after the first close while
+			// finishing its committed write. Close once more after every handler
+			// has returned so no replacement listener escapes the shutdown fence.
+			listenersErr = errors.Join(listenersErr, wl.close())
+			if manager.lifecycle != nil {
+				manager.lifecycle.clearHTTPListeners()
+			}
+			closeErr = errors.Join(listenersErr, unixErr)
+		})
+		return closeErr
 	}, nil
 }
 
@@ -177,7 +194,7 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	for _, rt := range servedHTTPRoutes() {
-		mux.HandleFunc(rt.Path, rt.handler(cs))
+		mux.HandleFunc(rt.Path, cs.trackHTTPRPC(rt.handler(cs)))
 	}
 
 	// WS data plane (#1592 Phase 2 PR5): the PTY stream broker + its stream-info

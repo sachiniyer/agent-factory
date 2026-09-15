@@ -242,7 +242,7 @@ to cross-check the help view against reality):
 2. **Attach & drive** — `enter`/`o` to open, `tab`/`shift+tab` to move
    focus, type real shell work into the instance pane, detach. Does focus
    go where you expect? Is it obvious how to get back out?
-3. **Tabs** — `t` new tab, `1`–`9` jump, `w` close. Also
+3. **Tabs** — `t` new tab, `1`–`9` jump, `w` delete tab (asks first; `y` confirms). Also
    `"$AF" sessions tab-create` from the CLI and confirm the TUI reflects it.
 4. **Panes** — `s` open the selected tab as a pane (or focus its pane), `S`
    commit the current preview as another pane, `x` hide the focused pane.

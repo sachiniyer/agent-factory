@@ -27,6 +27,7 @@ func TestPing_ReportsRecordedVersion(t *testing.T) {
 	s := &controlServer{}
 	require.NoError(t, s.Ping(PingRequest{}, &resp))
 	require.True(t, resp.OK)
+	require.True(t, resp.AccountHandoff)
 	require.Equal(t, "1.0.192", resp.Version)
 }
 

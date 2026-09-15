@@ -48,6 +48,17 @@ type SnapshotRequest struct {
 
 type SnapshotResponse struct {
 	Instances []session.InstanceData `json:"instances"`
+	// BootID is the same per-process daemon identity reported by Ping. A changed
+	// value proves requests admitted by the previous process can no longer run.
+	BootID string `json:"boot_id,omitempty"`
+	// OperationLockTimeoutMS is the admission wait a lifecycle request may spend
+	// queued before the daemon can prove whether it started. Browser mutation
+	// ledgers consume the live value rather than mirroring a timeout constant.
+	OperationLockTimeoutMS int64 `json:"operation_lock_timeout_ms"`
+	// OperationClockMS is sampled from the same monotonic clock that bounds the
+	// admission wait. Clients use it to pace reconciliation without treating a
+	// browser clock as proof of a daemon-side outcome.
+	OperationClockMS int64 `json:"operation_clock_ms"`
 	// DeliveryAlarms projects persistent watch-task delivery failures into the
 	// authoritative snapshot the TUI mirrors (#1238). When a watch task's events
 	// have been failing to reach their target session for longer than the alarm
@@ -147,6 +158,9 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
+	// Sample before the rows so reconciliation delay is measured against the
+	// projection returned with this response.
+	operationClockMS := operationClockMilliseconds()
 	instances := s.manager.Snapshot(req.RepoID)
 	alarms := s.deliveryAlarms(req.RepoID)
 	if owner, isSandbox := sandboxOwner(ctx); isSandbox {
@@ -159,6 +173,11 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	}
 	resp.Instances = instances
 	resp.DeliveryAlarms = alarms
+	if s.manager.lifecycle != nil {
+		resp.BootID = s.manager.lifecycle.snapshot().bootID
+	}
+	resp.OperationLockTimeoutMS = opLockTimeout.Milliseconds()
+	resp.OperationClockMS = operationClockMS
 	return nil
 }
 

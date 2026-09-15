@@ -77,6 +77,12 @@ different agent, or turn on auto-resume. See
 CLI exposes — and says `not reported` where a provider exposes no quota API,
 which is `af` declining to guess rather than a ceiling of zero.
 
+**An account handoff says mission delivery could not be confirmed.** Inspect the
+replacement pane because the mission may already have landed. If it did not,
+choose **Retry** in the TUI, **Retry handoff** in the web pane header, or run
+`af sessions retry-limit <title>`. af never retries this ambiguous submission on
+its own, and later prompts do not change that decision.
+
 **The web client will not load.** The daemon serves it at
 `http://127.0.0.1:8443` by default. Check the daemon is up
 (`af daemon status`), that `network.listen_addr` is not set to `""` (which turns

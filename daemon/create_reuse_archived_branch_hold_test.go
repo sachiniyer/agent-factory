@@ -77,8 +77,7 @@ func TestReserveCreate_HeldArchivedBranchIsReclaimed(t *testing.T) {
 		"the archived session's recorded branch must move with it, or its record and git disagree")
 	held, herr = sessiongit.BranchesHeldByWorktrees(repoPath)
 	require.NoError(t, herr)
-	holder, stillHeld := held[archivedBranch]
-	assert.True(t, stillHeld, "the archived worktree must still be on its (renamed) branch")
+	holder := onlyHeldWorktree(t, held, archivedBranch)
 	assert.Contains(t, holder, "(archived)", "and that worktree is the relocated archive")
 
 	rec := recordFor(t, repoID, "foo (archived)")
@@ -214,7 +213,7 @@ func TestReserveCreate_UnprobableBranchHoldsStillReuse(t *testing.T) {
 
 	probed := false
 	prev := branchesHeldByWorktrees
-	branchesHeldByWorktrees = func(string) (map[string]string, error) {
+	branchesHeldByWorktrees = func(string) (map[string][]string, error) {
 		probed = true
 		return nil, fmt.Errorf("forced branch-hold probe failure (#2127)")
 	}
@@ -284,8 +283,7 @@ func TestReserveCreate_ArchivedBranchMovesWithTheRename(t *testing.T) {
 		"renaming an archived session must now free its BRANCH as well as its title (#2127)")
 
 	archivedBranch := manager.branchForTitle("foo (archived)")
-	holder, stillHeld := held[archivedBranch]
-	assert.True(t, stillHeld, "the archived worktree must be on the renamed branch, not detached")
+	holder := onlyHeldWorktree(t, held, archivedBranch)
 	assert.Contains(t, holder, "(archived)",
 		"the branch follows the relocated archived worktree to its new path")
 	assert.Equal(t, archivedBranch, renamed.Branch,

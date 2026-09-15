@@ -12,7 +12,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -23,7 +22,18 @@ import (
 // production.
 var testHookCreateLimitObservedBeforePublication = func() {}
 
-func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (session.InstanceData, error) {
+func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (_ session.InstanceData, retErr error) {
+	// CreateSession owns the portion of the pre-reservation boundary before it
+	// delegates to reserveCreate. That function takes ownership from its entry to
+	// the exact reservedTitles commit. The two defers make the whole interval
+	// exhaustive without double-wrapping reserveCreate's errors.
+	reservationBoundaryDelegated := false
+	defer func() {
+		if !reservationBoundaryDelegated {
+			retErr = taskPreflightError(req.TaskOrigin, req.TaskID, req.TaskRepoID, retErr)
+		}
+	}()
+
 	// Own the create's lifetime: cancel derives a child context that is cancelled
 	// the instant this returns (success, failure, or panic), so the readiness poll
 	// StartAndSendPromptWithConversationCapture runs can never outlive the create
@@ -65,7 +75,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	if err := applyDefaultAccount(cfg, &req); err != nil {
 		return session.InstanceData{}, err
 	}
-	repo, title, release, renamedArchived, err := m.reserveCreate(req)
+	reservationBoundaryDelegated = true
+	repo, title, release, renamedArchived, err := m.reserveCreateForSession(req)
 	if err != nil {
 		return session.InstanceData{}, err
 	}
@@ -224,6 +235,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		}
 		return session.InstanceData{}, err
 	}
+	settleHookCreate := instance.HoldHookProgressUntilCreateSettled()
+	defer settleHookCreate()
 
 	// Single creation flow (#930 PR 3): every instance owns its worktree 1:1.
 	// InPlace only changes WHICH worktree that is — the repo's own working tree,
@@ -301,7 +314,11 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// endpoint's error even when the sandbox teardown SUCCEEDED, so the
 		// workspace is already gone — tombstoning a row, holding the title and
 		// telling the user a workspace may remain would all be false.
-		killErr := instance.Kill()
+		// Local launch already made this same decision in its defer, but the
+		// manager retries cleanup for every backend. Preserve the setup refusal
+		// across that second boundary too: it proves the candidate created no
+		// workspace, not that the foreign occupant is now safe to kill.
+		killErr := instance.CleanupFailedCreate(serr)
 		if killErr != nil && !session.TeardownStateUnknown(killErr) {
 			m.warn().Printf("create of session %q: cleanup reported an error that does not leave its workspace state unknown; discarding the session as normal: %v", title, killErr)
 		}
@@ -371,6 +388,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		}
 		return session.InstanceData{}, persistErr
 	}
+	settleHookCreate()
 	creatingProjectionSettled = true
 	// The session is on the roster and persisted, so its credential is now owned
 	// by the ordinary lifecycle — KillSession and archive revoke it from here.
@@ -430,22 +448,10 @@ func (m *Manager) projectDeleteMovedLocked(repoID string, since uint64) bool {
 // this create was outside m.mu; the guidance differs, and a create told to
 // "retry after deletion finishes" about a delete that already finished would be
 // telling the user to wait for nothing.
-//
-// TaskOrigin is daemon-only provenance independent of retained identity or
-// concurrency ownership. Legacy targeted rows can have neither TaskID nor
-// TaskRepoID, but admission still knows this create came from automation.
-// Nothing has reserved a name, created a runtime, or sent a prompt on any of
-// these paths, so the refusal is provably not attempted and carries the
-// wire-visible marker. Keep the older identity shapes as compatibility evidence
-// for in-process callers constructed before TaskOrigin was added; ordinary
-// client creates carry none of these fields and retain their plain error.
-func projectDeleteRefusal(req CreateSessionRequest, repoID string, inProgress bool) error {
+func projectDeleteRefusal(repoID string, inProgress bool) error {
 	err := fmt.Errorf("project %s is being deleted; retry the session create after deletion finishes", repoID)
 	if !inProgress {
 		err = fmt.Errorf("project %s was being deleted while this session create resolved its backend; nothing was created — retry if the project still exists", repoID)
-	}
-	if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
-		err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
 	}
 	return err
 }
@@ -573,7 +579,14 @@ func describeLegacyTasks(tasks []task.Task) string {
 // without a task file on disk. Production never reassigns it.
 var loadTasksForLegacyScan = task.LoadTasks
 
-func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, string, func(), *session.InstanceData, error) {
+func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, holdWorktreeAdmission bool) (_ *config.RepoContext, _ string, _ func(), _ *session.InstanceData, retErr error) {
+	reservationCommitted := false
+	defer func() {
+		if !reservationCommitted {
+			retErr = taskPreflightError(req.TaskOrigin, req.TaskID, req.TaskRepoID, retErr)
+		}
+	}()
+
 	if req.RepoPath == "" {
 		return nil, "", nil, nil, fmt.Errorf("repo path is required")
 	}
@@ -648,7 +661,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// an ordinary create after a completed delete, not a race.
 	deleteActive, deleteMoved := m.projectDeleteStateFor(repo.ID, deleteSeq)
 	if deleteActive || deleteMoved {
-		return nil, "", nil, nil, projectDeleteRefusal(req, repo.ID, deleteActive)
+		return nil, "", nil, nil, projectDeleteRefusal(repo.ID, deleteActive)
 	}
 
 	// Same reasoning for the task-run cap, which the hoist also moved behind the
@@ -689,6 +702,33 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// (#2778/#2415), and this check has to stay ahead of the archived-name-reuse
 	// rename and behind the project-delete fence, exactly where it was.
 	inPlaceConflict := session.InPlaceBackendConflict(backendOpts, workspace)
+	nameNamespace := runtimeNamespaceForKind(runtimeKind)
+
+	// Keep the create's final branch/path observation reserved until its live row
+	// is published. Without this lock, two --here creates can both observe no
+	// owner and then activate the same branch or detached worktree concurrently.
+	releaseWorktreeAdmission := func() {}
+	worktreeAdmissionHeld := false
+	if holdWorktreeAdmission && nameNamespace == runtimeNamespaceLocalTmux {
+		// Recovery may hold admission across an intentionally unbounded worktree
+		// add and operator hook. Bound this wait before manager reservations or an
+		// archived-title rename, so one stuck rebuild cannot wedge every later
+		// create in the repository and a timeout leaves no mutation to undo.
+		lock, waited, acquired := m.lockWorktreeAdmissionWithin(repo.ID)
+		if !acquired {
+			return nil, "", nil, nil, fmt.Errorf(
+				"cannot create session: timed out after %s waiting for another worktree operation in this repository; retry after that operation finishes",
+				waited,
+			)
+		}
+		releaseWorktreeAdmission = lock.Unlock
+		worktreeAdmissionHeld = true
+	}
+	defer func() {
+		if worktreeAdmissionHeld {
+			releaseWorktreeAdmission()
+		}
+	}()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -697,7 +737,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// pre-resolver check could not see.
 	_, deleting := m.projectDeletes[repo.ID]
 	if deleting || m.projectDeleteMovedLocked(repo.ID, deleteSeq) {
-		return nil, "", nil, nil, projectDeleteRefusal(req, repo.ID, deleting)
+		return nil, "", nil, nil, projectDeleteRefusal(repo.ID, deleting)
 	}
 	if err := m.refreshLocked(); err != nil {
 		return nil, "", nil, nil, err
@@ -721,8 +761,6 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	if err := m.admitTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
 		return nil, "", nil, nil, err
 	}
-
-	nameNamespace := runtimeNamespaceForKind(runtimeKind)
 
 	// An in-place session and an off-box runtime are contradictory, and
 	// NewInstance is where that is enforced — but it runs long after this
@@ -759,11 +797,24 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		if err != nil {
 			return nil, "", nil, nil, err
 		}
+		if req.InPlace {
+			if err := m.refuseLiveHeldBranchLocked(identityRoot, workspace, title, nameNamespace, true, diskData); err != nil {
+				return nil, "", nil, nil, err
+			}
+		}
 	} else {
 		// When the requested title is held ONLY by an archived session, rename that
 		// archived session out of the way so the new session can take the name
 		// (feat: reuse archived name). A LIVE collision is left untouched, so
 		// validateTitleAvailableLocked below still rejects it exactly as before.
+		// Ask that record question before the worktree guard as well: once branch
+		// admission has serialized concurrent creates, the winner of a same-title
+		// race is both a title conflict and the live holder of the branch it just
+		// created. The title conflict is the useful, established diagnosis; the
+		// worktree refusal is reserved for a genuinely different live lane.
+		if err := m.refuseNonReusableTitleConflictLocked(repo.ID, identityRoot, title, nameNamespace, diskData); err != nil {
+			return nil, "", nil, nil, err
+		}
 		//
 		// Ahead of that rename, refuse when the branch this create would derive is
 		// already checked out somewhere (#2127) — freeing the title does not free
@@ -771,6 +822,9 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		// discovering it at `git worktree add` leaves the archived session renamed
 		// for a create that then did not happen, which is exactly the state the
 		// admission comment above promises this function never produces.
+		if err := m.refuseLiveHeldBranchLocked(identityRoot, workspace, title, nameNamespace, req.InPlace, diskData); err != nil {
+			return nil, "", nil, nil, err
+		}
 		if err := m.refuseHeldBranchReuseLocked(repo.ID, identityRoot, title, nameNamespace, req.InPlace, diskData); err != nil {
 			return nil, "", nil, nil, err
 		}
@@ -816,6 +870,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// returns the release() only on success); m.mu has been held unbroken since
 	// admitTaskRunLocked, so the count is exactly what admission saw.
 	m.reservedTitles[key] = struct{}{}
+	reservationCommitted = true
 	if nameNamespace == runtimeNamespaceLocalTmux && !req.InPlace {
 		if m.reservedArchiveTitles == nil {
 			m.reservedArchiveTitles = make(map[string]struct{})
@@ -834,7 +889,6 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	m.reserveTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns)
 	release := func() {
 		m.mu.Lock()
-		defer m.mu.Unlock()
 		delete(m.reservedTitles, key)
 		delete(m.reservedArchiveTitles, key)
 		if tmuxReservationKey != "" {
@@ -848,8 +902,11 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		// handing the slot over with no gap. On a failed create nothing was
 		// registered, and dropping the reservation is exactly the right refund.
 		m.releaseTaskRunLocked(repo.ID, req.TaskID)
+		m.mu.Unlock()
+		releaseWorktreeAdmission()
 	}
 
+	worktreeAdmissionHeld = false
 	return repo, title, release, renamedArchived, nil
 }
 
@@ -865,49 +922,6 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 // available title", swallowing the actionable corruption message. Callers check
 // errors.Is and surface it instead of suffixing around it.
 var errTitleCheckFatal = errors.New("cannot verify title availability")
-
-// branchesHeldByWorktrees is the git query worktreeHeldBranchesLocked runs. A
-// package var so tests can force the probe to FAIL in isolation — the answer
-// that must NOT block a create (#2127) — without breaking the repo out from
-// under the rest of the create path, which needs it readable to get that far.
-// Mirrors reuseArchivedRenamePersist's precedent. Production points it at the
-// real query and never reassigns it.
-var branchesHeldByWorktrees = git.BranchesHeldByWorktrees
-
-// worktreeHeldBranchesLocked answers "which branches are already checked out by
-// a worktree of this repo" for the title walk (#2091), mapping each to the
-// worktree holding it. Runs under m.mu.
-//
-// Two deliberate non-answers:
-//
-//   - Hook sessions (remote) never take a local worktree — backend_local is the
-//     only caller of NewGitWorktree — so no local branch can block their name,
-//     and probing the repo for them would be answering a question nobody asked.
-//   - A probe that could not RUN returns nil, not an empty map with a shrug.
-//     Nil means "no holds known", which leaves the pre-#2091 behavior exactly as
-//     it was: the create proceeds, and if the name really is held, `git worktree
-//     add` refuses it loudly and changes nothing. That is the right failure for
-//     an unanswerable question. The destructive reading would be to treat an
-//     unreadable repo as "everything is held" and walk a recurring task's name
-//     to an ever-growing suffix on the strength of a probe that never answered.
-func (m *Manager) worktreeHeldBranchesLocked(repoPath string, remote bool) map[string]string {
-	if remote {
-		return nil
-	}
-	held, err := branchesHeldByWorktrees(repoPath)
-	if err != nil {
-		m.warn().Printf("could not list worktree branch holds for %s; resolving the session title without them (a name an archived worktree holds will fail at worktree add instead of being skipped): %v", repoPath, err)
-		return nil
-	}
-	return held
-}
-
-// branchForTitle derives the git branch name for a session title using the same
-// prefix and sanitization the git worktree layer applies, so the daemon can
-// detect branch collisions before worktree setup runs.
-func (m *Manager) branchForTitle(title string) string {
-	return git.BranchForTitle(m.cfg.BranchPrefix, title)
-}
 
 // keepFailedCreate registers and persists an instance whose create FAILED but
 // whose cleanup could not complete safely, so its tmux and/or worktree are still

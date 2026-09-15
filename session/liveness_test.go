@@ -143,6 +143,7 @@ func TestLifecycleActionIsSharedAcrossInstanceAndProjection(t *testing.T) {
 		{name: "archived restores", id: "archived-id", live: LiveArchived, want: LifecycleActionRestore},
 		{name: "creating has no lifecycle action", id: "pending-id", live: LiveReady, op: OpCreating, want: LifecycleActionNone},
 		{name: "replacing admits no competing lifecycle action", id: "handoff-id", live: LiveReady, op: OpReplacing, want: LifecycleActionNone},
+		{name: "restoring admits no competing lifecycle action", id: "restoring-id", live: LiveLost, op: OpRestoring, want: LifecycleActionNone},
 		{name: "tombstone admits no lifecycle action", id: "killed-id", live: LiveLost, killed: true, want: LifecycleActionNone},
 		{name: "id-less has no lifecycle action", live: LiveReady, want: LifecycleActionNone},
 	} {

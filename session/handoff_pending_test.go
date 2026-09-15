@@ -37,8 +37,9 @@ func TestPendingHandoffMissionReconstructsDurableFence(t *testing.T) {
 	// stronger startup-unknown terminal state. That state must stay settled and
 	// explicitly killable after reload, not reconstruct OpReplacing and hide its
 	// only teardown handle.
-	uncertain := stored
+	uncertain := data
 	uncertain.StartupStateUnknown = true
+	uncertain = uncertain.ForStorage()
 	restoredUnknown, err := FromInstanceData(uncertain)
 	if err != nil {
 		t.Fatalf("FromInstanceData(startup unknown): %v", err)
@@ -48,6 +49,121 @@ func TestPendingHandoffMissionReconstructsDurableFence(t *testing.T) {
 	}
 	if !restoredUnknown.CanKill() {
 		t.Fatal("startup-unknown pending record lost its explicit kill handle")
+	}
+}
+
+func TestPendingHandoffMissionWithoutEvidenceFailsClosed(t *testing.T) {
+	data := InstanceData{
+		ID:                    "legacy-pending-id",
+		Title:                 "legacy-pending",
+		Program:               "claude",
+		Status:                Running,
+		Liveness:              LiveRunning,
+		BackendType:           "docker",
+		PendingHandoffMission: "continue the inherited work",
+	}
+	normalized := data.restoreMissingHandoffMissionEvidence()
+	if got := normalized.HandoffDeliveryStatus; got != PromptCouldNotConfirm {
+		t.Fatalf("legacy pending mission evidence = %q, want %q", got, PromptCouldNotConfirm)
+	}
+	retryable := &Instance{
+		liveness:              LiveRunning,
+		pendingHandoffMission: normalized.PendingHandoffMission,
+		handoffDeliveryStatus: normalized.HandoffDeliveryStatus,
+	}
+	if !retryable.CanRetryPendingHandoffMissionDelivery() {
+		t.Fatal("normalized legacy evidence must expose explicit retry on a known live pane")
+	}
+	restored, err := FromInstanceData(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.PendingHandoffMissionAutoRetryable() {
+		t.Fatal("a legacy pending mission without durable delivery evidence authorized automatic replay")
+	}
+}
+
+func TestAmbiguousPendingHandoffProjectsRollbackFence(t *testing.T) {
+	data := InstanceData{
+		ID:                    "ambiguous-handoff-id",
+		Title:                 "ambiguous-handoff",
+		Program:               "claude",
+		Status:                Running,
+		Liveness:              LiveRunning,
+		BackendType:           "docker",
+		PendingHandoffMission: "continue the inherited work",
+		HandoffDeliveryStatus: PromptCouldNotConfirm,
+	}
+
+	stored := data.ForStorage()
+	if !stored.StartupStateUnknown {
+		t.Fatal("an older reader must see an ambiguous pending handoff as startup-unknown")
+	}
+
+	restored, err := FromInstanceData(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.StartupStateUnknown() {
+		t.Fatal("a current reader must restore the real known startup state")
+	}
+	if got := restored.ToInstanceData().HandoffDeliveryStatus; got != PromptCouldNotConfirm {
+		t.Fatalf("current reader lost mission-scoped evidence: got %q", got)
+	}
+
+	notDelivered := data
+	notDelivered.HandoffDeliveryStatus = PromptNotDelivered
+	if got := notDelivered.ForStorage(); got.StartupStateUnknown {
+		t.Fatalf("positive non-delivery must remain automatically recoverable, got %+v", got)
+	}
+}
+
+func TestPendingHandoffMissionExplicitRetryRequiresAmbiguousKnownRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		status         PromptDeliveryStatus
+		startupUnknown bool
+		lost           bool
+		want           bool
+	}{
+		{name: "could not confirm", status: PromptCouldNotConfirm, want: true},
+		{name: "sent unverified", status: PromptSentUnverified, want: true},
+		{name: "positive non-delivery is automatic only", status: PromptNotDelivered},
+		{name: "startup unknown is inert", status: PromptCouldNotConfirm, startupUnknown: true},
+		{name: "lost runtime is not inspectable", status: PromptCouldNotConfirm, lost: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst, err := NewInstance(InstanceOptions{Title: "ambiguous-handoff", Path: t.TempDir(), Program: "claude"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			inst.SetBackend(NewFakeBackend())
+			inst.SetStartedForTest(true)
+			inst.SetStatusForTest(Running)
+			if err := inst.Transition(BeginHandoff()); err != nil {
+				t.Fatal(err)
+			}
+			mission := "continue the inherited work"
+			inst.SetPendingHandoffMission(mission)
+			if tc.status != PromptNotDelivered {
+				if err := inst.BeginPendingHandoffMissionDelivery(mission); err != nil {
+					t.Fatal(err)
+				}
+				if err := inst.RecordPendingHandoffMissionDelivery(mission, tc.status); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.startupUnknown {
+				inst.MarkStartupStateUnknown()
+			}
+			if tc.lost {
+				inst.SetStatusForTest(Lost)
+			}
+			if got := inst.CanRetryPendingHandoffMissionDelivery(); got != tc.want {
+				t.Fatalf("CanRetryPendingHandoffMissionDelivery() = %v, want %v (liveness=%v op=%v startupUnknown=%v evidence=%q)",
+					got, tc.want, inst.GetLiveness(), inst.GetInFlightOp(), inst.StartupStateUnknown(), inst.ToInstanceData().HandoffDeliveryStatus)
+			}
+		})
 	}
 }
 

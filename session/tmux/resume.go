@@ -472,6 +472,45 @@ func DetectAgentFromCommand(command string) string {
 	return agent
 }
 
+// DetectAgentExecutable returns the canonical agent name that the executable
+// token of command will actually run, or "" when the executable is not a
+// recognized agent. Unlike DetectAgentFromCommand it stops at the first
+// non-assignment, non-env token — the executable — rather than scanning every
+// token. This is the correct check at an RPC validation boundary: a command
+// like "./collect codex" has an executable ("./collect") that runs no known
+// agent, so it is rejected, even though DetectAgentFromCommand would match the
+// argument "codex". Leading VAR=val assignments and "env …" invocations are
+// skipped the same way findAgentTokenStrict does, so fully-resolved commands
+// like "/opt/claude --model opus" and "CLAUDE_CONFIG_DIR=… claude" are still
+// accepted.
+func DetectAgentExecutable(command string) string {
+	tokens, _ := splitShellTokens(command)
+	for i := 0; i < len(tokens); {
+		tok := tokens[i]
+		if _, _, assignment := shellAssignment(tok); assignment {
+			i++
+			continue
+		}
+		if strings.EqualFold(baseCommand(tok), "env") {
+			invocation, err := envcommand.Parse(tokens[i+1:], envcommand.Policy{AllowAssignments: true})
+			if err != nil || invocation.CommandIndex < 0 {
+				return ""
+			}
+			i += 1 + invocation.CommandIndex
+			continue
+		}
+		// tok is the executable; check whether it names a supported agent.
+		base := strings.ToLower(filepath.Base(tok))
+		for _, supported := range SupportedPrograms {
+			if base == supported {
+				return supported
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
 // findAgentToken returns the index and canonical name of the first token whose
 // filepath.Base equals a SupportedPrograms entry, or (-1, "") when none does.
 func findAgentToken(tokens []string) (int, string) {

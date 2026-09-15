@@ -22,8 +22,11 @@ Sessions (one agent per isolated worktree):
   af sessions kill <title>                             Delete a session; work in af-owned workspaces can be lost
   af sessions archive <title>                          Archive (tmux down, worktree moved out; restartable)
   af sessions archive --self                            Archive your OWN session (resolved via whoami); no title needed
-  af sessions handoff <title> --to <agent>             Continue a stuck session under a different agent (same worktree/branch)
+  af sessions handoff <title> [--to <agent>] [--account <name>]  Continue under another agent, account, or both
+  af sessions retry-limit <title>                      Retry a usage-limit resume or an inspected, unconfirmed handoff
   af sessions restore <title>                          Restore an archived, lost, or dead session
+
+Never rebind an af worktree to another lane's branch with "git checkout -B", "git switch -C", or a direct ref/HEAD write. Those commands bypass Git's ordinary worktree collision refusal and can turn the other lane's unchanged index into a staged revert when the branch moves. Use "af sessions handoff --to <agent> -- <title>" to continue in the existing worktree, or create a session on a different branch.
 
 Tabs (extra processes and views in your instance's worktree; no limit on how many). Shell, process, and VS Code tabs require a local session; external HTTPS web tabs work on remote sessions; loopback web targets still require a local session (--port is loopback). The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.
   af sessions tab-create <title> --kind shell                    Terminal tab running $SHELL in the worktree (the same Terminal the TUI/web opens)
@@ -41,6 +44,12 @@ Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch scr
   af tasks trigger <id>                                Run a cron task immediately
   af tasks remove <id>
 Without --target-session each run creates a fresh session; {{line}} in a watch prompt is replaced by the emitted stdout line. On update, setting one trigger clears the other, --target-session "" reverts to session-per-run, and --project-path moves the task to another project (--repo still scopes its current project). A task is bound to one project at creation and "tasks add" echoes the binding as project_path — check it matches the project you meant, and never create a task from a scratch clone of a repo, which binds the automation to the clone instead of the real project. The background daemon runs all schedules; "af daemon install" / "af daemon uninstall" manage its login autostart.
+
+Root-agent configuration (global unless --project <id-or-path> selects a personal project override):
+  af config set root_agent <compact-json>             Merge the enabled/program profile as one table
+  af config set root_agent.enabled <bool>             Enable or disable the singleton profile
+  af config set root_agent.program <command>          Set the command while preserving enabled
+Root-agent configuration is frozen at daemon start. An already-running root session is adopted as-is; after changing its program, disabling it, or removing its enabling entry, restart the daemon first and then kill that session.
 
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".
 

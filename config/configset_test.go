@@ -324,6 +324,9 @@ func TestResolveSettable(t *testing.T) {
 	if s, leaf, _, ok := resolveSettable("program_overrides.claude"); !ok || s != "program_overrides" || leaf != "claude" {
 		t.Fatalf("dynamic resolve wrong: s=%q leaf=%q ok=%v", s, leaf, ok)
 	}
+	if s, leaf, spec, ok := resolveSettable("root_agent.enabled"); !ok || s != "root_agent" || leaf != "enabled" || spec.kind != cfgBool {
+		t.Fatalf("fixed leaf resolve wrong: s=%q leaf=%q kind=%v ok=%v", s, leaf, spec.kind, ok)
+	}
 	// A dotted leaf on a fixed key, an unknown key, and a nested dynamic leaf are rejected.
 	for _, bad := range []string{"default_program.x", "root_agents.foo", "nope", "program_overrides.a.b", "program_overrides."} {
 		if _, _, _, ok := resolveSettable(bad); ok {
@@ -516,6 +519,7 @@ func TestSettableKeysSorted(t *testing.T) {
 		if spec.dynamic && spec.structured {
 			wantLen++
 		}
+		wantLen += len(spec.subkeys)
 	}
 	if len(keys) != wantLen {
 		t.Fatalf("SettableKeys len %d != expected forms %d", len(keys), wantLen)
@@ -1036,6 +1040,9 @@ func TestSetGlobalConfigValueWarnsOnTokenlessNetworkListener(t *testing.T) {
 				return
 			}
 			w := res.Warnings[0]
+			if !strings.HasPrefix(w, "network.listen_addr ") {
+				t.Errorf("warning must lead with its sentence instead of a shouted prefix, got: %s", w)
+			}
 			// The warning has to say what is wrong AND what to do about it.
 			for _, want := range []string{"network.require_token", "af config set network.require_token true"} {
 				if !strings.Contains(w, want) {

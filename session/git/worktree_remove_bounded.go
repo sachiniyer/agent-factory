@@ -70,11 +70,10 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repoRoot}, args...)...)
-	// The environment is INHERITED rather than filtered. Cleanup's runner filters
-	// because it carries a session's hook passthrough; this path has no session and
-	// no secrets to scope, and a filtered env here would change what git resolves
-	// (PATH, HOME, GIT_* overrides) — a behaviour change beyond the bug being fixed.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// Preserve ambient runtime/credential settings, but not repository selection:
+	// Git hooks export GIT_DIR, which otherwise overrides the explicit -C path
+	// and can turn a registered worktree into a false "ours to delete" answer.
+	cmd.Env = append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0")
 	// Own process group, so the deadline tears down git AND anything it spawned.
 	// exec.CommandContext's default Cancel SIGKILLs only the direct child, which on
 	// a stalled unlink leaves the work still running against the dead mount.

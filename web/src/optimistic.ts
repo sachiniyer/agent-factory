@@ -35,6 +35,9 @@ export class OptimisticSessions {
     this.authoritative = sessions;
   }
 
+  /** Daemon-owned rows, without pending local mutation feedback. */
+  authoritativeRows(): ReadonlyArray<SessionData> { return this.authoritative; }
+
   /** Captured before fetching, so an older snapshot cannot undo an RPC or event. */
   snapshotFence(): number { return this.revision; }
 

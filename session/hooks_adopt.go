@@ -24,8 +24,12 @@ func AdoptRunningHookRuns(instances []*Instance) {
 		}
 		instance.mu.RLock()
 		gw := instance.gitWorktree
+		terminal := instance.userKilled || instance.liveness == LiveArchived
 		instance.mu.RUnlock()
-		if gw != nil {
+		if gw != nil && !gw.IsExternalWorktree() {
+			if terminal {
+				gw.SetHookResumeDisabled(true)
+			}
 			worktrees = append(worktrees, gw)
 		}
 	}

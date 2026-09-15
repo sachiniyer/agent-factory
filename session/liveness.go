@@ -130,7 +130,7 @@ func opIsTeardown(op InFlightOp) bool {
 // API unambiguously, so it also exposes nothing. A startup-unknown row must not
 // reuse its unconfirmed runtime binding, while a replacing row is inside one
 // transactional handoff and cannot admit a competing lifecycle mutation. A row
-// already tearing down (OpKilling/OpArchiving) is inside the teardown fence, so
+// already mutating (including OpRestoring) is inside its operation fence, so
 // it offers no verb either — the action it would show (Archive on a live row,
 // Restore on the archived result) is precisely the mutation the fence exists to
 // refuse. A kill tombstone likewise admits no competing archive/restore action:
@@ -144,7 +144,7 @@ func opIsTeardown(op InFlightOp) bool {
 // (CanKill): a retained tombstone or startup-unknown row must remain removable
 // without becoming attachable, archivable, or restorable.
 func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap bool) LifecycleAction {
-	if id == "" || op == OpCreating || op == OpReplacing || op == OpRespawning ||
+	if id == "" || op == OpCreating || op == OpReplacing || op == OpRespawning || op == OpRestoring ||
 		opIsTeardown(op) || startupStateUnknown || userKilled || pendingAccountSwap {
 		return LifecycleActionNone
 	}
@@ -550,6 +550,10 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
+		i.limitAgent = agent
+		i.touchLocked()
+	}
 	if i.limitAccount != i.Account {
 		i.limitAccount = i.Account
 		i.touchLocked()
@@ -652,6 +656,7 @@ func (i *Instance) ClearLimitReached() {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveRunning
 	i.limitResetAt = time.Time{}
+	i.limitAgent = ""
 	i.limitAccount = ""
 	// The epoch bump here is what a racing poll checks: it is the resume's
 	// completion point, so any limit re-detection made from content captured before
@@ -690,6 +695,18 @@ func (i *Instance) LimitAccount() (account string, ok bool) {
 		return "", false
 	}
 	return i.limitAccount, true
+}
+
+// LimitIdentity returns the agent namespace and account label whose runtime
+// produced the current wall. Account labels are meaningful only within their
+// agent namespace; account is empty for the ambient identity.
+func (i *Instance) LimitIdentity() (agent, account string, ok bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.liveness != LiveLimitReached {
+		return "", "", false
+	}
+	return i.limitAgent, i.limitAccount, true
 }
 
 // AccountLimitObservations returns durable named-identity quota evidence. It is

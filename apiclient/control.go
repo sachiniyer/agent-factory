@@ -2,7 +2,9 @@ package apiclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -98,10 +100,19 @@ func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) error {
 // actually performed (outgoing agent, incoming agent, attribution boundary).
 func (c *Client) HandoffSession(req daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
 	var resp daemon.HandoffSessionResponse
-	if err := c.call("HandoffSession", req, &resp); err != nil {
+	err := c.call(daemon.AccountAwareHandoffMethod, req, &resp)
+	if IsRouteNotServed(err) {
+		return daemon.HandoffSessionResponse{}, daemon.ErrAccountHandoffUnsupported
+	}
+	if err != nil && !IsMutationCommitted(err) {
 		return daemon.HandoffSessionResponse{}, err
 	}
-	return resp, nil
+	requestedAccount := strings.TrimSpace(req.Account)
+	if requestedAccount != "" && resp.ToAccount != requestedAccount {
+		mismatch := &mutationCommittedError{detail: fmt.Sprintf("daemon did not honor the requested account %q (likely an older daemon — upgrade it); the runtime was already restarted, but the resulting credential identity is unknown because the source account label may have carried across agent namespaces", requestedAccount)}
+		return resp, errors.Join(err, mismatch)
+	}
+	return resp, err
 }
 
 // CreateTab asks the daemon to spawn, persist, and report a new tab. The

@@ -55,7 +55,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
-- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a session blocked at a usage limit
+- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
@@ -860,11 +860,13 @@ Settable keys:
   session_env_passthrough    compact JSON array of exact environment variable names
   root_agents                compact JSON object keyed by repository path
   root_agent                 compact JSON object with enabled and optional program
+  root_agent.enabled         true | false
+  root_agent.program         full command string for the singleton root agent
   keys                       compact JSON object of TUI action-to-key rebinds
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
-                             DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and network.require_token defaults to FALSE —
+                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
+                             full control plane on the network, and network.require_token defaults to false —
                              set network.require_token = true in the same breath, or anyone who can reach the
                              address controls this machine. af serves plain HTTP, so front a routable
                              listener with a TLS-terminating proxy or a private network.
@@ -875,6 +877,7 @@ Settable keys:
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
+  watcher_events_per_minute  positive integer (per-task watch delivery cap; default 10; next daemon start)
   debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
                              unix control socket only, never on the web address. A profile dumps live daemon
                              memory — session titles, worktree paths, prompt text — so turn it off again.
@@ -912,7 +915,7 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command); a global-only key
 is rejected with the location it actually belongs to. Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
@@ -921,6 +924,8 @@ Examples:
   af config set auto_update false
   af config set appearance dark
   af config set session_env_passthrough '["HTTP_PROXY","NO_PROXY"]'
+  af config set root_agent.enabled true --project .
+  af config set root_agent.program "codex --profile work" --project .
   af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
@@ -1005,8 +1010,10 @@ materializes nothing — a read-only check.
 
 This is the companion to a raw hand-edit. "af config set" validates every scalar
 and structured key before it writes and so cannot leave a broken file. A manual
-edit bypasses that protection: exit 0 means af can load it, while a non-zero exit
-names what must be fixed before the next launch.
+edit bypasses that protection: exit 0 means no config defect was found, while a
+non-zero exit names what must be fixed before the next launch. An inconclusive
+read-only directory-access probe does not prove that a later startup can
+regenerate an empty stub; text output warns, and JSON appends uncertain=true.
 
 Local-only: it checks the config on the machine it runs on, so
 --daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
@@ -1348,6 +1355,10 @@ structural keys config cannot touch — are listed last. Contextual pane
 actions such as pane_prev/pane_next are included; their default arrow keys
 apply only while a workspace pane has focus.
 
+Every default key removed by a user rebind is named in SOURCE with its taker.
+The affected row keeps any remaining keys; when none remain, it shows an em
+dash instead. JSON appends the same key/taker pairs in suppressed_by.
+
 Key values use config spellings you can paste into [keys]. With --json,
 bindings are wrapped in {data,error}; keys/default keep those spellings.
 
@@ -1608,7 +1619,7 @@ af sessions
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
-- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a session blocked at a usage limit
+- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
@@ -1747,6 +1758,12 @@ Create a new session
 
 Create a new session running an agent in its own git worktree.
 
+With --prompt, unconfirmed or incomplete delivery adds a warning field to the
+JSON session result. Outside --json mode, it also prints the warning on stderr.
+The session remains created;
+inspect its pane before retrying, since an unverified prompt may already have
+run. Creation still exits successfully and does not automatically resend.
+
 With --here (alias --in-place) the session instead attaches to the repo's
 existing working tree at its current branch: no worktree or branch is created,
 the agent runs in the repo root, and killing the session never removes the
@@ -1807,7 +1824,12 @@ af sessions get <title>
 
 Continue a session under a different agent, in place
 
-Hand a session's work over to a different agent without losing it.
+Hand a session's work over to another agent or account without losing it.
+
+Use --account to choose a registered account. Omit --to to keep the same
+agent and stored prompt, or combine both flags to change agent and account.
+A manual handoff moves an explicit account pin; automatic rotation still
+respects it. Targets with current usage-limit evidence are refused.
 
 The session keeps its identity, its git worktree, and its branch — only the
 agent process changes. The incoming agent starts a fresh conversation and is
@@ -1828,6 +1850,7 @@ Local-worktree sessions only: swapping the agent inside a remote/docker/ssh
 sandbox is a different lifecycle and is not supported yet.
 
 Examples:
+  af sessions handoff fix-auth --account personal
   af sessions handoff fix-auth --to claude
   af sessions handoff fix-auth --to gemini --brief "finish the retry test, skip the docs"
 
@@ -1839,6 +1862,7 @@ af sessions handoff <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--account` | `string` | Registered target account; omit --to to keep the same agent |
 | `--brief` | `string` | Mission for the incoming agent, replacing the session's stored prompt |
 | `--to` | `string` | Agent to hand the session off to (one of claude, codex, aider, gemini, amp, opencode, devin) |
 
@@ -2015,17 +2039,21 @@ af sessions restore <title> [flags]
 
 ## af sessions retry-limit
 
-Retry a session blocked at a usage limit
+Retry a usage-limit resume or inspected handoff
 
-Retry a session that is parked at a provider usage-limit wall.
+Retry a session parked at a provider usage-limit wall, or explicitly retry
+a handoff whose mission delivery could not be confirmed.
 
 The daemon runs the same recovery action as the TUI's c key and the web's Retry
 button: it re-spawns an exited agent when necessary, re-delivers the pending
 prompt (or "continue" for an interactive session with no stored prompt), and
 clears the limit state after delivery succeeds.
 
-The command fails if the session is not currently blocked on a usage limit.
-Use 'af sessions list' to find sessions carrying the [limit] badge.
+Before retrying an unconfirmed handoff, inspect its pane: the first submission
+may already have landed, and this command is the operator's explicit decision to
+send the pending mission again. The command fails when neither recovery
+obligation exists. Use 'af sessions list' to find sessions carrying the [limit]
+badge; the TUI and web expose Retry handoff for an unconfirmed handoff.
 
 Example:
   af sessions retry-limit fix-auth

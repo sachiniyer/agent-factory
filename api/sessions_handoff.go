@@ -5,14 +5,16 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 var (
-	sessionsHandoffTo    string
-	sessionsHandoffBrief string
+	sessionsHandoffTo      string
+	sessionsHandoffBrief   string
+	sessionsHandoffAccount string
 )
 
 // handoffSessionViaDaemon is the daemon seam, matching the other session verbs
@@ -22,7 +24,12 @@ var handoffSessionViaDaemon = daemon.HandoffSession
 var sessionsHandoffCmd = &cobra.Command{
 	Use:   "handoff <title>",
 	Short: "Continue a session under a different agent, in place",
-	Long: `Hand a session's work over to a different agent without losing it.
+	Long: `Hand a session's work over to another agent or account without losing it.
+
+Use --account to choose a registered account. Omit --to to keep the same
+agent and stored prompt, or combine both flags to change agent and account.
+A manual handoff moves an explicit account pin; automatic rotation still
+respects it. Targets with current usage-limit evidence are refused.
 
 The session keeps its identity, its git worktree, and its branch — only the
 agent process changes. The incoming agent starts a fresh conversation and is
@@ -43,6 +50,7 @@ Local-worktree sessions only: swapping the agent inside a remote/docker/ssh
 sandbox is a different lifecycle and is not supported yet.
 
 Examples:
+  af sessions handoff fix-auth --account personal
   af sessions handoff fix-auth --to claude
   af sessions handoff fix-auth --to gemini --brief "finish the retry test, skip the docs"`,
 	Args: cobra.ExactArgs(1),
@@ -51,10 +59,10 @@ Examples:
 		defer log.Close()
 
 		title := args[0]
-		if sessionsHandoffTo == "" {
-			return jsonError(fmt.Errorf("--to is required: name the agent to hand off to (one of %s)", tmux.SupportedProgramsString()))
+		if sessionsHandoffTo == "" && sessionsHandoffAccount == "" {
+			return jsonError(fmt.Errorf("--to or --account is required: name the agent to hand off to (one of %s)", tmux.SupportedProgramsString()))
 		}
-		if !tmux.IsSupportedProgram(sessionsHandoffTo) {
+		if sessionsHandoffTo != "" && !tmux.IsSupportedProgram(sessionsHandoffTo) {
 			return jsonError(fmt.Errorf("unknown agent %q: --to must be one of %s", sessionsHandoffTo, tmux.SupportedProgramsString()))
 		}
 
@@ -67,21 +75,39 @@ Examples:
 		}
 
 		resp, err := handoffSessionViaDaemon(daemon.HandoffSessionRequest{
-			Title:  title,
-			RepoID: repoID,
-			To:     sessionsHandoffTo,
-			Brief:  sessionsHandoffBrief,
+			Title:   title,
+			RepoID:  repoID,
+			To:      sessionsHandoffTo,
+			Brief:   sessionsHandoffBrief,
+			Account: sessionsHandoffAccount,
 		})
-		if err != nil {
+		warning := ""
+		if err != nil && apiclient.IsMutationCommitted(err) {
+			warning = err.Error()
+		} else if err != nil {
 			return jsonError(err)
 		}
 
-		return jsonOut(map[string]any{
+		output := map[string]any{
 			"ok":       true,
 			"title":    title,
 			"from":     resp.From,
 			"to":       resp.To,
 			"head_sha": resp.HeadSHA,
-		})
+		}
+		if warning != "" {
+			output["warning"] = warning
+		}
+		if resp.FromAccount != "" {
+			output["from_account"] = resp.FromAccount
+		}
+		if resp.ToAccount != "" {
+			output["to_account"] = resp.ToAccount
+		}
+		return jsonOut(output)
 	},
+}
+
+func init() {
+	sessionsHandoffCmd.Flags().StringVar(&sessionsHandoffAccount, "account", "", "Registered target account; omit --to to keep the same agent")
 }

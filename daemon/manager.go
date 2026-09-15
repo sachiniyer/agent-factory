@@ -35,6 +35,9 @@ type Manager struct {
 	live atomic.Pointer[config.Config]
 	// configApplyMu serializes live config swaps and their side effects.
 	configApplyMu sync.Mutex
+	// accountSwapAfterManualPrecheckForTest pauses a manual handoff after its
+	// advisory launch check and before personal policy is locked.
+	accountSwapAfterManualPrecheckForTest func()
 	// pollReloadCh signals the poll goroutine to reset its ticker after ApplyConfig
 	// changed daemon_poll_interval (#2480). Buffered size 1 with a non-blocking
 	// send, so a burst of applies collapses to one reset and ApplyConfig never
@@ -216,8 +219,8 @@ type Manager struct {
 	// cap's count — then behaves as if that session does not exist. Its agent may
 	// still be running, so the cap must keep counting it or a failed LOAD becomes a
 	// licence to exceed max_concurrent_runs after every restart.
-	ghostTaskRuns  map[string]int
-	repoStartLocks map[string]*sync.Mutex
+	ghostTaskRuns                          map[string]int
+	repoStartLocks, worktreeAdmissionLocks map[string]*sync.Mutex
 	// aliveObservations counts POSITIVE liveness observations per session (keyed by
 	// stableSessionKey, so a same-title successor never inherits its predecessor's).
 	// Incremented only where the poll actually gets an answer OUT of a runtime; read
@@ -234,6 +237,24 @@ type Manager struct {
 	// written in config.json) for a legacy entry, or by the registered project's
 	// resolved root path for a singleton-only candidate (#2216 Phase 6).
 	rootEnsureStates map[string]*rootEnsureState
+	// rootProgramDriftLogged deduplicates the adopted-command warning by resolved
+	// repository identity. Two legacy paths can share one repo while retaining
+	// independent retry states; they must still produce only one warning. Guarded
+	// by mu and retained for the Manager's lifetime.
+	rootProgramDriftLogged map[string]bool
+	// rootProgramDriftConfigEpoch invalidates configured-command resolutions on
+	// every ApplyConfig. That boundary covers global and project-scoped live
+	// writes alike; guarded by mu.
+	rootProgramDriftConfigEpoch uint64
+	// Async inspection state: consumers may join; shutdown abandons uncancellable reads.
+	rootProgramDriftInFlight map[string]int
+	rootProgramDriftWG       sync.WaitGroup
+	rootProgramDriftStopping bool
+	// Transcript probe overrides are manager-local and set only before the
+	// manager is used. Never restore them during cleanup: a timed-out filesystem
+	// inspection may outlive both its caller and the joined poll loop (#4212).
+	inspectClaudeProjectConversations func(string, string, session.AgentConversationData) (session.ClaudeProjectConversationState, error)
+	claudeTranscriptInspectBudget     time.Duration
 	// rootCreateRefusals holds each repo's standing create-boundary identity
 	// refusal (#3714): the outcome class of the most recent identity proof at
 	// a root create, and when it was taken. Keyed by REPO ID — the key
@@ -273,22 +294,27 @@ type Manager struct {
 	// restart-to-apply; only a read that failed at daemon start heals mid-run,
 	// by being read successfully for the first time.
 	rootAgentLayers atomic.Pointer[rootAgentSnapshot]
-	// rootHealFailures/rootHealNextAttempt pace healRootAgentLayers on the
-	// shared ensure backoff (rootEnsureBackoffFor, on the injectable nowFunc
-	// clock): while every retried read keeps failing the pass backs off to
-	// rootEnsureBackoffMax instead of re-reading broken files every poll tick.
+	// rootHealFailures/rootHealNextAttempt pace the personal-config, reconcile,
+	// and legacy root_agents retries on the shared ensure backoff
+	// (rootEnsureBackoffFor, injectable nowFunc). The registry arm paces on
+	// its OWN clock, rootHealRegistryNextAttempt — NOT the shared one a legacy
+	// narrowing resets to now: its two-strike discipline (#3315) needs two
+	// reads SPACED by a cadence (the personal absence streak carries its own
+	// spacing, rootHealAbsenceLastStrike, for the same reason). Guarded by
+	// m.mu, like rootEnsureStates.
+	//
 	// rootHealRegistryStreak/rootHealRegistryProjects and
-	// rootHealAbsenceStreaks carry the two-strike counters for
-	// absence-classified observations (the applyHomeCheck discipline):
-	// registry recovery publishes on the second consecutive MATCHING
-	// present-and-listable snapshot, and an ENOENT personal config heals to
-	// "removed" on the second consecutive dir-present observation. All
-	// guarded by m.mu, like rootEnsureStates.
-	rootHealFailures         int
-	rootHealNextAttempt      time.Time
-	rootHealRegistryStreak   int
-	rootHealRegistryProjects []config.Project
-	rootHealAbsenceStreaks   map[string]int
+	// rootHealAbsenceStreaks are the two-strike counters: registry recovery
+	// publishes on the second consecutive MATCHING present-and-listable
+	// snapshot, and an ENOENT personal config heals to "removed" on the
+	// second consecutive dir-present observation.
+	rootHealFailures            int
+	rootHealNextAttempt         time.Time
+	rootHealRegistryFailures    int
+	rootHealRegistryNextAttempt time.Time
+	rootHealRegistryStreak      int
+	rootHealRegistryProjects    []config.Project
+	rootHealAbsenceStreaks      map[string]int
 	// rootHealAbsenceLastStrike stamps each project's most recent ENOENT
 	// strike. The two-strike release requires the strikes to be SPACED by at
 	// least one backoff base regardless of what the shared retry clock does —
@@ -375,6 +401,15 @@ type Manager struct {
 	// seams. Launchers must return before waiting so every Add precedes Wait;
 	// the production kill path never waits for these retrying workers.
 	lateGhostCleanupWG sync.WaitGroup
+	// backgroundMutationWG owns detached writers spawned by otherwise-synchronous
+	// control/poll paths: conversation capture, task on-complete teardown, and
+	// late ghost cleanup. backgroundMutationMu makes launch-vs-shutdown admission
+	// atomic, so the terminal checkpoint can close the gate and join every writer
+	// without racing a WaitGroup.Add.
+	backgroundMutationMu       sync.Mutex
+	backgroundMutationWG       sync.WaitGroup
+	backgroundMutationStop     chan struct{}
+	backgroundMutationsStopped bool
 	// restoresInFlight identifies the subset of killsInFlight entries admitted
 	// by a manual restore. DeleteProject treats these as early blockers because
 	// an archived row has not necessarily changed lifecycle state yet. Keeping
@@ -699,9 +734,12 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		reservedTaskRuns:          make(map[string]int),
 		ghostTaskRuns:             make(map[string]int),
 		repoStartLocks:            make(map[string]*sync.Mutex),
+		worktreeAdmissionLocks:    make(map[string]*sync.Mutex),
 		aliveObservations:         make(map[string]uint64),
 		targetLocks:               make(map[string]*sync.Mutex),
 		rootEnsureStates:          make(map[string]*rootEnsureState),
+		rootProgramDriftLogged:    make(map[string]bool),
+		rootProgramDriftInFlight:  make(map[string]int),
 		rootCreateRefusals:        make(map[string]rootCreateRefusal),
 		rootCreatesInFlight:       make(map[string]string),
 		rootKilledAt:              make(map[string]time.Time),
@@ -709,6 +747,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		killsInFlight:             make(map[string]struct{}),
 		killRetries:               make(map[string]*session.CleanupRetry),
 		ghostCleanupStalls:        make(map[string]string),
+		backgroundMutationStop:    make(chan struct{}),
 		restoresInFlight:          make(map[string]struct{}),
 		lostRestoreStates:         make(map[string]*lostRestoreState),
 		limitResumeStates:         make(map[string]*limitResumeState),
@@ -775,8 +814,9 @@ func (m *Manager) restoreInstances() error {
 	// running over an intact tree — #3658 keeps it alive on purpose, so a restart
 	// or an auto-upgrade does not kill an operator's build mid-pnpm. Adopt it
 	// here, before the instances are published, so the restored session reports
-	// hooks in flight exactly as a first run does. Adoption reports; it never
-	// re-runs the hook and never stops it (#3682).
+	// hooks in flight through completion of the remaining list. The session
+	// adopter excludes terminal/tombstoned and external worktrees, and retires
+	// terminal journals before any resume can be scheduled.
 	//
 	// Restore only, not the refresh poll: the poll runs on a timer and would turn
 	// this into a manager round trip per tick, while a survivor by definition
@@ -811,22 +851,6 @@ func (m *Manager) Ready() bool {
 	}
 }
 
-func (m *Manager) RefreshInstances() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.refreshLocked()
-}
-
-func (m *Manager) InstancesSnapshot() []*session.Instance {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return daemonInstances(m.instances)
-}
-
-func (m *Manager) SaveInstances() error {
-	return m.storage.SaveInstances(m.InstancesSnapshot())
-}
-
 // dockerReapProtectedSlugs returns the af.session label slugs of every session
 // the manager knows about — live instances AND still-provisioning pending creates
 // (the #2549 window where a container exists but no Instance does yet) — so the
@@ -859,11 +883,12 @@ func (m *Manager) dockerReapProtectedSlugs() map[string]bool {
 // of the single-writer model (#960 PR 3): the manager's settled instance map plus
 // its daemon-owned pending-create map ARE the source of truth, so clients mirror
 // this projection instead of re-reading instances.json or inventing optimistic
-// rows. Pure read — it copies the instance pointers/pending values under m.mu,
+// rows. It copies the instance pointers/pending values under m.mu,
 // then serializes each Instance via ToInstanceData (which takes its own lock)
 // OUTSIDE m.mu so a slow serialize never blocks a concurrent mutation. Results
 // are ordered by (repo, title) key for a stable diff, so the TUI reconcile does
-// not repaint on map-iteration jitter.
+// not repaint on map-iteration jitter. Each operation lock is probed without
+// waiting after its row is serialized; a free lock is released immediately.
 func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 	m.mu.Lock()
 	keys := make([]string, 0, len(m.instances)+len(m.pendingCreates))
@@ -907,11 +932,11 @@ func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 
 	data := make([]session.InstanceData, 0, len(entries))
 	for _, entry := range entries {
+		projected := entry.pending
 		if entry.instance != nil {
-			data = append(data, entry.instance.ToInstanceData())
-			continue
+			projected = entry.instance.ToInstanceData()
 		}
-		data = append(data, entry.pending)
+		data = append(data, projected)
 	}
 	return data
 }
@@ -972,19 +997,4 @@ func (m *Manager) opLockFor(key string) *sync.Mutex {
 		m.instanceOpLocks[key] = lock
 	}
 	return lock
-}
-
-// attachCredentialsToAll gives every instance the daemon holds its credential
-// minter (#3068).
-//
-// Applied at the two points where the daemon takes ownership of instances built
-// from DISK — the startup restore and every refresh — because that is the half a
-// per-call-site fix keeps missing: session.FromInstanceData cannot populate it,
-// so a session loaded after a daemon restart would provision its replacement
-// sandbox with no callback and no error. Idempotent and cheap; re-attaching to an
-// instance that already has one is a pointer write.
-func (m *Manager) attachCredentialsToAll(instances map[string]*session.Instance) {
-	for _, inst := range instances {
-		attachSandboxCredentials(m, inst)
-	}
 }

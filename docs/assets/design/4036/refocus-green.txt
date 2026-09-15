@@ -1,0 +1,6 @@
+Running 1 test using 1 worker
+
+#4036 PTY input: "\u001b[1;5Als\u001b[1;3Dls\u001b[1;5A\u0018\u001b\tz\u001b[1;5Als\u001b[1;3Dls\u001b[1;5A\u0018\u001b\tzxy"
+  ✓  1 [chromium] › selftest/phone-keybar.spec.ts:4:1 › #4036 phone keybar applies and consumes modifiers before the next letter (4.4s)
+
+  1 passed (11.9s)

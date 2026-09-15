@@ -73,6 +73,114 @@ func TestHandleLimitRetry_LimitRow_Dispatches(t *testing.T) {
 		"the resume command must preserve the selected session's stable identity")
 }
 
+func TestHandleLimitRetry_UnconfirmedAccountHandoffDispatches(t *testing.T) {
+	h := newTestHome(t)
+	base, err := session.NewInstance(session.InstanceOptions{
+		Title: "worker", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	data := base.ToInstanceData()
+	data.Status = session.Running
+	data.Liveness = session.LiveRunning
+	data.Worktree = session.GitWorktreeData{
+		RepoPath: data.Path, WorktreePath: data.Path, SessionName: data.Title, ExternalWorktree: true,
+	}
+	data.Account = "personal"
+	data.PendingAccountSwap = &session.AccountSwapData{
+		Manual: true, Mission: "continue", From: "work", To: "personal", ReplacementPanesStarted: true,
+		MissionDeliveryStatus: session.PromptCouldNotConfirm,
+	}
+	inst, err := session.FromInstanceData(data)
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	var gotRequest daemon.ResumeFromLimitRequest
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+		gotRequest = request
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.handleLimitRetry()
+	require.NotNil(t, cmd, "an inspected, unconfirmed handoff must expose an explicit retry")
+	done, ok := cmd().(limitRetriedMsg)
+	require.True(t, ok)
+	require.NoError(t, done.err)
+	require.Equal(t, daemon.ResumeFromLimitRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotRequest)
+}
+
+func TestHandleLimitRetry_UnconfirmedAgentHandoffDispatches(t *testing.T) {
+	h := newTestHome(t)
+	base, err := session.NewInstance(session.InstanceOptions{
+		Title: "worker", Path: t.TempDir(), Program: "gemini",
+	})
+	require.NoError(t, err)
+	base.SetBackend(session.NewFakeBackend())
+	base.SetStartedForTest(true)
+	base.SetStatusForTest(session.Running)
+	require.NoError(t, base.Transition(session.BeginHandoff()))
+	mission := "continue the inherited work"
+	base.SetPendingHandoffMission(mission)
+	require.NoError(t, base.BeginPendingHandoffMissionDelivery(mission))
+	require.NoError(t, base.RecordPendingHandoffMissionDelivery(mission, session.PromptCouldNotConfirm))
+	h.store.AddInstance(base)
+	h.sidebar.SetSelectedInstance(0)
+
+	var gotRequest daemon.ResumeFromLimitRequest
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+		gotRequest = request
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.handleLimitRetry()
+	require.NotNil(t, cmd, "an inspected, ambiguous agent handoff must expose the c retry action")
+	done, ok := cmd().(limitRetriedMsg)
+	require.True(t, ok)
+	require.NoError(t, done.err)
+	require.Equal(t, daemon.ResumeFromLimitRequest{ID: base.ID, Title: base.Title, RepoID: h.repoID}, gotRequest)
+}
+
+func TestHandleLimitRetry_StartupUnknownAccountHandoffDoesNotDispatch(t *testing.T) {
+	h := newTestHome(t)
+	base, err := session.NewInstance(session.InstanceOptions{
+		Title: "worker", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	data := base.ToInstanceData()
+	data.Status = session.Running
+	data.Liveness = session.LiveRunning
+	data.StartupStateUnknown = true
+	data.Worktree = session.GitWorktreeData{
+		RepoPath: data.Path, WorktreePath: data.Path, SessionName: data.Title, ExternalWorktree: true,
+	}
+	data.Account = "personal"
+	data.PendingAccountSwap = &session.AccountSwapData{
+		Manual: true, Mission: "continue", From: "work", To: "personal", ReplacementPanesStarted: true,
+		MissionDeliveryStatus: session.PromptCouldNotConfirm,
+	}
+	inst, err := session.FromInstanceData(data)
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	called := false
+	restore := SetLimitResumerForTest(func(daemon.ResumeFromLimitRequest) error {
+		called = true
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.handleLimitRetry()
+	if cmd != nil {
+		_ = cmd()
+	}
+	require.False(t, called, "an unknown replacement runtime must not expose a retry submission")
+}
+
 // A manual retry retains its target while the tea.Cmd waits to run. If a
 // snapshot replaces the selected row with a different session that reused the
 // title in that window, the pending retry must not deliver the old prompt into
@@ -176,4 +284,18 @@ func TestHandleLimitRetried_NoOpKeepsLimitLocally(t *testing.T) {
 
 	_, _ = h.handleLimitRetried(limitRetriedMsg{target: target, err: errors.New("resume was not performed: another operation owns the retry")})
 	require.True(t, inst.LimitReached(), "a daemon no-op must not clear the local limit state")
+}
+
+func TestHandleLimitRetried_CommittedWarningClearsLocallyAndWarns(t *testing.T) {
+	h := newTestHome(t)
+	inst := limitActionInstance(t, "worker", time.Now().Add(time.Hour))
+	h.store.AddInstance(inst)
+	target := captureSessionActionTarget(inst, h.repoID)
+
+	_, _ = h.handleLimitRetried(limitRetriedMsg{
+		target: target,
+		err:    committedHandoffNoticeError{},
+	})
+	require.False(t, inst.LimitReached(), "a committed retry already landed and must clear local limit state")
+	require.Contains(t, h.errBox.FullError(), "settlement is pending")
 }

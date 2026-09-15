@@ -578,6 +578,9 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// mis-ordered edge (#2135). The observer re-decides on its next tick.
 		return nil
 	}
+	if ev.kind == tkBeginArchive && i.archiveCheckpointSealed {
+		return fmt.Errorf("session %q cannot begin an archive after the daemon shutdown checkpoint was sealed", i.Title)
+	}
 	if ev.kind == tkBeginArchive && i.pendingAccountSwap != nil {
 		return fmt.Errorf("session %q has a committed account swap awaiting its replacement notice and task; retry that account swap before archiving", i.Title)
 	}
@@ -594,6 +597,23 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	}
 
 	to := spec.target(from, ev)
+	if to != from {
+		// Invalidate async runtime evidence before publishing a replacement fence
+		// or a liveness change. noteStateChangeLocked advances it again after the
+		// full mutation; the two increments deliberately bracket the write so a
+		// lock-free validator cannot accept a half-applied transition.
+		i.runtimeEvidenceGeneration.Add(1)
+	}
+	if ev.kind == tkBeginArchive {
+		i.archiveSettled = make(chan struct{})
+	}
+	// The durable-push fence belongs to exactly one archive generation. Begin
+	// clears any historical value before the remote push starts; every settling
+	// edge clears it after checkpoint retention no longer needs the phase.
+	switch ev.kind {
+	case tkBeginArchive, tkCancelArchive, tkCommitArchive, tkAbortArchiveToLost:
+		i.archivePushCompleted = false
+	}
 	// Apply this transition's declared effect on the task run (#1892). The answer
 	// comes from the table, not from reading the resulting state — see runEffect.
 	//
@@ -637,6 +657,10 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// Publish its identity and durable negative quota evidence in the same
 		// critical section as LiveLimitReached so account-swap admission cannot
 		// observe a limit without its provider/account attribution.
+		if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
+			i.limitAgent = agent
+			i.touchLocked()
+		}
 		if i.limitAccount != i.Account {
 			i.limitAccount = i.Account
 			i.touchLocked()
@@ -664,6 +688,10 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	switch ev.kind {
 	case tkCommitArchive, tkBeginRestore:
 		i.clearAgentModelChangeLocked()
+	}
+	if from.op == OpArchiving && to.op != OpArchiving && i.archiveSettled != nil {
+		close(i.archiveSettled)
+		i.archiveSettled = nil
 	}
 	return nil
 }

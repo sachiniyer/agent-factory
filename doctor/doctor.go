@@ -279,6 +279,11 @@ type Options struct {
 // scanContext carries the shared, immutable inputs of one run.
 type scanContext struct {
 	opts Options
+	// globalConfigMissing distinguishes the normal pre-first-write posture from
+	// a config load failure. Most checks keep treating a missing file as
+	// unconfigured; responding-daemon diagnostics alone compare against the
+	// defaults a subsequent daemon start would materialize.
+	globalConfigMissing bool
 	// snap is the process-table snapshot, or nil when it could not be read.
 	//
 	// nil means BLIND, not healthy. Every check that consumes it must say so

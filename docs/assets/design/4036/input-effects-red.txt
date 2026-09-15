@@ -1,0 +1,45 @@
+Running 1 test using 1 worker
+
+  ✘  1 [chromium] › selftest/phone-keybar.spec.ts:5:1 › #4036 phone keybar applies and consumes modifiers before the next letter (27.8s)
+
+
+  1) [chromium] › selftest/phone-keybar.spec.ts:5:1 › #4036 phone keybar applies and consumes modifiers before the next letter 
+
+    Error: bar input must clear xterm's selection
+
+    expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.af-pane-host').first().locator('.xterm-selection > div')
+    Expected: 0
+    Received: 2
+    Timeout:  15000ms
+
+    Call log:
+      - bar input must clear xterm's selection with timeout 15000ms
+      - waiting for locator('.af-pane-host').first().locator('.xterm-selection > div')
+        19 × locator resolved to 2 elements
+           - unexpected value "2"
+
+
+       at phone-keybar-effects.ts:31
+
+      29 |   await bar.getByRole("button", { name: "↑", exact: true }).click();
+      30 |   await expect.poll(stream).toBe(before + "\x1b[1;5A");
+    > 31 |   await expect(selection, "bar input must clear xterm's selection").toHaveCount(0);
+         |                                                                     ^
+      32 |   await expect.poll(() => viewport.evaluate(el => el.scrollTop)).toBeGreaterThan(parked);
+      33 |   await expect(host, "bar input must return from scrollback to the prompt").toContainText("keybar-history-59");
+      34 | }
+        at assertPhoneKeybarInputEffects (/work/web/selftest/phone-keybar-effects.ts:31:69)
+        at /work/web/selftest/phone-keybar.spec.ts:31:5
+
+    attachment #1: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/phone-keybar--4036-phone-k-e348d-iers-before-the-next-letter-chromium/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/phone-keybar--4036-phone-k-e348d-iers-before-the-next-letter-chromium/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [chromium] › selftest/phone-keybar.spec.ts:5:1 › #4036 phone keybar applies and consumes modifiers before the next letter 

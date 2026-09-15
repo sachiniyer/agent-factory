@@ -80,8 +80,7 @@ func TestClaimRelocationSource_PrimaryTimeoutSelectsKnownAlternate(t *testing.T)
 		FileType:      identity.fileType,
 	}))
 
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 100 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 100*time.Millisecond)
 	previousIdentity := relocationPathIdentity
 	releasePrimary := make(chan struct{})
 	primaryDone := make(chan struct{})
@@ -101,7 +100,6 @@ func TestClaimRelocationSource_PrimaryTimeoutSelectsKnownAlternate(t *testing.T)
 		close(releasePrimary)
 		<-primaryDone
 		relocationPathIdentity = previousIdentity
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	claim, err := gw.ClaimRelocationSource()
@@ -142,8 +140,7 @@ func TestClaimRelocationSource_PrimaryTimeoutPreservesUnprovenAlternate(t *testi
 		FileType:      expected.fileType,
 	}))
 
-	previousTimeout := relocationIdentityTimeout
-	relocationIdentityTimeout = 100 * time.Millisecond
+	useRelocationIdentityTimeoutForTest(t, 100*time.Millisecond)
 	previousIdentity := relocationPathIdentity
 	releasePrimary := make(chan struct{})
 	primaryDone := make(chan struct{})
@@ -163,7 +160,6 @@ func TestClaimRelocationSource_PrimaryTimeoutPreservesUnprovenAlternate(t *testi
 		close(releasePrimary)
 		<-primaryDone
 		relocationPathIdentity = previousIdentity
-		relocationIdentityTimeout = previousTimeout
 	})
 
 	_, err = gw.ClaimRelocationSource()

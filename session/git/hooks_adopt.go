@@ -29,14 +29,12 @@ var hookAdoptionPollInterval = 2 * time.Second
 // process-group pgid all died with the daemon that started the run — so every
 // consumer of the session's hook state read "nothing in flight" (#3682).
 //
-// Adoption is exactly that: it takes over the REPORTING, not the run. It never
-// starts a hook (re-running the operator's provisioning commands over a tree
-// whose first run is still going is the #2770 hazard) and it never stops one
-// (the paths that rebuild, remove or move the tree still own that, through
-// cancelAndWaitHooks). The only thing it produces is the same hooksDone channel
-// a first run produces, so nothing downstream has to learn a second way to ask.
+// Runs with a durable list snapshot resume only entries that never started,
+// after the surviving scopes and launchers are gone. Legacy runs without a
+// snapshot retain observation-only adoption. Neither path replays the entry
+// in flight or stops its survivor; rebuild/remove still own that teardown.
 //
-// One batched probe answers for the whole fleet. The caller is a daemon
+// One batched probe answers for legacy survivors. The caller is a daemon
 // restoring every session it owns, on the path that gates readiness, so a
 // per-session pair of oracle reads would be a round trip and a /proc walk each;
 // this is one of each, whatever the session count.
@@ -48,18 +46,35 @@ func AdoptRunningHooks(worktrees []*GitWorktree) {
 	if !systemdunit.RunningDaemonProcess() {
 		return
 	}
-	candidates := make([]*GitWorktree, 0, len(worktrees))
-	owned := make([][]string, 0, len(worktrees))
-	var all []string
+	eligible := make([]*GitWorktree, 0, len(worktrees))
+	terminal := make([]*GitWorktree, 0, len(worktrees))
 	for _, g := range worktrees {
-		if g == nil {
+		if g == nil || g.IsExternalWorktree() {
+			continue
+		}
+		if g.hooksResumeDisabled {
+			terminal = append(terminal, g)
+			continue
+		}
+		if g.HasUnresolvedRelocation() {
+			log.WarningLog.Printf("cannot adopt post-worktree hooks for %s: relocation recovery is unresolved; leaving hook journal pending", g.GetWorktreePath())
+			if g.hooksDone == nil {
+				g.installRelocationPendingHookAdoption()
+			}
 			continue
 		}
 		// A worktree with a live in-process run already reports itself, and
 		// overwriting its channel would strand the join cancelAndWaitHooks does.
-		// Restore always arrives here with none, so this is a guard rather than a
-		// case: adoption must never be the thing that loses a run's own handle.
-		if g.hooksDone != nil {
+		if g.hooksDone == nil {
+			eligible = append(eligible, g)
+		}
+	}
+	progressAdopted := reconcileHookProgressBatch(eligible, terminal)
+	candidates := make([]*GitWorktree, 0, len(eligible))
+	owned := make([][]string, 0, len(worktrees))
+	var all []string
+	for _, g := range eligible {
+		if progressAdopted[g] {
 			continue
 		}
 		prefixes := g.hookScopePrefixes()

@@ -70,11 +70,12 @@ func (m *Manager) retryReconcileOwed(healed *rootAgentSnapshot) bool {
 				changed = true
 				continue
 			}
-			proven, ok := config.ResolveRegisteredProjectRepoID(context.Background(), project)
+			provenRepo, ok := config.ResolveRegisteredProjectRepo(context.Background(), project)
 			if !ok {
 				remaining[projectID] = owed
 				continue
 			}
+			proven := provenRepo.ID
 			if proven != owed.repoID {
 				// The proof named a DIFFERENT identity than the boot resolved
 				// — the checkout is this project's, but its repository's
@@ -84,7 +85,7 @@ func (m *Manager) retryReconcileOwed(healed *rootAgentSnapshot) bool {
 				// resolving the new identity would start without the project's
 				// personal disable. Carry the work to the identity just
 				// proven, and move the snapshot with it.
-				if !moveResolvedIdentity(m, healed, owed.repoID, proven, project.Root) {
+				if !moveResolvedIdentity(m, healed, owed.repoID, proven, project.Root, provenRepo.IdentityPath()) {
 					remaining[projectID] = owed
 					continue
 				}
@@ -169,7 +170,7 @@ func (m *Manager) identityTransitionFenced(from, to string) bool {
 // the same way, and the published root moves with them. Refuses for the same
 // reasons — a delete holding either identity, or another live project holding
 // the one being left behind, which is #3611's case rather than this one's.
-func moveResolvedIdentity(m *Manager, healed *rootAgentSnapshot, from, to, root string) bool {
+func moveResolvedIdentity(m *Manager, healed *rootAgentSnapshot, from, to, root, identityRoot string) bool {
 	if from == to {
 		return true
 	}
@@ -193,6 +194,7 @@ func moveResolvedIdentity(m *Manager, healed *rootAgentSnapshot, from, to, root 
 		healed.projectRoots[from] = published
 		return false
 	}
+	published.identityRoot = identityRoot
 	healed.projectRoots[to] = published
 	return true
 }

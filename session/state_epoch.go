@@ -72,5 +72,6 @@ func (i *Instance) noteStateChangeLocked(lv Liveness, op InFlightOp, resetAt tim
 		return
 	}
 	i.stateEpoch++
+	i.runtimeEvidenceGeneration.Add(1)
 	i.touchLocked()
 }

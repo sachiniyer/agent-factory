@@ -418,11 +418,14 @@ func (m *Menu) addInstanceOptions() {
 	// record must still expose Kill so the user can remove it.
 	lifecycleAction := session.LifecycleActionNone
 	canKill := false
+	canRetryHandoff := false
 	if m.instance != nil {
 		lifecycleAction = m.instance.LifecycleAction()
 		canKill = m.instance.CanKill()
+		canRetryHandoff = m.instance.CanRetryPendingManualAccountSwapDelivery() ||
+			m.instance.CanRetryPendingHandoffMissionDelivery()
 	}
-	if lifecycleAction == session.LifecycleActionNone {
+	if lifecycleAction == session.LifecycleActionNone && !canRetryHandoff {
 		m.options = []keys.KeyName{keys.KeyNew}
 		if canKill {
 			m.options = append(m.options, keys.KeyKill)
@@ -438,11 +441,17 @@ func (m *Menu) addInstanceOptions() {
 	// (Archived/Lost/Dead) row instead advertises the dedicated `r` restore key
 	// (#1605) — the two verbs no longer share the `a` binding, so the footer
 	// shows exactly the one action the selected row supports.
-	mgmtVerb := keys.KeyArchive
-	if lifecycleAction == session.LifecycleActionRestore {
-		mgmtVerb = keys.KeyRestore
+	mgmtGroup := []keys.KeyName{keys.KeyNew}
+	if canKill {
+		mgmtGroup = append(mgmtGroup, keys.KeyKill)
 	}
-	mgmtGroup := []keys.KeyName{keys.KeyNew, keys.KeyKill, mgmtVerb}
+	if lifecycleAction != session.LifecycleActionNone {
+		mgmtVerb := keys.KeyArchive
+		if lifecycleAction == session.LifecycleActionRestore {
+			mgmtVerb = keys.KeyRestore
+		}
+		mgmtGroup = append(mgmtGroup, mgmtVerb)
+	}
 
 	// Action group: enter interacts in-pane, o attaches full-screen (#1089).
 	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeyAttach}
@@ -454,15 +463,14 @@ func (m *Menu) addInstanceOptions() {
 		actionGroup = append(actionGroup, keys.KeyShiftDown)
 	}
 
-	// Usage-limit retry (#1146): advertised only when the selected session is
-	// actually blocked at a limit wall — c re-spawns (if the agent exited) and
-	// resumes it. Kept off the bar for every normal session so it never clutters
-	// the hints.
+	// Retry (#1146): advertised for a usage-limit wall or an inspected account or
+	// agent handoff whose mission submission could not be confirmed. All re-enter
+	// the same durable recovery transaction; normal sessions keep the hint hidden.
 	// Not while an operation owns the session (#2997): a resume already in flight
 	// keeps the row LiveLimitReached by design — the fence preserves liveness — so
 	// LimitReached() alone would keep advertising `c` for a retry that
 	// RuntimeActionResumeLimit then refuses as busy.
-	if m.instance != nil && m.instance.LimitReached() && m.instance.GetInFlightOp() == session.OpNone {
+	if m.instance != nil && ((m.instance.LimitReached() && m.instance.GetInFlightOp() == session.OpNone) || canRetryHandoff) {
 		actionGroup = append(actionGroup, keys.KeyLimitRetry)
 		// Handoff (#2013) is the OTHER answer to a limit wall: `c` waits for this
 		// agent's window to reset, `H` continues the work under a different one.
@@ -472,7 +480,7 @@ func (m *Menu) addInstanceOptions() {
 		// legitimate whenever an agent is stuck — but a limit is the case where a
 		// user needs to be TOLD the option exists, and every other session keeps an
 		// uncluttered bar.
-		if m.instance.Capabilities().Handoff {
+		if m.instance.LimitReached() && m.instance.Capabilities().Handoff {
 			actionGroup = append(actionGroup, keys.KeyHandoff)
 		}
 	}
@@ -649,7 +657,7 @@ var hintDropOrder = [][]keys.KeyName{
 	// looking at it, so tab/pane discovery goes first and these two outlast it.
 	// Handoff before retry: retry is the primary action, handoff its alternative.
 	//
-	// They are IN this list at all because they have to be. `c retry limit` used
+	// They are IN this list at all because they have to be. `c retry` used
 	// to be absent, which read as "never drop it" but actually meant the row had
 	// no give left once everything below it was gone — so at ~45 cells it rendered
 	// 48 cells into the bar and the exact-rect clamp cut the RIGHT edge, taking

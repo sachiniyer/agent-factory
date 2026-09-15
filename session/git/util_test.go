@@ -262,6 +262,52 @@ func TestSanitizeBranchName_TruncationCannotReexposeDotLock(t *testing.T) {
 	}
 }
 
+func TestDerivedWorktreePathTitleSegment(t *testing.T) {
+	if got, want := DerivedWorktreePathTitleSegment("/srv/repo", "fix bug (urgent)"), "fix-bug-urgent"; got != want {
+		t.Errorf("ordinary derived segment = %q, want %q", got, want)
+	}
+
+	longRepo := filepath.Join("/srv", strings.Repeat("r", 220))
+	if got, want := DerivedWorktreePathTitleSegment(longRepo, "Confidential Migration"), "Confidential-Migra"; got != want {
+		t.Errorf("bounded derived segment = %q, want %q", got, want)
+	}
+
+	if got := DerivedWorktreePathTitleSegment("/srv/repo", "!!!"); got != "" {
+		t.Errorf("AF-authored fallback reported as user-title-derived: %q", got)
+	}
+}
+
+// The AF-authored fallback still shares the sibling directory component with
+// the repository basename. Choosing it after the repo-dependent bound makes a
+// 248-byte repo name produce a 256-byte component and fail with ENAMETOOLONG.
+func TestResolveWorktreePlacementBoundsFixedSiblingFallback(t *testing.T) {
+	repoBase := strings.Repeat("r", 248)
+	got, err := resolveWorktreePlacement(nil, filepath.Join("/srv", repoBase), t.TempDir(), "!!!", "")
+	if err != nil {
+		t.Fatalf("resolve fixed fallback below NAME_MAX: %v", err)
+	}
+	component := filepath.Base(got)
+	if len(component) > nameMax {
+		t.Fatalf("fixed fallback component is %d bytes, over NAME_MAX %d: %q", len(component), nameMax, component)
+	}
+	if want := repoBase + "-s"; component != want {
+		t.Errorf("fixed fallback component = %q, want %q", component, want)
+	}
+}
+
+func TestDerivedWorktreeSubdirectoryTitleSegment(t *testing.T) {
+	if got, want := DerivedWorktreeSubdirectoryTitleSegment("fix bug (urgent)"), "fix-bug-urgent"; got != want {
+		t.Errorf("ordinary derived segment = %q, want %q", got, want)
+	}
+	long := strings.Repeat("x", nameMax)
+	if got, want := len(DerivedWorktreeSubdirectoryTitleSegment(long)), nameMax-worktreeCollisionSuffixReserve; got != want {
+		t.Errorf("bounded derived segment length = %d, want %d", got, want)
+	}
+	if got := DerivedWorktreeSubdirectoryTitleSegment("!!!"); got != "" {
+		t.Errorf("AF-authored fallback reported as user-title-derived: %q", got)
+	}
+}
+
 // TestBoundTitleForDisambiguation_KeepsSuffixesInjective is the #2528 P3-b
 // mechanism lock. The daemon's uniquifying walks append "-N" / " (archived N)" to
 // a base title and judge availability on the DERIVED branch. For a long base,

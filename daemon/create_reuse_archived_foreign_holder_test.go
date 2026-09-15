@@ -28,6 +28,14 @@ func resolvedPath(t *testing.T, path string) string {
 	return resolved
 }
 
+func onlyHeldWorktree(t *testing.T, held map[string][]string, branch string) string {
+	t.Helper()
+	holders, ok := held[branch]
+	require.True(t, ok, "branch %q is not held", branch)
+	require.Len(t, holders, 1, "branch %q unexpectedly has multiple holders", branch)
+	return holders[0]
+}
+
 // TestReserveCreate_ForeignlyHeldBranchIsNotReclaimed is #3404: the reclaim must
 // not move a branch that belongs to somebody ELSE'S worktree.
 //
@@ -65,7 +73,7 @@ func TestReserveCreate_ForeignlyHeldBranchIsNotReclaimed(t *testing.T) {
 
 	held, herr := sessiongit.BranchesHeldByWorktrees(repoPath)
 	require.NoError(t, herr)
-	holderPath := held[branch]
+	holderPath := onlyHeldWorktree(t, held, branch)
 	require.Equal(t, resolvedPath(t, other), resolvedPath(t, holderPath),
 		"precondition: the branch must be held by the OTHER worktree, not the archived one; without that this test proves nothing")
 	require.NotEqual(t, resolvedPath(t, other), resolvedPath(t, archived.GetWorktreePath()),
@@ -82,7 +90,7 @@ func TestReserveCreate_ForeignlyHeldBranchIsNotReclaimed(t *testing.T) {
 	// rename it performed instead of stopping at the outcome check below.
 	held, herr = sessiongit.BranchesHeldByWorktrees(repoPath)
 	require.NoError(t, herr)
-	assert.Equal(t, resolvedPath(t, other), resolvedPath(t, held[branch]),
+	assert.Equal(t, resolvedPath(t, other), resolvedPath(t, onlyHeldWorktree(t, held, branch)),
 		"the unrelated worktree must still hold the branch it started on — renaming it out from under a live session is the bug")
 	assert.NotContains(t, held, archivedBranch,
 		"no worktree may have been moved onto the reclaim's target name; that branch is the rename this must not perform")
@@ -124,8 +132,7 @@ func TestReclaimArchivedBranch_ArchivedHolderStillQualifies(t *testing.T) {
 
 	held, herr := sessiongit.BranchesHeldByWorktrees(repoPath)
 	require.NoError(t, herr)
-	holder, ok := held[manager.branchForTitle("foo")]
-	require.True(t, ok, "the archived worktree must still hold its branch (#2013 relocates rather than releases)")
+	holder := onlyHeldWorktree(t, held, manager.branchForTitle("foo"))
 
 	assert.True(t, archivedWorktreeHoldsBranch(archived, holder),
 		"the archived session's own worktree must be recognized as the holder, or reuse-archived-name can never complete")

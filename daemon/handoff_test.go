@@ -46,6 +46,7 @@ type handoffBackend struct {
 	events          []string
 	noHandoff       bool
 	sendErr         error
+	deliveryStatus  session.PromptDeliveryStatus
 }
 
 func (b *handoffBackend) Capabilities() session.Capabilities {
@@ -56,13 +57,16 @@ func (b *handoffBackend) Capabilities() session.Capabilities {
 	return caps
 }
 
-func (b *handoffBackend) SwapAgent(i *session.Instance, _ session.AgentSwapPlan) error {
+func (b *handoffBackend) SwapAgent(i *session.Instance, plan session.AgentSwapPlan) error {
 	b.mu.Lock()
 	b.swapCalls++
 	b.events = append(b.events, "swap")
 	err := b.swapErr
 	b.mu.Unlock()
 	if err != nil {
+		return err
+	}
+	if err := plan.CaptureAfterStop(); err != nil {
 		return err
 	}
 	// Mirror the local backend's SetProgram: readiness and conversation capture
@@ -99,9 +103,24 @@ func (b *handoffBackend) SendPromptCommand(_ *session.Instance, prompt string) e
 	return nil
 }
 
-func (b *handoffBackend) setSendErr(err error) {
+func (b *handoffBackend) SendPromptCommandWithStatus(
+	i *session.Instance, prompt string,
+) (session.PromptDeliveryStatus, error) {
+	err := b.SendPromptCommand(i, prompt)
+	if err != nil {
+		return session.PromptCouldNotConfirm, err
+	}
 	b.mu.Lock()
-	b.sendErr = err
+	defer b.mu.Unlock()
+	if b.deliveryStatus.Valid() {
+		return b.deliveryStatus, nil
+	}
+	return session.PromptDelivered, nil
+}
+
+func (b *handoffBackend) setDeliveryStatus(status session.PromptDeliveryStatus) {
+	b.mu.Lock()
+	b.deliveryStatus = status
 	b.mu.Unlock()
 }
 
@@ -598,27 +617,26 @@ func TestHandoffSession_ReadinessFailureRetainsStartupUnknown(t *testing.T) {
 	}
 }
 
-// A post-ready paste failure keeps a durable pending marker. Once a later poll
-// positively observes Ready, the recovery path sends that exact rendered brief
-// and clears the marker in memory and on disk.
-func TestResumePendingHandoffs_DeliversPostReadyFailure(t *testing.T) {
+// Positive mission-scoped non-delivery keeps a durable retry authorization.
+// Once a later poll observes Ready, recovery sends that exact rendered brief and
+// clears the marker in memory and on disk.
+func TestResumePendingHandoffs_DeliversObservedNonDelivery(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	sendErr := errors.New("paste transport failed")
-	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), sendErr: sendErr}
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), deliveryStatus: session.PromptNotDelivered}
 	inst := registerHandoffSubject(t, manager, repoID, repoPath, "retry-mission", backend)
 
 	_, err := manager.HandoffSession(HandoffSessionRequest{
 		Title: "retry-mission", RepoID: repoID, To: tmux.ProgramGemini,
 	})
-	if !errors.Is(err, task.ErrPromptDelivery) || !errors.Is(err, sendErr) {
-		t.Fatalf("HandoffSession error = %v, want post-ready prompt-delivery failure", err)
+	if !errors.Is(err, task.ErrPromptDelivery) {
+		t.Fatalf("HandoffSession error = %v, want observed non-delivery", err)
 	}
 	mission := inst.PendingHandoffMission()
 	if mission == "" || inst.StartupStateUnknown() || inst.GetInFlightOp() != session.OpReplacing {
 		t.Fatalf("post-ready failure state = pending:%q startupUnknown:%v op:%v", mission, inst.StartupStateUnknown(), inst.GetInFlightOp())
 	}
 
-	backend.setSendErr(nil)
+	backend.setDeliveryStatus(session.PromptDelivered)
 	manager.ResumePendingHandoffs()
 
 	if got := inst.PendingHandoffMission(); got != "" {
@@ -628,8 +646,8 @@ func TestResumePendingHandoffs_DeliversPostReadyFailure(t *testing.T) {
 		t.Fatalf("delivered recovery mission retained replacement fence %v", got)
 	}
 	_, prompts := backend.snapshot()
-	if len(prompts) != 1 || prompts[0] != mission {
-		t.Fatalf("recovery prompts = %q, want exactly the pending rendered mission", prompts)
+	if len(prompts) != 2 || prompts[0] != mission || prompts[1] != mission {
+		t.Fatalf("handoff prompt attempts = %q, want one observed-absent attempt and one delivered recovery", prompts)
 	}
 	rec := recordFor(t, repoID, "retry-mission")
 	if rec == nil || rec.PendingHandoffMission != "" {
@@ -662,16 +680,15 @@ func TestResumePendingHandoffs_SkipsUserKilled(t *testing.T) {
 
 func TestResumePendingHandoffs_PostReadyFailureClearsOutgoingLimit(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	sendErr := errors.New("paste transport failed")
-	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), sendErr: sendErr}
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), deliveryStatus: session.PromptNotDelivered}
 	inst := registerHandoffSubject(t, manager, repoID, repoPath, "retry-after-outgoing-limit", backend)
 	inst.SetLimitReached(time.Now().Add(time.Hour))
 
 	_, err := manager.HandoffSession(HandoffSessionRequest{
 		Title: "retry-after-outgoing-limit", RepoID: repoID, To: tmux.ProgramGemini,
 	})
-	if !errors.Is(err, task.ErrPromptDelivery) || !errors.Is(err, sendErr) {
-		t.Fatalf("HandoffSession error = %v, want post-ready prompt-delivery failure", err)
+	if !errors.Is(err, task.ErrPromptDelivery) {
+		t.Fatalf("HandoffSession error = %v, want observed non-delivery", err)
 	}
 	if inst.LimitReached() {
 		t.Fatal("post-ready failure retained the outgoing provider's limit on the incoming runtime")
@@ -681,12 +698,12 @@ func TestResumePendingHandoffs_PostReadyFailureClearsOutgoingLimit(t *testing.T)
 		t.Fatalf("retry state = pending:%q op:%v, want mission behind replacement fence", mission, inst.GetInFlightOp())
 	}
 
-	backend.setSendErr(nil)
+	backend.setDeliveryStatus(session.PromptDelivered)
 	manager.ResumePendingHandoffs()
 
 	_, prompts := backend.snapshot()
-	if len(prompts) != 1 || prompts[0] != mission {
-		t.Fatalf("recovery prompts = %q, want exact pending mission; stale limit state must not divert it to limit resume", prompts)
+	if len(prompts) != 2 || prompts[1] != mission {
+		t.Fatalf("handoff prompt attempts = %q, want the observed-absent mission retried after outgoing limit state cleared", prompts)
 	}
 }
 

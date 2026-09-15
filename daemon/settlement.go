@@ -30,7 +30,8 @@ type settleOwedEntry struct {
 // What that costs depends on the fact:
 //
 //   - a handoff's PendingHandoffMission is a standing instruction, so losing its
-//     clear makes the next daemon deliver a mission the agent already ran (#2781);
+//     clear leaves a stale replacement fence. Mission-scoped ambiguity now blocks
+//     automatic replay, but an operator could still retry work the agent ran;
 //   - a recovery's branchCreatedByUs says af created this branch and may delete
 //     it, so losing the flip leaves an af-* branch nothing will ever clean up
 //     (#2883, and the outcome #1841 named).

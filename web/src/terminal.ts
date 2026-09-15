@@ -614,6 +614,7 @@ export class AttachTerminal {
     // Keystrokes → OpInput. xterm hands us the terminal's outgoing byte string
     // (regular chars and key escape sequences alike); UTF-8 encode it so a typed
     // multibyte char reaches the PTY as the same bytes a real terminal would send.
+    this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
 
     // Modified input + clipboard decisions (see clipboard.ts): intercept the key
@@ -628,17 +629,21 @@ export class AttachTerminal {
       if (ev.key === overrideKey) {
         this.mouseOverrideKeyHeld = ev.type !== "keyup";
       }
-      return handleClipboardKeydown(ev, {
+      const accepted = handleClipboardKeydown(ev, {
         composerNewline: this.endpoint.composerNewline,
         hasSelection: () => this.term.hasSelection(),
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
-        sendInput: (text) => this.sendInput(text),
+        sendInput: (text) => this.keybar.sendCustomUserInput(text, ev),
         // Public Terminal.input(..., true) is xterm's genuine-user-input path:
         // it scrolls to bottom and clears selection, then fires onData above.
-        sendUserInput: (text) => this.term.input(text, true),
+        sendUserInput: (text) => this.keybar.sendCustomUserInput(text, ev),
       });
+      // Xterm runs this handler before CompositionHelper.keydown. Its later
+      // capture listener must not infer that a rejected key finalized the IME.
+      if (!accepted) this.keybar.markKeydownSuppressed(ev);
+      return accepted;
     });
 
     // Re-fit + re-announce size whenever the container changes (window resize,

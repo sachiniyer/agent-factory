@@ -3,8 +3,10 @@ package ui
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/rpc"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // The `,` editor's target (#3708). Every case here asks the same question in a
@@ -521,6 +524,204 @@ func TestConfigPaneRemoteSaveRefusedByAQuiescingDaemonWritesNothing(t *testing.T
 		if strings.Contains(c.status, wrong) {
 			t.Errorf("a handler that ran and refused is not a missing route; status contains %q:\n%s", wrong, c.status)
 		}
+	}
+	assertLocalConfigUntouched(t, localPath, original)
+}
+
+// exposureControlStub is the daemon-RUNNING twin of quiescingControlStub: its
+// SetConfigValue populates BOTH warning fields the way the real
+// controlServer.SetConfigValue does — resp.Result.Warnings with the per-write
+// exposureWarning (config.SetGlobalConfigValue) and resp.Warnings with the
+// apply-time ListenerExposureNotice (manager.ApplyConfig) — so a test can pin
+// that localConfigSet surfaces exactly ONE notice on this path, not the two
+// differently-worded ones both fields carry here. The two strings are
+// deliberately findable markers so an assertion can tell them apart.
+type exposureControlStub struct{}
+
+func (s *exposureControlStub) SetConfigValue(req daemon.SetConfigValueRequest, resp *daemon.SetConfigValueResponse) error {
+	resp.Result = &config.SetResult{
+		Key:   config.CanonicalConfigKey(req.Key),
+		Value: req.Value,
+		Path:  remotePath,
+		Warnings: []string{
+			"WRITER-WARNING: per-write exposure warning from config.SetGlobalConfigValue",
+		},
+	}
+	resp.RestartNotice = "applied to the running daemon"
+	resp.Warnings = []string{
+		"APPLY-WARNING: apply-time notice from manager.ApplyConfig",
+	}
+	resp.ListenerAddr = "0.0.0.0:9999"
+	return nil
+}
+
+func (s *exposureControlStub) ApplyConfig(_ daemon.ApplyConfigRequest, _ *daemon.ApplyConfigResponse) error {
+	return nil
+}
+
+// serveControlStub binds the real control socket path inside the test's
+// AGENT_FACTORY_HOME to a net/rpc server running stub, so whatever the pane's
+// local save path dials reaches the stub instead of a real daemon. The general
+// form of serveQuiescingControl in config_pane_admission_test.go.
+func serveControlStub(t *testing.T, stub any) {
+	t.Helper()
+	socketPath, err := daemon.DaemonSocketPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	server := rpc.NewServer()
+	if err := server.RegisterName("Control", stub); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go server.ServeConn(conn)
+		}
+	}()
+}
+
+// TestLocalConfigSetSurfacesExposureWarningNoDaemon is the seam-level fix for
+// the tokenless-network exposure drop: a TUI edit of network.listen_addr to a
+// non-loopback address while require_token is false, with NO daemon running.
+//
+// On the no-daemon fallback, daemon.SetGlobalConfigValue's RequestApplyConfig
+// cannot dial the control socket, so resp.Warnings stays nil while
+// resp.Result.Warnings carries the exposureWarning the write produced. Before
+// the fix, localConfigSet passed only resp.Warnings to paneNotice and the
+// warning — the pane's sole at-write-time, interactive surface on this path —
+// was dropped. The notice the pane renders flows from this string verbatim, so
+// a warning produced but absent here is a warning the operator never sees.
+func TestLocalConfigSetSurfacesExposureWarningNoDaemon(t *testing.T) {
+	localTarget(t) // no remote target, no daemon
+
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfgPath := filepath.Join(home, config.TomlConfigFileName)
+	seed := strings.Join([]string{
+		"# hand-written",
+		"default_program = 'claude'",
+		"",
+		"[network]",
+		"require_token = false",
+		"",
+	}, "\n")
+	if err := os.WriteFile(cfgPath, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, notice, err := localConfigSet("network.listen_addr", "0.0.0.0:9999")
+	if err != nil {
+		t.Fatalf("localConfigSet failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("localConfigSet returned a nil result")
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatalf("precondition failed: the write produced no exposure warning in result.Warnings; notice=%q", notice)
+	}
+	// The exposureWarning text is fixed in config/configset.go and carries both
+	// of these substrings; asserting both guards the whole warning surviving,
+	// not a fragment that could appear in an unrelated notice.
+	for _, want := range []string{
+		"reachable from the network",
+		"require_token is false",
+	} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("the no-daemon notice dropped the exposure warning (absent: %q).\n result.Warnings=%v\n notice=%q",
+				want, result.Warnings, notice)
+		}
+	}
+}
+
+// TestLocalConfigSetShowsExactlyOneExposureNoticeWithDaemon pins the
+// daemon-RUNNING half of the fix: when a daemon is reached, the control handler
+// populates BOTH resp.Result.Warnings (the per-write exposureWarning) and
+// resp.Warnings (the apply-time ListenerExposureNotice) with two
+// differently-worded exposure sentences. The fix keeps exactly one — the
+// apply-time notice — so the pane does not show two exposure warnings for one
+// write. The per-write warning stays in result.Warnings for callers that want
+// the writer's own wording (the CLI prints it), so a caller is not silenced
+// even though the pane is de-duplicated.
+func TestLocalConfigSetShowsExactlyOneExposureNoticeWithDaemon(t *testing.T) {
+	localTarget(t)
+	// SocketTempDir, not t.TempDir: the home hosts a unix control socket, and
+	// macOS's $TMPDIR plus this test's name would blow the 107-byte socket path.
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	serveControlStub(t, &exposureControlStub{})
+
+	result, notice, err := localConfigSet("network.listen_addr", "0.0.0.0:9999")
+	if err != nil {
+		t.Fatalf("localConfigSet failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("localConfigSet returned a nil result")
+	}
+	if !strings.Contains(notice, "APPLY-WARNING") {
+		t.Errorf("a daemon-running edit must carry the apply-time warning in the notice; notice=%q", notice)
+	}
+	if strings.Contains(notice, "WRITER-WARNING") {
+		t.Errorf("a daemon-running edit must NOT also carry the per-write warning in the notice (would be a double exposure notice); notice=%q", notice)
+	}
+	// The per-write warning survives in the returned SetResult: the fix folds
+	// one notice into the pane but does not strip the other carrier, so `af
+	// config set`'s twin still prints the writer warning it reads from res.Warnings.
+	if !strings.Contains(strings.Join(result.Warnings, " "), "WRITER-WARNING") {
+		t.Errorf("result.Warnings must still carry the per-write warning; got %v", result.Warnings)
+	}
+}
+
+// TestRemoteConfigSetFallsBackToResultWarnings makes the same contract explicit
+// on the remote path that localConfigSet now honors: when a remote daemon
+// returns resp.Warnings empty (it did not produce an apply-time notice), the
+// pane falls back to resp.Result.Warnings rather than showing nothing. Today a
+// real remote daemon that applied populates resp.Warnings, so this is dormant —
+// but a daemon that accepted the write yet returned no apply notice is exactly
+// the case the fallback is for, and pinning it keeps remoteConfigSet's notice
+// from regressing to the resp.Warnings-only read it shared with the bug.
+func TestRemoteConfigSetFallsBackToResultWarnings(t *testing.T) {
+	localPath, original := seedLocalConfig(t)
+	d := serveRemoteDaemon(t, "9.9.9", map[string]func([]byte) apiproto.Envelope{
+		"/v1/SetConfigValue": func(body []byte) apiproto.Envelope {
+			var req daemon.SetConfigValueRequest
+			_ = json.Unmarshal(body, &req)
+			return apiproto.Success(daemon.SetConfigValueResponse{
+				Result: &config.SetResult{
+					Key:   config.CanonicalConfigKey(req.Key),
+					Value: req.Value,
+					Path:  remotePath,
+					Warnings: []string{
+						"WRITER-WARNING: per-write exposure warning from config.SetGlobalConfigValue",
+					},
+				},
+				RestartNotice: "applied to the running daemon",
+				// Warnings intentionally empty: the apply produced no notice, so
+				// resp.Result.Warnings is the only carrier the pane can show.
+			})
+		},
+	})
+
+	result, notice, err := remoteConfigSet("network.listen_addr", "0.0.0.0:9999")
+	if err != nil {
+		t.Fatalf("remoteConfigSet failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("remoteConfigSet returned a nil result")
+	}
+	if !strings.Contains(notice, "WRITER-WARNING") {
+		t.Errorf("a remote edit whose daemon returned no apply-time warning must fall back to result.Warnings; notice=%q", notice)
+	}
+	if got, want := d.url, apiclient.RemoteTargetURL(); got != want {
+		t.Errorf("the remote write did not target the stub daemon: got %q want %q", want, got)
 	}
 	assertLocalConfigUntouched(t, localPath, original)
 }

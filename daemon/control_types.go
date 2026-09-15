@@ -226,6 +226,11 @@ type RestoreSessionRequest struct {
 	// actions send it so a restore queued for one row cannot resurrect a
 	// different session that reuses the title before dispatch.
 	ID string `json:"id"`
+	// ExpectedDaemonBootID pins a browser request to the daemon incarnation in
+	// the Snapshot that enabled it. A different process refuses before mutation,
+	// so its first Snapshot can safely retire the previous process's client fence.
+	// Empty preserves compatibility for the CLI and older browser clients.
+	ExpectedDaemonBootID string `json:"expected_daemon_boot_id,omitempty"`
 	// ForceReap replaces a REACHABLE sandbox without first pushing its work
 	// (#2923). Recovery refuses that by default, because a sandbox that still
 	// answers may hold commits nothing else has a copy of; this is the operator
@@ -666,6 +671,12 @@ type DaemonBootConfig struct {
 
 type PingResponse struct {
 	OK bool `json:"ok"`
+	// AccountHandoff is an affirmative protocol capability, not a version
+	// guess. A new client must see true before it sends HandoffSession: only a
+	// capable daemon can inspect the live session's account pin and apply the
+	// safe account-aware admission rules. Older daemons omit the field, decode
+	// as false, and therefore never receive the destructive mutation.
+	AccountHandoff bool `json:"account_handoff,omitempty"`
 	// Version is the af build version the responding daemon is running, so a
 	// client can compare it against its own and detect skew (#1044). It rides
 	// Ping because Ping is the one RPC that answers throughout the daemon's

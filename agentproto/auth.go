@@ -34,58 +34,59 @@ func RedactAccessTokenURL(raw string) string {
 		// An unparseable URL cannot be safely separated from its credential.
 		return "[url redacted]"
 	}
-	if !redactAccessTokenQuery(parsed) {
-		// URL.Query discards malformed query pairs, so a structured miss says
-		// nothing about the raw text. The text pass reads the whole string
-		// rather than trusting a partially parsed query.
-		return RedactAccessTokenText(raw)
-	}
+	redactAccessTokenQuery(parsed)
+	// The raw-query scanner owns query grammar. The component sweep owns every
+	// other parser-proven URI field, including nested percent encoding. Neither
+	// pass depends on a match from the other before it runs.
 	redactAccessTokenComponents(parsed)
 	return parsed.String()
 }
 
-// redactAccessTokenQuery replaces every access_token value in u's parsed query,
-// reporting whether the query carried one at all. Working through url.Values is
-// what keeps the neighbouring parameters readable: their separators are known to
-// be separators here, which is exactly the fact unstructured text lacks.
-func redactAccessTokenQuery(u *url.URL) bool {
-	q := u.Query()
-	found := false
-	for key := range q {
-		if strings.EqualFold(key, AccessTokenQueryParam) {
-			q.Set(key, accessTokenRedaction)
-			found = true
-		}
+// redactAccessTokenQuery replaces every access_token value in u's raw query,
+// using RawQuery as the authoritative representation. url.ParseQuery discards
+// an entire ampersand-delimited chunk when it contains a semicolon or malformed
+// escape, so its key enumeration is not safe for a redaction boundary (#4187).
+func redactAccessTokenQuery(u *url.URL) {
+	redacted, found := redactAccessTokenRawQuery(u.RawQuery)
+	if found {
+		u.RawQuery = redacted
 	}
-	if !found {
-		return false
-	}
-	u.RawQuery = q.Encode()
-	return true
 }
 
-// redactAccessTokenComponents runs the text backstop over every part of u that
-// the query pass does not reach — most realistically the fragment, where an
-// implicit-grant callback parks its token (#2771), but a rootless URL carries
-// its whole body in Opaque and nothing stops a field from appearing in the path
-// or the userinfo either. url.URL's string fields are a closed set, so covering
-// them is a claim that stays true; covering "the separators a token can hide
-// behind" is the open-ended guess that missed ';' in #2687 and '#' in #2771.
-// Scheme is the one field left out, because the parser rejects '=' in it.
-//
-// Re-running the text pass over the serialized URL instead would defeat the
-// query pass: '&' does not end a value, so the scan would swallow every
-// parameter behind the one it just redacted.
+// redactAccessTokenComponents runs the URI-aware text matcher over every part
+// of u that the query pass does not reach — most realistically the fragment,
+// where an implicit-grant callback parks its token (#2771). A rootless URL
+// carries its body in Opaque, and fields can appear in the path or userinfo.
+// url.URL's string fields are a closed set; Scheme is the one field left out,
+// because the parser rejects '=' in it.
 func redactAccessTokenComponents(u *url.URL) {
-	u.Opaque = RedactAccessTokenText(u.Opaque)
+	// u.Opaque is "encoded opaque data" (net/url/url.go:376) — unlike Path,
+	// Fragment, and User, url.Parse does NOT percent-decode it.  We must decode
+	// before scanning so that %61ccess_token= is matched; if the escape sequence
+	// is malformed we must not emit the raw opaque value, so fall back to
+	// redacting the whole field rather than leaving a credential in place.
+	// Write back ONLY when the scan actually redacted something. url.URL.String
+	// prints Opaque verbatim — there is no RawOpaque to re-escape from, unlike
+	// the Path/RawPath pair below — so storing the decoded form unconditionally
+	// rewrote every opaque URL that passed through, credential or not:
+	// mailto:user%40host.example became mailto:user@host.example, and
+	// af:a%2Fb%20c became af:a/b c, which is no longer a valid URL (#4161).
+	// Leaving the original encoded bytes in place when nothing matched keeps
+	// this a redactor rather than a normalizer.
+	if _, malformed := fullyPercentDecodedView(u.Opaque, false); malformed {
+		u.Opaque = accessTokenRedaction
+	} else if redacted, found := redactPercentEncodedAccessTokenText(u.Opaque, false); found {
+		// Source mapping keeps every non-sensitive escape in its original form.
+		u.Opaque = redacted
+	}
 	u.Host = RedactAccessTokenText(u.Host)
-	if path := RedactAccessTokenText(u.Path); path != u.Path {
+	if path, found := redactPercentEncodedAccessTokenText(u.Path, false); found {
 		// RawPath is honoured only while it still encodes Path, and a rewritten
 		// Path leaves it stale. Drop it so String re-escapes from the redacted
 		// value rather than reprinting the credential it was holding.
 		u.Path, u.RawPath = path, ""
 	}
-	if fragment := RedactAccessTokenText(u.Fragment); fragment != u.Fragment {
+	if fragment, found := redactPercentEncodedAccessTokenText(u.Fragment, false); found {
 		u.Fragment, u.RawFragment = fragment, ""
 	}
 	if u.User != nil {
@@ -97,9 +98,9 @@ func redactAccessTokenComponents(u *url.URL) {
 // out of its name or password, and returns user itself when there is none — an
 // untouched Userinfo reprints exactly as it parsed.
 func redactAccessTokenUserinfo(user *url.Userinfo) *url.Userinfo {
-	name := RedactAccessTokenText(user.Username())
+	name, _ := redactPercentEncodedAccessTokenText(user.Username(), false)
 	password, hasPassword := user.Password()
-	redactedPassword := RedactAccessTokenText(password)
+	redactedPassword, _ := redactPercentEncodedAccessTokenText(password, false)
 	if name == user.Username() && redactedPassword == password {
 		return user
 	}
@@ -137,6 +138,8 @@ func RedactAccessTokenError(err error, token string) error {
 // RedactAccessTokenText is the logging-boundary backstop for an access_token
 // field embedded in otherwise unstructured text. Call sites that know they are
 // handling a URL or request error must still use the structured helpers above.
+// Percent escapes are ordinary bytes here: only RedactAccessTokenURL has parser
+// provenance that permits decoding them without rewriting arbitrary prose.
 //
 // Every occurrence of the field name is redacted, whatever precedes it. The
 // match used to be gated on a hand-listed set of separators the field may follow
@@ -147,28 +150,11 @@ func RedactAccessTokenError(err error, token string) error {
 // credential anyway — the same trade the value scan below already makes, in the
 // same direction.
 func RedactAccessTokenText(text string) string {
-	needle := AccessTokenQueryParam + "="
-	if indexFoldASCII(text, needle) < 0 {
+	spans := accessTokenTextValueSpans(text)
+	if len(spans) == 0 {
 		return text
 	}
-
-	var redacted strings.Builder
-	rest := text
-	for {
-		i := indexFoldASCII(rest, needle)
-		if i < 0 {
-			redacted.WriteString(rest)
-			return redacted.String()
-		}
-		valueStart := i + len(needle)
-		valueEnd := valueStart
-		for valueEnd < len(rest) && !accessTokenValueEnd(rest[valueEnd]) {
-			valueEnd++
-		}
-		redacted.WriteString(rest[:valueStart])
-		redacted.WriteString(accessTokenRedaction)
-		rest = rest[valueEnd:]
-	}
+	return replaceAccessTokenTextSpans(text, spans)
 }
 
 func redactAccessTokenTextOutsideStructuredURL(text string, urlErr *url.Error) string {

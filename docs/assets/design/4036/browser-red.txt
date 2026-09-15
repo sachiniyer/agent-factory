@@ -1,0 +1,46 @@
+Running 1 test using 1 worker
+
+#4036 PTY input: "\u001b[A"
+  ✘  1 [chromium] › selftest/phone-keybar.spec.ts:4:1 › #4036 phone keybar applies and consumes modifiers before the next letter (16.6s)
+
+
+  1) [chromium] › selftest/phone-keybar.spec.ts:4:1 › #4036 phone keybar applies and consumes modifiers before the next letter 
+
+    Error: expect(locator).toHaveAttribute(expected) failed
+
+    Locator:  locator('.af-terminal-keybar:visible').getByRole('button', { name: 'Ctrl', exact: true })
+    Expected: "off"
+    Received: "once"
+    Timeout:  15000ms
+
+    Call log:
+      - Expect "toHaveAttribute" with timeout 15000ms
+      - waiting for locator('.af-terminal-keybar:visible').getByRole('button', { name: 'Ctrl', exact: true })
+        19 × locator resolved to <button type="button" aria-label="Ctrl" data-state="once" aria-pressed="true" aria-description="Next character" title="Ctrl · Double tap to lock">Ctrl</button>
+           - unexpected value "once"
+
+
+       at phone-keybar.ts:41
+
+      39 |     await bar.getByRole("button", { name: arrow, exact: true }).click();
+      40 |     await bar.getByRole("button", { name: "Back", exact: true }).click();
+    > 41 |     await expect(button).toHaveAttribute("data-state", "off");
+         |                          ^
+      42 |     await expect(button).toHaveAttribute("aria-description", "Double tap to lock");
+      43 |     await page.keyboard.insertText("ls");
+      44 |     await expect.poll(stream).toBe(before + bytes + "ls");
+        at assertPhoneKeybar (/work/web/selftest/phone-keybar.ts:41:26)
+        at /work/web/selftest/phone-keybar.spec.ts:16:5
+
+    Error Context: test-results/phone-keybar--4036-phone-k-e348d-iers-before-the-next-letter-chromium/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/phone-keybar--4036-phone-k-e348d-iers-before-the-next-letter-chromium/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/phone-keybar--4036-phone-k-e348d-iers-before-the-next-letter-chromium/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [chromium] › selftest/phone-keybar.spec.ts:4:1 › #4036 phone keybar applies and consumes modifiers before the next letter 

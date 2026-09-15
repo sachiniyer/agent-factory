@@ -1,0 +1,97 @@
+TAP version 13
+# Subtest: terminal key bytes match physical keys
+ok 1 - terminal key bytes match physical keys
+  ---
+  duration_ms: 2.450576
+  type: 'test'
+  ...
+# Subtest: one shot consumes only the next character, including committed composition text
+ok 2 - one shot consumes only the next character, including committed composition text
+  ---
+  duration_ms: 1.005871
+  type: 'test'
+  ...
+# Subtest: double tap locks; tap unlocks; slow second tap cancels; reset clears both
+ok 3 - double tap locks; tap unlocks; slow second tap cancels; reset clears both
+  ---
+  duration_ms: 0.698161
+  type: 'test'
+  ...
+# Subtest: escape sequences and control bytes do not consume a character modifier
+ok 4 - escape sequences and control bytes do not consume a character modifier
+  ---
+  duration_ms: 0.297595
+  type: 'test'
+  ...
+# Subtest: pointerdown prevents focus transfer before acting
+ok 5 - pointerdown prevents focus transfer before acting
+  ---
+  duration_ms: 0.298303
+  type: 'test'
+  ...
+# Subtest: one-row keybar uses six primary targets and a replacement arrows row at 360px
+ok 6 - one-row keybar uses six primary targets and a replacement arrows row at 360px
+  ---
+  duration_ms: 15.326859
+  type: 'test'
+  ...
+# Subtest: keyBytes drops ctrl/alt for arrows and specials
+not ok 7 - keyBytes drops ctrl/alt for arrows and specials
+  ---
+  duration_ms: 6.182475
+  type: 'test'
+  location: '/home/siyer/Desktop/claude-squad-fix-4036-keybar-modifiers/web/src/terminal-keybar.test.ts:1:2350'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected "actual" to be strictly unequal to:
+    
+    '\x1B[D'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: '\x1B[D'
+  actual: '\x1B[D'
+  operator: 'notStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (/home/siyer/Desktop/claude-squad-fix-4036-keybar-modifiers/web/src/terminal-keybar.test.ts:59:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: an armed one-shot survives a keybar arrow press and hits the NEXT letter
+not ok 8 - an armed one-shot survives a keybar arrow press and hits the NEXT letter
+  ---
+  duration_ms: 2.230791
+  type: 'test'
+  location: '/home/siyer/Desktop/claude-squad-fix-4036-keybar-modifiers/web/src/terminal-keybar.test.ts:1:2516'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    'once' !== 'off'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'off'
+  actual: 'once'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/home/siyer/Desktop/claude-squad-fix-4036-keybar-modifiers/web/src/terminal-keybar.test.ts:67:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..8
+# tests 8
+# suites 0
+# pass 6
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1780.569606

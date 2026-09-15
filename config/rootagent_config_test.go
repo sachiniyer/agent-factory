@@ -31,6 +31,29 @@ func TestParseConfigRootAgents(t *testing.T) {
 	assert.Equal(t, "claude --model opus", custom.Program)
 }
 
+func TestRootAgentProgramsPreserveNonemptyWhitespaceAtLoadBoundary(t *testing.T) {
+	const command = `wrapper --suffix foo\ `
+	global, err := parseConfigTOML([]byte(`
+[root_agent]
+enabled = true
+program = 'wrapper --suffix foo\ '
+
+[root_agents."/repo"]
+program = 'wrapper --suffix foo\ '
+`), "config.toml")
+	require.NoError(t, err)
+	assert.Equal(t, command, global.RootAgent.Program)
+	assert.Equal(t, command, global.RootAgents["/repo"].Program)
+
+	personal, err := parseProjectConfig([]byte(`
+[root_agent]
+enabled = true
+program = 'wrapper --suffix foo\ '
+`), "project-config.toml")
+	require.NoError(t, err)
+	assert.Equal(t, command, personal.RootAgent.Program)
+}
+
 // TestDefaultConfigHasNoRootAgents pins the conservative default: nothing is
 // opted in until the user edits config.json.
 func TestDefaultConfigHasNoRootAgents(t *testing.T) {

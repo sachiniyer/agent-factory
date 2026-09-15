@@ -119,6 +119,8 @@ func TestSetGlobalConfigValueWarnsAboutAnUnregisteredDefaultAccount(t *testing.T
 	require.NotEmpty(t, res.Warnings,
 		"a default naming an account that is not registered must say so at the command that took it")
 	joined := strings.Join(res.Warnings, "\n")
+	assert.True(t, strings.HasPrefix(joined, "no claude account named"),
+		"warning must lead with its sentence instead of a shouted prefix: %s", joined)
 	assert.Contains(t, joined, "af accounts add claude personal",
 		"the warning names the registry command that makes the default real")
 }

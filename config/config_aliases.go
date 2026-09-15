@@ -161,6 +161,19 @@ func marshalGlobalConfigTOML(cfg *Config, legacyShape map[string]any) ([]byte, e
 		_, marshaledFlat := marshaled.shape[alias.legacy]
 		_, sourceFlat := legacyShape[alias.legacy]
 		_, sourceGrouped := aliasGroupedValue(legacyShape, alias)
+		// Deliberately UNGUARDED, unlike the identical-looking calls in
+		// configset.go and migrate.go, which first test tomlRootDottedTable
+		// because a [section] header cannot re-open a table a root dotted key
+		// already opened. That hazard cannot reach here: `content` is
+		// marshalConfigTOML's canonical output, never the user's file, and the
+		// Config struct spells these fields flat (`toml:"listen_addr"`), so the
+		// document this edits contains no `network.x = ...` root dotted key for
+		// a header to collide with. Verified by probe on 2026-09-10 (#4159):
+		// marshalConfigTOML emits zero root-dotted alias-section keys.
+		//
+		// If a grouped/dotted spelling is ever added to the struct tags, or if
+		// this loop is repointed at file bytes, add the tomlRootDottedTable
+		// guard the other two call sites use.
 		if marshaledFlat || sourceFlat || sourceGrouped {
 			content = setTOMLScalar(content, alias.section, alias.leaf, encoded)
 		}

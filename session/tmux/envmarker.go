@@ -34,6 +34,11 @@ const (
 	// the same sanitized name and Agent Factory home. AF_SESSION proves the
 	// reusable name, not which process generation carried it (#3309).
 	EnvMarkerGeneration = "AF_SESSION_GEN"
+	// envMarkerTestguardRun carries a test process's stable ownership identity
+	// across per-test AGENT_FACTORY_HOME overrides. It is deliberately private:
+	// production consumers authorize ownership with AF_HOME, while testguard uses
+	// the same string literal to diagnose test leaks without importing this package.
+	envMarkerTestguardRun = "AF_TESTGUARD_RUN"
 )
 
 // newSessionGeneration mints the process-generation identity stamped into one
@@ -77,6 +82,9 @@ func sessionEnvFlags(sanitizedName, generation string) []string {
 	if home, err := afHomeDir(); err == nil {
 		flags = append(flags, "-e", EnvMarkerHome+"="+home)
 	}
+	if testRun := os.Getenv(envMarkerTestguardRun); testRun != "" {
+		flags = append(flags, "-e", envMarkerTestguardRun+"="+testRun)
+	}
 	return flags
 }
 
@@ -93,6 +101,19 @@ func sessionEnvFlags(sanitizedName, generation string) []string {
 // distinction this sharp is how the first one drifts; there is now one.
 func SessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string, present bool, err error) {
 	return sessionHomeMarker(cmdExec, sanitizedName)
+}
+
+// SessionGenerationMarker reads a tmux session's AF_SESSION_GEN generation
+// marker with the same three-valued contract as SessionHomeMarker: (gen, true,
+// nil) when tmux answered and the session carries one, ("", false, nil) when
+// tmux answered and it carries none (a pre-generation pane or tmux < 3.2), and a
+// non-nil error when tmux did not answer — ownership remains UNKNOWN.
+//
+// Used by adopt to bind the verified generation identity through the
+// verification-to-track window: if the session is replaced between the marker
+// read and the track call, the generation will differ and adoption fails closed.
+func SessionGenerationMarker(cmdExec cmd.Executor, sanitizedName string) (generation string, present bool, err error) {
+	return sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerGeneration)
 }
 
 // sessionHomeMarker reads the AF_HOME ancestry marker from a tmux session's
@@ -112,29 +133,35 @@ func SessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string,
 // the named variable was absent. If neither query answers, ownership remains
 // unknown and cleanup decides whether the exact session has since vanished.
 func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string, present bool, err error) {
+	return sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerHome)
+}
+
+// sessionEnvMarker binds the query, response parser, and absence classifier to
+// one marker name so readers cannot accidentally classify a different variable.
+func sessionEnvMarker(cmdExec cmd.Executor, sanitizedName, marker string) (string, bool, error) {
 	ctx, cancel := tmuxTimeoutContext()
-	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), EnvMarkerHome)
+	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), marker)
 	markerTimedOut := ctx.Err() != nil
 	cancel()
 	if markerErr == nil {
 		line := strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r")
-		if line == "-"+EnvMarkerHome {
+		if line == "-"+marker {
 			return "", false, nil
 		}
 		if strings.ContainsAny(line, "\r\n") {
-			return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: malformed multiline response", EnvMarkerHome, sanitizedName)
+			return "", false, fmt.Errorf("read %s marker for tmux session %s: malformed multiline response", marker, sanitizedName)
 		}
-		home, ok := strings.CutPrefix(line, EnvMarkerHome+"=")
+		value, ok := strings.CutPrefix(line, marker+"=")
 		if !ok {
-			return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: malformed response %q", EnvMarkerHome, sanitizedName, line)
+			return "", false, fmt.Errorf("read %s marker for tmux session %s: malformed response %q", marker, sanitizedName, line)
 		}
-		return home, true, nil
+		return value, true, nil
 	}
 	if markerTimedOut {
 		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
 	}
-	if !missingSessionEnvMarker(markerErr) {
-		return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: %w", EnvMarkerHome, sanitizedName, markerErr)
+	if !missingSessionEnvMarker(markerErr, marker) {
+		return "", false, fmt.Errorf("read %s marker for tmux session %s: %w", marker, sanitizedName, markerErr)
 	}
 
 	// The targeted result itself identified an absent variable. Ask for the
@@ -152,18 +179,18 @@ func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string,
 		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
 	}
 
-	return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: targeted query: %v; environment query: %w",
-		EnvMarkerHome, sanitizedName, markerErr, allErr)
+	return "", false, fmt.Errorf("read %s marker for tmux session %s: targeted query: %v; environment query: %w",
+		marker, sanitizedName, markerErr, allErr)
 }
 
 // missingSessionEnvMarker recognizes tmux's explicit absent-variable answer
 // from the TARGETED query. Exit status alone is insufficient: a transient
 // wrapper/server failure may also be nonzero, and a later command succeeding
 // cannot retroactively determine why the first failed.
-func missingSessionEnvMarker(err error) bool {
+func missingSessionEnvMarker(err error, marker string) bool {
 	var exitErr *exec.ExitError
 	return errors.As(err, &exitErr) &&
-		strings.TrimSpace(string(exitErr.Stderr)) == "unknown variable: "+EnvMarkerHome
+		strings.TrimSpace(string(exitErr.Stderr)) == "unknown variable: "+marker
 }
 
 var (

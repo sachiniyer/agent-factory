@@ -3,9 +3,13 @@
 package proctree
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // This file is linux-tagged because its subject is: /proc/uptime, and the
@@ -13,6 +17,58 @@ import (
 // build-tagged symbol fails to COMPILE on the other platform — a runtime
 // t.Skip cannot rescue it, which `GOOS=darwin go vet` says immediately and
 // which is why this file exists rather than a skip.
+
+// Linux annotates /proc/<pid>/cwd with " (deleted)" after the directory is
+// unlinked. That annotation is not part of the pathname: returning it makes
+// every filepath-based containment check miss the process whose cwd is the
+// deleted directory it is trying to reap.
+func TestWorkingDirOmitsKernelDeletedSuffix(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "worktree")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	pid := parkedProcessIn(t, dir)
+	require.NoError(t, os.Remove(dir))
+
+	got, ok := WorkingDir(pid)
+	require.True(t, ok)
+	require.Equal(t, dir, got)
+}
+
+func TestWorkingDirPreservesRealDeletedSuffix(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "worktree (deleted)")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	pid := parkedProcessIn(t, dir)
+
+	got, ok := WorkingDir(pid)
+	require.True(t, ok)
+	require.Equal(t, dir, got)
+}
+
+func TestWorkingDirRejectsUnrelatedDeletedSuffixSibling(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "worktree")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, os.Mkdir(dir+" (deleted)", 0o755))
+	pid := parkedProcessIn(t, dir)
+	require.NoError(t, os.Remove(dir))
+
+	got, ok := WorkingDir(pid)
+	require.True(t, ok)
+	require.Equal(t, dir, got,
+		"an unrelated suffix-named sibling must not make procfs's annotation look like the cwd")
+}
+
+func TestLinuxWorkingDirPreservesSuffixOutsideMountNamespace(t *testing.T) {
+	path := "/container/worktree (deleted)"
+	require.Equal(t, path, linuxWorkingDirPath(path, nil, false),
+		"a host-side stat cannot disambiguate a path from another mount namespace")
+}
+
+func TestSameMountNamespaceRecognizesSelf(t *testing.T) {
+	same, known := sameMountNamespace(os.Getpid())
+	require.True(t, known)
+	require.True(t, same)
+}
 
 // TestSnapshotSurvivesUnreadableBootTime is the subset=pid regression: a procfs
 // that serves /proc/<pid>/stat but hides /proc/uptime must still yield a

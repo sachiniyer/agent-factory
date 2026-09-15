@@ -6562,12 +6562,14 @@ async function af(method, body, token2) {
   }
   return env?.data;
 }
-async function fetchSnapshot(token2) {
+async function fetchSessionSnapshot(token2) {
   const resp = await af("Snapshot", { repo_id: "" }, token2);
-  return resp.instances ?? [];
-}
-function probeToken(token2) {
-  return fetchSnapshot(token2);
+  return {
+    sessions: resp.instances ?? [],
+    operationLockTimeoutMs: resp.operation_lock_timeout_ms,
+    operationClockMs: resp.operation_clock_ms,
+    daemonBootId: resp.boot_id
+  };
 }
 async function probeAuthRequired() {
   let resp;
@@ -6632,8 +6634,13 @@ async function archiveSession(id, title, token2) {
     throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
 }
-async function restoreSession(id, title, token2) {
-  const result = await af("RestoreSession", { id, title, repo_id: "" }, token2);
+async function restoreSession(id, title, token2, expectedDaemonBootId) {
+  const result = await af("RestoreSession", {
+    id,
+    title,
+    repo_id: "",
+    expected_daemon_boot_id: expectedDaemonBootId
+  }, token2);
   if (result.warning) {
     throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
@@ -6643,9 +6650,32 @@ async function resumeFromLimit(id, title, token2) {
   if (!result.ok) {
     throw new Error(result.reason || "resume was not performed");
   }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
-async function handoffSession(id, title, to, token2) {
-  return af("HandoffSession", { id, title, repo_id: "", to }, token2);
+var ACCOUNT_AWARE_HANDOFF_METHOD = "HandoffSessionV2";
+var ACCOUNT_AWARE_HANDOFF_UNSUPPORTED = "daemon does not serve the version-bound account-aware handoff endpoint (likely an older daemon \u2014 upgrade it); the handoff was not sent";
+async function handoffSession(id, title, to, token2, account = "") {
+  let result;
+  try {
+    result = await af(ACCOUNT_AWARE_HANDOFF_METHOD, { id, title, repo_id: "", to, account }, token2);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404 && e.daemonRejected) {
+      throw new ApiError(404, ACCOUNT_AWARE_HANDOFF_UNSUPPORTED, e.code, true);
+    }
+    throw e;
+  }
+  const requestedAccount = account.trim();
+  if (requestedAccount && result.to_account !== requestedAccount) {
+    const mismatch = `daemon did not honor the requested account ${JSON.stringify(requestedAccount)} (likely an older daemon \u2014 upgrade it); the runtime was already restarted, but the resulting credential identity is unknown because the source account label may have carried across agent namespaces`;
+    throw new ApiError(200, result.warning ? `${result.warning}
+${mismatch}` : mismatch, MUTATION_COMMITTED_ERROR_CODE);
+  }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+  return result;
 }
 async function deleteProject(root2, token2) {
   const result = await af("DeleteProject", { repo_path: root2, repo_id: "" }, token2);
@@ -7271,7 +7301,7 @@ function terminalChrome(opts) {
   const retry = action("Retry limit", "", opts.retry);
   retry.title = "Retry after the usage limit";
   const handoff = action("Handoff", "", opts.handoff);
-  handoff.title = "Continue with another agent";
+  handoff.title = "Continue this session under another agent or account";
   const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
   copy.title = "Copy link";
   copy.setAttribute("aria-label", "Copy link");
@@ -7878,6 +7908,7 @@ var ConfigPane = class {
     input.addEventListener("input", () => {
       this.editing = e.key;
       this.draft = input.value;
+      this.editingInput = input;
       syncSave();
     });
     input.addEventListener("keydown", (ev) => {
@@ -8072,15 +8103,457 @@ function accountLoginStreamEndpoint(agent, name) {
   };
 }
 
+// src/terminal-soft-input.ts
+function insertedTextareaText(before, after) {
+  let prefix = 0;
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < before.length - prefix && suffix < after.length - prefix && before[before.length - suffix - 1] === after[after.length - suffix - 1]) suffix += 1;
+  return after.slice(prefix, after.length - suffix);
+}
+var TerminalSoftInput = class {
+  constructor(host, textarea, enabled, physicalInput, send, hasArmedModifier = () => true, keydownReachesCompositionHelper = () => true) {
+    this.host = host;
+    this.textarea = textarea;
+    this.enabled = enabled;
+    this.physicalInput = physicalInput;
+    this.send = send;
+    this.hasArmedModifier = hasArmedModifier;
+    this.keydownReachesCompositionHelper = keydownReachesCompositionHelper;
+    textarea?.addEventListener("compositionstart", this.onCompositionStart);
+    textarea?.addEventListener("compositionupdate", this.onCompositionUpdate);
+    textarea?.addEventListener("compositionend", this.onCompositionEnd);
+    textarea?.addEventListener("keydown", this.onKeyDown, true);
+    textarea?.addEventListener("keyup", this.onKeyUp, true);
+    textarea?.addEventListener("blur", this.onBlur, true);
+    host.addEventListener("beforeinput", this.onInput, true);
+    host.addEventListener("input", this.onInput, true);
+  }
+  active;
+  pending = [];
+  trailingFlushes = /* @__PURE__ */ new Set();
+  postCompositionTimers = /* @__PURE__ */ new Set();
+  forwardingTrailing;
+  forwardingComposition;
+  forwardingQueued;
+  keyDownSeen = false;
+  staleKeydown = false;
+  staleBeforeInputSent = false;
+  staleBeforeValue;
+  onKeyDown = (event) => {
+    this.keyDownSeen = true;
+    this.staleKeydown = false;
+    this.staleBeforeInputSent = false;
+    this.staleBeforeValue = void 0;
+    const range = this.pending.at(-1);
+    const keyCode = event.keyCode;
+    if (range && ![16, 17, 18, 229].includes(keyCode)) {
+      range.keydownAfterEnd = void 0;
+      range.keydownAfterEndEvent = event;
+    }
+  };
+  onKeyUp = () => {
+    this.keyDownSeen = false;
+    this.staleKeydown = false;
+    this.staleBeforeInputSent = false;
+    this.staleBeforeValue = void 0;
+  };
+  onBlur = () => {
+    if (this.keyDownSeen) this.staleKeydown = true;
+  };
+  onCompositionStart = () => {
+    const value = this.textarea?.value;
+    for (const range of this.pending) {
+      if (range.frozenText === void 0 && range.start !== void 0 && value !== void 0) {
+        range.frozenText = value.substring(range.start);
+      }
+      this.queueTrailingFlush(range);
+    }
+    this.active = { start: value?.length, initialValue: value, observedValue: value, text: "" };
+  };
+  onCompositionUpdate = (event) => {
+    const data = event.data;
+    if (this.active) {
+      this.observeCompositionValue(this.active);
+      this.active.sawUpdate = true;
+      if (typeof data === "string") this.active.text = this.active.updateText = data;
+    }
+  };
+  onCompositionEnd = (event) => {
+    this.active ??= { text: "" };
+    const range = this.active;
+    this.observeCompositionValue(range);
+    const data = event.data;
+    if (typeof data === "string") range.text = data;
+    this.active = void 0;
+    const value = this.textarea?.value;
+    const endText = range.start !== void 0 && value !== void 0 ? value.substring(range.start) : void 0;
+    range.provisionalAtEnd = endText !== void 0 && endText.length > 0 && range.updateText !== void 0 && range.updateText.length > endText.length && range.updateText.startsWith(endText);
+    if (range.start !== void 0 && value !== void 0 && value.length > range.start)
+      range.commitLength = value.length - range.start;
+    else if (range.textareaChanged && value === range.initialValue || !range.text && !range.sawUpdate)
+      range.commitLength = 0;
+    this.pending.push(range);
+    range.release = setTimeout(() => this.release(range), 0);
+  };
+  onInput = (event) => {
+    const input = event;
+    if (!this.enabled()) return;
+    if (this.active || this.pending.length) {
+      if (this.active && input.type === "input")
+        this.observeCompositionValue(this.active);
+      const range = this.pending.at(-1);
+      const postCompositionText = input.inputType === "insertText" || input.inputType === "insertCompositionText";
+      if (range && input.inputType === "deleteContentBackward" && input.isComposing === false) {
+        if (input.type === "beforeinput") {
+          range.beforeDeleteValue = this.textarea?.value ?? range.observedValue;
+        } else if (input.type === "input") {
+          const value = this.textarea?.value;
+          const beforeValue = range.beforeDeleteValue ?? range.observedValue;
+          const priorLength = beforeValue?.length ?? (range.start !== void 0 && range.commitLength !== void 0 ? range.start + range.commitLength + (range.trailingLength ?? 0) : void 0);
+          range.beforeDeleteValue = void 0;
+          if (value !== void 0 && priorLength !== void 0 && value.length < priorLength && range.start !== void 0) {
+            const beforeText = range.queuedInput?.beforeText ?? beforeValue?.substring(range.start);
+            if (beforeText !== void 0) {
+              range.frozenText = beforeText;
+              range.queuedInput = {
+                beforeText,
+                afterText: value.substring(range.start),
+                emissions: [...range.queuedInput?.emissions ?? [], "\x7F"]
+              };
+            }
+          }
+          range.observedValue = value;
+        }
+        return;
+      }
+      if (range && postCompositionText && input.type === "input" && input.isComposing === false) {
+        const keydownAfterEnd = this.keydownReachedCompositionHelper(range);
+        const value = this.textarea?.value;
+        const mutationLength = value !== void 0 && range.start !== void 0 && value.length > range.start ? value.length - range.start : void 0;
+        const fallbackLength = input.data?.length;
+        const firstCommitGrowth = range.provisionalAtEnd && !range.postEndInputSeen && !keydownAfterEnd && range.commitLength !== void 0 && (mutationLength ?? fallbackLength ?? 0) > range.commitLength;
+        if (keydownAfterEnd) {
+          range.trailingLength = mutationLength !== void 0 ? Math.max(range.trailingLength ?? 0, mutationLength - (range.commitLength ?? 0)) : (range.trailingLength ?? 0) + (input.data?.length ?? 0);
+        } else if (range.commitLength === void 0) {
+          range.commitLength = mutationLength ?? input.data?.length;
+        } else if (firstCommitGrowth) {
+          range.commitLength = mutationLength ?? fallbackLength;
+        } else {
+          range.trailingLength = mutationLength !== void 0 ? Math.max(range.trailingLength ?? 0, mutationLength - range.commitLength) : (range.trailingLength ?? 0) + (input.data?.length ?? 0);
+        }
+        range.postEndInputSeen = true;
+        range.observedValue = value;
+      }
+      if (input.type === "input" && input.inputType === "insertText") input.stopImmediatePropagation();
+      return;
+    }
+    if (this.physicalInput() || input.inputType !== "insertText") return;
+    if (input.isComposing && !this.staleKeydown) return;
+    if (this.staleKeydown) {
+      if (input.type === "beforeinput") {
+        this.staleBeforeInputSent = false;
+        this.staleBeforeValue = this.textarea?.value;
+        if (!input.data) return;
+        input.stopImmediatePropagation();
+        this.staleBeforeInputSent = true;
+        this.sendRecovered(input.data, input.isComposing);
+      } else if (input.type === "input") {
+        input.stopImmediatePropagation();
+        const value = this.textarea?.value;
+        const observed = value !== void 0 && this.staleBeforeValue !== void 0 ? insertedTextareaText(this.staleBeforeValue, value) : "";
+        const recovered = observed || input.data;
+        if (recovered && !this.staleBeforeInputSent) this.sendRecovered(recovered, input.isComposing);
+        this.staleBeforeInputSent = false;
+        this.staleBeforeValue = void 0;
+      }
+      return;
+    }
+    if (!input.data) return;
+    if (!this.hasArmedModifier()) return;
+    if (input.type === "beforeinput" && !input.cancelable) return;
+    input.preventDefault();
+    input.stopImmediatePropagation();
+    this.send(input.data);
+  };
+  /** Queue custom input after xterm's already-scheduled composition finalizer. */
+  deferAfterPendingComposition(action) {
+    if (!this.pending.length) return false;
+    const release = setTimeout(() => {
+      this.postCompositionTimers.delete(release);
+      action();
+    }, 0);
+    this.postCompositionTimers.add(release);
+    return true;
+  }
+  transform(text, applyModifiers) {
+    if (this.forwardingComposition === text) return text;
+    if (this.forwardingQueued?.text === text)
+      return this.applyQueuedInput(this.forwardingQueued.range, applyModifiers);
+    if (this.forwardingTrailing === text) return applyModifiers(text, true);
+    const ranges = this.active ? [...this.pending, this.active] : [...this.pending];
+    let rest = text, prefix = "", matchedComposition = false;
+    for (const range of ranges) {
+      const queued = range.queuedInput;
+      if (queued?.afterText && rest.startsWith(queued.afterText)) {
+        prefix += this.applyQueuedInput(range, applyModifiers);
+        rest = rest.slice(queued.afterText.length);
+        matchedComposition = true;
+        this.remove(range);
+        if (!rest) break;
+        continue;
+      }
+      const value = this.textarea?.value;
+      const committed = range.frozenText ?? (range.start !== void 0 && value !== void 0 ? value.substring(range.start) : range.text);
+      const boundary = Math.min(
+        committed.length,
+        range.commitLength ?? committed.length - (range.trailingLength ?? 0)
+      );
+      let length = 0;
+      for (const character of committed.slice(0, boundary)) {
+        if (!rest.startsWith(character, length)) break;
+        length += character.length;
+      }
+      if (!length) {
+        const trailingLength = Math.min(range.trailingLength ?? 0, committed.length);
+        const trailing = boundary === 0 && trailingLength ? committed.slice(-trailingLength) : "";
+        if (trailing && rest.startsWith(trailing)) {
+          prefix += applyModifiers(trailing, true);
+          rest = rest.slice(trailing.length);
+          this.remove(range);
+          if (!rest) break;
+        }
+        continue;
+      }
+      matchedComposition = true;
+      prefix += rest.slice(0, length);
+      rest = rest.slice(length);
+      const flush = range.trailingFlush;
+      if (flush && rest.startsWith(flush.text)) {
+        this.cancelTrailingFlush(flush);
+        range.trailingFlush = void 0;
+        prefix += applyModifiers(flush.text, true);
+        rest = rest.slice(flush.text.length);
+      }
+      this.remove(range);
+      if (!rest) break;
+    }
+    return prefix + (rest ? applyModifiers(rest, matchedComposition) : "");
+  }
+  remove(range) {
+    if (range.release !== void 0) clearTimeout(range.release);
+    const index = this.pending.indexOf(range);
+    if (index !== -1) this.pending.splice(index, 1);
+    if (this.active === range) this.active = void 0;
+  }
+  release(range) {
+    const queued = range.queuedInput;
+    if (!queued) {
+      this.remove(range);
+      return;
+    }
+    const text = queued.beforeText + queued.emissions.join("");
+    this.remove(range);
+    this.forwardingQueued = { range, text };
+    try {
+      this.send(text);
+    } finally {
+      this.forwardingQueued = void 0;
+    }
+  }
+  applyQueuedInput(range, applyModifiers) {
+    const queued = range.queuedInput;
+    if (!queued) return "";
+    const boundary = Math.min(
+      queued.beforeText.length,
+      range.commitLength ?? queued.beforeText.length - (range.trailingLength ?? 0)
+    );
+    const commit = queued.beforeText.slice(0, boundary);
+    const trailing = queued.beforeText.slice(boundary);
+    const input = queued.emissions.map((text) => applyModifiers(text, true)).join("");
+    return commit + (trailing ? applyModifiers(trailing, true) : "") + input;
+  }
+  observeCompositionValue(range) {
+    const value = this.textarea?.value;
+    if (value !== void 0) {
+      range.observedValue = value;
+      if (range.initialValue !== void 0 && value !== range.initialValue) range.textareaChanged = true;
+    }
+  }
+  keydownReachedCompositionHelper(range) {
+    if (range.keydownAfterEnd !== void 0) return range.keydownAfterEnd;
+    const event = range.keydownAfterEndEvent;
+    if (!event) return false;
+    range.keydownAfterEndEvent = void 0;
+    range.keydownAfterEnd = this.keydownReachesCompositionHelper(event);
+    return range.keydownAfterEnd;
+  }
+  queueTrailingFlush(range) {
+    const trailingLength = range.trailingLength ?? 0;
+    if (!trailingLength || !range.frozenText || range.trailingFlush) return;
+    const text = range.frozenText.slice(-trailingLength);
+    const flush = { text };
+    range.trailingFlush = flush;
+    this.trailingFlushes.add(flush);
+    flush.release = setTimeout(() => {
+      this.trailingFlushes.delete(flush);
+      if (range.trailingFlush === flush) range.trailingFlush = void 0;
+      this.forwardingTrailing = text;
+      try {
+        this.send(text);
+      } finally {
+        this.forwardingTrailing = void 0;
+      }
+    }, 0);
+  }
+  cancelTrailingFlush(flush) {
+    if (flush.release !== void 0) clearTimeout(flush.release);
+    this.trailingFlushes.delete(flush);
+  }
+  sendRecovered(text, composing) {
+    if (!composing) {
+      this.send(text);
+      return;
+    }
+    this.forwardingComposition = text;
+    try {
+      this.send(text);
+    } finally {
+      this.forwardingComposition = void 0;
+    }
+  }
+  reset() {
+    for (const range of this.pending) if (range.release !== void 0) clearTimeout(range.release);
+    for (const flush of this.trailingFlushes) if (flush.release !== void 0) clearTimeout(flush.release);
+    for (const release of this.postCompositionTimers) clearTimeout(release);
+    this.trailingFlushes.clear();
+    this.postCompositionTimers.clear();
+    this.pending.length = 0;
+    this.active = void 0;
+  }
+  dispose() {
+    this.reset();
+    this.textarea?.removeEventListener("compositionstart", this.onCompositionStart);
+    this.textarea?.removeEventListener("compositionupdate", this.onCompositionUpdate);
+    this.textarea?.removeEventListener("compositionend", this.onCompositionEnd);
+    this.textarea?.removeEventListener("keydown", this.onKeyDown, true);
+    this.textarea?.removeEventListener("keyup", this.onKeyUp, true);
+    this.textarea?.removeEventListener("blur", this.onBlur, true);
+    this.host.removeEventListener("beforeinput", this.onInput, true);
+    this.host.removeEventListener("input", this.onInput, true);
+  }
+};
+
 // src/terminal-keybar.ts
+var ARROW_SUFFIXES = { "\u2190": "D", "\u2191": "A", "\u2193": "B", "\u2192": "C" };
+var SPECIAL_BYTES = { Esc: "\x1B", Tab: "	", "^C": "" };
+var KEY_BYTES_NAMED_KEYS = Object.freeze([...Object.keys(ARROW_SUFFIXES), ...Object.keys(SPECIAL_BYTES)]);
 function keyBytes(key, ctrl = false, alt = false, applicationCursor = false) {
-  const arrows = { "\u2190": "D", "\u2191": "A", "\u2193": "B", "\u2192": "C" };
-  const special = { Esc: "\x1B", Tab: "	", "^C": "" };
-  if (arrows[key]) return `\x1B${applicationCursor ? "O" : "["}${arrows[key]}`;
-  if (special[key]) return special[key];
-  const code = key.toUpperCase().charCodeAt(0);
-  const text = ctrl && /^[\x40-\x7f]$/.test(key) && code >= 64 && code <= 95 ? String.fromCharCode(code & 31) : key;
+  const sequence = userSequence(key);
+  if (sequence) return encodeSequence(sequence, (alt ? 2 : 0) | (ctrl ? 4 : 0), key);
+  if (ARROW_SUFFIXES[key]) {
+    const modifier = 1 + (alt ? 2 : 0) + (ctrl ? 4 : 0);
+    return modifier > 1 ? `\x1B[1;${modifier}${ARROW_SUFFIXES[key]}` : `\x1B${applicationCursor ? "O" : "["}${ARROW_SUFFIXES[key]}`;
+  }
+  if (SPECIAL_BYTES[key]) return (alt ? "\x1B" : "") + SPECIAL_BYTES[key];
+  if (key === "\x7F") return (alt ? "\x1B" : "") + (ctrl ? "\b" : key);
+  const text = ctrl && key.length === 1 && key.charCodeAt(0) <= 127 ? ctrlModifiedEmission(key) ?? key : key;
   return (alt ? "\x1B" : "") + text;
+}
+var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
+function userSequence(text) {
+  if (text.length < 3 || text.charCodeAt(0) !== 27) return void 0;
+  const csi = /^\x1b\[([0-9;]*)([A-Za-z~])$/.exec(text);
+  if (csi) return { kind: "CSI", parameters: csi[1], final: csi[2] };
+  const ss3 = /^\x1bO([\x40-\x7e])$/.exec(text);
+  if (ss3) return { kind: "SS3", parameters: "", final: ss3[1] };
+  return void 0;
+}
+function encodeSequence(sequence, modifierBits, original, replaceModifiers = false) {
+  if (!modifierBits) return original;
+  if (sequence.kind === "SS3") return `\x1B[1;${modifierBits + 1}${sequence.final}`;
+  const parameters = sequence.parameters ? sequence.parameters.split(";") : [];
+  parameters[0] ||= "1";
+  const encoded = Number(parameters[1] || "1");
+  const existingBits = !replaceModifiers && Number.isSafeInteger(encoded) && encoded > 0 ? encoded - 1 : 0;
+  parameters[1] = String((existingBits | modifierBits) + 1);
+  return `\x1B[${parameters.join(";")}${sequence.final}`;
+}
+function decodeKeyBytes(text) {
+  let sequenceText = text;
+  let prefixedAlt = false;
+  let sequence = userSequence(sequenceText);
+  if (!sequence && text.charCodeAt(0) === 27) {
+    sequenceText = text.slice(1);
+    sequence = userSequence(sequenceText);
+    prefixedAlt = sequence !== void 0;
+  }
+  if (sequence) {
+    if (sequence.kind === "CSI" && sequence.final === "Z") return void 0;
+    const parameters = sequence.parameters ? sequence.parameters.split(";") : [];
+    const encoded = Number(parameters[1] || "1");
+    const modifierBits = Number.isSafeInteger(encoded) && encoded > 0 ? encoded - 1 : 0;
+    return {
+      key: sequenceText,
+      ctrl: (modifierBits & 4) !== 0,
+      alt: prefixedAlt || (modifierBits & 2) !== 0,
+      applicationCursor: sequence.kind === "SS3"
+    };
+  }
+  const alt = text.length > 1 && text.charCodeAt(0) === 27;
+  const character = alt ? text.slice(1) : text;
+  const codePoint = character.codePointAt(0);
+  if (codePoint === void 0 || character.length !== (codePoint > 65535 ? 2 : 1)) return void 0;
+  if (codePoint <= 31)
+    return { key: String.fromCharCode(codePoint + 64), ctrl: true, alt, applicationCursor: false };
+  return { key: character, ctrl: false, alt, applicationCursor: false };
+}
+function ctrlModifiedEmission(text) {
+  if (text.length !== 1) return void 0;
+  const code = text.charCodeAt(0);
+  if (code <= 31) return text;
+  if (code === 127) return "\b";
+  if (text === " ") return "\0";
+  const upper = text.toUpperCase();
+  if (upper.length === 1) {
+    const upperCode = upper.charCodeAt(0);
+    if (upperCode >= 64 && upperCode <= 95) return String.fromCharCode(upperCode & 31);
+  }
+  if (code >= 51 && code <= 55) return String.fromCharCode(code - 24);
+  if (code === 56) return "\x7F";
+  return void 0;
+}
+function xtermAltControlAlias(text, physical, stickyCtrl, stickyAlt) {
+  if (physical.metaKey || physical.key.length !== 1 || /^[A-Za-z ]$/.test(physical.key)) return void 0;
+  const control = ctrlModifiedEmission(physical.key);
+  if (control === void 0) return void 0;
+  if (physical.ctrlKey && !physical.altKey && stickyAlt && text === control)
+    return `\x1B${physical.key}`;
+  if (physical.altKey && !physical.ctrlKey && stickyCtrl && text === `\x1B${physical.key}`)
+    return text;
+  return void 0;
+}
+function mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt) {
+  if ((!stickyCtrl || physical.ctrlKey) && (!stickyAlt || physical.altKey)) return text;
+  const ctrl = physical.ctrlKey || stickyCtrl;
+  const alt = physical.altKey || stickyAlt;
+  const modifierBits = (physical.shiftKey ? 1 : 0) | (alt ? 2 : 0) | (ctrl ? 4 : 0) | (physical.metaKey ? 8 : 0);
+  if (physical.key === "Insert") return text;
+  if ((physical.key === "PageUp" || physical.key === "PageDown") && !ctrl) return text;
+  const sequence = userSequence(text);
+  if (sequence) {
+    if (sequence.kind === "CSI" && sequence.final === "Z") return text;
+    return encodeSequence(sequence, modifierBits, text, true);
+  }
+  const arrow = { ArrowLeft: "D", ArrowUp: "A", ArrowDown: "B", ArrowRight: "C" }[physical.key];
+  if (arrow && physical.altKey && (text === "\x1Bb" || text === "\x1Bf"))
+    return `\x1B[1;${modifierBits + 1}${arrow}`;
+  const altAlias = xtermAltControlAlias(text, physical, stickyCtrl, stickyAlt);
+  if (altAlias !== void 0) return altAlias;
+  const physicalAltPrefix = physical.altKey && text.length > 1 && text.charCodeAt(0) === 27;
+  let payload = physicalAltPrefix ? text.slice(1) : text;
+  if (stickyCtrl && !physical.ctrlKey) payload = ctrlModifiedEmission(payload) ?? payload;
+  return (physicalAltPrefix || stickyAlt && !physical.altKey ? "\x1B" : "") + payload;
 }
 var StickyModifiers = class {
   values = { Ctrl: "off", Alt: "off" };
@@ -8096,20 +8569,46 @@ var StickyModifiers = class {
     this.values = { Ctrl: "off", Alt: "off" };
     this.tapped = { Ctrl: -Infinity, Alt: -Infinity };
   }
-  input(text) {
-    if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) return text;
-    return Array.from(text, (char) => {
-      const result = keyBytes(char, this.values.Ctrl !== "off", this.values.Alt !== "off");
-      for (const key of ["Ctrl", "Alt"]) if (this.values[key] === "once") this.values[key] = "off";
+  key(key, applicationCursor = false) {
+    const ctrl = this.values.Ctrl !== "off";
+    const alt = this.values.Alt !== "off";
+    const result = keyBytes(key, ctrl, alt, applicationCursor);
+    this.consumeApplied(ctrl, alt);
+    return result;
+  }
+  input(text, source = "user", physical) {
+    if (source === "terminal") return text;
+    const stickyCtrl = this.values.Ctrl !== "off";
+    const stickyAlt = this.values.Alt !== "off";
+    if (physical && (stickyCtrl || stickyAlt)) {
+      const result = mergePhysicalKeyBytes(text, physical, stickyCtrl, stickyAlt);
+      this.consumeApplied(stickyCtrl && !physical.ctrlKey, stickyAlt && !physical.altKey);
       return result;
-    }).join("");
+    }
+    const decoded = decodeKeyBytes(text);
+    if (decoded) {
+      const encode2 = (ctrl, alt) => keyBytes(
+        decoded.key,
+        decoded.ctrl || ctrl,
+        decoded.alt || alt,
+        decoded.applicationCursor
+      );
+      const result = encode2(stickyCtrl, stickyAlt);
+      this.consumeApplied(stickyCtrl, stickyAlt);
+      return result;
+    }
+    if (!text || text.charCodeAt(0) < 32 || text.charCodeAt(0) === 127) return text;
+    return Array.from(text, (char) => this.key(char)).join("");
+  }
+  consumeApplied(ctrl, alt) {
+    if (ctrl && this.values.Ctrl === "once") this.values.Ctrl = "off";
+    if (alt && this.values.Alt === "once") this.values.Alt = "off";
   }
 };
 function keybarPointerDown(event, act) {
   event.preventDefault();
   act();
 }
-var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
 var TerminalKeybar = class {
   constructor(host, input, refit, applicationCursor) {
     this.host = host;
@@ -8117,6 +8616,7 @@ var TerminalKeybar = class {
     this.refit = refit;
     this.applicationCursor = applicationCursor;
     this.originalMaxHeight = host.style.maxHeight;
+    this.textarea = host.querySelector(".xterm-helper-textarea");
     this.bar.className = "af-terminal-keybar";
     this.bar.setAttribute("role", "group");
     this.bar.setAttribute("aria-label", "Terminal keys");
@@ -8133,7 +8633,7 @@ var TerminalKeybar = class {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
           else if (key === "Ctrl" || key === "Alt") this.modifiers.tap(key, performance.now());
-          else this.input(keyBytes(key, false, false, this.applicationCursor()));
+          else this.sendUserInput(this.modifiers.key(key, this.applicationCursor()), { keybar: true });
           this.paint();
         };
         button.addEventListener("pointerdown", (event) => keybarPointerDown(event, act));
@@ -8154,8 +8654,15 @@ var TerminalKeybar = class {
     window.addEventListener("resize", this.layout);
     host.addEventListener("keydown", this.onKeyDown, true);
     host.addEventListener("keyup", this.onKeyUp, true);
-    host.addEventListener("beforeinput", this.onSoftInput, true);
-    host.addEventListener("input", this.onSoftInput, true);
+    this.softInput = new TerminalSoftInput(
+      host,
+      this.textarea,
+      () => this.focused && this.phone.matches,
+      () => this.physicalInput,
+      (data) => this.sendUserInput(data),
+      () => this.modifiers.state("Ctrl") !== "off" || this.modifiers.state("Alt") !== "off",
+      (event) => !this.suppressedKeydowns.delete(event)
+    );
     this.paint();
   }
   arrows = false;
@@ -8165,37 +8672,104 @@ var TerminalKeybar = class {
   phone = window.matchMedia("(max-width: 768px)");
   viewport = window.visualViewport;
   observer;
+  textarea;
   focused = false;
   physicalInput = false;
   onKeyDown = (event) => {
     this.physicalInput = event.key.length === 1 && !event.isComposing && event.keyCode !== 229;
+    if (event.keyCode === 229) this.markDeferredUserInput();
   };
   onKeyUp = () => {
     this.physicalInput = false;
   };
-  onSoftInput = (event) => {
-    if (!this.focused || !this.phone.matches || this.physicalInput || event.isComposing || event.inputType !== "insertText" || !event.data || this.modifiers.state("Ctrl") === "off" && this.modifiers.state("Alt") === "off") return;
-    if (event.type === "beforeinput" && !event.cancelable) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    this.input(event.data);
-  };
+  softInput;
   buttons = /* @__PURE__ */ new Map();
   originalMaxHeight;
+  userInput;
+  userInputGeneration = 0;
+  deferred229;
+  deferred229Generation = 0;
+  suppressedKeydowns = /* @__PURE__ */ new WeakSet();
   setFocused(focused) {
     this.focused = focused;
     if (!focused) {
       this.modifiers.reset();
+      this.softInput.reset();
       this.physicalInput = false;
       this.arrows = false;
+      this.deferred229 = void 0;
+      this.deferred229Generation += 1;
     }
     this.paint();
     this.layout();
   }
   transform(text) {
-    const output = this.focused && this.phone.matches ? this.modifiers.input(text) : text;
+    const marker = this.userInput;
+    const source = marker || this.takeDeferred229(text) ? "user" : "terminal";
+    this.userInput = void 0;
+    this.userInputGeneration += 1;
+    const output = this.softInput.transform(text, (value, compositionTrailing) => this.focused && this.phone.matches && marker?.source !== "keybar" ? this.modifiers.input(
+      value,
+      compositionTrailing ? "user" : source,
+      compositionTrailing ? void 0 : marker?.physical
+    ) : value);
     this.paint();
     return output;
+  }
+  /** Mark xterm's synchronous onKey emission with its unaliased DOM identity. */
+  markUserInput(physical, keybar = false) {
+    const generation = ++this.userInputGeneration;
+    this.userInput = {
+      source: keybar ? "keybar" : "user",
+      physical: physical ? {
+        key: physical.key,
+        shiftKey: physical.shiftKey,
+        altKey: physical.altKey,
+        ctrlKey: physical.ctrlKey,
+        metaKey: physical.metaKey
+      } : void 0
+    };
+    const clear = () => {
+      if (this.userInputGeneration === generation) this.userInput = void 0;
+    };
+    queueMicrotask(clear);
+  }
+  /** Match xterm's deferred 229 textarea diff without marking an intervening reply. */
+  markDeferredUserInput() {
+    const before = this.textarea?.value;
+    if (before === void 0) return;
+    const generation = ++this.deferred229Generation;
+    this.deferred229 = { before, generation };
+    queueMicrotask(() => setTimeout(() => {
+      if (this.deferred229?.generation === generation) this.deferred229 = void 0;
+    }, 0));
+  }
+  /** Record that xterm's custom handler rejected this event before CompositionHelper. */
+  markKeydownSuppressed(event) {
+    this.suppressedKeydowns.add(event);
+  }
+  takeDeferred229(text) {
+    const pending = this.deferred229;
+    const value = this.textarea?.value;
+    if (!pending || value === void 0) return false;
+    const diff = value.replace(pending.before, "");
+    const expected = value.length > pending.before.length ? diff : value.length < pending.before.length ? "\x7F" : value !== pending.before ? value : void 0;
+    if (text !== expected) return false;
+    this.deferred229 = void 0;
+    this.deferred229Generation += 1;
+    return true;
+  }
+  sendUserInput(data, options = {}) {
+    if (options.afterComposition && this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
+    this.emitUserInput(data, options);
+  }
+  /** Send an xterm-suppressed physical key after any commit that it could not flush. */
+  sendCustomUserInput(data, physical) {
+    this.sendUserInput(data, { physical, afterComposition: true });
+  }
+  emitUserInput(data, options) {
+    this.markUserInput(options.physical, options.keybar);
+    this.input(data);
   }
   paint() {
     this.rows.forEach((row, index) => {
@@ -8205,7 +8779,7 @@ var TerminalKeybar = class {
       const state = this.modifiers.state(key);
       button.dataset.state = state;
       button.setAttribute("aria-pressed", String(state !== "off"));
-      button.setAttribute("aria-description", state === "locked" ? "Locked; tap to release" : state === "once" ? "Next character" : "Double tap to lock");
+      button.setAttribute("aria-description", state === "locked" ? "Locked; tap to release" : state === "once" ? "Next key" : "Double tap to lock");
       button.title = state === "locked" ? `${key} locked \xB7 Tap to release` : `${key} \xB7 Double tap to lock`;
       button.textContent = state === "locked" ? `\u25B8 ${key}` : key;
     }
@@ -8232,8 +8806,7 @@ var TerminalKeybar = class {
   dispose() {
     this.host.removeEventListener("keydown", this.onKeyDown, true);
     this.host.removeEventListener("keyup", this.onKeyUp, true);
-    this.host.removeEventListener("beforeinput", this.onSoftInput, true);
-    this.host.removeEventListener("input", this.onSoftInput, true);
+    this.softInput.dispose();
     this.observer.disconnect();
     this.phone.removeEventListener("change", this.layout);
     this.viewport?.removeEventListener("resize", this.layout);
@@ -8756,23 +9329,26 @@ var AttachTerminal = class {
         }
       });
     }
+    this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
     this.term.attachCustomKeyEventHandler((ev) => {
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
         this.mouseOverrideKeyHeld = ev.type !== "keyup";
       }
-      return handleClipboardKeydown(ev, {
+      const accepted = handleClipboardKeydown(ev, {
         composerNewline: this.endpoint.composerNewline,
         hasSelection: () => this.term.hasSelection(),
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
-        sendInput: (text) => this.sendInput(text),
+        sendInput: (text) => this.keybar.sendCustomUserInput(text, ev),
         // Public Terminal.input(..., true) is xterm's genuine-user-input path:
         // it scrolls to bottom and clears selection, then fires onData above.
-        sendUserInput: (text) => this.term.input(text, true)
+        sendUserInput: (text) => this.keybar.sendCustomUserInput(text, ev)
       });
+      if (!accepted) this.keybar.markKeydownSuppressed(ev);
+      return accepted;
     });
     this.ro = new ResizeObserver(() => this.scheduleFit());
     this.ro.observe(container);
@@ -10202,6 +10778,12 @@ var EventStream = class {
   }
 };
 
+// src/handoff_accounts.ts
+function handoffAccountChoices(accounts, agent, currentAccount = "") {
+  const rows = accountChoices(accounts, agent);
+  return accounts.entries.filter((entry) => entry.agent === agent && entry.name !== currentAccount && !entry.registration_only).map((entry) => ({ ...rows.find((row) => row.value === entry.name), logged_in: entry.logged_in }));
+}
+
 // src/account_selection.ts
 var AccountSelection = class {
   picked = false;
@@ -10728,9 +11310,36 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     confirmClass: "af-primary",
     onCancel: callbacks.onCancel
   });
+  let accounts = { entries: [], agents: [] };
+  let accountsLoaded = !callbacks.loadAccounts;
+  let accountsFailed = false;
+  const requiresAccount = (agent) => agent === currentAgent || !!callbacks.currentAccount;
+  let accountRows = [];
+  const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
+  const accountSelect = h("select", { class: "af-input" });
+  accountSelect.setAttribute("aria-label", "New account");
+  const syncAccountSelection = () => {
+    accountHint.textContent = accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
+    confirmBtn.disabled = !accountsLoaded || !agentSelect.value || requiresAccount(agentSelect.value) && !accountSelect.value;
+  };
+  const refreshAccounts2 = () => {
+    const agent = agentSelect.value;
+    const choices = handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "");
+    accountRows = choices;
+    accountSelect.replaceChildren();
+    if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
+    else if (!choices.some((choice) => choice.logged_in)) accountSelect.append(h("option", { value: "" }, "Choose an account"));
+    for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
+    const fallback = accounts.defaults?.[agent];
+    const selected = choices.find((choice) => choice.value === fallback && choice.logged_in) ?? (requiresAccount(agent) ? choices.find((choice) => choice.logged_in) : void 0);
+    accountSelect.value = selected?.value ?? "";
+    accountSelect.disabled = choices.length === 0;
+    syncAccountSelection();
+  };
   const agentSelect = h("select", { class: "af-input" });
   agentSelect.setAttribute("aria-label", "New agent");
   confirmBtn.disabled = true;
+  let catalogChoices = null;
   const renderChoices = (choices) => {
     agentSelect.replaceChildren();
     for (const choice of choices) {
@@ -10738,8 +11347,27 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     }
     confirmBtn.disabled = choices.length === 0;
   };
+  const refreshAgentChoices = () => {
+    if (catalogChoices === null || !accountsLoaded) return;
+    const hasAccount = (agent) => handoffAccountChoices(
+      accounts,
+      agent,
+      agent === currentAgent ? callbacks.currentAccount : ""
+    ).length > 0;
+    const choices = catalogChoices.filter((choice) => !callbacks.currentAccount || hasAccount(choice.value));
+    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
+      choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
+    }
+    const previous = agentSelect.value;
+    renderChoices(choices);
+    if (choices.some((choice) => choice.value === previous)) agentSelect.value = previous;
+    refreshAccounts2();
+    if (accountsLoaded) handle.setError(choices.length === 0 ? callbacks.currentAccount ? "No registered target account is available to hand off to." : "No other agent is available to hand off to." : null);
+  };
   body.append(
     field("New agent", agentSelect),
+    field("New account", accountSelect),
+    accountHint,
     h(
       "p",
       { class: "af-modal-text" },
@@ -10747,15 +11375,26 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     )
   );
   void callbacks.loadPrograms().then((catalog) => {
-    const choices = handoffAgentChoices(catalog, currentAgent);
-    renderChoices(choices);
-    if (choices.length === 0) {
-      handle.setError("No other agent is available to hand off to.");
-    }
+    catalogChoices = handoffAgentChoices(catalog, currentAgent);
+    refreshAgentChoices();
   }).catch(() => {
     renderChoices([]);
     handle.setError("Could not load the agent list. Try again.");
   });
+  agentSelect.addEventListener("change", refreshAccounts2);
+  accountSelect.addEventListener("change", syncAccountSelection);
+  if (callbacks.loadAccounts) {
+    void callbacks.loadAccounts().then((result) => {
+      accounts = result;
+      accountsLoaded = true;
+      refreshAgentChoices();
+    }).catch(() => {
+      accountsLoaded = true;
+      accountsFailed = true;
+      refreshAgentChoices();
+      handle.setError(callbacks.currentAccount ? "Could not load accounts. Try again to choose a registered target account." : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
+    });
+  }
   const card = handle.el.firstElementChild;
   asForm(card, () => {
     const target = agentSelect.value;
@@ -10764,7 +11403,11 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
       return;
     }
     handle.setError(null);
-    callbacks.onSubmit(target);
+    if (!accountsLoaded || requiresAccount(target) && !accountSelect.value) {
+      handle.setError("Pick another registered account.");
+      return;
+    }
+    callbacks.onSubmit(target, accountSelect.value);
   });
   queueMicrotask(() => agentSelect.focus());
   return handle;
@@ -10805,13 +11448,42 @@ function confirmModal(opts) {
       body: "Restore the worktree and agent. Sandboxes push work before replacement; restore refuses if preservation is uncertain."
     }
   }[opts.action];
-  const { handle, body } = modalChrome({
-    title: copy.title,
-    confirmLabel: copy.confirmLabel,
+  const { handle, body, confirmBtn } = modalChrome({
+    title: opts.immediateRestore ? `Restore ${opts.sessionTitle}` : copy.title,
+    confirmLabel: opts.immediateRestore ? "Retry restore" : copy.confirmLabel,
     confirmClass: copy.confirmClass,
     onCancel: opts.onCancel
   });
   body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
+  const card = handle.el.firstElementChild;
+  if (opts.immediateRestore) {
+    const progress = h("p", { class: "af-modal-text", role: "status", id: "af-restore-progress" }, "Restoring session\u2026");
+    body.append(progress);
+    card.tabIndex = -1;
+    card.setAttribute("aria-describedby", progress.id);
+    let isBusy = false;
+    card.addEventListener("keydown", (event) => {
+      if (isBusy && event.key === "Tab") {
+        event.preventDefault();
+        event.stopPropagation();
+        card.focus();
+      }
+    });
+    const setBusy = handle.setBusy;
+    handle.setBusy = (busy) => {
+      isBusy = busy;
+      if (busy && card.isConnected) card.focus();
+      setBusy(busy);
+      card.setAttribute("aria-busy", String(busy));
+      progress.textContent = busy ? "Restoring session\u2026" : "";
+      confirmBtn.textContent = busy ? "Restoring\u2026" : "Retry restore";
+    };
+    const setError = handle.setError;
+    handle.setError = (message) => {
+      setError(message);
+      if (message && card.isConnected) confirmBtn.focus();
+    };
+  }
   let acknowledgment;
   if (opts.action === "kill" && opts.isRoot) {
     body.append(h(
@@ -10822,7 +11494,6 @@ function confirmModal(opts) {
     acknowledgment = h("input", { type: "checkbox", class: "af-config-check", required: true });
     body.append(h("label", { class: "af-modal-text" }, acknowledgment, " I understand that deleting this root session interrupts task delivery."));
   }
-  const card = handle.el.firstElementChild;
   asForm(card, () => {
     if (acknowledgment && !acknowledgment.checked) {
       handle.setError("Acknowledge the interruption to root task delivery before deleting this session.");
@@ -11241,6 +11912,17 @@ function isArchived(s) {
 }
 function isLimitReached(s) {
   return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
+}
+function isPendingManualHandoffDeliveryUnconfirmed(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
+}
+function isPendingAgentHandoffDeliveryUnconfirmed(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && (status === "sent-unverified" || status === "could-not-confirm") && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && (op === InFlightOp.None || op === InFlightOp.Replacing);
 }
 function canHandoff(s) {
   return s.can_handoff === true;
@@ -13096,6 +13778,236 @@ var SplitView = class {
   }
 };
 
+// src/pending_restores.ts
+var RESTORE_ADMISSION_MARGIN_MS = 1e3;
+var RESTORE_RECONCILE_RETRY_MIN_MS = 2e3;
+var RESTORE_RECONCILE_RETRY_MAX_MS = 1e4;
+var LEGACY_OPERATION_LOCK_TIMEOUT_MS = 3e4;
+var PendingRestores = class {
+  constructor(changed, retainOnError = () => false, committedOnError = () => false, now = () => globalThis.performance.now(), requestReconcile = () => {
+  }, schedule = (callback, delayMs) => {
+    const timer = globalThis.setTimeout(callback, delayMs);
+    if (typeof timer === "object") timer.unref();
+    return timer;
+  }, cancel = (timer) => globalThis.clearTimeout(timer)) {
+    this.changed = changed;
+    this.retainOnError = retainOnError;
+    this.committedOnError = committedOnError;
+    this.now = now;
+    this.requestReconcile = requestReconcile;
+    this.schedule = schedule;
+    this.cancel = cancel;
+  }
+  tickets = /* @__PURE__ */ new Map();
+  snapshotGeneration = 0;
+  rows = null;
+  operationLockTimeoutMs = null;
+  operationClockMs = null;
+  daemonBootId = null;
+  daemonBootGeneration = -1;
+  has(id) {
+    return this.tickets.has(id);
+  }
+  /** Capture the current fence so a later archive response cannot clear its successor. */
+  captureArchiveSuccess(id) {
+    const ticket = this.tickets.get(id);
+    return () => {
+      if (!ticket || this.tickets.get(id) !== ticket || !ticket.settled) return;
+      this.release(id, ticket);
+      this.changed(new Set(this.tickets.keys()));
+    };
+  }
+  /** Resolve after an authoritative Snapshot releases this refusal's fence. */
+  waitForRefusalResync(id) {
+    const ticket = this.tickets.get(id);
+    if (!ticket) return Promise.resolve();
+    return new Promise((resolve) => {
+      ticket.refusalWaiters.push(resolve);
+    });
+  }
+  run(id, request, restoreEligible) {
+    if (this.has(id)) return null;
+    const ticket = {
+      settled: false,
+      uncertain: false,
+      succeededAt: null,
+      refusedAt: null,
+      refusalWaiters: [],
+      uncertainAt: this.snapshotGeneration,
+      uncertainSince: 0,
+      admissionClockStartedAt: null,
+      timer: null,
+      retryDelayMs: RESTORE_RECONCILE_RETRY_MIN_MS,
+      reconcileGeneration: 0,
+      restoreEligible,
+      daemonBootId: this.daemonBootId
+    };
+    this.tickets.set(id, ticket);
+    this.changed(new Set(this.tickets.keys()));
+    return (async () => {
+      try {
+        const result = await request(ticket.daemonBootId);
+        if (this.tickets.get(id) === ticket) {
+          ticket.settled = true;
+          ticket.succeededAt = this.snapshotGeneration;
+          if (this.rows) this.observe(this.rows);
+          if (this.tickets.get(id) === ticket) this.reconcile(id, ticket);
+        }
+        return result;
+      } catch (error) {
+        if (this.tickets.get(id) === ticket) {
+          if (this.retainOnError(error)) {
+            ticket.uncertain = true;
+            ticket.uncertainAt = this.snapshotGeneration;
+            ticket.uncertainSince = this.now();
+            ticket.admissionClockStartedAt = null;
+            ticket.retryDelayMs = RESTORE_RECONCILE_RETRY_MIN_MS;
+            this.armUncertainTimer(id, ticket);
+            if (this.committedOnError(error)) {
+              ticket.settled = true;
+              ticket.succeededAt = this.snapshotGeneration;
+            }
+            if (this.rows) this.observe(this.rows);
+          } else {
+            ticket.refusedAt = this.snapshotGeneration;
+            this.reconcile(id, ticket);
+          }
+        }
+        throw error;
+      }
+    })();
+  }
+  /** Stamp issuance, not arrival: a pre-success Snapshot cannot prove completion. */
+  beginSnapshot() {
+    return ++this.snapshotGeneration;
+  }
+  observe(rows, evidence) {
+    this.rows = rows;
+    if (evidence?.kind === "snapshot") {
+      const daemonBootId = typeof evidence.daemonBootId === "string" && evidence.daemonBootId !== "" ? evidence.daemonBootId : null;
+      if (evidence.generation > this.daemonBootGeneration) {
+        this.daemonBootId = daemonBootId;
+        this.daemonBootGeneration = evidence.generation;
+      }
+      const operationLockTimeoutMs = typeof evidence.operationLockTimeoutMs === "number" && evidence.operationLockTimeoutMs >= 0 ? evidence.operationLockTimeoutMs : LEGACY_OPERATION_LOCK_TIMEOUT_MS;
+      const operationClockMs = typeof evidence.operationClockMs === "number" && Number.isFinite(evidence.operationClockMs) && evidence.operationClockMs >= 0 ? evidence.operationClockMs : null;
+      const clockSupportChanged = this.operationClockMs === null !== (operationClockMs === null);
+      const clockReset = this.operationClockMs !== null && operationClockMs !== null && operationClockMs < this.operationClockMs;
+      if (this.operationLockTimeoutMs !== operationLockTimeoutMs || clockSupportChanged || clockReset) {
+        for (const ticket of this.tickets.values()) {
+          this.cancelTimer(ticket);
+          ticket.admissionClockStartedAt = null;
+        }
+      }
+      this.operationLockTimeoutMs = operationLockTimeoutMs;
+      this.operationClockMs = operationClockMs;
+    }
+    const eligibility = new Map(rows.map((row) => [row.id, row.restoreEligible]));
+    let changed = false;
+    for (const [id, ticket] of this.tickets) {
+      if (this.daemonBootId !== null && ticket.daemonBootId !== null && ticket.daemonBootId !== this.daemonBootId) {
+        this.release(id, ticket);
+        changed = true;
+        continue;
+      }
+      const authoritative = evidence?.kind === "updated" || evidence?.kind === "restored" || evidence?.kind === "snapshot";
+      const observedAfterSuccess = ticket.succeededAt !== null && evidence?.kind === "snapshot" && evidence.generation > ticket.succeededAt;
+      const observedAfterRefusal = ticket.refusedAt !== null && evidence?.kind === "snapshot" && evidence.generation > ticket.refusedAt;
+      const causalUncertainSnapshot = evidence?.kind === "snapshot" && evidence.generation > ticket.uncertainAt;
+      if (causalUncertainSnapshot && this.operationLockTimeoutMs !== null && this.operationClockMs !== null) {
+        if (ticket.admissionClockStartedAt === null || this.operationClockMs < ticket.admissionClockStartedAt) {
+          ticket.admissionClockStartedAt = this.operationClockMs;
+        }
+      }
+      const uncertainCompleted = ticket.uncertain && authoritative && causalUncertainSnapshot && !eligibility.has(id);
+      if (observedAfterRefusal || ticket.settled && (observedAfterSuccess || !eligibility.has(id)) || uncertainCompleted) {
+        this.release(id, ticket);
+        changed = true;
+      }
+    }
+    if (evidence?.kind === "snapshot") {
+      for (const [id, ticket] of this.tickets) this.armTimerForState(id, ticket);
+    }
+    if (changed) this.changed(new Set(this.tickets.keys()));
+  }
+  reset() {
+    for (const [id, ticket] of this.tickets) {
+      this.cancelTimer(ticket);
+      ticket.reconcileGeneration++;
+      ticket.retryDelayMs = RESTORE_RECONCILE_RETRY_MIN_MS;
+      if (ticket.settled) this.tickets.delete(id);
+    }
+    this.rows = null;
+    this.changed(new Set(this.tickets.keys()));
+  }
+  armTimerForState(id, ticket) {
+    if (ticket.uncertain) this.armUncertainTimer(id, ticket);
+    else if (ticket.settled || ticket.refusedAt !== null) this.armRetryTimer(id, ticket);
+  }
+  armUncertainTimer(id, ticket) {
+    if (!ticket.uncertain || ticket.timer !== null || this.operationLockTimeoutMs === null) return;
+    let remaining;
+    if (this.operationClockMs !== null && ticket.admissionClockStartedAt === null) {
+      remaining = 0;
+    } else {
+      remaining = this.operationClockMs === null ? ticket.uncertainSince + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS - this.now() : ticket.admissionClockStartedAt + this.operationLockTimeoutMs + RESTORE_ADMISSION_MARGIN_MS - this.operationClockMs;
+      if (remaining <= 0) {
+        this.armRetryTimer(id, ticket);
+        return;
+      }
+    }
+    ticket.timer = this.schedule(() => {
+      ticket.timer = null;
+      if (this.tickets.get(id) !== ticket || !ticket.uncertain) return;
+      this.reconcile(id, ticket);
+    }, Math.max(0, remaining));
+  }
+  armRetryTimer(id, ticket) {
+    if (!this.needsReconcile(ticket) || ticket.timer !== null) return;
+    const delay2 = ticket.retryDelayMs;
+    ticket.retryDelayMs = Math.min(ticket.retryDelayMs * 2, RESTORE_RECONCILE_RETRY_MAX_MS);
+    ticket.timer = this.schedule(() => {
+      ticket.timer = null;
+      if (this.tickets.get(id) !== ticket || !this.needsReconcile(ticket)) return;
+      this.reconcile(id, ticket);
+    }, delay2);
+  }
+  reconcile(id, ticket) {
+    const generation = ++ticket.reconcileGeneration;
+    const finish = () => {
+      if (this.tickets.get(id) !== ticket || ticket.reconcileGeneration !== generation) return;
+      if (!this.needsReconcile(ticket)) return;
+      this.armRetryTimer(id, ticket);
+    };
+    try {
+      const result = this.requestReconcile();
+      if (result && typeof result.then === "function") {
+        void result.then(finish, finish);
+      } else {
+        finish();
+      }
+    } catch {
+      finish();
+    }
+  }
+  needsReconcile(ticket) {
+    return ticket.uncertain || ticket.settled || ticket.refusedAt !== null;
+  }
+  cancelTimer(ticket) {
+    if (ticket.timer === null) return;
+    this.cancel(ticket.timer);
+    ticket.timer = null;
+  }
+  release(id, ticket) {
+    this.cancelTimer(ticket);
+    if (this.tickets.get(id) !== ticket) return;
+    this.tickets.delete(id);
+    const waiters = ticket.refusalWaiters;
+    ticket.refusalWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+};
+
 // src/optimistic.ts
 var OptimisticSessions = class {
   authoritative = [];
@@ -13110,6 +14022,10 @@ var OptimisticSessions = class {
     this.pending.clear();
     this.sessionEvents.clear();
     this.authoritative = sessions;
+  }
+  /** Daemon-owned rows, without pending local mutation feedback. */
+  authoritativeRows() {
+    return this.authoritative;
   }
   /** Captured before fetching, so an older snapshot cannot undo an RPC or event. */
   snapshotFence() {
@@ -14300,6 +15216,20 @@ function patchSessionIdentity(node, s) {
   node.title = [state.textContent, owner.textContent, work.title].filter(Boolean).join(" \xB7 ");
 }
 
+// src/project-menu-focus.ts
+function replaceProjectMenuChildren(menu, children, fallback) {
+  const active = menu.ownerDocument.activeElement;
+  const key = active && menu.contains(active) ? active.dataset.projectFocus : void 0;
+  menu.replaceChildren(...children);
+  if (key === void 0) return;
+  if (menu.hidden) {
+    fallback.focus({ preventScroll: true });
+    return;
+  }
+  const replacement = Array.from(menu.querySelectorAll("[data-project-focus]")).find((control) => control.dataset.projectFocus === key && !control.disabled);
+  (replacement ?? fallback).focus({ preventScroll: true });
+}
+
 // src/tabreorder.ts
 var PINNED_TABS = 1;
 function insertionIndexAt(centers, x) {
@@ -14380,10 +15310,33 @@ function orderChildren(parent, children) {
 function isActionableSession(s) {
   return typeof s.id === "string" && s.id !== "" && (s.lifecycle_action === "archive" || s.lifecycle_action === "restore");
 }
+function retryActionForSession(s) {
+  if (isPendingManualHandoffDeliveryUnconfirmed(s) || isPendingAgentHandoffDeliveryUnconfirmed(s)) {
+    return {
+      kind: "handoff",
+      label: "Retry handoff",
+      title: "Retry the handoff after inspecting the pane"
+    };
+  }
+  if (isLimitReached(s)) {
+    return { kind: "limit", label: "Retry limit", title: "Retry after the usage limit" };
+  }
+  return null;
+}
+function patchRetryButton(button, action) {
+  button.hidden = action === null;
+  if (action) {
+    button.textContent = action.label;
+    button.title = action.title;
+  }
+}
 function isKillableSession(s) {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
 }
 var TAB_PINNED_NOTICE = "Agent tab stays first \xB7 drag to a pane to split";
+function restoreRequiresConfirmation(session) {
+  return session.backend_type !== void 0 && session.backend_type !== "" && session.backend_type !== "local";
+}
 var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
 function isOffBoxWorkspace(s) {
   return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
@@ -14772,26 +15725,32 @@ var AppShell = class {
   };
   syncPhone() {
     const active = this.phone.matches && this.terminalSelected;
-    if (this.el.classList.contains("af-session-first") === active) {
-      this.responsiveNewTabState = null;
-      return;
-    }
-    const focus = document.activeElement;
+    const compositionChanged = this.el.classList.contains("af-session-first") !== active;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
     const responsiveState = this.responsiveNewTabState;
     this.responsiveNewTabState = null;
     const pickerOpen = responsiveState?.trigger === pickerTrigger ? responsiveState.open : pickerTrigger?.getAttribute("aria-expanded") === "true";
     const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ?? (responsiveState?.trigger === pickerTrigger ? responsiveState.cancel : void 0) : void 0;
+    const reopenPicker = () => {
+      this.openNewTabPicker();
+      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
+        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
+      }
+    };
+    if (!compositionChanged) {
+      if (responsiveState?.trigger === pickerTrigger && responsiveState.open && pickerTrigger?.getAttribute("aria-expanded") !== "true") reopenPicker();
+      return;
+    }
+    const focus = document.activeElement;
+    const sessionActionsOpen = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
     this.appControls.close();
     this.terminalChrome?.menu.close();
     this.closeProjectMenu();
     this.sessionFirst?.setActive(active);
     this.el.classList.toggle("af-session-first", active);
+    if (sessionActionsOpen) this.terminalChrome?.menu.open();
     if (pickerOpen) {
-      this.openNewTabPicker();
-      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
-        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
-      }
+      reopenPicker();
     }
     if (!pickerOpen && focus && focus !== document.activeElement) {
       if (focus.getClientRects().length) focus.focus();
@@ -14863,7 +15822,7 @@ var AppShell = class {
   // limit wall — or is resumed off it — WITHOUT a selection change, which is the
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
   retryBtn = null;
-  retryVisible = false;
+  retryKind = null;
   // The Handoff button and whether it is currently shown (#2013). Same in-place
   // treatment as retryBtn: a session becomes (or stops being) handoff-capable —
   // e.g. it goes Ready, or is archived from another client — WITHOUT a selection
@@ -14911,6 +15870,7 @@ var AppShell = class {
   // drag carrying the same MIME, which then falls through to the drop's own checks).
   dragFromIndex = null;
   // Last-applied state, for cheap change detection between updates.
+  pendingRestores;
   lastSessions = null;
   lastSelectedId = null;
   lastLive = null;
@@ -14979,6 +15939,8 @@ var AppShell = class {
   }
   /** Applies the latest state, touching only what changed. */
   update(state, prioritizeTerminal = false) {
+    const restoresChanged = this.pendingRestores !== state.pendingRestores;
+    this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
     if (this.lastKb !== kb) {
@@ -15054,7 +16016,7 @@ var AppShell = class {
     this.lastSelectedId = state.selectedId;
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged) {
       if (!this.railPainted && prioritizeTerminal) {
         this.pendingInitialRail = state;
         if (this.initialRailFrame === null) {
@@ -15156,7 +16118,7 @@ var AppShell = class {
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [],
       sessionKey,
-      (s) => JSON.stringify([s, s.id === state.selectedId]),
+      (s) => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true]),
       (s, previous) => {
         const key = sessionKey(s);
         const oldMenu = this.railMenus.get(key);
@@ -15243,6 +16205,7 @@ var AppShell = class {
         }
       });
       this.patchLifecycleButton(lifecycleBtn, lifecycleSession.lifecycle_action, lifecycleSession.title, surface2);
+      lifecycleBtn.disabled = lifecycleSession.lifecycle_action === "restore" && this.pendingRestores?.has(session.id) === true;
       if (surface2 === "rail" && selected) {
         this.lifecycleBtn = lifecycleBtn;
         this.lifecycleAction = lifecycleSession.lifecycle_action;
@@ -15395,6 +16358,7 @@ var AppShell = class {
     }
     const footChildren = [];
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
+    add.dataset.projectFocus = "add";
     add.setAttribute("title", "Register a git checkout by path as a project");
     add.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -15406,6 +16370,7 @@ var AppShell = class {
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
+      del.dataset.projectFocus = "delete";
       const isRegistered = state.registeredProjects.includes(currentSummary.root);
       if (currentSummary.liveCount === 0 && !isRegistered) {
         del.disabled = true;
@@ -15428,7 +16393,8 @@ var AppShell = class {
       footChildren.push(del);
     }
     children.push(h("div", { class: "af-project-menu-foot" }, ...footChildren));
-    this.projectMenu.replaceChildren(...children);
+    const focusFallback = this.projectSwitchBtn.getClientRects().length ? this.projectSwitchBtn : this.appControls.trigger;
+    replaceProjectMenuChildren(this.projectMenu, children, focusFallback);
   }
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
@@ -15445,6 +16411,7 @@ var AppShell = class {
     );
     const meta = h("span", { class: "af-project-item-meta" }, projectMeta(p));
     const item = h("button", { type: "button", class: cls }, check, label, meta);
+    item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", current ? "true" : "false");
     item.addEventListener("click", (e) => {
@@ -15666,7 +16633,7 @@ var AppShell = class {
       this.headActions = null;
       this.headActionSig = "";
       this.retryBtn = null;
-      this.retryVisible = false;
+      this.retryKind = null;
       this.tabBar = null;
       this.main.className = "af-main af-main-empty";
       delete this.main.dataset.afTheme;
@@ -15704,8 +16671,9 @@ var AppShell = class {
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
     this.retryBtn = chrome.retry;
-    this.retryVisible = isLimitReached(selected);
-    chrome.retry.hidden = !this.retryVisible;
+    const retryAction = retryActionForSession(selected);
+    this.retryKind = retryAction?.kind ?? null;
+    patchRetryButton(chrome.retry, retryAction);
     this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
     chrome.handoff.hidden = !this.handoffVisible;
@@ -16143,10 +17111,11 @@ var AppShell = class {
       this.patchLifecycleButton(this.lifecycleBtn, nowAction, selected.title);
       this.lifecycleAction = nowAction;
     }
-    const nowLimited = isLimitReached(selected);
-    if (this.retryBtn && nowLimited !== this.retryVisible) {
-      this.retryVisible = nowLimited;
-      this.retryBtn.hidden = !nowLimited;
+    const retryAction = retryActionForSession(selected);
+    const retryKind = retryAction?.kind ?? null;
+    if (this.retryBtn && retryKind !== this.retryKind) {
+      this.retryKind = retryKind;
+      patchRetryButton(this.retryBtn, retryAction);
     }
     const nowHandoff = canHandoff(selected);
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
@@ -16178,7 +17147,8 @@ var AppShell = class {
       managed.title,
       managed.lifecycle_action ?? null,
       managed.can_kill === true,
-      managed.is_root === true
+      managed.is_root === true,
+      this.pendingRestores?.has(managed.id) === true
     ]);
     if (sig !== this.headActionSig) {
       host.replaceChildren(...this.sessionActionButtons(managed, "head"));
@@ -16424,12 +17394,22 @@ var store = new Store({
   statusFilter: loadFilter()
 });
 var token = null;
+var connectionGeneration = 0;
+var pendingRestoreResync = false;
 var stream = null;
 var optimisticSessions = new OptimisticSessions();
+var pendingRestores = new PendingRestores(
+  (ids) => store.set({ pendingRestores: ids }),
+  (e) => isMutationCommittedError(e) || isMutationOutcomeUncertain(e),
+  isMutationCommittedError,
+  () => globalThis.performance.now(),
+  requestPendingRestoreResync
+);
 var connectionGate = createLatestRequestGate();
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var loadCreateAccounts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
 var resyncTimer = null;
+var resyncCompletions = [];
 var sessionEventGeneration = 0;
 var resyncRequestGeneration = 0;
 var taskResyncTimer = null;
@@ -16504,8 +17484,7 @@ function rerender() {
       shell = null;
     }
     disposeSplit();
-    closeModal();
-    closeConfigAssistant();
+    closeOverlays();
     renderLogin(root, state, actions);
     return;
   }
@@ -16522,10 +17501,19 @@ function rerender() {
 }
 async function connect(candidate) {
   const attempt = connectionGate.begin();
+  pendingRestores.reset();
+  const restoreSnapshot = pendingRestores.beginSnapshot();
   store.set({ connecting: true, loginError: null, loginCondition: void 0 });
   let sessions;
+  let operationLockTimeoutMs;
+  let operationClockMs;
+  let daemonBootId;
   try {
-    sessions = await probeToken(candidate);
+    const snapshot = await fetchSessionSnapshot(candidate);
+    sessions = snapshot.sessions;
+    operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
+    operationClockMs = snapshot.operationClockMs;
+    daemonBootId = snapshot.daemonBootId;
   } catch (e) {
     if (!attempt.isCurrent()) return;
     if (shouldForgetToken(e)) {
@@ -16545,6 +17533,7 @@ async function connect(candidate) {
   const { projects: registeredProjects, error: projectsError } = projectResult;
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  connectionGeneration++;
   optimisticSessions.reset(sessions);
   resolvingRoute = true;
   store.set({
@@ -16566,10 +17555,21 @@ async function connect(candidate) {
     projectsError,
     registeredProjects
   });
+  applySessions(sessions, {
+    kind: "snapshot",
+    generation: restoreSnapshot,
+    operationLockTimeoutMs,
+    operationClockMs,
+    daemonBootId
+  }, sessions);
   resolvingRoute = false;
   resolveRoute();
   clearLoginRoute();
   startStream(candidate);
+  if (pendingRestoreResync) {
+    pendingRestoreResync = false;
+    requestResync();
+  }
 }
 async function fetchRegisteredProjects(tok) {
   try {
@@ -16582,10 +17582,11 @@ async function fetchRegisteredProjects(tok) {
 function disconnect(loginError = null, authRequired = store.get().authRequired) {
   store.set({ loginCondition: loginError ? "expired" : void 0 });
   connectionGate.invalidate();
+  connectionGeneration++;
+  pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
-  closeModal();
-  closeConfigAssistant();
+  closeOverlays();
   token = null;
   clearToken();
   store.set({
@@ -16741,6 +17742,19 @@ function closeConfigAssistant() {
     configAssistant = null;
   }
 }
+function closeAccountLogin() {
+  accountLogin?.close();
+  accountLogin = null;
+}
+function closeOverlays() {
+  closeModal();
+  closeConfigAssistant();
+  closeAccountLogin();
+}
+function mountOverlay(open) {
+  closeOverlays();
+  return open(modalHost);
+}
 function captureModalInvoker() {
   const focused = document.activeElement;
   const row = focused?.closest(".af-row");
@@ -16751,66 +17765,64 @@ function captureModalInvoker() {
   };
 }
 function openModal(m, focusCard = false, explicitInvoker) {
-  closeModal();
-  closeConfigAssistant();
-  const focused = document.activeElement;
-  const invoker = explicitInvoker ?? captureModalInvoker();
-  const { sessionId, actionLabel } = invoker;
-  const row = explicitInvoker ? !invoker.header && sessionId : focused?.closest(".af-row");
-  const header = invoker.header ? root?.querySelector(".af-term-head") : null;
-  if (focusCard || row) {
-    restoreModalFocus = () => {
-      const canFocus = (el2) => !!el2 && el2.isConnected && el2 !== document.body && !el2.matches(":disabled") && el2.getClientRects().length > 0 && getComputedStyle(el2).visibility === "visible";
-      if (!row && !explicitInvoker && canFocus(focused)) {
-        focused.focus({ preventScroll: true });
-        return;
-      }
-      if (!row && header?.isConnected) {
-        const action2 = actionLabel ? header.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
-        const target2 = canFocus(action2) ? action2 : header.querySelector(".af-term-more");
-        if (canFocus(target2)) {
-          target2.focus({ preventScroll: true });
+  mountOverlay((mountHost) => {
+    const focused = document.activeElement;
+    const invoker = explicitInvoker ?? captureModalInvoker();
+    const { sessionId, actionLabel } = invoker;
+    const row = explicitInvoker ? !invoker.header && sessionId : focused?.closest(".af-row");
+    const header = invoker.header ? root?.querySelector(".af-term-head") : null;
+    if (focusCard || row) {
+      restoreModalFocus = () => {
+        const canFocus = (el2) => !!el2 && el2.isConnected && el2 !== document.body && !el2.matches(":disabled") && el2.getClientRects().length > 0 && getComputedStyle(el2).visibility === "visible";
+        if (!row && !explicitInvoker && canFocus(focused)) {
+          focused.focus({ preventScroll: true });
           return;
         }
-      }
-      const toggle = root?.querySelector(".af-nav-toggle");
-      if (!root?.querySelector(".af-app.af-nav-open") && canFocus(toggle)) {
-        focusRail();
-        toggle.focus({ preventScroll: true });
-        return;
-      }
-      focusRail();
-      const menu = sessionId ? root?.querySelector(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
-      const action = actionLabel ? menu?.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
-      const target = canFocus(action) ? action : menu?.querySelector("button");
-      if (canFocus(target)) target.focus({ preventScroll: true });
-      else {
-        const rail = root?.querySelector(".af-rail");
-        if (canFocus(rail)) {
-          rail.tabIndex = -1;
-          rail.focus({ preventScroll: true });
+        if (!row && header?.isConnected) {
+          const action2 = actionLabel ? header.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+          const target2 = canFocus(action2) ? action2 : header.querySelector(".af-term-more");
+          if (canFocus(target2)) {
+            target2.focus({ preventScroll: true });
+            return;
+          }
         }
-      }
-    };
-  }
-  modal = m;
-  modalHost.replaceChildren(m.el);
-  if (focusCard) m.el.querySelector(".af-modal-card")?.focus({ preventScroll: true });
+        const toggle = root?.querySelector(".af-nav-toggle");
+        if (!root?.querySelector(".af-app.af-nav-open") && canFocus(toggle)) {
+          focusRail();
+          toggle.focus({ preventScroll: true });
+          return;
+        }
+        focusRail();
+        const menu = sessionId ? root?.querySelector(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
+        const action = actionLabel ? menu?.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+        const target = canFocus(action) ? action : menu?.querySelector("button");
+        if (canFocus(target)) target.focus({ preventScroll: true });
+        else {
+          const rail = root?.querySelector(".af-rail");
+          if (canFocus(rail)) {
+            rail.tabIndex = -1;
+            rail.focus({ preventScroll: true });
+          }
+        }
+      };
+    }
+    modal = m;
+    mountHost.replaceChildren(m.el);
+    if (focusCard) m.el.querySelector(".af-modal-card")?.focus({ preventScroll: true });
+  });
 }
 function doOpenConfigAssistant() {
   const tok = token;
   if (tok === null) {
     return;
   }
-  closeModal();
-  closeConfigAssistant();
-  configAssistant = openConfigAssistant({
+  configAssistant = mountOverlay((mountHost) => openConfigAssistant({
     token: tok,
-    mountHost: modalHost,
+    mountHost,
     onClosed: () => {
       configAssistant = null;
     }
-  });
+  }));
 }
 function newSession() {
   const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
@@ -16877,7 +17889,9 @@ function newSession() {
   );
 }
 function openConfirm(action, session, invoker = captureModalInvoker()) {
+  if (action === "restore" && pendingRestores.has(session.id)) return;
   const target = { id: session.id, title: session.title };
+  const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
   const hasRootAcknowledgment = action === "kill" && session.is_root === true;
   const refreshRootConsent = (latest) => {
     if (action === "kill" && latest?.is_root === true && !hasRootAcknowledgment) {
@@ -16894,76 +17908,114 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
     stopModalProjectionWatch = store.subscribe(refresh);
     refresh();
   };
+  const onConfirm = () => {
+    const tok = token;
+    if (tok === null || !modal) {
+      return;
+    }
+    const latest = store.get().sessions.find((s) => s.id === target.id);
+    if (action === "kill" && !latest) {
+      modal.setError("This session is no longer available to delete.");
+      return;
+    }
+    if (refreshRootConsent(latest)) return;
+    if (action === "restore" && pendingRestores.has(target.id)) return;
+    const m = modal;
+    const requestGeneration = action === "restore" ? connectionGeneration : 0;
+    const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
+    const captureArchiveSuccess = action === "archive" ? pendingRestores.captureArchiveSuccess(target.id) : null;
+    if (action !== "restore" && !mutation) return;
+    m.setBusy(true);
+    if (mutation) {
+      closeModal();
+      applySessions(optimisticSessions.project());
+    }
+    const run = action === "kill" ? killSession(target.id, target.title, tok) : action === "archive" ? archiveSession(target.id, target.title, tok) : pendingRestores.run(
+      target.id,
+      (daemonBootId) => restoreSession(
+        target.id,
+        target.title,
+        tok,
+        daemonBootId ?? void 0
+      ),
+      isActionableSession(session) && session.lifecycle_action === "restore"
+    );
+    if (!run) return;
+    void run.then(() => {
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+        return;
+      }
+      if (mutation) {
+        captureArchiveSuccess?.();
+        if (!optimisticSessions.succeed(mutation)) return;
+        applySessions(optimisticSessions.project());
+        requestResync();
+      } else {
+        if (modal === m) closeModal();
+      }
+    }).catch((e) => {
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+        if (token !== null && store.get().phase === "app") requestResync();
+        else pendingRestoreResync = true;
+        return;
+      }
+      if (mutation) {
+        const committed = isMutationCommittedError(e);
+        const outcome = committed ? optimisticSessions.succeed(mutation) ? "confirmed" : "stale" : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
+        if (committed || outcome === "confirmed") captureArchiveSuccess?.();
+        if (outcome === "stale") return;
+        applySessions(optimisticSessions.project());
+        requestResync();
+        if (outcome !== "reverted") {
+          surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`) : e, outcome);
+          return;
+        }
+        m.setBusy(false);
+        m.setError(errorText(e));
+        if (!modal) mountConfirmation(m);
+        else surfaceMutationError(e);
+        return;
+      }
+      if (isMutationCommittedError(e)) {
+        if (modal === m) closeModal();
+        requestResync();
+        surfaceMutationError(e, "confirmed");
+        return;
+      }
+      if (isMutationOutcomeUncertain(e)) {
+        if (modal === m) closeModal();
+        requestResync();
+        surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
+        return;
+      }
+      const showRefusal = () => {
+        m.setBusy(false);
+        m.setError(errorText(e));
+        if (immediateRestore && modal !== m) surfaceMutationError(e);
+      };
+      if (action === "restore") {
+        void pendingRestores.waitForRefusalResync(target.id).then(() => {
+          if (requestGeneration !== connectionGeneration || token !== tok) return;
+          showRefusal();
+        });
+      } else showRefusal();
+    });
+  };
   mountConfirmation(
     confirmModal({
       action,
       sessionTitle: target.title,
+      immediateRestore,
       isRoot: hasRootAcknowledgment,
       archived: isArchived(session),
       offBox: isOffBoxWorkspace(session),
       externalWorktree: session.worktree?.external_worktree === true,
       branchCreatedByUs: session.worktree?.branch_created_by_us === true,
-      onConfirm: () => {
-        const tok = token;
-        if (tok === null || !modal) {
-          return;
-        }
-        const latest = store.get().sessions.find((s) => s.id === target.id);
-        if (action === "kill" && !latest) {
-          modal.setError("This session is no longer available to delete.");
-          return;
-        }
-        if (refreshRootConsent(latest)) return;
-        const m = modal;
-        const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
-        if (action !== "restore" && !mutation) return;
-        m.setBusy(true);
-        if (mutation) {
-          closeModal();
-          applySessions(optimisticSessions.project());
-        }
-        const run = action === "kill" ? killSession(target.id, target.title, tok) : action === "archive" ? archiveSession(target.id, target.title, tok) : restoreSession(target.id, target.title, tok);
-        void run.then(() => {
-          if (mutation) {
-            if (!optimisticSessions.succeed(mutation)) return;
-            applySessions(optimisticSessions.project());
-            requestResync();
-          } else if (modal === m) closeModal();
-        }).catch((e) => {
-          if (mutation) {
-            const outcome = isMutationCommittedError(e) ? optimisticSessions.succeed(mutation) ? "confirmed" : "stale" : optimisticSessions.reject(mutation, isMutationOutcomeUncertain(e));
-            if (outcome === "stale") return;
-            applySessions(optimisticSessions.project());
-            requestResync();
-            if (outcome !== "reverted") {
-              surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`) : e, outcome);
-              return;
-            }
-            m.setBusy(false);
-            m.setError(errorText(e));
-            if (!modal) mountConfirmation(m);
-            else surfaceMutationError(e);
-            return;
-          }
-          if (isMutationCommittedError(e)) {
-            if (modal === m) closeModal();
-            requestResync();
-            surfaceMutationError(e, "confirmed");
-            return;
-          }
-          if (isMutationOutcomeUncertain(e)) {
-            if (modal === m) closeModal();
-            requestResync();
-            surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
-            return;
-          }
-          m.setBusy(false);
-          m.setError(errorText(e));
-        });
-      },
+      onConfirm,
       onCancel: closeModal
     })
   );
+  if (immediateRestore) onConfirm();
 }
 function openDeleteProject(root2, label) {
   openModal(
@@ -17038,11 +18090,25 @@ function openTab(index) {
 }
 function guardedTabRebind(selId, run, resolve, verb) {
   const gen = splitView.layoutGeneration();
-  void run().then((sessions) => {
-    if (sessions === null) return;
+  void run().then((snapshot) => {
+    if (snapshot === null) return;
+    const {
+      sessions,
+      authoritative,
+      generation,
+      operationLockTimeoutMs,
+      operationClockMs,
+      daemonBootId
+    } = snapshot;
     const targetIdx = resolve(sessions);
     const currentGen = splitView.layoutGeneration();
-    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+    applySessions(sessions, {
+      kind: "snapshot",
+      generation,
+      operationLockTimeoutMs,
+      operationClockMs,
+      daemonBootId
+    }, authoritative);
     const pinnedSessionAlive = selId === "" || sessions.some((s) => s.id === selId);
     const outcome = rebindTargetAfterAwait({
       pinnedGen: gen,
@@ -17158,9 +18224,15 @@ function renameSessionTab(id, name, editedSessionId) {
   }
   clearTabError();
   const selId = sel.id ?? "";
-  void renameTab(selId, sel.title, target.name, name, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)).then((sessions) => {
-    if (sessions === null) return;
-    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+  void renameTab(selId, sel.title, target.name, name, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)).then((snapshot) => {
+    if (snapshot === null) return;
+    applySessions(snapshot.sessions, {
+      kind: "snapshot",
+      generation: snapshot.generation,
+      operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+      operationClockMs: snapshot.operationClockMs,
+      daemonBootId: snapshot.daemonBootId
+    }, snapshot.authoritative);
   }).catch((e) => surfaceTabError(e));
 }
 function reorderSessionTab(from, to) {
@@ -17176,9 +18248,15 @@ function reorderSessionTab(from, to) {
   }
   clearTabError();
   const selId = sel.id ?? "";
-  void reorderTab(selId, sel.title, target.name, to, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)).then((sessions) => {
-    if (sessions === null) return;
-    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+  void reorderTab(selId, sel.title, target.name, to, tabRealId(target), tok).then(() => fetchProjectedSnapshot(tok)).then((snapshot) => {
+    if (snapshot === null) return;
+    applySessions(snapshot.sessions, {
+      kind: "snapshot",
+      generation: snapshot.generation,
+      operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+      operationClockMs: snapshot.operationClockMs,
+      daemonBootId: snapshot.daemonBootId
+    }, snapshot.authoritative);
   }).catch((e) => surfaceTabError(e));
 }
 function surfaceMutationError(error, kind = "failed") {
@@ -17275,24 +18353,18 @@ function doOpenAccountLogin(agent, name) {
     }
     const notices = login.notices?.length ? ` \xB7 ${login.notices.join(" \xB7 ")}` : "";
     setAccountStatus(agent, name, `Running ${login.program}${notices}`, false);
-    closeModal();
-    closeAccountLogin();
-    accountLogin = openAccountLogin({
+    accountLogin = mountOverlay((mountHost) => openAccountLogin({
       token: tok,
-      mountHost: modalHost,
+      mountHost,
       login,
       onClosed: () => {
         accountLogin = null;
         refreshAccounts();
       }
-    });
+    }));
   }).catch((err) => {
     setAccountStatus(agent, name, errorText(err), true);
   });
-}
-function closeAccountLogin() {
-  accountLogin?.close();
-  accountLogin = null;
 }
 var queueConfigSave = createKeyedQueue();
 function applyConfigValue(key, value) {
@@ -17481,7 +18553,13 @@ function doRetryLimit() {
   if (!sel || tok === null) {
     return;
   }
-  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => surfaceTabError(e));
+  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => {
+    if (isMutationCommittedError(e)) {
+      surfaceMutationError(e, "confirmed");
+      return;
+    }
+    surfaceTabError(e);
+  });
 }
 function doHandoff() {
   const sel = selectedSessionData();
@@ -17493,14 +18571,22 @@ function doHandoff() {
     handoffModal(sel.title, sel.current_agent ?? "", {
       // The agent enum is global (#1970), so the picker asks with no repo scope.
       loadPrograms: () => loadPrograms(""),
-      onSubmit: (to) => {
+      loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
+      currentAccount: sel.account,
+      onSubmit: (to, account) => {
         const tok = token;
         if (tok === null || !modal) {
           return;
         }
         const m = modal;
         m.setBusy(true);
-        void handoffSession(target.id, target.title, to, tok).then(closeModal).catch((e) => {
+        void handoffSession(target.id, target.title, to, tok, account).then(closeModal).catch((e) => {
+          if (isMutationCommittedError(e)) {
+            if (modal === m) closeModal();
+            requestResync();
+            surfaceMutationError(e, "confirmed");
+            return;
+          }
           m.setBusy(false);
           m.setError(errorText(e));
         });
@@ -17660,6 +18746,7 @@ function stopStream() {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
   }
+  rejectResyncCompletions(new Error("Snapshot resync superseded by disconnect"));
   if (taskResyncTimer !== null) {
     window.clearTimeout(taskResyncTimer);
     taskResyncTimer = null;
@@ -17683,12 +18770,13 @@ function onEvent(ev) {
   }
   sessionEventGeneration += 1;
   const needsResync = optimisticSessions.event(ev);
-  applySessions(optimisticSessions.project());
-  if (needsResync) {
+  const evidence = ev.data?.id ? { kind: ev.type === "session.restored" ? "restored" : "updated", id: ev.data.id } : void 0;
+  applySessions(optimisticSessions.project(), evidence);
+  if (needsResync || ev.type === "session.restored") {
     requestResync();
   }
 }
-function applySessions(sessions) {
+function applySessions(sessions, evidence, authoritative = optimisticSessions.authoritativeRows()) {
   const prevSel = store.get().selectedId;
   const selectedProject = reconcileProject(
     sessions,
@@ -17707,11 +18795,37 @@ function applySessions(sessions) {
   const settled = selectedId === prevSel ? store.get().activeTab : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
+  if (evidence) pendingRestores.observe(authoritative.map((s) => ({
+    id: s.id,
+    restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
+    restoreSettled: isActionableSession(s) && s.lifecycle_action === "archive"
+  })), evidence);
 }
 async function fetchProjectedSnapshot(tok) {
   if (token !== tok) return null;
   try {
-    return await optimisticSessions.refresh(() => fetchSnapshot(tok));
+    let generation = 0;
+    let authoritative = [];
+    let operationLockTimeoutMs;
+    let operationClockMs;
+    let daemonBootId;
+    const sessions = await optimisticSessions.refresh(async () => {
+      generation = pendingRestores.beginSnapshot();
+      const snapshot = await fetchSessionSnapshot(tok);
+      authoritative = snapshot.sessions;
+      operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
+      operationClockMs = snapshot.operationClockMs;
+      daemonBootId = snapshot.daemonBootId;
+      return authoritative;
+    });
+    return sessions === null ? null : {
+      sessions,
+      authoritative,
+      generation,
+      operationLockTimeoutMs,
+      operationClockMs,
+      daemonBootId
+    };
   } catch (error) {
     requestResync();
     throw error;
@@ -17726,11 +18840,14 @@ function requestResync() {
     resyncTimer = null;
     const tok = token;
     if (tok === null) {
+      rejectResyncCompletions(new Error("Snapshot resync lost its connection"));
       return;
     }
     const eventGeneration = sessionEventGeneration;
     const mutationFence = optimisticSessions.snapshotFence();
-    void fetchSnapshot(tok).then((sessions) => {
+    const restoreSnapshot = pendingRestores.beginSnapshot();
+    void fetchSessionSnapshot(tok).then((snapshot) => {
+      const sessions = snapshot.sessions;
       if (requestGeneration !== resyncRequestGeneration || token !== tok) {
         return;
       }
@@ -17742,13 +18859,42 @@ function requestResync() {
         requestResync();
         return;
       }
-      applySessions(optimisticSessions.project());
+      applySessions(optimisticSessions.project(), {
+        kind: "snapshot",
+        generation: restoreSnapshot,
+        operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
+        operationClockMs: snapshot.operationClockMs,
+        daemonBootId: snapshot.daemonBootId
+      }, sessions);
       root?.setAttribute("data-af-resync-settled", "");
+      resolveResyncCompletions();
     }).catch((error) => {
       if (requestGeneration !== resyncRequestGeneration || token !== tok) return;
       if (shouldForgetToken(error)) disconnect(describeError(error), true);
+      rejectResyncCompletions(error);
     });
   }, 150);
+}
+function resolveResyncCompletions() {
+  const completions = resyncCompletions;
+  resyncCompletions = [];
+  for (const completion of completions) completion.resolve();
+}
+function rejectResyncCompletions(error) {
+  const completions = resyncCompletions;
+  resyncCompletions = [];
+  for (const completion of completions) completion.reject(error);
+}
+function requestPendingRestoreResync() {
+  if (token === null || store.get().phase !== "app") {
+    pendingRestoreResync = true;
+    return Promise.resolve();
+  }
+  const completion = new Promise((resolve, reject) => {
+    resyncCompletions.push({ resolve, reject });
+  });
+  requestResync();
+  return completion;
 }
 function isNativeControl(el2) {
   if (!el2) {

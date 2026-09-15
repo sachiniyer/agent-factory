@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func TestSnapshotReconcilesModelChangeWithoutLivenessChange(t *testing.T) {
@@ -74,6 +75,62 @@ func TestSnapshotReconcilesIdleEvidenceWithoutLivenessChange(t *testing.T) {
 	require.True(t, h.updateInstanceFromSnapshot(inst, data), "clearing daemon evidence is itself a row change")
 	reason, _ = inst.IdleReasonSnapshot()
 	require.Equal(t, session.IdleReasonNone, reason)
+}
+
+func TestSnapshotReconcilesAccountHandoffBeforeRetryGate(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "account-handoff")
+	data := inst.ToInstanceData()
+	data.Account = "personal"
+	data.PendingAccountSwap = &session.AccountSwapData{
+		Manual: true, Mission: "continue", From: "work", To: "personal",
+		ReplacementPanesStarted: true, MissionDeliveryStatus: session.PromptCouldNotConfirm,
+	}
+
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	account, _ := inst.AccountSelection()
+	require.Equal(t, "personal", account)
+	require.True(t, inst.CanRetryPendingManualAccountSwapDelivery(),
+		"the same-session projection must expose the daemon's pending inspected retry")
+}
+
+func TestSnapshotReconcilesAgentHandoffBeforeRetryGate(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "agent-handoff")
+	data := inst.ToInstanceData()
+	data.Liveness = session.LiveRunning
+	data.Status = session.Running
+	data.InFlightOp = session.OpReplacing
+	data.PendingHandoffMission = "continue the inherited work"
+	data.HandoffDeliveryStatus = session.PromptCouldNotConfirm
+
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	require.Equal(t, data.PendingHandoffMission, inst.PendingHandoffMission())
+	require.True(t, inst.CanRetryPendingHandoffMissionDelivery(),
+		"the same-session projection must expose the daemon's pending inspected retry")
+}
+
+func TestSnapshotReconcilesReplacementAgentRuntime(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "replacement-agent")
+	inst.SetTmuxSession(tmux.NewTmuxSession("replacement-agent", tmux.ProgramClaude))
+	require.True(t, inst.SetAgentConversation(session.AgentConversationData{
+		Agent: tmux.ProgramClaude, ID: "outgoing-conversation",
+	}))
+	data := inst.ToInstanceData()
+	data.Program = tmux.ProgramCodex
+	data.CurrentAgent = tmux.ProgramCodex
+	data.AgentConversation = &session.AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: "incoming-conversation",
+	}
+	data.Tabs[0].Conversation = data.AgentConversation
+
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	require.Equal(t, tmux.ProgramCodex, inst.AgentProgram())
+	require.Equal(t, tmux.ProgramCodex, inst.ResolvedPaneProgram())
+	require.Equal(t, tmux.ProgramCodex, inst.CurrentAgentName(),
+		"the next handoff picker must query and exclude the replacement agent")
+	require.Equal(t, *data.AgentConversation, inst.AgentConversation())
 }
 
 // TestSnapshotReconcilesUserKilledTombstone pins the same-session half of the

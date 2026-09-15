@@ -189,6 +189,52 @@ func menuHasOption(m *Menu, want keys.KeyName) bool {
 	return false
 }
 
+func TestMenuOffersRetryForUnconfirmedAccountHandoff(t *testing.T) {
+	path := t.TempDir()
+	base := readyUIInstance()
+	base.Path = path
+	data := base.ToInstanceData()
+	data.Worktree = session.GitWorktreeData{
+		RepoPath: path, WorktreePath: path, SessionName: data.Title, ExternalWorktree: true,
+	}
+	data.Account = "personal"
+	data.PendingAccountSwap = &session.AccountSwapData{
+		Manual: true, Mission: "continue", From: "work", To: "personal", ReplacementPanesStarted: true,
+		MissionDeliveryStatus: session.PromptCouldNotConfirm,
+	}
+	inst, err := session.FromInstanceData(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewMenu()
+	m.SetInstance(inst)
+	if !menuHasOption(m, keys.KeyLimitRetry) {
+		t.Fatalf("pending handoff has no retry option: %v", m.options)
+	}
+}
+
+func TestMenuOffersRetryForUnconfirmedAgentHandoff(t *testing.T) {
+	inst := readyUIInstance()
+	if err := inst.Transition(session.BeginHandoff()); err != nil {
+		t.Fatal(err)
+	}
+	mission := "continue the inherited work"
+	inst.SetPendingHandoffMission(mission)
+	if err := inst.BeginPendingHandoffMissionDelivery(mission); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.RecordPendingHandoffMissionDelivery(mission, session.PromptCouldNotConfirm); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewMenu()
+	m.SetInstance(inst)
+	if !menuHasOption(m, keys.KeyLimitRetry) {
+		t.Fatalf("ambiguous agent handoff has no c retry option: %v", m.options)
+	}
+}
+
 func TestMenuNewInstanceShowsSubmitProgramAndCancel(t *testing.T) {
 	m := NewMenu()
 	m.SetState(StateNewInstance)

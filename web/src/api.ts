@@ -285,9 +285,25 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
  * (never null — an empty daemon yields []); throws ApiError on transport/auth
  * failure so callers share one error path.
  */
-export async function fetchSnapshot(token: string): Promise<SessionData[]> {
+export interface SessionSnapshot {
+  sessions: SessionData[];
+  operationLockTimeoutMs?: number;
+  operationClockMs?: number;
+  daemonBootId?: string;
+}
+
+export async function fetchSessionSnapshot(token: string): Promise<SessionSnapshot> {
   const resp = await af<SnapshotResponse>("Snapshot", { repo_id: "" }, token);
-  return resp.instances ?? [];
+  return {
+    sessions: resp.instances ?? [],
+    operationLockTimeoutMs: resp.operation_lock_timeout_ms,
+    operationClockMs: resp.operation_clock_ms,
+    daemonBootId: resp.boot_id,
+  };
+}
+
+export async function fetchSnapshot(token: string): Promise<SessionData[]> {
+  return (await fetchSessionSnapshot(token)).sessions;
 }
 
 /**
@@ -490,8 +506,15 @@ export async function archiveSession(id: string, title: string, token: string): 
  *  repo_id stays empty because the web is an all-project client; the daemon's
  *  id-first resolver supplies the canonical repo and title. The
  *  session.restored event triggers a rail resync. */
-export async function restoreSession(id: string, title: string, token: string): Promise<void> {
-  const result = await af<{ warning?: string }>("RestoreSession", { id, title, repo_id: "" }, token);
+export async function restoreSession(
+  id: string,
+  title: string,
+  token: string,
+  expectedDaemonBootId?: string,
+): Promise<void> {
+  const result = await af<{ warning?: string }>("RestoreSession", {
+    id, title, repo_id: "", expected_daemon_boot_id: expectedDaemonBootId,
+  }, token);
   if (result.warning) {
     throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
@@ -514,6 +537,8 @@ export async function restoreSession(id: string, title: string, token: string): 
 export interface ResumeFromLimitResult {
   ok: boolean;
   reason?: string;
+  warning?: string;
+  code?: string;
 }
 
 export async function resumeFromLimit(id: string, title: string, token: string): Promise<void> {
@@ -521,22 +546,33 @@ export async function resumeFromLimit(id: string, title: string, token: string):
   if (!result.ok) {
     throw new Error(result.reason || "resume was not performed");
   }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 
 /** The daemon's HandoffSession response (daemon.HandoffSessionResponse): the
- *  outgoing and incoming agents, echoed so the toast can name the swap without
- *  re-reading the snapshot. */
+ *  outgoing and incoming agents and optional account identities, echoed so the
+ *  UI can report the committed swap without re-reading the snapshot. */
 export interface HandoffResult {
   from: string;
   to: string;
+  from_account?: string;
+  to_account?: string;
+  head_sha?: string;
+  warning?: string;
+  code?: string;
 }
 
-/** Continues a session under a different agent, in place (#2013) — the web half of
- *  the TUI's `F`. The daemon swaps the agent program, keeps the worktree and
- *  branch, and delivers a mission brief to the incoming agent; the resulting
- *  session.updated event repaints the rail. `to` is a supported agent enum name
- *  from ListPrograms, never the current one (the daemon's same-agent guard rejects
- *  that, and the picker already excludes it).
+const ACCOUNT_AWARE_HANDOFF_METHOD = "HandoffSessionV2";
+const ACCOUNT_AWARE_HANDOFF_UNSUPPORTED =
+  "daemon does not serve the version-bound account-aware handoff endpoint (likely an older daemon — upgrade it); the handoff was not sent";
+
+/** Continues a session under another agent or account, in place (#2013) — the
+ *  web half of the TUI's `F`. The daemon keeps the worktree and branch and
+ *  delivers a mission brief to the incoming identity; the resulting
+ *  session.updated event repaints the rail. `to` is optional when an account
+ *  changes under the current agent.
  *
  *  Sends `id` like kill/archive/resumeFromLimit, NOT title-only: a handoff STOPS a
  *  live agent and starts another, so resolving a duplicate title across repos to
@@ -547,8 +583,27 @@ export interface HandoffResult {
  *
  *  A failed handoff (not found, busy, unsupported backend, same agent) comes back
  *  as an envelope error and throws ApiError, so callers share one error path. */
-export async function handoffSession(id: string, title: string, to: string, token: string): Promise<HandoffResult> {
-  return af<HandoffResult>("HandoffSession", { id, title, repo_id: "", to }, token);
+export async function handoffSession(id: string, title: string, to: string, token: string, account = ""): Promise<HandoffResult> {
+  let result: HandoffResult;
+  try {
+    // The route itself is the capability check. An older daemon cannot serve it,
+    // so it returns 404 before its legacy target-only mutation can run.
+    result = await af<HandoffResult>(ACCOUNT_AWARE_HANDOFF_METHOD, { id, title, repo_id: "", to, account }, token);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404 && e.daemonRejected) {
+      throw new ApiError(404, ACCOUNT_AWARE_HANDOFF_UNSUPPORTED, e.code, true);
+    }
+    throw e;
+  }
+  const requestedAccount = account.trim();
+  if (requestedAccount && result.to_account !== requestedAccount) {
+    const mismatch = `daemon did not honor the requested account ${JSON.stringify(requestedAccount)} (likely an older daemon — upgrade it); the runtime was already restarted, but the resulting credential identity is unknown because the source account label may have carried across agent namespaces`;
+    throw new ApiError(200, result.warning ? `${result.warning}\n${mismatch}` : mismatch, MUTATION_COMMITTED_ERROR_CODE);
+  }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+  return result;
 }
 
 /** The daemon's DeleteProject response: how many sessions it archived vs tore

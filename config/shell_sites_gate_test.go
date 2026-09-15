@@ -106,10 +106,15 @@ var shellSiteRegistry = map[string][]classifiedSite{
 			"#3566 is about: an unscoped session never reaches the account boundary, so an `exec --` prefix " +
 			"here dies with exit 127 and no explanation.",
 	}},
-	"session/git/hooks.go:runPostWorktreeHooks": {
-		{class: operatorConfig, keys: []string{"post_worktree_commands"}, note: "the plain child"},
-		{class: operatorConfig, keys: []string{"post_worktree_commands"}, note: "the same command inside a transient systemd scope"},
-	},
+	"session/git/hooks.go:runPostWorktreeHooks": {{
+		class: operatorConfig, keys: []string{"post_worktree_commands"}, note: "the plain child",
+	}},
+	"session/git/hooks_progress.go:(*hookProgress).command": {{
+		class: operatorConfig, keys: []string{"post_worktree_commands"},
+		note: "the scoped entry's receipt wrapper passes the operator command as $2 to `sh -c \"$2\"` " +
+			"verbatim, both on first launch and when resuming the saved post_worktree_commands list; " +
+			"adoptHookProgress delegates to runPostWorktreeHooks and adds no separate shell site",
+	}},
 	"daemon/archive_hook.go:runOnArchiveHook": {{
 		class: operatorConfig, keys: []string{"on_archive_command"},
 		note: "the resolved archive hook, in its own transient scope",

@@ -717,6 +717,20 @@ func (m *Manager) persistGhostCleanupStall(repoID string, data *session.Instance
 	return persistInstanceData(repoID, *data)
 }
 
+// persistLateGhostCleanupCheckpoint is the revocable callback captured by a
+// descriptor worker that may outlive its caller. The caller has already durably
+// retained the ghost's cleanup-recovery row before shutdown can reach the
+// background drain. A callback that arrives after that drain starts therefore
+// leaves the safe row alone; one already admitted is counted and joined through
+// its targeted write.
+func (m *Manager) persistLateGhostCleanupCheckpoint(repoID string, data *session.InstanceData) error {
+	if _, admitted := m.beginBackgroundMutation(); !admitted {
+		return nil
+	}
+	defer m.backgroundMutationWG.Done()
+	return m.persistGhostCleanupStall(repoID, data)
+}
+
 var (
 	lateGhostDeleteSessionRecord  = deleteLateGhostSessionRecord
 	lateGhostCleanupRetryInterval = 10 * time.Second
@@ -756,11 +770,21 @@ func deleteLateGhostSessionRecord(
 // the normal editor fence may remove it.
 func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string, lateResult <-chan error) {
 	m.lateGhostCleanupWG.Add(1)
-	go func() {
+	if !m.launchBackgroundMutation(func(stop <-chan struct{}) {
 		defer m.lateGhostCleanupWG.Done()
-		if err := <-lateResult; err != nil {
+		var lateErr error
+		select {
+		case <-stop:
+			// A stuck descriptor worker is deliberately restart-recoverable: its
+			// cleanup-recovery row was retained before this reconciler launched.
+			// Its callback has separate shutdown admission, so abandoning this
+			// consumer cannot leave a write live across the terminal checkpoint.
+			return
+		case lateErr = <-lateResult:
+		}
+		if lateErr != nil {
 			m.clearGhostCleanupStall(key, stableID)
-			m.warn().Printf("ghost session %q: descriptor cleanup finished late with an error; retaining its stalled record: %v", title, err)
+			m.warn().Printf("ghost session %q: descriptor cleanup finished late with an error; retaining its stalled record: %v", title, lateErr)
 			return
 		}
 		for {
@@ -781,9 +805,18 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 			}
 			m.warn().Printf("ghost session %q: descriptor cleanup finished late, but final record cleanup failed; retrying in %s: %v", title, lateGhostCleanupRetryInterval, err)
 			timer := time.NewTimer(lateGhostCleanupRetryInterval)
-			<-timer.C
+			select {
+			case <-stop:
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			case <-timer.C:
+			}
 		}
-	}()
+	}) {
+		m.lateGhostCleanupWG.Done()
+	}
 }
 
 // reconcileSettledGhostCleanup gives a synchronous descriptor success the same

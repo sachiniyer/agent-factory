@@ -520,7 +520,7 @@ func readJSONFile(t *testing.T, path string, dst interface{}) {
 	}
 }
 
-func waitUntil(t *testing.T, timeout time.Duration, desc string, fn func() bool) {
+func waitUntil(t *testing.T, timeout time.Duration, desc string, fn func() bool, onTimeout ...func()) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -528,6 +528,9 @@ func waitUntil(t *testing.T, timeout time.Duration, desc string, fn func() bool)
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	for _, diagnostic := range onTimeout {
+		diagnostic()
 	}
 	t.Fatalf("timeout waiting for %s", desc)
 }

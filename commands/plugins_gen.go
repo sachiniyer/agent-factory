@@ -76,6 +76,9 @@ var pluginReleaseDigests = []string{
 	"828a01a7b3f3e3e14bdbe4dc864067040c4f260251d029dad422e65f5ce24e7e", // 3.11 — advertise bounded daemon-side session listing (#3362)
 	"264d561342f5d009e7ce52826ced4c640ee55227e1a43367e96c2a681ef7192b", // 3.12 — idle awaits input; deletion respects resource ownership (#4057)
 	"e25deafc97b6ced4c97d6b6d4c1c3396bc06c58e69b2bc06c3fc123602bf114c", // 3.13 — deletion labels and work-loss disclosure (#4033)
+	"d3fc6b5bf86c271996caf9391ac9be5a62787451dc949c84ee503909ace268e4", // 3.14 — account-aware handoff and explicit ambiguous-delivery retry (#4018)
+	"a7f642df5fed58f13fe5f0504e26695541183caafe32671e721b3d14f43f2865", // 3.15 — forbid bypassing Git's live-worktree branch guard (#4092)
+	"ae2b7057ea8fc398586676ae3dc4e34240e9a24c9e4f4ab8569c62a7bb41a768", // 3.16 — root-agent config forms and adopted-session remediation (#4087)
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it

@@ -100,15 +100,32 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 	// A handle retained after unexpected listener death outlives the empty
 	// binding sentinel. Disabling that listener must still enter bindWebLocked's
 	// teardown path so accepted connections do not survive reconciliation.
+	//
+	// A failed initial bind leaves webHandle==nil and webConfigAddr=="" while the
+	// lifecycle still records the boot-time address as TCPConfigured=true /
+	// TCPListenAddr=<addr> (set by newDaemonLifecycle independently). When the
+	// operator then disables the listener, the first two conditions are both false
+	// — "" == "" and webHandle is nil — so without the third condition the
+	// lifecycle pair is never cleared and status keeps reporting the old address as
+	// "not bound" for the rest of the boot. Enter the teardown path whenever the
+	// lifecycle configured half is stale so bindWebLocked can clear it.
+	lcfg := func() DaemonListenerStatus {
+		if wl.manager.lifecycle == nil {
+			return DaemonListenerStatus{}
+		}
+		return wl.manager.lifecycle.snapshot().listeners
+	}()
 	if newCfg.ListenAddr != wl.webConfigAddr ||
-		(newCfg.ListenAddr == "" && wl.webHandle != nil) {
+		(newCfg.ListenAddr == "" && wl.webHandle != nil) ||
+		(newCfg.ListenAddr == "" && lcfg.TCPConfigured) {
 		if e := wl.bindWebLocked(newCfg.ListenAddr); e != nil {
 			errs = append(errs, e)
 			failed = append(failed, "network.listen_addr")
 		}
 	}
 	if newCfg.PreviewListenAddr != wl.previewConfigAddr ||
-		(newCfg.PreviewListenAddr == "" && wl.previewHandle != nil) {
+		(newCfg.PreviewListenAddr == "" && wl.previewHandle != nil) ||
+		(newCfg.PreviewListenAddr == "" && lcfg.PreviewConfigured) {
 		if e := wl.bindPreviewLocked(newCfg.PreviewListenAddr); e != nil {
 			errs = append(errs, e)
 			failed = append(failed, "network.preview_listen_addr")
@@ -136,8 +153,24 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 			wl.webHandle.retire()
 			wl.webHandle = nil
 			if wl.manager.lifecycle != nil {
+				// Clear the bound half FIRST, then the configured half, so a
+				// concurrent /v1/health snapshot reader can never observe the
+				// bug's disable-direction signature (TCPConfigured=true while
+				// TCPBound=false) between the two updates. The death closure
+				// below clears the bound half only — this path additionally
+				// clears the configured half because the operator asked for the
+				// opt-out (network.listen_addr is now "").
 				wl.manager.lifecycle.clearTCPBound()
 			}
+		}
+		// Clear the lifecycle configured half unconditionally when addr=="", even
+		// when webHandle is nil. A failed initial bind leaves webHandle==nil but
+		// the lifecycle still holds the boot-time address as TCPConfigured=true /
+		// TCPListenAddr=<addr> (set independently by newDaemonLifecycle). Clearing
+		// here ensures the operator's disable intent is reflected in status whether
+		// or not the initial bind ever succeeded.
+		if wl.manager.lifecycle != nil {
+			wl.manager.lifecycle.setTCPConfigured("")
 		}
 		wl.webConfigAddr = ""
 		wl.webBoundAddr = ""
@@ -182,6 +215,17 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	wl.webGen++
 	gen := wl.webGen
 	if wl.manager.lifecycle != nil {
+		// Update the configured half BEFORE the bound half, so a concurrent
+		// /v1/health snapshot reader can never observe the bug's enable-direction
+		// signature (TCPConfigured=false while TCPBound=true) between the two
+		// updates. setTCPConfigured takes the CONFIGured address (addr), while
+		// setTCPBound takes the kernel-resolved one (info.Addr), so TCPListenAddr
+		// stays the operator's value and TCPBoundAddr the concrete port — matching
+		// the documented split (lifecycle.go:42-44). This runs only on the
+		// bind-success branch; the failed-rebind branch above returns before it,
+		// leaving the configured half at the previous serving value (the exact
+		// `webConfigAddr` discipline this file keeps for the failed-rebind case).
+		wl.manager.lifecycle.setTCPConfigured(addr)
 		wl.manager.lifecycle.setTCPBound(info.Addr)
 	}
 	go func() {
@@ -277,8 +321,23 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 			wl.previewHandle.retire()
 			wl.previewHandle = nil
 			if wl.manager.lifecycle != nil {
+				// Clear bound first, then configured, for the same reason as the
+				// control listener's opt-out: a concurrent snapshot reader must
+				// never see PreviewConfigured=true while PreviewBound=false as a
+				// stable post-apply state. The death closure below clears the
+				// bound half only; this additionally clears the configured half
+				// because the operator set network.preview_listen_addr to "".
 				wl.manager.lifecycle.clearPreviewBound()
 			}
+		}
+		// Clear the lifecycle configured half unconditionally when addr=="", even
+		// when previewHandle is nil. A failed initial bind leaves previewHandle==nil
+		// but the lifecycle still holds the boot-time address as
+		// PreviewConfigured=true / PreviewListenAddr=<addr>. Clearing here ensures
+		// the operator's disable intent is reflected in status regardless of
+		// whether the initial bind ever succeeded.
+		if wl.manager.lifecycle != nil {
+			wl.manager.lifecycle.setPreviewConfigured("")
 		}
 		wl.previewConfigAddr = ""
 		wl.previewBoundAddr = ""
@@ -300,6 +359,11 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 	wl.previewGen++
 	gen := wl.previewGen
 	if wl.manager.lifecycle != nil {
+		// Configured before bound, same ordering rationale as the control
+		// listener: a concurrent snapshot reader must not see PreviewConfigured=false
+		// while PreviewBound=true. setPreviewConfigured takes the configured address;
+		// setPreviewBound takes the kernel-resolved concrete address.
+		wl.manager.lifecycle.setPreviewConfigured(addr)
 		wl.manager.lifecycle.setPreviewBound(info.Addr)
 	}
 	go func() {

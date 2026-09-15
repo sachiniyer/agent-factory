@@ -42,6 +42,12 @@ func (m *home) showJumpTabPrompt() (tea.Model, tea.Cmd) {
 		return m, nil // nothing to jump within
 	}
 	m.promptOverlay = overlay.NewPromptOverlay("Jump to tab (number or name)", "")
+	// The widget is the naming form's initial-prompt field; handleStateJumpTab
+	// re-owns its keys (see below), so it must also own the copy that describes
+	// them. Inheriting the composer's told the operator "enter newline" while
+	// enter submitted, and "tab done" while tab did nothing (#4172).
+	m.promptOverlay.SetPlaceholder("Tab number or name…")
+	m.promptOverlay.SetHints("enter jump · esc cancel", "enter jump · esc cancel")
 	m.layoutPromptOverlay()
 	m.state = stateJumpTab
 	return m, nil

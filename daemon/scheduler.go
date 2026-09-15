@@ -36,6 +36,10 @@ type taskScheduler struct {
 	// which must not be read as the very different "this entry will never fire"
 	// (see armingSnapshot).
 	started bool
+	// stopped latches once Stop has been called. reloadTasks checks it under
+	// s.mu so a CRUD or ReloadTasks RPC that acquired s.mu after Stop released
+	// it cannot write armed=true back onto a scheduler whose cron has exited.
+	stopped bool
 
 	// Injection points for tests: loadTasks substitutes fixture task lists,
 	// parse allows a seconds-granularity parser so firing tests don't wait a
@@ -100,13 +104,29 @@ func (s *taskScheduler) Start() {
 // Stop halts schedule evaluation. Already-running task fires are left to
 // finish on their own goroutines.
 func (s *taskScheduler) Stop() {
-	// Symmetric with Start, and for the same reason: a stopped cron's Entries()
-	// takes the not-running path, so leaving started latched would make every
-	// entry's zero Next read as "will not fire" during shutdown.
+	// Clear both latches so a read landing during shutdown reports ArmingUnknown
+	// rather than a fabricated verdict about a cron that has stopped.
+	//
+	// armed=false is the shutdown twin of the warm-up guard in armingSnapshot:
+	// after cron.Stop the run loop has exited, so nothing is observing steady
+	// state, and an observed snapshot here would be a fabricated positive.
+	// Satisfiable entries retain their last-computed non-zero Next in
+	// cron.Entries() (entrySnapshot value-copies without zeroing), and with
+	// started=false the zero-Next guard below is bypassed, so leaving armed
+	// latched would report both shapes as Armed — a stale "will fire at" on a
+	// stopped cron, and a re-armed Feb-31-style entry the guard was written to
+	// drop (#3648 B-invariant: not observed is a third state, never a negative).
+	//
+	// started=false separately prevents the fabricated negative: a stopped
+	// cron's Entries() takes the not-running path, and a running cron's zero
+	// Next means "will not fire", so leaving started latched would let that
+	// verdict fire during shutdown.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cron.Stop()
 	s.started = false
+	s.armed = false
+	s.stopped = true
 }
 
 // Reload re-reads tasks.json and replaces the scheduled entry set so it
@@ -133,6 +153,12 @@ func (s *taskScheduler) reloadTasks(tasks []task.Task) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// A reload racing with Stop can acquire s.mu after Stop releases it. Honour
+	// the stopped latch so it cannot re-arm a scheduler whose cron has exited.
+	if s.stopped {
+		return nil
+	}
 
 	for id, entry := range s.entries {
 		s.cron.Remove(entry.id)

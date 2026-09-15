@@ -30,7 +30,7 @@ import (
 type credentialRedactingWriter struct{ writer io.Writer }
 
 func (w credentialRedactingWriter) Write(p []byte) (int, error) {
-	redacted := []byte(agentproto.RedactAccessTokenText(credscrub.Scrub(string(p))))
+	redacted := []byte(RedactCredentials(string(p)))
 	n, err := w.writer.Write(redacted)
 	if err != nil {
 		return 0, err
@@ -39,6 +39,14 @@ func (w credentialRedactingWriter) Write(p []byte) (int, error) {
 		return 0, io.ErrShortWrite
 	}
 	return len(p), nil
+}
+
+// RedactCredentials applies the same credential policy used by every AF log
+// sink. Callers use it before applying a transport encoding that would hide the
+// value's original structure from the sink. For example, post-worktree hook
+// commands pass through this function before %q escapes their shell quotes.
+func RedactCredentials(s string) string {
+	return agentproto.RedactAccessTokenText(credscrub.Scrub(s))
 }
 
 func redactedLogSink(writer io.Writer) io.Writer {

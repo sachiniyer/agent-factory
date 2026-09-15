@@ -60,6 +60,7 @@ func TestMutationOutcomeSurvivesGobRoundTrip(t *testing.T) {
 			"ArchiveSession":  &ArchiveSessionResponse{},
 			"RestoreSession":  &RestoreSessionResponse{},
 			"RestoreArchived": &RestoreArchivedResponse{},
+			"ResumeFromLimit": &ResumeFromLimitResponse{},
 			"AddTask":         &AddTaskResponse{},
 			"UpdateTask":      &UpdateTaskResponse{},
 			"RemoveTask":      &RemoveTaskResponse{},

@@ -331,7 +331,7 @@ func (s *localAgentServer) resetBrokerCaptures() {
 
 // ensureBrokerByID is ensureBroker addressed by a tab's STABLE id (#1738) — the
 // id-native binding path (TabAddressableServer). It resolves the id to the tmux it
-// currently backs ATOMICALLY (TabTmuxByID, one lock), so unlike the ordinal path
+// currently backs ATOMICALLY (tabTmuxByIDLocked, one lock), so unlike the ordinal path
 // there is no window in which a concurrent close/reorder can shift a different tab
 // under the caller's address (#1779). The broker map is already id-keyed, so this
 // is the direct route: no ordinal is involved at any point. A stale/unknown id is

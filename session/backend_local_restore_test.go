@@ -136,7 +136,15 @@ func TestLocalBackendSwapAgentResetsBrokerCapture(t *testing.T) {
 	server.brokers = map[string]*ptyBroker{"agent": broker}
 
 	plan := AgentSwapPlan{target: tmux.ProgramGemini, program: tmux.ProgramGemini}
+	captured := false
+	plan = plan.WithPostStopCapture(func() error {
+		require.True(t, killed, "capture must wait until the outgoing runtime stops")
+		require.Empty(t, ptyFactory.cmds, "capture must precede replacement launch")
+		captured = true
+		return nil
+	})
 	require.NoError(t, backend.SwapAgent(inst, plan))
+	require.True(t, captured)
 	require.Equal(t, 1, channel.stops, "handoff must stop the capture bound to the outgoing pane")
 	require.Equal(t, 2, channel.starts, "the attached subscriber must resume on the incoming pane without reconnecting")
 }
@@ -225,6 +233,40 @@ func TestLocalBackendStartRestoreReinjectsSystemPrompt(t *testing.T) {
 		"first PTY command must be the lazy-respawn new-session (not an attach)")
 	require.Contains(t, newSessionCmd, "--plugin-dir",
 		"respawned session must include claude --plugin-dir injection so /af-* slash commands keep working (#511)")
+	require.NotEmpty(t, inst.RuntimeProgram(),
+		"a successful respawn must keep recording the command AF positively launched")
+}
+
+func TestLocalBackendStartUnverifiedReattachClearsRuntimeProgram(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	const tmuxName = "af_recreated_same_name"
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, repoRoot, tmuxName, "main", "", true, false)
+	require.NoError(t, err)
+
+	cmdExec := nameKeyedExec(map[string]bool{tmuxName: true})
+	ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		tmuxName, "claude", persistPtyFactory{t: t, cmdExec: cmdExec}, cmdExec,
+	)
+	inst := &Instance{
+		Title:          "recreated-same-name",
+		Path:           repoRoot,
+		Program:        "claude",
+		runtimeProgram: "/old/claude",
+		backend:        &LocalBackend{},
+		liveness:       LiveReady,
+		gitWorktree:    gw,
+		Tabs:           []*Tab{newAgentTab(ts)},
+	}
+	stale := inst.ObserveRuntimeProgram()
+
+	require.NoError(t, inst.Start(false))
+	require.Empty(t, inst.RuntimeProgram(),
+		"reattachment by sanitized name cannot prove that the pane is the runtime whose command was persisted")
+	require.False(t, inst.RuntimeProgramEvidenceCurrent(stale),
+		"clearing the unverified persisted command must invalidate concurrent drift observers")
+	require.True(t, inst.ConsumeLoadRuntimeReplacement(),
+		"the loader must checkpoint the retired runtime command before publishing the restored row")
 }
 
 // --- remote terminal capability (#1592 Phase 4 PR7) ---

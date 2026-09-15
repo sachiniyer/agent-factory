@@ -4500,6 +4500,357 @@ test("an approved degraded pass survives the gate's own update-branch", async ()
   );
 });
 
+// #4239. A reply can land on one gate merge just before another base update.
+// Every link is independently tree-proven, so the intermediate head is as valid
+// an evidence name as the terminal content head; walking past it must not erase
+// the reviewer's answer.
+test("an inline usage-limit reply survives a verified chain of update-branch merges", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const LAP1 = "9e27c60100000000000000000000000000000000";
+  const BASE1 = "ba5e000100000000000000000000000000000000";
+  const BASE2 = "ba5e000200000000000000000000000000000000";
+  const MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+  const reply = {
+    ...codexRateLimit("2026-07-09T10:45:00Z"),
+    id: 4239001,
+    pull_request_review_id: 4239002,
+    in_reply_to_id: 4239000,
+    commit_id: LAP1,
+  };
+
+  const landed = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: LAP1, committedDate: "2026-07-09T10:40:00Z" },
+      { oid: BASE2, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    baseContainedShas: [BASE1, BASE2],
+    mergeBaseSha: MERGE_BASE,
+    parentsByOid: {
+      [LAP1]: [
+        { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+        { oid: BASE1, committedDate: "2026-07-09T10:39:00Z" },
+      ],
+    },
+    commitDatesByOid: {
+      [LAP1]: "2026-07-09T10:40:00Z",
+      [CONTENT]: "2026-07-09T10:30:00Z",
+    },
+    treeEntriesByCommit: {
+      [MERGE_BASE]: {},
+      [CONTENT]: { "pr.txt": "1".repeat(40) },
+      [BASE1]: { "base-one.txt": "2".repeat(40) },
+      [LAP1]: { "pr.txt": "1".repeat(40), "base-one.txt": "2".repeat(40) },
+      [BASE2]: { "base-two.txt": "3".repeat(40) },
+      [HEAD_SHA]: {
+        "pr.txt": "1".repeat(40),
+        "base-one.txt": "2".repeat(40),
+        "base-two.txt": "3".repeat(40),
+      },
+    },
+    issueComments: [
+      prComment("sachiniyer", "## Review — approve\n\nRead it.", "2026-07-09T10:46:00Z"),
+    ],
+    reviews: [],
+    reviewComments: [reply],
+  });
+
+  assert.equal(landed.degradedForUnavailableReviewer, true, landed.reasons.join("; "));
+  assert.equal(landed.shouldMerge, true, `must carry the intermediate reply: ${landed.reasons.join("; ")}`);
+  assert.match([...landed.notes, ...landed.reasons].join("\n"), /4239001/);
+});
+
+test("an inline usage-limit reply does not carry across a content-changing merge", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+  const MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+  const reply = {
+    ...codexRateLimit("2026-07-09T10:45:00Z"),
+    id: 4239011,
+    pull_request_review_id: 4239012,
+    in_reply_to_id: 4239010,
+    commit_id: CONTENT,
+  };
+
+  const blocked = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    mergeBaseSha: MERGE_BASE,
+    treeEntriesByCommit: {
+      [MERGE_BASE]: {},
+      [CONTENT]: { "pr.txt": "1".repeat(40) },
+      [BASE_TIP]: { "base.txt": "2".repeat(40) },
+      // A hand resolution silently drops the base-side change.
+      [HEAD_SHA]: { "pr.txt": "1".repeat(40) },
+    },
+    issueComments: [
+      prComment("sachiniyer", "## Review — approve\n\nRead it.", "2026-07-09T10:46:00Z"),
+    ],
+    reviews: [],
+    reviewComments: [reply],
+  });
+
+  assert.equal(blocked.degradedForUnavailableReviewer, false);
+  assert.equal(blocked.shouldMerge, false, "changed content must require fresh availability evidence");
+  assert.doesNotMatch(blocked.notes.join("\n"), /content head/);
+});
+
+test("an intermediate commit cited as finding context stays unbound across update merges", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const LAP1 = "9e27c60100000000000000000000000000000000";
+  const BASE1 = "ba5e000100000000000000000000000000000000";
+  const BASE2 = "ba5e000200000000000000000000000000000000";
+  const MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+  const finding = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    citing: LAP1,
+    id: 4239021,
+    timestamp: "2026-07-09T10:44:00Z",
+  });
+
+  const updateChain = {
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: LAP1, committedDate: "2026-07-09T10:40:00Z" },
+      { oid: BASE2, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    baseContainedShas: [BASE1, BASE2],
+    mergeBaseSha: MERGE_BASE,
+    parentsByOid: {
+      [LAP1]: [
+        { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+        { oid: BASE1, committedDate: "2026-07-09T10:39:00Z" },
+      ],
+    },
+    commitDatesByOid: {
+      [LAP1]: "2026-07-09T10:40:00Z",
+      [CONTENT]: "2026-07-09T10:30:00Z",
+    },
+    treeEntriesByCommit: {
+      [MERGE_BASE]: {},
+      [CONTENT]: { "pr.txt": "1".repeat(40) },
+      [BASE1]: { "base-one.txt": "2".repeat(40) },
+      [LAP1]: { "pr.txt": "1".repeat(40), "base-one.txt": "2".repeat(40) },
+      [BASE2]: { "base-two.txt": "3".repeat(40) },
+      [HEAD_SHA]: {
+        "pr.txt": "1".repeat(40),
+        "base-one.txt": "2".repeat(40),
+        "base-two.txt": "3".repeat(40),
+      },
+    },
+    reviews: [],
+  };
+  const blocked = await evaluateGate({
+    ...updateChain,
+    issueComments: [finding, codexVerdict(LAP1, "2026-07-09T10:46:00Z")],
+  });
+
+  assert.equal(blocked.shouldMerge, false, "a contextual link must not become a head assertion");
+  assert.ok(
+    blocked.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${blocked.reasons.join("; ")}`,
+  );
+  assert.ok(
+    blocked.reasons.some((reason) => reason.includes(finding.html_url)),
+    `the blocker must name the unbound finding: ${blocked.reasons.join("; ")}`,
+  );
+
+  // The opposite policy applies to GitHub's commit_id: it states which commit
+  // the review is about, so a finding authenticated to the same intermediate
+  // head remains part of the carried review rather than becoming unbound.
+  const authenticated = await evaluateGate({
+    ...updateChain,
+    issueComments: [
+      codexReview(LAP1, "P2: authenticated intermediate finding.", "2026-07-09T10:46:00Z"),
+    ],
+  });
+  assert.equal(authenticated.shouldMerge, false, "an authenticated finding must carry");
+  assert.ok(
+    authenticated.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${authenticated.reasons.join("; ")}`,
+  );
+  assert.ok(
+    !authenticated.reasons.some((reason) => reason.includes("name no commit")),
+    `an authenticated commit_id is classified: ${authenticated.reasons.join("; ")}`,
+  );
+});
+
+// #4235. Unlike the degraded path above, an ordinary verdict is bound by the
+// commit SHA it names. The gate already identifies the first parent as the
+// unchanged PR-content head; the verdict must follow that identity just as the
+// timestamp-based evidence follows its freshness anchor.
+test("an ordinary verdict survives the gate's own update-branch", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+  const MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+
+  const landed = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    mergeBaseSha: MERGE_BASE,
+    treeEntriesByCommit: {
+      [MERGE_BASE]: { "shared.txt": "1".repeat(40) },
+      [CONTENT]: { "shared.txt": "1".repeat(40), "pr.txt": "2".repeat(40) },
+      [BASE_TIP]: { "shared.txt": "1".repeat(40), "base.txt": "3".repeat(40) },
+      [HEAD_SHA]: {
+        "shared.txt": "1".repeat(40),
+        "pr.txt": "2".repeat(40),
+        "base.txt": "3".repeat(40),
+      },
+    },
+    issueComments: [codexVerdict(CONTENT, "2026-07-09T10:40:31Z")],
+  });
+
+  assert.equal(
+    landed.shouldMerge,
+    true,
+    `must carry the content-head verdict: ${landed.reasons.join("; ")}`,
+  );
+  assert.match(landed.notes.join("\n"), /Codex verdict matches content head 71c42134/);
+  assert.match(
+    landed.notes.join("\n"),
+    /merge that preserves the reviewed content.*approval and Codex evidence stay bound/,
+    "the decision says which evidence the verified tree carries",
+  );
+});
+
+test("a corroborated summary verdict survives the gate's own update-branch", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+
+  const landed = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    issueComments: [
+      codexSummaryTable(CONTENT, {
+        rowTime: "2026-07-09T10:40:31Z",
+        commentTime: "2026-07-09T10:40:31Z",
+      }),
+    ],
+    reviews: [automaticReview(CONTENT, "2026-07-09T10:40:30Z")],
+  });
+
+  assert.equal(
+    landed.shouldMerge,
+    true,
+    `must carry the content-head summary verdict: ${landed.reasons.join("; ")}`,
+  );
+  assert.match(landed.notes.join("\n"), /Codex verdict matches content head 71c42134/);
+  assert.match(landed.notes.join("\n"), /Codex verdict corroborated by review 3606/);
+});
+
+// The permissive direction is the load-bearing half: a hand-written conflict
+// resolution has the same two-parent/base-contained shape as update-branch, but
+// its committed tree is not the automatic three-way result. It must not inherit
+// the first parent's verdict.
+test("an ordinary verdict does not carry across a conflict-resolution merge", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+  const MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+
+  const blocked = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    mergeBaseSha: MERGE_BASE,
+    treeEntriesByCommit: {
+      [MERGE_BASE]: { "shared.txt": "1".repeat(40) },
+      [CONTENT]: { "shared.txt": "2".repeat(40) },
+      [BASE_TIP]: { "shared.txt": "3".repeat(40) },
+      [HEAD_SHA]: { "shared.txt": "4".repeat(40) },
+    },
+    issueComments: [codexVerdict(CONTENT, "2026-07-09T10:40:31Z")],
+  });
+
+  assert.equal(blocked.shouldMerge, false, "a conflict resolution must require a fresh verdict");
+  assert.match(blocked.reasons.join("\n"), new RegExp(`Codex has not reviewed head ${HEAD_SHA}`));
+  assert.doesNotMatch(blocked.notes.join("\n"), /content head/);
+});
+
+test("a committed-tree mismatch cannot carry a content-head verdict", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+  const MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+
+  const blocked = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    mergeBaseSha: MERGE_BASE,
+    treeEntriesByCommit: {
+      [MERGE_BASE]: {},
+      [CONTENT]: { "pr.txt": "1".repeat(40) },
+      [BASE_TIP]: { "base.txt": "2".repeat(40) },
+      // The committed merge silently dropped the base-side addition.
+      [HEAD_SHA]: { "pr.txt": "1".repeat(40) },
+    },
+    issueComments: [codexVerdict(CONTENT, "2026-07-09T10:40:31Z")],
+  });
+
+  assert.equal(blocked.shouldMerge, false, "a different committed tree is unreviewed content");
+  assert.doesNotMatch(blocked.notes.join("\n"), /content head/);
+});
+
+test("a truncated tree cannot carry a content-head verdict", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+
+  const blocked = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    truncatedTreeCommits: [CONTENT],
+    issueComments: [codexVerdict(CONTENT, "2026-07-09T10:40:31Z")],
+  });
+
+  assert.equal(blocked.shouldMerge, false, "an incomplete manifest proves nothing");
+  assert.doesNotMatch(blocked.notes.join("\n"), /content head/);
+});
+
+// Carrying the verdict but not the review body would be fail-open: a review can
+// have a valid verdict marker and a P0-P3 finding in the same artifact. Every
+// SHA-bound part of that artifact follows the content head together.
+test("a content-head verdict cannot carry without its finding", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+
+  const blocked = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    issueComments: [
+      codexReview(CONTENT, "P2: this still needs attention.", "2026-07-09T10:40:31Z"),
+    ],
+  });
+
+  assert.equal(blocked.shouldMerge, false, "carrying a verdict must carry its finding too");
+  assert.match(blocked.reasons.join("\n"), /latest exact-head Codex review body.*P0-P3 finding/);
+});
+
 // Exactly two parents, and the count is load-bearing on its own. An octopus
 // merge whose second parent happens to be base history is not an update-branch:
 // the other parents bring in content nothing here has looked at, and taking
@@ -4558,6 +4909,7 @@ test("the content head is found through a chain of the gate's own merges", async
     github,
     context: fakeContext(),
     baseRefName: "master",
+    headSha: HEAD_SHA,
     headParents: [
       { oid: LAP2, committedDate: "2026-07-09T14:17:00Z" },
       { oid: BASE, committedDate: "2026-07-09T14:16:00Z" },
@@ -4571,6 +4923,11 @@ test("the content head is found through a chain of the gate's own merges", async
     "…and carry its date, so evidence written at 13:09 still binds",
   );
   assert.equal(found?.chainLength, 3, "the decision names how many gate merges were walked");
+  assert.deepEqual(
+    found?.evidenceHeadOids,
+    [LAP2, LAP1, CONTENT],
+    "every tree-proven predecessor remains a valid name for evidence posted between laps",
+  );
 });
 
 // The bound is load-bearing, not decoration: this walks one API read per link, and
@@ -4595,6 +4952,7 @@ test("the content-head walk is bounded, even on a cycle", async () => {
     github,
     context: fakeContext(),
     baseRefName: "master",
+    headSha: HEAD_SHA,
     headParents: [{ oid: A, committedDate: "2026-07-09T13:02:00Z" }, { oid: BASE }],
     maxDepth: 5,
   });
@@ -4621,6 +4979,7 @@ test("a push inside the chain stops the walk and anchors on it", async () => {
     github,
     context: fakeContext(),
     baseRefName: "master",
+    headSha: HEAD_SHA,
     headParents: [
       { oid: LAP1, committedDate: "2026-07-09T13:35:00Z" },
       { oid: BASE, committedDate: "2026-07-09T13:34:00Z" },
@@ -4643,6 +5002,7 @@ test("a merge with more than two parents is not an update-branch", async () => {
     github: alwaysContained,
     context: fakeContext(),
     baseRefName: "master",
+    headSha: HEAD_SHA,
     headParents: [
       { oid: "71c4213400000000000000000000000000000000", committedDate: "2026-07-09T10:30:00Z" },
       { oid: "9ac0ffee00000000000000000000000000000000", committedDate: "2026-07-09T10:49:00Z" },
@@ -4659,6 +5019,7 @@ test("a merge with more than two parents is not an update-branch", async () => {
         github: alwaysContained,
         context: fakeContext(),
         baseRefName: "master",
+        headSha: HEAD_SHA,
         headParents: parents,
       }),
       null,
@@ -5481,6 +5842,490 @@ test("the happy path squash-merges the exact evaluated head", async () => {
 // computed against the tree that actually lands.
 // ---------------------------------------------------------------------------
 
+test("#4210-r3: a PR closed during the validation wait stops successfully before approval", async () => {
+  const overrides = { 1465: {} };
+  const github = fakeGateGithub({ headSha: OTHER_SHA, pullRequestsByNumber: overrides, runsAppearAfterReads: 1,
+    runsByHeadSha: { [OTHER_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request", conclusion: "action_required" }] },
+  });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => { overrides[1465].state = "CLOSED"; },
+  });
+  assert.deepEqual(targets, []);
+  assert.deepEqual(github.approvedRuns, []);
+  assert.deepEqual(github.dispatchedWorkflows, []);
+});
+
+test("#4210-r3: a head moving during validation recovery is recovered before publishing", async () => {
+  const newest = "f".repeat(40);
+  const overrides = { 1465: {} };
+  const github = fakeGateGithub({ headSha: OTHER_SHA, pullRequestsByNumber: overrides, runsAppearAfterReads: 1,
+    runsByHeadSha: {
+      [OTHER_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request", conclusion: "action_required" }],
+      [newest]: [{ id: 702, name: "PR Validation", event: "pull_request", conclusion: "action_required" }],
+    },
+  });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => { overrides[1465].headRefOid = newest; },
+  });
+  assert.equal(targets[0].headSha, newest);
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [702]);
+});
+
+test("#4210-r3: a successor with no PR runs uses the existing validation dispatch fallback", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.deepEqual(github.dispatchedWorkflows.map((run) => run.workflow_id), ["pr.yml"]);
+});
+
+for (const [invalidationFails, publicationFails] of [[true, false], [false, true], [true, true]]) {
+  test(`#4210-r5: recovery command survives invalidation=${invalidationFails} publication=${publicationFails} failures`, async () => {
+    const github = fakeGateGithub({ behindBy: 1,
+      workflowDispatchErrorsByWorkflow: { "auto-gate.yml": new Error("dispatch unavailable") },
+    });
+    const operations = [];
+    const createCheck = github.rest.checks.create;
+    github.rest.checks.create = async (options) => {
+      if (github.workflowDispatchAttempts > 0) {
+        operations.push("invalidate");
+        if (invalidationFails) throw Object.assign(new Error("invalidation rejected"), { status: 422 });
+      }
+      return createCheck(options);
+    };
+    const createComment = github.rest.issues.createComment;
+    github.rest.issues.createComment = async (options) => {
+      operations.push("notice");
+      if (publicationFails) throw new Error("comment unavailable");
+      return createComment(options);
+    };
+    const { error } = await runApplyGateStep({ github });
+    assert.ok(error);
+    assert.match(error.message, /dispatch unavailable/);
+    assert.match(error.message, /gh workflow run auto-gate.yml/);
+    if (invalidationFails) assert.match(error.message, /invalidation rejected/);
+    if (publicationFails) assert.match(error.message, /comment unavailable/);
+    assert.deepEqual(operations, ["notice", "invalidate"], "publication and invalidation are both attempted, in that order");
+    assert.equal(github.recoveryComments.length, publicationFails ? 0 : 1);
+    if (!publicationFails) assert.match(github.recoveryComments[0].body, /gh workflow run auto-gate.yml/);
+    assert.equal(github.workflowDispatchAttempts, 1);
+  });
+}
+
+for (const status of ["action_required", "queued", "in_progress"]) {
+  test(`#4210-r4: Docs appearing first cannot satisfy validation recovery (${status})`, async () => {
+    const runs = [{ id: 800, name: "Docs", event: "pull_request", status: "completed", conclusion: "action_required" }];
+    const github = fakeGateGithub({ headSha: OTHER_SHA, runsByHeadSha: { [OTHER_SHA]: runs } });
+    const waits = [];
+    await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+      headPollDelayMs: 7, sleep: async (ms) => {
+        waits.push(ms);
+        runs.push({ id: 801, name: "PR Validation", event: "pull_request",
+          status: status === "action_required" ? "completed" : status,
+          conclusion: status === "action_required" ? status : null });
+      },
+    });
+    assert.deepEqual(waits, [7]);
+    assert.deepEqual(github.approvedRuns.map((run) => run.run_id), status === "action_required" ? [800, 801] : [800]);
+    assert.deepEqual(github.dispatchedWorkflows, []);
+    assert.ok(github.runListReads.some((read) => read.workflow_id === "pr.yml"));
+  });
+}
+
+test("#4210-r4: unrelated PR runs do not suppress the validation dispatch fallback", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA, runsByHeadSha: { [OTHER_SHA]: [
+    { id: 800, name: "Dependency review", event: "pull_request", status: "queued", conclusion: null },
+  ] } });
+  await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465, sleep: async () => {} });
+  assert.deepEqual(github.dispatchedWorkflows.map((run) => run.workflow_id), ["pr.yml"]);
+  assert.deepEqual(github.approvedRuns, []);
+});
+
+test("#4210-r4: dispatch failure cannot supersede a concurrent successor PASS", async () => {
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: OTHER_SHA, runsByHeadSha: queuedRecoveryRuns() });
+  const dispatch = github.rest.actions.createWorkflowDispatch;
+  let successorCheckId;
+  github.rest.actions.createWorkflowDispatch = async (options) => {
+    if (options.workflow_id !== "auto-gate.yml") return dispatch(options);
+    const response = await github.rest.checks.create({ ...fakeContext().repo,
+      head_sha: OTHER_SHA, name: "Auto Gate decision", external_id: aggregateExternalId(OTHER_SHA),
+      status: "completed", conclusion: "success", output: { title: "PASS", summary: "Successor owner passed" },
+    });
+    successorCheckId = response.data.id;
+    throw new Error("recovery dispatch unavailable");
+  };
+  const { error } = await runApplyGateStep({ github });
+  assert.match(error.message, /recovery dispatch unavailable/);
+  assert.deepEqual(github.createdChecks.filter((check) => check.head_sha === OTHER_SHA).map((check) => check.conclusion), ["success"]);
+  assert.ok(!github.updatedChecks.some((check) => check.check_run_id === successorCheckId));
+  assert.equal(github.recoveryComments.length, 1);
+  assert.match(github.recoveryComments[0].body, /gh workflow run auto-gate.yml/);
+});
+
+// Review round three: recovery belongs to the live PR, not just a head read.
+function queuedRecoveryRuns(head = OTHER_SHA) {
+  return { [head]: [{ id: 701, name: "PR Validation", event: "pull_request", status: "queued", conclusion: null }] };
+}
+
+for (const observed of [true, false]) {
+  test(`#4210-r3: dispatch failure remains visible on the PR (updated head observed=${observed})`, async () => {
+    const github = fakeGateGithub({ behindBy: 1,
+      headAfterUpdate: observed ? OTHER_SHA : null,
+      runsByHeadSha: queuedRecoveryRuns(),
+      workflowDispatchErrorsByWorkflow: { "auto-gate.yml": new Error("dispatch unavailable") },
+    });
+    const { error } = await runApplyGateStep({ github });
+    assert.ok(error);
+    assert.equal(github.recoveryComments.length, 1);
+    assert.equal(github.recoveryComments[0].issue_number, 1465);
+    assert.match(github.recoveryComments[0].body, /gh workflow run auto-gate.yml/);
+    assert.ok(!github.createdChecks.some((check) => check.head_sha === OTHER_SHA),
+      "the initiating lane must not publish a successor aggregate");
+    if (observed) assert.match(github.recoveryComments[0].body, new RegExp(OTHER_SHA));
+  });
+}
+
+for (const state of ["action_required", "queued", "in_progress"]) {
+  test(`#4210-r3: eligible successor waits for late ${state} runs using validation recovery`, async () => {
+    const github = fakeGateGithub({ headSha: OTHER_SHA, runsAppearAfterReads: 1,
+      runsByHeadSha: { [OTHER_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request",
+        status: state === "action_required" ? "completed" : state,
+        conclusion: state === "action_required" ? state : null }] },
+    });
+    const delays = [];
+    const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+      headPollDelayMs: 7, sleep: async (ms) => delays.push(ms),
+    });
+    assert.equal(targets[0].headSha, OTHER_SHA);
+    assert.deepEqual(delays, [7], "head visibility is not run visibility");
+    assert.deepEqual(github.approvedRuns.map((run) => run.run_id), state === "action_required" ? [701] : []);
+    assert.deepEqual(github.dispatchedWorkflows, [], "an existing validation must not be duplicated");
+  });
+}
+
+// Execute the actual resolver workflow body so an empty successful result cannot
+// be turned into a failure by its consumer again.
+async function runRecoveryResolver(github, { core = fakeCore(), outputs = {} } = {}) {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const match = workflow.match(/- name: Evaluate gate[\s\S]*?script: \|\n([\s\S]*?)(?=\n      # A keep)/);
+  assert.ok(match);
+  const script = match[1].split("\n").map((line) => line.replace(/^ {12}/, "")).join("\n");
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const helper = { ...autoGate, resolveTargets: (args) => autoGate.resolveTargets({ ...args,
+    headPollAttempts: 3, headPollDelayMs: 0, sleep: async () => {},
+  }) };
+  const requireStub = (id) => id === "fs" ? { existsSync: () => true }
+    : id === "path" ? path : helper;
+  await new AsyncFunction("github", "context", "core", "require", "process", script)(
+    github, recoveryContext(), { ...core, setOutput: (key, value) => { outputs[key] = value; } },
+    requireStub, { env: { GITHUB_WORKSPACE: "/workspace", PR_NUMBER: "1465" } },
+  );
+  return outputs;
+}
+
+// #4210 round six. Nothing but this successor revisits an accepted update, and it
+// runs under workflow_dispatch, whose payload names no event heads: the workflow
+// catch has no aggregate to turn red. Each of its exits — setFailed and return
+// for a retry-exhausted read, rethrow for anything else — therefore ended the
+// lane as a red run on master with nothing on the PR, and a parked successor
+// stayed parked. Drive the real workflow body to whichever exit each failure
+// reaches and require the rerun command on the PR and in the failure.
+async function runFailingRecoveryResolver(github) {
+  const outputs = {};
+  const failures = [];
+  const core = { ...fakeCore(), setFailed: (message) => failures.push(String(message)) };
+  const thrown = await runRecoveryResolver(github, { core, outputs }).then(() => null, (error) => error);
+  return { outputs, failures, thrown };
+}
+
+const RECOVERY_RERUN = new RegExp("gh workflow run auto-gate\\.yml --repo sachiniyer/agent-factory --ref master " +
+  `-f pr_number=1465 -f previous_head_sha=${HEAD_SHA}`);
+
+// Every read on the recovery path, in the order a parked successor reaches them.
+const RECOVERY_READ_SITES = {
+  "initial PR read": { pullRead: 1 },
+  "stale-head poll read": { pullRead: 2, stale: true },
+  "eligibility read before the PR Validation listing": { pullRead: 2 },
+  "PR Validation run listing": { listing: "pr.yml" },
+  "eligibility read before approval": { pullRead: 3 },
+  "parked-run listing": { listing: "repository" },
+  "post-recovery PR read": { pullRead: 4 },
+};
+const RECOVERY_READ_FAULTS = {
+  // Retryable, so retryRead exhausts and marks it: the catch's return exit.
+  exhausted: { attempts: 3, fault: () => Object.assign(new Error("fetch failed"), { status: 502 }) },
+  // Not retryable, so it escapes unmarked: the catch's rethrow exit.
+  refused: { attempts: 1, fault: () => Object.assign(new Error("Resource not accessible by integration"), { status: 403 }) },
+};
+
+for (const [site, { pullRead, listing, stale }] of Object.entries(RECOVERY_READ_SITES)) {
+  for (const [kind, { attempts, fault }] of Object.entries(RECOVERY_READ_FAULTS)) {
+    test(`#4210-r6: a ${kind} ${site} still publishes the rerun command`, async () => {
+      const github = fakeGateGithub({ headSha: stale ? HEAD_SHA : OTHER_SHA, runsByHeadSha: {
+        [OTHER_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request", conclusion: "action_required" }],
+      } });
+      let faults = 0;
+      let pullReads = 0;
+      const graphql = github.graphql;
+      github.graphql = async (query, variables) => {
+        // From that read onward, so a retryable fault is exhausted where it lands.
+        if (pullRead && variables?.number === 1465 && ++pullReads >= pullRead) {
+          faults += 1;
+          throw fault();
+        }
+        return graphql(query, variables);
+      };
+      const listRuns = github.rest.actions.listWorkflowRunsForRepo;
+      github.rest.actions.listWorkflowRunsForRepo = async (options) => {
+        if (listing && (listing === "pr.yml") === (options.workflow_id === "pr.yml")) {
+          faults += 1;
+          throw fault();
+        }
+        return listRuns(options);
+      };
+
+      const { outputs, failures, thrown } = await runFailingRecoveryResolver(github);
+
+      assert.equal(faults, attempts, `the fault must land on the ${site}`);
+      if (kind === "exhausted") {
+        assert.equal(thrown, null, "a read failure takes the setFailed-and-return exit");
+        assert.equal(failures.length, 1);
+        assert.match(failures[0], RECOVERY_RERUN);
+      } else {
+        assert.ok(thrown, "anything else takes the rethrow exit");
+        assert.deepEqual(failures, []);
+        assert.match(thrown.message, RECOVERY_RERUN);
+      }
+      assert.deepEqual(JSON.parse(outputs.targets), []);
+      assert.deepEqual(JSON.parse(outputs.aggregate_heads), [], "a dispatch payload names no head to turn red");
+      assert.equal(github.recoveryComments.length, 1, "the PR is the only place a human will look");
+      assert.equal(github.recoveryComments[0].issue_number, 1465);
+      assert.match(github.recoveryComments[0].body, RECOVERY_RERUN);
+      if (!stale && pullRead !== 1) assert.match(github.recoveryComments[0].body, new RegExp(`head: ${OTHER_SHA}`));
+    });
+  }
+}
+
+// The resolver's own refusals already carried the command, but only into a red
+// run on master; they reach the PR through the same exit as the reads above.
+const UNCONFIRMED_RECOVERIES = {
+  "the head never moves past the initiating SHA": () => fakeGateGithub(),
+  "PR Validation cannot be dispatched": () => fakeGateGithub({ headSha: OTHER_SHA,
+    workflowDispatchErrorsByWorkflow: { "pr.yml": new Error("dispatch refused") } }),
+  "a parked run cannot be approved": () => fakeGateGithub({ headSha: OTHER_SHA, approveRunError: new Error("approval refused"),
+    runsByHeadSha: { [OTHER_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request", conclusion: "action_required" }] } }),
+};
+for (const [name, fixture] of Object.entries(UNCONFIRMED_RECOVERIES)) {
+  for (const publicationFails of [false, true]) {
+    test(`#4210-r6: ${name} reaches the PR (publication fails=${publicationFails})`, async () => {
+      const github = fixture();
+      let publications = 0;
+      github.rest.issues.createComment = async (options) => {
+        publications += 1;
+        if (publicationFails) throw new Error("comment unavailable");
+        github.recoveryComments.push(options);
+      };
+      const { outputs, failures, thrown } = await runFailingRecoveryResolver(github);
+      assert.ok(thrown);
+      assert.deepEqual(failures, []);
+      assert.match(thrown.message, RECOVERY_RERUN, "the command survives a failed publication");
+      assert.deepEqual(JSON.parse(outputs.targets), []);
+      assert.equal(publications, 1);
+      if (publicationFails) {
+        assert.match(thrown.message, /recovery publication also failed: .*comment unavailable/);
+      } else {
+        assert.match(github.recoveryComments[0].body, RECOVERY_RERUN);
+      }
+    });
+  }
+}
+
+for (const [name, state] of Object.entries({ closed: { state: "CLOSED" }, merged: { merged: true }, retargeted: { baseRefName: "other" } })) {
+  for (const duringPoll of [false, true]) {
+    test(`#4210-r3: ${name} recovery is a successful no-op (during poll=${duringPoll})`, async () => {
+      const overrides = { 1465: duringPoll ? {} : state };
+      const github = fakeGateGithub({ pullRequestsByNumber: overrides });
+      const graphql = github.graphql;
+      github.graphql = async (query, variables) => {
+        if (duringPoll && github.graphqlReadsByNumber[1465] >= 1) overrides[1465] = state;
+        return graphql(query, variables);
+      };
+      const outputs = await runRecoveryResolver(github);
+      assert.deepEqual(JSON.parse(outputs.targets), []);
+      assert.deepEqual(JSON.parse(outputs.aggregate_heads), []);
+      assert.equal(github.graphqlReadsByNumber[1465], duringPoll ? 2 : 1);
+      assert.deepEqual(github.runListReads, []);
+      assert.deepEqual(github.approvedRuns, []);
+      assert.deepEqual(github.dispatchedWorkflows, []);
+    });
+  }
+}
+
+// #4210 review: exercise the resolver and workflow caller, not only merge().
+function recoveryContext(previous = HEAD_SHA) {
+  return { ...fakeContext(), eventName: "workflow_dispatch",
+    payload: { inputs: { pr_number: "1465", previous_head_sha: previous } } };
+}
+
+test("#4210: dispatch carries the initiating head into the successor", async () => {
+  const github = fakeGateGithub({ behindBy: 1 });
+  await assert.rejects(() => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }), /Refusing to merge/);
+  assert.equal(github.dispatchedWorkflows[0].inputs.previous_head_sha, HEAD_SHA);
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  assert.match(workflow, /previous_head_sha:\n(?:.*\n)*? {8}type: string/);
+});
+
+test("#4210: a successor waits through stale reads before publishing its target", async () => {
+  const overrides = { 1465: { headRefOid: HEAD_SHA } };
+  const github = fakeGateGithub({ pullRequestsByNumber: overrides, runsByHeadSha: queuedRecoveryRuns() });
+  const delays = [];
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    headPollAttempts: 3, headPollDelayMs: 7, sleep: async (ms) => {
+      delays.push(ms);
+      if (delays.length === 2) overrides[1465].headRefOid = OTHER_SHA;
+    },
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.deepEqual(delays, [7, 7]);
+  assert.ok(github.graphqlReadsByNumber[1465] >= 3);
+});
+
+test("#4210: an already-visible successor head resolves without waiting", async () => {
+  const targets = await autoGate.resolveTargets({ github: fakeGateGithub({ headSha: OTHER_SHA, runsByHeadSha: queuedRecoveryRuns() }),
+    context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => assert.fail("new head needs no wait"),
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+});
+
+test("#4210: a permanently stale successor fails with recovery instructions, never a stale target", async () => {
+  const github = fakeGateGithub();
+  await assert.rejects(() => autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    headPollAttempts: 3, sleep: async () => {},
+  }), (error) => {
+    assert.match(error.message, /still exposes initiating head/);
+    assert.match(error.message, /gh workflow run auto-gate.yml/);
+    assert.match(error.message, new RegExp(`previous_head_sha=${HEAD_SHA}`));
+    return true;
+  });
+  assert.equal(github.graphqlReadsByNumber[1465], 3);
+});
+
+test("#4210: malformed initiating SHAs cannot disable the successor wait", async () => {
+  await assert.rejects(() => autoGate.resolveTargets({ github: fakeGateGithub(), context: recoveryContext("invalid"),
+    core: fakeCore(), prNumber: 1465,
+  }), /Invalid previous_head_sha/);
+});
+
+test("#4210: ordinary manual resolution still accepts the current head without waiting", async () => {
+  const targets = await autoGate.resolveTargets({ github: fakeGateGithub(), context: recoveryContext(""),
+    core: fakeCore(), prNumber: 1465, sleep: async () => assert.fail("ordinary manual dispatch must not wait"),
+  });
+  assert.equal(targets[0].headSha, HEAD_SHA);
+});
+
+test("#4210: a recovery dispatch failure fails the workflow and publishes its command on the PR", async () => {
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: OTHER_SHA, runsByHeadSha: queuedRecoveryRuns(),
+    workflowDispatchErrorsByWorkflow: { "auto-gate.yml": new Error("dispatch refused") },
+  });
+  const { error } = await runApplyGateStep({ github });
+  assert.ok(error, "processAggregateHead must not swallow infrastructure failure as waiting");
+  assert.match(error.message, /dispatch refused/);
+  assert.match(error.message, /gh workflow run auto-gate.yml/);
+  assert.doesNotMatch(error.message, /^Refusing to merge/);
+  assert.equal(github.recoveryComments.length, 1);
+  assert.match(github.recoveryComments[0].body, /dispatch refused/);
+  assert.match(github.recoveryComments[0].body, /gh workflow run auto-gate.yml/);
+  assert.equal(github.workflowDispatchAttempts, 1);
+});
+
+test("#4210: ordinary update refusal remains a successful waiting workflow", async () => {
+  const github = fakeGateGithub({ behindBy: 1 });
+  const { error, notices } = await runApplyGateStep({ github });
+  assert.equal(error, null);
+  assert.match(notices.join("\n"), /Refusing to merge PR #1465; head is behind/);
+  assert.equal(github.createdChecks.at(-1).conclusion, "failure");
+  assert.equal(github.mergeAttempts, 0);
+});
+
+// #4209: update-branch can return before the PR read exposes the new SHA.
+// In that window the existing approval/existence helpers are never reached.
+// A successor must be scheduled even though the current run cannot see its head.
+test("#4209: an accepted update with a stale head read schedules the gate that approves its late runs", async () => {
+  const NEW_HEAD = "d0bece4610c37b7d397100132ce03126ad556bfe";
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: NEW_HEAD,
+    pullGetSnapshots: [{ head: { sha: HEAD_SHA } }],
+    runsByHeadSha: { [NEW_HEAD]: [
+      { id: 101, name: "PR Validation", event: "pull_request", conclusion: "action_required" },
+      { id: 102, name: "Docs", event: "pull_request", conclusion: "action_required" },
+      { id: 103, name: "Dependency review", event: "pull_request", conclusion: "action_required" },
+    ] },
+  });
+  await assert.rejects(() => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }), /Refusing to merge/);
+  assert.deepEqual(github.approvedRuns, [], "the new head is not visible to this evaluation yet");
+  assert.equal(github.dispatchedWorkflows.length, 1);
+  const scheduled = github.dispatchedWorkflows[0];
+  assert.deepEqual(scheduled, {
+    owner: "sachiniyer", repo: "agent-factory", workflow_id: "auto-gate.yml",
+    ref: "master", inputs: { pr_number: "1465", previous_head_sha: HEAD_SHA },
+  });
+  const context = { ...fakeContext(), eventName: "workflow_dispatch", payload: { inputs: scheduled.inputs } };
+  const next = fakeGateGithub({ headSha: NEW_HEAD,
+    runsByHeadSha: { [NEW_HEAD]: [
+      { id: 101, name: "PR Validation", event: "pull_request", conclusion: "action_required" },
+      { id: 102, name: "Docs", event: "pull_request", conclusion: "action_required" },
+      { id: 103, name: "Dependency review", event: "pull_request", conclusion: "action_required" },
+    ] },
+  });
+  const targets = await autoGate.resolveTargets({ github: next, context, core: fakeCore(), prNumber: Number(scheduled.inputs.pr_number) });
+  assert.equal(targets[0].headSha, NEW_HEAD, "dispatch resolves the current head, never the stale initiating SHA");
+  await autoGate.evaluate({ github: next, context, core: fakeCore(), prNumber: targets[0].prNumber, setOutputs: false });
+  assert.deepEqual(next.approvedRuns.map((run) => run.run_id), [101, 102, 103]);
+  assert.deepEqual(next.dispatchedWorkflows, [], "evaluation alone must not create a dispatch loop");
+});
+
+for (const state of ["queued", "in_progress", "action_required"]) {
+  test(`#4209: successor scheduling leaves ${state} runs alone unless approval is required`, async () => {
+    const NEW_HEAD = "d0bece4610c37b7d397100132ce03126ad556bfe";
+    const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: NEW_HEAD,
+      runsByHeadSha: { [NEW_HEAD]: [{ id: 101, name: "PR Validation", event: "pull_request",
+        status: state === "action_required" ? "completed" : state,
+        conclusion: state === "action_required" ? state : null }] },
+    });
+    await assert.rejects(() => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }), /Refusing to merge/);
+    assert.deepEqual(github.approvedRuns.map((run) => run.run_id), state === "action_required" ? [101] : []);
+    assert.deepEqual(github.dispatchedWorkflows.map((run) => run.workflow_id), ["auto-gate.yml"], "only gate evaluation is scheduled, not duplicate validation");
+  });
+}
+
+test("#4209: a post-update read failure still schedules recovery", async () => {
+  const github = fakeGateGithub({ behindBy: 1, pullGetError: new Error("PR read unavailable") });
+  await assert.rejects(() => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }), /PR read unavailable/);
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.deepEqual(github.dispatchedWorkflows.map((run) => run.workflow_id), ["auto-gate.yml"]);
+});
+
+test("#4209: a rejected update does not schedule a successor", async () => {
+  const github = fakeGateGithub({ behindBy: 1, updateBranchError: new Error("update rejected") });
+  await assert.rejects(() => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }), /update rejected/);
+  assert.deepEqual(github.dispatchedWorkflows, []);
+});
+
+test("#4209: a failed follow-up dispatch names the manual recovery instead of claiming it is scheduled", async () => {
+  const github = fakeGateGithub({ behindBy: 1,
+    workflowDispatchErrorsByWorkflow: { "auto-gate.yml": new Error("dispatch refused") },
+  });
+  await assert.rejects(() => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }), (error) => {
+    assert.match(error.message, /update was accepted/);
+    assert.match(error.message, /dispatch refused/);
+    assert.match(error.message, /gh workflow run auto-gate.yml --repo sachiniyer\/agent-factory --ref master -f pr_number=1465/);
+    return true;
+  });
+  assert.equal(github.workflowDispatchAttempts, 1, "an ambiguous dispatch write is not retried");
+  assert.deepEqual(github.dispatchedWorkflows, []);
+});
+
 // #3807. The merge commit `PUT update-branch` writes is authored by the workflow
 // token, so every `pull_request` run it triggers is attributed to
 // `github-actions[bot]` and GitHub parks it in `action_required` behind "Approve
@@ -5532,7 +6377,7 @@ test("the gate approves the runs its own update-branch parked for approval", asy
 // while making the #3807 fallback fail at runtime with a 422 and no outward sign.
 // The same gap covered the master-push list, so both are checked here.
 test("every workflow the gate dispatches declares workflow_dispatch", () => {
-  const dispatched = [...__test.MASTER_PUSH_WORKFLOWS, __test.VALIDATION_WORKFLOW];
+  const dispatched = [...__test.MASTER_PUSH_WORKFLOWS, __test.VALIDATION_WORKFLOW, __test.GATE_WORKFLOW];
   for (const file of dispatched) {
     const workflow = fs.readFileSync(path.join(__dirname, "..", "workflows", file), "utf8");
     // The `on:` block, up to the first top-level key after it. Canonical spelling
@@ -5758,8 +6603,12 @@ test("a green PR whose head is behind master is updated instead of merged", asyn
   // Compare-and-set: an update racing a push must not rebuild the branch on top
   // of a head this run never evaluated.
   assert.equal(github.updateBranchCalls[0].expected_head_sha, HEAD_SHA);
-  // Nothing after the merge runs: no head-ref deletion, no master re-verification.
-  assert.deepEqual(github.dispatchedWorkflows, []);
+  // Only the successor gate runs: no head-ref deletion or master verification
+  // workflows, since the update did not merge the PR.
+  assert.deepEqual(github.dispatchedWorkflows, [{
+    owner: "sachiniyer", repo: "agent-factory", workflow_id: "auto-gate.yml",
+    ref: "master", inputs: { pr_number: "1465", previous_head_sha: HEAD_SHA },
+  }]);
   assert.deepEqual(github.deletedRefs, []);
 });
 
@@ -9132,16 +9981,25 @@ async function runApplyGateStep({
 // and containment always answers YES so only the SHAPE decides where the walk
 // stops — otherwise the compare stub would end it for an unrelated reason.
 function chainGithub(parentsByOid, datesByOid) {
+  const mergeBaseSha = "ba5eba5e00000000000000000000000000000000";
   return {
     rest: {
       repos: {
-        compareCommitsWithBasehead: async () => ({ data: { status: "behind" } }),
+        compareCommitsWithBasehead: async () => ({
+          data: { status: "behind", merge_base_commit: { sha: mergeBaseSha } },
+        }),
         getCommit: async ({ ref }) => ({
           data: {
+            sha: ref,
             // The commit's own date, which is what the anchor becomes.
-            commit: { committer: { date: (datesByOid || {})[ref] } },
+            commit: { committer: { date: (datesByOid || {})[ref] }, tree: { sha: ref } },
             parents: (parentsByOid[ref] || []).map((p) => ({ sha: p.oid })),
           },
+        }),
+      },
+      git: {
+        getTree: async ({ tree_sha }) => ({
+          data: { sha: tree_sha, truncated: false, tree: [] },
         }),
       },
     },
@@ -9175,6 +10033,12 @@ function fakeGateGithub({
   // branch, is what `PUT update-branch` produces (#3803).
   headParents = [],
   secondParentInBase = true,
+  // Historical second parents from earlier links in a repeated update chain.
+  // The live comparison recognizes each as contained in today's base branch.
+  baseContainedShas = [],
+  mergeBaseSha = "ba5eba5e00000000000000000000000000000000",
+  treeEntriesByCommit = {},
+  truncatedTreeCommits = [],
   // Workflow runs the repo reports for a head, and the head the branch moves to
   // when the gate update-branches it (#3807).
   runsByHeadSha = {},
@@ -9415,9 +10279,16 @@ function fakeGateGithub({
     workflowDispatchAttempts: 0,
     runListReads: [],
     approvedRuns: [],
+    recoveryComments: [],
     headShaAfterUpdate: null,
     rest: {
       actions: {
+        listWorkflowRuns: async (options) => {
+          assert.equal(options.workflow_id, "pr.yml");
+          const listed = await github.rest.actions.listWorkflowRunsForRepo(options);
+          const runs = listed.data.workflow_runs.filter((run) => run.name === "PR Validation");
+          return { data: { total_count: runs.length, workflow_runs: runs.slice(0, options.per_page) } };
+        },
         listWorkflowRunsForRepo: async (options) => {
           github.runListReads.push(options);
           // Per HEAD, not globally: evaluateRequiredChecks lists runs for the
@@ -9475,6 +10346,18 @@ function fakeGateGithub({
         },
       },
       git: {
+        getTree: async ({ tree_sha }) => ({
+          data: {
+            sha: tree_sha,
+            truncated: truncatedTreeCommits.includes(tree_sha),
+            tree: Object.entries(treeEntriesByCommit[tree_sha] || {}).map(([path, entry]) => ({
+              path,
+              mode: typeof entry === "string" ? "100644" : entry.mode,
+              type: typeof entry === "string" ? "blob" : entry.type,
+              sha: typeof entry === "string" ? entry : entry.sha,
+            })),
+          },
+        }),
         getRef: async ({ ref }) => {
           github.refReads.push(ref);
           if (refReadError) {
@@ -9508,13 +10391,20 @@ function fakeGateGithub({
           github.branchRefs = github.branchRefs.filter((branch) => branch.name !== name);
         },
       },
-      issues: { listComments },
+      issues: { listComments, createComment: async (options) => {
+        github.recoveryComments.push(options);
+        return { data: { id: 1 } };
+      } },
       repos: {
         listCommitStatusesForRef,
         listPullRequestsAssociatedWithCommit,
         getCommit: async ({ ref }) => ({
           data: {
-            commit: { committer: { date: (commitDatesByOid || {})[ref] } },
+            sha: ref,
+            commit: {
+              committer: { date: (commitDatesByOid || {})[ref] },
+              tree: { sha: ref },
+            },
             // Default: an ordinary one-parent commit, so the first-parent walk
             // stops at the first link unless a fixture describes a chain.
             parents: (parentsByOid[ref] || [{ oid: "0".repeat(40) }]).map((p) => ({ sha: p.oid })),
@@ -9533,8 +10423,15 @@ function fakeGateGithub({
           // declares: keying on `length === 2` meant an octopus fixture fell
           // through to the default "ahead" answer, so a truncating query looked
           // safe for a reason that had nothing to do with the guard under test.
-          if (target && target === headParents[1]?.oid) {
-            return { data: { behind_by: 0, ahead_by: 0, status: secondParentInBase ? "behind" : "diverged" } };
+          if (target && (target === headParents[1]?.oid || baseContainedShas.includes(target))) {
+            return {
+              data: {
+                behind_by: 0,
+                ahead_by: 0,
+                status: secondParentInBase ? "behind" : "diverged",
+                merge_base_commit: { sha: mergeBaseSha },
+              },
+            };
           }
           return {
             data: {

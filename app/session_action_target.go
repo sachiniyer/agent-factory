@@ -121,9 +121,13 @@ func (target sessionActionTarget) resumeStatusPollRequestAs(holder string) daemo
 	}
 }
 
-func (target sessionActionTarget) handoffRequest(to string) daemon.HandoffSessionRequest {
+func (target sessionActionTarget) handoffRequest(to string, accounts ...string) daemon.HandoffSessionRequest {
+	account := ""
+	if len(accounts) > 0 {
+		account = accounts[0]
+	}
 	return daemon.HandoffSessionRequest{
-		ID: target.id, Title: target.title, RepoID: target.repoID, To: to,
+		ID: target.id, Title: target.title, RepoID: target.repoID, To: to, Account: account,
 	}
 }
 

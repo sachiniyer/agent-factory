@@ -15,6 +15,11 @@ import (
 // advertises and admits while a restore is parked in front of that lock.
 var beforeRestoreOperationLock = func() {}
 
+// afterRestoreLivenessSnapshot fires after manual Lost/Dead restore has taken
+// the lifecycle snapshot it will act on. No-op in production; the #4249 test
+// uses it to land a poll observation at this exact boundary without timing.
+var afterRestoreLivenessSnapshot = func() {}
+
 // claimRestoreOperation makes restore admission atomic with DeleteProject's
 // per-repo lifecycle fence. If restore wins, killsInFlight makes deletion see
 // the session even while an archived row has not yet entered OpRestoring. If
@@ -202,6 +207,16 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		return "", err
 	}
 	defer opLock.Unlock()
+	// A local Recover may rebuild a vanished worktree. Serialize that registration
+	// with create, and do the bounded wait before this restore claims or fences the
+	// row so a stalled peer cannot leave the session busy indefinitely.
+	worktreeAdmission, err := m.lockLocalWorktreeAdmissionWithin(repoID, title, "restore", instance)
+	if err != nil {
+		return "", err
+	}
+	if worktreeAdmission != nil {
+		defer worktreeAdmission.Unlock()
+	}
 
 	if err := m.claimRestoreOperation(repoID, key, title, waited, deleteSeq); err != nil {
 		return "", err
@@ -215,13 +230,21 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		return "", fmt.Errorf("session %q changed state before restore could start", title)
 	}
 	view := instance.LifecycleView()
+	afterRestoreLivenessSnapshot()
 	if err := view.ValidateRuntimeAction(session.RuntimeActionRestoreLostOrDead); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
 	switch view.Liveness {
 	case session.LiveLost:
 	case session.LiveDead:
-		_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
+		// Dead is legacy input that recovery normalizes to Lost. The decision comes
+		// from view, so scope it to the epoch captured in that same snapshot: a poll
+		// that has since found the runtime alive is newer truth. Preserve the default
+		// refusal above when that newer observation wins.
+		_ = instance.Transition(session.ObserveLiveness(session.LiveLost).AtEpoch(view.StateEpoch))
+		if instance.GetLiveness() != session.LiveLost {
+			return "", fmt.Errorf("session %q changed state before restore could start", title)
+		}
 	default:
 		return "", fmt.Errorf("session %q changed state before restore could start", title)
 	}
@@ -313,7 +336,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// release HERE: a refusal whose advertised retry lands on the same branch and
 		// refuses again is the same defect wearing a helpful message.
 		if !force {
-			return "", refuseIndeterminateReap(instance)
+			return "", refuseIndeterminateReap(repoID, instance)
 		}
 		// Forced past an unanswerable probe: the sandbox may well be alive behind a
 		// broken path, so a replacement still must not land on the default branch and
@@ -349,11 +372,32 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 				return "", err
 			}
 			m.warn().Printf("restore of %q: --force-reap given, replacing its reachable sandbox without pushing; anything it has not pushed is discarded", title)
+			// The sandbox is being replaced: end the push-failure episode so that a
+			// later failure against the new sandbox earns a fresh budget rather than
+			// inheriting the old one's escalation — the same reset the non-forced arm
+			// applies after a successful preserve push.
+			m.resetPreserveBudget(repoID, instance)
+			// A force-replace also ends any in-progress Recover episode: the old
+			// sandbox is gone, so prior Recover failures are stale. Without this
+			// reset, d8e4e08f's give-up assignment (consecutiveFailures =
+			// lostRestoreMaxAttempts) survives the replacement, and the first
+			// Recover failure against the brand-new sandbox counts as attempt
+			// maxAttempts+1 and triggers immediate give-up. The successful-push
+			// arm at line 365 deliberately does NOT clear this — a push-success
+			// is not a replacement, and zeroing consecutiveFailures there would
+			// erase a legitimate Recover-flap count mid-episode.
+			m.resetRecoverBudget(repoID, instance)
 			break
 		}
-		if err := m.preserveSandboxBeforeReap(repoID, key, instance, forceReapSuggestionFor(instance)); err != nil {
+		// The shared selector keeps the refusal's off-ramp executable even when
+		// this session's branch is not durable and --force-reap cannot proceed (#4195).
+		if err := m.preserveSandboxBeforeReap(repoID, key, instance, reapRefusalSuggestionFor(repoID, instance)); err != nil {
 			return "", err
 		}
+		// The push landed: reset the push-failure episode budget so that a later
+		// blip earns a fresh counter rather than inheriting this episode's
+		// escalation — the same reset the automatic probeAnsweredDead path applies.
+		m.resetPreserveBudget(repoID, instance)
 	}
 
 	// Settle predecessor evidence at the exact ConfirmLive edge: late enough that

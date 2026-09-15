@@ -215,18 +215,21 @@ also excludes Docker; see [Opt-in auto-resume](#opt-in-auto-resume).
 
 ### Account-scoped handoff
 
-For a local session created with `--account`, `af sessions handoff` returns an
-error naming the account and saying “an account belongs to one agent”, if it
-gets past the earlier state and target checks. The replacement never starts;
-the outgoing agent keeps running with its selected account. The explicit guard
-is in [session/backend_local.go:416](https://github.com/sachiniyer/agent-factory/blob/c27c4f88ced6239d55cddf89dea6fc030da247fe/session/backend_local.go#L416),
-before the old pane is stopped. The daemon reaches it through
-[session/instance_backend.go:417](https://github.com/sachiniyer/agent-factory/blob/c27c4f88ced6239d55cddf89dea6fc030da247fe/session/instance_backend.go#L417),
-then rolls back the handoff record and returns the failure at
-[daemon/handoff.go:182](https://github.com/sachiniyer/agent-factory/blob/c27c4f88ced6239d55cddf89dea6fc030da247fe/daemon/handoff.go#L182).
-Create a separate session with the target agent and its account when you need
-that identity. The [handoff instructions](#hand-off-to-another-agent) below apply
-to sessions without account scoping.
+Local account-scoped sessions support both same-agent and cross-agent handoffs.
+Use `af sessions handoff <session> --account <name>` to choose another registered
+account of the current agent. Add `--to <agent>` to change agent and account
+together. The target account must belong to the incoming agent and must not be
+currently walled in the daemon's limit ledger.
+
+An explicit `--account` selects a pinned identity: an existing pin moves to the
+chosen account, and an ambient session becomes pinned to that account. For an
+ambient session, `--to <agent>` without `--account` keeps the replacement ambient.
+A session already scoped to an account must specify a target account when
+changing agents; omitting it does not bypass the pin.
+
+The session keeps its worktree and branch, and the new conversation receives the
+handoff brief. See [Hand off to another account](#hand-off-to-another-account)
+for examples, admission checks, and the TUI and web pickers.
 
 ### Bug report redaction
 
@@ -357,7 +360,7 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   Docker account-scoped creates remain supported, but automatic Docker
   replacement stays disabled until its complete provision plan and container
   cleanup identity can survive a daemon crash.
-- **An explicit `--account` is immutable.** It is a pin, so automatic switching
+- **An explicit `--account` is pinned.** It is a pin, so automatic switching
   never overrides it. Accounts selected by the scheduler may move again after
   they later hit their own limit.
 - **No invented quota claim.** Providers expose no quota API af can read. The
@@ -391,6 +394,45 @@ af config set limit_account_candidates work,personal
 Or add `--project <id-or-path>` for a personal per-project override.
 
 Full config reference: [configuration.md](configuration.md#usage-limit-auto-resume).
+
+## Hand off to another account
+
+To continue under another registered account of the same agent:
+
+```sh
+af sessions handoff fix-auth --account personal
+```
+
+The session keeps its identity, worktree, branch tip, and stored prompt. The
+new account starts a fresh conversation. Use `--brief` to replace the prompt,
+or combine `--to claude --account work` to change both agent and account.
+The recorded handoff includes the outgoing and incoming accounts and branch tip.
+
+If an agent or account handoff starts its replacement but cannot confirm whether
+the mission was submitted, af suppresses automatic redelivery because the first
+submission may already have landed. Inspect the replacement pane, then choose
+the explicit override when it is needed: press **`c`** in the TUI (shown as
+**Retry**), click **Retry handoff** in the web pane header, or run
+`af sessions retry-limit <title>`. The retry verdict is attached to that pending
+handoff mission; sending another prompt does not make the daemon resend it.
+If that explicit retry delivers the mission but cannot persist its final
+settlement, every client reports the retry as completed with a warning. The TUI
+shows the warning as a completion message, the web keeps it in the confirmed
+mutation notice, and CLI JSON includes a `warning` field; do not retry the
+already-delivered mission.
+
+This is an operator-chosen account swap: the target must be registered for the
+incoming agent and have no current limit observation in the daemon's ledger.
+An unregistered or currently limited target is refused before stopping the old
+runtime. No `limit_auto_resume` or `limit_account_candidates` setting is needed.
+An explicit pin moves to the chosen account and remains pinned against automatic
+rotation. The same local account-swap path replaces all credential-bearing panes;
+its launch checks and restrictions, including VS Code tabs, still apply.
+
+In the TUI, press **F** on the `[limit]` session and choose another account.
+The project default is preselected when it is another registered, logged-in
+account. In the web, use **Handoff** beside **Retry**, then choose the agent and account. Both
+pickers list accounts belonging to the selected agent.
 
 ## Hand off to another agent
 

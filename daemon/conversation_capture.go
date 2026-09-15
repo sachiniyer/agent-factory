@@ -38,10 +38,17 @@ func (m *Manager) startConversationCaptureLocked(repoID, key string, inst *sessi
 	}
 	m.pendingConversationCaptures[inst]++
 	timeout := conversationCaptureTimeout
-	go func() {
+	if m.launchBackgroundMutation(func(_ <-chan struct{}) {
 		defer m.finishConversationCapture(inst)
 		m.captureAgentConversation(repoID, key, inst, snap, token, timeout)
-	}()
+	}) {
+		return
+	}
+	if m.pendingConversationCaptures[inst] <= 1 {
+		delete(m.pendingConversationCaptures, inst)
+	} else {
+		m.pendingConversationCaptures[inst]--
+	}
 }
 
 func (m *Manager) finishConversationCapture(inst *session.Instance) {

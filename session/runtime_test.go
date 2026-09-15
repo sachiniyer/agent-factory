@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -216,85 +215,4 @@ func TestResolveBackendKind_Precedence(t *testing.T) {
 	got, err = resolveBackendKind(InstanceOptions{}, repoRoot)
 	require.NoError(t, err)
 	assert.Equal(t, BackendSSH, got)
-}
-
-// TestDefaultBackendFactory_ConfigSelection drives the full factory the way
-// NewInstance does: local is byte-identical, a docker config fails cleanly with
-// the not-implemented error, and a hook config provisions via launch_cmd and
-// exposes the af agent-server endpoint it echoes (#1592 Phase 4 PR7).
-func TestDefaultBackendFactory_ConfigSelection(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-
-	t.Run("local default is a plain LocalBackend", func(t *testing.T) {
-		repoRoot := initTempGitRepo(t) // no in-repo config → local
-		res, err := defaultBackendFactory(InstanceOptions{Title: "s"}, repoRoot)
-		require.NoError(t, err)
-		if _, ok := res.Backend.(*LocalBackend); !ok {
-			t.Fatalf("local default must be *LocalBackend, got %T", res.Backend)
-		}
-		assert.Nil(t, res.Endpoint, "a local session exposes no remote endpoint")
-	})
-
-	t.Run("docker config without image fails cleanly", func(t *testing.T) {
-		// A docker create with no docker.image errors before any docker call — the
-		// hermetic precondition. The real container path is the integration round-trip.
-		repoRoot := initTempGitRepo(t)
-		writeInRepoConfig(t, repoRoot, map[string]any{"backend": "docker", "docker": map[string]any{}})
-		_, err := defaultBackendFactory(InstanceOptions{Title: "s"}, repoRoot)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "docker.image")
-	})
-
-	t.Run("hook config provisions via launch_cmd and exposes its endpoint", func(t *testing.T) {
-		repoRoot := initTempGitRepo(t)
-		// launch_cmd echoes a static af agent-server endpoint (the provision-and-
-		// expose contract). defaultBackendFactory returns the ProvisionResult
-		// without dialing (the URL is validated later at NewInstance), so a mock
-		// echo is enough to prove the runtime parses + surfaces the endpoint.
-		// The endpoint is echoed with the legacy "tls_fingerprint" key present to
-		// prove an old launch_cmd still parses (the field is accepted and ignored —
-		// TLS was removed).
-		launch := writeScript(t, t.TempDir(), "launch.sh",
-			`echo '{"url":"http://127.0.0.1:9","token":"tkn","tls_fingerprint":"fp"}'`)
-		writeInRepoConfig(t, repoRoot, map[string]any{
-			"backend": "hook",
-			"remote_hooks": map[string]any{
-				"launch_cmd": launch,
-				"delete_cmd": "true",
-			},
-		})
-		res, err := defaultBackendFactory(InstanceOptions{Title: "s"}, repoRoot)
-		require.NoError(t, err)
-		if _, ok := res.Backend.(*HookBackend); !ok {
-			t.Fatalf("backend=hook must build a *HookBackend, got %T", res.Backend)
-		}
-		require.NotNil(t, res.Endpoint, "hook runtime must expose the launch_cmd endpoint")
-		assert.Equal(t, "http://127.0.0.1:9", res.Endpoint.URL)
-		assert.Equal(t, "tkn", res.Endpoint.Token)
-		require.NotNil(t, res.Teardown, "hook runtime must expose a delete_cmd teardown")
-	})
-
-	t.Run("hook config still carrying a removed key errors with the migration message", func(t *testing.T) {
-		repoRoot := initTempGitRepo(t)
-		writeInRepoConfig(t, repoRoot, map[string]any{
-			"backend": "hook",
-			"remote_hooks": map[string]any{
-				"launch_cmd":   "true",
-				"delete_cmd":   "true",
-				"terminal_cmd": "true",
-			},
-		})
-		_, err := defaultBackendFactory(InstanceOptions{Title: "s"}, repoRoot)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "was removed in the provision-and-expose migration")
-	})
-
-	t.Run("hook config without hooks errors cleanly", func(t *testing.T) {
-		repoRoot := initTempGitRepo(t)
-		writeInRepoConfig(t, repoRoot, map[string]any{"backend": "hook"})
-		_, err := defaultBackendFactory(InstanceOptions{Title: "s"}, repoRoot)
-		require.Error(t, err)
-		assert.True(t, strings.Contains(err.Error(), "no remote hooks configured"),
-			"want 'no remote hooks configured', got %v", err)
-	})
 }

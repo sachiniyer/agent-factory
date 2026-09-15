@@ -1,7 +1,6 @@
 package app
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,22 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// writeLegacyRepoConfig materializes the legacy per-repo config at
-// ~/.agent-factory/repos/<repoID>/config.json with the given RepoConfig.
-// Production code stopped writing here after #800 pulled writes into the
-// in-repo file; only test fixtures need this writer, so it lives in test scope.
-func writeLegacyRepoConfig(t *testing.T, repoID string, cfg *config.RepoConfig) {
-	t.Helper()
-	configDir, err := config.GetConfigDir()
-	require.NoError(t, err)
-	dir := filepath.Join(configDir, "repos", repoID)
-	path := filepath.Join(dir, config.RepoConfigFileName)
-	require.NoError(t, os.MkdirAll(dir, 0755))
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, data, 0644))
-}
 
 // recordPlaceholderProvision captures every InstanceOptions the backend factory
 // is asked to provision, and hands back a LocalBackend so the flow continues.

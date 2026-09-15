@@ -31,9 +31,11 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 
+	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -237,12 +239,19 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 	// and creating it would fail with "tmux session already exists" for a login
 	// that is sitting there waiting for its human. The name is derived from the
 	// account, so an existing one under it IS this account's flow.
-	if existing := s.adopt(req.Agent, req.Name, pane); existing != nil {
+	existing, foreignBlocked := s.adopt(req.Home, req.Agent, req.Name, pane)
+	if existing != nil {
 		out := base
 		out.Reused = true
 		out.TmuxName = existing.SanitizedName()
 		out.SocketPath = socketPath(ctx, existing)
 		return out, nil
+	}
+	if foreignBlocked {
+		return Session{}, fmt.Errorf(
+			"cannot start the %s login flow for account %q: a pane named %s already exists on the shared tmux server "+
+				"and is owned by a different agent-factory home — stop the conflicting flow first or use a distinct {agent, name}",
+			req.Agent, req.Name, pane.SanitizedName())
 	}
 
 	if err := pane.SetEnvPassthrough(req.Passthrough); err != nil {
@@ -329,25 +338,110 @@ func (s *Supervisor) live(agent, name string) *tmux.TmuxSession {
 }
 
 // adopt returns the live login pane for this account, tracking a pane this
-// supervisor did not spawn if tmux says one is there.
+// supervisor did not spawn if tmux says one is there. The second return value
+// is true when a same-named pane was found but belongs to a different home —
+// the caller should surface a distinct ownership-collision error rather than
+// falling through to pane.Start, which would fail with "tmux session already
+// exists" and could then be misread by finishedOrFailed as a completed login.
 //
 // Both answers must be POSITIVE to act on. A tracked session is returned only
 // when live() confirms it with tmux, and an untracked NAME is adopted only on
 // tmux's determinate "this session exists" — ProbeSession's unknown answer means
 // the server did not answer, which is not evidence either way, and adopting on
 // it would hand a caller a name nothing is running behind.
-func (s *Supervisor) adopt(agent, name string, candidate *tmux.TmuxSession) *tmux.TmuxSession {
+//
+// A same-named pane is adopted only when its AF_HOME session-environment marker
+// names THIS home, with both paths canonicalized to absolute, symlink-resolved
+// identities. The login-pane name is derived from {agent, name} and carries
+// no home component, so on the per-user (shared) tmux server two agent-factory
+// homes with the same {agent, name} both target one tmux session name. Reusing a
+// pane that belongs to another home would silently no-op this home's login — the
+// foreign flow keeps writing to its owner's account dir while THIS home reports
+// Reused — and let this home's Stop/Reap kill a pane it does not own, the
+// cross-home hazard CleanupSessions is already hardened against at
+// session/tmux/cleanup.go:658-702. The marker is the same ownership primitive
+// teardown uses; an absent or unresolvable marker means the pane's heritage
+// cannot be proven to be this home's, so it is left untouched — do not reuse
+// what you cannot prove you own. account-login itself refuses to spawn on tmux
+// < 3.2, so any pane this path creates carries a marker; an absent one is a pane
+// this home did not create.
+//
+// The AF_SESSION_GEN generation marker is read alongside the home marker and
+// re-checked after the session is tracked to close the TOCTOU window: if the
+// orphan exits and a foreign pane is created under the same name between the
+// marker read and the track call, the generation will differ and adoption fails
+// closed rather than silently handing a foreign pane to this home.
+func (s *Supervisor) adopt(home, agent, name string, candidate *tmux.TmuxSession) (*tmux.TmuxSession, bool) {
 	if existing := s.live(agent, name); existing != nil {
-		return existing
+		return existing, false
 	}
 	exists, known := candidate.ProbeSession()
 	if !known || !exists {
-		return nil
+		return nil, false
+	}
+	exec := cmd.MakeExecutor()
+	sName := candidate.SanitizedName()
+	owner, present, err := tmux.SessionHomeMarker(exec, sName)
+	if err != nil || !present {
+		// Marker absent or unreadable: cannot prove ownership — fail closed.
+		return nil, false
+	}
+	ownerCanon, err := canonicalHome(owner)
+	if err != nil {
+		return nil, false
+	}
+	homeCanon, err := canonicalHome(home)
+	if err != nil {
+		return nil, false
+	}
+	if ownerCanon != homeCanon {
+		// A pane exists but it belongs to a different home.
+		return nil, true
+	}
+	// Read the generation before tracking so we can detect a replacement pane
+	// that arrives in the verification-to-track window (TOCTOU). An error or
+	// absent marker (present=false) on either read is treated as unknown — fail
+	// closed rather than tracking a pane whose generation cannot be confirmed.
+	// This matches the home-marker check above, which also refuses on
+	// unreadable evidence ("do not reuse what you cannot prove you own").
+	gen, genPresent, genErr := tmux.SessionGenerationMarker(exec, sName)
+	if genErr != nil || !genPresent {
+		// Cannot read the generation marker — ownership unverifiable, fail closed.
+		return nil, false
 	}
 	if !s.track(agent, name, candidate) {
-		return nil
+		return nil, false
 	}
-	return candidate
+	// Re-verify the generation. If the session was replaced between the marker
+	// read and the track call, the generation will have changed — another home's
+	// pane now sits behind the same name. Forget the entry and fail closed.
+	gen2, gen2Present, genErr2 := tmux.SessionGenerationMarker(cmd.MakeExecutor(), sName)
+	if genErr2 != nil || !gen2Present || gen2 != gen {
+		s.forget(agent, name, candidate)
+		return nil, false
+	}
+	return candidate, false
+}
+
+// canonicalHome resolves a home path to its absolute, symlink-resolved form for
+// identity comparison. Two paths that differ only lexically (relative vs
+// absolute, symlink vs target) resolve to the same canonical form.
+//
+// On error the caller must treat ownership as unknown and fail closed — do not
+// reuse a pane whose home cannot be verified.
+func canonicalHome(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize home %q: %w", path, err)
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		// The directory may not exist yet (first login to a new home). Treat the
+		// not-yet-created case as an unresolvable path — fail closed rather than
+		// comparing a mix of real and non-real paths.
+		return "", fmt.Errorf("canonicalize home %q: %w", path, err)
+	}
+	return real, nil
 }
 
 func (s *Supervisor) track(agent, name string, pane *tmux.TmuxSession) bool {

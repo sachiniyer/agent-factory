@@ -293,9 +293,9 @@ func ResolveRuntime(kind BackendKind) (Runtime, error) {
 }
 
 // localRuntime is the default in-process runtime: a git worktree + tmux agent on
-// the daemon's own box. Its Provision is exactly what defaultBackendFactory
-// returned for a non-remote session before Phase 4 — a bare LocalBackend, no
-// endpoint — so the local session contract stays unchanged.
+// the daemon's own box. Its Provision is a bare LocalBackend with no remote
+// endpoint — exactly what the pre-Phase-4 default factory returned for a
+// non-remote session, so the local session contract stays unchanged.
 type localRuntime struct{}
 
 func (localRuntime) Provision(ProvisionSpec) (ProvisionResult, error) {

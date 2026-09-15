@@ -120,8 +120,9 @@ func exemptRewrittenKeys(expected, after reflect.Value, changed []string) string
 
 // exemptRewrittenKey resolves the two spellings the writers use: a top-level
 // field — including the flat field behind a dotted alias such as
-// network.listen_addr, which taggedFieldByKey maps for us — and a SINGLE entry
-// of a dynamic map (program_overrides.claude), whose siblings stay guarded.
+// network.listen_addr, which taggedFieldByKey maps for us — a SINGLE entry of a
+// dynamic map (program_overrides.claude), or one fixed field of a structured
+// table (root_agent.enabled). Sibling entries and fields stay guarded.
 // expected and after must be pointers, so the field found in expected is
 // settable.
 func exemptRewrittenKey(expected, after reflect.Value, key string) bool {
@@ -138,11 +139,23 @@ func exemptRewrittenKey(expected, after reflect.Value, key string) bool {
 		return false
 	}
 	target, ok := taggedFieldByKey(expected, table)
-	if !ok || target.Kind() != reflect.Map || target.Type().Key() != reflect.TypeOf("") || !target.CanSet() {
+	if !ok || !target.CanSet() {
 		return false
 	}
 	source, ok := taggedFieldByKey(after, table)
 	if !ok || source.Type() != target.Type() {
+		return false
+	}
+	if target.Kind() == reflect.Struct {
+		targetLeaf, targetOK := taggedFieldByKey(target, leaf)
+		sourceLeaf, sourceOK := taggedFieldByKey(source, leaf)
+		if !targetOK || !sourceOK || !targetLeaf.CanSet() || !sourceLeaf.Type().AssignableTo(targetLeaf.Type()) {
+			return false
+		}
+		targetLeaf.Set(sourceLeaf)
+		return true
+	}
+	if target.Kind() != reflect.Map || target.Type().Key() != reflect.TypeOf("") {
 		return false
 	}
 	entry := source.MapIndex(reflect.ValueOf(leaf))

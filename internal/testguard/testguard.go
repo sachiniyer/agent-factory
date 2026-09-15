@@ -19,6 +19,7 @@ package testguard
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -27,7 +28,9 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
 )
@@ -133,11 +136,61 @@ func ConfigTripwire() func() error {
 	}
 }
 
+const (
+	envMarkerHome         = "AF_HOME"
+	envMarkerTestRun      = "AF_TESTGUARD_RUN"
+	tmuxTripwireWaitDelay = 250 * time.Millisecond
+)
+
+// A var only so the wedge test can shorten it; production never reassigns it.
+var tmuxTripwireTimeout = 10 * time.Second
+
+var (
+	sandboxRunsMu sync.Mutex
+	sandboxRuns   []string
+)
+
+// sandboxRunCheckpoint identifies the next SandboxHome created in this test
+// process. TmuxTripwire takes a checkpoint before package sandboxing starts, so
+// another test process's temp home can never be mistaken for one of ours.
+func sandboxRunCheckpoint() int {
+	sandboxRunsMu.Lock()
+	defer sandboxRunsMu.Unlock()
+	return len(sandboxRuns)
+}
+
+func recordSandboxRun(id string) {
+	sandboxRunsMu.Lock()
+	defer sandboxRunsMu.Unlock()
+	sandboxRuns = append(sandboxRuns, id)
+}
+
+func sandboxRunsSince(checkpoint int) map[string]bool {
+	sandboxRunsMu.Lock()
+	defer sandboxRunsMu.Unlock()
+	owned := make(map[string]bool, len(sandboxRuns)-checkpoint)
+	for _, id := range sandboxRuns[checkpoint:] {
+		owned[id] = true
+	}
+	return owned
+}
+
+// ambientTmuxOutput bounds every read from the ambient tmux server. These
+// commands run from TestMain after the package suite has finished, so a wedged
+// server must not wedge the test process indefinitely.
+func ambientTmuxOutput(args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxTripwireTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	cmd.WaitDelay = tmuxTripwireWaitDelay
+	return cmd.Output()
+}
+
 // ambientAFSessions lists the af_-prefixed session names on the tmux server
 // the current environment resolves to. A nil map means no reachable server —
 // nothing to leak against.
 func ambientAFSessions() map[string]bool {
-	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	out, err := ambientTmuxOutput("list-sessions", "-F", "#{session_name}")
 	if err != nil {
 		return nil
 	}
@@ -152,20 +205,43 @@ func ambientAFSessions() map[string]bool {
 	return sessions
 }
 
-// TmuxTripwire snapshots the af_-prefixed sessions on the ambient tmux
-// server and returns a verify func for TestMain to call after m.Run().
-// Verify returns a non-nil error when the run left behind af_ sessions that
-// were not there before — i.e. a test created a real agent tmux session on
-// the developer's server and never killed it (#1056). Tests that need real
-// tmux should call IsolateTmux, whose private server this tripwire cannot
-// even see.
+// ambientAFSessionMarker reads one ownership marker from an exact tmux session.
+// False covers a missing marker, malformed output, and a query failure: none is
+// affirmative evidence that this test run owns the session.
+func ambientAFSessionMarker(name, marker string) (string, bool) {
+	out, err := ambientTmuxOutput("show-environment", "-t", "="+name, marker)
+	if err != nil {
+		return "", false
+	}
+	line := strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r")
+	if strings.ContainsAny(line, "\r\n") {
+		return "", false
+	}
+	value, ok := strings.CutPrefix(line, marker+"=")
+	return value, ok
+}
+
+func ambientAFSessionOwned(name string, ownedRuns map[string]bool) bool {
+	for _, marker := range []string{envMarkerTestRun, envMarkerHome} {
+		if value, readable := ambientAFSessionMarker(name, marker); readable && ownedRuns[value] {
+			return true
+		}
+	}
+	return false
+}
+
+// TmuxTripwire returns a verify func for TestMain to call after m.Run(). Verify
+// reports only a session whose AF_HOME or AF_TESTGUARD_RUN marker exactly
+// matches a sandbox that SandboxHome created for this run. The stable run marker
+// preserves attribution when an individual test overrides AGENT_FACTORY_HOME.
+// Arrival time is not ownership: a different, absent, or unreadable identity is
+// not proof and is ignored (#4194). Tests that need real tmux should call
+// IsolateTmux, whose private server this tripwire cannot even see.
 //
-// Call it BEFORE any test changes TMUX_TMPDIR/TMUX so both snapshots target
-// the ambient server. No-ops when tmux is not installed or with
-// AF_DISABLE_TMUX_TRIPWIRE=1. Caveat for dev boxes running a real daemon:
-// an af_ session legitimately created by the real daemon DURING the package
-// run is indistinguishable from a leak; the error lists the session names so
-// that case is recognizable, and the escape hatch covers it.
+// Call it BEFORE SandboxHome and before any test changes TMUX_TMPDIR/TMUX. The
+// former gives it an ownership checkpoint; restore TMUX_TMPDIR/TMUX before
+// calling the verifier so it inspects the ambient server. No-ops when tmux is
+// not installed or with AF_DISABLE_TMUX_TRIPWIRE=1.
 func TmuxTripwire() func() error {
 	if os.Getenv("AF_DISABLE_TMUX_TRIPWIRE") == "1" {
 		return func() error { return nil }
@@ -173,11 +249,12 @@ func TmuxTripwire() func() error {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return func() error { return nil }
 	}
-	before := ambientAFSessions()
+	runCheckpoint := sandboxRunCheckpoint()
 	return func() error {
+		ownedRuns := sandboxRunsSince(runCheckpoint)
 		var leaked []string
 		for name := range ambientAFSessions() {
-			if !before[name] {
+			if ambientAFSessionOwned(name, ownedRuns) {
 				leaked = append(leaked, name)
 			}
 		}
@@ -185,7 +262,9 @@ func TmuxTripwire() func() error {
 			return nil
 		}
 		sort.Strings(leaked)
-		return fmt.Errorf("tmux tripwire: this package's test run left tmux session(s) %v on the ambient tmux server — a test created a real af_ session without testguard.IsolateTmux or cleanup (#1056)", leaked)
+		return fmt.Errorf("tmux tripwire: session(s) %v on the ambient tmux server carry this package's sandbox ownership marker. "+
+			"Possible causes are a test that bypassed testguard.IsolateTmux or cleanup, or a session belonging to a live Agent Factory install or another concurrent run. "+
+			"DO NOT KILL IT based on this diagnostic; inspect ownership first. On a known-concurrent host, set AF_DISABLE_TMUX_TRIPWIRE=1 (#1056/#4194)", leaked)
 	}
 }
 
@@ -203,16 +282,28 @@ func TmuxTripwire() func() error {
 // inherits the pane's markers, so every child a test spawns would otherwise
 // carry the production install's identity — which breaks any test asserting
 // on marker absence (e.g. doctor's home-match gate) and misattributes test
-// children to the real install.
+// children to the real install. AF_TESTGUARD_RUN is replaced with this run's
+// stable identity so per-test AGENT_FACTORY_HOME overrides remain attributable.
 func SandboxHome() func() {
 	dir, err := os.MkdirTemp("", "af-test-home-")
 	if err != nil {
 		panic("testguard: cannot create sandbox AGENT_FACTORY_HOME: " + err.Error())
 	}
 	prev, had := os.LookupEnv("AGENT_FACTORY_HOME")
+	prevTestRun, hadTestRun := os.LookupEnv(envMarkerTestRun)
 	if err := os.Setenv("AGENT_FACTORY_HOME", dir); err != nil {
 		panic("testguard: cannot set sandbox AGENT_FACTORY_HOME: " + err.Error())
 	}
+	if err := os.Setenv(envMarkerTestRun, dir); err != nil {
+		if had {
+			_ = os.Setenv("AGENT_FACTORY_HOME", prev)
+		} else {
+			_ = os.Unsetenv("AGENT_FACTORY_HOME")
+		}
+		_ = os.RemoveAll(dir)
+		panic("testguard: cannot set sandbox run marker: " + err.Error())
+	}
+	recordSandboxRun(dir)
 	prevSession, hadSession := os.LookupEnv("AF_SESSION")
 	prevGeneration, hadGeneration := os.LookupEnv("AF_SESSION_GEN")
 	prevAFHome, hadAFHome := os.LookupEnv("AF_HOME")
@@ -239,6 +330,11 @@ func SandboxHome() func() {
 			_ = os.Setenv("AF_HOME", prevAFHome)
 		} else {
 			_ = os.Unsetenv("AF_HOME")
+		}
+		if hadTestRun {
+			_ = os.Setenv(envMarkerTestRun, prevTestRun)
+		} else {
+			_ = os.Unsetenv(envMarkerTestRun)
 		}
 		_ = os.RemoveAll(dir)
 	}

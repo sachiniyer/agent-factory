@@ -32,6 +32,10 @@ on:
         description: Pull request number to evaluate
         required: true
         type: number
+      previous_head_sha:
+        description: Initiating head that an update-branch recovery must wait to move past
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -161,7 +165,9 @@ jobs:
                 "aggregate_heads",
                 JSON.stringify(aggregateHeads.map((headSha) => ({ head_sha: headSha }))),
               );
-              if (context.eventName === "workflow_dispatch" && targets.length === 0) {
+              // Automated recovery can become unnecessary while it waits. Its
+              // resolver has already validated the input and PR eligibility.
+              if (context.eventName === "workflow_dispatch" && targets.length === 0 && !payload.inputs?.previous_head_sha) {
                 const failure = new Error("No pull-request head was resolved for manual recovery.");
                 failure.failWorkflow = true;
                 throw failure;

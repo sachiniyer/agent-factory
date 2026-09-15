@@ -438,6 +438,33 @@ func TestBothSurfaceScannersRecurse(t *testing.T) {
 	})
 }
 
+// TestWebRPCDerivationResolvesModuleStringConst keeps named transport methods
+// visible to the inventory. A module-level const is useful when a method name is
+// shared by compatibility handling and the call itself; treating only inline
+// string literals as RPCs would make that entire call disappear from parity.
+func TestWebRPCDerivationResolvesModuleStringConst(t *testing.T) {
+	root := repoRoot(t)
+	dir, err := os.MkdirTemp(filepath.Join(root, "web", "src"), "parityconstprobe-")
+	if err != nil {
+		t.Fatalf("mkdir const RPC probe: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	path := filepath.Join(dir, "probe.ts")
+	const method = "ParityConstProbe"
+	src := `const PARITY_RPC_METHOD = "` + method + `";
+export function parityConstProbe(token: string) {
+  return af(PARITY_RPC_METHOD, {}, token);
+}
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatalf("write const RPC probe: %v", err)
+	}
+
+	if !deriveWebRPCs(t)[method] {
+		t.Fatalf("module-level const RPC %q was not derived — named method calls are invisible to parity", method)
+	}
+}
+
 // TestDerivationCoversEveryRequestConstructionSite is the backstop the fixtures
 // above cannot provide: they prove specific known gaps are visible, not that the
 // walk reaches every surface. If a surface's sources move, this catches the walk

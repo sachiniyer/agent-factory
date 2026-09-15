@@ -86,13 +86,13 @@ func TestMenuNarrowWidthKeepsHelpAndQuit(t *testing.T) {
 
 // TestMenuLimitBlockedRowFitsNarrowWidths covers the WIDEST instance row in the
 // product and closes #2085. A usage-limit-blocked session is the only state that
-// shows two extra hints — `c retry limit` and `F hand off` — on a row that was
+// shows two extra hints — `c retry` and `F hand off` — on a row that was
 // already ~108 cells before either existed. Adding a hint is a WIDTH change
 // (#1936/#1083), and TestMenuNarrowWidthKeepsHelpAndQuit above uses a Ready
 // instance, so before this the widest row in the product was the one nothing
 // measured.
 //
-// #2085 was the consequence: `c retry limit` was absent from hintDropOrder,
+// #2085 was the consequence: `c retry` was absent from hintDropOrder,
 // which read as "never drop it" but actually meant the row had no give left once
 // everything below it was gone. At 45 cells it rendered 48 and the exact-rect
 // clamp cut the RIGHT edge — taking `? help` and `q quit` with it, which is the
@@ -119,19 +119,19 @@ func TestMenuLimitBlockedRowFitsNarrowWidths(t *testing.T) {
 	// limitRowFloor is where BOTH limit actions still fit alongside the four hints
 	// that are never dropped. It is arithmetic, not taste:
 	//
-	//   n new(5) + D delete session(16) + c retry limit(13) + F hand off(10)
-	//     + ? help(6) + q quit(6) + six separators(3 each) = 71
+	//   n new(5) + D delete session(16) + c retry(7) + F hand off(10)
+	//     + ? help(6) + q quit(6) + six separators(3 each) = 65
 	//
 	// Below it something in that set must go, and #1083 already settled which:
 	// help and quit are the escape hatches, so the limit actions shed instead.
 	// Pinned so a copy change that widens either fragment fails HERE, naming the
 	// row it broke, rather than silently raising the width at which a stuck user
 	// can see their way out.
-	const limitRowFloor = 71
+	const limitRowFloor = 65
 
 	m.SetSize(limitRowFloor, 1)
 	atFloor := m.String()
-	assert.Contains(t, atFloor, "retry limit", "at the floor the wait action must be advertised")
+	assert.Contains(t, atFloor, "retry", "at the floor the wait action must be advertised")
 	assert.Contains(t, atFloor, "hand off", "at the floor the switch action must be advertised alongside it")
 	assert.LessOrEqual(t, lipgloss.Width(atFloor), limitRowFloor)
 
@@ -139,13 +139,13 @@ func TestMenuLimitBlockedRowFitsNarrowWidths(t *testing.T) {
 	// alternative rather than both vanishing together.
 	m.SetSize(limitRowFloor-1, 1)
 	belowFloor := m.String()
-	assert.Contains(t, belowFloor, "retry limit",
+	assert.Contains(t, belowFloor, "retry",
 		"just below the floor the PRIMARY limit action must outlast the alternative")
 
 	// Roomy: both are advertised together — they are the two answers to the same
 	// wall, and a user who sees only one cannot weigh them.
 	m.SetSize(200, 1)
 	full := m.String()
-	assert.Contains(t, full, "retry limit")
+	assert.Contains(t, full, "retry")
 	assert.Contains(t, full, "hand off")
 }

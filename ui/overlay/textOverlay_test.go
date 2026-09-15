@@ -96,7 +96,7 @@ func TestTextOverlayHeightWindowsContent(t *testing.T) {
 	overlay.SetWidth(30)
 	overlay.SetHeight(6)
 
-	rendered := overlay.Render()
+	rendered := renderedText(overlay.Render())
 	assert.Equal(t, 6, strings.Count(rendered, "\n")+1,
 		"rendered overlay should fit the requested outer height")
 	assert.Contains(t, rendered, "title", "initial viewport starts at the top")
@@ -118,12 +118,12 @@ func TestTextOverlayScrollsContent(t *testing.T) {
 	overlay.SetHeight(6)
 
 	overlay.ScrollDown()
-	rendered := overlay.Render()
+	rendered := renderedText(overlay.Render())
 	assert.NotContains(t, rendered, "title", "scrolling down moves the viewport")
 	assert.Contains(t, rendered, "↑ more", "overflow above is visible")
 
 	overlay.ScrollUp()
-	rendered = overlay.Render()
+	rendered = renderedText(overlay.Render())
 	assert.Contains(t, rendered, "title", "scrolling up returns toward the top")
 }
 
@@ -213,14 +213,14 @@ func TestTextOverlayHeightWindowsWrappedContent(t *testing.T) {
 	overlay.SetWidth(24)
 	overlay.SetHeight(8)
 
-	rendered := overlay.Render()
+	rendered := renderedText(overlay.Render())
 	assert.Equal(t, 8, strings.Count(rendered, "\n")+1,
 		"wrapped content should still fit the requested outer height")
 	assert.Contains(t, rendered, "title")
 	assert.Contains(t, rendered, "↓ more")
 
 	overlay.ScrollDown()
-	rendered = overlay.Render()
+	rendered = renderedText(overlay.Render())
 	assert.Equal(t, 8, strings.Count(rendered, "\n")+1,
 		"scrolled wrapped content should still fit the requested outer height")
 	assert.Contains(t, rendered, "↑ more")
@@ -243,7 +243,7 @@ func TestTextOverlayScrollableTracksTheMarkerItPaints(t *testing.T) {
 		ov.SetWidth(30)
 		ov.SetHeight(height)
 
-		rendered := ov.Render()
+		rendered := renderedText(ov.Render())
 		marked := strings.Contains(rendered, "↓ more") || strings.Contains(rendered, "↑ more")
 		require.Equalf(t, marked, ov.Scrollable(),
 			"height %d: Scrollable()=%v but the rendered overlay %s a scroll marker:\n%s",
@@ -261,11 +261,11 @@ func TestTextOverlayScrollReachesTheTail(t *testing.T) {
 	ov.SetHeight(6)
 
 	require.True(t, ov.Scrollable(), "precondition: the content overflows")
-	require.NotContains(t, ov.Render(), "tail", "precondition: the tail starts below the fold")
+	require.NotContains(t, renderedText(ov.Render()), "tail", "precondition: the tail starts below the fold")
 
-	for i := 0; i < 20 && !strings.Contains(ov.Render(), "tail"); i++ {
+	for i := 0; i < 20 && !strings.Contains(renderedText(ov.Render()), "tail"); i++ {
 		ov.ScrollDown()
 	}
-	require.Contains(t, ov.Render(), "tail", "line-scrolling must reach the last line")
-	require.NotContains(t, ov.Render(), "↓ more", "the bottom must stop advertising more content")
+	require.Contains(t, renderedText(ov.Render()), "tail", "line-scrolling must reach the last line")
+	require.NotContains(t, renderedText(ov.Render()), "↓ more", "the bottom must stop advertising more content")
 }

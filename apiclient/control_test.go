@@ -3,8 +3,10 @@ package apiclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +23,10 @@ import (
 // the real envelope writer makes each round-trip a genuine parity proof rather
 // than a mock agreeing with itself, exactly like snapshotServer does for reads.
 func routeServer(t *testing.T, method string, handle func(body []byte) apiproto.Envelope) *Client {
+	return routeServerWithAccountHandoff(t, method, true, handle)
+}
+
+func routeServerWithAccountHandoff(t *testing.T, method string, supported bool, handle func(body []byte) apiproto.Envelope) *Client {
 	t.Helper()
 	sockPath := testguard.SocketPath(t, "daemon-http.sock")
 	ln, err := net.Listen("unix", sockPath)
@@ -28,11 +34,24 @@ func routeServer(t *testing.T, method string, handle func(body []byte) apiproto.
 		t.Fatalf("listen unix: %v", err)
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(map[string]any{
+			"ok":              true,
+			"account_handoff": supported,
+		}))
+	})
 	mux.HandleFunc("/v1/"+method, func(w http.ResponseWriter, r *http.Request) {
 		body := make([]byte, r.ContentLength)
 		_, _ = r.Body.Read(body)
 		w.Header().Set("Content-Type", "application/json")
 		_ = apiproto.WriteEnvelope(w, handle(body))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		env := apiproto.Failure(`unknown route "` + r.URL.Path + `"`)
+		env.Error.DaemonRejected = true
+		w.WriteHeader(http.StatusNotFound)
+		_ = apiproto.WriteEnvelope(w, env)
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
@@ -110,6 +129,87 @@ func TestControlRoundTrips(t *testing.T) {
 		}
 	})
 
+	t.Run("HandoffSession preserves committed response", func(t *testing.T) {
+		c := routeServer(t, daemon.AccountAwareHandoffMethod, func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.HandoffSessionResponse{
+				OK: true, From: "claude", To: "claude", FromAccount: "work", ToAccount: "personal", HeadSHA: "abc123",
+				MutationOutcome: daemon.MutationOutcome{Code: apiproto.ErrorCodeMutationCommitted, Warning: "pending settlement"},
+			})
+		})
+		resp, err := c.HandoffSession(daemon.HandoffSessionRequest{Account: "personal"})
+		if resp.ToAccount != "personal" || !IsMutationCommitted(err) {
+			t.Fatalf("HandoffSession = %+v, %v; want payload plus committed warning", resp, err)
+		}
+	})
+
+	t.Run("HandoffSession refuses an account mismatch", func(t *testing.T) {
+		c := routeServer(t, daemon.AccountAwareHandoffMethod, func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.HandoffSessionResponse{OK: true, From: "claude", To: "codex"})
+		})
+		resp, err := c.HandoffSession(daemon.HandoffSessionRequest{Account: "personal"})
+		if resp.To != "codex" || !IsMutationCommitted(err) || !strings.Contains(err.Error(), "did not honor") ||
+			!strings.Contains(err.Error(), "credential identity is unknown") || strings.Contains(err.Error(), "ambient identity") {
+			t.Fatalf("HandoffSession = %+v, %T %v; want payload plus committed account mismatch", resp, err, err)
+		}
+	})
+
+	t.Run("HandoffSession compares the canonical account", func(t *testing.T) {
+		c := routeServer(t, daemon.AccountAwareHandoffMethod, func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.HandoffSessionResponse{OK: true, From: "claude", To: "claude", ToAccount: "personal"})
+		})
+		resp, err := c.HandoffSession(daemon.HandoffSessionRequest{Account: " personal "})
+		if err != nil || resp.ToAccount != "personal" {
+			t.Fatalf("HandoffSession = %+v, %v; want canonical account success", resp, err)
+		}
+	})
+
+	t.Run("HandoffSession preserves committed warning with account mismatch", func(t *testing.T) {
+		c := routeServer(t, daemon.AccountAwareHandoffMethod, func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.HandoffSessionResponse{
+				OK: true, From: "claude", To: "claude",
+				MutationOutcome: daemon.MutationOutcome{Code: apiproto.ErrorCodeMutationCommitted, Warning: "pending settlement"},
+			})
+		})
+		resp, err := c.HandoffSession(daemon.HandoffSessionRequest{Account: "personal"})
+		if resp.To != "claude" || !IsMutationCommitted(err) || !strings.Contains(err.Error(), "pending settlement") || !strings.Contains(err.Error(), "did not honor") {
+			t.Fatalf("HandoffSession = %+v, %v; want payload plus both committed and mismatch errors", resp, err)
+		}
+	})
+
+	t.Run("HandoffSession binds support to the target-only mutation", func(t *testing.T) {
+		called := false
+		// Model a daemon replacement between the old health probe and mutation:
+		// health advertises account handoff, but the daemon serving mutations has
+		// only the legacy endpoint whose target-only behavior is unsafe for a pin.
+		c := routeServerWithAccountHandoff(t, "HandoffSession", true, func([]byte) apiproto.Envelope {
+			called = true
+			return apiproto.Success(daemon.HandoffSessionResponse{OK: true, From: "claude", To: "codex"})
+		})
+		_, err := c.HandoffSession(daemon.HandoffSessionRequest{To: "codex"})
+		if err == nil || !strings.Contains(err.Error(), "account-aware handoff") {
+			t.Fatalf("HandoffSession error = %v; want account-aware handoff refusal", err)
+		}
+		if called {
+			t.Fatal("an unsupported daemon must never receive the mutation")
+		}
+	})
+
+	t.Run("HandoffSession preserves an intermediary 404 as uncertain", func(t *testing.T) {
+		c := remoteStatusServer(t, func(*http.Request) (int, []byte) {
+			return http.StatusNotFound, []byte("proxy could not read the upstream response")
+		})
+		_, err := c.HandoffSession(daemon.HandoffSessionRequest{To: "codex"})
+		if err == nil {
+			t.Fatal("an intermediary 404 must remain an error")
+		}
+		if errors.Is(err, daemon.ErrAccountHandoffUnsupported) || IsRouteNotServed(err) {
+			t.Fatalf("an unmarked 404 cannot prove that the daemon lacks the route: %T %v", err, err)
+		}
+		if !strings.Contains(err.Error(), "outcome could not be confirmed") {
+			t.Fatalf("intermediary 404 error = %q, want explicit uncertainty", err)
+		}
+	})
+
 	// Both names come back, and they DIFFER: the resolved tab name and the tmux
 	// session it was spawned under are independent namespaces post-#1957, so a
 	// client that dropped the second and re-derived it from the first would bind
@@ -181,6 +281,23 @@ func TestControlRoundTrips(t *testing.T) {
 		})
 		if err := c.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "alpha"}); err == nil {
 			t.Fatal("ResumeFromLimit must not report success when the daemon performed no retry")
+		}
+	})
+	t.Run("ResumeFromLimit preserves a committed settlement warning", func(t *testing.T) {
+		c := routeServer(t, "ResumeFromLimit", func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.ResumeFromLimitResponse{
+				OK: true,
+				MutationOutcome: daemon.MutationOutcome{
+					Code: apiproto.ErrorCodeMutationCommitted, Warning: "mission delivered; settlement pending",
+				},
+			})
+		})
+		err := c.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "alpha"})
+		if !IsMutationCommitted(err) {
+			t.Fatalf("ResumeFromLimit error = %T %v, want committed warning", err, err)
+		}
+		if !strings.Contains(err.Error(), "settlement pending") {
+			t.Fatalf("ResumeFromLimit warning = %q", err)
 		}
 	})
 

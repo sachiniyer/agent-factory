@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +32,12 @@ func captureInfoLog(t *testing.T) *logCapture {
 // the parked instance, and its backend.
 func newAutoResumeManager(t *testing.T, retryInterval string, alive bool, prompt string, resetAt time.Time) (*Manager, string, *session.Instance, *limitResumeBackend) {
 	t.Helper()
+	shimDir := t.TempDir()
+	shim := filepath.Join(shimDir, tmux.ProgramClaude)
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	manager, repoID, repoPath := newStatusTestManager(t)
 	manager.cfg.LimitAutoResume = true
 	manager.cfg.LimitRetryInterval = retryInterval

@@ -48,7 +48,6 @@ func (g *GitWorktree) Setup() error {
 	if setupErr != nil {
 		return setupErr
 	}
-
 	// Fire-and-forget post-worktree hooks (cancellable via hooksCtx)
 	g.hooksDone = g.runHooks()
 	return nil
@@ -86,7 +85,6 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 		return err
 	}
 	g.branchCreatedByUs = branchCreatedByUs
-
 	g.startHooks()
 	return nil
 }
@@ -159,6 +157,9 @@ var hookStopTimeout = 30 * time.Second
 // modifying the checkout while an unjoined hook may still use it recreates the
 // exact remove/write race this boundary exists to prevent.
 func (g *GitWorktree) cancelAndWaitHooks() error {
+	if g.IsExternalWorktree() {
+		return nil
+	}
 	if g.hooksCancel != nil {
 		g.hooksCancel()
 	}
@@ -173,7 +174,10 @@ func (g *GitWorktree) cancelAndWaitHooks() error {
 				g.worktreePath, hookStopTimeout)
 		}
 	}
-	return g.stopSurvivingHookScopes()
+	if err := g.stopSurvivingHookScopes(); err != nil {
+		return err
+	}
+	return g.retireHookProgress()
 }
 
 // hookScopePrefixes names every transient scope this worktree's hooks could
@@ -193,6 +197,9 @@ func (g *GitWorktree) cancelAndWaitHooks() error {
 // a machine without systemd consult a manager that is not there, and the sweep
 // below fails closed — which would wedge cleanup for users who never had a scope.
 func (g *GitWorktree) hookScopePrefixes() []string {
+	if g.IsExternalWorktree() {
+		return nil
+	}
 	var prefixes []string
 	add := func(prefix string) {
 		if prefix == "" {
@@ -309,11 +316,12 @@ func (g *GitWorktree) startHooks() {
 // takes exactly the path it took before #3650.
 func (g *GitWorktree) runHooks() <-chan struct{} {
 	return runPostWorktreeHooks(g.hooksCtx, hookRun{
-		repoPath:        g.repoPath,
-		worktreePath:    g.worktreePath,
-		passthrough:     g.hookEnvPassthrough,
-		scopeSessionID:  g.hookScopeSessionID,
-		onScopeLaunched: g.SetHookScopeUnitPrefix,
+		repoPath:            g.repoPath,
+		worktreePath:        g.worktreePath,
+		passthrough:         g.hookEnvPassthrough,
+		scopeSessionID:      g.hookScopeSessionID,
+		onScopeLaunched:     g.SetHookScopeUnitPrefix,
+		onProgressPublished: g.retainHookProgressForCreate,
 	})
 }
 

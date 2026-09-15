@@ -472,9 +472,11 @@ func WorkingDir(pid int) (string, bool) {
 }
 
 // OpenWorkingDir returns an opened handle to pid's exact current working
-// directory plus its display path. The handle is identity-anchored: callers may
-// walk its parents without trusting a pathname that another same-UID process can
-// rename or replace between observation and a destructive decision.
+// directory plus its diagnostic display path. The handle is identity-anchored:
+// callers may walk its parents without trusting a pathname that another
+// same-UID process can rename or replace between observation and a destructive
+// decision. On Linux the display path may carry procfs's " (deleted)" suffix;
+// callers making path decisions must use the handle rather than that string.
 func OpenWorkingDir(pid int) (*os.File, string, bool) {
 	return openWorkingDir(pid)
 }

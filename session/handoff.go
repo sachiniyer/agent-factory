@@ -39,7 +39,9 @@ type AgentHandoff struct {
 	// conversation id was ever captured.
 	From AgentConversationData `json:"from,omitempty"`
 	// To is the incoming agent (a tmux.SupportedPrograms name).
-	To string `json:"to"`
+	To          string `json:"to"`
+	FromAccount string `json:"from_account,omitempty"`
+	ToAccount   string `json:"to_account,omitempty"`
 	// At is when the swap was recorded.
 	At time.Time `json:"at"`
 	// HeadSHA is the branch tip at swap time — everything at or before it is the
@@ -299,11 +301,14 @@ func (i *Instance) recordHandoffSwapLocked(target, reason, headSHA string, autom
 		Automatic: automatic,
 	}
 	swap := HandoffSwap{AgentHandoff: entry, previousProgram: i.Program}
+	sameAgent := i.currentAgentNameLocked() == target
 
 	i.Tabs[0].Handoffs = append(i.Tabs[0].Handoffs, entry)
 	i.touchLocked()
 	i.Tabs[0].Conversation = AgentConversationData{}
-	if i.Program != target {
+	// Account-only handoffs retain the exact configured command for subsequent
+	// restarts; the detected agent enum is only the ledger's identity.
+	if !sameAgent && i.Program != target {
 		i.Program = target
 		i.touchLocked()
 	}

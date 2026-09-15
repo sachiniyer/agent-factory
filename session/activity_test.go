@@ -142,6 +142,28 @@ func TestLifecycleViewActivity(t *testing.T) {
 	require.Equal(t, ActivityIdle, i.LifecycleView().Activity(), "an idle agent releases its slot")
 }
 
+func TestPendingAccountSwapActivityRemainsPending(t *testing.T) {
+	pending := &AccountSwapData{
+		Manual:                  true,
+		ReplacementPanesStarted: true,
+		Mission:                 "continue under the new account",
+		MissionDeliveryStatus:   PromptCouldNotConfirm,
+	}
+	data := InstanceData{Liveness: LiveReady, PendingAccountSwap: pending}
+	require.Equal(t, ActivityPending, activityOf(data),
+		"a live replacement still owing its mission must hold the activity slot")
+	require.Equal(t, ActivityPending, activityOf(data.ForStorage()),
+		"the old-reader compatibility fence must not make a current raw-record reader release the slot")
+	require.Equal(t, ActivityPending, (LifecycleView{
+		Liveness: LiveReady, PendingAccountSwap: true,
+	}).Activity(), "the live lifecycle projection must agree with the record path")
+}
+
+func activityOf(data InstanceData) Activity {
+	activity, _ := ClassifyActivity(data)
+	return activity
+}
+
 // TestActivity_UserKilledOutranksPendingHandoff keeps raw stored records and
 // live lifecycle views aligned: a committed kill is terminal even if the handoff
 // mission and its transient replacement op have not been cleared yet.

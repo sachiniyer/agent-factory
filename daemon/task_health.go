@@ -90,6 +90,9 @@ func (s *controlServer) withLiveArming(tasks []task.Task) []task.Task {
 			if s.watchers == nil {
 				continue
 			}
+			if !duplicate {
+				s.watchers.applyLiveDropState(&tasks[i])
+			}
 			arming := s.watchers.armingFor(tasks[i])
 			if duplicate && arming == task.ArmingArmed {
 				arming = task.ArmingNotArmed

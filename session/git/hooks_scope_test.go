@@ -87,7 +87,11 @@ func readScopeLog(t *testing.T, logPath string) string {
 func runScopedHooks(t *testing.T, sessionID string, cmds []string) (string, *GitWorktree) {
 	t.Helper()
 	repoPath := freshRepoConfig(t, cmds)
-	gw := &GitWorktree{repoPath: repoPath, worktreePath: t.TempDir()}
+	worktreePath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktreePath, ".git"), []byte("gitdir: test\n"), 0600); err != nil {
+		t.Fatalf("write linked-worktree identity fixture: %v", err)
+	}
+	gw := &GitWorktree{repoPath: repoPath, worktreePath: worktreePath}
 	gw.SetHookScopeSessionID(sessionID)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

@@ -280,6 +280,10 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 		log.WarningLog.Printf("daemon_poll_interval=%d is non-positive; using default %dms", config.DaemonPollInterval, defaultDaemonPollInterval)
 		config.DaemonPollInterval = defaultDaemonPollInterval
 	}
+	if config.WatcherEventsPerMinute <= 0 {
+		log.WarningLog.Printf("watcher_events_per_minute=%d is non-positive; using default %d", config.WatcherEventsPerMinute, DefaultWatcherEventsPerMinute)
+		config.WatcherEventsPerMinute = DefaultWatcherEventsPerMinute
+	}
 
 	if config.LogMaxSizeMB <= 0 {
 		log.WarningLog.Printf("log_max_size_mb=%d is non-positive; using default %d MB", config.LogMaxSizeMB, log.DefaultMaxSizeMB)

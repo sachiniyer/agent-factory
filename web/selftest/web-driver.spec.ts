@@ -69,8 +69,9 @@ const SESSION_C = process.env.AF_WEB_SESSION_C ?? "probe-c";
 // The name of the task the harness seeds (web-selftest-entry.sh) so the tasks list
 // is non-empty on load.
 const SEEDED_TASK = process.env.AF_WEB_TASK_NAME ?? "probe-task";
+const SEEDED_TASK_CRON = process.env.AF_WEB_TASK_CRON ?? "0 9 * * *";
 // The task the harness seeds ALREADY OVERDUE (#3626): created a month back with an
-// hourly schedule and no run, so the daemon derives it as overdue on first read.
+// daily schedule and no run, so the daemon derives it as overdue on first read.
 const OVERDUE_TASK = process.env.AF_WEB_OVERDUE_TASK ?? "probe-overdue";
 // The task in the TASK-ONLY project (a third repo with a task but no session,
 // redesign PR2): proves a task-only repo lists in the switcher and its tasks scope.
@@ -1483,6 +1484,14 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
       synth("probe-lost", 3, "process-exited"),
       synth("probe-dead", 4, "process-exited"),
       synth("probe-limit", 6, "usage-limit"),
+      {
+        ...synth("probe-handoff-retry", 1),
+        pending_account_swap: {
+          manual: true,
+          replacement_panes_started: true,
+          mission_delivery_status: "could-not-confirm",
+        },
+      },
     );
     if (snap) {
       snap.instances = list;
@@ -1537,6 +1546,12 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   // ordinary waiting row withdraws it. The rail move must not displace this path.
   await row(p, "probe-limit").click();
   const retry = p.locator(".af-term-head").getByRole("button", { name: "Retry limit", exact: true });
+  await expect(retry).toBeVisible();
+  await row(p, "probe-handoff-retry").click();
+  const handoffRetry = p.locator(".af-term-head").getByRole("button", { name: "Retry handoff", exact: true });
+  await expect(handoffRetry).toBeVisible();
+  await expect(handoffRetry).toHaveAttribute("title", "Retry the handoff after inspecting the pane");
+  await row(p, "probe-limit").click();
   await expect(retry).toBeVisible();
   const selectedActions = row(p, "probe-limit").locator(".af-row-actions");
   const waitingActions = row(p, "probe-needs-you").locator(".af-row-actions");
@@ -1902,15 +1917,17 @@ test("#2681/#2787: application mouse mode selects on a plain drag and keeps a mo
     await expect
       .poll(
         async () => {
-          const top = await viewport.evaluate((el) => el.scrollTop);
+          const { top, distance } = await viewport.evaluate((el) => ({
+            top: el.scrollTop,
+            distance: el.scrollHeight - el.clientHeight - el.scrollTop,
+          }));
           const stable = top === previousTop;
           previousTop = top;
-          return stable;
+          return { stable, pinned: distance <= 1 };
         },
-        { message: "output must settle before the wheel baseline is sampled", timeout: 10_000 },
+        { message: "output must settle while the terminal is pinned to the bottom", timeout: 10_000 },
       )
-      .toBe(true);
-    expect(await distanceFromBottom(viewport), "the terminal must start pinned to the bottom").toBeLessThanOrEqual(1);
+      .toEqual({ stable: true, pinned: true });
     inputPayloads.length = 0;
     await host.hover();
     await p.mouse.wheel(0, -900);
@@ -2321,14 +2338,16 @@ test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_
     // asserted is that the SELECTED TEXT reached the clipboard, not the pixel the
     // drag began on.
     await expect
-      .poll(() => p.evaluate(() => navigator.clipboard.readText()), {
+      .poll(async () => {
+        const text = await p.evaluate(() => navigator.clipboard.readText());
+        return {
+          copiedSelection: text.includes("2787-copy-me"),
+          replacedSentinel: !text.includes("untouched"),
+        };
+      }, {
         message: "Cmd+C must put the xterm selection on the system clipboard",
       })
-      .toContain("2787-copy-me");
-    expect(
-      await p.evaluate(() => navigator.clipboard.readText()),
-      "the seeded sentinel must be GONE — an unclaimed Cmd+C leaves it in place",
-    ).not.toContain("untouched");
+      .toEqual({ copiedSelection: true, replacedSentinel: true });
     await expect(selection, "Cmd+C keeps the selection — it has no interrupt to fall through to").not.toHaveCount(0);
     expect(inputPayloads, "Cmd+C is a copy, never an interrupt: nothing may reach the PTY").toHaveLength(0);
 
@@ -2345,8 +2364,13 @@ test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_
     inputPayloads.length = 0;
     await p.keyboard.press("Meta+c");
     await p.keyboard.press("x");
-    await expect.poll(() => inputPayloads.length, { message: "the marker keystroke must reach the PTY" }).toBeGreaterThan(0);
-    expect(inputPayloads.flat(), "Cmd+C with no selection sends nothing — least of all \\x03").toEqual([0x78]);
+    await expect.poll(() => ({
+      received: inputPayloads.length > 0,
+      bytes: inputPayloads.flat(),
+    }), { message: "Cmd+C with no selection sends nothing before the marker keystroke" }).toEqual({
+      received: true,
+      bytes: [0x78],
+    });
 
     // Ctrl+C keeps BOTH of its meanings on every platform (the reflex the interrupt
     // path exists for): nothing selected, so this one really does interrupt.
@@ -2394,12 +2418,22 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
     await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 
     await p.keyboard.press("Shift+Enter");
-    await expect.poll(() => inputPayloads.length, { message: "Shift+Enter must emit one OpInput" }).toBe(1);
-    expect(inputPayloads[0], "Shift+Enter reaches the PTY as LF / Ctrl+J, never xterm's default CR").toEqual([0x0a]);
+    await expect.poll(() => ({
+      count: inputPayloads.length,
+      bytes: inputPayloads[0] ?? [],
+    }), { message: "Shift+Enter must emit one OpInput carrying LF / Ctrl+J" }).toEqual({
+      count: 1,
+      bytes: [0x0a],
+    });
 
     await p.keyboard.press("Enter");
-    await expect.poll(() => inputPayloads.length, { message: "plain Enter must emit one more OpInput" }).toBe(2);
-    expect(inputPayloads[1], "plain Enter keeps xterm's submitting CR path").toEqual([0x0d]);
+    await expect.poll(() => ({
+      count: inputPayloads.length,
+      bytes: inputPayloads[1] ?? [],
+    }), { message: "plain Enter must emit one more OpInput carrying CR" }).toEqual({
+      count: 2,
+      bytes: [0x0d],
+    });
 
     // A direct websocket write can produce the right LF while bypassing xterm's
     // user-input effects. Build real agent scrollback, park at the oldest line,
@@ -2434,8 +2468,13 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
 
     inputPayloads.length = 0;
     await p.keyboard.press("Shift+Enter");
-    await expect.poll(() => inputPayloads.length, { message: "the selected agent still receives one LF" }).toBe(1);
-    expect(inputPayloads[0]).toEqual([0x0a]);
+    await expect.poll(() => ({
+      count: inputPayloads.length,
+      bytes: inputPayloads[0] ?? [],
+    }), { message: "the selected agent still receives one LF" }).toEqual({
+      count: 1,
+      bytes: [0x0a],
+    });
     await expect(host, "genuine user input must reveal the newest line at the prompt").toContainText(
       "shift-enter-scroll-40",
     );
@@ -2449,8 +2488,13 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
     // Ctrl+C immediately after the newline is the behavioral discriminator: if
     // the selection survived, the clipboard branch would copy and send no ETX.
     await p.keyboard.press("Control+c");
-    await expect.poll(() => inputPayloads.length, { message: "Ctrl+C after Shift+Enter must interrupt" }).toBe(2);
-    expect(inputPayloads[1], "the cleared selection leaves Ctrl+C on the interrupt path").toEqual([0x03]);
+    await expect.poll(() => ({
+      count: inputPayloads.length,
+      bytes: inputPayloads[1] ?? [],
+    }), { message: "the cleared selection leaves Ctrl+C on the interrupt path" }).toEqual({
+      count: 2,
+      bytes: [0x03],
+    });
 
     // The same terminal component owns non-agent tabs, where raw-mode programs
     // may distinguish CR from LF. Preserve xterm's historical Shift+Enter CR and
@@ -2735,16 +2779,16 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
 
     // THE assertion: a finger, no keyboard, and the token is on the system clipboard.
     await expect
-      .poll(() => p.evaluate(() => navigator.clipboard.readText()), {
+      .poll(async () => {
+        const text = await p.evaluate(() => navigator.clipboard.readText());
+        return {
+          copiedToken: text.includes(TOKEN),
+          excludedTrailer: !text.includes(TRAILER),
+        };
+      }, {
         message: `a long press must put the token under the finger on the system clipboard [delivered: ${delivered}]`,
       })
-      .toContain(TOKEN);
-    // …the TOKEN, not its line. That is the difference between copying what the
-    // finger was on and copying everything near it.
-    expect(
-      await p.evaluate(() => navigator.clipboard.readText()),
-      "the press copies the token under the finger, not the whole line",
-    ).not.toContain(TRAILER);
+      .toEqual({ copiedToken: true, excludedTrailer: true });
     // The selection xterm paints is the only feedback this gesture has, so it must
     // survive the press rather than being cleared by the click that follows it.
     await expect(selection, "the copied token must stay visibly selected").not.toHaveCount(0);
@@ -3062,9 +3106,10 @@ test("#2517: Escape interrupts the agent (forwards down the PTY) and never detac
     inputPayloads.length = 0;
     await p.keyboard.press("Escape");
     await expect
-      .poll(() => inputPayloads.length, { message: "Escape must reach the agent — it is the interrupt key" })
-      .toBe(1);
-    expect(inputPayloads[0], "Escape forwards the ESC byte (0x1b) down the PTY").toEqual([0x1b]);
+      .poll(() => ({ count: inputPayloads.length, bytes: inputPayloads[0] ?? [] }), {
+        message: "Escape must reach the agent as the ESC byte (0x1b)",
+      })
+      .toEqual({ count: 1, bytes: [0x1b] });
     await expect(
       p.locator(".af-app.af-kb-terminal"),
       "Escape must NOT detach — focus stays in the terminal so the user can keep driving the agent",
@@ -3276,6 +3321,69 @@ test("config: the editor renders from the manifest and writes through the real p
   // Back to the sessions view for the flows that follow.
   await page.locator('.af-viewtab[data-view="sessions"]').click();
   await expect(page.locator(".af-rail-list")).toBeVisible();
+});
+
+test("config: a refresh landing mid-edit preserves focus, caret, and later typing (#4244)", REAL_FIXTURE, async ({ browser }) => {
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the delayed checkbox response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // Hold an unrelated save response so its rebuild lands only after this field
+    // has become the active edit. The daemon is not mutated: the intercepted reply
+    // is enough to drive configStatus and the same ConfigPane.update/render path.
+    await pane.locator('.af-config-row[data-key="auto_update"] input').click();
+    await saveStarted;
+
+    const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    await field.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "abcdef";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "abcdef", inputType: "insertText" }));
+      input.setSelectionRange(3, 3);
+    });
+
+    releaseSave!();
+    await expect(pane.locator('.af-config-row[data-key="auto_update"] .af-config-echo')).toBeVisible();
+    await expect(field).toBeFocused();
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.selectionStart)).toBe(3);
+
+    // This is the user-visible contract: after the rebuild, typing still reaches
+    // the replacement input at the preserved caret instead of falling onto body
+    // and being discarded (or interpreted as a view shortcut).
+    await p.keyboard.type("Z");
+    await expect(field).toHaveValue("abcZdef");
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
 });
 
 // typeIntoAssistantAndExpectEcho is the config assistant's live-output proof. The
@@ -4894,7 +5002,7 @@ test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round
   await expect(tasks).toBeVisible();
   const seeded = tasks.locator(".af-task-row", { hasText: SEEDED_TASK });
   await expect(seeded).toHaveCount(1);
-  await expect(seeded.locator(".af-task-trigger")).toContainText("0 9 * * *");
+  await expect(seeded.locator(".af-task-trigger")).toContainText(SEEDED_TASK_CRON);
 
   // Add a cron task via the + Add modal. The project picker defaults to the scoped
   // project (redesign PR2), so the task lands in it; a cron task requires a prompt
@@ -5532,12 +5640,7 @@ test("restore (#1932): the selected rail row's Restore action brings an archived
   ).toHaveCount(1);
   await clickRailAction(page, SESSION_B, "Restore session");
 
-  // Restore is a confirm (mirroring kill/archive), so it inherits their busy/error
-  // surface; the primary button POSTs RestoreSession.
-  const restoreModal = page.locator(".af-modal-card");
-  await expect(restoreModal).toBeVisible();
-  await expect(restoreModal).toContainText("Restore");
-  await restoreModal.locator("button.af-primary").click();
+  // A safe local restore starts immediately; the modal only reports progress/errors.
 
   // The daemon's session.restored event resyncs the rail: B rejoins the LIVE group,
   // no longer archived — the end-to-end proof the archived session returned to active.
@@ -9746,6 +9849,13 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     // it also keeps this test independent of whatever the specs above renamed.
     af("sessions", "tab-create", SESSION_ORDER, "--command", "sleep 300", "--name", VICTIM);
     await expect(tabByLabel(win, VICTIM)).toHaveCount(1, { timeout: 15_000 });
+    // Start the outage from a fresh, accepted roster containing the victim.
+    // Its create event can paint the tab before an older startup Snapshot has
+    // drained; that old four-tab roster would clamp this pane to its neighbour
+    // during the gap and stop exercising an atomic close+recreate altogether.
+    await openAfterInitialResync(win, () => win.reload().then(() => {}));
+    await row(win, SESSION_ORDER).click();
+    await expect(tabByLabel(win, VICTIM)).toHaveCount(1);
     const roster = await tabLabels(win);
     // The bar WHILE the edit is open: the input REPLACES the edited tab's button, so
     // that tab draws no label until the edit is settled.
@@ -9799,6 +9909,8 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     ).toHaveAttribute("data-live", "reconnecting");
     af("sessions", "tab-delete", SESSION_ORDER, "--name", VICTIM);
     af("sessions", "tab-create", SESSION_ORDER, "--command", "sleep 300", "--name", VICTIM);
+    await expect(editedPane, "the offline fixture must retain the old binding until reconnect")
+      .toHaveAttribute("data-tab-id", editedPaneID!);
 
     // Unblocked: the next retry opens, and an open re-Snapshots. THAT single roster change
     // carries both. Waited on explicitly, because committing before it lands would make
@@ -10917,14 +11029,18 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await expect(row(p, SESSION_B)).toHaveClass(/af-row-selected/);
   await openDrawer();
   await openRailActions(p, SESSION_B);
+  // Observe immediate local restore intent without changing the shared archived
+  // fixture; the earlier restore round-trip test exercises the real daemon.
+  await p.route("**/v1/RestoreSession", route => route.fulfill({ json: { data: {} } }));
   const restore = railAction(p, SESSION_B, "Restore session");
   await expect(restore).toBeVisible();
   await restore.click();
   await expectDrawerClosed();
-  await expect(modal).toContainText(`Restore ${SESSION_B}?`);
-  await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect.poll(() => ({
+    count: lifecyclePosts.length,
+    isRestore: /\/v1\/RestoreSession$/.test(lifecyclePosts[0] ?? ""),
+  })).toEqual({ count: 1, isRestore: true });
   await expect(modal).toBeHidden();
-  expect(lifecyclePosts, "cancelling Restore must not post a lifecycle mutation").toEqual([]);
 
   // The escape hatch remains location-based by design: the scrim's action IS drawer
   // dismissal. Tap its exposed right edge (the left side sits behind the drawer).

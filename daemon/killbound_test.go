@@ -1,12 +1,44 @@
 package daemon
 
 import (
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
 )
+
+func TestLockWithinRejectsAcquisitionAfterClientAdmissionFenceExpires(t *testing.T) {
+	var mu sync.Mutex
+	mu.Lock()
+	deadline := time.Millisecond
+	clientMargin := 2 * time.Millisecond
+	clientFenceReleased := false
+	previous := afterOperationLockPollSleep
+	afterOperationLockPollSleep = func(candidate *sync.Mutex) {
+		if candidate != &mu || clientFenceReleased {
+			return
+		}
+		// Model a suspended/overloaded waiter: by the time it runs again, the
+		// advertised daemon bound and the client's safety margin have elapsed.
+		time.Sleep(clientMargin + time.Millisecond)
+		clientFenceReleased = true
+		mu.Unlock()
+	}
+	t.Cleanup(func() { afterOperationLockPollSleep = previous })
+
+	acquired, waited := lockWithin(&mu, deadline)
+	if acquired {
+		mu.Unlock()
+	}
+	require.True(t, clientFenceReleased, "the test must release the lock only after the client fence")
+	require.Greater(t, waited, deadline+clientMargin)
+	require.False(t, acquired, "an acquisition after the advertised deadline must be rejected")
+	require.True(t, mu.TryLock(), "rejecting a late acquisition must release the mutex")
+	mu.Unlock()
+}
 
 // TestKillWatchdogTabCount_SurvivesAGhostInstance pins the nil case, which is a
 // real path rather than defensive coding: a title-based kill can resolve a

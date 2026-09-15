@@ -1,0 +1,43 @@
+TAP version 13
+# (node:3213988) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: compositionstart → update → end → insertText commits once without consuming Ctrl
+not ok 1 - compositionstart → update → end → insertText commits once without consuming Ctrl
+  ---
+  duration_ms: 27.977332
+  type: 'test'
+  location: '/home/siyer/Desktop/claude-squad-fix-4036-keybar-modifiers/web/src/terminal-soft-input.test.ts:1:475'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+      [
+        '字',
+    +   '字'
+      ]
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0: '字'
+  actual:
+    0: '字'
+    1: '字'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (/home/siyer/Desktop/claude-squad-fix-4036-keybar-modifiers/web/src/terminal-soft-input.test.ts:28:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.start (node:internal/test_runner/test:944:17)
+    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 0
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1414.807571

@@ -233,7 +233,19 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 	} else {
 		out, err = cmd.Output()
 	}
-	if ctx.Err() != nil {
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The child exited cleanly (a non-zero exit surfaces as an *exec.ExitError,
+		// not ErrWaitDelay) and only a descendant held the capture pipe open past
+		// WaitDelay. The output is already complete, so this is not a failure —
+		// consistent with backend_docker.go and doctor/remote.go, which normalize
+		// a bare ErrWaitDelay to nil before any deadline check. (Previously this
+		// was after the deadline check and had no ErrWaitDelay carve-out, so an
+		// orphaned pipe-holder made the unconditional ctx.Err() check rewrite a
+		// completed command as context.DeadlineExceeded, misrouting reap's
+		// sentinel-present case into ErrWorkspaceStateUnknown instead of latching.)
+		err = nil
+	}
+	if err != nil && ctx.Err() != nil {
 		return out, fmt.Errorf("%q timed out after %s: %w", p.sshCmd, timeout, ctx.Err())
 	}
 	return out, err

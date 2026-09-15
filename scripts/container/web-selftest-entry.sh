@@ -386,11 +386,21 @@ for i in $(seq 1 30); do
 done
 
 # --- seed a scheduled task (#1592 Phase 5 PR8) ------------------------------
+# These tasks are armed on the daemon's real scheduler, so quietness has to be a
+# property of their schedule rather than an assumption about when CI starts. The
+# top of the hour twelve clock-hours ahead is always 11-12 hours away, well past
+# the far end of this ~35-minute suite. One shared expression covers every seeded
+# daily task below so a new fixture cannot quietly fall back to a fixed wall-clock
+# hour. It remains an ordinary enabled daily schedule: the deliberately old task
+# below is still overdue now and will still fire at its next occurrence (#4213).
+FIXTURE_HOUR="$(( ( $(date +%-H) + 12 ) % 24 ))"
+FIXTURE_CRON="0 $FIXTURE_HOUR * * *"
+
 # So the tasks view is non-empty on load. A cron task needs a prompt (there is no
-# event line to fall back to); the schedule never actually fires in the test window,
-# it just has to exist for the list + the enable/disable/trigger/remove flows.
+# event line to fall back to); it just has to exist for the list + the
+# enable/disable/trigger/remove flows.
 echo ">>> seeding task $SEEDED_TASK ..."
-"$BIN" tasks add --repo "$MOCK" --name "$SEEDED_TASK" --prompt "echo scheduled" --cron "0 9 * * *" >/dev/null
+"$BIN" tasks add --repo "$MOCK" --name "$SEEDED_TASK" --prompt "echo scheduled" --cron "$FIXTURE_CRON" >/dev/null
 
 # A task that is already OVERDUE on arrival (#3626), so the web's schedule-health
 # rendering has something to render without the test waiting out a cron window.
@@ -404,27 +414,23 @@ echo ">>> seeding task $SEEDED_TASK ..."
 # thirty missed occurrences. No clock manipulation, no hand-edited tasks.json, and
 # no waiting.
 #
-# The HOUR is computed, not fixed, and that is load-bearing. This fixture is armed
-# on a real daemon for the whole suite, so a schedule whose next occurrence falls
-# inside the run would actually FIRE: the daemon would stamp last_run_at, the task
-# would stop being overdue, and the assertion would fail depending on what time CI
-# happened to start — while also launching an agent run nobody asked for. Half a
-# day out puts the next fire ~12 hours past the far end of a ~35-minute suite from
-# whenever it starts. Local hour, not UTC: a schedule with no zone is evaluated in
-# the location of the clock handed to it, and that is the daemon's (#3626 review).
+# The shared cron above is load-bearing here too. A next occurrence inside the run
+# would actually FIRE: the daemon would stamp last_run_at, the task would stop being
+# overdue, and the assertion would fail while also launching an agent run nobody
+# asked for. Local hour, not UTC: a schedule with no zone is evaluated in the
+# location of the clock handed to it, and that is the daemon's (#3626 review).
 echo ">>> seeding overdue task $OVERDUE_TASK ..."
 OVERDUE_CREATED="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
-OVERDUE_HOUR="$(( ( $(date +%-H) + 12 ) % 24 ))"
 curl -sS -X POST "$BASE_URL/v1/AddTask" \
   -H 'Content-Type: application/json' \
-  -d "{\"task\":{\"id\":\"3626dead\",\"name\":\"$OVERDUE_TASK\",\"prompt\":\"echo overdue\",\"cron_expr\":\"0 $OVERDUE_HOUR * * *\",\"project_path\":\"$MOCK\",\"program\":\"claude\",\"enabled\":true,\"created_at\":\"$OVERDUE_CREATED\"},\"actor\":\"api\"}" \
+  -d "{\"task\":{\"id\":\"3626dead\",\"name\":\"$OVERDUE_TASK\",\"prompt\":\"echo overdue\",\"cron_expr\":\"$FIXTURE_CRON\",\"project_path\":\"$MOCK\",\"program\":\"claude\",\"enabled\":true,\"created_at\":\"$OVERDUE_CREATED\"},\"actor\":\"api\"}" \
   >/dev/null
 
 # A task in the THIRD repo, which has NO session (redesign PR2, Greptile Fix 1): this
 # makes MOCK3 a TASK-ONLY project so the harness can prove it lists in the switcher
 # and its tasks scope correctly.
 echo ">>> seeding task-only project $MOCK3 (task $TASK3_NAME, no session) ..."
-"$BIN" tasks add --repo "$MOCK3" --name "$TASK3_NAME" --prompt "echo mock3" --cron "0 9 * * *" >/dev/null
+"$BIN" tasks add --repo "$MOCK3" --name "$TASK3_NAME" --prompt "echo mock3" --cron "$FIXTURE_CRON" >/dev/null
 
 # --- seed a web-tab session (feat: web/iframe tabs) -------------------------
 # A tiny loopback HTTP server serves a deterministic marker; a LOCAL web tab
@@ -803,6 +809,7 @@ export AF_WEB_SESSION_WEB_RESTORED="$SESSION_WEB_RESTORED"
 export AF_WEB_SESSION_WEB_SHELVED="$SESSION_WEB_SHELVED"
 export AF_WEB_READY_MARKER="$READY_MARKER"
 export AF_WEB_TASK_NAME="$SEEDED_TASK"
+export AF_WEB_TASK_CRON="$FIXTURE_CRON"
 export AF_WEB_OVERDUE_TASK="$OVERDUE_TASK"
 export AF_WEB_TASK3_NAME="$TASK3_NAME"
 export AF_WEBTAB_LOCAL_MARKER="$WEBTAB_LOCAL_MARKER"

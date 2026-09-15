@@ -1,0 +1,70 @@
+TAP version 13
+# Subtest: terminal key bytes match physical keys
+ok 1 - terminal key bytes match physical keys
+  ---
+  duration_ms: 3.738166
+  type: 'test'
+  ...
+# Subtest: one shot consumes only the next character, including committed composition text
+ok 2 - one shot consumes only the next character, including committed composition text
+  ---
+  duration_ms: 0.858767
+  type: 'test'
+  ...
+# Subtest: double tap locks; tap unlocks; slow second tap cancels; reset clears both
+ok 3 - double tap locks; tap unlocks; slow second tap cancels; reset clears both
+  ---
+  duration_ms: 1.828098
+  type: 'test'
+  ...
+# Subtest: escape sequences and control bytes do not consume a character modifier
+ok 4 - escape sequences and control bytes do not consume a character modifier
+  ---
+  duration_ms: 1.337687
+  type: 'test'
+  ...
+# Subtest: pointerdown prevents focus transfer before acting
+ok 5 - pointerdown prevents focus transfer before acting
+  ---
+  duration_ms: 3.326841
+  type: 'test'
+  ...
+# Subtest: one-row keybar uses six primary targets and a replacement arrows row at 360px
+ok 6 - one-row keybar uses six primary targets and a replacement arrows row at 360px
+  ---
+  duration_ms: 20.476017
+  type: 'test'
+  ...
+# Subtest: keyBytes drops ctrl/alt for arrows and specials
+ok 7 - keyBytes drops ctrl/alt for arrows and specials
+  ---
+  duration_ms: 0.434479
+  type: 'test'
+  ...
+# Subtest: an armed one-shot survives a keybar arrow press and hits the NEXT letter
+ok 8 - an armed one-shot survives a keybar arrow press and hits the NEXT letter
+  ---
+  duration_ms: 0.248643
+  type: 'test'
+  ...
+# Subtest: bar keys apply and consume one-shots before the following letter
+ok 9 - bar keys apply and consume one-shots before the following letter
+  ---
+  duration_ms: 7.215013
+  type: 'test'
+  ...
+# Subtest: locked Ctrl survives an arrow and combined modifiers use CSI in both cursor modes
+ok 10 - locked Ctrl survives an arrow and combined modifiers use CSI in both cursor modes
+  ---
+  duration_ms: 1.293618
+  type: 'test'
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 10
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1714.768053

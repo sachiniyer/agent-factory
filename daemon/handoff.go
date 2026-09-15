@@ -19,21 +19,31 @@ type HandoffSessionRequest struct {
 	// keeps the legacy title path.
 	ID string `json:"id"`
 	// To is the incoming agent (a supported agent enum name).
-	To string `json:"to"`
+	To      string `json:"to"`
+	Account string `json:"account,omitempty"`
 	// Brief optionally replaces the session's stored prompt as the mission handed
 	// to the incoming agent. It is what a user typed at handoff time, so it wins:
 	// more specific and more current than a prompt stored at create time.
 	Brief string `json:"brief"`
 }
 
+// AccountAwareHandoffMethod is the version-bound mutation endpoint used by
+// first-party clients. Its presence on the daemon that receives the request is
+// the capability check: a daemon predating account-aware handoffs cannot serve
+// this method, so it refuses before any legacy agent-only mutation can run.
+const AccountAwareHandoffMethod = "HandoffSessionV2"
+
 type HandoffSessionResponse struct {
-	OK bool `json:"ok"`
+	OK          bool   `json:"ok"`
+	FromAccount string `json:"from_account,omitempty"`
+	ToAccount   string `json:"to_account,omitempty"`
 	// From and To are the outgoing and incoming agents, echoed so a client can
 	// report the swap without re-reading the snapshot.
 	From string `json:"from"`
 	To   string `json:"to"`
 	// HeadSHA is the branch tip at swap time — the attribution boundary.
 	HeadSHA string `json:"head_sha,omitempty"`
+	MutationOutcome
 }
 
 func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffSessionResponse) error {
@@ -44,11 +54,19 @@ func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffS
 		return err
 	}
 	result, err := s.manager.HandoffSession(req)
-	if err != nil {
+	*resp = result
+	if !resp.record(err) {
 		return err
 	}
-	*resp = result
+	resp.OK = true
 	return nil
+}
+
+// HandoffSessionV2 binds account-aware admission and the destructive handoff to
+// one request. Keep the implementation in HandoffSession so legacy callers and
+// this versioned entry point share exactly one mutation path.
+func (s *controlServer) HandoffSessionV2(req HandoffSessionRequest, resp *HandoffSessionResponse) error {
+	return s.HandoffSession(req, resp)
 }
 
 // HandoffSession swaps a session's agent in place, keeping its workspace,
@@ -59,25 +77,24 @@ func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffS
 //  1. Resolve and preflight the exact launch command BEFORE touching anything.
 //     An unsupported backend, unknown/same target, missing executable, or env
 //     wrapper af cannot model must fail without having killed a working agent.
-//  2. Capture the branch tip. This is the attribution boundary, and it has to be
-//     read while the outgoing agent's work is the only work on the branch.
-//  3. Build the mission from the OUTGOING agent's perspective — it names who
-//     stopped and why — so it must be built before Program is rewritten.
-//  4. Raise OpReplacing, then rewrite Program + append the ledger entry.
-//  5. Swap the runtime using the prepared plan: stop the old agent, confirm it
-//     stopped, and launch the new one fresh while KEEPING the fence raised.
+//  2. Remember the outgoing identity and reason for the mission.
+//  3. Raise OpReplacing, then rewrite Program + append the provisional ledger.
+//  4. Stop the old agent using the prepared plan and confirm it stopped.
+//  5. Freeze the branch summary and ledger tip, then start the new runtime
+//     while KEEPING the fence raised. No incoming work can enter this capture.
 //  6. Wait for readiness, dismiss trust UI, and deliver the mission. A usage
 //     limit here atomically parks the incoming runtime with that mission pending.
 //  7. Settle the fence, then persist and begin generation-scoped capture.
 //
-// Rollback: if the runtime swap fails, step 4's state change is reverted, because
+// Rollback: if the runtime swap fails, step 3's state change is reverted, because
 // a record claiming the session runs claude while the pane still runs codex is
 // worse than no handoff at all — every subsequent decision keyed off
 // Instance.Program would be wrong. If the swap SUCCEEDS but readiness cannot be
 // established, the record becomes startup-unknown rather than claiming a
 // healthy incoming runtime. If readiness succeeds but the mission paste fails,
-// the exact rendered brief and OpReplacing fence remain durable for the daemon's
-// bounded retry path; neither failure is flattened into a false Running state.
+// the exact rendered brief and OpReplacing fence remain durable. Automatic
+// recovery proceeds only from mission-scoped proof that delivery did not occur;
+// neither failure is flattened into a false Running state.
 //
 // Locking mirrors resumeFromLimit exactly: per-(repo,title) target lock FIRST,
 // then the per-session op lock (#2006's canonical target-before-op order), with
@@ -109,6 +126,9 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// the two from disagreeing about the same session again.
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionHandoff); err != nil {
 		return HandoffSessionResponse{}, err
+	}
+	if strings.TrimSpace(req.Account) != "" {
+		return m.handoffAccount(req, instance, repoID)
 	}
 	target := strings.TrimSpace(req.To)
 	if err := instance.ValidateHandoffTarget(target); err != nil {
@@ -149,6 +169,9 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := instance.ValidateHandoffTarget(target); err != nil {
 		return HandoffSessionResponse{}, err
 	}
+	if account, automatic := instance.AccountSelection(); account != "" && !automatic {
+		return HandoffSessionResponse{}, fmt.Errorf("session %q is pinned to %s account %q; specify a target account with --account before handing it off to %s", req.Title, instance.CurrentAgentName(), account, target)
+	}
 	plan, err := instance.PrepareAgentSwap(target)
 	if err != nil {
 		return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", req.Title, target, err)
@@ -156,15 +179,12 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 
 	outgoing := instance.CurrentAgentName()
 
-	// The mission describes the outgoing agent's work, so build it before the
-	// swap rewrites who the outgoing agent is.
+	// Preserve intent before the swap; branch work is frozen only after stop.
 	reason := session.HandoffReasonManual
 	if instance.LimitReached() {
 		reason = session.HandoffReasonUsageLimit
 	}
-	brief := instance.BuildMissionBrief(target, req.Brief, reason)
-	mission := brief.Render()
-	headSHA := brief.Work.HeadSHA
+	var brief session.MissionBrief
 	conversationCapture := plan.ConversationCapture()
 
 	// Fence the close/start window before either the record or runtime changes.
@@ -173,11 +193,17 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := instance.Transition(session.BeginHandoff()); err != nil {
 		return HandoffSessionResponse{}, err
 	}
-	entry, err := instance.RecordHandoffSwap(target, reason, headSHA, false)
+	entry, err := instance.RecordHandoffSwap(target, reason, "", false)
 	if err != nil {
 		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, err
 	}
+
+	plan = plan.WithPostStopCapture(func() error {
+		var captureErr error
+		brief, captureErr = instance.CaptureHandoffBrief(&entry, req.Brief)
+		return captureErr
+	})
 
 	checkpoint, swapErr := instance.SwapAgent(plan)
 	if swapErr != nil {
@@ -193,6 +219,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, fmt.Errorf("failed to hand %q off to %s: %w", req.Title, target, swapErr)
 	}
+	mission, headSHA := brief.Render(), brief.Work.HeadSHA
 	delivery := prepareHandoffDelivery(handoffDelivery{
 		repoID: repoID, key: key, title: req.Title, target: target, mission: mission,
 		instance: instance, conversationCapture: conversationCapture,
@@ -232,6 +259,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// instead of silently claiming an instruction-less agent is complete.
 	instance.SetPendingHandoffMission(mission)
 	checkpoint.PendingHandoffMission = mission
+	checkpoint.HandoffDeliveryStatus = session.PromptNotDelivered
 	// The process swap is already irreversible, so checkpoint its durable facts
 	// before the readiness wait. Memory stays fenced, but a daemon crash in this
 	// window must restore the incoming Program rather than lie that the outgoing
@@ -251,12 +279,16 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		m.warn().Printf("handoff %q: failed to persist the post-swap checkpoint before mission delivery: %v", req.Title, err)
 	}
 
+	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA}
 	if err := m.deliverHandoffMission(delivery); err != nil {
-		return HandoffSessionResponse{}, err
+		// SwapAgent already installed the incoming runtime. Preserve the resolved
+		// identity and classify every later delivery/settlement failure as
+		// committed so callers cannot present it as a safe refusal to retry.
+		return response, &mutationCommittedError{err: err}
 	}
 	m.info().Printf("handoff: session %q swapped %s → %s at %s", instance.Title, outgoing, target, shortSHA(headSHA))
 
-	return HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA}, nil
+	return response, nil
 }
 
 func shortSHA(sha string) string {

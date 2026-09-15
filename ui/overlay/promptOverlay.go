@@ -47,6 +47,12 @@ type PromptOverlay struct {
 	width     int
 	maxWidth  int
 	maxHeight int
+	// hint/shortHint let a caller that re-owns this overlay's keys describe its
+	// OWN semantics. Empty means the composer's, which is what the naming form
+	// wants; handleStateJumpTab does not, and inherited a hint that told the
+	// operator enter made a newline while it actually submitted (#4172).
+	hint      string
+	shortHint string
 }
 
 // NewPromptOverlay creates a prompt overlay seeded with value, so reopening it
@@ -148,9 +154,12 @@ func (p *PromptOverlay) Render() string {
 	lines = append(lines, strings.Split(p.textarea.View(), "\n")...)
 	lines = append(lines, "")
 
-	hint := "enter newline · tab done · ctrl+c cancel"
-	if layout.Cells(hint) > textRect.W {
-		hint = "tab done · ctrl+c cancel"
+	hint, shortHint := p.hint, p.shortHint
+	if hint == "" {
+		hint, shortHint = "enter newline · tab done · ctrl+c cancel", "tab done · ctrl+c cancel"
+	}
+	if shortHint != "" && layout.Cells(hint) > textRect.W {
+		hint = shortHint
 	}
 	lines = append(lines, truncateOverlayLine(ui.ActionHint(hint), textRect.W))
 
@@ -159,4 +168,18 @@ func (p *PromptOverlay) Render() string {
 		style = style.Height(fit.H)
 	}
 	return ui.RenderDialog(style, strings.Join(lines, "\n"))
+}
+
+// SetPlaceholder replaces the empty-state text. The default invites a prompt
+// for the agent, which is wrong for any caller that is not the naming form.
+func (p *PromptOverlay) SetPlaceholder(placeholder string) {
+	p.textarea.Placeholder = placeholder
+}
+
+// SetHints replaces the key hints. full is shown when it fits the overlay,
+// short is the narrow fallback; pass short == full when there is nothing to
+// shed. A caller that re-owns Enter/Esc/Tab must call this — the default
+// describes the naming form's semantics, not its own.
+func (p *PromptOverlay) SetHints(full, short string) {
+	p.hint, p.shortHint = full, short
 }

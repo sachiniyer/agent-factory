@@ -15,6 +15,7 @@ import {
   type CreateSessionInput,
   createTab,
   errorText,
+  fetchSessionSnapshot,
   fetchPreviewOrigin,
   handoffSession,
   isMutationCommittedError,
@@ -59,7 +60,14 @@ function stubFetch(): Captured {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({ data: { ok: true, name: "shell" }, error: null }),
+      json: async () => ({
+        data: {
+          ok: true,
+          name: "shell",
+          to_account: typeof cap.body.account === "string" ? cap.body.account.trim() : undefined,
+        },
+        error: null,
+      }),
     } as unknown as Response;
   };
   return cap;
@@ -67,6 +75,28 @@ function stubFetch(): Captured {
 
 afterEach(() => {
   delete (globalThis as { fetch?: unknown }).fetch;
+});
+
+test("Snapshot carries daemon identity and lifecycle admission timing with its rows", async () => {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        instances: [{ id: "session" }],
+        operation_lock_timeout_ms: 30_000,
+        operation_clock_ms: 12_345,
+        boot_id: "daemon-a",
+      },
+      error: null,
+    }),
+  }) as unknown as Response;
+  const snapshot = await fetchSessionSnapshot("tok");
+  assert.equal(snapshot.sessions[0]?.id, "session");
+  assert.equal(snapshot.operationLockTimeoutMs, 30_000);
+  assert.equal(snapshot.operationClockMs, 12_345);
+  assert.equal(snapshot.daemonBootId, "daemon-a");
 });
 
 // The backend-on-create contract (#1933). The daemon already accepted `backend`;
@@ -190,6 +220,32 @@ test("resumeFromLimit rejects the daemon's no-op outcome", async () => {
   );
 });
 
+test("resumeFromLimit surfaces a successful response's committed settlement warning", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        ok: true,
+        code: "mutation_committed",
+        warning: "mission delivered; settlement pending",
+      },
+      error: null,
+    }),
+  });
+
+  const err = await resumeFromLimit("id-repoB", "feature", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 200);
+  assert.equal(err.code, "mutation_committed");
+  assert.match(err.message, /settlement pending/);
+  assert.equal(isMutationCommittedError(err), true);
+});
+
 // #2013: a handoff STOPS a live agent and starts another, so it must key by stable
 // id like kill/archive — a title-resolved misroute would tear down an unrelated
 // repo's agent. `brief` is deliberately never sent from the web (the mission
@@ -199,13 +255,53 @@ test("handoffSession posts the stable id and target agent, and never a brief", a
   const cap = stubFetch();
   await handoffSession("id-repoB", "feature", "gemini", "tok");
 
-  assert.equal(cap.url, "/v1/HandoffSession");
+  assert.equal(cap.url, "/v1/HandoffSessionV2",
+    "the mutation endpoint itself proves the receiving daemon supports account-aware admission");
   assert.equal(cap.auth, "Bearer tok");
   assert.equal(cap.body.id, "id-repoB", "the daemon resolves by id first, so a duplicate title cannot misroute the swap");
   assert.equal(cap.body.title, "feature", "the title rides along for the event and the title-only fallback");
   assert.equal(cap.body.to, "gemini", "the picked agent is the incoming program");
   assert.equal(cap.body.repo_id, "", "an all-repos web client scopes by id, not repo");
   assert.equal("brief" in cap.body, false, "the web never sends a brief — the mission defaults to the stored prompt");
+});
+
+test("handoffSession refuses a daemon without the version-bound mutation endpoint", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({ data: null, error: { message: 'unknown route "/v1/HandoffSessionV2"', daemon_rejected: true } }),
+  });
+
+  const err = await handoffSession("id", "worker", "codex", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, true, "the absent route proves no handoff handler ran");
+  assert.match(err.message, /account-aware handoff endpoint/);
+  assert.match(err.message, /handoff was not sent/);
+});
+
+test("handoffSession preserves uncertainty when an intermediary substitutes a 404", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({ data: null, error: { message: "proxy could not read the upstream response" } }),
+  });
+
+  const err = await handoffSession("id", "worker", "codex", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 404);
+  assert.equal(err.daemonRejected, false);
+  assert.equal(isMutationOutcomeUncertain(err), true);
+  assert.match(err.message, /proxy could not read the upstream response/);
+  assert.doesNotMatch(err.message, /handoff was not sent/);
 });
 
 test("listPrograms asks the daemon for the agent catalog (#1970)", async () => {
@@ -266,14 +362,23 @@ test("archiveSession posts the stable id alongside the title", async () => {
 // Restore is retained intent too: the confirmation may outlive the row it names,
 // so it sends the same stable session id as archive/kill and cannot retarget a
 // same-title replacement before the user confirms.
-test("restoreSession posts the stable id alongside the title", async () => {
+test("restoreSession pins the stable session and daemon identities", async () => {
   const cap = stubFetch();
-  await restoreSession("id-repoB", "feature", "tok");
+  await restoreSession("id-repoB", "feature", "tok", "daemon-a");
   assert.equal(cap.url, "/v1/RestoreSession", "must hit the same route af sessions restore / the TUI `r` use");
   assert.equal(cap.auth, "Bearer tok");
   assert.equal(cap.body.id, "id-repoB", "id must be sent so title reuse cannot redirect the restore");
   assert.equal(cap.body.title, "feature");
   assert.equal(cap.body.repo_id, "", "web is an all-repos client; repo_id stays empty, as it does for archive/kill");
+  assert.equal(cap.body.expected_daemon_boot_id, "daemon-a",
+    "a restarted daemon must refuse the stale request before restore admission");
+});
+
+test("restoreSession omits the daemon pin when an older Snapshot supplied none", async () => {
+  const cap = stubFetch();
+  await restoreSession("id-repoB", "feature", "tok");
+  assert.equal("expected_daemon_boot_id" in cap.body, false,
+    "legacy daemons must receive the request body they already understand");
 });
 
 test("createTab / closeTab post the stable id alongside the title", async () => {
@@ -542,6 +647,76 @@ test("archiveSession surfaces a successful response's committed hook warning", a
   assert.match(err.message, /on-archive hook/);
   assert.equal(isMutationCommittedError(err), true);
 });
+
+test("handoffSession surfaces a successful response's committed settlement warning", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        ok: true,
+        from: "claude",
+        to: "claude",
+        from_account: "work",
+        to_account: "personal",
+        head_sha: "abc123",
+        warning: "handoff delivered, but completion has a pending settlement",
+        code: "mutation_committed",
+      },
+      error: null,
+    }),
+  });
+  const err = await handoffSession("id", "worker", "claude", "tok", "personal").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 200);
+  assert.equal(err.code, "mutation_committed");
+  assert.match(err.message, /pending settlement/);
+  assert.equal(isMutationCommittedError(err), true);
+});
+
+test("handoffSession accepts the canonical account echoed by the daemon", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: { ok: true, from: "claude", to: "claude", to_account: "personal" },
+      error: null,
+    }),
+  });
+
+  const result = await handoffSession("id", "worker", "claude", "tok", " personal ");
+  assert.equal(result.to_account, "personal");
+});
+
+for (const echoed of ["", "work"]) {
+  test(`handoffSession treats an ${echoed ? "incorrect" : "absent"} account echo as committed`, async () => {
+    stubFetchResponse({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        data: { ok: true, from: "claude", to: "codex", ...(echoed ? { to_account: echoed } : {}) },
+        error: null,
+      }),
+    });
+
+    const err = await handoffSession("id", "worker", "codex", "tok", "personal").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    assert.ok(err instanceof ApiError);
+    assert.equal(err.code, "mutation_committed");
+    assert.match(err.message, /did not honor the requested account/);
+    assert.match(err.message, /resulting credential identity is unknown/);
+    assert.match(err.message, /source account label may have carried across agent namespaces/);
+    assert.doesNotMatch(err.message, /ambient identity/);
+  });
+}
 
 test("restoreSession surfaces a successful response's durable archive warning", async () => {
   stubFetchResponse({
@@ -1093,7 +1268,7 @@ test("create refusal provenance distinguishes daemon rejection from lost or gate
   }
   (globalThis as { fetch: unknown }).fetch = async () => { throw new TypeError("response lost"); };
   await assert.rejects(createSession(createInput(), "tok"), error =>
-    error instanceof ApiError && !error.daemonRejected);
+    error instanceof ApiError && !error.daemonRejected && isMutationOutcomeUncertain(error));
 });
 
 
@@ -1166,4 +1341,11 @@ test("only a boolean daemon marker establishes rejection, and committed outcomes
       return true;
     });
   }
+});
+
+test("handoffSession sends an operator-selected account with optional agent", async () => {
+ const cap = stubFetch();
+ await handoffSession("id", "feature", "", "tok", "personal");
+ assert.equal(cap.body.account, "personal");
+ assert.equal(cap.body.to, "");
 });

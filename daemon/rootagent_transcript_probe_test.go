@@ -49,18 +49,17 @@ func adoptLiveClaudeRoot(t *testing.T, manager *Manager, rid, repoPath string) *
 // the test releases it, exactly as a stalled mount does — and, like a stalled
 // mount, it does NOT end on its own timer, because the property under test is
 // that the caller stops waiting rather than that the read gets faster.
-func stallTranscriptInspection(t *testing.T) (release func(), started <-chan struct{}) {
+func stallTranscriptInspection(t *testing.T, manager *Manager) (release func(), started <-chan struct{}) {
 	t.Helper()
-	prev := inspectClaudeProjectConversations
+	prev := session.InspectClaudeProjectConversations
 	released := make(chan struct{})
 	begun := make(chan struct{})
 	var once, beganOnce sync.Once
-	inspectClaudeProjectConversations = func(program, workingDir string, recorded session.AgentConversationData) (session.ClaudeProjectConversationState, error) {
+	manager.inspectClaudeProjectConversations = func(program, workingDir string, recorded session.AgentConversationData) (session.ClaudeProjectConversationState, error) {
 		beganOnce.Do(func() { close(begun) })
 		<-released
 		return prev(program, workingDir, recorded)
 	}
-	t.Cleanup(func() { inspectClaudeProjectConversations = prev })
 	return func() { once.Do(func() { close(released) }) }, begun
 }
 
@@ -83,7 +82,7 @@ func TestStalledTranscriptStoreDoesNotWedgeTheInstancePoll(t *testing.T) {
 	// A live, adopted root carrying a recorded claude conversation is what
 	// makes the adopt branch reach the inspection at all.
 	adoptLiveClaudeRoot(t, manager, rid, rootRepo)
-	release, _ := stallTranscriptInspection(t)
+	release, started := stallTranscriptInspection(t, manager)
 
 	backend := &deadButRecoverableBackend{FakeBackend: session.NewFakeBackend()}
 	registerStarted(t, manager, strandedID, strandedRepo, "stranded", backend, true, session.Running)
@@ -107,7 +106,12 @@ func TestStalledTranscriptStoreDoesNotWedgeTheInstancePoll(t *testing.T) {
 	for {
 		aliveProbes, recovers := backend.counts()
 		if aliveProbes >= 2 && recovers >= 1 {
-			return
+			select {
+			case <-started:
+				return
+			default:
+				// Recovery alone cannot prove the transcript stall was exercised.
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the instance poll goroutine is wedged reading a root's claude transcript store: the passes after "+
@@ -137,10 +141,8 @@ func TestTimedOutTranscriptInspectionIsNotAMissingTranscript(t *testing.T) {
 	manager, warnings := newManagerCapturingWarnings(t, rootTestConfig(repoPath, config.RootAgentConfig{Program: tmux.ProgramClaude}))
 	inst := adoptLiveClaudeRoot(t, manager, rid, repoPath)
 	recorded := inst.AgentConversation()
-	prev := rootClaudeTranscriptInspectBudget
-	rootClaudeTranscriptInspectBudget = 50 * time.Millisecond
-	t.Cleanup(func() { rootClaudeTranscriptInspectBudget = prev })
-	release, started := stallTranscriptInspection(t)
+	manager.claudeTranscriptInspectBudget = 50 * time.Millisecond
+	release, started := stallTranscriptInspection(t, manager)
 
 	manager.mu.Lock()
 	st := manager.rootEnsureStateForLocked(repoPath)
@@ -151,10 +153,8 @@ func TestTimedOutTranscriptInspectionIsNotAMissingTranscript(t *testing.T) {
 		defer close(done)
 		manager.refreshRootClaudeConversation(rid, daemonInstanceKey(rid, session.RootSessionTitle), repoPath, inst, st)
 	}()
-	// Registered AFTER the stall's own cleanup, so LIFO runs this first: the
-	// seam is a package var, and restoring it while a wedged caller is still
-	// reading it is a data race — measured on the fail-first run, where the
-	// verdict below hit t.Fatal with the inspection still inside the stall.
+	// Release the stalled read and join its caller even after an assertion fails.
+	// The manager-local inspector is never restored while a read can outlive it.
 	t.Cleanup(func() {
 		release()
 		select {
@@ -200,9 +200,9 @@ func TestTranscriptInspectionIsSingleFlightedPerRoot(t *testing.T) {
 
 	var mu sync.Mutex
 	inFlight, peak := 0, 0
-	prevInspect := inspectClaudeProjectConversations
+	prevInspect := session.InspectClaudeProjectConversations
 	released := make(chan struct{})
-	inspectClaudeProjectConversations = func(program, workingDir string, recorded session.AgentConversationData) (session.ClaudeProjectConversationState, error) {
+	manager.inspectClaudeProjectConversations = func(program, workingDir string, recorded session.AgentConversationData) (session.ClaudeProjectConversationState, error) {
 		mu.Lock()
 		inFlight++
 		if inFlight > peak {
@@ -215,11 +215,8 @@ func TestTranscriptInspectionIsSingleFlightedPerRoot(t *testing.T) {
 		mu.Unlock()
 		return prevInspect(program, workingDir, recorded)
 	}
-	t.Cleanup(func() { inspectClaudeProjectConversations = prevInspect })
 
-	prev := rootClaudeTranscriptInspectBudget
-	rootClaudeTranscriptInspectBudget = 20 * time.Millisecond
-	t.Cleanup(func() { rootClaudeTranscriptInspectBudget = prev })
+	manager.claudeTranscriptInspectBudget = 20 * time.Millisecond
 
 	manager.mu.Lock()
 	st := manager.rootEnsureStateForLocked(repoPath)
@@ -242,7 +239,6 @@ func TestTranscriptInspectionIsSingleFlightedPerRoot(t *testing.T) {
 	}
 	close(released)
 	wg.Wait()
-	t.Cleanup(func() {})
 
 	mu.Lock()
 	got := peak
@@ -250,5 +246,58 @@ func TestTranscriptInspectionIsSingleFlightedPerRoot(t *testing.T) {
 	if got > 1 {
 		t.Fatalf("a stalled transcript store must never hold more than one inspection per root, got %d concurrent — "+
 			"one per throttle interval accumulates for the life of the daemon (#3782 item 3)", got)
+	}
+}
+
+// A timed-out read stays owned by its manager while another manager inspects.
+// Run under -race in CI: no shared seam is swapped or restored, even while the
+// first worker is still executing after its caller has returned (#4212).
+func TestTranscriptInspectionOverridesAreManagerLocal(t *testing.T) {
+	released := make(chan struct{})
+	finished := make(chan struct{})
+	started := make(chan struct{})
+	t.Cleanup(func() {
+		close(released)
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Error("the released inspection did not finish")
+		}
+	})
+	stalled := &Manager{
+		claudeTranscriptInspectBudget: 20 * time.Millisecond,
+		inspectClaudeProjectConversations: func(string, string, session.AgentConversationData) (session.ClaudeProjectConversationState, error) {
+			close(started)
+			defer close(finished)
+			<-released
+			return session.ClaudeProjectConversationState{}, nil
+		},
+	}
+	_, inspected, err := stalled.inspectRootClaudeTranscript(&rootEnsureState{}, "claude", "stalled", session.AgentConversationData{})
+	if inspected || err != nil {
+		t.Fatalf("stalled inspection = (%v, %v), want not inspected without error", inspected, err)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the timed-out inspection never started")
+	}
+
+	independent := &Manager{
+		inspectClaudeProjectConversations: func(string, string, session.AgentConversationData) (session.ClaudeProjectConversationState, error) {
+			return session.ClaudeProjectConversationState{RecordedExists: true}, nil
+		},
+	}
+	state, inspected, err := independent.inspectRootClaudeTranscript(&rootEnsureState{}, "claude", "independent", session.AgentConversationData{})
+	if !inspected || err != nil || !state.RecordedExists {
+		t.Fatalf("independent inspection = (%+v, %v, %v), want its own successful result", state, inspected, err)
+	}
+	if got := independent.rootClaudeTranscriptBudget(); got != rootClaudeTranscriptInspectBudget {
+		t.Fatalf("independent budget = %s, want production default %s", got, rootClaudeTranscriptInspectBudget)
+	}
+	select {
+	case <-finished:
+		t.Fatal("the first inspection must still be stalled while the second finishes")
+	default:
 	}
 }

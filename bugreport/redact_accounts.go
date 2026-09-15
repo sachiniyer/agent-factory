@@ -78,61 +78,6 @@ func (r *redactor) noteAccount(name string) {
 	r.accounts[name] = struct{}{}
 }
 
-// scrubAccountLabels replaces every registered account label with the marker —
-// the SAME marker redactInstanceData puts in the Account field, so a report reads
-// consistently rather than leaving a reader to wonder whether two spellings mean
-// two things.
-//
-// Marker in both surfaces, value in neither. The operator reading their own report
-// has the account name in `af accounts list` and in their own config file; the
-// bundle is the copy meant to be handed to a stranger, and "an account was in
-// play" is the whole of what triage needs from it.
-//
-// A match must be a WHOLE label. The boundary is the label's own alphabet
-// (agentaccount.ValidateName: letters, digits, dot, dash, underscore) rather than
-// the general word-rune rule the title and username passes use, because the two
-// disagree on exactly the characters an account name is made of: with the word
-// rule, an account named "work" is a complete token inside `branch_prefix =
-// "work-stuff"` — the '-' is a non-word rune on the right — and redacting it would
-// corrupt an unrelated setting in the bundled config. With the label alphabet the
-// '-' continues the token and the match is refused, while `--account work` and
-// `"work"` still match.
-//
-// The same property removes the prefix hazard that forces the title sweep to run
-// longest-first: "acme" can never match inside "acme-prod", so a shorter label
-// cannot strand a longer one's suffix. The ordering is kept anyway — it costs one
-// sort, it makes the output deterministic over a map, and it is the invariant a
-// reader of the title pass will expect to find here too.
-func (r *redactor) scrubAccountLabels(s string) string {
-	if len(r.accounts) == 0 {
-		return s
-	}
-	labels := make([]string, 0, len(r.accounts))
-	for label := range r.accounts {
-		labels = append(labels, label)
-	}
-	sortLongestFirst(labels)
-	for _, label := range labels {
-		s = replaceToken(s, label, redactedMarker, isAccountNameRune)
-	}
-	return s
-}
-
-// scrubKnownLabels removes the labels this run knows by NAME — registered account
-// labels, then session titles — from text that is otherwise kept verbatim.
-//
-// scrub() sweeps account labels too, and that is what covers the config section;
-// this exists because in the passes that ALSO scrub titles, scrub() runs last and
-// that is too late. The title pass matches on word runes, so a session titled
-// "acme" is a complete token inside the account label "acme-prod": it rewrites the
-// shared prefix, the exact match for the label is gone before the catch-all ever
-// sees it, and "-prod" ships. Sweeping labels first is safe in the other direction
-// for the alphabet reason above — an account label never matches inside a longer
-// run of label characters, so it cannot strand a title.
-func (r *redactor) scrubKnownLabels(s string) string {
-	return r.scrubSessionTitles(r.scrubAccountLabels(s))
-}
-
 // isAccountNameRune reports whether r can appear inside an account name, and so
 // whether a neighboring rune CONTINUES a label rather than bounding it. It is
 // agentaccount.ValidateName's alphabet — letters, digits, '.', '-', '_' — widened

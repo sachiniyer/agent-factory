@@ -368,6 +368,69 @@ func TestArmingSnapshot_BeforeStartAZeroNextIsNotAVerdict(t *testing.T) {
 	assert.Nil(t, got[0].NextRunAt, "and no time is invented for it")
 }
 
+// TestSchedulerArming_DuringShutdownIsUnknown is the scheduler twin of
+// TestWatchArming_DuringShutdownIsUnknown. The control socket deliberately
+// stays open to drain in-flight deliveries while the cron run loop has exited,
+// so a read landing in that window would otherwise report armed entries about a
+// scheduler that has stopped observing — a fabricated positive that violates
+// the #3648 B-invariant ("not observed is a third state, never a negative") on
+// the scheduler side. Stop clears both the started and armed latches, so
+// armingSnapshot returns (nil, false) and withLiveArming leaves the record's
+// ArmingUnknown in place, exactly as it does before the first reload.
+func TestSchedulerArming_DuringShutdownIsUnknown(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, task.AddTask(enabledCronTask("shutdown", "")))
+
+	srv := &controlServer{scheduler: newTaskScheduler()}
+	require.NoError(t, srv.scheduler.Reload())
+	srv.scheduler.Start()
+	require.Equal(t, task.ArmingArmed, srv.withLiveArming([]task.Task{enabledCronTask("shutdown", "")})[0].Arming,
+		"precondition: armed before Stop")
+
+	srv.scheduler.Stop()
+	got := srv.withLiveArming([]task.Task{enabledCronTask("shutdown", "")})
+	assert.Equal(t, task.ArmingUnknown, got[0].Arming,
+		"a daemon on its way out has observed nothing about steady state")
+	assert.Nil(t, got[0].NextRunAt, "and no stale fire time is attached to it")
+}
+
+// TestArmingSnapshot_PostStopDropsBothFabricatedPositiveShapes pins the two
+// shapes a latched `armed` produced after Stop, both now closed by clearing the
+// latch in Stop:
+//
+//   - shape (a), the satisfiable entry: cron.Entries() value-copies each entry
+//     without zeroing Next, so after cron.Stop a satisfiable entry retains its
+//     last-computed future Next. Left observed, withLiveArming would set
+//     ArmingArmed with a stale NextRunAt the stopped cron will never honor.
+//   - shape (b), the zero-Next entry: a syntactically valid expression whose
+//     Next() returns zero within the five-year horizon (Feb 31). Before Stop the
+//     s.started && at.IsZero() guard drops it; after Stop, started=false makes
+//     that guard inert, so it would be re-armed as ArmingArmed with no NextRunAt.
+//
+// Clearing armed in Stop makes armingSnapshot return (nil, false) for both.
+func TestArmingSnapshot_PostStopDropsBothFabricatedPositiveShapes(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	fires := enabledCronTask("sat00001", "") // satisfiable: daily 3am
+	never := enabledCronTask("feb3101", "")  // Feb 31: parses, Next() returns zero
+	never.CronExpr = "0 0 31 2 *"
+
+	s := newTaskScheduler()
+	s.loadTasks = func() ([]task.Task, error) { return []task.Task{fires, never}, nil }
+	require.NoError(t, s.Reload())
+	s.Start()
+
+	before, obsBefore := s.armingSnapshot()
+	require.True(t, obsBefore, "precondition: observed before Stop")
+	assert.Contains(t, before, "sat00001", "satisfiable entry armed before Stop")
+	assert.NotContains(t, before, "feb3101", "Feb-31 entry omitted before Stop by the started guard")
+
+	s.Stop()
+
+	after, observed := s.armingSnapshot()
+	assert.False(t, observed, "after Stop the scheduler has stopped observing; the snapshot is not a verdict")
+	assert.Nil(t, after, "no entry survives as armed once arming is unlatched")
+}
+
 // TestWithLiveArming_StaleEntryAfterAFailedReloadIsNotArmed: a task write
 // commits durably and reloads the scheduler as a SEPARATE step, so a
 // post-commit reload failure — a supported outcome every task RPC can return —

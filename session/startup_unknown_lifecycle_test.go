@@ -57,6 +57,78 @@ func TestStartupUnknownIsTerminalAndKillableButHasNoLifecycleAction(t *testing.T
 	}
 }
 
+func TestStartupUnknownInvalidatesRuntimeProgramEvidence(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{
+		ID: "unknown-evidence-id", TaskID: "task-unknown-evidence", Title: "uncertain", Path: t.TempDir(), Program: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.setRuntimeProgram("claude")
+	evidence := inst.ObserveRuntimeProgram()
+	if !inst.RuntimeProgramEvidenceCurrent(evidence) {
+		t.Fatal("fresh runtime evidence is not current")
+	}
+
+	inst.MarkStartupStateUnknown()
+	if inst.RuntimeProgramEvidenceCurrent(evidence) {
+		t.Fatal("startup-unknown transition left prior runtime evidence current")
+	}
+}
+
+func TestUserKilledInvalidatesRuntimeProgramEvidence(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{
+		ID: "killed-evidence-id", TaskID: "task-killed-evidence", Title: "killed", Path: t.TempDir(), Program: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.setRuntimeProgram("claude")
+	evidence := inst.ObserveRuntimeProgram()
+	if !inst.RuntimeProgramEvidenceCurrent(evidence) {
+		t.Fatal("fresh runtime evidence is not current")
+	}
+
+	inst.MarkUserKilled()
+	if inst.RuntimeProgramEvidenceCurrent(evidence) {
+		t.Fatal("user-killed transition left prior runtime evidence current")
+	}
+}
+
+func TestCommitRuntimeProgramEvidenceSerializesLifecycleInvalidation(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{
+		ID: "committed-evidence-id", Title: "committed", Path: t.TempDir(), Program: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.setRuntimeProgram("claude")
+	evidence := inst.ObserveRuntimeProgram()
+	committed := false
+	if !inst.CommitRuntimeProgramEvidence(evidence, func() {
+		// A lifecycle writer cannot acquire i.mu between the evidence check and
+		// this side effect. TryLock makes that boundary deterministic without a
+		// timing-dependent goroutine race in the witness.
+		if inst.mu.TryLock() {
+			inst.mu.Unlock()
+			t.Fatal("runtime evidence commit did not hold the lifecycle lock")
+		}
+		committed = true
+	}) {
+		t.Fatal("fresh runtime evidence was not committed")
+	}
+	if !committed {
+		t.Fatal("fresh runtime evidence skipped its commit")
+	}
+
+	inst.MarkUserKilled()
+	if inst.CommitRuntimeProgramEvidence(evidence, func() {
+		t.Fatal("stale runtime evidence reached its commit")
+	}) {
+		t.Fatal("user-killed runtime evidence was committed")
+	}
+}
+
 // TestTeardownInProgressOffersNoLifecycleActions is the #2500 regression.
 //
 // OpKilling and OpArchiving are teardown FENCES: while one is in flight, the

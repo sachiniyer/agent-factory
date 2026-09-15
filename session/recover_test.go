@@ -88,6 +88,26 @@ func TestRecover_RespawnsLostSession(t *testing.T) {
 		"resolved-program injection must appear exactly once in the spawn: %s", agentSpawn)
 }
 
+func TestRecover_UnverifiedReattachClearsRuntimeProgram(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_recover_recreated_same_name"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	var newSessions int
+	exec := countingExec(map[string]bool{agentName: true, shellName: true}, &newSessions)
+	restored := lostInstanceForRecover(t, agentName, shellName, exec)
+	restored.setRuntimeProgram("/old/claude")
+	stale := restored.ObserveRuntimeProgram()
+
+	require.NoError(t, restored.Recover())
+	require.Zero(t, newSessions, "the fixture must exercise name-only reattachment, not verified respawn")
+	require.Empty(t, restored.RuntimeProgram(),
+		"a recovered tmux name cannot prove that the pane is the runtime whose command was persisted")
+	require.False(t, restored.RuntimeProgramEvidenceCurrent(stale))
+}
+
 func TestRespawnForAccountSwap_StartsFreshConversation(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
