@@ -266,6 +266,17 @@ func (m *Manager) resumeLimitedSession(
 		return
 	}
 	defer opLock.Unlock()
+	// Limit/account recovery reaches the same LocalBackend respawn choke point as
+	// Lost recovery and can rebuild a missing worktree. The poll must never wait
+	// for create's potentially unbounded worktree operation: skip while admission
+	// is held, before recording an attempt, and retry on a later tick.
+	worktreeAdmission, acquired := m.tryLocalWorktreeAdmission(repoID, inst)
+	if !acquired {
+		return
+	}
+	if worktreeAdmission != nil {
+		defer worktreeAdmission.Unlock()
+	}
 
 	// Re-verify under the lock: a kill may have torn the session down, a
 	// self-recovery or the manual retry may have cleared the limit, or the map

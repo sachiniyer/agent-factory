@@ -1917,15 +1917,17 @@ test("#2681/#2787: application mouse mode selects on a plain drag and keeps a mo
     await expect
       .poll(
         async () => {
-          const top = await viewport.evaluate((el) => el.scrollTop);
+          const { top, distance } = await viewport.evaluate((el) => ({
+            top: el.scrollTop,
+            distance: el.scrollHeight - el.clientHeight - el.scrollTop,
+          }));
           const stable = top === previousTop;
           previousTop = top;
-          return stable;
+          return { stable, pinned: distance <= 1 };
         },
-        { message: "output must settle before the wheel baseline is sampled", timeout: 10_000 },
+        { message: "output must settle while the terminal is pinned to the bottom", timeout: 10_000 },
       )
-      .toBe(true);
-    expect(await distanceFromBottom(viewport), "the terminal must start pinned to the bottom").toBeLessThanOrEqual(1);
+      .toEqual({ stable: true, pinned: true });
     inputPayloads.length = 0;
     await host.hover();
     await p.mouse.wheel(0, -900);
@@ -2336,14 +2338,16 @@ test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_
     // asserted is that the SELECTED TEXT reached the clipboard, not the pixel the
     // drag began on.
     await expect
-      .poll(() => p.evaluate(() => navigator.clipboard.readText()), {
+      .poll(async () => {
+        const text = await p.evaluate(() => navigator.clipboard.readText());
+        return {
+          copiedSelection: text.includes("2787-copy-me"),
+          replacedSentinel: !text.includes("untouched"),
+        };
+      }, {
         message: "Cmd+C must put the xterm selection on the system clipboard",
       })
-      .toContain("2787-copy-me");
-    expect(
-      await p.evaluate(() => navigator.clipboard.readText()),
-      "the seeded sentinel must be GONE — an unclaimed Cmd+C leaves it in place",
-    ).not.toContain("untouched");
+      .toEqual({ copiedSelection: true, replacedSentinel: true });
     await expect(selection, "Cmd+C keeps the selection — it has no interrupt to fall through to").not.toHaveCount(0);
     expect(inputPayloads, "Cmd+C is a copy, never an interrupt: nothing may reach the PTY").toHaveLength(0);
 
@@ -2360,8 +2364,13 @@ test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_
     inputPayloads.length = 0;
     await p.keyboard.press("Meta+c");
     await p.keyboard.press("x");
-    await expect.poll(() => inputPayloads.length, { message: "the marker keystroke must reach the PTY" }).toBeGreaterThan(0);
-    expect(inputPayloads.flat(), "Cmd+C with no selection sends nothing — least of all \\x03").toEqual([0x78]);
+    await expect.poll(() => ({
+      received: inputPayloads.length > 0,
+      bytes: inputPayloads.flat(),
+    }), { message: "Cmd+C with no selection sends nothing before the marker keystroke" }).toEqual({
+      received: true,
+      bytes: [0x78],
+    });
 
     // Ctrl+C keeps BOTH of its meanings on every platform (the reflex the interrupt
     // path exists for): nothing selected, so this one really does interrupt.
@@ -2409,12 +2418,22 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
     await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 
     await p.keyboard.press("Shift+Enter");
-    await expect.poll(() => inputPayloads.length, { message: "Shift+Enter must emit one OpInput" }).toBe(1);
-    expect(inputPayloads[0], "Shift+Enter reaches the PTY as LF / Ctrl+J, never xterm's default CR").toEqual([0x0a]);
+    await expect.poll(() => ({
+      count: inputPayloads.length,
+      bytes: inputPayloads[0] ?? [],
+    }), { message: "Shift+Enter must emit one OpInput carrying LF / Ctrl+J" }).toEqual({
+      count: 1,
+      bytes: [0x0a],
+    });
 
     await p.keyboard.press("Enter");
-    await expect.poll(() => inputPayloads.length, { message: "plain Enter must emit one more OpInput" }).toBe(2);
-    expect(inputPayloads[1], "plain Enter keeps xterm's submitting CR path").toEqual([0x0d]);
+    await expect.poll(() => ({
+      count: inputPayloads.length,
+      bytes: inputPayloads[1] ?? [],
+    }), { message: "plain Enter must emit one more OpInput carrying CR" }).toEqual({
+      count: 2,
+      bytes: [0x0d],
+    });
 
     // A direct websocket write can produce the right LF while bypassing xterm's
     // user-input effects. Build real agent scrollback, park at the oldest line,
@@ -2449,8 +2468,13 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
 
     inputPayloads.length = 0;
     await p.keyboard.press("Shift+Enter");
-    await expect.poll(() => inputPayloads.length, { message: "the selected agent still receives one LF" }).toBe(1);
-    expect(inputPayloads[0]).toEqual([0x0a]);
+    await expect.poll(() => ({
+      count: inputPayloads.length,
+      bytes: inputPayloads[0] ?? [],
+    }), { message: "the selected agent still receives one LF" }).toEqual({
+      count: 1,
+      bytes: [0x0a],
+    });
     await expect(host, "genuine user input must reveal the newest line at the prompt").toContainText(
       "shift-enter-scroll-40",
     );
@@ -2464,8 +2488,13 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
     // Ctrl+C immediately after the newline is the behavioral discriminator: if
     // the selection survived, the clipboard branch would copy and send no ETX.
     await p.keyboard.press("Control+c");
-    await expect.poll(() => inputPayloads.length, { message: "Ctrl+C after Shift+Enter must interrupt" }).toBe(2);
-    expect(inputPayloads[1], "the cleared selection leaves Ctrl+C on the interrupt path").toEqual([0x03]);
+    await expect.poll(() => ({
+      count: inputPayloads.length,
+      bytes: inputPayloads[1] ?? [],
+    }), { message: "the cleared selection leaves Ctrl+C on the interrupt path" }).toEqual({
+      count: 2,
+      bytes: [0x03],
+    });
 
     // The same terminal component owns non-agent tabs, where raw-mode programs
     // may distinguish CR from LF. Preserve xterm's historical Shift+Enter CR and
@@ -2750,16 +2779,16 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
 
     // THE assertion: a finger, no keyboard, and the token is on the system clipboard.
     await expect
-      .poll(() => p.evaluate(() => navigator.clipboard.readText()), {
+      .poll(async () => {
+        const text = await p.evaluate(() => navigator.clipboard.readText());
+        return {
+          copiedToken: text.includes(TOKEN),
+          excludedTrailer: !text.includes(TRAILER),
+        };
+      }, {
         message: `a long press must put the token under the finger on the system clipboard [delivered: ${delivered}]`,
       })
-      .toContain(TOKEN);
-    // …the TOKEN, not its line. That is the difference between copying what the
-    // finger was on and copying everything near it.
-    expect(
-      await p.evaluate(() => navigator.clipboard.readText()),
-      "the press copies the token under the finger, not the whole line",
-    ).not.toContain(TRAILER);
+      .toEqual({ copiedToken: true, excludedTrailer: true });
     // The selection xterm paints is the only feedback this gesture has, so it must
     // survive the press rather than being cleared by the click that follows it.
     await expect(selection, "the copied token must stay visibly selected").not.toHaveCount(0);
@@ -3077,9 +3106,10 @@ test("#2517: Escape interrupts the agent (forwards down the PTY) and never detac
     inputPayloads.length = 0;
     await p.keyboard.press("Escape");
     await expect
-      .poll(() => inputPayloads.length, { message: "Escape must reach the agent — it is the interrupt key" })
-      .toBe(1);
-    expect(inputPayloads[0], "Escape forwards the ESC byte (0x1b) down the PTY").toEqual([0x1b]);
+      .poll(() => ({ count: inputPayloads.length, bytes: inputPayloads[0] ?? [] }), {
+        message: "Escape must reach the agent as the ESC byte (0x1b)",
+      })
+      .toEqual({ count: 1, bytes: [0x1b] });
     await expect(
       p.locator(".af-app.af-kb-terminal"),
       "Escape must NOT detach — focus stays in the terminal so the user can keep driving the agent",
@@ -11006,8 +11036,10 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await expect(restore).toBeVisible();
   await restore.click();
   await expectDrawerClosed();
-  await expect.poll(() => lifecyclePosts.length).toBe(1);
-  expect(lifecyclePosts[0]).toMatch(/\/v1\/RestoreSession$/);
+  await expect.poll(() => ({
+    count: lifecyclePosts.length,
+    isRestore: /\/v1\/RestoreSession$/.test(lifecyclePosts[0] ?? ""),
+  })).toEqual({ count: 1, isRestore: true });
   await expect(modal).toBeHidden();
 
   // The escape hatch remains location-based by design: the scrim's action IS drawer
