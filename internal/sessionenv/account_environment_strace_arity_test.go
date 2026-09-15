@@ -103,7 +103,7 @@ func TestStracePrefixResolverMatchesInstalledGetoptTable(t *testing.T) {
 			}
 			checked++
 			canonical, result, _ := classifyStraceLongOption(prefix)
-			if result == straceOptionUnsafe {
+			if result == wrapperResultUnsafe {
 				// A cross-version union can contain an inequivalent option that
 				// makes a host-unique prefix undecidable (for example, strace 6.8's
 				// --col after newer --color is added). Refusal is the documented
@@ -112,11 +112,11 @@ func TestStracePrefixResolverMatchesInstalledGetoptTable(t *testing.T) {
 				continue
 			}
 			if expected.name == "help" || expected.name == "version" {
-				require.Equal(t, straceOptionStops, result,
+				require.Equal(t, wrapperResultStops, result,
 					"installed strace accepts terminal prefix %s", prefix)
 				continue
 			}
-			require.Equal(t, straceOptionContinue, result,
+			require.Equal(t, wrapperResultContinue, result,
 				"installed strace accepts prefix %s without ambiguity", prefix)
 			if canonical != "" {
 				require.Equal(t, uint32(1), expected.hasArg,
