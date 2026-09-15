@@ -878,7 +878,7 @@ func TestWatcherDrainExpiresAgedEvents(t *testing.T) {
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab130005", `sleep 60`, dir)))
 	fd := &flakyDeliver{}
 	fd.healed.Store(true)
-	s.deliver = fd.deliver
+	s.deliver = adaptWatchDelivery(fd.deliver)
 	// A generous bound: the "fresh" event has the whole window to be delivered,
 	// which no CI stall approaches — while the stale events are backdated an
 	// hour, an enormous margin past it. The seam replaces the old
@@ -932,10 +932,10 @@ func TestWatcherDrainLogsExpiryCountWhenStoppedMidBackoff(t *testing.T) {
 	// fails forever, so the drainer sits in the stop-aware backoff sleep — the
 	// exact window the stop has to land in.
 	var attempts atomic.Int64
-	s.deliver = func(taskID, line string) error {
+	s.deliver = adaptWatchDelivery(func(taskID, line string) error {
 		attempts.Add(1)
 		return errors.New("target unreachable (outage)")
-	}
+	})
 	s.queueMaxAge = 5 * time.Second
 	queueDir, _ := s.queueDir()
 
@@ -1077,7 +1077,7 @@ func TestWatcherQueuesFailedDeliveriesAndReplaysInOrder(t *testing.T) {
 	script := `echo e1; echo e2; echo e3; sleep 60`
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab130001", script, dir)))
 	fd := &flakyDeliver{}
-	s.deliver = fd.deliver
+	s.deliver = adaptWatchDelivery(fd.deliver)
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -1115,7 +1115,7 @@ func TestWatcherBacklogSurvivesRestart(t *testing.T) {
 	// First daemon lifetime: deliveries fail, three events queue, then stop.
 	s1, _ := newTestSupervisor(t, staticTasks(watchTask("ab130002", `echo e1; echo e2; echo e3; sleep 60`, dir)))
 	fd1 := &flakyDeliver{}
-	s1.deliver = fd1.deliver
+	s1.deliver = adaptWatchDelivery(fd1.deliver)
 	queueDir, _ := s1.queueDir()
 	if err := s1.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -1131,7 +1131,7 @@ func TestWatcherBacklogSurvivesRestart(t *testing.T) {
 	s2, _ := newTestSupervisor(t, staticTasks(watchTask("ab130002", `sleep 60`, dir)))
 	fd2 := &flakyDeliver{}
 	fd2.healed.Store(true)
-	s2.deliver = fd2.deliver
+	s2.deliver = adaptWatchDelivery(fd2.deliver)
 	s2.queueDir = func() (string, error) { return queueDir, nil }
 	if err := s2.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -1149,7 +1149,7 @@ func TestWatcherStopJoinsDrainer(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab130003", `echo e1; sleep 60`, dir)))
 	fd := &flakyDeliver{} // never healed: the drainer is stuck retrying
-	s.deliver = fd.deliver
+	s.deliver = adaptWatchDelivery(fd.deliver)
 	s.drainBaseBackoff = time.Hour // park the drainer deep in a backoff wait
 	s.drainMaxBackoff = time.Hour
 	queueDir, _ := s.queueDir()

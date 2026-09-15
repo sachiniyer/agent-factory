@@ -136,7 +136,18 @@ func (w *taskWatcher) drainLoop() {
 			w.stopDraining()
 			return
 		}
-		if ok && w.sup.queueMaxAge > 0 && time.Since(ev.TS) > w.sup.queueMaxAge {
+		aged := ok && w.sup.queueMaxAge > 0 && time.Since(ev.TS) > w.sup.queueMaxAge
+		retainForLimit := w.queue.retainLimitParked()
+		if aged && !retainForLimit && w.targetLimitRequiresRetention() {
+			retainForLimit = true
+			// The target entered a usage-limit episode while this ordinary backlog
+			// waited. Protect it BEFORE the age policy can consume the head; the
+			// delivery below will confirm the park and retry on the base cadence.
+			if markErr := w.queue.markLimitParked(); markErr != nil {
+				log.ErrorLog.Printf("watch task %s: failed to protect aged backlog at a usage limit: %v", w.taskID, markErr)
+			}
+		}
+		if aged && !retainForLimit {
 			// Retention (#1129): an event older than the age bound is expired
 			// instead of delivered — a prompt about a days-old notification is
 			// noise, and re-sweepable sources re-emit on their next poll.
@@ -182,8 +193,28 @@ func (w *taskWatcher) drainLoop() {
 			}
 			continue
 		}
-		if err := w.sup.deliver(w.taskID, ev.Line); err != nil {
+		err, attempted := w.deliverQueuedEventPublishingLimit(ev, cursor)
+		if !attempted {
+			w.releaseEventSlot()
+			w.stopDraining()
+			return
+		}
+		if err != nil {
 			w.recordDeliveryResult(time.Now(), err)
+			if errors.Is(err, errTargetLimitReached) {
+				// A known limit park is not an outage and delivered nothing. Retain
+				// the head past ordinary age/cap eviction, refund this attempt's rate
+				// slot, and retry on the base cadence until liveness clears.
+				w.releaseEventSlot()
+				if parkLog.allow("usage-limit", time.Now()) {
+					log.InfoLog.Printf("watch task %s: target session is at a usage limit; holding %d queued event(s) until the limit clears — repeats at most every %s while this holds", w.taskID, w.queue.pendingCount(), watcherParkLogInterval)
+				}
+				if !w.sleepStopAware(w.sup.drainBaseBackoff) {
+					w.stopDraining()
+					return
+				}
+				continue
+			}
 			if errors.Is(err, errAtConcurrencyLimit) {
 				// The task is at its max_concurrent_runs cap (#1892): nothing was
 				// created and nothing is wrong. Refund the rate slot this attempt

@@ -27,7 +27,7 @@ func TestWatcherRateDropIsVisibleOnTaskAndListAPI(t *testing.T) {
 
 	s := newWatcherSupervisor()
 	s.eventsPerMinute = 1
-	s.deliver = func(_, _ string) error { return nil }
+	s.deliver = func(_, _ string, _ watchDeliveryOptions) error { return nil }
 	logDir := t.TempDir()
 	s.logPath = func(taskID string) (string, error) {
 		return filepath.Join(logDir, "task-"+taskID+".log"), nil
@@ -103,4 +103,58 @@ func TestLiveDropOverlayPreservesTerminalWatcherStatus(t *testing.T) {
 			require.Equal(t, terminal, persisted)
 		})
 	}
+}
+
+func TestLiveDropOverlayPreservesRecordedParkedHeadOverTerminalStatus(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "d4357005")
+	require.NoError(t, queue.enqueueWithParkedStatus("held occurrence", true, true))
+	var persisted string
+	w := &taskWatcher{taskID: "d4357005", queue: queue}
+	s := &watcherSupervisor{
+		watchers:  map[string]*taskWatcher{w.taskID: w},
+		setStatus: func(_, status string) { persisted = status },
+	}
+	w.sup = s
+	w.persistTerminalStatus("stopped")
+	record := task.Task{ID: w.taskID, LastRunStatus: TaskStatusLimitParked}
+
+	s.applyLiveDropState(&record)
+
+	require.Equal(t, TaskStatusLimitParked, record.LastRunStatus)
+	require.Empty(t, persisted, "terminal persistence must not hide a recorded parked occurrence")
+	w.mu.Lock()
+	terminalStatus := w.terminalStatus
+	w.mu.Unlock()
+	require.Empty(t, terminalStatus, "live overlay must not latch a terminal status over a parked head")
+}
+
+func TestNewerParkRetiresEarlierLiveTerminalOverlay(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "d4357006")
+	require.NoError(t, queue.enqueue("held occurrence"))
+	_, cursor, ok, err := queue.peek()
+	require.NoError(t, err)
+	require.True(t, ok)
+	persisted := ""
+	w := &taskWatcher{taskID: "d4357006", queue: queue}
+	s := &watcherSupervisor{
+		watchers:  map[string]*taskWatcher{w.taskID: w},
+		setStatus: func(_, status string) { persisted = status },
+	}
+	w.sup = s
+	w.persistTerminalStatus("stopped")
+	recorded, err := w.commitParkedStatus(cursor, func() error {
+		persisted = TaskStatusLimitParked
+		return nil
+	})
+	require.NoError(t, err)
+	require.True(t, recorded)
+	record := task.Task{ID: w.taskID, LastRunStatus: persisted}
+
+	s.applyLiveDropState(&record)
+
+	require.Equal(t, TaskStatusLimitParked, record.LastRunStatus)
+	w.mu.Lock()
+	terminalStatus := w.terminalStatus
+	w.mu.Unlock()
+	require.Empty(t, terminalStatus, "newer parked publication must retire an older terminal overlay")
 }
