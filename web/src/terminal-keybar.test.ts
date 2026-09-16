@@ -400,9 +400,22 @@ test("custom hardware input carries physical identity into its matching onData",
   assert.equal(modifiers.state("Alt"), "off", "sticky Alt participated in the interrupt emission");
 });
 
-// A keybar wired to a real TerminalSoftInput, with xterm's CompositionHelper
-// finalizer modelled as the setTimeout(0) it schedules at compositionend (xterm
-// 5.5 _finalizeComposition(true)). `writes` is the wire, in order.
+// A keybar wired to a real TerminalSoftInput, with the two pieces of pinned
+// xterm 5.5.0 behaviour that decide what a composition window delivers modelled
+// as xterm actually does them. `writes` is the wire, in order.
+//
+//   - The finalizer (CompositionHelper._finalizeComposition(true),
+//     CompositionHelper.ts:152-171) is a setTimeout(0) scheduled at
+//     compositionend. It reads the textarea INSIDE that timer, and sends only
+//     when the read is non-empty.
+//   - The blur handler (Terminal._handleTextAreaBlur, Terminal.ts:289-292)
+//     empties the textarea SYNCHRONOUSLY, and nothing flushes the composition
+//     first. So a blur in the window discards the commit: the finalizer still
+//     runs, but reads "".
+//
+// Listeners are registered in the order the app registers them: xterm's in
+// term.open (terminal.ts:569), then the soft input's (the keybar, :570), then
+// terminal.ts's own blur listener (:605), which is what calls setFocused(false).
 function composingKeybar(t: TestContext) {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget();
@@ -410,8 +423,10 @@ function composingKeybar(t: TestContext) {
   const writes: string[] = [];
   let keybar: TerminalKeybar;
   textarea.addEventListener("compositionend", () => setTimeout(() => {
-    writes.push(keybar.transform(textarea.value));
+    const input = textarea.value;
+    if (input.length > 0) writes.push(keybar.transform(input));
   }, 0));
+  textarea.addEventListener("blur", () => { textarea.value = ""; });
   const softInput = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
   keybar = Object.assign(Object.create(TerminalKeybar.prototype) as object, {
     modifiers: new StickyModifiers(), textarea, rows: [], buttons: new Map(), focused: true,
@@ -421,10 +436,12 @@ function composingKeybar(t: TestContext) {
     paint: () => {}, layout: () => {},
     input: (text: string) => { writes.push(keybar.transform(text)); },
   }) as unknown as TerminalKeybar;
+  textarea.addEventListener("blur", () => keybar.setFocused(false));
   let disposed = false;
   t.after(() => { if (!disposed) softInput.dispose(); });
   return {
-    keybar, writes,
+    keybar, writes, textarea,
+    blur(): void { textarea.dispatchEvent(new Event("blur")); },
     commit(text: string): void {
       textarea.dispatchEvent(new Event("compositionstart"));
       textarea.value = text;
@@ -485,38 +502,41 @@ test("EOF and Escape keep their place behind a pending commit", async t => {
 
 test("an interrupt pressed during a pending commit survives an immediate focus loss", t => {
   // The #4151 repro: Ctrl+C, then focus loss before the next macrotask. The
-  // interrupt used to sit on a timer that setFocused(false) cleared unrun.
-  const { keybar, writes, commit } = composingKeybar(t);
+  // interrupt used to sit on a timer that the blur cleared unrun. It is never
+  // queued now, so the blur has nothing of it to cancel — while xterm's blur
+  // still discards the commit, as it always has.
+  const { keybar, writes, commit, blur } = composingKeybar(t);
   commit("字");
   keybar.sendCustomUserInput("\x03", physicalKey("c", true));
-  keybar.setFocused(false);
+  blur();
   t.mock.timers.tick(0);
-  assert.ok(writes.includes("\x03"), `the interrupt was dropped: ${JSON.stringify(writes)}`);
-  assert.equal(writes.filter(w => w === "\x03").length, 1, "exactly one interrupt");
+  assert.deepEqual(writes, ["\x03"], "the interrupt arrives; the discarded commit does not");
 });
 
-test("focus loss does not drop custom text already queued behind a commit", t => {
-  // Queued custom input is a key the user pressed, waiting only for xterm's
-  // finalizer — which focus loss does not cancel either. So the commit still
-  // arrives, and the newline must still follow it.
-  const { keybar, writes, commit } = composingKeybar(t);
+test("a blur that discards the commit also cancels the text queued behind it", t => {
+  // xterm's blur empties the textarea before its finalizer reads it, so the
+  // committed word never reaches the wire. A newline queued behind that word
+  // must not be sent on its own: it would land in the PTY as an orphaned LF,
+  // detached from the text it was ordered after.
+  const { keybar, writes, commit, blur, textarea } = composingKeybar(t);
   commit("字");
   keybar.sendCustomUserInput("\n", physicalKey("Enter", false, true));
-  keybar.setFocused(false);
-  assert.deepEqual(writes, [], "focus loss must not flush the newline ahead of the commit");
+  blur();
+  assert.equal(textarea.value, "", "xterm's blur empties the textarea synchronously");
   t.mock.timers.tick(0);
-  assert.deepEqual(writes, ["字", "\n"]);
+  assert.deepEqual(writes, [], `the blur left an orphaned key on the wire: ${JSON.stringify(writes)}`);
 });
 
 test("custom text never overtakes earlier custom text still queued", t => {
-  // Once focus loss clears the pending ranges, a later key would otherwise see
-  // no pending commit and go straight to the wire, ahead of the queued one.
+  // xterm's finalizer, then this soft input's range release, then the queued
+  // newline — each a separate macrotask, so a real browser can dispatch a key
+  // between the release and the newline. That key finds no pending commit, but
+  // it must still wait behind the newline rather than overtake it.
   const { keybar, writes, commit } = composingKeybar(t);
   commit("字");
+  setTimeout(() => keybar.sendCustomUserInput("\r", physicalKey("Enter")), 0);
   keybar.sendCustomUserInput("\n", physicalKey("Enter", false, true));
-  keybar.setFocused(false);
-  keybar.sendCustomUserInput("\r", physicalKey("Enter"));
-  assert.deepEqual(writes, [], "the later key must wait behind the queued one");
+  t.mock.timers.tick(0);
   t.mock.timers.tick(0);
   assert.deepEqual(writes, ["字", "\n", "\r"]);
 });

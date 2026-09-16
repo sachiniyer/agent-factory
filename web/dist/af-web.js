@@ -8433,25 +8433,32 @@ var TerminalSoftInput = class {
     }
   }
   /**
-   * Drop composition state on focus loss.
+   * Drop composition state on focus loss — including custom input queued behind
+   * the composition, because the blur discards the commit it was waiting for.
    *
-   * Custom input queued by deferAfterPendingComposition is not composition state.
-   * It is a key the user pressed, waiting only for xterm's finalizer, and focus
-   * loss does not cancel that finalizer either: the committed text still reaches
-   * the wire. Cancelling the key here dropped it silently — Ctrl+C included,
-   * before signal bytes stopped being queued (#4151). It runs, in order.
+   * In the pinned xterm 5.5.0, Terminal._handleTextAreaBlur empties the textarea
+   * synchronously (Terminal.ts:289-292) and nothing flushes the composition
+   * first, while CompositionHelper's finalizer only reads the textarea later, in
+   * its setTimeout(0) (CompositionHelper.ts:152-171), and sends nothing when the
+   * read is empty. A blur in the window therefore loses the committed text. A key
+   * queued behind that text must go with it: sent alone, a Shift+Enter would land
+   * as an orphaned LF, detached from the word it was ordered after.
+   *
+   * Cancelling here is safe because nothing that must arrive is ever queued: a
+   * terminal signal byte, the Ctrl+C interrupt included, bypasses the queue
+   * (TerminalKeybar's SIGNAL_BYTES), which is what #4151 needed.
    */
   reset() {
     for (const range of this.pending) if (range.release !== void 0) clearTimeout(range.release);
     for (const flush of this.trailingFlushes) if (flush.release !== void 0) clearTimeout(flush.release);
+    for (const release of this.postCompositionTimers) clearTimeout(release);
     this.trailingFlushes.clear();
+    this.postCompositionTimers.clear();
     this.pending.length = 0;
     this.active = void 0;
   }
   dispose() {
     this.reset();
-    for (const release of this.postCompositionTimers) clearTimeout(release);
-    this.postCompositionTimers.clear();
     this.textarea?.removeEventListener("compositionstart", this.onCompositionStart);
     this.textarea?.removeEventListener("compositionupdate", this.onCompositionUpdate);
     this.textarea?.removeEventListener("compositionend", this.onCompositionEnd);

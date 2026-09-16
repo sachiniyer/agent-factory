@@ -258,9 +258,10 @@ export class TerminalSoftInput {
 
   /** Queue custom input after xterm's already-scheduled composition finalizer. */
   deferAfterPendingComposition(action: () => void): boolean {
-    // Also queue behind custom input that is itself still waiting. Focus loss
-    // clears the pending ranges but keeps those keys (see reset), so a later key
-    // would otherwise find nothing pending and overtake them on the wire.
+    // Also queue behind custom input that is itself still waiting. This soft
+    // input releases a pending range in its own macrotask, before the keys queued
+    // behind it run, and a browser may dispatch a key between the two; that key
+    // finds nothing pending but must not overtake the keys still waiting.
     if (!this.pending.length && !this.postCompositionTimers.size) return false;
     // compositionend registered xterm's finalizer and our range release before
     // the custom keydown can reach this method. Timer FIFO therefore preserves
@@ -417,27 +418,32 @@ export class TerminalSoftInput {
     try { this.send(text); } finally { this.forwardingComposition = undefined; }
   }
   /**
-   * Drop composition state on focus loss.
+   * Drop composition state on focus loss — including custom input queued behind
+   * the composition, because the blur discards the commit it was waiting for.
    *
-   * Custom input queued by deferAfterPendingComposition is not composition state.
-   * It is a key the user pressed, waiting only for xterm's finalizer, and focus
-   * loss does not cancel that finalizer either: the committed text still reaches
-   * the wire. Cancelling the key here dropped it silently — Ctrl+C included,
-   * before signal bytes stopped being queued (#4151). It runs, in order.
+   * In the pinned xterm 5.5.0, Terminal._handleTextAreaBlur empties the textarea
+   * synchronously (Terminal.ts:289-292) and nothing flushes the composition
+   * first, while CompositionHelper's finalizer only reads the textarea later, in
+   * its setTimeout(0) (CompositionHelper.ts:152-171), and sends nothing when the
+   * read is empty. A blur in the window therefore loses the committed text. A key
+   * queued behind that text must go with it: sent alone, a Shift+Enter would land
+   * as an orphaned LF, detached from the word it was ordered after.
+   *
+   * Cancelling here is safe because nothing that must arrive is ever queued: a
+   * terminal signal byte, the Ctrl+C interrupt included, bypasses the queue
+   * (TerminalKeybar's SIGNAL_BYTES), which is what #4151 needed.
    */
   reset(): void {
     for (const range of this.pending) if (range.release !== undefined) clearTimeout(range.release);
     for (const flush of this.trailingFlushes) if (flush.release !== undefined) clearTimeout(flush.release);
+    for (const release of this.postCompositionTimers) clearTimeout(release);
     this.trailingFlushes.clear();
+    this.postCompositionTimers.clear();
     this.pending.length = 0;
     this.active = undefined;
   }
   dispose(): void {
     this.reset();
-    // Teardown is the one place queued custom input must not run: the terminal it
-    // would write to is going away.
-    for (const release of this.postCompositionTimers) clearTimeout(release);
-    this.postCompositionTimers.clear();
     this.textarea?.removeEventListener("compositionstart", this.onCompositionStart);
     this.textarea?.removeEventListener("compositionupdate", this.onCompositionUpdate);
     this.textarea?.removeEventListener("compositionend", this.onCompositionEnd);
