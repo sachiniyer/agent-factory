@@ -60,6 +60,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(
 			cmd,
 			pausePollCmd,
+			// The config overlay's bounded Usage refresh rides this heartbeat
+			// (#4361 review) — it needs no command of its own, so neither open
+			// path's returned command carries it.
+			m.usageRefreshDue(),
 			func() tea.Msg {
 				time.Sleep(100 * time.Millisecond)
 				return previewTickMsg{}
@@ -241,8 +245,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case usageLoadedMsg:
 		m.handleUsageLoaded(msg)
 		return m, nil
-	case usageRefreshTickMsg:
-		return m, m.refreshUsageSection(msg)
 	case accountRegisteredMsg:
 		return m, m.handleAccountRegistered(msg)
 	case accountLoginStartedMsg:

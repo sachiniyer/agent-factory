@@ -37,6 +37,10 @@ func SetUsageSeamForTest(
 // caller — so a stalled daemon cannot freeze the UI; only the in-process local
 // read stays inline.
 func (m *home) loadUsageIntoPane() {
+	// Pace the bounded refresh from the read's dispatch (#4361 review) — the
+	// remote read lands off the UI loop beside this call, so both paths mark
+	// here and the refresh stays one minute behind the data either way.
+	m.lastUsageRead = time.Now()
 	if apiclient.IsRemoteTarget() {
 		m.configPane.SetUsageLoading()
 		return
@@ -47,6 +51,7 @@ func (m *home) loadUsageIntoPane() {
 
 // applyUsageToPane applies a completed read on the UI loop.
 func (m *home) applyUsageToPane(resp daemon.QuotaReportResponse, err error) {
+	m.lastUsageRead = time.Now()
 	if err != nil {
 		log.WarningLog.Printf("usage: could not read the usage report for the config pane: %v", err)
 		m.configPane.SetUsage(daemon.QuotaReportResponse{}, err)
@@ -60,45 +65,31 @@ func (m *home) applyUsageToPane(resp daemon.QuotaReportResponse, err error) {
 // web rail polls the same report on (web/src/index.ts TASK_HEALTH_POLL_MS).
 const usagePollInterval = time.Minute
 
-// usageRefreshTickMsg fires the bounded Usage-section refresh (#4361 review):
-// a session reaching or clearing a wall, being killed, or being created while
-// the overlay stays open changes the report behind the pane, and the relative
-// times ("just now", "in 5m") never advance at all on an open-only read. The
-// message carries the open's generation so a re-opened pane runs exactly one
-// refresh chain: an older chain's tick dies on its next edge.
-type usageRefreshTickMsg struct {
-	generation uint64
-}
-
-// usageRefreshTickCmd schedules the next refresh edge, tagged with the open's
-// usage generation. The loop is bounded by the overlay's lifetime rather than
-// cancelled: each tick re-arms only while the pane is still open and focused,
-// so a tick landing after close is a no-op instead of a timer to reap.
-func (m *home) usageRefreshTickCmd() tea.Cmd {
-	generation := m.usageGeneration
-	return tea.Tick(usagePollInterval, func(time.Time) tea.Msg {
-		return usageRefreshTickMsg{generation: generation}
-	})
-}
-
-// refreshUsageSection answers one usageRefreshTickMsg: while the config editor
-// is still open and focused it re-reads the report and re-arms; once the pane
-// closes — or a newer open superseded this chain — the chain ends. The remote
-// refresh is generation-fenced and deliberately skips SetUsageLoading: a
-// refresh keeps the rows it already has until the answer lands rather than
-// blinking the section to "Loading…" once a minute.
-func (m *home) refreshUsageSection(msg usageRefreshTickMsg) tea.Cmd {
-	if m.state != stateConfigEditor || !m.configPane.HasFocus() || msg.generation != m.usageGeneration {
+// usageRefreshDue re-reads the Usage section once it is a minute stale while
+// the config editor is open and focused (#4361 review): a session reaching or
+// clearing a wall, being killed, or being created behind the overlay changes
+// the report, and the relative times ("just now", "in 5m") never advance on an
+// open-only read. It rides the app's existing previewTickMsg heartbeat — a
+// tea.Tick command of its own cannot ride the opener's returned command
+// (remote must stay the pure section-read batch, local must stay nil, and a
+// blocking tick inside either would stall the consumers that run those
+// commands directly). The remote refresh is generation-fenced and
+// deliberately skips SetUsageLoading: the section keeps the rows it already
+// has until the answer lands rather than blinking to "Loading…" each minute.
+func (m *home) usageRefreshDue() tea.Cmd {
+	if m.state != stateConfigEditor || !m.configPane.HasFocus() {
 		return nil
 	}
-	var refresh tea.Cmd
-	if apiclient.IsRemoteTarget() {
-		m.usageGeneration++ // this read supersedes any still in flight
-		refresh = m.remoteUsageLoadCmd()
-	} else {
-		m.loadUsageIntoPane()
+	if time.Since(m.lastUsageRead) < usagePollInterval {
+		return nil
 	}
-	return tea.Batch(refresh, m.usageRefreshTickCmd())
+	m.lastUsageRead = time.Now()
+	if !apiclient.IsRemoteTarget() {
+		m.loadUsageIntoPane()
+		return nil
+	}
+	m.usageGeneration++ // this read supersedes any still in flight
+	return m.remoteUsageLoadCmd()
 }
 
 // remoteUsageLoadCmd refetches only the Usage section off the UI loop — the

@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -84,6 +85,30 @@ func TestUsageLoadRemoteIgnoresCompletionAfterReopen(t *testing.T) {
 	require.Contains(t, current, "current-opening")
 	updateAll(h, stale)
 	require.Equal(t, current, h.configPane.String(), "an earlier opening's report must not replace the current one")
+}
+
+// The bounded refresh rides previewTickMsg and is paced by lastUsageRead:
+// closed pane or fresh data owes nothing, a stale open pane re-reads inline
+// for a local target. Neither open path's returned command may carry it —
+// remote's batch is the section reads and local's is nil — so a blocking
+// tea.Tick can never stall the consumers that run those commands directly.
+func TestUsageRefreshDuePacing(t *testing.T) {
+	h := newTestHome(t)
+	calls := 0
+	t.Cleanup(SetUsageSeamForTest(func(daemon.QuotaReportRequest) (daemon.QuotaReportResponse, error) {
+		calls++
+		return usageReportWith("localagent", "the local wall"), nil
+	}))
+	h.lastUsageRead = time.Now().Add(-2 * usagePollInterval)
+	require.Nil(t, h.usageRefreshDue(), "a closed pane owes no refresh")
+	_, cmd := h.showConfigEditor()
+	require.Nil(t, cmd, "a local open owes no command — the refresh has no cmd of its own")
+	sizeConfigPane(h)
+	require.Equal(t, 1, calls, "the opening read is still inline")
+	require.Nil(t, h.usageRefreshDue(), "a fresh read owes no refresh")
+	h.lastUsageRead = time.Now().Add(-2 * usagePollInterval)
+	require.Nil(t, h.usageRefreshDue(), "the local refresh applies inline and returns no command")
+	require.Equal(t, 2, calls, "a stale open pane re-reads the report")
 }
 
 // The local read is in-process through quotahost: it applies during open with
