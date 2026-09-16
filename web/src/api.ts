@@ -1228,7 +1228,18 @@ export async function reapConfigAssistant(token: string): Promise<void> {
 export async function listAccounts(token: string, repoPath = ""): Promise<AccountsResponse> {
   const body = repoPath === "" ? {} : { repo_path: repoPath };
   const resp = await af<AccountsResponse>("ListAccounts", body, token);
-  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {} };
+  // Pass the router fields through verbatim: pool_routing is the capability bit
+  // the picker needs before it may offer the ambient pin or call a routable row
+  // "af picks a healthy account", and ambient_opt_outs is what keeps an opted-out
+  // project from being labelled that way. Rebuilding the object without them
+  // makes a routing-capable daemon look pre-router to every web consumer (#4404).
+  return {
+    entries: resp?.entries ?? [],
+    agents: resp?.agents ?? [],
+    defaults: resp?.defaults ?? {},
+    ambient_opt_outs: resp?.ambient_opt_outs,
+    pool_routing: resp?.pool_routing,
+  };
 }
 
 /** Creates an account's credential directory without logging in. Idempotent.

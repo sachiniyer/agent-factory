@@ -8,7 +8,7 @@ for (const state of ["pending", "failed", "loaded-empty"] as const) {
       if (state === "pending") await waiting;
       await route.fulfill(state === "failed"
         ? { status: 503, json: { data: null, error: { message: "Registry unavailable" } } }
-        : { json: { data: { agents: ["claude"], entries: [], defaults: {} }, error: null } });
+        : { json: { data: { agents: ["claude"], entries: [], defaults: {}, pool_routing: true }, error: null } });
     });
     try {
       await page.goto("/");
@@ -45,7 +45,7 @@ test("explicit account survives a project switch and reaches CreateSession", asy
   await page.route("**/v1/ListAccounts", async route => {
     if (++loads > 1) await waiting;
     await route.fulfill({ json: { data: {
-      agents: ["claude"], defaults: { claude: "personal" },
+      agents: ["claude"], defaults: { claude: "personal" }, pool_routing: true,
       entries: ["personal", "work"].map(name => ({
         agent: "claude", name, dir: `/accounts/${name}`, registration_only: false, logged_in: true,
       })),

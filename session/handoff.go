@@ -63,6 +63,13 @@ type AgentHandoff struct {
 type HandoffSwap struct {
 	AgentHandoff
 	previousProgram string
+	// previousAccount/previousAccountAuto preserve the account selection a
+	// cross-agent swap cleared, for the same synchronous rollback as
+	// previousProgram. They are populated only when the cleared account was
+	// af's own pool pick — a user-pinned account is refused outright, never
+	// silently dropped (#4404 review).
+	previousAccount     string
+	previousAccountAuto bool
 }
 
 // From/To agent names for display, e.g. "codex → claude".
@@ -312,6 +319,26 @@ func (i *Instance) recordHandoffSwapLocked(target, reason, headSHA string, autom
 		i.Program = target
 		i.touchLocked()
 	}
+	// An account af itself picked for this session cannot follow the handoff
+	// across agents — claude's "work" and codex's "work" are different
+	// registries — and SwapAgent refuses every account it is handed, so the
+	// routed-create workflow would lose agent-only handoff the moment a pool
+	// exists (#4404 review). The pick was never the user's to begin with, so
+	// the honest resolution is to drop it as part of the transaction: the
+	// incoming agent launches on the ambient identity, and the cleared pair is
+	// recorded on the swap token so a failed runtime swap restores it.
+	// A PINNED account is refused before this point — it is the user's choice,
+	// and silently clearing it would be the wrong-identity outcome wearing a
+	// different hat.
+	if !sameAgent && i.accountAutoSelected && strings.TrimSpace(i.Account) != "" {
+		swap.previousAccount = i.Account
+		swap.previousAccountAuto = true
+		swap.FromAccount = i.Account
+		i.Tabs[0].Handoffs[len(i.Tabs[0].Handoffs)-1].FromAccount = i.Account
+		i.Account = ""
+		i.accountAutoSelected = false
+		i.touchLocked()
+	}
 	// Invalidate outgoing-runtime capture BEFORE its pane is torn down. A capture
 	// already waiting on a rollout must not refill the live slot after this record
 	// has been rewritten for the incoming agent.
@@ -355,6 +382,14 @@ func (i *Instance) RevertHandoff(swap HandoffSwap) error {
 	i.Tabs[0].Conversation = swap.From
 	if i.Program != swap.previousProgram {
 		i.Program = swap.previousProgram
+		i.touchLocked()
+	}
+	// Restore the account selection a cross-agent swap cleared: the runtime
+	// swap failed, so the session is still running under the outgoing agent and
+	// the pool pick it recorded must come back with it.
+	if swap.previousAccountAuto {
+		i.Account = swap.previousAccount
+		i.accountAutoSelected = true
 		i.touchLocked()
 	}
 	// Generations are monotonic even on rollback. Reusing the old number would

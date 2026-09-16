@@ -42,7 +42,10 @@ func stubAccounts(t *testing.T, resp daemon.ListAccountsResponse, err error) (*i
 // twoAgentsWithAccounts is the ordinary answer from a host that has been used:
 // two claude accounts (one of them never logged into) and one codex account,
 // which is the shape constraint 1 is about — claude's "work" and codex's "work"
-// are different identities in different registries.
+// are different identities in different registries. PoolRouting is what the
+// daemon always sends on this build; omitting it tells the picker the daemon
+// predates the router, which drops the ambient pin and the routed labels —
+// a different contract than the one these fixtures exist to exercise.
 func twoAgentsWithAccounts() daemon.ListAccountsResponse {
 	return daemon.ListAccountsResponse{
 		Entries: []daemon.AccountEntry{
@@ -50,7 +53,8 @@ func twoAgentsWithAccounts() daemon.ListAccountsResponse {
 			{Agent: "claude", Name: "work", Dir: "/h/accounts/claude/work", LoggedIn: true},
 			{Agent: "codex", Name: "work", Dir: "/h/accounts/codex/work", LoggedIn: true},
 		},
-		Agents: []string{"claude", "codex", "gemini"},
+		Agents:      []string{"claude", "codex", "gemini"},
+		PoolRouting: true,
 	}
 }
 

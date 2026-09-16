@@ -306,31 +306,50 @@ var errRefutedRowBusy = errors.New("session is mid-operation; the cleared row is
 // the durable row straight back into the evidence a router or swap reads
 // (#4404 review).
 //
-// The per-session op lock is deliberately NOT taken: opLock → accountLimitMu
-// is the established order (a kill or swap holds its op lock across the fence),
-// so acquiring it here deadlocks. The revalidation below stands in for it, and
-// it is sufficient because the in-flight flag is the mutation fence: an op
-// raises it before touching anything, so GetInFlightOp() == OpNone means the
-// snapshot being written is committed state. A row found mid-operation is
-// owed to the settlement retry instead — its durable copy keeps contributing
-// for the op's duration, which is the single-writer contract every other row
-// write obeys rather than a refutation-specific hole.
+// The per-session op lock IS taken — by TryLock, never Lock. opLock →
+// accountLimitMu is the established order (a kill or swap holds its op lock
+// across the fence), and the caller holds accountLimitMu, so blocking here
+// would deadlock; a TryLock that never waits cannot. A held op lock means an
+// operation is mid-flight, which is the same answer the in-flight check gives:
+// the write is owed to the settlement retry, which revalidates under the op
+// lock after the op releases it. The check must run UNDER that lock rather than
+// before it — an op that raises its fence between a bare GetInFlightOp read and
+// the ToInstanceData snapshot would let this write persist a half-built row
+// with the transient operation scrubbed by ForStorage (#4404 review).
 //
-// repoStartLock is absent for the same reason — it is held above
-// accountLimitMu on the create path. The write is a stable-id-keyed update, and
-// the repo file lock persistInstanceData takes is all the ordering it needs.
+// repoStartLock is absent: it is held above accountLimitMu on the create path.
+// The write is a stable-id-keyed update, and the repo file lock
+// persistInstanceData takes is all the ordering it needs.
 func (m *Manager) persistRefutedRow(key string, instance *session.Instance) {
 	repoID, _ := splitDaemonInstanceKey(key)
 	m.mu.Lock()
 	registered := m.instances[key] == instance
 	m.mu.Unlock()
-	if !registered || instance.IsArchived() {
-		// A deleted or archived row has no repo record left to retire — the
-		// delete moved its evidence to the ledger under this same fence, or the
-		// archive took the row out of the reader's source set. Persisting it
-		// would only publish a stale session.updated for a session that is
-		// gone (#4404 review). The in-memory clear already retired its live
-		// contribution.
+	if !registered {
+		// A deleted row has no repo record left to retire — the delete moved its
+		// evidence to the ledger under this same fence, and the retraction
+		// retires that copy. Persisting it would only publish a stale
+		// session.updated for a session that is gone (#4404 review).
+		//
+		// An ARCHIVED row is not the same shape: it still sits in the repo's
+		// instances file, and loadPersistedAccountLimitObservations reads every
+		// durable row without an archived exclusion — so skipping the write
+		// leaves the cleared observation on disk, and the next routing scan
+		// folds the stale wall straight back in (#4404 review).
+		return
+	}
+	opLock := m.opLockFor(key)
+	if !opLock.TryLock() {
+		m.recordSettlementWrite(repoID, key, instance, errRefutedRowBusy)
+		return
+	}
+	defer opLock.Unlock()
+	// Re-verify under the lock. Registration can change while it is acquired,
+	// and an op raised outside it must not be flattened by this write.
+	m.mu.Lock()
+	registered = m.instances[key] == instance
+	m.mu.Unlock()
+	if !registered {
 		return
 	}
 	if instance.GetInFlightOp() != session.OpNone {

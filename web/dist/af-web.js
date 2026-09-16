@@ -6865,7 +6865,13 @@ async function reapConfigAssistant(token2) {
 async function listAccounts(token2, repoPath = "") {
   const body = repoPath === "" ? {} : { repo_path: repoPath };
   const resp = await af("ListAccounts", body, token2);
-  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {} };
+  return {
+    entries: resp?.entries ?? [],
+    agents: resp?.agents ?? [],
+    defaults: resp?.defaults ?? {},
+    ambient_opt_outs: resp?.ambient_opt_outs,
+    pool_routing: resp?.pool_routing
+  };
 }
 async function registerAccount(agent, name, token2) {
   return af("RegisterAccount", { agent, name }, token2);

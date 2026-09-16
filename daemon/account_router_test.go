@@ -358,7 +358,7 @@ func TestRouteCreateAccountRefusesWhenEveryCredentialProbeFails(t *testing.T) {
 	req := CreateSessionRequest{Title: "unverifiable", RepoPath: repoPath, Program: "codex", AccountAuto: true}
 	err := (&Manager{}).routeCreateAccount(&config.Config{}, &req)
 	require.Error(t, err, "a pool whose every probe errored is unknown, not empty")
-	assert.Contains(t, err.Error(), "could not be verified")
+	assert.Contains(t, err.Error(), "no registered account's login could be verified")
 	assert.Empty(t, req.Account)
 }
 
@@ -424,9 +424,11 @@ func TestPersistRefutedRowWritesTheClearedRowInsideTheFence(t *testing.T) {
 	require.Len(t, cleared.AccountLimitObservations(), 1, "precondition: the stale wall is stored")
 
 	// The durable copy still carries the wall — the stale row the refute must
-	// overwrite before the fence can open.
+	// overwrite before the fence can open. Seeded through the create primitive:
+	// persistInstanceData is update-only and refuses a row that is not already
+	// stored (#4404 review).
 	key := daemonInstanceKey(project.ID, "cleared")
-	require.NoError(t, persistInstanceData(project.ID, cleared.ToInstanceData()))
+	require.NoError(t, appendInstanceData(project.ID, cleared.ToInstanceData()))
 	cleared.RetractAccountLimitObservation("codex", "codex4")
 	require.Empty(t, cleared.AccountLimitObservations())
 
@@ -458,7 +460,9 @@ func TestPersistRefutedRowOwesABusyRowToTheSettlementRetry(t *testing.T) {
 	busy.SetLimitReached(reset)
 	busy.ClearLimitReached()
 	key := daemonInstanceKey(project.ID, "busy")
-	require.NoError(t, persistInstanceData(project.ID, busy.ToInstanceData()))
+	// Seeded through the create primitive: persistInstanceData is update-only
+	// and refuses a row that is not already stored (#4404 review).
+	require.NoError(t, appendInstanceData(project.ID, busy.ToInstanceData()))
 	busy.RetractAccountLimitObservation("codex", "codex4")
 	busy.SetInFlightOpForTest(session.OpReplacing)
 
