@@ -2,6 +2,7 @@ package testguard
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,13 +10,27 @@ import (
 	"testing"
 )
 
+// fakeHome points HOME at a temp dir for the test, and sets the Go toolchain
+// variables so SandboxHome finds them set and does not run `go env` there. A
+// `go env` under a fake home writes Go telemetry into the fake config dir from
+// a process that can outlive it, and that write raced t.TempDir's cleanup
+// ("directory not empty").
+func fakeHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range goToolchainVars {
+		t.Setenv(name, filepath.Join(home, "pinned-"+name))
+	}
+	return home
+}
+
 // fakeAmbientHome stands in for the developer's real environment: a HOME and
 // every root override pointed somewhere this test owns. Restoration is
 // registered with t.Setenv, so a failing test cannot leak it.
 func fakeAmbientHome(t *testing.T) (home string, overrides map[string]string) {
 	t.Helper()
-	home = t.TempDir()
-	t.Setenv("HOME", home)
+	home = fakeHome(t)
 	overrides = make(map[string]string, len(userRootOverrides))
 	for _, name := range userRootOverrides {
 		value := filepath.Join(home, "override-"+name)
@@ -90,7 +105,7 @@ func TestSandboxHome_RelocatesEveryUserRoot(t *testing.T) {
 // after it, not set to an empty string. CODEX_HOME="" and an unset CODEX_HOME
 // are different inputs to every resolver that uses LookupEnv.
 func TestSandboxHome_RestoresAbsentOverridesAsAbsent(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	fakeHome(t)
 	for _, name := range userRootOverrides {
 		unsetForTest(t, name)
 	}
@@ -175,8 +190,7 @@ func TestSandboxHome_LeavesExplicitToolchainSettingsAlone(t *testing.T) {
 }
 
 func TestSandboxHome_PinsDockerConfig(t *testing.T) {
-	realHome := t.TempDir()
-	t.Setenv("HOME", realHome)
+	realHome := fakeHome(t)
 	unsetForTest(t, "DOCKER_CONFIG")
 
 	restore := SandboxHome()
@@ -200,8 +214,7 @@ func TestSandboxHome_KeepsGitGlobalConfigReadOnly(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skipf("git not available: %v", err)
 	}
-	realHome := t.TempDir()
-	t.Setenv("HOME", realHome)
+	realHome := fakeHome(t)
 	unsetForTest(t, "XDG_CONFIG_HOME")
 	unsetForTest(t, "GIT_CONFIG_GLOBAL")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
@@ -257,10 +270,112 @@ func TestSandboxHome_KeepsGitGlobalConfigReadOnly(t *testing.T) {
 // interactive new-user setup, which waits for input and would stall a zsh pane
 // or the claude probe's `source ~/.zshrc`.
 func TestSandboxHome_SeedsZshrc(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	fakeHome(t)
 	restore := SandboxHome()
 	defer restore()
 	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".zshrc")); err != nil {
 		t.Fatalf("sandbox HOME has no .zshrc: %v", err)
+	}
+}
+
+const sandboxChildEnv = "AF_TESTGUARD_SANDBOX_CHILD"
+
+// TestSandboxHomeChildProcess is re-exec'd by TestSandboxHome_ChildInheritsTheParentsSandbox.
+// It stands in for a test binary a test launches as a fixture: the daemon's
+// fake Codex is the test binary behind a "codex" symlink. Its TestMain calls
+// SandboxHome again before the fixture reads CODEX_HOME.
+func TestSandboxHomeChildProcess(t *testing.T) {
+	if os.Getenv(sandboxChildEnv) != "1" {
+		t.Skip("re-exec'd by TestSandboxHome_ChildInheritsTheParentsSandbox")
+	}
+	restore := SandboxHome()
+	defer restore()
+	fmt.Printf("HOME=%s\nCODEX_HOME=%s\n", os.Getenv("HOME"), os.Getenv("CODEX_HOME"))
+}
+
+// TestSandboxHome_ChildInheritsTheParentsSandbox is the regression CI caught on
+// the first head of #4469. A parent test points CODEX_HOME at its fixture store
+// and launches the test binary as the fake Codex. That child must keep writing
+// where the parent reads, so a child of a live sandbox inherits the sandbox
+// instead of applying a fresh one that clears CODEX_HOME.
+func TestSandboxHome_ChildInheritsTheParentsSandbox(t *testing.T) {
+	fakeHome(t)
+	restore := SandboxHome()
+	defer restore()
+	parentHome := os.Getenv("HOME")
+	fixtureStore := t.TempDir()
+	t.Setenv("CODEX_HOME", fixtureStore)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSandboxHomeChildProcess$", "-test.count=1")
+	cmd.Env = append(os.Environ(), sandboxChildEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child test binary: %v\n%s", err, out)
+	}
+	for _, want := range []string{"HOME=" + parentHome + "\n", "CODEX_HOME=" + fixtureStore + "\n"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("child did not inherit %q from its parent's sandbox:\n%s", strings.TrimSpace(want), out)
+		}
+	}
+}
+
+// TestSandboxHome_IgnoresAStaleMarker: a marker whose sandbox is gone came from
+// a run that has ended, and must not switch the sandbox off for this one.
+func TestSandboxHome_IgnoresAStaleMarker(t *testing.T) {
+	realHome := fakeHome(t)
+	t.Setenv(envSandboxUserHome, filepath.Join(t.TempDir(), "removed-sandbox"))
+
+	restore := SandboxHome()
+	home := os.Getenv("HOME")
+	restore()
+	if home == realHome {
+		t.Fatalf("a stale %s marker kept HOME at the real %q", envSandboxUserHome, realHome)
+	}
+}
+
+// TestUseAmbientHome_RestoresThePreSandboxHomeForOneTest covers the opt-out for
+// tests whose subject is the real user environment: inside the test, HOME and
+// every override match what they were before the sandbox, including an override
+// that was absent. Afterwards the sandbox is back.
+func TestUseAmbientHome_RestoresThePreSandboxHomeForOneTest(t *testing.T) {
+	realHome, overrides := fakeAmbientHome(t)
+	unsetForTest(t, "XDG_STATE_HOME")
+	delete(overrides, "XDG_STATE_HOME")
+	restore := SandboxHome()
+	defer restore()
+	sandboxHome := os.Getenv("HOME")
+
+	t.Run("opted out", func(t *testing.T) {
+		UseAmbientHome(t)
+		if got := os.Getenv("HOME"); got != realHome {
+			t.Fatalf("HOME = %q, want the pre-sandbox %q", got, realHome)
+		}
+		for name, want := range overrides {
+			if got := os.Getenv(name); got != want {
+				t.Fatalf("%s = %q, want the pre-sandbox %q", name, got, want)
+			}
+		}
+		if value, ok := os.LookupEnv("XDG_STATE_HOME"); ok {
+			t.Fatalf("XDG_STATE_HOME was unset before the sandbox; UseAmbientHome set it to %q", value)
+		}
+	})
+
+	if got := os.Getenv("HOME"); got != sandboxHome {
+		t.Fatalf("after the opted-out test HOME = %q, want the sandbox %q back", got, sandboxHome)
+	}
+	for name := range overrides {
+		if value, ok := os.LookupEnv(name); ok {
+			t.Fatalf("after the opted-out test %s = %q, want it cleared again", name, value)
+		}
+	}
+}
+
+func TestUseAmbientHome_NoSandboxIsANoOp(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	unsetForTest(t, envSandboxUserHome)
+	UseAmbientHome(t)
+	if got := os.Getenv("HOME"); got != home {
+		t.Fatalf("UseAmbientHome without a sandbox changed HOME to %q", got)
 	}
 }

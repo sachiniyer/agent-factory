@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"testing"
 	"time"
 )
 
@@ -86,6 +88,18 @@ func restoreEnv(states []envState) {
 // The sandbox HOME is a sibling temp dir, not a child of AGENT_FACTORY_HOME, so
 // tests that list the af home do not find it there.
 func sandboxUserHome() (func(), error) {
+	// A test binary that a sandboxed test launched as a fixture keeps what it
+	// inherited. That is the parent's sandbox, or an override a parent test set
+	// on purpose (the daemon's fake Codex writes to the CODEX_HOME its parent
+	// reads). Applying a fresh sandbox here would clear that override. A marker
+	// whose directory is gone came from a run that has ended, so it does not
+	// count.
+	if inherited := os.Getenv(envSandboxUserHome); inherited != "" {
+		if info, err := os.Stat(inherited); err == nil && info.IsDir() {
+			return func() {}, nil
+		}
+	}
+
 	ambientHome, homeErr := os.UserHomeDir()
 	if homeErr != nil {
 		ambientHome = ""
@@ -95,15 +109,17 @@ func sandboxUserHome() (func(), error) {
 	_, hadGitGlobal := os.LookupEnv("GIT_CONFIG_GLOBAL")
 	_, hadDockerConfig := os.LookupEnv("DOCKER_CONFIG")
 
-	names := append([]string{"HOME", "DOCKER_CONFIG"}, userRootOverrides...)
-	names = append(names, goToolchainVars...)
-	saved := saveEnv(names...)
+	ambient := saveEnv(append([]string{"HOME"}, userRootOverrides...)...)
+	names := append([]string{"DOCKER_CONFIG", envSandboxUserHome}, goToolchainVars...)
+	saved := append(saveEnv(names...), ambient...)
 
 	home, err := os.MkdirTemp("", "af-test-user-home-")
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox HOME: %w", err)
 	}
+	prevAmbient := swapAmbientUserEnv(ambient)
 	restore := func() {
+		swapAmbientUserEnv(prevAmbient)
 		restoreEnv(saved)
 		_ = os.RemoveAll(home)
 	}
@@ -148,10 +164,64 @@ func sandboxUserHome() (func(), error) {
 			return fail(fmt.Errorf("clear %s: %w", name, err))
 		}
 	}
+	if err := set(envSandboxUserHome, home); err != nil {
+		return fail(err)
+	}
 	if err := set("HOME", home); err != nil {
 		return fail(err)
 	}
 	return restore, nil
+}
+
+// envSandboxUserHome names the live sandbox HOME, so a child test binary can
+// tell that it runs inside one.
+const envSandboxUserHome = "AF_TESTGUARD_USER_HOME"
+
+var (
+	ambientUserEnvMu sync.Mutex
+	// ambientUserEnv is the HOME and userRootOverrides state from before the
+	// sandbox this process created, or nil when this process created none.
+	ambientUserEnv []envState
+)
+
+func swapAmbientUserEnv(states []envState) []envState {
+	ambientUserEnvMu.Lock()
+	defer ambientUserEnvMu.Unlock()
+	prev := ambientUserEnv
+	ambientUserEnv = states
+	return prev
+}
+
+// UseAmbientHome puts back, for the rest of the test, the HOME and root
+// overrides this process had before SandboxHome moved them. It is for tests
+// whose subject is the developer's real user environment and that already
+// refuse to run anywhere but a disposable machine. The example is the
+// real-systemd lifecycle test: `af daemon install` writes the unit under HOME,
+// and the user manager only looks in the real one.
+//
+// Without a sandbox it does nothing, because the environment is already the
+// ambient one. In a child test binary that inherited its sandbox, it fails the
+// test, because the ambient values are not known there. Like t.Setenv, it
+// cannot be used with t.Parallel.
+func UseAmbientHome(t testing.TB) {
+	t.Helper()
+	ambientUserEnvMu.Lock()
+	states := append([]envState(nil), ambientUserEnv...)
+	ambientUserEnvMu.Unlock()
+	if states == nil {
+		if inherited := os.Getenv(envSandboxUserHome); inherited != "" {
+			t.Fatalf("testguard: this process inherited the HOME sandbox %s from a parent test and does not know the ambient HOME", inherited)
+		}
+		return
+	}
+	for _, state := range states {
+		t.Setenv(state.name, state.value)
+		if !state.set {
+			if err := os.Unsetenv(state.name); err != nil {
+				t.Fatalf("testguard: unset %s: %v", state.name, err)
+			}
+		}
+	}
 }
 
 // goToolchainPins returns the effective value of every goToolchainVars entry
