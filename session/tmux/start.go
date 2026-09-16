@@ -639,7 +639,14 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 	// the replacement and read the old mark against the new generation's
 	// death, and a replacement server reissuing the same $id must not
 	// impersonate it either (#4473 review). nil degrades to the name target.
-	resolved, _ := t.confirmedGeneration()
+	// The probe runs only when the existence check answered: a wedged
+	// has-session already spent a full tmuxCommandTimeout, and a second
+	// command here would pay the same deadline for the same non-answer —
+	// once per persisted tab on the local restore path (Codex on #4473).
+	var resolved *tmuxGeneration
+	if answered {
+		resolved, _ = t.confirmedGeneration()
+	}
 	if err := t.refreshRestoredAccountEnvironment(); err != nil {
 		return RestoreReattached, fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
 	}

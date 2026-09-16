@@ -64,10 +64,12 @@ type teardownMarkTmux struct {
 	// idList, when set, is what `tmux ls -F '#{session_id}'` answers — the
 	// corroborating session-id listing for an unclassified probe failure.
 	idList atomic.Value
-	// captureCalls and idProbeCalls count tmux invocations per verb, so a test
-	// can assert a wedged identity probe never pays a second timeout budget.
-	captureCalls atomic.Int32
-	idProbeCalls atomic.Int32
+	// captureCalls, idProbeCalls, and nameProbeCalls count tmux invocations
+	// per verb, so a test can assert a wedged probe never pays a second
+	// timeout budget.
+	captureCalls   atomic.Int32
+	idProbeCalls   atomic.Int32
+	nameProbeCalls atomic.Int32
 	// duringSetup, if set, runs inside Start's post-confirmation set-option call,
 	// between the existence poll and the inner Restore.
 	duringSetup func()
@@ -104,6 +106,7 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 		return nil, nil
 	case strings.Contains(args, "display-message") && strings.Contains(args, "session_id"):
 		// confirmedGeneration's name-targeted bind probe.
+		m.nameProbeCalls.Add(1)
 		if m.nameWedged.Load() {
 			time.Sleep(markTestWedge)
 			return nil, errors.New("wedged tmux server never answered the name probe")

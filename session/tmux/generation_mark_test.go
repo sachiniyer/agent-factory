@@ -41,7 +41,7 @@ func monitorMark(t *testing.T, session *TmuxSession) bool {
 // attribution object.
 func TestSameGenerationRebindSharesTeardownMark(t *testing.T) {
 	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
-	session, _ := boundSession(t, gen)
+	session, m := boundSession(t, gen)
 	outgoing := session.monitor
 
 	// The rebind resolves the same generation — display-message answered with
@@ -53,6 +53,9 @@ func TestSameGenerationRebindSharesTeardownMark(t *testing.T) {
 
 	// close() marks the CURRENT monitor's generation; the swapped-out
 	// monitor's in-flight poll reads the same mark through the shared object.
+	// The name probe answers the bound generation — the session is still
+	// live, so a real server reports its identity.
+	m.nameGen.Store("$5 111 222")
 	session.markTeardownInitiated()
 	require.True(t, outgoing.generation.teardownInitiated,
 		"a close during an in-flight poll on the old monitor must still classify the shared generation's teardown as af-initiated")
@@ -66,6 +69,9 @@ func TestSameGenerationRebindSharesTeardownMark(t *testing.T) {
 func TestBoundMonitorReadsIdReuseAsGenerationGone(t *testing.T) {
 	gen := &tmuxGeneration{sessionID: "$0", serverPID: "111", created: "222"}
 	session, m := boundSession(t, gen)
+	// The name probe answers the bound generation — the session is live at
+	// mark time, which is what lets af's teardown request aim at it.
+	m.nameGen.Store("$0 111 222")
 	session.markTeardownInitiated()
 
 	// A replacement server reissued $0 — same id, same-second creation stamp
@@ -100,9 +106,12 @@ func TestBoundMonitorUnmarkedIdReuseStaysError(t *testing.T) {
 }
 
 // TestAnsweredResolutionDoesNotCarryStaleMark is the third finding: when the
-// has-session probe timed out but the display-message resolution DID answer,
+// rebind's probes answer and resolve a DIFFERENT generation behind the name,
 // the confirmed-live session is not the one af closed — carrying the old
-// settled mark onto it would misclassify its death at INFO.
+// settled mark onto it would misclassify its death at INFO. The bind probe
+// only runs once the existence check has answered; a wedged has-session
+// shares its budget rather than paying for a second timeout (Codex on
+// #4473), so this test answers both.
 func TestAnsweredResolutionDoesNotCarryStaleMark(t *testing.T) {
 	shortTmuxTimeout(t, markTestTimeout)
 	session, m := newMarkedTeardownSession(t)
@@ -110,9 +119,9 @@ func TestAnsweredResolutionDoesNotCarryStaleMark(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, session.TeardownInitiated())
 
-	// The existence probe wedges — but the bind probe recovers and answers
-	// with a DIFFERENT generation behind the name.
-	m.probeWedged.Store(true)
+	// The name is live again, owned by a DIFFERENT generation — the
+	// existence probe answers and the bind probe resolves $9.
+	m.alive.Store(true)
 	m.nameGen.Store("$9 999 888")
 
 	_, err = session.RestoreWithResult(t.TempDir())
@@ -143,14 +152,13 @@ func TestSameGenerationResolutionRetiresSettledMark(t *testing.T) {
 	session, m := boundSession(t, gen)
 
 	// A settled mark: af asked, close() returned, and the generation is still
-	// here to answer — the teardown did not take.
+	// here to answer — the teardown did not take. The name probe answers the
+	// bound generation, so the mark lands.
+	m.nameGen.Store("$5 111 222")
 	session.markTeardownInitiated()
 	session.monitorMu.Lock()
 	gen.teardownSettledAt = time.Now()
 	session.monitorMu.Unlock()
-
-	m.probeWedged.Store(true)
-	m.nameGen.Store("$5 111 222") // the SAME generation answers the bind probe
 
 	_, err := session.RestoreWithResult(t.TempDir())
 	require.NoError(t, err)
@@ -162,10 +170,8 @@ func TestSameGenerationResolutionRetiresSettledMark(t *testing.T) {
 	// And the unsettled counterpart: an in-flight teardown keeps its mark.
 	gen2 := &tmuxGeneration{sessionID: "$7", serverPID: "111", created: "222"}
 	session2, m2 := boundSession(t, gen2)
-	session2.markTeardownInitiated() // no settle — close() still running
-
-	m2.probeWedged.Store(true)
 	m2.nameGen.Store("$7 111 222")
+	session2.markTeardownInitiated() // no settle — close() still running
 	_, err = session2.RestoreWithResult(t.TempDir())
 	require.NoError(t, err)
 	require.True(t, monitorMark(t, session2),
@@ -179,6 +185,7 @@ func TestSameGenerationResolutionRetiresSettledMark(t *testing.T) {
 func TestStartKeepsBoundMarkWhenNameIsRebound(t *testing.T) {
 	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
 	session, m := boundSession(t, gen)
+	m.nameGen.Store("$5 111 222") // the live session answers the mark probe
 	session.markTeardownInitiated()
 
 	// The name is live — but the session answering there is a DIFFERENT
@@ -366,6 +373,7 @@ func TestStartWedgedRebindDoesNotBindRetiredGeneration(t *testing.T) {
 	session := newTmuxSession(toTmuxName("generation-mark", ""), "claude",
 		liveOnSpawn{NewMockPtyFactory(t), m}, m.exec())
 	session.monitor = &statusMonitor{generation: gen}
+	m.nameGen.Store("$5 111 222") // the live session answers the mark probe
 	_, err := session.Close()
 	require.NoError(t, err)
 	require.True(t, gen.teardownInitiated)
@@ -415,4 +423,50 @@ func TestCloseWedgedIdentityProbeSpendsNoFurtherBudget(t *testing.T) {
 		"no kill-session was ever sent, so no teardown request exists to attribute")
 	require.True(t, m.alive.Load(),
 		"kill-session must not run after the identity probe consumed the budget")
+}
+
+// TestCloseDoesNotMarkAbsentGeneration is the definitive-absence half of the
+// target-binding rule: the bound session crashed before Close ran, so the
+// name probe answers an empty session context — an ANSWERED nothing, not a
+// wedge. kill-session cannot retire a generation already gone, so marking it
+// would launder the unrequested crash into af's request and quiet the next
+// poll to INFO (Codex on #4473).
+func TestCloseDoesNotMarkAbsentGeneration(t *testing.T) {
+	shortTmuxTimeout(t, markTestTimeout)
+	gen := &tmuxGeneration{sessionID: "$6", serverPID: "111", created: "222"}
+	session, m := boundSession(t, gen)
+
+	// The session crashed before the poll noticed: the name probe answers
+	// empty (nameGen unset) — answered, but nothing owns the name.
+	m.alive.Store(false)
+
+	_, err := session.Close()
+	require.NoError(t, err)
+	require.False(t, monitorMark(t, session),
+		"the generation vanished without af asking — marking it would attribute the unrequested crash to af")
+	require.False(t, gen.teardownInitiated)
+}
+
+// TestWedgedExistenceProbeSkipsGenerationLookup keeps the rebind inside the
+// one budget has-session already spent: a wedged existence probe means every
+// later tmux command pays the same deadline for the same non-answer, and the
+// local restore path runs this once per persisted tab (Codex on #4473). The
+// generation lookup is skipped and the unanswered rebind still carries the
+// outgoing monitor's generation — the wedge semantics are unchanged.
+func TestWedgedExistenceProbeSkipsGenerationLookup(t *testing.T) {
+	shortTmuxTimeout(t, markTestTimeout)
+	gen := &tmuxGeneration{sessionID: "$7", serverPID: "111", created: "222"}
+	session, m := boundSession(t, gen)
+	m.probeWedged.Store(true)
+	m.nameWedged.Store(true) // a probe that ran here would stall out
+
+	_, err := session.RestoreWithResult(t.TempDir())
+	require.NoError(t, err)
+	require.Zero(t, m.nameProbeCalls.Load(),
+		"a wedged existence probe must not open a second full-timeout generation probe")
+	session.monitorMu.Lock()
+	carried := session.monitor.generation
+	session.monitorMu.Unlock()
+	require.Same(t, gen, carried,
+		"an unanswered rebind still carries the outgoing monitor's generation")
 }
