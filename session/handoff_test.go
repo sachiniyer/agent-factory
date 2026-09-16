@@ -540,6 +540,15 @@ func TestRefuseIfCredentialSiblingsExist(t *testing.T) {
 	inst.Tabs = inst.Tabs[:1]
 	err = inst.RefuseIfCredentialSiblingsExist()
 	require.NoError(t, err, "RefuseIfCredentialSiblingsExist must pass with only the agent tab")
+
+	// A tab removed from Tabs whose tmux teardown is still pending means the
+	// process may still be alive under the old account's credentials. Refuse
+	// to match the account-swap validator's posture.
+	inst.SetPendingTabCleanupForTest([]TabCleanupData{{TabID: "tab-closed", TmuxName: "closed-session"}})
+	err = inst.RefuseIfCredentialSiblingsExist()
+	require.Error(t, err, "RefuseIfCredentialSiblingsExist must refuse when tab cleanup is pending")
+	require.Contains(t, err.Error(), "teardown", "refusal must name the cleanup condition")
+	inst.SetPendingTabCleanupForTest(nil)
 }
 
 // TestRecordHandoffSwap_RecordsFromAccount pins the audit-trail half of the P2

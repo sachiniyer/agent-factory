@@ -400,6 +400,10 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto boo
 // exposes the previous one. Call this BEFORE ClearAutoSelectedAccount and
 // PrepareAgentSwap.
 //
+// Tabs removed from Tabs whose tmux teardown has not been confirmed are also
+// refused: a pending cleanup handle means the process may still be alive with
+// the old account's credentials, matching the posture validateAccountSwap takes.
+//
 // A VS Code tab owns no tmux pane, but its daemon-managed editor is
 // account-scoped — vscodeAccountScopeForInstance bakes the selected account
 // into the child's environ at exec (#3876) — so it is refused on tab presence,
@@ -408,7 +412,17 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto boo
 func (i *Instance) RefuseIfCredentialSiblingsExist() error {
 	i.mu.RLock()
 	tabs := append([]*Tab(nil), i.Tabs...)
+	pendingCleanup := len(i.pendingTabCleanup)
 	i.mu.RUnlock()
+	// A tab removed from Tabs whose tmux teardown has not yet been confirmed
+	// is retained in pendingTabCleanup. Its process may still be alive under
+	// the outgoing account's credentials, for the same reason the normal
+	// account-swap validator (validateAccountSwap) refuses non-empty cleanup.
+	if pendingCleanup > 0 {
+		return fmt.Errorf(
+			"cannot hand session %q off to an ambient agent while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the handoff",
+			i.Title, pendingCleanup)
+	}
 	for idx, tab := range tabs {
 		if idx == 0 {
 			// Agent tab — SwapAgent handles this one.
