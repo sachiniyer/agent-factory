@@ -24,7 +24,7 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		if err != nil {
 			return true
 		}
-		// Coarse rule: if the command contains both a command substitution
+		// Coarse rule 1: if the command contains both a command substitution
 		// anywhere and an arithmetic context anywhere, refuse without modelling
 		// scope. bash re-evaluates the stdout of a command substitution as fresh
 		// arithmetic when the variable holding it appears in an arithmetic
@@ -38,6 +38,18 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		// that IS common — arithmetic alone, command substitutions alone, or the
 		// two in separate statements without a re-evaluation path — stays allowed.
 		if fileHasCmdSubst(file) && fileHasArithmeticContext(file) {
+			return true
+		}
+		// Coarse rule 2: if the command contains a literal string that is itself
+		// a denied arithmetic assignment AND the command contains any arithmetic
+		// context, refuse. bash re-evaluates a variable's stored value as fresh
+		// arithmetic when that variable appears inside $(( )), (( )), let, etc.,
+		// so `x='CODEX_HOME=1'; : $((x)); codex` carries the same bypass as the
+		// command-substitution form — no CmdSubst is involved, but the literal
+		// value is the hazard. Combined with fileHasArithmeticContext this is
+		// symmetric with coarse rule 1: both are structural, scope-free, and
+		// cannot gain a new gap from an unhandled compound form.
+		if fileHasLiteralDeniedArithAssignment(file, names) && fileHasArithmeticContext(file) {
 			return true
 		}
 		mutates := false
