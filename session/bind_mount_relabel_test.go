@@ -145,8 +145,12 @@ func TestBindMountRelabel_UnprovenEngineKeepsTheRelabel(t *testing.T) {
 	}{
 		{name: "local unix socket trusts the local probe", dockerHost: "unix:///var/run/docker.sock", wantRelabel: false},
 		{name: "local npipe trusts the local probe", dockerHost: "npipe:////./pipe/docker_engine", wantRelabel: false},
+		{name: "ssh to loopback trusts the local probe", dockerHost: "ssh://build@127.0.0.1", wantRelabel: false},
 		{name: "remote tcp endpoint keeps the relabel", dockerHost: "tcp://10.0.0.7:2376", wantRelabel: true},
 		{name: "remote ssh endpoint keeps the relabel", dockerHost: "ssh://build@10.0.0.7", wantRelabel: true},
+		// loopback TCP is reachable-local for the dial-back check but can be a
+		// forwarded remote daemon — host identity is unproven, so relabel stays
+		{name: "loopback tcp endpoint keeps the relabel", dockerHost: "tcp://127.0.0.1:2375", wantRelabel: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			writeEnforce(t, "0\n") // permissive: the LOCAL answer is "no relabel"
