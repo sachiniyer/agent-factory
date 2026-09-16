@@ -201,13 +201,18 @@ func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
 			insertAt = len(s.tasks)
 		}
 	}
+	prevLen := len(s.tasks)
 	s.tasks = append(s.tasks[:insertAt], append([]task.Task{tsk}, s.tasks[insertAt:]...)...)
 	// If the restored row was inserted at or before the current selection,
 	// shift the index forward so the cursor stays on the same surviving task
 	// the user was looking at before the restore. Without this, the user's
 	// next edit, run, or delete targets the task one row above the one they
 	// selected.
-	if insertAt <= s.selectedIdx {
+	// Only shift when there was a surviving selected row before the insertion;
+	// when the pane was empty (prevLen == 0), selectedIdx is 0 but points at
+	// nothing, and incrementing it leaves the cursor out of bounds on the
+	// newly single-element slice.
+	if prevLen > 0 && insertAt <= s.selectedIdx {
 		s.selectedIdx++
 	}
 	s.deleted = append(s.deleted, tsk)
