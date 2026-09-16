@@ -245,6 +245,58 @@ func TestValidateAccountEnvironmentCommand_RefusesExpandedTaintedVarInArithm(t *
 	}
 }
 
+// TestValidateAccountEnvironmentCommand_RefusesParamExpAssignmentTaint verifies
+// that a parameter expansion with an assignment operator (${x:=...} or ${x=...})
+// taints the target variable when the default value is a command substitution.
+// bash evaluates the default value and assigns it to x when x is unset, after
+// which `: $((x))` re-evaluates x's contents as arithmetic — the same bypass as
+// an inline substitution.
+//
+//	x=; : "${x:=$(printf CODEX_HOME=1)}"; : $((x)); codex
+//
+// The ParamExp assigns the substitution output to x; the later arithmetic
+// re-evaluates it and changes CODEX_HOME.
+func TestValidateAccountEnvironmentCommand_RefusesParamExpAssignmentTaint(t *testing.T) {
+	for _, command := range []string{
+		// := operator (assign-if-unset-or-null) with command substitution.
+		`x=; : "${x:=$(printf CODEX_HOME=1)}"; : $((x)); codex`,
+		// = operator (assign-if-unset) with command substitution.
+		`x=; : "${x=$(printf CODEX_HOME=1)}"; : $((x)); codex`,
+		// Tainted variable used in (( )) arithmetic command.
+		`x=; : "${x:=$(printf CODEX_HOME=1)}"; (( x )); codex`,
+		// Tainted variable used in let.
+		`x=; : "${x:=$(printf CODEX_HOME=1)}"; let x; codex`,
+		// Tainted variable used in numeric [[ ]] operand.
+		`x=; : "${x:=$(printf CODEX_HOME=1)}"; [[ 0 -eq $x ]]; codex`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q taints a variable through a ParamExp assignment and must be refused", command)
+	}
+}
+
+// TestValidateAccountEnvironmentCommand_RefusesCStyleLoopArithmetic verifies
+// that C-style for loops (`for (( init; cond; post ))`) fail closed when any
+// clause contains a command substitution or references a tainted variable.
+// All three clauses are arithmetic contexts: bash re-evaluates the substitution
+// output or variable value as arithmetic in each one.
+func TestValidateAccountEnvironmentCommand_RefusesCStyleLoopArithmetic(t *testing.T) {
+	for _, command := range []string{
+		// Command substitution in the init clause.
+		"for (( i = $(printf CODEX_HOME=1), n=0; n < 1; n++ )); do :; done; codex",
+		// Command substitution in the condition clause.
+		"for (( i = 0; i < $(printf CODEX_HOME=1); i++ )); do :; done; codex",
+		// Command substitution in the post clause.
+		"for (( i = 0; i < 1; i += $(printf CODEX_HOME=1) )); do :; done; codex",
+		// Tainted variable in the init clause.
+		"x=$(printf CODEX_HOME=1); for (( i = x, n=0; n < 1; n++ )); do :; done; codex",
+		// Tainted variable in the condition clause.
+		"x=$(printf CODEX_HOME=1); for (( i = 0; i < x; i++ )); do :; done; codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q uses a command substitution or tainted variable in a C-style for loop and must be refused", command)
+	}
+}
+
 // The refusal above must stay narrow. A process tab is an arbitrary user
 // command, so ordinary arithmetic — including `$(( ))` that contains NO
 // command substitution — and command substitutions that appear OUTSIDE an
@@ -293,6 +345,12 @@ func TestValidateAccountEnvironmentCommand_AllowsProvableArithmeticAndExternalCm
 		"x=42; [[ x -eq 0 ]]; codex",
 		// A variable copy from a non-tainted source is not tainted.
 		"x=42; y=$x; : $((y)); codex",
+		// A ParamExp assignment from a literal (not a command substitution)
+		// does not taint the variable.
+		`x=; : "${x:=42}"; : $((x)); codex`,
+		// $[ ] (deprecated arithmetic) is handled as ArithmExp — pure
+		// arithmetic with no substitution is provable.
+		"echo $[1+2]; codex",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"command %q is provably free of identity mutation and must stay allowed", command)
