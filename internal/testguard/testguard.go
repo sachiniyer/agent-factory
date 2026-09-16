@@ -285,9 +285,15 @@ func TmuxTripwire() func() error {
 // children to the real install. AF_TESTGUARD_RUN is replaced with this run's
 // stable identity so per-test AGENT_FACTORY_HOME overrides remain attributable.
 func SandboxHome() func() {
+	if stats, ran := sweepOrphanTempDirsOnce(); ran && stats.noteworthy() {
+		fmt.Fprintf(os.Stderr, "testguard: %s\n", stats)
+	}
 	dir, err := os.MkdirTemp("", "af-test-home-")
 	if err != nil {
 		panic("testguard: cannot create sandbox AGENT_FACTORY_HOME: " + err.Error())
+	}
+	if err := writeOwnerStamp(dir); err != nil {
+		fmt.Fprintf(os.Stderr, "testguard: cannot stamp sandbox home owner, dir will not be reaped if this binary dies: %v\n", err)
 	}
 	prev, had := os.LookupEnv("AGENT_FACTORY_HOME")
 	prevTestRun, hadTestRun := os.LookupEnv(envMarkerTestRun)
@@ -361,9 +367,15 @@ func SandboxTmux() func() {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return func() {}
 	}
+	if stats, ran := sweepOrphanTempDirsOnce(); ran && stats.noteworthy() {
+		fmt.Fprintf(os.Stderr, "testguard: %s\n", stats)
+	}
 	dir, err := os.MkdirTemp("", "af-tmux-pkg-")
 	if err != nil {
 		panic("testguard: cannot create package tmux socket dir: " + err.Error())
+	}
+	if err := writeOwnerStamp(dir); err != nil {
+		fmt.Fprintf(os.Stderr, "testguard: cannot stamp package tmux dir owner, dir will not be reaped if this binary dies: %v\n", err)
 	}
 	prevTmpdir, hadTmpdir := os.LookupEnv("TMUX_TMPDIR")
 	prevTmux, hadTmux := os.LookupEnv("TMUX")
@@ -449,14 +461,27 @@ func KeepTmuxServerOnEmpty(t testing.TB) {
 // unix socket paths are length-limited (~104 bytes) and t.TempDir() embeds
 // the full test name. Skips the test when tmux is not installed; must not be
 // used with t.Parallel (t.Setenv forbids it).
+//
+// The dir carries an owner stamp naming this test binary's process instance,
+// and entry runs a once-per-process sweep of sibling dirs: a stamped dir
+// whose owner is provably dead is reaped along with its tmux server, because
+// a binary killed by -timeout or SIGKILL never runs the t.Cleanup below and
+// its daemonized server survives the process group (#4468). Anything the
+// sweep cannot prove is left in place and reported, never killed on a guess.
 func IsolateTmux(t testing.TB) {
 	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skipf("tmux not available: %v", err)
 	}
+	if stats, ran := sweepOrphanTempDirsOnce(); ran && stats.noteworthy() {
+		t.Logf("testguard: %s", stats)
+	}
 	dir, err := os.MkdirTemp("", "af-tmux-")
 	if err != nil {
 		t.Fatalf("testguard: cannot create private tmux socket dir: %v", err)
+	}
+	if err := writeOwnerStamp(dir); err != nil {
+		t.Logf("testguard: cannot stamp private tmux dir owner, dir will not be reaped if this binary dies: %v", err)
 	}
 	t.Setenv("TMUX_TMPDIR", dir)
 	// Empty counts as unset for tmux's "am I inside tmux" check; t.Setenv
