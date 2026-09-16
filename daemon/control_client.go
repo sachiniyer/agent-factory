@@ -235,7 +235,22 @@ func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error
 	// an unsupervised process, and is exactly the escape that left the unit
 	// inactive while an impostor served the home for hours (#4470).
 	if err := waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout)); err != nil {
-		return fmt.Errorf("the installed daemon service accepted the start but no daemon answered — it may still be starting (RestartSec after a crash); retry shortly or check `%s`: %w", unitStatusDiagnostic(), err)
+		// On linux an ALREADY-ACTIVE unit makes `start` a no-op: when the
+		// daemon's process is alive but its control socket is dead or its RPC
+		// loop is wedged, every command fails here identically and the home
+		// stays wedged until manual recovery (#4475 review). Reclaim it the
+		// way `af daemon adopt` does — a manager-owned restart, once — then
+		// wait out the remaining budget. launchd needs no such branch:
+		// `kickstart -k` already kills and restarts a running job.
+		if autostartGOOS == "linux" && systemdUnitActive(admissionBoundedDeadline(deadline, ensureUnitStartTimeout)) {
+			restartDeadline := admissionBoundedDeadline(deadline, ensureUnitStartTimeout)
+			if rerr := runEnsureManagerCommand(restartDeadline, "systemctl", "--user", "restart", autostartUnitName); rerr == nil {
+				if werr := waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout)); werr == nil {
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("the installed daemon service accepted the start but no daemon answered — it may still be starting (RestartSec after a crash); retry shortly, check `%s`, or reclaim the unit's daemon with `af daemon adopt`: %w", unitStatusDiagnostic(), err)
 	}
 	return nil
 }

@@ -327,6 +327,7 @@ func TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass(t *testing.T) {
 		busConfigured bool
 		managerStderr string
 		wantAdoptLead bool
+		wantRemedy    string // when set, the refusal must name this remedy
 	}{
 		{name: "no session bus (cron)", busConfigured: false, wantAdoptLead: false},
 		{
@@ -336,6 +337,15 @@ func TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass(t *testing.T) {
 			wantAdoptLead: false,
 		},
 		{name: "refused under reachable manager", busConfigured: true, wantAdoptLead: true},
+		// A masked unit is a durable admin override: adopt's reset-failed +
+		// restart cannot lift it, so the remedy must name unmask (#4475
+		// review).
+		{
+			name:          "masked unit",
+			busConfigured: true,
+			managerStderr: "Failed to start af-daemon.service: Unit af-daemon.service is masked.",
+			wantRemedy:    "unmask the unit (`systemctl --user unmask",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _ = installEnsureTestUnitAndManager(t, false)
@@ -368,7 +378,11 @@ func TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass(t *testing.T) {
 			if adHocLaunched {
 				t.Fatal("refused start spawned an unsupervised daemon")
 			}
-			if tc.wantAdoptLead {
+			if tc.wantRemedy != "" {
+				if !strings.Contains(err.Error(), tc.wantRemedy) {
+					t.Fatalf("refusal must name remedy %q, got: %v", tc.wantRemedy, err)
+				}
+			} else if tc.wantAdoptLead {
 				if !strings.Contains(err.Error(), "run `af daemon adopt`") {
 					t.Fatalf("reachable-manager refusal must lead with adopt, got: %v", err)
 				}
@@ -384,14 +398,70 @@ func TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass(t *testing.T) {
 	}
 }
 
+// TestEnsureDaemonActiveUnitUnreachableReclaimsThroughManager is the
+// alive-but-unreachable case (#4475 review): the unit's daemon process is
+// alive per the manager, but its control socket is dead — `systemctl --user
+// start` is a no-op on an already-active unit, so without a reclaim every
+// command burns the readiness budget and fails identically forever. Ensure
+// must detect the active unit and restart it through the manager — the same
+// teardown `af daemon adopt` performs explicitly.
+func TestEnsureDaemonActiveUnitUnreachableReclaimsThroughManager(t *testing.T) {
+	_, _ = installEnsureTestUnitAndManager(t, false)
+
+	// Replace the accepting fake with one that models the wedge: `start`
+	// exits 0 without serving (the unit is already active), `is-active
+	// --quiet` reports the unit active, and only `restart` produces a
+	// serving daemon.
+	managerDir := t.TempDir()
+	startMarker := filepath.Join(managerDir, "start-called")
+	restartMarker := filepath.Join(managerDir, "restart-called")
+	script := "#!/bin/sh\n" +
+		"case \"$2\" in\n" +
+		"  start) printf 'called\\n' > " + shellQuote(startMarker) + "; exit 0;;\n" +
+		"  is-active) exit 0;;\n" +
+		"  restart) printf 'called\\n' > " + shellQuote(restartMarker) + "; exit 0;;\n" +
+		"  reset-failed) exit 0;;\n" +
+		"esac\n" +
+		"exit 64\n"
+	if err := os.WriteFile(filepath.Join(managerDir, "systemctl"), []byte(script), 0o700); err != nil {
+		t.Fatalf("write wedged-unit systemctl: %v", err)
+	}
+	t.Setenv("PATH", managerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	startServer, serverErr := ensureTestServerStarter(t)
+	// The daemon only answers once the manager has restarted the unit.
+	stopWatcher := startServerWhenMarked(restartMarker, startServer)
+	defer stopWatcher()
+
+	adHocLaunched := false
+	if err := ensureDaemonWithLauncher(func() error {
+		adHocLaunched = true
+		return startServer()
+	}); err != nil {
+		t.Fatalf("active-but-unreachable unit must be reclaimed through the manager, got: %v", err)
+	}
+	if err := serverErr(); err != nil {
+		t.Fatalf("start reclaimed supervised daemon: %v", err)
+	}
+	if adHocLaunched {
+		t.Fatal("a wedged unit daemon produced an ad-hoc spawn — the #4470 escape")
+	}
+	for _, m := range []string{startMarker, restartMarker} {
+		if _, err := os.Stat(m); err != nil {
+			t.Fatalf("expected manager call %s was not made: %v", filepath.Base(m), err)
+		}
+	}
+}
+
 // TestProbeUnitSupervisorOrdering pins the probe's three states and its check
 // order: a systemd manager — either as PID 1 (the sd_booted marker) or as a
-// user manager with a reachable bus (a `systemd --user` under a foreign init,
-// #4475 review) — is consulted before PATH, so "no manager" reads absent even
-// when the binary exists (a container shipping systemctl), while "manager
-// but binary missing" is an invocation failure that fails closed — never
-// absence. On darwin launchd is always PID 1, so a missing binary is always
-// unreachable.
+// user manager whose runtime marker exists (a `systemd --user` under a
+// foreign init, #4475 review) — is consulted before PATH, so "no manager"
+// reads absent even when the binary exists (a container shipping systemctl)
+// or a FOREIGN bus is reachable (a standalone dbus-daemon owns no manager),
+// while "manager but binary missing" or "manager but bus dead" is an
+// invocation failure that fails closed — never absence. On darwin launchd is
+// always PID 1, so a missing binary is always unreachable.
 func TestProbeUnitSupervisorOrdering(t *testing.T) {
 	binaryDir := t.TempDir()
 	for _, name := range []string{"systemctl", "launchctl"} {
@@ -403,19 +473,26 @@ func TestProbeUnitSupervisorOrdering(t *testing.T) {
 		name    string
 		goos    string
 		booted  bool // linux only: the sd_booted marker exists
+		userMgr bool // linux only: the user manager's runtime marker dir exists
 		userBus bool // linux only: the user manager's bus socket exists
 		binary  bool // the manager client binary is on PATH
 		want    supervisorPresence
 	}{
-		{"linux booted + binary", "linux", true, false, true, supervisorPresent},
-		{"linux booted, binary missing", "linux", true, false, false, supervisorUnreachable},
-		{"linux not booted + binary", "linux", false, false, true, supervisorAbsent},
-		{"linux not booted, no binary", "linux", false, false, false, supervisorAbsent},
-		{"linux not booted + user bus + binary", "linux", false, true, true, supervisorPresent},
-		{"linux not booted + user bus, binary missing", "linux", false, true, false, supervisorUnreachable},
-		{"darwin binary", "darwin", false, false, true, supervisorPresent},
-		{"darwin binary missing", "darwin", false, false, false, supervisorUnreachable},
-		{"unsupported platform", "plan9", false, false, false, supervisorAbsent},
+		{"linux booted + binary", "linux", true, false, false, true, supervisorPresent},
+		{"linux booted, binary missing", "linux", true, false, false, false, supervisorUnreachable},
+		{"linux not booted + binary", "linux", false, false, false, true, supervisorAbsent},
+		{"linux not booted, no binary", "linux", false, false, false, false, supervisorAbsent},
+		// A bus endpoint alone is NOT a manager — a foreign dbus-daemon or an
+		// inherited DBUS_SESSION_BUS_ADDRESS must read absent (#4475 review).
+		{"linux not booted + foreign bus + binary", "linux", false, false, true, true, supervisorAbsent},
+		{"linux not booted + user manager + bus + binary", "linux", false, true, true, true, supervisorPresent},
+		{"linux not booted + user manager + bus, binary missing", "linux", false, true, true, false, supervisorUnreachable},
+		// Marker proven, endpoint dead: the manager exists but cannot be
+		// invoked — fail closed, never absent.
+		{"linux not booted + user manager, bus dead + binary", "linux", false, true, false, true, supervisorUnreachable},
+		{"darwin binary", "darwin", false, false, false, true, supervisorPresent},
+		{"darwin binary missing", "darwin", false, false, false, false, supervisorUnreachable},
+		{"unsupported platform", "plan9", false, false, false, false, supervisorAbsent},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withAutostartTestEnv(t, tc.goos)
@@ -427,12 +504,17 @@ func TestProbeUnitSupervisorOrdering(t *testing.T) {
 			prevBase := systemdUserBusBase
 			t.Cleanup(func() { systemdUserBusBase = prevBase })
 			systemdUserBusBase = t.TempDir()
+			userDir := filepath.Join(systemdUserBusBase, strconv.Itoa(os.Getuid()))
+			if tc.userMgr {
+				if err := os.MkdirAll(filepath.Join(userDir, "systemd"), 0o700); err != nil {
+					t.Fatalf("mkdir user manager marker: %v", err)
+				}
+			}
 			if tc.userBus {
-				sockDir := filepath.Join(systemdUserBusBase, strconv.Itoa(os.Getuid()))
-				if err := os.MkdirAll(sockDir, 0o700); err != nil {
+				if err := os.MkdirAll(userDir, 0o700); err != nil {
 					t.Fatalf("mkdir user bus dir: %v", err)
 				}
-				ln, err := net.Listen("unix", filepath.Join(sockDir, "bus"))
+				ln, err := net.Listen("unix", filepath.Join(userDir, "bus"))
 				if err != nil {
 					t.Fatalf("fake user bus socket: %v", err)
 				}

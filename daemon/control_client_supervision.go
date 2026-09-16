@@ -85,25 +85,38 @@ const (
 // is started through can act from THIS environment. Manager existence is
 // checked FIRST and on its own — a property of the OS, independent of this
 // process's PATH: the sd_booted marker for systemd-as-PID-1, OR the user
-// manager's own bus endpoint for a `systemd --user` running under a foreign
-// init (#4475 review), so a container that merely carries the client binary
-// still reads absent. Only once the manager is known to exist does a missing
-// binary become meaningful, and there it is an inability to invoke, never
-// proof of absence (#4470).
+// manager's own runtime marker for a `systemd --user` running under a foreign
+// init (#4475 review), so a container that merely carries the client binary —
+// or a session bus with no manager behind it — still reads absent. Only once
+// the manager is known to exist does a missing binary become meaningful, and
+// there it is an inability to invoke, never proof of absence (#4470).
 func probeUnitSupervisor() (supervisorPresence, error) {
 	switch autostartGOOS {
 	case "linux":
 		// Presence is "a manager this unit can be started through exists": the
-		// sd_booted marker proves systemd-as-PID-1, and the user manager's own
-		// bus endpoint covers `systemd --user` running under a non-systemd
-		// init — the boot marker cannot prove THAT manager absent because
-		// `systemctl --user` drives the user manager, not PID 1 (#4475
-		// review). Neither existing is the only proven-absent case.
-		if _, err := os.Stat(systemdBootedDir); err != nil && !systemdUserBusReachable() {
-			return supervisorAbsent, fmt.Errorf("systemd runs neither this system nor a user manager reachable from it: %w", err)
+		// sd_booted marker proves systemd-as-PID-1, and the user manager's
+		// runtime state dir covers `systemd --user` running under a
+		// non-systemd init — the boot marker cannot prove THAT manager absent
+		// because `systemctl --user` drives the user manager, not PID 1. The
+		// bus endpoint deliberately does NOT prove presence: a foreign
+		// dbus-daemon (an OpenRC session, a container inheriting
+		// DBUS_SESSION_BUS_ADDRESS) owns a bus with no manager behind it
+		// (#4475 review). Neither marker existing is the only proven-absent
+		// case.
+		_, bootErr := os.Stat(systemdBootedDir)
+		booted := bootErr == nil
+		if !booted && !systemdUserManagerPresent() {
+			return supervisorAbsent, fmt.Errorf("systemd runs neither this system nor a user manager in this session: %w", bootErr)
 		}
 		if _, err := exec.LookPath("systemctl"); err != nil {
 			return supervisorUnreachable, fmt.Errorf("systemd is present but no systemctl binary is reachable in PATH: %w", err)
+		}
+		// A user manager under a foreign init can be invoked ONLY through its
+		// own bus — unlike the booted case, there is no PID-1 activation path.
+		// Its marker proves the manager ran, so a dead endpoint is an
+		// invocation failure (fail closed), not absence.
+		if !booted && !systemdUserBusReachable() {
+			return supervisorUnreachable, fmt.Errorf("a systemd user manager runs in this session but its bus is unreachable from this environment")
 		}
 		return supervisorPresent, nil
 	case "darwin":
@@ -154,6 +167,12 @@ func unitStartRemedy(startErr error) string {
 	// plist from a domain that already answered.
 	if autostartGOOS == "darwin" && strings.Contains(startErr.Error(), "Could not find service") {
 		return "re-bootstrap the unit with `af daemon install` — the gui domain answered but the service is not loaded"
+	}
+	// A masked unit is a durable admin override that neither reset-failed nor
+	// restart can reverse — `af daemon adopt` deterministically fails on it
+	// (#4475 review). Only `systemctl unmask` lifts the mask, so it leads.
+	if autostartGOOS == "linux" && strings.Contains(startErr.Error(), "is masked") {
+		return fmt.Sprintf("unmask the unit (`systemctl --user unmask %s`), then run `af daemon adopt`", autostartUnitName)
 	}
 	if unitStartBusUnreachable(startErr) {
 		return "start the unit from a session with a service manager — `af daemon adopt` cannot reach the manager from this environment either"
@@ -221,6 +240,24 @@ func runEnsureManagerCommand(deadline time.Time, name string, args ...string) er
 	return fmt.Errorf("%s %s failed: %w\n%s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 }
 
+// systemdUserManagerPresent reports whether a `systemd --user` manager runs
+// in this session, proven by its runtime state dir <runtime>/systemd — created
+// by the manager itself at startup, under the same runtime dir chain
+// `systemctl --user` resolves ($XDG_RUNTIME_DIR, else /run/user/<uid>). This —
+// not the session bus — is the evidence a manager exists: a standalone
+// dbus-daemon or an inherited DBUS_SESSION_BUS_ADDRESS owns a bus endpoint
+// with nothing systemd behind it, and taking it as presence read that foreign
+// session as supervised and failed every command closed (#4475 review).
+func systemdUserManagerPresent() bool {
+	// Check both plausible locations: a marker under EITHER proves a manager
+	// ran here — a session whose XDG_RUNTIME_DIR points elsewhere can then
+	// only fail to invoke it, which reads as unreachable, not absent.
+	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" && isDir(filepath.Join(dir, "systemd")) {
+		return true
+	}
+	return isDir(filepath.Join(systemdUserBusBase, strconv.Itoa(os.Getuid()), "systemd"))
+}
+
 // systemdUserBusReachable reports whether a systemd USER manager's bus is
 // declared or listening — resolved exactly the way `systemctl --user`
 // resolves it: DBUS_SESSION_BUS_ADDRESS, else $XDG_RUNTIME_DIR/bus, else
@@ -241,4 +278,19 @@ func systemdUserBusReachable() bool {
 func isSocket(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.Mode()&os.ModeSocket != 0
+}
+
+func isDir(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.IsDir()
+}
+
+// systemdUnitActive reports whether the manager considers the unit's process
+// alive — `is-active --quiet` exits zero only for the active state, so a dead
+// bus, a missing unit, or a wedged manager all read false and never trigger
+// the readiness-failure reclaim (#4475 review).
+func systemdUnitActive(deadline time.Time) bool {
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	return exec.CommandContext(ctx, "systemctl", "--user", "is-active", "--quiet", autostartUnitName).Run() == nil
 }
