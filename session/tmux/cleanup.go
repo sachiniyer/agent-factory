@@ -133,6 +133,23 @@ func probeSession(cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	return false, true
 }
 
+// probeSessionTarget is probeSession for an explicit tmux target — used by
+// the monitor's id-bound capture, where `-t=` would force an exact NAME match
+// and a session id ($N) must instead resolve by id (#4473 review). Same
+// answered/unknown split: a timed-out probe reports (false, false).
+func probeSessionTarget(cmdExec cmd.Executor, target string) (exists bool, known bool) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	err := runTmuxBoundedWith(ctx, cmdExec, "has-session", "-t", target)
+	if err == nil {
+		return true, true
+	}
+	if ctx.Err() != nil {
+		return false, false
+	}
+	return false, true
+}
+
 // recoveryWindowObserver is notified when a vanished-session recovery's bounded
 // GRACE WAIT opens and closes. Production leaves it nil, so this costs one nil
 // check per wait.

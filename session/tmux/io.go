@@ -50,6 +50,15 @@ type statusMonitor struct {
 	// kill lands (Codex on #4473).
 	// Guarded by monitorMu.
 	teardownSettledAt time.Time
+	// sessionID is the confirmed tmux session id ($N) of the generation this
+	// monitor polls — resolved when the generation answered live, and the
+	// target the mark-consulting capture uses. The reused NAME cannot bind a
+	// generation: a poll that straddles a same-object restart and lands on
+	// the replacement would consult THIS monitor's mark against the new
+	// session's death (#4473 review). "" when no id was resolved — the
+	// pre-binding name target, no worse than before.
+	// Written before the monitor is installed; read under monitorMu.
+	sessionID string
 }
 
 func newStatusMonitor() *statusMonitor {
@@ -181,13 +190,17 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 	t.monitorMu.Lock()
 	mon := t.monitor
 	alive := mon != nil && !mon.dead
+	target := exactTarget(t.sanitizedName)
+	if alive && mon.sessionID != "" {
+		target = mon.sessionID
+	}
 	t.monitorMu.Unlock()
 	if !alive {
 		return false, false, "", false
 	}
 
 	captureStartedAt := time.Now()
-	content, err := t.CapturePaneContent()
+	content, err := t.capturePaneContentTarget(context.Background(), target)
 	if err != nil {
 		// If the tmux session no longer exists, log once and latch the
 		// monitor as dead so the daemon's per-second poll doesn't spam
@@ -316,13 +329,25 @@ func (t *TmuxSession) CapturePaneContent() (string, error) {
 // ErrSessionGone — callers tear sessions down on "gone"). The parent is checked
 // first so a cancel racing the deadline is attributed to the caller.
 func (t *TmuxSession) CapturePaneContentContext(ctx context.Context) (string, error) {
+	return t.capturePaneContentTarget(ctx, exactTarget(t.sanitizedName))
+}
+
+// capturePaneContentTarget is CapturePaneContentContext addressed to an
+// explicit tmux target. The status poll passes the monitor's confirmed
+// session id ($N): a poll that straddles a same-object restart must not land
+// on the replacement that reused the name and consult the old generation's
+// teardown mark against ITS death — the name alone cannot tell them apart
+// (#4473 review). The gone-probe is bound to the same target for the same
+// reason: the name answering "live" proves only that SOME generation stands
+// behind it.
+func (t *TmuxSession) capturePaneContentTarget(ctx context.Context, target string) (string, error) {
 	// Add -e flag to preserve escape sequences (ANSI color codes). `=` forces
 	// an exact session match: without it tmux would prefix-match a surviving
 	// sibling session (e.g. the `__shell` tab) when the agent session has
 	// died, capturing the wrong pane and masking the dead agent (#1006).
 	bctx, cancel := context.WithTimeout(ctx, tmuxCommandTimeout)
 	defer cancel()
-	output, err := t.outputTmuxBounded(bctx, "capture-pane", "-p", "-e", "-J", "-t", exactTarget(t.sanitizedName))
+	output, err := t.outputTmuxBounded(bctx, "capture-pane", "-p", "-e", "-J", "-t", target)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
@@ -330,12 +355,44 @@ func (t *TmuxSession) CapturePaneContentContext(ctx context.Context) (string, er
 		if bctx.Err() != nil {
 			return "", fmt.Errorf("%w: capture-pane after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		if !t.ExistsOrUnknown() {
+		if !t.captureTargetExistsOrUnknown(target) {
 			return "", t.sessionGoneError("capture-pane", err)
 		}
 		return "", fmt.Errorf("error capturing pane content: %v", err)
 	}
 	return string(output), nil
+}
+
+// captureTargetExistsOrUnknown is the gone-probe for a possibly id-bound
+// capture target: a $id needs has-session against THAT id, not the reused
+// name, or the replacement's liveness would mask the polled generation's
+// death. Same conservative timeout lie as ExistsOrUnknown.
+func (t *TmuxSession) captureTargetExistsOrUnknown(target string) bool {
+	if !strings.HasPrefix(target, "$") {
+		return t.ExistsOrUnknown()
+	}
+	exists, known := probeSessionTarget(t.cmdExec, target)
+	if !known {
+		return true
+	}
+	return exists
+}
+
+// confirmedSessionID resolves the tmux session id ($N) currently standing
+// behind the session name — the generation token a reused name cannot
+// provide. "" on any failure: the caller falls back to the name target,
+// which is the pre-binding behavior and no worse than it.
+func (t *TmuxSession) confirmedSessionID() string {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), "#{session_id}")
+	if err != nil {
+		return ""
+	}
+	if id := strings.TrimSpace(string(out)); strings.HasPrefix(id, "$") {
+		return id
+	}
+	return ""
 }
 
 // CaptureVisiblePaneGrid captures the visible pane as a GRID — one output line per

@@ -615,6 +615,12 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	if workDir != "" {
 		monitor = newReattachStatusMonitor()
 	}
+	// Bind the fresh monitor to the generation that just answered live: the
+	// session id targets exactly that tmux session, which the reused name
+	// cannot do — a poll holding the OLD monitor across this swap must not
+	// land a capture on the replacement and read the old mark against the
+	// new generation's death (#4473 review). "" degrades to the name target.
+	monitor.sessionID = t.confirmedSessionID()
 	if err := t.refreshRestoredAccountEnvironment(); err != nil {
 		return RestoreReattached, fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
 	}
