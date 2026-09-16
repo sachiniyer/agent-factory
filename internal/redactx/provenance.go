@@ -58,21 +58,8 @@ const (
 	// text — the carrier an access_token field hides in.
 	ProvURIQueryPair
 	// ProvURIComponent is a percent-decoded URI component that is neither
-	// path nor query pair (fragment, opaque body).
+	// path nor query pair (fragment, opaque body, userinfo).
 	ProvURIComponent
-	// ProvJSONDocument is a marshalled JSON document (entry kind; the
-	// document parser owns it, not the transform dispatcher).
-	ProvJSONDocument
-	// ProvConfigJSON is a config file in JSON format (entry kind).
-	ProvConfigJSON
-	// ProvConfigTOML is a config file in TOML format (entry kind).
-	ProvConfigTOML
-	// ProvGoQuoted is a Go-quoted value handed to an entry point with no
-	// owning document grammar; fails closed there.
-	ProvGoQuoted
-	// ProvShell is a shell command handed to an entry point with no owning
-	// document grammar; fails closed there.
-	ProvShell
 )
 
 func (p Provenance) String() string {
@@ -109,16 +96,6 @@ func (p Provenance) String() string {
 		return "uri-query-pair"
 	case ProvURIComponent:
 		return "uri-component"
-	case ProvJSONDocument:
-		return "json-document"
-	case ProvConfigJSON:
-		return "config-json"
-	case ProvConfigTOML:
-		return "config-toml"
-	case ProvGoQuoted:
-		return "go-quoted"
-	case ProvShell:
-		return "shell"
 	default:
 		return "provenance(?)"
 	}
