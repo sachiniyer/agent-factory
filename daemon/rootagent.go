@@ -157,19 +157,6 @@ type rootEnsureState struct {
 	// dedupe bits. Runtime evidence is committed separately under the instance
 	// lifecycle lock.
 	programDriftBeforeLatchForTest func()
-	// carriedReaped is what a reaped root record handed a replacement that has
-	// not been published yet (#4400 review). The record is deleted at the reap,
-	// so the carried account pin, conversation, and tab roster otherwise exist
-	// only in the one create invocation's stack — a create that then fails
-	// leaves the next ensure seeing no prior instance, rebuilding an empty
-	// carry, and silently demoting the guaranteed root to ambient credentials.
-	// The state parks here — the per-repo retry state that already outlives a
-	// single create attempt — until rootEnsureSucceeded publishes a
-	// replacement (or an adopt/disable/delete outcome makes it moot).
-	// rootEnsureFailed deliberately leaves it: the pin must survive transient
-	// create failure.
-	carriedReaped    reapedRootState
-	carriedReapedSet bool
 	// Claude transcript verification is advisory while the root is live. Keep
 	// its filesystem work and any persistent inspection warning off the hot
 	// one-second ensure path.
@@ -509,7 +496,7 @@ func (m *Manager) rootEnsureStateForLocked(key string) *rootEnsureState {
 // boundary (#3366), and nil for a legacy root_agents path.
 func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo *config.RepoContext, resolution config.RootAgentResolution, identity *resolvedProjectRoot) {
 	if !resolution.Enabled {
-		m.rootEnsureSucceeded(st)
+		m.rootEnsureSucceeded(repo.ID, st)
 		return
 	}
 	workspace := repo.WorkspacePath()
@@ -531,7 +518,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	deleted := m.rootDeletionTombstoneApplies(sweepLayers, repo.ID)
 	m.mu.Unlock()
 	if deleted {
-		m.rootEnsureSucceeded(st)
+		m.rootEnsureSucceeded(repo.ID, st)
 		return
 	}
 
@@ -574,7 +561,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			// evidence, so a later outage does not carry a rotated-away id (#3306).
 			m.checkAdoptedRootProgramDrift(repo, key, workspace, st, resolution.RootAgent, inst, identity)
 			m.refreshRootClaudeConversation(repo.ID, key, workspace, inst, st)
-			m.rootEnsureSucceeded(st)
+			m.rootEnsureSucceeded(repo.ID, st)
 			return
 		}
 	}
@@ -768,8 +755,10 @@ type reapedRootState struct {
 }
 
 // rootEnsureSucceeded resets a repo's retry state after a pass that left a
-// healthy root in place (freshly created or adopted).
-func (m *Manager) rootEnsureSucceeded(st *rootEnsureState) {
+// healthy root in place (freshly created or adopted). The repoID keys the
+// pending reaped carry the same pass makes moot — by repository, not by this
+// candidate's state key, because two spellings of one repo share one carry.
+func (m *Manager) rootEnsureSucceeded(repoID string, st *rootEnsureState) {
 	m.mu.Lock()
 	st.consecutiveFailures = 0
 	st.unansweredFailures = 0
@@ -777,8 +766,7 @@ func (m *Manager) rootEnsureSucceeded(st *rootEnsureState) {
 	st.escalatedPersistent = false
 	st.nextAttempt = time.Time{}
 	st.suppressLogged = false
-	st.carriedReaped = reapedRootState{}
-	st.carriedReapedSet = false
+	delete(m.reapedRootCarries, repoID)
 	m.mu.Unlock()
 }
 

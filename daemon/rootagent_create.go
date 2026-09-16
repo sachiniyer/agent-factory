@@ -246,25 +246,33 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		if !reapedRoot {
 			return
 		}
-		// Park what the reap carried on the ensure state before attempting the
+		// Park what the reap carried under the REPO ID before attempting the
 		// create: the record is already gone, so the carry exists only on this
 		// stack. A create that now fails would otherwise hand the next ensure
 		// an empty carry — a transient launch failure silently demoting the
 		// guaranteed root to ambient credentials and a fresh conversation
-		// (#4400 review). The park is re-armed on every successful reap; it is
-		// released only by a pass that publishes or obviates the replacement.
+		// (#4400 review). The park is keyed by repo rather than by this
+		// candidate's ensure state for the same reason rootCreatesInFlight is:
+		// two root_agents spellings of one repository share it — otherwise a
+		// sibling spelling's next ensure finds no record AND no carry,
+		// publishes an ambient root, and this pass's success sweep then
+		// discards the carry nobody consumed (#4400 review round 2). The park
+		// is re-armed on every successful reap; it is released only by a pass
+		// that publishes or obviates the replacement.
 		m.mu.Lock()
-		st.carriedReaped = carried
-		st.carriedReapedSet = true
+		m.reapedRootCarries[repo.ID] = carried
 		m.mu.Unlock()
 	} else {
 		// No record to reap — but an earlier heal may have reaped one and
 		// parked its carry when the replacement then failed to publish.
 		// Adopting the parked carry is what keeps that transient failure from
-		// costing the root its account pin, conversation, and tab roster.
+		// costing the root its account pin, conversation, and tab roster. The
+		// lookup is repo-keyed, so the carry parked by ANY spelling of this
+		// repository is consumed here — which spelling next publishes the
+		// replacement is irrelevant to what the replacement must carry.
 		m.mu.Lock()
-		if st.carriedReapedSet {
-			carried = st.carriedReaped
+		if parked, ok := m.reapedRootCarries[repo.ID]; ok {
+			carried = parked
 			reapedRoot = true
 		}
 		m.mu.Unlock()
@@ -462,5 +470,5 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		reportRootConversationCarry(workspace, carried.conversation, data.AgentConversation, data.CurrentAgent)
 		reportRootTabCarry(workspace, carried.tabs, data.Tabs)
 	}
-	m.rootEnsureSucceeded(st)
+	m.rootEnsureSucceeded(repo.ID, st)
 }

@@ -255,9 +255,17 @@ func claudeAccountTranscriptProgram(program, account string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir, err := agentaccount.Dir(home, tmux.ProgramClaude, account)
+	// Selected, not Dir: this path is read once per inspection interval for the
+	// life of the root, and a registration can be invalidated between intervals —
+	// an `accounts/<agent>` ancestor swapped for a symlink redirects the entire
+	// transcript scan outside the registry, where it would persist a foreign
+	// store's newest conversation id over the recorded one. Selected re-proves
+	// the ancestors and the leaf on every call, so an invalidated registration
+	// surfaces here as an inspection warning instead of a durable write (#4400
+	// review round 2).
+	selected, err := agentaccount.Selected(home, tmux.ProgramClaude, account)
 	if err != nil {
 		return "", err
 	}
-	return "CLAUDE_CONFIG_DIR=" + shellquote.Quote(dir) + " " + program, nil
+	return "CLAUDE_CONFIG_DIR=" + shellquote.Quote(selected.Dir) + " " + program, nil
 }

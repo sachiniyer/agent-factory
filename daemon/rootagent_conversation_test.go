@@ -249,7 +249,7 @@ func TestEnsureRootAgentsDropsTheAccountPinAcrossAnAgentChange(t *testing.T) {
 func TestClaudeAccountTranscriptProgramScope(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
-	accountDir, err := agentaccount.Dir(home, tmux.ProgramClaude, "work")
+	accountDir, err := agentaccount.Register(home, tmux.ProgramClaude, "work")
 	require.NoError(t, err)
 
 	scoped, err := claudeAccountTranscriptProgram("claude --verbose", "work")
