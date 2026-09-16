@@ -25,6 +25,11 @@ func readCarryFile(t *testing.T, path string) string {
 	return string(data)
 }
 
+// plainCarryRoot anchors a destination at itself, refusing a symlinked root.
+func plainCarryRoot(dir string) carryRoot {
+	return carryRoot{base: dir}
+}
+
 func carryHomes(t *testing.T) (string, string) {
 	t.Helper()
 	return t.TempDir(), t.TempDir()
@@ -35,7 +40,7 @@ func TestCarryConversationFileCreatesOwnerOnlyCopy(t *testing.T) {
 	const transcript = "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n"
 	srcPath := writeCarryFile(t, src, carryTestRel, transcript)
 
-	require.NoError(t, carryConversationFile(src, dst, carryTestRel, true))
+	require.NoError(t, carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true))
 
 	dstPath := filepath.Join(dst, carryTestRel)
 	require.Equal(t, transcript, readCarryFile(t, dstPath))
@@ -56,11 +61,11 @@ func TestCarryConversationFileCreatesOwnerOnlyCopy(t *testing.T) {
 func TestCarryConversationFileIsIdempotent(t *testing.T) {
 	src, dst := carryHomes(t)
 	writeCarryFile(t, src, carryTestRel, "line one\n")
-	require.NoError(t, carryConversationFile(src, dst, carryTestRel, true))
+	require.NoError(t, carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true))
 	before, err := os.Stat(filepath.Join(dst, carryTestRel))
 	require.NoError(t, err)
 
-	require.NoError(t, carryConversationFile(src, dst, carryTestRel, true))
+	require.NoError(t, carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true))
 	after, err := os.Stat(filepath.Join(dst, carryTestRel))
 	require.NoError(t, err)
 	require.True(t, os.SameFile(before, after), "an identical copy must not be rewritten on retry")
@@ -88,7 +93,7 @@ func TestCarryConversationFileKeepsTheSuperset(t *testing.T) {
 			writeCarryFile(t, src, carryTestRel, tc.src)
 			writeCarryFile(t, dst, carryTestRel, tc.dst)
 
-			require.NoError(t, carryConversationFile(src, dst, carryTestRel, true))
+			require.NoError(t, carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true))
 			require.Equal(t, tc.want, readCarryFile(t, filepath.Join(dst, carryTestRel)))
 			require.Equal(t, tc.src, readCarryFile(t, filepath.Join(src, carryTestRel)))
 		})
@@ -100,7 +105,7 @@ func TestCarryConversationFileRefusesDivergedDestination(t *testing.T) {
 	writeCarryFile(t, src, carryTestRel, "turn one\nturn two\n")
 	dstPath := writeCarryFile(t, dst, carryTestRel, "turn one\nsomething else\n")
 
-	err := carryConversationFile(src, dst, carryTestRel, true)
+	err := carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true)
 	require.Error(t, err)
 	require.Equal(t, "the new account already holds a different copy of this conversation", carryFailureReason(err))
 	require.Equal(t, "turn one\nsomething else\n", readCarryFile(t, dstPath),
@@ -115,7 +120,7 @@ func TestCarryConversationFileRefusesSymlinks(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(dst, carryTestRel)), 0o700))
 		require.NoError(t, os.Symlink(outside, filepath.Join(dst, carryTestRel)))
 
-		require.Error(t, carryConversationFile(src, dst, carryTestRel, true))
+		require.Error(t, carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true))
 		require.Empty(t, readCarryFile(t, outside), "a planted destination symlink must never be written through")
 	})
 	t.Run("destination directory", func(t *testing.T) {
@@ -124,7 +129,7 @@ func TestCarryConversationFileRefusesSymlinks(t *testing.T) {
 		outside := t.TempDir()
 		require.NoError(t, os.Symlink(outside, filepath.Join(dst, "projects")))
 
-		require.Error(t, carryConversationFile(src, dst, carryTestRel, true))
+		require.Error(t, carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true))
 		entries, err := os.ReadDir(outside)
 		require.NoError(t, err)
 		require.Empty(t, entries, "a symlinked store directory must not redirect the copy outside the account")
@@ -136,7 +141,7 @@ func TestCarryConversationFileRefusesSymlinks(t *testing.T) {
 		dst := filepath.Join(t.TempDir(), "account")
 		require.NoError(t, os.Symlink(real, dst))
 
-		require.Error(t, carryConversationFile(src, dst, carryTestRel, true))
+		require.Error(t, carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true))
 		entries, err := os.ReadDir(real)
 		require.NoError(t, err)
 		require.Empty(t, entries)
@@ -147,7 +152,7 @@ func TestCarryConversationFileRefusesSymlinks(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(src, carryTestRel)), 0o700))
 		require.NoError(t, os.Symlink(secret, filepath.Join(src, carryTestRel)))
 
-		require.Error(t, carryConversationFile(src, dst, carryTestRel, true))
+		require.Error(t, carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true))
 		require.NoFileExists(t, filepath.Join(dst, carryTestRel),
 			"a symlinked source must not smuggle another file into the new account")
 	})
@@ -157,7 +162,7 @@ func TestCarryConversationFileRefusesSymlinks(t *testing.T) {
 		writeCarryFile(t, elsewhere, "-repo/5b1d2c3e-4f50-4a6b-8c7d-9e0f1a2b3c4d.jsonl", "turn one\n")
 		require.NoError(t, os.Symlink(elsewhere, filepath.Join(src, "projects")))
 
-		require.Error(t, carryConversationFile(src, dst, carryTestRel, true))
+		require.Error(t, carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true))
 		require.NoFileExists(t, filepath.Join(dst, carryTestRel))
 	})
 }
@@ -168,7 +173,7 @@ func TestCarryConversationFileAllowsSymlinkedAmbientSourceRoot(t *testing.T) {
 	src := filepath.Join(t.TempDir(), ".claude")
 	require.NoError(t, os.Symlink(real, src))
 
-	require.NoError(t, carryConversationFile(src, dst, carryTestRel, true),
+	require.NoError(t, carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true),
 		"an ambient ~/.claude kept in a dotfiles checkout is the provider's real store")
 	require.Equal(t, "turn one\n", readCarryFile(t, filepath.Join(dst, carryTestRel)))
 }
@@ -177,7 +182,7 @@ func TestCarryConversationFileMissingSource(t *testing.T) {
 	t.Run("a new carry needs the source", func(t *testing.T) {
 		src, dst := carryHomes(t)
 		writeCarryFile(t, dst, carryTestRel, "stale prefix\n")
-		err := carryConversationFile(src, dst, carryTestRel, true)
+		err := carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true)
 		require.Error(t, err)
 		require.Equal(t, "its transcript is missing from the previous account's home", carryFailureReason(err),
 			"a stale destination copy must not be resumed as though it were the whole conversation")
@@ -185,15 +190,15 @@ func TestCarryConversationFileMissingSource(t *testing.T) {
 	t.Run("a committed carry accepts its landed copy", func(t *testing.T) {
 		src, dst := carryHomes(t)
 		writeCarryFile(t, dst, carryTestRel, "carried\n")
-		require.NoError(t, carryConversationFile(src, dst, carryTestRel, false))
+		require.NoError(t, carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, false))
 	})
 	t.Run("a committed carry with no copy anywhere fails", func(t *testing.T) {
 		src, dst := carryHomes(t)
-		require.Error(t, carryConversationFile(src, dst, carryTestRel, false))
+		require.Error(t, carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, false))
 	})
 	t.Run("a missing ambient source home", func(t *testing.T) {
 		dst := t.TempDir()
-		err := carryConversationFile(filepath.Join(t.TempDir(), "absent"), dst, carryTestRel, true)
+		err := carryConversationFile(ambientCarryRoot(filepath.Join(t.TempDir(), "absent")), plainCarryRoot(dst), carryTestRel, true)
 		require.Error(t, err)
 		require.Contains(t, carryFailureReason(err), "missing")
 	})
@@ -205,7 +210,7 @@ func TestCarryConversationFileSameStoreIsANoOp(t *testing.T) {
 	before, err := os.Stat(path)
 	require.NoError(t, err)
 
-	require.NoError(t, carryConversationFile(home, home, carryTestRel, true))
+	require.NoError(t, carryConversationFile(ambientCarryRoot(home), plainCarryRoot(home), carryTestRel, true))
 	after, err := os.Stat(path)
 	require.NoError(t, err)
 	require.True(t, os.SameFile(before, after))
@@ -225,7 +230,7 @@ func TestSplitCarryPathRefusesPathsOutsideTheConversationStore(t *testing.T) {
 	} {
 		_, _, err := splitCarryPath(rel, true)
 		require.Error(t, err, "carry path %q must be refused", rel)
-		require.Error(t, carryConversationFile(t.TempDir(), t.TempDir(), rel, true), "carry path %q must be refused", rel)
+		require.Error(t, carryConversationFile(ambientCarryRoot(t.TempDir()), plainCarryRoot(t.TempDir()), rel, true), "carry path %q must be refused", rel)
 	}
 	dirs, name, err := splitCarryPath("sessions/2026/09/16/rollout-x.jsonl", true)
 	require.NoError(t, err)
@@ -241,12 +246,64 @@ func TestCarryConversationTreeCopiesRegularFilesOnly(t *testing.T) {
 	secret := writeCarryFile(t, t.TempDir(), "secret", "secret")
 	require.NoError(t, os.Symlink(secret, filepath.Join(src, aux, "link")))
 
-	require.NoError(t, carryConversationTree(src, dst, aux))
+	require.NoError(t, carryConversationTree(ambientCarryRoot(src), plainCarryRoot(dst), aux))
 	require.Equal(t, "result", readCarryFile(t, filepath.Join(dst, aux, "tool-results", "one.txt")))
 	require.Equal(t, "sub\n", readCarryFile(t, filepath.Join(dst, aux, "subagents", "agent-1.jsonl")))
 	_, err := os.Lstat(filepath.Join(dst, aux, "link"))
 	require.True(t, os.IsNotExist(err), "symlinks in the per-session directory are not carried")
 
-	require.NoError(t, carryConversationTree(t.TempDir(), dst, aux),
+	require.NoError(t, carryConversationTree(ambientCarryRoot(t.TempDir()), plainCarryRoot(dst), aux),
 		"a conversation with no per-session directory has nothing extra to carry")
+}
+
+func TestCarryConversationFileRefusesASymlinkedAccountAncestor(t *testing.T) {
+	for _, side := range []string{"destination", "source"} {
+		t.Run(side, func(t *testing.T) {
+			home := t.TempDir()
+			elsewhere := t.TempDir()
+			// accounts/claude was validated as a real directory, then swapped for
+			// a link to a tree the registry does not own.
+			require.NoError(t, os.MkdirAll(filepath.Join(home, "accounts"), 0o700))
+			require.NoError(t, os.MkdirAll(filepath.Join(elsewhere, "work"), 0o700))
+			require.NoError(t, os.Symlink(elsewhere, filepath.Join(home, "accounts", "claude")))
+			account, err := accountCarryRoot(home, "claude", "work", filepath.Join(home, "accounts", "claude", "work"))
+			require.NoError(t, err)
+
+			other := t.TempDir()
+			if side == "destination" {
+				writeCarryFile(t, other, carryTestRel, "turn one\n")
+				require.Error(t, carryConversationFile(ambientCarryRoot(other), account, carryTestRel, true))
+				require.NoFileExists(t, filepath.Join(elsewhere, "work", carryTestRel),
+					"a swapped ancestor must not redirect the copy outside the registered account")
+			} else {
+				writeCarryFile(t, filepath.Join(elsewhere, "work"), carryTestRel, "not this account's\n")
+				require.Error(t, carryConversationFile(account, plainCarryRoot(other), carryTestRel, true))
+				require.NoFileExists(t, filepath.Join(other, carryTestRel),
+					"a swapped ancestor must not supply another tree's file as the conversation")
+			}
+		})
+	}
+	_, err := accountCarryRoot("/af", "claude", "work", "/elsewhere/claude/work")
+	require.Error(t, err, "an account directory outside the AF home's registry is not anchored")
+}
+
+func TestCarryConversationFileKeepsARetainedCopyWritable(t *testing.T) {
+	for _, tc := range []struct{ name, src, dst string }{
+		{name: "identical", src: "turn one\n", dst: "turn one\n"},
+		{name: "longer", src: "turn one\n", dst: "turn one\nturn two\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, dst := carryHomes(t)
+			writeCarryFile(t, src, carryTestRel, tc.src)
+			dstPath := writeCarryFile(t, dst, carryTestRel, tc.dst)
+			require.NoError(t, os.Chmod(dstPath, 0o400))
+
+			require.NoError(t, carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true))
+			info, err := os.Stat(dstPath)
+			require.NoError(t, err)
+			require.Equal(t, os.FileMode(0o600), info.Mode().Perm(),
+				"the resumed provider appends to the kept copy, so it must be writable")
+			require.Equal(t, tc.dst, readCarryFile(t, dstPath))
+		})
+	}
 }

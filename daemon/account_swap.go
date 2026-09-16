@@ -496,7 +496,7 @@ func captureAccountSwapConversation(instance *session.Instance, snap session.Con
 	if !res.conversation.HasID() {
 		return errors.New("replacement Codex runtime did not expose a conversation id")
 	}
-	if !instance.SetAgentConversationForRuntime(token, res.conversation) {
+	if !instance.RecordAccountSwapConversationForRuntime(token, res.conversation) {
 		return errors.New("replacement Codex runtime changed before its conversation id could be recorded")
 	}
 	return nil

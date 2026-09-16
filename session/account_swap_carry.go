@@ -30,6 +30,9 @@ type conversationCarry struct {
 	sourceAccount string
 	srcHome       string
 	dstHome       string
+	// srcRoot and dstRoot anchor the two homes for the copy itself.
+	srcRoot carryRoot
+	dstRoot carryRoot
 	// transcript is the conversation file, relative to both homes. The layout
 	// is kept identical so the provider finds it where it would have written it.
 	transcript string
@@ -114,11 +117,15 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 		return nil, "the new account's home could not be resolved"
 	}
 	carry.dstHome = target.Dir
-	srcHome, reason := carrySourceHome(home, req.agent, carry.sourceAccount, req.program, req.workDir)
+	if carry.dstRoot, err = accountCarryRoot(home, req.agent, req.target, target.Dir); err != nil {
+		return nil, "the new account's home is not where af registers accounts"
+	}
+	srcRoot, reason := carrySourceHome(home, req.agent, carry.sourceAccount, req.program, req.workDir)
 	if reason != "" {
 		return nil, reason
 	}
-	carry.srcHome = srcHome
+	carry.srcHome = srcRoot.dir()
+	carry.srcRoot = srcRoot
 	if reason := carry.locate(req.program, req.workDir); reason != "" {
 		return nil, reason
 	}
@@ -128,29 +135,33 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 // carrySourceHome resolves the provider home the outgoing runtime used. A
 // registered account is its registry directory; the ambient identity follows
 // the same environment model the provider-store readers already use.
-func carrySourceHome(home, agent, account, program, workDir string) (string, string) {
+func carrySourceHome(home, agent, account, program, workDir string) (carryRoot, string) {
 	if strings.TrimSpace(account) != "" {
 		source, err := agentaccount.Selected(home, agent, account)
 		if err != nil || source.Dir == "" {
-			return "", fmt.Sprintf("the previous account %q is no longer registered for %s", account, agent)
+			return carryRoot{}, fmt.Sprintf("the previous account %q is no longer registered for %s", account, agent)
 		}
-		return source.Dir, ""
+		root, err := accountCarryRoot(home, agent, account, source.Dir)
+		if err != nil {
+			return carryRoot{}, "the previous account's home is not where af registers accounts"
+		}
+		return root, ""
 	}
 	switch agent {
 	case tmux.ProgramClaude:
 		dir, _, err := claudeTranscriptLaunchContext(program, workDir)
 		if err != nil {
-			return "", "af could not resolve the ambient Claude config directory"
+			return carryRoot{}, "af could not resolve the ambient Claude config directory"
 		}
-		return dir, ""
+		return ambientCarryRoot(dir), ""
 	case tmux.ProgramCodex:
 		dir, err := tmux.CodexHomeFromCommand(program, workDir)
 		if err != nil {
-			return "", "af could not resolve the ambient Codex home"
+			return carryRoot{}, "af could not resolve the ambient Codex home"
 		}
-		return dir, ""
+		return ambientCarryRoot(dir), ""
 	}
-	return "", fmt.Sprintf("%s conversations cannot be carried", agent)
+	return carryRoot{}, fmt.Sprintf("%s conversations cannot be carried", agent)
 }
 
 // locate finds the conversation artifact and checks it exists before any
@@ -182,8 +193,8 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 	for _, dir := range candidates {
 		project := filepath.Join("projects", claudeProjectName(dir))
 		transcript := filepath.Join(project, c.id+".jsonl")
-		if carryArtifactPresent(c.srcHome, transcript) ||
-			(c.committed && carryArtifactPresent(c.dstHome, transcript)) {
+		if carryArtifactPresent(c.srcRoot, transcript) ||
+			(c.committed && carryArtifactPresent(c.dstRoot, transcript)) {
 			c.transcript = transcript
 			c.aux = filepath.Join(project, c.id)
 			return ""
@@ -259,13 +270,13 @@ func (c *conversationCarry) launch(resolvedProgram string) (string, AgentConvers
 
 // copy performs the carry. Only the transcript decides success.
 func (c *conversationCarry) copy() error {
-	if err := carryConversationFile(c.srcHome, c.dstHome, c.transcript, !c.committed); err != nil {
+	if err := carryConversationFile(c.srcRoot, c.dstRoot, c.transcript, !c.committed); err != nil {
 		return err
 	}
 	if c.aux == "" {
 		return nil
 	}
-	if err := carryConversationTree(c.srcHome, c.dstHome, c.aux); err != nil {
+	if err := carryConversationTree(c.srcRoot, c.dstRoot, c.aux); err != nil {
 		log.WarningLog.Printf("account swap carried %s conversation %s without all of its per-session files: %v",
 			c.agent, c.id, err)
 	}
@@ -277,6 +288,8 @@ func (c *conversationCarry) clone() *conversationCarry {
 		return nil
 	}
 	cloned := *c
+	cloned.srcRoot.components = append([]string(nil), c.srcRoot.components...)
+	cloned.dstRoot.components = append([]string(nil), c.dstRoot.components...)
 	return &cloned
 }
 
@@ -321,19 +334,38 @@ func (i *Instance) carryOrReplan(plan *accountSwapLaunchPlan) (string, error) {
 	return reason, nil
 }
 
-// ensureAccountSwapConversationCarried is the respawn-time half: it re-runs
-// the idempotent copy for the plan about to launch (a daemon restart, or a
-// session-level caller that never ran the pre-commit step), and demotes a
-// committed carry whose copy can no longer be completed.
+// ensureAccountSwapConversationCarried is the respawn-time half, run for
+// every plan about to launch. A carry re-runs its idempotent copy (a daemon
+// restart, or a session-level caller that never ran the pre-commit step). A
+// plan that launches fresh — because that copy failed, or because restart
+// validation already found the carry impossible — must not leave the pending
+// record claiming the carried id: restart metadata sync would then reject the
+// fresh id it launched, and the notice would say the conversation continues.
 func (i *Instance) ensureAccountSwapConversationCarried(plan *accountSwapLaunchPlan) (*accountSwapLaunchPlan, error) {
-	reason, err := i.carryOrReplan(plan)
-	if err != nil || reason == "" {
-		return plan, err
+	reason := plan.carryFallback
+	if plan.carry != nil {
+		copyReason, err := i.carryOrReplan(plan)
+		if err != nil || copyReason == "" {
+			return plan, err
+		}
+		reason = copyReason
+	} else if !i.pendingAccountSwapClaimsCarry(plan.account) {
+		return plan, nil
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "the carried conversation could not be resumed"
 	}
 	if err := i.demotePendingAccountSwapCarry(plan.account, reason); err != nil {
 		return nil, err
 	}
 	return i.accountSwapLaunchForRespawn()
+}
+
+func (i *Instance) pendingAccountSwapClaimsCarry(account string) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	pending := i.pendingAccountSwap
+	return pending != nil && pending.To == account && pending.CarriedConversationID != ""
 }
 
 // demotePendingAccountSwapCarry rewrites a committed carry as the fresh
@@ -426,6 +458,29 @@ func (c *conversationCarry) sameCarryHome(dir string) bool {
 		return true
 	}
 	return filepath.Clean(c.dstHome) == filepath.Clean(dir)
+}
+
+// RecordAccountSwapConversationForRuntime is SetAgentConversationForRuntime
+// for an account-swap replacement. When capture shows the replacement on a
+// different Codex thread than the one carried — a provider that forked on
+// resume — the pending record follows it, so restart recovery resumes the
+// thread the replacement is actually writing, not the stale pre-fork one. The
+// tab and the record change under one lock and reach disk in the same row.
+func (i *Instance) RecordAccountSwapConversationForRuntime(token AgentRuntimeToken, conv AgentConversationData) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.runtimeTokenCurrentLocked(token, conv) {
+		return false
+	}
+	changed := i.setAgentConversationLocked(conv)
+	pending := i.pendingAccountSwap
+	if pending != nil && pending.To == i.Account && pending.CarriedConversationID != "" &&
+		conv.Agent == tmux.ProgramCodex && providerConversationIDRE.MatchString(conv.ID) &&
+		pending.CarriedConversationID != conv.ID {
+		pending.CarriedConversationID = conv.ID
+		i.touchLocked()
+	}
+	return changed
 }
 
 // synchronizeCarriedConversationLocked restores a committed carry's

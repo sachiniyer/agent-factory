@@ -95,11 +95,17 @@ func (i *Instance) AgentRuntimeToken() AgentRuntimeToken {
 func (i *Instance) SetAgentConversationForRuntime(token AgentRuntimeToken, conv AgentConversationData) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.userKilled || token.agent == "" || token.generation != i.agentRuntimeGeneration ||
-		conv.Agent != token.agent || i.resolvedAgentLocked() != token.agent {
+	if !i.runtimeTokenCurrentLocked(token, conv) {
 		return false
 	}
 	return i.setAgentConversationLocked(conv)
+}
+
+// runtimeTokenCurrentLocked reports whether token still names the live process
+// generation and conv belongs to its provider. Callers hold i.mu.
+func (i *Instance) runtimeTokenCurrentLocked(token AgentRuntimeToken, conv AgentConversationData) bool {
+	return !i.userKilled && token.agent != "" && token.generation == i.agentRuntimeGeneration &&
+		conv.Agent == token.agent && i.resolvedAgentLocked() == token.agent
 }
 
 // noteAgentRuntimeReplaced invalidates every capture bound to the prior process.

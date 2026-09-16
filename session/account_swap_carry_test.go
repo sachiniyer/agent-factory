@@ -518,3 +518,86 @@ func TestCarriedLaunchesPassTheAccountBoundary(t *testing.T) {
 	_, _, ok := (&conversationCarry{agent: tmux.ProgramClaude, id: carryTestID}).launch("claude --continue")
 	require.False(t, ok, "a program already pinning a conversation cannot also resume the carried one")
 }
+
+func TestPendingCarryFollowsACodexForkForRestartRecovery(t *testing.T) {
+	carryAmbientProviderHomes(t)
+	inst, target := carrySwapInstance(t, tmux.ProgramCodex)
+	source := registerAccount(t, tmux.ProgramCodex, "old")
+	inst.Account, inst.accountAutoSelected = "old", true
+	recordOutgoingConversation(t, inst, tmux.ProgramCodex, carryTestID)
+	writeCarryFile(t, source, codexRolloutRel(carryTestID), codexRollout(inst.GetWorktreePath()))
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+	require.NoError(t, inst.CarryAccountSwapConversation())
+	_, err := inst.SelectAccountAutomatically("old", "work")
+	require.NoError(t, err)
+
+	// The replacement resumed onto a new thread rather than appending in place.
+	const forkID = "0a0b0c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d"
+	forkRel := filepath.Join("sessions", "2026", "09", "17", "rollout-2026-09-17T00-00-00-"+forkID+".jsonl")
+	writeCarryFile(t, target, forkRel, codexRollout(inst.GetWorktreePath()))
+	fork := AgentConversationData{Agent: tmux.ProgramCodex, ID: forkID, CapturedAt: time.Now(), CaptureKind: ConversationCaptureCodexRollout}
+	require.True(t, inst.RecordAccountSwapConversationForRuntime(inst.AgentRuntimeToken(), fork))
+	require.Equal(t, forkID, inst.AgentConversation().ID)
+	require.Equal(t, forkID, inst.ToInstanceData().PendingAccountSwap.CarriedConversationID,
+		"restart recovery must resume the thread the replacement is on, not the pre-fork one")
+
+	// A restart that must rebuild the replacement re-plans from the record.
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+	plan := inst.accountSwapLaunch
+	require.NotNil(t, plan.carry)
+	require.Equal(t, forkID, plan.carry.id)
+	require.Equal(t, forkRel, plan.carry.transcript, "the fork exists only in the new account, which a committed carry accepts")
+	require.Equal(t, "codex resume "+forkID, plan.program)
+
+	stale := AgentRuntimeToken{agent: tmux.ProgramCodex, generation: inst.AgentRuntimeToken().generation + 1}
+	require.False(t, inst.RecordAccountSwapConversationForRuntime(stale,
+		AgentConversationData{Agent: tmux.ProgramCodex, ID: carryTestID}))
+	require.Equal(t, forkID, inst.ToInstanceData().PendingAccountSwap.CarriedConversationID,
+		"a capture from a replaced runtime must not move the record")
+}
+
+func TestRespawnForAccountSwapDemotesACarryRestartFoundImpossible(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	home := carryAmbientProviderHomes(t)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: "claude"}
+	require.NoError(t, config.SaveConfig(cfg))
+	registerAccount(t, tmux.ProgramClaude, "work")
+
+	const agentName = "af_account_swap_restart_fresh"
+	var newSessions int
+	var spawns []string
+	restored := lostInstanceForRecover(t, agentName, agentName+tmuxTabSeparator+shellTabName,
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	processSiblingForSwap(restored)
+	restored.Path = initTempGitRepo(t)
+	recordOutgoingConversation(t, restored, tmux.ProgramClaude, carryTestID)
+	sourcePath := writeCarryFile(t, filepath.Join(home, ".claude"),
+		claudeTranscriptRel(restored.GetWorktreePath(), carryTestID), "{}\n")
+	restored.SetLimitReached(time.Time{})
+	require.NoError(t, restored.BeginLimitResume())
+	require.NoError(t, restored.ValidateAccountSwap("work"))
+	_, err := restored.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+
+	// The daemon restarts before launching, and by then neither home holds the
+	// transcript: recovery validation itself plans the fresh start.
+	require.NoError(t, os.Remove(sourcePath))
+	require.NoError(t, restored.ValidateAccountSwap("work"))
+	require.Nil(t, restored.accountSwapLaunch.carry)
+	require.Equal(t, "its transcript is missing from the previous account's home", restored.accountSwapLaunch.carryFallback)
+
+	require.NoError(t, restored.RespawnForAccountSwap())
+	require.NotEmpty(t, spawns)
+	require.Contains(t, spawns[0], "--session-id")
+	pending := restored.ToInstanceData().PendingAccountSwap
+	require.Empty(t, pending.CarriedConversationID,
+		"a fresh launch must not leave the record claiming the carried id")
+	require.Equal(t, "its transcript is missing from the previous account's home", pending.CarryFallback)
+	require.Equal(t, restored.AgentConversation().ID, pending.ConversationID)
+	require.NoError(t, restored.SynchronizeAccountSwapRuntimeMetadata(),
+		"restart metadata sync must accept the fresh id that actually launched")
+	require.Equal(t, HandoffConversation{CarryFailure: pending.CarryFallback}, restored.PendingAccountSwapConversation())
+}

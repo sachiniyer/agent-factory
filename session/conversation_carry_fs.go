@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"golang.org/x/sys/unix"
 )
 
@@ -99,10 +100,54 @@ func retryEINTR(call func() error) error {
 	}
 }
 
-// openCarryRoot opens an account home. The destination must itself be a real
-// directory (agentaccount.Selected already refused symlinked ancestors); an
-// ambient source such as ~/.claude may legitimately be a symlink to a dotfiles
-// checkout, so only the source root is followed.
+// carryRoot anchors a provider home. base is opened following a symlink only
+// when follow is set; every component below it is opened with O_NOFOLLOW. A
+// registered account is anchored at the AF home with the
+// accounts/<agent>/<name> components, so an ancestor swapped for a symlink
+// after agentaccount.Selected validated it still cannot redirect the carry.
+// An ambient source such as ~/.claude is anchored at itself and followed,
+// because it may legitimately be a symlink into a dotfiles checkout.
+type carryRoot struct {
+	base       string
+	follow     bool
+	components []string
+}
+
+// ambientCarryRoot anchors a home af does not own at itself.
+func ambientCarryRoot(dir string) carryRoot {
+	return carryRoot{base: dir, follow: true}
+}
+
+// accountCarryRoot anchors a registered account's home at the AF home. dir
+// must be exactly home/accounts/<agent>/<name>, as agentaccount.Dir builds it.
+func accountCarryRoot(home, agent, name, dir string) (carryRoot, error) {
+	rel, err := filepath.Rel(home, dir)
+	if err != nil {
+		return carryRoot{}, err
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) != 3 || parts[0] != agentaccount.DirName || parts[1] != agent || parts[2] != name {
+		return carryRoot{}, fmt.Errorf("account directory %s is not %s/%s/%s under %s",
+			dir, agentaccount.DirName, agent, name, home)
+	}
+	return carryRoot{base: home, follow: true, components: parts}, nil
+}
+
+// dir is the provider home r names, for messages and path joins.
+func (r carryRoot) dir() string {
+	return filepath.Join(append([]string{r.base}, r.components...)...)
+}
+
+// openCarryAnchor opens the provider home r names.
+func openCarryAnchor(r carryRoot) (*os.File, error) {
+	base, err := openCarryRoot(r.base, r.follow)
+	if err != nil || len(r.components) == 0 {
+		return base, err
+	}
+	defer base.Close()
+	return openCarryDirChain(base, r.components, false)
+}
+
 func openCarryRoot(path string, follow bool) (*os.File, error) {
 	flags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
 	if !follow {
@@ -185,14 +230,14 @@ func openCarryFileAt(dir *os.File, name string) (*os.File, os.FileInfo, error) {
 	return file, info, nil
 }
 
-// carryArtifactPresent reports whether home/rel is a regular file reachable
-// without following a symlink below home.
-func carryArtifactPresent(home, rel string) bool {
+// carryArtifactPresent reports whether rel is a regular file beneath home,
+// reachable without following a symlink below home's anchor.
+func carryArtifactPresent(home carryRoot, rel string) bool {
 	dirs, name, err := splitCarryPath(rel, true)
 	if err != nil {
 		return false
 	}
-	root, err := openCarryRoot(home, true)
+	root, err := openCarryAnchor(home)
 	if err != nil {
 		return false
 	}
@@ -218,12 +263,12 @@ func carryArtifactPresent(home, rel string) bool {
 // conversation is enough even if the previous account has since lost it. A new
 // carry always requires the source, or a stale destination copy would be
 // resumed as though it were the whole conversation.
-func carryConversationFile(srcHome, dstHome, rel string, requireSource bool) error {
+func carryConversationFile(srcHome, dstHome carryRoot, rel string, requireSource bool) error {
 	dirs, name, err := splitCarryPath(rel, true)
 	if err != nil {
 		return carryFailure("af refused an unsafe conversation path", err)
 	}
-	dstRoot, err := openCarryRoot(dstHome, false)
+	dstRoot, err := openCarryAnchor(dstHome)
 	if err != nil {
 		return carryFailure("the new account's home could not be opened safely", err)
 	}
@@ -235,7 +280,7 @@ func carryConversationFile(srcHome, dstHome, rel string, requireSource bool) err
 	defer dstDir.Close()
 
 	var srcDir *os.File
-	srcRoot, err := openCarryRoot(srcHome, true)
+	srcRoot, err := openCarryAnchor(srcHome)
 	if err == nil {
 		defer srcRoot.Close()
 		srcDir, err = openCarryDirChain(srcRoot, dirs, false)
@@ -298,6 +343,13 @@ func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) error
 		if dstSize >= srcSize {
 			// A replacement that already resumed here appended to this copy.
 			// Overwriting it with the shorter source would truncate that work.
+			// It is kept, so it must stay appendable: the resumed provider
+			// writes its next turn into this file.
+			if dstInfo.Mode().Perm()&0o200 == 0 {
+				if err := dst.Chmod(carryFileMode); err != nil {
+					return carryFailure("the new account's copy of this conversation is not writable", err)
+				}
+			}
 			return nil
 		}
 	}
@@ -389,12 +441,12 @@ func replaceCarryFile(dir *os.File, name string, src *os.File, size int64) error
 // and subagent files) beside a carried transcript. It is best effort: the
 // transcript is the conversation, and these files only restore detail. Files
 // follow the same superset rule; symlinks and special files are skipped.
-func carryConversationTree(srcHome, dstHome, rel string) error {
+func carryConversationTree(srcHome, dstHome carryRoot, rel string) error {
 	parts, _, err := splitCarryPath(rel, false)
 	if err != nil {
 		return err
 	}
-	srcRoot, err := openCarryRoot(srcHome, true)
+	srcRoot, err := openCarryAnchor(srcHome)
 	if err != nil {
 		return err
 	}
@@ -407,7 +459,7 @@ func carryConversationTree(srcHome, dstHome, rel string) error {
 		return err
 	}
 	defer srcDir.Close()
-	dstRoot, err := openCarryRoot(dstHome, false)
+	dstRoot, err := openCarryAnchor(dstHome)
 	if err != nil {
 		return err
 	}

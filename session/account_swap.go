@@ -507,13 +507,11 @@ func (b *LocalBackend) respawnFresh(i *Instance) error {
 	if err != nil {
 		return err
 	}
-	if plan.carry != nil {
-		// Idempotent, and the only copy a restarted daemon performs. A copy that
-		// can no longer complete rebuilds this launch, and the pending record,
-		// as a stated fresh start.
-		if plan, err = i.ensureAccountSwapConversationCarried(plan); err != nil {
-			return err
-		}
+	// Idempotent, and the only copy a restarted daemon performs. A carry that
+	// can no longer complete — at this copy or already at validation — leaves
+	// this launch and the pending record as a stated fresh start.
+	if plan, err = i.ensureAccountSwapConversationCarried(plan); err != nil {
+		return err
 	}
 	if err := b.respawnWithConversation(i, false, plan); err != nil {
 		stopErr := b.stopForAccountSwap(i, false)
