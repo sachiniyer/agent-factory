@@ -6,6 +6,37 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
+// wrapperOperandTailMutates keeps a consumed option operand a candidate for
+// inspection. The modeled wrappers match by basename, which cannot prove the
+// binary is real util-linux: a repository-local or PATH-shadowed `ionice`
+// containing `shift; exec "$@"` parses `-c` differently and executes what the
+// model discarded as a class operand.
+//
+// words begins at the operand. A literal operand is judged as the head of a
+// command line (`-c env -u CODEX_HOME codex` hides `env -u CODEX_HOME codex`
+// under a shadowed binary). A dynamic operand is provably one argv word — the
+// caller's gate — but can still expand to `env`, so the words after it are
+// judged as env's argv, the same rule the tail scan applies to unprovable
+// words; `ionice -c "$CLASS" --help` stays allowed because `env --help`
+// mutates nothing. The option consumption that follows still covers the real
+// binary's reading.
+func wrapperOperandTailMutates(words []*syntax.Word, names map[string]struct{}) bool {
+	if len(words) == 0 {
+		return false
+	}
+	if _, literal := literalShellWord(words[0]); !literal {
+		return envCallMutatesAccountEnvironment(words[1:], names, true)
+	}
+	tail, unsafe := unwrapAccountCommand(words, names)
+	if unsafe {
+		return true
+	}
+	if len(tail) == 0 {
+		return false
+	}
+	return unwrappedAccountCommandMutates(tail, names)
+}
+
 func unwrapNohup(words []*syntax.Word) ([]*syntax.Word, bool) {
 	if len(words) > 0 && wordEquals(words[0], "--") {
 		words = words[1:]
@@ -19,7 +50,7 @@ func unwrapNohup(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return words, false
 }
 
-func unwrapNice(words []*syntax.Word) ([]*syntax.Word, bool) {
+func unwrapNice(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
@@ -33,6 +64,9 @@ func unwrapNice(words []*syntax.Word) ([]*syntax.Word, bool) {
 				return nil, true
 			}
 			if _, literal := literalShellWord(words[1]); !literal {
+				return nil, true
+			}
+			if wrapperOperandTailMutates(words[1:], names) {
 				return nil, true
 			}
 			words = words[2:]
@@ -51,7 +85,7 @@ func unwrapNice(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return nil, false
 }
 
-func unwrapTimeout(words []*syntax.Word) ([]*syntax.Word, bool) {
+func unwrapTimeout(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
@@ -63,12 +97,22 @@ func unwrapTimeout(words []*syntax.Word) ([]*syntax.Word, bool) {
 			if len(words) < 2 {
 				return nil, false
 			}
+			if _, literal := literalShellWord(words[0]); !literal &&
+				!isSimpleQuotedParameterWord(words[0]) {
+				return nil, true
+			}
+			if wrapperOperandTailMutates(words, names) {
+				return nil, true
+			}
 			return words[1:], false
 		case option == "-k" || option == "--kill-after" || option == "-s" || option == "--signal":
 			if len(words) < 2 {
 				return nil, true
 			}
 			if _, literal := literalShellWord(words[1]); !literal {
+				return nil, true
+			}
+			if wrapperOperandTailMutates(words[1:], names) {
 				return nil, true
 			}
 			words = words[2:]
@@ -81,6 +125,11 @@ func unwrapTimeout(words []*syntax.Word) ([]*syntax.Word, bool) {
 		default:
 			if len(words) < 2 {
 				return nil, false
+			}
+			// The duration is an operand like taskset's mask: it stays a
+			// candidate for the shadowed reading.
+			if wrapperOperandTailMutates(words, names) {
+				return nil, true
 			}
 			return words[1:], false
 		}
@@ -117,7 +166,7 @@ func unwrapSetsid(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return nil, false
 }
 
-func unwrapStdbuf(words []*syntax.Word) ([]*syntax.Word, bool) {
+func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
@@ -135,6 +184,9 @@ func unwrapStdbuf(words []*syntax.Word) ([]*syntax.Word, bool) {
 				return nil, true
 			}
 			if _, literal := literalShellWord(words[1]); !literal {
+				return nil, true
+			}
+			if wrapperOperandTailMutates(words[1:], names) {
 				return nil, true
 			}
 			words = words[2:]
@@ -160,7 +212,7 @@ func unwrapStdbuf(words []*syntax.Word) ([]*syntax.Word, bool) {
 // opaque leaf program whose arguments were inert, so
 // `ionice -c 3 sh -c 'unset CODEX_HOME; codex'` reached the default-safe
 // return and the nested shell removed the selected root before launch.
-func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
+func unwrapIonice(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
@@ -230,6 +282,9 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 			// operand leaves the following no-child modes reachable.
 			if _, literal := literalShellWord(words[1]); !literal &&
 				!isSimpleQuotedParameterWord(words[1]) {
+				return nil, true
+			}
+			if wrapperOperandTailMutates(words[1:], names) {
 				return nil, true
 			}
 			words = words[2:]
@@ -394,7 +449,7 @@ func ioniceProcessOnlyOption(option string) bool {
 // unwrapTaskset is unwrapIonice for `taskset`, with one extra step: taskset's
 // first OPERAND is the affinity mask (or, after -c, the cpu list), and the
 // command it runs begins only after it.
-func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
+func unwrapTaskset(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
@@ -413,7 +468,7 @@ func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 		}
 		switch {
 		case option == "--":
-			return tasksetCommandAfterMask(words[1:])
+			return tasksetCommandAfterMask(words[1:], names)
 		case utilLinuxTerminalOption(option, "acp"):
 			return words[1:], false
 		case tasksetProcessOnlyOption(option):
@@ -429,7 +484,7 @@ func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 		case strings.HasPrefix(option, "-"):
 			return nil, true
 		default:
-			return tasksetCommandAfterMask(words)
+			return tasksetCommandAfterMask(words, names)
 		}
 	}
 	return nil, false
@@ -478,7 +533,7 @@ func tasksetProcessOnlyOption(option string) bool {
 	return false
 }
 
-func tasksetCommandAfterMask(words []*syntax.Word) ([]*syntax.Word, bool) {
+func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
 	if len(words) == 0 {
 		return nil, false
 	}
@@ -489,6 +544,12 @@ func tasksetCommandAfterMask(words []*syntax.Word) ([]*syntax.Word, bool) {
 	// child — which the walk then inspects either way.
 	if _, literal := literalShellWord(words[0]); !literal &&
 		!isSimpleQuotedParameterWord(words[0]) {
+		return nil, true
+	}
+	// The mask word stays a candidate like any other consumed operand: a
+	// shadowed taskset need not skip it, so the mask-onward tail is judged as
+	// a command before the real binary's child is returned.
+	if wrapperOperandTailMutates(words, names) {
 		return nil, true
 	}
 	return words[1:], false
@@ -542,7 +603,11 @@ options:
 					if len(words) < 2 {
 						return nil, true
 					}
-					// The argument value itself is inert to this analysis.
+					// The argument value itself is inert to this analysis on
+					// the real binary, but a shadowed xargs may exec it.
+					if wrapperOperandTailMutates(words[1:], names) {
+						return nil, true
+					}
 					words = words[1:]
 				}
 				words = words[1:]
@@ -556,6 +621,9 @@ options:
 						return nil, true
 					}
 					arg, argLiteral = literalShellWord(words[1])
+					if wrapperOperandTailMutates(words[1:], names) {
+						return nil, true
+					}
 					words = words[1:]
 				}
 				if !argLiteral || accountEnvironmentOperandDenied(arg, names) {
@@ -590,6 +658,9 @@ options:
 							return nil, true
 						}
 						arg, argLiteral = literalShellWord(words[1])
+						if wrapperOperandTailMutates(words[1:], names) {
+							return nil, true
+						}
 						words = words[1:]
 					}
 					if flags[idx] == 'I' {

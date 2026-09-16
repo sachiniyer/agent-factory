@@ -235,13 +235,13 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 			}
 		case isAccountCommandName(words[0], "nice"):
 			var unsafe bool
-			words, unsafe = unwrapNice(words[1:])
+			words, unsafe = unwrapNice(words[1:], names)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "timeout"):
 			var unsafe bool
-			words, unsafe = unwrapTimeout(words[1:])
+			words, unsafe = unwrapTimeout(words[1:], names)
 			if unsafe {
 				return nil, true
 			}
@@ -253,19 +253,19 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 			}
 		case isAccountCommandName(words[0], "stdbuf"):
 			var unsafe bool
-			words, unsafe = unwrapStdbuf(words[1:])
+			words, unsafe = unwrapStdbuf(words[1:], names)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "ionice"):
 			var unsafe bool
-			words, unsafe = unwrapIonice(words[1:])
+			words, unsafe = unwrapIonice(words[1:], names)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "taskset"):
 			var unsafe bool
-			words, unsafe = unwrapTaskset(words[1:])
+			words, unsafe = unwrapTaskset(words[1:], names)
 			if unsafe {
 				return nil, true
 			}

@@ -96,6 +96,13 @@ func TestValidateAccountEnvironmentCommand_AllowsProcessOnlyWrapperModes(t *test
 // only has to be provably ONE argv word — it does not have to be literal. A
 // double-quoted scalar expansion always is, even expanding empty.
 //
+// But ONE-word-ness is not inertness. The basename match cannot prove the
+// binary is real util-linux, and a shadowed wrapper can exec the "operand"
+// onward, so the operand stays a candidate for inspection: a literal operand
+// is judged as a command head, and a dynamic operand is judged like the tail
+// scan's unprovable words — it can expand to `env`, so the words after it are
+// judged as env's argv.
+//
 // Measured on util-linux 2.39.3: an empty or unknown class exits with "unknown
 // scheduling class", and an empty or unparseable mask with "failed to parse CPU
 // mask"/"CPU list", both BEFORE launching anything; a valid value goes on to
@@ -103,19 +110,68 @@ func TestValidateAccountEnvironmentCommand_AllowsProcessOnlyWrapperModes(t *test
 // leaves these no-child modes reachable.
 func TestValidateAccountEnvironmentCommand_SingleWordWrapperOperandsStayVisible(t *testing.T) {
 	for _, command := range []string{
-		"ionice -c \"$CLASS\" --help",
-		"ionice -c \"$CLASS\" -V",
-		"ionice -c \"$CLASS\" -p 123",
-		"ionice -n \"$N\" --help",
-		"ionice --class \"$CLASS\" -p 123",
-		"ionice --classdata \"$N\" -p 123",
+		// `npm run dev` is a safe tail under both readings: env runs npm.
 		"ionice -c \"$CLASS\" npm run dev",
 		// taskset's mask is positional, so this applies once `--` has ended
 		// option parsing and the next word is unambiguously the mask.
 		"taskset -- \"$MASK\" npm run dev",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
-			"%q consumes one argv word whatever it expands to", command)
+			"%q keeps the operand a candidate and the tail proves safe under both readings", command)
+	}
+	for _, command := range []string{
+		// A shadowed wrapper can exec the operand onward: "$CLASS" may expand
+		// to `env`, and env's parse of the option-shaped tail (--help, -V,
+		// -p 123) cannot be proven safe, so these fail closed.
+		"ionice -c \"$CLASS\" --help",
+		"ionice -c \"$CLASS\" -V",
+		"ionice -c \"$CLASS\" -p 123",
+		"ionice -n \"$N\" --help",
+		"ionice --class \"$CLASS\" -p 123",
+		"ionice --classdata \"$N\" -p 123",
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q leaves a tail env cannot prove safe under the shadowed-wrapper reading", command)
+	}
+}
+
+// An operand a modeled option consumes stays a candidate for inspection: the
+// basename match cannot prove the wrapper is real util-linux, and a
+// repository-local or PATH-shadowed binary can parse differently and exec the
+// "operand" onward — `./ionice -c env -u CODEX_HOME codex` runs `env -u
+// CODEX_HOME codex` under a shadowed ionice.
+func TestValidateAccountEnvironmentCommand_WrapperOperandsStayCandidates(t *testing.T) {
+	for _, command := range []string{
+		"./ionice -c env -u CODEX_HOME codex",
+		"ionice -c env -u CODEX_HOME codex",
+		"ionice -n env -u CODEX_HOME codex",
+		"ionice --class env -u CODEX_HOME codex",
+		"./taskset -c env CODEX_HOME=/other codex",
+		"taskset env CODEX_HOME=/other codex",
+		"timeout env -u CODEX_HOME codex",
+		"timeout -k env -u CODEX_HOME codex",
+		"nice -n env -u CODEX_HOME codex",
+		"stdbuf -o env -u CODEX_HOME codex",
+		"xargs -n env -u CODEX_HOME codex",
+		"xargs --max-args env -u CODEX_HOME codex",
+		"xargs --process-slot-var env CODEX_HOME=/other codex",
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q hides a mutating tail behind an operand the basename-matched wrapper consumed", command)
+	}
+	for _, command := range []string{
+		// Literal operands with benign tails stay accepted under both readings.
+		"ionice -c 3 codex",
+		"ionice -c env codex",
+		"taskset -c 0-3 codex",
+		"taskset 0x3 codex",
+		"timeout 30 codex",
+		"nice -n -5 codex",
+		"stdbuf -oL codex",
+		"xargs -n 2 codex",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q is safe under the real and shadowed readings alike", command)
 	}
 }
 
