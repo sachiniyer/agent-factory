@@ -82,6 +82,15 @@ func TestValidateAccountEnvironmentCommand_RefusesArithmeticCommandSubstitution(
 		"(( $(echo CODEX_HOME=1) )); codex",
 		// A modeled wrapper (nice) that schedules `let` reaches the same guard.
 		"nice -n 5 let 'arr[$(echo CODEX_HOME=1)]'; codex",
+		// Parameter expansion with an arithmetic subscript: bash re-evaluates
+		// the subscript as arithmetic, so `${arr[$(printf CODEX_HOME=1)]}` has
+		// the same re-evaluation hazard as a `let` subscript. ParamExp.Index is
+		// an implicit arithmetic context.
+		": \"${arr[$(printf CODEX_HOME=1)]}\"; codex",
+		": \"${arr[$(echo CODEX_HOME=1)]}\"; codex",
+		": ${arr[`echo CODEX_HOME=1`]}; codex",
+		// Indexed assignment also uses arithmetic for the subscript.
+		"arr[$(echo CODEX_HOME=1)]=x; codex",
 		// LITERAL forms the followup suite already guards must keep being refused.
 		"let 'arr[CODEX_HOME=42]'; codex",
 		"(( arr[CODEX_HOME=42] )); codex",
@@ -113,6 +122,10 @@ func TestValidateAccountEnvironmentCommand_AllowsProvableArithmeticAndExternalCm
 		"(( x = 1 )); codex",
 		"let 'x = 1'; codex",
 		"let 'x = $((1+1))'; codex",
+		// Parameter expansions with literal subscripts are safe: no
+		// command substitution to re-evaluate as arithmetic.
+		"echo ${arr[0]}; codex",
+		"echo ${arr[i]}; codex",
 		// The existing narrow arithmetic forms remain allowed.
 		"let 'total += 1'",
 		"let 'arr[i=42]'; npm run dev",

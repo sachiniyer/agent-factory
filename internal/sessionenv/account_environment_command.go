@@ -44,10 +44,25 @@ func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) 
 	case *syntax.CallExpr:
 		return callMutatesAccountEnvironment(node, names)
 	case *syntax.Assign:
+		// An indexed assignment (`arr[i]=val`) evaluates the subscript as
+		// arithmetic; a command substitution in the index is re-evaluated as
+		// fresh arithmetic by bash and can assign a denied name via its output
+		// even when `arr` itself is not denied.
+		if node.Index != nil && arithmeticExprHasCommandSubstitution(node.Index) {
+			return true
+		}
 		return node.Name != nil && accountEnvironmentNameDenied(node.Name.Value, names)
 	case *syntax.WordIter:
 		return node.Name != nil && accountEnvironmentNameDenied(node.Name.Value, names)
 	case *syntax.ParamExp:
+		// An indexed subscript (`${arr[i]}`) is evaluated as arithmetic by
+		// bash, so a command substitution inside the index — e.g.
+		// `${arr[$(printf CODEX_HOME=1)]}` — is re-evaluated as fresh
+		// arithmetic and can assign a denied name even when `arr` itself is
+		// not denied. Fail closed when the index contains a substitution.
+		if node.Index != nil && arithmeticExprHasCommandSubstitution(node.Index) {
+			return true
+		}
 		return node.Param != nil && node.Exp != nil &&
 			(node.Exp.Op == syntax.AssignUnset || node.Exp.Op == syntax.AssignUnsetOrNull) &&
 			accountEnvironmentNameDenied(node.Param.Value, names)
