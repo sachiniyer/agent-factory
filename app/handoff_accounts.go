@@ -36,15 +36,33 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 	current, _ := selected.AccountSelection()
 	agents, accounts, labels, warnings := []string{}, []string{}, []string{}, []string{}
 	preselected := -1
+	// The daemon's account-capable roster decides whether a target can carry a
+	// scope at all; a registry entry is proof of the same fact for a response
+	// whose roster was empty.
+	scopable := make(map[string]bool, len(msg.response.Agents)+len(msg.response.Entries))
+	for _, name := range msg.response.Agents {
+		scopable[name] = true
+	}
+	for _, entry := range msg.response.Entries {
+		scopable[entry.Agent] = true
+	}
 	for _, agent := range append([]string{msg.agent}, handoffAgentChoices(msg.agent)...) {
-		if agent != msg.agent && current == "" {
+		// The ambient row is also the honest offer for a scoped session aimed at
+		// a target that cannot carry a scope: the swap drops it and reports the
+		// drop on from_account (#4428), so the target is offered with its
+		// warning rather than hidden.
+		if agent != msg.agent && (current == "" || !scopable[agent]) {
 			if preselected < 0 {
 				preselected = len(labels)
+			}
+			warning := ""
+			if current != "" {
+				warning = fmt.Sprintf("%s cannot carry an account — the %q scope is dropped on handoff. ", agent, current)
 			}
 			agents = append(agents, agent)
 			accounts = append(accounts, "")
 			labels = append(labels, agent+" (ambient)")
-			warnings = append(warnings, "")
+			warnings = append(warnings, warning)
 		}
 		for _, entry := range msg.response.Entries {
 			if entry.Agent != agent || (agent == msg.agent && entry.Name == current) || entry.RegistrationOnly {

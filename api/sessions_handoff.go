@@ -31,6 +31,11 @@ agent and stored prompt, or combine both flags to change agent and account.
 A manual handoff moves an explicit account pin; automatic rotation still
 respects it. Targets with current usage-limit evidence are refused.
 
+An account belongs to one agent, so a scoped session that changes agents
+must name the incoming agent's account with --account — unless the target
+has no account support at all, which drops the scope instead and reports
+it on from_account.
+
 The session keeps its identity, its git worktree, and its branch — only the
 agent process changes. The incoming agent starts a fresh conversation and is
 given a mission brief: the session's goal, and what is already on the branch.

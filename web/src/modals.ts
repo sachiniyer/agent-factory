@@ -22,6 +22,7 @@ import type { CreateSessionInput, DirectoryListing } from "./api.js";
 import {
   type AccountChoice,
   accountAgentFor,
+  accountAgentSupported,
   accountChoices,
   accountDefaultFor,
   accountNotice,
@@ -459,13 +460,21 @@ export function handoffModal(
   let accounts: AccountsResponse = { entries: [], agents: [] };
   let accountsLoaded = !callbacks.loadAccounts;
   let accountsFailed = false;
-  const requiresAccount = (agent: string): boolean => agent === currentAgent || !!callbacks.currentAccount;
+  // A scoped session needs a named account only for a target that can carry
+  // one; a target outside the daemon's roster drops the scope instead (#4428).
+  // A registry that failed to load cannot prove a target unscopable, so it is
+  // treated as requiring one — the daemon refuses the carry either way.
+  const scopableTarget = (agent: string): boolean => accountsFailed || accountAgentSupported(accounts, agent);
+  const requiresAccount = (agent: string): boolean =>
+    agent === currentAgent || (!!callbacks.currentAccount && scopableTarget(agent));
   let accountRows: ReturnType<typeof handoffAccountChoices> = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
   accountSelect.setAttribute("aria-label", "New account");
   const syncAccountSelection = (): void => {
-    accountHint.textContent = accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
+    accountHint.textContent = callbacks.currentAccount && !scopableTarget(agentSelect.value)
+      ? `${agentSelect.value} cannot carry an account — the "${callbacks.currentAccount}" scope is dropped on handoff.`
+      : accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
     confirmBtn.disabled = !accountsLoaded || !agentSelect.value || (requiresAccount(agentSelect.value) && !accountSelect.value);
   };
   const refreshAccounts = (): void => {
@@ -503,7 +512,10 @@ export function handoffModal(
     if (catalogChoices === null || !accountsLoaded) return;
     const hasAccount = (agent: string): boolean => handoffAccountChoices(accounts, agent,
       agent === currentAgent ? callbacks.currentAccount : "").length > 0;
-    const choices = catalogChoices.filter(choice => !callbacks.currentAccount || hasAccount(choice.value));
+    // A scoped session keeps every target it can honestly reach: an agent with
+    // a registered account to name, or one with no account support at all,
+    // which drops the scope rather than needing it (#4428).
+    const choices = catalogChoices.filter(choice => !callbacks.currentAccount || hasAccount(choice.value) || !scopableTarget(choice.value));
     if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
       choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
     }

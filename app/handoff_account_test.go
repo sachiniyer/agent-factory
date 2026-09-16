@@ -76,23 +76,57 @@ func TestHandoffPinnedAccountsAndCredentialWarning(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 	restore := SetAccountListerForTest(func(agent, _ string) (daemon.ListAccountsResponse, error) {
 		require.Empty(t, agent, "pinned handoff needs the target agents' registry too")
-		return daemon.ListAccountsResponse{Entries: []daemon.AccountEntry{
-			{Agent: "claude", Name: "work", LoggedIn: true},
-			{Agent: "claude", Name: "personal", LoggedIn: false},
-			{Agent: "codex", Name: "spare", LoggedIn: true},
-		}, Defaults: map[string]string{"claude": "personal"}}, nil
+		return daemon.ListAccountsResponse{
+			Agents: []string{"claude", "codex", "gemini"},
+			Entries: []daemon.AccountEntry{
+				{Agent: "claude", Name: "work", LoggedIn: true},
+				{Agent: "claude", Name: "personal", LoggedIn: false},
+				{Agent: "codex", Name: "spare", LoggedIn: true},
+			}, Defaults: map[string]string{"claude": "personal"}}, nil
 	})
 	defer restore()
 	_, cmd := h.handleHandoff()
 	require.Empty(t, h.handoffChoices, "pinned sessions cannot submit ambient rows while loading")
 	h.Update(cmd())
-	require.Equal(t, []string{"claude", "codex"}, h.handoffChoices)
-	require.Equal(t, []string{"personal", "spare"}, h.handoffAccounts)
+	// #4428: targets that cannot carry a scope stay offered — the swap drops it
+	// — while a scopable target with no registered account stays hidden.
+	require.Equal(t, []string{"claude", "codex", "aider", "amp", "opencode", "devin"}, h.handoffChoices)
+	require.Equal(t, []string{"personal", "spare", "", "", "", ""}, h.handoffAccounts)
 	require.Contains(t, h.selectionOverlay.Render(), "not logged in")
+	require.Contains(t, h.selectionOverlay.Render(), "aider (ambient)")
+	require.NotContains(t, h.selectionOverlay.Render(), "gemini")
 	require.Equal(t, 1, h.selectionOverlay.GetSelectedIndex(), "unauthenticated default must not be preselected")
 	h.selectionOverlay.SetSelectedIndex(0)
 	h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
 	require.Contains(t, h.confirmationOverlay.Render(), "no claude credential yet")
+}
+
+// A scoped session picking a target with no account support must SEE that the
+// scope is what is being handed over — the ambient row's warning names the drop
+// before the picker submits (#4428).
+func TestHandoffScopedOffersAmbientDropRows(t *testing.T) {
+	h := newTestHome(t)
+	inst := handoffActionInstance(t, "worker", "claude")
+	inst.Account = "work"
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+	restore := SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
+		return daemon.ListAccountsResponse{
+			Agents:  []string{"claude", "codex", "gemini"},
+			Entries: []daemon.AccountEntry{{Agent: "claude", Name: "work", LoggedIn: true}},
+		}, nil
+	})
+	defer restore()
+	_, cmd := h.handleHandoff()
+	h.Update(cmd())
+	require.Equal(t, []string{"aider", "amp", "opencode", "devin"}, h.handoffChoices,
+		"only targets that cannot carry the scope remain — no account exists to name for the rest")
+	require.Equal(t, []string{"", "", "", ""}, h.handoffAccounts)
+	h.selectionOverlay.SetSelectedIndex(0)
+	h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+	rendered := h.confirmationOverlay.Render()
+	require.Contains(t, rendered, "aider cannot carry an account")
+	require.Contains(t, rendered, `"work" scope is dropped`)
 }
 
 func TestHandoffCredentialWarning(t *testing.T) {

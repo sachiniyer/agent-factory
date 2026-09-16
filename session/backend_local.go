@@ -435,24 +435,19 @@ func (b *LocalBackend) Respawn(i *Instance) error {
 // otherwise mirrors: on a create, a failed Start means the workspace holds
 // nothing worth keeping; here it holds everything the outgoing agent did.
 func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
-	// REFUSED for an account-scoped session (#3083 review).
+	// A still-scoped record must never reach this boundary (#3083 review, #4428).
 	//
-	// Clearing the generated-args declaration is not enough, and that was the gap:
-	// refreshSessionEnvironment below reapplies the UNCHANGED i.Account, so handing a
-	// claude session scoped to "work" over to codex launches codex under a codex
-	// account also called "work" — a different identity the user never selected for
-	// that agent, chosen by a name collision. Bare codex needs no declaration, so
-	// nothing downstream refuses it.
-	//
-	// An account names one identity of one agent; it does not survive a change of
-	// agent, and af cannot pick the replacement's account for the user. Refusing is
-	// the honest answer, and it names the way through.
-	if account := i.Account; strings.TrimSpace(account) != "" {
-		return fmt.Errorf(
-			"swap agent: session %q is scoped to the %s account %q, and an account belongs to one agent — "+
-				"af cannot know which %s identity you meant. Create a new session on the account you want "+
-				"instead of handing this one over",
-			i.Title, sessionenv.AgentForCommand(i.Program), account, plan.target)
+	// The record transaction now settles the scope before the runtime changes —
+	// dropped for a target with no account namespace, replaced by an explicit
+	// --account for one that has it — so a non-empty Account here means a caller
+	// skipped that transaction. refreshSessionEnvironment below reapplies the
+	// UNCHANGED i.Account, so a claude session scoped to "work" handed to codex
+	// would launch codex under a codex account also called "work" — a different
+	// identity the user never selected for that agent, chosen by a name collision.
+	// Bare codex needs no declaration, so nothing downstream refuses it. Refusing
+	// here is the last wall; the message names each class's way through.
+	if err := i.handoffUnsettledAccountError(plan.target); err != nil {
+		return fmt.Errorf("swap agent: %w", err)
 	}
 	// Checked BEFORE any runtime state: this is about intent, not about whether the
 	// session currently has a tmux binding, and a missing binding must not mask it.

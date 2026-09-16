@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -174,8 +175,20 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := instance.ValidateHandoffTarget(target); err != nil {
 		return HandoffSessionResponse{}, err
 	}
-	if account, automatic := instance.AccountSelection(); account != "" && !automatic {
-		return HandoffSessionResponse{}, fmt.Errorf("session %q is pinned to %s account %q; specify a target account with --account before handing it off to %s", req.Title, instance.CurrentAgentName(), account, target)
+	// A scoped account belongs to one agent, so it can never be carried onto a
+	// different one unchanged (#4428). A target WITH an account namespace must be
+	// given its own account explicitly — handoffAccount owns that transaction,
+	// and this refusal names the flag that reaches it. A target WITHOUT one has
+	// no namespace the name could resolve in, so there is no identity to guess:
+	// the record drops the scope in the same mutation that rewrites the program,
+	// and the response reports the drop on from_account.
+	fromAccount, _ := instance.AccountSelection()
+	if fromAccount != "" {
+		if _, scopable := sessionenv.SupportsAccounts(target); scopable {
+			return HandoffSessionResponse{}, fmt.Errorf(
+				"session %q is scoped to %s account %q; specify a target account with --account before handing it off to %s",
+				req.Title, instance.CurrentAgentName(), fromAccount, target)
+		}
 	}
 	plan, err := instance.PrepareAgentSwap(target)
 	if err != nil {
@@ -284,7 +297,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		m.warn().Printf("handoff %q: failed to persist the post-swap checkpoint before mission delivery: %v", req.Title, err)
 	}
 
-	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA}
+	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA, FromAccount: fromAccount}
 	if err := m.deliverHandoffMission(delivery); err != nil {
 		// SwapAgent already installed the incoming runtime. Preserve the resolved
 		// identity and classify every later delivery/settlement failure as

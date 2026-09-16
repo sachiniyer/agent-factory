@@ -225,7 +225,10 @@ An explicit `--account` selects a pinned identity: an existing pin moves to the
 chosen account, and an ambient session becomes pinned to that account. For an
 ambient session, `--to <agent>` without `--account` keeps the replacement ambient.
 A session already scoped to an account must specify a target account when
-changing agents; omitting it does not bypass the pin.
+changing to an agent that supports accounts (claude, codex, gemini); omitting it
+does not bypass the pin. Handing it to an agent with no account support (aider,
+amp, opencode, devin) drops the scope instead, and the response reports the drop
+on `from_account`.
 
 The session keeps its worktree and branch, and the new conversation receives the
 handoff brief. See [Hand off to another account](#hand-off-to-another-account)

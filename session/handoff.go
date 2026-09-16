@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -60,9 +61,13 @@ type AgentHandoff struct {
 // and Program are rewritten. AgentHandoff is the durable completed-swap record;
 // previousProgram is deliberately kept out of it because rollback is synchronous
 // and a successful ledger entry must not retain transaction-only state forever.
+// previousAccount/previousAuto are the same rollback-only state for the scope a
+// cross-agent record drops when the target cannot carry it (#4428).
 type HandoffSwap struct {
 	AgentHandoff
 	previousProgram string
+	previousAccount string
+	previousAuto    bool
 }
 
 // From/To agent names for display, e.g. "codex → claude".
@@ -293,14 +298,20 @@ func (i *Instance) recordHandoffSwapLocked(target, reason, headSHA string, autom
 	}
 
 	entry := AgentHandoff{
-		From:      outgoing,
-		To:        target,
-		At:        time.Now(),
-		HeadSHA:   strings.TrimSpace(headSHA),
-		Reason:    strings.TrimSpace(reason),
-		Automatic: automatic,
+		From:        outgoing,
+		To:          target,
+		FromAccount: i.Account,
+		At:          time.Now(),
+		HeadSHA:     strings.TrimSpace(headSHA),
+		Reason:      strings.TrimSpace(reason),
+		Automatic:   automatic,
 	}
-	swap := HandoffSwap{AgentHandoff: entry, previousProgram: i.Program}
+	swap := HandoffSwap{
+		AgentHandoff:    entry,
+		previousProgram: i.Program,
+		previousAccount: i.Account,
+		previousAuto:    i.accountAutoSelected,
+	}
 	sameAgent := i.currentAgentNameLocked() == target
 
 	i.Tabs[0].Handoffs = append(i.Tabs[0].Handoffs, entry)
@@ -311,6 +322,21 @@ func (i *Instance) recordHandoffSwapLocked(target, reason, headSHA string, autom
 	if !sameAgent && i.Program != target {
 		i.Program = target
 		i.touchLocked()
+	}
+	// A target with no account namespace cannot carry the session's scope (#4428):
+	// an account names one identity of one agent, and nothing about the incoming
+	// agent can resolve the outgoing name. Dropping the scope inside the same
+	// locked mutation that rewrites Program makes ambient the only environment a
+	// later refresh can derive — a still-scoped record at the runtime boundary is
+	// the violation handoffUnsettledAccountError refuses on. Scopable targets keep
+	// the recorded scope so their swap can name the incoming account explicitly or
+	// refuse; selectAccountLocked replaces it on the --account path.
+	if !sameAgent && i.Account != "" {
+		if _, scopable := sessionenv.SupportsAccounts(target); !scopable {
+			i.Account = ""
+			i.accountAutoSelected = false
+			i.touchLocked()
+		}
 	}
 	// Invalidate outgoing-runtime capture BEFORE its pane is torn down. A capture
 	// already waiting on a rollout must not refill the live slot after this record
@@ -357,9 +383,45 @@ func (i *Instance) RevertHandoff(swap HandoffSwap) error {
 		i.Program = swap.previousProgram
 		i.touchLocked()
 	}
+	// Restore the scope a non-scopable target dropped: the runtime swap never
+	// completed, so the session is still the outgoing agent's and still owns its
+	// account.
+	if i.Account != swap.previousAccount {
+		i.Account = swap.previousAccount
+		i.touchLocked()
+	}
+	if i.accountAutoSelected != swap.previousAuto {
+		i.accountAutoSelected = swap.previousAuto
+		i.touchLocked()
+	}
 	// Generations are monotonic even on rollback. Reusing the old number would
 	// make a token from the abandoned target indistinguishable from the restored
 	// outgoing runtime.
 	i.agentRuntimeGeneration++
 	return nil
+}
+
+// handoffUnsettledAccountError refuses a runtime swap whose session record still
+// carries an account. The record transaction (#4428) settles the scope BEFORE the
+// runtime changes — dropped for a target with no account namespace, replaced by
+// an explicit --account for one that has it — so a non-empty Account here means a
+// caller skipped that transaction. Letting it through would let the environment
+// refresh reapply the name in the INCOMING agent's namespace, where it collides
+// with an identity the user never selected. Refusing before any pane is touched
+// is the only honest answer, and each class's message names its way through.
+func (i *Instance) handoffUnsettledAccountError(target string) error {
+	account, _ := i.AccountSelection()
+	if account == "" {
+		return nil
+	}
+	if _, scopable := sessionenv.SupportsAccounts(target); scopable {
+		return fmt.Errorf(
+			"session %q is scoped to account %q, and an account belongs to one agent — "+
+				"af cannot know which %s identity you meant; hand it off with --account to name the %s account",
+			i.Title, account, target, target)
+	}
+	return fmt.Errorf(
+		"session %q still records account %q on a handoff to %s, which cannot carry an account scope — "+
+			"the session record must drop the scope before the runtime changes",
+		i.Title, account, target)
 }

@@ -263,22 +263,37 @@ func TestAccountScoping_RefusesUnsupportedCombinations(t *testing.T) {
 	require.NoError(t, refuseUnsupportedAccountAgent(plain, plain.Path))
 }
 
-// An account-scoped session must REFUSE a handoff (#3083 review, P1).
+// A handoff that reaches the runtime boundary with an account still on the
+// record must refuse (#3083 review, #4428).
 //
 // Clearing the generated-args declaration was not enough: refreshSessionEnvironment
 // reapplies the unchanged Account, so handing a claude session scoped to "work" to
 // codex would launch codex under a codex account also named "work" — a different
 // identity, selected by a name collision rather than by the user. Bare codex needs
 // no declaration, so nothing downstream refuses it.
+//
+// Since #4428 the honest answers differ by target: a scopable one takes an
+// explicit --account, a non-scopable one has the record transaction drop the
+// scope. A direct backend call bypasses that transaction, so the account still
+// being recorded is itself the violation both cases refuse on.
 func TestSwapAgent_RefusesAnAccountScopedSession(t *testing.T) {
 	backend := &LocalBackend{}
-	inst := &Instance{Title: "scoped", Path: t.TempDir(), Program: "claude", Account: "work"}
 
-	err := backend.SwapAgent(inst, AgentSwapPlan{target: "codex", program: "codex"})
+	scopable := &Instance{Title: "scoped", Path: t.TempDir(), Program: "claude", Account: "work"}
+	err := backend.SwapAgent(scopable, AgentSwapPlan{target: "codex", program: "codex"})
 
 	require.Error(t, err, "an account-scoped handoff must refuse rather than reuse the account name")
 	require.Contains(t, err.Error(), "belongs to one agent")
 	require.Contains(t, err.Error(), "work", "the refusal must name the account it is protecting")
+	require.Contains(t, err.Error(), "--account", "the refusal must name the explicit remedy")
+	require.NotContains(t, err.Error(), "new session", "creating a session is no longer the remedy")
+
+	unscopable := &Instance{Title: "scoped", Path: t.TempDir(), Program: "claude", Account: "work"}
+	err = backend.SwapAgent(unscopable, AgentSwapPlan{target: "aider", program: "aider"})
+
+	require.Error(t, err, "a still-scoped record must not reach the runtime swap, "+
+		"even for a target that cannot carry the scope")
+	require.Contains(t, err.Error(), "work")
 }
 
 // A cross-agent program_overrides must refuse BEFORE launch (#3083 review, P1).
