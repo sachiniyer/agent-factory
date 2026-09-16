@@ -164,33 +164,224 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
-			return nil, true
+			// An option token carrying a quoted value is still ONE argv word when
+			// a literal '=' or literal value text pins its boundary, so the value
+			// need not be literal for the token to be understood. Only tokens
+			// whose boundary is pinned are accepted here; see
+			// ioniceQuotedOptionBoundaryPinned for the case that is not.
+			prefix, quoted := literalPrefixBeforeSimpleQuotedParameter(words[0])
+			if !quoted {
+				return nil, true
+			}
+			// A process selector needs no boundary decision at all. It switches
+			// ionice to acting on already-running processes, so the remaining
+			// operands are PIDs rather than a command and NO expansion of the value
+			// can launch a child. Measured on util-linux 2.39.3 with the value
+			// empty, valid and invalid, `ionice -p"$PID" /bin/echo X` reports
+			// `invalid PID argument` every time and prints nothing — a valid PID
+			// does not help, because the trailing word is read as a further PID.
+			//
+			// This is why the selector case is decidable while the class case above
+			// is not: `ionice -c"$C" /bin/echo X` DOES print X once $C is valid, so
+			// its two readings differ and one of them execs.
+			if ioniceProcessOnlyOption(prefix) {
+				return nil, false
+			}
+			if !ioniceQuotedOptionBoundaryPinned(prefix) {
+				return nil, true
+			}
+			words = words[1:]
+			continue
 		}
 		switch {
 		case option == "--":
 			return words[1:], false
+		case utilLinuxTerminalOption(option, "tpPu"):
+			return nil, false
+		case ioniceProcessOnlyOption(option):
+			// -p/-P/-u select existing-process modes. They never exec a
+			// child, so this external command cannot replace the selected
+			// account environment inherited by one. Process-control policy is
+			// outside this validator's environment-mutation contract.
+			return nil, false
 		case option == "-t" || option == "--ignore":
 			words = words[1:]
-		case option == "-c" || option == "--class" || option == "-n" || option == "--classdata":
+		case option == "-c" || option == "-n" || ioniceClassValueLongOption(option):
 			if len(words) < 2 {
 				return nil, true
 			}
-			if _, literal := literalShellWord(words[1]); !literal {
+			// This value selects a scheduling class. It cannot move the child
+			// boundary or touch the child's environment, so it only has to be
+			// provably ONE argv word — it does not have to be literal. A
+			// double-quoted scalar expansion always is, even expanding empty; an
+			// unquoted one can word-split and shift the boundary, and "$@" can
+			// produce several words, so both still fail closed.
+			//
+			// Measured on util-linux 2.39.3: an empty or unknown class exits with
+			// "unknown scheduling class" before launching anything, and a valid one
+			// goes on to --help or -p mode, so every runtime value of a single-word
+			// operand leaves the following no-child modes reachable.
+			if _, literal := literalShellWord(words[1]); !literal &&
+				!isSimpleQuotedParameterWord(words[1]) {
 				return nil, true
 			}
 			words = words[2:]
 		case strings.HasPrefix(option, "-c") || strings.HasPrefix(option, "-n") ||
-			strings.HasPrefix(option, "--class=") || strings.HasPrefix(option, "--classdata="):
+			ioniceClassValueLongOptionAttached(option):
 			words = words[1:]
 		case strings.HasPrefix(option, "-"):
-			// -p/-P/-u retune an EXISTING process and run no command at all, so
-			// there is nothing here to unwrap; every other form is unmodelled.
 			return nil, true
 		default:
 			return words, false
 		}
 	}
 	return nil, false
+}
+
+// literalPrefixBeforeSimpleQuotedParameter splits a word into a literal option
+// prefix and a trailing simple quoted parameter expansion — `-c"$C"` gives
+// "-c", true. The last part must be exactly one double-quoted scalar
+// expansion; every earlier part must be literal.
+func literalPrefixBeforeSimpleQuotedParameter(word *syntax.Word) (string, bool) {
+	if word == nil || len(word.Parts) == 0 || !isSimpleQuotedParameterPart(word.Parts[len(word.Parts)-1]) {
+		return "", false
+	}
+	var prefix strings.Builder
+	for _, part := range word.Parts[:len(word.Parts)-1] {
+		if !appendLiteralShellPart(&prefix, part) {
+			return "", false
+		}
+	}
+	return prefix.String(), true
+}
+
+func isSimpleQuotedParameterWord(word *syntax.Word) bool {
+	prefix, dynamic := literalPrefixBeforeSimpleQuotedParameter(word)
+	return dynamic && prefix == ""
+}
+
+func isSimpleQuotedParameterPart(part syntax.WordPart) bool {
+	quoted, ok := part.(*syntax.DblQuoted)
+	if !ok || quoted.Dollar || len(quoted.Parts) != 1 {
+		return false
+	}
+	exp, ok := quoted.Parts[0].(*syntax.ParamExp)
+	return ok && exp.Param != nil && shellParameterExpandsToOneWord(exp.Param.Value) &&
+		exp.Flags == nil && exp.NestedParam == nil && exp.Index == nil &&
+		len(exp.Modifiers) == 0 && exp.Slice == nil && exp.Repl == nil && exp.Exp == nil &&
+		!exp.Excl && !exp.Length && !exp.Width && !exp.IsSet && exp.Names == 0
+}
+
+func shellParameterExpandsToOneWord(name string) bool {
+	if validName(name) {
+		return true
+	}
+	if name != "" && strings.IndexFunc(name, func(r rune) bool { return r < '0' || r > '9' }) < 0 {
+		return true
+	}
+	// Residual accepted set: scalar shell parameters whose double-quoted
+	// expansion always occupies exactly one argv word, including when empty.
+	// "$*" joins positional values into one word; "$@" is deliberately absent
+	// because it expands to zero or many words. Structured/modifying parameter
+	// expansions are rejected by the caller's remaining shape checks.
+	return strings.Contains("!#$*-?", name) && len(name) == 1
+}
+
+// ioniceQuotedOptionBoundaryPinned reports whether an ionice option token whose
+// value is a simple quoted expansion still occupies exactly one argv word for
+// EVERY value that expansion can take, including the empty string.
+//
+// Two shapes pin it. A long option's literal '=' separates the value inside the
+// same word, so `--class="$C"` is one word even when $C is empty. Literal value
+// text after a short flag, as in `-c2"$X"`, proves the attached value is
+// nonempty, so the flag cannot fall back to consuming the following word.
+//
+// A bare short flag with a wholly dynamic value, `-c"$C"`, is NOT pinned and is
+// refused here: when $C expands empty the word reduces to `-c`, and getopt then
+// takes the FOLLOWING argv word as the class instead, which moves the child.
+// Measured on util-linux 2.39.3 — with $C empty, `ionice -c"$C" /bin/echo X`
+// reports `unknown scheduling class: '/bin/echo'` and execs nothing, while with
+// $C=2 the same command prints X. Admitting that shape means evaluating both
+// readings, and doing so by forking the parse is the exponential shape a sibling
+// finding reported for nested strace wrappers, so it needs a bounded
+// candidate-boundary set rather than a fork. Tracked separately; it fails closed
+// meanwhile.
+func ioniceQuotedOptionBoundaryPinned(prefix string) bool {
+	if strings.HasPrefix(prefix, "--") {
+		name, _, attached := strings.Cut(prefix, "=")
+		if !attached {
+			return false
+		}
+		// util-linux resolves long-option prefixes, so an abbreviation of either
+		// value-taking option counts. Both are value-taking, so an abbreviation
+		// ambiguous between them still consumes exactly this one word.
+		return strings.HasPrefix("--class", name) || strings.HasPrefix("--classdata", name)
+	}
+	if len(prefix) < 3 || prefix[0] != '-' {
+		return false
+	}
+	return prefix[1] == 'c' || prefix[1] == 'n'
+}
+
+// ioniceClassValueLongOption reports whether option names one of ionice's two
+// value-taking long options through a GNU long-option abbreviation. util-linux
+// parses with getopt_long, which resolves any unambiguous prefix — so --classd,
+// --classda and --classdat all spell --classdata, and the exact --class still
+// wins over being a prefix of it. The only ambiguity a shorter spelling can
+// hit is --class against --classdata, and BOTH take exactly one value word:
+// like the selector ambiguity ioniceProcessOnlyOption documents, a spelling
+// shared by same-arity candidates lands the child at the same word either way,
+// so it is decidable without knowing which option was meant.
+func ioniceClassValueLongOption(option string) bool {
+	return len(option) > 2 &&
+		(strings.HasPrefix("--class", option) || strings.HasPrefix("--classdata", option))
+}
+
+// ioniceClassValueLongOptionAttached is the `--opt=value` spelling of
+// ioniceClassValueLongOption: the '=' pins the value inside this one argv word
+// for every abbreviation getopt_long resolves.
+func ioniceClassValueLongOptionAttached(option string) bool {
+	name, _, attached := strings.Cut(option, "=")
+	return attached && ioniceClassValueLongOption(name)
+}
+
+func ioniceProcessOnlyOption(option string) bool {
+	// util-linux parses with getopt_long, so every nonempty prefix of a selector
+	// names that selector, with or without an attached value. Ambiguity AMONG the
+	// three selectors needs no resolution here: each of them switches ionice to
+	// acting on already-running processes, so no resolution launches a child. A
+	// prefix that is ambiguous with a non-selector, or unsupported by the
+	// installed ionice, makes ionice exit before launching one — the same
+	// no-child answer. This mirrors tasksetProcessOnlyOption, whose --pid prefix
+	// handling landed for the same finding.
+	//
+	// Measured on util-linux 2.39.3: --pi, --pgi, --ui and --u all enter
+	// process-only mode (as do their =value spellings), --p exits "ambiguous"
+	// without a child, and --i resolves to --ignore and DOES exec its child, so
+	// it must not match here.
+	if name, _, _ := strings.Cut(option, "="); len(name) > 2 &&
+		(strings.HasPrefix("--pid", name) ||
+			strings.HasPrefix("--pgid", name) ||
+			strings.HasPrefix("--uid", name)) {
+		return true
+	}
+	if len(option) < 2 || option[0] != '-' || option[1] == '-' {
+		return false
+	}
+	for idx := 1; idx < len(option); idx++ {
+		switch option[idx] {
+		case 't':
+			continue
+		case 'p', 'P', 'u':
+			return true
+		case 'c', 'n':
+			// These flags consume the remainder as their attached value.
+			return false
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // unwrapTaskset is unwrapIonice for `taskset`, with one extra step: taskset's
@@ -200,17 +391,32 @@ func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
+			// taskset's selector behaves as ionice's does: -p switches it to
+			// operating on an existing PID, so no expansion of an attached quoted
+			// value launches a child. Measured on util-linux 2.39.3, `taskset
+			// -p"$P" /bin/echo X` reports `invalid PID argument` for an empty and a
+			// valid $P alike, and `--pid="$P"` is rejected outright with `option
+			// '--pid' doesn't allow an argument` — every spelling exits childless,
+			// so the name is matched with any attached value cut away.
+			prefix, quoted := literalPrefixBeforeSimpleQuotedParameter(words[0])
+			if name, _, _ := strings.Cut(prefix, "="); quoted && tasksetProcessOnlyOption(name) {
+				return nil, false
+			}
 			return nil, true
 		}
 		switch {
 		case option == "--":
 			return tasksetCommandAfterMask(words[1:])
+		case utilLinuxTerminalOption(option, "acp"):
+			return nil, false
+		case tasksetProcessOnlyOption(option):
+			// -p switches taskset from command execution to inspecting or
+			// updating an existing PID. No child environment exists to mutate.
+			return nil, false
 		case option == "-a" || option == "--all-tasks" ||
 			option == "-c" || option == "--cpu-list":
 			words = words[1:]
 		case strings.HasPrefix(option, "-"):
-			// -p rebinds an EXISTING pid and runs no command; anything else is
-			// unmodelled.
 			return nil, true
 		default:
 			return tasksetCommandAfterMask(words)
@@ -219,11 +425,60 @@ func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return nil, false
 }
 
+func utilLinuxTerminalOption(option, argumentFreeShortFlags string) bool {
+	if len(option) > 2 && strings.HasPrefix(option, "--") {
+		return strings.HasPrefix("--help", option) || strings.HasPrefix("--version", option)
+	}
+	if len(option) < 2 || option[0] != '-' || option[1] == '-' {
+		return false
+	}
+	for _, flag := range option[1:] {
+		if flag == 'h' || flag == 'V' {
+			return true
+		}
+		// Only scan past argument-free flags. A value-taking flag owns the
+		// rest of its argv word, so an h or V after it is operand text rather
+		// than a terminal option.
+		if !strings.ContainsRune(argumentFreeShortFlags, flag) {
+			return false
+		}
+	}
+	return false
+}
+
+func tasksetProcessOnlyOption(option string) bool {
+	// util-linux uses getopt_long, so every nonempty prefix of --pid is the
+	// same process-only mode while that prefix is unambiguous. Accepting a
+	// prefix unsupported by the installed taskset is harmless: taskset exits
+	// before it could launch a child.
+	if len(option) > 2 && strings.HasPrefix("--pid", option) {
+		return true
+	}
+	if len(option) < 2 || option[0] != '-' || option[1] == '-' {
+		return false
+	}
+	for _, flag := range option[1:] {
+		if flag == 'p' {
+			return true
+		}
+		if flag != 'a' && flag != 'c' {
+			return false
+		}
+	}
+	return false
+}
+
 func tasksetCommandAfterMask(words []*syntax.Word) ([]*syntax.Word, bool) {
 	if len(words) == 0 {
 		return nil, false
 	}
-	if _, literal := literalShellWord(words[0]); !literal {
+	// Same rule as ionice's class value, and for the same reason: the mask (or
+	// cpu list) names CPUs, so only its ONE-WORD-ness matters, not its content.
+	// Measured on util-linux 2.39.3, an empty or unparseable mask exits with
+	// "failed to parse CPU mask"/"CPU list" before exec, and a valid one runs the
+	// child — which the walk then inspects either way.
+	if _, literal := literalShellWord(words[0]); !literal &&
+		!isSimpleQuotedParameterWord(words[0]) {
 		return nil, true
 	}
 	return words[1:], false
