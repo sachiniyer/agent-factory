@@ -456,37 +456,28 @@ func TestValidateAccountEnvironmentCommand_AllowsCompoundSafeTaintOrder(t *testi
 	// TestValidateAccountEnvironmentCommand_RefusesAnyCmdSubstWithArithmetic.
 }
 
-// TestValidateAccountEnvironmentCommand_LiteralArithAssignmentScope documents
-// that the coarse rule's CmdSubst+arithmetic check does not cover the case
-// where a literal string holding a denied arithmetic assignment is stored in a
-// variable and then used in arithmetic without any command substitution.
+// TestValidateAccountEnvironmentCommand_RefusesLiteralDeniedArithAssignment
+// verifies that the second coarse rule closes the literal-arithmetic-assignment
+// bypass: a command that assigns a literal string containing a denied arithmetic
+// assignment AND contains an arithmetic context is refused, even when no command
+// substitution is present.
 //
 // Example: `x='CODEX_HOME=1'; : $((x)); codex`
 //   - x is assigned the literal string "CODEX_HOME=1" (no CmdSubst involved).
 //   - bash re-evaluates x as arithmetic in $((x)), performing CODEX_HOME=1.
-//   - The coarse rule (CmdSubst+arithmetic) does not fire: no CmdSubst present.
-//
-// This is a known out-of-scope bypass for the coarse rule. It requires
-// statement-order taint tracking with literal-value analysis to detect, which
-// the PR previously provided via taintAccumulator but removed in favour of the
-// simpler coarse rule that eliminates the compound-form enumeration gap. The
-// literal-assignment form is an unusual agent invocation pattern; its exclusion
-// is explicitly priced.
-func TestValidateAccountEnvironmentCommand_LiteralArithAssignmentScope(t *testing.T) {
+//   - Coarse rule 1 (CmdSubst+arithmetic) does not fire: no CmdSubst present.
+//   - Coarse rule 2 (literalDeniedArithAssignment+arithmetic) fires: the literal
+//     "CODEX_HOME=1" is a denied arithmetic assignment, and $((x)) is an
+//     arithmetic context.
+func TestValidateAccountEnvironmentCommand_RefusesLiteralDeniedArithAssignment(t *testing.T) {
 	for _, command := range []string{
-		// These are real bypasses: bash re-evaluates the literal string as
-		// arithmetic, changing CODEX_HOME. The coarse rule does not detect them
-		// (no CmdSubst present). They are documented here as known out-of-scope.
 		"x='CODEX_HOME=1'; : $((x)); codex",
 		"x='OPENAI_API_KEY=secret'; : $((x)); codex",
 		"x='CODEX_HOME=1'; (( x )); codex",
 		"x='CODEX_HOME=1'; let x; codex",
 	} {
-		// These are allowed by the coarse rule (no CmdSubst + arithmetic combination
-		// with a command substitution as the hazard source). The bypass is real but
-		// requires the taint accumulator to detect, which was removed in favour of
-		// the coarse rule.
-		_ = ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q stores a literal denied arithmetic assignment with arithmetic context and must be refused", command)
 	}
 }
 
