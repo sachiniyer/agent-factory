@@ -395,7 +395,10 @@ pointing at one).`,
 		// before we spend time creating a tmux session and git worktree we'd
 		// just have to tear down. The authoritative race-safe check still
 		// happens inside the daemon under the per-repo file lock.
-		exists, err := repoHasInstanceTitle(repo.ID, createTitle)
+		// repoHasLiveInstanceTitle skips archived rows so a create targeting
+		// a title held only by an archived session reaches the daemon, which
+		// reclaims the title (renameArchivedForReuseLocked).
+		exists, err := repoHasLiveInstanceTitle(repo.ID, createTitle)
 		if err != nil {
 			return jsonError(err)
 		}
@@ -454,7 +457,7 @@ pointing at one).`,
 			if herr != nil {
 				return jsonError(herr)
 			}
-			if _, aerr := agentaccount.Selected(home, sessionenv.AgentForCommand(program), createAccountFlag, ""); aerr != nil {
+			if _, aerr := agentaccount.Selected(home, sessionenv.AgentForCommand(program), createAccountFlag); aerr != nil {
 				return jsonError(aerr)
 			}
 		}

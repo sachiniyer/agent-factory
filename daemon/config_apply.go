@@ -241,16 +241,29 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// need a credential to reach it. Only re-enabling the key restores it.
 	if old.RequireToken && !newCfg.RequireToken {
 		if n := m.sandboxTokens.revokeAll(); n > 0 {
-			warning := fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. NOTE: this does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable network.require_token to restore the boundary", n)
+			warning := fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. This does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable network.require_token to restore the boundary", n)
 			m.warn().Printf("%s", warning)
 			result.Warnings = append(result.Warnings, warning)
 		}
 	}
 	// The tokenless-network exposure notice, surfaced at SAVE time so a user who
 	// makes the control API reachable without a token is told once — warned, never
-	// refused (#2168 Phase 0 / config/authposture.go).
-	if notice := config.ListenerExposureNotice(newCfg); notice != "" {
-		result.Warnings = append(result.Warnings, notice)
+	// refused (#2168 Phase 0 / config/authposture.go). Emitted ONLY on the
+	// transition INTO the exposed posture, not on every apply while already
+	// exposed: ListenerExposureNotice is a stateless predicate of the current
+	// posture (not a transition detector), so calling it unconditionally would
+	// re-append the notice on every unrelated save (e.g. default_program) while the
+	// daemon holds a tokenless non-loopback bind — the warning fatigue
+	// authposture.go's "at most once per daemon start" contract and the two other
+	// emitters (exposureWarning per-write, the bind-time caller in
+	// listener_reload.go) both exist to avoid. A daemon that STARTS exposed gets
+	// this notice from the bind-time caller, so gating the apply-time emitter to
+	// !wasExposed drops only the spam, not the legitimate first emission.
+	wasExposed := config.ListenerServesUnauthenticatedNetwork(old.ListenAddr, old.RequireToken)
+	if !wasExposed {
+		if notice := config.ListenerExposureNotice(newCfg); notice != "" {
+			result.Warnings = append(result.Warnings, notice)
+		}
 	}
 
 	return result, nil

@@ -296,8 +296,12 @@ func liveHeldInPlaceDetachedRefusal(title, workspace, lane, holder string) error
 		title, config.ShellQuotePath(workspace), lane, config.ShellQuotePath(holder), handoff)
 }
 
-// worktreeAdmissionLockForRepo serializes create-side branch/path admission.
-// It is keyed by the canonical repository ID already resolved at create entry.
+// worktreeAdmissionLockForRepo serializes branch/path selection through the
+// filesystem operation that commits it. Create, archived restore, and every
+// daemon entry that can reach LocalBackend's missing-worktree rebuild use it: a
+// free-path observation is not a reservation unless every peer that can
+// populate that path is excluded until the observing operation has acted.
+// It is keyed by the canonical repository ID already resolved at entry.
 func (m *Manager) worktreeAdmissionLockForRepo(repoID string) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -496,10 +500,14 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	if err != nil {
 		return nil, err
 	}
-	origDest, err := archivedWorktreePath(repoID, oldTitle)
-	if err != nil {
-		return nil, err
-	}
+	// The rollback destination is the path the durable record actually claims,
+	// captured before the move rewrites it — not a fresh derivation from the
+	// title. A pre-upgrade archive can sit on a leaf sanitizeArchiveTitle no
+	// longer produces (a title exactly archiveLeafNameMax bytes took the literal
+	// path before the strict digest boundary), so re-deriving it would move the
+	// worktree somewhere the restored record does not name and report the
+	// rollback as done while the row points at a missing directory.
+	origDest := archived.GetWorktreePath()
 
 	// The branch moves aside with the title (#2127). Freeing the title alone left
 	// the archived session holding <prefix><oldTitle>, which is exactly the branch

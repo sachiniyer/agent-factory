@@ -211,6 +211,17 @@ func (b *ptyBroker) recoverCapture(onlyIfNoHealthyCapture bool) {
 	b.mu.Lock()
 	b.base = b.headLocked()
 	b.buf = nil
+	// Mark that THIS base was set by a pane-replacing discard. A later reconnect
+	// whose cursor lands exactly at base — a client that was caught up at the live
+	// tail when it dropped, with the pane idle in the disconnect window so head
+	// never advanced past its cursor — gets no replay (the new ring is empty) and,
+	// without this mark, no repaint either, leaving the dead pane's screen frozen
+	// until the recovered pane emits. subscribe() reads the mark to repaint that
+	// caught-up reconnect the same way it repaints the behind one. The mark is
+	// tied to base, so an eviction that later advances base (or a second discard
+	// that resets it) invalidates the stale value; a same-pane eviction clamp,
+	// which advances base WITHOUT replacing the pane, never sets it.
+	b.recoveryDiscardAt = b.base
 	// The upstream is about to be re-established, so the pane's death stops being
 	// the terminal condition shouldWarnResizeFailure latched on (#3862) and a later
 	// one deserves its own line. Cleared here rather than after the restart because

@@ -253,6 +253,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "watcher_events_per_minute",
+		Type:       "int",
+		Default:    "10",
+		Purpose:    "Maximum events each watch task may deliver per rolling minute · excess source events are discarded and counted on the task record.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "debug_pprof",
 		Type:       "bool",
 		Default:    "false",

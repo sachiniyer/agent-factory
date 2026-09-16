@@ -139,7 +139,7 @@ func vscodeAccountEnvironment(agent, account string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("locate registered accounts: %w", err)
 	}
-	scope, err := agentaccount.Selected(home, agent, account, "")
+	scope, err := agentaccount.Selected(home, agent, account)
 	if err != nil {
 		return nil, err
 	}

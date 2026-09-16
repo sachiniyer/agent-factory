@@ -36,6 +36,10 @@ for (const width of [1280, 390]) {
       // A shortcut-opened picker restores navigation, even when it had to open
       // both enclosing phone disclosures to make the picker reachable.
       await expect(sessionActions).toHaveAttribute("aria-expanded", "false");
+      // The hidden phone rail cannot take DOM focus (#4360): cancel must not
+      // leave it on the just-hidden picker item either, or the next shortcut
+      // dispatches to a native button and dies. Body is the rail-mode landing.
+      expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
       await page.keyboard.press("t");
       await expect(menu).toBeVisible();
       await page.keyboard.press("Escape");
@@ -103,9 +107,15 @@ for (const width of [1280, 390]) {
     }
     await page.keyboard.press("Space");
     // The existing shell API uses shell: true and omits kind.
-    await expect.poll(() => creates.map(c => c.kind)).toEqual(["vscode", undefined]);
-    expect(creates.map(c => c.id)).toEqual([session.id, session.id]);
-    expect(creates[1].shell).toBe(true);
+    await expect.poll(() => ({
+      kinds: creates.map(c => c.kind),
+      ids: creates.map(c => c.id),
+      shell: creates[1]?.shell,
+    })).toEqual({
+      kinds: ["vscode", undefined],
+      ids: [session.id, session.id],
+      shell: true,
+    });
     await expect(page.locator(".af-term-title")).toHaveText(session.title);
   });
 }
@@ -226,6 +236,10 @@ test("desktop shortcut cancel closes app controls opened by phone recomposition"
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();
   await expect(controls).toHaveAttribute("aria-expanded", "false");
+  // The hidden phone rail cannot take DOM focus (#4360): the cancel must land
+  // on body, not the just-hidden picker item, or the next t dispatches to a
+  // native button and dies.
+  expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
   await page.keyboard.press("t");
   await expect(menu).toBeVisible();
 });

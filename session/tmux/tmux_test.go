@@ -30,8 +30,7 @@ func TestMain(m *testing.M) {
 	// test binary. Real-pane account tests then exercise the same registry-backed
 	// child boundary as the shipped executable rather than a test-only shortcut.
 	sessionenv.AccountLookup = func(agent, name string) (sessionenv.Account, error) {
-		executable, _ := os.Executable()
-		return agentaccount.Selected(os.Getenv("AGENT_FACTORY_HOME"), agent, name, executable)
+		return agentaccount.Selected(os.Getenv("AGENT_FACTORY_HOME"), agent, name)
 	}
 	sessionenv.HandleInternalExec()
 	HandleDedicatedServerExec()
