@@ -79,3 +79,28 @@ func TestEffectNoticeAgreesWithStatusForKeyAcrossOutcomes(t *testing.T) {
 	}
 	t.Logf("checked %d (key, outcome) combinations", checked)
 }
+
+// A failed apply and an unconfirmed one rank DIFFERENTLY against the effect
+// class, which is easy to read as an inconsistency, so it is pinned directly.
+// Manager.ApplyConfig's only error return wraps config.LoadConfig, so a failure
+// means the file did not load — and a deferred key's next start reads that same
+// file. An unconfirmed apply wrote the file fine and only lost the reply (#4247).
+func TestDeferredKeyDistinguishesAFailedReloadFromAnUnconfirmedOne(t *testing.T) {
+	for _, key := range []string{"branch_prefix", "root_agents", "appearance", "debug_pprof"} {
+		failed := ApplyOutcome{DaemonApplyFailed: true}
+		if got := failed.StatusForKey(key); got != ApplyStatusFailed {
+			t.Errorf("StatusForKey(%q) with a failed reload = %q, want %q", key, got, ApplyStatusFailed)
+		}
+		if notice := EffectNotice(key, failed); strings.Contains(notice, "takes effect") {
+			t.Errorf("EffectNotice(%q) promised an effect from a file that did not load: %q", key, notice)
+		}
+
+		unconfirmed := ApplyOutcome{DaemonApplyUnconfirmed: true}
+		if got := unconfirmed.StatusForKey(key); got != ApplyStatusDeferred {
+			t.Errorf("StatusForKey(%q) with an unconfirmed apply = %q, want %q", key, got, ApplyStatusDeferred)
+		}
+		if notice := EffectNotice(key, unconfirmed); !strings.Contains(notice, "takes effect") {
+			t.Errorf("EffectNotice(%q) withheld the deferred sentence for a save whose write succeeded: %q", key, notice)
+		}
+	}
+}

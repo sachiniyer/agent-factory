@@ -331,8 +331,23 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			want: ApplyStatusDeferred,
 		},
 		{
-			name:    "startup-only key remains deferred despite unrelated apply failure",
+			// This case used to expect "deferred", on the premise that an apply
+			// failure was UNRELATED to a key the apply cannot make live. There is
+			// no such failure: Manager.ApplyConfig has exactly one error return,
+			// wrapping config.LoadConfig, so a failure means the whole file did not
+			// load — and the next daemon start reads that same file. "Deferred"
+			// promised an effect the invalid file cannot deliver (#4247).
+			name:    "startup-only key reports the failed reload that will also break its next start",
 			outcome: ApplyOutcome{DaemonApplyFailed: true},
+			key:     "root_agents",
+			want:    ApplyStatusFailed,
+		},
+		{
+			// The complement, and the reason failure and uncertainty rank
+			// differently against the class: an unconfirmed apply still WROTE the
+			// file, so the next start reads this save's value.
+			name:    "startup-only key stays deferred when the apply is merely unconfirmed",
+			outcome: ApplyOutcome{DaemonApplyUnconfirmed: true},
 			key:     "root_agents",
 			want:    ApplyStatusDeferred,
 		},

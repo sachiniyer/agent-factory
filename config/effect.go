@@ -214,6 +214,23 @@ func (o ApplyOutcome) StatusForKey(key string) ApplyStatus {
 	if o.SavedValueSuperseded {
 		return ApplyStatusSuperseded
 	}
+	// Uncertainty outranks failure for a key the daemon applies live: once the
+	// reply is lost, the client cannot honestly claim the daemon kept its previous
+	// config. It does NOT outrank the class, because an unconfirmed apply still
+	// wrote the file successfully — so a deferred key's next start reads this
+	// save's value and "deferred" remains true.
+	if o.DaemonApplyUnconfirmed && !deferredEffectClass(key) {
+		return ApplyStatusUnconfirmed
+	}
+	// A failed apply is the one apply result that IS evidence about the FILE.
+	// Manager.ApplyConfig's only error return wraps config.LoadConfig ("reload
+	// config: …"), so a failure means the file did not load — and the next daemon
+	// start or af launch reads that same file. Failure therefore outranks the
+	// effect class, which would otherwise promise a deferred effect that cannot
+	// happen (#4247).
+	if o.DaemonApplyFailed {
+		return ApplyStatusFailed
+	}
 	// Match EffectNotice's key-first rule. A startup-only setting is deferred
 	// regardless of whether a daemon happened to receive this save; that apply
 	// call cannot make the key live. The same holds for client-side settings,
@@ -224,12 +241,9 @@ func (o ApplyOutcome) StatusForKey(key string) ApplyStatus {
 	case EffectUnknown:
 		return ApplyStatusUnknown
 	}
-	if o.DaemonApplyUnconfirmed {
-		return ApplyStatusUnconfirmed
-	}
-	if o.DaemonApplyFailed {
-		return ApplyStatusFailed
-	}
+	// Only EffectAppliedLive reaches here, and both apply-result branches above
+	// already returned for it — the unconfirmed guard passes for a live key, and
+	// failure is unconditional — so neither is repeated below.
 	if o.listenerRebindFailed(key) {
 		return ApplyStatusDeferred
 	}
@@ -237,6 +251,19 @@ func (o ApplyOutcome) StatusForKey(key string) ApplyStatus {
 		return ApplyStatusApplied
 	}
 	return ApplyStatusNoDaemon
+}
+
+// deferredEffectClass reports whether key's value is consumed at the next daemon
+// start or af launch rather than by the running daemon. It is what lets an
+// unconfirmed apply and a failed one rank differently against the class: an
+// unconfirmed apply still wrote the file that start will read, while a failed one
+// means that file did not load.
+func deferredEffectClass(key string) bool {
+	switch KeyEffectClass(key) {
+	case EffectNextDaemonStart, EffectNextAfLaunch:
+		return true
+	}
+	return false
 }
 
 // listenerRebindFailed reports whether key is one of the socket keys whose live
@@ -284,10 +311,20 @@ func EffectNotice(key string, outcome ApplyOutcome) string {
 	if outcome.SavedValueSuperseded {
 		return supersededNotice(key)
 	}
-	// Then the class, exactly as StatusForKey does. An apply result says nothing
-	// about a key the apply cannot make live, so a startup-only or client-side key
-	// is deferred whether or not the apply was confirmed — the value is already on
-	// disk, which is what the next start reads.
+	// Uncertainty next, and only for a live key — mirroring StatusForKey. An
+	// unconfirmed apply still wrote the file, so a deferred key's next start reads
+	// this save's value and keeps its class sentence.
+	if outcome.DaemonApplyUnconfirmed && !deferredEffectClass(key) {
+		return "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
+	}
+	// A failed apply outranks the class, because Manager.ApplyConfig's only error is
+	// a failed config reload: the file did not load, and the next daemon start or af
+	// launch reads that same file. Promising a deferred effect there would promise
+	// something the invalid file cannot deliver (#4247).
+	if outcome.DaemonApplyFailed {
+		return "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
+	}
+	// Then the class, exactly as StatusForKey does.
 	switch KeyEffectClass(key) {
 	case EffectNextDaemonStart:
 		notice := "Saved — this setting takes effect on the next daemon start."
@@ -297,17 +334,9 @@ func EffectNotice(key string, outcome ApplyOutcome) string {
 	case EffectUnknown:
 		return "Saved."
 	}
-	// EffectAppliedLive from here, in StatusForKey's order: uncertainty, then
-	// failure, then a rebind that kept the old listener. The rebind sits below the
-	// first two because both can accompany it on the version-skewed fallback, where
-	// FailedListenerKeys comes from an apply that SUCCEEDED while the post-apply file
-	// read could not confirm which value the daemon loaded.
-	if outcome.DaemonApplyUnconfirmed {
-		return "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
-	}
-	if outcome.DaemonApplyFailed {
-		return "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
-	}
+	// Only EffectAppliedLive reaches here; uncertainty and failure both returned
+	// above, so what remains is a rebind that kept the old listener, then the plain
+	// applied / no-daemon answers.
 	if outcome.listenerRebindFailed(key) {
 		return listenerRebindDeferredNotice(key)
 	}
