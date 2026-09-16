@@ -63,6 +63,18 @@ func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) 
 		if node.Index != nil && arithmeticExprHasCommandSubstitution(node.Index) {
 			return true
 		}
+		// Slice expressions (`${x:offset:length}`) also evaluate their
+		// operands as arithmetic; a command substitution in either position
+		// is re-evaluated as fresh arithmetic by bash and can assign a denied
+		// name (e.g. `${x:$(printf CODEX_HOME=1)}`). Fail closed on either.
+		if node.Slice != nil {
+			if node.Slice.Offset != nil && arithmeticExprHasCommandSubstitution(node.Slice.Offset) {
+				return true
+			}
+			if node.Slice.Length != nil && arithmeticExprHasCommandSubstitution(node.Slice.Length) {
+				return true
+			}
+		}
 		return node.Param != nil && node.Exp != nil &&
 			(node.Exp.Op == syntax.AssignUnset || node.Exp.Op == syntax.AssignUnsetOrNull) &&
 			accountEnvironmentNameDenied(node.Param.Value, names)

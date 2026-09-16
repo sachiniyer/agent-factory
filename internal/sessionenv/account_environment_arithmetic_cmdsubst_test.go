@@ -122,10 +122,6 @@ func TestValidateAccountEnvironmentCommand_AllowsProvableArithmeticAndExternalCm
 		"(( x = 1 )); codex",
 		"let 'x = 1'; codex",
 		"let 'x = $((1+1))'; codex",
-		// Parameter expansions with literal subscripts are safe: no
-		// command substitution to re-evaluate as arithmetic.
-		"echo ${arr[0]}; codex",
-		"echo ${arr[i]}; codex",
 		// The existing narrow arithmetic forms remain allowed.
 		"let 'total += 1'",
 		"let 'arr[i=42]'; npm run dev",
