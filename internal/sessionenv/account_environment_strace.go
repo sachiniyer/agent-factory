@@ -218,6 +218,18 @@ func parseStraceLongOption(
 
 	if canonical == "" {
 		if attached {
+			// An option this model cannot name may still carry an environment
+			// mutation in its attached value — the --opt=DENIED shape #4261
+			// refuses generically on unmodeled wrappers (xargs's
+			// --process-slot-var=NAME). Nothing here proves the value is not a
+			// denied name or assignment, so it fails closed. Options the table
+			// above DOES name keep their modelled semantics instead: their values
+			// are syscall sets, paths and limits, and --env/--output are judged by
+			// parseStraceSemanticOptionValue, so a denied-looking --trace= value
+			// is not an environment mutation and is not refused for resembling one.
+			if accountEnvironmentOperandDenied(attachedValue, names) {
+				return []straceOptionAction{{result: straceOptionUnsafe}}
+			}
 			return []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
 		}
 		if exact {
@@ -324,6 +336,13 @@ func parseStraceShortOptionAt(
 	flag := value[idx]
 	switch {
 	case flag == straceShortOptionValueSeparator:
+		// Every flag that reaches the separator is argument-free or unmodeled —
+		// a value-taking flag consumes the rest of the word itself and never
+		// recurses here — so nothing proves the attached value is not the
+		// environment mutation #4261 refuses generically on unmodeled wrappers.
+		if accountEnvironmentOperandDenied(value[idx+1:], names) {
+			return []straceOptionAction{{result: straceOptionUnsafe}}
+		}
 		return []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
 	case flag == straceShortHelpOption || flag == straceShortVersionOption:
 		return []straceOptionAction{{result: straceOptionStops}}

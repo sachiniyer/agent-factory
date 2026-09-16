@@ -274,11 +274,14 @@ test("web-selftest.yml is callable AND runs on master", () => {
 const { PERF_PATHS, scopePerf } = require("./web-selftest-scope.js");
 
 test("performance path list is pinned to the reviewed client and harness scope", () => {
-  assert.deepEqual(PERF_PATHS, ["web/**", "app/**", "ui/**", "scripts/perf/**", "scripts/container/**"]);
+  assert.deepEqual(PERF_PATHS, ["web/**", "app/**", "ui/**", "config/**", "scripts/perf/**", "scripts/container/**"]);
   for (const changed of [
     "web/src/ui.ts", "web/dist/af-web.js", "web/playwright.demo.config.ts",
     "web/playwright.perf.config.ts", "web/playwright.visual.config.ts",
     "web/selftest/goldens/dashboard-dark.png", "app/app.go", "ui/sidebar.go",
+    // The Config view renders the daemon manifest verbatim — a schema change
+    // moves pixels without touching web/** (#4358 -> #4360's red gate).
+    "config/manifest.go",
     "scripts/perf/baselines.json", "scripts/container/web-demo-entry.sh",
   ]) {
     assert.equal(scopePerf([changed]).run, true, changed);

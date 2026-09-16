@@ -280,3 +280,64 @@ func looksLikeStraceLongOptions(options []installedStraceLongOption) bool {
 	}
 	return found["env"] && found["help"] && found["output"] && found["version"]
 }
+
+// #4261 refuses an unmodeled wrapper whose literal option carries a denied name
+// or assignment in an attached value (`--opt=DENIED`, xargs's
+// --process-slot-var=NAME). That rule lives in unwrapAccountCommand's default
+// arm, which strace no longer reaches now that it has its own arity model, so
+// the model applies the rule itself for every option it cannot name.
+//
+// The boundary is which side of the model the option falls on, not its
+// spelling. An option the arity table names is judged by its modelled
+// semantics — --env and --output through parseStraceSemanticOptionValue, the
+// rest by an operand kind (syscall set, path, limit) that cannot assign an
+// environment variable — so a value that merely resembles a denied name is not
+// a mutation and must not be refused for resembling one. An option the table
+// cannot name proves nothing about its value, so it fails closed.
+func TestStraceUnmodeledOptionValueFailsClosed(t *testing.T) {
+	names := accountScopedNames("codex", "CODEX_HOME")
+	for name := range accountShellStartupNames {
+		names[name] = struct{}{}
+	}
+	for _, test := range []struct {
+		command string
+		want    bool
+		reason  string
+	}{
+		// Unmodeled options: the value is unprovable, so it fails closed. Each
+		// is pinned against its still-unmodeled-wrapper twin, which is the
+		// verdict #4261 produces and which this model must not weaken.
+		{"strace --setenv=CODEX_HOME codex", true, "unmodeled long option, denied name"},
+		{"perf --setenv=CODEX_HOME codex", true, "#4261 twin"},
+		{"strace --setenv=CODEX_HOME=/other codex", true, "unmodeled long option, denied assignment"},
+		{"perf --setenv=CODEX_HOME=/other codex", true, "#4261 twin"},
+		{"strace -Z=CODEX_HOME codex", true, "unmodeled short flag, denied attached value"},
+		{"perf -Z=CODEX_HOME codex", true, "#4261 twin"},
+		{"strace -f=BASH_ENV=/tmp/evil codex", true, "argument-free flag never takes =value"},
+		{"strace --summary=CODEX_HOME codex", true, "self-contained exact name takes no value"},
+
+		// A separate-word value is NOT this shape: #4261 matched only an
+		// attached `=`, and both wrappers still accept it. Pinned so the
+		// restored rule is not silently widened past the twin it mirrors.
+		{"strace --setenv CODEX_HOME codex", false, "separate word, unchanged by #4261"},
+		{"perf --setenv CODEX_HOME codex", false, "#4261 twin"},
+		{"strace -ZCODEX_HOME codex", false, "no separator, unchanged by #4261"},
+
+		// Modeled options keep their semantics: refusing these would be a false
+		// refusal, since none of the operands can assign a variable.
+		{"strace --trace=CODEX_HOME codex", false, "syscall set, not an assignment"},
+		{"strace --output=CODEX_HOME codex", false, "output path, not an assignment"},
+		{"strace -o CODEX_HOME codex", false, "output path, not an assignment"},
+		{"strace --trace=execve codex", false, "ordinary syscall set"},
+		{"strace --env=PORT=3000 codex", false, "modeled env option, undenied name"},
+		{"strace -E FOO=1 codex", false, "modeled env option, undenied name"},
+		{"strace -f -e trace=execve codex", false, "ordinary tracing invocation"},
+
+		// The modeled env option still refuses a denied name in every spelling.
+		{"strace --env=CODEX_HOME=/other codex", true, "modeled env option, denied assignment"},
+		{"strace -ECODEX_HOME=/other codex", true, "modeled env option, denied assignment"},
+	} {
+		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, names),
+			"command %q (%s)", test.command, test.reason)
+	}
+}
