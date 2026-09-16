@@ -192,10 +192,22 @@ func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
 			// renderEditMode would panic on an out-of-range access.
 			if s.selectedIdx == i {
 				s.editing = false
+			} else if s.selectedIdx > i {
+				// The removed row sat ABOVE the cursor, so every row after it
+				// shifted up by one. Follow the task the cursor was on: clamping
+				// alone only repairs an index that fell off the end, leaving an
+				// in-range one addressing its neighbour, and the next x/D/r
+				// would act on a record the user never selected.
+				s.selectedIdx--
 			}
 			// Clamp the selection so it stays within the (now shorter) slice.
-			if s.selectedIdx >= len(s.tasks) && s.selectedIdx > 0 {
+			if s.selectedIdx >= len(s.tasks) {
 				s.selectedIdx = len(s.tasks) - 1
+			}
+			// …and never below it: removing the last row leaves an empty slice,
+			// where len(s.tasks)-1 is -1.
+			if s.selectedIdx < 0 {
+				s.selectedIdx = 0
 			}
 			return
 		}
