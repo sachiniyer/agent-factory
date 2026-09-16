@@ -176,3 +176,139 @@ func TestAcknowledgeDeletedRestoredKeepsCursorOnSameTask(t *testing.T) {
 	assert.Equal(t, "c", sel.ID,
 		"the cursor must follow its task when a row above it is removed, not slide onto the next one")
 }
+
+// mkPane builds a focused pane over ids, in that order.
+func mkPane(t *testing.T, ids ...string) *TaskPane {
+	t.Helper()
+	repo := newGitRepo(t)
+	tasks := make([]task.Task, 0, len(ids))
+	for _, id := range ids {
+		tasks = append(tasks, task.Task{
+			ID: id, Name: id, Prompt: "p", CronExpr: "* * * * *",
+			ProjectPath: repo, Program: "claude", Enabled: true,
+		})
+	}
+	tp := NewTaskPane()
+	tp.SetTasks(tasks)
+	tp.SetFocus(true)
+	return tp
+}
+
+func paneIDs(tp *TaskPane) []string {
+	ids := []string{}
+	for _, tsk := range tp.GetTasks() {
+		ids = append(ids, tsk.ID)
+	}
+	return ids
+}
+
+// selectByID parks the cursor on id.
+func selectByID(t *testing.T, tp *TaskPane, id string) {
+	t.Helper()
+	for i, tsk := range tp.GetTasks() {
+		if tsk.ID == id {
+			tp.SelectTask(i)
+			return
+		}
+	}
+	t.Fatalf("no row %q to select", id)
+}
+
+// TestRestoreFailedDeleteShiftsSelectionWhenInsertingAbove: inserting a
+// restored row above the cursor must carry the cursor with it.
+//
+// The mirror of the removal case, and the more dangerous direction. The edit
+// form writes its buffers into s.tasks[s.selectedIdx] on submit
+// (ui/task_pane_edit.go:147-155), so an index left pointing one row short does
+// not merely highlight the wrong task — it writes the task under edit's values
+// into its neighbour and marks THAT record dirty.
+func TestRestoreFailedDeleteShiftsSelectionWhenInsertingAbove(t *testing.T) {
+	tp := mkPane(t, "a", "b", "c", "d")
+
+	selectByID(t, tp, "b")
+	tp.deleteSelectedTask()
+	queued := tp.ConsumeDeleted()
+	require.Len(t, queued, 1)
+
+	// The user moves to "d" and opens it in the editor.
+	selectByID(t, tp, "d")
+	tp.EnterEditSelected()
+	require.True(t, tp.IsEditing())
+	sel, ok := tp.SelectedTask()
+	require.True(t, ok)
+	require.Equal(t, "d", sel.ID, "the editor is open on d")
+
+	// The delete failed; the row comes back above the cursor.
+	tp.RestoreFailedDelete(queued[0])
+
+	sel, ok = tp.SelectedTask()
+	require.True(t, ok)
+	assert.Equal(t, "d", sel.ID,
+		"a row inserted above the cursor must shift it; otherwise the open editor's buffers submit into the wrong task")
+}
+
+// TestRestoreFailedDeleteKeepsDiskOrderForMultipleDeletions: positions recorded
+// for several pending deletions must all be valid at restore time.
+//
+// An index recorded against the live slice is only correct for the first
+// deletion — each removal renumbers the rows after it, so the second deletion's
+// recorded index already refers to a different slot than the one the user
+// deleted from. Restoring by those stale numbers reorders the pane against the
+// sidebar, which is the wrong-row hazard again.
+func TestRestoreFailedDeleteKeepsDiskOrderForMultipleDeletions(t *testing.T) {
+	tp := mkPane(t, "a", "b", "c", "d")
+
+	selectByID(t, tp, "b")
+	tp.deleteSelectedTask()
+	selectByID(t, tp, "d")
+	tp.deleteSelectedTask()
+	require.Equal(t, []string{"a", "c"}, paneIDs(tp))
+
+	queued := tp.ConsumeDeleted()
+	require.Len(t, queued, 2)
+	for _, tsk := range queued {
+		tp.RestoreFailedDelete(tsk)
+	}
+
+	assert.Equal(t, []string{"a", "b", "c", "d"}, paneIDs(tp),
+		"every restored row must land in its loaded position, not at an index the earlier deletion renumbered")
+}
+
+// TestEditingRestoredRowCancelsPendingDeletion: editing a restored row must
+// cancel the deletion still queued against it.
+//
+// A restored row is an ordinary editable row, but it is also still in s.deleted
+// awaiting retry. The save runs edits before deletions, so a user who edits or
+// toggles the row they can plainly see gets both: UpdateTask writes the change,
+// then RemoveTask deletes the record it was just written to. deleteSelectedTask
+// already holds the mirror invariant — it drops the task from the update set —
+// and this is the same invariant from the other side.
+func TestEditingRestoredRowCancelsPendingDeletion(t *testing.T) {
+	tp := mkPane(t, "a", "b", "c")
+
+	selectByID(t, tp, "b")
+	tp.deleteSelectedTask()
+	queued := tp.ConsumeDeleted()
+	require.Len(t, queued, 1)
+	tp.RestoreFailedDelete(queued[0])
+	require.Contains(t, paneIDs(tp), "b", "the restored row is visible and editable")
+
+	// The user toggles the restored row — an ordinary edit through the same
+	// markTaskDirty seam the form submit uses.
+	selectByID(t, tp, "b")
+	tp.toggleSelectedTask()
+
+	edits := tp.ConsumeDirty()
+	editedIDs := []string{}
+	for _, e := range edits {
+		editedIDs = append(editedIDs, e.ID)
+	}
+	require.Contains(t, editedIDs, "b", "the toggle must be queued as an edit")
+
+	stillQueued := []string{}
+	for _, tsk := range tp.ConsumeDeleted() {
+		stillQueued = append(stillQueued, tsk.ID)
+	}
+	assert.Empty(t, stillQueued,
+		"editing a restored row must cancel its pending deletion, or the save saves the edit and then deletes the task")
+}

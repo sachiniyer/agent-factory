@@ -17,12 +17,18 @@ func (s *TaskPane) SetTasks(tasks []task.Task) {
 	// value type (its only pointer field, LastRunAt, is scheduler-owned and never
 	// diffed), so a by-value copy is a sufficient baseline.
 	s.originals = make(map[string]task.Task, len(tasks))
-	for _, t := range tasks {
+	// loadedRank is the ordinal of each record in the set the pane loaded. It is
+	// the stable baseline the restore path orders against: a LIVE slice index
+	// stops describing the row the moment any other deletion renumbers the rows
+	// after it, so a second pending deletion recorded against it points at the
+	// wrong slot.
+	s.loadedRank = make(map[string]int, len(tasks))
+	for i, t := range tasks {
 		s.originals[t.ID] = t
+		s.loadedRank[t.ID] = i
 	}
 	s.deleted = nil
 	s.restoredDeletes = nil
-	s.deletedOriginalIdx = nil
 	s.editing = false
 	// A reload replaces the create-form buffers a pending create was captured
 	// against, so a create left un-consumed by a failed save must be dropped —
@@ -66,8 +72,27 @@ func (s *TaskPane) markTaskDirty(id string) {
 	if s.dirtyIDs == nil {
 		s.dirtyIDs = make(map[string]bool)
 	}
+	// Editing a row cancels any deletion still queued against it. A restored row
+	// is an ordinary editable row that is ALSO awaiting a delete retry, and the
+	// save runs edits before deletions — so without this the user's edit is
+	// written and the record it was written to is then removed. This is the
+	// mirror of deleteSelectedTask, which drops the task from the update set for
+	// the same reason.
+	s.cancelQueuedDeletion(id)
 	s.dirtyIDs[id] = true
 	s.dirty = true
+}
+
+// cancelQueuedDeletion drops any pending deletion of id, along with the restore
+// bookkeeping that would otherwise keep treating the row as a retry in flight.
+func (s *TaskPane) cancelQueuedDeletion(id string) {
+	for i, d := range s.deleted {
+		if d.ID == id {
+			s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
+			break
+		}
+	}
+	delete(s.restoredDeletes, id)
 }
 
 // ConsumeDirty returns a field-level patch for each task the user actually
@@ -155,19 +180,42 @@ func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
 		s.restoredDeletes = make(map[string]bool)
 	}
 	if !s.restoredDeletes[tsk.ID] {
-		// Re-insert at the original deletion position so the TaskPane order
-		// stays consistent with the sidebar's disk-loaded order. If the
-		// original index is beyond the current slice length (other deletions
-		// ran first), clamp to the end.
-		pos := len(s.tasks)
-		if idx, ok := s.deletedOriginalIdx[tsk.ID]; ok && idx < pos {
-			pos = idx
-		}
+		pos := s.restorePosition(tsk.ID)
 		s.tasks = append(s.tasks[:pos], append([]task.Task{tsk}, s.tasks[pos:]...)...)
+		// Carry the cursor over an insertion at or above it, so it keeps naming
+		// the same record. This is not cosmetic: the edit form submits its
+		// buffers into s.tasks[s.selectedIdx] (task_pane_edit.go:147-155), so a
+		// stale index writes the task under edit into its neighbour.
+		if pos <= s.selectedIdx {
+			s.selectedIdx++
+		}
 		s.restoredDeletes[tsk.ID] = true
 	}
 	s.deleted = append(s.deleted, tsk)
 	s.dirty = true
+}
+
+// restorePosition returns the slice index at which a restored row belongs, so
+// the pane keeps the order of the set it loaded — the order the sidebar reloads
+// in, and the order showTasksOverlay's index-based selection transfer assumes.
+//
+// It orders against loadedRank rather than a remembered slice index because any
+// number of deletions may be pending at once and each one renumbers the rows
+// after it. Rows the pane loaded keep their loaded order; anything without a
+// rank (created in the pane, not yet reloaded) sorts after them, which is where
+// it already sits.
+func (s *TaskPane) restorePosition(id string) int {
+	rank, ok := s.loadedRank[id]
+	if !ok {
+		return len(s.tasks)
+	}
+	for i, t := range s.tasks {
+		other, known := s.loadedRank[t.ID]
+		if !known || other > rank {
+			return i
+		}
+	}
+	return len(s.tasks)
 }
 
 // AcknowledgeDeletedRestored removes a previously-restored row from s.tasks

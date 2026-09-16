@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -1358,4 +1359,80 @@ func TestSaveContentPaneState_RetryFindingRecordGoneDropsRestoredRow(t *testing.
 	require.Len(t, tp.GetTasks(), 1,
 		"a row restored by an earlier pass must be dropped once the record is known gone")
 	assert.Empty(t, tp.ConsumeDeleted(), "a record known gone must not be re-queued for another retry")
+}
+
+// TestSaveContentPaneState_SameRepoRebindKeepsTaskInPane covers the absence
+// question being settled by the loaded set rather than by the error text.
+//
+// ProjectExpectation.Verify compares ProjectPath by exact string
+// (task/expectation.go:47), but repoScope.matches resolves a task into a repo by
+// IDENTITY (task/repo_scope.go:76-98). So another client moving the task's
+// ProjectPath from the repo root to a subdirectory or a linked worktree of the
+// SAME repository produces the "re-bound to a different project" refusal while
+// the task is still in this repo's set. The old text-matching guard read that
+// refusal as absence, skipped the restore, and — with SetTasks gated on
+// !failedEdit by a concurrent failed edit — left the sidebar showing a task the
+// pane permanently omitted.
+//
+// The remover here refuses with exactly that message and leaves the record on
+// disk, which is the whole point: the error says "rebound", the repo-scoped
+// reload says "still here", and the reload is the one that gets to decide.
+func TestSaveContentPaneState_SameRepoRebindKeepsTaskInPane(t *testing.T) {
+	h := newTestHome(t)
+
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	keep := task.Task{
+		ID: "keep-rebind", Name: "keep", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	moved := task.Task{
+		ID: "moved-rebind", Name: "moved", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	require.NoError(t, task.AddTask(keep))
+	require.NoError(t, task.AddTask(moved))
+
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, loaded, 2)
+	tp := h.automations.TaskPane()
+	tp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+
+	t.Cleanup(SetTaskUpdaterForTest(func(string, task.TaskUpdate, task.ProjectExpectation) error {
+		return fmt.Errorf("update daemon RPC failure")
+	}))
+	// The daemon's own project-rebind refusal (task/expectation.go:51), for a
+	// rebind WITHIN this repository — so the record stays in the repo's set.
+	t.Cleanup(SetTaskRemoverForTest(func(id string, _ task.ProjectExpectation) error {
+		return fmt.Errorf(
+			"task %q was re-bound to a different project while this command was running (expected %s, now %s) — nothing was changed; re-run the command to act on it in its current project",
+			id, repo.Root, filepath.Join(repo.Root, "sub"))
+	}))
+
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+
+	require.Error(t, h.saveContentPaneState())
+
+	// The record never left this repository.
+	disk, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, disk, 2, "a same-repo rebind does not remove the record from this repo")
+	require.Len(t, h.store.GetTasks(), 2, "the sidebar shows it")
+
+	// FIX: so must the pane. Pre-fix the rebind message was read as absence and
+	// this saw 1 while the sidebar showed 2.
+	require.Len(t, tp.GetTasks(), 2,
+		"a task the repo-scoped reload still lists must stay in the pane, whatever the removal error said")
 }

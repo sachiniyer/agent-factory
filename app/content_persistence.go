@@ -3,7 +3,6 @@ package app
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/apiclient"
@@ -58,6 +57,9 @@ func (m *home) saveContentPaneState() error {
 	// can never clobber one another (#1001).
 	var saveErr error
 	failedEdit := false
+	// Deletions whose removal did not commit. Their restore decision is settled
+	// after the reload below, against the freshly loaded repo-scoped set.
+	var failedDeletes []task.Task
 
 	hp := m.hooksPane
 	if hp.IsDirty() {
@@ -135,36 +137,17 @@ func (m *home) saveContentPaneState() error {
 				continue
 			}
 			log.ErrorLog.Printf("failed to remove task: %v", err)
-			// Only restore when the record still exists. Two cases indicate the
-			// record is gone from this repo and re-queuing would retry an
-			// operation that can never satisfy its original expectation:
-			//   - task.RemoveTask returned "not found": another client already
-			//     deleted the record.
-			//   - task.ProjectExpectation.Verify returned a project-rebind
-			//     error: the record was moved to a different project.
-			// An UnconfirmedHTTPResponseError is deliberately excluded: its 404
-			// status cannot prove the task handler ran (apiclient/skew.go:159),
-			// so it does not prove the record is gone — restore and retry.
-			// For any other failure (lock contention, transient I/O) the
-			// removal did not commit; re-appending and re-queueing is correct.
-			// sp.SetTasks below is gated on !failedEdit; without this restore a
-			// concurrent failed edit would make the row disappear from the pane.
-			var unconfirmed *apiclient.UnconfirmedHTTPResponseError
-			recordGone := !errors.As(err, &unconfirmed) &&
-				(strings.Contains(err.Error(), "not found") ||
-					strings.Contains(err.Error(), "re-bound to a different project"))
-			if recordGone {
-				// The record is gone from this repo. A copy restored into the
-				// pane by an EARLIER failed pass must be dropped now: sp.SetTasks
-				// below is gated on !failedEdit, so while a concurrent edit keeps
-				// failing nothing else would ever remove it, and the pane would
-				// keep showing a task the reload has already dropped from the
-				// sidebar — the same divergence this restore exists to prevent.
-				// A no-op when this task was never restored (the first-pass case).
-				sp.AcknowledgeDeletedRestored(tsk.ID)
-			} else {
-				sp.RestoreFailedDelete(tsk)
-			}
+			// Whether to restore this row depends on whether the record still
+			// belongs to this repo — which the ERROR cannot answer. Defer the
+			// decision to the reload below, which loads the repo-scoped set and
+			// can simply be asked. Deriving it from the error text was wrong in
+			// both directions: an intermediary's "404 page not found" claimed an
+			// absence that never happened, and a rebind WITHIN this repo (root
+			// to a subdirectory or a linked worktree) produces the project-rebind
+			// error while repoScope.matches still resolves the task into this
+			// repo by identity (task/repo_scope.go:76-98), so a task that is
+			// still listed was treated as gone and dropped from the pane.
+			failedDeletes = append(failedDeletes, tsk)
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to remove task %q: %w", tsk.Name, err))
 		} else {
 			// Deletion committed cleanly: if this task was previously restored
@@ -184,6 +167,23 @@ func (m *home) saveContentPaneState() error {
 	// AcknowledgeDeletedRestored above, so that class of divergence is closed.
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err == nil {
+		// The authoritative answer to "does this record still belong to this
+		// repo?" — the same set the sidebar is about to show. Present means the
+		// removal genuinely did not land, so restore the row and keep the retry
+		// queued; absent means it is gone (deleted elsewhere, or rebound out of
+		// this repo), so drop any copy an earlier pass restored rather than
+		// showing a row the sidebar does not have.
+		present := make(map[string]bool, len(tasks))
+		for _, t := range tasks {
+			present[t.ID] = true
+		}
+		for _, tsk := range failedDeletes {
+			if present[tsk.ID] {
+				sp.RestoreFailedDelete(tsk)
+			} else {
+				sp.AcknowledgeDeletedRestored(tsk.ID)
+			}
+		}
 		m.store.SetTasks(tasks)
 		if !failedEdit {
 			sp.SetTasks(tasks)
@@ -192,6 +192,12 @@ func (m *home) saveContentPaneState() error {
 		// reflow so an add/delete grows or shrinks the section immediately.
 		m.relayout()
 	} else {
+		// No authoritative set to consult, so fall back to the conservative
+		// answer: keep the rows visible and the retries queued. Dropping a row
+		// on an unproven absence is the failure this restore exists to prevent.
+		for _, tsk := range failedDeletes {
+			sp.RestoreFailedDelete(tsk)
+		}
 		saveErr = errors.Join(saveErr, fmt.Errorf("failed to reload tasks after save: %w", err))
 	}
 	if failedEdit {

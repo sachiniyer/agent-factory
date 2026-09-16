@@ -135,13 +135,15 @@ type TaskPane struct {
 	// restore already has the row in the pane. Cleared by SetTasks (successful
 	// reload) and AcknowledgeDeletedRestored (successful retry).
 	restoredDeletes map[string]bool
-	// deletedOriginalIdx records the s.tasks index at which each task was
-	// deleted by deleteSelectedTask. RestoreFailedDelete uses it to re-insert
-	// the row at its original position rather than appending at the end, so the
-	// TaskPane order stays consistent with the sidebar's disk-loaded order.
-	// Cleared by SetTasks on a successful reload.
-	deletedOriginalIdx map[string]int
-	hasFocus           bool
+	// loadedRank is each loaded record's ordinal in the set SetTasks received,
+	// i.e. disk order. RestoreFailedDelete orders against it to put a restored
+	// row back where it belongs, so the pane's order keeps matching the
+	// sidebar's — showTasksOverlay carries the rail's selection across BY INDEX,
+	// so a divergent order makes that index name a different record. A live
+	// slice index cannot serve here: several deletions can be pending at once
+	// and each renumbers the rows after it.
+	loadedRank map[string]int
+	hasFocus   bool
 
 	// now is inherited from the owning AutomationsPane and passed to each
 	// schedule picker for its custom-cron next-run preview.
@@ -577,13 +579,6 @@ func (s *TaskPane) deleteSelectedTask() {
 	if original, ok := s.originals[deleted.ID]; ok {
 		deleted = original
 	}
-	// Record the original position so RestoreFailedDelete can re-insert at the
-	// same slot rather than appending, keeping the TaskPane order consistent
-	// with the sidebar's disk-loaded order.
-	if s.deletedOriginalIdx == nil {
-		s.deletedOriginalIdx = make(map[string]int)
-	}
-	s.deletedOriginalIdx[deleted.ID] = s.selectedIdx
 	// If this task was previously restored after a failed deletion, clear the
 	// restore tracking and drop the existing stale queue entry: the user is
 	// explicitly re-deleting, so we replace it with a fresh one rather than
