@@ -276,17 +276,40 @@ func classifyStraceLongOption(option string) (string, straceOptionResult, bool) 
 	// closed last result can reject a prefix that is unique on a strace release
 	// whose option set is smaller than this cross-version union; that is the
 	// deliberate residual when the parser cannot prove which family applies.
+	// Several inequivalent families can share a prefix. They are still resolvable
+	// when every candidate puts the child at the same word: all members of
+	// straceLongOptionsWithSeparateValue consume exactly one separate operand, so
+	// an abbreviation matching only those has a provable boundary even though the
+	// option itself is not proven. --env/--output are excluded because their
+	// operand, not their arity, carries the security meaning, and a prefix that
+	// could reach one of them cannot be given those semantics on a guess.
+	// Differing RESULTS (a separate-value option against terminal --help) keep
+	// failing closed, as does a prefix strace itself would call ambiguous when one
+	// of the candidates is security-sensitive.
 	matchFamily := ""
 	matchResult := straceOptionContinue
+	families := map[string]struct{}{}
 	conflict := false
+	semantic := false
 	addMatch := func(family string, result straceOptionResult) {
+		if _, seen := families[family]; !seen {
+			families[family] = struct{}{}
+		}
+		if family == "--env" || family == "--output" {
+			semantic = true
+		}
 		if matchFamily == "" {
 			matchFamily = family
 			matchResult = result
 			return
 		}
-		if matchFamily != family || matchResult != result {
+		if matchResult != result {
 			conflict = true
+		}
+		if family < matchFamily {
+			// Smallest name wins so the canonical result never depends on map
+			// iteration order.
+			matchFamily = family
 		}
 	}
 	for candidate := range straceLongOptionsWithSeparateValue {
@@ -299,7 +322,7 @@ func classifyStraceLongOption(option string) (string, straceOptionResult, bool) 
 			addMatch(candidate, straceOptionStops)
 		}
 	}
-	if conflict {
+	if conflict || (semantic && len(families) > 1) {
 		return "", straceOptionUnsafe, false
 	}
 	if matchFamily == "" {

@@ -200,9 +200,23 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 }
 
 func ioniceProcessOnlyOption(option string) bool {
-	if option == "--pid" || strings.HasPrefix(option, "--pid=") ||
-		option == "--pgid" || strings.HasPrefix(option, "--pgid=") ||
-		option == "--uid" || strings.HasPrefix(option, "--uid=") {
+	// util-linux parses with getopt_long, so every nonempty prefix of a selector
+	// names that selector, with or without an attached value. Ambiguity AMONG the
+	// three selectors needs no resolution here: each of them switches ionice to
+	// acting on already-running processes, so no resolution launches a child. A
+	// prefix that is ambiguous with a non-selector, or unsupported by the
+	// installed ionice, makes ionice exit before launching one — the same
+	// no-child answer. This mirrors tasksetProcessOnlyOption, whose --pid prefix
+	// handling landed for the same finding.
+	//
+	// Measured on util-linux 2.39.3: --pi, --pgi, --ui and --u all enter
+	// process-only mode (as do their =value spellings), --p exits "ambiguous"
+	// without a child, and --i resolves to --ignore and DOES exec its child, so
+	// it must not match here.
+	if name, _, _ := strings.Cut(option, "="); len(name) > 2 &&
+		(strings.HasPrefix("--pid", name) ||
+			strings.HasPrefix("--pgid", name) ||
+			strings.HasPrefix("--uid", name)) {
 		return true
 	}
 	if len(option) < 2 || option[0] != '-' || option[1] == '-' {

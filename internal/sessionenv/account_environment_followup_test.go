@@ -66,6 +66,20 @@ func TestValidateAccountEnvironmentCommand_AllowsProcessOnlyWrapperModes(t *test
 		"ionice --pgid 123",
 		"ionice -u 1000",
 		"ionice --uid 1000",
+		// util-linux resolves long-option prefixes, and all three ionice selectors
+		// mean "act on an already-running process", so an abbreviation that is
+		// ambiguous only among THEM still launches no child. Measured on util-linux
+		// 2.39.3: --pi/--pgi/--ui/--u all enter process-only mode, and --p exits
+		// "ambiguous" without a child. taskset's --pid prefixes landed for the same
+		// finding; these are their ionice siblings.
+		"ionice --pi 123",
+		"ionice --pi=123",
+		"ionice --pgi 123",
+		"ionice --pgi=123",
+		"ionice --ui 1000",
+		"ionice --ui=0",
+		"ionice --u 1000",
+		"ionice --p 123",
 		"taskset -p 0x1 123",
 		"taskset -cp 0-3 123",
 		"taskset --pi 123",
@@ -74,6 +88,22 @@ func TestValidateAccountEnvironmentCommand_AllowsProcessOnlyWrapperModes(t *test
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"process-only command %q launches no child whose account environment could be changed", command)
+	}
+}
+
+// The selector-prefix rule must not swallow ionice's other long options. On
+// util-linux 2.39.3, `ionice --i /bin/true` exits 0 after EXECUTING its child:
+// --i resolves to --ignore, not to a selector, so its child stays inspected.
+func TestValidateAccountEnvironmentCommand_IoniceNonSelectorPrefixesKeepChildVisible(t *testing.T) {
+	for _, command := range []string{
+		"ionice --i env CODEX_HOME=/other codex",
+		"ionice --ig env CODEX_HOME=/other codex",
+		"ionice --ignore env CODEX_HOME=/other codex",
+		"ionice -t env CODEX_HOME=/other codex",
+		"ionice -c 2 env CODEX_HOME=/other codex",
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q executes a child whose account environment the assignment replaces", command)
 	}
 }
 

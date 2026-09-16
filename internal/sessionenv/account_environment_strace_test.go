@@ -258,6 +258,69 @@ func TestValidateAccountEnvironmentCommand_StraceEquivalentAliasPrefixes(t *test
 	}
 }
 
+// Inequivalent families can share a prefix. When every candidate consumes one
+// separate operand, the child sits at the same word whichever one the installed
+// strace picks — and if it calls the prefix ambiguous it exits without a child
+// at all — so the boundary is provable even though the option is not. `--col`
+// is the reported case: strace 6.8 resolves it to --columns, while the
+// cross-version table also holds --color.
+//
+// --env and --output are excluded: their OPERAND carries the security meaning,
+// not their arity, so a prefix that could reach one of them cannot be given
+// those semantics on a guess and keeps failing closed.
+func TestValidateAccountEnvironmentCommand_StraceSameArityPrefixesResolve(t *testing.T) {
+	for _, option := range []string{"--col", "--colu", "--colo"} {
+		t.Run(option, func(t *testing.T) {
+			require.NoError(t, ValidateAccountEnvironmentCommand(
+				"strace "+option+" 120 npm run dev", scopedProcessTabAccount()),
+				"%s consumes one operand under every resolution, so it must not be refused", option)
+			require.Error(t, ValidateAccountEnvironmentCommand(
+				"strace "+option+" 120 env CODEX_HOME=/other codex", scopedProcessTabAccount()),
+				"%s must still consume exactly one operand and leave the child visible", option)
+		})
+	}
+}
+
+// A shared prefix is only resolvable when the candidates agree. These keep
+// failing closed for two distinct reasons, pinned separately so a later change
+// cannot collapse them into one rule.
+func TestValidateAccountEnvironmentCommand_StraceUnresolvablePrefixesFailClosed(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		reason  string
+	}{
+		// Reachable candidates disagree on arity: --signal consumes an operand,
+		// --stack-trace-frame-limit does too, but --summary-* and terminal
+		// options do not all agree, so no single boundary is provable.
+		{"strace --s 1 env CODEX_HOME=/other codex", "candidates disagree"},
+		// Security-sensitive candidate reachable: --e can resolve to --env, whose
+		// operand is the mutation itself.
+		{"strace --e=CODEX_HOME=/other codex", "--e can reach --env"},
+		{"strace --o '|env CODEX_HOME=/other codex' true", "--o can reach --output"},
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(test.command, scopedProcessTabAccount()),
+			"%q must fail closed (%s)", test.command, test.reason)
+	}
+}
+
+// Resolving same-arity prefixes must not disturb the abbreviations that name
+// exactly one family, including the terminal options, which have a different
+// result and therefore never group.
+func TestValidateAccountEnvironmentCommand_StraceSingleFamilyPrefixesUnchanged(t *testing.T) {
+	for _, command := range []string{
+		"strace --hel",
+		"strace --vers",
+		"strace --en=PORT=3000 codex",
+		"strace --expr trace=all npm run dev",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q names one family and must keep its existing verdict", command)
+	}
+	require.Error(t, ValidateAccountEnvironmentCommand(
+		"strace --en=CODEX_HOME=/other codex", scopedProcessTabAccount()),
+		"--en names --env alone and must still refuse a denied assignment")
+}
+
 func TestValidateAccountEnvironmentCommand_FailClosedBoundaryStaysNarrow(t *testing.T) {
 	for _, command := range []string{
 		"echo CODEX_HOME=/tmp",
