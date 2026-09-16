@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,6 +107,14 @@ func probeUnitSupervisor() (supervisorPresence, error) {
 		_, bootErr := os.Stat(systemdBootedDir)
 		booted := bootErr == nil
 		if !booted && !systemdUserManagerPresent() {
+			// Only nonexistence proves the marker absent. A permission or
+			// I/O error from a confined process proves nothing about whether
+			// systemd is init — reading it as absence would spawn the very
+			// escapee this gate exists to refuse, so it fails closed
+			// (Codex on #4475).
+			if !errors.Is(bootErr, os.ErrNotExist) {
+				return supervisorUnreachable, fmt.Errorf("cannot determine whether systemd is init (boot marker unreadable): %w", bootErr)
+			}
 			return supervisorAbsent, fmt.Errorf("systemd runs neither this system nor a user manager in this session: %w", bootErr)
 		}
 		if _, err := exec.LookPath("systemctl"); err != nil {
@@ -135,11 +144,17 @@ func probeUnitSupervisor() (supervisorPresence, error) {
 // cannot work either: it drives the same manager through the same bus and
 // fails identically, so the refusal must lead with the remedy that can work.
 func unitStartBusUnreachable(startErr error) bool {
-	// Deterministic on linux: with neither variable set, systemctl has no
-	// address through which to reach the user bus at all — no stderr parsing.
+	// Deterministic on linux: with neither variable set AND no live private
+	// manager socket, systemctl has no address through which to reach the
+	// user manager at all — no stderr parsing. The socket matters: under a
+	// foreign init both variables are legitimately empty while
+	// `systemctl --user` still reaches the manager through
+	// <runtime>/systemd/private, so an empty env cannot classify a refusal
+	// as missing-bus while that endpoint answers (Codex on #4475).
 	if autostartGOOS == "linux" &&
 		os.Getenv("DBUS_SESSION_BUS_ADDRESS") == "" &&
-		os.Getenv("XDG_RUNTIME_DIR") == "" {
+		os.Getenv("XDG_RUNTIME_DIR") == "" &&
+		!systemdUserManagerPresent() {
 		return true
 	}
 	// A bus address existed but the connect still failed (stale socket, dead
@@ -151,10 +166,11 @@ func unitStartBusUnreachable(startErr error) bool {
 }
 
 // unitStartRemedy orders the remedies named in a start refusal by failure
-// class: a bus-unreachable start cannot be fixed by adopt, so the session
-// remedy leads; a refused or hung start leaves adopt the working verb; and a
-// darwin not-loaded job is repaired by re-bootstrap, which neither session
-// nor adopt performs.
+// class: a bus-unreachable or timed-out start cannot be fixed by adopt — it
+// drives the same manager through the same bus and fails or hangs
+// identically — so the session remedy leads; a refused start leaves adopt
+// the working verb; and a darwin not-loaded job is repaired by re-bootstrap,
+// which neither session nor adopt performs.
 func unitStartRemedy(startErr error) string {
 	// On darwin "Could not find service" means the gui domain answered but
 	// the plist is not loaded — a booted-out job or a reset interrupted
@@ -169,6 +185,13 @@ func unitStartRemedy(startErr error) string {
 	// (#4475 review). Only `systemctl unmask` lifts the mask, so it leads.
 	if autostartGOOS == "linux" && strings.Contains(startErr.Error(), "is masked") {
 		return fmt.Sprintf("unmask the unit (`systemctl --user unmask %s`), then run `af daemon adopt`", autostartUnitName)
+	}
+	// A start that hit the bounded deadline means the manager itself did not
+	// answer — `af daemon adopt` drives that same manager through
+	// RestartAutostartUnit's UNBOUNDED exec and would hang identically rather
+	// than recover, so the session remedy leads (Codex on #4475).
+	if errors.Is(startErr, context.DeadlineExceeded) {
+		return "start the unit from a session with a responsive service manager — the manager did not answer the bounded start, and `af daemon adopt` drives the same manager and would hang identically"
 	}
 	if unitStartBusUnreachable(startErr) {
 		return "start the unit from a session with a service manager — `af daemon adopt` cannot reach the manager from this environment either"
@@ -206,6 +229,15 @@ func waitForUnitDaemonReady(deadline time.Time) error {
 		return nil
 	}
 	if autostartGOOS == "linux" && systemdUnitActive(time.Now().Add(ensureUnitStartTimeout)) {
+		// is-active proves the unit's process lives — not that its daemon is
+		// still wedged: the last readiness poll may have just missed a socket
+		// the unit bound on the deadline's edge (RestartSec=5 matches the 5s
+		// wait, so a healthy daemon landing at expiry is the common shape).
+		// Re-ping before letting a manager-owned restart kill a daemon that
+		// is actually answering (Codex on #4475).
+		if werr := waitForDaemonReady(time.Now().Add(daemonDialTimeout)); werr == nil {
+			return nil
+		}
 		restartDeadline := time.Now().Add(ensureUnitStartTimeout)
 		if rerr := runEnsureManagerCommand(restartDeadline, "systemctl", "--user", "restart", autostartUnitName); rerr == nil {
 			if werr := waitForDaemonReady(time.Now().Add(daemonReadyTimeout)); werr == nil {
@@ -281,17 +313,17 @@ func runEnsureManagerCommand(deadline time.Time, name string, args ...string) er
 
 // systemdUserManagerPresent reports whether a `systemd --user` manager is
 // LIVE for this uid under an init that is not systemd — a container or
-// foreign root running `systemd --user` independently. Liveness is the
-// manager's own `systemd/private` socket, not the `systemd/` runtime
-// directory: the directory is not reliably reaped when the manager exits, so
-// a failed `systemd --user` leaves it behind while unlinking the private
-// socket — reading the dir as presence would fail every command closed on a
-// dead manager (Codex on #4475). The private socket is also an invocation
-// path — `systemctl --user` connects to it directly when no session broker
-// runs — so presence implies invocable and no separate "present but
-// unreachable" user-manager state exists. A bus socket or
-// DBUS_SESSION_BUS_ADDRESS deliberately proves NOTHING: a foreign
-// dbus-daemon owns a bus with no manager behind it (#4475 review).
+// foreign root running `systemd --user` independently. Liveness is a working
+// connect to the manager's own `systemd/private` socket, not the `systemd/`
+// runtime directory (which a failed manager leaves behind) and not the
+// socket's inode (which survives an unclean exit — SIGKILL does not unlink
+// it) — either remnant would otherwise read as a live manager and fail every
+// command closed (Codex on #4475). The private socket is also the invocation
+// path `systemctl --user` uses directly when no session broker runs, so
+// presence implies invocable and no separate "present but unreachable"
+// user-manager state exists. A bus socket or DBUS_SESSION_BUS_ADDRESS
+// deliberately proves NOTHING: a foreign dbus-daemon owns a bus with no
+// manager behind it (#4475 review).
 func systemdUserManagerPresent() bool {
 	for _, dir := range []string{
 		os.Getenv("XDG_RUNTIME_DIR"),
@@ -300,11 +332,29 @@ func systemdUserManagerPresent() bool {
 		if dir == "" {
 			continue
 		}
-		if isSocket(filepath.Join(dir, "systemd", "private")) {
+		if systemdPrivateSocketLive(filepath.Join(dir, "systemd", "private")) {
 			return true
 		}
 	}
 	return false
+}
+
+// systemdPrivateSocketLive verifies a live listener owns the manager's
+// private socket rather than trusting the inode type. A refused connect
+// proves the remnant dead — no listener owns it; any other dial failure
+// (a timeout on a saturated backlog) cannot prove death, so it still counts
+// present — reading dead-while-alive would reintroduce the ad-hoc escape
+// this probe guards (Codex on #4475).
+func systemdPrivateSocketLive(path string) bool {
+	if !isSocket(path) {
+		return false
+	}
+	conn, err := net.DialTimeout("unix", path, daemonDialTimeout)
+	if err == nil {
+		_ = conn.Close()
+		return true
+	}
+	return !errors.Is(err, syscall.ECONNREFUSED)
 }
 
 func isSocket(path string) bool {

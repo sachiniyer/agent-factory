@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 )
 
 // These tests exercise the ordinary EnsureDaemon production gate with a real
@@ -118,7 +120,10 @@ func TestEnsureDaemonPrefersHomeServingLaunchdUnit(t *testing.T) {
 func TestEnsureDaemonManagerHangRefusesAdHocSpawn(t *testing.T) {
 	marker, _ := installEnsureTestUnitAndManager(t, true)
 	// A session-bus address is configured, so the wedge is a manager hang,
-	// not a missing bus — the adopt remedy must lead.
+	// not a missing bus — and a hang means `af daemon adopt` would drive the
+	// same wedged manager through an unbounded call, so the session remedy
+	// leads and adopt is named only as the thing that cannot work (Codex on
+	// #4475).
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	startServer, _ := ensureTestServerStarter(t)
 
@@ -133,8 +138,11 @@ func TestEnsureDaemonManagerHangRefusesAdHocSpawn(t *testing.T) {
 	if err == nil {
 		t.Fatal("a wedged manager on a unit-claimed home produced an ad-hoc daemon — the #4470 escape")
 	}
-	if !strings.Contains(err.Error(), "unsupervised") || !strings.Contains(err.Error(), "af daemon adopt") {
-		t.Fatalf("refusal must name the supervision problem and the remedy, got: %v", err)
+	if !strings.Contains(err.Error(), "unsupervised") || !strings.Contains(err.Error(), "responsive service manager") {
+		t.Fatalf("a manager timeout must name the supervision problem and the session remedy, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "run `af daemon adopt`") {
+		t.Fatalf("a wedged-manager timeout must not lead with adopt — it hangs identically: %v", err)
 	}
 	if adHocLaunched {
 		t.Fatal("wedged manager spawned an unsupervised daemon")
@@ -326,6 +334,7 @@ func TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass(t *testing.T) {
 		name          string
 		busConfigured bool
 		managerStderr string
+		privSock      bool // a live <runtime>/systemd/private listener exists
 		wantAdoptLead bool
 		wantRemedy    string // when set, the refusal must name this remedy
 	}{
@@ -337,6 +346,12 @@ func TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass(t *testing.T) {
 			wantAdoptLead: false,
 		},
 		{name: "refused under reachable manager", busConfigured: true, wantAdoptLead: true},
+		// A foreign-init host legitimately has BOTH bus variables unset while
+		// the manager answers on <runtime>/systemd/private — a refused start
+		// there is a manager answer, not a missing bus, and adopt's
+		// reset-failed + restart reaches it through the same socket (Codex
+		// on #4475).
+		{name: "private socket live, bus env empty", busConfigured: false, privSock: true, wantAdoptLead: true},
 		// A masked unit is a durable admin override: adopt's reset-failed +
 		// restart cannot lift it, so the remedy must name unmask (#4475
 		// review).
@@ -354,6 +369,17 @@ func TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass(t *testing.T) {
 			} else {
 				t.Setenv("XDG_RUNTIME_DIR", "")
 				t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+			}
+			if tc.privSock {
+				userDir := filepath.Join(systemdUserBusBase, strconv.Itoa(os.Getuid()))
+				if err := os.MkdirAll(filepath.Join(userDir, "systemd"), 0o700); err != nil {
+					t.Fatalf("mkdir private socket dir: %v", err)
+				}
+				ln, err := net.Listen("unix", filepath.Join(userDir, "systemd", "private"))
+				if err != nil {
+					t.Fatalf("fake private manager socket: %v", err)
+				}
+				t.Cleanup(func() { ln.Close() })
 			}
 			managerDir := t.TempDir()
 			script := "#!/bin/sh\n"
@@ -476,35 +502,46 @@ func TestProbeUnitSupervisorOrdering(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct {
-		name     string
-		goos     string
-		booted   bool // linux only: the sd_booted marker exists
-		userMgr  bool // linux only: a leftover <runtime>/systemd dir exists (may be a dead manager's residue)
-		userBus  bool // linux only: a bus socket exists — a session broker, not manager evidence
-		privSock bool // linux only: the manager's <runtime>/systemd/private socket exists — the liveness marker
-		binary   bool // the manager client binary is on PATH
-		want     supervisorPresence
+		name      string
+		goos      string
+		booted    bool // linux only: the sd_booted marker exists
+		userMgr   bool // linux only: a leftover <runtime>/systemd dir exists (may be a dead manager's residue)
+		userBus   bool // linux only: a bus socket exists — a session broker, not manager evidence
+		privSock  bool // linux only: the manager's <runtime>/systemd/private socket exists — the liveness marker
+		binary    bool // the manager client binary is on PATH
+		want      supervisorPresence
+		bootedErr bool // linux only: the sd_booted stat fails with a non-ENOENT error
+		deadPriv  bool // linux only: <runtime>/systemd/private is a stale inode with no listener
 	}{
-		{"linux booted + binary", "linux", true, false, false, false, true, supervisorPresent},
-		{"linux booted, binary missing", "linux", true, false, false, false, false, supervisorUnreachable},
-		{"linux not booted + binary", "linux", false, false, false, false, true, supervisorAbsent},
-		{"linux not booted, no binary", "linux", false, false, false, false, false, supervisorAbsent},
+		{"linux booted + binary", "linux", true, false, false, false, true, supervisorPresent, false, false},
+		{"linux booted, binary missing", "linux", true, false, false, false, false, supervisorUnreachable, false, false},
+		{"linux not booted + binary", "linux", false, false, false, false, true, supervisorAbsent, false, false},
+		{"linux not booted, no binary", "linux", false, false, false, false, false, supervisorAbsent, false, false},
 		// A bus endpoint alone is NOT a manager — a foreign dbus-daemon or an
 		// inherited DBUS_SESSION_BUS_ADDRESS must read absent (#4475 review).
-		{"linux not booted + foreign bus + binary", "linux", false, false, true, false, true, supervisorAbsent},
+		{"linux not booted + foreign bus + binary", "linux", false, false, true, false, true, supervisorAbsent, false, false},
 		// The runtime dir is NOT liveness either: a failed `systemd --user`
 		// leaves <runtime>/systemd behind after unlinking its private socket,
 		// and dir + foreign bus still names no manager (Codex on #4475).
-		{"linux not booted + leftover manager dir + bus + binary", "linux", false, true, true, false, true, supervisorAbsent},
-		{"linux not booted + leftover manager dir only + binary", "linux", false, true, false, false, true, supervisorAbsent},
+		{"linux not booted + leftover manager dir + bus + binary", "linux", false, true, true, false, true, supervisorAbsent, false, false},
+		{"linux not booted + leftover manager dir only + binary", "linux", false, true, false, false, true, supervisorAbsent, false, false},
+		// A socket INODE is not liveness either: SIGKILL leaves the file
+		// behind, and only a refused connect proves no listener owns it
+		// (Codex on #4475).
+		{"linux not booted + stale private socket + binary", "linux", false, false, false, false, true, supervisorAbsent, false, true},
 		// The manager's own private socket IS the live marker — and the path
 		// `systemctl --user` connects to directly, so it reads present even
 		// with no session broker at all (Codex on #4475).
-		{"linux not booted + private socket, no bus + binary", "linux", false, false, false, true, true, supervisorPresent},
-		{"linux not booted + private socket, binary missing", "linux", false, false, false, true, false, supervisorUnreachable},
-		{"darwin binary", "darwin", false, false, false, false, true, supervisorPresent},
-		{"darwin binary missing", "darwin", false, false, false, false, false, supervisorUnreachable},
-		{"unsupported platform", "plan9", false, false, false, false, false, supervisorAbsent},
+		{"linux not booted + private socket, no bus + binary", "linux", false, false, false, true, true, supervisorPresent, false, false},
+		{"linux not booted + private socket, binary missing", "linux", false, false, false, true, false, supervisorUnreachable, false, false},
+		// A non-ENOENT boot-marker stat (a confined process's EACCES/EIO)
+		// proves nothing about absence — fail closed, never spawn the
+		// escapee (Codex on #4475).
+		{"linux booted marker unreadable + binary", "linux", false, false, false, false, true, supervisorUnreachable, true, false},
+		{"linux booted marker unreadable + live private socket", "linux", false, false, false, true, true, supervisorPresent, true, false},
+		{"darwin binary", "darwin", false, false, false, false, true, supervisorPresent, false, false},
+		{"darwin binary missing", "darwin", false, false, false, false, false, supervisorUnreachable, false, false},
+		{"unsupported platform", "plan9", false, false, false, false, false, supervisorAbsent, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withAutostartTestEnv(t, tc.goos)
@@ -546,11 +583,33 @@ func TestProbeUnitSupervisorOrdering(t *testing.T) {
 				}
 				t.Cleanup(func() { ln.Close() })
 			}
+			if tc.deadPriv {
+				// A stale remnant: the file exists, no listener owns it.
+				// Go unix listeners unlink their path on close, so disable
+				// that first to leave the dead inode behind.
+				if err := os.MkdirAll(filepath.Join(userDir, "systemd"), 0o700); err != nil {
+					t.Fatalf("mkdir user manager dir for stale socket: %v", err)
+				}
+				ln, err := net.Listen("unix", filepath.Join(userDir, "systemd", "private"))
+				if err != nil {
+					t.Fatalf("fake stale private socket: %v", err)
+				}
+				if ul, ok := ln.(*net.UnixListener); ok {
+					ul.SetUnlinkOnClose(false)
+				}
+				ln.Close()
+			}
 			prevBooted := systemdBootedDir
 			t.Cleanup(func() { systemdBootedDir = prevBooted })
-			if tc.booted {
+			switch {
+			case tc.bootedErr:
+				// A path longer than every platform's maximum stats as
+				// ENAMETOOLONG — a non-ENOENT failure that must fail closed,
+				// not read as "not booted".
+				systemdBootedDir = strings.Repeat("x", 5000)
+			case tc.booted:
 				systemdBootedDir = t.TempDir()
-			} else {
+			default:
 				systemdBootedDir = filepath.Join(t.TempDir(), "no-such-dir")
 			}
 			if tc.binary {
@@ -643,6 +702,126 @@ func TestCallDaemonReclaimPastDeadlineStillDials(t *testing.T) {
 	}
 	if _, err := os.Stat(restartMarker); err != nil {
 		t.Fatalf("the manager reclaim was not exercised: %v", err)
+	}
+}
+
+// TestCallDaemonReEnsurePastDeadlineStillDials covers the retry-loop half of
+// the deadline finding (Codex on #4475): a failed dial during a proven
+// upgrade handoff enters the loop's re-ensure, whose unit-path reclaim can
+// legitimately finish AFTER the admission deadline — the repaired daemon is
+// still owed the RPC, so the renewed dial must carry it rather than the loop
+// returning the pre-repair dial error.
+func TestCallDaemonReEnsurePastDeadlineStillDials(t *testing.T) {
+	_, _ = installEnsureTestUnitAndManager(t, false)
+
+	// Wedged-unit fake: `start` is a no-op on the already-active unit,
+	// `is-active` says active, only `restart` produces a serving daemon.
+	managerDir := t.TempDir()
+	restartMarker := filepath.Join(managerDir, "restart-called")
+	script := "#!/bin/sh\n" +
+		"case \"$2\" in\n" +
+		"  start) exit 0;;\n" +
+		"  is-active) exit 0;;\n" +
+		"  restart) printf 'called\\n' > " + shellQuote(restartMarker) + "; exit 0;;\n" +
+		"  reset-failed) exit 0;;\n" +
+		"esac\n" +
+		"exit 64\n"
+	if err := os.WriteFile(filepath.Join(managerDir, "systemctl"), []byte(script), 0o700); err != nil {
+		t.Fatalf("write wedged-unit systemctl: %v", err)
+	}
+	t.Setenv("PATH", managerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	startServer, serverErr := ensureTestServerStarter(t)
+	stopWatcher := startServerWhenMarked(restartMarker, startServer)
+	defer stopWatcher()
+
+	// The first ensure sees a live upgrade handoff (typed gate error), which
+	// is what admits the later reclaim into the retry loop at all.
+	var gateMu sync.Mutex
+	gateCalls := 0
+	prevGate := runEntrypointGate
+	runEntrypointGate = func(context.Context, string, bool) error {
+		gateMu.Lock()
+		defer gateMu.Unlock()
+		gateCalls++
+		if gateCalls == 1 {
+			return &upgradetxn.UpgradeInProgressError{
+				TransactionID: "txn-4475", ToVersion: "9.9.9",
+				Phase:    upgradetxn.PhaseCandidateValidating,
+				Deadline: time.Now().Add(time.Minute),
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { runEntrypointGate = prevGate })
+
+	prevLaunch := launchDaemonProcessFn
+	adHocLaunched := false
+	launchDaemonProcessFn = func() error { adHocLaunched = true; return startServer() }
+	t.Cleanup(func() { launchDaemonProcessFn = prevLaunch })
+
+	var resp PingResponse
+	if err := callDaemon("Ping", PingRequest{}, &resp); err != nil {
+		t.Fatalf("a successful re-ensure past the admission deadline must still deliver the RPC: %v", err)
+	}
+	if err := serverErr(); err != nil {
+		t.Fatalf("start reclaimed supervised daemon: %v", err)
+	}
+	if adHocLaunched {
+		t.Fatal("a wedged unit daemon produced an ad-hoc spawn — the #4470 escape")
+	}
+	if _, err := os.Stat(restartMarker); err != nil {
+		t.Fatalf("the re-ensure reclaim was not exercised: %v", err)
+	}
+}
+
+// TestEnsureDaemonActiveUnitReadyDaemonIsNotRestarted is the reclaim's edge
+// race (Codex on #4475): is-active proves the unit's process lives but not
+// that its daemon is still wedged — the last readiness poll can miss a
+// socket the unit bound on the deadline's edge. The re-ping must see the
+// answering daemon and leave it running rather than restarting it.
+func TestEnsureDaemonActiveUnitReadyDaemonIsNotRestarted(t *testing.T) {
+	_, _ = installEnsureTestUnitAndManager(t, false)
+
+	// is-active marks then sleeps so the fake daemon can begin serving mid
+	// check: the re-ping after it must find that daemon and skip restart.
+	managerDir := t.TempDir()
+	activeMarker := filepath.Join(managerDir, "is-active-called")
+	restartMarker := filepath.Join(managerDir, "restart-called")
+	script := "#!/bin/sh\n" +
+		"case \"$2\" in\n" +
+		"  start) exit 0;;\n" +
+		"  is-active) printf 'called\\n' > " + shellQuote(activeMarker) + "; sleep 1; exit 0;;\n" +
+		"  restart) printf 'called\\n' > " + shellQuote(restartMarker) + "; exit 0;;\n" +
+		"  reset-failed) exit 0;;\n" +
+		"esac\n" +
+		"exit 64\n"
+	if err := os.WriteFile(filepath.Join(managerDir, "systemctl"), []byte(script), 0o700); err != nil {
+		t.Fatalf("write edge-race systemctl: %v", err)
+	}
+	t.Setenv("PATH", managerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	startServer, serverErr := ensureTestServerStarter(t)
+	stopWatcher := startServerWhenMarked(activeMarker, startServer)
+	defer stopWatcher()
+
+	adHocLaunched := false
+	// Short enough that the first readiness wait expires before is-active's
+	// sleep ends — the daemon then answers in the re-ping window.
+	if err := ensureDaemonWithLauncherUntil(func() error {
+		adHocLaunched = true
+		return startServer()
+	}, time.Now().Add(1200*time.Millisecond)); err != nil {
+		t.Fatalf("a daemon answering at the edge must count as ready, got: %v", err)
+	}
+	if err := serverErr(); err != nil {
+		t.Fatalf("start edge-arriving daemon: %v", err)
+	}
+	if adHocLaunched {
+		t.Fatal("an active unit produced an ad-hoc spawn — the #4470 escape")
+	}
+	if _, err := os.Stat(restartMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a newly-ready daemon was restarted anyway — the edge race: %v", err)
 	}
 }
 
@@ -777,7 +956,10 @@ func installEnsureTestUnitAndManager(t *testing.T, block bool) (string, string) 
 	t.Setenv("XDG_RUNTIME_DIR", "")
 	prevBusBase := systemdUserBusBase
 	t.Cleanup(func() { systemdUserBusBase = prevBusBase })
-	systemdUserBusBase = t.TempDir()
+	// SocketTempDir, not TempDir: rows that fake the manager's private
+	// socket bind a real unix listener under this base, and macOS's
+	// 104-byte sun_path cannot hold a /var/folders/.../T/... path.
+	systemdUserBusBase = testguard.SocketTempDir(t)
 	unit := systemdAutostartUnit("/opt/agent-factory/bin/af", "", "", home)
 	if err := os.WriteFile(filepath.Join(unitDir, autostartUnitName), []byte(unit), 0o600); err != nil {
 		t.Fatalf("write home-serving unit: %v", err)

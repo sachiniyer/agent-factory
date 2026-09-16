@@ -88,6 +88,13 @@ func callDaemon(method string, req any, resp any) error {
 				if !handoffSeen && !isDaemonAbsentErr(err) {
 					return err
 				}
+				// The re-ensure can itself outlive the admission window — the
+				// unit-path reclaim draws its own budgets. The daemon it just
+				// repaired is still owed this request, so dial on the renewed
+				// window rather than letting the stale deadline below discard
+				// the repair (Codex on #4475).
+				attempt = callDaemonNoEnsureAttemptUntil(method, req, resp, postEnsureDialDeadline(deadline))
+				continue
 			case isLiveUpgradeGateErr(ensureErr):
 				handoffSeen = true
 				fallbackErr = ensureErr
