@@ -102,7 +102,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	} else if recData != nil {
 		backendType = recData.BackendType
 	}
-	if session.IsReservedRecordTitle(req.Title, backendType) {
+	if !req.allowReserved && session.IsReservedRecordTitle(req.Title, backendType) {
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive the reserved %q session", req.Title)
 	}
 	if instance == nil {

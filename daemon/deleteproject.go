@@ -398,14 +398,6 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		id       string
 		title    string
 		external bool
-		// reserved marks a record whose title claims the root's tmux name —
-		// a pre-#3732 session like "ro ot" on the local backend. Archive is
-		// refused for it (identity, not relocatability), so it takes the same
-		// teardown path as the in-place root and every external worktree: kill
-		// (#4407 review round 5). Without this routing the archive refusal
-		// wedges the whole delete AFTER the root_agents opt-in is already
-		// durably removed, and every retry fails on the same unarchivable row.
-		reserved bool
 	}
 	var targets []target
 	m.mu.Lock()
@@ -414,8 +406,7 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		if rid != repoID || inst == nil || inst.GetLiveness() == session.LiveArchived {
 			continue
 		}
-		targets = append(targets, target{id: inst.ID, title: title, external: inst.IsExternalWorktree(),
-			reserved: session.IsReservedRecordTitle(title, inst.BackendType())})
+		targets = append(targets, target{id: inst.ID, title: title, external: inst.IsExternalWorktree()})
 	}
 	m.mu.Unlock()
 
@@ -425,7 +416,7 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 
 	var errs []error
 	for _, t := range targets {
-		if t.external || t.reserved {
+		if t.external {
 			// Carry the stable identity captured under m.mu into the destructive
 			// lookup. Besides making a concurrent completed kill distinguishable,
 			// this prevents a same-title replacement from being torn down in the
@@ -462,7 +453,16 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		// external-session kill path above carries into KillSession. A title-only
 		// lookup here can resolve a NEW same-title session created after the
 		// snapshot and archive work the user never confirmed deleting.
-		_, archived, err := m.archiveSession(ArchiveSessionRequest{ID: t.id, Title: t.title, RepoID: repoID}, taskTargets, nil)
+		// allowReserved lifts the reserved-title archive refusal for this
+		// caller only (#4407 review): a pre-#3732 local record like "ro ot"
+		// claims the root's af_root identity and is refused by direct archive
+		// calls, but project deletion tears down EVERY session — the real
+		// in-place root takes the kill path above in the same pass — so the
+		// collision the fence protects cannot outlive this loop, while the
+		// record's linked worktree still deserves archive's preserve-not-
+		// destroy teardown. Without it the refusal wedged the whole delete
+		// after the root_agents opt-in was already durably removed.
+		_, archived, err := m.archiveSession(ArchiveSessionRequest{ID: t.id, Title: t.title, RepoID: repoID, allowReserved: true}, taskTargets, nil)
 		if errors.Is(err, errSessionNotFound) {
 			// Snapshot-gated idempotency, exactly like the kill path: this target
 			// existed under m.mu and is now authoritatively absent by stable ID, so

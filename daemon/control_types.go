@@ -176,6 +176,12 @@ type ArchiveSessionRequest struct {
 	// follow-up). Retained TUI actions send it; one-shot CLI callers resolve by
 	// {Title, RepoID}.
 	ID string `json:"id"`
+	// allowReserved lifts the reserved-title archive refusal — set only by
+	// DeleteProject, which archives every non-external session while tearing
+	// the whole project down, so the af_root collision the fence protects
+	// cannot outlive the pass (#4407 review). Unexported so no wire caller
+	// can bypass the admission fence.
+	allowReserved bool
 }
 
 type ArchiveSessionResponse struct {
