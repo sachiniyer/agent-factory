@@ -121,3 +121,79 @@ func TestEngineFailClosedOnUnparseableShell(t *testing.T) {
 		t.Fatalf("unparseable raw command not failed closed: %q", got)
 	}
 }
+
+// TestTriggerDecodeImplication makes the engine's gate contract executable:
+// trigger(text)==false must imply decode(text) finds nothing, because the
+// engine skips the transform entirely when the trigger fails. A transform
+// whose trigger stops firing for an input its decode handles is a silent
+// leak — the failure mode the shared stage exists to prevent. The check runs
+// every registered transform over every provenance and a corpus of texts
+// carrying no encoding's starter byte.
+func TestTriggerDecodeImplication(t *testing.T) {
+	e := &Engine{
+		Produce:    func(string, Provenance) []redactspan.Span { return nil },
+		FailClosed: redactspan.Span{Replacement: "[x]", Priority: 0},
+		Fallback:   "[x]",
+	}
+	provs := []Provenance{
+		ProvLogRecord, ProvLogValue, ProvLogShell, ProvLogShellRaw,
+		ProvLogShellLiteral, ProvDiagnostic, ProvGeneric, ProvConfigScalar,
+		ProvConfigShell, ProvConfigShellLiteral, ProvANSIPayload,
+		ProvURIPathSensitive, ProvURIPathGeneric, ProvURIQueryPair,
+		ProvURIComponent, ProvUnknown,
+	}
+	// Texts that cannot begin any registered encoding: no ':' (URI), no '"'
+	// (%q), no ESC/C1 (ANSI), no emitter prefix (shell).
+	inert := []string{
+		"",
+		"plain log line with no encodable bytes",
+		"percent %41 not URI and no colonless scheme",
+		"back\\slash 'quotes' are prose",
+		"newlines\nand\ttabs only",
+	}
+	for _, tr := range transforms {
+		for _, prov := range provs {
+			if !tr.admit(prov) {
+				continue
+			}
+			for _, text := range inert {
+				if tr.trigger(text) {
+					continue // gate is allowed to be generous
+				}
+				res := tr.decode(e, text, prov, 0)
+				if len(res.views)+len(res.fail)+len(res.rewrites) > 0 {
+					t.Fatalf("%s: trigger(%q)=false but decode found work", tr.name(), text)
+				}
+			}
+		}
+	}
+}
+
+// TestTriggerFiresOnCarrier asserts the positive half per transform: a text
+// that does carry the encoding opens its gate. For log-shell-emitter this is
+// also the check that every prefix in logEmitters passes the trigger — the
+// two cannot drift because they range over the same table.
+func TestTriggerFiresOnCarrier(t *testing.T) {
+	carriers := map[string]string{
+		"log-shell-emitter": `post-worktree hook "cmd"`,
+		"ansi":              "before \x1b[1m after",
+		"go-quote":          `field "value" tail`,
+		"uri":               "see http://h/p",
+		"shell-literal":     "anything",
+	}
+	for _, tr := range transforms {
+		text, ok := carriers[tr.name()]
+		if !ok {
+			t.Fatalf("no carrier case registered for transform %q", tr.name())
+		}
+		if !tr.trigger(text) {
+			t.Fatalf("%s: trigger(%q)=false on a text carrying its encoding", tr.name(), text)
+		}
+	}
+	// And the emitter gate fires on every prefix decode dispatches on.
+	for _, emitter := range logEmitters {
+		if !(logShellEmitter{}).trigger("x " + emitter.prefix + "y") {
+			t.Fatalf("emitter prefix %q does not pass its own trigger", emitter.prefix)
+		}
+	}
+}

@@ -28,22 +28,51 @@ var afLogRecordStart = regexp.MustCompile(
 // format.
 type logShellEmitter struct{}
 
+// emitterForm selects how the command bytes follow an emitter prefix.
+type emitterForm int
+
+const (
+	// emitterQuoted: the prefix is followed directly by a %q token.
+	emitterQuoted emitterForm = iota
+	// emitterRootAgentProgram: the %q token follows " (in-place, program "
+	// later on the same line, closing with ")".
+	emitterRootAgentProgram
+	// emitterRawTail: the command follows " (output: <path>): " — a %q token
+	// reaching end of line, else the raw tail bounded by the next AF record.
+	emitterRawTail
+)
+
+// logEmitters is the one list both decode and trigger range over, so a new
+// emitter is gated by construction: trigger(text) is true exactly when some
+// prefix decode dispatches on is present. Keeping them one table is what makes
+// "trigger false ⟹ decode finds nothing" structural rather than a wording
+// coincidence (#4149 review).
+var logEmitters = []struct {
+	prefix string
+	form   emitterForm
+}{
+	{prefix: "post-worktree hook ", form: emitterQuoted},
+	{prefix: "ensured root agent for ", form: emitterRootAgentProgram},
+	{prefix: "running post-worktree hook in ", form: emitterRawTail},
+}
+
 func (logShellEmitter) name() string { return "log-shell-emitter" }
 
 func (logShellEmitter) admit(prov Provenance) bool { return prov == ProvLogRecord }
 
-// trigger gates the per-line scan on a byte the emitter prefixes share —
-// every recognized prefix contains "hook" or "root agent" — so ordinary log
-// text never pays for it.
+// trigger fires iff some emitter prefix decode dispatches on appears in the
+// text — derived from the same table, so the two cannot drift.
 func (logShellEmitter) trigger(text string) bool {
-	return strings.Contains(text, "hook") || strings.Contains(text, "root agent")
+	for _, emitter := range logEmitters {
+		if strings.Contains(text, emitter.prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (logShellEmitter) decode(e *Engine, text string, _ Provenance, depth int) transformResult {
 	const (
-		runPrefix            = "running post-worktree hook in "
-		quotedPrefix         = "post-worktree hook "
-		rootAgentPrefix      = "ensured root agent for "
 		rootAgentProgramOpen = " (in-place, program "
 		outputOpen           = " (output: "
 		commandSep           = "): "
@@ -61,50 +90,57 @@ func (logShellEmitter) decode(e *Engine, text string, _ Provenance, depth int) t
 			contentEnd--
 		}
 		line := text[lineStart:contentEnd]
-		quoted := strings.Index(line, quotedPrefix)
-		if quoted >= 0 {
-			quotedStart := lineStart + quoted + len(quotedPrefix)
-			if quotedStart < contentEnd && text[quotedStart] == '"' {
-				res.rewrites = append(res.rewrites,
-					shellQuotedRewrite(e, text, quotedStart, contentEnd, depth)...)
+		for _, emitter := range logEmitters {
+			prefixAt := strings.Index(line, emitter.prefix)
+			if prefixAt < 0 {
+				continue
 			}
-		}
-		rootAgent := strings.Index(line, rootAgentPrefix)
-		program := strings.LastIndex(line, rootAgentProgramOpen)
-		if rootAgent >= 0 && program > rootAgent {
-			quotedStart := lineStart + program + len(rootAgentProgramOpen)
-			quotedEnd := GoQuotedEnd(text[:contentEnd], quotedStart)
-			if quotedEnd >= 0 && text[quotedEnd:contentEnd] == ")" {
-				res.rewrites = append(res.rewrites,
-					shellQuotedRewrite(e, text, quotedStart, contentEnd, depth)...)
-			}
-		}
-		run := strings.Index(line, runPrefix)
-		if run >= 0 {
-			afterRun := run + len(runPrefix)
-			output := strings.Index(line[afterRun:], outputOpen)
-			if output >= 0 {
+			switch emitter.form {
+			case emitterQuoted:
+				quotedStart := lineStart + prefixAt + len(emitter.prefix)
+				if quotedStart < contentEnd && text[quotedStart] == '"' {
+					res.rewrites = append(res.rewrites,
+						shellQuotedRewrite(e, text, quotedStart, contentEnd, depth)...)
+				}
+			case emitterRootAgentProgram:
+				program := strings.LastIndex(line, rootAgentProgramOpen)
+				if program <= prefixAt {
+					continue
+				}
+				quotedStart := lineStart + program + len(rootAgentProgramOpen)
+				quotedEnd := GoQuotedEnd(text[:contentEnd], quotedStart)
+				if quotedEnd >= 0 && text[quotedEnd:contentEnd] == ")" {
+					res.rewrites = append(res.rewrites,
+						shellQuotedRewrite(e, text, quotedStart, contentEnd, depth)...)
+				}
+			case emitterRawTail:
+				afterRun := prefixAt + len(emitter.prefix)
+				output := strings.Index(line[afterRun:], outputOpen)
+				if output < 0 {
+					continue
+				}
 				afterOutput := afterRun + output + len(outputOpen)
 				separator := strings.Index(line[afterOutput:], commandSep)
-				if separator >= 0 {
-					commandStart := lineStart + afterOutput + separator + len(commandSep)
-					quotedEnd := -1
-					if commandStart < contentEnd && text[commandStart] == '"' {
-						quotedEnd = GoQuotedEnd(text[:contentEnd], commandStart)
-					}
-					if quotedEnd == contentEnd {
-						res.rewrites = append(res.rewrites,
-							shellQuotedRewrite(e, text, commandStart, contentEnd, depth)...)
-					} else {
-						commandEnd := nextAFLogRecordStart(text, contentEnd)
-						res.views = append(res.views, viewOut{
-							view: View{
-								Text:   text[commandStart:commandEnd],
-								Source: identityRange(commandStart, commandEnd),
-							},
-							prov: ProvLogShellRaw,
-						})
-					}
+				if separator < 0 {
+					continue
+				}
+				commandStart := lineStart + afterOutput + separator + len(commandSep)
+				quotedEnd := -1
+				if commandStart < contentEnd && text[commandStart] == '"' {
+					quotedEnd = GoQuotedEnd(text[:contentEnd], commandStart)
+				}
+				if quotedEnd == contentEnd {
+					res.rewrites = append(res.rewrites,
+						shellQuotedRewrite(e, text, commandStart, contentEnd, depth)...)
+				} else {
+					commandEnd := nextAFLogRecordStart(text, contentEnd)
+					res.views = append(res.views, viewOut{
+						view: View{
+							Text:   text[commandStart:commandEnd],
+							Source: identityRange(commandStart, commandEnd),
+						},
+						prov: ProvLogShellRaw,
+					})
 				}
 			}
 		}
