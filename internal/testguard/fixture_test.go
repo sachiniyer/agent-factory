@@ -222,6 +222,29 @@ func TestGroupPinExitsWithItsSpawner(t *testing.T) {
 	reapOrphanedChild(t, pinPID)
 }
 
+// The unpinned variant exists so a test can observe its fixture's group
+// EMPTY after a mid-test group signal (#4417 review): kill(-pgid, 0) counts
+// a held pin zombie, so the pinned variant reports the group alive forever.
+// Kill the single-member group, reap the leader, and the group probe must
+// go ESRCH — while the cleanup's direct-child kill stays a safe no-op past
+// the reap instead of risking a recycled pgid.
+func TestStartGroupProcessUnpinnedLeavesObservableEmptyGroup(t *testing.T) {
+	cmd := StartGroupProcessUnpinned(t, exec.Command("sh", "-c", "exec sleep 60"))
+	pgid := cmd.Process.Pid
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill fixture group: %v", err)
+	}
+	_, _ = cmd.Process.Wait()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-pgid, 0); err == syscall.ESRCH {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Errorf("process group %d still visible after its only member was killed and reaped", pgid)
+}
+
 // waitForProcessDeath asks proctree, not kill(pid, 0): signal-0 answers for a
 // ZOMBIE, and a watchdog-killed orphan stays one until whatever it reparented
 // to collects it — on that reaper's schedule, which a container init may never

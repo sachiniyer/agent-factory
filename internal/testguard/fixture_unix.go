@@ -62,6 +62,14 @@ func StartGroupProcess(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 		strconv.Itoa(os.Getpid()))
 	pin.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: cmd.Process.Pid}
 	if err := pin.Start(); err != nil {
+		// The leader is already running and no cleanup for it is registered
+		// yet — a bare Fatalf here strands the indefinitely-blocking fixture
+		// this helper exists to contain, in exactly the failure conditions
+		// (a transient fork/exec refusal) that produce one. Kill the group
+		// and collect the leader before failing; the pin never started, so
+		// nothing else holds the id.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
 		t.Fatalf("start fixture group pin: %v", err)
 	}
 	// Registered in this order so cleanup runs kill-then-wait (t.Cleanup is
@@ -74,6 +82,45 @@ func StartGroupProcess(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 	t.Cleanup(func() { _, _ = pin.Process.Wait() })
 	t.Cleanup(func() { _, _ = cmd.Process.Wait() })
 	KillProcessGroupOnCleanup(t, cmd.Process.Pid)
+	return cmd
+}
+
+// StartGroupProcessUnpinned starts cmd in its own process group like
+// StartGroupProcess but WITHOUT the pin member, for fixtures whose tests
+// must OBSERVE the group empty mid-test: a held pin keeps kill(-pgid, 0)
+// reporting the group alive after the fixture's real members die, which
+// defeats any wait-for-group-exit loop the code under test runs (the daemon
+// vscode teardown waits on exactly that probe).
+//
+// Dropping the pin drops the pgid-recycling guard with it, so this variant
+// never signals the GROUP at cleanup — it kills the direct child only.
+// os.Process.Kill is a safe no-op once the child is reaped (the handle
+// reports the process done instead of signaling a recycled pid), which makes
+// this correct ONLY for single-member fixtures — `exec sleep N` and the
+// like. A fixture that forks children into its group needs
+// StartGroupProcess: without the pin, a late group kill is the hazard the
+// pin was added to close.
+//
+// The pin is redundant for the callers that need this variant anyway: their
+// mid-test group signals go through a seam that only signals while the
+// recorded leader is alive (daemon/vscode_owner.go refuses to signal a
+// leaderless group), and a live leader pins its own pgid for the signal's
+// duration. The cleanup child-kill covers the test that never signals.
+func StartGroupProcessUnpinned(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
+	t.Helper()
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fixture process %q: %v", cmd.Path, err)
+	}
+	// Kill the direct child, not the group: with no member pinning the id, a
+	// post-empty group kill is the recycled-pgid hazard the pinned variant
+	// exists to close. LIFO registration runs Kill before Wait, and a caller
+	// holding its own Wait goroutine makes the cleanup reap a no-op.
+	t.Cleanup(func() { _, _ = cmd.Process.Wait() })
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
 	return cmd
 }
 

@@ -84,7 +84,13 @@ func startOwnedSleepWithNonce(t *testing.T, processNonce string) (*exec.Cmd, pro
 	t.Helper()
 	cmd := exec.Command("/bin/sh", "-c", "exec sleep 60")
 	cmd.Env = append(os.Environ(), vscodeOwnerNonceEnv+"="+processNonce)
-	testguard.StartGroupProcess(t, cmd)
+	// Unpinned on purpose: the tests signal this group MID-test through the
+	// supervisor's own seam and then wait on the group being GONE — a held
+	// pin member would keep kill(-pgid, 0) reporting it alive forever. The
+	// fixture is a single `exec sleep`, so the direct-child teardown loses
+	// nothing, and the seam only signals while the recorded leader is live —
+	// which pins the pgid itself for the signal's duration.
+	testguard.StartGroupProcessUnpinned(t, cmd)
 	// Reap the moment the leader dies, not only at cleanup: the tests signal
 	// this group MID-test through the supervisor's own seam, and the
 	// escalation path then re-verifies the leader's identity in proctree. An

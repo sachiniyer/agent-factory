@@ -20,6 +20,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -82,7 +83,18 @@ func fakeVSCodeServerMain() {
 	testguard.ExitWhenOrphaned(50 * time.Millisecond)
 	if dir := os.Getenv(fakeVSCodePgidDirEnv); dir != "" {
 		if pgid, err := syscall.Getpgid(0); err == nil && pgid == os.Getpid() {
-			_ = os.WriteFile(filepath.Join(dir, strconv.Itoa(pgid)), nil, 0o600)
+			// Record our start stamp alongside the pgid so the spawning
+			// test's cleanup can re-verify the leader before SIGKILLing the
+			// group: this file outlives us, and the freed number can name a
+			// foreign group — especially on macOS's small PID space. An
+			// empty stamp is what an uninspectable process table leaves,
+			// and the cleanup must skip rather than signal what it cannot
+			// prove is ours.
+			var stamp []byte
+			if self, lerr := proctree.Lookup(os.Getpid()); lerr == nil {
+				stamp = []byte(strconv.FormatUint(self.StartID, 10))
+			}
+			_ = os.WriteFile(filepath.Join(dir, strconv.Itoa(pgid)), stamp, 0o600)
 		}
 	}
 	args := os.Args[1:]
@@ -269,9 +281,24 @@ func writeFakeVSCodeBinary(t *testing.T, name string, env map[string]string) str
 			return
 		}
 		for _, e := range entries {
-			if pgid, aerr := strconv.Atoi(e.Name()); aerr == nil {
-				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			pgid, aerr := strconv.Atoi(e.Name())
+			if aerr != nil {
+				continue
 			}
+			// Signal only the group whose leader is still the exact process
+			// that registered: an entry survives the editor that wrote it,
+			// and the freed pgid can name a group that is not ours —
+			// SIGKILL there is the recycled-pgid hazard this cleanup exists
+			// to close. An unreadable stamp or uninspectable leader is
+			// skipped, never signaled; the editor's own orphan watchdog
+			// still bounds how long it can outlive the test.
+			raw, rerr := os.ReadFile(filepath.Join(pgidDir, e.Name()))
+			stamp, perr := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64)
+			leader, lerr := proctree.Lookup(pgid)
+			if rerr != nil || perr != nil || lerr != nil || leader.StartID != stamp {
+				continue
+			}
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		}
 	})
 	var exports strings.Builder
