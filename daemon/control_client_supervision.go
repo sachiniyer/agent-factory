@@ -91,8 +91,12 @@ const (
 // or a session bus with no manager behind it — still reads absent. Only once
 // the manager is known to exist does a missing binary become meaningful, and
 // there it is an inability to invoke, never proof of absence (#4470).
-func probeUnitSupervisor() (supervisorPresence, error) {
-	switch autostartGOOS {
+//
+// goos is an explicit input rather than a read of autostartGOOS: a table test
+// that can only reach the host's arm is not testing the switch (#4475
+// review). Production passes autostartGOOS.
+func probeUnitSupervisor(goos string) (supervisorPresence, error) {
+	switch goos {
 	case "linux":
 		// Presence is "a manager this unit can be started through exists": the
 		// sd_booted marker proves systemd-as-PID-1, and the user manager's own
@@ -134,16 +138,22 @@ func probeUnitSupervisor() (supervisorPresence, error) {
 		}
 		return supervisorPresent, nil
 	default:
-		return supervisorAbsent, fmt.Errorf("daemon autostart is not supported on %s", autostartGOOS)
+		return supervisorAbsent, fmt.Errorf("daemon autostart is not supported on %s", goos)
 	}
 }
 
 // unitStartBusUnreachable reports whether a failed unit start could not reach
 // the manager at all — no session bus to drive it through (a user cron job, a
-// system service, an SSH-less environment). In that class `af daemon adopt`
-// cannot work either: it drives the same manager through the same bus and
-// fails identically, so the refusal must lead with the remedy that can work.
-func unitStartBusUnreachable(startErr error) bool {
+// system service, `su` without -l, a minimal container shell). In that class
+// `af daemon adopt` cannot work either: it drives the same manager through the
+// same bus and fails identically, so the refusal must lead with the remedy
+// that can work.
+//
+// The predicate is sufficient, not exhaustive. A bus failure worded in a way
+// it does not recognize (an older systemd's "Failed to get D-Bus connection",
+// for example) falls through to startRefused, which is why that class still
+// names the session remedy second (#4475 review).
+func unitStartBusUnreachable(goos string, startErr error) bool {
 	// Deterministic on linux: with neither variable set AND no live private
 	// manager socket, systemctl has no address through which to reach the
 	// user manager at all — no stderr parsing. The socket matters: under a
@@ -151,52 +161,209 @@ func unitStartBusUnreachable(startErr error) bool {
 	// `systemctl --user` still reaches the manager through
 	// <runtime>/systemd/private, so an empty env cannot classify a refusal
 	// as missing-bus while that endpoint answers (Codex on #4475).
-	if autostartGOOS == "linux" &&
+	if goos == "linux" &&
 		os.Getenv("DBUS_SESSION_BUS_ADDRESS") == "" &&
 		os.Getenv("XDG_RUNTIME_DIR") == "" &&
 		!systemdUserManagerPresent() {
 		return true
 	}
 	// A bus address existed but the connect still failed (stale socket, dead
-	// user manager) — take the manager's own words. launchd's "Could not find
-	// service" is deliberately NOT here: the gui domain ANSWERED that the job
-	// is not loaded, which is a bootstrap repair, not a reachability failure
-	// (#4475 review).
+	// user manager), or the env is empty while a live manager socket exists (a
+	// cron job on a lingering host: systemctl does not look for that socket
+	// without XDG_RUNTIME_DIR) — take the manager's own words. launchd's
+	// "Could not find service" is deliberately NOT here: the gui domain
+	// ANSWERED that the job is not loaded, which is a bootstrap repair, not a
+	// reachability failure (#4475 review).
 	return strings.Contains(startErr.Error(), "connect to bus")
 }
 
-// unitStartRemedy orders the remedies named in a start refusal by failure
-// class: a bus-unreachable or timed-out start cannot be fixed by adopt — it
-// drives the same manager through the same bus and fails or hangs
-// identically — so the session remedy leads; a refused start leaves adopt
-// the working verb; and a darwin not-loaded job is repaired by re-bootstrap,
-// which neither session nor adopt performs.
-func unitStartRemedy(startErr error) string {
-	// On darwin "Could not find service" means the gui domain answered but
-	// the plist is not loaded — a booted-out job or a reset interrupted
-	// between pause and resume (#4475 review). `af daemon install`
-	// re-bootstraps it; adopting or switching sessions cannot register the
-	// plist from a domain that already answered.
-	if autostartGOOS == "darwin" && strings.Contains(startErr.Error(), "Could not find service") {
-		return "re-bootstrap the unit with `af daemon install` — the gui domain answered but the service is not loaded"
+// startFailureClass is why the bounded unit start failed. The class, not the
+// raw error, decides which remedies can work and in what order (#4475
+// review).
+type startFailureClass uint8
+
+const (
+	// startRefused: the manager answered and refused — a start-limit hit, a
+	// failing ExecStart, or any error the other classes do not recognize.
+	// The manager is reachable and the problem is the unit, so adopt's
+	// reset-failed + restart leads.
+	startRefused startFailureClass = iota
+	// startHung: the bounded start hit its deadline. That is most often a
+	// manager that is busy with the unit rather than dead: through at least
+	// systemd v256, service_start returns -EAGAIN while the unit waits out
+	// RestartSec — "if a user does not want to wait for the holdoff time to
+	// elapse, the service should be manually restarted, not started" — and
+	// while it is still stopping, so the start job stays queued and the
+	// unit's own RestartSec=5 alone outlasts the 2s bound. adopt's restart
+	// skips the holdoff and is not held to that bound, so adopt leads. A
+	// manager that hangs adopt too is genuinely wedged; the second remedy
+	// covers it.
+	startHung
+	// startBusUnreachable: this process has no path to the manager at all.
+	// adopt fails the same way, so the session remedy leads.
+	startBusUnreachable
+	// startMasked: a durable admin mask that neither reset-failed nor
+	// restart lifts, so adopt alone deterministically fails (#4475 review).
+	startMasked
+	// startNotLoaded: darwin's gui domain answered that the job is not loaded
+	// — a booted-out job, or a reset interrupted between pause and resume
+	// (#4475 review). Only a re-bootstrap registers the plist again.
+	startNotLoaded
+)
+
+// classifyUnitStartFailure maps a failed bounded start onto its class. goos is
+// an input so both platform arms are testable on every host.
+func classifyUnitStartFailure(goos string, startErr error) startFailureClass {
+	msg := startErr.Error()
+	switch {
+	case goos == "darwin" && strings.Contains(msg, "Could not find service"):
+		return startNotLoaded
+	case goos == "linux" && strings.Contains(msg, "is masked"):
+		return startMasked
+	case errors.Is(startErr, context.DeadlineExceeded):
+		// Ahead of the bus predicate: a start that ran out its bound got as
+		// far as waiting on the manager, while the bus predicate is an
+		// inference from this process's environment.
+		return startHung
+	case unitStartBusUnreachable(goos, startErr):
+		return startBusUnreachable
+	default:
+		return startRefused
 	}
-	// A masked unit is a durable admin override that neither reset-failed nor
-	// restart can reverse — `af daemon adopt` deterministically fails on it
-	// (#4475 review). Only `systemctl unmask` lifts the mask, so it leads.
-	if autostartGOOS == "linux" && strings.Contains(startErr.Error(), "is masked") {
-		return fmt.Sprintf("unmask the unit (`systemctl --user unmask %s`), then run `af daemon adopt`", autostartUnitName)
+}
+
+// uninstallRemedy is the escape hatch every refusal names last: an operator
+// who deliberately wants this home unmanaged needs a supported exit.
+const uninstallRemedy = "if this home should be unmanaged, uninstall the autostart unit with `af daemon uninstall`"
+
+// managerSessionRemedy names the session that can drive the manager, and the
+// command that proves a candidate session qualifies.
+func managerSessionRemedy(goos string) string {
+	if goos == "darwin" {
+		return fmt.Sprintf("run this from a session with a service manager, such as this user's GUI login session, where `%s` answers", unitStatusDiagnostic(goos))
 	}
-	// A start that hit the bounded deadline means the manager itself did not
-	// answer — `af daemon adopt` drives that same manager through
-	// RestartAutostartUnit's UNBOUNDED exec and would hang identically rather
-	// than recover, so the session remedy leads (Codex on #4475).
-	if errors.Is(startErr, context.DeadlineExceeded) {
-		return "start the unit from a session with a responsive service manager — the manager did not answer the bounded start, and `af daemon adopt` drives the same manager and would hang identically"
+	return fmt.Sprintf("run this from a session with a service manager, such as a login shell where `%s` answers", unitStatusDiagnostic(goos))
+}
+
+// busSessionRemedy extends managerSessionRemedy with how an unattended job
+// becomes such a session. On linux the user manager listens at
+// /run/user/<uid>/systemd/private, which systemctl only looks for when
+// XDG_RUNTIME_DIR names that directory; lingering keeps the manager running
+// with nobody logged in. The uid is rendered because a cron job has no login
+// session for a bare `loginctl enable-linger` to act on.
+func busSessionRemedy(goos string) string {
+	if goos != "linux" {
+		return managerSessionRemedy(goos)
 	}
-	if unitStartBusUnreachable(startErr) {
-		return "start the unit from a session with a service manager — `af daemon adopt` cannot reach the manager from this environment either"
+	uid := os.Getuid()
+	return managerSessionRemedy(goos) + fmt.Sprintf(" (for a cron job or system service, set `XDG_RUNTIME_DIR=/run/user/%d` in its environment, and run `loginctl enable-linger %d` once so the user manager runs without a login)", uid, uid)
+}
+
+// unitStartRemedies orders the remedies a start refusal names by failure
+// class: what the caller can act on first, the uninstall escape hatch always
+// last (#4475 review).
+func unitStartRemedies(goos string, class startFailureClass) []string {
+	switch class {
+	case startNotLoaded:
+		return []string{
+			"re-bootstrap the unit with `af daemon install` (the gui domain answered that the service is not loaded, which neither adopt nor another session repairs)",
+			uninstallRemedy,
+		}
+	case startMasked:
+		return []string{
+			fmt.Sprintf("unmask the unit with `systemctl --user unmask %s`, then run `af daemon adopt` (adopt alone cannot lift a mask)", autostartUnitName),
+			uninstallRemedy,
+		}
+	case startBusUnreachable:
+		return []string{
+			busSessionRemedy(goos),
+			"do not expect `af daemon adopt` to help from here (it drives the same service manager through the same missing bus and fails the same way)",
+			uninstallRemedy,
+		}
+	case startHung:
+		adopt := fmt.Sprintf("run `af daemon adopt` (its restart is not held to this command's %s start bound)", ensureUnitStartTimeout)
+		if goos == "linux" {
+			adopt = fmt.Sprintf("run `af daemon adopt` (its restart skips the RestartSec holdoff a queued start waits out, and is not held to this command's %s start bound)", ensureUnitStartTimeout)
+		}
+		return []string{
+			adopt,
+			"if adopt hangs too, the service manager itself is not answering: interrupt adopt, then " + managerSessionRemedy(goos),
+			uninstallRemedy,
+		}
+	default:
+		adopt := "run `af daemon adopt` (it restarts the unit through the service manager)"
+		if goos == "linux" {
+			adopt = "run `af daemon adopt` (it clears the unit's failed state and start-limit counter, then restarts it through the service manager)"
+		}
+		return []string{
+			adopt,
+			"if adopt fails the same way, " + busSessionRemedy(goos),
+			uninstallRemedy,
+		}
 	}
-	return "run `af daemon adopt`, or start the unit from a session with a service manager"
+}
+
+// unreachableSupervisorRemedies orders the remedies for a manager that exists
+// but cannot be invoked from here. adopt is never named: it runs the same
+// binary from the same environment.
+func unreachableSupervisorRemedies(goos string, probeErr error) []string {
+	var remedies []string
+	if errors.Is(probeErr, exec.ErrNotFound) {
+		bin, dir := "systemctl", "/usr/bin"
+		if goos == "darwin" {
+			bin, dir = "launchctl", "/bin"
+		}
+		remedies = append(remedies, fmt.Sprintf("add the directory holding `%s` (usually %s) to this environment's PATH (`af daemon adopt` runs the same binary and fails the same way)", bin, dir))
+	}
+	return append(remedies, busSessionRemedy(goos), uninstallRemedy)
+}
+
+// unitReadinessRemedies is the accepted-but-silent class: the manager took
+// the start, so waiting and adopt stay the working verbs.
+func unitReadinessRemedies(goos string) []string {
+	retry := "retry shortly, since the unit may still be starting"
+	if goos == "linux" {
+		retry += " (systemd holds a crashed unit's restart for RestartSec)"
+	}
+	return []string{
+		retry,
+		fmt.Sprintf("check `%s`", unitStatusDiagnostic(goos)),
+		"reclaim the unit's daemon with `af daemon adopt`",
+		uninstallRemedy,
+	}
+}
+
+// formatRemedies renders an ordered remedy list with its order visible, so a
+// reader follows the numbers rather than guessing which clause comes first.
+func formatRemedies(remedies []string) string {
+	var b strings.Builder
+	b.WriteString("try, in order:")
+	for i, r := range remedies {
+		if i > 0 {
+			b.WriteString(";")
+		}
+		fmt.Fprintf(&b, " (%d) %s", i+1, r)
+	}
+	return b.String()
+}
+
+// The three refusals ensureDaemonThroughUnitUntil returns instead of an
+// ad-hoc spawn on a unit-claimed home (#4470). The start and readiness
+// refusals wrap their cause, since callDaemon's lifecycle fallback reads
+// context.DeadlineExceeded through them; the probe error stays formatted
+// only, as it always was, so its stat errno can never be read as a daemon
+// that is merely absent (isDaemonAbsentErr matches fs.ErrNotExist).
+
+func unreachableSupervisorRefusal(goos string, probeErr error) error {
+	return fmt.Errorf("the installed daemon service supervises this home but its service manager cannot be invoked from this environment (%v); refusing to launch an unsupervised daemon — %s", probeErr, formatRemedies(unreachableSupervisorRemedies(goos, probeErr)))
+}
+
+func unitStartRefusal(goos string, startErr error) error {
+	return fmt.Errorf("the installed daemon service supervises this home but could not be started (%w); refusing to launch an unsupervised daemon — %s", startErr, formatRemedies(unitStartRemedies(goos, classifyUnitStartFailure(goos, startErr))))
+}
+
+func unitReadinessRefusal(goos string, readyErr error) error {
+	return fmt.Errorf("the installed daemon service accepted the start but no daemon answered (%w); refusing to launch an unsupervised daemon — %s", readyErr, formatRemedies(unitReadinessRemedies(goos)))
 }
 
 // waitForUnitDaemonReady waits out the caller's readiness budget for the
@@ -253,8 +420,8 @@ func waitForUnitDaemonReady(deadline time.Time) error {
 
 // unitStatusDiagnostic names the manager-specific inspection command for the
 // readiness-failure hint — systemd and launchd share no spelling.
-func unitStatusDiagnostic() string {
-	if autostartGOOS == "darwin" {
+func unitStatusDiagnostic(goos string) string {
+	if goos == "darwin" {
 		return fmt.Sprintf("launchctl print %s", launchdServiceTarget())
 	}
 	return fmt.Sprintf("systemctl --user status %s", autostartUnitName)

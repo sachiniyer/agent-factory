@@ -196,7 +196,7 @@ func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error
 	// start with an already-served socket (whose ExecStart exits 0 by
 	// design), and leaves the daemon permanently outside Restart=on-failure
 	// protection (#4470).
-	presence, probeErr := probeUnitSupervisor()
+	presence, probeErr := probeUnitSupervisor(autostartGOOS)
 	switch presence {
 	case supervisorAbsent:
 		if admissionDeadlineExpired(deadline) {
@@ -221,12 +221,12 @@ func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error
 		// to invoke it failed (e.g. a PATH that omits the binary). `af daemon
 		// adopt` would hit the same wall, so the remedy is an environment
 		// that can reach the manager.
-		return fmt.Errorf("the installed daemon service supervises this home but its service manager cannot be invoked from this environment (%v); refusing to launch an unsupervised daemon — fix PATH so the manager binary is reachable, or run this from a session with a service manager; if this home should be unmanaged, uninstall the autostart unit", probeErr)
+		return unreachableSupervisorRefusal(autostartGOOS, probeErr)
 	}
 
 	unitDeadline := admissionBoundedDeadline(deadline, ensureUnitStartTimeout)
 	if startErr := runEnsureUnitStartCommand(unitDeadline); startErr != nil {
-		return fmt.Errorf("the installed daemon service supervises this home but could not be started (%w); refusing to launch an unsupervised daemon — %s; if this home should be unmanaged, uninstall the autostart unit", startErr, unitStartRemedy(startErr))
+		return unitStartRefusal(autostartGOOS, startErr)
 	}
 	// The manager accepted the start — but "accepted" is not "serving":
 	// after an on-failure kill the unit holds ExecStart for RestartSec, so a
@@ -236,7 +236,7 @@ func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error
 	// an unsupervised process, and is exactly the escape that left the unit
 	// inactive while an impostor served the home for hours (#4470).
 	if err := waitForUnitDaemonReady(deadline); err != nil {
-		return fmt.Errorf("the installed daemon service accepted the start but no daemon answered — it may still be starting (RestartSec after a crash); retry shortly, check `%s`, or reclaim the unit's daemon with `af daemon adopt`: %w", unitStatusDiagnostic(), err)
+		return unitReadinessRefusal(autostartGOOS, err)
 	}
 	return nil
 }

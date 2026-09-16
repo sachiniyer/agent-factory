@@ -3,9 +3,14 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -120,10 +125,10 @@ func TestEnsureDaemonPrefersHomeServingLaunchdUnit(t *testing.T) {
 func TestEnsureDaemonManagerHangRefusesAdHocSpawn(t *testing.T) {
 	marker, _ := installEnsureTestUnitAndManager(t, true)
 	// A session-bus address is configured, so the wedge is a manager hang,
-	// not a missing bus — and a hang means `af daemon adopt` would drive the
-	// same wedged manager through an unbounded call, so the session remedy
-	// leads and adopt is named only as the thing that cannot work (Codex on
-	// #4475).
+	// not a missing bus. A start that outlives its bound is most often queued
+	// behind the unit's RestartSec holdoff, which adopt's restart skips, so
+	// adopt leads; the session remedy follows for a manager that hangs adopt
+	// too (#4475 review).
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	startServer, _ := ensureTestServerStarter(t)
 
@@ -138,12 +143,13 @@ func TestEnsureDaemonManagerHangRefusesAdHocSpawn(t *testing.T) {
 	if err == nil {
 		t.Fatal("a wedged manager on a unit-claimed home produced an ad-hoc daemon — the #4470 escape")
 	}
-	if !strings.Contains(err.Error(), "unsupervised") || !strings.Contains(err.Error(), "responsive service manager") {
-		t.Fatalf("a manager timeout must name the supervision problem and the session remedy, got: %v", err)
+	if !strings.Contains(err.Error(), "unsupervised") {
+		t.Fatalf("a manager timeout must name the supervision problem, got: %v", err)
 	}
-	if strings.Contains(err.Error(), "run `af daemon adopt`") {
-		t.Fatalf("a wedged-manager timeout must not lead with adopt — it hangs identically: %v", err)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a manager timeout must keep its deadline identity, got: %v", err)
 	}
+	assertRemedyOrder(t, renderedRemedies(t, err), remedyAdoptLead, remedyAdoptHangsToo, uninstallRemedy)
 	if adHocLaunched {
 		t.Fatal("wedged manager spawned an unsupervised daemon")
 	}
@@ -220,9 +226,7 @@ func TestEnsureDaemonUnitStartRefusedDoesNotSpawn(t *testing.T) {
 	if err == nil {
 		t.Fatal("a refused start produced an ad-hoc daemon — the #4470 escape")
 	}
-	if !strings.Contains(err.Error(), "af daemon adopt") {
-		t.Fatalf("refusal must name the adopt remedy, got: %v", err)
-	}
+	assertRemedyOrder(t, renderedRemedies(t, err), remedyAdoptLead, remedyAdoptFailsSame, uninstallRemedy)
 	if adHocLaunched {
 		t.Fatal("refused start spawned an unsupervised daemon")
 	}
@@ -314,9 +318,12 @@ func TestEnsureDaemonUnreachableSupervisorRefusesAdHoc(t *testing.T) {
 	if err == nil {
 		t.Fatal("a PATH-omitted manager binary on a booted host produced an ad-hoc daemon — the #4470 escape")
 	}
-	if !strings.Contains(err.Error(), "cannot be invoked") || !strings.Contains(err.Error(), "session with a service manager") {
-		t.Fatalf("refusal must name the invocation failure and the session remedy, got: %v", err)
+	if !strings.Contains(err.Error(), "cannot be invoked") {
+		t.Fatalf("refusal must name the invocation failure, got: %v", err)
 	}
+	// adopt runs the same binary from the same PATH, so it is never named;
+	// the PATH repair leads.
+	assertRemedyOrder(t, renderedRemedies(t, err), remedyPathLead+"systemctl`", remedySessionLead, uninstallRemedy)
 	if adHocLaunched {
 		t.Fatal("unreachable supervisor spawned an unsupervised daemon")
 	}
@@ -328,30 +335,42 @@ func TestEnsureDaemonUnreachableSupervisorRefusesAdHoc(t *testing.T) {
 // service), or a configured bus that refused the connect — `af daemon adopt`
 // would drive the same manager through the same bus and fail identically, so
 // the session remedy leads and adopt is only named to say it cannot help. A
-// refusal under a reachable manager keeps adopt first.
+// refusal under a reachable manager keeps adopt first. Each row pins the full
+// rendered order, not the mere presence of a phrase.
 func TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass(t *testing.T) {
+	busOrder := []string{remedySessionLead, remedyAdoptWontHelp, uninstallRemedy}
+	refusedOrder := []string{remedyAdoptLead, remedyAdoptFailsSame, uninstallRemedy}
 	for _, tc := range []struct {
 		name          string
 		busConfigured bool
 		managerStderr string
 		privSock      bool // a live <runtime>/systemd/private listener exists
-		wantAdoptLead bool
-		wantRemedy    string // when set, the refusal must name this remedy
+		want          []string
 	}{
-		{name: "no session bus (cron)", busConfigured: false, wantAdoptLead: false},
+		{name: "no session bus (cron)", busConfigured: false, want: busOrder},
 		{
 			name:          "bus configured, connect failed",
 			busConfigured: true,
 			managerStderr: "Failed to connect to bus: No such file or directory",
-			wantAdoptLead: false,
+			want:          busOrder,
 		},
-		{name: "refused under reachable manager", busConfigured: true, wantAdoptLead: true},
+		// The shape measured on a lingering host: the user manager is live on
+		// /run/user/<uid>/systemd/private, but a cron job's env names no
+		// runtime dir, so systemctl never finds that socket and says so.
+		{
+			name:          "cron on a lingering host: live private socket, bus env empty, connect failed",
+			busConfigured: false,
+			privSock:      true,
+			managerStderr: "Failed to connect to bus: No medium found",
+			want:          busOrder,
+		},
+		{name: "refused under reachable manager", busConfigured: true, want: refusedOrder},
 		// A foreign-init host legitimately has BOTH bus variables unset while
 		// the manager answers on <runtime>/systemd/private — a refused start
 		// there is a manager answer, not a missing bus, and adopt's
 		// reset-failed + restart reaches it through the same socket (Codex
 		// on #4475).
-		{name: "private socket live, bus env empty", busConfigured: false, privSock: true, wantAdoptLead: true},
+		{name: "private socket live, bus env empty", busConfigured: false, privSock: true, want: refusedOrder},
 		// A masked unit is a durable admin override: adopt's reset-failed +
 		// restart cannot lift it, so the remedy must name unmask (#4475
 		// review).
@@ -359,7 +378,7 @@ func TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass(t *testing.T) {
 			name:          "masked unit",
 			busConfigured: true,
 			managerStderr: "Failed to start af-daemon.service: Unit af-daemon.service is masked.",
-			wantRemedy:    "unmask the unit (`systemctl --user unmask",
+			want:          []string{remedyUnmaskLead, uninstallRemedy},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -404,22 +423,7 @@ func TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass(t *testing.T) {
 			if adHocLaunched {
 				t.Fatal("refused start spawned an unsupervised daemon")
 			}
-			if tc.wantRemedy != "" {
-				if !strings.Contains(err.Error(), tc.wantRemedy) {
-					t.Fatalf("refusal must name remedy %q, got: %v", tc.wantRemedy, err)
-				}
-			} else if tc.wantAdoptLead {
-				if !strings.Contains(err.Error(), "run `af daemon adopt`") {
-					t.Fatalf("reachable-manager refusal must lead with adopt, got: %v", err)
-				}
-			} else {
-				if !strings.Contains(err.Error(), "start the unit from a session with a service manager") {
-					t.Fatalf("bus-unreachable refusal must lead with the session remedy, got: %v", err)
-				}
-				if strings.Contains(err.Error(), "run `af daemon adopt`,") {
-					t.Fatalf("adopt cannot help in the bus-unreachable class and must not lead, got: %v", err)
-				}
-			}
+			assertRemedyOrder(t, renderedRemedies(t, err), tc.want...)
 		})
 	}
 }
@@ -494,14 +498,24 @@ func TestEnsureDaemonActiveUnitUnreachableReclaimsThroughManager(t *testing.T) {
 // while "manager but binary missing" or "manager but bus dead" is an
 // invocation failure that fails closed — never absence. On darwin launchd is
 // always PID 1, so a missing binary is always unreachable.
+//
+// Every row runs on every host: the probe takes GOOS as an argument, the
+// ambient autostartGOOS is poisoned so a probe that fell back to reading it
+// fails the linux and darwin rows alike, and the table must carry both arms —
+// a linux CI runner exercises the darwin switch and a macOS runner the linux
+// one, with every filesystem input sandboxed (#4475 review).
 func TestProbeUnitSupervisorOrdering(t *testing.T) {
+	prevGOOS := autostartGOOS
+	t.Cleanup(func() { autostartGOOS = prevGOOS })
+	autostartGOOS = "ambient-goos-must-not-be-read"
+
 	binaryDir := t.TempDir()
 	for _, name := range []string{"systemctl", "launchctl"} {
 		if err := os.WriteFile(filepath.Join(binaryDir, name), []byte("#!/bin/sh\n"), 0o700); err != nil {
 			t.Fatalf("write fake %s: %v", name, err)
 		}
 	}
-	for _, tc := range []struct {
+	cases := []struct {
 		name      string
 		goos      string
 		booted    bool // linux only: the sd_booted marker exists
@@ -542,9 +556,18 @@ func TestProbeUnitSupervisorOrdering(t *testing.T) {
 		{"darwin binary", "darwin", false, false, false, false, true, supervisorPresent, false, false},
 		{"darwin binary missing", "darwin", false, false, false, false, false, supervisorUnreachable, false, false},
 		{"unsupported platform", "plan9", false, false, false, false, false, supervisorAbsent, false, false},
-	} {
+	}
+	arms := map[string]bool{}
+	for _, tc := range cases {
+		arms[tc.goos] = true
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if !arms[goos] {
+			t.Fatalf("the table has no %s rows; every host must exercise both arms of the switch", goos)
+		}
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			withAutostartTestEnv(t, tc.goos)
 			// The host's real bus env must not leak a manager into a test that
 			// wants none: clear the declared-bus variables and point the
 			// well-known socket root at a sandbox.
@@ -617,9 +640,9 @@ func TestProbeUnitSupervisorOrdering(t *testing.T) {
 			} else {
 				t.Setenv("PATH", t.TempDir())
 			}
-			got, err := probeUnitSupervisor()
+			got, err := probeUnitSupervisor(tc.goos)
 			if got != tc.want {
-				t.Fatalf("probeUnitSupervisor = %v (err %v), want %v", got, err, tc.want)
+				t.Fatalf("probeUnitSupervisor(%q) on a %s host = %v (err %v), want %v", tc.goos, runtime.GOOS, got, err, tc.want)
 			}
 		})
 	}
@@ -1039,5 +1062,192 @@ func startServerWhenMarked(marker string, startServer func() error) func() {
 	return func() {
 		close(stop)
 		<-done
+	}
+}
+
+// Leading phrases of each remedy a refusal can name. assertRemedyOrder
+// matches them as prefixes, position by position, so a test pins the ORDER a
+// reader acts in rather than whether a phrase appears somewhere (#4475
+// review).
+const (
+	remedyAdoptLead      = "run `af daemon adopt` ("
+	remedyAdoptFailsSame = "if adopt fails the same way, run this from a session with a service manager"
+	remedyAdoptHangsToo  = "if adopt hangs too, the service manager itself is not answering: interrupt adopt, then run this from a session with a service manager"
+	remedySessionLead    = "run this from a session with a service manager"
+	remedyAdoptWontHelp  = "do not expect `af daemon adopt` to help"
+	remedyUnmaskLead     = "unmask the unit with `systemctl --user unmask "
+	remedyReinstallLead  = "re-bootstrap the unit with `af daemon install`"
+	remedyPathLead       = "add the directory holding `"
+)
+
+var renderedRemedyRE = regexp.MustCompile(`(?:^|;) \((\d+)\) `)
+
+// renderedRemedies parses a refusal's "try, in order: (1) …; (2) …" tail back
+// into its ordered items, failing if the numbering is not 1..n.
+func renderedRemedies(t *testing.T, err error) []string {
+	t.Helper()
+	if err == nil {
+		t.Fatal("want a refusal, got nil")
+	}
+	_, list, ok := strings.Cut(err.Error(), "refusing to launch an unsupervised daemon — try, in order:")
+	if !ok {
+		t.Fatalf("refusal names no ordered remedies: %v", err)
+	}
+	locs := renderedRemedyRE.FindAllStringSubmatchIndex(list, -1)
+	items := make([]string, 0, len(locs))
+	for i, loc := range locs {
+		if got, want := list[loc[2]:loc[3]], strconv.Itoa(i+1); got != want {
+			t.Fatalf("remedy numbered %s where %s belongs: %v", got, want, err)
+		}
+		end := len(list)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		items = append(items, list[loc[1]:end])
+	}
+	return items
+}
+
+func assertRemedyOrder(t *testing.T, got []string, wantPrefixes ...string) {
+	t.Helper()
+	if len(got) != len(wantPrefixes) {
+		t.Fatalf("got %d remedies %q, want %d led by %q", len(got), got, len(wantPrefixes), wantPrefixes)
+	}
+	for i, prefix := range wantPrefixes {
+		if !strings.HasPrefix(got[i], prefix) {
+			t.Fatalf("remedy %d = %q, want it to start with %q (full order %q)", i+1, got[i], prefix, got)
+		}
+	}
+}
+
+// TestClassifyUnitStartFailureBothArms pins which class each start failure
+// lands in, for both platform arms on every host: GOOS is an argument, and
+// the bus environment and manager socket root are sandboxed.
+func TestClassifyUnitStartFailureBothArms(t *testing.T) {
+	timedOut := fmt.Errorf("systemctl --user start unit timed out: %w", context.DeadlineExceeded)
+	refused := errors.New("systemctl --user start unit failed: exit status 1\nJob failed.")
+	for _, tc := range []struct {
+		name     string
+		goos     string
+		busEnv   bool // XDG_RUNTIME_DIR names a directory
+		privSock bool // a live <base>/<uid>/systemd/private listener exists
+		err      error
+		want     startFailureClass
+	}{
+		{"linux refused, bus configured", "linux", true, false, refused, startRefused},
+		{"linux refused, no bus env, no manager socket", "linux", false, false, refused, startBusUnreachable},
+		{"linux refused, no bus env, live manager socket", "linux", false, true, refused, startRefused},
+		{"linux connect failure, bus configured", "linux", true, false, errors.New("Failed to connect to bus: No such file or directory"), startBusUnreachable},
+		{"linux connect failure, live manager socket", "linux", false, true, errors.New("Failed to connect to bus: No medium found"), startBusUnreachable},
+		{"linux masked", "linux", true, false, errors.New("Unit agent-factory-daemon.service is masked."), startMasked},
+		{"linux timeout", "linux", true, false, timedOut, startHung},
+		// The deadline outranks the environment inference.
+		{"linux timeout, no bus env", "linux", false, false, timedOut, startHung},
+		{"linux does not read launchd's not-loaded text", "linux", true, false, errors.New("Could not find service"), startRefused},
+		{"darwin not loaded", "darwin", false, false, errors.New("Could not find service \"com.x\" in domain for port"), startNotLoaded},
+		{"darwin refused, empty env is not a bus verdict", "darwin", false, false, refused, startRefused},
+		{"darwin does not read systemd's masked text", "darwin", false, false, errors.New("is masked"), startRefused},
+		{"darwin timeout", "darwin", false, false, timedOut, startHung},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+			if tc.busEnv {
+				t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			} else {
+				t.Setenv("XDG_RUNTIME_DIR", "")
+			}
+			prevBase := systemdUserBusBase
+			t.Cleanup(func() { systemdUserBusBase = prevBase })
+			systemdUserBusBase = testguard.SocketTempDir(t)
+			if tc.privSock {
+				dir := filepath.Join(systemdUserBusBase, strconv.Itoa(os.Getuid()), "systemd")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatalf("mkdir private socket dir: %v", err)
+				}
+				ln, err := net.Listen("unix", filepath.Join(dir, "private"))
+				if err != nil {
+					t.Fatalf("fake private manager socket: %v", err)
+				}
+				t.Cleanup(func() { ln.Close() })
+			}
+			if got := classifyUnitStartFailure(tc.goos, tc.err); got != tc.want {
+				t.Fatalf("classifyUnitStartFailure(%q, %q) on a %s host = %d, want %d", tc.goos, tc.err, runtime.GOOS, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUnitRefusalRemediesOrderByClass pins the full remedy order of every
+// refusal class on both platform arms, and that the rendered message keeps
+// exactly that order. Bus-unreachable leads with the session remedy because
+// adopt fails the same way there; refused and hung lead with adopt because
+// the manager is reachable and the problem is the unit; every class ends with
+// the uninstall escape hatch (#4475 review).
+func TestUnitRefusalRemediesOrderByClass(t *testing.T) {
+	uid := strconv.Itoa(os.Getuid())
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			for _, tc := range []struct {
+				class startFailureClass
+				want  []string
+			}{
+				{startRefused, []string{remedyAdoptLead, remedyAdoptFailsSame, uninstallRemedy}},
+				{startHung, []string{remedyAdoptLead, remedyAdoptHangsToo, uninstallRemedy}},
+				{startBusUnreachable, []string{remedySessionLead, remedyAdoptWontHelp, uninstallRemedy}},
+				{startMasked, []string{remedyUnmaskLead, uninstallRemedy}},
+				{startNotLoaded, []string{remedyReinstallLead, uninstallRemedy}},
+			} {
+				got := unitStartRemedies(goos, tc.class)
+				assertRemedyOrder(t, got, tc.want...)
+				// The rendered refusal carries the same order the list does.
+				startErr := errors.New("start failed")
+				rendered := renderedRemedies(t, fmt.Errorf("x (%w); refusing to launch an unsupervised daemon — %s", startErr, formatRemedies(got)))
+				if !reflect.DeepEqual(rendered, got) {
+					t.Fatalf("class %d rendered %q, want %q", tc.class, rendered, got)
+				}
+			}
+
+			// The bus lead is concrete: the diagnostic that proves a session
+			// qualifies, and on linux the two settings that turn a cron job
+			// into one.
+			busLead := unitStartRemedies(goos, startBusUnreachable)[0]
+			if !strings.Contains(busLead, unitStatusDiagnostic(goos)) {
+				t.Fatalf("bus lead %q must name the diagnostic %q", busLead, unitStatusDiagnostic(goos))
+			}
+			hungLead := unitStartRemedies(goos, startHung)[0]
+			if goos == "linux" {
+				for _, want := range []string{"XDG_RUNTIME_DIR=/run/user/" + uid, "loginctl enable-linger " + uid} {
+					if !strings.Contains(busLead, want) {
+						t.Fatalf("linux bus lead %q must name %q", busLead, want)
+					}
+				}
+				if !strings.Contains(hungLead, "RestartSec") {
+					t.Fatalf("linux hung lead %q must say why adopt beats a queued start", hungLead)
+				}
+			} else {
+				for _, notWant := range []string{"XDG_RUNTIME_DIR", "loginctl", "systemctl"} {
+					if strings.Contains(busLead, notWant) {
+						t.Fatalf("darwin bus lead %q must not name systemd's %q", busLead, notWant)
+					}
+				}
+				if strings.Contains(hungLead, "RestartSec") {
+					t.Fatalf("darwin hung lead %q must not cite systemd's RestartSec", hungLead)
+				}
+			}
+
+			// A manager that exists but cannot be invoked: PATH first when the
+			// binary is missing, never adopt (same binary, same PATH).
+			bin := map[string]string{"linux": "systemctl", "darwin": "launchctl"}[goos]
+			pathMiss := fmt.Errorf("no binary: %w", &exec.Error{Name: bin, Err: exec.ErrNotFound})
+			assertRemedyOrder(t, unreachableSupervisorRemedies(goos, pathMiss),
+				remedyPathLead+bin+"`", remedySessionLead, uninstallRemedy)
+			unreadable := fmt.Errorf("boot marker unreadable: %w", os.ErrPermission)
+			assertRemedyOrder(t, unreachableSupervisorRemedies(goos, unreadable),
+				remedySessionLead, uninstallRemedy)
+
+			// Accepted but silent: waiting and adopt stay the working verbs.
+			assertRemedyOrder(t, unitReadinessRemedies(goos),
+				"retry shortly", "check `"+unitStatusDiagnostic(goos)+"`", "reclaim the unit's daemon with `af daemon adopt`", uninstallRemedy)
+		})
 	}
 }
