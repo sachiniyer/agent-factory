@@ -164,7 +164,17 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
-			return nil, true
+			// An option token carrying a quoted value is still ONE argv word when
+			// a literal '=' or literal value text pins its boundary, so the value
+			// need not be literal for the token to be understood. Only tokens
+			// whose boundary is pinned are accepted here; see
+			// ioniceQuotedOptionBoundaryPinned for the case that is not.
+			prefix, quoted := literalPrefixBeforeSimpleQuotedParameter(words[0])
+			if !quoted || !ioniceQuotedOptionBoundaryPinned(prefix) {
+				return nil, true
+			}
+			words = words[1:]
+			continue
 		}
 		switch {
 		case option == "--":
@@ -209,6 +219,42 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 		}
 	}
 	return nil, false
+}
+
+// ioniceQuotedOptionBoundaryPinned reports whether an ionice option token whose
+// value is a simple quoted expansion still occupies exactly one argv word for
+// EVERY value that expansion can take, including the empty string.
+//
+// Two shapes pin it. A long option's literal '=' separates the value inside the
+// same word, so `--class="$C"` is one word even when $C is empty. Literal value
+// text after a short flag, as in `-c2"$X"`, proves the attached value is
+// nonempty, so the flag cannot fall back to consuming the following word.
+//
+// A bare short flag with a wholly dynamic value, `-c"$C"`, is NOT pinned and is
+// refused here: when $C expands empty the word reduces to `-c`, and getopt then
+// takes the FOLLOWING argv word as the class instead, which moves the child.
+// Measured on util-linux 2.39.3 — with $C empty, `ionice -c"$C" /bin/echo X`
+// reports `unknown scheduling class: '/bin/echo'` and execs nothing, while with
+// $C=2 the same command prints X. Admitting that shape means evaluating both
+// readings, and doing so by forking the parse is the exponential shape a sibling
+// finding reported for nested strace wrappers, so it needs a bounded
+// candidate-boundary set rather than a fork. Tracked separately; it fails closed
+// meanwhile.
+func ioniceQuotedOptionBoundaryPinned(prefix string) bool {
+	if strings.HasPrefix(prefix, "--") {
+		name, _, attached := strings.Cut(prefix, "=")
+		if !attached {
+			return false
+		}
+		// util-linux resolves long-option prefixes, so an abbreviation of either
+		// value-taking option counts. Both are value-taking, so an abbreviation
+		// ambiguous between them still consumes exactly this one word.
+		return strings.HasPrefix("--class", name) || strings.HasPrefix("--classdata", name)
+	}
+	if len(prefix) < 3 || prefix[0] != '-' {
+		return false
+	}
+	return prefix[1] == 'c' || prefix[1] == 'n'
 }
 
 func ioniceProcessOnlyOption(option string) bool {

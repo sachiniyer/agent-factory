@@ -684,3 +684,38 @@ func TestValidateAccountEnvironmentCommand_StraceVanishingAttachedValueKeepsBoth
 			"%q reaches a child or an executable output target", command)
 	}
 }
+
+// The boundary memo must be shared with every wrapper the walk reaches, not
+// created per wrapper. A nested strace reached through an ambiguous boundary
+// otherwise starts an empty memo, so both readings of every level re-derive the
+// same suffixes and the cost doubles per level: at the per-wrapper memo, a
+// 20-level, 203-byte command took 4.8s (8 levels 2ms, 16 levels 355ms), which a
+// 16MiB request body can extend without bound.
+//
+// The assertion is that cost stays workable at a depth the exponential form
+// could not reach at all, and that the verdicts are unchanged at every depth.
+func TestValidateAccountEnvironmentCommand_NestedStraceWrappersShareTheBoundaryMemo(t *testing.T) {
+	for _, levels := range []int{8, 20, 200, 2000} {
+		nest := strings.TrimSpace(strings.Repeat("strace -Z ", levels))
+		require.NoError(t, ValidateAccountEnvironmentCommand(
+			nest+" npm run dev", scopedProcessTabAccount()),
+			"%d nested wrappers around an ordinary child must not be refused", levels)
+		require.Error(t, ValidateAccountEnvironmentCommand(
+			nest+" env CODEX_HOME=/other codex", scopedProcessTabAccount()),
+			"%d nested wrappers must not hide the mutating child", levels)
+	}
+	// Other wrappers between the strace levels reach shared states by different
+	// paths; the memo keys on the argv suffix and hazards, so those must agree.
+	for _, command := range []string{
+		"strace -Z nohup strace -Z env CODEX_HOME=/other codex",
+		"strace -Z perf strace -Z env CODEX_HOME=/other codex",
+		"strace -Z env PORT=1 strace -Z env CODEX_HOME=/other codex",
+		"strace -Z ionice -c 2 strace -Z env CODEX_HOME=/other codex",
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q reaches a mutating child through mixed wrappers", command)
+	}
+	require.NoError(t, ValidateAccountEnvironmentCommand(
+		"strace -Z nice strace -Z npm run dev", scopedProcessTabAccount()),
+		"mixed wrappers around an ordinary child must not be refused")
+}

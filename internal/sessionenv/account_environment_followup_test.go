@@ -119,6 +119,49 @@ func TestValidateAccountEnvironmentCommand_SingleWordWrapperOperandsStayVisible(
 	}
 }
 
+// An ionice option token may carry its value as a quoted expansion and still be
+// exactly ONE argv word, provided something pins the boundary for every value
+// the expansion can take: a long option's literal '=', or literal value text
+// after a short flag.
+func TestValidateAccountEnvironmentCommand_IonicePinnedQuotedOptionTokens(t *testing.T) {
+	for _, command := range []string{
+		"ionice --class=\"$CLASS\" --help",
+		"ionice --classdata=\"$N\" --help",
+		"ionice --cla=\"$CLASS\" --help", // util-linux resolves long prefixes
+		"ionice -c2\"$X\" --help",
+		"ionice -n5\"$X\" --help",
+		"ionice --class=\"$CLASS\" npm run dev",
+		"ionice -c2\"$X\" npm run dev",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q occupies one argv word for every value its expansion can take", command)
+	}
+	for _, command := range []string{
+		// The token being understood does not exempt the child from the walk.
+		"ionice --class=\"$CLASS\" env CODEX_HOME=/other codex",
+		"ionice -c2\"$X\" env CODEX_HOME=/other codex",
+		"ionice --class=\"$CLASS\" nohup env CODEX_HOME=/other codex",
+		// NOT pinned: an empty expansion reduces `-c"$C"` to a bare `-c`, which
+		// then takes the FOLLOWING word as the class and moves the child.
+		// Measured on util-linux 2.39.3: with $C empty, `ionice -c"$C" /bin/echo X`
+		// reports `unknown scheduling class: '/bin/echo'` and execs nothing,
+		// while with $C=2 the same command prints X.
+		"ionice -c\"$CLASS\" --help",
+		"ionice -n\"$N\" --help",
+		"ionice -c\"$CLASS\" env CODEX_HOME=/other codex",
+		// Not a value-taking option, so no boundary to pin.
+		"ionice --ignore=\"$X\" --help",
+		"ionice -t\"$X\" --help",
+		// Shapes that are not one word, or not an option token at all.
+		"ionice --class=$CLASS --help",
+		"ionice --class=\"$@\" --help",
+		"ionice \"$X\" --help",
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q is not a pinned single-word option token with a safe child", command)
+	}
+}
+
 // The single-word rule is about ARITY, not trust. It must not admit a word that
 // can produce a different number of argv words, and must not hide a child.
 func TestValidateAccountEnvironmentCommand_SingleWordOperandRuleStaysNarrow(t *testing.T) {

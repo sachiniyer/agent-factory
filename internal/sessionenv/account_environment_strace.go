@@ -132,8 +132,18 @@ var straceLongSelfContainedPrefixCollisions = map[string]struct{}{
 // not represented as an "unknown self-contained option": the parser checks
 // every child boundary it could have, while syntactically attached values keep
 // their single fixed boundary without requiring an option catalogue.
-func unwrapStrace(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
-	evaluation := &straceBoundaryEvaluation{}
+func unwrapStrace(
+	words []*syntax.Word,
+	names map[string]struct{},
+	evaluation *straceBoundaryEvaluation,
+) ([]*syntax.Word, bool) {
+	// The evaluation is supplied by the caller, not created here. A nested
+	// strace reached through an ambiguous boundary would otherwise start an
+	// empty memo, so both readings of every level would re-derive the same
+	// suffixes and the cost would double per level.
+	if evaluation == nil {
+		evaluation = &straceBoundaryEvaluation{}
+	}
 	return unwrapStraceState(words, straceDeferredHazards{}, names, evaluation)
 }
 
@@ -763,7 +773,7 @@ func straceTailMutatesAccountEnvironment(
 	child, unsafe := unwrapStraceState(words, hazards, names, evaluation)
 	result := unsafe
 	if !unsafe {
-		result = accountCommandWordsMutateEnvironment(child, names)
+		result = accountCommandWordsMutateEnvironment(child, names, evaluation)
 	}
 	evaluation.memo[state] = result
 	return result
