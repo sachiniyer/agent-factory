@@ -418,19 +418,11 @@ func (s *TaskPane) restorePosition(id string, expect task.Task) int {
 			// wrong side of the duplicate (PRRT_kwDORdIFwM6i1oQb).
 			other, known = s.survivingSameIDRank(id, i, rank)
 		} else {
-			// Use the first pending-deletion rank for this ID (if any), falling
-			// back to the first loaded occurrence rank.
-			for _, e := range s.deletedRanks {
-				if e.expect.ID == t.ID {
-					other, known = e.rank, true
-					break
-				}
-			}
-			if !known {
-				if lrranks, hasLR := s.loadedRanks[t.ID]; hasLR && len(lrranks) > 0 {
-					other, known = lrranks[0], true
-				}
-			}
+			// Use the surviving occurrence's loaded rank, skipping any
+			// pending-deletion siblings for this ID. Using a deleted sibling's
+			// rank would misplace the restored row relative to the survivor
+			// (PRRT_kwDORdIFwM6i7stc).
+			other, known = s.survivingDifferentIDRank(t.ID, i)
 		}
 		if !known || other > rank {
 			return i
@@ -470,6 +462,62 @@ func (s *TaskPane) survivingSameIDRank(id string, pos int, deletedRank int) (ran
 			// Skip the deleted occurrence's rank; consume the flag so it is
 			// only skipped once (defensive against duplicate rank values).
 			skippedDeleted = true
+			continue
+		}
+		if occIdx == priorSurvivors {
+			return r, true
+		}
+		occIdx++
+	}
+	return 0, false
+}
+
+// survivingDifferentIDRank returns the loaded rank for the surviving row at pos
+// whose ID differs from the row being restored. It skips the ranks of deleted
+// siblings that are truly absent (not yet restored to s.tasks) so that a
+// deleted sibling's rank is never used in place of the visible survivor's rank
+// (PRRT_kwDORdIFwM6i7stc).
+func (s *TaskPane) survivingDifferentIDRank(id string, pos int) (rank int, known bool) {
+	// Count how many surviving rows with this ID appear before pos.
+	priorSurvivors := 0
+	for j := 0; j < pos; j++ {
+		if s.tasks[j].ID == id {
+			priorSurvivors++
+		}
+	}
+	ranks, hasLR := s.loadedRanks[id]
+	if !hasLR || len(ranks) == 0 {
+		return 0, false
+	}
+	// Build a multiset of deleted ranks for this ID. A deletion is "truly
+	// absent" (not in s.tasks) when its deletedRanks entry has no corresponding
+	// restoredDeletes entry. Restored occurrences ARE visible in s.tasks and
+	// must not be skipped: their slot in loadedRanks represents a surviving row.
+	deletedCounts := map[int]int{}
+	for _, e := range s.deletedRanks {
+		if e.expect.ID == id {
+			deletedCounts[e.rank]++
+		}
+	}
+	// Subtract restored occurrences: each restoredDeletes entry has a
+	// matching deletedRanks entry whose rank belongs to a visible row — do not
+	// skip it.
+	for _, re := range s.restoredDeletes[id] {
+		for _, de := range s.deletedRanks {
+			if de.expect.ID == id && reflect.DeepEqual(de.expect, re.expect) {
+				if deletedCounts[de.rank] > 0 {
+					deletedCounts[de.rank]--
+				}
+				break
+			}
+		}
+	}
+	// Walk the sorted loadedRanks list, skipping truly-absent deleted slots,
+	// and return the rank at the priorSurvivors-th surviving position.
+	occIdx := 0
+	for _, r := range ranks {
+		if cnt := deletedCounts[r]; cnt > 0 {
+			deletedCounts[r]--
 			continue
 		}
 		if occIdx == priorSurvivors {
