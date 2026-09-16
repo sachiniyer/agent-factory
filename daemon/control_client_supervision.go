@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -51,6 +53,14 @@ const (
 // A var so tests can point it at a sandbox.
 var systemdBootedDir = "/run/systemd/system"
 
+// systemdUserBusBase roots the user-manager probe: while `systemd --user`
+// runs, its bus socket lives at <base>/<uid>/bus — present on hosts where a
+// user manager exists WITHOUT systemd as PID 1 (a container or foreign root
+// running `systemd --user` independently), where the boot marker alone would
+// misread a live manager as absent (#4475 review). A var so tests can point
+// it at a sandbox.
+var systemdUserBusBase = "/run/user"
+
 // supervisorPresence is the three-way answer the unit-start gate needs. The
 // states are not a boolean because "absent" must be proven, never inferred
 // from a failed lookup: a manager that EXISTS but cannot be invoked from this
@@ -72,20 +82,28 @@ const (
 )
 
 // probeUnitSupervisor determines whether the service manager an installed unit
-// is started through can act from THIS environment. The boot marker is checked
-// FIRST and on its own: whether systemd/launchd runs the system is a property
-// of the OS, independent of this process's PATH — so a container that merely
-// carries the client binary still reads absent. Only once the manager is known
-// to exist does a missing binary become meaningful, and there it is an
-// inability to invoke, never proof of absence (#4470).
+// is started through can act from THIS environment. Manager existence is
+// checked FIRST and on its own — a property of the OS, independent of this
+// process's PATH: the sd_booted marker for systemd-as-PID-1, OR the user
+// manager's own bus endpoint for a `systemd --user` running under a foreign
+// init (#4475 review), so a container that merely carries the client binary
+// still reads absent. Only once the manager is known to exist does a missing
+// binary become meaningful, and there it is an inability to invoke, never
+// proof of absence (#4470).
 func probeUnitSupervisor() (supervisorPresence, error) {
 	switch autostartGOOS {
 	case "linux":
-		if _, err := os.Stat(systemdBootedDir); err != nil {
-			return supervisorAbsent, fmt.Errorf("systemd is not running this system: %w", err)
+		// Presence is "a manager this unit can be started through exists": the
+		// sd_booted marker proves systemd-as-PID-1, and the user manager's own
+		// bus endpoint covers `systemd --user` running under a non-systemd
+		// init — the boot marker cannot prove THAT manager absent because
+		// `systemctl --user` drives the user manager, not PID 1 (#4475
+		// review). Neither existing is the only proven-absent case.
+		if _, err := os.Stat(systemdBootedDir); err != nil && !systemdUserBusReachable() {
+			return supervisorAbsent, fmt.Errorf("systemd runs neither this system nor a user manager reachable from it: %w", err)
 		}
 		if _, err := exec.LookPath("systemctl"); err != nil {
-			return supervisorUnreachable, fmt.Errorf("systemd runs this system but no systemctl binary is reachable in PATH: %w", err)
+			return supervisorUnreachable, fmt.Errorf("systemd is present but no systemctl binary is reachable in PATH: %w", err)
 		}
 		return supervisorPresent, nil
 	case "darwin":
@@ -116,16 +134,27 @@ func unitStartBusUnreachable(startErr error) bool {
 		return true
 	}
 	// A bus address existed but the connect still failed (stale socket, dead
-	// user manager), or launchd has no gui domain for this uid — take the
-	// manager's own words.
-	return strings.Contains(startErr.Error(), "connect to bus") ||
-		strings.Contains(startErr.Error(), "Could not find service")
+	// user manager) — take the manager's own words. launchd's "Could not find
+	// service" is deliberately NOT here: the gui domain ANSWERED that the job
+	// is not loaded, which is a bootstrap repair, not a reachability failure
+	// (#4475 review).
+	return strings.Contains(startErr.Error(), "connect to bus")
 }
 
 // unitStartRemedy orders the remedies named in a start refusal by failure
 // class: a bus-unreachable start cannot be fixed by adopt, so the session
-// remedy leads; a refused or hung start leaves adopt the working verb.
+// remedy leads; a refused or hung start leaves adopt the working verb; and a
+// darwin not-loaded job is repaired by re-bootstrap, which neither session
+// nor adopt performs.
 func unitStartRemedy(startErr error) string {
+	// On darwin "Could not find service" means the gui domain answered but
+	// the plist is not loaded — a booted-out job or a reset interrupted
+	// between pause and resume (#4475 review). `af daemon install`
+	// re-bootstraps it; adopting or switching sessions cannot register the
+	// plist from a domain that already answered.
+	if autostartGOOS == "darwin" && strings.Contains(startErr.Error(), "Could not find service") {
+		return "re-bootstrap the unit with `af daemon install` — the gui domain answered but the service is not loaded"
+	}
 	if unitStartBusUnreachable(startErr) {
 		return "start the unit from a session with a service manager — `af daemon adopt` cannot reach the manager from this environment either"
 	}
@@ -190,4 +219,26 @@ func runEnsureManagerCommand(deadline time.Time, name string, args ...string) er
 		return fmt.Errorf("%s %s timed out: %w", name, strings.Join(args, " "), ctx.Err())
 	}
 	return fmt.Errorf("%s %s failed: %w\n%s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+}
+
+// systemdUserBusReachable reports whether a systemd USER manager's bus is
+// declared or listening — resolved exactly the way `systemctl --user`
+// resolves it: DBUS_SESSION_BUS_ADDRESS, else $XDG_RUNTIME_DIR/bus, else
+// /run/user/<uid>/bus. Its presence is what the boot marker cannot show: a
+// manager that can start the user unit even under a non-systemd init (#4475
+// review). A declared-but-dead address still counts — the start attempt, not
+// the probe, is what surfaces that connect failure.
+func systemdUserBusReachable() bool {
+	if os.Getenv("DBUS_SESSION_BUS_ADDRESS") != "" {
+		return true
+	}
+	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
+		return isSocket(filepath.Join(dir, "bus"))
+	}
+	return isSocket(filepath.Join(systemdUserBusBase, strconv.Itoa(os.Getuid()), "bus"))
+}
+
+func isSocket(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode()&os.ModeSocket != 0
 }

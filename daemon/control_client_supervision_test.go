@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -383,11 +385,13 @@ func TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass(t *testing.T) {
 }
 
 // TestProbeUnitSupervisorOrdering pins the probe's three states and its check
-// order: the boot marker is consulted before PATH, so "not booted" reads
-// absent even when the binary exists (a container shipping systemctl), while
-// "booted but binary missing" is an invocation failure that fails closed —
-// never absence. On darwin launchd is always PID 1, so a missing binary is
-// always unreachable.
+// order: a systemd manager — either as PID 1 (the sd_booted marker) or as a
+// user manager with a reachable bus (a `systemd --user` under a foreign init,
+// #4475 review) — is consulted before PATH, so "no manager" reads absent even
+// when the binary exists (a container shipping systemctl), while "manager
+// but binary missing" is an invocation failure that fails closed — never
+// absence. On darwin launchd is always PID 1, so a missing binary is always
+// unreachable.
 func TestProbeUnitSupervisorOrdering(t *testing.T) {
 	binaryDir := t.TempDir()
 	for _, name := range []string{"systemctl", "launchctl"} {
@@ -396,22 +400,44 @@ func TestProbeUnitSupervisorOrdering(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct {
-		name   string
-		goos   string
-		booted bool // linux only: the sd_booted marker exists
-		binary bool // the manager client binary is on PATH
-		want   supervisorPresence
+		name    string
+		goos    string
+		booted  bool // linux only: the sd_booted marker exists
+		userBus bool // linux only: the user manager's bus socket exists
+		binary  bool // the manager client binary is on PATH
+		want    supervisorPresence
 	}{
-		{"linux booted + binary", "linux", true, true, supervisorPresent},
-		{"linux booted, binary missing", "linux", true, false, supervisorUnreachable},
-		{"linux not booted + binary", "linux", false, true, supervisorAbsent},
-		{"linux not booted, no binary", "linux", false, false, supervisorAbsent},
-		{"darwin binary", "darwin", false, true, supervisorPresent},
-		{"darwin binary missing", "darwin", false, false, supervisorUnreachable},
-		{"unsupported platform", "plan9", false, false, supervisorAbsent},
+		{"linux booted + binary", "linux", true, false, true, supervisorPresent},
+		{"linux booted, binary missing", "linux", true, false, false, supervisorUnreachable},
+		{"linux not booted + binary", "linux", false, false, true, supervisorAbsent},
+		{"linux not booted, no binary", "linux", false, false, false, supervisorAbsent},
+		{"linux not booted + user bus + binary", "linux", false, true, true, supervisorPresent},
+		{"linux not booted + user bus, binary missing", "linux", false, true, false, supervisorUnreachable},
+		{"darwin binary", "darwin", false, false, true, supervisorPresent},
+		{"darwin binary missing", "darwin", false, false, false, supervisorUnreachable},
+		{"unsupported platform", "plan9", false, false, false, supervisorAbsent},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withAutostartTestEnv(t, tc.goos)
+			// The host's real bus env must not leak a manager into a test that
+			// wants none: clear the declared-bus variables and point the
+			// well-known socket root at a sandbox.
+			t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+			t.Setenv("XDG_RUNTIME_DIR", "")
+			prevBase := systemdUserBusBase
+			t.Cleanup(func() { systemdUserBusBase = prevBase })
+			systemdUserBusBase = t.TempDir()
+			if tc.userBus {
+				sockDir := filepath.Join(systemdUserBusBase, strconv.Itoa(os.Getuid()))
+				if err := os.MkdirAll(sockDir, 0o700); err != nil {
+					t.Fatalf("mkdir user bus dir: %v", err)
+				}
+				ln, err := net.Listen("unix", filepath.Join(sockDir, "bus"))
+				if err != nil {
+					t.Fatalf("fake user bus socket: %v", err)
+				}
+				t.Cleanup(func() { ln.Close() })
+			}
 			prevBooted := systemdBootedDir
 			t.Cleanup(func() { systemdBootedDir = prevBooted })
 			if tc.booted {
@@ -584,6 +610,15 @@ func installEnsureTestUnitAndManager(t *testing.T, block bool) (string, string) 
 	prevBooted := systemdBootedDir
 	t.Cleanup(func() { systemdBootedDir = prevBooted })
 	systemdBootedDir = t.TempDir()
+	// Pin the user-bus side of the presence probe to "absent" too: a host
+	// DBUS_SESSION_BUS_ADDRESS/XDG_RUNTIME_DIR — or a real /run/user/<uid>/bus
+	// — would otherwise smuggle a manager into the cases that repoint
+	// systemdBootedDir to mean "absent" (#4475 review).
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	prevBusBase := systemdUserBusBase
+	t.Cleanup(func() { systemdUserBusBase = prevBusBase })
+	systemdUserBusBase = t.TempDir()
 	unit := systemdAutostartUnit("/opt/agent-factory/bin/af", "", "", home)
 	if err := os.WriteFile(filepath.Join(unitDir, autostartUnitName), []byte(unit), 0o600); err != nil {
 		t.Fatalf("write home-serving unit: %v", err)

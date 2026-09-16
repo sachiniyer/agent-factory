@@ -225,7 +225,7 @@ func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error
 
 	unitDeadline := admissionBoundedDeadline(deadline, ensureUnitStartTimeout)
 	if startErr := runEnsureUnitStartCommand(unitDeadline); startErr != nil {
-		return fmt.Errorf("the installed daemon service supervises this home but could not be started (%v); refusing to launch an unsupervised daemon — %s; if this home should be unmanaged, uninstall the autostart unit", startErr, unitStartRemedy(startErr))
+		return fmt.Errorf("the installed daemon service supervises this home but could not be started (%w); refusing to launch an unsupervised daemon — %s; if this home should be unmanaged, uninstall the autostart unit", startErr, unitStartRemedy(startErr))
 	}
 	// The manager accepted the start — but "accepted" is not "serving":
 	// after an on-failure kill the unit holds ExecStart for RestartSec, so a
