@@ -19,6 +19,18 @@ import (
 // while that file exists, a newer project transcript may belong to another
 // Claude process and is not evidence about this root.
 func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, inst *session.Instance, st *rootEnsureState) {
+	// A committed account swap owns the recorded conversation until its
+	// mission settles: PendingAccountSwap.ConversationID names the injected
+	// conversation, and SynchronizeAccountSwapRuntimeMetadata hard-rejects a
+	// live tab recording any other id. The injected transcript legitimately
+	// does not exist until the delivered agent writes it, so rotating here —
+	// on a restart, EnsureRootAgents reaches this refresh before
+	// ResumeLimitedSessions settles the transaction — would stamp a foreign
+	// id the pending swap can never match and fence the root on every
+	// recovery attempt (Codex on #4400).
+	if _, _, pending := inst.PendingAccountSwap(); pending {
+		return
+	}
 	// The recorded conversation and the account pin come off ONE locked
 	// projection: selectAccountLocked rewrites the account under i.mu during a
 	// handoff commit, so reading inst.Account bare is a data race — and even
@@ -83,6 +95,12 @@ func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, in
 	current := m.instances[key]
 	m.mu.Unlock()
 	if current != inst || inst.AgentConversation() != recorded {
+		return
+	}
+	// handoffAccount commits a swap under this same op lock, so a pending
+	// marker visible here was committed while the inspection ran: the
+	// transaction now owns the recorded id, as at the head of this function.
+	if _, _, pending := inst.PendingAccountSwap(); pending {
 		return
 	}
 	status := inst.GetStatus()

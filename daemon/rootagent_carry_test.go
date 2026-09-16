@@ -178,7 +178,7 @@ func TestRepoHasEnabledRootCandidate(t *testing.T) {
 	)
 	require.True(t, m.repoHasEnabledRootCandidate(repoID, "/a"),
 		"an enabled sibling spelling keeps the carry parked for it")
-	require.False(t, m.repoHasEnabledRootCandidate(repoID, "/b"),
+	require.True(t, m.repoHasEnabledRootCandidate(repoID, "/b"),
 		"symmetric: with /b excluded, /a is still enabled — the answer stays true")
 	// Both present but the excluded key is /a: /b remains → true; and excluding
 	// both is not a shape the sweep produces — the caller names one key.

@@ -249,6 +249,69 @@ func TestTranscriptInspectionIsSingleFlightedPerRoot(t *testing.T) {
 	}
 }
 
+// A committed account swap owns the recorded conversation until its mission
+// settles: PendingAccountSwap.ConversationID names the injected conversation
+// and SynchronizeAccountSwapRuntimeMetadata rejects a live tab recording any
+// other id. The injected transcript legitimately does not exist until the
+// delivered agent writes it, so on a daemon restart mid-swap the "recorded
+// transcript is gone" finding would fire spuriously — EnsureRootAgents reaches
+// this refresh before ResumeLimitedSessions settles the transaction — and
+// rotating would stamp a foreign id that fences the root on every recovery
+// attempt (Codex on #4400).
+func TestRefreshRootClaudeConversationSkipsPendingSwap(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	rid := repoID(t, repoPath)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{Program: tmux.ProgramClaude}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: session.RootSessionTitle, Path: repoPath, Program: "claude",
+		PendingAccountSwap: &session.AccountSwapData{
+			Manual: true, From: "personal", To: "work", ConversationID: "injected-conv",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	seedDiskInstance(t, rid, session.RootSessionTitle, repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(rid, session.RootSessionTitle)] = inst
+	manager.mu.Unlock()
+	recorded := seedRootConversation(t, inst)
+
+	// The inspection would report the recorded transcript absent and a newer
+	// project conversation on disk — the rotation the finding fences. Under a
+	// pending swap the refresh must not reach the store at all.
+	inspectionRan := false
+	manager.inspectClaudeProjectConversations = func(string, string, session.AgentConversationData) (session.ClaudeProjectConversationState, error) {
+		inspectionRan = true
+		return session.ClaudeProjectConversationState{
+			Resume: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "foreign-conv"},
+		}, nil
+	}
+
+	manager.mu.Lock()
+	st := manager.rootEnsureStateForLocked(repoPath)
+	st.nextClaudeTranscriptInspection = time.Time{} // force the interval due
+	manager.mu.Unlock()
+
+	manager.refreshRootClaudeConversation(rid, daemonInstanceKey(rid, session.RootSessionTitle), repoPath, inst, st)
+
+	if inspectionRan {
+		t.Fatal("a committed account swap owns the recorded conversation — the transcript rotation must not run while it is pending")
+	}
+	if got := inst.AgentConversation(); got != recorded {
+		t.Fatalf("pending swap: recorded conversation rotated to %+v, want %+v", got, recorded)
+	}
+}
+
 // A timed-out read stays owned by its manager while another manager inspects.
 // Run under -race in CI: no shared seam is swapped or restored, even while the
 // first worker is still executing after its caller has returned (#4212).
