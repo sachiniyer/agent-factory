@@ -134,6 +134,41 @@ func TestValidateAccountEnvironmentCommand_RefusesBinaryTestNumericCmdSubst(t *t
 	}
 }
 
+// TestValidateAccountEnvironmentCommand_RefusesIndirectArithmeticTaint verifies
+// that a variable assigned from a command substitution and later used in an
+// arithmetic context is refused. bash re-evaluates the variable's value as
+// fresh arithmetic at the point of use, so the substitution's stdout becomes
+// a deferred arithmetic mutation — the same bypass as an inline substitution,
+// just split across two statements.
+//
+//	x=$(printf CODEX_HOME=1)   # x is now "CODEX_HOME=1"
+//	: $((x))                   # bash re-evaluates x as arithmetic → CODEX_HOME=1
+//	codex                      # runs with the replaced root
+func TestValidateAccountEnvironmentCommand_RefusesIndirectArithmeticTaint(t *testing.T) {
+	for _, command := range []string{
+		// Variable assigned from cmd substitution, then used in $(( )).
+		"x=$(printf CODEX_HOME=1); : $((x)); codex",
+		"x=$(printf CODEX_HOME=1); : $((x+0)); codex",
+		// Used in (( )) arithmetic command.
+		"x=$(printf CODEX_HOME=1); (( x )); codex",
+		// Used in let.
+		"x=$(printf CODEX_HOME=1); let x; codex",
+		// Used in a [[ ]] numeric comparison operand.
+		"x=$(printf CODEX_HOME=1); [[ 0 -eq $x ]]; codex",
+		"x=$(printf CODEX_HOME=1); [[ $x -eq 0 ]]; codex",
+		// Backtick assignment also taints.
+		"x=`printf CODEX_HOME=1`; : $((x)); codex",
+		// Other denied names are reachable the same way.
+		"x=$(printf OPENAI_API_KEY=1); (( x )); codex",
+		// Array subscript using a tainted variable.
+		": ${arr[$(printf CODEX_HOME=1)]}; codex",
+		"x=$(printf CODEX_HOME=1); : ${arr[x]}; codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q routes a command-substitution through a variable into arithmetic and must be refused", command)
+	}
+}
+
 // The refusal above must stay narrow. A process tab is an arbitrary user
 // command, so ordinary arithmetic — including `$(( ))` that contains NO
 // command substitution — and command substitutions that appear OUTSIDE an
@@ -169,6 +204,14 @@ func TestValidateAccountEnvironmentCommand_AllowsProvableArithmeticAndExternalCm
 		// [[ ]] numeric operators with no command substitution are fine.
 		"[[ 0 -eq 0 ]]; codex",
 		"[[ 1 -lt 2 ]]; codex",
+		// A variable assigned from a command substitution but used OUTSIDE
+		// arithmetic is still just data — the stdout is a string, not re-evaluated.
+		"x=$(echo CODEX_HOME=1); echo $x; codex",
+		"x=$(echo hi); echo $x; codex",
+		// A variable assigned from a literal value (not a command substitution)
+		// and used in arithmetic is provable.
+		"x=42; : $((x)); codex",
+		"x=1; (( x )); codex",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"command %q is provably free of identity mutation and must stay allowed", command)
