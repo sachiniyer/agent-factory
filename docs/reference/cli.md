@@ -169,7 +169,7 @@ directory af prints holds the credential at <dir>/.gemini/oauth_creds.json or
 <dir>/.gemini/gemini-credentials.json.
 Point the variable at the printed directory, never at a .gemini path inside it.
 
-Select an account for a session with:
+Pin an account for a session with:
 
   af sessions create --account work
 
@@ -178,6 +178,15 @@ identity-bearing variable for the agent. The removal is what makes the selection
 real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the config
 directory, so without it a session would authenticate as whoever that key belongs
 to while every visible signal reported the selected account.
+
+Omitting --account does not mean ambient. On a backend that carries accounts,
+af routes the create across the agent's logged-in accounts: the configured
+default_accounts entry wins while it is healthy, otherwise the least-loaded
+account with no current usage-limit evidence, and a create that finds the whole
+pool walled refuses with the earliest known reset rather than launching into a
+known limit. When no logged-in account exists at all, the session keeps the
+ambient identity — and an explicit `--account ""` asks for ambient directly,
+the same pick the TUI and web pickers' ambient row makes.
 
 Account-scoped sessions require the local or docker backend, and tmux 3.2 or newer. af
 refuses rather than falling back, because a fallback would run on the ambient

@@ -188,8 +188,22 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// the wire cannot tell from an untouched field without the flag (#4404
 		// review). pendingAccountChosen needs no clearing — the next
 		// startNewInstance's clearPendingAccount resets the whole field.
+		//
+		// pendingAccount may be showing a CONFIGURED DEFAULT the picker
+		// preselected (handleAccountDefault) — a presentation convenience, not
+		// a decision. Serializing it would read on the wire as an explicit
+		// --account pin and bypass the create-time router's pool routing
+		// entirely (#4404 review), so only a deliberate pick carries a name;
+		// an untouched field submits "" and stays routable. AccountAmbient is
+		// already false when nothing was picked — it is only ever set under
+		// pendingAccountChosen — but reset it explicitly anyway so the wire
+		// contract never depends on that invariant.
 		account := m.pendingAccount
 		accountAmbient := m.pendingAccountAmbient
+		if !m.pendingAccountChosen {
+			account = ""
+			accountAmbient = false
+		}
 		m.pendingAccount = ""
 		m.pendingAccountAmbient = false
 		m.namingInstance = nil
@@ -325,6 +339,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingBackend = ""
 		m.backendPickerPending = false
 		m.pendingAccount = ""
+		m.pendingAccountAmbient = false
 		m.state = stateDefault
 		cmd := m.selectionChanged()
 

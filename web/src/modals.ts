@@ -21,6 +21,7 @@ import { AccountSelection } from "./account_selection.js";
 import type { CreateSessionInput, DirectoryListing } from "./api.js";
 import {
   AMBIENT_ACCOUNT,
+  AMBIENT_PIN_ACCOUNT,
   type AccountChoice,
   accountAgentFor,
   accountChoices,
@@ -191,8 +192,12 @@ export function newSessionModal(
       .replace(/^Repo default \((.*)\)$/, "$1 (default)")
       .replace(/^Use configured default \((.*)\)$/, "$1 (default)");
     // Ambiguity, unavailable choices and explicit overrides must remain in view.
+    // A real choice exists when at least one NAMED account is offered and no
+    // configured default answers for the field — the routable and ambient rows
+    // are present for every supported agent, so they cannot count (#4404).
     const accountNeedsChoice = !!accountHint.textContent || accountSelection.picked
-      || (accountRows.length > 2 && !accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog)));
+      || (accountRows.some((row) => row.value !== AMBIENT_ACCOUNT && row.value !== AMBIENT_PIN_ACCOUNT)
+        && !accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog)));
     defaults.setSummary([`Program: ${choiceLabel(programSelect)}`, `Backend: ${choiceLabel(backendSelect)}`,
       ...(accountNeedsChoice ? [] : [`Account: ${choiceLabel(accountSelect)}`])]);
     const accountParent = accountNeedsChoice ? accountSlot : defaults.body;
@@ -419,17 +424,20 @@ export function newSessionModal(
       // REPO_DEFAULT ("") when the user did not choose — createSession then omits
       // `backend` entirely and the repo's config decides (#1933).
       backend: backendSelect.value,
-      // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
-      // `account` entirely and the daemon applies its default, if any (#3844).
-      account: accountSelect.value,
-      // The ambient row is a deliberate choice only when the user picked it AND
-      // it did not stand in for a configured default ("Use configured default
-      // (X)" is row-empty too, and it is not ambient). Without this bit the
-      // daemon cannot tell that pick from an untouched field, and its pool
-      // router would re-identify the session the user chose to keep ambient
-      // (#4404 review).
-      accountAmbient: accountSelection.picked && accountSelect.value === AMBIENT_ACCOUNT
-        && accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog)) === "",
+      // The select may be SHOWING a configured default it preselected — a
+      // presentation convenience, not a decision. Serializing that name would
+      // read on the wire as an explicit --account pin and bypass the daemon's
+      // pool routing entirely (#4404 review), so a name travels only when the
+      // user actually picked a row; an untouched field submits AMBIENT_ACCOUNT
+      // ("") and stays routable.
+      account: accountSelection.picked && accountSelect.value !== AMBIENT_PIN_ACCOUNT
+        ? accountSelect.value
+        : AMBIENT_ACCOUNT,
+      // Only the explicit ambient row asks for the ambient identity — every
+      // other "" is a routable "let af decide" the daemon would otherwise
+      // pool-route, and it cannot tell that pick from an untouched field
+      // without the bit (#4404 review).
+      accountAmbient: accountSelection.picked && accountSelect.value === AMBIENT_PIN_ACCOUNT,
     });
   });
 

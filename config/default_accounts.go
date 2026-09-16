@@ -194,8 +194,51 @@ func (s DefaultAccountSelection) ClearHint(repoPath string) string {
 // create durable state (the catalog RPC behind the TUI and web pickers calls this
 // on every form open).
 func DefaultAccountLayersFor(global *Config, repoPath, agent string) (project, globalLayer DefaultAccountSelection) {
+	project, globalLayer, _ = defaultAccountLayersAndOptOut(global, repoPath, agent)
+	return project, globalLayer
+}
+
+// DefaultAccountPolicyFor answers, from ONE resolved configuration generation,
+// the two things a create needs together: the winning default selection (with
+// its provenance) and whether the SAME generation carries the agent's
+// `default_accounts` key present-but-empty — the ambient opt-out.
+//
+// It exists because the create-time account router consumes both answers, and
+// resolving them in two separate reads — DefaultAccountLayersFor for the
+// selection, DefaultAccountAmbientOptOut for the opt-out — runs the repository
+// resolution twice and can pair a selection read from one config save with an
+// opt-out read from the next (#4404 review). One generation feeds both answers
+// here, so the routed identity and the ambient refusal can never disagree
+// about which config they came from.
+func DefaultAccountPolicyFor(global *Config, repoPath, agent string) (selection DefaultAccountSelection, ambientOptOut bool) {
+	project, globalLayer, ambientOptOut := defaultAccountLayersAndOptOut(global, repoPath, agent)
+	name := agentaccount.Resolve("", project.Name, globalLayer.Name)
+	if name == "" {
+		return DefaultAccountSelection{}, ambientOptOut
+	}
+	selection = project
+	if selection.Name != name {
+		selection = globalLayer
+	}
+	return selection, ambientOptOut
+}
+
+// defaultAccountLayersAndOptOut is DefaultAccountLayersFor plus the one bit its
+// two-selection shape must drop: whether the SAME resolution carries the
+// agent's key present but empty — the ambient opt-out DefaultAccountAmbientOptOut
+// and the create-time router also need. One resolution feeds all three answers
+// so no caller can mix a selection from one config generation with an opt-out
+// from another (#4404 review).
+func defaultAccountLayersAndOptOut(global *Config, repoPath, agent string) (project, globalLayer DefaultAccountSelection, ambientOptOut bool) {
 	if strings.TrimSpace(agent) == "" {
-		return DefaultAccountSelection{}, DefaultAccountSelection{}
+		return DefaultAccountSelection{}, DefaultAccountSelection{}, false
+	}
+	globalOptOut := func() bool {
+		if global == nil {
+			return false
+		}
+		value, present := global.DefaultAccounts[agent]
+		return present && strings.TrimSpace(value) == ""
 	}
 	if global != nil {
 		if name := strings.TrimSpace(global.DefaultAccounts[agent]); name != "" {
@@ -209,24 +252,28 @@ func DefaultAccountLayersFor(global *Config, repoPath, agent string) (project, g
 		}
 	}
 	if strings.TrimSpace(repoPath) == "" {
-		return DefaultAccountSelection{}, globalLayer
+		return DefaultAccountSelection{}, globalLayer, globalOptOut()
 	}
 	repo, err := RepoFromPath(repoPath)
 	if err != nil {
-		return DefaultAccountSelection{}, globalLayer
+		return DefaultAccountSelection{}, globalLayer, globalOptOut()
 	}
 	resolved, err := ResolveConfigForRepoInspection(repo)
 	if err != nil {
-		return DefaultAccountSelection{}, globalLayer
+		return DefaultAccountSelection{}, globalLayer, globalOptOut()
 	}
 	// From here the repo resolution is AUTHORITATIVE and the fallback is dropped.
 	// It has already folded the global layer under the personal one — including a
 	// project entry set to "" to opt out of a global default — so returning the
 	// global selection beside it would let a caller resolve past that opt-out and
-	// scope the session to the very account the project turned off.
-	name := strings.TrimSpace(resolved.DefaultAccounts[agent])
+	// scope the session to the very account the project turned off. The opt-out
+	// itself is reported alongside: a PRESENT-but-empty entry is exactly the
+	// spelling of "this project runs on the ambient identity" (#4404).
+	value, present := resolved.DefaultAccounts[agent]
+	ambientOptOut = present && strings.TrimSpace(value) == ""
+	name := strings.TrimSpace(value)
 	if name == "" {
-		return DefaultAccountSelection{}, DefaultAccountSelection{}
+		return DefaultAccountSelection{}, DefaultAccountSelection{}, ambientOptOut
 	}
 	// The pre-trace attribution, used only if the trace below cannot be read. It is
 	// derived rather than assumed: a value that differs from the global snapshot —
@@ -249,7 +296,7 @@ func DefaultAccountLayersFor(global *Config, repoPath, agent string) (project, g
 			}
 		}
 	}
-	return project, DefaultAccountSelection{}
+	return project, DefaultAccountSelection{}, ambientOptOut
 }
 
 // DefaultAccountAmbientOptOut reports whether the resolved config for repoPath
@@ -266,29 +313,8 @@ func DefaultAccountLayersFor(global *Config, repoPath, agent string) (project, g
 // is how a global default is cleared, and a user who wrote it chose ambient.
 // An agent with no entry anywhere is not an opt-out — the pool may route.
 func DefaultAccountAmbientOptOut(global *Config, repoPath, agent string) bool {
-	if strings.TrimSpace(agent) == "" {
-		return false
-	}
-	globalOptOut := func() bool {
-		if global == nil {
-			return false
-		}
-		value, present := global.DefaultAccounts[agent]
-		return present && strings.TrimSpace(value) == ""
-	}
-	if strings.TrimSpace(repoPath) == "" {
-		return globalOptOut()
-	}
-	repo, err := RepoFromPath(repoPath)
-	if err != nil {
-		return globalOptOut()
-	}
-	resolved, err := ResolveConfigForRepoInspection(repo)
-	if err != nil {
-		return globalOptOut()
-	}
-	value, present := resolved.DefaultAccounts[agent]
-	return present && strings.TrimSpace(value) == ""
+	_, _, optOut := defaultAccountLayersAndOptOut(global, repoPath, agent)
+	return optOut
 }
 
 // ResolvedDefaultAccountsFor reports the effective `default_accounts` map for

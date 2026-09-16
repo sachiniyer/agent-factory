@@ -54,7 +54,10 @@ func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionReque
 	if agent == "" {
 		return nil
 	}
-	selection := defaultAccountSelectionFor(cfg, req.RepoPath, agent)
+	// Selection and opt-out come from ONE resolved configuration generation:
+	// resolving them separately could pair a default read from one config save
+	// with an ambient refusal read from the next (#4404 review).
+	selection, ambientOptOut := config.DefaultAccountPolicyFor(cfg, req.RepoPath, agent)
 
 	kind, kindErr := session.BackendKindFor(session.InstanceOptions{
 		Backend:     session.BackendKind(req.Backend),
@@ -78,7 +81,7 @@ func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionReque
 		// name, which is the same outcome a pinned --account gets.
 		return applyResolvedDefaultAccount(req, selection)
 	}
-	if config.DefaultAccountAmbientOptOut(cfg, req.RepoPath, agent) {
+	if ambientOptOut {
 		return nil
 	}
 	home, err := config.GetConfigDir()
@@ -131,11 +134,23 @@ func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionReque
 		// identity left.
 		return nil
 	}
+	// The evidence scan and the claim must publish as ONE observation against
+	// account-limit updates: a status tick's refute or a startup's retained
+	// load may be writing fresh wall evidence under accountLimitMu while this
+	// route reads it, and a claim laid down between an evidence snapshot and
+	// its use routes onto a wall the swap scheduler would never pick (#4404
+	// review). accountLimitMu is the same fence swap admission and the refute
+	// take; taking it first keeps the established accountLimitMu → m.mu order
+	// — both accountLimitEvidenceForSwap and claimCreateAccount acquire m.mu
+	// inside.
+	m.accountLimitMu.Lock()
 	limited, err := m.accountLimitEvidenceForSwap(agent, loadAccountLimitEvidenceForSwap)
 	if err != nil {
+		m.accountLimitMu.Unlock()
 		return fmt.Errorf("cannot route %q to a healthy %s account: %w", req.Title, agent, err)
 	}
 	chosen, claim, err := m.claimCreateAccount(agent, pool, limited, selection.Name)
+	m.accountLimitMu.Unlock()
 	if err != nil {
 		return err
 	}

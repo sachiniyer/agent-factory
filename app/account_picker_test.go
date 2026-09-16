@@ -159,8 +159,8 @@ func TestAccountPickerListsOnlyTheProgramsAgent(t *testing.T) {
 		assert.Equal(t, "claude", choice.agent,
 			"every offered row must belong to the agent the form's program runs as")
 	}
-	require.Len(t, labels, 3, "the ambient row plus claude's two accounts: %v", labels)
-	assert.Equal(t, []string{"personal", "work"}, labels[1:],
+	require.Len(t, labels, 4, "the routable and ambient rows plus claude's two accounts: %v", labels)
+	assert.Equal(t, []string{"personal", "work"}, labels[2:],
 		"the picker must offer claude's accounts, in the daemon's order")
 
 	// The codex account is the control: it is in the response, and it must not be
@@ -197,7 +197,7 @@ func TestAccountPickerFollowsAProgramChange(t *testing.T) {
 		labels = append(labels, choice.label)
 		assert.Equal(t, "codex", choice.agent, "the reopened list must follow the NEW program")
 	}
-	require.Len(t, labels, 2, "the ambient row plus codex's one account: %v", labels)
+	require.Len(t, labels, 3, "the routable and ambient rows plus codex's one account: %v", labels)
 
 	// Leave the reopened field without choosing: the create must then go out on the
 	// ambient identity, not on the claude account the program change dropped.
@@ -250,10 +250,13 @@ func TestNamingFormWithoutAccountSendsNothing(t *testing.T) {
 	assert.Equal(t, "ambient-create", got.Title)
 }
 
-// TestAccountPickerAmbientRowSendsNoAccount covers the sentinel: choosing the
-// ambient row explicitly must be identical to never opening the field. A
-// non-empty sentinel would eventually be transmitted as a literal account name —
-// and an account name that does not exist is a refused create at best.
+// TestAccountPickerAmbientRowSendsNoAccount covers the ambient row: choosing it
+// must clear a previously picked account and ask for the ambient identity
+// outright — Account "" on the wire PLUS the ambient bit, so the daemon's pool
+// router can tell "keep this session off the pool" from an untouched field
+// (#4404 review). A non-empty sentinel would eventually be transmitted as a
+// literal account name — and an account name that does not exist is a refused
+// create at best.
 func TestAccountPickerAmbientRowSendsNoAccount(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(200, 1)
@@ -266,11 +269,23 @@ func TestAccountPickerAmbientRowSendsNoAccount(t *testing.T) {
 	require.Equal(t, "work", h.pendingAccount)
 
 	openAccountField(t, h)
-	pickAccount(t, h, h.accountPickerChoices[0].label)
+	// The ambient row is the one pinsAmbient marks — the routable first row
+	// shares its "" value but is NOT it.
+	ambientRow := -1
+	for i, choice := range h.accountPickerChoices {
+		if choice.pinsAmbient {
+			ambientRow = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, ambientRow, "the picker must offer an explicit ambient row")
+	pickAccount(t, h, h.accountPickerChoices[ambientRow].label)
 	assert.Empty(t, h.pendingAccount, "the ambient row must clear a previously picked account")
+	assert.True(t, h.pendingAccountAmbient, "the ambient row must record the ambient pick")
 
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Empty(t, got.Account, "the ambient row must send NO account")
+	assert.True(t, got.AccountAmbient, "the ambient row must set account_ambient on the wire")
 }
 
 // TestAccountPickerRefusesARegistrationOnlyAccount is constraint 2. An agent can
@@ -592,8 +607,8 @@ func TestAccountChoiceItemMarksBothStates(t *testing.T) {
 			"work — registration only"},
 		{"both", accountChoice{value: "work", label: "work", registrationOnly: true},
 			"work — registration only · not logged in"},
-		{"ambient", accountChoice{value: ambientAccount, label: "Use the agent's own login (no default configured)"},
-			"Use the agent's own login (no default configured)"},
+		{"ambient", accountChoice{value: ambientAccount, label: "Use the ambient identity (no account)", pinsAmbient: true},
+			"Use the ambient identity (no account)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, tc.choice.item())

@@ -7927,6 +7927,7 @@ var ConfigPane = class {
 
 // src/account_scope.ts
 var AMBIENT_ACCOUNT = "";
+var AMBIENT_PIN_ACCOUNT = "af://ambient";
 function accountAgentFor(program, catalog) {
   const picked = program.trim();
   if (picked !== "") {
@@ -7951,10 +7952,12 @@ function accountChoices(accounts, agent, failed = false) {
       note: failed ? "Accounts could not be loaded. The daemon default, if any, applies." : ""
     }];
   }
+  const fallback = accountDefaultFor(accounts, agent);
+  const anyLoggedIn = accounts.entries.some((entry) => entry.agent === agent && entry.logged_in);
   const choices = [
     {
       value: AMBIENT_ACCOUNT,
-      label: agent === "" ? "Use daemon default" : accountDefaultFor(accounts, agent) ? `Use configured default (${accountDefaultFor(accounts, agent)})` : "Use agent login (no default)",
+      label: agent === "" ? "Use daemon default" : fallback !== "" ? `Use configured default (${fallback})` : anyLoggedIn ? "Automatic \u2014 af picks a healthy account" : "Use agent login (nothing to route)",
       agent,
       blocked: "",
       note: agent === "" ? "The daemon default, if any, applies." : "",
@@ -7964,7 +7967,14 @@ function accountChoices(accounts, agent, failed = false) {
   if (agent === "" || !accountAgentSupported(accounts, agent)) {
     return choices;
   }
-  const fallback = accountDefaultFor(accounts, agent);
+  choices.push({
+    value: AMBIENT_PIN_ACCOUNT,
+    label: "Use the ambient identity (no account)",
+    agent,
+    blocked: "",
+    note: "Pins this session to the agent's own login instead of routing the account pool.",
+    projectDefault: false
+  });
   let listed = false;
   for (const entry of accounts.entries) {
     if (entry.agent !== agent) {
@@ -8036,9 +8046,12 @@ function accountSelectable(choices, selected) {
   const choice = choices.find((c) => c.value === selected);
   return choice === void 0 || choice.blocked === "";
 }
-function accountSkewMessage(requested, created) {
+function accountSkewMessage(requested, created, ambient = false) {
   const want = requested.trim();
   if (want === AMBIENT_ACCOUNT) {
+    if (ambient && (created.account ?? "").trim() !== "") {
+      return `Session "${created.title}" was created but the daemon did not keep it on the ambient identity \u2014 it is running as account "${(created.account ?? "").trim()}". The running daemon predates the ambient pin; upgrade it, then choose Delete session and create it again.`;
+    }
     return "";
   }
   const got = (created.account ?? "").trim();
@@ -10796,11 +10809,16 @@ var AccountSelection = class {
     this.value = value;
   }
   render(accounts, agent, failed = false) {
+    if (agent !== "") {
+      if (agent !== this.agent) {
+        this.picked = false;
+        this.value = AMBIENT_ACCOUNT;
+      }
+      this.agent = agent;
+    }
     if (accounts === null || !agent && this.namedChoicePending) return AMBIENT_ACCOUNT;
     const rows = accountChoices(accounts, agent, failed);
-    const changedAgent = agent !== this.agent;
-    this.agent = agent;
-    if (this.picked && (changedAgent || !rows.some((row) => row.value === this.value))) {
+    if (this.picked && !rows.some((row) => row.value === this.value)) {
       this.picked = false;
       this.value = AMBIENT_ACCOUNT;
       return AMBIENT_ACCOUNT;
@@ -10809,7 +10827,7 @@ var AccountSelection = class {
     return rows.some((row) => row.value === value) ? value : AMBIENT_ACCOUNT;
   }
   get namedChoicePending() {
-    return this.picked && this.value !== AMBIENT_ACCOUNT;
+    return this.picked && this.value !== AMBIENT_ACCOUNT && this.value !== AMBIENT_PIN_ACCOUNT;
   }
 };
 
@@ -11139,7 +11157,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       accountHint.textContent = "Cannot verify the selected account. Reopen this form to try again.";
     }
     const choiceLabel = (select) => (select.selectedOptions[0]?.textContent ?? "Loading\u2026").replace(/^Repo default \((.*)\)$/, "$1 (default)").replace(/^Use configured default \((.*)\)$/, "$1 (default)");
-    const accountNeedsChoice = !!accountHint.textContent || accountSelection.picked || accountRows.length > 2 && !accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog));
+    const accountNeedsChoice = !!accountHint.textContent || accountSelection.picked || accountRows.some((row) => row.value !== AMBIENT_ACCOUNT && row.value !== AMBIENT_PIN_ACCOUNT) && !accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog));
     defaults.setSummary([
       `Program: ${choiceLabel(programSelect)}`,
       `Backend: ${choiceLabel(backendSelect)}`,
@@ -11297,16 +11315,18 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       // REPO_DEFAULT ("") when the user did not choose — createSession then omits
       // `backend` entirely and the repo's config decides (#1933).
       backend: backendSelect.value,
-      // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
-      // `account` entirely and the daemon applies its default, if any (#3844).
-      account: accountSelect.value,
-      // The ambient row is a deliberate choice only when the user picked it AND
-      // it did not stand in for a configured default ("Use configured default
-      // (X)" is row-empty too, and it is not ambient). Without this bit the
-      // daemon cannot tell that pick from an untouched field, and its pool
-      // router would re-identify the session the user chose to keep ambient
-      // (#4404 review).
-      accountAmbient: accountSelection.picked && accountSelect.value === AMBIENT_ACCOUNT && accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog)) === ""
+      // The select may be SHOWING a configured default it preselected — a
+      // presentation convenience, not a decision. Serializing that name would
+      // read on the wire as an explicit --account pin and bypass the daemon's
+      // pool routing entirely (#4404 review), so a name travels only when the
+      // user actually picked a row; an untouched field submits AMBIENT_ACCOUNT
+      // ("") and stays routable.
+      account: accountSelection.picked && accountSelect.value !== AMBIENT_PIN_ACCOUNT ? accountSelect.value : AMBIENT_ACCOUNT,
+      // Only the explicit ambient row asks for the ambient identity — every
+      // other "" is a routable "let af decide" the daemon would otherwise
+      // pool-route, and it cannot tell that pick from an untouched field
+      // without the bit (#4404 review).
+      accountAmbient: accountSelection.picked && accountSelect.value === AMBIENT_PIN_ACCOUNT
     });
   });
   queueMicrotask(() => titleInput.focus());
@@ -17854,7 +17874,7 @@ function newSession() {
           if (created.id && maySelect && store.get().selectedProject === values.repoPath && store.get().sessions.some((session) => session.id === created.id)) {
             store.set({ selectedId: created.id, activeTab: 0, tabError: null });
           }
-          const skew = accountSkewMessage(requestedAccount, created);
+          const skew = accountSkewMessage(requestedAccount, created, values.accountAmbient === true);
           if (skew !== "") {
             surfaceTabError(new Error(skew));
           }

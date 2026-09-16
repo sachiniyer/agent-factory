@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 
 import {
   AMBIENT_ACCOUNT,
+  AMBIENT_PIN_ACCOUNT,
   accountAgentFor,
   accountAgentSupported,
   accountChoices,
@@ -44,13 +45,13 @@ function session(over: Partial<SessionData> = {}): SessionData {
   return { title: "scoped", branch: "af/scoped", ...over };
 }
 
-test("the picker offers the agent's accounts, in the daemon's order, behind the ambient row", () => {
+test("the picker offers the agent's accounts, in the daemon's order, behind the routable and ambient rows", () => {
   const choices = accountChoices(registry(), "claude");
 
   assert.deepEqual(
     choices.map((c) => c.value),
-    [AMBIENT_ACCOUNT, "personal", "work"],
-    "the ambient identity leads, then the daemon's entries verbatim",
+    [AMBIENT_ACCOUNT, AMBIENT_PIN_ACCOUNT, "personal", "work"],
+    "the routable row leads, the explicit ambient pin follows, then the daemon's entries verbatim",
   );
 });
 
@@ -62,8 +63,8 @@ test("the list follows the agent: a codex account is never offered to a claude s
   const forClaude = accountChoices(registry(), "claude");
   const forCodex = accountChoices(registry(), "codex");
 
-  assert.deepEqual(forClaude.map((c) => c.value), [AMBIENT_ACCOUNT, "personal", "work"]);
-  assert.deepEqual(forCodex.map((c) => c.value), [AMBIENT_ACCOUNT, "work"]);
+  assert.deepEqual(forClaude.map((c) => c.value), [AMBIENT_ACCOUNT, AMBIENT_PIN_ACCOUNT, "personal", "work"]);
+  assert.deepEqual(forCodex.map((c) => c.value), [AMBIENT_ACCOUNT, AMBIENT_PIN_ACCOUNT, "work"]);
   assert.ok(
     forClaude.every((c) => c.agent === "claude"),
     "every offered row must belong to the agent asked for",
@@ -87,8 +88,8 @@ test("an account name this file has never heard of is offered and sent verbatim"
     "claude",
   );
 
-  assert.deepEqual(choices.map((c) => c.value), [AMBIENT_ACCOUNT, "moonbase-oncall"]);
-  assert.equal(choices[1].label, "moonbase-oncall", "the label is the daemon's name, not a lookup");
+  assert.deepEqual(choices.map((c) => c.value), [AMBIENT_ACCOUNT, AMBIENT_PIN_ACCOUNT, "moonbase-oncall"]);
+  assert.equal(choices[2].label, "moonbase-oncall", "the label is the daemon's name, not a lookup");
 });
 
 // Constraint 2. A registration-only account is LISTED with its reason — hiding it
@@ -109,7 +110,7 @@ test("a registration-only account is listed, marked, and blocks the submit", () 
     "claude",
   );
 
-  assert.equal(choices[1].label, "unproven — registration only", "the row says so before any click");
+  assert.equal(choices[2].label, "unproven — registration only", "the row says so before any click");
   assert.equal(accountSelectable(choices, "unproven"), false, "a create that would be refused must not be offered");
   assert.match(accountNotice(choices, "unproven"), /cannot be scoped to a claude account yet/);
 });
@@ -129,7 +130,7 @@ test("a not-logged-in account is listed, labelled, and still selectable", () => 
     "claude",
   );
 
-  assert.equal(choices[1].label, "just-registered — not logged in");
+  assert.equal(choices[2].label, "just-registered — not logged in");
   assert.equal(accountSelectable(choices, "just-registered"), true, "nothing about it would fail a create");
   assert.match(accountNotice(choices, "just-registered"), /no claude credential yet/);
 });
@@ -145,7 +146,7 @@ test("both states at once join with the repo's separator, and the blocking reaso
     "claude",
   );
 
-  assert.equal(choices[1].label, "neither — registration only · not logged in");
+  assert.equal(choices[2].label, "neither — registration only · not logged in");
   assert.match(
     accountNotice(choices, "neither"),
     /cannot be scoped/,
@@ -269,7 +270,7 @@ test("a default naming an unregistered account is OFFERED, labelled, and not blo
 });
 
 test("empty account choice describes configured inheritance without adding an override", () => {
-  assert.equal(accountChoices({ agents: ["claude"], entries: [], defaults: {} }, "claude")[0].label, "Use agent login (no default)");
+  assert.equal(accountChoices({ agents: ["claude"], entries: [], defaults: {} }, "claude")[0].label, "Use agent login (nothing to route)");
   const registry = { agents: ["claude"], entries: [], defaults: { claude: "work" } } as AccountsResponse;
   const choice = accountChoices(registry, "claude")[0];
   assert.equal(choice.label, "Use configured default (work)");
@@ -282,8 +283,9 @@ for (const [registrationOnly, loggedIn] of [[true, true], [false, true], [false,
       defaults: { claude: "work" },
       entries: [{ agent: "claude", name: "work", dir: "/h/a/work", registration_only: registrationOnly, logged_in: loggedIn }],
     }), "claude");
-    assert.equal(choices[0].blocked, choices[1].blocked);
-    assert.equal(choices[0].note, choices[1].note);
+    const work = choices.find((c) => c.value === "work")!;
+    assert.equal(choices[0].blocked, work.blocked);
+    assert.equal(choices[0].note, work.note);
     assert.equal(accountSelectable(choices, AMBIENT_ACCOUNT), !registrationOnly);
     assert.equal(accountNotice(choices, AMBIENT_ACCOUNT), accountNotice(choices, "work"));
   });

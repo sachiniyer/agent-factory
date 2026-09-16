@@ -919,7 +919,7 @@ function newSession(): void {
             // It runs AFTER the upsert, not before, because the store.set above
             // carries `tabError: null` — raising the notice first would have it
             // cleared by the very update that puts the wrongly-scoped row on screen.
-            const skew = accountSkewMessage(requestedAccount, created);
+            const skew = accountSkewMessage(requestedAccount, created, values.accountAmbient === true);
             if (skew !== "") {
               surfaceTabError(new Error(skew));
             }

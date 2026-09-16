@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
@@ -77,15 +76,7 @@ func applyDefaultAccount(cfg *config.Config, req *CreateSessionRequest) error {
 // session.refuseUnsupportedAccountAgent with a message naming both — and, since
 // #3386, naming this config key too when the account came from here.
 func defaultAccountSelectionFor(cfg *config.Config, repoPath, agent string) config.DefaultAccountSelection {
-	project, global := config.DefaultAccountLayersFor(cfg, repoPath, agent)
-	name := agentaccount.Resolve("", project.Name, global.Name)
-	if name == "" {
-		return config.DefaultAccountSelection{}
-	}
-	selection := project
-	if selection.Name != name {
-		selection = global
-	}
+	selection, _ := config.DefaultAccountPolicyFor(cfg, repoPath, agent)
 	return selection
 }
 

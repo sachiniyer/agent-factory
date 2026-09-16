@@ -13,7 +13,7 @@ func TestGroupACopyNamesExistingActionsAndDefaults(t *testing.T) {
 	require.Equal(t, "Use configured default (work)", choices[0].label)
 	require.Equal(t, ambientAccount, choices[0].value)
 	ambient := accountChoicesFrom(daemon.ListAccountsResponse{}, "claude")
-	require.Equal(t, "Use the agent's own login (no default configured)", ambient[0].label)
+	require.Equal(t, "Use the agent's own login (nothing to route)", ambient[0].label)
 	require.Equal(t, ambientAccount, ambient[0].value)
 	require.Equal(t, "VS Code (web UI)", newTabChoices[1].label)
 	help := xansi.Strip((helpTypeGeneral{}).toContent())

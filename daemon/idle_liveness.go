@@ -3,6 +3,7 @@ package daemon
 import (
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -75,15 +76,21 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 // updatedPaneAccountVerdict applies the wall-or-refute verdict above to a pane
 // that CHANGED this tick — the changed-content sibling of the still-pane check.
 // Fresh bytes are affirmative-work evidence ONLY when they are not themselves a
-// usage-limit banner AND they show the agent working: a wall repainting (its
-// reset countdown ticking, the banner scrolling into view) produces updated
-// content too, and refuting on it retracts the very evidence the banner is
-// proving — then routes the next create onto an account that is still walled
-// (#4404 review). A detected banner is therefore parked at the wall it shows,
-// exactly as a still pane would be; churn that is neither banner nor working
-// content proves only that the pane is alive, not that the account answered, so
-// it settles Running without touching stored evidence — the same bar the
-// still-pane path applies before it refutes.
+// usage-limit banner: a wall repainting (its reset countdown ticking, the
+// banner scrolling into view) produces updated content too, and refuting on it
+// retracts the very evidence the banner is proving — then routes the next
+// create onto an account that is still walled (#4404 review). A detected banner
+// is therefore parked at the wall it shows, exactly as a still pane would be.
+//
+// What counts as refuting work differs by agent. Agents WITH a working-content
+// indicator (amp, opencode) refute only on task.IsWorkingContent — churn that
+// is neither banner nor working content proves only that the pane is alive,
+// not that the account answered. The account-scoped agents — claude, codex,
+// gemini — have no such indicator BY DESIGN: pane churn is the whole of their
+// work signal, so gating their refutation on IsWorkingContent made it
+// unreachable for exactly the identities account-limit evidence exists for
+// (#4404 review). For them fresh non-banner output IS the refutation: a
+// session parked at its wall emits nothing but the banner's own repaint.
 //
 // Returns (walled, refuted): walled tells the caller NOT to transition the
 // session Running — the pane just proved the opposite — and refuted feeds the
@@ -97,8 +104,11 @@ func (m *Manager) updatedPaneAccountVerdict(instance *session.Instance, content 
 		_ = m.setLimitReachedAtEpoch(instance, resetAt, epoch)
 		return true, false
 	}
-	if !task.IsWorkingContent(content, agent) {
-		return false, false
+	if task.IsWorkingContent(content, agent) {
+		return false, m.refuteAccountLimitEvidence(instance, epoch)
 	}
-	return false, m.refuteAccountLimitEvidence(instance, epoch)
+	if _, accountScoped := sessionenv.SupportsAccounts(agent); accountScoped {
+		return false, m.refuteAccountLimitEvidence(instance, epoch)
+	}
+	return false, false
 }

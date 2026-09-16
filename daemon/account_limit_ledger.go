@@ -246,12 +246,6 @@ func (m *Manager) refuteAccountLimitEvidence(instance *session.Instance, epoch u
 	m.accountLimitMu.Lock()
 	m.mu.Lock()
 	_, checked := m.refutedLedgerAccounts[key]
-	if !checked {
-		if m.refutedLedgerAccounts == nil {
-			m.refutedLedgerAccounts = make(map[string]struct{})
-		}
-		m.refutedLedgerAccounts[key] = struct{}{}
-	}
 	for instanceKey, other := range m.instances {
 		if other == nil || other == instance {
 			continue
@@ -267,6 +261,19 @@ func (m *Manager) refuteAccountLimitEvidence(instance *session.Instance, epoch u
 		if err := retractAccountLimitObservation(agent, account); err != nil {
 			m.warn().Printf("could not retract the retained limit evidence for %s account %q — it may keep excluding the account until restart: %v",
 				agent, account, err)
+		} else {
+			// The mark means "the durable row is already retracted" — so it
+			// may only be written AFTER a successful retraction. Marking it
+			// before the fallible file op and then failing would poison the
+			// identity for the daemon's lifetime: every later refutation
+			// would see the mark and skip the retry the evidence still
+			// needs (#4404 review).
+			m.mu.Lock()
+			if m.refutedLedgerAccounts == nil {
+				m.refutedLedgerAccounts = make(map[string]struct{})
+			}
+			m.refutedLedgerAccounts[key] = struct{}{}
+			m.mu.Unlock()
 		}
 	}
 	m.accountLimitMu.Unlock()

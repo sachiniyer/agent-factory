@@ -74,13 +74,12 @@ type accountChoice struct {
 	// behaviour: the row is selected like any other, and saying so is the point —
 	// the issue's complaint is a default applied in silence.
 	projectDefault bool
-	// defersToDefault marks the first row when it means "use configured default"
-	// rather than "use the ambient identity" — both send Account "", but only
-	// the no-default version asks for ambient outright. The submit turns that
-	// difference into CreateSessionRequest.AccountAmbient, so the daemon's pool
-	// router can tell "let the default decide" from "keep this session off the
-	// pool" (#4404 review).
-	defersToDefault bool
+	// pinsAmbient marks the one row that asks for the ambient identity
+	// outright. Every other "" value is a routable "let af decide" — the
+	// automatic first row and the configured-default stand-in alike — so only
+	// this flag can carry "keep this session off the pool" onto the wire as
+	// CreateSessionRequest.AccountAmbient (#4404 review).
+	pinsAmbient bool
 	// unregistered marks a row that exists only because the project default names
 	// it: the daemon's registry did not list it, so a create with it will be
 	// refused. Distinct from !loggedIn, which is an account that exists and merely
@@ -89,8 +88,8 @@ type accountChoice struct {
 }
 
 // accountChoicesFrom turns the daemon's registry into the picker's rows: the
-// ambient-identity row first, then every account the daemon listed FOR THIS
-// AGENT, in the daemon's own order.
+// routable first row, the explicit ambient pin, then every account the daemon
+// listed FOR THIS AGENT, in the daemon's own order.
 //
 // The agent filter lives HERE, over each entry's own Agent field, rather than in
 // the request — see openAccountPicker for why the whole registry is fetched. That
@@ -99,15 +98,44 @@ type accountChoice struct {
 // codex account offered to a claude session is a create that fails, or worse, one
 // that quietly does not.
 func accountChoicesFrom(resp daemon.ListAccountsResponse, agent string) []accountChoice {
+	fallback := resp.Defaults[agent]
+	anyLoggedIn := false
+	for _, entry := range resp.Entries {
+		if entry.Agent == agent && entry.LoggedIn {
+			anyLoggedIn = true
+			break
+		}
+	}
+	// The first row is the ROUTABLE choice — a create that names no account.
+	// What af does with it changed with the pool router (#4404): it is no
+	// longer a synonym for the ambient identity. With a configured default it
+	// prefers that account; with logged-in accounts and no default it picks
+	// the least-loaded healthy one; only with nothing to route does it land
+	// on the agent's own login, and the label says which applies.
+	routableLabel := "Use the agent's own login (nothing to route)"
+	switch {
+	case fallback != "":
+		routableLabel = "Use configured default (" + fallback + ")"
+	case anyLoggedIn:
+		routableLabel = "Automatic — af picks a healthy account"
+	}
 	choices := []accountChoice{{
 		value: ambientAccount,
-		label: "Use the agent's own login (no default configured)",
+		label: routableLabel,
 		agent: agent,
 	}}
-	fallback := resp.Defaults[agent]
-	if fallback != "" {
-		choices[0].label = "Use configured default (" + fallback + ")"
-		choices[0].defersToDefault = true
+	// The ambient identity is a deliberate pick in its own right — "keep this
+	// session off the pool" — not merely the label an untouched field wears.
+	// It needs a row of its own so it can still be asked for once a default is
+	// configured, which is exactly when the first row stops meaning it (#4404
+	// review). The pick maps to Account "" + AccountAmbient on the wire.
+	if accountRosterHas(resp.Agents, agent) {
+		choices = append(choices, accountChoice{
+			value:       ambientAccount,
+			label:       "Use the ambient identity (no account)",
+			agent:       agent,
+			pinsAmbient: true,
+		})
 	}
 	listed := false
 	for _, entry := range resp.Entries {
@@ -268,11 +296,14 @@ func (m *home) openAccountPicker() (tea.Model, tea.Cmd) {
 // fetchAccountDefault asks the daemon which account this project would apply to a
 // create that names none, so the naming form can PRESELECT it (#3386).
 //
-// Preselecting rather than sending nothing is the whole point. The daemon would
-// fill the account in either way, and the session would be identical — but a form
-// that shows "Ambient identity" while the create runs as `work` is the silence the
-// issue opens with, and it is also what makes the skew check meaningless: a client
-// that sent no account has nothing to compare the created session against.
+// Preselecting rather than sending nothing is the whole point. A form that
+// shows "Ambient identity" while the create prefers `work` is the silence the
+// issue opens with. The preselection is DISPLAY ONLY, though: it does not set
+// pendingAccountChosen, so the submit still sends no account and the pool router
+// answers — which is also why the skew check does not compare it: routing may
+// legitimately land on a different account when the preferred one is walled
+// (#4404 review), and a false "asked for X, got Y" alarm on a correct reroute
+// is exactly the noise a skew check must never raise.
 //
 // It is the same ListAccounts call the picker makes, so opening the field costs no
 // extra round trip's worth of new code, and the answer includes the registry — which
@@ -339,6 +370,10 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 		return m, nil
 	}
 	m.pendingAccount = preselect
+	// AccountAmbient is already false when nothing was picked — it is only ever
+	// set under pendingAccountChosen — but clear it explicitly so the wire
+	// contract never depends on that invariant.
+	m.pendingAccountAmbient = false
 	if m.state == stateSelectAccount && m.selectionOverlay != nil {
 		// A registry response can open this picker before the default arrives.
 		// Keep the visible row in sync with what Enter will submit.
@@ -383,9 +418,17 @@ func (m *home) handleAccountRegistry(msg accountRegistryMsg) (tea.Model, tea.Cmd
 		return m, m.handleNotice(accountRosterNotice(msg.agent, msg.resp.Agents))
 	}
 	choices := accountChoicesFrom(msg.resp, msg.agent)
-	if len(choices) == 1 {
-		// Only the ambient row: this agent supports accounts but none is registered
-		// on the daemon host yet. An empty-but-for-one-row modal answers nothing, so
+	named := false
+	for _, choice := range choices {
+		if choice.value != ambientAccount {
+			named = true
+			break
+		}
+	}
+	if !named {
+		// Only the routable and ambient rows — two spellings of "no account" —
+		// are on offer: this agent supports accounts but none is registered on
+		// the daemon host yet. An empty-but-for-those modal answers nothing, so
 		// point at where accounts are made instead.
 		return m, m.handleNotice(fmt.Errorf(
 			"no %s accounts are registered on the daemon host yet — register one in the config tab (%s) "+
@@ -395,7 +438,9 @@ func (m *home) handleAccountRegistry(msg accountRegistryMsg) (tea.Model, tea.Cmd
 
 	selected := 0
 	for i, choice := range choices {
-		if choice.value == m.pendingAccount {
+		// The routable row and the ambient pin share the empty value; only the
+		// ambient flag tells a reopen which one the field is showing.
+		if choice.value == m.pendingAccount && choice.pinsAmbient == m.pendingAccountAmbient {
 			selected = i
 			break
 		}
@@ -478,11 +523,11 @@ func (m *home) handleStateSelectAccount(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.pendingAccount = choice.value
 	m.pendingAccountChosen = true
-	// The empty row only means ambient when it did not stand in for a configured
-	// default — "use the agent's own login" is a deliberate keep-off-the-pool
-	// choice the daemon cannot distinguish from an untouched field without this
-	// flag (#4404 review).
-	m.pendingAccountAmbient = choice.value == ambientAccount && !choice.defersToDefault
+	// The ambient row is the one pick that must read as ambient on the wire —
+	// every other "" is a routable "let af decide" the daemon would otherwise
+	// pool-route, and it cannot tell that pick from an untouched field without
+	// the flag (#4404 review).
+	m.pendingAccountAmbient = choice.pinsAmbient
 	m.menu.SetNamingAccount(m.pendingAccount != ambientAccount)
 	if choice.unregistered {
 		// A row that exists only because the project default names it. It is a

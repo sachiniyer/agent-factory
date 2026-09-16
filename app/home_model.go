@@ -430,13 +430,13 @@ type home struct {
 	// just chosen against, which is the whole failure this field exists to prevent.
 	pendingAccountChosen bool
 	// pendingAccountAmbient records that the chosen account value "" means the
-	// user asked for the ambient identity OUTRIGHT — the picker's "use the
-	// agent's own login" row — rather than the row-empty "use configured
-	// default" choice or an untouched field (#4404 review). The daemon needs the
-	// distinction on the wire: Account alone sends "" for all three, and the
-	// router reads unspecified-empty as permission to route the create onto the
-	// account pool — silently re-identifying a session the user chose to keep
-	// off it. Reset wherever pendingAccount is, for the same reason.
+	// user asked for the ambient identity OUTRIGHT — the picker's dedicated
+	// ambient row — rather than the routable "let af decide" row or an
+	// untouched field (#4404 review). The daemon needs the distinction on the
+	// wire: Account alone sends "" for all three, and the router reads
+	// unspecified-empty as permission to route the create onto the account
+	// pool — silently re-identifying a session the user chose to keep off it.
+	// Reset wherever pendingAccount is, for the same reason.
 	pendingAccountAmbient bool
 	// backendPickerChoices is the option list the open backend picker is showing,
 	// held alongside the overlay for the same reason handoffChoices is: the list is

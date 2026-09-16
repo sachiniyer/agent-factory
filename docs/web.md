@@ -119,7 +119,7 @@ switcher first; creation stays disabled until a project is available.
 | Project | The repository to work in; starts with the selected project. |
 | Program (Defaults) | The agent to run, or **Repo default**. Choices come from the project's agent catalog. |
 | Backend (Defaults) | Where the session runs, or **Repo default**. Unavailable choices explain why they cannot be used. |
-| Account | A registered identity for the selected agent. The project's default is preselected when offered; changing Program refreshes the account list. **Use configured default (…)** inherits the named default; **Use agent login (no default)** uses the agent’s own login when none is configured. **Use daemon default** leaves resolution to the daemon. These rows send no account override. |
+| Account | A registered identity for the selected agent. The project's default is preselected when offered; changing Program refreshes the account list. The first row is routable — it sends no account name: **Use configured default (…)** prefers the named default while it is healthy, **Automatic — af picks a healthy account** routes across the registered pool when no default is configured, and **Use agent login (nothing to route)** applies when there is no pool. **Use the ambient identity (no account)** pins the session to the agent’s own login, off the pool. Named rows pin the session to that account. |
 | Prompt | Optional initial instructions to send to the agent. |
 
 An account without a credential is labelled but still selectable. A
