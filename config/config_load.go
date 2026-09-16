@@ -163,10 +163,11 @@ type ReadOnlyConfigLoad struct {
 	Missing      bool
 	LegacyJSON   bool
 	ShadowedJSON bool
-	// EmptyStub identifies contentless, unshadowed TOML. Startup resolves the
-	// same state to in-memory defaults without modifying the file (#4483 — a
-	// read never deletes user data), and Config contains those defaults for
-	// diagnostics.
+	// EmptyStub identifies a contentless config file startup accepts: an
+	// effectively-empty, unshadowed config.toml, or a zero-byte legacy
+	// config.json with no config.toml. Startup resolves the same state to
+	// in-memory defaults without modifying the file (#4483 — a read never
+	// deletes user data), and Config contains those defaults for diagnostics.
 	EmptyStub bool
 }
 
@@ -221,6 +222,17 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 
 	data, err := os.ReadFile(configPath)
 	if err == nil {
+		// A zero-byte config.json is the same empty stub startup resolves to
+		// defaults: leaving it for the parser would report "invalid" for a
+		// state af accepts and runs past (#4483 review — diagnostics must agree
+		// with startup or they diagnose a file af does not have).
+		if len(data) == 0 {
+			return ReadOnlyConfigLoad{
+				Path:      configPath,
+				EmptyStub: true,
+				Config:    DefaultConfig(),
+			}, nil
+		}
 		cfg, parseErr := parseLoadedConfigJSON(data, prettyConfigPath, configPath)
 		return ReadOnlyConfigLoad{
 			Config:     cfg,

@@ -345,3 +345,39 @@ func TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyAliasSymlink(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o500), info.Mode().Perm(), "the diagnostic must not chmod the concrete default it reports on")
 }
+
+// A zero-byte config.json with no config.toml is the same stub startup
+// accepts (#4483): the load answers in-memory defaults and leaves the file.
+// The diagnostic must classify it EmptyStub rather than feed zero bytes to
+// the JSON parser and report "invalid" for a state af runs past — validate
+// and doctor disagreeing with startup is the defect this pins.
+func TestLoadConfigReadOnly_EmptyJSONStubAgreesWithStartup(t *testing.T) {
+	fastShell(t)
+	home := t.TempDir()
+	jsonPath := filepath.Join(home, ConfigFileName)
+	require.NoError(t, os.WriteFile(jsonPath, nil, 0o644))
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	loaded, err := LoadConfigReadOnly()
+	require.NoError(t, err, "read-only diagnostic must not fail a state startup recovers from")
+	assert.True(t, loaded.EmptyStub, "a zero-byte config.json is an empty stub, not invalid JSON")
+	assert.Equal(t, jsonPath, loaded.Path, "the stub verdict names the file that carries it")
+	assert.NotNil(t, loaded.Config, "EmptyStub carries DefaultConfig() for downstream diagnostics")
+	assert.False(t, loaded.LegacyJSON, "a contentless file is not a loadable legacy config")
+	assert.False(t, loaded.Missing, "a present stub is not Missing")
+
+	// No-write contract: the stub is intact and no config.toml appeared.
+	got, err := os.ReadFile(jsonPath)
+	require.NoError(t, err)
+	assert.Empty(t, got, "LoadConfigReadOnly must not touch the stub")
+	_, statErr := os.Stat(filepath.Join(home, TomlConfigFileName))
+	assert.True(t, os.IsNotExist(statErr), "LoadConfigReadOnly must not materialize config.toml")
+
+	// Startup agrees on the same home: defaults in memory, file untouched.
+	cfg, err := LoadConfig()
+	require.NoError(t, err, "startup must recover past the empty JSON stub")
+	require.NotNil(t, cfg)
+	after, err := os.ReadFile(jsonPath)
+	require.NoError(t, err)
+	assert.Empty(t, after, "startup must not remove or rewrite the stub (#4483)")
+}

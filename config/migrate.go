@@ -61,9 +61,12 @@ func MigrateGlobalConfig() (*MigrationResult, error) {
 	// (#3624 review).
 	converting := !fileExists(tomlPath) && fileExists(filepath.Join(configDir, ConfigFileName))
 
-	// Precondition, exactly as `af config set` uses it: materialize or convert
-	// so config.toml exists, and prove the current file loads, so a later parse
-	// failure is unambiguously this migration's fault.
+	// Precondition, exactly as `af config set` uses it: convert a legacy
+	// config.json or materialize first-run defaults so config.toml exists when
+	// it should, and prove the current file loads, so a later parse failure is
+	// unambiguously this migration's fault. An empty stub stays a stub — the
+	// load answers it with defaults and leaves it (#4483) — so the locked body
+	// below tolerates a missing or contentless file as an empty document.
 	if _, err := LoadConfig(); err != nil {
 		return nil, fmt.Errorf("refusing to migrate: the current config does not load: %w", err)
 	}
@@ -155,8 +158,19 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	// file and land it on another (#3688, #3697).
 	prettyPath := prettyHomePath(locked.link)
 	raw, err := locked.read()
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
+	}
+	// A missing or contentless config.toml under the lock is an empty document
+	// — the same answer loadConfigLocked gives. It gets here when a zero-byte
+	// config.json satisfied the pre-lock LoadConfig with in-memory defaults
+	// (#4483 review), when the file is the empty stub that load now leaves
+	// untouched, or when it was removed in the gap before acquisition. Every
+	// one of those has no deprecated keys to move: "nothing migrated" is the
+	// honest result, and writing a fresh file to say so would touch a file a
+	// mid-flight rewrite may be holding open.
+	if len(raw) == 0 || isEffectivelyEmptyToml(raw) {
+		return &MigrationResult{Path: locked.link, Migrated: []MigratedKey{}}, nil
 	}
 	// The loader supports a leading BOM, so a migration must not quietly strip
 	// one. Edits run on the stripped text — every surgical helper expects that —

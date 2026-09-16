@@ -237,3 +237,23 @@ func TestLoadConfig_DoesNotUnlinkAnInFlightJSONRewrite(t *testing.T) {
 	assert.JSONEq(t, `{"schema_version":1,"default_program":"codex"}`, string(data),
 		"the writer's content must land at config.json — losing it is the #4483 data loss")
 }
+
+// A zero-byte config.json satisfies UnsetGlobalConfigValue's pre-lock
+// LoadConfig with in-memory defaults while config.toml stays absent (#4483
+// review). The locked body must answer "not set" from that empty document —
+// not ENOENT, and not a defaults file materialized just to say so.
+func TestUnsetGlobalConfigValue_EmptyJSONStubAnswersNotSet(t *testing.T) {
+	fastShell(t)
+	home := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home, ConfigFileName), nil, 0o644))
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	result, err := UnsetGlobalConfigValue("ssh.host_key_verification")
+	require.NoError(t, err, "unset on an accepted stub must not fail")
+	require.NotNil(t, result)
+	assert.False(t, result.Removed, "an empty document holds no key to remove")
+	assert.Equal(t, filepath.Join(home, TomlConfigFileName), result.Path)
+	_, statErr := os.Stat(filepath.Join(home, TomlConfigFileName))
+	assert.True(t, os.IsNotExist(statErr),
+		"a no-op unset must not materialize config.toml — a mid-flight rewrite may be holding the name open")
+}
