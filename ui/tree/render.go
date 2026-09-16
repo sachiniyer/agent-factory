@@ -509,11 +509,6 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// clamp enforces, so the over-estimate costs a shorter title and the ● stays.
 	title := titleS.Render(layout.RowWithRightAffix(titleContent, " "+join, r.width))
 
-	remainingWidth := r.width
-	remainingWidth -= prefixWidth
-	remainingWidth -= runewidth.StringWidth(branchIcon)
-	remainingWidth -= 2 // for the literal " " and "-" in the branchLine format string
-
 	// Use the mutex-guarded accessor so this read (on the renderer
 	// goroutine) doesn't race with LocalBackend.Start's write on the
 	// instance-creation tea.Cmd goroutine.
@@ -526,6 +521,20 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 			branch += fmt.Sprintf(" (%s)", repoName)
 		}
 	}
+
+	// The ⎇ labels the row's branch, so it only leads a row that names one:
+	// in front of a bare idle detail it would mark a phrase that is not a
+	// branch (#4174).
+	branchMarker := ""
+	if branch != "" {
+		branchMarker = branchIcon + "-"
+	}
+
+	remainingWidth := r.width
+	remainingWidth -= prefixWidth
+	remainingWidth -= runewidth.StringWidth(branchMarker)
+	remainingWidth-- // for the literal " " in the branchLine format string
+
 	description := branch
 	restoreFailed := false
 	if reason, restoreFailure, churnAt := i.IdleReasonDetailSnapshot(); reason != session.IdleReasonNone {
@@ -538,7 +547,10 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		if branch == "" {
 			description = detail
 		} else {
-			description = detail + " · " + branch
+			// The branch leads so right-truncation eats the idle detail
+			// first: this row exists to name the branch, and a leading
+			// detail truncated the branch away entirely (#4174).
+			description = branch + " · " + detail
 		}
 	}
 	// Don't show the branch if there's no space for it; otherwise fit it into
@@ -564,7 +576,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		spaces = strings.Repeat(" ", remainingWidth)
 	}
 
-	branchLine := fmt.Sprintf("%s %s-%s%s", strings.Repeat(" ", prefixWidth), branchIcon, description, spaces)
+	branchLine := fmt.Sprintf("%s %s%s%s", strings.Repeat(" ", prefixWidth), branchMarker, description, spaces)
 
 	lines := []string{title}
 	if archiveWarning == "" {

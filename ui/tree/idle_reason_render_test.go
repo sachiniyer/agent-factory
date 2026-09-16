@@ -40,7 +40,10 @@ func TestInstanceRendererSurfacesTerminalRestoreFailure(t *testing.T) {
 	assert.Contains(t, out, "feature")
 }
 
-func TestInstanceRendererSurfacesIdleReasonBeforeBranch(t *testing.T) {
+// TestInstanceRendererSurfacesBranchBeforeIdleReason pins #4174: the ⎇ row
+// exists to name the branch, so the branch leads and right-truncation eats the
+// idle detail tail first — not the other way round.
+func TestInstanceRendererSurfacesBranchBeforeIdleReason(t *testing.T) {
 	t.Parallel()
 
 	attemptedAt := time.Now().Add(-time.Hour)
@@ -66,5 +69,30 @@ func TestInstanceRendererSurfacesIdleReasonBeforeBranch(t *testing.T) {
 	}
 	require.NotEmpty(t, secondary)
 	assert.Contains(t, secondary, "no change after delivery")
-	assert.Less(t, strings.Index(secondary, "no change"), strings.Index(secondary, "feature"))
+	assert.Less(t, strings.Index(secondary, "feature"), strings.Index(secondary, "no change"),
+		"the branch must lead the row so truncation eats the idle detail, not the branch")
+}
+
+// TestInstanceRendererIdleReasonWithoutBranchDropsGlyph: a session with no
+// branch and an idle reason shows the detail on the second row, but the ⎇
+// labels a branch — it must not sit in front of a phrase that is not one
+// (#4174).
+func TestInstanceRendererIdleReasonWithoutBranchDropsGlyph(t *testing.T) {
+	t.Parallel()
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "worker",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	inst.SetStatusForTest(session.Ready)
+	require.True(t, inst.RecordPromptAttempt(session.PromptDelivered, time.Now().Add(-time.Hour)))
+
+	r := NewInstanceRenderer()
+	r.SetWidth(80)
+	out := ansiEscape.ReplaceAllString(r.Render(inst, 1, true, false, false), "")
+	assert.NotContains(t, out, branchIcon,
+		"no branch means no branch glyph — the ⎇ must not label an idle phrase")
+	assert.Contains(t, out, "no change after delivery")
 }
