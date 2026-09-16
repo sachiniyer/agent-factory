@@ -106,6 +106,19 @@ func (m *Manager) observeTaskTargetLimit(taskID string) (bool, error) {
 // process, so a target/repository change can cross the manager liveness fences
 // above. Such an observation is unknown, never permission to expire, evict, or
 // rate-drop an event; the next admission retries against the new binding.
+//
+// The answer takes effect at this read, not at the caller's later queue
+// write: a rebind committing after it is ordered after the admission. That
+// ordering is sound because the two touch disjoint state. A delivery-only
+// rebind writes only tasks.json and leaves the running watcher and its queue
+// alone (TargetSession is not in watcherSignature). The admission writes only
+// the queue. An eviction, drop or expiry landing just after such a rebind
+// therefore leaves exactly the state it would have left just before it: an
+// ordinary admission to a target that was healthy. The task-store lock is not
+// held through the admission, for two reasons. It is a non-reentrant flock
+// that the drop accounting on those same paths takes again
+// (RecordWatchRateDrops), and it would stall every task update behind queue
+// I/O on a slow AF home (#4226 review).
 func (m *Manager) revalidateTaskTargetLimitBinding(taskID, repoID, target string, limited bool) (bool, error) {
 	current, err := task.GetTask(taskID)
 	if err != nil {
