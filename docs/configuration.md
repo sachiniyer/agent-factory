@@ -713,7 +713,7 @@ Precedence for a key that admits every layer is:
 app default → global → in-repo (shared) → personal per-project
 ```
 
-Inspect exactly which layer wins, and why, with `af config get <key> --repo <path> --explain` (or `af config list --repo <path> --explain`): the trace shows the personal-project candidate alongside the others, marked won, shadowed, absent, or — for a key that cannot be overridden per project — disallowed. Changes take effect the next time the relevant operation resolves that project's config, the same as a hand-edit.
+Inspect exactly which layer wins, and why, with `af config get <key> --repo <path> --explain` (or `af config list --repo <path> --explain`): the trace shows the personal-project candidate alongside the others, marked won, shadowed, absent, or — for a key that cannot be overridden per project — disallowed. For the live-resolved keys (`default_program`, `program_overrides`, `default_accounts`, `on_archive_command`, `limit_account_candidates`) changes take effect the next time the relevant operation resolves that project's config, the same as a hand-edit. For the startup-only keys (`branch_prefix` and the `[root_agent]` table) the running daemon keeps its frozen startup value — a daemon restart is required for those to take effect.
 
 ## Migrating from JSON
 
