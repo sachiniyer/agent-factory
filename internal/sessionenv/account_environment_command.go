@@ -55,6 +55,29 @@ func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) 
 		return arithmeticAssignmentMutatesAccountEnvironment(node, names)
 	case *syntax.UnaryArithm:
 		return arithmeticIncrementMutatesAccountEnvironment(node, names)
+	case *syntax.ArithmCmd:
+		// `(( expr ))`. A command substitution inside the arithmetic is
+		// re-evaluated as fresh arithmetic by bash and can assign a denied name
+		// via its output; the literal assignment form is still caught by the
+		// BinaryArithm/UnaryArithm arms below once this returns false.
+		return arithmeticExprHasCommandSubstitution(node.X)
+	case *syntax.ArithmExp:
+		// `$(( expr ))`. Same re-evaluation hazard as `(( ))`; appears inside a
+		// word (e.g. `echo $(( ... ))` or `x=$(( ... ))`), and the literal
+		// assignment form is still caught by the arithm arms below.
+		return arithmeticExprHasCommandSubstitution(node.X)
+	case *syntax.LetClause:
+		// A bash `let` clause parsed as a builtin (the POSIX parse keeps `let` as
+		// a CallExpr and is handled by letMutatesAccountEnvironment). The
+		// command-substitution hazard is the same; returning false lets the walk
+		// descend so a literal assignment (BinaryArithm/UnaryArithm) is still
+		// caught.
+		for _, expr := range node.Exprs {
+			if arithmeticExprHasCommandSubstitution(expr) {
+				return true
+			}
+		}
+		return false
 	case *syntax.UnaryTest:
 		return unaryTestMutatesAccountEnvironment(node)
 	default:
