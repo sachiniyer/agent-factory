@@ -457,3 +457,15 @@ export interface DragPayload {
   index: number;
   tabs: string[];
 }
+
+/** What a touch drop on a pane resolved to (split.ts dropTabAt). Two questions
+ *  need two answers (#4434): `landed` is the gesture-consumption fact — a pane
+ *  was under the release — and `changed` is the mutation fact — the layout
+ *  actually committed. A landed-but-rejected drop (stale payload, or the sole
+ *  tab released on its own pane's edge) is still consumed, but nothing about
+ *  the session's composition changed, so it must not retire user state the way
+ *  a real tab move does. */
+export interface TabDropResult {
+  landed: boolean;
+  changed: boolean;
+}

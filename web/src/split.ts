@@ -31,6 +31,7 @@ import {
   closeLeaf,
   companionTab,
   type DragPayload,
+  type TabDropResult,
   type Edge,
   findLeaf,
   type LayoutNode,
@@ -1511,15 +1512,15 @@ export class SplitView {
    * rather than two: every rule below (id resolution, the #1901 self-split dedupe, the
    * focus choice) is a rule a second implementation would drift away from.
    */
-  private applyTabDrop(pane: Pane, drag: DragPayload, clientX: number, clientY: number): void {
+  private applyTabDrop(pane: Pane, drag: DragPayload, clientX: number, clientY: number): boolean {
     if (!this.tree) {
-      return;
+      return false;
     }
     // Resolve the dragged tab to the ordinal it should bind — by its STABLE id when
     // it has one, else the guarded legacy index. See resolveDragTab; null cancels.
     const tab = resolveDragTab(drag, this.tabRealIds, this.tabIds, this.tabCount);
     if (tab === null) {
-      return;
+      return false;
     }
     const zone = this.zoneAt(pane.container, clientX, clientY);
     // Dragging the pane's OWN tab onto its edge still splits — but the new half must
@@ -1530,7 +1531,7 @@ export class SplitView {
       ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs())
       : tab;
     if (opened === null) {
-      return; // no other tab to fill the new half — leave the layout as it stands
+      return false; // no other tab to fill the new half — leave the layout as it stands
     }
     this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, opened);
     // Focus the pane holding the tab that just landed — the NEW half (VS Code focuses
@@ -1543,6 +1544,7 @@ export class SplitView {
     }
     this.commit();
     this.refocus();
+    return true;
   }
 
   /** The pane whose box contains a viewport point, or null. Used by the touch path,
@@ -1580,17 +1582,18 @@ export class SplitView {
     }
   }
 
-  /** Lands a touch-dragged tab at a viewport point. Returns whether a pane took it —
-   *  false means the release was not over any pane, so the caller can treat it as a
-   *  bar drop (reorder) instead. */
-  dropTabAt(clientX: number, clientY: number, drag: DragPayload): boolean {
+  /** Lands a touch-dragged tab at a viewport point. `landed` reports whether a
+   *  pane took it — false means the release was not over any pane, so the caller
+   *  can treat it as a bar drop (reorder) instead. `changed` reports whether the
+   *  layout actually committed; a landed drop can still be rejected inside
+   *  applyTabDrop, and the caller keys any user-visible side effects off that. */
+  dropTabAt(clientX: number, clientY: number, drag: DragPayload): TabDropResult {
     const pane = this.paneAtPoint(clientX, clientY);
     if (!pane) {
-      return false;
+      return { landed: false, changed: false };
     }
     this.hideZone(pane);
-    this.applyTabDrop(pane, drag, clientX, clientY);
-    return true;
+    return { landed: true, changed: this.applyTabDrop(pane, drag, clientX, clientY) };
   }
 
   /** The drop zone for a pointer position over a pane: an edge (outer band) or the
