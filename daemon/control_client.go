@@ -657,8 +657,9 @@ func ReorderTab(req ReorderTabRequest) (string, int, error) {
 // The TUI's session/task reads and many controls moved onto HTTP apiclient in
 // #1592 Phase 2 PR3; local account management, config-agent spawn/reap, and
 // config-editor writes still use gob. The net/rpc wrappers only the TUI called —
-// PauseStatusPoll, ResumeStatusPoll (here), ResumeFromLimit, and SnapshotWithAlarms
-// (in limit.go / snapshot.go) — are gone.
+// PauseStatusPoll, ResumeStatusPoll, and SnapshotWithAlarms — are gone;
+// ResumeFromLimit's wrapper survives below for the CLI's `af sessions
+// retry-limit` (#2289), which keeps the gob transport.
 // The controlServer handlers stay: the gob control socket still SERVES every
 // verb for CLI/internal callers; only the TUI-only Go client wrappers were
 // removed. The sessions read (SnapshotNoSpawn) moved to apiclient in Phase 2

@@ -176,7 +176,7 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 - `session/tmux/` — tmux PTY integration
 - `config/` — configuration and state management
 - `api/` — Cobra sessions/tasks/projects commands and their JSON output paths
-- `apiproto/` — API envelope types (leaf package, no daemon/client imports)
+- `apiproto/` — API envelope types and marker interfaces (leaf package, no daemon/client imports)
 - `apiclient/` — HTTP API client used by TUI/CLI to talk to daemon
 - `agentproto/` — WebSocket wire protocol for PTY stream and events
 - `task/` — task store, cron/watch validation/parsing, session-start helpers
