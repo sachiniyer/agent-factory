@@ -299,7 +299,15 @@ func TestAccountShellCommandDisablesStartupFiles(t *testing.T) {
 			"PS1=$((CODEX_HOME=42))",
 		}, command, account)
 		require.NoError(t, err)
-		require.ElementsMatch(t, []string{"PATH=/bin", "ZDOTDIR=", "CODEX_HOME=" + account.Dir}, scoped)
+		// Only the generated zsh form earns the pin: other shells close their
+		// startup chain with flags alone, and a defined-empty ZDOTDIR would
+		// strip user dotfiles from every zsh a sibling process spawns (#4474
+		// review). The ambient value is still stripped for all of them.
+		if filepath.Base(shell) == "zsh" {
+			require.ElementsMatch(t, []string{"PATH=/bin", "ZDOTDIR=", "CODEX_HOME=" + account.Dir}, scoped)
+		} else {
+			require.ElementsMatch(t, []string{"PATH=/bin", "CODEX_HOME=" + account.Dir}, scoped)
+		}
 	}
 }
 

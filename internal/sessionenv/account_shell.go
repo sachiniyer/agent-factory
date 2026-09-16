@@ -69,10 +69,11 @@ func accountShellArgs(name string) []string {
 		// The residue is /etc/zsh/zshenv, which zsh reads unconditionally by
 		// design and which CAN `setopt RCS`, re-admitting every file -f
 		// skipped; no invocation flag survives that (measured on zsh 5.9,
-		// #4474 review). The user chain still cannot return: the scoped
-		// environment pins ZDOTDIR empty (ApplyAccountEnvironment), leaving
-		// zsh no dotfile directory to read. What a re-enabling zshenv can
-		// then reach is only the root-owned global files — the same operator
+		// #4474 review). The user chain still cannot return: the launch env
+		// pins ZDOTDIR empty — but only for this generated form
+		// (ApplyAccountEnvironment → isGeneratedAccountZsh), leaving zsh no
+		// dotfile directory to read. What a re-enabling zshenv can then
+		// reach is only the root-owned global files — the same operator
 		// trust class this list already assigns to the /bin and /usr/bin
 		// executables it launches.
 		return []string{"-f", "-i"}
@@ -108,6 +109,19 @@ func isAccountShellCommand(command string) bool {
 // the default command for additional windows in an account-scoped shell tab.
 func IsAccountShellCommand(command string) bool {
 	return isAccountShellCommand(command)
+}
+
+// isGeneratedAccountZsh reports whether command is exactly the zsh form
+// AccountShellCommand generates — the one launch whose startup chain the
+// ZDOTDIR pin exists to close. The env also flows to code-server, process
+// panes, and login shells where a pinned ZDOTDIR would strip user dotfiles
+// from every zsh they spawn (#4474 review).
+func isGeneratedAccountZsh(command string) bool {
+	if !isAccountShellCommand(command) {
+		return false
+	}
+	words, _ := literalAccountShellWords(command)
+	return filepath.Base(words[0]) == "zsh"
 }
 
 func literalAccountShellWords(command string) ([]string, bool) {
