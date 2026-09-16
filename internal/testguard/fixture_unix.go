@@ -74,15 +74,21 @@ func StartGroupProcess(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 	// bare pid is reissued once the owner dies, and the live replacement
 	// would hold this pin for the whole bound — the same reuse race
 	// ExpectedOwnerStartEnv closes for the Go watchdog, closed here by
-	// passing the spawner's proctree StartID as $2 (#4417 review). A
-	// platform where the stamp cannot be read passes an empty $2 and the
-	// pin keeps existence semantics.
-	pinStart := ""
+	// passing the spawner's proctree StartID as $2 (#4417 review). The ps
+	// arm cannot read a StartID, so it gets the owner's start SECOND as $3 —
+	// the granularity ps -o lstart itself reports — and validates it every
+	// poll rather than self-binding to whatever pid reuse put in the slot
+	// before the first check. A platform where either stamp cannot be read
+	// passes an empty argument and that arm degrades to its fallback.
+	pinStart, pinStartEpoch := "", ""
 	if self, err := proctree.Lookup(os.Getpid()); err == nil && self.StartID != 0 {
 		pinStart = strconv.FormatUint(self.StartID, 10)
+		if !self.StartedAt.IsZero() {
+			pinStartEpoch = strconv.FormatInt(self.StartedAt.Unix(), 10)
+		}
 	}
 	pin := exec.Command("sh", "-c", groupPinScript, "af-testguard-pin",
-		strconv.Itoa(os.Getpid()), pinStart)
+		strconv.Itoa(os.Getpid()), pinStart, pinStartEpoch)
 	pin.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: cmd.Process.Pid}
 	if err := pin.Start(); err != nil {
 		// The leader is already running and no cleanup for it is registered
@@ -90,8 +96,13 @@ func StartGroupProcess(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 		// this helper exists to contain, in exactly the failure conditions
 		// (a transient fork/exec refusal) that produce one. Kill the group
 		// and collect the leader before failing; the pin never started, so
-		// nothing else holds the id.
+		// nothing else holds the id. reapGroupOrphans runs for the same
+		// reason as in the normal cleanup: a leader that already forked a
+		// child leaves that grandchild orphaned to this process under the
+		// subreaper mark, and collecting only the leader strands it as a
+		// zombie for a non-reaping container PID 1 (#4417 review).
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		reapGroupOrphans(t, cmd.Process.Pid)
 		_, _ = cmd.Process.Wait()
 		t.Fatalf("start fixture group pin: %v", err)
 	}
@@ -152,31 +163,35 @@ func StartGroupProcessUnpinned(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 }
 
 // groupPinScript is the pin process's body. $1 is the pid it must outlive —
-// its spawner, the test binary — and $2 that pid's proctree StartID, empty
-// when the platform could not stamp it. See StartGroupProcess for why a
-// bare `sleep 86400` leaks and why the death signal is the owner's process
-// STATE rather than the pin's ppid or a kill -0: a zombie owner still
-// answers signal-0, and a ppid captured after reparenting names a reaper
-// that never dies. Two platform arms, both ending the pin when the owner is
-// gone or dead-but-uncollected:
+// its spawner, the test binary — $2 that pid's proctree StartID, and $3 its
+// start time in epoch seconds for the ps arm; any is empty when the
+// platform could not stamp it. See StartGroupProcess for why a bare
+// `sleep 86400` leaks and why the death signal is the owner's process STATE
+// rather than the pin's ppid or a kill -0: a zombie owner still answers
+// signal-0, and a ppid captured after reparenting names a reaper that never
+// dies. Two platform arms, both ending the pin when the owner is gone or
+// dead-but-uncollected:
 //
 //   - /proc (linux): one read yields the state letter AND the starttime —
 //     stat field 22 is exactly what proctree reports as StartID — so this
 //     arm validates pid AND instance every poll. A reused owner pid shows a
 //     different starttime and the pin exits instead of holding the group
 //     for a recycled stranger.
-//   - ps (darwin and /proc-less boxes): the state check alone cannot see a
-//     stamp, so the pin self-binds to the first lstart ps reports and exits
-//     if it ever changes — that shrinks the reuse window to
-//     pin-start→first-poll rather than closing it, and an empty capture
-//     degrades to the state check alone.
+//   - ps (darwin and /proc-less boxes): ps reports no StartID, but lstart
+//     IS the stamp at second precision — so this arm converts each poll's
+//     lstart to epoch seconds and compares it to the passed $3, binding the
+//     watch to the recorded owner instead of self-binding to whoever holds
+//     the slot at first poll. The residual window is the granularity ps
+//     itself reports: a same-second replacement compares equal and holds
+//     the pin. An empty $3 or an unconvertible lstart falls back to the
+//     old self-bind, and an empty capture degrades to the state check.
 //
 // Neither arm trusts kill -0 or ppid drift, for the same reasons as before.
 // A box with neither /proc nor ps degrades to the bounded sleeper, which
 // can still leak for a day but keeps the pgid pin it was bought for. Both
 // live arms stay bounded too: the loop is the last-resort ceiling when
 // every check keeps passing on an immortal owner.
-const groupPinScript = `_af_pin_pid=$1; _af_pin_stamp=$2; _af_pin_i=0
+const groupPinScript = `_af_pin_pid=$1; _af_pin_stamp=$2; _af_pin_epoch=$3; _af_pin_i=0
 if [ -r "/proc/$_af_pin_pid/stat" ]; then
 	while [ "$_af_pin_i" -lt 86400 ]; do
 		_af_pin_raw=$(cat "/proc/$_af_pin_pid/stat" 2>/dev/null) || exit 0
@@ -192,7 +207,12 @@ elif command -v ps >/dev/null 2>&1; then
 		_af_pin_stat=$(ps -o stat= -p "$_af_pin_pid" 2>/dev/null)
 		case "$_af_pin_stat" in ""|Z*|X*|x*) exit 0;; esac
 		_af_pin_now=$(ps -o lstart= -p "$_af_pin_pid" 2>/dev/null)
-		if [ -z "$_af_pin_id" ]; then
+		if [ -n "$_af_pin_epoch" ]; then
+			_af_pin_secs=$(date -j -f "%a %b %e %T %Y" "$_af_pin_now" +%s 2>/dev/null)
+			if [ -n "$_af_pin_secs" ] && [ "$_af_pin_secs" != "$_af_pin_epoch" ]; then
+				exit 0
+			fi
+		elif [ -z "$_af_pin_id" ]; then
 			_af_pin_id=$_af_pin_now
 		elif [ -n "$_af_pin_now" ] && [ "$_af_pin_now" != "$_af_pin_id" ]; then
 			exit 0
