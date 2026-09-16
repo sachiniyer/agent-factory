@@ -176,22 +176,49 @@ func (s *TaskPane) RestoreFailedEdit(id string) {
 // SetTasks (a successful reload) or AcknowledgeDeletedRestored (a successful
 // retry), so the dedupe key is live for the entire retry sequence.
 func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
+	s.restoreFailedDeleteImpl(tsk, tsk)
+}
+
+// RestoreFailedDeleteWithExpect is like RestoreFailedDelete but separates the
+// record the pane displays (fresh) from the one it queues for the deletion
+// retry (expect). Use this when the freshly loaded set contains an updated
+// copy of the record — e.g. after a same-repository rebind — so the pane and
+// originals baseline reflect the current authoritative state, while the retry
+// still carries the expectation the deletion was originally authorised against.
+func (s *TaskPane) RestoreFailedDeleteWithExpect(fresh, expect task.Task) {
+	s.restoreFailedDeleteImpl(fresh, expect)
+}
+
+// restoreFailedDeleteImpl is the shared implementation for RestoreFailedDelete
+// and RestoreFailedDeleteWithExpect. display is inserted into s.tasks and
+// snapshotted into s.originals; expect is queued in s.deleted for the retry.
+func (s *TaskPane) restoreFailedDeleteImpl(display, expect task.Task) {
 	if s.restoredDeletes == nil {
 		s.restoredDeletes = make(map[string]bool)
 	}
-	if !s.restoredDeletes[tsk.ID] {
-		pos := s.restorePosition(tsk.ID)
-		s.tasks = append(s.tasks[:pos], append([]task.Task{tsk}, s.tasks[pos:]...)...)
-		// Carry the cursor over an insertion at or above it, so it keeps naming
-		// the same record. This is not cosmetic: the edit form submits its
-		// buffers into s.tasks[s.selectedIdx] (task_pane_edit.go:147-155), so a
-		// stale index writes the task under edit into its neighbour.
-		if pos <= s.selectedIdx {
+	if !s.restoredDeletes[display.ID] {
+		pos := s.restorePosition(display.ID)
+		// Snapshot the authoritative record so a subsequent user action
+		// (e.g. re-pressing D) bases its CAS expectation on the current
+		// binding rather than a stale one that the daemon would refuse.
+		if s.originals == nil {
+			s.originals = make(map[string]task.Task)
+		}
+		s.originals[display.ID] = display
+		s.tasks = append(s.tasks[:pos], append([]task.Task{display}, s.tasks[pos:]...)...)
+		// Carry the cursor over an insertion at or above it, so it keeps
+		// naming the same record. This is not cosmetic: the edit form submits
+		// its buffers into s.tasks[s.selectedIdx] (task_pane_edit.go:147-155),
+		// so a stale index writes the task under edit into its neighbour.
+		// Only advance when the cursor was on a real (pre-insertion) row:
+		// when the pane was empty before the restore (selectedIdx==0, no row),
+		// incrementing would leave selectedIdx==1 against a slice of length 1.
+		if pos <= s.selectedIdx && s.selectedIdx < len(s.tasks)-1 {
 			s.selectedIdx++
 		}
-		s.restoredDeletes[tsk.ID] = true
+		s.restoredDeletes[display.ID] = true
 	}
-	s.deleted = append(s.deleted, tsk)
+	s.deleted = append(s.deleted, expect)
 	s.dirty = true
 }
 

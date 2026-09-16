@@ -173,13 +173,23 @@ func (m *home) saveContentPaneState() error {
 		// queued; absent means it is gone (deleted elsewhere, or rebound out of
 		// this repo), so drop any copy an earlier pass restored rather than
 		// showing a row the sidebar does not have.
-		present := make(map[string]bool, len(tasks))
+		// Build an index of the freshly loaded set so we can both decide
+		// presence and pass the authoritative record to RestoreFailedDelete.
+		// The stale tsk is used only as the retry expectation; the pane
+		// displays and baselines against the freshly loaded record so a
+		// subsequent user action (e.g. re-pressing D) submits the current
+		// binding rather than a never-persisted one that the CAS would refuse.
+		loaded := make(map[string]task.Task, len(tasks))
 		for _, t := range tasks {
-			present[t.ID] = true
+			loaded[t.ID] = t
 		}
 		for _, tsk := range failedDeletes {
-			if present[tsk.ID] {
-				sp.RestoreFailedDelete(tsk)
+			if fresh, present := loaded[tsk.ID]; present {
+				// Restore the authoritative record so the pane and originals
+				// are up-to-date; pass the original tsk as the retry
+				// expectation so the deletion CAS still pins the binding it
+				// was authorised against.
+				sp.RestoreFailedDeleteWithExpect(fresh, tsk)
 			} else {
 				sp.AcknowledgeDeletedRestored(tsk.ID)
 			}
