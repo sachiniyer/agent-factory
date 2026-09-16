@@ -6854,6 +6854,194 @@ test("scheduled reconciliation keeps a queued rerun inside an existing suite ahe
   }), [], "a queued rerun is not stale terminal evidence for the generation it replaces");
 });
 
+test("latestRequiredState orders mixed dated and undated generations by run id alone", () => {
+  const spec = { context: "Build", sourceAppId: ACTIONS_APP_ID };
+  const completedLate = checkRun({
+    id: 9001,
+    nodeId: "CR_completed_late",
+    name: "Build",
+    conclusion: "failure",
+    completedAt: "2026-07-09T21:05:00Z",
+  });
+  const queued = checkRun({
+    id: 9002,
+    nodeId: "CR_queued",
+    name: "Build",
+    status: "queued",
+    conclusion: null,
+    createdAt: null,
+    startedAt: null,
+    completedAt: null,
+  });
+  const completedEarly = checkRun({
+    id: 9003,
+    nodeId: "CR_completed_early",
+    name: "Build",
+    conclusion: "failure",
+    completedAt: "2026-07-09T21:03:00Z",
+  });
+
+  // A pairwise mix — id for undated pairs, time for dated ones — is not
+  // transitive across these three: 2 beats 1 by id, 1 beats 3 by time, and 3
+  // beats 2 by id. One per-kind rule must pick the same winner for every
+  // input order, and the winner is the newest generation (#4427).
+  for (const runs of [
+    [completedLate, queued, completedEarly],
+    [completedEarly, queued, completedLate],
+    [queued, completedLate, completedEarly],
+  ]) {
+    const state = __test.latestRequiredState(spec, [...runs], []);
+    assert.equal(state.observation.id, "CR_completed_early");
+  }
+});
+
+test("scheduled reconciliation re-reads a head whose queued run faces dated rivals", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const completedLate = {
+    id: 9001,
+    node_id: "CR_completed_late",
+    name: "Build",
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "completed",
+    conclusion: "failure",
+    started_at: "2026-07-09T21:00:30Z",
+    completed_at: "2026-07-09T21:05:00Z",
+  };
+  const queued = {
+    id: 9002,
+    node_id: "CR_queued",
+    name: "Build",
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "queued",
+    conclusion: null,
+    started_at: null,
+    completed_at: null,
+  };
+  const completedEarly = {
+    id: 9003,
+    node_id: "CR_completed_early",
+    name: "Build",
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "completed",
+    conclusion: "failure",
+    started_at: "2026-07-09T21:01:30Z",
+    completed_at: "2026-07-09T21:03:00Z",
+  };
+  // The decision was taken while id 9002 was the latest generation; id 9003
+  // has since completed, so the PR owes a fresh evaluation.
+  const settlingDecision = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T21:02:00Z",
+    reason:
+      `required check Build (app ${ACTIONS_APP_ID}) is still settling ` +
+      "(check run queued/no conclusion from github-actions (15368))",
+    snapshotVersion: 2,
+    observedChecks: [{
+      name: "Build",
+      appId: ACTIONS_APP_ID,
+      observed: {
+        kind: "check_run",
+        id: "CR_queued",
+        status: "queued",
+        conclusion: null,
+      },
+      generation: [{
+        kind: "check_run",
+        id: "CR_queued",
+        status: "queued",
+        conclusion: null,
+      }],
+    }],
+  });
+  const checkRunReads = [];
+  const snapshot = () => scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, HEAD_SHA)],
+    checksByHead: { [HEAD_SHA]: [settlingDecision, completedLate, queued, completedEarly] },
+    checkRunReads,
+  });
+
+  const targets = await autoGate.resolveTargets({
+    github: snapshot(),
+    context,
+    core: fakeCore(),
+  });
+  assert.equal(targets.length, 1, "a newer terminal generation must wake the PR");
+  assert.equal(targets[0].prNumber, 1465);
+  assert.deepEqual(
+    checkRunReads,
+    [HEAD_SHA],
+    "the ambiguous head pays one REST read to order its queued run",
+  );
+});
+
+test("scheduled reconciliation does not let a dated status outrank a queued run the decision observed", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  // The context is source-less, so the queued check run competes with a
+  // commit status. GraphQL cannot date the queued run, and letting the dated
+  // status win made every sweep see a terminal mismatch the REST-built
+  // snapshot never produced — the same PR re-enqueued forever (#4427).
+  const queuedBuild = {
+    id: 9002,
+    node_id: "CR_queued_build",
+    name: "Build",
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "queued",
+    conclusion: null,
+    created_at: "2026-07-09T21:12:00Z",
+    started_at: null,
+    completed_at: null,
+  };
+  const staleStatus = {
+    id: 41,
+    node_id: "SC_stale_build",
+    context: "Build",
+    state: "success",
+    created_at: "2026-07-09T21:00:00Z",
+  };
+  const settlingDecision = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T21:11:30Z",
+    reason: `required check Build is missing on ${HEAD_SHA}`,
+    snapshotVersion: 2,
+    observedChecks: [{
+      name: "Build",
+      appId: null,
+      observed: {
+        kind: "check_run",
+        id: "CR_queued_build",
+        status: "queued",
+        conclusion: null,
+      },
+      generation: [{
+        kind: "check_run",
+        id: "CR_queued_build",
+        status: "queued",
+        conclusion: null,
+      }],
+    }],
+  });
+  const checkRunReads = [];
+  const snapshot = () => scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, HEAD_SHA)],
+    checksByHead: { [HEAD_SHA]: [settlingDecision, queuedBuild] },
+    statusesByHead: { [HEAD_SHA]: [staleStatus] },
+    checkRunReads,
+  });
+
+  assert.deepEqual(await autoGate.resolveTargets({
+    github: snapshot(),
+    context,
+    core: fakeCore(),
+  }), []);
+  assert.deepEqual(
+    checkRunReads,
+    [HEAD_SHA],
+    "the undated run is ordered by its REST timestamp, not left to lose on date 0",
+  );
+});
+
 test("scheduled reconciliation batches head inspection and caps reevaluations", async () => {
   const pulls = [];
   const checksByHead = {};
@@ -12567,6 +12755,7 @@ function scheduledReconciliationGithub({
   checksByHead,
   statusesByHead = {},
   statusReads = [],
+  checkRunReads = [],
   inspectedHeads = [],
   graphqlReads = [],
   truncatedHeads = [],
@@ -12576,8 +12765,24 @@ function scheduledReconciliationGithub({
     statusReads.push(ref);
     return { data: statusesByHead[ref] || [] };
   };
+  // The default `filter` returns only the latest run per name — the generation
+  // the decision path's own listForRef read sees.
+  const listForRef = async ({ ref }) => {
+    checkRunReads.push(ref);
+    const latestByName = new Map();
+    for (const run of checksByHead[ref] || []) {
+      const prior = latestByName.get(run.name);
+      if (!prior || run.id > prior.id) {
+        latestByName.set(run.name, run);
+      }
+    }
+    return { data: [...latestByName.values()] };
+  };
   return {
-    rest: { repos: { listCommitStatusesForRef } },
+    rest: {
+      repos: { listCommitStatusesForRef },
+      checks: { listForRef },
+    },
     paginate: async (operation, options) => (await operation(options)).data,
     graphql: async (query, { after }) => {
       graphqlReads.push(after);

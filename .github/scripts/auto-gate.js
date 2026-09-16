@@ -3710,6 +3710,24 @@ function reconciliationStatusContext(status) {
   };
 }
 
+function undatedCheckRunFacesADatedRival(checkRuns, statuses) {
+  const undatedNames = new Set(
+    checkRuns
+      .filter((run) => run.started_at == null && run.completed_at == null)
+      .map((run) => run.name),
+  );
+  if (undatedNames.size === 0) {
+    return false;
+  }
+  return (
+    checkRuns.some(
+      (run) =>
+        undatedNames.has(run.name) &&
+        (run.started_at != null || run.completed_at != null),
+    ) || statuses.some((status) => undatedNames.has(status.context))
+  );
+}
+
 function statusContextsHaveTimestampTie(statuses) {
   const seen = new Set();
   for (const status of statuses) {
@@ -3771,7 +3789,7 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
         );
         continue;
       }
-      const checkRuns = (contexts?.nodes || [])
+      let checkRuns = (contexts?.nodes || [])
         .filter((node) => node?.__typename === "CheckRun")
         .map(reconciliationCheckRun);
       if (checkRuns.some((run) => !Number.isSafeInteger(run.id))) {
@@ -3804,6 +3822,25 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
           );
           continue;
         }
+      }
+      // GraphQL cannot order a run that has neither startedAt nor completedAt
+      // — CheckRun exposes no createdAt to stand in for one. When such a run
+      // shares its context with a dated observation — an older generation or
+      // a commit status — the order decides which evidence is newest, and the
+      // only timestamp that answers it lives on the REST check run. Read this
+      // head's runs the way the decision snapshots being compared were read,
+      // latest-per-name, so the two paths cannot disagree (#4427).
+      if (undatedCheckRunFacesADatedRival(checkRuns, statuses)) {
+        checkRuns = await retryRead(
+          `could not order a queued check run at ${headSha}`,
+          () =>
+            github.paginate(github.rest.checks.listForRef, {
+              owner,
+              repo,
+              ref: headSha,
+              per_page: 100,
+            }),
+        );
       }
       pulls.push(pull);
       checkRunsByHead.set(headSha, checkRuns);
@@ -4636,23 +4673,33 @@ function latestRequiredState(spec, checkRuns, statuses) {
     }
   }
 
+  // Once any candidate of a kind has no timestamp to order by, the whole kind
+  // must order by the per-run id alone: mixing rules pairwise is not
+  // transitive — a queued run wins its dated pair by id while two dated runs
+  // order by completion, so three generations can cycle and leave a newer
+  // terminal generation unselected. The id strictly increases with creation,
+  // so one rule ranks every run of that kind: a newer queued generation
+  // outranks each older run, terminal or not. A missing id sorts last
+  // (#4427). All-dated kinds keep the timestamp ordering, and cross-kind
+  // pairs keep it too since the id spaces do not compare.
+  const undatedKinds = new Set();
+  for (const candidate of candidates) {
+    if (candidate.date === 0) {
+      undatedKinds.add(candidate.observation.kind);
+    }
+  }
+
   candidates.sort((a, b) => {
     const sameKind = a.observation.kind === b.observation.kind;
-    const comparableGenerations = a.generationID != null && b.generationID != null;
-    // A run with no usable date — a queued rerun reports neither started nor
-    // completed, and no API exposes its creation time — still has a per-run id
-    // that strictly increases with creation, so it decides the order whenever
-    // a timestamp cannot: a newer queued generation outranks the older
-    // completed run it replaces (#4427). Cross-kind pairs have no shared id
-    // space and dated pairs keep the timestamp ordering.
-    if (sameKind && comparableGenerations && (a.date === 0 || b.date === 0)) {
-      return b.generationID - a.generationID;
+    if (sameKind && undatedKinds.has(a.observation.kind)) {
+      const generationDifference = (b.generationID ?? -1) - (a.generationID ?? -1);
+      return generationDifference !== 0 ? generationDifference : b.date - a.date;
     }
     const timeDifference = b.date - a.date;
     if (timeDifference !== 0) {
       return timeDifference;
     }
-    if (sameKind && comparableGenerations) {
+    if (sameKind && a.generationID != null && b.generationID != null) {
       return b.generationID - a.generationID;
     }
     return 0;
