@@ -174,8 +174,10 @@ func TestTaskPaneReloadKeepsDraftOfTaskGoneFromDisk(t *testing.T) {
 
 	require.True(t, s.HandleKeyPress(keyRunes("D")))
 	assert.Equal(t, []string{"b", "c"}, paneIDs(s))
-	s.ConsumeDirty()
-	s.ConsumeDeleted()
+	assert.Empty(t, s.ConsumeDirty(), "a deleted draft is not also saved")
+	deleted := s.ConsumeDeleted()
+	require.Len(t, deleted, 1, "discarding the draft is an ordinary deletion")
+	assert.Equal(t, "a", deleted[0].ID)
 	s.SetTasks(disk())
 	assert.Equal(t, []string{"b", "c"}, paneIDs(s))
 	assert.False(t, s.IsDirty())
@@ -219,4 +221,26 @@ func TestTaskPaneReloadPlacesHeldDraftOnce(t *testing.T) {
 
 	assert.Equal(t, []string{"a", "b"}, paneIDs(s))
 	assert.False(t, s.tasks[0].Enabled)
+}
+
+// When a damaged file lists an ID twice, the copy the user edited is the draft
+// the reload keeps, whichever copy that is; keeping an untouched copy would
+// drop the edit while the pane still claimed to be dirty.
+func TestTaskPaneReloadKeepsTheEditedCopyOfADuplicatedID(t *testing.T) {
+	for _, edited := range []int{0, 1} {
+		s := NewTaskPane()
+		s.SetTasks([]task.Task{reloadTask("a", "p"), reloadTask("a", "p")})
+		s.SetFocus(true)
+		s.SelectTask(edited)
+		require.True(t, s.HandleKeyPress(keyRunes("x")))
+
+		s.SetTasks([]task.Task{reloadTask("a", "p"), reloadTask("b", "p"), reloadTask("a", "p")})
+
+		require.Equal(t, []string{"a", "b"}, paneIDs(s), "copy %d", edited)
+		assert.False(t, s.tasks[0].Enabled, "copy %d: the copy the user toggled must be the one kept", edited)
+		edits := s.ConsumeDirty()
+		require.Len(t, edits, 1, "copy %d: the toggle must still be saved", edited)
+		require.NotNil(t, edits[0].Update.Enabled)
+		assert.False(t, *edits[0].Update.Enabled)
+	}
 }

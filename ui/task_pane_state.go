@@ -25,9 +25,13 @@ import (
 //
 // A held row the load no longer contains stays visible, after the loaded rows,
 // so a draft is never dropped silently: the save reports why it failed, and
-// deleting the row discards it. Loaded rows keep disk order ahead of it, so an
-// index taken from the rail still names the same task. The cursor follows its
-// task by ID.
+// deleting the row discards it (that save then also reports the task as not
+// found). Loaded rows keep disk order ahead of it, so an index taken from the
+// rail still names the same task. The cursor follows its task by ID.
+//
+// Only the user's values are held. A held row also keeps the run status and
+// schedule health it was loaded with until it saves, as the whole pane did
+// before; the rail shows the fresh ones.
 //
 // SetTasks used to discard all of this, so callers had to skip it while an
 // edit was live, and the pane then hid anything the skipped reload would have
@@ -134,16 +138,31 @@ func (s *TaskPane) ResetTasks(tasks []task.Task) {
 
 // heldRows returns the rows a reload must not replace, keyed by ID: every row
 // with an unsaved edit, and the row an open edit form is bound to.
+//
+// A damaged file can list an ID twice, and the reload keeps one copy of a held
+// ID, so it must be the copy carrying the user's work: the form's row, else the
+// first copy that differs from its baseline.
 func (s *TaskPane) heldRows() map[string]task.Task {
 	held := make(map[string]task.Task, len(s.dirtyIDs)+1)
-	for i, t := range s.tasks {
-		if s.dirtyIDs[t.ID] || (s.editing && i == s.selectedIdx) {
-			if _, seen := held[t.ID]; !seen {
-				held[t.ID] = t
-			}
+	formID := ""
+	if s.editing && s.selectedTaskInRange() {
+		formID = s.tasks[s.selectedIdx].ID
+		held[formID] = s.tasks[s.selectedIdx]
+	}
+	for _, t := range s.tasks {
+		if !s.dirtyIDs[t.ID] || t.ID == formID {
+			continue
+		}
+		if kept, seen := held[t.ID]; !seen || (s.unedited(kept) && !s.unedited(t)) {
+			held[t.ID] = t
 		}
 	}
 	return held
+}
+
+// unedited reports whether t carries no change a save would send.
+func (s *TaskPane) unedited(t task.Task) bool {
+	return task.DiffTask(s.originals[t.ID], t).IsEmpty()
 }
 
 func sameTasks(a, b []task.Task) bool {

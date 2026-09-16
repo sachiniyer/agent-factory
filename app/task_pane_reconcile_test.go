@@ -28,7 +28,7 @@ func taskIDs(tasks []task.Task) []string {
 // that fails must leave its task in the pane exactly once — on the first
 // failure and on the next — without retrying the removal behind the user's
 // back. The pane used to skip the reload while an edit was retained, so the task
-// vanished; the restore built to bring it back appended a copy per failure.
+// vanished, and restoring it by hand appended a copy per failure (#4283).
 func TestSaveContentPaneState_RepeatedFailedDeleteDuringFailedEditShowsTaskOnce(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(500, 1)
@@ -131,7 +131,9 @@ func TestRefreshTasksReconcilesPaneAroundRetainedEdit(t *testing.T) {
 	aCLI.Prompt = "changed by the CLI"
 	b := task.Task{ID: "b", Name: "b", Prompt: "p", CronExpr: "0 0 * * *", Enabled: true}
 	fresh := []task.Task{aCLI, b}
-	require.True(t, h.refreshTasks(fresh, nil))
+	// The rail already shows fresh, so a reported change can only be the pane's.
+	h.store.SetTasks([]task.Task{aCLI, b})
+	require.True(t, h.refreshTasks(fresh, nil), "the pane's reconcile is a visible change")
 
 	got := sp.GetTasks()
 	require.Equal(t, []string{"a", "b"}, taskIDs(got), "a task added out-of-band must reach the pane")
