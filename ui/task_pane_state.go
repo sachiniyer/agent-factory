@@ -314,7 +314,14 @@ func (s *TaskPane) restorePosition(id string) int {
 	for i, t := range s.tasks {
 		var other int
 		var known bool
-		if dr, hasDR := s.deletedRank[t.ID]; hasDR {
+		if t.ID == id {
+			// Surviving row shares the restored ID — use its own occurrence
+			// rank, not the deleted occurrence's rank stored in deletedRank.
+			// Using deletedRank for the survivor would compare the deleted
+			// row's rank against itself, placing the restored row on the
+			// wrong side of the duplicate (PRRT_kwDORdIFwM6i1oQb).
+			other, known = s.survivingSameIDRank(id, i)
+		} else if dr, hasDR := s.deletedRank[t.ID]; hasDR {
 			other, known = dr, true
 		} else if ranks, hasLR := s.loadedRanks[t.ID]; hasLR && len(ranks) > 0 {
 			other, known = ranks[0], true
@@ -324,6 +331,46 @@ func (s *TaskPane) restorePosition(id string) int {
 		}
 	}
 	return len(s.tasks)
+}
+
+// survivingSameIDRank returns the original load rank for a surviving row that
+// shares the given ID with the row being restored, at position pos in s.tasks.
+// It reports whether a rank is known.
+//
+// When duplicate-ID rows exist and one was deleted, the survivor must not be
+// compared using deletedRank[id] (which is the deleted occurrence's rank).
+// Instead, count same-ID survivors before pos to find the occurrence index,
+// then pick the corresponding rank from loadedRanks while skipping the deleted
+// slot. This places each remaining duplicate in its own original position.
+func (s *TaskPane) survivingSameIDRank(id string, pos int) (rank int, known bool) {
+	// Count how many surviving rows with the same ID appear before pos.
+	priorSurvivors := 0
+	for j := 0; j < pos; j++ {
+		if s.tasks[j].ID == id {
+			priorSurvivors++
+		}
+	}
+	ranks, hasLR := s.loadedRanks[id]
+	if !hasLR || len(ranks) == 0 {
+		return 0, false
+	}
+	deletedR, hasDeleted := s.deletedRank[id]
+	// Walk the sorted loadedRanks list, skipping the deleted slot, and return
+	// the rank at the priorSurvivors-th surviving position.
+	occIdx := 0
+	for _, r := range ranks {
+		if hasDeleted && r == deletedR {
+			// Skip the deleted occurrence's rank; consume the flag so it is
+			// only skipped once (defensive against duplicate rank values).
+			hasDeleted = false
+			continue
+		}
+		if occIdx == priorSurvivors {
+			return r, true
+		}
+		occIdx++
+	}
+	return 0, false
 }
 
 // AcknowledgeDeletedRestored removes all previously-restored rows for id from
