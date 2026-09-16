@@ -170,7 +170,24 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 			// whose boundary is pinned are accepted here; see
 			// ioniceQuotedOptionBoundaryPinned for the case that is not.
 			prefix, quoted := literalPrefixBeforeSimpleQuotedParameter(words[0])
-			if !quoted || !ioniceQuotedOptionBoundaryPinned(prefix) {
+			if !quoted {
+				return nil, true
+			}
+			// A process selector needs no boundary decision at all. It switches
+			// ionice to acting on already-running processes, so the remaining
+			// operands are PIDs rather than a command and NO expansion of the value
+			// can launch a child. Measured on util-linux 2.39.3 with the value
+			// empty, valid and invalid, `ionice -p"$PID" /bin/echo X` reports
+			// `invalid PID argument` every time and prints nothing — a valid PID
+			// does not help, because the trailing word is read as a further PID.
+			//
+			// This is why the selector case is decidable while the class case above
+			// is not: `ionice -c"$C" /bin/echo X` DOES print X once $C is valid, so
+			// its two readings differ and one of them execs.
+			if ioniceProcessOnlyOption(prefix) {
+				return nil, false
+			}
+			if !ioniceQuotedOptionBoundaryPinned(prefix) {
 				return nil, true
 			}
 			words = words[1:]
@@ -303,6 +320,17 @@ func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
+			// taskset's selector behaves as ionice's does: -p switches it to
+			// operating on an existing PID, so no expansion of an attached quoted
+			// value launches a child. Measured on util-linux 2.39.3, `taskset
+			// -p"$P" /bin/echo X` reports `invalid PID argument` for an empty and a
+			// valid $P alike, and `--pid="$P"` is rejected outright with `option
+			// '--pid' doesn't allow an argument` — every spelling exits childless,
+			// so the name is matched with any attached value cut away.
+			prefix, quoted := literalPrefixBeforeSimpleQuotedParameter(words[0])
+			if name, _, _ := strings.Cut(prefix, "="); quoted && tasksetProcessOnlyOption(name) {
+				return nil, false
+			}
 			return nil, true
 		}
 		switch {

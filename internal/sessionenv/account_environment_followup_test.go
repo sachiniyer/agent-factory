@@ -119,6 +119,58 @@ func TestValidateAccountEnvironmentCommand_SingleWordWrapperOperandsStayVisible(
 	}
 }
 
+// A PROCESS SELECTOR carrying a quoted value needs no boundary decision at all.
+// It switches the wrapper to acting on already-running processes, so the
+// remaining operands are PIDs rather than a command and no expansion of the
+// value can launch a child.
+//
+// Verified by attempting the override rather than by reading --help. On
+// util-linux 2.39.3, with the value empty and valid alike:
+//
+//	ionice -p"$PID" env CODEX_HOME=/pwn sh -c 'echo PWNED=$CODEX_HOME'
+//	  -> ionice: invalid PID argument: 'env'        (nothing printed)
+//	ionice -c 2     env CODEX_HOME=/pwn sh -c 'echo PWNED=$CODEX_HOME'
+//	  -> PWNED=/pwn                                  (control: a real exec)
+//
+// A valid PID does not help the attacker: the trailing word is read as a further
+// PID, since -p takes a list. That control line is why this is decidable while
+// the class options below are not — theirs genuinely execs once the value parses.
+func TestValidateAccountEnvironmentCommand_QuotedProcessSelectorsLaunchNoChild(t *testing.T) {
+	for _, command := range []string{
+		"ionice -p\"$PID\"",
+		"ionice --pid=\"$PID\"",
+		"ionice --pi=\"$PID\"",
+		"ionice -P\"$GROUP\"",
+		"ionice --pgid=\"$GROUP\"",
+		"ionice -u\"$UID\"",
+		"ionice --uid=\"$UID\"",
+		"ionice -tp\"$PID\"", // selector inside an argument-free cluster
+		"taskset -p\"$PID\"",
+		"taskset --pid=\"$PID\"",
+		// A trailing command-shaped word is read as a further PID, not exec'd,
+		// so it does not make the selector unsafe.
+		"ionice -p\"$PID\" env CODEX_HOME=/other codex",
+		"taskset -p\"$PID\" env CODEX_HOME=/other codex",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q selects processes and launches no child under any expansion", command)
+	}
+	for _, command := range []string{
+		// Not a selector: an unquoted expansion word-splits, "$@" is zero-or-many,
+		// and --ignore is not a selector at all.
+		"ionice -p$PID --help",
+		"ionice -p\"$@\" --help",
+		"ionice --ignore=\"$X\" --help",
+		// The class options keep their verdict: one of their readings execs.
+		"ionice -c\"$CLASS\" --help",
+		"ionice -n\"$N\" --help",
+		"taskset -c\"$LIST\" npm",
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q is not a process selector with a provable single word", command)
+	}
+}
+
 // An ionice option token may carry its value as a quoted expansion and still be
 // exactly ONE argv word, provided something pins the boundary for every value
 // the expansion can take: a long option's literal '=', or literal value text
