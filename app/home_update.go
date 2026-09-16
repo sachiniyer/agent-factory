@@ -235,8 +235,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleConfigAgentDone(msg)
 	case handoffAccountsLoadedMsg:
 		return m.handleHandoffAccountsLoaded(msg)
-	case configSectionsLoadedMsg:
-		m.handleConfigSectionsLoaded(msg)
+	case accountsLoadedMsg:
+		m.handleAccountsLoaded(msg)
+		return m, nil
+	case usageLoadedMsg:
+		m.handleUsageLoaded(msg)
 		return m, nil
 	case accountRegisteredMsg:
 		return m, m.handleAccountRegistered(msg)

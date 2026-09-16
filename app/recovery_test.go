@@ -66,7 +66,9 @@ func TestRecoveryDriverScenes(t *testing.T) {
 					load := h.remoteSectionsLoadCmd()
 					h.configPane.SetFocus(true)
 					require.NotNil(t, load)
-					_, _ = h.Update(load())
+					for _, loadMsg := range sectionsMsgs(t, load) {
+						_, _ = h.Update(loadMsg)
+					}
 					_, _ = h.Update(tea.KeyMsg{Type: tea.KeyDown})
 					_, _ = h.Update(tea.KeyMsg{Type: tea.KeyEnter})
 					require.True(t, h.configPane.HasFocus(), "refused login keeps Accounts visible")

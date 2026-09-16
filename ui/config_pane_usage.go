@@ -81,8 +81,9 @@ func (c *ConfigPane) SetUsageLoading() {
 func (c *ConfigPane) UsageLoaded() bool { return c.usage.loaded }
 
 // appendUsageRows flattens the section into the pane's row list, between the
-// config tiers and the Accounts section. Usage rows carry no cursor and answer
-// no key — they are evidence, not editable state.
+// config tiers and the Accounts section. Usage rows answer no key — they are
+// evidence, not editable state — but the cursor may park on one, because the
+// cursor is this pane's only scroll and a tall section must stay reachable.
 func (c *ConfigPane) appendUsageRows() {
 	if !c.usage.loaded {
 		return
@@ -124,11 +125,23 @@ func (c *ConfigPane) renderUsageHeadingLines() []string {
 
 // renderUsageRow renders one report row: the agent, its two verdicts, and the
 // detail sentence — when it reset, when af saw it — wrapped under the row so a
-// long observation never steals the line the agent name is on.
-func (c *ConfigPane) renderUsageRow(row quota.Row) string {
+// long observation never steals the line the agent name is on. A selected
+// usage row draws the cursor like any other, so the user can see where the
+// scroll position is; it still answers no key.
+func (c *ConfigPane) renderUsageRow(row quota.Row, selected bool) string {
 	var b strings.Builder
-	b.WriteString("  ")
-	b.WriteString(configKeyStyle.Render(row.Agent))
+	cursor := "  "
+	if selected {
+		cursor = SelectionMarker("› ")
+	}
+	b.WriteString(cursor)
+	agent := row.Agent
+	if selected {
+		agent = configSelectedStyle.Render(agent)
+	} else {
+		agent = configKeyStyle.Render(agent)
+	}
+	b.WriteString(agent)
 	b.WriteString(configValueStyle.Render("  " + row.Quota + " · " + row.Observed))
 	out := c.fitPaneLine(b.String()) + "\n"
 	if row.Detail != "" {

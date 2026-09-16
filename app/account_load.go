@@ -5,47 +5,61 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 )
 
-// configSectionsLoadedMsg delivers the Usage and Accounts reads back to the UI
-// loop together (#4361). The overlay's two daemon-reported sections load as one
-// command on open so opening it returns a single command, and each half carries
-// its OWN generation: an account register bumping accountGeneration must not
-// discard this opening's usage report, nor a usage read's generation gate the
-// accounts.
-type configSectionsLoadedMsg struct {
-	accountGeneration uint64
-	usageGeneration   uint64
-	accounts          daemon.ListAccountsResponse
-	accountsErr       error
-	usage             daemon.QuotaReportResponse
-	usageErr          error
+// accountsLoadedMsg delivers the remote Accounts read back to the UI loop, and
+// usageLoadedMsg the Usage read (#4361). They are SEPARATE messages on purpose:
+// the two daemon calls run concurrently, so a stalled ListAccounts keeps only
+// Accounts on "Loading…" while Usage renders, and a stalled QuotaReport no
+// longer withholds an Accounts answer that already arrived. Each message
+// carries its OWN generation: an account register bumping accountGeneration
+// must not discard this opening's usage report, nor a usage read's generation
+// gate the accounts.
+type accountsLoadedMsg struct {
+	generation uint64
+	accounts   daemon.ListAccountsResponse
+	err        error
+}
+
+type usageLoadedMsg struct {
+	generation uint64
+	usage      daemon.QuotaReportResponse
+	err        error
 }
 
 // remoteSectionsLoadCmd reads both daemon-reported sections off the UI loop.
 // Commands perform I/O only; they never mutate the pane from their goroutine.
+// tea.Batch runs the two reads concurrently and delivers each section's
+// message the moment its own request finishes.
 func (m *home) remoteSectionsLoadCmd() tea.Cmd {
 	accountGeneration, usageGeneration := m.accountGeneration, m.usageGeneration
 	list, report := listAccountsForPane, quotaReportForPane
-	return func() tea.Msg {
-		accounts, accountsErr := list(daemon.ListAccountsRequest{})
-		usage, usageErr := report(daemon.QuotaReportRequest{})
-		return configSectionsLoadedMsg{
-			accountGeneration: accountGeneration, usageGeneration: usageGeneration,
-			accounts: accounts, accountsErr: accountsErr,
-			usage: usage, usageErr: usageErr,
-		}
-	}
+	return tea.Batch(
+		func() tea.Msg {
+			accounts, err := list(daemon.ListAccountsRequest{})
+			return accountsLoadedMsg{generation: accountGeneration, accounts: accounts, err: err}
+		},
+		func() tea.Msg {
+			usage, err := report(daemon.QuotaReportRequest{})
+			return usageLoadedMsg{generation: usageGeneration, usage: usage, err: err}
+		},
+	)
 }
 
-func (m *home) handleConfigSectionsLoaded(msg configSectionsLoadedMsg) {
+func (m *home) handleAccountsLoaded(msg accountsLoadedMsg) {
 	if m.state != stateConfigEditor || !m.configPane.HasFocus() {
 		return
 	}
 	// Registration also advances the account generation: an older read must not
 	// overwrite the newly registered account or feedback from a newer operation.
-	if msg.accountGeneration == m.accountGeneration {
-		m.applyAccountsToPane(msg.accounts, msg.accountsErr)
+	if msg.generation == m.accountGeneration {
+		m.applyAccountsToPane(msg.accounts, msg.err)
 	}
-	if msg.usageGeneration == m.usageGeneration {
-		m.applyUsageToPane(msg.usage, msg.usageErr)
+}
+
+func (m *home) handleUsageLoaded(msg usageLoadedMsg) {
+	if m.state != stateConfigEditor || !m.configPane.HasFocus() {
+		return
+	}
+	if msg.generation == m.usageGeneration {
+		m.applyUsageToPane(msg.usage, msg.err)
 	}
 }

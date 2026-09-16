@@ -88,25 +88,37 @@ func TestUsageSectionCarriesTheDaemonsCaveats(t *testing.T) {
 	}
 }
 
-// Usage rows are evidence, not state: the cursor never lands on one, and enter
-// on the pane opens no editor over them. A selectable usage row would imply an
-// action the section does not have.
-func TestUsageRowsAreNotSelectable(t *testing.T) {
+// Usage rows are evidence, not state: the cursor may LAND on one — that is how
+// the pane scrolls, and a Usage section taller than the window would otherwise
+// strand its middle lines off screen — but enter opens no editor over them.
+func TestUsageRowsNavigateForScrollButStayInert(t *testing.T) {
 	pane := usagePane(t, stubUsageReport(), nil)
+	firstUsage := -1
 	for i, row := range pane.rows {
-		if row.usage != nil && row.isSelectable() {
-			t.Fatalf("usage row %d (%s) must not be selectable", i, row.usage.Agent)
+		if row.usage != nil {
+			firstUsage = i
+			break
 		}
 	}
-	// And navigation skips them: j from the last config entry must land on a
-	// selectable row past the whole section, not inside it.
+	if firstUsage < 0 {
+		t.Fatal("the stub report produced no usage rows")
+	}
+	// j walks the cursor from the last config entry onto the first usage row —
+	// the scroll that keeps a tall section reachable.
 	pane.selectedIdx = 0
 	for !pane.rows[pane.selectedIdx].isSelectable() {
 		pane.selectedIdx++
 	}
-	pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
-	if row := pane.rows[pane.selectedIdx]; row.usage != nil || row.heading != "" {
-		t.Fatalf("navigation must skip usage rows and headings, landed on %+v", row)
+	for pane.selectedIdx < firstUsage {
+		pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	}
+	if pane.rows[pane.selectedIdx].usage == nil {
+		t.Fatalf("j must land inside the Usage section, landed on %+v", pane.rows[pane.selectedIdx])
+	}
+	// Enter is inert on evidence: no editor opens, no request fires.
+	pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if pane.editing {
+		t.Fatal("enter on a usage row opened the value editor")
 	}
 }
 

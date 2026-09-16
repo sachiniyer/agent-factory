@@ -109,12 +109,20 @@ type AgentQuota struct {
 	// a limit with no reset time is common (not every provider states one), and
 	// showing a zero time would invent a deadline in 1970.
 	ResetAt *time.Time
-	// ObservedAt is the LATEST time af recorded a usage-limit wall for this
-	// agent, or nil when no parked session carries one. It is what makes a
-	// stale claim visibly stale (#4361): the reader can see that af last saw
-	// the wall days ago rather than just now. A wall recorded before this
-	// field existed is nil and must render as unknown, not as fresh.
+	// ObservedAt is when af recorded the wall whose reset this row reports, or
+	// nil when that session carries none. It is what makes a stale claim
+	// visibly stale (#4361): the reader can see that af last saw the wall days
+	// ago rather than just now. It pairs with ResetAt rather than taking the
+	// latest sighting outright — a fresh observation borrowed from a different
+	// session would make old reset evidence read as new. A wall recorded
+	// before this field existed is nil and must render as unknown, not as
+	// fresh.
 	ObservedAt *time.Time
+	// latestObserved is the newest sighting among all of this agent's parked
+	// sessions, kept unpaired so a row with no reset time at all can still say
+	// when af last saw a wall. When a reset is reported, only the observation
+	// that came with it is honest to show.
+	latestObserved *time.Time
 }
 
 // Report is the full answer, one row per configured agent.
@@ -177,24 +185,39 @@ func Build(programs []string, sessions []SessionState) Report {
 			continue
 		}
 		row.LimitedSessions++
-		if !state.ObservedAt.IsZero() && (row.ObservedAt == nil || state.ObservedAt.After(*row.ObservedAt)) {
-			// Latest observation wins: it is the freshest evidence af holds
-			// about this agent's wall.
+		if !state.ObservedAt.IsZero() && (row.latestObserved == nil || state.ObservedAt.After(*row.latestObserved)) {
 			at := state.ObservedAt
-			row.ObservedAt = &at
+			row.latestObserved = &at
 		}
 		if state.ResetAt.IsZero() {
 			continue
 		}
-		// Earliest reset wins: it is the soonest the user could resume anything.
+		// Earliest reset wins: it is the soonest the user could resume
+		// anything. The observation shown must be one af recorded of THAT
+		// session's wall — a fresher sighting borrowed from a session with a
+		// later reset would make the reported reset look newly observed
+		// (#4361 review). Among sessions sharing the earliest reset, the
+		// latest sighting is the freshest evidence of it.
 		if row.ResetAt == nil || state.ResetAt.Before(*row.ResetAt) {
 			at := state.ResetAt
 			row.ResetAt = &at
+			row.ObservedAt = nil
+		}
+		if row.ResetAt != nil && state.ResetAt.Equal(*row.ResetAt) &&
+			!state.ObservedAt.IsZero() && (row.ObservedAt == nil || state.ObservedAt.After(*row.ObservedAt)) {
+			at := state.ObservedAt
+			row.ObservedAt = &at
 		}
 	}
 	report := Report{Agents: make([]AgentQuota, 0, len(order))}
 	for _, name := range order {
 		row := rows[name]
+		if row.ResetAt == nil {
+			// No reset is rendered, so no observation can misdate one: the
+			// latest sighting is safe to show on its own.
+			row.ObservedAt = row.latestObserved
+		}
+		row.latestObserved = nil
 		switch {
 		case row.LimitedSessions > 0:
 			row.Observation = ObservationLimitReached

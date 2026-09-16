@@ -147,6 +147,59 @@ func TestBuild_ParkedSessionsCarryTheLatestObservationTime(t *testing.T) {
 	}
 }
 
+// The observation a row reports must belong to the wall it reports: with two
+// parked sessions, a fresh sighting on the LATER-reset session must not freshen
+// the earliest reset's evidence — that is the stale-claim ambiguity the
+// timestamp exists to prevent.
+func TestBuild_ObservationPairsWithTheReportedReset(t *testing.T) {
+	old := time.Unix(1_700_000_000, 0)
+	fresh := old.Add(3 * 24 * time.Hour)
+	earlyReset := time.Unix(1_800_000_000, 0)
+	lateReset := earlyReset.Add(6 * 24 * time.Hour)
+	report := Build([]string{"codex"}, []SessionState{
+		{Program: "codex", LimitReached: true, ResetAt: earlyReset, ObservedAt: old},
+		{Program: "codex", LimitReached: true, ResetAt: lateReset, ObservedAt: fresh},
+	})
+	codex := agentNamed(t, report, "codex")
+	if codex.ResetAt == nil || !codex.ResetAt.Equal(earlyReset) {
+		t.Fatalf("ResetAt = %v, want the earliest reset %v", codex.ResetAt, earlyReset)
+	}
+	if codex.ObservedAt == nil || !codex.ObservedAt.Equal(old) {
+		t.Fatalf("ObservedAt = %v, want the sighting recorded with the reported reset %v, not the fresher %v",
+			codex.ObservedAt, old, fresh)
+	}
+}
+
+// A wall observed before the field existed keeps its own honesty: when the
+// earliest reset comes from a session with no recorded sighting, the row says
+// the observation time is unknown rather than borrowing a fresher one.
+func TestBuild_PreFieldResetReportsUnknownObservation(t *testing.T) {
+	fresh := time.Unix(1_700_000_000, 0)
+	report := Build([]string{"codex"}, []SessionState{
+		{Program: "codex", LimitReached: true, ResetAt: time.Unix(1_800_000_000, 0)},
+		{Program: "codex", LimitReached: true, ResetAt: time.Unix(1_900_000_000, 0), ObservedAt: fresh},
+	})
+	codex := agentNamed(t, report, "codex")
+	if codex.ObservedAt != nil {
+		t.Fatalf("ObservedAt = %v, want nil: the reported reset's session recorded no sighting", codex.ObservedAt)
+	}
+}
+
+// With no reset time anywhere the latest sighting cannot misdate anything, so
+// it is still the row's observation age.
+func TestBuild_NoResetAnywhereKeepsTheLatestObservation(t *testing.T) {
+	older := time.Unix(1_700_000_000, 0)
+	newer := older.Add(time.Hour)
+	report := Build([]string{"codex"}, []SessionState{
+		{Program: "codex", LimitReached: true, ObservedAt: older},
+		{Program: "codex", LimitReached: true, ObservedAt: newer},
+	})
+	codex := agentNamed(t, report, "codex")
+	if codex.ObservedAt == nil || !codex.ObservedAt.Equal(newer) {
+		t.Fatalf("ObservedAt = %v, want the latest sighting %v", codex.ObservedAt, newer)
+	}
+}
+
 // A row with no parked session has no wall observation to show — nil, never a
 // zero time that would render as 1970.
 func TestBuild_NoParkedSessionHasNoObservationTime(t *testing.T) {
