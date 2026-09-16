@@ -5835,6 +5835,101 @@ test("#4484: a per-PR evaluation failure does not abort the aggregate run", asyn
   assert.notEqual(aggregate.conclusion, "success");
 });
 
+// A mid-evaluation failure used to drop the resolved PR's node id, so the
+// scoped failure write built no resolved-PR subject — and a self-contradictory
+// NOT_FOUND during that write's check-run read could not classify as a
+// vanished PR, rethrew unclassified, and aborted the serialized run over
+// unrelated PRs: the repo-wide outage the scoping exists to prevent (Codex on
+// #4486).
+test("#4486: an evaluation failure keeps the resolved PR identity", async () => {
+  const github = fakeGateGithub({
+    pullRequestsByNumber: {
+      1465: { issueComments: [codexVerdict(HEAD_SHA)] },
+    },
+  });
+  // A 422 on the files read is definitive, not transient: it escapes retryRead
+  // unmarked — a deterministic evaluation failure, the class the scoped write
+  // exists for — and it lands AFTER the PR resolved, which is the whole point:
+  // the node id existed to carry and was still dropped.
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options = {}) => {
+    if (fn === github.rest.pulls.listFiles && options.pull_number === 1465) {
+      const error = new Error("files lookup refused");
+      error.status = 422;
+      throw error;
+    }
+    return realPaginate(fn, options);
+  };
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.ok(
+    result.reasons.some((reason) => reason.startsWith("auto-gate evaluation error:")),
+    `expected a deterministic evaluation failure, got: ${result.reasons.join("; ")}`,
+  );
+  assert.equal(
+    result.pullRequestId,
+    "PR_node_1465",
+    "reportDecision needs the resolved node id to build its vanished-PR subject",
+  );
+});
+
+// The scoped failure write is still a decision write: on a workflow_dispatch
+// recovery with no prior decision it must publish NEVER_RAN like the normal
+// path does, not an ordinary WAITING that erases the "recovery found nothing"
+// signal (Codex on #4486).
+test("#4486: a manual recovery's scoped failure write stays NEVER_RAN", async () => {
+  const github = fakeGateGithub({
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2400, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+    ],
+    pullRequestsByNumber: {
+      1465: { issueComments: [codexVerdict(HEAD_SHA)] },
+      2400: { files: [], issueComments: [codexVerdict(HEAD_SHA)] },
+    },
+  });
+  // Same deterministic, post-resolution failure class as the identity test:
+  // a definitive 422 on the files read, scoped to the failing PR only.
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options = {}) => {
+    if (fn === github.rest.pulls.listFiles && options.pull_number === 1465) {
+      const error = new Error("files lookup refused");
+      error.status = 422;
+      throw error;
+    }
+    return realPaginate(fn, options);
+  };
+
+  await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [
+      { prNumber: 1465, headSha: HEAD_SHA },
+      { prNumber: 2400, headSha: HEAD_SHA },
+    ],
+    manual: true,
+  });
+
+  const failedDecision = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+  assert.ok(failedDecision, "the failing PR's scoped decision was never published");
+  assert.match(
+    failedDecision.output.title,
+    /^NEVER_RAN:/,
+    `a manual recovery's failure write must keep the never-ran distinction, got: ${failedDecision.output.title}`,
+  );
+});
+
 test("#4205: advisory play-test read failures do not waive a manual verdict blocker", async () => {
   const result = await evaluateGate(playTestFixture({
     author: "outside-contributor",

@@ -701,8 +701,14 @@ function delay(milliseconds) {
 }
 
 async function evaluate({ github, context, core, prNumber, setOutputs = true }) {
+  // The resolved PR's node id is what reportDecision's NOT_FOUND
+  // classification reads, so evaluatePullRequest publishes it here the moment
+  // it is known — a mid-evaluation failure then still writes its scoped
+  // failure against the right subject instead of rethrowing unclassified
+  // (#4484, Codex on #4486).
+  const resolved = {};
   try {
-    return await evaluatePullRequest({ github, context, core, prNumber, setOutputs });
+    return await evaluatePullRequest({ github, context, core, prNumber, setOutputs, resolved });
   } catch (error) {
     // A PR that no longer exists is a conclusion, not an evaluation failure: it
     // cannot be evaluated and there is nothing to report on it. isOpen false
@@ -725,6 +731,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
       prNumber: prNumber ? String(prNumber) : "",
       shouldMerge: false,
       isOpen: false,
+      pullRequestId: resolved.pullRequestId,
       readFailure: isReadFailure(error),
       reasons: [`auto-gate evaluation error: ${message}`],
       notes: [],
@@ -732,7 +739,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
   }
 }
 
-async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true }) {
+async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true, resolved }) {
   const number = prNumber || (await findPullRequestNumber({ github, context, core }));
 
   if (!number) {
@@ -746,6 +753,12 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   }
 
   const pr = await getPullRequest({ github, context, number });
+  // From here on a failure is a failure OF a known PR: hand its node id back
+  // through the carrier so evaluate()'s failure result can still write the
+  // scoped decision against the right subject.
+  if (resolved) {
+    resolved.pullRequestId = pr.id;
+  }
   const baseRepository = `${context.repo.owner}/${context.repo.repo}`;
   const reasons = [];
   const notes = [];
@@ -2012,6 +2025,12 @@ async function processAggregateHead({
           github,
           context,
           core,
+          // A workflow_dispatch recovery with no prior decision must publish
+          // this failure as NEVER_RAN, the same state the normal decision
+          // write below produces — dropping `manual` here rendered it as an
+          // ordinary WAITING and erased the "recovery found nothing" signal
+          // (Codex on #4486).
+          manual,
           result: {
             prNumber,
             headSha: pending.headSha,
