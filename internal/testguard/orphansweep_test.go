@@ -164,13 +164,28 @@ func TestClassifyDir_MissingAndMalformedStampsAreUnknown(t *testing.T) {
 	}
 }
 
-func TestClassifyDir_ForeignScopeIsDeadWithoutLookup(t *testing.T) {
+func TestClassifyDir_ForeignBootIsDeadWithoutLookup(t *testing.T) {
 	dir := t.TempDir()
+	// Same namespace, different boot: the stamped instance cannot still
+	// exist — a reboot ended every process it could name.
 	writeStamp(t, dir, ownerStamp{pid: os.Getpid(), startID: 1, bootID: "other-boot", nsID: "ns-a"})
 	env := fakeEnv("boot-a", "ns-a", nil, nil)
 	verdict, _, reason := env.classifyDir(dir)
 	if verdict != ownerDead {
 		t.Fatalf("different boot: verdict=%v (%s), want ownerDead — a stamp from another boot cannot name a live process here", verdict, reason)
+	}
+}
+
+func TestClassifyDir_ForeignNamespaceIsUnproven(t *testing.T) {
+	dir := t.TempDir()
+	// A different PID namespace means the stamped pid lives in a number
+	// space we cannot read — the owner may be alive there (two test
+	// containers sharing a host /tmp). Unverifiable is not dead.
+	writeStamp(t, dir, ownerStamp{pid: os.Getpid(), startID: 1, bootID: "boot-a", nsID: "ns-other"})
+	env := fakeEnv("boot-a", "ns-a", nil, nil)
+	verdict, stamped, _ := env.classifyDir(dir)
+	if !stamped || verdict != ownerUnknown {
+		t.Fatalf("foreign namespace: verdict=%v, want ownerUnknown — an alive-elsewhere owner must never be killed", verdict)
 	}
 }
 
@@ -224,7 +239,14 @@ func TestSweep_ReapsDeadOwnerAndItsSockets(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sock := unixSocket(t, dead, "default")
+	// The real layout is dir/tmux-<uid>/default — TMUX_TMPDIR is the base,
+	// not the socket's parent. A sweep that only reads the top level sees a
+	// directory and never kills the server (#4503 review).
+	sockDir := filepath.Join(dead, "tmux-1000")
+	if err := os.MkdirAll(sockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sock := unixSocket(t, sockDir, "default")
 	writeStamp(t, dead, ownerStamp{pid: 424244, startID: 1, bootID: "b", nsID: "n"})
 	writeStamp(t, live, ownerStamp{pid: 424245, startID: 7, bootID: "b", nsID: "n"})
 
@@ -254,10 +276,11 @@ func TestSweep_ReapsDeadOwnerAndItsSockets(t *testing.T) {
 func TestSweep_KillFailureStillRemovesDeadOwnerDir(t *testing.T) {
 	base := sweepBase(t)
 	dir := filepath.Join(base, "af-tmux-wedged")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	sockDir := filepath.Join(dir, "tmux-1000")
+	if err := os.MkdirAll(sockDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	unixSocket(t, dir, "default")
+	unixSocket(t, sockDir, "default")
 	writeStamp(t, dir, ownerStamp{pid: 424246, startID: 1, bootID: "b", nsID: "n"})
 	env := fakeEnv("b", "n", nil, nil)
 	env.killSocket = func(string) error { return errors.New("server not responding") }
@@ -336,8 +359,12 @@ func TestSweep_IgnoresUnrelatedPrefixesAndFiles(t *testing.T) {
 }
 
 func TestSweepOnce_DisableEnvSkipsSweep(t *testing.T) {
+	// Both halves of the cache must reset: under -shuffle a prior test's real
+	// sweep can leave nonzero orphanSweepStats, and a disabled run must return
+	// empty stats regardless of order (#4503 review).
 	orphanSweepOnce = sync.Once{}
-	t.Cleanup(func() { orphanSweepOnce = sync.Once{} })
+	orphanSweepStats = sweepStats{}
+	t.Cleanup(func() { orphanSweepOnce = sync.Once{}; orphanSweepStats = sweepStats{} })
 	t.Setenv("AF_DISABLE_ORPHAN_SWEEP", "1")
 	stats, ran := sweepOrphanTempDirsOnce()
 	if !ran || stats.noteworthy() {

@@ -39,6 +39,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,11 +56,14 @@ import (
 // instance. It lives inside the dir so it is created and destroyed with it.
 const ownerStampFile = "owner"
 
-// orphanDirPatterns are the temp-dir prefixes this package creates.
-// af-tmux-* covers both IsolateTmux (af-tmux-*) and SandboxTmux
-// (af-tmux-pkg-*); af-test-home-* covers SandboxHome. SocketTempDir's af-*
+// orphanDirPrefixes are the temp-dir prefixes this package creates.
+// af-tmux- covers both IsolateTmux (af-tmux-*) and SandboxTmux
+// (af-tmux-pkg-*); af-test-home- covers SandboxHome. SocketTempDir's af-*
 // dirs are per-test t.TempDir-cleaned and deliberately not matched.
-var orphanDirPatterns = []string{"af-tmux-*", "af-test-home-*"}
+// Prefix matching rather than filepath.Glob on purpose: a TMPDIR
+// containing a glob metacharacter would make Glob misread or fail the
+// pattern and silently sweep nothing.
+var orphanDirPrefixes = []string{"af-tmux-", "af-test-home-"}
 
 // orphanSweepBudget bounds the whole once-per-process sweep so a /tmp full
 // of wedged servers cannot stall a test binary at startup.
@@ -182,11 +186,17 @@ func (e *sweepEnv) classifyDir(dir string) (verdict ownerVerdict, stamped bool, 
 	if e.bootID == "" || e.nsID == "" {
 		return ownerUnknown, true, "current boot/namespace identity unreadable"
 	}
-	// A stamp from a different boot or PID namespace names a process
-	// instance that cannot exist here — (pid, StartID) is only unique
-	// within its scope, so this check must precede the pid lookup.
-	if stamp.bootID != e.bootID || stamp.nsID != e.nsID {
-		return ownerDead, true, "owner stamp names a different boot or pid namespace"
+	// A stamp from a different PID namespace names a process whose pid lives
+	// in a number space we cannot read — the owner may be alive there (two
+	// test containers sharing a host /tmp mount). Unverifiable is not dead.
+	if stamp.nsID != e.nsID {
+		return ownerUnknown, true, "owner stamp names a different pid namespace"
+	}
+	// Same namespace, different boot: the stamped instance cannot still
+	// exist. (The boot fallback is the namespace id itself, so a fallback
+	// boot id can only differ when the namespace already did.)
+	if stamp.bootID != e.bootID {
+		return ownerDead, true, "owner stamp names a different boot"
 	}
 	cur, err := e.lookup(stamp.pid)
 	switch {
@@ -229,61 +239,70 @@ func (s sweepStats) String() string {
 func (e *sweepEnv) sweep(baseDir string) sweepStats {
 	var stats sweepStats
 	deadline := e.now().Add(orphanSweepBudget)
-	for _, pattern := range orphanDirPatterns {
-		matches, err := filepath.Glob(filepath.Join(baseDir, pattern))
-		if err != nil {
-			continue // a malformed pattern cannot happen; keep sweeping
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return stats // cannot list the temp base — sweep nothing, prove nothing
+	}
+	for _, entry := range entries {
+		isTmux := strings.HasPrefix(entry.Name(), "af-tmux-")
+		if !isTmux && !strings.HasPrefix(entry.Name(), "af-test-home-") {
+			continue
 		}
-		isTmux := strings.HasPrefix(pattern, "af-tmux-")
-		for i, dir := range matches {
-			if e.now().After(deadline) {
-				stats.unproven += len(matches) - i
-				return stats
+		dir := filepath.Join(baseDir, entry.Name())
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		if e.now().After(deadline) {
+			stats.unproven++
+			continue
+		}
+		verdict, stamped, _ := e.classifyDir(dir)
+		switch verdict {
+		case ownerAlive:
+			stats.live++
+		case ownerDead:
+			if isTmux {
+				stats.killFailed += e.killSockets(dir, deadline)
 			}
-			info, err := os.Stat(dir)
-			if err != nil || !info.IsDir() {
+			if err := os.RemoveAll(dir); err != nil {
+				stats.unproven++
 				continue
 			}
-			verdict, stamped, _ := e.classifyDir(dir)
-			switch verdict {
-			case ownerAlive:
-				stats.live++
-			case ownerDead:
-				if isTmux {
-					stats.killFailed += e.killSockets(dir)
-				}
-				if err := os.RemoveAll(dir); err != nil {
-					stats.unproven++
-					continue
-				}
-				stats.reaped++
-			case ownerUnknown:
-				if stamped {
-					stats.unproven++
-				} else {
-					stats.unattributed++
-				}
+			stats.reaped++
+		case ownerUnknown:
+			if stamped {
+				stats.unproven++
+			} else {
+				stats.unattributed++
 			}
 		}
 	}
 	return stats
 }
 
-// killSockets runs kill-server on every unix socket in dir and returns how
-// many attempts failed. A dead socket fails fast ("no server running"),
-// which is indistinguishable from a wedged one — the dir is removed either
-// way since its owner is proven dead, but the count stays in the report.
-func (e *sweepEnv) killSockets(dir string) int {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0
-	}
-	failed := 0
-	for _, entry := range entries {
-		if entry.Type()&os.ModeSocket == 0 {
-			continue
+// killSockets runs kill-server on every unix socket under dir and returns
+// how many attempts failed or were skipped when the sweep deadline expired.
+// TMUX_TMPDIR is only the base — the real socket lives one level down at
+// dir/tmux-<uid>/default — so the search walks the tree rather than reading
+// the top level. A dead socket fails fast ("no server running"), which is
+// indistinguishable from a wedged one — the dir is removed either way since
+// its owner is proven dead, but the count stays in the report.
+func (e *sweepEnv) killSockets(dir string, deadline time.Time) int {
+	var sockets []string
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type()&os.ModeSocket != 0 {
+			sockets = append(sockets, path)
 		}
-		if err := e.killSocket(filepath.Join(dir, entry.Name())); err != nil {
+		return nil
+	})
+	failed := 0
+	for i, sock := range sockets {
+		if e.now().After(deadline) {
+			failed += len(sockets) - i
+			break
+		}
+		if err := e.killSocket(sock); err != nil {
 			failed++
 		}
 	}
