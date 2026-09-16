@@ -127,7 +127,12 @@ func (m *Manager) ListAccounts(req ListAccountsRequest) (ListAccountsResponse, e
 	if m != nil {
 		defaults, ambientOptOuts = defaultAccountsFor(m.Config(), req.RepoPath, roster)
 	}
-	return ListAccountsResponse{Entries: entries, Agents: roster, Defaults: defaults, AmbientOptOuts: ambientOptOuts}, nil
+	return ListAccountsResponse{
+		Entries: entries, Agents: roster, Defaults: defaults, AmbientOptOuts: ambientOptOuts,
+		// This build has the create-time router — the capability bit a picker
+		// checks before it may call a routable row "af picks a healthy account".
+		PoolRouting: true,
+	}, nil
 }
 
 // RegisterAccount creates an account's credential directory without logging in.

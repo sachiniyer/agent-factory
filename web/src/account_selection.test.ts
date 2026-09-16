@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createSession } from "./api.js";
 import { AccountSelection } from "./account_selection.js";
+import { AMBIENT_PIN_ACCOUNT } from "./account_scope.js";
 import type { AccountsResponse } from "./types.js";
 
 const registry: AccountsResponse = {
   agents: ["claude", "codex"], defaults: { claude: "personal" },
+  pool_routing: true,
   entries: ["personal", "work"].map(name => ({
     agent: "claude", name, dir: `/accounts/${name}`, registration_only: false, logged_in: true,
   })),
@@ -67,4 +69,42 @@ test("an unresolved agent is not evidence that a named account disappeared", () 
   assert.equal(selection.render(registry, ""), "");
   assert.equal(selection.namedChoicePending, true);
   assert.equal(selection.render(registry, "claude"), "work");
+});
+
+// #4404 review: the wire shape is computed from the RETAINED pick, not the
+// select's current value — a failed reload replaces the DOM with one "" row,
+// and serializing that would silently drop a deliberate ambient pin.
+test("wireAccount sends the retained ambient pin through a failed reload", () => {
+  const selection = new AccountSelection();
+  selection.render(registry, "claude");
+  selection.pick(AMBIENT_PIN_ACCOUNT);
+  // The reload fails: the select now shows only "Accounts unavailable" ("").
+  selection.render(null, "claude", true);
+
+  assert.deepEqual(selection.wireAccount(),
+    { account: "", accountAmbient: true, accountAuto: false },
+    "the pin survives the DOM losing every row that could express it");
+});
+
+test("wireAccount marks the routable ask, and only that ask, account_auto", () => {
+  const selection = new AccountSelection();
+  selection.render(registry, "claude");
+  assert.deepEqual(selection.wireAccount(),
+    { account: "", accountAmbient: false, accountAuto: true },
+    "an untouched field is this client's routable ask");
+
+  selection.pick("");
+  assert.deepEqual(selection.wireAccount(),
+    { account: "", accountAmbient: false, accountAuto: true },
+    "the routable first row picked deliberately is the same ask");
+
+  selection.pick("work");
+  assert.deepEqual(selection.wireAccount(),
+    { account: "work", accountAmbient: false, accountAuto: false },
+    "a named account is a pin, not a routing request");
+
+  selection.pick(AMBIENT_PIN_ACCOUNT);
+  assert.deepEqual(selection.wireAccount(),
+    { account: "", accountAmbient: true, accountAuto: false },
+    "an explicit ambient pick opts out of routing, not into it");
 });

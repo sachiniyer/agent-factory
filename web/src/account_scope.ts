@@ -141,6 +141,11 @@ export function accountChoices(accounts: AccountsResponse | null, agent: string,
   const fallback = accountDefaultFor(accounts, agent);
   const optedOut = accounts.ambient_opt_outs?.[agent] === true;
   const anyLoggedIn = accounts.entries.some((entry) => entry.agent === agent && entry.logged_in);
+  // The capability bit decides what the routable row may promise: a daemon
+  // without pool_routing has no router at all, so its empty account IS the
+  // ambient identity — labelling it "Automatic" would promise a pick the
+  // daemon cannot make (#4404 review).
+  const routing = accounts.pool_routing === true;
   // The first row is the ROUTABLE choice — a create that names no account.
   // What af does with it changed with the pool router (#4404): it is no longer
   // a synonym for the ambient identity. With a configured default it prefers
@@ -157,7 +162,8 @@ export function accountChoices(accounts: AccountsResponse | null, agent: string,
       label: agent === "" ? "Use daemon default" : fallback !== ""
         ? `Use configured default (${fallback})`
         : optedOut ? "Use the ambient identity (routing is off)"
-        : anyLoggedIn ? "Automatic — af picks a healthy account" : "Use agent login (nothing to route)",
+        : anyLoggedIn && routing ? "Automatic — af picks a healthy account"
+        : routing ? "Use agent login (nothing to route)" : "Use the agent's own login",
       agent,
       blocked: "",
       note: agent === "" ? "The daemon default, if any, applies." : "",
@@ -172,14 +178,18 @@ export function accountChoices(accounts: AccountsResponse | null, agent: string,
   // needs a row of its own so it can still be asked for once a default is
   // configured, which is exactly when the first row stops meaning it (#4404
   // review). The sentinel maps back to account "" + account_ambient at submit.
-  choices.push({
-    value: AMBIENT_PIN_ACCOUNT,
-    label: "Use the ambient identity (no account)",
-    agent,
-    blocked: "",
-    note: "Pins this session to the agent's own login instead of routing the account pool.",
-    projectDefault: false,
-  });
+  // A daemon without the router has no pool to be kept off — the first row is
+  // already the ambient identity there, so the pin row would be a duplicate.
+  if (routing) {
+    choices.push({
+      value: AMBIENT_PIN_ACCOUNT,
+      label: "Use the ambient identity (no account)",
+      agent,
+      blocked: "",
+      note: "Pins this session to the agent's own login instead of routing the account pool.",
+      projectDefault: false,
+    });
+  }
   let listed = false;
   for (const entry of accounts.entries) {
     if (entry.agent !== agent) {

@@ -115,14 +115,19 @@ func accountChoicesFrom(resp daemon.ListAccountsResponse, agent string) []accoun
 	// The ambient opt-out — a present-but-empty `default_accounts` entry —
 	// must be named rather than inferred: logged-in accounts exist beside it,
 	// and calling the row "Automatic" would promise a pool pick the daemon
-	// refuses to make (#4404 review).
+	// refuses to make (#4404 review). The same is true of CAPABILITY: a daemon
+	// without PoolRouting has no router at all, so its empty account is the
+	// ambient identity and the label must say so (#4404 review).
 	routableLabel := "Use the agent's own login (nothing to route)"
+	if !resp.PoolRouting {
+		routableLabel = "Use the agent's own login"
+	}
 	switch {
 	case fallback != "":
 		routableLabel = "Use configured default (" + fallback + ")"
 	case resp.AmbientOptOuts[agent]:
 		routableLabel = "Use the ambient identity (routing is off)"
-	case anyLoggedIn:
+	case anyLoggedIn && resp.PoolRouting:
 		routableLabel = "Automatic — af picks a healthy account"
 	}
 	choices := []accountChoice{{
@@ -135,7 +140,10 @@ func accountChoicesFrom(resp daemon.ListAccountsResponse, agent string) []accoun
 	// It needs a row of its own so it can still be asked for once a default is
 	// configured, which is exactly when the first row stops meaning it (#4404
 	// review). The pick maps to Account "" + AccountAmbient on the wire.
-	if accountRosterHas(resp.Agents, agent) {
+	// A daemon without the router has no pool to be kept off — the first row
+	// already IS the ambient identity there, so the pin row would be a
+	// duplicate that silently sends a bit the daemon drops.
+	if accountRosterHas(resp.Agents, agent) && resp.PoolRouting {
 		choices = append(choices, accountChoice{
 			value:       ambientAccount,
 			label:       "Use the ambient identity (no account)",

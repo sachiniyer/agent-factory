@@ -77,6 +77,9 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 			Prompt:     prompt,
 			TaskRepoID: t.RepoID,
 			TaskOrigin: true,
+			// Same-binary sends always opt in: a task delivery asks for the
+			// router's pool pick the way the shipped surfaces' routable row does.
+			AccountAuto: true,
 			// Provenance + the cap the manager admits against (#1892). TaskID is
 			// persisted on the session so the count is by association, never by a
 			// title prefix; MaxConcurrentRuns is zero for every task that has not

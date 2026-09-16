@@ -47,4 +47,21 @@ export class AccountSelection {
     // stay meaningful while the registry reloads.
     return this.picked && this.value !== AMBIENT_ACCOUNT && this.value !== AMBIENT_PIN_ACCOUNT;
   }
+
+  /** The identity triple a create sends for the RETAINED pick — not whatever
+   *  the DOM select currently shows. The distinction is load-bearing: a failed
+   *  account reload replaces the select with a single "Accounts unavailable"
+   *  row whose value is "", and serializing THAT while an ambient pin is
+   *  retained would drop the pin the user chose — the wrong-identity outcome
+   *  in miniature (#4404 review). */
+  wireAccount(): { account: string; accountAmbient: boolean; accountAuto: boolean } {
+    if (this.picked && this.value === AMBIENT_PIN_ACCOUNT) {
+      return { account: AMBIENT_ACCOUNT, accountAmbient: true, accountAuto: false };
+    }
+    if (this.picked && this.value !== AMBIENT_ACCOUNT) {
+      return { account: this.value, accountAmbient: false, accountAuto: false };
+    }
+    // Untouched field or the routable first row: the routable ask.
+    return { account: AMBIENT_ACCOUNT, accountAmbient: false, accountAuto: true };
+  }
 }

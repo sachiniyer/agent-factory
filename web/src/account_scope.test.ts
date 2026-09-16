@@ -28,7 +28,9 @@ import type { AccountsResponse, SessionData } from "./types.js";
 
 /** A registry in the daemon's own shape: two agents, one account never logged
  *  into, and the SAME NAME under two agents — which is the collision the whole
- *  agent-scoping rule exists for. */
+ *  agent-scoping rule exists for. pool_routing is set because these describe a
+ *  CURRENT daemon — a response without it is the pre-router build, and its
+ *  empty account means the ambient identity. */
 function registry(over: Partial<AccountsResponse> = {}): AccountsResponse {
   return {
     entries: [
@@ -37,6 +39,7 @@ function registry(over: Partial<AccountsResponse> = {}): AccountsResponse {
       { agent: "codex", name: "work", dir: "/h/accounts/codex/work", registration_only: false, logged_in: true },
     ],
     agents: ["claude", "codex", "gemini"],
+    pool_routing: true,
     ...over,
   };
 }
@@ -270,11 +273,27 @@ test("a default naming an unregistered account is OFFERED, labelled, and not blo
 });
 
 test("empty account choice describes configured inheritance without adding an override", () => {
-  assert.equal(accountChoices({ agents: ["claude"], entries: [], defaults: {} }, "claude")[0].label, "Use agent login (nothing to route)");
+  assert.equal(accountChoices({ agents: ["claude"], entries: [], defaults: {}, pool_routing: true }, "claude")[0].label, "Use agent login (nothing to route)");
   const registry = { agents: ["claude"], entries: [], defaults: { claude: "work" } } as AccountsResponse;
   const choice = accountChoices(registry, "claude")[0];
   assert.equal(choice.label, "Use configured default (work)");
   assert.equal(choice.value, AMBIENT_ACCOUNT);
+});
+
+// #4404 review: a daemon WITHOUT pool_routing is a pre-router build — its
+// empty account IS the ambient identity, so the routable row must say that and
+// the ambient-pin row must not exist (it would be a duplicate ambient row).
+test("a daemon without pool routing labels the empty row ambient and offers no pin", () => {
+  const choices = accountChoices(registry({ pool_routing: undefined }), "claude");
+
+  assert.equal(choices[0].value, AMBIENT_ACCOUNT);
+  assert.match(choices[0].label, /agent's own login/, "the only thing an empty account can mean there");
+  assert.doesNotMatch(choices[0].label, /Automatic/, "no router exists to make that pick");
+  assert.equal(
+    choices.some((c) => c.value === AMBIENT_PIN_ACCOUNT),
+    false,
+    "the pin row would be a second ambient row on a daemon with no pool to be kept off",
+  );
 });
 
 for (const [registrationOnly, loggedIn] of [[true, true], [false, true], [false, false]]) {

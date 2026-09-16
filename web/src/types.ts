@@ -539,6 +539,12 @@ export interface AccountsResponse {
    *  does the opposite. Optional because the daemon omits it when empty and
    *  older daemons do not send it at all. */
   ambient_opt_outs?: Record<string, boolean>;
+  /** The daemon's capability bit: present and true means this build has the
+   *  create-time account router, so a routable create (account_auto) can land
+   *  on a pooled account. Absent means a daemon older than the router, whose
+   *  empty account is the ambient identity — a picker must not label that row
+   *  "af picks a healthy account" for it (#4404 review). */
+  pool_routing?: boolean;
 }
 
 /** RegisterAccountResponse (daemon/control_types_accounts.go). */

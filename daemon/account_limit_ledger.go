@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -222,8 +224,11 @@ func retractAccountLimitObservation(agent, account string) error {
 // disproven (#4404 review). What is deliberately NOT retired is live state — a
 // sibling still parked LiveLimitReached under the identity keeps claiming its
 // wall, the conservative direction, and clears it on its own affirmative work.
-// Cleared sibling rows are persisted through the settlement path so a restart
-// cannot resurrect them.
+// Cleared rows are persisted INSIDE the same fence (persistRefutedRow): the
+// durable copy is what accountLimitEvidenceForSwap merges back in, so retiring
+// the in-memory observation and releasing the fence before the durable write
+// landed left a window where a create read stale rows the refute had already
+// disproven and kept excluding the account anyway (#4404 review).
 //
 // accountLimitMu makes the whole retirement one publication against automatic
 // account-swap admission: a swap reads either all of the identity's evidence or
@@ -232,31 +237,41 @@ func retractAccountLimitObservation(agent, account string) error {
 // Returns whether the session's own row changed, so the caller can checkpoint
 // the cleared evidence through the settlement write path.
 func (m *Manager) refuteAccountLimitEvidence(instance *session.Instance, epoch uint64) bool {
+	m.accountLimitMu.Lock()
+	defer m.accountLimitMu.Unlock()
+	// The reporting session's epoch-gated refute runs inside the fence too —
+	// it is part of the same publication.
 	agent, account, changed := instance.RefuteAccountLimitObservationAtEpoch(epoch)
 	if agent == "" || account == "" {
 		return false
 	}
 	key := agent + "\x00" + account
-	type clearedRow struct {
-		repoID   string
-		key      string
-		instance *session.Instance
-	}
-	var cleared []clearedRow
-	m.accountLimitMu.Lock()
 	m.mu.Lock()
-	_, checked := m.refutedLedgerAccounts[key]
+	reportKey := ""
+	rows := make(map[string]*session.Instance, len(m.instances))
 	for instanceKey, other := range m.instances {
-		if other == nil || other == instance {
+		if other == nil {
+			continue
+		}
+		rows[instanceKey] = other
+		if other == instance {
+			reportKey = instanceKey
+		}
+	}
+	_, checked := m.refutedLedgerAccounts[key]
+	m.mu.Unlock()
+	if changed && reportKey != "" {
+		m.persistRefutedRow(reportKey, instance)
+	}
+	for instanceKey, other := range rows {
+		if other == instance {
 			continue
 		}
 		if !other.RetractAccountLimitObservation(agent, account) {
 			continue
 		}
-		repoID, _ := splitDaemonInstanceKey(instanceKey)
-		cleared = append(cleared, clearedRow{repoID: repoID, key: instanceKey, instance: other})
+		m.persistRefutedRow(instanceKey, other)
 	}
-	m.mu.Unlock()
 	if !checked {
 		if err := retractAccountLimitObservation(agent, account); err != nil {
 			m.warn().Printf("could not retract the retained limit evidence for %s account %q — it may keep excluding the account until restart: %v",
@@ -276,17 +291,60 @@ func (m *Manager) refuteAccountLimitEvidence(instance *session.Instance, epoch u
 			m.mu.Unlock()
 		}
 	}
-	m.accountLimitMu.Unlock()
-	// A cleared row is durable evidence retired in memory; the settlement write
-	// makes the retirement durable too, and its retry obligation survives a
-	// failed write rather than resurrecting the wall on the next load.
-	for _, row := range cleared {
-		if err := m.persistSettlement(row.repoID, row.key, row.instance); err != nil {
-			m.warn().Printf("session %q: refuted limit evidence for %s account %q cleared in memory but not yet on disk: %v",
-				row.instance.Title, agent, account, err)
-		}
-	}
 	return changed
+}
+
+// errRefutedRowBusy is the sentinel recordSettlementWrite receives for a
+// cleared row that could not be written inside the refutation fence because the
+// session is mid-operation — the write is owed to the settlement retry, which
+// holds the op lock this path cannot take and revalidates under it.
+var errRefutedRowBusy = errors.New("session is mid-operation; the cleared row is owed to the settlement retry")
+
+// persistRefutedRow durably writes one cleared row while the caller still
+// holds the refutation fence — the half of the retirement the in-memory
+// Retract cannot provide on its own, because accountLimitEvidenceForSwap folds
+// the durable row straight back into the evidence a router or swap reads
+// (#4404 review).
+//
+// The per-session op lock is deliberately NOT taken: opLock → accountLimitMu
+// is the established order (a kill or swap holds its op lock across the fence),
+// so acquiring it here deadlocks. The revalidation below stands in for it, and
+// it is sufficient because the in-flight flag is the mutation fence: an op
+// raises it before touching anything, so GetInFlightOp() == OpNone means the
+// snapshot being written is committed state. A row found mid-operation is
+// owed to the settlement retry instead — its durable copy keeps contributing
+// for the op's duration, which is the single-writer contract every other row
+// write obeys rather than a refutation-specific hole.
+//
+// repoStartLock is absent for the same reason — it is held above
+// accountLimitMu on the create path. The write is a stable-id-keyed update, and
+// the repo file lock persistInstanceData takes is all the ordering it needs.
+func (m *Manager) persistRefutedRow(key string, instance *session.Instance) {
+	repoID, _ := splitDaemonInstanceKey(key)
+	m.mu.Lock()
+	registered := m.instances[key] == instance
+	m.mu.Unlock()
+	if !registered || instance.IsArchived() {
+		// A deleted or archived row has no repo record left to retire — the
+		// delete moved its evidence to the ledger under this same fence, or the
+		// archive took the row out of the reader's source set. Persisting it
+		// would only publish a stale session.updated for a session that is
+		// gone (#4404 review). The in-memory clear already retired its live
+		// contribution.
+		return
+	}
+	if instance.GetInFlightOp() != session.OpNone {
+		m.recordSettlementWrite(repoID, key, instance, errRefutedRowBusy)
+		return
+	}
+	data := instance.ToInstanceData()
+	err := persistInstanceData(repoID, data)
+	if err != nil {
+		m.warn().Printf("session %q: refuted account-limit evidence cleared in memory but not yet on disk (the poll retries it): %v",
+			instance.Title, err)
+	}
+	m.publishEvent(agentproto.EventSessionUpdated, data)
+	m.recordSettlementWrite(repoID, key, instance, err)
 }
 
 // unrefuteRetainedAccountLimits drops the daemon-lifetime "ledger already

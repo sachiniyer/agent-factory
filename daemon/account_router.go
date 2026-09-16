@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -12,6 +13,12 @@ import (
 	"github.com/sachiniyer/agent-factory/quota"
 	"github.com/sachiniyer/agent-factory/session"
 )
+
+// accountLoggedInProbe is the credential check the pool filter runs per
+// registered account — a var for the same reason loadAccountLimitEvidenceForSwap
+// is: a test must be able to say "the probe errored" without relying on a
+// filesystem race between List and LoggedIn (#4404 review).
+var accountLoggedInProbe = agentaccount.LoggedIn
 
 // The create-time account router (#4404).
 //
@@ -46,6 +53,13 @@ import (
 // there, so routing one would break a previously-working create). For the
 // first and last, the configured default still applies and refuses by name as
 // before.
+//
+// A fourth keeps it too, and it is the one that makes the feature safe to ship:
+// a request that did not ASK for routing. Account "" without account_auto is
+// what every client built before the router sends — an older picker's "Ambient
+// identity" row, a script that never passed --account — and that shape cannot
+// be told apart from a new client's routable ask. The pre-router contract is
+// the only answer that is right for both: configured default, else ambient.
 func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionRequest) error {
 	if strings.TrimSpace(req.Account) != "" || req.allowReserved || req.AccountAmbient {
 		return nil
@@ -56,8 +70,21 @@ func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionReque
 	}
 	// Selection and opt-out come from ONE resolved configuration generation:
 	// resolving them separately could pair a default read from one config save
-	// with an ambient refusal read from the next (#4404 review).
-	selection, ambientOptOut := config.DefaultAccountPolicyFor(cfg, req.RepoPath, agent)
+	// with an ambient refusal read from the next. And it is the STRICT read —
+	// a personal project layer that cannot be loaded may carry exactly the
+	// default or the opt-out this create is about to apply past, so "policy
+	// unknown" is a refusal, never an empty layer (#4404 review).
+	selection, ambientOptOut, err := config.DefaultAccountPolicyForDecision(cfg, req.RepoPath, agent)
+	if err != nil {
+		return err
+	}
+	if !req.AccountAuto {
+		// The pre-router contract for a client that cannot have opted in —
+		// or one that deliberately did not: the configured default still
+		// applies and refuses by name, else the session keeps the ambient
+		// identity it always got.
+		return applyResolvedDefaultAccount(req, selection)
+	}
 
 	kind, kindErr := session.BackendKindFor(session.InstanceOptions{
 		Backend:     session.BackendKind(req.Backend),
@@ -114,18 +141,28 @@ func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionReque
 	// carries), and its picker rows already say "runs as it until you log in",
 	// so it stays a candidate the way an explicit choice would.
 	pool := make([]string, 0, len(registered))
+	var verifyErrs []error
 	for _, name := range registered {
-		loggedIn, lerr := agentaccount.LoggedIn(home, agent, name)
+		loggedIn, lerr := accountLoggedInProbe(home, agent, name)
 		switch {
 		case lerr != nil:
 			m.warn().Printf("cannot verify the %s credential for account %q — leaving it out of automatic routing: %v",
 				agent, name, lerr)
+			verifyErrs = append(verifyErrs, fmt.Errorf("%s: %w", name, lerr))
 		case loggedIn:
 			pool = append(pool, name)
 		}
 	}
 	if selection.Name != "" && !slices.Contains(pool, selection.Name) {
 		pool = append(pool, selection.Name)
+	}
+	if len(pool) == 0 && len(verifyErrs) > 0 {
+		// No account could be verified as logged in — so "none logged in" is
+		// not established, only "none verified". Falling back to ambient here
+		// would launch a session on an identity the request did not ask for
+		// while the credential store is degraded; refuse instead (#4404 review).
+		return fmt.Errorf("cannot route %q to a %s account: no registered account's login could be verified: %w",
+			req.Title, agent, errors.Join(verifyErrs...))
 	}
 	if len(pool) == 0 {
 		// Every registered account is missing its credential, so no automatic
@@ -246,6 +283,15 @@ func (m *Manager) accountSessionLoadsLocked(agent string, registered []string) m
 	loads := make(map[string]int, len(registered))
 	for _, inst := range m.instances {
 		if inst == nil || inst.IsArchived() {
+			continue
+		}
+		switch inst.GetLiveness() {
+		case session.LiveLost, session.LiveDead:
+			// A lost or dead session still HAS an account recorded, but no
+			// agent is running under it — the runtime that consumed the
+			// account's budget is gone, and recovery starts a new one rather
+			// than resuming the old. Counting it would shrink the pool around
+			// ghosts (#4404 review).
 			continue
 		}
 		account, _ := inst.AccountSelection()

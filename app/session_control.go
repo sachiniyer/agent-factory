@@ -119,6 +119,11 @@ type sessionStartRequest struct {
 	// CreateSessionRequest.AccountAmbient, so the daemon's pool router does not
 	// re-identify a session the user chose to keep on the ambient identity.
 	AccountAmbient bool
+	// AccountAuto marks the empty-and-not-ambient Account as a routable ask —
+	// forwarded as CreateSessionRequest.AccountAuto, the opt-in bit a daemon
+	// with the router requires before it may pool-route an unspecified account
+	// (#4404 review).
+	AccountAuto bool
 }
 
 var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartRequest) (*session.Instance, error) {
@@ -134,6 +139,7 @@ var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartReques
 			Backend:        req.Backend,
 			Account:        req.Account,
 			AccountAmbient: req.AccountAmbient,
+			AccountAuto:    req.AccountAuto,
 		})
 		return e
 	})

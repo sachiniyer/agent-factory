@@ -384,6 +384,11 @@ export interface CreateSessionInput {
    *  routable — silently re-identifying a session the user chose to keep off
    *  the account pool. */
   accountAmbient?: boolean;
+  /** True when the empty account is this client's routable ask — the opt-in
+   *  bit a daemon with the pool router requires before an unspecified account
+   *  may land on a pooled identity (#4404 review). Without it the daemon
+   *  serves the pre-router contract: configured default, else ambient. */
+  accountAuto?: boolean;
 }
 
 /** Lists the runtimes a session in this repo can be created on, whether the repo's
@@ -445,6 +450,12 @@ export async function createSession(input: CreateSessionInput, token: string): P
   // an untouched field sends neither and lets the daemon's router decide.
   if (input.accountAmbient === true) {
     body.account_ambient = true;
+  }
+  // And the routable ask: sent when the empty account means "pick for me"
+  // rather than "ambient" — the bit that lets the daemon tell this client's
+  // unspecified create from a pre-router client's identical wire shape.
+  if (input.accountAuto === true) {
+    body.account_auto = true;
   }
   const resp = await af<{ instance: SessionData; warning?: string }>("CreateSession", body, token);
   if (resp.warning) {

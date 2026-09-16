@@ -6616,6 +6616,9 @@ async function createSession(input, token2) {
   if (input.accountAmbient === true) {
     body.account_ambient = true;
   }
+  if (input.accountAuto === true) {
+    body.account_auto = true;
+  }
   const resp = await af("CreateSession", body, token2);
   if (resp.warning) {
     throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
@@ -7961,10 +7964,11 @@ function accountChoices(accounts, agent, failed = false) {
   const fallback = accountDefaultFor(accounts, agent);
   const optedOut = accounts.ambient_opt_outs?.[agent] === true;
   const anyLoggedIn = accounts.entries.some((entry) => entry.agent === agent && entry.logged_in);
+  const routing = accounts.pool_routing === true;
   const choices = [
     {
       value: AMBIENT_ACCOUNT,
-      label: agent === "" ? "Use daemon default" : fallback !== "" ? `Use configured default (${fallback})` : optedOut ? "Use the ambient identity (routing is off)" : anyLoggedIn ? "Automatic \u2014 af picks a healthy account" : "Use agent login (nothing to route)",
+      label: agent === "" ? "Use daemon default" : fallback !== "" ? `Use configured default (${fallback})` : optedOut ? "Use the ambient identity (routing is off)" : anyLoggedIn && routing ? "Automatic \u2014 af picks a healthy account" : routing ? "Use agent login (nothing to route)" : "Use the agent's own login",
       agent,
       blocked: "",
       note: agent === "" ? "The daemon default, if any, applies." : "",
@@ -7974,14 +7978,16 @@ function accountChoices(accounts, agent, failed = false) {
   if (agent === "" || !accountAgentSupported(accounts, agent)) {
     return choices;
   }
-  choices.push({
-    value: AMBIENT_PIN_ACCOUNT,
-    label: "Use the ambient identity (no account)",
-    agent,
-    blocked: "",
-    note: "Pins this session to the agent's own login instead of routing the account pool.",
-    projectDefault: false
-  });
+  if (routing) {
+    choices.push({
+      value: AMBIENT_PIN_ACCOUNT,
+      label: "Use the ambient identity (no account)",
+      agent,
+      blocked: "",
+      note: "Pins this session to the agent's own login instead of routing the account pool.",
+      projectDefault: false
+    });
+  }
   let listed = false;
   for (const entry of accounts.entries) {
     if (entry.agent !== agent) {
@@ -10841,6 +10847,21 @@ var AccountSelection = class {
   get namedChoicePending() {
     return this.picked && this.value !== AMBIENT_ACCOUNT && this.value !== AMBIENT_PIN_ACCOUNT;
   }
+  /** The identity triple a create sends for the RETAINED pick — not whatever
+   *  the DOM select currently shows. The distinction is load-bearing: a failed
+   *  account reload replaces the select with a single "Accounts unavailable"
+   *  row whose value is "", and serializing THAT while an ambient pin is
+   *  retained would drop the pin the user chose — the wrong-identity outcome
+   *  in miniature (#4404 review). */
+  wireAccount() {
+    if (this.picked && this.value === AMBIENT_PIN_ACCOUNT) {
+      return { account: AMBIENT_ACCOUNT, accountAmbient: true, accountAuto: false };
+    }
+    if (this.picked && this.value !== AMBIENT_ACCOUNT) {
+      return { account: this.value, accountAmbient: false, accountAuto: false };
+    }
+    return { account: AMBIENT_ACCOUNT, accountAmbient: false, accountAuto: true };
+  }
 };
 
 // src/backends.ts
@@ -11328,17 +11349,11 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       // `backend` entirely and the repo's config decides (#1933).
       backend: backendSelect.value,
       // The select may be SHOWING a configured default it preselected — a
-      // presentation convenience, not a decision. Serializing that name would
-      // read on the wire as an explicit --account pin and bypass the daemon's
-      // pool routing entirely (#4404 review), so a name travels only when the
-      // user actually picked a row; an untouched field submits AMBIENT_ACCOUNT
-      // ("") and stays routable.
-      account: accountSelection.picked && accountSelect.value !== AMBIENT_PIN_ACCOUNT ? accountSelect.value : AMBIENT_ACCOUNT,
-      // Only the explicit ambient row asks for the ambient identity — every
-      // other "" is a routable "let af decide" the daemon would otherwise
-      // pool-route, and it cannot tell that pick from an untouched field
-      // without the bit (#4404 review).
-      accountAmbient: accountSelection.picked && accountSelect.value === AMBIENT_PIN_ACCOUNT
+      // presentation convenience, not a decision — or a failure row whose
+      // value is "" while an ambient pin is still logically picked. Either
+      // way the DOM value is not the pick; wireAccount serializes the
+      // RETAINED one (#4404 review).
+      ...accountSelection.wireAccount()
     });
   });
   queueMicrotask(() => titleInput.focus());

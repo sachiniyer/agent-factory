@@ -104,6 +104,14 @@ type ListAccountsResponse struct {
 	// cannot see the opt-out labels that row "af picks a healthy account" while
 	// the daemon does the opposite.
 	AmbientOptOuts map[string]bool `json:"ambient_opt_outs,omitempty"`
+	// PoolRouting is the daemon's capability bit: true means this build has the
+	// create-time account router, so a routable create (account_auto) CAN land
+	// on a pooled account. A picker must not label that row "af picks a healthy
+	// account" when the field is absent — a daemon older than the router reads
+	// the same empty account as the ambient identity, and a label that promises
+	// a pool pick while the daemon runs the pre-router contract is the
+	// silent-wrong-identity outcome rendered as UI text (#4404 review).
+	PoolRouting bool `json:"pool_routing,omitempty"`
 }
 
 // RegisterAccountRequest creates an account's credential directory on the

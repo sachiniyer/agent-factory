@@ -30,6 +30,19 @@ type CreateSessionRequest struct {
 	// default_accounts application — an explicit ambient choice outranks a
 	// configured default exactly as an explicit --account does.
 	AccountAmbient bool `json:"account_ambient,omitempty"`
+	// AccountAuto asks for the create-time account router's pool pick: the
+	// client asserts it understands that an empty account may come back scoped
+	// to a registered identity, and wants that outcome. False — the zero value
+	// every client predating the router sends — means the pre-router contract:
+	// a configured default_accounts entry, else the ambient identity. The bit
+	// exists because an empty Account is not evidence of consent to routing:
+	// an older client's "Ambient identity" pick and a script that simply never
+	// passed --account are the same wire shape, and routing either onto the
+	// pool silently re-identifies a session its user did not offer the pool
+	// (#4404 review). The shipped surfaces set it: the CLI on an absent
+	// --account, the pickers on their routable row, the daemon's own task
+	// deliveries.
+	AccountAuto bool `json:"account_auto,omitempty"`
 	// AccountSource explains where a NON-REQUESTED account came from — the
 	// `default_accounts` key, the layer, the file, and how to clear it (#3386).
 	// Empty when the client named the account itself.

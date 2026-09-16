@@ -425,19 +425,11 @@ export function newSessionModal(
       // `backend` entirely and the repo's config decides (#1933).
       backend: backendSelect.value,
       // The select may be SHOWING a configured default it preselected — a
-      // presentation convenience, not a decision. Serializing that name would
-      // read on the wire as an explicit --account pin and bypass the daemon's
-      // pool routing entirely (#4404 review), so a name travels only when the
-      // user actually picked a row; an untouched field submits AMBIENT_ACCOUNT
-      // ("") and stays routable.
-      account: accountSelection.picked && accountSelect.value !== AMBIENT_PIN_ACCOUNT
-        ? accountSelect.value
-        : AMBIENT_ACCOUNT,
-      // Only the explicit ambient row asks for the ambient identity — every
-      // other "" is a routable "let af decide" the daemon would otherwise
-      // pool-route, and it cannot tell that pick from an untouched field
-      // without the bit (#4404 review).
-      accountAmbient: accountSelection.picked && accountSelect.value === AMBIENT_PIN_ACCOUNT,
+      // presentation convenience, not a decision — or a failure row whose
+      // value is "" while an ambient pin is still logically picked. Either
+      // way the DOM value is not the pick; wireAccount serializes the
+      // RETAINED one (#4404 review).
+      ...accountSelection.wireAccount(),
     });
   });
 

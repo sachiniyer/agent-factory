@@ -467,7 +467,10 @@ pointing at one).`,
 		// CLI's spelling of the picker's ambient row — and the daemon's pool
 		// router cannot tell it from an unset flag without the AccountAmbient
 		// bit: Changed distinguishes "--account \"\"" from "flag absent" (#4404
-		// review). Absent keeps the router's default: pool or configured default.
+		// review). Absent keeps the router's default — pool or configured
+		// default — which is exactly the ask account_auto carries: the flag's
+		// absence IS this client opting in, since this build knows the router
+		// exists and prints the pool contract in --account's help.
 		accountAmbient := cmd.Flags().Changed("account") && strings.TrimSpace(createAccountFlag) == ""
 
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
@@ -476,6 +479,7 @@ pointing at one).`,
 			Program:        program,
 			Account:        createAccountFlag,
 			AccountAmbient: accountAmbient,
+			AccountAuto:    !cmd.Flags().Changed("account"),
 			Prompt:         createPromptFlag,
 			InPlace:        inPlace,
 			Backend:        createBackendFlag,

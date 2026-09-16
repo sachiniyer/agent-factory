@@ -204,6 +204,12 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			account = ""
 			accountAmbient = false
 		}
+		// An empty account that is not an ambient pin is this client's routable
+		// ask — whether the routable first row was picked or the field was left
+		// untouched. account_auto is what makes that ask legible to the daemon:
+		// a bare empty account is the shape a PRE-router client sends for the
+		// ambient identity, and the daemon reads it that way (#4404 review).
+		accountAuto := account == "" && !accountAmbient
 		m.pendingAccount = ""
 		m.pendingAccountAmbient = false
 		m.namingInstance = nil
@@ -241,6 +247,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// cannot carry: whether that empty was the user's own pick (#4404).
 				Account:        account,
 				AccountAmbient: accountAmbient,
+				AccountAuto:    accountAuto,
 			}
 			started, err := start(instance, req)
 			return instanceStartedMsg{
