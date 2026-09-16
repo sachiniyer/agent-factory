@@ -472,6 +472,54 @@ func TestRepeatObservationRefreshIsQuantized(t *testing.T) {
 		"a sighting past the quantum refreshes when af last saw the wall")
 }
 
+// UpdatedAt is the mutation stamp storage/archive reconciliation reads as proof
+// of real state change, so a repeat sighting may only advance it when the
+// RETAINED evidence actually changed (#4409 review): the poll re-observes a
+// parked session every few seconds, and stamping each sighting would let an
+// unrelated later checkpoint persist a synthetic mutation time — the row's
+// evidence slice compares equal, so the persist gate never wrote it, yet
+// reconcilers still saw the row as freshly mutated.
+func TestRepeatObservationTouchesUpdatedAtOnlyOnEvidenceChange(t *testing.T) {
+	first := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	inside := first.Add(accountObservationRefreshQuantum - time.Second)
+	past := first.Add(accountObservationRefreshQuantum + time.Second)
+	later := past.Add(time.Second)
+	oldClock := instanceNow
+	instanceNow = func() time.Time { return first }
+	t.Cleanup(func() { instanceNow = oldClock })
+	reset := first.Add(5 * 24 * time.Hour)
+
+	i := &Instance{}
+	i.mu.Lock()
+	i.recordAccountLimitObservationLocked(tmux.ProgramCodex, "work", reset)
+	i.mu.Unlock()
+	require.True(t, i.UpdatedAt.Equal(first), "the first sighting is a real mutation")
+
+	// Same wall inside the quantum: nothing the record keeps changed.
+	instanceNow = func() time.Time { return inside }
+	i.mu.Lock()
+	i.recordAccountLimitObservationLocked(tmux.ProgramCodex, "work", reset)
+	i.mu.Unlock()
+	require.True(t, i.UpdatedAt.Equal(first),
+		"an unchanged repeat sighting is not a mutation — UpdatedAt must not advance")
+
+	// Past the quantum the ObservedAt refresh IS retained evidence.
+	instanceNow = func() time.Time { return past }
+	i.mu.Lock()
+	i.recordAccountLimitObservationLocked(tmux.ProgramCodex, "work", reset)
+	i.mu.Unlock()
+	require.True(t, i.UpdatedAt.Equal(past),
+		"a retained ObservedAt refresh must stamp the mutation it persists")
+
+	// A reset the merge retains is evidence change even inside the quantum.
+	instanceNow = func() time.Time { return later }
+	i.mu.Lock()
+	i.recordAccountLimitObservationLocked(tmux.ProgramCodex, "work", reset.Add(time.Hour))
+	i.mu.Unlock()
+	require.True(t, i.UpdatedAt.Equal(later),
+		"a retained reset change must stamp the mutation it persists")
+}
+
 // A repeat sighting of the same account wall refreshes when af last saw it,
 // while the conservative reset merge still keeps the safer boundary.
 func TestRepeatObservationRefreshesTheSightingNotTheReset(t *testing.T) {

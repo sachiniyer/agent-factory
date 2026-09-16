@@ -593,12 +593,21 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 			// the conservative reset merge keeps the safer boundary. The refresh
 			// is quantized so each re-dating is one the persist gate durably
 			// checkpoints rather than a per-tick memory-only advance (#4361
-			// review).
+			// review). The mutation stamp follows the retained evidence, not
+			// the sighting: a repeat that changes nothing the record keeps is
+			// no mutation — advancing UpdatedAt for it would let an unrelated
+			// later checkpoint persist a synthetic timestamp the storage and
+			// archive reconcilers read as real state change (#4409 review).
+			priorReset := observation.ResetAt
 			observation.ResetAt = RetainedAccountLimitReset(observation.ResetAt, resetAt)
+			changed := !observation.ResetAt.Equal(priorReset)
 			if instanceNow().Sub(observation.ObservedAt) >= accountObservationRefreshQuantum {
 				observation.ObservedAt = instanceNow()
+				changed = true
 			}
-			i.touchLocked()
+			if changed {
+				i.touchLocked()
+			}
 			return
 		}
 	}
