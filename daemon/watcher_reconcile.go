@@ -149,7 +149,13 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 		if _, running := s.watchers[id]; running {
 			continue
 		}
-		if flushed := flushedDrops[id]; flushed.drops > t.DroppedEvents && flushed.generationID == t.GenerationID {
+		if flushed, ok := flushedDrops[id]; ok && flushed.generationID != t.GenerationID {
+			// The generation rebound under the reused ID, so the row's
+			// persisted total is the predecessor incarnation's evidence just
+			// as the flush is — the replacement starts clean rather than
+			// inheriting a count its generation never earned (#4224).
+			t.DroppedEvents = 0
+		} else if flushed.drops > t.DroppedEvents && flushed.generationID == t.GenerationID {
 			t.DroppedEvents = flushed.drops
 		}
 		w := s.newTaskWatcher(t)

@@ -33,8 +33,16 @@ func (s *watcherSupervisor) restart(t task.Task) error {
 		// The flush total crosses only between incarnations: a watcher stopped
 		// for a replaced task must not seed its drops onto the row the reused
 		// ID now names (#4224 review).
-		if dropped := current.stop(); dropped > t.DroppedEvents && current.generationID == t.GenerationID {
-			t.DroppedEvents = dropped
+		dropped := current.stop()
+		if current.generationID == t.GenerationID {
+			if dropped > t.DroppedEvents {
+				t.DroppedEvents = dropped
+			}
+		} else {
+			// The generation rebound under the reused ID: the persisted total
+			// on the row is the predecessor incarnation's evidence just as
+			// the flush is, so the replacement starts clean (#4224).
+			t.DroppedEvents = 0
 		}
 	}
 
