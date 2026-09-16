@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -210,4 +211,139 @@ func TestStartClearsBoundMarkWhenGenerationSurvives(t *testing.T) {
 	require.ErrorIs(t, session.Start(t.TempDir()), ErrSessionNotStarted)
 	require.False(t, session.TeardownInitiated(),
 		"the bound generation answering live proves the teardown did not take")
+}
+
+// TestCloseDoesNotMarkAGenerationThatLostTheName is the next finding: the
+// bound session exited on its own and a replacement already owns the name, so
+// close()'s name-targeted kill-session will hit the replacement. Marking the
+// bound generation anyway would read its unrequested death as the teardown af
+// just asked for.
+func TestCloseDoesNotMarkAGenerationThatLostTheName(t *testing.T) {
+	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+	session, m := boundSession(t, gen)
+	m.nameGen.Store("$9 999 888") // the name now answers for another generation
+
+	_, err := session.Close()
+	require.NoError(t, err)
+	require.False(t, session.TeardownInitiated(),
+		"the kill targets the name's owner, which is not the bound generation — its mark must not land")
+
+	// The bound generation's earlier, unrequested death then reports as the
+	// anomaly it was — not as the request close() just made.
+	m.captureOK.Store(false)
+	infos := captureInfoLog(t)
+	errs := captureErrorLog(t)
+	session.HasUpdated()
+	require.Contains(t, errs.String(), "going silent")
+	require.NotContains(t, infos.String(), "going silent")
+}
+
+// TestCloseMarksTheGenerationTheNameStillResolvesTo is the counterpart: while
+// the name answers for the polled generation, close() marks it exactly as
+// before — the resolution only vetoes a mark that could not describe the
+// session kill-session will reach.
+func TestCloseMarksTheGenerationTheNameStillResolvesTo(t *testing.T) {
+	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+	session, m := boundSession(t, gen)
+	m.nameGen.Store("$5 111 222")
+
+	_, err := session.Close()
+	require.NoError(t, err)
+	require.True(t, session.TeardownInitiated())
+}
+
+// TestWedgedIdentityProbeSpendsOneBudget is the double-timeout finding: a
+// bound monitor whose identity probe consumes the whole command deadline must
+// end the poll on that error — not follow it with a capture-pane that spends
+// a second full budget, which doubles the sequential status loop's worst case
+// per wedged session.
+func TestWedgedIdentityProbeSpendsOneBudget(t *testing.T) {
+	shortTmuxTimeout(t, markTestTimeout)
+	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+	session, m := boundSession(t, gen)
+	m.idWedged.Store(true)
+
+	errs := captureErrorLog(t)
+	session.HasUpdated()
+	require.Equal(t, int32(1), m.idProbeCalls.Load())
+	require.Zero(t, m.captureCalls.Load(),
+		"an identity probe that consumed the deadline must not be followed by a capture spending a second one")
+	require.False(t, session.monitor.dead, "an unanswered probe is unknown — never a latchable death")
+	require.Contains(t, errs.String(), "error capturing pane content")
+}
+
+// TestTransientIdentityProbeFailureStaysRetryable is the misclassification
+// finding: a probe error tmux never answered — an exec-level failure here —
+// is not evidence the generation is gone. The poll must surface it as an
+// ordinary transient and keep the monitor retryable, which is what the
+// recovery half of this test observes.
+func TestTransientIdentityProbeFailureStaysRetryable(t *testing.T) {
+	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+	session, m := boundSession(t, gen)
+	m.idErr.Store(errors.New("fork/exec tmux: resource temporarily unavailable"))
+	m.idErrOn.Store(true)
+
+	errs := captureErrorLog(t)
+	updated, _, _ := session.HasUpdated()
+	require.False(t, updated)
+	require.False(t, session.monitor.dead,
+		"a probe that never produced an answer proves nothing about the generation's fate")
+	require.NotContains(t, errs.String(), "going silent")
+
+	m.idErrOn.Store(false)
+	m.idGen.Store("111 222") // the bound generation answers again
+	updated, _, _ = session.HasUpdated()
+	require.True(t, updated, "the retryable poll recovers once the probe can run again")
+}
+
+// TestUnclassifiedProbeErrorCorroboratesAgainstTheIdList is the finding's
+// middle case: tmux answered the probe with exit 1 but a diagnostic that is
+// neither "can't find session" nor a server-death report. Only the server's
+// own session-id listing settles it — the id still registered means the
+// failure was the probe's, not the generation's.
+func TestUnclassifiedProbeErrorCorroboratesAgainstTheIdList(t *testing.T) {
+	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+	session, m := boundSession(t, gen)
+	m.idErr.Store(exitErrorWithStderr(t, 1, "no current target"))
+	m.idErrOn.Store(true)
+	m.idList.Store("$5\n") // the server still knows the id
+
+	session.HasUpdated()
+	require.False(t, session.monitor.dead,
+		"an unclassified probe error while the id remains registered is a retryable failure, not a death")
+}
+
+// TestUnclassifiedProbeErrorIsDeterminateWhenTheIdIsGone is the same failure
+// with the corroboration coming back empty: the server answers listings but
+// no longer holds the id, so the bound generation is proved gone.
+func TestUnclassifiedProbeErrorIsDeterminateWhenTheIdIsGone(t *testing.T) {
+	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+	session, m := boundSession(t, gen)
+	m.idErr.Store(exitErrorWithStderr(t, 1, "no current target"))
+	m.idErrOn.Store(true)
+
+	errs := captureErrorLog(t)
+	session.HasUpdated()
+	require.True(t, session.monitor.dead,
+		"the server answering with the id unregistered is a proved death")
+	require.Contains(t, errs.String(), "going silent")
+}
+
+// TestBoundGenerationDeathKeepsDialogContext is the lost-context finding: a
+// bound monitor that learns of the generation's death from the identity probe
+// must build the error through sessionGoneError like the capture path does —
+// a dialog af answered moments before the pane vanished is the difference
+// between "the agent exited" and "the agent exited because we told it to".
+func TestBoundGenerationDeathKeepsDialogContext(t *testing.T) {
+	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+	session, m := boundSession(t, gen)
+	m.captureOK.Store(false)
+	session.noteDialogKeystroke(codexDirectoryTrustDialogName, codexDirectoryTrustAffirmative, "Enter")
+
+	errs := captureErrorLog(t)
+	session.HasUpdated() // idGen unset: the id resolves to nothing
+	require.True(t, session.monitor.dead)
+	require.Contains(t, errs.String(),
+		"after af answered its Codex directory-trust dialog by sending Enter",
+		"a generation-mismatch death must carry the same dialog context the capture path reports")
 }

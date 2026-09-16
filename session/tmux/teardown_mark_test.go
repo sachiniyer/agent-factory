@@ -41,9 +41,30 @@ type teardownMarkTmux struct {
 	// Unset answers empty, so monitors stay unbound (the pre-binding shape).
 	nameGen atomic.Value
 	// idGen, when set, is what display-message answers for a $id target:
-	// "pid created" — the identity of whatever currently owns that id. Unset
-	// answers "can't find session": the id resolves to nothing.
+	// "pid created" — the identity of whatever currently owns that id.
+	// Unset answers the missing-id shape real tmux produces: exit 0 with the
+	// server-level fields printed and the session-level ones empty
+	// ("975304 " — measured on tmux 3.4; a dead id and an empty live server
+	// answer identically). That short field list is the probe's determinate
+	// "no session at this id" answer.
 	idGen atomic.Value
+	// idErr, while idErrOn is set, is the identity probe's failure instead of
+	// an answer — an injected error for the paths that must stay retryable
+	// (an exec-level failure) or corroborate through the session listing (an
+	// unclassified exit 1). The gate exists because an atomic.Value cannot
+	// be un-stored, and a transient failure's regression IS the recovery.
+	idErr   atomic.Value
+	idErrOn atomic.Bool
+	// idWedged stalls the identity probe past the shortened deadline, so the
+	// poll's timeout budget is spent on the probe alone.
+	idWedged atomic.Bool
+	// idList, when set, is what `tmux ls -F '#{session_id}'` answers — the
+	// corroborating session-id listing for an unclassified probe failure.
+	idList atomic.Value
+	// captureCalls and idProbeCalls count tmux invocations per verb, so a test
+	// can assert a wedged identity probe never pays a second timeout budget.
+	captureCalls atomic.Int32
+	idProbeCalls atomic.Int32
 	// duringSetup, if set, runs inside Start's post-confirmation set-option call,
 	// between the existence poll and the inner Restore.
 	duringSetup func()
@@ -68,10 +89,16 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 		m.alive.Store(false)
 		return nil, nil
 	case strings.Contains(args, "capture-pane"):
+		m.captureCalls.Add(1)
 		if m.captureOK.Load() {
 			return []byte("pane content"), nil
 		}
 		return nil, errors.New("exit status 1")
+	case strings.Contains(args, " ls "):
+		if v := m.idList.Load(); v != nil {
+			return []byte(v.(string)), nil
+		}
+		return nil, nil
 	case strings.Contains(args, "display-message") && strings.Contains(args, "session_id"):
 		// confirmedGeneration's name-targeted bind probe.
 		if v := m.nameGen.Load(); v != nil {
@@ -80,10 +107,20 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 		return nil, nil
 	case strings.Contains(args, "display-message") && strings.Contains(args, "session_created"):
 		// generationMatches' id-targeted identity probe.
+		m.idProbeCalls.Add(1)
+		if m.idWedged.Load() {
+			time.Sleep(markTestWedge)
+			return nil, errors.New("wedged tmux server never answered the identity probe")
+		}
+		if m.idErrOn.Load() {
+			return nil, m.idErr.Load().(error)
+		}
 		if v := m.idGen.Load(); v != nil {
 			return []byte(v.(string)), nil
 		}
-		return nil, errors.New("can't find session")
+		// The id resolves to nothing: real tmux answers exit 0 with the
+		// server-level field filled and the session-level one empty.
+		return []byte("1 "), nil
 	case strings.Contains(args, "show-options"):
 		// importClientEnvironmentArgs: the ordinary first-session case.
 		return nil, errors.New("no server running")

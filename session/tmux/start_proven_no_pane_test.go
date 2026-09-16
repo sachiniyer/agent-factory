@@ -199,3 +199,56 @@ func TestStart_ProbeDeniedNotAbsent_ProvesNothing(t *testing.T) {
 			"so claiming no pane here would let a teardown delete a live agent's worktree")
 	}
 }
+
+// TestStartAlreadyExistsSkipsResolutionWithoutAMark is the #4473 review
+// finding's regression: the exists gate resolves the name's generation only to
+// clear a bound monitor's teardown mark, so with no mark to clear no
+// display-message may run — the double below has no OutputFunc at all, and any
+// query would panic instead of returning ErrSessionNotStarted.
+func TestStartAlreadyExistsSkipsResolutionWithoutAMark(t *testing.T) {
+	execu := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			for _, a := range c.Args {
+				if a == "has-session" {
+					return nil // answered: the session EXISTS
+				}
+			}
+			return nil
+		},
+	}
+	session := NewTmuxSessionFromSanitizedNameWithDeps("af_4473_no_mark", "claude", NewMockPtyFactory(t), execu)
+	session.monitor = newStatusMonitor() // installed but unmarked
+
+	if err := session.Start(t.TempDir()); !errors.Is(err, ErrSessionNotStarted) {
+		t.Fatalf("expected the already-exists refusal, got: %v", err)
+	}
+}
+
+// TestStartAlreadyExistsClearsAnUnboundMarkWithoutResolving covers the
+// name-scoped mark: the caller's live-name answer is the whole proof an
+// unbound monitor needs, so the clear must not run a resolution query either.
+func TestStartAlreadyExistsClearsAnUnboundMarkWithoutResolving(t *testing.T) {
+	execu := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			for _, a := range c.Args {
+				if a == "has-session" {
+					return nil
+				}
+			}
+			return nil
+		},
+	}
+	session := NewTmuxSessionFromSanitizedNameWithDeps("af_4473_unbound_mark", "claude", NewMockPtyFactory(t), execu)
+	session.monitor = newStatusMonitor()
+	session.markTeardownInitiated()
+	if !session.TeardownInitiated() {
+		t.Fatal("the unbound mark must land before Start runs")
+	}
+
+	if err := session.Start(t.TempDir()); !errors.Is(err, ErrSessionNotStarted) {
+		t.Fatalf("expected the already-exists refusal, got: %v", err)
+	}
+	if session.TeardownInitiated() {
+		t.Fatal("the live-name answer the caller already established discharges a name-scoped mark")
+	}
+}

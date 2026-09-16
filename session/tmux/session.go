@@ -547,14 +547,35 @@ func (t *TmuxSession) TeardownInitiated() bool {
 // (Codex on #4473). An unresolvable live session is not proof either way —
 // the mark stays.
 func (t *TmuxSession) clearTeardownMarkForConfirmedGeneration() {
-	live := t.confirmedGeneration()
+	// Establish whether anything needs clearing BEFORE asking tmux anything:
+	// a monitor with no marked generation owes no resolution, and running the
+	// display-message query unconditionally spends a bounded tmux call on
+	// every exists-gated Start while reaching test doubles that stub only
+	// RunFunc — which is how an already-exists Start panicked on a nil
+	// OutputFunc instead of returning ErrSessionNotStarted (Codex on #4473).
 	t.monitorMu.Lock()
-	defer t.monitorMu.Unlock()
-	if t.monitor == nil || t.monitor.generation == nil {
+	mon := t.monitor
+	if mon == nil || mon.generation == nil || !mon.generation.teardownInitiated {
+		t.monitorMu.Unlock()
 		return
 	}
-	g := t.monitor.generation
-	if g.sessionID != "" && (live == nil || !g.sameAs(live)) {
+	g := mon.generation
+	if g.sessionID == "" {
+		// An unbound monitor's mark is name-scoped, so the live-name answer
+		// the caller already established is the whole proof — there is no id
+		// to resolve and nothing to query.
+		g.teardownInitiated = false
+		g.teardownSettledAt = time.Time{}
+		t.monitorMu.Unlock()
+		return
+	}
+	t.monitorMu.Unlock()
+
+	live := t.confirmedGeneration()
+
+	t.monitorMu.Lock()
+	defer t.monitorMu.Unlock()
+	if live == nil || !g.sameAs(live) {
 		return
 	}
 	g.teardownInitiated = false

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -104,17 +105,44 @@ func newReattachStatusMonitor() *statusMonitor {
 // is polling: there is no one to attribute a disappearance to. An unbound
 // monitor gets an id-less generation to carry the mark — the pre-binding
 // name-scoped behavior.
+//
+// A BOUND monitor is marked only while the name still resolves to its
+// generation: kill-session targets the NAME, so when the name already answers
+// for a different generation this request is aimed at the replacement, not at
+// the bound session that vanished on its own — and marking the bound
+// generation would launder that unrequested death into af's request (Codex on
+// #4473). A name that does not resolve proves nothing either way, so the mark
+// still lands: a server wedged enough to refuse the probe will fail the kill
+// the same way, and the settled-mark path retires a teardown that did not
+// take. The resolution cannot run under monitorMu — it is a tmux command with
+// a deadline, exactly what the lock ordering forbids holding it across.
 func (t *TmuxSession) markTeardownInitiated() *statusMonitor {
 	t.monitorMu.Lock()
-	defer t.monitorMu.Unlock()
-	if t.monitor != nil {
-		if t.monitor.generation == nil {
-			t.monitor.generation = &tmuxGeneration{}
-		}
-		t.monitor.generation.teardownInitiated = true
-		t.monitor.generation.teardownSettledAt = time.Time{}
+	mon := t.monitor
+	t.monitorMu.Unlock()
+	if mon == nil {
+		return nil
 	}
-	return t.monitor
+	if g := mon.generation; g != nil && g.sessionID != "" {
+		if live := t.confirmedGeneration(); live != nil && !g.sameAs(live) {
+			return nil
+		}
+	}
+	t.monitorMu.Lock()
+	defer t.monitorMu.Unlock()
+	// A monitor swapped in while the resolution ran binds the generation its
+	// own restore confirmed at the name — newer evidence than the answer
+	// above — so the mark lands on whatever monitor is current now.
+	mon = t.monitor
+	if mon == nil {
+		return nil
+	}
+	if mon.generation == nil {
+		mon.generation = &tmuxGeneration{}
+	}
+	mon.generation.teardownInitiated = true
+	mon.generation.teardownSettledAt = time.Time{}
+	return mon
 }
 
 // settleTeardown stamps that the asking close() returned on the generation it
@@ -246,11 +274,26 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 	// session forever without ever noticing the polled generation died.
 	// The identity probe asks the id's owner for the server pid and creation
 	// stamp resolved at bind time; a mismatch IS the bound generation's
-	// death. An unanswered probe means a wedged server — unknown, so fall
-	// through to the capture, which takes the ordinary bounded-timeout path.
+	// death. An unanswered probe means a wedged server — unknown, so the
+	// poll ends on the probe's own error rather than doubling the budget on
+	// a capture the server is just as unlikely to answer.
 	if gen != nil && gen.sessionID != "" {
-		if same, known := t.generationMatches(gen); known && !same {
-			err = fmt.Errorf("%w: tmux session id %s no longer resolves to the bound generation", ErrSessionGone, gen.sessionID)
+		switch same, known, probeErr := t.generationMatches(gen); {
+		case known && !same:
+			// Route through the canonical constructor: a hand-built
+			// ErrSessionGone would report a bare disappearance even when af
+			// answered a trust dialog moments before the pane vanished —
+			// the context the error exists to carry (Codex on #4473).
+			err = t.sessionGoneError("identity probe", fmt.Errorf("tmux session id %s no longer resolves to the bound generation", gen.sessionID))
+		case !known:
+			// The probe already spent this poll's tmux command budget
+			// without an answer; capture-pane against the same server would
+			// spend a SECOND one, and the daemon's sequential status loop
+			// cannot afford 2×tmuxCommandTimeout per wedged session (Codex
+			// on #4473). The probe's own error stands in for the capture's:
+			// generationMatches never reports it as ErrSessionGone, so the
+			// monitor stays retryable and the dead latch stays unset.
+			err = probeErr
 		}
 	}
 	if err == nil {
@@ -429,7 +472,7 @@ func (t *TmuxSession) captureTargetAliveOrUnknown(gen *tmuxGeneration) bool {
 	if gen == nil || gen.sessionID == "" {
 		return t.ExistsOrUnknown()
 	}
-	same, known := t.generationMatches(gen)
+	same, known, _ := t.generationMatches(gen)
 	if !known {
 		return true
 	}
@@ -462,25 +505,63 @@ func (t *TmuxSession) confirmedGeneration() *tmuxGeneration {
 // still gen itself: the id is asked for the server pid and creation stamp
 // resolved when the generation was confirmed, and any mismatch means the id
 // was reissued — the bound generation is gone even though a session answers.
-// Three answers, like the name probes: (false, false) on a timed-out probe,
-// because a wedged server is no evidence of the generation's fate.
-func (t *TmuxSession) generationMatches(gen *tmuxGeneration) (same bool, known bool) {
+//
+// Three answers, like the name probes, with the error carried so the caller
+// can spend its budget instead of a second command: (false, false, err) when
+// the probe never got an answer — timeout, exec-level failure, or any error
+// that is not tmux's own absence report — because a read that did not happen
+// is no evidence of the generation's fate (Codex on #4473). Only two outcomes
+// are determinate GONE: tmux PROVING the id resolves to nothing
+// (provedGenerationAbsent, which includes a definitively dead server), and a
+// successful answer with no session_created. display-message -t resolves a
+// missing target to an EMPTY session context rather than erroring — server
+// fields still print while session fields come back blank (measured on tmux
+// 3.4: a dead $id and an empty live server both answer "975304 " for this
+// format) — so a short field list IS tmux's "no session there" for this
+// probe, not a parse hiccup.
+func (t *TmuxSession) generationMatches(gen *tmuxGeneration) (same bool, known bool, err error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	out, err := t.outputTmuxBounded(ctx, "display-message", "-p",
+	out, runErr := t.outputTmuxBounded(ctx, "display-message", "-p",
 		"-t", gen.sessionID,
 		"#{pid} #{session_created}")
-	if err != nil {
+	if runErr != nil {
 		if ctx.Err() != nil {
-			return false, false
+			return false, false, fmt.Errorf("%w: display-message after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		return false, true
+		if t.provedGenerationAbsent(gen, runErr) {
+			return false, true, nil
+		}
+		return false, false, fmt.Errorf("generation probe for %s did not return a usable answer%s: %w",
+			gen.sessionID, tmuxDiagnosticSuffix(runErr), runErr)
 	}
 	f := strings.Fields(strings.TrimSpace(string(out)))
 	if len(f) < 2 {
-		return false, true
+		return false, true, nil
 	}
-	return f[0] == gen.serverPID && f[1] == gen.created, true
+	return f[0] == gen.serverPID && f[1] == gen.created, true, nil
+}
+
+// provedGenerationAbsent is tmuxProvedSessionAbsent's contract applied to an
+// ID target: a failed identity probe counts as determinate death only when
+// tmux itself answered "can't find session: $id" or proved the server gone —
+// and, for an exit-1 diagnostic that names neither, when the server's own
+// session-id listing corroborates the id is unregistered. A listing that
+// still contains the id — or cannot answer — leaves the failure unknown and
+// retryable: the bound generation may be alive behind a probe that merely
+// could not run (Codex on #4473).
+func (t *TmuxSession) provedGenerationAbsent(gen *tmuxGeneration, runErr error) bool {
+	if missingTmuxSession(runErr, gen.sessionID) {
+		return true
+	}
+	if _, exitOne := tmuxExitOneDiagnostic(runErr); !exitOne {
+		return false
+	}
+	ids, listErr := listSessionIDs(t.cmdExec)
+	if listErr != nil {
+		return false
+	}
+	return !slices.Contains(ids, gen.sessionID)
 }
 
 // CaptureVisiblePaneGrid captures the visible pane as a GRID — one output line per
