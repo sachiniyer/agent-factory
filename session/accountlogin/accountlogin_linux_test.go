@@ -510,29 +510,27 @@ func occupyLoginPaneName(t *testing.T, agent, name string) {
 // credential that is already there, or a flow that answers itself. tmux.Start
 // reports that as a pane that vanished, worded for a broken install; af has to
 // tell the two apart by the ACCOUNT, not by the launch error.
+//
+// The fixture is a REAL launched flow: the shim writes the credential the
+// agent's own flow would leave and exits, so the pane dies inside tmux.Start's
+// probe sequence — the exact shape the finding is about. Staging the artifact
+// and blocking the name instead would exercise the collision path, not this
+// one (#4217 review).
 func TestLoginReportsAFlowThatEndedBeforeTheHandover(t *testing.T) {
 	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	binDir := t.TempDir()
-	dir, err := agentaccount.Register(home, "codex", "work")
-	if err != nil {
-		t.Fatalf("register account: %v", err)
-	}
-	// The credential a self-answering flow would have left. af only stats the
-	// artifact — it never opens it — so staging it here is the same evidence
-	// the pane's own write would leave.
-	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte("{}"), 0o600); err != nil {
-		t.Fatalf("stage credential: %v", err)
-	}
-	// codex has to resolve on PATH for Start's agent check, but the pane's
-	// name is already taken, so the program never runs.
-	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	// The agent's own flow against an already-provisioned account: write the
+	// credential the login command would leave, then exit — the pane is gone
+	// before af's handover. CODEX_HOME is the account root the login boundary
+	// injects, which is where codex writes auth.json.
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte(
+		"#!/bin/sh\nprintf '{}' > \"$CODEX_HOME/auth.json\"\n"), 0o700); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	occupyLoginPaneName(t, "codex", "work")
 
 	supervisor := New()
 	t.Cleanup(supervisor.Stop)
@@ -551,6 +549,45 @@ func TestLoginReportsAFlowThatEndedBeforeTheHandover(t *testing.T) {
 	}
 }
 
+// TestLoginDoesNotCreditACollisionAsACompletedFlow is the misread adopt's
+// contract names: a same-named pane this home cannot prove ownership of blocks
+// the launch entirely, so the flow never ran — and the account's artifact,
+// left by some earlier flow, must not turn that collision into a reported
+// completion (#4217 review).
+func TestLoginDoesNotCreditACollisionAsACompletedFlow(t *testing.T) {
+	isolateLoginTmux(t)
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	binDir := t.TempDir()
+	dir, err := agentaccount.Register(home, "codex", "work")
+	if err != nil {
+		t.Fatalf("register account: %v", err)
+	}
+	// The artifact some earlier flow left — stale evidence the collision must
+	// not be allowed to spend.
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("stage credential: %v", err)
+	}
+	// codex has to resolve on PATH for Start's agent check, but the pane's
+	// name is already taken, so the program never runs.
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	occupyLoginPaneName(t, "codex", "work")
+
+	supervisor := New()
+	t.Cleanup(supervisor.Stop)
+	_, err = supervisor.Start(context.Background(), Request{Home: home, Agent: "codex", Name: "work"})
+	if err == nil {
+		t.Fatal("a name collision with a markerless foreign pane was reported as a completed login")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("the collision must be reported as a collision, not as the finished flow the artifact suggests: %v", err)
+	}
+}
+
 // TestLoginReportsANoOpAsFailure is #3384's verification requirement at its
 // sharpest: a flow that exits leaving the account empty must report failure. The
 // alternative is a registered account that looks fine and fails much later, at
@@ -563,14 +600,13 @@ func TestLoginReportsANoOpAsFailure(t *testing.T) {
 	binDir := t.TempDir()
 	// Exits 0 and writes nothing: the shape of an OAuth flow the user abandoned
 	// at the browser step, which several of these CLIs report as success. The
-	// pane never runs — the name is already taken — because what is pinned here
-	// is finishedOrFailed's answer to a Start failure against an empty account,
-	// and staging that failure as a collision takes pane-exit timing out of it.
+	// pane really launches and dies inside tmux.Start's probe sequence — a
+	// staged name collision would exercise the collision path instead of this
+	// one (#4217 review).
 	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	occupyLoginPaneName(t, "codex", "work")
 
 	supervisor := New()
 	t.Cleanup(supervisor.Stop)

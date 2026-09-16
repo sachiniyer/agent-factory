@@ -393,6 +393,32 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 	// 0700 directory af created, outside any temp dir (codex refuses to create
 	// helper binaries under /tmp), and it is the directory the flow is about.
 	if err := pane.Start(dir); err != nil {
+		// A same-named session that survives the launch failure is not "a flow
+		// that ended" — it is a pane blocking the launch entirely, so the flow
+		// never ran and the account's artifact must not be credited to it.
+		// Re-running adopt answers all three cases with the same ownership
+		// primitive the pre-Start check used: provably-ours is joined like any
+		// open flow, proven-foreign is refused by name, and anything left that
+		// still holds the name is the markerless collision adopt's contract
+		// warns finishedOrFailed about (#4217 review).
+		if existing, foreignBlocked := s.adopt(req.Home, req.Agent, req.Name, pane); existing != nil {
+			out := base
+			out.Reused = true
+			out.TmuxName = existing.SanitizedName()
+			out.SocketPath = socketPath(ctx, existing)
+			return out, nil
+		} else if foreignBlocked {
+			return Session{}, fmt.Errorf(
+				"cannot start the %s login flow for account %q: a pane named %s already exists on the shared tmux server "+
+					"and is owned by a different agent-factory home — stop the conflicting flow first or use a distinct {agent, name}",
+				req.Agent, req.Name, pane.SanitizedName())
+		} else if exists, known := pane.ProbeSession(); known && exists {
+			return Session{}, fmt.Errorf(
+				"cannot start the %s login flow for account %q: a pane named %s already exists on the shared tmux server "+
+					"and its owning home cannot be proven — stop the conflicting flow first or use a distinct {agent, name} "+
+					"(underlying launch error: %w)",
+				req.Agent, req.Name, pane.SanitizedName(), err)
+		}
 		return finishedOrFailed(req, base, err)
 	}
 	// The name tmux actually knows — sanitized, with the af_ prefix — not the one

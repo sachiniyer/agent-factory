@@ -384,11 +384,39 @@ test("the visual gate diffs stills against committed goldens and cannot regenera
     "a plain CI run must reach the script — the guard is about the update variables, not CI");
   assert.equal(runGuard({ AF_UPDATE_GOLDENS: "1" }).status, 0,
     "a human-run update outside CI is the path the guard exists to keep");
+  // The TypeScript guards get the same treatment as the shell guard above:
+  // EXECUTE the config under each environment combination rather than assert
+  // its source text — a regex still passes while the line is commented out or
+  // evaluates as dead code. The module body is evaluated verbatim with its two
+  // imports stubbed, so every guard statement runs at its real position and
+  // updateSnapshots is resolved by the file's own expression. A refactor that
+  // moves the logic behind a shape the replaces miss leaves `import` or
+  // `export` tokens behind and the Function constructor throws — the test
+  // fails loudly instead of passing on a stale pattern.
   const visual = fs.readFileSync(path.join(__dirname, "..", "..", "web/playwright.visual.config.ts"), "utf8");
-  assert.match(visual, /process\.env\.CI && process\.env\.AF_UPDATE_GOLDENS === "1"\) throw/);
-  assert.match(
-    visual,
-    /updateSnapshots: process\.env\.AF_UPDATE_GOLDENS === "1" \? "all" : "none"/,
-    "CI must always diff against the committed goldens (updateSnapshots: none) — update mode belongs to AF_UPDATE_GOLDENS runs a human reviews",
+  const loadVisualConfig = (env) => new Function(
+    "process",
+    "defineConfig",
+    "demo",
+    visual
+      .replace(/import \{ defineConfig \} from "@playwright\/test";/, "")
+      .replace(/import demo from "\.\/playwright\.demo\.config\.js";/, "")
+      .replace(/export default /, "return "),
+  )({ env }, (base, over) => ({ ...base, ...over }), {});
+  assert.throws(
+    () => loadVisualConfig({ AF_PERF_MODE: "1", CI: "1", AF_UPDATE_GOLDENS: "1" }),
+    /CI cannot update goldens/,
+    "CI + AF_UPDATE_GOLDENS must be refused by the config's own guard",
   );
+  assert.throws(
+    () => loadVisualConfig({ CI: "1", AF_UPDATE_GOLDENS: "1" }),
+    /testbox\.sh perf/,
+    "the perf-mode guard fires before the CI guard ever matters",
+  );
+  assert.equal(loadVisualConfig({ AF_PERF_MODE: "1", CI: "1" }).updateSnapshots, "none",
+    "CI must always diff against the committed goldens (updateSnapshots: none)");
+  assert.equal(loadVisualConfig({ AF_PERF_MODE: "1" }).updateSnapshots, "none",
+    "a plain human run diffs; it does not rewrite baselines");
+  assert.equal(loadVisualConfig({ AF_PERF_MODE: "1", AF_UPDATE_GOLDENS: "1" }).updateSnapshots, "all",
+    "update mode belongs to AF_UPDATE_GOLDENS runs a human reviews");
 });
