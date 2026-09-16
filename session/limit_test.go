@@ -395,6 +395,83 @@ func TestParkManualAccountSwapAtLimitStampsTheObservationTime(t *testing.T) {
 	require.True(t, i.AccountLimitObservations()[0].ObservedAt.Equal(observed))
 }
 
+// A poll observation that moves the session OFF the wall — the agent answered
+// again, or the runtime was declared lost — ends the sighting episode: the
+// stamp belongs to the wall that produced it, and the next wall must stamp its
+// own first sighting rather than inherit this one's date (#4361 review).
+// ObserveLiveness is the edge every such departure routes through: the daemon
+// poll's settles, the remote-loss path's LiveLost, and the client reconcile
+// mirroring either.
+func TestObserveLivenessLeavingTheWallDropsItsObservationTime(t *testing.T) {
+	first := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	second := first.Add(2 * time.Hour)
+	oldClock := instanceNow
+	instanceNow = func() time.Time { return first }
+	t.Cleanup(func() { instanceNow = oldClock })
+
+	i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+	i.SetLimitReached(first.Add(5 * 24 * time.Hour))
+	require.True(t, i.limitObservedAt.Equal(first))
+
+	require.NoError(t, i.Transition(ObserveLiveness(LiveRunning)))
+	require.True(t, i.limitObservedAt.IsZero(),
+		"leaving the wall must drop its sighting time — it belongs to that wall")
+	require.True(t, i.limitResetAt.IsZero())
+
+	// The next wall is a new episode: it stamps its own first sighting.
+	instanceNow = func() time.Time { return second }
+	i.SetLimitReached(second.Add(24 * time.Hour))
+	require.True(t, i.limitObservedAt.Equal(second),
+		"a wall after the cleared episode must stamp its own sighting, got %v", i.limitObservedAt)
+}
+
+// Re-applying the SAME liveness through the daemon-truth edge is not a
+// departure: the client reconcile mirrors LiveLimitReached onto a row already
+// parked there, and dropping the stamp on that no-op edge would clear the
+// sighting the snapshot just carried (#4361 review).
+func TestObserveLivenessReappliedOnTheWallKeepsItsObservationTime(t *testing.T) {
+	observed := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	oldClock := instanceNow
+	instanceNow = func() time.Time { return observed }
+	t.Cleanup(func() { instanceNow = oldClock })
+
+	i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+	i.SetLimitReached(observed.Add(5 * 24 * time.Hour))
+
+	require.NoError(t, i.Transition(ObserveLiveness(LiveLimitReached)))
+	require.True(t, i.limitObservedAt.Equal(observed),
+		"re-observing the same wall is not a departure — the stamp stays")
+}
+
+// The account evidence's last-seen refresh is quantized (#4361 review): a
+// sighting inside the quantum keeps the recorded stamp, so a poll ticking
+// every few seconds cannot force a durable write per tick; a sighting past the
+// quantum re-dates the wall — and the persist gate's evidence compare makes
+// that re-dating reach disk.
+func TestRepeatObservationRefreshIsQuantized(t *testing.T) {
+	first := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	inside := first.Add(accountObservationRefreshQuantum - time.Second)
+	past := first.Add(accountObservationRefreshQuantum + time.Second)
+	oldClock := instanceNow
+	instanceNow = func() time.Time { return first }
+	t.Cleanup(func() { instanceNow = oldClock })
+
+	i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+	i.SetLimitReached(first.Add(5 * 24 * time.Hour))
+	i.ClearLimitReached()
+
+	instanceNow = func() time.Time { return inside }
+	i.SetLimitReached(first.Add(5 * 24 * time.Hour))
+	require.True(t, i.AccountLimitObservations()[0].ObservedAt.Equal(first),
+		"a repeat sighting inside the quantum must not re-date the evidence")
+
+	i.ClearLimitReached()
+	instanceNow = func() time.Time { return past }
+	i.SetLimitReached(first.Add(5 * 24 * time.Hour))
+	require.True(t, i.AccountLimitObservations()[0].ObservedAt.Equal(past),
+		"a sighting past the quantum refreshes when af last saw the wall")
+}
+
 // A repeat sighting of the same account wall refreshes when af last saw it,
 // while the conservative reset merge still keeps the safer boundary.
 func TestRepeatObservationRefreshesTheSightingNotTheReset(t *testing.T) {

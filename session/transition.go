@@ -318,6 +318,11 @@ const (
 	limitResetKeep limitResetEffect = iota
 	limitResetClear
 	limitResetFromEvent
+	// limitResetOnLeave drops the current wall's metadata only when the edge
+	// LEAVES LiveLimitReached (#4361 review): the fields describe that wall, so
+	// re-observing it keeps them while moving off ends the episode — re-arming
+	// limitObservedAt's first-sighting stamp for the next wall.
+	limitResetOnLeave
 )
 
 // edgeSpec is one row of the allowed-edge table: which from-states an event is
@@ -398,6 +403,15 @@ var transitionTable = map[transitionKind]edgeSpec{
 		// alone — Lost in particular must not decide anything, since a finished and an
 		// interrupted run are indistinguishable once lost.
 		run: runEndsOnIdleEdge,
+		// The daemon-truth edge is also the poll's way OFF the wall: a session
+		// observed working again settles LiveRunning while its wall metadata —
+		// including the first-sighting stamp — is still parked. Keeping it would
+		// misdate the next wall's observation to this episode; clearing re-arms
+		// the zero edge the stamp keys on (#4361 review). The resume path never
+		// routes through here — ClearLimitReached's own clear and the op-owned
+		// ConfirmLive/ReparkLimitUnderResumeFence sequence carry the same wall
+		// across the respawn deliberately.
+		limitReset: limitResetOnLeave,
 	},
 	tkBeginKill: {
 		// Always legal: a kill supersedes any in-flight op (see BeginKill doc). I1
@@ -652,6 +666,11 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		i.limitObservedAt = time.Time{}
 	case limitResetFromEvent:
 		i.limitResetAt = ev.resetAt
+	case limitResetOnLeave:
+		if from.liveness == LiveLimitReached && to.liveness != LiveLimitReached {
+			i.limitResetAt = time.Time{}
+			i.limitObservedAt = time.Time{}
+		}
 	}
 	if ev.kind == tkParkHandoff {
 		// The incoming runtime, not the retired predecessor, produced this wall.

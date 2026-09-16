@@ -323,6 +323,7 @@ func (m *Manager) settleRemoteProbeFailure(
 	before session.Liveness,
 	beforeReset time.Time,
 	beforeObserved time.Time,
+	beforeAccountEvidence []session.AccountLimitObservationData,
 	epoch uint64,
 ) {
 	if !isRemoteWorkspace(instance) {
@@ -371,7 +372,7 @@ func (m *Manager) settleRemoteProbeFailure(
 		return
 	}
 	_ = instance.Transition(session.ObserveLiveness(session.LiveLost).AtEpoch(epoch))
-	m.persistPollChange(repoID, instance, before, beforeReset, beforeObserved, false)
+	m.persistPollChange(repoID, instance, before, beforeReset, beforeObserved, beforeAccountEvidence, false)
 }
 
 // livenessProbe is the outcome of a liveness probe. It is a tri-state, not a

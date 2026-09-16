@@ -417,10 +417,12 @@ func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
 	m.configPane.SetFocus(true)
 	m.layoutPaneOverlays()
 	m.state = stateConfigEditor
+	// Arm the bounded Usage refresh (#4361 review): the report changes behind
+	// the overlay while it stays open, and nothing else re-reads it.
 	if apiclient.IsRemoteTarget() {
-		return m, m.remoteSectionsLoadCmd()
+		return m, tea.Batch(m.remoteSectionsLoadCmd(), m.usageRefreshTickCmd())
 	}
-	return m, nil
+	return m, m.usageRefreshTickCmd()
 }
 
 // handleStateConfigEditor routes key events to the config editor overlay. Esc

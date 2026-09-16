@@ -241,6 +241,8 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case usageLoadedMsg:
 		m.handleUsageLoaded(msg)
 		return m, nil
+	case usageRefreshTickMsg:
+		return m, m.refreshUsageSection(msg)
 	case accountRegisteredMsg:
 		return m, m.handleAccountRegistered(msg)
 	case accountLoginStartedMsg:

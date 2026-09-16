@@ -122,6 +122,46 @@ func TestUsageRowsNavigateForScrollButStayInert(t *testing.T) {
 	}
 }
 
+// The framing note is itself scrollable, one wrapped line per row (#4361
+// review): hung under the nonselectable heading, a note taller than the window
+// could never bring its middle lines on screen — the cursor is the only
+// scroll this pane has. Every note line must be individually reachable by j.
+func TestUsageNoteLinesAreScrollAnchors(t *testing.T) {
+	pane := NewConfigPane()
+	pane.SetSize(60, 12) // deliberately short: the wrapped note exceeds the window
+	pane.SetEntries([]config.ConfigEntry{{
+		Key: "default_program", Value: "claude", Purpose: "p", Tier: 1,
+	}}, "/tmp/config.toml")
+	pane.SetUsage(stubUsageReport(), nil)
+	pane.SetFocus(true)
+
+	noteRows := 0
+	for _, row := range pane.rows {
+		if row.usageNote != nil {
+			noteRows++
+		}
+	}
+	if noteRows == 0 {
+		t.Fatal("the section produced no anchored note lines")
+	}
+	landed := 0
+	pane.selectedIdx = 0
+	pane.clampSelection()
+	for {
+		if pane.rows[pane.selectedIdx].usageNote != nil {
+			landed++
+		}
+		before := pane.selectedIdx
+		pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		if pane.selectedIdx == before {
+			break
+		}
+	}
+	if landed != noteRows {
+		t.Fatalf("j reached %d of %d note lines — an unanchored line can never scroll on screen", landed, noteRows)
+	}
+}
+
 // A failed read is a failure line, not an empty section — "no rows" and
 // "cannot read" need different actions from the operator, and rendering one as
 // the other is how a dead daemon reads as a healthy host.

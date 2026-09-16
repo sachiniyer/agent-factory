@@ -116,20 +116,27 @@ type configRow struct {
 	// window is otherwise unreachable — but it answers no key, so enter still
 	// opens nothing.
 	usage *quota.Row
+	// usageNote is one line of the Usage section's framing — the gloss, the
+	// report's note, a caveat, or the loading/failure block — emitted as its
+	// own row for the same reason usage rows are (#4361 review): hung under
+	// the nonselectable heading, a wrapped note taller than the window could
+	// never scroll its middle into view. One line per row is what gives every
+	// line a scroll anchor.
+	usageNote *string
 }
 
 // isSelectable reports whether the cursor may land on this row. Every manifest
-// entry is editable since #3345; only tier headings are skipped. Usage rows
-// are selectable for SCROLLING alone (#4361 review): a Usage section taller
-// than the window has no selectable row inside it otherwise, so its middle
-// lines could never be brought on screen. Landing on one still does nothing —
+// entry is editable since #3345; only tier headings are skipped. Usage rows —
+// and each note line under the section — are selectable for SCROLLING alone
+// (#4361 review): a Usage section taller than the window has no selectable row
+// inside it otherwise, so its middle lines could never be brought on screen. Landing on one still does nothing —
 // beginEdit no-ops without an entry. A pre-#3345 daemon may reject a newly
 // supported structured save during version skew; that rejection stays visible
 // in this real field. Turning the row read-only would restore the class #3345
 // explicitly removed, while a local-write fallback would bypass the running
 // daemon's lifecycle admission gate.
 func (r configRow) isSelectable() bool {
-	return r.entry != nil || r.account != nil || r.usage != nil
+	return r.entry != nil || r.account != nil || r.usage != nil || r.usageNote != nil
 }
 
 var (
@@ -181,6 +188,10 @@ func (c *ConfigPane) SetSize(width, height int) {
 	c.width = width
 	c.height = height
 	c.sizeEditField()
+	// The Usage section's note lines are baked into rows at rebuild time
+	// (#4361 review): a resize changes where each one wraps, so the row list
+	// must be re-flattened rather than re-rendered from a stale wrap.
+	c.rebuildRows()
 }
 
 func (c *ConfigPane) HasFocus() bool { return c.hasFocus }
@@ -563,14 +574,17 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 		case row.usage != nil:
 			rendered := c.renderUsageRow(*row.usage, i == c.selectedIdx)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
+		case row.usageNote != nil:
+			cursor := "  "
+			if i == c.selectedIdx {
+				cursor = SelectionMarker("› ")
+			}
+			lines = append(lines, c.fitPaneLine(cursor+*row.usageNote))
 		case row.entry != nil:
 			rendered := c.renderEntryRow(i, row, *row.entry)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
 		default:
 			lines = append(lines, configHeadingStyle.Render(row.heading))
-			if row.heading == usageHeading {
-				lines = append(lines, c.renderUsageHeadingLines()...)
-			}
 			if row.heading == accountsHeading {
 				if c.accounts.loading {
 					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("Loading accounts…", configHintStyle), "\n"), "\n")...)

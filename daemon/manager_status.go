@@ -324,6 +324,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
 	beforeObserved, _ := instance.LimitObservedAt()
+	beforeAccountEvidence := instance.AccountLimitObservations()
 	taskRunWasActive := instance.TaskRunActive()
 	// Paired with the op axis, and skipped on, for the same reason as the plain poll
 	// (#2997). This is a SECOND path out of refreshInstanceStatus and it returns
@@ -354,14 +355,14 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	if obs.Baseline || obs.Updated || obs.HasPrompt {
 		// Updated/prompt proves the run remains active; a baseline cannot establish
 		// that it finished. Either way, the cap has no completion to learn this tick.
-		m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, beforeObserved, projectionChanged, churnCheckpoint)
+		m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, beforeObserved, beforeAccountEvidence, projectionChanged, churnCheckpoint)
 		return
 	}
 	// Idle output. The normal poll would probe liveness here to tell a healthy idle
 	// session from a vanished one; this path deliberately does not, because it must
 	// never conclude death. The attach already answers that question.
 	m.resolveIdleLiveness(instance, obs.Content, epoch)
-	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, beforeObserved, projectionChanged, churnCheckpoint)
+	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, beforeObserved, beforeAccountEvidence, projectionChanged, churnCheckpoint)
 	// The run may have just ended here, on the one path that cannot act on it: the
 	// attach owns this session's tmux. Park the declared lifecycle so the first
 	// unpaused tick applies it, instead of losing the edge entirely (#2595).
@@ -549,6 +550,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
 	beforeObserved, _ := instance.LimitObservedAt()
+	beforeAccountEvidence := instance.AccountLimitObservations()
 	// The task run's own in-flight marker, captured beside the liveness it will be
 	// compared against. Reading it here rather than deriving it later is what makes
 	// the completion edge observable: taskRunActive flips true→false exactly once,
@@ -595,6 +597,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			before,
 			beforeReset,
 			beforeObserved,
+			beforeAccountEvidence,
 			epoch,
 		)
 		return
@@ -693,7 +696,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	}
 
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.
-	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, beforeObserved, projectionChanged, settlementCheckpoint)
+	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, beforeObserved, beforeAccountEvidence, projectionChanged, settlementCheckpoint)
 
 	// The run this session was spawned for may have just finished on the idle edge
 	// above. Apply the owning task's declared lifecycle (#2595) — last, after the

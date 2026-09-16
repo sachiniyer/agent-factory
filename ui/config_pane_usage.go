@@ -70,9 +70,17 @@ func (c *ConfigPane) SetUsage(resp daemon.QuotaReportResponse, err error) {
 }
 
 // SetUsageLoading clears an earlier opening's rows while a remote read runs.
+// The flag must be set BEFORE rebuildRows: the heading lines are baked into
+// rows at rebuild time (#4361 review), so toggling it afterwards would leave
+// the stale state rendered until the next rebuild.
 func (c *ConfigPane) SetUsageLoading() {
-	c.SetUsage(daemon.QuotaReportResponse{}, nil)
 	c.usage.loading = true
+	c.usage.loaded = true
+	c.usage.unavailable = ""
+	c.usage.rows = nil
+	c.usage.note = ""
+	c.usage.caveats = nil
+	c.rebuildRows()
 }
 
 // UsageLoaded reports whether the section has been initialized. Before the
@@ -84,20 +92,29 @@ func (c *ConfigPane) UsageLoaded() bool { return c.usage.loaded }
 // config tiers and the Accounts section. Usage rows answer no key — they are
 // evidence, not editable state — but the cursor may park on one, because the
 // cursor is this pane's only scroll and a tall section must stay reachable.
+// The heading's note lines flatten the same way — one row per wrapped line —
+// so a note taller than the window still scrolls every line into view (#4361
+// review).
 func (c *ConfigPane) appendUsageRows() {
 	if !c.usage.loaded {
 		return
 	}
 	c.rows = append(c.rows, configRow{heading: usageHeading})
+	for _, line := range c.usageHeadingLines() {
+		line := line
+		c.rows = append(c.rows, configRow{usageNote: &line})
+	}
 	for i := range c.usage.rows {
 		row := c.usage.rows[i]
 		c.rows = append(c.rows, configRow{usage: &row})
 	}
 }
 
-// renderUsageHeadingLines renders everything under the Usage heading that is
-// not a row: the loading/failure states, the framing note, and the caveats.
-func (c *ConfigPane) renderUsageHeadingLines() []string {
+// usageHeadingLines renders everything under the Usage heading that is not a
+// report row: the loading/failure states, the framing note, and the caveats.
+// Called at rebuild time — each line becomes its own scroll-anchored row — so
+// the wrapping is as of the current width and SetSize rebuilds (#4361 review).
+func (c *ConfigPane) usageHeadingLines() []string {
 	var lines []string
 	split := func(s string) {
 		lines = append(lines, strings.Split(strings.TrimSuffix(s, "\n"), "\n")...)

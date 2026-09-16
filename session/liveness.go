@@ -572,6 +572,16 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	return true
 }
 
+// accountObservationRefreshQuantum bounds how often a REPEAT sighting re-dates
+// durable account evidence (#4361 review): the poll ticks over a parked session
+// every few seconds, and every stamp it advances is a row the daemon's persist
+// gate durably writes — unquantized, "last seen" costs one write per tick per
+// parked session for as long as it sits at its wall. The quantum keeps the
+// last-seen fact honest at the granularity the quota report displays while
+// bounding the write cadence; a stamp older than the quantum refreshes, so the
+// record still cannot read days fresh while it is actually days stale.
+const accountObservationRefreshQuantum = 5 * time.Minute
+
 func (i *Instance) recordAccountLimitObservationLocked(agent, account string, resetAt time.Time) {
 	if agent == "" || account == "" {
 		return
@@ -580,9 +590,14 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 		observation := &i.accountLimitObservations[idx]
 		if observation.Agent == agent && observation.Account == account {
 			// A repeat sighting refreshes WHEN af last saw this wall (#4361);
-			// the conservative reset merge keeps the safer boundary.
+			// the conservative reset merge keeps the safer boundary. The refresh
+			// is quantized so each re-dating is one the persist gate durably
+			// checkpoints rather than a per-tick memory-only advance (#4361
+			// review).
 			observation.ResetAt = RetainedAccountLimitReset(observation.ResetAt, resetAt)
-			observation.ObservedAt = instanceNow()
+			if instanceNow().Sub(observation.ObservedAt) >= accountObservationRefreshQuantum {
+				observation.ObservedAt = instanceNow()
+			}
 			i.touchLocked()
 			return
 		}

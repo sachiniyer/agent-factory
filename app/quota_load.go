@@ -1,6 +1,9 @@
 package app
 
 import (
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
@@ -50,4 +53,62 @@ func (m *home) applyUsageToPane(resp daemon.QuotaReportResponse, err error) {
 		return
 	}
 	m.configPane.SetUsage(resp, nil)
+}
+
+// usagePollInterval is the bounded refresh cadence for the Usage section while
+// the config overlay stays open (#4361 review) — the same one-minute tick the
+// web rail polls the same report on (web/src/index.ts TASK_HEALTH_POLL_MS).
+const usagePollInterval = time.Minute
+
+// usageRefreshTickMsg fires the bounded Usage-section refresh (#4361 review):
+// a session reaching or clearing a wall, being killed, or being created while
+// the overlay stays open changes the report behind the pane, and the relative
+// times ("just now", "in 5m") never advance at all on an open-only read. The
+// message carries the open's generation so a re-opened pane runs exactly one
+// refresh chain: an older chain's tick dies on its next edge.
+type usageRefreshTickMsg struct {
+	generation uint64
+}
+
+// usageRefreshTickCmd schedules the next refresh edge, tagged with the open's
+// usage generation. The loop is bounded by the overlay's lifetime rather than
+// cancelled: each tick re-arms only while the pane is still open and focused,
+// so a tick landing after close is a no-op instead of a timer to reap.
+func (m *home) usageRefreshTickCmd() tea.Cmd {
+	generation := m.usageGeneration
+	return tea.Tick(usagePollInterval, func(time.Time) tea.Msg {
+		return usageRefreshTickMsg{generation: generation}
+	})
+}
+
+// refreshUsageSection answers one usageRefreshTickMsg: while the config editor
+// is still open and focused it re-reads the report and re-arms; once the pane
+// closes — or a newer open superseded this chain — the chain ends. The remote
+// refresh is generation-fenced and deliberately skips SetUsageLoading: a
+// refresh keeps the rows it already has until the answer lands rather than
+// blinking the section to "Loading…" once a minute.
+func (m *home) refreshUsageSection(msg usageRefreshTickMsg) tea.Cmd {
+	if m.state != stateConfigEditor || !m.configPane.HasFocus() || msg.generation != m.usageGeneration {
+		return nil
+	}
+	var refresh tea.Cmd
+	if apiclient.IsRemoteTarget() {
+		m.usageGeneration++ // this read supersedes any still in flight
+		refresh = m.remoteUsageLoadCmd()
+	} else {
+		m.loadUsageIntoPane()
+	}
+	return tea.Batch(refresh, m.usageRefreshTickCmd())
+}
+
+// remoteUsageLoadCmd refetches only the Usage section off the UI loop — the
+// bounded refresh's read (#4361 review). It carries this dispatch's generation
+// so a stale completion cannot overwrite a newer read's rows.
+func (m *home) remoteUsageLoadCmd() tea.Cmd {
+	usageGeneration := m.usageGeneration
+	report := quotaReportForPane
+	return func() tea.Msg {
+		usage, err := report(daemon.QuotaReportRequest{})
+		return usageLoadedMsg{generation: usageGeneration, usage: usage, err: err}
+	}
 }
