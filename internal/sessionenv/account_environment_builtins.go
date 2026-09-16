@@ -1053,13 +1053,56 @@ func (t *taintAccumulator) Tainted() map[string]struct{} {
 // taint when the new value is provably clean, implementing reaching-assignment
 // semantics: `x=$(cmd); x=0; : $((x))` is allowed because `x=0` overwrites
 // the tainted value before the arithmetic.
+//
+// Only an unindexed, non-append assignment that fully replaces the variable's
+// value is allowed to clear taint. An append (`x+=0`) only prepends/appends
+// to the existing value, so `x=$(printf CODEX_HOME=1); x+=0` still leaves `x`
+// tainted. An indexed assignment (`x[1]=0`) does not overwrite `x[0]`.
+//
+// Command-local (prefix) assignments — `Assign` nodes attached to a CallExpr
+// that have a non-nil command (Assigns on CallExpr.Assigns) — only affect the
+// child process's environment, not the parent's. These are distinguished by
+// their position inside a CallExpr; since AddStmt walks raw syntax nodes the
+// caller is responsible for not feeding prefix assignments through this path.
+// The walk skips them by not entering CallExpr bodies.
 func (t *taintAccumulator) AddStmt(node syntax.Node) {
 	syntax.Walk(node, func(n syntax.Node) bool {
 		switch n := n.(type) {
 		case *syntax.Subshell, *syntax.CmdSubst:
 			return false
+		case *syntax.CallExpr:
+			// A CallExpr WITH Args has a command: its Assigns list contains
+			// prefix assignments that only affect the child process's
+			// environment, not the parent shell. We must NOT process
+			// n.Assigns as persistent taint changes.
+			//
+			// However, we DO need to walk the Args words because they may
+			// contain ParamExp assignment expansions (e.g. `${x:=...}`) that
+			// persist in the parent shell. We handle this by manually
+			// processing only the args (not n.Assigns) and then tracking
+			// certain builtins (printf -v) that write to parent-shell vars.
+			if len(n.Args) > 0 {
+				// Track printf -v VAR taint.
+				if len(n.Args) >= 3 {
+					name, isName := literalShellWord(n.Args[0])
+					if isName && name == "printf" {
+						t.trackPrintfV(n.Args[1:])
+					}
+				}
+				// Walk the Args words to find ParamExp assignments like
+				// ${x:=...} that persist in the current shell.
+				// We use a nested walk that SKIPS any sub-CallExpr nodes
+				// to avoid double-processing.
+				t.walkWordsForTaint(n.Args)
+				return false
+			}
+			// No Args: standalone assignments — fall through to walk the
+			// Assign nodes in n.Assigns normally.
 		case *syntax.Assign:
-			if n.Name != nil && n.Value != nil {
+			// Only a simple, non-append, non-indexed assignment to a named
+			// variable can clear taint. Append (`x+=0`) and indexed (`x[1]=0`)
+			// assignments do not replace the entire value.
+			if n.Name != nil && n.Value != nil && n.Index == nil && !n.Append {
 				if wordHasCommandSubstitution(n.Value) {
 					// Command substitution: taint directly and remove any
 					// prior clean-assignment record for this name.
@@ -1082,6 +1125,10 @@ func (t *taintAccumulator) AddStmt(node syntax.Node) {
 						t.allAssigns = append(t.allAssigns, taintAssignRecord{n.Name.Value, n.Value})
 					}
 				}
+			} else if n.Name != nil && n.Value != nil && wordHasCommandSubstitution(n.Value) {
+				// Append or indexed CmdSubst: taint the variable without
+				// clearing prior taint records (they remain relevant).
+				t.tainted[n.Name.Value] = struct{}{}
 			}
 		case *syntax.ParamExp:
 			// ${x:=...} / ${x=...} assigns to x when x is unset (or null).
@@ -1095,10 +1142,111 @@ func (t *taintAccumulator) AddStmt(node syntax.Node) {
 					t.allAssigns = append(t.allAssigns, taintAssignRecord{n.Param.Value, n.Exp.Word})
 				}
 			}
+		case *syntax.WordIter:
+			// A `for x in item1 item2; do ...` loop assigns each item to the
+			// iteration variable in the current shell. If any item in the list
+			// is a literal that looks like an arithmetic assignment to a denied
+			// name, taint the variable — bash re-evaluates it as arithmetic
+			// when the variable appears inside $(( )), (( )), or let.
+			if n.Name != nil {
+				for _, item := range n.Items {
+					if wordHasCommandSubstitution(item) {
+						// A CmdSubst item: taint directly.
+						t.tainted[n.Name.Value] = struct{}{}
+						t.removeAllAssigns(n.Name.Value)
+						break
+					}
+					val, isLiteral := literalShellWord(item)
+					if !isLiteral {
+						// A non-literal item is dynamically composed and may
+						// contain a denied arithmetic assignment.
+						t.tainted[n.Name.Value] = struct{}{}
+						t.removeAllAssigns(n.Name.Value)
+						break
+					}
+					if literalContainsDeniedArithAssignment(val, t.names) {
+						t.tainted[n.Name.Value] = struct{}{}
+						t.removeAllAssigns(n.Name.Value)
+						break
+					}
+				}
+			}
 		}
 		return true
 	})
 	t.propagate()
+}
+
+// walkWordsForTaint walks a list of words for ParamExp assignment expansions
+// (${x:=...} / ${x=...}) that persist in the current shell and updates the
+// taint accumulator accordingly. Called when processing the Args of a CallExpr
+// that has a command (so its own Assigns are prefix-only and skipped).
+func (t *taintAccumulator) walkWordsForTaint(words []*syntax.Word) {
+	for _, word := range words {
+		syntax.Walk(word, func(n syntax.Node) bool {
+			switch n := n.(type) {
+			case *syntax.CmdSubst, *syntax.Subshell:
+				return false
+			case *syntax.ParamExp:
+				if n.Param != nil && n.Exp != nil &&
+					(n.Exp.Op == syntax.AssignUnset || n.Exp.Op == syntax.AssignUnsetOrNull) &&
+					n.Exp.Word != nil {
+					if wordHasCommandSubstitution(n.Exp.Word) {
+						t.tainted[n.Param.Value] = struct{}{}
+						t.removeAllAssigns(n.Param.Value)
+					} else {
+						t.allAssigns = append(t.allAssigns, taintAssignRecord{n.Param.Value, n.Exp.Word})
+					}
+				}
+			}
+			return true
+		})
+	}
+}
+
+// trackPrintfV checks whether a `printf -v VAR ...` call has a CmdSubst in
+// its arguments (after the -v flag), and if so marks VAR as tainted.
+// words is everything AFTER the `printf` command name.
+func (t *taintAccumulator) trackPrintfV(words []*syntax.Word) {
+	if len(words) < 2 {
+		return
+	}
+	opt, literal := literalShellWord(words[0])
+	if !literal {
+		return
+	}
+	var varName string
+	switch {
+	case opt == "-v":
+		// -v VAR: next word is the variable name.
+		if len(words) < 3 {
+			return
+		}
+		v, ok := literalShellWord(words[1])
+		if !ok {
+			return
+		}
+		varName = v
+		words = words[2:]
+	case strings.HasPrefix(opt, "-v") && len(opt) > 2:
+		// -vVAR (attached).
+		varName = opt[2:]
+		words = words[1:]
+	default:
+		return
+	}
+	if varName == "" {
+		return
+	}
+	// If any remaining word (format or args) contains a command substitution,
+	// the value written to varName may be derived from CmdSubst output.
+	for _, w := range words {
+		if wordHasCommandSubstitution(w) {
+			t.tainted[varName] = struct{}{}
+			t.removeAllAssigns(varName)
+			return
+		}
+	}
 }
 
 // removeAllAssigns removes all allAssigns records for the given variable name.
@@ -1116,7 +1264,25 @@ func (t *taintAccumulator) removeAllAssigns(name string) {
 // propagate runs a fixed-point pass over all accumulated non-CmdSubst assigns,
 // marking any whose RHS references an already-tainted variable as tainted.
 // Repeated until stable to handle transitive chains (x→y→z).
+//
+// Additionally, any RHS value that mixes dynamic expansions with literal `=`
+// text is treated as potentially composing a denied arithmetic assignment:
+// `x="${n}=1"` expands to `CODEX_HOME=1` when n=CODEX_HOME, even when `n`
+// is not itself tainted. A word is considered compositionally hazardous when
+// it contains at least one parameter expansion (or other non-literal part) AND
+// at least one literal part containing `=`.
 func (t *taintAccumulator) propagate() {
+	// First pass: taint variables assigned from compositionally hazardous
+	// RHS values — words that combine dynamic expansions with literal `=`.
+	for _, rec := range t.allAssigns {
+		if _, already := t.tainted[rec.name]; already {
+			continue
+		}
+		if wordIsCompositionallyHazardous(rec.value) {
+			t.tainted[rec.name] = struct{}{}
+		}
+	}
+	// Fixed-point pass: propagate taint through chains referencing tainted vars.
 	for {
 		added := false
 		for _, rec := range t.allAssigns {
@@ -1134,36 +1300,86 @@ func (t *taintAccumulator) propagate() {
 	}
 }
 
+// wordIsCompositionallyHazardous reports whether a word mixes dynamic parts
+// (parameter expansions, arithmetic expansions, etc.) with a literal segment
+// that contains `=`. Such a word could expand to `NAME=value` even when no
+// single constituent is tainted, enabling a denied arithmetic assignment.
+//
+// Example: `"${n}=1"` has parts [ParamExp(n), Lit("=1")]. When n=CODEX_HOME,
+// the word expands to `CODEX_HOME=1`.
+func wordIsCompositionallyHazardous(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	hasDynamic := false
+	hasLiteralEquals := false
+	for _, part := range word.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			if strings.ContainsRune(p.Value, '=') {
+				hasLiteralEquals = true
+			}
+		default:
+			// Any non-literal part (ParamExp, ArithmExp, CmdSubst, etc.)
+			// is a dynamic component.
+			hasDynamic = true
+		}
+	}
+	return hasDynamic && hasLiteralEquals
+}
+
 // literalContainsDeniedArithAssignment reports whether a literal string, when
 // evaluated by bash as an arithmetic expression, would perform an assignment to
-// a denied account-environment variable. The simplest and most dangerous form
-// is `NAME=value` where NAME is a denied name — bash evaluates this as an
-// arithmetic assignment when the string appears inside `$(( ))`, `(( ))`, or
-// `let`. Only the unambiguous form (a shell identifier immediately followed by
-// `=` without a preceding operator character) is detected; false negatives on
-// exotic compound expressions are acceptable because fail-closed CmdSubst
-// checks cover runtime-unknown values.
+// a denied account-environment variable. bash evaluates the entire string as
+// arithmetic, so compound expressions like `0,CODEX_HOME=1` (comma operator)
+// and compound assignments like `CODEX_HOME+=1` are also detected.
+//
+// The check parses the string as a bash arithmetic expression and walks the
+// resulting AST for assignment nodes whose target is a denied name. Any
+// expression that cannot be parsed is treated as potentially hazardous and
+// causes the check to return true.
 func literalContainsDeniedArithAssignment(value string, names map[string]struct{}) bool {
 	if len(names) == 0 {
 		return false
 	}
-	// Check for NAME= where NAME is a valid shell identifier and is denied.
-	// Parse the leading identifier: must start with a letter or underscore,
-	// followed by letters, digits, or underscores. Stop at `=`.
-	eq := strings.IndexByte(value, '=')
-	if eq <= 0 {
+	// Parse the literal as an arithmetic expression to catch compound forms
+	// like `0,CODEX_HOME=1`, `CODEX_HOME+=1`, etc. If parsing fails the
+	// expression is unprovable; treat it as hazardous.
+	parsed, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Arithmetic(strings.NewReader(value))
+	if err != nil {
+		// Not valid arithmetic — not hazardous as an arithmetic assignment.
 		return false
 	}
-	name := value[:eq]
-	for i, b := range []byte(name) {
-		if i == 0 && (b >= '0' && b <= '9') {
+	found := false
+	syntax.Walk(parsed, func(node syntax.Node) bool {
+		if found {
 			return false
 		}
-		if !isShellNameByte(b) {
-			return false
+		switch n := node.(type) {
+		case *syntax.BinaryArithm:
+			switch n.Op {
+			case syntax.Assgn, syntax.AddAssgn, syntax.SubAssgn, syntax.MulAssgn,
+				syntax.QuoAssgn, syntax.RemAssgn, syntax.AndAssgn, syntax.OrAssgn,
+				syntax.XorAssgn, syntax.ShlAssgn, syntax.ShrAssgn, syntax.AndBoolAssgn,
+				syntax.OrBoolAssgn, syntax.XorBoolAssgn, syntax.PowAssgn:
+				name, ok := arithmeticAccountEnvironmentName(n.X)
+				if ok && accountEnvironmentNameDenied(name, names) {
+					found = true
+					return false
+				}
+			}
+		case *syntax.UnaryArithm:
+			if n.Op == syntax.Inc || n.Op == syntax.Dec {
+				name, ok := arithmeticAccountEnvironmentName(n.X)
+				if ok && accountEnvironmentNameDenied(name, names) {
+					found = true
+					return false
+				}
+			}
 		}
-	}
-	return accountEnvironmentNameDenied(name, names)
+		return true
+	})
+	return found
 }
 
 // cmdSubstAssignedVars returns the set of variable names that are assigned
@@ -1397,20 +1613,106 @@ func stmtMutates(stmt *syntax.Stmt, names map[string]struct{}, acc *taintAccumul
 	case *syntax.BinaryCmd:
 		switch cmd.Op {
 		case syntax.AndStmt, syntax.OrStmt:
-			// X && Y or X || Y — both X and Y may execute in the current shell,
-			// with X always executing first. Taint from X is visible to Y.
+			// X && Y or X || Y: X always executes; Y executes conditionally.
+			// Taint from X is always visible when checking Y (X always runs
+			// first), so we propagate X's taint to acc before checking Y.
+			//
+			// Y's effect on the accumulator is conservative: since Y may or
+			// may not execute, we compute the taint changes from Y in a
+			// temporary accumulator that starts with X's state. After Y is
+			// checked, we UNION Y's resulting taint with the current
+			// accumulator — variables tainted in Y but not in pre-Y state are
+			// added (Y might have tainted them), but variables that Y cleared
+			// are NOT cleared (Y might not have run, so the parent-shell taint
+			// may still be present).
 			if stmtMutates(cmd.X, names, acc) {
 				return true
 			}
-			return stmtMutates(cmd.Y, names, acc)
+			// Fork a temporary accumulator for Y at X's post-taint state.
+			yAcc := newTaintAccumulator(names)
+			for k := range acc.Tainted() {
+				yAcc.tainted[k] = struct{}{}
+			}
+			// Copy existing allAssigns so transitive propagation works in yAcc.
+			yAcc.allAssigns = append(yAcc.allAssigns, acc.allAssigns...)
+			if stmtMutates(cmd.Y, names, yAcc) {
+				return true
+			}
+			// Union: add any variable that Y tainted that was not tainted
+			// before Y. Do NOT remove variables from acc that Y cleared — Y
+			// may not have run.
+			for k := range yAcc.Tainted() {
+				acc.tainted[k] = struct{}{}
+			}
+			return false
 		}
+	case *syntax.IfClause:
+		// if/then/elif/else — branches execute sequentially in the current
+		// shell and may reference or assign variables visible to later
+		// statements. We use a conservative union: any taint acquired in ANY
+		// branch is committed to the accumulator, but taint cleared in only
+		// one branch is retained (the other branch may not run).
+		if cmd == nil {
+			break
+		}
+		// unionAcc collects the union of taint from all branches.
+		unionAcc := newTaintAccumulator(names)
+		for k := range acc.Tainted() {
+			unionAcc.tainted[k] = struct{}{}
+		}
+		// Walk the chain: if → elif → else. Each IfClause node has a .Then
+		// body and a .Else pointing to the next elif/else IfClause.
+		clause := cmd
+		for clause != nil {
+			branchAcc := newTaintAccumulator(names)
+			for k := range acc.Tainted() {
+				branchAcc.tainted[k] = struct{}{}
+			}
+			branchAcc.allAssigns = append(branchAcc.allAssigns, acc.allAssigns...)
+			if stmtsMutate(clause.Then, names, branchAcc) {
+				return true
+			}
+			// Union this branch's resulting taint.
+			for k := range branchAcc.Tainted() {
+				unionAcc.tainted[k] = struct{}{}
+			}
+			clause = clause.Else
+		}
+		// Commit the union back to the parent accumulator.
+		for k := range unionAcc.Tainted() {
+			acc.tainted[k] = struct{}{}
+		}
+		return false
 	}
-	// Default: walk the statement with the current taint snapshot, then record
-	// any new taint assignments so subsequent statements see them.
-	tainted := acc.Tainted()
+	// Default: walk the statement with the current taint snapshot extended by
+	// any within-statement assignments, then record any new taint assignments
+	// so subsequent statements see them.
+	//
+	// Within a simple command, bash evaluates words left-to-right. A
+	// ParamExp assignment expansion (`${x:=cmd}`) may store a CmdSubst
+	// value in `x` before a later `$((x))` in the same word list is reached.
+	// To detect this, we pre-scan the statement for ParamExp CmdSubst
+	// assignments and include those as additional transient taint when
+	// checking the arithmetic nodes.
+	transientTaint := make(map[string]struct{})
+	for k, v := range acc.Tainted() {
+		transientTaint[k] = v
+	}
+	// Pre-scan: collect variables assigned from CmdSubst via ${x:=...} within
+	// this statement (not inside a subshell).
+	withinStmtAcc := newTaintAccumulator(names)
+	for k := range acc.Tainted() {
+		withinStmtAcc.tainted[k] = struct{}{}
+	}
+	withinStmtAcc.allAssigns = append(withinStmtAcc.allAssigns, acc.allAssigns...)
+	withinStmtAcc.AddStmt(stmt)
+	for k := range withinStmtAcc.Tainted() {
+		transientTaint[k] = struct{}{}
+	}
+
 	mutates := false
 	syntax.Walk(stmt, func(node syntax.Node) bool {
-		if nodeMutatesAccountEnvironment(node, names, tainted) {
+		if nodeMutatesAccountEnvironment(node, names, transientTaint) {
 			mutates = true
 			return false
 		}
