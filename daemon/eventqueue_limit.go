@@ -165,8 +165,9 @@ func (q *eventQueue) retainLimitParked() bool {
 // limitBackpressureState tells the stdout reader whether consuming another line
 // could lose a protected event, and whether the reason is unreadable queue
 // state. Keeping those facts in one locked observation matters when the writer
-// exits: a known full queue may drain the now-finite pipe beyond its ordinary
-// cap, while unknown state must keep the pipe intact until enqueue can recover.
+// exits: the kernel pipe stays as the bounded staging buffer while the queue is
+// full — the staged lines drain at queue pace, or once on stop — rather than
+// appending past the cap once per process exit (#4226 review).
 // One final record may cross the byte cap; event lines are themselves bounded,
 // and the reader checks again before reading another.
 func (q *eventQueue) limitBackpressureState() (blocked, unknown bool) {

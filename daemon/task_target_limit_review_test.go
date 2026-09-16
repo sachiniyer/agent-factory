@@ -624,6 +624,85 @@ func TestStopDrainsCompleteEventsAlreadyAcceptedByKernelPipe(t *testing.T) {
 	}
 }
 
+// TestExitedWriterPipeStagesUntilQueueHasRoom is the #4226 review finding: a
+// command that exits while the protected queue is full must leave its finite
+// kernel pipe as the staging buffer. Draining it on exit appends past the cap
+// once per restart — a command that repeatedly exits after crashWindow grows
+// the durable backlog without bound. The staged lines land at queue pace once
+// replay makes room.
+func TestExitedWriterPipeStagesUntilQueueHasRoom(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "a4223112")
+	for i := 0; i < watcherQueueMaxEvents; i++ {
+		if err := queue.enqueue(fmt.Sprintf("old-%03d", i), true); err != nil {
+			t.Fatalf("seed event %d: %v", i, err)
+		}
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer reader.Close()
+	if _, err := writer.WriteString("kernel-one\nkernel-two\n"); err != nil {
+		t.Fatalf("write kernel-buffered events: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	writersStopped := make(chan struct{})
+	close(writersStopped)
+
+	oldPoll := watcherLimitBackpressurePoll
+	watcherLimitBackpressurePoll = time.Millisecond
+	t.Cleanup(func() { watcherLimitBackpressurePoll = oldPoll })
+
+	stopCh := make(chan struct{})
+	w := &taskWatcher{taskID: "a4223112", sup: newWatcherSupervisor(), queue: queue, stopCh: stopCh}
+	done := make(chan struct{})
+	go func() {
+		w.consumeLines(reader, &tailBuffer{}, writersStopped)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		close(stopCh)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("reader did not finish after stop")
+		}
+	})
+
+	// The exited writer's finite pipe is staging, not a drain: the backlog
+	// must not grow while the queue is full.
+	select {
+	case <-done:
+		t.Fatal("reader drained an exited writer's pipe past the queue cap")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := queue.pendingCount(); got != watcherQueueMaxEvents {
+		t.Fatalf("exited writer's pipe drained past the cap: pending=%d", got)
+	}
+
+	// Replay makes room; the staged lines land at queue pace and the reader
+	// reaches the pipe's real EOF.
+	for i := 0; i < 3; i++ {
+		_, cursor, ok, err := queue.peek()
+		if err != nil || !ok {
+			t.Fatalf("peek %d while making room: ok=%v err=%v", i, ok, err)
+		}
+		advanceEventQueue(t, queue, cursor)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reader stayed blocked after replay made room")
+	}
+	got := drainAllEvents(t, queue)
+	if len(got) != watcherQueueMaxEvents-1 ||
+		got[len(got)-2] != "kernel-one" || got[len(got)-1] != "kernel-two" {
+		t.Fatalf("staged pipe events did not land in order at queue pace: %v", got[len(got)-3:])
+	}
+}
+
 func TestOrdinaryStopDoesNotPromotePrefetchedLinesToLimitBacklog(t *testing.T) {
 	queue := newEventQueue(t.TempDir(), "a4223105")
 	if err := queue.enqueue("ordinary-backlog"); err != nil {

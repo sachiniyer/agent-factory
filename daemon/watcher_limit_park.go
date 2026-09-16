@@ -20,13 +20,21 @@ var watcherLimitBackpressurePoll = 100 * time.Millisecond
 // multi-day limit park both lossless and bounded: AF stops reading stdout, so
 // the subprocess blocks on the pipe instead of AF dropping distinct events or
 // growing its own queue without limit. A stop always breaks the wait so watcher
-// reload and daemon shutdown remain bounded. Once queue state is known, writer
-// shutdown breaks it too: no process can add bytes, so the finite pipe may drain
-// beyond the ordinary cap. Unknown state is different — enqueue must refuse it,
-// so the finite pipe remains the only lossless buffer until recovery. A stop
-// below capacity needs the same drain whenever the queue is limit-protected:
-// capacity controls when reads pause, but ownership of bytes already accepted
-// by the pipe does not depend on whether the disk backlog reached that bound.
+// reload and daemon shutdown remain bounded, and the finite pipe it leaves
+// drains into protected storage then — once, at teardown.
+//
+// Writer shutdown does NOT break the wait. An exited process's kernel pipe is
+// already finite — every byte it will ever emit is staged there — so the pipe
+// itself is the bounded buffer the cap advertises. Draining it into the queue
+// on exit would let a command that repeatedly exits after crashWindow append a
+// fresh pipeful on every restart and grow the durable backlog without bound
+// (#4226 review). The staged lines drain at queue pace instead: EOF reaches
+// consumeLines only once the backlog has room. Unknown state waits the same
+// way, with a harder reason — enqueue must refuse it, so the finite pipe is
+// the only lossless buffer until recovery. A stop below capacity needs the
+// same drain whenever the queue is limit-protected: capacity controls when
+// reads pause, but ownership of bytes already accepted by the pipe does not
+// depend on whether the disk backlog reached that bound.
 func (w *taskWatcher) waitForLimitQueueCapacity(stdoutWritersStopped <-chan struct{}) (proceed, drainFinitePipe bool) {
 	writersStopped := stdoutWritersStopped
 	writerFinished := false
@@ -36,9 +44,6 @@ func (w *taskWatcher) waitForLimitQueueCapacity(stdoutWritersStopped <-chan stru
 		blocked, unknown := w.queue.limitBackpressureState()
 		if !blocked {
 			break
-		}
-		if writerFinished && !unknown {
-			return false, true
 		}
 		if stopping && (writerFinished || writersStopped == nil) {
 			// Stop arrived while queue state was unreadable. It is still
@@ -59,13 +64,10 @@ func (w *taskWatcher) waitForLimitQueueCapacity(stdoutWritersStopped <-chan stru
 			stopping = true
 			stopCh = nil
 		case <-writersStopped:
-			if !unknown {
-				return false, true
-			}
-			// The writer is finished, so leaving its pipe unread is bounded by
-			// the finite output already present. Disable the closed channel and
-			// keep retrying recovery: draining while state is unknown only hands
-			// those bytes to an enqueue that is required to refuse them.
+			// The writer is finished and its pipe is finite, so the bytes it
+			// already emitted stage in the kernel buffer at no further cost.
+			// Draining them into the queue here would append past the cap once
+			// per restart forever; keep waiting for queue space instead.
 			writerFinished = true
 			writersStopped = nil
 		case <-time.After(watcherLimitBackpressurePoll):
