@@ -139,6 +139,80 @@ func dockerShorthandValue(arg string, pos int, args []string, index int) (string
 	return "", false
 }
 
+// dockerCheckShorthandCluster walks a COMBINED short option such as `-tv`,
+// whose trailing guarded option Docker honors exactly as if it had been
+// written on its own. Ambiguity fails CLOSED here: when af cannot prove that a
+// guarded character is an option rather than part of an earlier option's
+// value, it refuses and names the argument. A refusal is an annoyance with an
+// obvious remedy — write the options separately — while an accept would hand a
+// repository a credential boundary (#3401).
+//
+// guarded is the set of short options this walk has to act on: "ve" for the
+// account path (a -v installs a mount, a -e names another identity) and "e"
+// for the credential-mount path (only -e can redirect credential lookup; a -v
+// cannot shadow af's single-file credential mount, so the credential path does
+// not guard it). check dispatches per guarded character — 'v' to a mount
+// check, 'e' to an env check — and returns the per-option refusal. whichGuarded
+// is the "-v or -e" / "-e" phrase the fail-closed refusal names, and scope is
+// the "account-scoped session" / "credential-mount session" clause, so the
+// account and credential guards share the WORDING the account tests pin
+// without two copies of the pflag-walk drifting apart.
+//
+// pflag resolves the `-f=value` form BEFORE it consults the option's kind, so
+// an explicit `=` makes the WHOLE suffix that option's value — a boolean's
+// included. `-t=false` therefore ends the cluster; walking on into `false`
+// refused a valid docker.run_args entry over the `e` in it, which would have
+// kept the session from starting at all.
+//
+// Docker demonstrates the precedence rather than just documenting it:
+// `-t=v/tmp:/x` fails with "invalid argument ... for -t, --tty flag:
+// strconv.ParseBool", so the suffix was -t's value and never a `v` option
+// nested inside it. The `pos+2 < len(arg)` bound is pflag's own
+// `len(shorthands) > 2` — with nothing after the `=` there is no value, and
+// Docker reads the `=` as a further option ("unknown shorthand flag: '=' in
+// -=").
+func dockerCheckShorthandCluster(arg string, args []string, index int, guarded string,
+	check func(character byte, value string) error, scope, whichGuarded string) error {
+	for pos := 1; pos < len(arg); pos++ {
+		character := arg[pos]
+		guardedChar := strings.IndexByte(guarded, character) >= 0
+		if pos+2 < len(arg) && arg[pos+1] == '=' {
+			if guardedChar {
+				return check(character, arg[pos+2:])
+			}
+			return nil
+		}
+		if guardedChar {
+			value, present := dockerShorthandValue(arg, pos, args, index)
+			if !present {
+				// Docker refuses an option whose value never arrives, so this
+				// argument installs nothing to check.
+				return nil
+			}
+			return check(character, value)
+		}
+		if _, boolean := dockerRunBooleanShorthands[character]; boolean {
+			continue
+		}
+		if _, takesValue := dockerRunValueShorthands[character]; takesValue {
+			// Proven to consume the remainder, so no later character in this
+			// cluster is an option Docker will act on.
+			return nil
+		}
+		// An option af has not been taught. It either takes a value —
+		// swallowing the rest of the cluster, any guarded option inside it
+		// included — or is a boolean, and the two are indistinguishable here.
+		// Refuse while anything guarded could still be hiding.
+		if strings.ContainsAny(arg[pos+1:], guarded) {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot use the combined short option %s for %s because af cannot tell whether %s in it is an option or part of -%c's value; write the options separately, such as -t -v /host:/container",
+				arg, scope, whichGuarded, character)
+		}
+		return nil
+	}
+	return nil
+}
+
 // dockerDeviceMode reports whether a --device field is a permission mask rather
 // than a container path: one to three characters drawn from r, w and m, which
 // is docker/cli's own `^[rwm]{1,3}$`. Anything else is read as a path, which
@@ -274,71 +348,13 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 	}
 	// checkShorthandCluster examines a COMBINED short option such as `-tv`,
 	// whose trailing -v or -e Docker honors exactly as if it had been written
-	// on its own. Ambiguity fails CLOSED here: when af cannot prove that a `v`
-	// or `e` is an option rather than part of an earlier option's value, it
-	// refuses and names the argument. A refusal is an annoyance with an obvious
-	// remedy — write the options separately — while an accept would hand a
-	// repository the credential boundary (#3401).
-	checkGuardedShorthand := func(character byte, value string) error {
-		if character == 'v' {
-			return checkMount(value)
-		}
-		return checkEnv(value)
-	}
-	checkShorthandCluster := func(arg string, args []string, index int) error {
-		for pos := 1; pos < len(arg); pos++ {
-			character := arg[pos]
-			guarded := strings.IndexByte(dockerGuardedShorthands, character) >= 0
-			// pflag resolves the `-f=value` form BEFORE it consults the
-			// option's kind, so an explicit `=` makes the WHOLE suffix that
-			// option's value — a boolean's included. `-t=false` therefore ends
-			// the cluster; walking on into `false` refused a valid
-			// docker.run_args entry over the `e` in it, which would have kept
-			// the session from starting at all.
-			//
-			// Docker demonstrates the precedence rather than just documenting
-			// it: `-t=v/tmp:/x` fails with "invalid argument ... for -t, --tty
-			// flag: strconv.ParseBool", so the suffix was -t's value and never
-			// a `v` option nested inside it. The `pos+2 < len(arg)` bound is
-			// pflag's own `len(shorthands) > 2` — with nothing after the `=`
-			// there is no value, and Docker reads the `=` as a further option
-			// ("unknown shorthand flag: '=' in -=").
-			if pos+2 < len(arg) && arg[pos+1] == '=' {
-				if guarded {
-					return checkGuardedShorthand(character, arg[pos+2:])
-				}
-				return nil
-			}
-			if guarded {
-				value, present := dockerShorthandValue(arg, pos, args, index)
-				if !present {
-					// Docker refuses an option whose value never arrives, so
-					// this argument installs nothing to check.
-					return nil
-				}
-				return checkGuardedShorthand(character, value)
-			}
-			if _, boolean := dockerRunBooleanShorthands[character]; boolean {
-				continue
-			}
-			if _, takesValue := dockerRunValueShorthands[character]; takesValue {
-				// Proven to consume the remainder, so no later character in
-				// this cluster is an option Docker will act on.
-				return nil
-			}
-			// An option af has not been taught. It either takes a value —
-			// swallowing the rest of the cluster, any -v or -e inside it
-			// included — or is a boolean, and the two are indistinguishable
-			// here. Refuse while anything guarded could still be hiding.
-			if strings.ContainsAny(arg[pos+1:], dockerGuardedShorthands) {
-				return fmt.Errorf(
-					"backend=docker: docker.run_args cannot use the combined short option %s for an account-scoped session because af cannot tell whether the -v or -e in it is an option or part of -%c's value; write the options separately, such as -t -v /host:/container",
-					arg, character)
-			}
-			return nil
-		}
-		return nil
-	}
+	// on its own. Ambiguity fails CLOSED, via dockerCheckShorthandCluster: when
+	// af cannot prove that a `v` or `e` is an option rather than part of an
+	// earlier option's value, it refuses and names the argument. A refusal is an
+	// annoyance with an obvious remedy — write the options separately — while
+	// an accept would hand a repository the credential boundary (#3401). The
+	// shared helper is the same walk the credential-mount guard uses with
+	// guarded="e", so the two run_args guards cannot drift on the pflag rules.
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		switch {
@@ -422,7 +438,14 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			// see. The index deliberately does NOT advance past the value:
 			// that value may belong to an earlier option in the cluster, and
 			// consuming it here would skip a real --mount written next to it.
-			if err := checkShorthandCluster(arg, args, index); err != nil {
+			if err := dockerCheckShorthandCluster(arg, args, index, dockerGuardedShorthands,
+				func(character byte, value string) error {
+					if character == 'v' {
+						return checkMount(value)
+					}
+					return checkEnv(value)
+				},
+				"an account-scoped session", "the -v or -e"); err != nil {
 				return err
 			}
 		}

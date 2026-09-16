@@ -297,6 +297,20 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		}
 		p.accountMount, p.accountEnv = mount, env
 	} else if cfg.DockerMountAgentCredentials {
+		// Validate repo-controlled run_args before the mount is installed.
+		// docker.run_args is repository-controlled and checked in (the docker
+		// table is sourceRepoOnly) and appended AFTER the credential mount with
+		// no later env af emits to dominate it, so an entry setting the agent's
+		// credential-root env var (CODEX_HOME / CLAUDE_CONFIG_DIR / GEMINI_CLI_HOME
+		// — all built-in per-agent names) would redirect the agent's credential
+		// lookup away from af's mounted file and start the session
+		// unauthenticated while the provisioning log reports the mount as
+		// installed. The account path's lexical guard (validateAccountDockerRunArgs)
+		// defends the same redirect on its path; this is the symmetric guard for
+		// the credential-mount path, refused BEFORE docker run rather than after.
+		if err := validateCredentialDockerRunArgs(runArgs, p.agentName()); err != nil {
+			return ProvisionResult{}, err
+		}
 		p.credentialMounts = resolveAgentCredentialMounts(p.agentName(), p.bindMountRelabel())
 	}
 	res, err := p.provision()
@@ -469,7 +483,14 @@ func (p *dockerProvisioner) runContainer() error {
 		args = append(args, "-e", name)
 	}
 	// Read-only agent credential mounts (docker.mount_agent_credentials, #2194) go
-	// before run_args so an operator's own run_args can still be appended after.
+	// before run_args. docker.run_args is repository-controlled and checked in,
+	// and for a non-account session nothing af emits later dominates it, so the
+	// credential-mount path validates it (validateCredentialDockerRunArgs) before
+	// the mount is installed — a repo entry setting the agent's credential-root
+	// env var (e.g. CODEX_HOME) would otherwise redirect credential lookup away
+	// from this read-only file and start the session unauthenticated while af's
+	// log reported the mount. Ordering the mount before run_args keeps the two
+	// sources distinct; validation, not precedence, is what closes the gap.
 	args = append(args, p.credentialMounts...)
 	// The account's mount and its config var. Placed before run_args like the
 	// credential mounts, so an operator's own run_args still come last.
