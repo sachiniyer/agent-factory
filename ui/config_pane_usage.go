@@ -107,6 +107,17 @@ func (c *ConfigPane) appendUsageRows() {
 	for i := range c.usage.rows {
 		row := c.usage.rows[i]
 		c.rows = append(c.rows, configRow{usage: &row})
+		// The wrapped detail flattens the same way the heading's note lines
+		// do — one row per line (#4361 review): kept inside the usage row's
+		// own render, a detail taller than the window pinned to the row's top
+		// and its tail lines could never scroll on screen.
+		if row.Detail != "" {
+			for _, line := range strings.Split(
+				strings.TrimSuffix(c.wrapIndented(row.Detail, configHintStyle), "\n"), "\n") {
+				line := line
+				c.rows = append(c.rows, configRow{usageNote: &line})
+			}
+		}
 	}
 }
 
@@ -140,11 +151,13 @@ func (c *ConfigPane) usageHeadingLines() []string {
 	return lines
 }
 
-// renderUsageRow renders one report row: the agent, its two verdicts, and the
-// detail sentence — when it reset, when af saw it — wrapped under the row so a
-// long observation never steals the line the agent name is on. A selected
-// usage row draws the cursor like any other, so the user can see where the
-// scroll position is; it still answers no key.
+// renderUsageRow renders one report row's headline: the agent and its two
+// verdicts. The detail sentence — when it reset, when af saw it — is NOT
+// rendered here: it is baked into per-line scroll-anchored rows at rebuild
+// time (appendUsageRows), so a detail taller than the window still scrolls
+// every line into view rather than pinning to the row's top (#4361 review).
+// A selected usage row draws the cursor like any other, so the user can see
+// where the scroll position is; it still answers no key.
 func (c *ConfigPane) renderUsageRow(row quota.Row, selected bool) string {
 	var b strings.Builder
 	cursor := "  "
@@ -160,11 +173,7 @@ func (c *ConfigPane) renderUsageRow(row quota.Row, selected bool) string {
 	}
 	b.WriteString(agent)
 	b.WriteString(configValueStyle.Render("  " + row.Quota + " · " + row.Observed))
-	out := c.fitPaneLine(b.String()) + "\n"
-	if row.Detail != "" {
-		out += c.wrapIndented(row.Detail, configHintStyle)
-	}
-	return out
+	return c.fitPaneLine(b.String()) + "\n"
 }
 
 // renderUsageUnavailable renders the section's failure in place of rows — the

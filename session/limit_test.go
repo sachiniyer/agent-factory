@@ -496,3 +496,67 @@ func TestRepeatObservationRefreshesTheSightingNotTheReset(t *testing.T) {
 	require.True(t, observations[0].ResetAt.Equal(laterReset),
 		"a shorter second window must not shorten the durable one")
 }
+
+// ObserveLiveness is not the only way off the wall: the archive outcomes and a
+// spawn completing also move a parked session out of LiveLimitReached without
+// any poll observation, and the episode ends there too — the same in-memory
+// record's next wall must stamp its own sighting rather than inherit this
+// one's date (#4361 review).
+func TestNonPollEdgesLeavingTheWallDropItsObservationTime(t *testing.T) {
+	first := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	oldClock := instanceNow
+	instanceNow = func() time.Time { return first }
+	t.Cleanup(func() { instanceNow = oldClock })
+
+	// A committed archive ends the wall's episode.
+	committed := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+	committed.SetLimitReached(first.Add(5 * 24 * time.Hour))
+	require.NoError(t, committed.Transition(BeginArchive()))
+	require.NoError(t, committed.Transition(CommitArchive()))
+	require.True(t, committed.limitObservedAt.IsZero(),
+		"committing a parked session to the archive must drop the wall's sighting")
+	require.True(t, committed.limitResetAt.IsZero())
+
+	// So does the failed archive's landing at Lost.
+	aborted := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+	aborted.SetLimitReached(first.Add(5 * 24 * time.Hour))
+	require.NoError(t, aborted.Transition(BeginArchive()))
+	require.NoError(t, aborted.Transition(AbortArchiveToLost()))
+	require.True(t, aborted.limitObservedAt.IsZero(),
+		"a parked session whose archive fails to Lost must drop the wall's sighting")
+	require.True(t, aborted.limitResetAt.IsZero())
+
+	// And a non-resume spawn completing off the wall.
+	completed := &Instance{
+		Program: tmux.ProgramClaude, Account: "work",
+		liveness: LiveLimitReached, inFlightOp: OpCreating,
+		limitObservedAt: first, limitResetAt: first.Add(5 * 24 * time.Hour),
+	}
+	require.NoError(t, completed.Transition(ConfirmLive()))
+	require.True(t, completed.limitObservedAt.IsZero(),
+		"a spawn completing off the wall without a resume fence must drop the sighting")
+	require.True(t, completed.limitResetAt.IsZero())
+}
+
+// The one deliberate retain on the completion edge: a spawn coming up while
+// OpRespawning is held IS the limit resume's runtime arriving —
+// ReparkLimitUnderResumeFence still needs this episode's metadata, so
+// ConfirmLive keeps it exactly there (#4361 review).
+func TestConfirmLiveUnderResumeFenceKeepsTheWallMetadata(t *testing.T) {
+	first := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	oldClock := instanceNow
+	instanceNow = func() time.Time { return first }
+	t.Cleanup(func() { instanceNow = oldClock })
+
+	i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+	i.SetLimitReached(first.Add(5 * 24 * time.Hour))
+	require.NoError(t, i.Transition(BeginRespawn()))
+	require.NoError(t, i.Transition(ConfirmLive()))
+
+	require.True(t, i.limitObservedAt.Equal(first),
+		"the resume's own completion must keep the episode's sighting for the re-park")
+	require.True(t, i.limitResetAt.Equal(first.Add(5*24*time.Hour)),
+		"the resume's own completion must keep the episode's reset for the re-park")
+	require.Equal(t, OpRespawning, i.GetInFlightOp(),
+		"ConfirmLive under the fence keeps the op until the re-park")
+}

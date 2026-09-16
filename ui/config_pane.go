@@ -116,12 +116,12 @@ type configRow struct {
 	// window is otherwise unreachable — but it answers no key, so enter still
 	// opens nothing.
 	usage *quota.Row
-	// usageNote is one line of the Usage section's framing — the gloss, the
-	// report's note, a caveat, or the loading/failure block — emitted as its
-	// own row for the same reason usage rows are (#4361 review): hung under
-	// the nonselectable heading, a wrapped note taller than the window could
-	// never scroll its middle into view. One line per row is what gives every
-	// line a scroll anchor.
+	// usageNote is one wrapped line of the Usage section's prose — the gloss,
+	// the report's note, a caveat, the loading/failure block, or one line of a
+	// usage row's detail — emitted as its own row for the same reason usage
+	// rows are (#4361 review): hung under the nonselectable heading or inside
+	// a taller-than-window row, a wrapped line could never scroll its middle
+	// into view. One line per row is what gives every line a scroll anchor.
 	usageNote *string
 }
 

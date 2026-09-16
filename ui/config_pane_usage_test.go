@@ -191,3 +191,54 @@ func TestUsageSectionShowsLoading(t *testing.T) {
 		t.Errorf("a read in flight must say so, got:\n%s", pane.String())
 	}
 }
+
+// A usage row's DETAIL is scroll-anchored the same way the heading's note is
+// (#4361 review): a wrapped detail taller than the window must not pin to its
+// row's top — every wrapped line becomes its own row the cursor can reach, or
+// the tail of a long observation can never scroll on screen.
+func TestUsageDetailLinesAreScrollAnchors(t *testing.T) {
+	pane := NewConfigPane()
+	pane.SetSize(60, 12) // deliberately short: the wrapped detail exceeds the window
+	pane.SetEntries([]config.ConfigEntry{{
+		Key: "default_program", Value: "claude", Purpose: "p", Tier: 1,
+	}}, "/tmp/config.toml")
+	resp := stubUsageReport()
+	resp.Rows[1].Detail = strings.Repeat("observed far longer than one window line ", 6) + "detail-tail-marker"
+	pane.SetUsage(resp, nil)
+	pane.SetFocus(true)
+
+	// The detail's tail must be a baked row of its own — proof the wrapped
+	// lines flattened out of the usage row rather than rendering inside it.
+	tailAnchored := false
+	noteRows := 0
+	for _, row := range pane.rows {
+		if row.usageNote == nil {
+			continue
+		}
+		noteRows++
+		if strings.Contains(*row.usageNote, "detail-tail-marker") {
+			tailAnchored = true
+		}
+	}
+	if !tailAnchored {
+		t.Fatalf("the detail's tail never became a scroll-anchored row:\n%s", pane.String())
+	}
+
+	// And every anchored line — detail lines included — is reachable by j.
+	landed := 0
+	pane.selectedIdx = 0
+	pane.clampSelection()
+	for {
+		if pane.rows[pane.selectedIdx].usageNote != nil {
+			landed++
+		}
+		before := pane.selectedIdx
+		pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		if pane.selectedIdx == before {
+			break
+		}
+	}
+	if landed != noteRows {
+		t.Fatalf("j reached %d of %d anchored lines — a detail line can never scroll on screen", landed, noteRows)
+	}
+}

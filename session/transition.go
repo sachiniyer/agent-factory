@@ -323,6 +323,12 @@ const (
 	// re-observing it keeps them while moving off ends the episode — re-arming
 	// limitObservedAt's first-sighting stamp for the next wall.
 	limitResetOnLeave
+	// limitResetOnLeaveUnlessRespawning is limitResetOnLeave with the resume
+	// sequence's one deliberate retain carved out (#4361 review): a spawn
+	// completing while OpRespawning is held is the limit resume's own runtime
+	// coming up, and ReparkLimitUnderResumeFence still needs this episode's
+	// metadata to re-park it — every other way off the wall ends the episode.
+	limitResetOnLeaveUnlessRespawning
 )
 
 // edgeSpec is one row of the allowed-edge table: which from-states an event is
@@ -393,6 +399,11 @@ var transitionTable = map[transitionKind]edgeSpec{
 		// cannot REOPEN a finished run either: the marker only ever goes true→false,
 		// so a restored archive (whose commit ended the run) stays ended here.
 		run: runKeep,
+		// Leaving the wall by completing a spawn ends the episode — EXCEPT the
+		// resume's own: under OpRespawning this edge is the re-spawned runtime
+		// coming up, and the re-park still needs this episode's metadata (#4361
+		// review). Every other completion off the wall clears it.
+		limitReset: limitResetOnLeaveUnlessRespawning,
 	},
 	tkObserveLiveness: {
 		allowedFrom: func(stateAxes) bool { return true },
@@ -459,6 +470,10 @@ var transitionTable = map[transitionKind]edgeSpec{
 		// BeginRestore/ConfirmLive and the old run counts again — on top of whatever
 		// events already took its slot.
 		run: runEnds,
+		// Shelving a limit-blocked session leaves its wall without a poll
+		// observation: the episode ends here, or a restore of the same in-memory
+		// record would misdate its next wall to this one's sighting (#4361 review).
+		limitReset: limitResetOnLeave,
 	},
 	tkAbortArchiveToLost: {
 		allowedFrom: func(s stateAxes) bool { return s.op == OpArchiving },
@@ -468,6 +483,10 @@ var transitionTable = map[transitionKind]edgeSpec{
 		// more, no less. If it had already finished, the marker is already false and
 		// this must not resurrect it.
 		run: runKeep,
+		// The failed archive still took the session off its wall — Lost is not the
+		// parked state — so the episode ends here too; the healed agent's next wall
+		// stamps its own sighting (#4361 review).
+		limitReset: limitResetOnLeave,
 	},
 	tkBeginRestore: {
 		allowedFrom: func(s stateAxes) bool { return s.op == OpNone && s.liveness == LiveArchived },
@@ -668,6 +687,11 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		i.limitResetAt = ev.resetAt
 	case limitResetOnLeave:
 		if from.liveness == LiveLimitReached && to.liveness != LiveLimitReached {
+			i.limitResetAt = time.Time{}
+			i.limitObservedAt = time.Time{}
+		}
+	case limitResetOnLeaveUnlessRespawning:
+		if from.liveness == LiveLimitReached && to.liveness != LiveLimitReached && from.op != OpRespawning {
 			i.limitResetAt = time.Time{}
 			i.limitObservedAt = time.Time{}
 		}
