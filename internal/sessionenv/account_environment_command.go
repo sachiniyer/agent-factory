@@ -116,6 +116,21 @@ func arithmeticAccountEnvironmentName(expr syntax.ArithmExpr) (string, bool) {
 	return literalShellWord(word)
 }
 
+// accountEnvironmentEvaluationBudget bounds the work one command validation
+// may do before the walk fails closed. Recursive descents — nested env
+// commands, wrapper tails, strace suffixes — each charge their argv length, so
+// an attacker-sized input refuses inside a fixed budget instead of
+// overflowing the stack or fanning out exponentially.
+const accountEnvironmentEvaluationBudget = 32768
+
+// evaluationBudget is the shared work meter for one command walk. Every
+// recursive descent into the walker draws on the same counter, so the total
+// cost of validating one command stays bounded no matter how many wrapper
+// layers or suffix judgments the walk reaches.
+type evaluationBudget struct {
+	work int
+}
+
 func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}) bool {
 	for _, assign := range call.Assigns {
 		if assign != nil && assign.Name != nil {
@@ -125,14 +140,29 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 		}
 	}
 
-	words, unsafe := unwrapAccountCommand(call.Args, names)
+	// One evaluation per validated command: the work meter is shared with
+	// every nested wrapper and suffix judgment the walk reaches, so the total
+	// cost is bounded by the budget rather than by recursion depth.
+	return accountCommandWordsMutateEnvironment(call.Args, names, &evaluationBudget{})
+}
+
+func accountCommandWordsMutateEnvironment(
+	words []*syntax.Word,
+	names map[string]struct{},
+	evaluation *evaluationBudget,
+) bool {
+	words, unsafe := unwrapAccountCommand(words, names, evaluation)
 	if unsafe || len(words) == 0 {
 		return unsafe
 	}
-	return unwrappedAccountCommandMutates(words, names)
+	return unwrappedAccountCommandMutates(words, names, evaluation)
 }
 
-func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}) bool {
+func unwrappedAccountCommandMutates(
+	words []*syntax.Word,
+	names map[string]struct{},
+	evaluation *evaluationBudget,
+) bool {
 	if _, literal := literalShellWord(words[0]); !literal {
 		// A dynamic command name can resolve to env or a same-shell builtin such
 		// as unset/export, so its effect on the selected identity is unprovable.
@@ -140,7 +170,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 	}
 	switch {
 	case isAccountCommandName(words[0], "env"):
-		return envCallMutatesAccountEnvironment(words[1:], names, false)
+		return envCallMutatesAccountEnvironment(words[1:], names, false, evaluation)
 	case isBareName(words[0], "unset"):
 		return unsetMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "set"):
@@ -182,7 +212,11 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 // unwrapAccountCommand removes shell wrappers that still execute the remaining
 // words in the current environment. Dynamic or unsupported wrapper forms are
 // unsafe because they could resolve to env or an environment-mutating builtin.
-func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
+func unwrapAccountCommand(
+	words []*syntax.Word,
+	names map[string]struct{},
+	evaluation *evaluationBudget,
+) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		switch {
 		case isBareName(words[0], "exec"):
@@ -269,6 +303,12 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 			if unsafe {
 				return nil, true
 			}
+		case isAccountCommandName(words[0], "strace"):
+			var unsafe bool
+			words, unsafe = unwrapStrace(words[1:], names, evaluation)
+			if unsafe {
+				return nil, true
+			}
 		case isAccountCommandName(words[0], "xargs"):
 			var unsafe bool
 			words, unsafe = unwrapXargs(words[1:], names)
@@ -276,9 +316,22 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 				return nil, true
 			}
 		default:
-			if unrecognizedWrapperHidesAccountAssignment(words, names) {
+			// An unmodeled argv-passthrough wrapper can still hide the modelled
+			// `env NAME=value <agent>` mutation one level down, so its literal tail
+			// is scanned before anything here is accepted (#4261).
+			if unrecognizedWrapperHidesAccountAssignment(words, names, evaluation) {
 				return nil, true
 			}
+			// Residual accepted set: a literal executable not classified above as a
+			// shell mutator or command-executing wrapper, whose tail the scan above
+			// cleared, with its remaining words treated as that executable's data.
+			// Process tabs intentionally run arbitrary programs, so assignment-shaped
+			// operands alone prove nothing: `echo CODEX_HOME=/tmp` and
+			// `rg OPENAI_API_KEY=x` mutate no child environment. A wrapper added above
+			// earns different treatment by naming which word is executable; its parser
+			// must fail closed on every unknown option, unreduced operand, and
+			// unreduced executable rather than returning here as though uncertainty
+			// meant safety.
 			return words, false
 		}
 	}
@@ -314,7 +367,11 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 // denied name or assignment (xargs --process-slot-var=NAME, strace -E var=val
 // and --env=var=val) is refused — a wrapper's own options can place the
 // mutation without any env word.
-func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}) bool {
+func unrecognizedWrapperHidesAccountAssignment(
+	words []*syntax.Word,
+	names map[string]struct{},
+	evaluation *evaluationBudget,
+) bool {
 	strace := isAccountCommandName(words[0], "strace")
 	for i := 1; i < len(words); i++ {
 		word := words[i]
@@ -322,7 +379,7 @@ func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[s
 			// A nested env only mutates the child it execs; requireCommand
 			// keeps an `env CODEX_HOME=/tmp` whose argv ends there — env's
 			// print mode, which overrides nothing — allowed.
-			if envCallMutatesAccountEnvironment(words[i+1:], names, true) {
+			if envCallMutatesAccountEnvironment(words[i+1:], names, true, evaluation) {
 				return true
 			}
 			continue
@@ -332,12 +389,18 @@ func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[s
 			// An unprovable tail word can itself expand to `env` (or to a
 			// multiword `env NAME=value` after word splitting); judge the
 			// words after it as that invocation's argv.
-			if envCallMutatesAccountEnvironment(words[i+1:], names, true) {
+			if envCallMutatesAccountEnvironment(words[i+1:], names, true, evaluation) {
 				return true
 			}
 			continue
 		}
 		if !strings.HasPrefix(literal, "-") {
+			// A strace nested in another wrapper's tail keeps its own option
+			// hazards: run the same declared record over its argv.
+			if isAccountCommandName(word, "strace") &&
+				straceArgvHazardous(words[i:], names) {
+				return true
+			}
 			// A shell in the wrapper's tail gets the same verdict a bare
 			// shell command gets: `strace sh -c 'unset CODEX_HOME; codex'`
 			// execs the literal script the modeled path already refuses
@@ -480,7 +543,26 @@ func envCallArgvParse(words []*syntax.Word) (envcommand.Invocation, error) {
 // sit in an unrecognized wrapper's tail rather than forming the command itself —
 // an `env CODEX_HOME=/tmp` with nothing after it runs env's print path, not an
 // override of a running agent.
-func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}, requireCommand bool) bool {
+func envCallMutatesAccountEnvironment(
+	words []*syntax.Word,
+	names map[string]struct{},
+	requireCommand bool,
+	evaluation *evaluationBudget,
+) bool {
+	if evaluation == nil {
+		evaluation = &evaluationBudget{}
+	}
+	if evaluation.work >= accountEnvironmentEvaluationBudget {
+		// Each nested env that re-enters the command walk is one recursive
+		// descent, and an attacker-sized chain of them overflows the stack or
+		// fans out exponentially rather than returning a verdict.
+		return true
+	}
+	// The argv parse below costs one unit per word, and an unrecognized
+	// wrapper tail can reach this once per env word it finds — charging the
+	// suffix length keeps both the deep-nesting and the fan-out shapes inside
+	// the same budget.
+	evaluation.work += len(words)
 	invocation, err := envCallArgvParse(words)
 	if err != nil || invocation.ClearEnvironment {
 		return true
@@ -494,14 +576,14 @@ func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]str
 		}
 	}
 	if invocation.CommandIndex >= 0 {
-		commandWords, unsafe := unwrapAccountCommand(words[invocation.CommandIndex:], names)
+		commandWords, unsafe := unwrapAccountCommand(words[invocation.CommandIndex:], names, evaluation)
 		if unsafe {
 			return true
 		}
 		if len(commandWords) == 0 {
 			return false
 		}
-		return unwrappedAccountCommandMutates(commandWords, names)
+		return unwrappedAccountCommandMutates(commandWords, names, evaluation)
 	}
 	return false
 }

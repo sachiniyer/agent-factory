@@ -161,13 +161,6 @@ func TestValidateAccountEnvironmentCommand_WrapperGuardStaysNarrow(t *testing.T)
 		"rg OPENAI_API_KEY= .",
 		"grep CODEX_HOME= /etc/environment",
 		"cat CODEX_HOME=/other",
-		// A nested env with no command word is env's print mode: it mutates
-		// only its own process's environment and execs nothing, so the tail
-		// assignment overrides no running agent.
-		"strace env CODEX_HOME=/other",
-		// A dynamic tail word could expand to `env`, but with no command word
-		// after the assignment the result is still print mode.
-		"strace $W CODEX_HOME=/other",
 		// xargs with a literal command whose argv cannot reach env: items and
 		// substitutions land in the command's own arguments.
 		"xargs",
@@ -229,12 +222,15 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace sh -c 'export CODEX_HOME=/x; codex'", true},
 		{"strace bash -c 'CODEX_HOME=/x codex'", true},
 		{"sh -c 'unset CODEX_HOME; codex'", true}, // control: bare shell form is caught
-		// A trailing shell name with no argv after it has nothing to prove
-		// against, so noun-uses stay allowed.
-		{"strace sh", false},
+		// A trailing shell name in an unmodeled wrapper's tail stays allowed
+		// there, but strace is modeled now: every suffix is judged as a
+		// standalone command, and a bare interactive shell is unproven under
+		// the same shellCommandIsUnproven rule that refuses `sh` at command
+		// position.
+		{"strace sh", true},
 		{"echo sh", false},
 		{"man sh", false},
-		{"strace -p 1234 sh", false},
+		{"strace -p 1234 sh", true},
 		// A tail that parses as a real unproven shell invocation refuses even
 		// under a non-wrapper head — the same trade `echo env X=y cmd` takes.
 		{"echo sh -c 'unset CODEX_HOME'", true},
