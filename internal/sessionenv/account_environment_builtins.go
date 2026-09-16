@@ -994,11 +994,23 @@ func wordHasCommandSubstitution(word syntax.Node) bool {
 // `(( ))`, `let`, numeric `[[ ]]`), so a prior `x=$(printf CODEX_HOME=1)`
 // followed by `: $((x))` carries the same bypass as an inline substitution.
 //
+// Taint propagates transitively through parameter-expansion copies: when `y=$x`
+// and `x` is tainted, bash stores `x`'s contents in `y`, so `: $((y))` carries
+// the same re-evaluation hazard. A single fixed-point pass over the same
+// top-level Assign nodes handles chains of arbitrary length.
+//
 // Only top-level Assign nodes are collected; assignments inside a subshell or
 // command substitution run in a child process and cannot affect the parent's
 // environment, so they do not taint the outer scope.
 func cmdSubstAssignedVars(file syntax.Node) map[string]struct{} {
 	tainted := make(map[string]struct{})
+
+	// First pass: collect direct command-substitution assignments.
+	type assignRecord struct {
+		name  string
+		value *syntax.Word
+	}
+	var topLevelAssigns []assignRecord
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch n := node.(type) {
 		case *syntax.Subshell, *syntax.CmdSubst:
@@ -1006,20 +1018,51 @@ func cmdSubstAssignedVars(file syntax.Node) map[string]struct{} {
 			// child process; they cannot affect the parent environment.
 			return false
 		case *syntax.Assign:
-			if n.Name != nil && n.Value != nil && wordHasCommandSubstitution(n.Value) {
-				tainted[n.Name.Value] = struct{}{}
+			if n.Name != nil && n.Value != nil {
+				if wordHasCommandSubstitution(n.Value) {
+					tainted[n.Name.Value] = struct{}{}
+				} else {
+					topLevelAssigns = append(topLevelAssigns, assignRecord{n.Name.Value, n.Value})
+				}
 			}
 		}
 		return true
 	})
+
+	// Second pass: propagate taint through parameter-expansion copies.
+	// `y=$x` assigns x's value to y; if x is tainted, so is y. Repeat until
+	// no new names are added (handles chains: x→y→z).
+	for {
+		added := false
+		for _, rec := range topLevelAssigns {
+			if _, already := tainted[rec.name]; already {
+				continue
+			}
+			if wordReferencesTaintedVar(rec.value, tainted) {
+				tainted[rec.name] = struct{}{}
+				added = true
+			}
+		}
+		if !added {
+			break
+		}
+	}
+
 	return tainted
 }
 
 // arithmeticExprReferencesTaintedVar reports whether an arithmetic expression
-// tree contains a direct variable reference (a bare word spelling a tainted
-// name). When a tainted variable appears inside arithmetic, bash re-evaluates
-// that variable's value as fresh arithmetic — the same re-evaluation hazard as
-// an inline command substitution — so the expression is unprovable.
+// tree contains a variable reference (bare word or `$name` expansion) of a
+// tainted name. When a tainted variable appears inside arithmetic, bash
+// re-evaluates that variable's value as fresh arithmetic — the same
+// re-evaluation hazard as an inline command substitution — so the expression
+// is unprovable.
+//
+// Array subscripts are NOT stripped: `arr[x]` evaluates `x` as arithmetic, so
+// `x` must be checked against the tainted set in addition to `arr`. All
+// identifiers inside `[…]` are extracted and tested. Additionally, `$name`
+// expansions (ParamExp nodes) inside arithmetic are also checked, covering the
+// `$(( $x ))` form.
 func arithmeticExprReferencesTaintedVar(expr syntax.ArithmExpr, tainted map[string]struct{}) bool {
 	if len(tainted) == 0 {
 		return false
@@ -1029,19 +1072,28 @@ func arithmeticExprReferencesTaintedVar(expr syntax.ArithmExpr, tainted map[stri
 		if found {
 			return false
 		}
-		word, ok := node.(*syntax.Word)
-		if !ok {
-			return true
-		}
-		name, literal := literalShellWord(word)
-		if literal {
-			// Strip an array subscript if present; the base name is what matters.
-			if idx := strings.IndexByte(name, '['); idx >= 0 {
-				name = name[:idx]
+		switch n := node.(type) {
+		case *syntax.Word:
+			name, literal := literalShellWord(n)
+			if !literal {
+				return true
 			}
-			if _, taint := tainted[name]; taint {
+			// The word may be an array reference like `arr[x]`; bash evaluates
+			// the subscript as arithmetic, so a tainted name inside `[…]` is
+			// just as hazardous as the base name itself.
+			if checkArithWordForTaint(name, tainted) {
 				found = true
 				return false
+			}
+		case *syntax.ParamExp:
+			// `$name` inside arithmetic — bash expands the variable and then
+			// re-evaluates its value as arithmetic, which is the same hazard
+			// as a bare reference. Check the parameter name directly.
+			if n.Param != nil {
+				if _, taint := tainted[n.Param.Value]; taint {
+					found = true
+					return false
+				}
 			}
 		}
 		return true
@@ -1049,11 +1101,48 @@ func arithmeticExprReferencesTaintedVar(expr syntax.ArithmExpr, tainted map[stri
 	return found
 }
 
+// checkArithWordForTaint reports whether any shell identifier in the arithmetic
+// word token (which may have the form `name`, `arr[idx]`, or `arr[a+b]`)
+// appears in the tainted set.
+//
+// In arithmetic context, bash evaluates array subscripts as arithmetic too, so
+// every identifier within `[…]` must be tested — not only the base array name.
+func checkArithWordForTaint(word string, tainted map[string]struct{}) bool {
+	// Collect every identifier in the word (base name and subscript names).
+	// Identifiers are contiguous runs of [A-Za-z0-9_] not starting with a digit.
+	start := -1
+	checkIdent := func(s string) bool {
+		if s == "" || (s[0] >= '0' && s[0] <= '9') {
+			return false
+		}
+		_, taint := tainted[s]
+		return taint
+	}
+	for i := 0; i <= len(word); i++ {
+		if i < len(word) && isShellNameByte(word[i]) {
+			if start < 0 {
+				start = i
+			}
+		} else {
+			if start >= 0 && checkIdent(word[start:i]) {
+				return true
+			}
+			start = -1
+		}
+	}
+	return false
+}
+
 // wordReferencesTaintedVar reports whether a shell word (as used in a [[ ]]
-// test operand) contains a parameter expansion of a tainted variable name.
-// bash re-evaluates the expanded value as arithmetic when the word appears in
-// a numeric [[ ]] operand, so `[[ 0 -eq $x ]]` after `x=$(printf CODEX_HOME=1)`
-// is the deferred form of the inline bypass.
+// test operand) references a tainted variable name. bash re-evaluates the
+// expanded value as arithmetic when the word appears in a numeric [[ ]]
+// operand, so `[[ 0 -eq $x ]]` after `x=$(printf CODEX_HOME=1)` is the
+// deferred form of the inline bypass.
+//
+// In bash arithmetic syntax, variable names can appear either as `$x`
+// (ParamExp) or as the bare word `x` without `$`. A literal word that exactly
+// matches a tainted variable name is therefore also a reference that must be
+// refused.
 func wordReferencesTaintedVar(word syntax.Node, tainted map[string]struct{}) bool {
 	if len(tainted) == 0 {
 		return false
@@ -1063,13 +1152,26 @@ func wordReferencesTaintedVar(word syntax.Node, tainted map[string]struct{}) boo
 		if found {
 			return false
 		}
-		exp, ok := node.(*syntax.ParamExp)
-		if !ok || exp.Param == nil {
-			return true
-		}
-		if _, taint := tainted[exp.Param.Value]; taint {
-			found = true
-			return false
+		switch n := node.(type) {
+		case *syntax.ParamExp:
+			// `$x` form — explicit parameter expansion.
+			if n.Param != nil {
+				if _, taint := tainted[n.Param.Value]; taint {
+					found = true
+					return false
+				}
+			}
+		case *syntax.Word:
+			// Bare-word form — arithmetic syntax allows `x` (no `$`) as a
+			// variable reference.  A literal word whose text matches a tainted
+			// name is a reference to that variable.
+			name, literal := literalShellWord(n)
+			if literal {
+				if checkArithWordForTaint(name, tainted) {
+					found = true
+					return false
+				}
+			}
 		}
 		return true
 	})
