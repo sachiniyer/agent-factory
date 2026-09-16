@@ -162,6 +162,14 @@ func New() *Supervisor {
 // different accounts and must not share a flow.
 func key(agent, name string) string { return agent + "/" + name }
 
+// collisionProbeSession is the post-Start re-probe in the collision verdict —
+// a seam because the scenario it decides (the blocker exiting between Start's
+// positive name-collision and this second probe) is a real-tmux race no test
+// can stage deterministically; the test stubs the probe's answer instead.
+var collisionProbeSession = func(pane *tmux.TmuxSession) (bool, bool) {
+	return pane.ProbeSession()
+}
+
 // Start opens (or rejoins) the login flow for one account.
 //
 // The order is load-bearing. Everything that can refuse runs BEFORE anything is
@@ -393,6 +401,43 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 	// 0700 directory af created, outside any temp dir (codex refuses to create
 	// helper binaries under /tmp), and it is the directory the flow is about.
 	if err := pane.Start(dir); err != nil {
+		// A same-named session that survives the launch failure is not "a flow
+		// that ended" — it is a pane blocking the launch entirely, so the flow
+		// never ran and the account's artifact must not be credited to it.
+		// Re-running adopt answers all three cases with the same ownership
+		// primitive the pre-Start check used: provably-ours is joined like any
+		// open flow, proven-foreign is refused by name, and anything left that
+		// still holds the name is the markerless collision adopt's contract
+		// warns finishedOrFailed about (#4217 review).
+		if existing, foreignBlocked := s.adopt(req.Home, req.Agent, req.Name, pane); existing != nil {
+			out := base
+			out.Reused = true
+			out.TmuxName = existing.SanitizedName()
+			out.SocketPath = socketPath(ctx, existing)
+			return out, nil
+		} else if foreignBlocked {
+			return Session{}, fmt.Errorf(
+				"cannot start the %s login flow for account %q: a pane named %s already exists on the shared tmux server "+
+					"and is owned by a different agent-factory home — stop the conflicting flow first or use a distinct {agent, name}",
+				req.Agent, req.Name, pane.SanitizedName())
+		} else if exists, known := collisionProbeSession(pane); known && exists {
+			return Session{}, fmt.Errorf(
+				"cannot start the %s login flow for account %q: a pane named %s already exists on the shared tmux server "+
+					"and its owning home cannot be proven — stop the conflicting flow first or use a distinct {agent, name} "+
+					"(underlying launch error: %w)",
+				req.Agent, req.Name, pane.SanitizedName(), err)
+		} else if errors.Is(err, tmux.ErrSessionNameTaken) {
+			// The blocker exited between Start's positive collision verdict and
+			// the re-diagnosis above: the name is free now, but no login command
+			// ever ran, so finishedOrFailed's artifact check would credit a
+			// stale credential to a flow that never started. The collision IS
+			// the launch failure; it survives the blocker's exit.
+			return Session{}, fmt.Errorf(
+				"cannot start the %s login flow for account %q: a pane named %s already existed on the shared tmux server "+
+					"at launch and exited before its owning home could be proven — stop conflicting flows first or use a "+
+					"distinct {agent, name} (underlying launch error: %w)",
+				req.Agent, req.Name, pane.SanitizedName(), err)
+		}
 		return finishedOrFailed(req, base, err)
 	}
 	// The name tmux actually knows — sanitized, with the af_ prefix — not the one
