@@ -204,6 +204,13 @@ const (
 	startBusUnreachable
 	// startMasked: a durable admin mask that neither reset-failed nor
 	// restart lifts, so adopt alone deterministically fails (#4475 review).
+	// The mask is af's own unit file: `systemctl --user mask` places its
+	// /dev/null link at ~/.config/systemd/user/<unit> and refuses while a
+	// regular file is there, and a --runtime mask is shadowed by that
+	// higher-priority file (systemd v255 install.c, unit-file.c). `unmask`
+	// therefore deletes the unit, so the follow-up is install, not adopt; and
+	// `af daemon uninstall` refuses the link, so the unmanaged exit is the
+	// unmask alone.
 	startMasked
 	// startNotLoaded: darwin's gui domain answered that the job is not loaded
 	// — a booted-out job, or a reset interrupted between pause and resume
@@ -236,6 +243,11 @@ func classifyUnitStartFailure(goos string, startErr error) startFailureClass {
 // who deliberately wants this home unmanaged needs a supported exit.
 const uninstallRemedy = "if this home should be unmanaged, uninstall the autostart unit with `af daemon uninstall`"
 
+// maskedUnmanagedRemedy is the same exit for a masked unit, where
+// `af daemon uninstall` refuses the mask's /dev/null link and the unmask
+// already removes the only unit claiming this home.
+const maskedUnmanagedRemedy = "if this home should be unmanaged, stop after the unmask, which leaves no unit claiming this home (`af daemon uninstall` refuses to remove the mask's /dev/null link)"
+
 // managerSessionRemedy names the session that can drive the manager, and the
 // command that proves a candidate session qualifies.
 func managerSessionRemedy(goos string) string {
@@ -260,8 +272,8 @@ func busSessionRemedy(goos string) string {
 }
 
 // unitStartRemedies orders the remedies a start refusal names by failure
-// class: what the caller can act on first, the uninstall escape hatch always
-// last (#4475 review).
+// class: what the caller can act on first, the unmanaged-home escape hatch
+// always last (#4475 review).
 func unitStartRemedies(goos string, class startFailureClass) []string {
 	switch class {
 	case startNotLoaded:
@@ -271,8 +283,8 @@ func unitStartRemedies(goos string, class startFailureClass) []string {
 		}
 	case startMasked:
 		return []string{
-			fmt.Sprintf("unmask the unit with `systemctl --user unmask %s`, then run `af daemon adopt` (adopt alone cannot lift a mask)", autostartUnitName),
-			uninstallRemedy,
+			fmt.Sprintf("lift the mask with `systemctl --user unmask %s`, then restore the unit with `af daemon install` (the mask is the unit's own file, so unmask deletes it and adopt would find no unit to hand the daemon to)", autostartUnitName),
+			maskedUnmanagedRemedy,
 		}
 	case startBusUnreachable:
 		return []string{

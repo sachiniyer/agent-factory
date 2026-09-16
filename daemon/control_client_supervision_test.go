@@ -378,7 +378,7 @@ func TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass(t *testing.T) {
 			name:          "masked unit",
 			busConfigured: true,
 			managerStderr: "Failed to start af-daemon.service: Unit af-daemon.service is masked.",
-			want:          []string{remedyUnmaskLead, uninstallRemedy},
+			want:          []string{remedyUnmaskLead, maskedUnmanagedRemedy},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1075,7 +1075,7 @@ const (
 	remedyAdoptHangsToo  = "if adopt hangs too, the service manager itself is not answering: interrupt adopt, then run this from a session with a service manager"
 	remedySessionLead    = "run this from a session with a service manager"
 	remedyAdoptWontHelp  = "do not expect `af daemon adopt` to help"
-	remedyUnmaskLead     = "unmask the unit with `systemctl --user unmask "
+	remedyUnmaskLead     = "lift the mask with `systemctl --user unmask " + autostartUnitName + "`, then restore the unit with `af daemon install`"
 	remedyReinstallLead  = "re-bootstrap the unit with `af daemon install`"
 	remedyPathLead       = "add the directory holding `"
 )
@@ -1182,7 +1182,7 @@ func TestClassifyUnitStartFailureBothArms(t *testing.T) {
 // exactly that order. Bus-unreachable leads with the session remedy because
 // adopt fails the same way there; refused and hung lead with adopt because
 // the manager is reachable and the problem is the unit; every class ends with
-// the uninstall escape hatch (#4475 review).
+// its unmanaged-home escape hatch (#4475 review).
 func TestUnitRefusalRemediesOrderByClass(t *testing.T) {
 	uid := strconv.Itoa(os.Getuid())
 	for _, goos := range []string{"linux", "darwin"} {
@@ -1194,7 +1194,10 @@ func TestUnitRefusalRemediesOrderByClass(t *testing.T) {
 				{startRefused, []string{remedyAdoptLead, remedyAdoptFailsSame, uninstallRemedy}},
 				{startHung, []string{remedyAdoptLead, remedyAdoptHangsToo, uninstallRemedy}},
 				{startBusUnreachable, []string{remedySessionLead, remedyAdoptWontHelp, uninstallRemedy}},
-				{startMasked, []string{remedyUnmaskLead, uninstallRemedy}},
+				// A masked unit's own file is the mask: unmask deletes it, so
+				// install (not adopt) restores it, and stopping there is the
+				// unmanaged exit `af daemon uninstall` cannot take.
+				{startMasked, []string{remedyUnmaskLead, maskedUnmanagedRemedy}},
 				{startNotLoaded, []string{remedyReinstallLead, uninstallRemedy}},
 			} {
 				got := unitStartRemedies(goos, tc.class)
