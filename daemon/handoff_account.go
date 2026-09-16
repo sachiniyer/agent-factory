@@ -82,9 +82,19 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 		if instance.LimitReached() {
 			reason = session.HandoffReasonUsageLimit
 		}
+		// The transaction's account namespace is the agent the launch
+		// RESOLVES to, not the requested enum: an override redirect is what the
+		// scoped refusal at the admission boundary already resolved against —
+		// `program_overrides.aider = "codex"` sends the user here for a codex
+		// account, and only codex's registry can answer Selected — while
+		// `program_overrides.codex = "aider"` must not scope a codex account
+		// onto a launch that cannot consume it (#4430 review). The committed
+		// and scheduler paths derive the same namespace from the command
+		// (accountSwapAgent, AgentForCommand); this request names the enum only
+		// because no plan has frozen its command yet.
 		swap = &autoAccountSwap{
 			manual: true, promptOverride: req.Brief, from: from, to: strings.TrimSpace(req.Account),
-			fromAgent: outgoing, agent: target, reason: reason,
+			fromAgent: outgoing, agent: session.HandoffEffectiveAgentForPath(instance.Path, target), reason: reason,
 		}
 	}
 	outcome, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, instance.Title, swap)
