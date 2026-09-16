@@ -433,11 +433,17 @@ func TestEnsureDaemonActiveUnitUnreachableReclaimsThroughManager(t *testing.T) {
 	stopWatcher := startServerWhenMarked(restartMarker, startServer)
 	defer stopWatcher()
 
+	// The reclaim must run even when the readiness wait consumed the whole
+	// admission window — callDaemon supplies a real deadline and the wait
+	// legitimately spends all of it (RestartSec can outlast the budget), so a
+	// reclaim sharing that deadline is dead code on the only path that reaches
+	// it (Codex on #4475). This deadline is long enough for the fake `start`
+	// to be accepted and then expires inside the readiness wait.
 	adHocLaunched := false
-	if err := ensureDaemonWithLauncher(func() error {
+	if err := ensureDaemonWithLauncherUntil(func() error {
 		adHocLaunched = true
 		return startServer()
-	}); err != nil {
+	}, time.Now().Add(2*time.Second)); err != nil {
 		t.Fatalf("active-but-unreachable unit must be reclaimed through the manager, got: %v", err)
 	}
 	if err := serverErr(); err != nil {
@@ -470,29 +476,35 @@ func TestProbeUnitSupervisorOrdering(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct {
-		name    string
-		goos    string
-		booted  bool // linux only: the sd_booted marker exists
-		userMgr bool // linux only: the user manager's runtime marker dir exists
-		userBus bool // linux only: the user manager's bus socket exists
-		binary  bool // the manager client binary is on PATH
-		want    supervisorPresence
+		name     string
+		goos     string
+		booted   bool // linux only: the sd_booted marker exists
+		userMgr  bool // linux only: the user manager's runtime marker dir exists
+		userBus  bool // linux only: the user manager's bus socket exists
+		privSock bool // linux only: the manager's <runtime>/systemd/private socket exists
+		binary   bool // the manager client binary is on PATH
+		want     supervisorPresence
 	}{
-		{"linux booted + binary", "linux", true, false, false, true, supervisorPresent},
-		{"linux booted, binary missing", "linux", true, false, false, false, supervisorUnreachable},
-		{"linux not booted + binary", "linux", false, false, false, true, supervisorAbsent},
-		{"linux not booted, no binary", "linux", false, false, false, false, supervisorAbsent},
+		{"linux booted + binary", "linux", true, false, false, false, true, supervisorPresent},
+		{"linux booted, binary missing", "linux", true, false, false, false, false, supervisorUnreachable},
+		{"linux not booted + binary", "linux", false, false, false, false, true, supervisorAbsent},
+		{"linux not booted, no binary", "linux", false, false, false, false, false, supervisorAbsent},
 		// A bus endpoint alone is NOT a manager — a foreign dbus-daemon or an
 		// inherited DBUS_SESSION_BUS_ADDRESS must read absent (#4475 review).
-		{"linux not booted + foreign bus + binary", "linux", false, false, true, true, supervisorAbsent},
-		{"linux not booted + user manager + bus + binary", "linux", false, true, true, true, supervisorPresent},
-		{"linux not booted + user manager + bus, binary missing", "linux", false, true, true, false, supervisorUnreachable},
-		// Marker proven, endpoint dead: the manager exists but cannot be
+		{"linux not booted + foreign bus + binary", "linux", false, false, true, false, true, supervisorAbsent},
+		{"linux not booted + user manager + bus + binary", "linux", false, true, true, false, true, supervisorPresent},
+		{"linux not booted + user manager + bus, binary missing", "linux", false, true, true, false, false, supervisorUnreachable},
+		// A manager under a foreign init with NO session broker is still
+		// invocable: systemctl --user connects to <runtime>/systemd/private
+		// directly, so that socket reads reachable, not unreachable (Codex on
+		// #4475).
+		{"linux not booted + user manager + private socket, no bus + binary", "linux", false, true, false, true, true, supervisorPresent},
+		// Marker proven, every endpoint dead: the manager exists but cannot be
 		// invoked — fail closed, never absent.
-		{"linux not booted + user manager, bus dead + binary", "linux", false, true, false, true, supervisorUnreachable},
-		{"darwin binary", "darwin", false, false, false, true, supervisorPresent},
-		{"darwin binary missing", "darwin", false, false, false, false, supervisorUnreachable},
-		{"unsupported platform", "plan9", false, false, false, false, supervisorAbsent},
+		{"linux not booted + user manager, bus dead + binary", "linux", false, true, false, false, true, supervisorUnreachable},
+		{"darwin binary", "darwin", false, false, false, false, true, supervisorPresent},
+		{"darwin binary missing", "darwin", false, false, false, false, false, supervisorUnreachable},
+		{"unsupported platform", "plan9", false, false, false, false, false, supervisorAbsent},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withAutostartTestEnv(t, tc.goos)
@@ -517,6 +529,16 @@ func TestProbeUnitSupervisorOrdering(t *testing.T) {
 				ln, err := net.Listen("unix", filepath.Join(userDir, "bus"))
 				if err != nil {
 					t.Fatalf("fake user bus socket: %v", err)
+				}
+				t.Cleanup(func() { ln.Close() })
+			}
+			if tc.privSock {
+				if err := os.MkdirAll(filepath.Join(userDir, "systemd"), 0o700); err != nil {
+					t.Fatalf("mkdir user manager dir for private socket: %v", err)
+				}
+				ln, err := net.Listen("unix", filepath.Join(userDir, "systemd", "private"))
+				if err != nil {
+					t.Fatalf("fake private manager socket: %v", err)
 				}
 				t.Cleanup(func() { ln.Close() })
 			}

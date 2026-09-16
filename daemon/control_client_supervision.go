@@ -112,11 +112,11 @@ func probeUnitSupervisor() (supervisorPresence, error) {
 			return supervisorUnreachable, fmt.Errorf("systemd is present but no systemctl binary is reachable in PATH: %w", err)
 		}
 		// A user manager under a foreign init can be invoked ONLY through its
-		// own bus — unlike the booted case, there is no PID-1 activation path.
-		// Its marker proves the manager ran, so a dead endpoint is an
+		// own endpoints — unlike the booted case, there is no PID-1 activation
+		// path. Its marker proves the manager ran, so a dead endpoint is an
 		// invocation failure (fail closed), not absence.
-		if !booted && !systemdUserBusReachable() {
-			return supervisorUnreachable, fmt.Errorf("a systemd user manager runs in this session but its bus is unreachable from this environment")
+		if !booted && !systemdUserManagerInvocable() {
+			return supervisorUnreachable, fmt.Errorf("a systemd user manager runs in this session but it is unreachable from this environment (no session bus and no private manager socket)")
 		}
 		return supervisorPresent, nil
 	case "darwin":
@@ -178,6 +178,46 @@ func unitStartRemedy(startErr error) string {
 		return "start the unit from a session with a service manager — `af daemon adopt` cannot reach the manager from this environment either"
 	}
 	return "run `af daemon adopt`, or start the unit from a session with a service manager"
+}
+
+// waitForUnitDaemonReady waits out the caller's readiness budget for the
+// unit-started daemon to answer, then tries ONE manager-owned reclaim before
+// giving up: on linux an ALREADY-ACTIVE unit makes `start` a no-op, so when
+// the daemon's process is alive but its control socket is dead or its RPC
+// loop is wedged, every command fails identically and the home stays wedged
+// until manual recovery (#4475 review). The reclaim is what `af daemon adopt`
+// does — a restart owned by the manager — followed by a fresh readiness wait.
+// launchd needs no such branch: `kickstart -k` already kills and restarts a
+// running job.
+//
+// The reclaim gets its OWN bounded budgets rather than sharing the outer
+// admission deadline: the readiness wait above can legitimately consume that
+// whole window (RestartSec=5 alone outlasts the 5s budget), and an expired
+// deadline handed to is-active reads an active unit as dead — so a reclaim
+// drawn from `deadline` could never run for an ordinary callDaemon RPC, the
+// only path that reaches it (Codex on #4475).
+//
+// When the wait failed because the admission budget expired, the returned
+// error keeps the context.DeadlineExceeded identity so callDaemon does not
+// let this refusal replace the live-upgrade lifecycle fallback it explicitly
+// preserves (Codex on #4475).
+func waitForUnitDaemonReady(deadline time.Time) error {
+	err := waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout))
+	if err == nil {
+		return nil
+	}
+	if autostartGOOS == "linux" && systemdUnitActive(time.Now().Add(ensureUnitStartTimeout)) {
+		restartDeadline := time.Now().Add(ensureUnitStartTimeout)
+		if rerr := runEnsureManagerCommand(restartDeadline, "systemctl", "--user", "restart", autostartUnitName); rerr == nil {
+			if werr := waitForDaemonReady(time.Now().Add(daemonReadyTimeout)); werr == nil {
+				return nil
+			}
+		}
+	}
+	if admissionDeadlineExpired(deadline) {
+		err = fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
+	}
+	return err
 }
 
 // unitStatusDiagnostic names the manager-specific inspection command for the
@@ -258,21 +298,35 @@ func systemdUserManagerPresent() bool {
 	return isDir(filepath.Join(systemdUserBusBase, strconv.Itoa(os.Getuid()), "systemd"))
 }
 
-// systemdUserBusReachable reports whether a systemd USER manager's bus is
-// declared or listening — resolved exactly the way `systemctl --user`
-// resolves it: DBUS_SESSION_BUS_ADDRESS, else $XDG_RUNTIME_DIR/bus, else
-// /run/user/<uid>/bus. Its presence is what the boot marker cannot show: a
-// manager that can start the user unit even under a non-systemd init (#4475
-// review). A declared-but-dead address still counts — the start attempt, not
-// the probe, is what surfaces that connect failure.
-func systemdUserBusReachable() bool {
+// systemdUserManagerInvocable reports whether this process can invoke the
+// systemd USER manager — resolved the way `systemctl --user` reaches it:
+// DBUS_SESSION_BUS_ADDRESS, else $XDG_RUNTIME_DIR/bus, else
+// /run/user/<uid>/bus, and finally the manager's own private socket at
+// <runtime>/systemd/private, which systemctl connects to directly when no
+// session D-Bus broker runs at all — the exact shape of a `systemd --user`
+// under a foreign init (Codex on #4475). Endpoint presence is what the boot
+// marker cannot show: a manager that can start the user unit even under a
+// non-systemd init (#4475 review). A declared-but-dead address still counts —
+// the start attempt, not the probe, is what surfaces that connect failure.
+func systemdUserManagerInvocable() bool {
 	if os.Getenv("DBUS_SESSION_BUS_ADDRESS") != "" {
 		return true
 	}
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		return isSocket(filepath.Join(dir, "bus"))
+	for _, dir := range []string{
+		os.Getenv("XDG_RUNTIME_DIR"),
+		filepath.Join(systemdUserBusBase, strconv.Itoa(os.Getuid())),
+	} {
+		if dir == "" {
+			continue
+		}
+		// The private socket is the manager's own endpoint, not the session
+		// broker's — systemctl --user uses it directly when no bus exists.
+		if isSocket(filepath.Join(dir, "bus")) ||
+			isSocket(filepath.Join(dir, "systemd", "private")) {
+			return true
+		}
 	}
-	return isSocket(filepath.Join(systemdUserBusBase, strconv.Itoa(os.Getuid()), "bus"))
+	return false
 }
 
 func isSocket(path string) bool {

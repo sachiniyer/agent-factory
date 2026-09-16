@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -234,22 +235,7 @@ func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error
 	// in this window races the pending ExecStart to the socket, wins it as
 	// an unsupervised process, and is exactly the escape that left the unit
 	// inactive while an impostor served the home for hours (#4470).
-	if err := waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout)); err != nil {
-		// On linux an ALREADY-ACTIVE unit makes `start` a no-op: when the
-		// daemon's process is alive but its control socket is dead or its RPC
-		// loop is wedged, every command fails here identically and the home
-		// stays wedged until manual recovery (#4475 review). Reclaim it the
-		// way `af daemon adopt` does — a manager-owned restart, once — then
-		// wait out the remaining budget. launchd needs no such branch:
-		// `kickstart -k` already kills and restarts a running job.
-		if autostartGOOS == "linux" && systemdUnitActive(admissionBoundedDeadline(deadline, ensureUnitStartTimeout)) {
-			restartDeadline := admissionBoundedDeadline(deadline, ensureUnitStartTimeout)
-			if rerr := runEnsureManagerCommand(restartDeadline, "systemctl", "--user", "restart", autostartUnitName); rerr == nil {
-				if werr := waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout)); werr == nil {
-					return nil
-				}
-			}
-		}
+	if err := waitForUnitDaemonReady(deadline); err != nil {
 		return fmt.Errorf("the installed daemon service accepted the start but no daemon answered — it may still be starting (RestartSec after a crash); retry shortly, check `%s`, or reclaim the unit's daemon with `af daemon adopt`: %w", unitStatusDiagnostic(), err)
 	}
 	return nil
@@ -298,7 +284,14 @@ func ensureDaemonAdHocUntil(launch func() error, deadline time.Time) error {
 		return daemonAdmissionDeadlineError()
 	}
 
-	return waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout))
+	err := waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout))
+	if err != nil && admissionDeadlineExpired(deadline) {
+		// Same deadline-identity rule as the unit path: a readiness wait that
+		// consumed the whole admission window must still read as a deadline to
+		// callDaemon's lifecycle-fallback guard (Codex on #4475).
+		return fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
+	}
+	return err
 }
 
 func waitForDaemonReady(deadline time.Time) error {
