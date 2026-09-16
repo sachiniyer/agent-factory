@@ -265,10 +265,20 @@ func TestCommandMutatesAccountEnvironment_ExpandableCommandHead(t *testing.T) {
 		{`$COMMAND CODEX_HOME`, true},
 		{`(( counter[index] ))`, true},
 		{`(( arr[i=42] )); npm run dev`, true},
-		// A tilde head expands to one fixed path — the same trust class as an
-		// absolute executable — and an ordinary literal head stays accepted.
+		// A bare `~` head is NOT a fixed path: the shell substitutes its
+		// current HOME verbatim, so HOME=unset turns the word into the unset
+		// builtin — quoting the remainder away is the same expansion (Codex
+		// on #4466).
+		{`HOME=unset; ~ CODEX_HOME; codex`, true},
+		{`~ CODEX_HOME`, true},
+		{`~"" CODEX_HOME`, true},
+		// The longer tilde forms stay accepted: `~/x` keeps a literal slash,
+		// `~name` resolves to that user's absolute home (or stays `~name`),
+		// and `~+`/`~-` expand to PWD/OLDPWD — none can spell a builtin.
 		{`~/bin/tool arg`, false},
 		{`~/.local/bin/tool arg`, false},
+		{`~root/bin/tool arg`, false},
+		{`~+/bin/tool arg`, false},
 		{`npm run dev`, false},
 		{`ls CODEX_HOME`, false},
 	}
@@ -307,4 +317,20 @@ func TestValidateAccountEnvironmentCommand_NamesUnprovableWord(t *testing.T) {
 		"refusal must name the word that failed proof")
 	require.Contains(t, err.Error(), "replace it with a literal",
 		"refusal must tell the user how to fix it")
+}
+
+// The evaluation budget is one meter for the whole command, not a fresh
+// 32,768 per CallExpr — syntax.Walk runs the callback once per call, so a
+// program of individually admissible strace invocations (50 calls of a
+// ~900-word argv took ~8s measured) spent the full quadratic suffix cost on
+// each while every call stayed under straceFlatArgvLimit. Sharing the budget
+// across the walk makes the advertised bound cover multi-call programs
+// (Codex on #4466).
+func TestCommandMutatesAccountEnvironment_SharedBudgetAcrossCalls(t *testing.T) {
+	codex := accountScopedNames("codex", "CODEX_HOME")
+	// Each call is under the flat-argv cap and spends ~900 metered suffix
+	// slots; 40 of them exceed 32,768 only if the meter is shared.
+	command := strings.Repeat("strace "+strings.Repeat("f ", 900)+"; ", 40)
+	require.True(t, commandMutatesAccountEnvironment(command, codex),
+		"a program of individually-admissible calls must exhaust the shared budget")
 }

@@ -19,6 +19,11 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 	if command == "" {
 		return false
 	}
+	// One meter for the whole validation: syntax.Walk invokes the callback once
+	// per CallExpr, so allocating the budget inside it let a program of many
+	// individually-admissible calls (50 × 900-word strace argv) spend the full
+	// quadratic suffix cost on each — ~8s on one validation (Codex on #4466).
+	evaluation := &evaluationBudget{}
 	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
 		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
 		if err != nil {
@@ -26,7 +31,7 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		}
 		mutates := false
 		syntax.Walk(file, func(node syntax.Node) bool {
-			if nodeMutatesAccountEnvironment(node, names) {
+			if nodeMutatesAccountEnvironment(node, names, evaluation) {
 				mutates = true
 				return false
 			}
@@ -39,10 +44,10 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 	return false
 }
 
-func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) bool {
+func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}, evaluation *evaluationBudget) bool {
 	switch node := node.(type) {
 	case *syntax.CallExpr:
-		return callMutatesAccountEnvironment(node, names)
+		return callMutatesAccountEnvironment(node, names, evaluation)
 	case *syntax.Assign:
 		return node.Name != nil && accountEnvironmentNameDenied(node.Name.Value, names)
 	case *syntax.WordIter:
@@ -131,7 +136,7 @@ type evaluationBudget struct {
 	work int
 }
 
-func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}) bool {
+func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}, evaluation *evaluationBudget) bool {
 	for _, assign := range call.Assigns {
 		if assign != nil && assign.Name != nil {
 			if _, denied := names[assign.Name.Value]; denied {
@@ -140,10 +145,10 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 		}
 	}
 
-	// One evaluation per validated command: the work meter is shared with
-	// every nested wrapper and suffix judgment the walk reaches, so the total
-	// cost is bounded by the budget rather than by recursion depth.
-	return accountCommandWordsMutateEnvironment(call.Args, names, &evaluationBudget{})
+	// The walk's single meter is shared with every nested wrapper and suffix
+	// judgment this call reaches, so the total cost stays bounded by the
+	// budget rather than by the number of calls in the program.
+	return accountCommandWordsMutateEnvironment(call.Args, names, evaluation)
 }
 
 func accountCommandWordsMutateEnvironment(

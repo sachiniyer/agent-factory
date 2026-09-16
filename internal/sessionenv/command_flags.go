@@ -438,11 +438,18 @@ func literalShellWordExpandableSafe(word *syntax.Word) (string, bool) {
 
 // provableCommandHead reports whether the word in command position resolves to
 // a fixed executable: literalShellWordExpandableSafe, plus a leading-~
-// carve-out — tilde expands to a fixed absolute path that can never resolve to
-// a same-shell builtin. Every other unprovable head fails closed: an unquoted
-// glob or brace can expand to a builtin name (u* to unset, e{val,} to eval)
-// that mutates the environment in this shell, and judging the tail as env's
-// argv cannot model that.
+// carve-out for the forms that always land on a path. Every other unprovable
+// head fails closed: an unquoted glob or brace can expand to a builtin name
+// (u* to unset, e{val,} to eval) that mutates the environment in this shell,
+// and judging the tail as env's argv cannot model that.
+//
+// The tilde carve-out needs the remainder to be nonempty. `~/x` keeps a
+// literal slash, `~name` resolves to that user's absolute home (or stays a
+// harmless `~name` when the user does not exist), and `~+`/`~-` expand to
+// PWD/OLDPWD — all path-shaped. A BARE `~` is different: the shell substitutes
+// its current HOME verbatim, so `HOME=unset; ~ CODEX_HOME` expands the head to
+// the `unset` builtin and strips the account variable outright (Codex on
+// #4466). The same applies when quoting reduces the remainder to empty.
 func provableCommandHead(word *syntax.Word) bool {
 	if word == nil || len(word.Parts) == 0 {
 		return false
@@ -458,8 +465,8 @@ func provableCommandHead(word *syntax.Word) bool {
 	rest.Parts = make([]syntax.WordPart, len(word.Parts))
 	copy(rest.Parts, word.Parts)
 	rest.Parts[0] = &syntax.Lit{Value: first.Value[1:]}
-	_, ok := literalShellWordExpandableSafe(&rest)
-	return ok
+	restValue, ok := literalShellWordExpandableSafe(&rest)
+	return ok && restValue != ""
 }
 
 // braceExpansionState tracks unquoted '{', '}', ',', and '..' across a word's
@@ -646,6 +653,10 @@ func appendUnexpandedLit(
 // when pinned (the denial lives in the name, not the dynamic value), so
 // `env CODEX_HOME=$X codex` is likewise a literal-cause refusal.
 func unprovableWordCausedRefusal(command string, names map[string]struct{}) string {
+	// The diagnostic walk draws on one meter like the verdict walk does —
+	// semicolon-separated calls share it rather than each spending a fresh
+	// budget.
+	evaluation := &evaluationBudget{}
 	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
 		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
 		if err != nil {
@@ -659,13 +670,13 @@ func unprovableWordCausedRefusal(command string, names map[string]struct{}) stri
 			}
 			call, isCall := node.(*syntax.CallExpr)
 			if !isCall {
-				if nodeMutatesAccountEnvironment(node, names) {
+				if nodeMutatesAccountEnvironment(node, names, evaluation) {
 					literalCause = true
 					return false
 				}
 				return true
 			}
-			if !callMutatesAccountEnvironment(call, names) {
+			if !callMutatesAccountEnvironment(call, names, evaluation) {
 				return true
 			}
 			pinned, first := pinnedCallArgs(call)
@@ -674,7 +685,7 @@ func unprovableWordCausedRefusal(command string, names map[string]struct{}) stri
 				return false
 			}
 			substituted := &syntax.CallExpr{Assigns: call.Assigns, Args: pinned}
-			if callMutatesAccountEnvironment(substituted, names) {
+			if callMutatesAccountEnvironment(substituted, names, evaluation) {
 				literalCause = true
 				return false
 			}
