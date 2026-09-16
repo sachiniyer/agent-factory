@@ -129,7 +129,12 @@ type TaskPane struct {
 	// another writer changed out-of-band while the editor was open (#1700).
 	originals map[string]task.Task
 	deleted   []task.Task
-	hasFocus  bool
+	// deletedPositions records the s.tasks index at which each deleted task
+	// sat when deleteSelectedTask removed it, keyed by task ID. RestoreFailedDelete
+	// uses it to re-insert the row at its original position so the TaskPane
+	// order stays consistent with the sidebar's disk-order reload.
+	deletedPositions map[string]int
+	hasFocus         bool
 
 	// now is inherited from the owning AutomationsPane and passed to each
 	// schedule picker for its custom-cron next-run preview.
@@ -565,6 +570,10 @@ func (s *TaskPane) deleteSelectedTask() {
 	if original, ok := s.originals[deleted.ID]; ok {
 		deleted = original
 	}
+	if s.deletedPositions == nil {
+		s.deletedPositions = make(map[string]int)
+	}
+	s.deletedPositions[deleted.ID] = s.selectedIdx
 	s.deleted = append(s.deleted, deleted)
 	s.tasks = append(s.tasks[:s.selectedIdx], s.tasks[s.selectedIdx+1:]...)
 	// A task queued for deletion must not also be in the update set:

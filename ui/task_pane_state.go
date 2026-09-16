@@ -21,6 +21,7 @@ func (s *TaskPane) SetTasks(tasks []task.Task) {
 		s.originals[t.ID] = t
 	}
 	s.deleted = nil
+	s.deletedPositions = nil
 	s.editing = false
 	// A reload replaces the create-form buffers a pending create was captured
 	// against, so a create left un-consumed by a failed save must be dropped —
@@ -60,12 +61,25 @@ func (s *TaskPane) SelectTask(idx int) {
 // markTaskDirty records that the task with the given ID was edited so a later
 // save persists it. It also sets the pane-wide dirty flag that gates whether
 // saveContentPaneState runs at all (#1213).
+//
+// If the task was previously restored to s.tasks by RestoreFailedDelete (and
+// so still has a pending entry in s.deleted), editing or toggling it cancels
+// the deletion retry: the user's intent is now to keep and modify the row, not
+// to remove it. saveContentPaneState processes edits before deletions, so
+// without this removal the edit would persist and the retained deletion would
+// immediately undo it.
 func (s *TaskPane) markTaskDirty(id string) {
 	if s.dirtyIDs == nil {
 		s.dirtyIDs = make(map[string]bool)
 	}
 	s.dirtyIDs[id] = true
 	s.dirty = true
+	// Cancel any pending deletion retry for this task.
+	for i := len(s.deleted) - 1; i >= 0; i-- {
+		if s.deleted[i].ID == id {
+			s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
+		}
+	}
 }
 
 // ConsumeDirty returns a field-level patch for each task the user actually
@@ -138,13 +152,22 @@ func (s *TaskPane) RestoreFailedEdit(id string) {
 // from s.tasks at delete time, so without this restore it would vanish from the
 // pane while the disk reload that would re-show it (SetTasks) is gated on
 // !failedEdit — and a concurrent failed edit leaves failedEdit true, skipping
-// that reload. Re-appending to s.tasks keeps the row visible (the pane and
-// sidebar can never diverge, per saveContentPaneState), and re-queueing in
-// s.deleted retries the removal on the next save. The record still exists on
+// that reload. Re-inserting at the task's original position keeps the row visible
+// and the pane order consistent with the sidebar's disk-order reload; re-queueing
+// in s.deleted retries the removal on the next save. The record still exists on
 // disk (the removal did not commit), so retrying RemoveTask is not the
 // already-deleted re-run ConsumeDeleted drains to avoid (fixes #763).
 func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
-	s.tasks = append(s.tasks, tsk)
+	// Re-insert at the position the task held when it was deleted so the pane
+	// order matches the sidebar's disk-order view. showTasksOverlay transfers
+	// the sidebar's selected index directly into the TaskPane, so a position
+	// mismatch would cause subsequent actions to target the wrong task.
+	insertAt := len(s.tasks) // default: append
+	if pos, ok := s.deletedPositions[tsk.ID]; ok && pos <= len(s.tasks) {
+		insertAt = pos
+		delete(s.deletedPositions, tsk.ID)
+	}
+	s.tasks = append(s.tasks[:insertAt], append([]task.Task{tsk}, s.tasks[insertAt:]...)...)
 	s.deleted = append(s.deleted, tsk)
 	s.dirty = true
 }
