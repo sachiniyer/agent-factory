@@ -56,7 +56,7 @@ func wrapperOperandTailMutatesUncached(words []*syntax.Word, names map[string]st
 	if len(tail) == 0 {
 		return false
 	}
-	return unwrappedAccountCommandMutates(tail, names, memo)
+	return unwrappedAccountCommandMutates(tail, names, nil, memo)
 }
 
 // shadowedTailOperandLimit bounds a childless tail. The real binaries take a
@@ -904,7 +904,7 @@ func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct
 	return false
 }
 
-func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
+func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}, tainted map[string]struct{}) bool {
 	for _, word := range words {
 		expression, literal := literalShellWord(word)
 		if !literal || accountSubscriptInArithmetic(expression, names) {
@@ -925,9 +925,16 @@ func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{
 		if arithmeticExprHasCommandSubstitution(parsed) {
 			return true
 		}
+		// A variable that was assigned from a command substitution earlier in the
+		// same command is equally unprovable when referenced in arithmetic: bash
+		// re-evaluates the variable's value as fresh arithmetic, so its prior
+		// substitution output becomes a deferred arithmetic mutation.
+		if arithmeticExprReferencesTaintedVar(parsed, tainted) {
+			return true
+		}
 		mutates := false
 		syntax.Walk(parsed, func(node syntax.Node) bool {
-			if nodeMutatesAccountEnvironment(node, names) {
+			if nodeMutatesAccountEnvironment(node, names, tainted) {
 				mutates = true
 				return false
 			}
@@ -972,6 +979,95 @@ func wordHasCommandSubstitution(word syntax.Node) bool {
 	found := false
 	syntax.Walk(word, func(node syntax.Node) bool {
 		if _, ok := node.(*syntax.CmdSubst); ok {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// cmdSubstAssignedVars returns the set of variable names that are assigned
+// (at the top-level, not inside a subshell) from command substitutions in the
+// given file. These variables are "tainted": bash re-evaluates their value as
+// fresh arithmetic when they appear inside an arithmetic context (`$(( ))`,
+// `(( ))`, `let`, numeric `[[ ]]`), so a prior `x=$(printf CODEX_HOME=1)`
+// followed by `: $((x))` carries the same bypass as an inline substitution.
+//
+// Only top-level Assign nodes are collected; assignments inside a subshell or
+// command substitution run in a child process and cannot affect the parent's
+// environment, so they do not taint the outer scope.
+func cmdSubstAssignedVars(file syntax.Node) map[string]struct{} {
+	tainted := make(map[string]struct{})
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch n := node.(type) {
+		case *syntax.Subshell, *syntax.CmdSubst:
+			// Assignments inside a subshell or command substitution run in a
+			// child process; they cannot affect the parent environment.
+			return false
+		case *syntax.Assign:
+			if n.Name != nil && n.Value != nil && wordHasCommandSubstitution(n.Value) {
+				tainted[n.Name.Value] = struct{}{}
+			}
+		}
+		return true
+	})
+	return tainted
+}
+
+// arithmeticExprReferencesTaintedVar reports whether an arithmetic expression
+// tree contains a direct variable reference (a bare word spelling a tainted
+// name). When a tainted variable appears inside arithmetic, bash re-evaluates
+// that variable's value as fresh arithmetic — the same re-evaluation hazard as
+// an inline command substitution — so the expression is unprovable.
+func arithmeticExprReferencesTaintedVar(expr syntax.ArithmExpr, tainted map[string]struct{}) bool {
+	if len(tainted) == 0 {
+		return false
+	}
+	found := false
+	syntax.Walk(expr, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		word, ok := node.(*syntax.Word)
+		if !ok {
+			return true
+		}
+		name, literal := literalShellWord(word)
+		if literal {
+			// Strip an array subscript if present; the base name is what matters.
+			if idx := strings.IndexByte(name, '['); idx >= 0 {
+				name = name[:idx]
+			}
+			if _, taint := tainted[name]; taint {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// wordReferencesTaintedVar reports whether a shell word (as used in a [[ ]]
+// test operand) contains a parameter expansion of a tainted variable name.
+// bash re-evaluates the expanded value as arithmetic when the word appears in
+// a numeric [[ ]] operand, so `[[ 0 -eq $x ]]` after `x=$(printf CODEX_HOME=1)`
+// is the deferred form of the inline bypass.
+func wordReferencesTaintedVar(word syntax.Node, tainted map[string]struct{}) bool {
+	if len(tainted) == 0 {
+		return false
+	}
+	found := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		exp, ok := node.(*syntax.ParamExp)
+		if !ok || exp.Param == nil {
+			return true
+		}
+		if _, taint := tainted[exp.Param.Value]; taint {
 			found = true
 			return false
 		}
