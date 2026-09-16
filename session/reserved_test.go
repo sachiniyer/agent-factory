@@ -77,35 +77,49 @@ func TestReservedTitleCollisionLeavesDistinctTitlesAlone(t *testing.T) {
 	}
 }
 
-// TestReservedIdentityAndAdmissionAreOneQuestion pins the #4396 collapse: the
-// identity question (is this record the root?) and the admission question (may
-// a create claim this title?) are the SAME predicate over ONE normalization —
-// the tmux session name the title derives, compared case-folded. They can no
-// longer disagree, which is what let "ro ot" sit between them as a creatable
-// name claiming the reserved session's runtime name.
-//
-// The widened identity is deliberate for the shapes it adds. A record titled
-// "ro ot" can only predate the #3732 admission rule — the create gate has
-// refused it since — and its tmux name already collides with the root's, so
-// every tmux-keyed mechanism (markers, generation cohorts, scope prefixes)
-// treated it as the same session anyway. Projecting it as the root is the
-// coherent read of that record, not a new privilege for a claimable title.
-func TestReservedIdentityAndAdmissionAreOneQuestion(t *testing.T) {
+// TestReservedIdentityStaysInsideAdmission pins the #4396 relationship after
+// the case-variant review fix: admission is a strict SUPERSET of identity.
+// Every title the record-identity predicate calls the root is refused at
+// create — no admitted session can be projected as the root, the incoherence
+// the admission rule exists to prevent — while admission additionally refuses
+// the case variants whose derived tmux name is distinct.
+func TestReservedIdentityStaysInsideAdmission(t *testing.T) {
 	for _, title := range []string{
 		"root", "Root", " ROOT ", "ROOT",
-		"ro ot", "r o o t", "ro\tot", "Ro ot",
+		"ro ot", "r o o t", "ro\tot", "Ro ot", "RO OT",
 		"worker", "root-2", "rooted", "ro-ot", "Ro-ot", "root!", "root_", "toor", "",
 	} {
-		if got, want := IsReservedTitle(title), ReservedTitleCollision(title) != ""; got != want {
-			t.Fatalf("identity and admission disagree on %q: IsReservedTitle=%v, ReservedTitleCollision=%q",
-				title, got, ReservedTitleCollision(title))
+		if IsReservedTitle(title) && ReservedTitleCollision(title) == "" {
+			t.Fatalf("IsReservedTitle(%q) = true but admission would accept it — a session could be created that the daemon projects as the root", title)
 		}
 	}
-	// The widening itself: a whitespace-interleaved spelling claims the root's
-	// tmux name, so a record holding one IS the reserved session to af.
-	for _, title := range []string{"ro ot", "r o o t", "ro\tot", "Ro ot"} {
+}
+
+// TestIsReservedTitleCoversExactlyWhatARecordCanClaim enumerates the identity
+// predicate itself: the byte-exact derived-name claim plus the shapes the
+// pre-#4396 spelling rule caught — and NOT the case variants admission widened
+// past it.
+func TestIsReservedTitleCoversExactlyWhatARecordCanClaim(t *testing.T) {
+	// Reserved: whitespace-interleaved spellings whose derived tmux name is
+	// af_root byte-for-byte — the claim is real, two records cannot own one
+	// tmux session — plus the legacy trim-and-fold shapes.
+	for _, title := range []string{"root", "Root", "ROOT", " root ", "ro ot", "r o o t", "ro\tot", "ro ot"} {
 		if !IsReservedTitle(title) {
-			t.Fatalf("IsReservedTitle(%q) = false; a title claiming the root's derived name must read as the reserved session", title)
+			t.Fatalf("IsReservedTitle(%q) = false, want reserved", title)
+		}
+	}
+	// Ordinary: a whitespace-interleaved CASE VARIANT ("Ro ot") derives a
+	// case-distinct tmux name (af_Root — tmux names are case-sensitive), so it
+	// was admissible before #4396 and a stored record under it is a real
+	// session, not the root — unarchivable/unrecoverable were it projected as
+	// reserved. Admission still refuses it going forward (pinned above); the
+	// record keeps the identity its tmux name actually claims.
+	for _, title := range []string{"Ro ot", "RO OT", "r Oo t", "rO OT"} {
+		if IsReservedTitle(title) {
+			t.Fatalf("IsReservedTitle(%q) = true: a case-distinct derived name (af_Root) is not the root's af_root", title)
+		}
+		if ReservedTitleCollision(title) == "" {
+			t.Fatalf("ReservedTitleCollision(%q) = no collision: admission must still refuse the lookalike", title)
 		}
 	}
 }

@@ -17,44 +17,56 @@ const RootSessionTitle = "root"
 // repo-free namespace (the repo prefix cancels on both sides of the
 // comparison, so a caller with no repo path handy asks the identical
 // question). Both reserved-title predicates normalize a candidate to the name
-// it would claim and compare it against this — one normalization, so the
-// identity question and the admission question can no longer diverge the way
-// they did before #4396.
+// it would claim and compare it against this — IsReservedTitle byte-exact,
+// ReservedTitleCollision case-folded, so the admission gate stays a strict
+// superset of the identity a record can hold.
 var reservedTmuxName = tmux.SanitizedNameForRepo(RootSessionTitle, "")
 
-// IsReservedTitle reports whether a session title IS the root agent's. What is
-// reserved is the DERIVED tmux session name, not the spelling (#3732):
-// toTmuxName DELETES whitespace, so "ro ot" claims the identical tmux session
-// name as "root" — and the tmux name, not the title, is what markers,
-// generation cohorts and scope prefixes key on. The comparison folds case on
-// the derived name, so " Root ", "ROOT" and "Ro ot" cannot masquerade as a
-// distinct session beside the reserved one.
+// IsReservedTitle reports whether a session title IS the root agent's. Two
+// claims count, and they are deliberately a subset of what admission refuses:
+//
+//   - a title that derives the reserved tmux session name byte-for-byte.
+//     toTmuxName DELETES whitespace, so "ro ot" mints the identical af_root
+//     the root itself holds (#3732). Two records cannot own one tmux session:
+//     markers, generation cohorts and scope prefixes already conflate that
+//     record with the root, so reading it as the reserved session is the only
+//     coherent answer.
+//   - a title the pre-#4396 spelling rule caught — trim-and-fold on the title
+//     itself ("Root", " ROOT "). Admission has refused those long enough that
+//     a record holding one can only predate the gate.
+//
+// What is NOT counted is the rest of the admission superset: a whitespace-
+// interleaved CASE VARIANT like "Ro ot" derives a case-DISTINCT tmux name
+// (af_Root — tmux session names are case-sensitive), so it was admissible
+// before #4396 and can sit in storage as an ordinary session beside the root.
+// Folding case on the derived name would reclassify that record as a root it
+// is not — unarchivable (daemon/archive.go), refused handoff and limit-resume,
+// skipped by Lost-restore, and arming rootKilledAt on kill against a repo
+// whose real root it is not.
 //
 // It is asked of records that already exist — whether to pin the row to the
-// top of the sidebar, to skip Lost-restore, to arm the re-create grace window
-// — and it is equally the admission question (see ReservedTitleCollision).
-// The two share this normalization on purpose: a session af admits under a
-// title it calls the root is exactly the incoherence the admission rule exists
-// to prevent, so a create may not take a title the daemon would project as the
-// root agent.
-//
-// The widened identity is deliberate for the shapes it adds over the old
-// trim-and-fold rule. A record titled "ro ot" can only predate the #3732
-// admission rule — the create gate has refused it since — and its tmux name
-// already collides with the root's, so every tmux-keyed mechanism treated it
-// as the same session anyway. Reading it as the reserved session is the
-// coherent answer for that record.
+// top of the sidebar, to skip Lost-restore, to arm the re-create grace window.
+// The admission question (ReservedTitleCollision) is the wider one: a create
+// may not take even a lookalike of the reserved name, while a record that
+// predates admission keeps the identity its tmux name actually claims.
 func IsReservedTitle(title string) bool {
-	return strings.EqualFold(tmux.SanitizedNameForRepo(title, ""), reservedTmuxName)
+	if tmux.SanitizedNameForRepo(title, "") == reservedTmuxName {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(title), RootSessionTitle)
 }
 
 // ReservedTitleCollision returns the reserved title a candidate would claim,
 // or "" when the candidate claims nothing reserved. It is the ADMISSION
 // question — "may a create claim this title?" — asked of a title that does not
-// exist yet, and since #4396 it is the same question IsReservedTitle asks of a
-// record that does. The string result names the reserved title in refusals.
+// exist yet. It is deliberately a superset of IsReservedTitle: the case-fold
+// on the derived name also refuses a case variant like "Ro ot" whose tmux name
+// (af_Root) is genuinely distinct, because a new session admitted under a
+// lookalike spelling is the confusion the reserve exists to prevent — while an
+// existing record under that title keeps the identity its tmux name actually
+// claims. The string result names the reserved title in refusals.
 func ReservedTitleCollision(title string) string {
-	if IsReservedTitle(title) {
+	if strings.EqualFold(tmux.SanitizedNameForRepo(title, ""), reservedTmuxName) {
 		return RootSessionTitle
 	}
 	return ""
