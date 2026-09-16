@@ -107,3 +107,47 @@ func TestSavedValueMatchesComparesDurationsAsInstants(t *testing.T) {
 		t.Errorf("SavedValueMatches(default_program, \"claude\") = (%v, %v), want (true, true)", match, ok)
 	}
 }
+
+// The fixed-table leaves root_agent.enabled and root_agent.program are also
+// settable keys whose full name reaches no toml-tagged field — but their
+// section is a STRUCT, not a map, so the dynamic-leaf resolution above still
+// cannot reach them. Left unresolved, a competing write between the save and
+// the apply could never read as a lost race: the readback would stay
+// unverifiable and the deferred effect would be promised on a file that no
+// longer holds this save (#4247).
+func TestCurrentSavedValueResolvesFixedStructLeafKeys(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RootAgent.Enabled = true
+	cfg.RootAgent.Program = "codex --profile work"
+
+	for _, tc := range []struct {
+		key  string
+		want string
+	}{
+		{key: "root_agent.enabled", want: "true"},
+		{key: "root_agent.program", want: "codex --profile work"},
+	} {
+		if _, ok := CurrentValue(cfg, tc.key); ok {
+			t.Errorf("CurrentValue(%q) resolved; this test exists because it does not, "+
+				"so CurrentSavedValue's struct-leaf branch may now be dead code", tc.key)
+		}
+		got, ok := CurrentSavedValue(cfg, tc.key)
+		if !ok {
+			t.Errorf("CurrentSavedValue(%q) = _, false; want it to resolve, or a lost "+
+				"race on this leaf can never be reported", tc.key)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("CurrentSavedValue(%q) = %q, want %q", tc.key, got, tc.want)
+		}
+	}
+
+	// A resolved leaf must still compare in both directions, or the readback is
+	// inert: the written value matches, a competing one diverges.
+	if match, ok := SavedValueMatches(cfg, "root_agent.program", "codex --profile work"); !ok || !match {
+		t.Errorf("SavedValueMatches(root_agent.program, written) = (%v, %v), want (true, true)", match, ok)
+	}
+	if match, ok := SavedValueMatches(cfg, "root_agent.program", "claude --profile other"); !ok || match {
+		t.Errorf("SavedValueMatches(root_agent.program, competing) = (%v, %v), want (false, true)", match, ok)
+	}
+}

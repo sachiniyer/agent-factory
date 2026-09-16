@@ -163,3 +163,34 @@ func TestClientFallbackConfigSaveCannotConfirmADivergedValue(t *testing.T) {
 		})
 	}
 }
+
+// The server-side readback must verify a deferred key against the FILE — the
+// store the next daemon start or af launch actually reads — not the live
+// snapshot the apply just swapped in. The snapshot cannot see a competing
+// write that lands after the apply's own load, so a deferred key checked
+// there promises a next-start effect the stored file will not deliver (#4247).
+func TestAppliedSavedValueVerifiesDeferredKeyAgainstDisk(t *testing.T) {
+	configClientHome(t)
+	// Simulate the post-apply, post-competing-write state: the live snapshot
+	// the apply swapped in still holds THIS save's values, while the file now
+	// holds the competing write's.
+	snapshot := config.DefaultConfig()
+	snapshot.BranchPrefix = "mine"
+	snapshot.DefaultProgram = "aider"
+	_, err := config.SetGlobalConfigValue("branch_prefix", "winner")
+	require.NoError(t, err)
+	_, err = config.SetGlobalConfigValue("default_program", "gemini")
+	require.NoError(t, err)
+
+	// branch_prefix is consumed at the next daemon start: the file decides, so
+	// the competing write reads as superseded even though the snapshot still
+	// holds this save — the case the live-snapshot check could not see.
+	require.Equal(t, savedValueSuperseded,
+		appliedSavedValue(snapshot, "branch_prefix", "mine"))
+
+	// default_program is consumed by the running daemon: the snapshot decides,
+	// so a write that landed after the apply does not contradict what the
+	// daemon is serving.
+	require.Equal(t, savedValueConfirmed,
+		appliedSavedValue(snapshot, "default_program", "aider"))
+}

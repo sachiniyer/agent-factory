@@ -62,12 +62,14 @@ func durationOrMillisecondCount(value string) (int, bool) {
 // WRITE, in the same form SetResult.Value records and `af config set` accepts
 // back.
 //
-// It is CurrentValue widened by exactly one case: the dotted dynamic-family
-// leaves (program_overrides.<agent>, default_accounts.<agent>,
-// limit_patterns.<agent>). Those are valid settable keys, but the full dotted
-// key names no toml-tagged field — the reflection walk behind CurrentValue
-// matches whole fields, and the field here is the containing map — so
-// CurrentValue reports ok=false for them.
+// It is CurrentValue widened by the settable leaves the whole-field reflection
+// walk cannot reach: the dotted dynamic-family leaves
+// (program_overrides.<agent>, default_accounts.<agent>,
+// limit_patterns.<agent>) inside map sections, and the declared subkeys of a
+// fixed table (root_agent.enabled, root_agent.program) inside a struct
+// section. Those are valid settable keys, but the full dotted key names no
+// toml-tagged field — the walk matches whole fields, and the field here is
+// the containing map or struct — so CurrentValue reports ok=false for them.
 //
 // That distinction matters because a post-apply readback must resolve exactly
 // the key that was written. Reading an unresolvable key as "diverged" made every
@@ -92,14 +94,28 @@ func CurrentSavedValue(cfg *Config, key string) (string, bool) {
 		return "", false
 	}
 	field, ok := configFieldByTomlKey(cfg, section)
-	if !ok || field.Kind() != reflect.Map {
+	if !ok {
 		return "", false
 	}
-	// MapIndex on a nil or entry-less map yields the zero Value rather than
-	// panicking, which is the absent-entry case documented above.
-	entry := field.MapIndex(reflect.ValueOf(leaf))
-	if !entry.IsValid() {
-		return "", true
+	switch field.Kind() {
+	case reflect.Map:
+		// MapIndex on a nil or entry-less map yields the zero Value rather than
+		// panicking, which is the absent-entry case documented above.
+		entry := field.MapIndex(reflect.ValueOf(leaf))
+		if !entry.IsValid() {
+			return "", true
+		}
+		return editorValue(entry), true
+	case reflect.Struct:
+		// A section can also be a fixed table whose scalar leaves are declared
+		// settable subkeys (root_agent.enabled, root_agent.program). The leaf
+		// names a tagged struct field, not a map entry — resolved by the same
+		// tagged walk that found the section.
+		leafField, ok := taggedFieldByKey(field, leaf)
+		if !ok {
+			return "", false
+		}
+		return editorValue(leafField), true
 	}
-	return editorValue(entry), true
+	return "", false
 }

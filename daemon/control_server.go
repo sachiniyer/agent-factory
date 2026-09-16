@@ -243,11 +243,14 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 			// A successful apply claims "applied" only if the daemon is serving
 			// THIS save's value: a competing write can land between the writer's
 			// file-lock release and the apply's load, so the applied config may
-			// carry a different value for the same key (#4247). Only a readback
-			// that RESOLVED the key may contradict the apply — an unverifiable
-			// one leaves the claim where the apply left it.
+			// carry a different value for the same key (#4247). The readback
+			// checks the store that will serve the key — the live snapshot for
+			// a live key, the file for a deferred one whose next start reads
+			// that file — and only a readback that RESOLVED the key may
+			// contradict the apply: an unverifiable one leaves the claim where
+			// the apply left it.
 			outcome.SavedValueSuperseded =
-				liveSavedValue(s.manager.Config(), result.Key, result.Value) == savedValueSuperseded
+				appliedSavedValue(s.manager.Config(), result.Key, result.Value) == savedValueSuperseded
 		} else {
 			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+aerr.Error())
 			outcome.DaemonApplyFailed = true

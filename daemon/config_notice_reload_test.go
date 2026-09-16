@@ -45,15 +45,35 @@ func TestCompleteConfigSaveWarnings(t *testing.T) {
 }
 
 func TestFailedConfigApplyOutcomeDistinguishesLostReply(t *testing.T) {
-	t.Run("daemon refusal", func(t *testing.T) {
-		outcome, warning := failedConfigApplyOutcome(rpc.ServerError("apply refused during upgrade"))
+	t.Run("reload failure", func(t *testing.T) {
+		// Manager.ApplyConfig's only error wraps config.LoadConfig as
+		// "reload config: …" — the one ServerError that proves the saved FILE
+		// did not load, so it outranks even a deferred key's next-start class.
+		outcome, warning := failedConfigApplyOutcome(rpc.ServerError("reload config: forced reload failure"))
 		require.True(t, outcome.DaemonApplyFailed)
 		require.False(t, outcome.DaemonApplyUnconfirmed)
 		require.Contains(t, warning, "live apply failed")
-		require.Contains(t, warning, "apply refused during upgrade")
+		require.Contains(t, warning, "reload config: forced reload failure")
 		require.Equal(t,
 			"Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value.",
 			config.EffectNotice("network.require_token", outcome))
+		require.Equal(t, config.ApplyStatusFailed, outcome.StatusForKey("branch_prefix"))
+	})
+
+	t.Run("daemon refusal", func(t *testing.T) {
+		// An admission refusal (upgrade probation, quiescing) reaches the client
+		// as a ServerError too, but it says nothing about whether the saved file
+		// loads — only that this daemon declined to apply it right now. That is
+		// unconfirmed, not failed: reporting failure would call a deferred key's
+		// save broken although the next af/daemon launch reads the file normally
+		// (#4247).
+		outcome, warning := failedConfigApplyOutcome(rpc.ServerError("apply refused during upgrade"))
+		require.False(t, outcome.DaemonApplyFailed)
+		require.True(t, outcome.DaemonApplyUnconfirmed)
+		require.Contains(t, warning, "live apply could not be confirmed")
+		require.Contains(t, warning, "apply refused during upgrade")
+		require.Equal(t, config.ApplyStatusUnconfirmed, outcome.StatusForKey("network.require_token"))
+		require.Equal(t, config.ApplyStatusDeferred, outcome.StatusForKey("branch_prefix"))
 	})
 
 	t.Run("lost reply", func(t *testing.T) {

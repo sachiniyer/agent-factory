@@ -31,9 +31,11 @@ func (s *controlServer) UnsetConfigValue(req UnsetConfigValueRequest, resp *Unse
 			// Same race as SetConfigValue: an unset's live value is the default,
 			// so a competing write between the file-lock release and the apply's
 			// load leaves the daemon serving that write instead (#4247). As
-			// there, only a resolved readback may contradict the apply.
+			// there, the readback checks the store that will serve the key —
+			// live snapshot for a live key, the file for a deferred one — and
+			// only a resolved readback may contradict the apply.
 			outcome.SavedValueSuperseded =
-				liveSavedValue(s.manager.Config(), result.Key, unsetExpectedValue(result.Key)) == savedValueSuperseded
+				appliedSavedValue(s.manager.Config(), result.Key, unsetExpectedValue(result.Key)) == savedValueSuperseded
 		} else {
 			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+applyErr.Error())
 			outcome.DaemonApplyFailed = true

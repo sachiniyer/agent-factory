@@ -52,10 +52,13 @@ func unsetExpectedValue(key string) string {
 	return expected
 }
 
-// diskSavedValue is the fallback counterpart of liveSavedValue: a client whose
-// daemon is too old to serve SetConfigValue is also too old to serve GetConfig
-// (both arrived together in #1960), so it cannot read the daemon's live config
-// back and must read the file instead.
+// diskSavedValue is the FILE counterpart of liveSavedValue, for the two
+// callers whose authoritative store is the file rather than the daemon's
+// snapshot: a client whose daemon is too old to serve SetConfigValue is also
+// too old to serve GetConfig (both arrived together in #1960), so it cannot
+// read the daemon's live config back and must read the file instead; and the
+// in-daemon appliedSavedValue uses it for deferred keys, whose next daemon
+// start or af launch reads that same file.
 //
 // It reports what the FILE says and nothing more. What a divergence proves
 // depends on the key, and only the caller knows that:
@@ -87,4 +90,26 @@ func deferredEffectKey(key string) bool {
 		return true
 	}
 	return false
+}
+
+// appliedSavedValue is the in-daemon post-apply readback behind a successful
+// ApplyConfig: it verifies the saved value against the store that will actually
+// serve it, which depends on when the key's value is consumed (#4247).
+//
+//   - A key the running daemon consumes is checked against cfg — the live
+//     snapshot the apply just swapped in. A divergence means the apply loaded
+//     a competing write.
+//   - A deferred key is checked against the FILE, because the file is what the
+//     next daemon start or af launch will read. The live snapshot cannot see a
+//     competing write that lands after the apply's own load — it would still
+//     hold this save and promise a deferred effect the stored file will not
+//     deliver.
+//
+// An unloadable file reads as unverifiable, not superseded: it proves the
+// caller cannot say which value won, never that a competing one did.
+func appliedSavedValue(cfg *config.Config, key, expected string) savedValueVerdict {
+	if deferredEffectKey(key) {
+		return diskSavedValue(key, expected)
+	}
+	return liveSavedValue(cfg, key, expected)
 }

@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"net/rpc"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -19,12 +20,19 @@ import (
 // this states what is known rather than asserting a lost race.
 const unconfirmedReadbackWarning = "saved config, but this daemon is too old to report its live config back and the file no longer holds this save's value, so the value the daemon is serving could not be confirmed"
 
-// failedConfigApplyOutcome keeps a daemon's explicit refusal distinct from a
-// lost RPC reply. The former proves that the saved config was not applied; the
-// latter proves only that the client cannot tell whether it was applied.
+// failedConfigApplyOutcome keeps a genuine reload failure distinct from both a
+// lost RPC reply and a refusal that never reached the reload. net/rpc flattens
+// every handler error into rpc.ServerError, so the message is the only signal:
+// Manager.ApplyConfig's sole error return wraps config.LoadConfig as
+// "reload config: …", and only that string proves the saved FILE did not load —
+// evidence that outranks even a deferred key's next-start effect. An admission
+// refusal (upgrade probation, quiescing) is also a ServerError but says nothing
+// about whether the file loads; like a lost reply, it proves only that the
+// client cannot tell whether the apply ran, so it is unconfirmed rather than
+// failed.
 func failedConfigApplyOutcome(err error) (config.ApplyOutcome, string) {
 	var serverErr rpc.ServerError
-	if errors.As(err, &serverErr) {
+	if errors.As(err, &serverErr) && strings.HasPrefix(string(serverErr), "reload config:") {
 		return config.ApplyOutcome{DaemonApplyFailed: true}, "saved config, but live apply failed: " + err.Error()
 	}
 	return config.ApplyOutcome{DaemonApplyUnconfirmed: true}, "saved config, but live apply could not be confirmed: " + err.Error()
