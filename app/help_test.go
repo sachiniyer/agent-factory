@@ -174,7 +174,7 @@ func TestInstanceStartHelpMentionsFullScreenDetach(t *testing.T) {
 	local := newStartedInstance(t, "local")
 	content := helpStart(local).toContent()
 
-	if !strings.Contains(content, "ctrl-w") || !strings.Contains(content, "Leave full-screen") {
+	if !strings.Contains(content, "ctrl+w") || !strings.Contains(content, "Leave full-screen") {
 		t.Errorf("instance-start help must name the full-screen detach key; got:\n%s", content)
 	}
 }
@@ -225,7 +225,7 @@ func TestInstanceAttachHelpShowsProceedCancelAndDetach(t *testing.T) {
 		"preview scrolling works only in navigation mode",
 		"enter attach full-screen · esc cancel",
 		"Detach later with",
-		"ctrl-w",
+		"ctrl+w",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("attach help missing %q; got:\n%s", want, content)

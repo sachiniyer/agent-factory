@@ -695,7 +695,7 @@ func resolveAttachTarget(title string) (string, string, error) {
 var sessionsAttachCmd = &cobra.Command{
 	Use:   "attach <title>",
 	Short: "Attach to a session's terminal",
-	Long:  "Attach to a running session's tmux terminal. Detach with the configured detach key (default: Ctrl-w).",
+	Long:  "Attach to a running session's tmux terminal. Detach with the configured detach key (default: ctrl+w).",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)

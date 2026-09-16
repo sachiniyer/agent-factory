@@ -310,13 +310,26 @@ var ErrAccountEnvironmentRefresh = errors.New("account-scoped tmux environment r
 // Default is 23 (Ctrl-W). Set via SetDetachKey.
 var DetachKeyByte byte = 23
 
-// DetachKeyDisplay is the human-readable name for the detach key (e.g. "ctrl-w").
-var DetachKeyDisplay string = "ctrl-w"
+// DetachKeyDisplay is the human-readable name for the detach key, in the
+// help-overlay spelling ("ctrl+w"). The config file keeps its "ctrl-w" form;
+// SetDetachKey normalises it on the way in (#4176).
+var DetachKeyDisplay string = "ctrl+w"
 
 // SetDetachKey sets the global detach key byte and display name.
 func SetDetachKey(b byte, display string) {
 	DetachKeyByte = b
-	DetachKeyDisplay = display
+	DetachKeyDisplay = detachKeyDisplayForm(display)
+}
+
+// detachKeyDisplayForm renders a config-shaped key name ("ctrl-w") in the
+// spelling the help overlay uses for every other ctrl binding ("ctrl+w").
+// Anything that does not look like a ctrl- combination passes through
+// unchanged rather than being re-spelled.
+func detachKeyDisplayForm(display string) string {
+	if rest, ok := strings.CutPrefix(strings.ToLower(strings.TrimSpace(display)), "ctrl-"); ok {
+		return "ctrl+" + rest
+	}
+	return display
 }
 
 // repoHash returns a short hex hash of the repo path for use in tmux session names.
