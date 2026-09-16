@@ -376,9 +376,26 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) 
 	// the same value for both). The ordinal does not change between retries
 	// for the same occurrence, so it is a stable discriminator that does not
 	// break the rebind dedup case (PRRT_kwDORdIFwM6i7iHM).
+	//
+	// When two duplicate-ID deletions share an identical expect record, both
+	// would match the same first deletedRanks entry, giving them the same
+	// ordinal. To break the tie, skip entries whose rank is already claimed by
+	// an existing restoredDeletes entry for this (expect, ordinal) pair —
+	// that entry belongs to the occurrence restored on a prior call
+	// (PRRT_kwDORdIFwM6i9KHj).
+	claimedOrdinals := map[int]int{} // rank -> count already assigned to restored entries
+	for _, e := range s.restoredDeletes[display.ID] {
+		if reflect.DeepEqual(e.expect, expect) && e.ordinal >= 0 {
+			claimedOrdinals[e.ordinal]++
+		}
+	}
 	occOrdinal := -1
 	for _, e := range s.deletedRanks {
 		if reflect.DeepEqual(e.expect, expect) {
+			if claimedOrdinals[e.rank] > 0 {
+				claimedOrdinals[e.rank]--
+				continue
+			}
 			occOrdinal = e.rank
 			break
 		}
@@ -475,7 +492,12 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) 
 				s.tasks[i] = display
 				// Update the stored display so subsequent retries can locate
 				// the newly-refreshed row (not the stale pre-refresh value).
-				s.restoredDeletes[display.ID][storedIdx] = restoredEntry{expect: expect, display: display}
+				// Preserve the ordinal from the original entry: it is the
+				// load-order rank captured at delete time and does not change
+				// between retries. Resetting it to zero would cause the dedup
+				// check to miss the existing entry on the next retry and insert
+				// a duplicate visible row (PRRT_kwDORdIFwM6i9KHf).
+				s.restoredDeletes[display.ID][storedIdx] = restoredEntry{expect: expect, display: display, ordinal: storedEntries[storedIdx].ordinal}
 			}
 			break
 		}
@@ -605,17 +627,16 @@ func (s *TaskPane) survivingDifferentIDRank(id string, pos int) (rank int, known
 			deletedCounts[e.rank]++
 		}
 	}
-	// Subtract restored occurrences: each restoredDeletes entry has a
-	// matching deletedRanks entry whose rank belongs to a visible row — do not
-	// skip it.
+	// Subtract restored occurrences: each restoredDeletes entry corresponds to
+	// a visible row. Its ordinal IS the load-order rank stored in deletedRanks
+	// at delete time, so decrement deletedCounts directly using re.ordinal.
+	// A secondary deletedRanks lookup by re.expect would mis-hit when two
+	// restored entries share the same expect record (because originals[id] is
+	// ID-keyed), subtracting the wrong rank and causing a surviving row to be
+	// assigned an absent deleted slot's rank (PRRT_kwDORdIFwM6i9KHq).
 	for _, re := range s.restoredDeletes[id] {
-		for _, de := range s.deletedRanks {
-			if de.expect.ID == id && reflect.DeepEqual(de.expect, re.expect) {
-				if deletedCounts[de.rank] > 0 {
-					deletedCounts[de.rank]--
-				}
-				break
-			}
+		if re.ordinal >= 0 && deletedCounts[re.ordinal] > 0 {
+			deletedCounts[re.ordinal]--
 		}
 	}
 	// Walk the sorted loadedRanks list, skipping truly-absent deleted slots,
