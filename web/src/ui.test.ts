@@ -154,6 +154,12 @@ test("a managed-but-inert row is marked disabled and explains itself (#4394)", (
   // drew its Kill button, looked live, and silently swallowed every click.
   const { el, open } = row({ can_kill: true, pending_account_swap: {} });
   assert.equal(el.getAttribute("aria-disabled"), "true", "an inert row must not read as live");
+  const actions = el.children[el.children.length - 1];
+  assert.equal(
+    actions.getAttribute("aria-disabled"),
+    "false",
+    "the row's disabled marker must not read onto its live Delete control",
+  );
   el.click();
   assert.equal(open.calls, 0, "a click on an inert row must not reach the open callback");
   assert.match(
@@ -168,7 +174,9 @@ test("the inert reason names the suppressing condition the daemon projected", ()
   // the durable causes still on the wire; each gets its own short reason, and
   // an unrecognized cause still refuses out loud rather than going silent.
   for (const [over, reason] of [
-    [{ user_killed: true }, "cannot be opened · kill in progress"],
+    // A kill tombstone is durable intent, not an active operation: a failed
+    // teardown leaves it as the retry handle, so the reason says pending.
+    [{ user_killed: true }, "cannot be opened · kill pending"],
     [{ startup_state_unknown: true }, "cannot be opened · startup could not be confirmed"],
     [{ pending_account_swap: {} }, "cannot be opened · account swap in progress"],
     [{}, "cannot be opened"],

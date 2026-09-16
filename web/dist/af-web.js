@@ -17270,7 +17270,7 @@ function beginTabRename(btn, tab, actions2, editedId, editedSessionId) {
 function inertRowReason(s) {
   let cause = "";
   if (s.user_killed === true) {
-    cause = "kill in progress";
+    cause = "kill pending";
   } else if (s.startup_state_unknown === true) {
     cause = "startup could not be confirmed";
   } else if (s.pending_account_swap !== void 0) {
@@ -17322,7 +17322,11 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   row.append(statusSlot);
   row.append(main);
   if (managed) {
-    row.append(buildActions(s));
+    const actions2 = buildActions(s);
+    if (!actionable) {
+      actions2.setAttribute("aria-disabled", "false");
+    }
+    row.append(actions2);
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");

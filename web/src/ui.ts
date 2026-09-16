@@ -3109,14 +3109,16 @@ function beginTabRename(
 
 /** Why a managed-but-inert row cannot be opened, appended to its title (#4394).
  *  Killable without lifecycle_action means lifecycleActionFor withheld the verb
- *  for a durable cause the projection still names: a kill tombstone finishing
- *  teardown, a startup whose runtime was never confirmed, or a committed
- *  account swap still in flight. An unrecognized cause still gets the bare
- *  refusal rather than going silent again. */
+ *  for a durable cause the projection still names: a kill tombstone awaiting
+ *  teardown or retry, a startup whose runtime was never confirmed, or a
+ *  committed account swap still in flight. user_killed proves the intent, not
+ *  an active operation — a failed kill leaves the tombstone as a retry handle,
+ *  so the wording says pending rather than in progress. An unrecognized cause
+ *  still gets the bare refusal rather than going silent again. */
 function inertRowReason(s: SessionData): string {
   let cause = "";
   if (s.user_killed === true) {
-    cause = "kill in progress";
+    cause = "kill pending";
   } else if (s.startup_state_unknown === true) {
     cause = "startup could not be confirmed";
   } else if (s.pending_account_swap !== undefined) {
@@ -3187,7 +3189,15 @@ export function sessionRow(
   row.append(statusSlot);
   row.append(main);
   if (managed) {
-    row.append(buildActions(s));
+    const actions = buildActions(s);
+    // The row's aria-disabled below says it cannot be opened — it must not
+    // read onto the still-working controls inside it. A managed-but-inert
+    // row's Delete button stays live, so the actions host opts back out of
+    // the disabled state the row carries (#4394 review).
+    if (!actionable) {
+      actions.setAttribute("aria-disabled", "false");
+    }
+    row.append(actions);
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
