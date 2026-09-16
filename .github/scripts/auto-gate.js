@@ -1998,12 +1998,57 @@ async function processAggregateHead({
         });
         return { state: "evaluation-error", pending, aggregate };
       }
-      // A deterministic evaluation failure is scoped to this PR: publishing
-      // nothing leaves it without a passing (PR, head) decision, so the
-      // aggregate stays red for it — while unrelated PRs sharing this run
-      // still evaluate and publish. Throwing here used to kill the whole job
-      // and take the gate down repo-wide (#4484).
+      // A deterministic evaluation failure is scoped to this PR — unrelated
+      // PRs sharing this run still evaluate and publish; throwing here used
+      // to kill the whole job and take the gate down repo-wide (#4484). But
+      // skipping the write is NOT neutral: an earlier run can have left a
+      // green (PR, head) decision on this unchanged head, and the aggregate
+      // accepts any completed success it rereads — republishing green for a
+      // PR this run never evaluated (#4486 review). Write the failure in
+      // place so the reread reads this run's truth.
       core.warning(`Auto Gate evaluation failed for PR #${prNumber}; scoping the failure to that PR: ${result.summary}`);
+      try {
+        const failedWrite = await reportDecision({
+          github,
+          context,
+          core,
+          result: {
+            prNumber,
+            headSha: pending.headSha,
+            pullRequestId: result.pullRequestId,
+            shouldMerge: false,
+            reasons: [`auto-gate evaluation error: ${result.summary}`],
+            summary: `Auto Gate could not evaluate this pull request: ${result.summary}`,
+            requiredCheckObservations: [],
+          },
+        });
+        if (failedWrite.state === "read-only") {
+          return { state: "read-only", pending };
+        }
+      } catch (error) {
+        // The same classification the normal decision write below uses: a PR
+        // that vanished mid-run is an association change, a read that gave up
+        // is an evaluation error, anything else stays fatal.
+        if (error?.autoGatePullRequestGone) {
+          core.notice(
+            `Keeping aggregate ${pending.headSha} non-green because PR #${prNumber} ` +
+              "no longer exists.",
+          );
+          return { state: "association-changed", pending };
+        }
+        if (!isReadFailure(error)) {
+          throw error;
+        }
+        const aggregate = await blockAggregateEvaluation({
+          github,
+          context,
+          core,
+          headSha: pending.headSha,
+          checkRunId: pending.checkRunId,
+          reason: formatError(error),
+        });
+        return { state: "evaluation-error", pending, aggregate };
+      }
       continue;
     }
     if (result.headSha !== pending.headSha) {
