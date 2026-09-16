@@ -162,6 +162,11 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		{class: notAShell, note: "`stat -c %u:%g` — stat's format flag"},
 		{class: afAuthored, note: "af's mkdir/chown script for the account-owned home"},
 	},
+	"internal/testguard/fixture_unix.go:StartGroupProcess": {{
+		class: afAuthored,
+		note: "groupPinScript, a const in the same file; the spawner pid and its start stamp " +
+			"arrive as $1/$2 positional parameters, never spliced into the script text",
+	}},
 
 	// ---- not a shell at all ----
 	"session/tmux/start.go:(*TmuxSession).Start": {{

@@ -69,8 +69,20 @@ func StartGroupProcess(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 	// kill -0 while it awaits collection. ppid drift cannot stand in for
 	// this: a pin orphaned between fork and first poll captures the reaper
 	// as its parent and watches a process that never goes away.
+	//
+	// The watch is bound to the owner's process instance, not its slot: a
+	// bare pid is reissued once the owner dies, and the live replacement
+	// would hold this pin for the whole bound — the same reuse race
+	// ExpectedOwnerStartEnv closes for the Go watchdog, closed here by
+	// passing the spawner's proctree StartID as $2 (#4417 review). A
+	// platform where the stamp cannot be read passes an empty $2 and the
+	// pin keeps existence semantics.
+	pinStart := ""
+	if self, err := proctree.Lookup(os.Getpid()); err == nil && self.StartID != 0 {
+		pinStart = strconv.FormatUint(self.StartID, 10)
+	}
 	pin := exec.Command("sh", "-c", groupPinScript, "af-testguard-pin",
-		strconv.Itoa(os.Getpid()))
+		strconv.Itoa(os.Getpid()), pinStart)
 	pin.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: cmd.Process.Pid}
 	if err := pin.Start(); err != nil {
 		// The leader is already running and no cleanup for it is registered
@@ -139,16 +151,57 @@ func StartGroupProcessUnpinned(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 	return cmd
 }
 
-// groupPinScript is the pin process's body; $1 is the pid it must outlive —
-// its spawner, the test binary. See StartGroupProcess for why a bare `sleep
-// 86400` leaks and why the death signal is the owner's ps STATE rather than
-// the pin's ppid or a kill -0: a zombie owner still answers signal-0, and a
-// ppid captured after reparenting names a reaper that never dies. Empty ps
-// output means the owner is gone outright; Z/X/x mean it is dead but
-// uncollected — both end the pin. command -v degrades a ps-less minimal box
-// to the bounded sleeper, which can still leak for a day but keeps the pgid
-// pin it was bought for.
-const groupPinScript = `if command -v ps >/dev/null 2>&1; then _af_pin_i=0; while [ "$_af_pin_i" -lt 86400 ]; do _af_pin_stat=$(ps -o stat= -p "$1" 2>/dev/null); case "$_af_pin_stat" in ""|Z*|X*|x*) exit 0;; esac; sleep 1; _af_pin_i=$((_af_pin_i + 1)); done; else sleep 86400; fi`
+// groupPinScript is the pin process's body. $1 is the pid it must outlive —
+// its spawner, the test binary — and $2 that pid's proctree StartID, empty
+// when the platform could not stamp it. See StartGroupProcess for why a
+// bare `sleep 86400` leaks and why the death signal is the owner's process
+// STATE rather than the pin's ppid or a kill -0: a zombie owner still
+// answers signal-0, and a ppid captured after reparenting names a reaper
+// that never dies. Two platform arms, both ending the pin when the owner is
+// gone or dead-but-uncollected:
+//
+//   - /proc (linux): one read yields the state letter AND the starttime —
+//     stat field 22 is exactly what proctree reports as StartID — so this
+//     arm validates pid AND instance every poll. A reused owner pid shows a
+//     different starttime and the pin exits instead of holding the group
+//     for a recycled stranger.
+//   - ps (darwin and /proc-less boxes): the state check alone cannot see a
+//     stamp, so the pin self-binds to the first lstart ps reports and exits
+//     if it ever changes — that shrinks the reuse window to
+//     pin-start→first-poll rather than closing it, and an empty capture
+//     degrades to the state check alone.
+//
+// Neither arm trusts kill -0 or ppid drift, for the same reasons as before.
+// A box with neither /proc nor ps degrades to the bounded sleeper, which
+// can still leak for a day but keeps the pgid pin it was bought for. Both
+// live arms stay bounded too: the loop is the last-resort ceiling when
+// every check keeps passing on an immortal owner.
+const groupPinScript = `_af_pin_pid=$1; _af_pin_stamp=$2; _af_pin_i=0
+if [ -r "/proc/$_af_pin_pid/stat" ]; then
+	while [ "$_af_pin_i" -lt 86400 ]; do
+		_af_pin_raw=$(cat "/proc/$_af_pin_pid/stat" 2>/dev/null) || exit 0
+		[ -n "$_af_pin_raw" ] || exit 0
+		set -f; set -- ${_af_pin_raw##*)}; set +f
+		case "$1" in Z*|X*|x*) exit 0;; esac
+		[ -z "$_af_pin_stamp" ] || [ "${20}" = "$_af_pin_stamp" ] || exit 0
+		sleep 1; _af_pin_i=$((_af_pin_i + 1))
+	done
+elif command -v ps >/dev/null 2>&1; then
+	_af_pin_id=""
+	while [ "$_af_pin_i" -lt 86400 ]; do
+		_af_pin_stat=$(ps -o stat= -p "$_af_pin_pid" 2>/dev/null)
+		case "$_af_pin_stat" in ""|Z*|X*|x*) exit 0;; esac
+		_af_pin_now=$(ps -o lstart= -p "$_af_pin_pid" 2>/dev/null)
+		if [ -z "$_af_pin_id" ]; then
+			_af_pin_id=$_af_pin_now
+		elif [ -n "$_af_pin_now" ] && [ "$_af_pin_now" != "$_af_pin_id" ]; then
+			exit 0
+		fi
+		sleep 1; _af_pin_i=$((_af_pin_i + 1))
+	done
+else
+	sleep 86400
+fi`
 
 // processAlive reports whether pid currently names a RUNNING process — the
 // instance stamped start when the spawner recorded one, any live process

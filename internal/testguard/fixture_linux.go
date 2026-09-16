@@ -4,11 +4,26 @@ package testguard
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+// orphanReaperCount tracks how many registered fixture groups still need the
+// process-wide subreaper mark. PR_SET_CHILD_SUBREAPER is not per-group: a
+// test that starts two fixtures registers two cleanups, and they run LIFO —
+// the LAST fixture's cleanup kills and reaps, then the last-registered reset
+// would clear the flag before the FIRST fixture is killed. Its orphans —
+// including the pin's `sleep 1` — would then reparent to a container PID 1
+// that may never collect, the exact zombie the mark exists to prevent
+// (#4417 review). The flag is set on the first call and cleared only when
+// the last registered group has cleaned up.
+var orphanReaperCount struct {
+	mu sync.Mutex
+	n  int
+}
 
 // becomeOrphanReaper marks the test process a child subreaper
 // (PR_SET_CHILD_SUBREAPER), so a fixture orphaned mid-test reparents HERE
@@ -18,14 +33,26 @@ import (
 // The reparenting takes effect for orphans created after the call, so it
 // must run before the fixture's parent is killed. The attribute is reset on
 // cleanup so a subreaper test cannot change where a sibling test's orphans
-// land.
+// land — reference-counted, because the flag is process-wide while the
+// cleanups are per fixture group.
 func becomeOrphanReaper(t testing.TB) {
 	t.Helper()
-	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
-		t.Fatalf("mark test process a child subreaper: %v", err)
+	orphanReaperCount.mu.Lock()
+	if orphanReaperCount.n == 0 {
+		if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+			orphanReaperCount.mu.Unlock()
+			t.Fatalf("mark test process a child subreaper: %v", err)
+		}
 	}
+	orphanReaperCount.n++
+	orphanReaperCount.mu.Unlock()
 	t.Cleanup(func() {
-		_ = unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
+		orphanReaperCount.mu.Lock()
+		defer orphanReaperCount.mu.Unlock()
+		orphanReaperCount.n--
+		if orphanReaperCount.n == 0 {
+			_ = unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
+		}
 	})
 }
 
