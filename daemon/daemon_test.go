@@ -30,6 +30,15 @@ func TestMain(m *testing.M) {
 		fakeVSCodeServerMain()
 		return
 	}
+	// A re-exec of this test binary standing in for Codex (see
+	// newConfigAgentCodexFixture): run only the fixture test and exit, BEFORE the
+	// tripwires and sandboxing below. It is a child process of a test, not a test
+	// run — and its CODEX_HOME is the launch command's own environment, which the
+	// parent test points at its fixture dir. SandboxHome would rewrite it to the
+	// child's own throwaway sandbox, and the parent's rollout would never arrive.
+	if os.Getenv(configAgentCodexFixtureEnv) != "" {
+		os.Exit(m.Run())
+	}
 	// #837: fail the package loudly if any test touches the real config.json.
 	verifyRealConfig := testguard.ConfigTripwire()
 	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux

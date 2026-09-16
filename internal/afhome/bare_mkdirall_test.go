@@ -76,6 +76,10 @@ var allowedBareMkdirAll = map[string]struct {
 		"Writes generated plugin files into an af SOURCE CHECKOUT selected by " +
 			"--plugin-root, which the caller has already validated by reading its " +
 			"go.mod module path. Never the AF home."},
+	"internal/testguard/testguard.go:SandboxHome": {1,
+		"The codex-home leaf inside the os.MkdirTemp SandboxHome itself just " +
+			"created — a path the OS handed this test run, never under the real " +
+			"AF home (#4469)."},
 }
 
 func TestNoBareMkdirAllUnderTheAFHome(t *testing.T) {
