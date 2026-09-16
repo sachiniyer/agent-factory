@@ -89,7 +89,7 @@ import {
 } from "./sessions.js";
 import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
-import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
+import { canHandoff, canHandoffAccount, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
 import { PendingRestores, type RestoreEvidence } from "./pending_restores.js";
 import { CreateSelectionIntent, OptimisticSessions } from "./optimistic.js";
@@ -2110,7 +2110,10 @@ function doRetryLimit(): void {
  * agent), which the id/title-only selectedSession() omits. */
 function doHandoff(): void {
   const sel = selectedSessionData();
-  if (!sel || !sel.id || !canHandoff(sel)) {
+  // can_handoff_account is the account form of the gate (#4433): it adds the one
+  // row that can never change agent — the reserved root — and stays absent on
+  // older daemons, which is why the two fields are OR'd rather than collapsed.
+  if (!sel || !sel.id || !(canHandoff(sel) || canHandoffAccount(sel))) {
     return;
   }
   const target = { id: sel.id, title: sel.title };
@@ -2120,6 +2123,9 @@ function doHandoff(): void {
       loadPrograms: () => loadPrograms(""),
       loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
       currentAccount: sel.account,
+      // The agent axis is only offered when the session may change agent at all:
+      // on the reserved root that is never true, so the modal runs account-only.
+      accountOnly: !canHandoff(sel),
       onSubmit: (to: string, account?: string) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).

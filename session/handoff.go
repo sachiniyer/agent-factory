@@ -189,6 +189,18 @@ func (i *Instance) canHandoffLocked() bool {
 		i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionHandoff) == nil
 }
 
+// canHandoffAccountLocked is the account-only form of canHandoffLocked (#4433):
+// the same two predicates against RuntimeActionHandoffAccount, which shares the
+// handoff contract minus the reserved-root refusal — an account move keeps the
+// same agent on the same worktree and branch, so it is the one runtime
+// replacement the daemon-managed root admits (#4395). Projected as
+// InstanceData.CanHandoffAccount so a browser can offer root's account move
+// without weakening can_handoff's agent-swap answer.
+func (i *Instance) canHandoffAccountLocked() bool {
+	return i.capabilitiesLocked().Handoff &&
+		i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionHandoffAccount) == nil
+}
+
 // currentAgentNameLocked is CurrentAgentName's already-locked half, for callers
 // holding i.mu (SwapAgentProgram builds the ledger entry inside its write lock,
 // and sync.RWMutex is not reentrant). TmuxSession.Program takes only the tmux

@@ -412,7 +412,10 @@ The reserved `root` agent accepts the account form too — `af sessions handoff
 root --account personal` moves which identity the same agent authenticates as,
 while its worktree, branch, and singleton status are untouched. `af sessions
 handoff root --to <agent>` stays refused: changing the agent changes what root
-is, which no handoff may do.
+is, which no handoff may do. The TUI's `F` picker and the web's Handoff action
+offer the same account-only move for root, listing its agent's other registered
+accounts — the incoming process starts a fresh conversation with a summary of
+the work so far.
 
 If an agent or account handoff starts its replacement but cannot confirm whether
 the mission was submitted, af suppresses automatic redelivery because the first

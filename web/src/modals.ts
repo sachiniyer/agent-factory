@@ -445,13 +445,21 @@ export function handoffModal(
     onSubmit: (target: string, account?: string) => void;
     loadAccounts?: () => Promise<AccountsResponse>;
     currentAccount?: string;
+    /** Account-only mode (#4433): the reserved root can never change agent, so
+     *  the modal drops the agent field and offers the current agent's other
+     *  accounts alone — leading with agent rows would be choices that can only
+     *  refuse at submit. The submit still sends the current agent explicitly,
+     *  so a mid-flight agent change fails closed at the daemon rather than
+     *  silently retargeting. */
+    accountOnly?: boolean;
     onCancel: () => void;
     loadPrograms: () => Promise<ProgramCatalog>;
   },
 ): ModalHandle {
+  const accountOnly = callbacks.accountOnly === true;
   const { handle, body, confirmBtn } = modalChrome({
-    title: `Hand off ${sessionTitle}`,
-    confirmLabel: "Hand off",
+    title: accountOnly ? `Switch account — ${sessionTitle}` : `Hand off ${sessionTitle}`,
+    confirmLabel: accountOnly ? "Switch account" : "Hand off",
     confirmClass: "af-primary",
     onCancel: callbacks.onCancel,
   });
@@ -459,7 +467,7 @@ export function handoffModal(
   let accounts: AccountsResponse = { entries: [], agents: [] };
   let accountsLoaded = !callbacks.loadAccounts;
   let accountsFailed = false;
-  const requiresAccount = (agent: string): boolean => agent === currentAgent || !!callbacks.currentAccount;
+  const requiresAccount = (agent: string): boolean => accountOnly || agent === currentAgent || !!callbacks.currentAccount;
   let accountRows: ReturnType<typeof handoffAccountChoices> = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
@@ -485,6 +493,12 @@ export function handoffModal(
   };
   const agentSelect = h("select", { class: "af-input" });
   agentSelect.setAttribute("aria-label", "New agent");
+  if (accountOnly) {
+    // The agent axis is fixed but the submit path still reads agentSelect.value —
+    // give it the one answer so the shared account/submit logic below is unchanged.
+    agentSelect.append(h("option", { value: currentAgent }, currentAgent));
+    agentSelect.value = currentAgent;
+  }
   // Nothing to pick until the catalog lands; Hand off is disabled until it does.
   confirmBtn.disabled = true;
 
@@ -516,43 +530,71 @@ export function handoffModal(
       : null);
   };
 
-  body.append(
-    field("New agent", agentSelect),
-    field("New account", accountSelect),
-    accountHint,
-    h(
-      "p",
-      { class: "af-modal-text" },
-      "Start a new agent with a summary. Keep the worktree and branch.",
-    ),
-  );
+  if (accountOnly) {
+    body.append(
+      h(
+        "p",
+        { class: "af-modal-text" },
+        `${currentAgent} stays the agent — it restarts on the new account with a fresh ` +
+          "conversation and a summary of the work so far. The worktree and branch are kept.",
+      ),
+      field("New account", accountSelect),
+      accountHint,
+    );
+  } else {
+    body.append(
+      field("New agent", agentSelect),
+      field("New account", accountSelect),
+      accountHint,
+      h(
+        "p",
+        { class: "af-modal-text" },
+        "Start a new agent with a summary. Keep the worktree and branch.",
+      ),
+    );
+  }
 
-  void callbacks
-    .loadPrograms()
-    .then((catalog) => {
-      catalogChoices = handoffAgentChoices(catalog, currentAgent);
-      refreshAgentChoices();
-    })
-    .catch(() => {
-      // A handoff needs a concrete target and the web cannot read the enum itself —
-      // that is the whole reason ListPrograms is served — so an unreachable catalog
-      // means the picker can't be offered. Say so rather than submit an empty `to`.
-      renderChoices([]);
-      handle.setError("Could not load the agent list. Try again.");
-    });
+  if (!accountOnly) {
+    void callbacks
+      .loadPrograms()
+      .then((catalog) => {
+        catalogChoices = handoffAgentChoices(catalog, currentAgent);
+        refreshAgentChoices();
+      })
+      .catch(() => {
+        // A handoff needs a concrete target and the web cannot read the enum itself —
+        // that is the whole reason ListPrograms is served — so an unreachable catalog
+        // means the picker can't be offered. Say so rather than submit an empty `to`.
+        renderChoices([]);
+        handle.setError("Could not load the agent list. Try again.");
+      });
+  }
 
   agentSelect.addEventListener("change", refreshAccounts);
   accountSelect.addEventListener("change", syncAccountSelection);
   if (callbacks.loadAccounts) {
     void callbacks.loadAccounts().then((result) => {
-      accounts = result; accountsLoaded = true; refreshAgentChoices();
+      accounts = result; accountsLoaded = true;
+      if (accountOnly) {
+        refreshAccounts();
+        handle.setError(accountRows.length === 0
+          ? `No other ${currentAgent} account is registered — register one in the Config view.`
+          : null);
+      } else {
+        refreshAgentChoices();
+      }
     }).catch(() => {
       accountsLoaded = true;
       accountsFailed = true;
-      refreshAgentChoices();
-      handle.setError(callbacks.currentAccount
-        ? "Could not load accounts. Try again to choose a registered target account."
-        : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
+      if (accountOnly) {
+        refreshAccounts();
+        handle.setError("Could not load accounts. Try again.");
+      } else {
+        refreshAgentChoices();
+        handle.setError(callbacks.currentAccount
+          ? "Could not load accounts. Try again to choose a registered target account."
+          : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
+      }
     });
   }
   const card = handle.el.firstElementChild as HTMLElement;
@@ -569,7 +611,7 @@ export function handoffModal(
     callbacks.onSubmit(target, accountSelect.value);
   });
 
-  queueMicrotask(() => agentSelect.focus());
+  queueMicrotask(() => (accountOnly ? accountSelect : agentSelect).focus());
   return handle;
 }
 

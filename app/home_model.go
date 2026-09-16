@@ -385,6 +385,11 @@ type home struct {
 	handoffChoices  []string
 	handoffAccounts []string
 	handoffWarnings []string
+	// handoffAccountOnly is true while the picker runs its account-only mode
+	// (#4433): the reserved root can never change agent, so its rows are the
+	// running agent's registered accounts and nothing else. It is cleared with
+	// the rest of the picker state when the overlay closes.
+	handoffAccountOnly bool
 	// handoffTarget is the immutable session identity that opened the picker.
 	// Background snapshots may move the sidebar cursor or replace a same-title
 	// row while the modal owns the keyboard; submit must never re-read that

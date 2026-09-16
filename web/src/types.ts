@@ -135,6 +135,13 @@ export interface SessionData {
    *  re-deriving the TUI's handoff policy from backend/liveness fields; absence/false
    *  fails closed. */
   can_handoff?: boolean;
+  /** Daemon-owned account-swap capability (#4433) — the account form of
+   *  can_handoff. True when the session can move between its current agent's
+   *  registered accounts, which is exactly can_handoff's contract minus the
+   *  reserved-root refusal: the daemon-managed root can switch accounts but can
+   *  never change agent. The web offers the account-only handoff on this field
+   *  rather than weakening can_handoff; absence/false fails closed. */
+  can_handoff_account?: boolean;
   /** The agent enum this session is treated AS (session.CurrentAgentName): the
    *  handoff picker excludes it, matching the daemon's same-agent guard. Absent
    *  when unknowable. */
