@@ -165,6 +165,42 @@ func TestIsLiveTmuxServerRefusesClients(t *testing.T) {
 		"an unretitled tmux stays a candidate: argv cannot disprove it is a server")
 	require.False(t, isLiveTmuxServer(ordinary.Process.Pid))
 	require.False(t, isLiveTmuxServer(-1), "a pid that does not exist is not a server")
+
+	// The full set of title shapes, and the near misses. #4432: filepath.Base
+	// was wrong here in BOTH directions, and the second one is the dangerous
+	// one — it mangles a suffixed server OUT of the gate (a withheld signal),
+	// and it lifts a client whose truncated title happens to end in "/tmux"
+	// straight INTO it, which is a SIGUSR1 at a process whose default
+	// disposition for it is terminate.
+	cases := []struct {
+		argv0 string
+		want  bool
+		why   string
+	}{
+		{"tmux: server", true, "retitled, cut back to the last space"},
+		{"tmux: server (/private/tmp/tmux-501/default)", true, "the full retitle: role plus socket path"},
+		{"tmux: server (/tmp/tmux-1000/def", true, "truncated mid-suffix is still positively a server"},
+		{"tmux", true, "unretitled: argv[0] is the binary and cannot disprove server-hood"},
+		{"/opt/homebrew/bin/tmux", true, "unretitled and pathed — Base is justified on a real path"},
+		{"tmux: client (/private/tmp/tmux-501/default)", false, "a suffixed client must stay out of the signal set"},
+		{"tmux: client (/private/tmp/tmux", false, "a client truncated so its tail reads /tmux must not pass as an unretitled tmux"},
+		{"tmux: serverfoo", false, "the role has to end at the title or at \" (\""},
+		{"tmux: ", false, "a retitle that names no role is not a CONFIRMED server"},
+		{"vim", false, "not tmux at all"},
+	}
+	// Spawn every stand-in BEFORE asserting on any of them. argv only becomes
+	// readable once the child has exec'd, and asserting immediately after
+	// Start() reads an empty /proc/<pid>/cmdline as "no argv" on a loaded box.
+	pids := make([]int, len(cases))
+	for i, tc := range cases {
+		pids[i] = tmuxArgvProc(t, tc.argv0).Process.Pid
+	}
+	for i, tc := range cases {
+		require.NotEmpty(t, proctree.Argv(pids[i]),
+			"stand-in for %q never became readable — the case below would pass vacuously", tc.argv0)
+		require.Equal(t, tc.want, isLiveTmuxServer(pids[i]),
+			"isLiveTmuxServer(%q): %s", tc.argv0, tc.why)
+	}
 }
 
 // TestTmuxArgvNamesClient covers the positive-sighting rule the construction
@@ -177,7 +213,29 @@ func TestTmuxArgvNamesClient(t *testing.T) {
 	}{
 		{[]string{"tmux: client"}, true},
 		{[]string{"tmux: client", "attach-session"}, true},
+		// The retitle tmux actually writes. proc.c has ONE setproctitle call
+		// site — setproctitle("%s (%s)", name, socket_path) in proc_start() —
+		// so the full shape carries the socket PATH in parentheses, and
+		// filepath.Base ate exactly that: Base("tmux: client
+		// (/private/tmp/tmux-501/default)") is "default)". A normally
+		// retitled client therefore failed to match, stayed in the fallback
+		// set, and was signalled — #4349 reintroduced through an incomplete
+		// match (#4432).
+		{[]string{"tmux: client (/private/tmp/tmux-501/default)"}, true},
+		{[]string{"tmux: client (/dev/ttys001)"}, true},
+		{[]string{"tmux: client (/tmp/tmux-1000/default)", "attach-session"}, true},
+		// Truncated mid-suffix, the way tmux's own compat setproctitle leaves
+		// a title that overflows its 16-byte buffer. Still positively a client.
+		{[]string{"tmux: client (/private/tmp/tm"}, true},
+		// Near misses. The role has to END — at the title, or at the " ("
+		// that opens the socket path — so a longer word is a different
+		// process, not a suffixed client.
+		{[]string{"tmux: clientfoo"}, false},
+		{[]string{"tmux: clientx"}, false},
+		{[]string{"tmux: clients (/tmp/tmux-1000/default)"}, false},
+		{[]string{"tmux: client(/dev/ttys001)"}, false}, // tmux always writes the space
 		{[]string{"tmux: server"}, false},
+		{[]string{"tmux: server (/private/tmp/tmux-501/default)"}, false},
 		{[]string{"tmux"}, false},                   // unretitled — cannot disprove server
 		{[]string{"/opt/homebrew/bin/tmux"}, false}, // unretitled, pathed — same
 		{nil, false}, // unreadable is not a client sighting
