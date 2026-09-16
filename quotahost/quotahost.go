@@ -16,6 +16,7 @@ package quotahost
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -49,41 +50,55 @@ type Result struct {
 // Read-only: it reads record files and starts nothing, contacts no provider,
 // and touches no session.
 func Report(now time.Time) (Result, error) {
-	records, skipped, err := config.LoadAllRepoInstancesReportingSkips()
+	// The detailed form, because these caveats are shown to a user — often a
+	// remote one who cannot list the daemon's AF home. A repoID is an opaque
+	// hash there, and only the cause says whether removing the file repairs it
+	// or destroys a newer af's sessions (#4361 review, #3479).
+	records, skipped, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
 		return Result{}, fmt.Errorf("cannot read session records: %w", err)
 	}
-	states, unreadable := sessionStates(records)
+	states, unparsed := sessionStates(records)
 	result := Result{
 		Rows: quota.Build(tmux.SupportedPrograms, states).Rows(now),
 		Note: quota.ReportNote,
 	}
 	if len(skipped) > 0 {
-		result.Caveats = append(result.Caveats, fmt.Sprintf(
-			"%d project record file(s) could not be read, so this report is INCOMPLETE; "+
-				"sessions in them are not counted: %v", len(skipped), skipped))
+		result.Caveats = append(result.Caveats,
+			incompleteCaveat(config.DescribeRepoInstancesSkips(skipped), skipped))
 	}
-	if unreadable > 0 {
-		result.Caveats = append(result.Caveats, fmt.Sprintf(
-			"%d project record file(s) could not be parsed and were skipped, so this report is INCOMPLETE",
-			unreadable))
+	if len(unparsed) > 0 {
+		result.Caveats = append(result.Caveats, incompleteCaveat(fmt.Sprintf(
+			"%d project record file(s) could not be parsed and were skipped: %s",
+			len(unparsed), config.FormatRepoInstancesSkips(unparsed)), unparsed))
 	}
 	return result, nil
 }
 
+// incompleteCaveat frames one under-read: which files and why, that the report
+// is incomplete because of them, and the remedy config picks for those causes.
+func incompleteCaveat(what string, skips []config.RepoInstancesSkip) string {
+	return fmt.Sprintf("%s — so this report is INCOMPLETE and sessions in those files are not counted; %s",
+		what, config.RepoInstancesSkipRemedy(skips))
+}
+
 // sessionStates projects the on-disk records into the minimal shape the
-// quota package needs, and reports how many record blobs could not be parsed.
+// quota package needs, and reports each record blob that could not be parsed.
 //
-// The count is returned rather than swallowed for the same reason the skip list
-// is: a record that would not parse might have been the parked one, and a report
-// that quietly drops it reads as authoritative.
-func sessionStates(records map[string]json.RawMessage) ([]quota.SessionState, int) {
+// The failures are returned rather than swallowed for the same reason the skip
+// list is: a record that would not parse might have been the parked one, and a
+// report that quietly drops it reads as authoritative. They are named, in repoID
+// order, because the loader hands corrupt files back raw precisely so callers
+// can say which repo was corrupt (#730).
+func sessionStates(records map[string]json.RawMessage) ([]quota.SessionState, []config.RepoInstancesSkip) {
 	states := []quota.SessionState{}
-	unreadable := 0
-	for _, raw := range records {
+	var unparsed []config.RepoInstancesSkip
+	for repoID, raw := range records {
 		var data []session.InstanceData
 		if err := json.Unmarshal(raw, &data); err != nil {
-			unreadable++
+			// Best-effort path: String() falls back to the repoID without one.
+			path, _ := config.RepoInstancesPath(repoID)
+			unparsed = append(unparsed, config.RepoInstancesSkip{RepoID: repoID, Path: path, Err: err})
 			continue
 		}
 		for _, instance := range data {
@@ -103,7 +118,8 @@ func sessionStates(records map[string]json.RawMessage) ([]quota.SessionState, in
 			})
 		}
 	}
-	return states, unreadable
+	sort.Slice(unparsed, func(i, j int) bool { return unparsed[i].RepoID < unparsed[j].RepoID })
+	return states, unparsed
 }
 
 // agentIsRunning reports whether a record still has an agent process behind

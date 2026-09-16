@@ -57,8 +57,8 @@ func TestSessionStates_ExcludesInertRowsAndCarriesLimitState(t *testing.T) {
 	}
 
 	states, unreadable := sessionStates(map[string]json.RawMessage{"repo": raw})
-	if unreadable != 0 {
-		t.Fatalf("unreadable = %d, want 0", unreadable)
+	if len(unreadable) != 0 {
+		t.Fatalf("unreadable = %v, want none", unreadable)
 	}
 	if len(states) != 2 {
 		t.Fatalf("states = %d (%+v), want 2: archived and tombstoned rows run no agent", len(states), states)
@@ -137,14 +137,29 @@ func TestAgentIsRunning_UnsetLivenessIsNotRunning(t *testing.T) {
 	}
 }
 
-// A record blob that will not parse is COUNTED, never silently dropped: it might
-// have been the parked one, and a report that hides it reads as authoritative.
+// A record blob that will not parse is REPORTED, never silently dropped: it
+// might have been the parked one, and a report that hides it reads as
+// authoritative. It is reported by name, path and cause so the caveat built from
+// it is actionable.
 func TestSessionStates_CountsUnparseableRecordsRatherThanHidingThem(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	states, unreadable := sessionStates(map[string]json.RawMessage{
-		"broken": json.RawMessage(`{"not":"an array"}`),
+		"broken":  json.RawMessage(`{"not":"an array"}`),
+		"alsobad": json.RawMessage(`"string"`),
 	})
-	if unreadable != 1 {
-		t.Fatalf("unreadable = %d, want 1: an unparseable record must be reported, not swallowed", unreadable)
+	if len(unreadable) != 2 {
+		t.Fatalf("unreadable = %v, want 2: an unparseable record must be reported, not swallowed", unreadable)
+	}
+	for i, wantID := range []string{"alsobad", "broken"} {
+		skip := unreadable[i]
+		wantPath, err := config.RepoInstancesPath(wantID)
+		if err != nil {
+			t.Fatalf("RepoInstancesPath: %v", err)
+		}
+		if skip.RepoID != wantID || skip.Path != wantPath || skip.Err == nil {
+			t.Fatalf("unreadable[%d] = %+v, want repo %s at %s with its parse error, in repoID order",
+				i, skip, wantID, wantPath)
+		}
 	}
 	if len(states) != 0 {
 		t.Fatalf("states = %d, want 0", len(states))
@@ -213,5 +228,100 @@ func TestReport_CarriesUnderReadCaveatsAndObservationTimes(t *testing.T) {
 	}
 	if result.Note == "" {
 		t.Fatal("the report must carry its framing note for surfaces to render")
+	}
+}
+
+// An under-read caveat is rendered verbatim by `af quota`, the TUI and the web,
+// including to a REMOTE user who cannot list the daemon's AF home. A bare repoID
+// is an opaque hash there, and the remedy depends on WHY the file was skipped:
+// "remove it" is right for a corrupt record and destroys sessions when the file
+// is merely newer than this binary (#3479). So every caveat names the file, the
+// cause, and the remedy that fits.
+func TestReport_UnderReadCaveatsNameTheFileTheCauseAndAFittingRemedy(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		plant       func(t *testing.T, path string)
+		wantCause   string
+		wantRemedy  string
+		forbidEvery string
+	}{
+		{
+			name: "newer schema",
+			plant: func(t *testing.T, path string) {
+				writeRecord(t, path, `{"schema_version": 99, "instances": []}`)
+			},
+			wantCause:   "schema_version 99",
+			wantRemedy:  "upgrade af",
+			forbidEvery: "remove",
+		},
+		{
+			name: "unreadable file",
+			plant: func(t *testing.T, path string) {
+				// A directory where the file should be: ReadFile fails, which is
+				// the I/O skip the loader reports rather than a parse failure.
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+			},
+			wantCause:  "failed to read repo instances",
+			wantRemedy: "repair or remove",
+		},
+		{
+			name: "unparseable record",
+			plant: func(t *testing.T, path string) {
+				writeRecord(t, path, `{"not":"an array"}`)
+			},
+			wantCause:  "could not be parsed",
+			wantRemedy: "repair or remove",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("AGENT_FACTORY_HOME", home)
+			good, err := json.Marshal([]session.InstanceData{
+				{Title: "live", Program: "claude", Liveness: session.LiveRunning},
+			})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := config.SaveRepoInstances("goodrepo", good); err != nil {
+				t.Fatalf("SaveRepoInstances: %v", err)
+			}
+			path, err := config.RepoInstancesPath("badrepo")
+			if err != nil {
+				t.Fatalf("RepoInstancesPath: %v", err)
+			}
+			tc.plant(t, path)
+
+			result, err := Report(time.Unix(1_800_000_000, 0))
+			if err != nil {
+				t.Fatalf("Report: %v", err)
+			}
+			if len(result.Caveats) != 1 {
+				t.Fatalf("caveats = %q, want exactly one for the one bad file", result.Caveats)
+			}
+			caveat := result.Caveats[0]
+			for _, want := range []string{path, tc.wantCause, tc.wantRemedy, "INCOMPLETE"} {
+				if !strings.Contains(caveat, want) {
+					t.Fatalf("caveat %q must contain %q", caveat, want)
+				}
+			}
+			if tc.forbidEvery != "" && strings.Contains(caveat, tc.forbidEvery) {
+				t.Fatalf("caveat %q must not advise %q for this cause", caveat, tc.forbidEvery)
+			}
+			if len(result.Rows) == 0 {
+				t.Fatal("the readable repo must still be reported")
+			}
+		})
+	}
+}
+
+func writeRecord(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write record: %v", err)
 	}
 }
