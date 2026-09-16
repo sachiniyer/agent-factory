@@ -136,7 +136,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	program, proof := respawnLaunchProgram(
 		i, resolvedProgram, declarationBase, resolution.trustBase, resume, prepared)
 	setLaunchProgram(ts, program, proof)
-	if err := refreshSessionEnvironment(i, ts); err != nil {
+	if err := refreshSessionEnvironment(i, ts, program); err != nil {
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: %w", err))
 	}
 	// A fresh start owns the pane it creates, which is what RestoreRespawned

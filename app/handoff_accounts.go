@@ -51,10 +51,12 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 		// daemon's resolved_agents map answers "which agent runs" for this
 		// session's repo, so program_overrides.codex = "aider" shows the ambient
 		// row Aider's launch warrants rather than Codex accounts a resolved
-		// Aider could never use (#4430 review). A missing entry means an older
-		// daemon; the enum is the safe fallback.
-		resolved := msg.response.ResolvedAgents[agent]
-		if resolved == "" {
+		// Aider could never use (#4430 review). An absent map means an older
+		// daemon; the enum is the safe fallback. A KNOWN empty answer means the
+		// resolved command is not a provable agent invocation — that is
+		// non-scopable, not the enum.
+		resolved, resolvedKnown := msg.response.ResolvedAgents[agent]
+		if !resolvedKnown {
 			resolved = agent
 		}
 		canCarry := scopable[resolved]
@@ -68,9 +70,12 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 			}
 			warning := ""
 			if current != "" {
-				if resolved != agent {
+				switch {
+				case resolved == "":
+					warning = fmt.Sprintf("%s resolves to a command that cannot carry an account — the %q scope is dropped on handoff. ", agent, current)
+				case resolved != agent:
 					warning = fmt.Sprintf("%s launches %s, which cannot carry an account — the %q scope is dropped on handoff. ", agent, resolved, current)
-				} else {
+				default:
 					warning = fmt.Sprintf("%s cannot carry an account — the %q scope is dropped on handoff. ", agent, current)
 				}
 			}
@@ -79,24 +84,26 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 			labels = append(labels, agent+" (ambient)")
 			warnings = append(warnings, warning)
 		}
-		// Account rows are honest only when the requested enum IS the agent the
-		// command launches: the daemon's --account transaction registers against
-		// the resolved command's namespace, so a redirected target could never
-		// apply an account the picker offered under its own name.
-		if resolved != agent {
-			continue
-		}
+		// Account rows come from the RESOLVED namespace, not the requested
+		// enum: the daemon's --account transaction registers the name against
+		// the resolved command's agent, so `aider` redirected to `codex` is
+		// honestly served by codex's registry — hiding those rows made the
+		// target unreachable even though the daemon accepts the handoff
+		// (#4430 review round 3).
 		for _, entry := range msg.response.Entries {
-			if entry.Agent != agent || (agent == msg.agent && entry.Name == current) || entry.RegistrationOnly {
+			if entry.Agent != resolved || (agent == msg.agent && entry.Name == current) || entry.RegistrationOnly {
 				continue
 			}
 			label := fmt.Sprintf("%s: %s", agent, entry.Name)
 			warning := ""
+			if resolved != agent {
+				warning = fmt.Sprintf("%s launches %s — %q is a %s account. ", agent, resolved, entry.Name, resolved)
+			}
 			if !entry.LoggedIn {
 				label += " (not logged in)"
-				warning = fmt.Sprintf("%s has no %s credential yet. Log in before handing off. ", entry.Name, agent)
+				warning += fmt.Sprintf("%s has no %s credential yet. Log in before handing off. ", entry.Name, resolved)
 			}
-			isDefault := msg.response.Defaults[agent] == entry.Name
+			isDefault := msg.response.Defaults[resolved] == entry.Name
 			if isDefault {
 				label += " (project default)"
 			}

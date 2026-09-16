@@ -24,15 +24,19 @@ func (i *Instance) ValidateHandoffRuntimeAction(agent, account string) error {
 
 // pendingAccountSwapRetryTargetLocked reports whether agent and account name
 // the committed swap's own target: the account the identity checkpoint already
-// moved this session to and — when the request names an agent — the agent the
-// record already runs. Callers hold i.mu.
+// moved this session to and — when the request names an agent — a target the
+// committed transaction already is. That is the requested enum in i.Program OR
+// the resolved agent the pane now runs: a program_overrides redirect makes the
+// two differ (`--to aider` recording Program=aider while launching codex), and
+// a retry may spell the committed identity either way (#4430 review round 3).
+// Callers hold i.mu.
 func (i *Instance) pendingAccountSwapRetryTargetLocked(agent, account string) bool {
 	pending := i.pendingAccountSwap
 	if pending == nil || pending.To != i.Account || strings.TrimSpace(account) != pending.To {
 		return false
 	}
 	if agent = strings.TrimSpace(agent); agent != "" {
-		return agent == i.currentAgentNameLocked()
+		return agent == i.Program || agent == i.currentAgentNameLocked()
 	}
 	return true
 }

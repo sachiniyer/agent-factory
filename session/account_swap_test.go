@@ -587,6 +587,23 @@ func TestPendingAccountSwapHandoffAdmitsOnlySameTargetRetry(t *testing.T) {
 	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("codex", "work"), "account swap")
 	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("", ""), "account swap")
 
+	// A redirected swap (`--to aider` resolving to codex) commits a codex
+	// pane while Program records the requested aider enum. The retry the
+	// refusal advertises may spell the committed target EITHER way — the
+	// requested enum or the resolved agent — because both name the same
+	// committed transaction (#4430 review round 3).
+	redirected := accountSwapTestInstance(tmux.ProgramAider)
+	redirected.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSession("swap", tmux.ProgramCodex))}
+	_, selectErr := redirected.SelectAccountForHandoff("ambient", "work", tmux.ProgramAider, tmux.ProgramCodex, HandoffReasonManual, "", "continue the mission")
+	require.NoError(t, selectErr)
+	redirected.inFlightOp = OpNone
+	require.NoError(t, redirected.ValidateHandoffRuntimeAction(tmux.ProgramAider, "work"),
+		"the retry may name the requested enum even though the committed pane runs codex")
+	require.NoError(t, redirected.ValidateHandoffRuntimeAction(tmux.ProgramCodex, "work"),
+		"or the resolved agent the pane actually runs")
+	require.ErrorContains(t, redirected.ValidateHandoffRuntimeAction(tmux.ProgramGemini, "work"), "account swap",
+		"a third agent names another transaction and stays fenced")
+
 	// The same goes for an automatic swap: its committed target is retryable,
 	// and only that target.
 	auto := accountSwapTestInstance("claude")

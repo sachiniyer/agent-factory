@@ -132,6 +132,67 @@ func TestHandoffAccountRechecksChangedProgramOverrideUnderProjectLock(t *testing
 	}
 }
 
+// The precheck-to-lock window must re-resolve the account NAMESPACE, not only
+// the command (#4430 review round 3): flipping `program_overrides.claude` from
+// "claude" to "codex" between the advisory pass and locked admission changes
+// which registry Selected consults. A namespace frozen at request time would
+// admit "personal" against claude's registry while the committed launch runs
+// codex — so the refusal must name codex, proving the locked pass re-resolved.
+func TestHandoffAccountReresolvesAccountNamespaceUnderProjectLock(t *testing.T) {
+	m, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal") // registered under claude only
+	project, err := config.RegisterProject(inst.Path)
+	require.NoError(t, err)
+	_, err = config.SetProjectConfigValue(project.ID, "program_overrides.claude", "claude")
+	require.NoError(t, err)
+	prepareHandoffTargetPreflight(t, inst)
+	// The flipped resolution needs a launchable codex so the ONLY refusal the
+	// locked pass can produce is the namespace one.
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	inst.ClearLimitReached()
+
+	precheckDone := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releasePrecheck := func() { releaseOnce.Do(func() { close(release) }) }
+	m.accountSwapAfterManualPrecheckForTest = func() {
+		close(precheckDone)
+		<-release
+	}
+	t.Cleanup(func() {
+		releasePrecheck()
+		m.accountSwapAfterManualPrecheckForTest = nil
+	})
+
+	handoffDone := make(chan error, 1)
+	go func() {
+		_, err := m.HandoffSession(HandoffSessionRequest{
+			Title: inst.Title, RepoID: repoID, Account: "personal",
+		})
+		handoffDone <- err
+	}()
+	select {
+	case <-precheckDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("manual handoff did not reach the precheck-to-lock window")
+	}
+	_, err = config.SetProjectConfigValue(project.ID, "program_overrides.claude", "codex")
+	require.NoError(t, err)
+	releasePrecheck()
+	select {
+	case err := <-handoffDone:
+		require.Error(t, err,
+			"the locked admission must consult the namespace the override NOW resolves to — "+
+				"personal is registered under claude, not codex")
+		require.Contains(t, err.Error(), "codex")
+		require.False(t, isMutationCommitted(err))
+	case <-time.After(5 * time.Second):
+		t.Fatal("manual handoff did not finish")
+	}
+}
+
 // handoffRealPlanBackend keeps limitResumeBackend's recorded surface but runs
 // the REAL LocalBackend.PrepareAgentSwap, so the daemon judges the command a
 // production handoff actually froze. The plain fake freezes program=target —

@@ -479,26 +479,32 @@ export function handoffModal(
     const target = agentSelect.value;
     const resolved = resolvedAgent(target);
     accountHint.textContent = callbacks.currentAccount && !scopableTarget(target)
-      ? (resolved !== target
-        ? `${target} launches ${resolved}, which cannot carry an account — the "${callbacks.currentAccount}" scope is dropped on handoff.`
-        : `${target} cannot carry an account — the "${callbacks.currentAccount}" scope is dropped on handoff.`)
-      : accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
+      ? (resolved === ""
+        ? `${target} resolves to a command that cannot carry an account — the "${callbacks.currentAccount}" scope is dropped on handoff.`
+        : resolved !== target
+          ? `${target} launches ${resolved}, which cannot carry an account — the "${callbacks.currentAccount}" scope is dropped on handoff.`
+          : `${target} cannot carry an account — the "${callbacks.currentAccount}" scope is dropped on handoff.`)
+      : (resolved !== "" && resolved !== target
+          ? `${target} launches ${resolved} — the account must be a ${resolved} account. `
+          : "") + (accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "");
     confirmBtn.disabled = !accountsLoaded || !agentSelect.value || (requiresAccount(agentSelect.value) && !accountSelect.value);
   };
   const refreshAccounts = (): void => {
     const agent = agentSelect.value;
-    // Account rows are honest only when the enum IS the agent the command
-    // launches — the daemon registers --account against the resolved command's
-    // namespace, so a redirected target could never apply what was offered.
-    const choices = resolvedAgent(agent) === agent
-      ? handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "")
-      : [];
+    // Account rows come from the RESOLVED namespace, not the requested enum:
+    // the daemon registers --account against the resolved command's agent, so
+    // an `aider` target redirected to `codex` is honestly served by codex's
+    // registry — hiding those rows made the target unreachable even though the
+    // daemon accepts the handoff (#4430 review round 3). An empty resolution
+    // (a command af cannot prove is an agent) matches no rows.
+    const choices = handoffAccountChoices(accounts, resolvedAgent(agent),
+      agent === currentAgent ? callbacks.currentAccount : "");
     accountRows = choices;
     accountSelect.replaceChildren();
     if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
     else if (!choices.some((choice) => choice.logged_in)) accountSelect.append(h("option", { value: "" }, "Choose an account"));
     for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
-    const fallback = accounts.defaults?.[agent];
+    const fallback = accounts.defaults?.[resolvedAgent(agent)];
     const selected = choices.find((choice) => choice.value === fallback && choice.logged_in)
       ?? (requiresAccount(agent) ? choices.find((choice) => choice.logged_in) : undefined);
     accountSelect.value = selected?.value ?? "";
@@ -523,7 +529,7 @@ export function handoffModal(
   // leave a same-agent row with an empty account picker selected.
   const refreshAgentChoices = (): void => {
     if (catalogChoices === null || !accountsLoaded) return;
-    const hasAccount = (agent: string): boolean => resolvedAgent(agent) === agent && handoffAccountChoices(accounts, agent,
+    const hasAccount = (agent: string): boolean => handoffAccountChoices(accounts, resolvedAgent(agent),
       agent === currentAgent ? callbacks.currentAccount : "").length > 0;
     // A scoped session keeps every target it can honestly reach: an agent with
     // a registered account to name, or one with no account support at all,

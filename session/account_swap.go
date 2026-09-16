@@ -496,14 +496,28 @@ func (i *Instance) ValidateAccountSwapReplacementPanes() error {
 // this restores tmux's launch metadata and promotes a durable injected Claude
 // id before the pending marker can be cleared.
 func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
+	// The incoming agent is the resolved command's, not i.Program's enum: a
+	// program_overrides redirect records the requested target while launching
+	// the overridden command, and the live-pane answer a stopped swap lacks
+	// falls back to that enum (#4430 review round 3). Resolved before the
+	// instance lock — program resolution does config I/O. Inside the lock the
+	// pane's frozen launch program wins when it exists: it is the command the
+	// committed transaction actually froze, which re-resolution can only
+	// approximate once the configuration has moved.
+	resolvedAgent := HandoffEffectiveAgentForPath(i.Path, i.AgentProgram())
 	i.mu.Lock()
+	agent := resolvedAgent
+	if ts := i.tmuxLocked(); ts != nil {
+		if frozen := sessionenv.AgentForCommand(ts.Program()); frozen != "" {
+			agent = frozen
+		}
+	}
 	account := i.Account
 	pending := cloneAccountSwapData(i.pendingAccountSwap)
 	if pending == nil || account != pending.To {
 		i.mu.Unlock()
 		return fmt.Errorf("account swap for %q has no committed replacement to synchronize", i.Title)
 	}
-	agent := i.currentAgentNameLocked()
 	if pending.ConversationID != "" {
 		if agent != tmux.ProgramClaude {
 			i.mu.Unlock()

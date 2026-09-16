@@ -130,14 +130,15 @@ func TestHandoffScopedOffersAmbientDropRows(t *testing.T) {
 }
 
 // A scoped session must classify targets by the command they launch, not the
-// requested enum (#4430 review): resolved_agents is the daemon's report of
-// DetectAgentFromCommand over this repo's program_overrides.
+// requested enum (#4430 review): resolved_agents is the daemon's report of the
+// resolved command's agent over this repo's program_overrides.
 //   - codex → aider: the target gets the ambient drop row its resolved launch
 //     warrants, the warning names the resolution, and codex's account rows are
 //     NOT offered — a resolved aider has no use for them.
-//   - aider → codex: the target is hidden entirely — an ambient row would be
-//     refused by admission, and a codex account row could never apply through
-//     the aider enum.
+//   - aider → codex: the daemon registers --account against the RESOLVED
+//     namespace, so the target is honestly served by codex's registry — the
+//     picker offers "aider: spare" rather than hiding a target the daemon
+//     accepts (#4430 review round 3).
 func TestHandoffScopedClassifiesTargetsByResolvedAgent(t *testing.T) {
 	h := newTestHome(t)
 	inst := handoffActionInstance(t, "worker", "claude")
@@ -157,14 +158,27 @@ func TestHandoffScopedClassifiesTargetsByResolvedAgent(t *testing.T) {
 	defer restore()
 	_, cmd := h.handleHandoff()
 	h.Update(cmd())
-	require.Equal(t, []string{"codex", "amp", "opencode", "devin"}, h.handoffChoices)
-	require.Equal(t, []string{"", "", "", ""}, h.handoffAccounts,
-		"redirected targets drop their enum's account rows — codex:spare cannot apply to a resolved aider")
+	require.Equal(t, []string{"codex", "aider", "amp", "opencode", "devin"}, h.handoffChoices,
+		"aider redirected to codex is reachable through codex's registry, not hidden")
+	require.Equal(t, []string{"", "spare", "", "", ""}, h.handoffAccounts,
+		"the aider row names a codex account — the namespace --account resolves in")
 	h.selectionOverlay.SetSelectedIndex(0)
 	h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
 	rendered := flatten(h.confirmationOverlay.Render())
 	require.Contains(t, rendered, "codex launches aider")
 	require.Contains(t, rendered, `"work" scope is dropped`)
+
+	// The redirected aider row explains its namespace up front: "spare" is a
+	// codex account, which is the registry the daemon's --account transaction
+	// will consult for this target. The picker tears down on Enter, so the
+	// second row's confirmation takes a fresh load cycle.
+	_, cmd = h.handleHandoff()
+	h.Update(cmd())
+	h.selectionOverlay.SetSelectedIndex(1)
+	h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+	rendered = flatten(h.confirmationOverlay.Render())
+	require.Contains(t, rendered, "aider launches codex")
+	require.Contains(t, rendered, `"spare" is a codex account`)
 }
 
 func TestHandoffCredentialWarning(t *testing.T) {

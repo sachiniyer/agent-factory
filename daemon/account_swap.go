@@ -132,8 +132,20 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 	current, currentAuto := instance.AccountSelection()
 	manual, mission := instance.PendingManualAccountSwap()
 	agent := instance.CurrentAgentName()
+	var accountAgent string
 	if manual {
 		agent = sessionenv.AgentForCommand(instance.AgentProgram())
+		// A manual swap can redirect through program_overrides: agent is the
+		// recorded requested enum while the committed account was selected in
+		// the resolved command's namespace — the one Selected, the limit
+		// ledger, and the conversation-id repair must all answer in (#4430
+		// review round 3). The pane's frozen launch program is that namespace's
+		// authority; a re-resolution of the enum only covers a pane that can no
+		// longer report it.
+		accountAgent = sessionenv.AgentForCommand(instance.ResolvedPaneProgram())
+		if accountAgent == "" {
+			accountAgent = session.HandoffEffectiveAgentForPath(instance.Path, agent)
+		}
 	}
 	if !pending || (!currentAuto && !manual) || strings.TrimSpace(to) == "" || current != to {
 		return nil
@@ -154,11 +166,12 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 	}
 	return &autoAccountSwap{
 		manual: manual, mission: mission, headSHA: headSHA,
-		from:       from,
-		to:         to,
-		fromAgent:  fromAgent,
-		agent:      agent,
-		alreadySet: true,
+		from:         from,
+		to:           to,
+		fromAgent:    fromAgent,
+		agent:        agent,
+		accountAgent: accountAgent,
+		alreadySet:   true,
 	}
 }
 

@@ -271,13 +271,13 @@ func (i *Instance) RecordHandoffSwap(target, effectiveAgent, reason, headSHA str
 }
 
 // handoffEffectiveAgent resolves the agent identity of the command a handoff
-// to target would launch — DetectAgentFromCommand over the resolved
-// program_overrides command — falling back to the enum when the command
-// names no supported agent (a wrapper or an arbitrary tool, which af cannot
-// scope either way). It resolves configuration OUTSIDE the instance lock;
-// callers holding i.mu must not invoke it. Where a frozen AgentSwapPlan
-// exists its EffectiveAgent is the same answer computed once, and preferred:
-// a re-resolution could see a different config than the plan already froze.
+// to target would launch — the credential-boundary parse of the resolved
+// program_overrides command — answering "" when the command is not a provable
+// agent invocation (a wrapper or an arbitrary tool, which af cannot scope
+// either way). It resolves configuration OUTSIDE the instance lock; callers
+// holding i.mu must not invoke it. Where a frozen AgentSwapPlan exists its
+// EffectiveAgent is the same answer computed once, and preferred: a
+// re-resolution could see a different config than the plan already froze.
 func handoffEffectiveAgent(i *Instance, target string) string {
 	return HandoffEffectiveAgentForPath(i.Path, target)
 }
@@ -288,11 +288,17 @@ func handoffEffectiveAgent(i *Instance, target string) string {
 // daemon's account-list response answers with it for clients that hold no
 // Instance, so a picker classifies a target by the agent its command launches,
 // never by the enum the request happened to name (#4430 review).
+//
+// The answer comes from the credential-boundary parser — the same
+// AgentForCommand the account selection and launch checks use — because every
+// consumer of this value decides whether an ACCOUNT can follow the target, and
+// the boundary can only grant one to a provable literal invocation. A command
+// that merely mentions an agent (`./collect codex`) or runs no agent at all
+// (`bash`) answers "": the target is non-scopable, and callers must not fall
+// back to the enum — an enum answer would offer --account remedies that can
+// never succeed (#4430 review round 3).
 func HandoffEffectiveAgentForPath(path, target string) string {
-	if detected := tmux.DetectAgentFromCommand(resolveProgramForPath(path, target)); detected != "" {
-		return detected
-	}
-	return target
+	return sessionenv.AgentForCommand(resolveProgramForPath(path, target))
 }
 
 // HandoffEffectiveAgentsForPathInspection answers HandoffEffectiveAgentForPath
@@ -302,31 +308,32 @@ func HandoffEffectiveAgentForPath(path, target string) string {
 // which records the durable in-repo load observation, so a read-only picker
 // would emit the runtime-load log and write the inrepo-config-hash marker the
 // mutating operation is supposed to announce (#4430 review round 2). Same
-// two-step answer per target: the detected agent of the resolved command, or
-// the enum when the command names no supported agent.
+// answer per target: the credential-boundary agent of the resolved command, or
+// "" when the command is not a provable agent invocation — a picker must treat
+// "" as non-scopable rather than falling back to the enum.
 func HandoffEffectiveAgentsForPathInspection(path string, targets []string) map[string]string {
 	cfg := resolveConfigForPathInspection(path)
 	resolved := make(map[string]string, len(targets))
 	for _, target := range targets {
-		if detected := tmux.DetectAgentFromCommand(config.ResolveProgram(cfg, target)); detected != "" {
-			resolved[target] = detected
-		} else {
-			resolved[target] = target
-		}
+		resolved[target] = sessionenv.AgentForCommand(config.ResolveProgram(cfg, target))
 	}
 	return resolved
 }
 
 // EffectiveAgent is the agent identity of the plan's frozen launch command —
-// the handoffEffectiveAgent answer computed on the command preflight actually
-// froze, so it cannot see a different configuration than the swap will run.
-// Capability decisions (does this incoming process have an account namespace?)
-// must read it rather than the requested target enum.
+// the answer computed on the command preflight actually froze, so it cannot
+// see a different configuration than the swap will run. Capability decisions
+// (does this incoming process have an account namespace?) must read it rather
+// than the requested target enum.
+//
+// It is parsed by the credential-boundary parser, not a token scan: a command
+// like `./collect codex` detects Codex as an argument while AgentForCommand
+// proves no literal invocation, so the scan would claim an account namespace
+// the launch can never apply. An unprovable command answers "" — every
+// SupportsAccounts check on it reads non-scopable, which is the honest answer
+// for a launch the account boundary cannot prove (#4430 review round 3).
 func (p AgentSwapPlan) EffectiveAgent() string {
-	if detected := tmux.DetectAgentFromCommand(p.program); detected != "" {
-		return detected
-	}
-	return p.target
+	return sessionenv.AgentForCommand(p.program)
 }
 
 // handoffStorageCheckpoint projects a runtime swap that has completed while its
@@ -497,8 +504,15 @@ func (i *Instance) handoffUnsettledAccountError(plan AgentSwapPlan) error {
 				"af cannot know which %s identity you meant; hand it off with --account to name the %s account",
 			i.Title, account, effectiveAgent, effectiveAgent)
 	}
+	// The message names what the user asked for when the resolved command is
+	// not a provable agent invocation — "a handoff to " with an empty agent
+	// would read as a rendering bug.
+	incoming := effectiveAgent
+	if incoming == "" {
+		incoming = plan.target
+	}
 	return fmt.Errorf(
 		"session %q still records account %q on a handoff to %s, which cannot carry an account scope — "+
 			"the session record must drop the scope before the runtime changes",
-		i.Title, account, effectiveAgent)
+		i.Title, account, incoming)
 }

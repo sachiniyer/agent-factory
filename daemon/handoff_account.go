@@ -63,7 +63,13 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 	outgoing := instance.CurrentAgentName()
 	from, _ := instance.AccountSelection()
 	var swap *autoAccountSwap
-	if from == strings.TrimSpace(req.Account) && target == outgoing {
+	// The committed-transaction test compares the request's target to BOTH
+	// spellings of the committed target: the agent the pane now runs (outgoing)
+	// covers the --account-only retry whose target defaulted to it, and
+	// i.Program covers a redirected swap whose recorded enum differs — a retry
+	// of `--to aider --account work` still says aider while the pane runs codex
+	// (#4430 review round 3).
+	if from == strings.TrimSpace(req.Account) && (target == outgoing || target == instance.AgentProgram()) {
 		// The request names the identity a committed swap already recorded —
 		// the retry the pending-swap refusal advertises (#4393), not a no-op.
 		// Finish the recorded transaction, whose stored mission and durable
@@ -90,12 +96,14 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 		// accountAgent is the agent the command actually launches, the only
 		// namespace its registry can answer Selected in. The committed and
 		// scheduler paths derive the same namespace from the command
-		// (accountSwapAgent, AgentForCommand); this request resolves it
-		// because no plan has frozen a command yet.
+		// (accountSwapAgent, AgentForCommand). It is resolved inside
+		// evaluateManualAccountSwap rather than here: the authoritative pass
+		// runs under the project-config lock, so the namespace it consults is
+		// recomputed from the same configuration the locked admission freezes
+		// (#4430 review round 3).
 		swap = &autoAccountSwap{
 			manual: true, promptOverride: req.Brief, from: from, to: strings.TrimSpace(req.Account),
-			fromAgent: outgoing, agent: target,
-			accountAgent: session.HandoffEffectiveAgentForPath(instance.Path, target), reason: reason,
+			fromAgent: outgoing, agent: target, reason: reason,
 		}
 	}
 	outcome, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, instance.Title, swap)
@@ -131,6 +139,30 @@ func (m *Manager) evaluateManualAccountSwap(instance *session.Instance, swap *au
 	home, err := config.GetConfigDir()
 	if err != nil {
 		return nil, err
+	}
+	// Re-resolve the account namespace on every pass: this function runs once
+	// unlocked (an advisory precheck) and once under the project-config lock
+	// (locked admission), and program_overrides may change between them — a
+	// namespace resolved at request time would have Selected, limit-ledger
+	// checks, and messages consulting a registry the frozen launch command no
+	// longer belongs to (#4430 review round 3). The credential-boundary parser
+	// answers "" for a command it cannot prove, which no registry can serve —
+	// refuse it directly rather than fall back to the requested enum and
+	// report the wrong agent.
+	//
+	// The input mirrors validateAccountSwap's program selection — the swap's
+	// target for a cross-agent handoff, the recorded program for a same-agent
+	// one — so the namespace consulted here is the one the frozen launch plan
+	// proves, even when overrides point at each other (aider→codex beside
+	// codex→aider).
+	program := instance.AgentProgram()
+	if swap.agent != "" && swap.agent != instance.CurrentAgentName() {
+		program = swap.agent
+	}
+	swap.accountAgent = session.HandoffEffectiveAgentForPath(instance.Path, program)
+	if swap.accountAgent == "" {
+		return nil, fmt.Errorf("cannot hand %q off to %s with account %q: the program it resolves to cannot carry an account scope",
+			instance.Title, swap.agent, swap.to)
 	}
 	if _, err := agentaccount.Selected(home, swap.accountNamespace(), swap.to); err != nil {
 		return nil, err

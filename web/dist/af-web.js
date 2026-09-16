@@ -11333,18 +11333,22 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   const syncAccountSelection = () => {
     const target = agentSelect.value;
     const resolved = resolvedAgent(target);
-    accountHint.textContent = callbacks.currentAccount && !scopableTarget(target) ? resolved !== target ? `${target} launches ${resolved}, which cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : `${target} cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
+    accountHint.textContent = callbacks.currentAccount && !scopableTarget(target) ? resolved === "" ? `${target} resolves to a command that cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : resolved !== target ? `${target} launches ${resolved}, which cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : `${target} cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : (resolved !== "" && resolved !== target ? `${target} launches ${resolved} \u2014 the account must be a ${resolved} account. ` : "") + (accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "");
     confirmBtn.disabled = !accountsLoaded || !agentSelect.value || requiresAccount(agentSelect.value) && !accountSelect.value;
   };
   const refreshAccounts2 = () => {
     const agent = agentSelect.value;
-    const choices = resolvedAgent(agent) === agent ? handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "") : [];
+    const choices = handoffAccountChoices(
+      accounts,
+      resolvedAgent(agent),
+      agent === currentAgent ? callbacks.currentAccount : ""
+    );
     accountRows = choices;
     accountSelect.replaceChildren();
     if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
     else if (!choices.some((choice) => choice.logged_in)) accountSelect.append(h("option", { value: "" }, "Choose an account"));
     for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
-    const fallback = accounts.defaults?.[agent];
+    const fallback = accounts.defaults?.[resolvedAgent(agent)];
     const selected = choices.find((choice) => choice.value === fallback && choice.logged_in) ?? (requiresAccount(agent) ? choices.find((choice) => choice.logged_in) : void 0);
     accountSelect.value = selected?.value ?? "";
     accountSelect.disabled = choices.length === 0;
@@ -11363,9 +11367,9 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   };
   const refreshAgentChoices = () => {
     if (catalogChoices === null || !accountsLoaded) return;
-    const hasAccount = (agent) => resolvedAgent(agent) === agent && handoffAccountChoices(
+    const hasAccount = (agent) => handoffAccountChoices(
       accounts,
-      agent,
+      resolvedAgent(agent),
       agent === currentAgent ? callbacks.currentAccount : ""
     ).length > 0;
     const choices = catalogChoices.filter((choice) => !callbacks.currentAccount || hasAccount(choice.value) || !scopableTarget(choice.value));

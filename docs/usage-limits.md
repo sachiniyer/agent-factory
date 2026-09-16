@@ -225,10 +225,16 @@ An explicit `--account` selects a pinned identity: an existing pin moves to the
 chosen account, and an ambient session becomes pinned to that account. For an
 ambient session, `--to <agent>` without `--account` keeps the replacement ambient.
 A session already scoped to an account must specify a target account when
-changing to an agent that supports accounts (claude, codex, gemini); omitting it
-does not bypass the pin. Handing it to an agent with no account support (aider,
-amp, opencode, devin) drops the scope instead, and the response reports the drop
-on `from_account`.
+changing to an agent whose resolved command supports accounts (claude, codex,
+gemini as shipped); omitting it does not bypass the pin. Handing it to a target
+whose resolved command has no account support drops the scope instead, and the
+response reports the drop on `from_account`. Capability follows the resolved
+command rather than the enum, so `program_overrides` moves a target between the
+two cases: `aider` redirected to `codex` requires a codex account, and `codex`
+redirected to `aider` drops the scope. Because a scope drop restarts only the
+agent pane, a session with shell, process, or VS Code sibling tabs is refused
+until those tabs are closed — they would keep running under the dropped
+account's environment.
 
 The session keeps its worktree and branch, and the new conversation receives the
 handoff brief. See [Hand off to another account](#hand-off-to-another-account)

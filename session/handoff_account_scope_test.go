@@ -103,6 +103,13 @@ func TestSwapAgentProgram_KeepsScopeForScopableTarget(t *testing.T) {
 // scope could occupy, so the record still drops it. Both directions are
 // exercised because a fix that only consulted the enum would pass one and
 // silently break the other.
+//
+// The unprovable shapes are the third class (#4430 review round 3): a command
+// the credential-boundary parser cannot prove — `bash`, or `./collect codex`
+// whose agent-looking word is an argument, not the executable — must answer
+// non-scopable. A loose token scan claims the namespace the argument names
+// ("codex"), and the enum fallback claims the target's — both let "work" ride
+// a launch that can never apply it.
 func TestSwapAgentProgram_ScopeDecisionFollowsResolvedCommand(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -114,6 +121,12 @@ func TestSwapAgentProgram_ScopeDecisionFollowsResolvedCommand(t *testing.T) {
 			target: tmux.ProgramAider, override: tmux.ProgramCodex, wantAccount: "work"},
 		{name: "scopable enum resolving to non-scopable command",
 			target: tmux.ProgramCodex, override: tmux.ProgramAider, wantAccount: ""},
+		{name: "scopable enum resolving to a non-agent command",
+			target: tmux.ProgramCodex, override: "bash", wantAccount: ""},
+		{name: "scopable enum resolving to an agent-looking argument",
+			target: tmux.ProgramCodex, override: "./collect codex", wantAccount: ""},
+		{name: "non-scopable enum resolving to an agent-looking argument",
+			target: tmux.ProgramAider, override: "./collect codex", wantAccount: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -309,4 +322,34 @@ func TestHandoffEffectiveAgentForPath_NeedsNoBinary(t *testing.T) {
 	require.Equal(t, tmux.ProgramCodex,
 		HandoffEffectiveAgentForPath(t.TempDir(), tmux.ProgramAider),
 		"detection answers from the resolved command even when its binary cannot launch")
+}
+
+// refreshSessionEnvironment must pin the account's namespace to the command
+// the pane will RUN — the frozen launch program — never to i.Program's
+// recorded enum (#4430 review round 3). After `--to aider --account work`
+// resolves aider to a codex command, Program still records aider while the
+// pane launches codex; deriving the namespace from the enum declares "work" in
+// aider's, and prepareLaunchEnvironment refuses the launch for disagreeing
+// with the pane's own command. The sibling-tab refresh takes the same answer —
+// a credential-bearing shell inherits the agent pane's resolved namespace, not
+// its own program's (a shell is not the agent the account belongs to).
+func TestRefreshSessionEnvironment_PinsNamespaceToLaunchProgram(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramAider)
+	inst.Account = "work"
+
+	agent := tmux.NewTmuxSession("refresh-agent", "codex --model o4")
+	require.NoError(t, refreshSessionEnvironment(inst, agent, "codex --model o4"))
+	require.Equal(t, tmux.ProgramCodex, agent.AccountAgentForTest(),
+		"the account lives in the launch command's namespace — codex — not the recorded aider enum")
+
+	process := tmux.NewTmuxSession("refresh-process", "cat")
+	tab := &Tab{ID: newTabID(), Name: "build", Kind: TabKindProcess, Command: "cat", tmux: process}
+	require.NoError(t, refreshTabSessionEnvironment(inst, tab, "codex --model o4"))
+	require.Equal(t, tmux.ProgramCodex, process.AccountAgentForTest(),
+		"a credential-bearing sibling inherits the agent pane's resolved namespace")
+
+	unprovable := tmux.NewTmuxSession("refresh-unprovable", "./collect codex")
+	require.NoError(t, refreshSessionEnvironment(inst, unprovable, "./collect codex"))
+	require.Equal(t, "", unprovable.AccountAgentForTest(),
+		"an unprovable launch command carries no namespace — never the recorded enum's")
 }
