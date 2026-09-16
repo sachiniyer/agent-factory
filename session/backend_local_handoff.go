@@ -13,7 +13,15 @@ import (
 // in the destructive close/start gap.
 func (b *LocalBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPlan, error) {
 	resolved := resolveProgramForAgent(i, target)
-	program := injectSystemPrompt(resolved, resolveSkillTarget(i, resolved))
+	// Use resolveSkillTargetForAccount with an empty account name rather than
+	// resolveSkillTarget(i, resolved): at preflight time i.Account still holds
+	// the auto-selected account (ClearAutoSelectedAccount runs later, after
+	// PrepareAgentSwap succeeds). SwapAgent unconditionally rejects any non-empty
+	// i.Account, so every launch built from an AgentSwapPlan runs with no account.
+	// Stating that identity here — ambient, unscoped — means the af skill lands at
+	// the unscoped root the incoming pane will actually read, rather than in the
+	// outgoing auto-account's directory, which the incoming pane never opens.
+	program := injectSystemPrompt(resolved, resolveSkillTargetForAccount(resolved, target, ""))
 	program, conversation := planLaunchConversation(i.ID, program)
 	workDir := i.GetWorktreePath()
 	if workDir == "" {

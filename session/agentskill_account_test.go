@@ -261,3 +261,44 @@ func TestInjectSystemPrompt_WritesNothingWhenTheAccountIsUnresolvable(t *testing
 	require.NoError(t, err)
 	require.Empty(t, entries, "nothing at all may be created for an unresolvable account")
 }
+
+// Regression: PrepareAgentSwap now calls resolveSkillTargetForAccount with an
+// empty account name rather than resolveSkillTarget(i, resolved). At preflight
+// time i.Account still holds the auto-selected account (ClearAutoSelectedAccount
+// runs only after PrepareAgentSwap returns without error). resolveSkillTarget
+// would have read that stale value and written the af skill into the outgoing
+// account's codex/gemini directory — a directory the incoming ambient pane never
+// reads. The fix passes "" as the account name so the skill targets the unscoped
+// root the incoming pane will actually read.
+func TestPrepareAgentSwapSkillTarget_UsesAmbientRootForAutoAccountedSession(t *testing.T) {
+	agentHome(t)
+	grantGlobalAgentSkills(t)
+	ambientCodexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", ambientCodexHome)
+	codexAccountDir := registerAccount(t, "codex", "work")
+
+	// Simulate the state inside PrepareAgentSwap: the instance is auto-accounted
+	// (auto-selected "work"), but the handoff will run ambient (no account).
+	// resolveSkillTargetForAccount with target="codex" and name="" must yield
+	// the unscoped skillTarget{} — the ambient root — not the account root.
+	ambientTarget := resolveSkillTargetForAccount("codex", "codex", "")
+	require.Equal(t, skillTarget{}, ambientTarget,
+		"an ambient handoff targets the unscoped root: empty name must yield empty skillTarget")
+
+	// Confirm: the OLD path (reading i.Account directly) would have yielded the
+	// account root. The bug was that PrepareAgentSwap called resolveSkillTarget
+	// which reads i.Account = "work", and that resolved to the account directory.
+	scopedTarget := resolveSkillTargetForAccount("codex", "codex", "work")
+	require.Equal(t, skillTarget{root: codexAccountDir}, scopedTarget,
+		"sanity: a scoped target does resolve to the account directory")
+	require.NotEqual(t, ambientTarget, scopedTarget,
+		"the ambient and scoped targets must differ — the fix routes to the correct one")
+
+	// Writing through the ambient target must land in the ambient codex home, not
+	// in the account directory. This is the end-to-end path PrepareAgentSwap takes.
+	injectSystemPrompt("codex", ambientTarget)
+	require.FileExists(t, codexSkillPathUnder(ambientCodexHome),
+		"the skill must land in the ambient CODEX_HOME, which the incoming pane reads")
+	require.NoFileExists(t, codexSkillPathUnder(codexAccountDir),
+		"the skill must not land in the outgoing auto-account directory, which the ambient pane never reads")
+}
