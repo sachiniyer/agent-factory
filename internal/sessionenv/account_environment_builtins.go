@@ -206,7 +206,7 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 			return nil, false
 		case option == "-t" || option == "--ignore":
 			words = words[1:]
-		case option == "-c" || option == "--class" || option == "-n" || option == "--classdata":
+		case option == "-c" || option == "-n" || ioniceClassValueLongOption(option):
 			if len(words) < 2 {
 				return nil, true
 			}
@@ -227,7 +227,7 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 			}
 			words = words[2:]
 		case strings.HasPrefix(option, "-c") || strings.HasPrefix(option, "-n") ||
-			strings.HasPrefix(option, "--class=") || strings.HasPrefix(option, "--classdata="):
+			ioniceClassValueLongOptionAttached(option):
 			words = words[1:]
 		case strings.HasPrefix(option, "-"):
 			return nil, true
@@ -272,6 +272,28 @@ func ioniceQuotedOptionBoundaryPinned(prefix string) bool {
 		return false
 	}
 	return prefix[1] == 'c' || prefix[1] == 'n'
+}
+
+// ioniceClassValueLongOption reports whether option names one of ionice's two
+// value-taking long options through a GNU long-option abbreviation. util-linux
+// parses with getopt_long, which resolves any unambiguous prefix — so --classd,
+// --classda and --classdat all spell --classdata, and the exact --class still
+// wins over being a prefix of it. The only ambiguity a shorter spelling can
+// hit is --class against --classdata, and BOTH take exactly one value word:
+// like the selector ambiguity ioniceProcessOnlyOption documents, a spelling
+// shared by same-arity candidates lands the child at the same word either way,
+// so it is decidable without knowing which option was meant.
+func ioniceClassValueLongOption(option string) bool {
+	return len(option) > 2 &&
+		(strings.HasPrefix("--class", option) || strings.HasPrefix("--classdata", option))
+}
+
+// ioniceClassValueLongOptionAttached is the `--opt=value` spelling of
+// ioniceClassValueLongOption: the '=' pins the value inside this one argv word
+// for every abbreviation getopt_long resolves.
+func ioniceClassValueLongOptionAttached(option string) bool {
+	name, _, attached := strings.Cut(option, "=")
+	return attached && ioniceClassValueLongOption(name)
 }
 
 func ioniceProcessOnlyOption(option string) bool {

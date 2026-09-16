@@ -254,6 +254,42 @@ func TestValidateAccountEnvironmentCommand_IoniceNonSelectorPrefixesKeepChildVis
 	}
 }
 
+// util-linux resolves GNU long-option abbreviations, so --classd through
+// --classdat all spell --classdata and take its value word the same way. A
+// spelling shared only by --class and --classdata (--clas) is ambiguous to
+// getopt_long, but both candidates consume exactly one value word, so the
+// child boundary is provable either way — the same rule the selector-prefix
+// handling applies.
+func TestValidateAccountEnvironmentCommand_IoniceClassValueAbbreviations(t *testing.T) {
+	for _, command := range []string{
+		"ionice --classd 2 npm run dev",
+		"ionice --classd=2 npm run dev",
+		"ionice --classda 2 npm run dev",
+		"ionice --classdat=2 npm run dev",
+		"ionice --classdata 2 npm run dev",
+		"ionice --classdata=2 npm run dev",
+		"ionice --class 2 --classd 4 npm run dev",
+		"ionice --clas 2 npm run dev",
+		"ionice --clas=2 npm run dev",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q schedules an ordinary child the walk can see", command)
+	}
+	for _, command := range []string{
+		"ionice --classd 2 env CODEX_HOME=/other codex",
+		"ionice --classd=2 env CODEX_HOME=/other codex",
+		"ionice --classdat 2 env CODEX_HOME=/other codex",
+		"ionice --clas 2 env CODEX_HOME=/other codex",
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q must not hide the mutating child behind an abbreviated option", command)
+	}
+	// A value-taking abbreviation with no value word left still fails closed.
+	require.Error(t, ValidateAccountEnvironmentCommand(
+		"ionice --classd", scopedProcessTabAccount()),
+		"a bare abbreviated value option must refuse rather than guess the boundary")
+}
+
 func TestValidateAccountEnvironmentCommand_AllowsTerminalUtilLinuxWrapperModes(t *testing.T) {
 	for _, command := range []string{
 		"ionice -h",
