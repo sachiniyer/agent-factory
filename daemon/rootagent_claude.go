@@ -19,7 +19,17 @@ import (
 // while that file exists, a newer project transcript may belong to another
 // Claude process and is not evidence about this root.
 func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, inst *session.Instance, st *rootEnsureState) {
-	recorded := inst.AgentConversation()
+	// The recorded conversation and the account pin come off ONE locked
+	// projection: selectAccountLocked rewrites the account under i.mu during a
+	// handoff commit, so reading inst.Account bare is a data race — and even
+	// two locked reads could land on either side of that commit and pair one
+	// swap's conversation with the next account's transcript store (#4400
+	// review).
+	snapshot := inst.ToInstanceData()
+	var recorded session.AgentConversationData
+	if snapshot.AgentConversation != nil {
+		recorded = *snapshot.AgentConversation
+	}
 	if recorded.Agent != tmux.ProgramClaude || !recorded.HasID() {
 		return
 	}
@@ -33,7 +43,7 @@ func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, in
 			repoRoot, recorded.ID)
 		return
 	}
-	program, scopeErr := claudeAccountTranscriptProgram(program, inst.Account)
+	program, scopeErr := claudeAccountTranscriptProgram(program, snapshot.Account)
 	if scopeErr != nil {
 		m.logRootClaudeTranscriptWarning(st,
 			"root agent for %s could not verify its recorded claude conversation %s against the account-scoped transcript store: %v",

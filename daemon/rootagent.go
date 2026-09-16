@@ -736,6 +736,13 @@ type reapedRootState struct {
 	// the record held is the operator's choice, and a replacement create that
 	// dropped it would silently resume work on the ambient identity.
 	account string
+	// agent is the namespace that account pin was selected under — the agent
+	// the REAPED record resolved to, not the one the replacement will. An
+	// account name means nothing across registries (claude's "work" and
+	// codex's "work" are different credentials), so the recreate may keep the
+	// pin only while the replacement program resolves to this same agent
+	// (#4400 review).
+	agent string
 	// tabs is its full persisted roster, agent tab included (#2628). The create
 	// ignores index 0 and rebuilds the rest; keeping the roster whole means the
 	// snapshot is exactly what the record held, not a pre-filtered view of it.

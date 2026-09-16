@@ -184,6 +184,47 @@ func TestEnsureRootAgentsInspectsTheCarriedAccountsTranscriptStore(t *testing.T)
 	require.NotNil(t, findRootInstance(t, manager, repoPath), "always-ensure: the root must exist again")
 }
 
+// TestEnsureRootAgentsDropsTheAccountPinAcrossAnAgentChange is the #4400
+// review finding: an account name means nothing outside its own registry.
+// The root was pinned to claude account "work" before its profile changed to
+// codex; a codex account named "work" exists and validates cleanly, so only
+// the namespace comparison keeps the replacement from silently starting on a
+// same-named credential the operator never chose for codex.
+func TestEnsureRootAgentsDropsTheAccountPinAcrossAnAgentChange(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{Program: "codex"}))
+	require.NoError(t, err)
+	manager.ensureRootAgentsAndWait()
+
+	first := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, first, "root instance missing after first ensure")
+	require.Len(t, *seen, 1)
+
+	// The pin was selected under claude — the reaped record's tmux binding is
+	// what proves that — while the replacement's profile already resolves to
+	// codex. Registering codex "work" makes the wrong-registry validation
+	// SUCCEED, so the assertion below can only pass if the namespace check ran.
+	_, err = agentaccount.Register(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
+	_, err = agentaccount.Register(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err)
+	first.Account = "work"
+	first.SetTmuxSession(tmux.NewTmuxSession(session.RootSessionTitle, tmux.ProgramClaude))
+
+	// The #1104 outage class: tmux vanished under a healthy daemon.
+	first.SetStatusForTest(session.Lost)
+	manager.ensureRootAgentsAndWait()
+
+	require.Len(t, *seen, 2, "the vanished root must be reaped and re-created")
+	require.Empty(t, (*seen)[1].Account,
+		"a pin selected under claude must not validate a same-named codex account — the replacement starts on the ambient identity")
+	require.NotNil(t, findRootInstance(t, manager, repoPath), "always-ensure: the root must exist again")
+}
+
 // TestClaudeAccountTranscriptProgramScope pins the helper's contract: the
 // account's config dir rides as a leading shell assignment — the same
 // position a program-local override would occupy — and only when there is

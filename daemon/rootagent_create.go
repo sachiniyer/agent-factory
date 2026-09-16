@@ -252,11 +252,16 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	// A reaped root's account pin rides into its replacement like its
 	// conversation does: an account handoff is the one way root acquires an
 	// account (#4395), and silently dropping it would resume the guaranteed
-	// session's work on the ambient identity. Re-prove the pin against the live
-	// registry in the namespace the replacement program resolves to — a stale
-	// name would stamp an identity the launch cannot honour — and fall back to
-	// ambient with a named warning rather than strand the always-on guarantee
-	// on a boundary refusal.
+	// session's work on the ambient identity. The pin is kept only in the
+	// namespace it was selected under: a profile change between reap and
+	// recreate can make the replacement a different agent, and an account name
+	// means nothing across registries — claude's "work" and codex's "work" are
+	// different credentials — so validating the name in the REPLACEMENT's
+	// registry would stamp a same-named identity the operator never chose for
+	// it (#4400 review). Within the namespace, re-prove the pin against the
+	// live registry — a stale name would stamp an identity the launch cannot
+	// honour — and fall back to ambient with a named warning rather than
+	// strand the always-on guarantee on a boundary refusal.
 	//
 	// Resolved BEFORE the transcript check: registration relocates claude's
 	// entire transcript store, so an inspection that does not scope to the
@@ -271,6 +276,8 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		switch {
 		case agent == "":
 			accountErr = fmt.Errorf("no agent resolvable from program %q", program)
+		case carried.agent != agent:
+			accountErr = fmt.Errorf("the account was pinned under agent %q and the replacement resolves to %q", carried.agent, agent)
 		case homeErr != nil:
 			accountErr = homeErr
 		default:

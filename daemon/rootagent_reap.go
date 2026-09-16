@@ -85,7 +85,7 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 	// and a roster that never coexisted; there is no reason to leave that open
 	// when the whole record is available atomically.
 	snapshot := inst.ToInstanceData()
-	carried := reapedRootState{tabs: snapshot.Tabs, notice: snapshot.RootRecreateContext, account: snapshot.Account}
+	carried := reapedRootState{tabs: snapshot.Tabs, notice: snapshot.RootRecreateContext, account: snapshot.Account, agent: snapshot.CurrentAgent}
 	if snapshot.AgentConversation != nil {
 		carried.conversation = *snapshot.AgentConversation
 	}
