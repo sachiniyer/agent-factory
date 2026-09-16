@@ -268,8 +268,10 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// Adopting the parked carry is what keeps that transient failure from
 		// costing the root its account pin, conversation, and tab roster. The
 		// lookup is repo-keyed, so the carry parked by ANY spelling of this
-		// repository is consumed here — which spelling next publishes the
-		// replacement is irrelevant to what the replacement must carry.
+		// repository is found here — but consumed only by the workspace that
+		// parked it. A linked worktree shares the repo ID without sharing the
+		// checkout the carried conversation and tab roster ran in (#4400
+		// review).
 		m.mu.Lock()
 		parked, parkedOk := m.reapedRootCarries[repo.ID]
 		m.mu.Unlock()
@@ -288,6 +290,14 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 				m.reapedRootCarries[repo.ID] = parked
 				m.mu.Unlock()
 			}
+		}
+		if parkedOk && !parked.forWorkspace(workspace) {
+			// The carry belongs to another spelling of this repository: leave
+			// it parked for that spelling's own pass — or for the ambient
+			// publish below to retire — rather than restore a different
+			// worktree's state under this one. A carry with no workspace is a
+			// pre-binding record; it consumes as it always did.
+			parkedOk = false
 		}
 		if parkedOk {
 			carried = parked

@@ -186,6 +186,56 @@ func (m *Manager) resolvedRootAgentFor(repoID string, legacy *config.RootAgentCo
 	return m.rootAgentLayers.Load().resolve(repoID, legacy)
 }
 
+// repoHasEnabledRootCandidate reports whether any candidate OTHER than the one
+// at excludeKey still opts this repo into an ensured root — the question a
+// disabled pass asks before retiring the parked reaped carry, which exists
+// for exactly one consumer: the next enabled spelling of this repo (#4400
+// review).
+//
+// The sibling set mirrors the sweep's own. A projectRoots binding counts only
+// while the legacy map does not cover the repo — the singleton sweep applies
+// the same gate before visiting it. A legacy path counts when the dedup set
+// ties it to this repo (byPath is the proven answer) or while its probe has
+// never answered (unknownPaths): an unproven path may name this repo — a
+// linked worktree's provisional guess hashes to nothing real — and "unknown"
+// must never read as "absent" here any more than it does in the dedup set
+// itself. Each sibling is judged by resolve on ONE loaded snapshot — its own
+// pass would reach the same layers through resolvedRootAgentFor, whose pending-
+// probe gate this helper already applies once for the whole repo below.
+func (m *Manager) repoHasEnabledRootCandidate(repoID, excludeKey string) bool {
+	layers := m.rootAgentLayers.Load()
+	// An UNKNOWABLE decision is not a disabled one: a pending re-attribution
+	// probe or an unreadable personal layer resolves every candidate disabled
+	// fail-closed, but retiring the carry on that evidence would destroy it in
+	// exactly the transient it exists to survive. Park until a source answers.
+	if m.rootAttributionPendingFor(repoID) || layers.decisionUnknown(repoID) {
+		return true
+	}
+	if binding, ok := layers.projectRoots[repoID]; ok && binding.root != excludeKey &&
+		!layers.legacy.covers(repoID) && layers.resolve(repoID, nil).Enabled {
+		return true
+	}
+	for path, rc := range m.cfg.RootAgents {
+		if path == excludeKey {
+			continue
+		}
+		// Skip only a path the dedup set PROVES belongs to another repository.
+		// byPath may carry a stale resolution beside an unanswered probe
+		// (unknownPaths), and a determinately-free or unenumerated path can
+		// still resolve here later — both stay candidates, because retiring
+		// the carry while one might ensure this repo is the defect this check
+		// exists to prevent.
+		if owner := layers.legacy.byPath[path]; owner != "" && owner != repoID &&
+			!layers.legacy.unknownPaths[path] {
+			continue
+		}
+		if layers.resolve(repoID, &rc).Enabled {
+			return true
+		}
+	}
+	return false
+}
+
 // resolve applies the daemon's fail-closed policy (#3241, #3247) before
 // layering: a repo whose decision decisionUnknown reports unknowable resolves
 // to disabled without consulting lower layers — absence of proof is not
@@ -496,11 +546,13 @@ func (m *Manager) rootEnsureStateForLocked(key string) *rootEnsureState {
 func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo *config.RepoContext, resolution config.RootAgentResolution, identity *resolvedProjectRoot) {
 	if !resolution.Enabled {
 		// A disabled candidate ran and adopted nothing, so it cannot be the
-		// pass that retires this repo's parked reaped carry: with a second
-		// still-enabled spelling of this same repo sitting in backoff, doing
-		// so would cost the replacement its account pin, conversation, and
-		// tab roster (Codex on #4400). Only a live root standing makes the
-		// carry moot.
+		// pass that retires this repo's parked reaped carry WHILE a second
+		// still-enabled spelling of this same repo sits in backoff — doing so
+		// would cost the replacement its account pin, conversation, and tab
+		// roster (Codex on #4400). But when no enabled spelling remains at
+		// all, the carry has no consumer left: parking it indefinitely would
+		// resurrect an obsolete account, conversation, and roster the next
+		// time anything re-enables this repo's root (#4400 review).
 		key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
 		m.mu.Lock()
 		inst := m.instances[key]
@@ -510,6 +562,9 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 				m.rootEnsureSucceeded(repo.ID, st)
 				return
 			}
+		}
+		if !m.repoHasEnabledRootCandidate(repo.ID, stateKey) {
+			m.retireReapedRootCarry(repo.ID)
 		}
 		m.rootEnsureBackoffReset(st)
 		return
@@ -743,6 +798,15 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 // growing return list so a future field cannot be added to the snapshot and
 // forgotten at the create — the shape of both #2616 and #2628.
 type reapedRootState struct {
+	// workspace is the checkout the reaped record ran in (#4400 review). Two
+	// spellings of one repository — a linked worktree of a bare repo shares the
+	// repo ID — park and consume the same repo-keyed carry, but the carried
+	// conversation and tab roster belong to the workspace that produced them:
+	// transcript lookup is scoped by project path, and carried tabs describe
+	// processes that ran in that tree. A create under a different workspace
+	// must leave the carry for its own spelling rather than restore another
+	// worktree's state.
+	workspace string
 	// conversation is the provider conversation the vanished root was in (#2616).
 	conversation session.AgentConversationData
 	// account is the credential account the vanished root ran as (#4395). A

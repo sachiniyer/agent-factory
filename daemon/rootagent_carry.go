@@ -26,6 +26,7 @@ import (
 // the file's schema: they land on disk in every user's AF home, so renaming
 // one is a format change, not a refactor.
 type reapedRootCarryDisk struct {
+	Workspace             string                        `json:"workspace,omitempty"`
 	Conversation          session.AgentConversationData `json:"conversation,omitempty"`
 	Account               string                        `json:"account,omitempty"`
 	Agent                 string                        `json:"agent,omitempty"`
@@ -37,6 +38,7 @@ type reapedRootCarryDisk struct {
 
 func (s reapedRootState) carryDisk() reapedRootCarryDisk {
 	return reapedRootCarryDisk{
+		Workspace:             s.workspace,
 		Conversation:          s.conversation,
 		Account:               s.account,
 		Agent:                 s.agent,
@@ -49,6 +51,7 @@ func (s reapedRootState) carryDisk() reapedRootCarryDisk {
 
 func (d reapedRootCarryDisk) state() reapedRootState {
 	return reapedRootState{
+		workspace:             d.Workspace,
 		conversation:          d.Conversation,
 		account:               d.Account,
 		agent:                 d.Agent,
@@ -57,6 +60,16 @@ func (d reapedRootCarryDisk) state() reapedRootState {
 		pendingSwap:           d.PendingSwap,
 		pendingHandoffMission: d.PendingHandoffMission,
 	}
+}
+
+// forWorkspace reports whether this carry may be consumed by a create running
+// in workspace. The carry file is keyed by repository ID so every spelling of
+// the repository finds it, but the state inside belongs to the checkout that
+// parked it; a carry written before the field existed ("" workspace) remains
+// consumable anywhere, matching the pre-binding behavior.
+func (s reapedRootState) forWorkspace(workspace string) bool {
+	return s.workspace == "" ||
+		filepath.Clean(s.workspace) == filepath.Clean(workspace)
 }
 
 // reapedRootCarryPath places the carry beside the repo's instances.json: one
@@ -96,6 +109,14 @@ func (m *Manager) writeReapedRootCarry(repoID string, carried reapedRootState) e
 func (m *Manager) loadReapedRootCarry(repoID string) (state reapedRootState, present bool, err error) {
 	path, err := reapedRootCarryPath(repoID)
 	if err != nil {
+		return reapedRootState{}, false, err
+	}
+	// The write and remove ends already refuse a managed-file symlink; the
+	// read end must too. Following the link would let foreign content stand in
+	// as the carry af parked — the refusal is about the link's presence, not
+	// about what it resolves to, so a dangling link is refused the same way
+	// (#4400 review).
+	if err := config.RefuseManagedFileSymlink(path); err != nil {
 		return reapedRootState{}, false, err
 	}
 	data, err := os.ReadFile(path)
