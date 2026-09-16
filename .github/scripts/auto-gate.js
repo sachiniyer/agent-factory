@@ -1,6 +1,28 @@
 const { randomUUID } = require("node:crypto");
 
-const ALLOWED_AUTHORS = new Set(["sachiniyer", "app-detail-app", "app-detail-app[bot]"]);
+// GitHub renders one GitHub App actor under several logins depending on the
+// surface being read: the detail app has been observed as `app/detail-app` on a
+// pull request's author field, `detail-app[bot]` on its commits, and
+// `app-detail-app` / `app-detail-app[bot]` in the renderings this set was first
+// written for. Strip a leading `app/` and a trailing `[bot]` before the
+// membership test so a rename — or a rendering this gate has not seen before —
+// cannot silently fail closed into the manual-merge path again (#4425). The
+// predicate is applied at every ALLOWED_AUTHORS lookup; a site that skipped the
+// normalization would be an intermittent version of the same defect.
+function normalizeAuthorLogin(login) {
+  return String(login || "").replace(/^app\//, "").replace(/\[bot\]$/, "");
+}
+const ALLOWED_AUTHORS = new Set(["sachiniyer", "detail-app", "app-detail-app"]);
+function isAllowedAuthor(login) {
+  return ALLOWED_AUTHORS.has(normalizeAuthorLogin(login));
+}
+// The merge queue's own app authors its synthetic test PRs. Its login gets the
+// same normalization: `app/trunk-io` is what the author field reports. A batch
+// PR is recognized by this author AND the branch prefix together — either alone
+// would also match a hand-pushed `trunk-merge/*` branch or an ordinary PR that
+// happened to quote the queue's links.
+const TRUNK_MERGE_AUTHOR = "trunk-io";
+const TRUNK_MERGE_BRANCH_PREFIX = "trunk-merge/";
 const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 // Every workflow whose master-side run is triggered by `push: branches:
 // [master]`. A push made with GITHUB_TOKEN does not trigger further workflow
@@ -345,6 +367,14 @@ const AWAITING_MAINTAINER_REVIEW_REMEDY =
 const CODEX_VERDICT_REMEDY =
   "post `@codex review` on this head in a PR comment; requesting the review needs nothing from " +
   "the author, and the blocker clears when Codex returns a covering verdict";
+// The "author" reason a merge-queue batch PR reports instead of
+// MANUAL_MERGE_AUTHOR_REASON: the synthetic head's author is the queue's own
+// app, which says nothing about the pull requests under test. Each constituent
+// carries the gate's real evidence on its own head (#4418).
+const MERGE_QUEUE_BATCH_REASON =
+  "Auto Gate does not auto-merge a merge-queue batch head; the queue performs the merge once " +
+  "this check passes, which it does only when every constituent pull request carries a passing " +
+  "decision on its own head.";
 const RETRY_DELAYS_MS = [250, 1000];
 // A merge that has already STARTED needs longer than a read retry to land.
 // Reusing RETRY_DELAYS_MS gave the winner 1.25s total, and a slower merge then
@@ -716,13 +746,20 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   }
 
   const pr = await getPullRequest({ github, context, number });
+  const baseRepository = `${context.repo.owner}/${context.repo.repo}`;
   const reasons = [];
   const notes = [];
+  // A merge-queue batch head carries no reviewable content of its own — the
+  // approval and verdict it stands in for live on each constituent PR's own
+  // head — so the author gate is replaced by the constituent evaluation below
+  // (#4418). A PR that merely looks like a batch without parsing as one keeps
+  // the ordinary author check and fails closed exactly as it did before.
+  const batchConstituents = mergeQueueBatchConstituents({ pr, context });
   // Every cause that makes this PR maintainer-merged rather than auto-merged.
   // Each one is a full sentence because the decision summary is where a human
   // finds out why the gate stopped short of merging.
   const manualMergeReasons = [];
-  if (!ALLOWED_AUTHORS.has(pr.author)) {
+  if (!batchConstituents && !isAllowedAuthor(pr.author)) {
     manualMergeReasons.push(MANUAL_MERGE_AUTHOR_REASON);
   }
 
@@ -744,7 +781,6 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     reasons.push("PR is a draft");
   }
 
-  const baseRepository = `${context.repo.owner}/${context.repo.repo}`;
   if (pr.headRepository !== baseRepository) {
     reasons.push(
       `head repository ${pr.headRepository || "(unknown)"} is not ${baseRepository}; ` +
@@ -791,6 +827,47 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   }
   notes.push(...requiredChecks.notes);
 
+  // A recognized merge-queue batch skips everything below: no approval, verdict
+  // or play-test can ever be bound to a synthetic head, and requiring one is
+  // what ejected every batch (#4418). The structural requirements already
+  // computed still apply — open, master base, mergeable, and the required
+  // checks ON THIS HEAD, which are the combined-tree CI the queue exists to
+  // run. What replaces the per-head review evidence is the per-constituent
+  // check: every constituent must be an open master PR whose current head is
+  // contained in this batch head and carries a passing decision of its own.
+  //
+  // The decision is published on the manual path so shouldMerge stays false:
+  // the gate certifies the batch head for the QUEUE to merge and never merges
+  // the synthetic PR itself.
+  if (batchConstituents) {
+    const batch = await evaluateMergeQueueBatch({
+      github,
+      context,
+      pr,
+      constituents: batchConstituents,
+      subject,
+    });
+    notes.push(...batch.notes);
+    return finish(core, setOutputs, {
+      prNumber: String(pr.number),
+      pullRequestId: pr.id,
+      shouldMerge: false,
+      manualMergeRequired: true,
+      manualMergeReasons: [MERGE_QUEUE_BATCH_REASON],
+      manualMergeBlockers: batch.blockers,
+      mergeQueueBatch: true,
+      isOpen: pr.state === "OPEN" && !pr.merged,
+      baseRefName: pr.baseRefName,
+      headRefName: pr.headRefName,
+      headRepository: pr.headRepository,
+      headSha: pr.headRefOid,
+      workflowsChanged,
+      requiredCheckObservations: requiredChecks.observations,
+      reasons,
+      notes,
+    });
+  }
+
   // Whether this head is a merge the gate made to bring the branch up to date. If
   // it is, the anchors follow its first parent, so the approval and the Codex
   // evidence that were bound to the reviewed content survive the update (#3803).
@@ -836,7 +913,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
       // TUI evidence is advisory for authors the gate never auto-merges. Keep
       // unreadable snapshots advisory too, without swallowing review/check
       // failures or relaxing snapshot verification on the automatic path.
-      if (ALLOWED_AUTHORS.has(pr.author)) throw error;
+      if (isAllowedAuthor(pr.author)) throw error;
       playTest = {
         ok: false,
         message: `play-tested attestation could not be verified: ${error.message || String(error)}`,
@@ -1008,6 +1085,207 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     reasons,
     notes,
   });
+}
+
+// The pull-request numbers a merge-queue batch PR names as its constituents,
+// or null when this is not a recognizable Trunk batch (#4418).
+//
+// Three properties are required together. The branch prefix is what Trunk
+// names its synthetic test branches (`trunk-merge/pr-<number>/<uuid>`, with a
+// `-bisection` suffix on a bisected batch); the author — normalized like every
+// author read here, since GitHub reports the app as `app/trunk-io` — is what
+// keeps a hand-pushed lookalike branch off this path; and at least one
+// constituent must parse, from the `pr-<number>` the branch carries or from the
+// `…/pull/<number>` links the body's "Pull Requests Being Tested" list holds.
+// Both surfaces are unioned so a multi-PR batch is not under-counted when one
+// of them omits a member. A partial parse only ever fails closed: a named
+// constituent that is not really in the batch fails its containment check
+// below, and a batch that fails to name one at all simply is not a batch here
+// and takes the ordinary evaluation — which cannot pass a synthetic head.
+function mergeQueueBatchConstituents({ pr, context }) {
+  const headRefName = String(pr.headRefName || "");
+  if (!headRefName.startsWith(TRUNK_MERGE_BRANCH_PREFIX)) {
+    return null;
+  }
+  if (normalizeAuthorLogin(pr.author) !== TRUNK_MERGE_AUTHOR) {
+    return null;
+  }
+  const numbers = new Set();
+  const branchMatch = /^trunk-merge\/pr-(\d+)(?:\/|$)/.exec(headRefName);
+  if (branchMatch) {
+    numbers.add(Number(branchMatch[1]));
+  }
+  const repoName = `${context.repo.owner}/${context.repo.repo}`;
+  const escaped = repoName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pullLink = new RegExp(`github\\.com/${escaped}/pull/(\\d+)`, "gi");
+  for (const match of String(pr.body || "").matchAll(pullLink)) {
+    numbers.add(Number(match[1]));
+  }
+  return numbers.size > 0 ? [...numbers].sort((left, right) => left - right) : null;
+}
+
+// The gate evidence for a merge-queue batch head, as blockers on the synthetic
+// PR's manual-path decision (#4418).
+//
+// A batch head binds nothing of its own: nobody reviews the merge the queue
+// wrote, and an approval posted on the batch PR binds a head that exists only
+// to be closed when testing ends. What the head CAN prove is containment —
+// that the revision each constituent's own decision already certified is the
+// revision this batch contains. So every named constituent must be an open
+// master PR whose CURRENT head is an ancestor of the batch head and whose
+// newest (PR, head) decision run is a pass. A constituent whose head moved
+// since it was batched fails the containment check — the queue retests it on
+// its own — and one whose own decision is red surfaces its own wait reason
+// verbatim rather than re-deriving it.
+//
+// The synthetic head's own shape is checked too: it must be a merge whose
+// first parent is already base history. A linear commit appended to the batch
+// branch — the only write shape available to anyone holding push access —
+// would otherwise inherit the constituents' green while containing none of
+// the content they were gated on.
+async function evaluateMergeQueueBatch({ github, context, pr, constituents, subject }) {
+  const { owner, repo } = context.repo;
+  const notes = [];
+  const blockers = [];
+  const batchHead = normalizeHeadSha(pr.headRefOid);
+  const requeue = "close this pull request so the queue retests the current heads";
+
+  const parents = (pr.headParents || [])
+    .map((parent) => normalizeHeadSha(parent?.oid))
+    .filter(Boolean);
+  if (parents.length < 2) {
+    blockers.push({
+      reason:
+        `merge-queue batch head ${batchHead || pr.headRefOid} is not a merge commit, so the ` +
+        "gate cannot tell its tested content from commits appended to the batch branch",
+      remedy: requeue,
+    });
+  } else {
+    const firstParent = parents[0];
+    const comparison = await retryRead(
+      `could not compare ${pr.baseRefName} with batch head's first parent ${firstParent}`,
+      () =>
+        github.rest.repos.compareCommitsWithBasehead({
+          owner,
+          repo,
+          basehead: `${pr.baseRefName}...${firstParent}`,
+          per_page: 1,
+        }),
+      subject,
+    );
+    const status = comparison?.data?.status;
+    if (status !== "behind" && status !== "identical") {
+      blockers.push({
+        reason:
+          `merge-queue batch head's first parent ${firstParent} is not contained in ` +
+          `${pr.baseRefName} (compare reports ${JSON.stringify(status)}), so the batch does ` +
+          "not sit on base history",
+        remedy: requeue,
+      });
+    }
+  }
+
+  for (const number of constituents) {
+    let constituent;
+    try {
+      constituent = await getPullRequest({ github, context, number });
+    } catch (error) {
+      // An exhausted READ is an evaluation error everywhere else in this file
+      // and stays one here; only an absent PR is a gate verdict on the batch.
+      if (isReadFailure(error) || error?.autoGatePullRequestGone) {
+        throw error;
+      }
+      blockers.push({
+        reason:
+          `merge-queue batch constituent PR #${number} could not be read ` +
+          `(${formatError(error)})`,
+        remedy: requeue,
+      });
+      continue;
+    }
+    if (constituent.merged) {
+      // Its content already reached master by the merge that closed it; what
+      // the batch still holds of it is already-gated history, not new code.
+      notes.push(`constituent PR #${number} has already merged`);
+      continue;
+    }
+    if (constituent.state !== "OPEN" || constituent.baseRefName !== "master") {
+      blockers.push({
+        reason:
+          `merge-queue batch constituent PR #${number} is no longer an open master pull ` +
+          `request (${constituent.state.toLowerCase()} into ${constituent.baseRefName})`,
+        remedy: requeue,
+      });
+      continue;
+    }
+    const head = normalizeHeadSha(constituent.headRefOid);
+    if (!head || !batchHead) {
+      blockers.push({
+        reason: `merge-queue batch constituent PR #${number} has no readable head SHA`,
+        remedy: requeue,
+      });
+      continue;
+    }
+    const contained = await retryRead(
+      `could not compare constituent PR #${number} head ${head} with batch head ${batchHead}`,
+      () =>
+        github.rest.repos.compareCommitsWithBasehead({
+          owner,
+          repo,
+          basehead: `${head}...${batchHead}`,
+          per_page: 1,
+        }),
+      subject,
+    );
+    const status = contained?.data?.status;
+    if (status !== "ahead" && status !== "identical") {
+      blockers.push({
+        reason:
+          `constituent PR #${number}'s head ${head} is not contained in this batch head ` +
+          `(compare reports ${JSON.stringify(status)}); the batch tests a different revision`,
+        remedy: "let the queue retest the pull request's current head",
+      });
+      continue;
+    }
+    const checkRuns = await retryRead(
+      `could not read check runs at constituent PR #${number} head ${head}`,
+      () =>
+        github.paginate(github.rest.checks.listForRef, {
+          owner,
+          repo,
+          ref: head,
+          per_page: 100,
+        }),
+      subject,
+    );
+    const identity = decisionIdentity(number, head);
+    const decision = newestCheckGeneration(
+      checkRuns.filter(
+        (run) =>
+          run.name === identity.checkName &&
+          run.external_id === identity.externalId &&
+          run.app?.id === GITHUB_ACTIONS_APP_ID,
+      ),
+    );
+    if (!decision) {
+      blockers.push({
+        reason: `constituent PR #${number} has no Auto Gate decision at its head ${head}`,
+        remedy: `run Auto Gate manually for PR #${number} so its decision exists, then let the queue retest`,
+      });
+    } else if (decision.status !== "completed" || decision.conclusion !== "success") {
+      blockers.push({
+        reason:
+          `constituent PR #${number} at its head ${head} is waiting: ` +
+          decisionWaitingReason(decision),
+        remedy: `clear PR #${number}'s own Auto Gate requirements, then let the queue retest`,
+      });
+    } else {
+      notes.push(
+        `constituent PR #${number} is gate-green at its head ${head}, which this batch contains`,
+      );
+    }
+  }
+  return { notes, blockers };
 }
 
 // The first requirement a blocked decision is waiting on, for the title.
@@ -1200,9 +1478,11 @@ async function reportDecision({ github, context, core, result, manual = false })
       ? `NEVER_RAN: no prior decision; recovery ${decisionPasses ? "passed" : "is waiting"}`
       : result.manualMergeRequired
         ? manualMergePasses
-          ? result.degradedForUnavailableReviewer
-            ? `PASS: reviewer ${describeCodexUnavailable({ kind: result.reviewerUnavailableKind })}; maintainer review and manual merge required`
-            : "PASS: maintainer review and manual merge required"
+          ? result.mergeQueueBatch
+            ? "PASS: merge-queue batch — every constituent pull request is gate-green at its own head"
+            : result.degradedForUnavailableReviewer
+              ? `PASS: reviewer ${describeCodexUnavailable({ kind: result.reviewerUnavailableKind })}; maintainer review and manual merge required`
+              : "PASS: maintainer review and manual merge required"
           : `BLOCKED: ${firstManualMergeBlocker(result) || "a manual merge has an unanswered blocker"}`
         : result.shouldMerge
           ? "PASS: Auto Gate requirements are satisfied"
@@ -4028,6 +4308,7 @@ async function getPullRequest({ github, context, number }) {
           number
           title
           url
+          body
           baseRefName
           headRefName
           headRefOid
@@ -4095,6 +4376,7 @@ async function getPullRequest({ github, context, number }) {
     number: pr.number,
     title: pr.title,
     url: pr.url,
+    body: pr.body || "",
     baseRefName: pr.baseRefName,
     headRefName: pr.headRefName,
     headRefOid: pr.headRefOid,
@@ -4292,7 +4574,7 @@ function isGatedTuiPath(path) {
 // The latest recognized attestation wins; a label alone cannot identify tested code.
 async function evaluatePlayTest({ github, context, pr, comments, subject }) {
   const attestations = comments
-    .filter((comment) => ALLOWED_AUTHORS.has(comment.user?.login || ""))
+    .filter((comment) => isAllowedAuthor(comment.user?.login))
     .map((comment) => ({
       comment,
       sha: /^Play-tested commit: ([0-9a-f]{40})$/i.exec(
@@ -4830,7 +5112,7 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
     ),
   ].filter(
     (artifact) =>
-      ALLOWED_AUTHORS.has(artifact.user?.login || "") &&
+      isAllowedAuthor(artifact.user?.login) &&
       reviewArtifactTime(artifact) > headCurrentSince,
   );
   return approvals.sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a))[0] || null;
@@ -5109,7 +5391,7 @@ function unansweredFindingArtifacts({
 }) {
   const acknowledgements = acknowledgementCandidates.filter(
     (artifact) =>
-      ALLOWED_AUTHORS.has(artifact.user?.login || "") && hasResolutionMarker(artifact.body || ""),
+      isAllowedAuthor(artifact.user?.login) && hasResolutionMarker(artifact.body || ""),
   );
   //
   // An artifact is CLASSIFIED when something says which revision it is about.
@@ -5552,7 +5834,7 @@ async function evaluateCodex({
       .filter((comment) => {
         return (
           comment.in_reply_to_id &&
-          ALLOWED_AUTHORS.has(comment.user?.login || "") &&
+          isAllowedAuthor(comment.user?.login) &&
           hasResolutionMarker(comment.body || "")
         );
       })
@@ -5611,7 +5893,7 @@ async function evaluateCodex({
   // than the reply": the normal order is fix, push, reply, which leaves the head
   // older than the reply and would block a correctly fixed PR.
   const allowedReplies = reviewComments.filter(
-    (comment) => comment.in_reply_to_id && ALLOWED_AUTHORS.has(comment.user?.login || ""),
+    (comment) => comment.in_reply_to_id && isAllowedAuthor(comment.user?.login),
   );
   const claimedFixed = new Set(
     allowedReplies.filter((c) => FIX_CLAIM_RE.test(c.body || "")).map((c) => c.in_reply_to_id),
@@ -6080,10 +6362,13 @@ function finish(core, setOutputs, result) {
     const blocked = blockers
       .map((blocker) => `${blocker.reason} — ${blocker.remedy}`)
       .join("\n- ");
+    const blockedLead = result.mergeQueueBatch
+      ? "The queue's merge is blocked until each of these is answered:"
+      : "A manual merge is blocked until each of these is answered:";
     summary =
       blockers.length === 0
         ? `PASS: ${manual}${unmetSuffix}`
-        : `BLOCKED: ${manual} A manual merge is blocked until each of these is answered:` +
+        : `BLOCKED: ${manual} ${blockedLead}` +
           `\n- ${blocked}${unmetSuffix}`;
   } else {
     summary =
@@ -6179,6 +6464,10 @@ module.exports = {
     DECISION_STAMP_PREFIX,
     maintainerApproval,
     MAINTAINER_APPROVAL_MARKER,
+    isAllowedAuthor,
+    normalizeAuthorLogin,
+    mergeQueueBatchConstituents,
+    evaluateMergeQueueBatch,
     unansweredFindingArtifacts,
     codexArtifactStatesItsCommit,
     isCodexSummaryArtifact,
