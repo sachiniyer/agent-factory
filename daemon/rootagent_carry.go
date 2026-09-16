@@ -105,7 +105,9 @@ func (m *Manager) writeReapedRootCarry(repoID string, carried reapedRootState) e
 // bounce the in-memory map is empty but the file the reap wrote still names
 // what the deleted record carried. present=false means no file exists (the
 // ordinary no-carry case), not an empty carry — a reaped root that carried
-// nothing still round-trips to present=true with a zero state.
+// nothing still round-trips to present=true with a zero state. A non-nil err
+// means a carry may exist that could not be read; it is never "no carry", and
+// the consumer fails its ensure on it rather than rebuild without it.
 func (m *Manager) loadReapedRootCarry(repoID string) (state reapedRootState, present bool, err error) {
 	path, err := reapedRootCarryPath(repoID)
 	if err != nil {
@@ -131,6 +133,19 @@ func (m *Manager) loadReapedRootCarry(repoID string) (state reapedRootState, pre
 		return reapedRootState{}, false, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return disk.state(), true, nil
+}
+
+// reapedRootCarryUnreadableError words a present-but-unreadable carry as the
+// ensure failure it is: what is being withheld, which file, and the two ways
+// out — repair the file so the next retry restores it, or remove it to accept
+// the ambient identity.
+func reapedRootCarryUnreadableError(repoID string, loadErr error) error {
+	path, pathErr := reapedRootCarryPath(repoID)
+	if pathErr != nil {
+		path = "reaped-root-carry.json for repo " + repoID
+	}
+	return fmt.Errorf("not re-creating the root agent: the carry its reaped predecessor parked (account pin, conversation, tabs, pending account swap) could not be read, and an ambient rebuild would retire it — fix %s so the next retry can restore it, or remove it to start the root on the ambient identity: %w",
+		path, loadErr)
 }
 
 // ambientSafeCarriedTabs filters a carried roster for a replacement whose

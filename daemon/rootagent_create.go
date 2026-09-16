@@ -277,13 +277,25 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		m.mu.Unlock()
 		if !parkedOk {
 			// The map is empty after a daemon restart; the carry the reap
-			// wrote beside instances.json is not (#4400 review round 3). A
-			// read error keeps the carry as the fallback it always was —
-			// ambient rebuild — rather than failing the heal on a file the
-			// record's deletion already made advisory.
+			// wrote beside instances.json is not (#4400 review round 3).
+			//
+			// A carry that EXISTS but cannot be read fails the ensure rather
+			// than degrading to an ambient rebuild (#4400 review round 6):
+			// the record is already deleted, so this file is the only copy of
+			// the account pin, conversation, tab roster, and pending swap, and
+			// a successful ambient create retires it — a transient read error
+			// would become a permanent credential demotion. This is the read
+			// half of the policy reapDeadRoot already applies to the write,
+			// which retains the record rather than heal over a carry it could
+			// not persist. Only "no file" (present=false, nil) is the ordinary
+			// first-create case. A fault that never clears — a corrupt or
+			// linked file — stays on rootEnsureFailed's retry-forever cadence
+			// and its escalation ERROR, and the message names the file and
+			// the remedy, so dropping the carry stays the operator's choice.
 			var loadErr error
 			if parked, parkedOk, loadErr = m.loadReapedRootCarry(repo.ID); loadErr != nil {
-				m.warn().Printf("root agent for %s could not read the parked reaped carry: %v", workspace, loadErr)
+				m.rootEnsureFailed(stateKey, st, reapedRootCarryUnreadableError(repo.ID, loadErr))
+				return
 			}
 			if parkedOk {
 				m.mu.Lock()
