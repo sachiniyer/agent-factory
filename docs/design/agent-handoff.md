@@ -255,6 +255,38 @@ agent onto someone's branch with no instructions. In the prompted path the user
 can supply the brief inline (`--brief`), which is strictly better information
 than anything af could synthesize.
 
+### 3.4 Addendum (#4367): the same-agent account boundary copies the transcript
+
+D2's "never transcript" rule is about **providers**: claude cannot read a codex
+rollout. A same-agent **account** handoff crosses a different boundary. The
+format stays the same, and only the provider home changes: each account
+relocates `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, so the new account starts with
+none of the old account's history. There, af deliberately copies the
+provider's own conversation file:
+
+| Provider | What is copied, relative to both homes | Replacement launch |
+|---|---|---|
+| claude | `projects/<project>/<id>.jsonl`, plus the `<id>/` per-session directory when possible | `claude --resume <id>` |
+| codex | `sessions/YYYY/MM/DD/rollout-…-<id>.jsonl` | `codex resume <id>` |
+
+Both were measured to resume under the other account's real credentials, and
+both keep the same id and append to the same file. Both CLIs fail loudly when
+the id is missing, so a failed copy never turns into a silent fresh session.
+The copy runs after the outgoing runtime stops, because transcripts are
+appended while the agent runs, and before the identity checkpoint. It only
+adds to the new account's home, never changes the previous account's, and
+never touches a credential file. Symlinks are never followed below either
+home. Both formats are append-only, so the copy always keeps the longer
+version when one is a prefix of the other, and refuses when neither is.
+
+If the copy cannot be made, the replacement starts fresh, and the brief says
+that af tried to carry the conversation and why it could not. A cross-agent
+handoff never copies anything, and gemini, which records no conversation id,
+keeps the fresh start with a brief. The pending swap record stores the carried
+id separately from a freshly injected one (`carried_conversation_id` beside
+`conversation_id`). A daemon restart therefore plans a resume plus an
+idempotent re-copy, rather than injecting the carried id as a new session.
+
 ---
 
 ## 4. D3 — Session identity  ⚠️ LOAD-BEARING

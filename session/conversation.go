@@ -11,6 +11,9 @@ const (
 	ConversationCaptureInjected         = "injected"
 	ConversationCaptureCodexRollout     = "codex_rollout"
 	ConversationCaptureClaudeTranscript = "claude_transcript"
+	// ConversationCaptureCarried marks a conversation a same-agent account
+	// swap copied into the incoming account's home and resumed (#4367).
+	ConversationCaptureCarried = "carried"
 )
 
 // AgentConversationData is the provider-specific conversation identity for a

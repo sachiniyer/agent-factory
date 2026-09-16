@@ -371,13 +371,18 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   and new identities before repeating the stored task prompt.
 - **One credential boundary.** A local swap stops every agent, shell, and process
   pane before committing the new identity, then restores them with the selected
-  account environment; the agent starts a fresh provider conversation. New
+  account environment. A claude or codex agent keeps its conversation: af copies
+  the transcript into the new account's home before committing the new identity,
+  and the replacement resumes it. If the copy cannot be made, the agent starts a
+  fresh conversation, and the notice it receives says why. Other agents start a
+  fresh provider conversation. New
   account-scoped terminal tabs remain interactive but skip shell startup files,
   because an rc file can otherwise replace the selected identity after af has
   established it. A resolved command that explicitly pins `--continue`,
   `--resume`, `--session-id`,
-  or `codex resume` is not safe to carry across accounts, so af names those
-  arguments and keeps the existing wait instead.
+  or `codex resume` would take away af's choice of which conversation the
+  replacement opens, so af names those arguments and keeps the existing wait
+  instead.
 - **Operator-only.** `limit_auto_resume`, `limit_retry_interval`, and
   `limit_account_candidates` are rejected
   in in-repo configs. A save through `af config set` applies them to the running
@@ -403,10 +408,20 @@ To continue under another registered account of the same agent:
 af sessions handoff fix-auth --account personal
 ```
 
-The session keeps its identity, worktree, branch tip, and stored prompt. The
-new account starts a fresh conversation. Use `--brief` to replace the prompt,
-or combine `--to claude --account work` to change both agent and account.
-The recorded handoff includes the outgoing and incoming accounts and branch tip.
+The session keeps its identity, worktree, branch tip, and stored prompt. For
+claude and codex it also keeps the conversation. Each account has its own
+provider home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), so after stopping the
+outgoing agent af copies that conversation's file into the new account's home:
+the transcript for claude, the rollout for codex. The new account then resumes
+the same conversation id. The copy only ever adds to the new account's home;
+nothing in the previous account's home changes. If the copy cannot be made (the
+file is missing, or the new account already holds a different version of it),
+the new account starts a fresh conversation, and the brief it receives says the
+carry was attempted and why it failed. Other agents always start fresh with a
+brief. Use `--brief` to replace the prompt, or combine
+`--to claude --account work` to change both agent and account; changing the
+agent always starts a fresh conversation. The recorded handoff includes the
+outgoing and incoming accounts and branch tip.
 
 If an agent or account handoff starts its replacement but cannot confirm whether
 the mission was submitted, af suppresses automatic redelivery because the first
@@ -454,7 +469,7 @@ What a handoff does, and does not do:
   same task binding, same name. Only the agent process is replaced. Nothing is
   archived, nothing is re-cloned, and uncommitted work is untouched — it is
   simply still there, because the worktree never moved.
-- **The new agent starts fresh, with a brief.** Agent conversations are not
+- **A different agent starts fresh, with a brief.** Agent conversations are not
   portable between providers: claude cannot read codex's transcript and vice
   versa. So instead of a transcript, the incoming agent is told the session's
   goal, that it is continuing someone else's work, and where to look
