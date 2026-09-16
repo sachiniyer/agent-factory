@@ -124,18 +124,17 @@ func TestCheckConfigAndStorage_EmptyStubIsHealthy(t *testing.T) {
 }
 
 // TestCheckConfigAndStorage_EmptyStubDefaultHomeReadOnlyIsHealthy is the
-// end-to-end `af doctor` guarantee for the chmod-repairable default home: a
-// contentless config.toml in an owner-owned default ~/.agent-factory tightened
-// to a write-less mode (0500) is a state af self-heals at startup, so doctor's
-// CONFIG validity row must be an advisory WARN (problem=false), not the FAIL
-// (problem=true) it raised before the fix when the read-only diagnostic errored
-// on the unrepaired 0500 mode. The config row agreeing with startup is the
-// in-scope fix; see the inline note about the separate hook-logs check.
+// end-to-end `af doctor` guarantee for the default home at a write-less mode:
+// a contentless config.toml in an owner-owned default ~/.agent-factory
+// tightened to 0500 is a state af recovers past at startup (in-memory
+// defaults — nothing is removed, so the mode cannot matter, #4483), so
+// doctor's CONFIG validity row must be an advisory WARN (problem=false), not
+// a FAIL. See the inline note about the separate hook-logs check.
 //
 // Unlike TestCheckConfigAndStorage_EmptyStubIsHealthy above, this stages the home
 // as the CONCRETE default via $HOME (AGENT_FACTORY_HOME empty) at a write-less
-// mode — the arrangement the gate's write-permission probe wrongly rejected and
-// that seedHome-based tests never reach by pinning a custom home.
+// mode — the arrangement a seedHome-based test never reaches by pinning a
+// custom home.
 func TestCheckConfigAndStorage_EmptyStubDefaultHomeReadOnlyIsHealthy(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root bypasses mode bits, so a 0500 home cannot be staged as non-writable")
