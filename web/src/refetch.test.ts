@@ -268,7 +268,7 @@ test("#3659 every refetcher in index.ts commits through the fence, not inline", 
   const source = readFileSync(join(srcRoot, "index.ts"), "utf8");
   const refetchers: string[] = [];
 
-  for (const name of ["refreshConfig", "refreshRegisteredProjects", "refreshTasks"]) {
+  for (const name of ["refreshConfig", "refreshRegisteredProjects", "refreshTasks", "refreshAccounts"]) {
     const body = topLevelFunction(source, name);
     const delegation = /\b(\w+)\.refresh\(\)/.exec(body);
     assert.ok(delegation, `${name} must issue its request through a fenced refetcher`);
