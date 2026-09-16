@@ -38,32 +38,70 @@ func failedConfigApplyOutcome(err error) (config.ApplyOutcome, string) {
 	return config.ApplyOutcome{DaemonApplyUnconfirmed: true}, "saved config, but live apply could not be confirmed: " + err.Error()
 }
 
-// applyFallbackDiskVerdict folds the version-skewed fallback's post-apply FILE
-// read into outcome. What a divergence proves depends on when the key is
-// consumed, which is why the verdict is interpreted here rather than inside the
-// readback:
-//
-//   - A deferred key: the file IS what the next daemon start or af launch will
-//     read, so a divergence means this save will not take effect. Definitive,
-//     and reported as superseded.
-//   - A key whose live rebind failed is deferred the same way: the old listener
-//     keeps serving and the next daemon start reads the file, so a divergence
-//     is definitive there too.
-//   - A live key: the read happens after the apply RPC returned and cannot
-//     establish which generation the daemon loaded, so a divergence means only
-//     that the client cannot confirm what the daemon is serving.
-//
-// An unresolvable readback claims neither and leaves the apply's own answer
-// standing.
+// readbackStore is which store a post-apply readback could consult. It is what
+// decides what a divergence on a LIVE key proves.
+type readbackStore int
+
+const (
+	// readbackSnapshot: the in-daemon handler reads the snapshot its apply just
+	// swapped in, so a live key's divergence is a definite lost race.
+	readbackSnapshot readbackStore = iota
+	// readbackFileAfterApply: a version-skewed client can read only the file, and
+	// only after the apply returned, which cannot establish which generation the
+	// daemon loaded for a live key.
+	readbackFileAfterApply
+)
+
+// recordSavedValueReadback is the ONE place a post-apply readback verdict
+// becomes an outcome fact. Each save path used to compare the verdict against
+// savedValueSuperseded at its own call site, so a verdict a path did not name —
+// an unloadable file — was silently dropped on all four of them (#4247). Every
+// verdict is decided here, once, for every path.
+func recordSavedValueReadback(outcome *config.ApplyOutcome, warnings *[]string, key string, store readbackStore, verdict savedValueVerdict, loadErr error) {
+	switch verdict {
+	case savedValueConfirmed, savedValueUnresolved:
+		// Either this save is confirmed, or the readback could not look. Neither
+		// contradicts the apply, so its own answer stands.
+	case savedValueFileUnreadable:
+		// Only a key served FROM the file is harmed: its next daemon start or af
+		// launch reads this same file. A live key's value is whatever the running
+		// daemon already loaded, which a file breaking afterwards does not change,
+		// and the apply's own answer already states what is known about it.
+		if outcome.FileAuthoritative(key) {
+			outcome.SavedFileUnreadable = true
+			*warnings = append(*warnings, fileUnreadableWarning(key, loadErr))
+		}
+	case savedValueSuperseded:
+		// The file decides for a file-authoritative key, and the snapshot decides
+		// for a live key read inside the daemon. Either way the divergence is
+		// definitive.
+		if outcome.FileAuthoritative(key) || store == readbackSnapshot {
+			outcome.SavedValueSuperseded = true
+			return
+		}
+		// A live key read from the file after the apply returned: the file may
+		// have moved after the daemon loaded this save, so this proves only that
+		// the client cannot confirm what the daemon is serving.
+		outcome.DaemonApplied = false
+		outcome.DaemonApplyUnconfirmed = true
+		*warnings = append(*warnings, unconfirmedReadbackWarning)
+	}
+}
+
+// fileUnreadableWarning names the key whose next-start effect is lost and the
+// reason the file will not load, so the operator knows what to fix.
+func fileUnreadableWarning(key string, loadErr error) string {
+	reason := "the file could not be read"
+	if loadErr != nil {
+		reason = loadErr.Error()
+	}
+	return "saved config, but the config file no longer loads, so " + key +
+		" cannot take effect at its next start until the file is fixed: " + reason
+}
+
+// applyFallbackDiskVerdict is the version-skewed fallback's readback: the file is
+// the only store such a daemon lets a client consult.
 func applyFallbackDiskVerdict(outcome *config.ApplyOutcome, warnings *[]string, key, expected string) {
-	if diskSavedValue(key, expected) != savedValueSuperseded {
-		return
-	}
-	if deferredEffectKey(key) || outcome.ListenerRebindFailed(key) {
-		outcome.SavedValueSuperseded = true
-		return
-	}
-	outcome.DaemonApplied = false
-	outcome.DaemonApplyUnconfirmed = true
-	*warnings = append(*warnings, unconfirmedReadbackWarning)
+	verdict, loadErr := diskSavedValue(key, expected)
+	recordSavedValueReadback(outcome, warnings, key, readbackFileAfterApply, verdict, loadErr)
 }

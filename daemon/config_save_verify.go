@@ -7,11 +7,14 @@ import "github.com/sachiniyer/agent-factory/config"
 // before the apply loads config.toml, so a competing write can land in that gap
 // and be the value the apply carries (#4247).
 //
-// The readback that checks this has three possible answers, not two. Collapsing
-// "cannot tell" into "a competing value won" is what made a successful save of
-// program_overrides.claude report a race that never happened, so the verdict is
-// explicit here and each call site decides what an unverifiable readback means
-// for its own surface.
+// The readback that checks this has four possible answers, not two, and each
+// means something different to the save that is reported. Collapsing any two is
+// how this mechanism kept producing findings: "cannot tell" read as "a competing
+// value won" made a successful program_overrides.claude save report a race that
+// never happened, and "the file will not load" read as "cannot tell" let a
+// deferred key promise an effect from a file nothing can load. The verdicts stay
+// distinct here, and recordSavedValueReadback is the one place that decides
+// what each means for the outcome.
 
 // savedValueVerdict is what a post-apply readback can honestly say about whether
 // the daemon ended up serving the value this save wrote.
@@ -24,20 +27,25 @@ const (
 	// savedValueSuperseded: the readback resolved the key and a DIFFERENT value
 	// holds it, so this save lost a race.
 	savedValueSuperseded
-	// savedValueUnverifiable: the readback could not resolve the key at all, so
-	// neither of the other two may be claimed.
-	savedValueUnverifiable
+	// savedValueUnresolved: the store loaded but the key did not render, so
+	// neither of the answers above may be claimed. This says nothing about the
+	// store itself.
+	savedValueUnresolved
+	// savedValueFileUnreadable: the config FILE did not load. For a key served
+	// from that file this is not neutral: the next daemon start or af launch
+	// reads the same file.
+	savedValueFileUnreadable
 )
 
 // liveSavedValue compares cfg's rendered value for key against the value the
 // save wrote. CurrentSavedValue renders the same form `config set` accepts and
 // SetResult.Value records (the round trip is pinned by
 // TestCurrentValueRoundTripsThroughConfigSet), so a plain string compare is
-// exact.
+// exact. cfg is already loaded, so this never reports an unreadable file.
 func liveSavedValue(cfg *config.Config, key, expected string) savedValueVerdict {
 	match, ok := config.SavedValueMatches(cfg, key, expected)
 	if !ok {
-		return savedValueUnverifiable
+		return savedValueUnresolved
 	}
 	if !match {
 		return savedValueSuperseded
@@ -52,69 +60,40 @@ func unsetExpectedValue(key string) string {
 	return expected
 }
 
-// diskSavedValue is the FILE counterpart of liveSavedValue, for the two
-// callers whose authoritative store is the file rather than the daemon's
-// snapshot: a client whose daemon is too old to serve SetConfigValue is also
-// too old to serve GetConfig (both arrived together in #1960), so it cannot
-// read the daemon's live config back and must read the file instead; and the
-// in-daemon appliedSavedValue uses it for deferred keys, whose next daemon
-// start or af launch reads that same file.
+// diskSavedValue is the FILE counterpart of liveSavedValue, for the callers
+// whose authoritative store is the file rather than the daemon's snapshot: a
+// client whose daemon is too old to serve SetConfigValue is also too old to
+// serve GetConfig (both arrived together in #1960), so it cannot read the
+// daemon's live config back; and appliedSavedValue uses it for file-authoritative
+// keys, whose next daemon start or af launch reads that same file.
 //
-// It reports what the FILE says and nothing more. What a divergence proves
-// depends on the key, and only the caller knows that:
-//
-//   - For a live key the file read happens after the apply RPC returned, so it
-//     cannot establish which generation the daemon loaded — a write landing
-//     between the daemon's load and this read leaves the daemon correctly
-//     serving THIS save. There, a divergence means "cannot confirm".
-//   - For a key that takes effect at the next daemon start or af launch, the
-//     file IS the thing that will be read, so a divergence means this save
-//     genuinely will not take effect: definitively superseded.
-//
-// Collapsing those two into one answer here is what made a deferred key's lost
-// race report as merely unconfirmed (#4247).
-func diskSavedValue(key, expected string) savedValueVerdict {
+// It reports what the FILE says and nothing more, returning the load error with
+// savedValueFileUnreadable so the report can name what is wrong with the file.
+// What any verdict proves depends on the key and on which store the caller could
+// consult, and only recordSavedValueReadback decides that.
+func diskSavedValue(key, expected string) (savedValueVerdict, error) {
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		return savedValueUnverifiable
+		return savedValueFileUnreadable, err
 	}
-	return liveSavedValue(cfg, key, expected)
-}
-
-// deferredEffectKey reports whether key's value is consumed at the next daemon
-// start or af launch rather than by the running daemon — the condition that
-// makes a post-apply FILE read definitive for it.
-func deferredEffectKey(key string) bool {
-	switch config.KeyEffectClass(key) {
-	case config.EffectNextDaemonStart, config.EffectNextAfLaunch:
-		return true
-	}
-	return false
+	return liveSavedValue(cfg, key, expected), nil
 }
 
 // appliedSavedValue is the in-daemon post-apply readback behind a successful
 // ApplyConfig: it verifies the saved value against the store that will actually
-// serve it, which depends on when the key's value is consumed (#4247).
+// serve it (#4247).
 //
 //   - A key the running daemon consumes is checked against cfg — the live
 //     snapshot the apply just swapped in. A divergence means the apply loaded
 //     a competing write.
-//   - A deferred key is checked against the FILE, because the file is what the
-//     next daemon start or af launch will read. The live snapshot cannot see a
-//     competing write that lands after the apply's own load — it would still
-//     hold this save and promise a deferred effect the stored file will not
-//     deliver.
-//   - A key whose live rebind FAILED is deferred the same way even though its
-//     static class is live: the apply loaded this save into the snapshot, but
-//     the old listener keeps serving and the value only reaches a daemon at
-//     the next start — which reads the file. Checking the snapshot there would
-//     confirm this save while the stored file already holds a competing write.
-//
-// An unloadable file reads as unverifiable, not superseded: it proves the
-// caller cannot say which value won, never that a competing one did.
-func appliedSavedValue(cfg *config.Config, outcome config.ApplyOutcome, key, expected string) savedValueVerdict {
-	if deferredEffectKey(key) || outcome.ListenerRebindFailed(key) {
+//   - A file-authoritative key (config.ApplyOutcome.FileAuthoritative: deferred
+//     by class, or a listener whose rebind failed) is checked against the FILE,
+//     because the file is what the next daemon start or af launch will read.
+//     The live snapshot cannot see a competing write that lands after the
+//     apply's own load, and it would still hold this save.
+func appliedSavedValue(cfg *config.Config, outcome config.ApplyOutcome, key, expected string) (savedValueVerdict, error) {
+	if outcome.FileAuthoritative(key) {
 		return diskSavedValue(key, expected)
 	}
-	return liveSavedValue(cfg, key, expected)
+	return liveSavedValue(cfg, key, expected), nil
 }

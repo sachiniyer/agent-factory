@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -186,14 +188,16 @@ func TestAppliedSavedValueVerifiesDeferredKeyAgainstDisk(t *testing.T) {
 	// branch_prefix is consumed at the next daemon start: the file decides, so
 	// the competing write reads as superseded even though the snapshot still
 	// holds this save — the case the live-snapshot check could not see.
-	require.Equal(t, savedValueSuperseded,
-		appliedSavedValue(snapshot, config.ApplyOutcome{}, "branch_prefix", "mine"))
+	verdict, err := appliedSavedValue(snapshot, config.ApplyOutcome{}, "branch_prefix", "mine")
+	require.NoError(t, err)
+	require.Equal(t, savedValueSuperseded, verdict)
 
 	// default_program is consumed by the running daemon: the snapshot decides,
 	// so a write that landed after the apply does not contradict what the
 	// daemon is serving.
-	require.Equal(t, savedValueConfirmed,
-		appliedSavedValue(snapshot, config.ApplyOutcome{}, "default_program", "aider"))
+	verdict, err = appliedSavedValue(snapshot, config.ApplyOutcome{}, "default_program", "aider")
+	require.NoError(t, err)
+	require.Equal(t, savedValueConfirmed, verdict)
 }
 
 // A failed listener rebind defers the key dynamically: its static class is
@@ -211,14 +215,16 @@ func TestAppliedSavedValueVerifiesFailedListenerKeyAgainstDisk(t *testing.T) {
 	require.NoError(t, err)
 
 	rebindFailed := config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: []string{"network.listen_addr"}}
-	require.Equal(t, savedValueSuperseded,
-		appliedSavedValue(snapshot, rebindFailed, "network.listen_addr", "127.0.0.1:8080"),
+	verdict, err := appliedSavedValue(snapshot, rebindFailed, "network.listen_addr", "127.0.0.1:8080")
+	require.NoError(t, err)
+	require.Equal(t, savedValueSuperseded, verdict,
 		"a failed-listener key is consumed from the file at next start, so the file decides")
 
 	// The same key with a successful rebind stays live-checked: the snapshot
 	// holds this save, so the post-apply write does not contradict it.
-	require.Equal(t, savedValueConfirmed,
-		appliedSavedValue(snapshot, config.ApplyOutcome{DaemonApplied: true}, "network.listen_addr", "127.0.0.1:8080"))
+	verdict, err = appliedSavedValue(snapshot, config.ApplyOutcome{DaemonApplied: true}, "network.listen_addr", "127.0.0.1:8080")
+	require.NoError(t, err)
+	require.Equal(t, savedValueConfirmed, verdict)
 }
 
 // The version-skewed fallback runs its definitive disk verdict on a successful
@@ -270,4 +276,100 @@ func TestClientFallbackUnconfirmedApplyVerifiesDeferredKeyOnDisk(t *testing.T) {
 		"the competing write reached the file while the apply was unconfirmed")
 	require.NotContains(t, resp.RestartNotice, "takes effect",
 		"a lost race must not promise the save takes effect next start")
+}
+
+// breakConfigFile makes config.toml unparsable, standing in for another writer
+// that corrupts it after an apply has already loaded this save.
+func breakConfigFile(t *testing.T) {
+	t.Helper()
+	dir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, config.TomlConfigFileName), []byte("[broken"), 0o600))
+}
+
+// A config file that stops loading after the apply, for a key served FROM that
+// file: the next daemon start or af launch reads the same file, so the save must
+// not promise a deferred effect. Every save path compared the readback verdict
+// against savedValueSuperseded alone, so this verdict was dropped on all of them
+// and the save reported "deferred" (#4247).
+func TestUnreadableFileBlocksTheDeferredPromise(t *testing.T) {
+	cases := []struct {
+		name    string
+		key     string
+		outcome config.ApplyOutcome
+		store   readbackStore
+	}{
+		{name: "next daemon start, in daemon", key: "branch_prefix",
+			outcome: config.ApplyOutcome{DaemonApplied: true}, store: readbackSnapshot},
+		{name: "next af launch, in daemon", key: "appearance",
+			outcome: config.ApplyOutcome{DaemonApplied: true}, store: readbackSnapshot},
+		{name: "failed listener rebind, in daemon", key: "network.listen_addr",
+			outcome: config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: []string{"network.listen_addr"}},
+			store:   readbackSnapshot},
+		{name: "next daemon start, version-skewed fallback", key: "branch_prefix",
+			outcome: config.ApplyOutcome{DaemonApplied: true}, store: readbackFileAfterApply},
+		{name: "next daemon start, fallback after an unconfirmed apply", key: "branch_prefix",
+			outcome: config.ApplyOutcome{DaemonApplyUnconfirmed: true}, store: readbackFileAfterApply},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configClientHome(t)
+			breakConfigFile(t)
+
+			verdict, loadErr := appliedSavedValue(config.DefaultConfig(), tc.outcome, tc.key, "mine")
+			if tc.store == readbackFileAfterApply {
+				verdict, loadErr = diskSavedValue(tc.key, "mine")
+			}
+			require.Equal(t, savedValueFileUnreadable, verdict,
+				"a file-authoritative key is read from the file, which does not load")
+			require.Error(t, loadErr)
+
+			outcome := tc.outcome
+			var warnings []string
+			recordSavedValueReadback(&outcome, &warnings, tc.key, tc.store, verdict, loadErr)
+
+			require.True(t, outcome.SavedFileUnreadable)
+			require.Len(t, warnings, 1)
+			require.Contains(t, warnings[0], tc.key)
+			require.Contains(t, warnings[0], "no longer loads")
+			require.Equal(t, config.ApplyStatusUnconfirmed, outcome.StatusForKey(tc.key))
+			require.NotContains(t, config.EffectNotice(tc.key, outcome), "takes effect",
+				"the next start reads a file that does not load, so no effect may be promised")
+		})
+	}
+}
+
+// The complement: a LIVE key's value is whatever the running daemon already
+// loaded, which a file breaking afterwards does not change. The unloadable file
+// must not rewrite that key's outcome, or every live save racing a hand-edit
+// would stop reporting what the daemon is actually serving.
+func TestUnreadableFileLeavesALiveKeyOutcomeAlone(t *testing.T) {
+	configClientHome(t)
+	breakConfigFile(t)
+
+	verdict, loadErr := diskSavedValue("default_program", "aider")
+	require.Equal(t, savedValueFileUnreadable, verdict)
+
+	outcome := config.ApplyOutcome{DaemonApplied: true}
+	var warnings []string
+	recordSavedValueReadback(&outcome, &warnings, "default_program", readbackFileAfterApply, verdict, loadErr)
+
+	require.False(t, outcome.SavedFileUnreadable)
+	require.Empty(t, warnings)
+	require.Equal(t, config.ApplyStatusApplied, outcome.StatusForKey("default_program"))
+}
+
+// The version-skewed fallback reaches the same fold through its wrapper, so the
+// verdict it used to ignore now changes its answer too.
+func TestApplyFallbackDiskVerdictReportsUnreadableFileForDeferredKey(t *testing.T) {
+	configClientHome(t)
+	breakConfigFile(t)
+
+	outcome := config.ApplyOutcome{DaemonApplied: true}
+	var warnings []string
+	applyFallbackDiskVerdict(&outcome, &warnings, "branch_prefix", "mine")
+
+	require.True(t, outcome.SavedFileUnreadable)
+	require.False(t, outcome.SavedValueSuperseded, "an unloadable file proves nothing about which value won")
+	require.Equal(t, config.ApplyStatusUnconfirmed, outcome.StatusForKey("branch_prefix"))
 }

@@ -168,8 +168,18 @@ type ApplyOutcome struct {
 	// SavedValueSuperseded is set when the apply completed but the key's live
 	// value is not the one this save wrote: a competing write landed between the
 	// save's file-lock release and the apply's load, so the apply carried the
-	// other value (#4247). Meaningful only alongside DaemonApplied.
+	// other value (#4247). It is set only by a readback that RESOLVED the key:
+	// after a successful apply, or — for a file-authoritative key on the
+	// version-skewed fallback — after an unconfirmed one, since the file decides
+	// there whether or not the apply's reply arrived.
 	SavedValueSuperseded bool
+	// SavedFileUnreadable is set when a post-apply readback of the config FILE
+	// could not load it, for a key FileAuthoritative says is served from that
+	// file. The next daemon start or af launch reads the same file, so the save
+	// cannot promise a deferred effect (#4247). It is its own fact rather than a
+	// cause of DaemonApplyUnconfirmed because its implication is the opposite:
+	// every cause of that bit leaves the file written and loadable.
+	SavedFileUnreadable bool
 }
 
 // ApplyStatus is the machine-readable result for the key a save wrote. A
@@ -193,64 +203,134 @@ const (
 	ApplyStatusSuperseded ApplyStatus = "superseded"
 )
 
-// StatusForKey projects the whole apply onto one saved key's stable wire value.
+// saveRule is one row of the ordering that turns a save's facts into what the
+// save surfaces report. A row carries BOTH projections — the wire status and the
+// sentence — so for any save StatusForKey and EffectNotice read the same row and
+// cannot disagree.
 //
-// Precedence, and why it is this order: a lost race outranks everything, because
-// it is the one answer about which VALUE IS STORED rather than about what the
-// apply did with it. Below that, the key's effect class outranks the apply
-// result, since an apply cannot make a startup-only key live and an unconfirmed
-// or failed apply does not change when that stored value starts being used.
-// Within the apply result, uncertainty wins over failure if a malformed caller
-// sets both: once the reply is lost, the client cannot honestly claim the daemon
-// kept its previous config.
+// That is the point of the shape. The two used to be separate hand-written
+// orderings, kept in step by a test that asserted they agreed, and review found
+// them out of step four times (#4247). A disagreement is now unrepresentable
+// rather than tested for: there is one ordering and two columns.
+type saveRule struct {
+	// applies reports whether this row describes the save; key is canonical.
+	applies func(key string, o ApplyOutcome) bool
+	status  ApplyStatus
+	// notice renders the sentence for the canonical key.
+	notice func(key string) string
+}
+
+// saveRules is the one precedence for a save's reported answer: the FIRST row
+// that applies decides both the status and the sentence. The order is the
+// substance, so each row records why it sits where it does. Several rows share a
+// status and differ only in their sentence; that is a difference of projection,
+// not of ordering, and it is why the rows are per meaning rather than per status.
+var saveRules = []saveRule{
+	// A lost race outranks everything: it is the one answer about WHICH value is
+	// stored, and it contradicts every "takes effect" promise below. Only a
+	// readback that resolved the key sets it.
+	{
+		applies: func(_ string, o ApplyOutcome) bool { return o.SavedValueSuperseded },
+		status:  ApplyStatusSuperseded,
+		notice:  supersededNotice,
+	},
+	// A config file that no longer loads, for a key served FROM that file. The
+	// next daemon start or af launch reads the same file, so every deferred
+	// promise below would be made about a value nothing can load.
+	{
+		applies: func(key string, o ApplyOutcome) bool {
+			return o.SavedFileUnreadable && o.FileAuthoritative(key)
+		},
+		status: ApplyStatusUnconfirmed,
+		notice: fileUnreadableNotice,
+	},
+	// Uncertainty about a LIVE key: once the reply is lost the client cannot claim
+	// the daemon kept its previous config. It deliberately does not reach a
+	// deferred key, because every cause of this bit — a lost reply, an admission
+	// refusal, a live key's unconfirmable readback — leaves the file written, so
+	// the next start still reads this save's value and the class rows stay true.
+	{
+		applies: func(key string, o ApplyOutcome) bool {
+			return o.DaemonApplyUnconfirmed && !deferredEffectClass(key)
+		},
+		status: ApplyStatusUnconfirmed,
+		notice: staticNotice("Saved — the daemon’s live config apply could not be confirmed. See warnings for details."),
+	},
+	// A failed apply is evidence about the FILE: DaemonApplyFailed is set only for
+	// a "reload config" failure (Manager.ApplyConfig's one error return), so the
+	// file did not load — and the next start reads it. It therefore outranks the
+	// class rows, which would promise an effect that file cannot deliver.
+	{
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApplyFailed },
+		status:  ApplyStatusFailed,
+		notice:  staticNotice("Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."),
+	},
+	// The key's class. No apply can make these keys live, so an apply result that
+	// says nothing about the file does not change when the stored value is used.
+	{
+		applies: classIs(EffectNextDaemonStart),
+		status:  ApplyStatusDeferred,
+		notice: func(key string) string {
+			return WithRootAgentAdoptionNotice(key, "Saved — this setting takes effect on the next daemon start.")
+		},
+	},
+	{
+		applies: classIs(EffectNextAfLaunch),
+		status:  ApplyStatusDeferred,
+		notice:  staticNotice("Saved — this setting takes effect the next time you launch af."),
+	},
+	{
+		applies: classIs(EffectUnknown),
+		status:  ApplyStatusUnknown,
+		notice:  staticNotice("Saved."),
+	},
+	// Only EffectAppliedLive reaches here. A failed rebind kept the old listener
+	// serving, so the value waits for the next daemon start.
+	{
+		applies: func(key string, o ApplyOutcome) bool { return o.ListenerRebindFailed(key) },
+		status:  ApplyStatusDeferred,
+		notice:  listenerRebindDeferredNotice,
+	},
+	{
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApplied },
+		status:  ApplyStatusApplied,
+		notice:  staticNotice("Applied — the running daemon is using the new value now."),
+	},
+	// The zero outcome: no daemon was reached. It always applies, so the table is
+	// total and every save gets exactly one row.
+	{
+		applies: func(string, ApplyOutcome) bool { return true },
+		status:  ApplyStatusNoDaemon,
+		notice:  staticNotice("Saved — no daemon is running to apply it, so it takes effect on the next daemon start."),
+	},
+}
+
+func staticNotice(sentence string) func(string) string {
+	return func(string) string { return sentence }
+}
+
+func classIs(class EffectClass) func(string, ApplyOutcome) bool {
+	return func(key string, _ ApplyOutcome) bool { return KeyEffectClass(key) == class }
+}
+
+// matchSaveRule returns the canonical key and the one row describing this save.
+func matchSaveRule(key string, o ApplyOutcome) (string, saveRule) {
+	key = canonicalConfigKey(key)
+	for _, rule := range saveRules {
+		if rule.applies(key, o) {
+			return key, rule
+		}
+	}
+	// Unreachable while the last row always applies; kept total rather than
+	// panicking on a save surface.
+	return key, saveRules[len(saveRules)-1]
+}
+
+// StatusForKey projects the whole apply onto one saved key's stable wire value.
+// It is a column of saveRules, never a separate decision.
 func (o ApplyOutcome) StatusForKey(key string) ApplyStatus {
-	// Ahead of the class switch, because losing the race is a statement about
-	// WHICH VALUE IS STORED and the class only describes when a stored value
-	// starts being used. A startup-only key is raced on disk exactly like a live
-	// one, and "deferred" would promise that THIS save takes effect at the next
-	// daemon start while the value waiting there belongs to the writer that won
-	// (#4247). Only a readback that resolved the key sets this, so it cannot
-	// fire for a key whose value was never actually compared.
-	if o.SavedValueSuperseded {
-		return ApplyStatusSuperseded
-	}
-	// Uncertainty outranks failure for a key the daemon applies live: once the
-	// reply is lost, the client cannot honestly claim the daemon kept its previous
-	// config. It does NOT outrank the class, because an unconfirmed apply still
-	// wrote the file successfully — so a deferred key's next start reads this
-	// save's value and "deferred" remains true.
-	if o.DaemonApplyUnconfirmed && !deferredEffectClass(key) {
-		return ApplyStatusUnconfirmed
-	}
-	// A failed apply is the one apply result that IS evidence about the FILE.
-	// Manager.ApplyConfig's only error return wraps config.LoadConfig ("reload
-	// config: …"), so a failure means the file did not load — and the next daemon
-	// start or af launch reads that same file. Failure therefore outranks the
-	// effect class, which would otherwise promise a deferred effect that cannot
-	// happen (#4247).
-	if o.DaemonApplyFailed {
-		return ApplyStatusFailed
-	}
-	// Match EffectNotice's key-first rule. A startup-only setting is deferred
-	// regardless of whether a daemon happened to receive this save; that apply
-	// call cannot make the key live. The same holds for client-side settings,
-	// which take effect on the next af launch rather than in the daemon.
-	switch KeyEffectClass(key) {
-	case EffectNextDaemonStart, EffectNextAfLaunch:
-		return ApplyStatusDeferred
-	case EffectUnknown:
-		return ApplyStatusUnknown
-	}
-	// Only EffectAppliedLive reaches here, and both apply-result branches above
-	// already returned for it — the unconfirmed guard passes for a live key, and
-	// failure is unconditional — so neither is repeated below.
-	if o.ListenerRebindFailed(key) {
-		return ApplyStatusDeferred
-	}
-	if o.DaemonApplied {
-		return ApplyStatusApplied
-	}
-	return ApplyStatusNoDaemon
+	_, rule := matchSaveRule(key, o)
+	return rule.status
 }
 
 // deferredEffectClass reports whether key's value is consumed at the next daemon
@@ -290,6 +370,20 @@ func (o ApplyOutcome) ListenerRebindFailed(key string) bool {
 	return false
 }
 
+// FileAuthoritative reports whether this save's value for key is served from the
+// config FILE rather than the running daemon's snapshot: a key consumed at the
+// next daemon start or af launch, or a live listener whose rebind failed and so
+// reaches a daemon only at its next start. A post-apply readback must check the
+// file for these keys, and a file that no longer loads breaks the promise the
+// save would otherwise make about them.
+//
+// It is the one definition of that condition. The daemon's readback and its
+// version-skewed fallback each spelled it out, over a second copy of the class
+// test that lived in another package.
+func (o ApplyOutcome) FileAuthoritative(key string) bool {
+	return deferredEffectClass(key) || o.ListenerRebindFailed(key)
+}
+
 // EffectNotice is the one sentence a save surface shows after writing key, stating
 // WHEN the change takes effect. outcome is what the running daemon did with it (see
 // ApplyOutcome); it only changes the applied-live answer, because an applied-live
@@ -301,51 +395,8 @@ func (o ApplyOutcome) ListenerRebindFailed(key string) bool {
 // never claims a key is live when the rebind that would have made it live failed.
 // Sentence case, one clause set off with an em dash, per the copy conventions.
 func EffectNotice(key string, outcome ApplyOutcome) string {
-	key = canonicalConfigKey(key)
-	// This prefix mirrors StatusForKey's precedence deliberately. The two answer the
-	// same question for the same save — one as prose, one as a wire status — so an
-	// ordering that differs between them lets a save be reported as `superseded`
-	// while its sentence promises the value takes effect.
-	//
-	// A lost race comes first, because it is the one answer about WHICH value is
-	// stored, and it contradicts every "takes effect" promise below — including the
-	// rebind-deferred one.
-	if outcome.SavedValueSuperseded {
-		return supersededNotice(key)
-	}
-	// Uncertainty next, and only for a live key — mirroring StatusForKey. An
-	// unconfirmed apply still wrote the file, so a deferred key's next start reads
-	// this save's value and keeps its class sentence.
-	if outcome.DaemonApplyUnconfirmed && !deferredEffectClass(key) {
-		return "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
-	}
-	// A failed apply outranks the class, because Manager.ApplyConfig's only error is
-	// a failed config reload: the file did not load, and the next daemon start or af
-	// launch reads that same file. Promising a deferred effect there would promise
-	// something the invalid file cannot deliver (#4247).
-	if outcome.DaemonApplyFailed {
-		return "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
-	}
-	// Then the class, exactly as StatusForKey does.
-	switch KeyEffectClass(key) {
-	case EffectNextDaemonStart:
-		notice := "Saved — this setting takes effect on the next daemon start."
-		return WithRootAgentAdoptionNotice(key, notice)
-	case EffectNextAfLaunch:
-		return "Saved — this setting takes effect the next time you launch af."
-	case EffectUnknown:
-		return "Saved."
-	}
-	// Only EffectAppliedLive reaches here; uncertainty and failure both returned
-	// above, so what remains is a rebind that kept the old listener, then the plain
-	// applied / no-daemon answers.
-	if outcome.ListenerRebindFailed(key) {
-		return listenerRebindDeferredNotice(key)
-	}
-	if outcome.DaemonApplied {
-		return "Applied — the running daemon is using the new value now."
-	}
-	return "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
+	key, rule := matchSaveRule(key, outcome)
+	return rule.notice(key)
 }
 
 // supersededNotice is the one sentence for a save that lost a race, worded for
@@ -362,6 +413,17 @@ func supersededNotice(key string) string {
 	default:
 		return "Saved — a newer write raced this save, so the running daemon may be using a different value."
 	}
+}
+
+// fileUnreadableNotice is the sentence for a save whose value is served from a
+// config file that no longer loads. It names the start that will fail to read the
+// setting and withholds the "takes effect" promise, which that file cannot keep.
+func fileUnreadableNotice(key string) string {
+	when := "the next daemon start"
+	if KeyEffectClass(key) == EffectNextAfLaunch {
+		when = "the next af launch"
+	}
+	return "Saved — the config file no longer loads, so " + when + " cannot read this setting until the file is fixed. See warnings for details."
 }
 
 // WithRootAgentAdoptionNotice appends the half of restart guidance unique to
