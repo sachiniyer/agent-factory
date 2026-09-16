@@ -5,22 +5,6 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// resolveProgramForInstance returns the actual tmux command for an instance.
-// Resolution chain: agent enum -> cfg.ProgramOverrides[agent] (if set) -> bare
-// agent name. Repo-resolved config wins when the path belongs to a repository;
-// otherwise the global config applies. A nil cfg preserves legacy free-form
-// Program values verbatim.
-func resolveProgramForInstance(i *Instance) string {
-	i.mu.RLock()
-	agent := i.Program
-	alreadyResolved := agent != "" && agent == i.preResolvedProgram
-	i.mu.RUnlock()
-	if alreadyResolved {
-		return agent
-	}
-	return resolveProgramForAgent(i, agent)
-}
-
 type launchProgramResolution struct {
 	command   string
 	trustBase bool
