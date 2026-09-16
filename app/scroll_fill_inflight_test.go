@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -35,11 +36,13 @@ func firstRenderedHistoryMarker(view string, maxLines int) int {
 	return 0
 }
 
-// TestPreviewScrollFirstIntentConformanceKeyboardAndWheel proves both root
-// input paths submit the same semantic first intent to host-history preview.
-// The size matrix is the real outer-terminal contract requested by #2192; the
-// expected top marker is derived from each resulting pane height.
-func TestPreviewScrollFirstIntentConformanceKeyboardAndWheel(t *testing.T) {
+// TestPreviewScrollFirstIntentSemanticsKeyboardAndWheel proves each root input
+// path's semantic first intent survives the asynchronous history fill: the
+// keyboard's is half a page (#4173), the wheel's one line, and both must hold
+// across the fill landing later. The size matrix is the real outer-terminal
+// contract requested by #2192; the expected top marker is derived from each
+// resulting pane height.
+func TestPreviewScrollFirstIntentSemanticsKeyboardAndWheel(t *testing.T) {
 	const historyLines = 100
 	history := appNumberedHistory(historyLines)
 
@@ -88,9 +91,16 @@ func TestPreviewScrollFirstIntentConformanceKeyboardAndWheel(t *testing.T) {
 
 				_, paneHeight := w.GetPreviewSize()
 				// AF chrome lives in the pane header, outside these 100 terminal
-				// rows. Bottom's first marker is 101-paneHeight; one preserved up
-				// intent makes it 100-paneHeight.
-				require.Equal(t, 100-paneHeight, firstRenderedHistoryMarker(w.View(), historyLines),
+				// rows. Bottom's first marker is 101-paneHeight; the preserved
+				// up intent subtracts its own quantum — half a page for the
+				// keyboard (#4173), one line for the wheel.
+				firstMarker := 101 - paneHeight
+				if input == "keyboard" {
+					firstMarker -= int(math.Round(float64(paneHeight) / 2))
+				} else {
+					firstMarker--
+				}
+				require.Equal(t, firstMarker, firstRenderedHistoryMarker(w.View(), historyLines),
 					"first %s intent must be visible after fill at %s", input, size.name)
 
 				// Exercise the matching down route too. Once history is ready this
