@@ -729,3 +729,38 @@ func TestMigrateReportsAJSONConversionWithNoAliases(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, second.ConvertedFromJSON)
 }
+
+// An empty config.toml satisfies MigrateGlobalConfig's pre-lock LoadConfig
+// with in-memory defaults and stays a stub (#4483 — the load no longer
+// repairs it). The locked migration must answer "nothing to migrate" from
+// that empty document, not fail the file startup accepts.
+func TestMigrateGlobalConfig_EmptyTomlStubMigratesNothing(t *testing.T) {
+	fastShell(t)
+	home := seedHome(t, "")
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err, "migrate must not fail a stub startup accepts")
+	require.NotNil(t, result)
+	assert.Empty(t, result.Migrated)
+	assert.False(t, result.Changed())
+	assert.False(t, result.ConvertedFromJSON)
+	assert.Empty(t, readFile(t, filepath.Join(home, TomlConfigFileName)),
+		"migrate must not rewrite the stub it was asked to migrate — a mid-flight write may be landing in it")
+}
+
+// A zero-byte config.json with no config.toml is the same accepted stub on
+// the legacy path: nothing migrates, nothing converts, no config.toml appears.
+func TestMigrateGlobalConfig_EmptyJSONStubMigratesNothing(t *testing.T) {
+	fastShell(t)
+	home := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home, ConfigFileName), nil, 0o644))
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Empty(t, result.Migrated)
+	assert.False(t, result.ConvertedFromJSON, "a contentless config.json is not a conversion")
+	_, statErr := os.Stat(filepath.Join(home, TomlConfigFileName))
+	assert.True(t, os.IsNotExist(statErr), "migrate must not materialize config.toml to report nothing")
+}

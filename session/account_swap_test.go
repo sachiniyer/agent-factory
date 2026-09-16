@@ -557,6 +557,63 @@ func TestPendingAccountSwapFencesArchiveAndHandoffButAllowsDelivery(t *testing.T
 		"a durable identity change must fence new credential-bearing panes until replacement completes")
 }
 
+// TestPendingAccountSwapHandoffAdmitsOnlySameTargetRetry is the #4393 deadlock
+// regression: a session whose committed account swap never delivered is
+// permanently bricked — every lifecycle action refuses on the pending marker,
+// and the refusal's own remedy ("retry that account swap") is itself a refused
+// lifecycle action. A handoff naming the swap's committed account (agent
+// explicit or inherited) IS that retry: the pending-swap axis cannot refuse it.
+// Every other axis — and every other target — still applies.
+func TestPendingAccountSwapHandoffAdmitsOnlySameTargetRetry(t *testing.T) {
+	newPending := func() *Instance {
+		inst := accountSwapTestInstance("claude")
+		_, err := inst.SelectAccountForHandoff("ambient", "work", "claude", HandoffReasonManual, "", "continue the mission")
+		require.NoError(t, err)
+		inst.inFlightOp = OpNone
+		return inst
+	}
+
+	retry := newPending()
+	require.ErrorContains(t, retry.ValidateRuntimeAction(RuntimeActionHandoff), "account swap",
+		"the unqualified handoff check keeps the blanket pending-swap refusal")
+	require.NoError(t, retry.ValidateHandoffRuntimeAction("", "work"),
+		"retrying the committed account is the remedy the refusal advertises")
+	require.NoError(t, retry.ValidateHandoffRuntimeAction("claude", "work"),
+		"an explicit agent equal to the recorded one is the same retry")
+
+	// A different account, a different agent, or no account at all is another
+	// transaction the committed swap still owns.
+	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("", "personal"), "account swap")
+	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("codex", "work"), "account swap")
+	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("", ""), "account swap")
+
+	// The same goes for an automatic swap: its committed target is retryable,
+	// and only that target.
+	auto := accountSwapTestInstance("claude")
+	_, err := auto.SelectAccountAutomatically("ambient", "work")
+	require.NoError(t, err)
+	auto.inFlightOp = OpNone
+	require.NoError(t, auto.ValidateHandoffRuntimeAction("", "work"))
+	require.ErrorContains(t, auto.ValidateHandoffRuntimeAction("", "personal"), "account swap")
+
+	// A pending marker whose target was never committed is no retry either —
+	// the identity the request names has not moved, so the row stays fenced.
+	stale := newPending()
+	stale.Account = "ambient"
+	require.ErrorContains(t, stale.ValidateHandoffRuntimeAction("", "work"), "account swap")
+
+	// The exemption clears only the pending-swap axis: a pending swap on a lost
+	// session still refuses on liveness, and an in-flight operation still
+	// refuses on the op fence.
+	lost := newPending()
+	lost.liveness = LiveLost
+	require.ErrorContains(t, lost.ValidateHandoffRuntimeAction("", "work"), "restore it first")
+
+	busy := newPending()
+	busy.inFlightOp = OpReplacing
+	require.ErrorContains(t, busy.ValidateHandoffRuntimeAction("", "work"), "busy")
+}
+
 type captureAccountSwapEnvironmentPty struct {
 	cmd *exec.Cmd
 }
