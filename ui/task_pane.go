@@ -133,9 +133,15 @@ type TaskPane struct {
 	// re-appended to s.tasks, keyed by task ID. When a deletion retry also
 	// fails, the second call must not append another visible copy — the first
 	// restore already has the row in the pane. Cleared by SetTasks (successful
-	// reload) and ConsumeDeleted (starting a fresh delete pass).
+	// reload) and AcknowledgeDeletedRestored (successful retry).
 	restoredDeletes map[string]bool
-	hasFocus        bool
+	// deletedOriginalIdx records the s.tasks index at which each task was
+	// deleted by deleteSelectedTask. RestoreFailedDelete uses it to re-insert
+	// the row at its original position rather than appending at the end, so the
+	// TaskPane order stays consistent with the sidebar's disk-loaded order.
+	// Cleared by SetTasks on a successful reload.
+	deletedOriginalIdx map[string]int
+	hasFocus           bool
 
 	// now is inherited from the owning AutomationsPane and passed to each
 	// schedule picker for its custom-cron next-run preview.
@@ -570,6 +576,28 @@ func (s *TaskPane) deleteSelectedTask() {
 	// copy is the fallback only for a record SetTasks never snapshotted.
 	if original, ok := s.originals[deleted.ID]; ok {
 		deleted = original
+	}
+	// Record the original position so RestoreFailedDelete can re-insert at the
+	// same slot rather than appending, keeping the TaskPane order consistent
+	// with the sidebar's disk-loaded order.
+	if s.deletedOriginalIdx == nil {
+		s.deletedOriginalIdx = make(map[string]int)
+	}
+	s.deletedOriginalIdx[deleted.ID] = s.selectedIdx
+	// If this task was previously restored after a failed deletion, clear the
+	// restore tracking and drop the existing stale queue entry: the user is
+	// explicitly re-deleting, so we replace it with a fresh one rather than
+	// appending a second copy (which would cause RemoveTask to be called twice
+	// on the next save — the first call would succeed and the second would
+	// return "not found", producing a false save failure).
+	if s.restoredDeletes[deleted.ID] {
+		delete(s.restoredDeletes, deleted.ID)
+		for i, t := range s.deleted {
+			if t.ID == deleted.ID {
+				s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
+				break
+			}
+		}
 	}
 	s.deleted = append(s.deleted, deleted)
 	s.tasks = append(s.tasks[:s.selectedIdx], s.tasks[s.selectedIdx+1:]...)

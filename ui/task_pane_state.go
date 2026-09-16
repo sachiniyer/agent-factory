@@ -22,6 +22,7 @@ func (s *TaskPane) SetTasks(tasks []task.Task) {
 	}
 	s.deleted = nil
 	s.restoredDeletes = nil
+	s.deletedOriginalIdx = nil
 	s.editing = false
 	// A reload replaces the create-form buffers a pending create was captured
 	// against, so a create left un-consumed by a failed save must be dropped —
@@ -154,7 +155,15 @@ func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
 		s.restoredDeletes = make(map[string]bool)
 	}
 	if !s.restoredDeletes[tsk.ID] {
-		s.tasks = append(s.tasks, tsk)
+		// Re-insert at the original deletion position so the TaskPane order
+		// stays consistent with the sidebar's disk-loaded order. If the
+		// original index is beyond the current slice length (other deletions
+		// ran first), clamp to the end.
+		pos := len(s.tasks)
+		if idx, ok := s.deletedOriginalIdx[tsk.ID]; ok && idx < pos {
+			pos = idx
+		}
+		s.tasks = append(s.tasks[:pos], append([]task.Task{tsk}, s.tasks[pos:]...)...)
 		s.restoredDeletes[tsk.ID] = true
 	}
 	s.deleted = append(s.deleted, tsk)
@@ -166,6 +175,10 @@ func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
 // visible until SetTasks runs — which is skipped while failedEdit is true — so
 // a task deleted from disk would stay in the pane for the remainder of the
 // retry sequence.
+//
+// If the removed row is the currently selected entry and the pane is in edit
+// mode, edit mode is exited to prevent renderEditMode from evaluating
+// s.tasks[s.selectedIdx] against a removed entry and panicking.
 func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
 	if !s.restoredDeletes[id] {
 		return
@@ -174,6 +187,16 @@ func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
 	for i, t := range s.tasks {
 		if t.ID == id {
 			s.tasks = append(s.tasks[:i], s.tasks[i+1:]...)
+			// Exit edit mode if the selected row was just removed: the index
+			// now refers to a different (or nonexistent) entry, and
+			// renderEditMode would panic on an out-of-range access.
+			if s.selectedIdx == i {
+				s.editing = false
+			}
+			// Clamp the selection so it stays within the (now shorter) slice.
+			if s.selectedIdx >= len(s.tasks) && s.selectedIdx > 0 {
+				s.selectedIdx = len(s.tasks) - 1
+			}
 			return
 		}
 	}
