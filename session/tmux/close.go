@@ -144,10 +144,22 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	// settles on return, which is what lets a later post-settle successful
 	// poll retire a mark whose teardown demonstrably did not take (Codex on
 	// #4473).
-	markedMon := t.markTeardownInitiated()
+	markedMon, probeAnswered := t.markTeardownInitiated()
 	defer t.settleTeardown(markedMon)
 	var errs []error
 	r := &closeRun{t: t}
+	if !probeAnswered {
+		// The mark's identity probe already spent a full tmuxCommandTimeout
+		// without an answer — the server is wedged, so list-panes and
+		// kill-session would each pay the same deadline for the same
+		// non-answer. Report the run unknown from the probe's own failure
+		// instead of stacking two more budgets onto a wedged Close (Codex on
+		// #4473). No mark was set: no kill-session was ever sent, so no af
+		// request exists to attribute a later vanish to.
+		r.unknown = true
+		errs = append(errs, fmt.Errorf("%w: session identity probe after %s", ErrTmuxTimeout, tmuxCommandTimeout))
+		return r.state(), errors.Join(errs...), closeProcessOutcome{}
+	}
 
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable

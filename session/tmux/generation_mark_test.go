@@ -347,3 +347,72 @@ func TestBoundGenerationDeathKeepsDialogContext(t *testing.T) {
 		"after af answered its Codex directory-trust dialog by sending Enter",
 		"a generation-mismatch death must carry the same dialog context the capture path reports")
 }
+
+// TestStartWedgedRebindDoesNotBindRetiredGeneration is the Start-side finding:
+// the inner Restore re-probes a server that wedged between Start's own
+// positive confirmation and the rebind, so `resolved` and `answered` are both
+// empty — and carrying the retired generation into the fresh monitor binds a
+// LIVE replacement to a dead id. The next answered poll reads that id's
+// absence and latches the monitor dead (Codex on #4473). Start's confirmed
+// boundary makes the carry impossible: the replacement is what answered.
+func TestStartWedgedRebindDoesNotBindRetiredGeneration(t *testing.T) {
+	forceNewSessionEnvMarkers(t, false)
+	forceSessionEnvExecutable(t, "/test/af")
+	shortTmuxTimeout(t, markTestTimeout)
+	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+	m := &teardownMarkTmux{}
+	m.alive.Store(true)
+	m.captureOK.Store(true)
+	session := newTmuxSession(toTmuxName("generation-mark", ""), "claude",
+		liveOnSpawn{NewMockPtyFactory(t), m}, m.exec())
+	session.monitor = &statusMonitor{generation: gen}
+	_, err := session.Close()
+	require.NoError(t, err)
+	require.True(t, gen.teardownInitiated)
+
+	// The server wedges between Start's existence poll confirming the
+	// replacement and the inner Restore's own probes.
+	m.duringSetup = func() {
+		m.probeWedged.Store(true)
+		m.nameWedged.Store(true)
+	}
+	require.NoError(t, session.Start(t.TempDir()))
+
+	session.monitorMu.Lock()
+	newGen := session.monitor.generation
+	session.monitorMu.Unlock()
+	require.NotSame(t, gen, newGen,
+		"the replacement's monitor must not carry the retired generation — a wedged rebind is no evidence the old session owns the name")
+	require.False(t, session.TeardownInitiated(),
+		"the fresh monitor answers for a session af did not tear down")
+
+	// Once tmux answers again the monitor must be polling a live session —
+	// under the old carry, generationMatches reads the retired id's absence
+	// and latches the monitor dead on the spot.
+	m.probeWedged.Store(false)
+	m.nameWedged.Store(false)
+	session.HasUpdated()
+	require.False(t, session.monitor.dead,
+		"a monitor bound to the retired generation reports the live replacement as gone")
+}
+
+// TestCloseWedgedIdentityProbeSpendsNoFurtherBudget is the close-side finding:
+// when the mark's name-resolution probe never answers, the server is wedged
+// and every later tmux command pays the same full deadline for the same
+// non-answer. close() reports the run unknown from the probe's failure alone
+// (Codex on #4473) — no kill-session is attempted, so no mark lands either:
+// af asked for nothing.
+func TestCloseWedgedIdentityProbeSpendsNoFurtherBudget(t *testing.T) {
+	shortTmuxTimeout(t, markTestTimeout)
+	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+	session, m := boundSession(t, gen)
+	m.nameWedged.Store(true)
+
+	state, err := session.Close()
+	require.ErrorIs(t, err, ErrTmuxTimeout)
+	require.Equal(t, PaneStateUnknown, state)
+	require.False(t, monitorMark(t, session),
+		"no kill-session was ever sent, so no teardown request exists to attribute")
+	require.True(t, m.alive.Load(),
+		"kill-session must not run after the identity probe consumed the budget")
+}

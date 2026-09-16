@@ -111,21 +111,31 @@ func newReattachStatusMonitor() *statusMonitor {
 // for a different generation this request is aimed at the replacement, not at
 // the bound session that vanished on its own — and marking the bound
 // generation would launder that unrequested death into af's request (Codex on
-// #4473). A name that does not resolve proves nothing either way, so the mark
-// still lands: a server wedged enough to refuse the probe will fail the kill
-// the same way, and the settled-mark path retires a teardown that did not
-// take. The resolution cannot run under monitorMu — it is a tmux command with
-// a deadline, exactly what the lock ordering forbids holding it across.
-func (t *TmuxSession) markTeardownInitiated() *statusMonitor {
+// #4473). A probe that never answers is different again: no mark lands and
+// probeAnswered reports false, because a server wedged enough to refuse the
+// probe will fail the kill the same way — close() reports the run unknown
+// there rather than paying a second and third command budget for the same
+// non-answer (Codex on #4473). The resolution cannot run under monitorMu —
+// it is a tmux command with a deadline, exactly what the lock ordering
+// forbids holding it across.
+// probeAnswered is false only when the name-resolution probe ran and never
+// got an answer: the server is wedged, so the caller should not spend another
+// command budget on a kill that cannot be delivered — and no mark lands,
+// because no teardown request was ever sent (Codex on #4473).
+func (t *TmuxSession) markTeardownInitiated() (marked *statusMonitor, probeAnswered bool) {
 	t.monitorMu.Lock()
 	mon := t.monitor
 	t.monitorMu.Unlock()
 	if mon == nil {
-		return nil
+		return nil, true
 	}
 	if g := mon.generation; g != nil && g.sessionID != "" {
-		if live := t.confirmedGeneration(); live != nil && !g.sameAs(live) {
-			return nil
+		live, answered := t.confirmedGeneration()
+		if !answered {
+			return nil, false
+		}
+		if live != nil && !g.sameAs(live) {
+			return nil, true
 		}
 	}
 	t.monitorMu.Lock()
@@ -135,14 +145,14 @@ func (t *TmuxSession) markTeardownInitiated() *statusMonitor {
 	// above — so the mark lands on whatever monitor is current now.
 	mon = t.monitor
 	if mon == nil {
-		return nil
+		return nil, true
 	}
 	if mon.generation == nil {
 		mon.generation = &tmuxGeneration{}
 	}
 	mon.generation.teardownInitiated = true
 	mon.generation.teardownSettledAt = time.Time{}
-	return mon
+	return mon, true
 }
 
 // settleTeardown stamps that the asking close() returned on the generation it
@@ -485,20 +495,27 @@ func (t *TmuxSession) captureTargetAliveOrUnknown(gen *tmuxGeneration) bool {
 // replacement server reissues, while #{pid} and #{session_created} pin the
 // server lifetime and the session within it. nil on any failure or malformed
 // answer: callers fall back to the name target, the pre-binding behavior.
-func (t *TmuxSession) confirmedGeneration() *tmuxGeneration {
+// confirmedGeneration resolves the generation answering at the session name.
+// answered reports whether the probe got a reply at all: a nil generation
+// WITH an answer means the name resolves to nothing provable (absent or an
+// empty session context), while a nil generation WITHOUT an answer is a
+// wedged server — the distinction close() needs, because every tmux command
+// after an unanswered one pays the same full timeout for the same outcome
+// (Codex on #4473).
+func (t *TmuxSession) confirmedGeneration() (*tmuxGeneration, bool) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := t.outputTmuxBounded(ctx, "display-message", "-p",
 		"-t", exactTarget(t.sanitizedName),
 		"#{session_id} #{pid} #{session_created}")
 	if err != nil {
-		return nil
+		return nil, ctx.Err() == nil
 	}
 	f := strings.Fields(strings.TrimSpace(string(out)))
 	if len(f) < 3 || !strings.HasPrefix(f[0], "$") {
-		return nil
+		return nil, true
 	}
-	return &tmuxGeneration{sessionID: f[0], serverPID: f[1], created: f[2]}
+	return &tmuxGeneration{sessionID: f[0], serverPID: f[1], created: f[2]}, true
 }
 
 // generationMatches reports whether the session answering at gen's id is

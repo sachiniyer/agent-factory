@@ -237,8 +237,11 @@ func (t *TmuxSession) Start(workDir string) error {
 	cancel()
 
 	// Attach to the session we just created. Pass empty workDir so a missing
-	// session here surfaces as an error rather than recursively re-spawning.
-	err = t.Restore("")
+	// session here surfaces as an error rather than recursively re-spawning,
+	// and confirmedFresh because the existence poll above already answered for
+	// the session THIS Start created — an unanswered rebind probe here is a
+	// wedged server, not the retired generation coming back (Codex on #4473).
+	_, err = t.restoreWithResult("", true)
 	if err != nil {
 		// Probe BEFORE Close (which kills the session): the existence poll
 		// above saw the session, so if it is gone again by attach time the
@@ -576,6 +579,16 @@ func (t *TmuxSession) Restore(workDir string) error {
 // branch successfully created a replacement process. Callers that retain facts
 // about one concrete pane use this result to retire them only on replacement.
 func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
+	return t.restoreWithResult(workDir, false)
+}
+
+// restoreWithResult is RestoreWithResult plus confirmedFresh: the caller
+// already proved THIS operation's new-session answers the name (Start's inner
+// attach), so an unanswered rebind must not inherit the outgoing monitor's
+// generation — that generation is retired, and binding the live replacement
+// to it latches the fresh monitor dead the moment the server answers again
+// (Codex on #4473).
+func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (RestoreResult, error) {
 	// !existsOrUnknown is the definitively-absent branch (#1962): only a session
 	// tmux CONFIRMED gone triggers the re-spawn. A wedged→"exists" falls through
 	// to the pure rebind below, which is the safe direction — re-spawning against
@@ -626,7 +639,7 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	// the replacement and read the old mark against the new generation's
 	// death, and a replacement server reissuing the same $id must not
 	// impersonate it either (#4473 review). nil degrades to the name target.
-	resolved := t.confirmedGeneration()
+	resolved, _ := t.confirmedGeneration()
 	if err := t.refreshRestoredAccountEnvironment(); err != nil {
 		return RestoreReattached, fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
 	}
@@ -636,8 +649,12 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	// different generation starts unmarked, and only a fully unanswered
 	// rebind carries the old generation — a wedged probe is no evidence the
 	// request resolved, so carrying keeps af's own teardown at INFO once the
-	// server answers (Codex on #4473). Either way the OLD monitor keeps its
-	// generation, so an in-flight poll still reads its own attribution.
-	t.setMonitor(monitor, resolved, answered)
+	// server answers (Codex on #4473). The exception is confirmedFresh:
+	// Start's own existence poll already answered for a session THIS Start
+	// created, so an unanswered rebind cannot be the retired generation and
+	// the fresh monitor must not be bound to it. Either way the OLD monitor
+	// keeps its generation, so an in-flight poll still reads its own
+	// attribution.
+	t.setMonitor(monitor, resolved, answered || confirmedFresh)
 	return RestoreReattached, nil
 }

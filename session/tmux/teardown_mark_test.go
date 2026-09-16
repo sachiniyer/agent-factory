@@ -40,6 +40,9 @@ type teardownMarkTmux struct {
 	// "$id pid created" — the session generation currently behind the name.
 	// Unset answers empty, so monitors stay unbound (the pre-binding shape).
 	nameGen atomic.Value
+	// nameWedged stalls the name-targeted probe past the shortened deadline —
+	// a server that never answers confirmedGeneration.
+	nameWedged atomic.Bool
 	// idGen, when set, is what display-message answers for a $id target:
 	// "pid created" — the identity of whatever currently owns that id.
 	// Unset answers the missing-id shape real tmux produces: exit 0 with the
@@ -101,6 +104,10 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 		return nil, nil
 	case strings.Contains(args, "display-message") && strings.Contains(args, "session_id"):
 		// confirmedGeneration's name-targeted bind probe.
+		if m.nameWedged.Load() {
+			time.Sleep(markTestWedge)
+			return nil, errors.New("wedged tmux server never answered the name probe")
+		}
 		if v := m.nameGen.Load(); v != nil {
 			return []byte(v.(string)), nil
 		}

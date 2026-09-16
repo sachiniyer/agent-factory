@@ -571,7 +571,7 @@ func (t *TmuxSession) clearTeardownMarkForConfirmedGeneration() {
 	}
 	t.monitorMu.Unlock()
 
-	live := t.confirmedGeneration()
+	live, _ := t.confirmedGeneration()
 
 	t.monitorMu.Lock()
 	defer t.monitorMu.Unlock()
