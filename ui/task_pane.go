@@ -627,6 +627,14 @@ func (s *TaskPane) runSelectedTask() {
 		s.listNotice = watchRunNowRefusal
 		return
 	}
+	// Cancel any pending deletion for this task before queuing the run trigger.
+	// A restored task is displayed as a normal runnable row while its deletion
+	// is still queued for retry. saveContentPaneState drains ConsumeDeleted
+	// before dispatching ConsumePendingTrigger; if the deletion retry succeeds
+	// the row is removed from disk, after which the trigger cannot find its ID
+	// and reports that no task is selected instead of running it. Cancelling
+	// the deletion here ensures the run happens against a live record.
+	s.cancelQueuedDeletion(s.tasks[s.selectedIdx].ID)
 	s.pendingTrigger = true
 	s.pendingTriggerID = s.tasks[s.selectedIdx].ID
 }

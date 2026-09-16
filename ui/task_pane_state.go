@@ -196,14 +196,14 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect task.Task) {
 	if s.restoredDeletes == nil {
 		s.restoredDeletes = make(map[string]bool)
 	}
+	if s.originals == nil {
+		s.originals = make(map[string]task.Task)
+	}
 	if !s.restoredDeletes[display.ID] {
 		pos := s.restorePosition(display.ID)
 		// Snapshot the authoritative record so a subsequent user action
 		// (e.g. re-pressing D) bases its CAS expectation on the current
 		// binding rather than a stale one that the daemon would refuse.
-		if s.originals == nil {
-			s.originals = make(map[string]task.Task)
-		}
 		s.originals[display.ID] = display
 		s.tasks = append(s.tasks[:pos], append([]task.Task{display}, s.tasks[pos:]...)...)
 		// Carry the cursor over an insertion at or above it, so it keeps
@@ -217,6 +217,19 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect task.Task) {
 			s.selectedIdx++
 		}
 		s.restoredDeletes[display.ID] = true
+	} else {
+		// Second or later retry failure: a fresh record may have been supplied
+		// (e.g. another client changed the task between retries). Update the
+		// visible row and originals baseline in place without inserting a
+		// duplicate — the dedupe guard above already ensures exactly one visible
+		// row exists for this ID.
+		s.originals[display.ID] = display
+		for i, t := range s.tasks {
+			if t.ID == display.ID {
+				s.tasks[i] = display
+				break
+			}
+		}
 	}
 	s.deleted = append(s.deleted, expect)
 	s.dirty = true
@@ -245,13 +258,17 @@ func (s *TaskPane) restorePosition(id string) int {
 	return len(s.tasks)
 }
 
-// AcknowledgeDeletedRestored removes a previously-restored row from s.tasks
-// when its deletion retry succeeds. Without this, a restored row remains
-// visible until SetTasks runs — which is skipped while failedEdit is true — so
-// a task deleted from disk would stay in the pane for the remainder of the
-// retry sequence.
+// AcknowledgeDeletedRestored removes all previously-restored rows for id from
+// s.tasks when their deletion retry succeeds. Without this, a restored row
+// remains visible until SetTasks runs — which is skipped while failedEdit is
+// true — so a task deleted from disk would stay in the pane for the remainder
+// of the retry sequence.
 //
-// If the removed row is the currently selected entry and the pane is in edit
+// All rows with a matching ID are removed: tasks.json permits duplicate IDs in
+// hand-edited stores and task.RemoveTask removes every matching row from disk,
+// so leaving extra ghost rows behind after a successful retry is incorrect.
+//
+// If a removed row is the currently selected entry and the pane is in edit
 // mode, edit mode is exited to prevent renderEditMode from evaluating
 // s.tasks[s.selectedIdx] against a removed entry and panicking.
 func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
@@ -259,33 +276,37 @@ func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
 		return
 	}
 	delete(s.restoredDeletes, id)
-	for i, t := range s.tasks {
-		if t.ID == id {
-			s.tasks = append(s.tasks[:i], s.tasks[i+1:]...)
-			// Exit edit mode if the selected row was just removed: the index
-			// now refers to a different (or nonexistent) entry, and
-			// renderEditMode would panic on an out-of-range access.
-			if s.selectedIdx == i {
-				s.editing = false
-			} else if s.selectedIdx > i {
-				// The removed row sat ABOVE the cursor, so every row after it
-				// shifted up by one. Follow the task the cursor was on: clamping
-				// alone only repairs an index that fell off the end, leaving an
-				// in-range one addressing its neighbour, and the next x/D/r
-				// would act on a record the user never selected.
-				s.selectedIdx--
-			}
-			// Clamp the selection so it stays within the (now shorter) slice.
-			if s.selectedIdx >= len(s.tasks) {
-				s.selectedIdx = len(s.tasks) - 1
-			}
-			// …and never below it: removing the last row leaves an empty slice,
-			// where len(s.tasks)-1 is -1.
-			if s.selectedIdx < 0 {
-				s.selectedIdx = 0
-			}
-			return
+	// Remove all rows with the given ID (tasks.json allows duplicate IDs;
+	// RemoveTask removes every matching row from disk, so we must do the same
+	// in the pane). Iterate backwards so index removal does not shift
+	// unvisited positions.
+	for i := len(s.tasks) - 1; i >= 0; i-- {
+		if s.tasks[i].ID != id {
+			continue
 		}
+		s.tasks = append(s.tasks[:i], s.tasks[i+1:]...)
+		// Exit edit mode if the selected row was just removed: the index
+		// now refers to a different (or nonexistent) entry, and
+		// renderEditMode would panic on an out-of-range access.
+		if s.selectedIdx == i {
+			s.editing = false
+		} else if s.selectedIdx > i {
+			// The removed row sat ABOVE the cursor, so every row after it
+			// shifted up by one. Follow the task the cursor was on: clamping
+			// alone only repairs an index that fell off the end, leaving an
+			// in-range one addressing its neighbour, and the next x/D/r
+			// would act on a record the user never selected.
+			s.selectedIdx--
+		}
+	}
+	// Clamp the selection so it stays within the (now shorter) slice.
+	if s.selectedIdx >= len(s.tasks) {
+		s.selectedIdx = len(s.tasks) - 1
+	}
+	// …and never below it: removing the last row leaves an empty slice,
+	// where len(s.tasks)-1 is -1.
+	if s.selectedIdx < 0 {
+		s.selectedIdx = 0
 	}
 }
 
