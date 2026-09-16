@@ -237,19 +237,18 @@ func parseStraceLongOption(
 		}
 		return stracePossibleValueBoundaries()
 	}
-	var action straceOptionAction
 	if canonical == "--env" || canonical == "--output" {
-		action = parseStraceSemanticOptionValue(words, token, attachedValue, attached, canonical, names)
-	} else if token.quotedOperand {
-		action = straceOptionAction{consumed: 1, result: straceOptionContinue}
-	} else {
-		_, consumed, ok := straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
-		if !ok {
-			return []straceOptionAction{{result: straceOptionUnsafe}}
-		}
-		action = straceOptionAction{consumed: consumed, result: straceOptionContinue}
+		// May return BOTH boundaries when an attached expansion can vanish.
+		return parseStraceSemanticOptionValue(words, token, attachedValue, attached, canonical, names)
 	}
-	return []straceOptionAction{action}
+	if token.quotedOperand {
+		return []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
+	}
+	_, consumed, ok := straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
+	if !ok {
+		return []straceOptionAction{{result: straceOptionUnsafe}}
+	}
+	return []straceOptionAction{{consumed: consumed, result: straceOptionContinue}}
 }
 
 func classifyStraceLongOption(option string) (string, straceOptionResult, bool) {
@@ -352,68 +351,110 @@ func parseStraceShortOptionAt(
 	names map[string]struct{},
 	idx int,
 ) []straceOptionAction {
+	// Scanned iteratively rather than one frame per option byte. A cluster is
+	// attacker-sized: an account-scoped request body may carry ~16MiB
+	// (daemon.maxHTTPBodyBytes), and a per-byte recursion overflows the goroutine
+	// stack at roughly 7M bytes. That is a FATAL runtime error, not a panic, so
+	// no recover() in the request path can contain it — the whole daemon dies
+	// with every live session, instead of the tab request being refused.
+	//
+	// Only the unmodeled arm below accumulates anything, and what it accumulates
+	// collapses: it appends {1,continue} for a byte that is not the cluster's
+	// last, {2,continue} for one that is, and appendUniqueStraceAction dedupes.
+	// However long the cluster, at most those two actions survive, so the scan
+	// carries two booleans instead of a stack.
 	value := token.literalPrefix
-	if idx >= len(value) {
-		return []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
-	}
-	flag := value[idx]
-	switch {
-	case flag == straceShortOptionValueSeparator:
-		// Every flag that reaches the separator is argument-free or unmodeled —
-		// a value-taking flag consumes the rest of the word itself and never
-		// recurses here — so nothing proves the attached value is not the
-		// environment mutation #4261 refuses generically on unmodeled wrappers.
-		if accountEnvironmentOperandDenied(value[idx+1:], names) {
-			return []straceOptionAction{{result: straceOptionUnsafe}}
+	unmodeledBeforeLast := false
+	unmodeledAtLast := false
+	var actions []straceOptionAction
+scan:
+	for {
+		if idx >= len(value) {
+			actions = []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
+			break
 		}
-		return []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
-	case flag == straceShortHelpOption || flag == straceShortVersionOption:
-		return []straceOptionAction{{result: straceOptionStops}}
-	case strings.ContainsRune(straceShortOptionsProvenSelfContained, rune(flag)):
-		return parseStraceShortOptionAt(words, token, names, idx+1)
-	case strings.ContainsRune(straceShortOptionsWithSeparateValue, rune(flag)):
-		attached := idx+1 < len(value)
-		attachedValue := ""
-		if attached {
-			attachedValue = value[idx+1:]
-		}
-		if flag == 'E' {
-			return []straceOptionAction{parseStraceSemanticOptionValue(
-				words, token, attachedValue, attached, "--env", names,
-			)}
-		}
-		if flag == 'o' {
-			return []straceOptionAction{parseStraceSemanticOptionValue(
-				words, token, attachedValue, attached, "--output", names,
-			)}
-		}
-		if token.quotedOperand {
-			if token.quotedOperandMayConsumeNext {
-				return stracePossibleValueBoundaries()
+		flag := value[idx]
+		switch {
+		case flag == straceShortOptionValueSeparator:
+			// Every flag that reaches the separator is argument-free or unmodeled —
+			// a value-taking flag consumes the rest of the word itself and never
+			// reaches here — so nothing proves the attached value is not the
+			// environment mutation #4261 refuses generically on unmodeled wrappers.
+			if accountEnvironmentOperandDenied(value[idx+1:], names) {
+				actions = []straceOptionAction{{result: straceOptionUnsafe}}
+				break scan
 			}
-			return []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
+			actions = []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
+			break scan
+		case flag == straceShortHelpOption || flag == straceShortVersionOption:
+			actions = []straceOptionAction{{result: straceOptionStops}}
+			break scan
+		case strings.ContainsRune(straceShortOptionsProvenSelfContained, rune(flag)):
+			idx++
+			continue
+		case strings.ContainsRune(straceShortOptionsWithSeparateValue, rune(flag)):
+			attached := idx+1 < len(value)
+			attachedValue := ""
+			if attached {
+				attachedValue = value[idx+1:]
+			}
+			if flag == 'E' {
+				actions = parseStraceSemanticOptionValue(
+					words, token, attachedValue, attached, "--env", names,
+				)
+				break scan
+			}
+			if flag == 'o' {
+				actions = parseStraceSemanticOptionValue(
+					words, token, attachedValue, attached, "--output", names,
+				)
+				break scan
+			}
+			if token.quotedOperand {
+				if token.quotedOperandMayConsumeNext {
+					actions = stracePossibleValueBoundaries()
+					break scan
+				}
+				actions = []straceOptionAction{{consumed: 1, result: straceOptionContinue}}
+				break scan
+			}
+			_, consumed, ok := straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
+			if !ok {
+				actions = []straceOptionAction{{result: straceOptionUnsafe}}
+				break scan
+			}
+			actions = []straceOptionAction{{consumed: consumed, result: straceOptionContinue}}
+			break scan
+		default:
+			// An unmodeled short flag is never assigned a guessed arity. One branch
+			// treats it as argument-free and keeps parsing the cluster; the other
+			// treats the rest of this word, or the following word when it is last,
+			// as its operand. Stable arity proofs above only remove impossible
+			// branches; omissions therefore fail closed rather than hiding a child.
+			if idx+1 == len(value) {
+				unmodeledAtLast = true
+			} else {
+				unmodeledBeforeLast = true
+			}
+			idx++
+			continue
 		}
-		_, consumed, ok := straceOptionValueAllowQuotedScalar(words, attachedValue, attached)
-		if !ok {
-			return []straceOptionAction{{result: straceOptionUnsafe}}
-		}
-		return []straceOptionAction{{consumed: consumed, result: straceOptionContinue}}
-	default:
-		// An unmodeled short flag is never assigned a guessed arity. One branch
-		// treats it as argument-free and keeps parsing the cluster; the other
-		// treats the rest of this word, or the following word when it is last,
-		// as its operand. Stable arity proofs above only remove impossible
-		// branches; omissions therefore fail closed rather than hiding a child.
-		actions := parseStraceShortOptionAt(words, token, names, idx+1)
-		consumed := 1
-		if idx+1 == len(value) {
-			consumed = 2
-		}
-		return appendUniqueStraceAction(actions, straceOptionAction{
-			consumed: consumed,
+	}
+	// The recursion these two replace unwound deepest-first, so the last byte's
+	// action is appended before the earlier bytes' shared one.
+	if unmodeledAtLast {
+		actions = appendUniqueStraceAction(actions, straceOptionAction{
+			consumed: 2,
 			result:   straceOptionContinue,
 		})
 	}
+	if unmodeledBeforeLast {
+		actions = appendUniqueStraceAction(actions, straceOptionAction{
+			consumed: 1,
+			result:   straceOptionContinue,
+		})
+	}
+	return actions
 }
 
 func stracePossibleValueBoundaries() []straceOptionAction {
@@ -527,6 +568,25 @@ func shellParameterExpandsToOneWord(name string) bool {
 	return strings.Contains("!#$*-?", name) && len(name) == 1
 }
 
+// straceBareOptionNextWordResult judges the operand a BARE semantic option takes
+// from the following argv word — the reading that applies when an attached
+// quoted expansion turns out to be empty. It mirrors the literal and
+// simple-quoted handling the non-vanishing path uses, and fails closed on a word
+// whose shape proves neither.
+func straceBareOptionNextWordResult(
+	word *syntax.Word,
+	semantic string,
+	names map[string]struct{},
+) straceOptionResult {
+	if operand, literal := literalShellWord(word); literal {
+		return straceLiteralSemanticResult(semantic, operand, names)
+	}
+	if prefix, dynamic := literalPrefixBeforeSimpleQuotedParameter(word); dynamic {
+		return straceDynamicSemanticResult(semantic, prefix, names)
+	}
+	return straceOptionUnsafe
+}
+
 func parseStraceSemanticOptionValue(
 	words []*syntax.Word,
 	token straceOptionToken,
@@ -534,37 +594,55 @@ func parseStraceSemanticOptionValue(
 	attached bool,
 	semantic string,
 	names map[string]struct{},
-) straceOptionAction {
+) []straceOptionAction {
 	if token.quotedOperand {
+		result := straceDynamicSemanticResult(semantic, attachedValue, names)
 		if token.quotedOperandMayConsumeNext {
-			return straceOptionAction{result: straceOptionUnsafe}
+			// The attached expansion may vanish, leaving a BARE option that
+			// consumes the FOLLOWING word as its value instead. Neither boundary
+			// is disprovable, so keep both — exactly as an unmodeled option does —
+			// rather than refusing the token outright.
+			//
+			// Each boundary is judged by ITS OWN operand. On the nonempty reading
+			// that is the attached expansion; on the empty reading the expansion is
+			// gone and the operand is words[1], which is frequently provable when
+			// the expansion was not. `strace -o"$OUT" --version` turns on exactly
+			// that: the empty reading makes --version an ordinary output filename,
+			// not an executable `|`/`!` target, so that boundary carries no hazard
+			// at all. Giving both boundaries the attached value's verdict would
+			// refuse it for a hazard the second reading cannot have.
+			actions := []straceOptionAction{{consumed: 1, result: result}}
+			if len(words) > 1 {
+				actions = append(actions, straceOptionAction{
+					consumed: 2,
+					result:   straceBareOptionNextWordResult(words[1], semantic, names),
+				})
+			}
+			return actions
 		}
-		return straceOptionAction{
-			consumed: 1,
-			result:   straceDynamicSemanticResult(semantic, attachedValue, names),
-		}
+		return []straceOptionAction{{consumed: 1, result: result}}
 	}
 	operand, consumed, literal := straceOptionValue(words, attachedValue, attached)
 	if literal {
-		return straceOptionAction{
+		return []straceOptionAction{{
 			consumed: consumed,
 			result:   straceLiteralSemanticResult(semantic, operand, names),
-		}
+		}}
 	}
 	if len(words) < 2 {
-		return straceOptionAction{consumed: 2, result: straceOptionContinue}
+		return []straceOptionAction{{consumed: 2, result: straceOptionContinue}}
 	}
 	if attached {
-		return straceOptionAction{result: straceOptionUnsafe}
+		return []straceOptionAction{{result: straceOptionUnsafe}}
 	}
 	prefix, dynamic := literalPrefixBeforeSimpleQuotedParameter(words[1])
 	if !dynamic {
-		return straceOptionAction{result: straceOptionUnsafe}
+		return []straceOptionAction{{result: straceOptionUnsafe}}
 	}
-	return straceOptionAction{
+	return []straceOptionAction{{
 		consumed: 2,
 		result:   straceDynamicSemanticResult(semantic, prefix, names),
-	}
+	}}
 }
 
 func straceLiteralSemanticResult(

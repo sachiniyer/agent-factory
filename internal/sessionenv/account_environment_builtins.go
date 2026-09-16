@@ -183,7 +183,19 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 			if len(words) < 2 {
 				return nil, true
 			}
-			if _, literal := literalShellWord(words[1]); !literal {
+			// This value selects a scheduling class. It cannot move the child
+			// boundary or touch the child's environment, so it only has to be
+			// provably ONE argv word — it does not have to be literal. A
+			// double-quoted scalar expansion always is, even expanding empty; an
+			// unquoted one can word-split and shift the boundary, and "$@" can
+			// produce several words, so both still fail closed.
+			//
+			// Measured on util-linux 2.39.3: an empty or unknown class exits with
+			// "unknown scheduling class" before launching anything, and a valid one
+			// goes on to --help or -p mode, so every runtime value of a single-word
+			// operand leaves the following no-child modes reachable.
+			if _, literal := literalShellWord(words[1]); !literal &&
+				!isSimpleQuotedParameterWord(words[1]) {
 				return nil, true
 			}
 			words = words[2:]
@@ -315,7 +327,13 @@ func tasksetCommandAfterMask(words []*syntax.Word) ([]*syntax.Word, bool) {
 	if len(words) == 0 {
 		return nil, false
 	}
-	if _, literal := literalShellWord(words[0]); !literal {
+	// Same rule as ionice's class value, and for the same reason: the mask (or
+	// cpu list) names CPUs, so only its ONE-WORD-ness matters, not its content.
+	// Measured on util-linux 2.39.3, an empty or unparseable mask exits with
+	// "failed to parse CPU mask"/"CPU list" before exec, and a valid one runs the
+	// child — which the walk then inspects either way.
+	if _, literal := literalShellWord(words[0]); !literal &&
+		!isSimpleQuotedParameterWord(words[0]) {
 		return nil, true
 	}
 	return words[1:], false

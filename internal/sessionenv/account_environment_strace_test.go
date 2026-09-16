@@ -628,3 +628,59 @@ func TestValidateAccountEnvironmentCommand_StraceQuotedScalarAttachPIDs(t *testi
 		}
 	}
 }
+
+// A short-option cluster is attacker-sized: an account-scoped request body may
+// carry ~16MiB (daemon.maxHTTPBodyBytes). The parser scanned it one stack frame
+// per option byte, which overflows the goroutine stack — a FATAL runtime error
+// that no recover() in the request path can contain, so the whole daemon dies
+// with every live session rather than the tab request being refused. Measured
+// before the fix: with an 8MiB stack the recursion died between 40k and 80k
+// bytes, putting the default 1GiB limit around 7M.
+//
+// The bound asserted here is wall-clock and depth: a full body-sized cluster
+// must parse without overflowing, and must still refuse its mutating child.
+func TestValidateAccountEnvironmentCommand_StraceLargeClusterHasNoStackDepth(t *testing.T) {
+	for _, size := range []int{80000, 1 << 20, 16 << 20} {
+		cluster := "-" + strings.Repeat("Z", size)
+		require.Error(t, ValidateAccountEnvironmentCommand(
+			"strace "+cluster+" env CODEX_HOME=/other codex", scopedProcessTabAccount()),
+			"a %d-byte cluster must still refuse the mutating child", size)
+		require.NoError(t, ValidateAccountEnvironmentCommand(
+			"strace "+cluster+" npm run dev", scopedProcessTabAccount()),
+			"a %d-byte cluster must not refuse an ordinary child", size)
+	}
+}
+
+// An attached quoted operand that may expand EMPTY leaves a bare option which
+// consumes the following word instead. Both readings are kept, and each is
+// judged by its OWN operand: on the empty reading the expansion is gone and
+// words[1] is the operand, which is often provable when the expansion was not.
+func TestValidateAccountEnvironmentCommand_StraceVanishingAttachedValueKeepsBothBoundaries(t *testing.T) {
+	for _, command := range []string{
+		// Neither reading can launch a child, so neither hazard can land.
+		`strace -E"$SPEC" --version`,
+		`strace -E"$SPEC" -V`,
+		`strace -o"$OUT" --version`,
+		`strace --env="$SPEC" --version`,
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q launches no child under either boundary", command)
+	}
+	for _, command := range []string{
+		// A child exists under one reading or the other, so the deferred hazard
+		// lands and the command is refused.
+		`strace -E"$SPEC" codex`,
+		`strace -o"$OUT" codex`,
+		`strace -E"$SPEC" env CODEX_HOME=/other codex`,
+		`strace -o"$OUT" 123 env CODEX_HOME=/other codex`,
+		// An executable output target still executes in attach mode, where no
+		// tracee child exists at all — the hazard a terminal option clears but
+		// a childless attach must not.
+		`strace -o"$OUT" -p 123`,
+		`strace -o"$OUT" '|evil' -p 123`,
+		`strace -o '|env CODEX_HOME=/other codex' true`,
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q reaches a child or an executable output target", command)
+	}
+}

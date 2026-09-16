@@ -91,6 +91,58 @@ func TestValidateAccountEnvironmentCommand_AllowsProcessOnlyWrapperModes(t *test
 	}
 }
 
+// A scheduling class, cpu mask or cpu list selects CPUs or a priority band. It
+// can neither move the child boundary nor touch the child's environment, so it
+// only has to be provably ONE argv word — it does not have to be literal. A
+// double-quoted scalar expansion always is, even expanding empty.
+//
+// Measured on util-linux 2.39.3: an empty or unknown class exits with "unknown
+// scheduling class", and an empty or unparseable mask with "failed to parse CPU
+// mask"/"CPU list", both BEFORE launching anything; a valid value goes on to
+// --help, -p mode, or the child. So every runtime value of a single-word operand
+// leaves these no-child modes reachable.
+func TestValidateAccountEnvironmentCommand_SingleWordWrapperOperandsStayVisible(t *testing.T) {
+	for _, command := range []string{
+		"ionice -c \"$CLASS\" --help",
+		"ionice -c \"$CLASS\" -V",
+		"ionice -c \"$CLASS\" -p 123",
+		"ionice -n \"$N\" --help",
+		"ionice --class \"$CLASS\" -p 123",
+		"ionice --classdata \"$N\" -p 123",
+		"ionice -c \"$CLASS\" npm run dev",
+		// taskset's mask is positional, so this applies once `--` has ended
+		// option parsing and the next word is unambiguously the mask.
+		"taskset -- \"$MASK\" npm run dev",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q consumes one argv word whatever it expands to", command)
+	}
+}
+
+// The single-word rule is about ARITY, not trust. It must not admit a word that
+// can produce a different number of argv words, and must not hide a child.
+func TestValidateAccountEnvironmentCommand_SingleWordOperandRuleStaysNarrow(t *testing.T) {
+	for _, command := range []string{
+		// The child is still walked and still refused.
+		"ionice -c \"$CLASS\" env CODEX_HOME=/other codex",
+		"ionice -n \"$N\" env CODEX_HOME=/other codex",
+		"ionice -c \"$CLASS\" nohup env CODEX_HOME=/other codex",
+		"taskset -- \"$MASK\" env CODEX_HOME=/other codex",
+		// Unquoted expansions word-split, so the boundary can shift.
+		"ionice -c $CLASS --help",
+		"taskset -- $MASK npm run dev",
+		// "$@" expands to zero or many words.
+		"ionice -c \"$@\" --help",
+		"taskset -- \"$@\" npm run dev",
+		// A dynamic word in OPTION position could expand to a flag such as -a,
+		// which moves the mask and the child by one.
+		"taskset \"$MASK\" npm run dev",
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q does not prove a single unshifted boundary", command)
+	}
+}
+
 // The selector-prefix rule must not swallow ionice's other long options. On
 // util-linux 2.39.3, `ionice --i /bin/true` exits 0 after EXECUTING its child:
 // --i resolves to --ignore, not to a selector, so its child stays inspected.
