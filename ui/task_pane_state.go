@@ -219,29 +219,37 @@ func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
 	s.dirty = true
 }
 
-// AcknowledgeDeletedRestored removes the task with the given ID from s.tasks
-// when a previously restored deletion finally succeeds. Without this, a task
-// re-inserted by RestoreFailedDelete stays visible after its retry RemoveTask
-// call commits — the failedEdit gate that suppresses SetTasks also suppresses
-// the reload that would otherwise remove it.
+// AcknowledgeDeletedRestored removes every task with the given ID from s.tasks
+// when a previously restored deletion finally succeeds. Without this, tasks
+// re-inserted by RestoreFailedDelete stay visible after their retry RemoveTask
+// calls commit — the failedEdit gate that suppresses SetTasks also suppresses
+// the reload that would otherwise remove them.
+//
+// When tasks.json contains duplicate IDs, task.RemoveTask deletes ALL matching
+// rows from disk. AcknowledgeDeletedRestored therefore sweeps the entire slice
+// rather than returning after the first match, so the pane and disk stay in
+// sync even when multiple rows shared the acknowledged ID.
 func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
-	for i, t := range s.tasks {
-		if t.ID == id {
-			s.tasks = append(s.tasks[:i], s.tasks[i+1:]...)
-			// If the removed row was before the cursor, shift the cursor back
-			// so it still points at the same surviving task. Without this, the
-			// cursor silently advances to the following task, and the next
-			// edit, run, or delete targets the wrong row.
-			if i < s.selectedIdx {
-				s.selectedIdx--
-			}
-			// Clamp to a valid range after the removal (covers the case where
-			// the cursor was on or after the last row).
-			if s.selectedIdx >= len(s.tasks) && s.selectedIdx > 0 {
-				s.selectedIdx--
-			}
-			return
+	// Walk backwards so removing an element does not invalidate the remaining
+	// indices, matching the pattern used by PruneRestoredAbsent and
+	// cancelQueuedDeletion.
+	for i := len(s.tasks) - 1; i >= 0; i-- {
+		if s.tasks[i].ID != id {
+			continue
 		}
+		s.tasks = append(s.tasks[:i], s.tasks[i+1:]...)
+		// If the removed row was before the cursor, shift the cursor back so
+		// it still points at the same surviving task. Without this, the cursor
+		// silently advances to the following task and the next edit, run, or
+		// delete targets the wrong row.
+		if i < s.selectedIdx {
+			s.selectedIdx--
+		}
+	}
+	// Clamp to a valid range after all removals (covers the case where the
+	// cursor was on or after the last row).
+	if s.selectedIdx >= len(s.tasks) && s.selectedIdx > 0 {
+		s.selectedIdx--
 	}
 }
 
