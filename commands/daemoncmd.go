@@ -39,7 +39,10 @@ the local one: a call that needs a running local daemon ensures it as part of
 the call — opening af on the default local target, creating a session,
 attaching to one, adding a task. Commands built to answer without one
 ('af daemon status', 'af sessions list', config reads and writes) and every
-remote --daemon-url/AF_DAEMON_URL target never start anything. Outside any
+call that genuinely routes to a remote --daemon-url/AF_DAEMON_URL daemon
+never start anything — but the session mutation verbs that always act
+locally (kill, archive, restore, retry-limit, send-prompt, tab create/delete)
+still ensure the local daemon even when the flag is set. Outside any
 call, a bare 'af' launch checks the local task store and asks for the daemon
 when an enabled task exists (best-effort), and 'af daemon install' starts it
 under the user service manager. That is the whole list.

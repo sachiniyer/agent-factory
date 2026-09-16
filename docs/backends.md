@@ -6,8 +6,10 @@ at one, and what changes about tabs, archive, and restore.
 
 Docker runs on the daemon's Docker host: af publishes the agent port on
 `127.0.0.1` and connects over loopback. SSH and sandbox reach the host selected
-by their SSH settings or command; these are the built-in paths to another
-machine. A hook runs wherever its provisioner puts it, including the daemon host.
+by their SSH settings or command; these are the built-in paths to a separately
+provisioned target — which need not be another machine, since a loopback
+`ssh.host` or a localhost `sandbox.ssh` command is supported. A hook runs
+wherever its provisioner puts it, including the daemon host.
 The code's legacy "off-box" category (`WorkspaceRemote` and
 `backendProvisionsOffBox`) means a separately provisioned workspace with an
 agent-server, not necessarily another machine.

@@ -14,7 +14,9 @@ import "strings"
 // the in-process tmux+worktree runtime on the daemon's machine. `docker` runs a
 // container on that machine's Docker host and connects over loopback. `ssh` and
 // `sandbox` reach the host selected by their SSH settings or command; these are
-// the built-in paths to another machine. `hook` runs wherever the operator's
+// the built-in paths to a separately provisioned target — which need not be
+// another machine, since a loopback `ssh.host` or a localhost `sandbox.ssh`
+// command is a supported configuration. `hook` runs wherever the operator's
 // provisioner puts it, which may be a container, this machine, or a remote host.
 const (
 	BackendLocal   = "local"

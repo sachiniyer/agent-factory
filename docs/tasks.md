@@ -411,7 +411,7 @@ In the TUI, an automation that has stopped firing — or whose expression the sc
 
 The daemon is the single scheduler host: it evaluates cron expressions and supervises watch scripts.
 
-- The daemon starts only for a caller that needs the local one running: locally targeted calls ensure it, while remote `--daemon-url`/`AF_DAEMON_URL` targets and no-spawn reads never start anything. A bare `af` launch separately checks the local task store and asks for the daemon when an enabled task exists (best-effort). The local daemon keeps running after the TUI exits.
+- The daemon starts only for a caller that needs the local one running: locally targeted calls ensure it, calls that genuinely route to a remote `--daemon-url`/`AF_DAEMON_URL` daemon and no-spawn reads never start anything — though the session mutation verbs that always act locally (`kill`, `archive`, `restore`, `retry-limit`, `send-prompt`, tab create/delete) still ensure the local daemon even when the flag is set. A bare `af` launch separately checks the local task store and asks for the daemon when an enabled task exists (best-effort). The local daemon keeps running after the TUI exits.
 - To keep tasks firing across **reboots** without opening `af`, register the user-level autostart unit (a systemd user service on Linux, a launchd agent on macOS):
 
 ```bash
