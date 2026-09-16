@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/accountlogin"
 )
 
@@ -127,11 +129,17 @@ func (m *Manager) ListAccounts(req ListAccountsRequest) (ListAccountsResponse, e
 	if m != nil {
 		defaults, ambientOptOuts = defaultAccountsFor(m.Config(), req.RepoPath, roster)
 	}
+	repoBackendScoped := false
+	if strings.TrimSpace(req.RepoPath) != "" {
+		kind, kindErr := session.BackendKindFor(session.InstanceOptions{}, req.RepoPath)
+		repoBackendScoped = kindErr == nil && kind.LaunchesWithAccount()
+	}
 	return ListAccountsResponse{
 		Entries: entries, Agents: roster, Defaults: defaults, AmbientOptOuts: ambientOptOuts,
 		// This build has the create-time router — the capability bit a picker
 		// checks before it may call a routable row "af picks a healthy account".
-		PoolRouting: true,
+		PoolRouting:              true,
+		RepoBackendAccountScoped: repoBackendScoped,
 	}, nil
 }
 

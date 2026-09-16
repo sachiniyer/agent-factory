@@ -361,9 +361,10 @@ func TestRouteCreateAccountDoesNotRouteACrossAgentOverride(t *testing.T) {
 	assert.Empty(t, req.Account,
 		"the label resolves to a non-codex command — no codex account can ride this launch")
 	assert.False(t, req.accountAutoSelected)
-	assert.True(t, req.accountRouteEvaluated,
+	require.NotNil(t, req.accountRoute,
 		"declining is a decision too: the launch must refuse if the override is gone by then")
-	assert.Empty(t, req.accountRouteAgent, "made for a command no agent owns")
+	assert.Equal(t, session.AccountRouteDecision{Agent: "", BackendScoped: true}, *req.accountRoute,
+		"made for a command no agent owns, on a backend that takes an account")
 }
 
 // #4404 review: the router must resolve program_overrides from the sources the
@@ -381,9 +382,9 @@ func TestRouteCreateAccountResolvesOverridesLikeTheLaunch(t *testing.T) {
 	assert.Equal(t, "codex1", req.Account,
 		"nothing on disk overrides codex, so the launch runs codex and the pool applies")
 	assert.True(t, req.accountAutoSelected)
-	assert.True(t, req.accountRouteEvaluated)
-	assert.Equal(t, "codex", req.accountRouteAgent,
-		"the decision's agent rides to NewInstance's drift check")
+	require.NotNil(t, req.accountRoute)
+	assert.Equal(t, session.AccountRouteDecision{Agent: "codex", BackendScoped: true}, *req.accountRoute,
+		"the decision's launch facts ride to NewInstance's drift check")
 }
 
 func TestRouteCreateAccountAppliesTheDefaultOnANonCarryingBackend(t *testing.T) {
@@ -396,8 +397,9 @@ func TestRouteCreateAccountAppliesTheDefaultOnANonCarryingBackend(t *testing.T) 
 		"the configured default still applies — NewInstance's off-box refusal reports it by name")
 	assert.False(t, req.accountAutoSelected,
 		"and routing never ran, so the selection is not marked automatic")
-	assert.False(t, req.accountRouteEvaluated,
-		"a backend that cannot carry an account owes the launch no drift check")
+	require.NotNil(t, req.accountRoute,
+		"declining for the backend is a decision too: a repo that moves to local before launch must refuse")
+	assert.False(t, req.accountRoute.BackendScoped)
 }
 
 // #4404 review: an empty Account alone is not consent to routing — it is the

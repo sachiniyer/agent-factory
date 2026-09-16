@@ -112,6 +112,15 @@ type ListAccountsResponse struct {
 	// a pool pick while the daemon runs the pre-router contract is the
 	// silent-wrong-identity outcome rendered as UI text (#4404 review).
 	PoolRouting bool `json:"pool_routing,omitempty"`
+	// RepoBackendAccountScoped reports whether the backend a create with NO
+	// explicit backend resolves to for RepoPath can run under a registered
+	// account (session.BackendKind.LaunchesWithAccount) — the router routes
+	// only those, so a picker needs it to label an untouched account row on an
+	// untouched backend field (#4404 review). It is the daemon's resolution of
+	// the repo's `backend` key, which a client of a remote daemon cannot read.
+	// False for an empty RepoPath or an unresolvable backend; absent from
+	// daemons that predate the router, which report no pool_routing either.
+	RepoBackendAccountScoped bool `json:"repo_backend_account_scoped,omitempty"`
 }
 
 // RegisterAccountRequest creates an account's credential directory on the

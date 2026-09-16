@@ -214,10 +214,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// picker's label is built from, so the wire never asks for what the
 		// row did not describe. A daemon that never answered is not one this
 		// client may opt in on (#4404 review).
-		accountAuto := account == "" && !accountAmbient && m.pendingAccountRouting && m.accountBackendRoutable(backend)
+		accountAuto := account == "" && !accountAmbient && m.pendingAccountRouting && m.accountBackendScoped(backend)
 		m.pendingAccount = ""
 		m.pendingAccountAmbient = false
-		m.pendingAccountRouting = false
+		m.pendingAccountRouting, m.pendingRepoBackendScoped = false, false
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.state = stateDefault
@@ -393,7 +393,7 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.pendingPrompt = ""
 	m.pendingBackend = ""
 	m.clearPendingAccount()
-	m.pendingAccountRouting = false
+	m.pendingAccountRouting, m.pendingRepoBackendScoped = false, false
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram
 	}

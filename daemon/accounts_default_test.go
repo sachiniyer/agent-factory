@@ -222,3 +222,29 @@ func TestListAccountsReportsTheProjectDefaults(t *testing.T) {
 	assert.Equal(t, map[string]string{"codex": "gone"}, goneDefaults)
 	assert.NoDirExists(t, filepath.Join(home, "accounts", "codex", "gone"))
 }
+
+// #4404 review: whether an untouched backend field can carry a routed account is
+// the DAEMON's resolution of the repo's `backend` key — a TUI attached to a
+// remote daemon cannot read that repo's config — so the account catalog the
+// picker already fetches carries the answer.
+func TestListAccountsReportsWhetherTheRepoBackendTakesAnAccount(t *testing.T) {
+	_, repoPath, _ := defaultAccountFixture(t, "codex", "work")
+	var m *Manager
+
+	resp, err := m.ListAccounts(ListAccountsRequest{Agent: "codex", RepoPath: repoPath})
+	require.NoError(t, err)
+	assert.True(t, resp.PoolRouting)
+	assert.True(t, resp.RepoBackendAccountScoped, "an unconfigured repo defaults to local, which takes an account")
+
+	writeRepoBackendConfig(t, repoPath, map[string]any{
+		"backend": "ssh",
+		"ssh":     map[string]any{"host": "example.invalid"},
+	})
+	resp, err = m.ListAccounts(ListAccountsRequest{Agent: "codex", RepoPath: repoPath})
+	require.NoError(t, err)
+	assert.False(t, resp.RepoBackendAccountScoped, "the router leaves an ssh-default repo on the legacy contract")
+
+	resp, err = m.ListAccounts(ListAccountsRequest{Agent: "codex"})
+	require.NoError(t, err)
+	assert.False(t, resp.RepoBackendAccountScoped, "no repo, no backend to answer for")
+}

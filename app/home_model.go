@@ -431,13 +431,12 @@ type home struct {
 	pendingAccountChosen bool
 	// pendingAccountAmbient records that the chosen account value "" means the
 	// user asked for the ambient identity OUTRIGHT — the picker's ambient row —
-	// rather than the routable row or an untouched field (#4404 review). Account
-	// alone sends "" for all three, and the router reads unspecified-empty as
-	// permission to route the create onto the pool. Reset with pendingAccount.
+	// rather than the routable row or an untouched field (#4404 review): Account
+	// alone sends "" for all three. Reset with pendingAccount.
 	pendingAccountAmbient bool
-	// pendingAccountRouting is ListAccountsResponse.PoolRouting as the form last
-	// OBSERVED it; account_auto is sent only when it is true (#4404 review).
-	pendingAccountRouting bool
+	// ListAccountsResponse's PoolRouting and RepoBackendAccountScoped as the form
+	// last OBSERVED them; account_auto needs both for the submitted backend (#4404).
+	pendingAccountRouting, pendingRepoBackendScoped bool
 	// backendPickerChoices is the option list the open backend picker is showing,
 	// held alongside the overlay for the same reason handoffChoices is: the list is
 	// built from the daemon's response (plus a leading "repo default" row), so the

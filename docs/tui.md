@@ -75,7 +75,8 @@ On the new-session naming form (`n`), press `ctrl+o` to choose an account for
 the selected agent. The first row is the routable choice — a create that names
 no account: it prefers the configured project default while that account is
 healthy, and otherwise lets af pick the least-loaded account with no current
-usage-limit evidence. A separate **ambient identity** row keeps the session on
+usage-limit evidence. On a backend that runs no account (SSH, sandbox, remote
+hook) the row says so, and af picks nothing. A separate **ambient identity** row keeps the session on
 the agent's own login and off the account pool entirely. Picking an account row
 pins the session to that identity, and the picker labels the project default
 `project default`. The configured default is also preselected on the form as a

@@ -390,7 +390,7 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 	// The capability is recorded before the chosen-guard below: a user who
 	// picked the routable row before this answer landed still needs it for
 	// the create to opt in.
-	m.pendingAccountRouting = msg.resp.PoolRouting
+	m.observeAccountRouting(msg.resp)
 	if m.pendingAccountChosen {
 		return m, nil
 	}
@@ -450,8 +450,8 @@ func (m *home) handleAccountRegistry(msg accountRegistryMsg) (tea.Model, tea.Cmd
 	if !accountRosterHas(msg.resp.Agents, msg.agent) {
 		return m, m.handleNotice(accountRosterNotice(msg.agent, msg.resp.Agents))
 	}
-	m.pendingAccountRouting = msg.resp.PoolRouting
-	choices := accountChoicesFrom(msg.resp, msg.agent, m.accountBackendRoutable(m.pendingBackend))
+	m.observeAccountRouting(msg.resp)
+	choices := accountChoicesFrom(msg.resp, msg.agent, m.accountBackendScoped(m.pendingBackend))
 	named := false
 	for _, choice := range choices {
 		if choice.value != ambientAccount {
@@ -494,15 +494,26 @@ func (m *home) handleAccountRegistry(msg accountRegistryMsg) (tea.Model, tea.Cmd
 	return m, nil
 }
 
-// accountBackendRoutable asks the router's own predicate whether backend — the
-// form's pick, "" for the repo's `backend` key — can run an account, resolved
-// the way the create will be. A backend this build cannot resolve is not one it
-// may promise a pool pick on; the daemon owns that refusal at submit. The pick
-// is a parameter because submit reads it after clearing the form.
-func (m *home) accountBackendRoutable(backend string) bool {
-	kind, err := session.BackendKindFor(session.InstanceOptions{
-		Backend: session.BackendKind(backend),
-	}, m.repoRoot)
+// observeAccountRouting records the two daemon facts the untouched account row
+// is labelled — and submitted — from (#4404 review).
+func (m *home) observeAccountRouting(resp daemon.ListAccountsResponse) {
+	m.pendingAccountRouting = resp.PoolRouting
+	m.pendingRepoBackendScoped = resp.RepoBackendAccountScoped
+}
+
+// accountBackendScoped answers whether backend — the form's pick, "" for the
+// repo's `backend` key — can run a routed account. The repo default is the
+// DAEMON's resolution, carried on its account catalog: a TUI attached to a
+// remote daemon cannot read that repo's config, and "the TUI knows no backend
+// names" holds for defaults too. An explicit pick needs no config at all, so the
+// router's own predicate answers it; a name this build cannot parse is not one
+// it may promise a pool pick on. The pick is a parameter because submit reads it
+// after clearing the form.
+func (m *home) accountBackendScoped(backend string) bool {
+	if backend == repoDefaultBackend {
+		return m.pendingRepoBackendScoped
+	}
+	kind, err := session.ParseBackendKind(backend)
 	return err == nil && kind.LaunchesWithAccount()
 }
 

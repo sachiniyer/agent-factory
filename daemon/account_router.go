@@ -86,30 +86,36 @@ func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionReque
 		return applyResolvedDefaultAccount(req, selection)
 	}
 
+	if _, supported := sessionenv.SupportsAccounts(agent); !supported {
+		// No account registry at all: the configured default still applies and
+		// refuses exactly as before.
+		return applyResolvedDefaultAccount(req, selection)
+	}
+	// The two launch facts eligibility rests on, resolved with the launch
+	// boundary's own resolvers rather than the op-entry snapshot: the launch
+	// reads program_overrides from disk, and the snapshot only follows
+	// ApplyConfig or a restart — a hand-edited override made the two disagree on
+	// every create until the daemon reloaded (#4404 review). The pair rides to
+	// NewInstance, which resolves both again and refuses a create whose launch
+	// moved while it waited, so this decision is never applied to a launch it
+	// was not made for.
 	kind, kindErr := session.BackendKindFor(session.InstanceOptions{
 		Backend:     session.BackendKind(req.Backend),
 		ForceRemote: req.ForceRemote,
 		InPlace:     req.InPlace,
 	}, req.RepoPath)
-	if _, supported := sessionenv.SupportsAccounts(agent); !supported ||
-		kindErr != nil || !kind.LaunchesWithAccount() {
-		// Not routable: either the agent has no account registry at all, or the
-		// backend an account would land on cannot carry it — including a backend
-		// value that will not resolve, whose refusal NewInstance owns. The
-		// configured default still applies and refuses exactly as before.
+	decision := session.AccountRouteDecision{
+		Agent:         sessionenv.AgentForCommand(session.ResolveLaunchProgram(req.Program, req.RepoPath)),
+		BackendScoped: kindErr == nil && kind.LaunchesWithAccount(),
+	}
+	req.accountRoute = &decision
+	if !decision.BackendScoped {
+		// The backend an account would land on cannot carry it — including a
+		// backend value that will not resolve, whose refusal NewInstance owns.
+		// The configured default still applies and refuses exactly as before.
 		return applyResolvedDefaultAccount(req, selection)
 	}
-	// Resolved with the launch boundary's own resolver, not the op-entry
-	// snapshot: the launch reads program_overrides from disk, and the snapshot
-	// only follows ApplyConfig or a restart — a hand-edited override made the
-	// two disagree on every create until the daemon reloaded (#4404 review).
-	// The answer rides to NewInstance, which resolves again and refuses a
-	// create whose command moved while it waited, so this decision can never
-	// be applied to a launch it was not made for.
-	resolvedAgent := sessionenv.AgentForCommand(session.ResolveLaunchProgram(req.Program, req.RepoPath))
-	req.accountRouteAgent = resolvedAgent
-	req.accountRouteEvaluated = true
-	if resolvedAgent != agent {
+	if decision.Agent != agent {
 		// program_overrides redirects this label to a different agent's command —
 		// or to no agent's command at all, as a fixture shim does. The launch
 		// boundary refuses ANY account whose validation namespace disagrees with

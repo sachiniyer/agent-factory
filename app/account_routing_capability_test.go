@@ -2,9 +2,6 @@ package app
 
 import (
 	"errors"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"slices"
 	"testing"
 
@@ -12,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 )
 
@@ -106,6 +102,18 @@ func TestAccountPickerLabelFollowsTheBackend(t *testing.T) {
 			assert.NotContains(t, h.accountPickerChoices[0].label, "Automatic")
 		})
 	}
+	t.Run("remote ssh-default repo", func(t *testing.T) {
+		h := newTestHome(t)
+		h.errBox.SetSize(200, 1)
+		sshDefault := twoAgentsWithAccounts()
+		sshDefault.RepoBackendAccountScoped = false
+		stubAccounts(t, sshDefault, nil)
+		startNaming(t, h, "remote-default")
+		openAccountField(t, h)
+		require.NotEmpty(t, h.accountPickerChoices)
+		assert.Equal(t, "Use the agent's own login (this backend runs no account)", h.accountPickerChoices[0].label,
+			"the daemon's answer for the repo default wins over anything this client could read")
+	})
 	for _, backend := range []string{"", "local", "docker"} {
 		t.Run("routable "+backend, func(t *testing.T) {
 			h := newTestHome(t)
@@ -122,8 +130,12 @@ func TestAccountPickerLabelFollowsTheBackend(t *testing.T) {
 
 // The wire follows the backend the form SUBMITTED, not the repo default the
 // cleared form falls back to: a local pick in an ssh-default repo is routed,
-// and an untouched field there is not.
+// and an untouched field there is not. The repo default is the daemon's
+// answer (RepoBackendAccountScoped), because a TUI attached to a remote daemon
+// cannot read that repo's config.
 func TestNamingFormOptInFollowsTheSubmittedBackend(t *testing.T) {
+	sshDefault := twoAgentsWithAccounts()
+	sshDefault.RepoBackendAccountScoped = false
 	for _, tc := range []struct {
 		backend  string
 		wantAuto bool
@@ -132,20 +144,14 @@ func TestNamingFormOptInFollowsTheSubmittedBackend(t *testing.T) {
 		{backend: "local", wantAuto: true},
 		{backend: "docker", wantAuto: true},
 		{backend: "hook", wantAuto: false},
+		{backend: "not-a-backend-this-build-knows", wantAuto: false},
 	} {
 		t.Run("backend="+tc.backend, func(t *testing.T) {
 			h := newTestHome(t)
 			h.errBox.SetSize(200, 1)
-			repo := t.TempDir()
-			require.NoError(t, exec.Command("git", "init", repo).Run())
-			dir := filepath.Join(repo, config.InRepoConfigDirName)
-			require.NoError(t, os.MkdirAll(dir, 0o755))
-			require.NoError(t, os.WriteFile(filepath.Join(dir, config.ConfigFileName),
-				[]byte(`{"backend":"ssh","ssh":{"host":"example.invalid"}}`), 0o644))
-			h.repoRoot = repo
 			got := recordStartRequest(t)
-			inst := startNaming(t, h, "backend-"+tc.backend)
-			h.handleAccountDefault(accountDefaultMsg{naming: inst, agent: "claude", resp: twoAgentsWithAccounts()})
+			inst := startNaming(t, h, "backend-pick")
+			h.handleAccountDefault(accountDefaultMsg{naming: inst, agent: "claude", resp: sshDefault})
 			h.pendingBackend = tc.backend
 
 			pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})

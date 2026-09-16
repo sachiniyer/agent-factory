@@ -11,12 +11,13 @@ import (
 )
 
 // The daemon's create-time account router (#4404) decides a session's account
-// from the command its program label resolves to, and the launch boundary
-// resolves that label again later — after the create has reserved its title
-// and waited its turn behind the repo's start lock. A program_overrides edit
-// landing in between made the two answers disagree (#4404 review): the router
-// left a create ambient because codex pointed at a shim, the override was
-// removed, and real codex launched on the ambient identity instead of the pool.
+// from what its launch resolves to — the program's agent and whether the
+// backend takes an account — and the launch boundary resolves both again later,
+// after the create has reserved its title and waited its turn behind the repo's
+// start lock. An edit landing in between made the two answers disagree (#4404
+// review): the router left a create ambient because codex pointed at a shim, the
+// override was removed, and real codex launched on the ambient identity instead
+// of the pool.
 
 // stubInstanceFactory records whether NewInstance reached provisioning — the
 // point after which a refusal would cost a worktree.
@@ -38,65 +39,54 @@ func saveProgramOverride(t *testing.T, program, command string) {
 	require.NoError(t, config.SaveConfig(cfg))
 }
 
-func TestNewInstance_RefusesAnAccountRouteDecidedForAnotherCommand(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	repo := initTempGitRepo(t)
-	reached := stubInstanceFactory(t)
-
-	// The router saw codex pointed at a shim no agent owns, so it routed
-	// nothing; by launch time the override is gone and the label runs codex.
-	_, err := NewInstance(InstanceOptions{
-		Title:                 "drifted",
-		Path:                  repo,
-		Program:               "codex",
-		AccountRouteEvaluated: true,
-		AccountRouteAgent:     "",
-	})
-	require.Error(t, err, "an account decision made for a different command must not launch")
-	assert.False(t, *reached, "the refusal must land before provisioning")
-	assert.Contains(t, err.Error(), "program_overrides")
-	assert.Contains(t, err.Error(), "create the session again")
+func writeRepoBackend(t *testing.T, repo, backend string) {
+	t.Helper()
+	fields := map[string]any{"backend": backend}
+	if backend == "ssh" {
+		fields["ssh"] = map[string]any{"host": "example.invalid"}
+	}
+	writeInRepoConfig(t, repo, fields)
 }
 
-func TestNewInstance_RefusesARoutedAccountWhoseCommandMovedAway(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", home)
-	_, err := agentaccount.Register(home, "codex", "work")
-	require.NoError(t, err)
-	repo := initTempGitRepo(t)
-	reached := stubInstanceFactory(t)
-	saveProgramOverride(t, "codex", "/bin/fake-agent")
-
-	_, err = NewInstance(InstanceOptions{
-		Title:                 "moved",
-		Path:                  repo,
-		Program:               "codex",
-		Account:               "work",
-		AccountAutoSelected:   true,
-		AccountRouteEvaluated: true,
-		AccountRouteAgent:     "codex",
-	})
-	require.Error(t, err)
-	assert.False(t, *reached)
-	assert.Contains(t, err.Error(), "changed while",
-		"the refusal names the race, not an account-namespace mismatch the user never configured")
-}
-
-// Canaries: the guard is stricter, so pin the creates it must keep admitting —
-// every shape where the router and the launch agree, including the persistent
-// shim override the web selftest runs on and a create the router never saw.
-func TestNewInstance_AccountRouteThatMatchesTheLaunchStillCreates(t *testing.T) {
+func TestNewInstance_RefusesAnAccountRouteDecidedForAnotherLaunch(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		override string
-		account  string
-		agent    string
-		routed   bool
+		name        string
+		account     string
+		decision    AccountRouteDecision
+		override    string
+		repoBackend string
+		wantSetting string
 	}{
-		{name: "routed pool pick", account: "work", agent: "codex", routed: true},
-		{name: "evaluated but left ambient", agent: "codex", routed: true},
-		{name: "persistent shim override", override: "/bin/fake-agent", agent: "", routed: true},
-		{name: "router never ran", override: "/bin/fake-agent", agent: "codex", routed: false},
+		{
+			// The router saw codex pointed at a shim no agent owns, so it routed
+			// nothing; by launch time the override is gone and the label runs codex.
+			name:        "override removed after an ambient decision",
+			decision:    AccountRouteDecision{Agent: "", BackendScoped: true},
+			wantSetting: "program_overrides",
+		},
+		{
+			name:        "override added under a routed account",
+			account:     "work",
+			decision:    AccountRouteDecision{Agent: "codex", BackendScoped: true},
+			override:    "/bin/fake-agent",
+			wantSetting: "program_overrides",
+		},
+		{
+			// The router saw an ssh-default repo and routed nothing; by launch
+			// time the repo is local and would start on the ambient identity.
+			name:        "backend moved to local after an ambient decision",
+			decision:    AccountRouteDecision{Agent: "codex", BackendScoped: false},
+			wantSetting: "`backend`",
+		},
+		{
+			// Named before the off-box refusal, which would otherwise blame an
+			// account the user never configured for a backend they did not pick.
+			name:        "backend moved off-box under a routed account",
+			account:     "work",
+			decision:    AccountRouteDecision{Agent: "codex", BackendScoped: true},
+			repoBackend: "ssh",
+			wantSetting: "`backend`",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -108,15 +98,67 @@ func TestNewInstance_AccountRouteThatMatchesTheLaunchStillCreates(t *testing.T) 
 			if tc.override != "" {
 				saveProgramOverride(t, "codex", tc.override)
 			}
+			if tc.repoBackend != "" {
+				writeRepoBackend(t, repo, tc.repoBackend)
+			}
+			decision := tc.decision
+
+			_, err = NewInstance(InstanceOptions{
+				Title:               "drifted",
+				Path:                repo,
+				Program:             "codex",
+				Account:             tc.account,
+				AccountAutoSelected: tc.account != "",
+				AccountRoute:        &decision,
+			})
+			require.Error(t, err, "an account decision made for a different launch must not launch")
+			assert.False(t, *reached, "the refusal must land before provisioning")
+			assert.Contains(t, err.Error(), tc.wantSetting)
+			assert.Contains(t, err.Error(), "changed while")
+			assert.Contains(t, err.Error(), "create the session again")
+		})
+	}
+}
+
+// Canaries: the guard is stricter, so pin the creates it must keep admitting —
+// every shape where the router and the launch agree, including the persistent
+// shim override the web selftest runs on, an ssh-default repo the router left
+// alone, and a create the router never saw.
+func TestNewInstance_AccountRouteThatMatchesTheLaunchStillCreates(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		override    string
+		repoBackend string
+		account     string
+		decision    *AccountRouteDecision
+	}{
+		{name: "routed pool pick", account: "work", decision: &AccountRouteDecision{Agent: "codex", BackendScoped: true}},
+		{name: "evaluated but left ambient", decision: &AccountRouteDecision{Agent: "codex", BackendScoped: true}},
+		{name: "persistent shim override", override: "/bin/fake-agent", decision: &AccountRouteDecision{Agent: "", BackendScoped: true}},
+		{name: "persistent ssh-default repo", repoBackend: "ssh", decision: &AccountRouteDecision{Agent: "codex", BackendScoped: false}},
+		{name: "router never ran", override: "/bin/fake-agent", repoBackend: "ssh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("AGENT_FACTORY_HOME", home)
+			_, err := agentaccount.Register(home, "codex", "work")
+			require.NoError(t, err)
+			repo := initTempGitRepo(t)
+			reached := stubInstanceFactory(t)
+			if tc.override != "" {
+				saveProgramOverride(t, "codex", tc.override)
+			}
+			if tc.repoBackend != "" {
+				writeRepoBackend(t, repo, tc.repoBackend)
+			}
 
 			inst, err := NewInstance(InstanceOptions{
-				Title:                 "agreed",
-				Path:                  repo,
-				Program:               "codex",
-				Account:               tc.account,
-				AccountAutoSelected:   tc.account != "",
-				AccountRouteEvaluated: tc.routed,
-				AccountRouteAgent:     tc.agent,
+				Title:               "agreed",
+				Path:                repo,
+				Program:             "codex",
+				Account:             tc.account,
+				AccountAutoSelected: tc.account != "",
+				AccountRoute:        tc.decision,
 			})
 			require.NoError(t, err)
 			require.NotNil(t, inst)

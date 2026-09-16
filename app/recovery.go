@@ -34,9 +34,10 @@ func (m *home) restoreFailedCreate() bool {
 	// must not lose "the user picked ambient" and let the router re-identify the
 	// retry (#4404 review).
 	m.pendingAccountAmbient = req.AccountAmbient
-	// The draft's opt-in was sent only after the form observed a routing
-	// daemon, so it carries that observation back with the account.
+	// The draft's opt-in was sent only after the form observed a routing daemon
+	// and a backend that takes an account, so it carries both observations back.
 	m.pendingAccountRouting = req.AccountAuto
+	m.pendingRepoBackendScoped = req.AccountAuto && req.Backend == ""
 	m.menu.SetNamingHasPrompt(m.pendingPrompt != "")
 	m.menu.SetNamingBackend(m.pendingBackend != "")
 	m.menu.SetNamingAccount(m.pendingAccount != "")

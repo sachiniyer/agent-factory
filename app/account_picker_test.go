@@ -55,6 +55,9 @@ func twoAgentsWithAccounts() daemon.ListAccountsResponse {
 		},
 		Agents:      []string{"claude", "codex", "gemini"},
 		PoolRouting: true,
+		// And the repo the form targets defaults to a backend that takes an
+		// account — a local repo on a current daemon (#4404 review).
+		RepoBackendAccountScoped: true,
 	}
 }
 

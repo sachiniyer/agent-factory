@@ -67,13 +67,12 @@ type CreateSessionRequest struct {
 	// claim is the daemon's own bookkeeping, and a client-settable one would let
 	// a request name a reservation it never paid for.
 	routedAccountClaim string
-	// accountRouteAgent/accountRouteEvaluated carry the agent the router
-	// resolved this create's program to when it decided the account, so
-	// NewInstance can refuse a launch whose program_overrides moved in the
-	// meantime (#4404 review). Unexported: the decision is the daemon's own.
-	accountRouteAgent     string
-	accountRouteEvaluated bool
-	Prompt                string `json:"prompt"`
+	// accountRoute carries the launch facts the router decided the account on,
+	// so NewInstance can refuse a launch whose program_overrides or backend
+	// moved in the meantime (#4404 review). Unexported: the decision is the
+	// daemon's own.
+	accountRoute *session.AccountRouteDecision
+	Prompt       string `json:"prompt"`
 	// TaskID records which task's delivery spawned this session, and
 	// MaxConcurrentRuns carries that task's cap so the manager can decide
 	// admission under its own lock — the only place a burst cannot race the check
