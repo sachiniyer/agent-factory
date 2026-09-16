@@ -28,33 +28,67 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		// built incrementally: each statement is checked using only the taint
 		// accumulated from preceding statements, so a command substitution that
 		// appears AFTER an arithmetic expression does not cause that earlier
-		// expression to be refused. Within each statement the full subtree is
-		// walked, preserving the existing handling of inline CmdSubst and
-		// same-statement arithmetic uses.
-		acc := newTaintAccumulator()
-		mutates := false
-		for _, stmt := range file.Stmts {
-			tainted := acc.Tainted()
-			syntax.Walk(stmt, func(node syntax.Node) bool {
-				if nodeMutatesAccountEnvironment(node, names, tainted) {
-					mutates = true
-					return false
-				}
-				return true
-			})
-			if mutates {
-				break
-			}
-			// After checking this statement for mutations, record any
-			// command-substitution assignments it contains so they taint
-			// variables in subsequent statements.
-			acc.AddStmt(stmt)
-		}
-		if mutates {
+		// expression to be refused. Compound statements (blocks, AND/OR lists)
+		// are processed recursively so that taint advances through sequential
+		// children within them as well.
+		acc := newTaintAccumulator(names)
+		if stmtsMutate(file.Stmts, names, acc) {
 			return true
 		}
 	}
 	return false
+}
+
+// stmtsMutate processes a slice of statements in execution order, propagating
+// taint incrementally through acc. Returns true if any statement mutates the
+// account environment.
+func stmtsMutate(stmts []*syntax.Stmt, names map[string]struct{}, acc *taintAccumulator) bool {
+	for _, stmt := range stmts {
+		if stmtMutates(stmt, names, acc) {
+			return true
+		}
+	}
+	return false
+}
+
+// stmtMutates checks a single statement for account-environment mutations,
+// recursing into compound constructs that execute their children sequentially
+// in the current shell so that taint from an earlier child is visible when
+// checking a later one.
+//
+// Constructs whose children run in a subshell (Subshell, pipes) do not
+// propagate taint outward and fall through to the default walk.
+func stmtMutates(stmt *syntax.Stmt, names map[string]struct{}, acc *taintAccumulator) bool {
+	switch cmd := stmt.Cmd.(type) {
+	case *syntax.Block:
+		// { stmts } — all children execute in the current shell sequentially.
+		return stmtsMutate(cmd.Stmts, names, acc)
+	case *syntax.BinaryCmd:
+		switch cmd.Op {
+		case syntax.AndStmt, syntax.OrStmt:
+			// X && Y or X || Y — both X and Y may execute in the current shell,
+			// with X always executing first. Taint from X is visible to Y.
+			if stmtMutates(cmd.X, names, acc) {
+				return true
+			}
+			return stmtMutates(cmd.Y, names, acc)
+		}
+	}
+	// Default: walk the statement with the current taint snapshot, then record
+	// any new taint assignments so subsequent statements see them.
+	tainted := acc.Tainted()
+	mutates := false
+	syntax.Walk(stmt, func(node syntax.Node) bool {
+		if nodeMutatesAccountEnvironment(node, names, tainted) {
+			mutates = true
+			return false
+		}
+		return true
+	})
+	if !mutates {
+		acc.AddStmt(stmt)
+	}
+	return mutates
 }
 
 func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}, tainted map[string]struct{}) bool {

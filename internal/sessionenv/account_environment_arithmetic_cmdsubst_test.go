@@ -410,3 +410,101 @@ func TestValidateAccountEnvironmentCommand_AllowsProvableArithmeticAndExternalCm
 			"command %q is provably free of identity mutation and must stay allowed", command)
 	}
 }
+
+// TestValidateAccountEnvironmentCommand_RefusesCompoundStatementTaint verifies
+// that taint propagates through sequential children inside compound statements
+// such as blocks (`{ }`) and AND/OR lists (`&&`, `||`). When an assignment from
+// a command substitution appears before an arithmetic expression inside the same
+// compound statement, the later expression must see the taint.
+//
+//	{ x=$(printf CODEX_HOME=1); : $((x)); }; codex
+//
+// Both children of the block execute in the current shell, so x is tainted at
+// the point where $((x)) is evaluated.
+func TestValidateAccountEnvironmentCommand_RefusesCompoundStatementTaint(t *testing.T) {
+	for _, command := range []string{
+		// Block: assignment before arithmetic, both inside { }.
+		"{ x=$(printf CODEX_HOME=1); : $((x)); }; codex",
+		// AND list: assignment on the left, arithmetic on the right.
+		"x=$(printf CODEX_HOME=1) && : $((x)); codex",
+		// OR list: both sides may execute; taint from X is visible to Y.
+		"x=$(printf CODEX_HOME=1) || : $((x)); codex",
+		// Nested block.
+		"{ { x=$(printf CODEX_HOME=1); }; : $((x)); }; codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q has a tainted variable inside a compound statement and must be refused", command)
+	}
+}
+
+// TestValidateAccountEnvironmentCommand_RefusesStatementOrderForTaint_Compound
+// verifies that the allowed-before-tainted rule from
+// TestValidateAccountEnvironmentCommand_RespectsStatementOrderForTaint also
+// applies inside compound statements: arithmetic that precedes the tainted
+// assignment stays allowed.
+func TestValidateAccountEnvironmentCommand_AllowsCompoundSafeTaintOrder(t *testing.T) {
+	for _, command := range []string{
+		// Arithmetic precedes the tainted assignment inside the same block.
+		"{ : $((x)); x=$(printf CODEX_HOME=1); }; codex",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"command %q uses arithmetic before the tainted assignment inside a block and must stay allowed", command)
+	}
+}
+
+// TestValidateAccountEnvironmentCommand_RefusesLiteralArithAssignment verifies
+// that a variable assigned a literal string that is itself an arithmetic
+// assignment expression to a denied name is refused when later used in
+// arithmetic. bash evaluates the variable's contents as fresh arithmetic in
+// `$(( ))`, `(( ))`, and `let`, so `x='CODEX_HOME=1'; : $((x))` changes
+// CODEX_HOME even though x was assigned from a literal, not a command
+// substitution.
+func TestValidateAccountEnvironmentCommand_RefusesLiteralArithAssignment(t *testing.T) {
+	for _, command := range []string{
+		// Literal value is DENIED_NAME=value; arithmetic re-evaluates it.
+		"x='CODEX_HOME=1'; : $((x)); codex",
+		"x='OPENAI_API_KEY=secret'; : $((x)); codex",
+		// Other arithmetic entry points.
+		"x='CODEX_HOME=1'; (( x )); codex",
+		"x='CODEX_HOME=1'; let x; codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q stores a denied-name assignment in a variable and uses it in arithmetic and must be refused", command)
+	}
+}
+
+// TestValidateAccountEnvironmentCommand_AllowsLiteralArithNonDenied verifies
+// that the literal-arithmetic-assignment check is narrow: a variable whose
+// literal value assigns a non-denied name, or is a plain number, must stay
+// allowed.
+func TestValidateAccountEnvironmentCommand_AllowsLiteralArithNonDenied(t *testing.T) {
+	for _, command := range []string{
+		// Literal is a plain number — does not assign any name.
+		"x='42'; : $((x)); codex",
+		"x='0'; (( x )); codex",
+		// Literal assigns a non-denied name.
+		"x='a=1'; : $((x)); codex",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"command %q stores a non-hazardous literal and must stay allowed", command)
+	}
+}
+
+// TestValidateAccountEnvironmentCommand_AllowsDefiniteReassignment verifies
+// that a definite unconditional reassignment to a provably clean value removes
+// a variable from the taint set. `x=$(cmd); x=0; : $((x))` is safe because the
+// literal `x=0` overwrites the tainted value before the arithmetic expression
+// is evaluated.
+func TestValidateAccountEnvironmentCommand_AllowsDefiniteReassignment(t *testing.T) {
+	for _, command := range []string{
+		// Direct reassignment to a literal clears taint.
+		"x=$(printf CODEX_HOME=1); x=0; : $((x)); codex",
+		"x=$(printf CODEX_HOME=1); x=42; (( x )); codex",
+		"x=$(printf CODEX_HOME=1); x=42; let x; codex",
+		// Reassignment to a non-tainted copy also clears.
+		"x=$(printf CODEX_HOME=1); y=0; x=$y; : $((x)); codex",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"command %q overwrites the tainted variable with a clean value and must stay allowed", command)
+	}
+}

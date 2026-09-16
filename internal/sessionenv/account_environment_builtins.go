@@ -999,14 +999,21 @@ func wordHasCommandSubstitution(word syntax.Node) bool {
 // taintAccumulator tracks the set of "tainted" variable names across a
 // sequence of shell statements, processing them in execution order. A variable
 // is tainted when its value originates from a command substitution at top-level
-// (not inside a subshell): bash re-evaluates such values as fresh arithmetic
-// when the variable appears inside an arithmetic context, so the substitution's
-// output becomes a deferred arithmetic mutation.
+// (not inside a subshell), or when its literal value is an arithmetic
+// assignment expression to a denied name: bash re-evaluates such values as
+// fresh arithmetic when the variable appears inside an arithmetic context, so
+// the substitution's output (or the literal assignment string) becomes a
+// deferred arithmetic mutation.
 //
 // Taint propagates transitively through parameter-expansion copies: when `y=$x`
 // and `x` is tainted, bash stores x's contents in y, so `: $((y))` carries the
 // same re-evaluation hazard as `: $((x))`. The fixed-point propagation covers
 // chains of arbitrary length.
+//
+// A definite unconditional reassignment to a provably clean value removes the
+// variable from taint. This ensures that `x=$(cmd); x=0; : $((x))` is allowed:
+// the `x=0` overwrites the tainted value with a literal zero, so the later
+// arithmetic expression is safe.
 //
 // Processing statements individually rather than whole-file ensures that an
 // assignment that appears AFTER an arithmetic expression does not cause that
@@ -1015,9 +1022,13 @@ func wordHasCommandSubstitution(word syntax.Node) bool {
 type taintAccumulator struct {
 	// tainted is the set of variable names currently known to be tainted.
 	tainted map[string]struct{}
-	// allAssigns accumulates every non-CmdSubst assign seen in any statement
-	// processed so far, for use in the fixed-point propagation step.
+	// allAssigns accumulates the current-reaching non-CmdSubst assign for each
+	// variable name, for use in the fixed-point propagation step. A later
+	// assignment supersedes all prior ones for the same name.
 	allAssigns []taintAssignRecord
+	// names is the set of denied account-environment variable names, used to
+	// detect literal values that are arithmetic assignments to denied names.
+	names map[string]struct{}
 }
 
 // taintAssignRecord holds a non-CmdSubst assignment target and its RHS word,
@@ -1027,9 +1038,10 @@ type taintAssignRecord struct {
 	value *syntax.Word
 }
 
-// newTaintAccumulator creates an empty taintAccumulator.
-func newTaintAccumulator() *taintAccumulator {
-	return &taintAccumulator{tainted: make(map[string]struct{})}
+// newTaintAccumulator creates an empty taintAccumulator. names is the set of
+// denied account-environment variable names.
+func newTaintAccumulator(names map[string]struct{}) *taintAccumulator {
+	return &taintAccumulator{tainted: make(map[string]struct{}), names: names}
 }
 
 // Tainted returns the current set of tainted variable names. The returned map
@@ -1038,14 +1050,18 @@ func (t *taintAccumulator) Tainted() map[string]struct{} {
 	return t.tainted
 }
 
-// AddStmt scans node for command-substitution assignments and updates the
-// tainted set. Call this AFTER checking node for mutations so that an
-// assignment in this statement does not taint variables used in this same
-// statement's arithmetic expressions; the taint only applies to subsequent
-// statements.
+// AddStmt scans node for assignments and updates the tainted set. Call this
+// AFTER checking node for mutations so that an assignment in this statement
+// does not taint variables used in this same statement's arithmetic
+// expressions; the taint only applies to subsequent statements.
 //
 // Assignments inside a subshell or command substitution are skipped because
 // they run in a child process and cannot affect the parent's environment.
+//
+// A non-CmdSubst assignment to a currently-tainted variable removes it from
+// taint when the new value is provably clean, implementing reaching-assignment
+// semantics: `x=$(cmd); x=0; : $((x))` is allowed because `x=0` overwrites
+// the tainted value before the arithmetic.
 func (t *taintAccumulator) AddStmt(node syntax.Node) {
 	syntax.Walk(node, func(n syntax.Node) bool {
 		switch n := n.(type) {
@@ -1054,9 +1070,26 @@ func (t *taintAccumulator) AddStmt(node syntax.Node) {
 		case *syntax.Assign:
 			if n.Name != nil && n.Value != nil {
 				if wordHasCommandSubstitution(n.Value) {
+					// Command substitution: taint directly and remove any
+					// prior clean-assignment record for this name.
 					t.tainted[n.Name.Value] = struct{}{}
+					t.removeAllAssigns(n.Name.Value)
 				} else {
-					t.allAssigns = append(t.allAssigns, taintAssignRecord{n.Name.Value, n.Value})
+					// Definite reassignment: supersede any prior record.
+					t.removeAllAssigns(n.Name.Value)
+					// A literal value that is an arithmetic assignment
+					// expression to a denied name is itself a hazard: bash
+					// evaluates the variable's contents as fresh arithmetic,
+					// so `x='CODEX_HOME=1'; : $((x))` assigns CODEX_HOME.
+					val, isLiteral := literalShellWord(n.Value)
+					if isLiteral && literalContainsDeniedArithAssignment(val, t.names) {
+						t.tainted[n.Name.Value] = struct{}{}
+					} else {
+						// Clear stale taint from a prior CmdSubst assignment
+						// now superseded by this definite assignment.
+						delete(t.tainted, n.Name.Value)
+						t.allAssigns = append(t.allAssigns, taintAssignRecord{n.Name.Value, n.Value})
+					}
 				}
 			}
 		case *syntax.ParamExp:
@@ -1066,6 +1099,7 @@ func (t *taintAccumulator) AddStmt(node syntax.Node) {
 				n.Exp.Word != nil {
 				if wordHasCommandSubstitution(n.Exp.Word) {
 					t.tainted[n.Param.Value] = struct{}{}
+					t.removeAllAssigns(n.Param.Value)
 				} else {
 					t.allAssigns = append(t.allAssigns, taintAssignRecord{n.Param.Value, n.Exp.Word})
 				}
@@ -1074,6 +1108,18 @@ func (t *taintAccumulator) AddStmt(node syntax.Node) {
 		return true
 	})
 	t.propagate()
+}
+
+// removeAllAssigns removes all allAssigns records for the given variable name.
+// Used when a new assignment supersedes all prior ones.
+func (t *taintAccumulator) removeAllAssigns(name string) {
+	out := t.allAssigns[:0]
+	for _, rec := range t.allAssigns {
+		if rec.name != name {
+			out = append(out, rec)
+		}
+	}
+	t.allAssigns = out
 }
 
 // propagate runs a fixed-point pass over all accumulated non-CmdSubst assigns,
@@ -1097,17 +1143,50 @@ func (t *taintAccumulator) propagate() {
 	}
 }
 
+// literalContainsDeniedArithAssignment reports whether a literal string, when
+// evaluated by bash as an arithmetic expression, would perform an assignment to
+// a denied account-environment variable. The simplest and most dangerous form
+// is `NAME=value` where NAME is a denied name — bash evaluates this as an
+// arithmetic assignment when the string appears inside `$(( ))`, `(( ))`, or
+// `let`. Only the unambiguous form (a shell identifier immediately followed by
+// `=` without a preceding operator character) is detected; false negatives on
+// exotic compound expressions are acceptable because fail-closed CmdSubst
+// checks cover runtime-unknown values.
+func literalContainsDeniedArithAssignment(value string, names map[string]struct{}) bool {
+	if len(names) == 0 {
+		return false
+	}
+	// Check for NAME= where NAME is a valid shell identifier and is denied.
+	// Parse the leading identifier: must start with a letter or underscore,
+	// followed by letters, digits, or underscores. Stop at `=`.
+	eq := strings.IndexByte(value, '=')
+	if eq <= 0 {
+		return false
+	}
+	name := value[:eq]
+	for i, b := range []byte(name) {
+		if i == 0 && (b >= '0' && b <= '9') {
+			return false
+		}
+		if !isShellNameByte(b) {
+			return false
+		}
+	}
+	return accountEnvironmentNameDenied(name, names)
+}
+
 // cmdSubstAssignedVars returns the set of variable names that are assigned
-// (at the top-level, not inside a subshell) from command substitutions in the
-// given file. These variables are "tainted": bash re-evaluates their value as
-// fresh arithmetic when they appear inside an arithmetic context (`$(( ))`,
-// `(( ))`, `let`, numeric `[[ ]]`), so a prior `x=$(printf CODEX_HOME=1)`
-// followed by `: $((x))` carries the same bypass as an inline substitution.
+// (at the top-level, not inside a subshell) from command substitutions or
+// hazardous literals in the given file. These variables are "tainted": bash
+// re-evaluates their value as fresh arithmetic when they appear inside an
+// arithmetic context (`$(( ))`, `(( ))`, `let`, numeric `[[ ]]`), so a prior
+// `x=$(printf CODEX_HOME=1)` followed by `: $((x))` carries the same bypass
+// as an inline substitution.
 //
 // This whole-file variant is kept for callers that do not need statement-level
 // ordering. Prefer taintAccumulator when ordering matters.
-func cmdSubstAssignedVars(file syntax.Node) map[string]struct{} {
-	acc := newTaintAccumulator()
+func cmdSubstAssignedVars(file syntax.Node, names map[string]struct{}) map[string]struct{} {
+	acc := newTaintAccumulator(names)
 	acc.AddStmt(file)
 	return acc.Tainted()
 }
