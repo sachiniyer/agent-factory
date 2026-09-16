@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
+	"github.com/sachiniyer/agent-factory/internal/testresidue"
 )
 
 // ambientConfigPaths resolves the config files the test process could touch
@@ -285,7 +286,7 @@ func TmuxTripwire() func() error {
 // children to the real install. AF_TESTGUARD_RUN is replaced with this run's
 // stable identity so per-test AGENT_FACTORY_HOME overrides remain attributable.
 func SandboxHome() func() {
-	dir, err := os.MkdirTemp("", "af-test-home-")
+	dir, err := os.MkdirTemp("", testresidue.SandboxHomePrefix)
 	if err != nil {
 		panic("testguard: cannot create sandbox AGENT_FACTORY_HOME: " + err.Error())
 	}
@@ -361,7 +362,7 @@ func SandboxTmux() func() {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return func() {}
 	}
-	dir, err := os.MkdirTemp("", "af-tmux-pkg-")
+	dir, err := os.MkdirTemp("", testresidue.PackageTmuxPrefix)
 	if err != nil {
 		panic("testguard: cannot create package tmux socket dir: " + err.Error())
 	}
@@ -454,7 +455,7 @@ func IsolateTmux(t testing.TB) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skipf("tmux not available: %v", err)
 	}
-	dir, err := os.MkdirTemp("", "af-tmux-")
+	dir, err := os.MkdirTemp("", testresidue.TestTmuxPrefix)
 	if err != nil {
 		t.Fatalf("testguard: cannot create private tmux socket dir: %v", err)
 	}
