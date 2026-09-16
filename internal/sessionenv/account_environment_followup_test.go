@@ -147,13 +147,37 @@ func TestValidateAccountEnvironmentCommand_QuotedProcessSelectorsLaunchNoChild(t
 		"ionice -tp\"$PID\"", // selector inside an argument-free cluster
 		"taskset -p\"$PID\"",
 		"taskset --pid=\"$PID\"",
-		// A trailing command-shaped word is read as a further PID, not exec'd,
-		// so it does not make the selector unsafe.
-		"ionice -p\"$PID\" env CODEX_HOME=/other codex",
-		"taskset -p\"$PID\" env CODEX_HOME=/other codex",
+		// A trailing PID operand stays accepted: the words after a selector
+		// are still inspected, and a literal PID list judges as an
+		// unrecognized literal command with nothing to refuse.
+		"ionice -p\"$PID\" 456",
+		"taskset -p\"$PID\" 456",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q selects processes and launches no child under any expansion", command)
+	}
+	for _, command := range []string{
+		// A trailing command-shaped word is read as a further PID only on the
+		// real util-linux binary. isAccountCommandName matches by basename,
+		// which a PATH-shadowed or repo-local ionice/taskset satisfies while
+		// exec'ing the tail, so the tail is still inspected — and an env
+		// invocation in it is refused. The path-qualified spellings pin the
+		// review finding's exact shape.
+		"ionice -p\"$PID\" env CODEX_HOME=/other codex",
+		"taskset -p\"$PID\" env CODEX_HOME=/other codex",
+		"ionice -p env CODEX_HOME=/other codex",
+		"taskset -p env CODEX_HOME=/other codex",
+		"./ionice -p 123 env CODEX_HOME=/other codex",
+		"./taskset -p 123 env CODEX_HOME=/other codex",
+		"./ionice --pid=123 env CODEX_HOME=/other codex",
+		"./taskset --pid 123 env CODEX_HOME=/other codex",
+		"ionice -p 123 sh -c 'unset CODEX_HOME; codex'",
+		"taskset -p 0x1 sh -c 'export CODEX_HOME=/x; codex'",
+		"./ionice -h env CODEX_HOME=/other codex",
+		"./taskset --help env CODEX_HOME=/other codex",
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"%q hides a mutating tail behind a basename-matched selector", command)
 	}
 	for _, command := range []string{
 		// Not a selector: an unquoted expansion word-splits, "$@" is zero-or-many,

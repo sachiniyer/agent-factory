@@ -173,19 +173,18 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 			if !quoted {
 				return nil, true
 			}
-			// A process selector needs no boundary decision at all. It switches
-			// ionice to acting on already-running processes, so the remaining
-			// operands are PIDs rather than a command and NO expansion of the value
-			// can launch a child. Measured on util-linux 2.39.3 with the value
-			// empty, valid and invalid, `ionice -p"$PID" /bin/echo X` reports
-			// `invalid PID argument` every time and prints nothing — a valid PID
-			// does not help, because the trailing word is read as a further PID.
-			//
-			// This is why the selector case is decidable while the class case above
-			// is not: `ionice -c"$C" /bin/echo X` DOES print X once $C is valid, so
-			// its two readings differ and one of them execs.
+			// A process selector needs no boundary decision for its OWN operand:
+			// it switches ionice to acting on already-running processes, so no
+			// expansion of the attached value can launch a child. The words AFTER
+			// the selector still return for inspection: isAccountCommandName
+			// matches by basename, which cannot distinguish the real util-linux
+			// binary from a PATH-shadowed or repo-local `ionice` that execs
+			// whatever follows. On the real binary the tail is further PID
+			// operands — measured on 2.39.3, `ionice -p"$PID" /bin/echo X` reports
+			// `invalid PID argument` and prints nothing — so inspecting it as a
+			// command refuses only what a shadowed wrapper could actually run.
 			if ioniceProcessOnlyOption(prefix) {
-				return nil, false
+				return words[1:], false
 			}
 			if !ioniceQuotedOptionBoundaryPinned(prefix) {
 				return nil, true
@@ -197,13 +196,21 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 		case option == "--":
 			return words[1:], false
 		case utilLinuxTerminalOption(option, "tpPu"):
-			return nil, false
+			// --help/--version exit before reaching a child on the real
+			// binary, but the basename match cannot prove this IS that binary;
+			// the words after the option still get inspected as a command.
+			return words[1:], false
 		case ioniceProcessOnlyOption(option):
-			// -p/-P/-u select existing-process modes. They never exec a
-			// child, so this external command cannot replace the selected
-			// account environment inherited by one. Process-control policy is
-			// outside this validator's environment-mutation contract.
-			return nil, false
+			// -p/-P/-u select existing-process modes that never exec a child
+			// on real util-linux, so this external command cannot replace the
+			// selected account environment inherited by one. The selector's
+			// operand tail is still inspected rather than assumed inert:
+			// isAccountCommandName matched the basename, which a PATH-shadowed
+			// or repo-local `ionice` script satisfies while exec'ing the tail.
+			// PID operands judge as an unrecognized literal command and stay
+			// accepted; an env or shell tail is refused. Process-control policy
+			// is outside this validator's environment-mutation contract.
+			return words[1:], false
 		case option == "-t" || option == "--ignore":
 			words = words[1:]
 		case option == "-c" || option == "-n" || ioniceClassValueLongOption(option):
@@ -400,7 +407,7 @@ func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 			// so the name is matched with any attached value cut away.
 			prefix, quoted := literalPrefixBeforeSimpleQuotedParameter(words[0])
 			if name, _, _ := strings.Cut(prefix, "="); quoted && tasksetProcessOnlyOption(name) {
-				return nil, false
+				return words[1:], false
 			}
 			return nil, true
 		}
@@ -408,11 +415,14 @@ func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 		case option == "--":
 			return tasksetCommandAfterMask(words[1:])
 		case utilLinuxTerminalOption(option, "acp"):
-			return nil, false
+			return words[1:], false
 		case tasksetProcessOnlyOption(option):
 			// -p switches taskset from command execution to inspecting or
-			// updating an existing PID. No child environment exists to mutate.
-			return nil, false
+			// updating an existing PID, so no child environment exists to
+			// mutate on the real binary. The operand tail is still inspected:
+			// the basename match cannot distinguish taskset from a
+			// PATH-shadowed script that execs whatever follows the selector.
+			return words[1:], false
 		case option == "-a" || option == "--all-tasks" ||
 			option == "-c" || option == "--cpu-list":
 			words = words[1:]
