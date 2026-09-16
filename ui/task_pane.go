@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -54,6 +55,16 @@ const (
 	taskFocusSave
 	taskFocusCount
 )
+
+// deletedDisplayPair pairs the CAS expectation queued for a pending deletion
+// with the exact display record the user saw when they pressed D. Stored as a
+// slice element (not a map value) so that two deletions of the same task ID
+// each carry their own display — an ID-keyed map would lose the first entry
+// when the second deletion with the same ID is queued (PRRT_kwDORdIFwM6i2XFw).
+type deletedDisplayPair struct {
+	expect  task.Task
+	display task.Task
+}
 
 // TaskPane renders an inline task editor in the right pane.
 type TaskPane struct {
@@ -129,15 +140,16 @@ type TaskPane struct {
 	// another writer changed out-of-band while the editor was open (#1700).
 	originals map[string]task.Task
 	deleted   []task.Task
-	// deletedDisplays holds the task record as it was DISPLAYED at delete time
-	// (keyed by ID), separate from the CAS expectation queued in s.deleted.
-	// The two can differ when tasks.json has duplicate IDs: originals[id] is
-	// the LAST duplicate (SetTasks keeps only one entry per ID), so deleting
-	// an EARLIER duplicate makes s.deleted carry the later row's content.
-	// By capturing s.tasks[s.selectedIdx] before the originals lookup we
-	// preserve the exact visible row for the restore path. Cleared together
-	// with s.deleted by SetTasks and AcknowledgeDeletedRestored.
-	deletedDisplays map[string]task.Task
+	// deletedDisplays holds the (expect, display) pair for each pending
+	// deletion, where expect is the CAS record queued in s.deleted and display
+	// is the exact row the user saw before deleteSelectedTask replaced it with
+	// originals[id]. Stored as a slice — not a map — so two deletions of the
+	// same ID each keep their own display record; an ID-keyed map would
+	// overwrite the first occurrence's display with the second's, and the
+	// restore path would show the wrong row for the first deletion
+	// (PRRT_kwDORdIFwM6i2XFw). Each entry is appended when the deletion is
+	// queued and removed when it is acknowledged or the pane is reloaded.
+	deletedDisplays []deletedDisplayPair
 	// restoredDeletes tracks the display value inserted by RestoreFailedDelete
 	// for each task ID. When a deletion retry also fails, the second call must
 	// not append another visible copy — the first restore already has the row in
@@ -602,6 +614,42 @@ func (s *TaskPane) deleteSelectedTask() {
 	if original, ok := s.originals[deleted.ID]; ok {
 		deleted = original
 	}
+	// If this task was previously restored after a failed deletion, drop the
+	// existing stale queue entry NOW — before computing pendBefore — so the
+	// stale entry does not inflate the occurrence count (PRRT_kwDORdIFwM6i2XF0).
+	// The user is explicitly re-deleting, so we replace the entry with a fresh
+	// one rather than appending a second copy (which would cause RemoveTask to be
+	// called twice on the next save — the first call would succeed and the second
+	// would return "not found", producing a false save failure). We do NOT clear
+	// restoredDeletes here: AcknowledgeDeletedRestored relies on running the
+	// row-removal loop even after an explicit re-delete, to sweep remaining
+	// duplicate-ID ghost rows that RemoveTask deletes from disk but SetTasks
+	// (gated on !failedEdit) cannot reload (PRRT_kwDORdIFwM6i06Tg). Clearing
+	// restoredDeletes[id] would make AcknowledgeDeletedRestored return early and
+	// leave those ghosts. Instead reset only the dedupe marker so the next
+	// RestoreFailedDelete (if this new deletion also fails) can re-insert without
+	// hitting the dedupe.
+	if _, wasRestored := s.restoredDeletes[deleted.ID]; wasRestored {
+		delete(s.restoredDeletes, deleted.ID)
+		// Remove the stale s.deleted entry for this ID and its parallel
+		// deletedDisplays entry. Both are found by the same index so we remove
+		// them together to keep the slices consistent.
+		for i, t := range s.deleted {
+			if t.ID == deleted.ID {
+				s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
+				// Remove the corresponding display entry by matching the same
+				// expect record. The slices may have drifted if a prior stale
+				// remove already ran, so search by expect value, not index.
+				for j, p := range s.deletedDisplays {
+					if reflect.DeepEqual(p.expect, t) {
+						s.deletedDisplays = append(s.deletedDisplays[:j], s.deletedDisplays[j+1:]...)
+						break
+					}
+				}
+				break
+			}
+		}
+	}
 	// Capture the rank of the SPECIFIC occurrence being deleted, before the row
 	// is removed from s.tasks. restorePosition uses this instead of the
 	// ID-keyed loadedRanks entry, which only records the FIRST occurrence's
@@ -610,6 +658,8 @@ func (s *TaskPane) deleteSelectedTask() {
 	// Compute occurrence rank: count prior occurrences of the same ID visible
 	// in s.tasks (occBefore) plus those already pending in s.deleted
 	// (pendBefore). The sum is this occurrence's index into loadedRanks[id].
+	// The wasRestored cleanup above runs first so pendBefore reflects only
+	// genuine prior deletions, not the stale retry being replaced.
 	occBefore := 0
 	for i := 0; i < s.selectedIdx; i++ {
 		if s.tasks[i].ID == deleted.ID {
@@ -633,33 +683,7 @@ func (s *TaskPane) deleteSelectedTask() {
 		// (can happen when tasks were created in the pane and not yet reloaded).
 		s.deletedRank[deleted.ID] = ranks[0]
 	}
-	// If this task was previously restored after a failed deletion, drop the
-	// existing stale queue entry: the user is explicitly re-deleting, so we
-	// replace it with a fresh one rather than appending a second copy (which
-	// would cause RemoveTask to be called twice on the next save — the first
-	// call would succeed and the second would return "not found", producing a
-	// false save failure). Unlike the old code, we do NOT clear restoredDeletes
-	// here: AcknowledgeDeletedRestored relies on running the row-removal loop
-	// even after an explicit re-delete, to sweep remaining duplicate-ID ghost
-	// rows that RemoveTask deletes from disk but SetTasks (gated on !failedEdit)
-	// cannot reload (PRRT_kwDORdIFwM6i06Tg). Clearing restoredDeletes[id]
-	// would make AcknowledgeDeletedRestored return early and leave those ghosts.
-	// Instead reset only the dedupe marker so the next RestoreFailedDelete (if
-	// this new deletion also fails) can re-insert without hitting the dedupe.
-	if _, wasRestored := s.restoredDeletes[deleted.ID]; wasRestored {
-		delete(s.restoredDeletes, deleted.ID)
-		delete(s.deletedDisplays, deleted.ID)
-		for i, t := range s.deleted {
-			if t.ID == deleted.ID {
-				s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
-				break
-			}
-		}
-	}
-	if s.deletedDisplays == nil {
-		s.deletedDisplays = make(map[string]task.Task)
-	}
-	s.deletedDisplays[deleted.ID] = display
+	s.deletedDisplays = append(s.deletedDisplays, deletedDisplayPair{expect: deleted, display: display})
 	s.deleted = append(s.deleted, deleted)
 	s.tasks = append(s.tasks[:s.selectedIdx], s.tasks[s.selectedIdx+1:]...)
 	// A task queued for deletion must not also be in the update set:

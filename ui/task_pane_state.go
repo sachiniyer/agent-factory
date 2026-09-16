@@ -398,8 +398,19 @@ func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
 	// explicit re-deletes that cleared the marker.
 	if _, wasRestored := s.restoredDeletes[id]; wasRestored {
 		delete(s.restoredDeletes, id)
-		delete(s.deletedDisplays, id)
 		delete(s.deletedRank, id)
+		// Remove all deletedDisplays entries for this ID (there may be more
+		// than one when duplicate-ID rows were both deleted and both failed).
+		// RemoveTask removes every matching row from disk, so all display
+		// records for that ID are now stale.
+		i := 0
+		for _, p := range s.deletedDisplays {
+			if p.expect.ID != id {
+				s.deletedDisplays[i] = p
+				i++
+			}
+		}
+		s.deletedDisplays = s.deletedDisplays[:i]
 	}
 	// Remove all rows with the given ID (tasks.json allows duplicate IDs;
 	// RemoveTask removes every matching row from disk, so we must do the same
@@ -455,15 +466,25 @@ func (s *TaskPane) ConsumeDeleted() []task.Task {
 }
 
 // GetDeletedDisplay returns the display record captured at delete time for the
-// given task ID, and whether one was recorded. This is the exact row the user
-// selected, before deleteSelectedTask replaced it with originals[id] for CAS
-// purposes. When tasks.json contains duplicate IDs, originals[id] is the LAST
-// duplicate, so this display record preserves the SELECTED row's content for
-// the restore path. The map persists until SetTasks (successful reload) or
-// AcknowledgeDeletedRestored (successful retry) clears it.
-func (s *TaskPane) GetDeletedDisplay(id string) (task.Task, bool) {
-	t, ok := s.deletedDisplays[id]
-	return t, ok
+// given expect record, and whether one was recorded. This is the exact row the
+// user selected, before deleteSelectedTask replaced it with originals[id] for
+// CAS purposes. When tasks.json contains duplicate IDs, originals[id] is the
+// LAST duplicate, so this display record preserves the SELECTED row's content
+// for the restore path.
+//
+// The lookup is keyed by the full expect record (not just ID) so that two
+// concurrent deletions of different occurrences of the same ID each return
+// their own display — an ID-only lookup would return the same (last) display
+// for both (PRRT_kwDORdIFwM6i2XFw). The slice persists until SetTasks
+// (successful reload) or AcknowledgeDeletedRestored (successful retry) removes
+// entries.
+func (s *TaskPane) GetDeletedDisplay(expect task.Task) (task.Task, bool) {
+	for _, p := range s.deletedDisplays {
+		if reflect.DeepEqual(p.expect, expect) {
+			return p.display, true
+		}
+	}
+	return task.Task{}, false
 }
 
 // IsDirty returns true if tasks were modified.

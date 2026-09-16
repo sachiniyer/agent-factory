@@ -218,9 +218,11 @@ func (m *home) saveContentPaneState() error {
 					// tsk (a potentially stale binding the daemon would refuse,
 					// PRRT_kwDORdIFwM6i06TE).
 					sp.RestoreFailedDeleteWithFresh(loaded[tsk.ID], tsk)
-				} else if display, ok := sp.GetDeletedDisplay(tsk.ID); ok {
+				} else if display, ok := sp.GetDeletedDisplay(tsk); ok {
 					// Duplicate IDs: the display record preserves the actual
-					// selected row, independent of the ID-keyed originals map.
+					// selected row for this specific deletion, looked up by the
+					// full expect record so that two deletions of the same ID
+					// each return their own display (PRRT_kwDORdIFwM6i2XFw).
 					// Use WithExpect so originals baseline stays the loaded
 					// original (tsk), not the potentially-draft display.
 					sp.RestoreFailedDeleteWithExpect(display, tsk)
@@ -247,7 +249,7 @@ func (m *home) saveContentPaneState() error {
 		// Use the captured display record if available, so the pane shows the
 		// exact selected row rather than the ID-keyed originals entry.
 		for _, tsk := range failedDeletes {
-			if display, ok := sp.GetDeletedDisplay(tsk.ID); ok {
+			if display, ok := sp.GetDeletedDisplay(tsk); ok {
 				sp.RestoreFailedDeleteWithExpect(display, tsk)
 			} else {
 				sp.RestoreFailedDelete(tsk)
