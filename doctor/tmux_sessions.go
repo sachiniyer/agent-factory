@@ -106,14 +106,24 @@ func checkRunawayChildren(ctx *scanContext, report *Report) {
 		}
 		// The pane tree comes from the EVIDENCE-BEARING capture so a per-session
 		// list-panes failure is not swallowed as an empty result. A session
-		// whose pane tree could not be read contributes nothing to the runaway
-		// counts below AND is named in a blindness row, so the function does
-		// not print "no runaway processes" over a session it never inspected —
-		// the same treatment the unmeasurable counter gives CPU blindness.
+		// whose pane tree could not be read is named in a blindness row so the
+		// function does not print "no runaway processes" over a session it never
+		// fully inspected — the same treatment the unmeasurable counter gives
+		// CPU blindness. Partial captures still yield verified processes that
+		// are evaluated for runaway findings before recording the blindness.
 		procs, paneErr := tmux.CaptureSessionProcessTrees(ctx.opts.Exec, name)
 		if paneErr != nil {
+			// A vanished session is conclusively no longer live: it is not a
+			// blind live session, so it gets no blindness row and the operator
+			// needs no nudge to inspect it — it simply exited.
+			if errors.Is(paneErr, tmux.ErrSessionVanishedBeforeCapture) {
+				continue
+			}
+			// Partial captures (non-nil procs alongside an error) still carry
+			// verified processes; evaluate them for runaway findings before
+			// recording the blindness warning so a CPU-pegged child in an
+			// unaffected pane is not silently dropped.
 			blindSessions = append(blindSessions, name)
-			continue
 		}
 		sort.Slice(procs, func(i, j int) bool { return procs[i].PID < procs[j].PID })
 		for _, p := range procs {

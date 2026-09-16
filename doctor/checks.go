@@ -567,7 +567,19 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			// observations.blindSessions) rather than classified either way.
 			tree, paneErr := tmux.CaptureSessionProcessTrees(ctx.opts.Exec, name)
 			if paneErr != nil {
-				observations.blindSessions = append(observations.blindSessions, name)
+				// Revalidate candidates before declaring blindness: if every
+				// marked process for this session already exited (normal churn),
+				// there is nothing left to be blind about and no row is needed.
+				var anyPresent bool
+				for _, p := range procs {
+					if observations.stillPresent(p) {
+						anyPresent = true
+						break
+					}
+				}
+				if anyPresent {
+					observations.blindSessions = append(observations.blindSessions, name)
+				}
 				continue
 			}
 			inSession := map[int]bool{}
