@@ -62,8 +62,8 @@ paragraph because it's why `af` doesn't corrupt itself:
 af starts a daemon **only for a caller that needs the local one running** — the
 start is part of the call. That ensure path is the whole on-demand mechanism:
 the TUI's calls on the default local target and the local control verbs
-(creating a session, writing a task, an account login, and the like) each make
-sure the daemon is up before doing their work. Commands built to answer
+(creating a session, writing a task, an account login, attaching, and the
+like) each make sure the daemon is up before doing their work. Commands built to answer
 without a daemon — `af daemon status`, `af sessions list`, `af tasks list`,
 config reads and writes — take the no-spawn path, and every remote
 `--daemon-url`/`AF_DAEMON_URL` target is dial-only, so none of them can start

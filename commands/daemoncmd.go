@@ -19,8 +19,9 @@ import (
 // scripts), session monitoring, and the web UI. On-demand startup is exactly
 // one mechanism — daemon.EnsureDaemon — and a caller reaches it only when the
 // call needs the local daemon running: the TUI's calls on the default local
-// target (withDaemonHTTP), the local control verbs (callDaemon), the bare root
-// launch's enabled-task check, and the post-upgrade respawn. Callers built to
+// target (withDaemonHTTP), the local control verbs (callDaemon), the CLI
+// attach's own ensure dial (api/sessions.go), the bare root launch's
+// enabled-task check, and the post-upgrade respawn. Callers built to
 // answer without a daemon — the no-spawn reads, config file paths, and every
 // remote target — never enter it. `af daemon install` is the separate,
 // supervised mechanism: it registers a user-level autostart unit so schedules
@@ -35,13 +36,13 @@ watch-task scripts, monitors sessions, and serves the bundled web UI.
 The web UI is part of the daemon — there is no separate web command — so it is
 served whenever the daemon is running. af starts the daemon lazily, and only
 the local one: a call that needs a running local daemon ensures it as part of
-the call — opening af on the default local target, creating a session, adding
-a task. Commands built to answer without one ('af daemon status', 'af sessions
-list', config reads and writes) and every remote --daemon-url/AF_DAEMON_URL
-target never start anything. Outside any call, a bare 'af' launch checks the
-local task store and asks for the daemon when an enabled task exists
-(best-effort), and 'af daemon install' starts it under the user service
-manager. That is the whole list.
+the call — opening af on the default local target, creating a session,
+attaching to one, adding a task. Commands built to answer without one
+('af daemon status', 'af sessions list', config reads and writes) and every
+remote --daemon-url/AF_DAEMON_URL target never start anything. Outside any
+call, a bare 'af' launch checks the local task store and asks for the daemon
+when an enabled task exists (best-effort), and 'af daemon install' starts it
+under the user service manager. That is the whole list.
 
 With af running, open:
 

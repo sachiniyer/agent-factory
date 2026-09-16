@@ -337,8 +337,9 @@ func stopDaemonHint(h daemon.HealthStatus) string {
 // Also NOT `af daemon restart`: with no daemon up there is no socket, so it
 // reports "no running daemon to restart" and starts nothing — it restarts, it
 // does not start. A call that needs the local daemon starts one (the TUI cold
-// start's withDaemonHTTP ensure, the local control verbs' callDaemon, and the
-// bare-launch ensureDaemonForTasks check all converge on daemon.EnsureDaemon).
+// start's withDaemonHTTP ensure, the local control verbs' callDaemon, the CLI
+// attach's own ensure dial, and the bare-launch ensureDaemonForTasks check all
+// converge on daemon.EnsureDaemon).
 // `af daemon install` both starts one and re-registers it for this home
 // (systemctl --user enable --now / a RunAtLoad launchd agent), which is the only
 // option here that ends with the daemon supervised.
