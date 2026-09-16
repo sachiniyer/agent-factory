@@ -78,7 +78,7 @@ func TestCaptureAndPollTmuxCommandsDoNotHang(t *testing.T) {
 			stallingTmuxOnPath(t)
 			shortTmuxTimeout(t, 200*time.Millisecond)
 			ts := NewTmuxSessionWithDeps("wedge-2105", "sh", MakePtyFactory(), cmd.MakeExecutor())
-			ts.setMonitor(newStatusMonitor())
+			ts.setMonitor(newStatusMonitor(), false)
 
 			done := make(chan error, 1)
 			go func() { done <- tc.call(ts) }()
@@ -113,7 +113,7 @@ func TestHasUpdatedDoesNotHangOnWedgedServer(t *testing.T) {
 	stallingTmuxOnPath(t)
 	shortTmuxTimeout(t, 200*time.Millisecond)
 	ts := NewTmuxSessionWithDeps("wedge-2105-poll", "sh", MakePtyFactory(), cmd.MakeExecutor())
-	ts.setMonitor(newStatusMonitor())
+	ts.setMonitor(newStatusMonitor(), false)
 
 	done := make(chan bool, 1)
 	go func() {
@@ -336,7 +336,7 @@ func TestBoundedCapturesSucceedWhenTmuxIsHealthy(t *testing.T) {
 	healthyTmuxOnPath(t, sink)
 	shortTmuxTimeout(t, 10*time.Second)
 	ts := NewTmuxSessionWithDeps("healthy-2099", "sh", MakePtyFactory(), cmd.MakeExecutor())
-	ts.setMonitor(newStatusMonitor())
+	ts.setMonitor(newStatusMonitor(), false)
 
 	if got, err := ts.CapturePaneContent(); err != nil || got != "pane line\n" {
 		t.Fatalf("CapturePaneContent: got %q err %v", got, err)

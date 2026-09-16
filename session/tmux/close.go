@@ -138,8 +138,14 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	// Every af-initiated teardown of a tracked session routes here, so marking
 	// before kill-session runs is what lets the status monitor tell "af asked"
 	// from "vanished on its own" (#4472). A capture already in flight during
-	// teardown then reads the mark on its error path.
-	t.setTeardownInitiated(true)
+	// teardown then reads the mark on its error path. The mark lands on the
+	// CURRENT monitor — scoped to this session generation, so a same-object
+	// restart can neither inherit it nor wipe an old poll's attribution — and
+	// settles on return, which is what lets a later post-settle successful
+	// poll retire a mark whose teardown demonstrably did not take (Codex on
+	// #4473).
+	markedMon := t.markTeardownInitiated()
+	defer t.settleTeardown(markedMon)
 	var errs []error
 	r := &closeRun{t: t}
 

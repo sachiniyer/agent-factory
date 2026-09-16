@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/cmd"
@@ -247,28 +248,14 @@ type TmuxSession struct {
 	// time so a stale latch cannot pass a recreated session.
 	// Guarded by provenMu.
 	closedConclusively bool
-	// teardownInitiated records that af itself asked for this session's
-	// teardown. Every af-initiated teardown — kill, archive, task completion,
-	// handoff swap, root-agent reap — routes through close(), which sets it
-	// before kill-session runs; the status monitor reads it to keep an
-	// expected disappearance at INFO. A session vanishing WITHOUT the mark is
-	// the anomaly ERROR exists for (#4472).
-	//
-	// The mark tracks one fact, so it clears on exactly one kind of evidence:
-	// tmux ANSWERING that a session is live behind this name, which means no af
-	// request describes the session there now. That answer arrives at five
-	// sites — close()'s probe finding the session survived its kill, Start's
-	// gate finding the name taken, Start's poll confirming the replacement,
-	// RestoreWithResult rebinding on an answered probe, and
-	// ClosedConclusivelyAndStillAbsent finding the name live again. Every other
-	// path leaves it as it was: a timed-out kill or probe, and a Start that fails
-	// before a replacement is live, have learned nothing that makes af's request
-	// stale. Clearing on those turned af's own teardown into an ERROR, and
-	// keeping it past a refused kill quieted a live session's later vanish
-	// (Codex on #4473).
-	// Guarded by provenMu.
-	teardownInitiated bool
-	provenMu          sync.RWMutex
+	// The teardown mark lives on statusMonitor (io.go), not here: the fact a
+	// status poll needs is the teardown attribution of the session generation
+	// IT is polling, and a shared session-level flag lets a same-object
+	// restart rewrite that attribution out from under an in-flight poll of
+	// the old generation (Codex on #4473). Accessors below proxy the current
+	// monitor's mark for callers — and for the clear sites that fire on
+	// tmux's answered-live evidence.
+	provenMu sync.RWMutex
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.
@@ -539,19 +526,28 @@ func (t *TmuxSession) setClosedConclusively(closed bool) {
 	t.provenMu.Unlock()
 }
 
-// TeardownInitiated reports whether af itself asked for this session's
-// teardown — the predicate the status monitor uses to keep expected
-// disappearances out of ERROR (#4472).
+// TeardownInitiated reports whether af itself asked for the teardown of the
+// session the CURRENT monitor is polling — the predicate the status monitor
+// uses to keep expected disappearances out of ERROR (#4472).
 func (t *TmuxSession) TeardownInitiated() bool {
-	t.provenMu.RLock()
-	defer t.provenMu.RUnlock()
-	return t.teardownInitiated
+	t.monitorMu.Lock()
+	defer t.monitorMu.Unlock()
+	return t.monitor != nil && t.monitor.teardownInitiated
 }
 
+// setTeardownInitiated writes the mark on the CURRENT monitor. A clear
+// applies to the generation being polled now — it cannot reach back and
+// rewrite an old monitor's attribution, which is what keeps an in-flight
+// poll's late read honest across a monitor swap.
 func (t *TmuxSession) setTeardownInitiated(initiated bool) {
-	t.provenMu.Lock()
-	t.teardownInitiated = initiated
-	t.provenMu.Unlock()
+	t.monitorMu.Lock()
+	defer t.monitorMu.Unlock()
+	if t.monitor != nil {
+		t.monitor.teardownInitiated = initiated
+		if !initiated {
+			t.monitor.teardownSettledAt = time.Time{}
+		}
+	}
 }
 
 // SanitizedName returns the sanitized tmux session name.

@@ -13,10 +13,20 @@ package tmux
 // can't stall Restore's setMonitor(). setMonitor() is the only other writer of
 // the pointer (#1528).
 
-// setMonitor swaps in a new status monitor under monitorMu.
-func (t *TmuxSession) setMonitor(m *statusMonitor) {
+// setMonitor swaps in a new status monitor under monitorMu. carryTeardownMark
+// copies the outgoing monitor's teardown attribution onto the replacement —
+// the rebind passes it only when the probe did not answer, because a wedged
+// has-session is no evidence the request resolved, while an answered live
+// session behind the name is not the one af closed (Codex on #4473). The copy
+// and the swap happen under one lock so a close() marking the current monitor
+// mid-rebind cannot fall between them and be lost.
+func (t *TmuxSession) setMonitor(m *statusMonitor, carryTeardownMark bool) {
 	t.monitorMu.Lock()
 	defer t.monitorMu.Unlock()
+	if carryTeardownMark && t.monitor != nil {
+		m.teardownInitiated = t.monitor.teardownInitiated
+		m.teardownSettledAt = t.monitor.teardownSettledAt
+	}
 	t.monitor = m
 }
 

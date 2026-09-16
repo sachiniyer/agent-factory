@@ -276,11 +276,13 @@ func TestStartNameTakenClearsTeardownMark(t *testing.T) {
 	require.True(t, atError)
 }
 
-// TestStartConfirmedReplacementClearsTeardownMark: Start's poll confirming the
-// replacement, observed INSIDE Start — after the poll, before the inner Restore
-// rebinds — which is the window where a stale mark would quiet a replacement
-// dying on launch (#1116).
-func TestStartConfirmedReplacementClearsTeardownMark(t *testing.T) {
+// TestStartConfirmedReplacementKeepsOldMonitorMark pins the window between the
+// existence poll confirming the replacement and the inner Restore installing
+// the fresh monitor: the OLD monitor keeps its mark through that window, so an
+// in-flight poll of the session af closed still reads its own generation's
+// attribution (Codex on #4473) — while the fresh monitor the replacement is
+// polled on starts unmarked.
+func TestStartConfirmedReplacementKeepsOldMonitorMark(t *testing.T) {
 	forceNewSessionEnvMarkers(t, false)
 	forceSessionEnvExecutable(t, "/test/af")
 	session, m := newMarkedTeardownSession(t)
@@ -295,8 +297,9 @@ func TestStartConfirmedReplacementClearsTeardownMark(t *testing.T) {
 
 	require.NoError(t, session.Start(t.TempDir()))
 	require.True(t, setupRan.Load(), "the observation point must actually run")
-	require.False(t, markDuringSetup.Load(), "the mark must clear when the poll confirms the replacement")
-	require.False(t, session.TeardownInitiated())
+	require.True(t, markDuringSetup.Load(),
+		"the old monitor must keep its mark until the swap — clearing it here is the in-flight-poll race Codex found")
+	require.False(t, session.TeardownInitiated(), "the fresh monitor for the confirmed replacement starts unmarked")
 }
 
 // TestRestoreKeepsTeardownMarkOnUnansweredProbe pins the third site with the
@@ -318,6 +321,38 @@ func TestRestoreKeepsTeardownMarkOnUnansweredProbe(t *testing.T) {
 	atInfo, atError := pollVanish(t, session, m)
 	require.True(t, atInfo)
 	require.False(t, atError, "af closed this session itself; a wedged probe in between changes nothing")
+}
+
+// TestSurvivedTeardownRetiresMarkOnProvenLiveness is the first Codex finding's
+// remaining half: a close() that returns while its session demonstrably
+// survived must not leave the mark standing, or the session's LATER unrelated
+// vanish is misattributed to a teardown that never happened. A capture that
+// began after the request settled and still succeeded is that proof — and it
+// is deliberately NOT just "the next successful poll": one that straddled the
+// close proves nothing about the request's outcome.
+func TestSurvivedTeardownRetiresMarkOnProvenLiveness(t *testing.T) {
+	session, m := newMarkedTeardownSession(t)
+
+	// af asks for the teardown, and close() returns with the request settled —
+	// the shape a timed-out kill leaves behind when tmux recovers and the
+	// session kept running.
+	_, err := session.Close()
+	require.NoError(t, err)
+	require.True(t, session.TeardownInitiated())
+
+	// A poll that began after the request settled captures successfully —
+	// proof the session outlived af's request — so the mark retires.
+	m.alive.Store(true)
+	m.captureOK.Store(true)
+	session.HasUpdated()
+	require.False(t, session.TeardownInitiated(),
+		"post-settle liveness proves the teardown did not take; the mark must retire")
+
+	// The session then dies on its own — unrelated to the request that
+	// failed — and the monitor must say so at ERROR.
+	atInfo, atError := pollVanish(t, session, m)
+	require.True(t, atError)
+	require.False(t, atInfo)
 }
 
 // TestClosedConclusivelyLiveAgainClearsTeardownMark: the account swap's skip

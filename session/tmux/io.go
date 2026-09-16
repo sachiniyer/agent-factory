@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -26,6 +27,29 @@ type statusMonitor struct {
 	// Restore replaces the monitor with a fresh one, which naturally clears
 	// this state on respawn.
 	dead bool
+	// teardownInitiated records that af itself asked for the teardown of the
+	// session generation THIS monitor is polling — set by close() before
+	// kill-session runs so the ErrSessionGone branch can tell "af asked"
+	// (INFO) from "vanished on its own" (ERROR) (#4472). It lives on the
+	// monitor, not the TmuxSession, because the fact a poll needs is the
+	// attribution of the generation it started on: a session-level flag can
+	// be cleared by a same-object restart while an in-flight poll of the OLD
+	// session is still descheduled, turning af's own teardown into an ERROR
+	// when the poll resumes (Codex on #4473). The mark clears only on tmux
+	// ANSWERING that a session is live behind the name — see the clear sites
+	// in close(), Start, and ClosedConclusivelyAndStillAbsent — except on an
+	// unanswered rebind, where it is carried to the replacement monitor
+	// because a wedged probe is no evidence the request resolved.
+	// Guarded by monitorMu.
+	teardownInitiated bool
+	// teardownSettledAt is when the asking close() RETURNED; zero while the
+	// request is still running or when there is none. A successful capture
+	// retires the mark only if the capture began after this stamp — liveness
+	// proven before the request finished says nothing about its outcome, so
+	// a poll that straddled the close cannot retire the mark just before the
+	// kill lands (Codex on #4473).
+	// Guarded by monitorMu.
+	teardownSettledAt time.Time
 }
 
 func newStatusMonitor() *statusMonitor {
@@ -34,6 +58,36 @@ func newStatusMonitor() *statusMonitor {
 
 func newReattachStatusMonitor() *statusMonitor {
 	return &statusMonitor{baselinePending: true}
+}
+
+// markTeardownInitiated records on the CURRENT monitor that af asked for this
+// session's teardown and returns the monitor it marked, so the asking close()
+// can settle the same one. Marking must reach the monitor the polls are
+// reading — not a flag on the session object — or a mid-close monitor swap
+// would leave the old generation's in-flight polls reading a cleared shared
+// flag (Codex on #4473). A nil monitor means nothing is polling: there is no
+// one to attribute a disappearance to.
+func (t *TmuxSession) markTeardownInitiated() *statusMonitor {
+	t.monitorMu.Lock()
+	defer t.monitorMu.Unlock()
+	if t.monitor != nil {
+		t.monitor.teardownInitiated = true
+		t.monitor.teardownSettledAt = time.Time{}
+	}
+	return t.monitor
+}
+
+// settleTeardown stamps that the asking close() returned on the monitor it
+// marked — what lets a later post-settle successful poll retire a mark whose
+// teardown demonstrably did not take. It lands on the marked monitor itself,
+// so a monitor swap mid-close cannot carry the settle onto the replacement.
+func (t *TmuxSession) settleTeardown(mon *statusMonitor) {
+	if mon == nil {
+		return
+	}
+	t.monitorMu.Lock()
+	mon.teardownSettledAt = time.Now()
+	t.monitorMu.Unlock()
 }
 
 // hash hashes the string.
@@ -132,6 +186,7 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 		return false, false, "", false
 	}
 
+	captureStartedAt := time.Now()
 	content, err := t.CapturePaneContent()
 	if err != nil {
 		// If the tmux session no longer exists, log once and latch the
@@ -142,24 +197,43 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 		// error path, so use the wrapped sentinel rather than re-probing.
 		if errors.Is(err, ErrSessionGone) {
 			// af-initiated teardown (kill, archive, task completion, handoff
-			// swap, root reap) routes through close(), which marks the session
-			// before kill-session runs — that disappearance is the request
-			// completing, not an anomaly, and at ~5,800 lines per log rotation
-			// it buried the errors that matter (#4472). Only a vanish af never
-			// asked for stays at ERROR.
-			if t.TeardownInitiated() {
+			// swap, root reap) routes through close(), which marks THIS
+			// monitor before kill-session runs — that disappearance is the
+			// request completing, not an anomaly, and at ~5,800 lines per log
+			// rotation it buried the errors that matter (#4472). The mark is
+			// read off the snapshotted monitor: a poll in flight across a
+			// same-object restart still attributes the OLD session's death to
+			// the teardown af asked for (Codex on #4473), and a vanish af
+			// never asked for stays at ERROR.
+			t.monitorMu.Lock()
+			initiated := mon.teardownInitiated
+			mon.dead = true
+			t.monitorMu.Unlock()
+			if initiated {
 				log.InfoLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
 			} else {
 				log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
 			}
-			t.monitorMu.Lock()
-			mon.dead = true
-			t.monitorMu.Unlock()
 			return false, false, "", false
 		}
 		log.ErrorLog.Printf("error capturing pane content in status monitor: %v", err)
 		return false, false, "", false
 	}
+
+	// A capture that BEGAN after the asking close() returned and still
+	// succeeded proves the session outlived the request — the mark is stale,
+	// so retire it before a later unrelated vanish is misattributed to a
+	// teardown that never happened (Codex on #4473). The capture-start gate
+	// is the precise half of the check: a poll that straddled the close —
+	// captured pre-kill, resumed post-settle — proves nothing about the
+	// request's outcome and must leave the mark for the kill that is about
+	// to land.
+	t.monitorMu.Lock()
+	if !mon.teardownSettledAt.IsZero() && captureStartedAt.After(mon.teardownSettledAt) {
+		mon.teardownInitiated = false
+		mon.teardownSettledAt = time.Time{}
+	}
+	t.monitorMu.Unlock()
 
 	// Only set hasPrompt for agents with a known confirmation dialog, keyed
 	// off the agent actually running in the pane (a non-agent override or a

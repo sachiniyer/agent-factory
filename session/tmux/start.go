@@ -131,8 +131,11 @@ func (t *TmuxSession) Start(workDir string) error {
 	for {
 		if exists, known := t.ProbeSession(); known && exists {
 			// The replacement is live: from here on a vanish is this session's,
-			// and af has not asked for it.
-			t.setTeardownInitiated(false)
+			// and af has not asked for it. There is no mark to clear here — the
+			// inner Restore installs a fresh monitor, which starts unmarked,
+			// while the OLD monitor keeps its mark so a poll in flight across
+			// this confirmation still attributes the old session's death to
+			// the teardown af asked for (Codex on #4473).
 			break
 		}
 		select {
@@ -608,13 +611,6 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	// liveness check for a pane that is still running.
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
-	// The teardown mark clears only on an ANSWERED probe. Clearing a proof on
-	// "exists or unknown" is the safe direction; clearing the mark is not — a
-	// wedged probe after af closed this session would turn af's own teardown
-	// into an ERROR once the server answers (Codex on #4473).
-	if answered {
-		t.setTeardownInitiated(false)
-	}
 	monitor := newStatusMonitor()
 	if workDir != "" {
 		monitor = newReattachStatusMonitor()
@@ -622,6 +618,12 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	if err := t.refreshRestoredAccountEnvironment(); err != nil {
 		return RestoreReattached, fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
 	}
-	t.setMonitor(monitor)
+	// The teardown mark carries to the fresh monitor only when the probe did
+	// NOT answer: an answered live session behind the name is not the one af
+	// closed, while a wedged probe is no evidence the request resolved —
+	// carrying it keeps af's own teardown at INFO once the server answers
+	// (Codex on #4473). Either way the OLD monitor keeps its mark, so an
+	// in-flight poll of the old generation still reads its own attribution.
+	t.setMonitor(monitor, !answered)
 	return RestoreReattached, nil
 }
