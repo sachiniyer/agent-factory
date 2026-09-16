@@ -305,6 +305,13 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex
   af refuses a remote engine at create time (and reports it unavailable at choose
   time) rather than provisioning a session that fails later with an opaque
   `connection refused` to `127.0.0.1`.
+- **At most one of `DOCKER_HOST` and `DOCKER_CONTEXT`**, unless both point at the
+  same endpoint. When both are set, the docker CLI dials `DOCKER_HOST`, but its
+  reference documents `DOCKER_CONTEXT` as the override. af cannot tell which one
+  you meant, so it refuses the combination and names both variables in the
+  error. With only one of them set, af follows the CLI: `DOCKER_HOST` wins over
+  the context selected with `docker context use`, and `DOCKER_CONTEXT` wins over
+  it too.
 - The repo must have an `origin` remote the container can clone from (GitHub for
   a real repo; a `file://` path + a `run_args` bind-mount for a self-contained
   test).

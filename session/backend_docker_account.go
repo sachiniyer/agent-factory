@@ -430,14 +430,18 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 	return nil
 }
 
-func environmentValue(environ []string, name string) string {
+// rawEnvironmentValue returns the untrimmed value environ gives name, or "" when
+// it is absent. The last entry wins because exec.Cmd.Env passes the last
+// duplicate to the child, and the value af judges must be the one docker reads.
+func rawEnvironmentValue(environ []string, name string) string {
 	prefix := name + "="
+	value := ""
 	for _, entry := range environ {
 		if strings.HasPrefix(entry, prefix) {
-			return strings.TrimSpace(strings.TrimPrefix(entry, prefix))
+			value = strings.TrimPrefix(entry, prefix)
 		}
 	}
-	return ""
+	return value
 }
 
 func localDockerEndpoint(endpoint string) bool {
@@ -532,21 +536,42 @@ func dockerLocalityProbeError(err error) error {
 // stricter dockerEndpointOnThisHost to it instead — see its comment for why a
 // loopback TCP endpoint is not host-identity proof.
 //
-// It reads DOCKER_HOST / DOCKER_CONTEXT from environ exactly as the docker CLI
-// receives them, and runs `docker context inspect` only when DOCKER_HOST is unset
-// or a DOCKER_CONTEXT is named — the same call ensureAccountDockerEngineLocal and
-// bindMountRelabel make. Two concerns turn on the engine being local: Docker
-// resolves AND labels a bind source on the daemon host (not the CLI host), and the
-// agent-server port publishes on the engine host's loopback while the daemon dials
-// its own. A remote engine breaks the latter for every docker session, not only
+// It reads DOCKER_HOST and DOCKER_CONTEXT from environ exactly as the docker CLI
+// receives them. The CLI picks its engine in this order (resolveContextName in
+// docker/cli; the order is the same in 19.03 through 29.x, and since 23.0 an
+// empty value counts as unset): a non-empty DOCKER_HOST, then a non-empty
+// DOCKER_CONTEXT, then the context chosen with `docker context use`, then the
+// default socket. With DOCKER_HOST alone, af uses that value directly.
+// With neither set, `docker context inspect` reports the CLI's own choice. When
+// both are set, the CLI's code and its reference disagree about which one wins,
+// so resolveConflictingDockerSelectors refuses unless both name the same
+// endpoint.
+//
+// ensureAccountDockerEngineLocal and bindMountRelabel make this same call. Two
+// concerns turn on the engine being local: Docker resolves AND labels a bind
+// source on the daemon host (not the CLI host), and the agent-server port
+// publishes on the engine host's loopback while the daemon dials its own. A
+// remote engine breaks the latter for every docker session, not only
 // account-scoped ones.
 func resolveDockerEngineEndpoint(environ []string) (endpoint string, local bool, err error) {
-	dockerHost := environmentValue(environ, "DOCKER_HOST")
-	dockerContext := environmentValue(environ, "DOCKER_CONTEXT")
-	endpoint = dockerHost
-	if dockerContext != "" || endpoint == "" {
-		ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
-		defer cancel()
+	// The CLI tests both variables with os.Getenv(...) != "", so a
+	// whitespace-only value still counts as set. Presence is decided on the raw
+	// value for that reason.
+	rawHost := rawEnvironmentValue(environ, "DOCKER_HOST")
+	rawContext := rawEnvironmentValue(environ, "DOCKER_CONTEXT")
+	ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
+	defer cancel()
+	switch {
+	case rawHost != "" && rawContext != "":
+		endpoint, err = resolveConflictingDockerSelectors(ctx, environ, rawContext)
+		if err != nil {
+			return "", false, err
+		}
+	case strings.TrimSpace(rawHost) != "":
+		endpoint = strings.TrimSpace(rawHost)
+	default:
+		// A whitespace-only DOCKER_HOST lands here too. The CLI still selects the
+		// default context for it, and the inspect below reports that choice.
 		out, derr := dockerExec(ctx, environ, "context", "inspect", "--format", dockerEndpointFormat)
 		if derr != nil {
 			return "", false, fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), derr)
@@ -554,6 +579,38 @@ func resolveDockerEngineEndpoint(environ []string) (endpoint string, local bool,
 		endpoint = strings.TrimSpace(string(out))
 	}
 	return endpoint, localDockerEndpoint(endpoint), nil
+}
+
+// resolveConflictingDockerSelectors handles DOCKER_HOST and DOCKER_CONTEXT set
+// together, the one pair Docker's own sources disagree on (#4413). Every CLI
+// release dials DOCKER_HOST and ignores DOCKER_CONTEXT. The CLI reference
+// documents DOCKER_CONTEXT as overriding DOCKER_HOST. A user who set both may
+// have meant either one, and a wrong guess puts the session on an engine they
+// did not choose. af therefore has the CLI resolve both, and proceeds only when
+// they name the same endpoint.
+//
+// "default" is the context a set DOCKER_HOST selects. Resolving it through the
+// CLI keeps Docker's own normalization of the value: a whitespace-only
+// DOCKER_HOST becomes the default socket, not an empty endpoint. The `--` stops
+// a context name that starts with a dash from being read as a flag.
+func resolveConflictingDockerSelectors(ctx context.Context, environ []string, rawContext string) (string, error) {
+	out, err := dockerExec(ctx, environ, "context", "inspect", "--format", dockerEndpointFormat, "--", "default", rawContext)
+	if err != nil {
+		return "", fmt.Errorf("DOCKER_HOST and DOCKER_CONTEXT are both set, and DOCKER_CONTEXT=%q could not be resolved to compare them (%s: %w) — unset the one you did not mean",
+			rawContext, strings.TrimSpace(string(out)), err)
+	}
+	endpoints := strings.Split(strings.TrimRight(string(out), "\r\n"), "\n")
+	if len(endpoints) != 2 {
+		return "", fmt.Errorf("DOCKER_HOST and DOCKER_CONTEXT are both set, and `docker context inspect` reported %d endpoints instead of 2 when comparing them — unset the one you did not mean",
+			len(endpoints))
+	}
+	hostEndpoint := strings.TrimSpace(endpoints[0])
+	contextEndpoint := strings.TrimSpace(endpoints[1])
+	if hostEndpoint != contextEndpoint {
+		return "", fmt.Errorf("DOCKER_HOST and DOCKER_CONTEXT are both set and select different Docker engines (DOCKER_HOST resolves to %q, DOCKER_CONTEXT=%q to %q); the docker CLI dials DOCKER_HOST but its reference documents DOCKER_CONTEXT as the override, so af will not guess — unset the one you did not mean",
+			hostEndpoint, rawContext, contextEndpoint)
+	}
+	return hostEndpoint, nil
 }
 
 // dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will
