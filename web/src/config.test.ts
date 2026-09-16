@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import { getConfig, setConfigValue } from "./api.js";
-import { canCommit, controlKind, createKeyedQueue, saveNotice } from "./config.js";
+import { type ConfigStatus, canCommit, controlKind, createKeyedQueue, saveNotice, shouldCloseSavedField } from "./config.js";
 import type { ConfigEntry, ConfigSetResponse } from "./types.js";
 
 // These are the web client's config-editor contracts. They are pure logic +
@@ -293,4 +293,49 @@ test("different keys are not queued behind each other", async () => {
   await Promise.all([slow, fast]);
 
   assert.deepEqual(finished, ["auto_update", "listen_addr"], "keys have no ordering relationship; they must not block each other");
+});
+
+// shouldCloseSavedField (#4383). The close-on-save rule reads a status that the
+// store holds as a LEVEL, and the post-save refetch re-delivers it. These pin the
+// edge requirement, because the cost of getting it wrong is the user's typing.
+const okStatus = (key: string): ConfigStatus => ({ key, value: "v", notice: "", error: "" });
+
+test("a save's success status closes the field it came from", () => {
+  assert.equal(
+    shouldCloseSavedField(okStatus("network.listen_addr"), "network.listen_addr", true),
+    true,
+    "the edge that commits a value must close the field, or the user is invited to write it twice",
+  );
+});
+
+test("the post-save refetch re-delivers the same status and must not close a newer edit", () => {
+  const status = okStatus("network.listen_addr");
+  // Delivery 1 is the save landing; delivery 2 is refreshConfig() committing fresh
+  // entries while configStatus is untouched. The user has typed again by then, so
+  // `editing` names the same key — the shape that silently discarded their text.
+  assert.equal(shouldCloseSavedField(status, "network.listen_addr", true), true);
+  assert.equal(
+    shouldCloseSavedField(status, "network.listen_addr", false),
+    false,
+    "a re-delivered status must not close an edit the user opened after the save",
+  );
+});
+
+test("a refused value leaves its field open to be corrected", () => {
+  const refused: ConfigStatus = { key: "update_channel", value: "", notice: "", error: "must be one of [stable, preview]" };
+  assert.equal(
+    shouldCloseSavedField(refused, "update_channel", true),
+    false,
+    "closing on an error would discard the text the validator is complaining about",
+  );
+});
+
+test("a save for another key never closes the field being edited", () => {
+  assert.equal(
+    shouldCloseSavedField(okStatus("auto_update"), "network.listen_addr", true),
+    false,
+    "saves are queued per key and can land in any order; only the field's OWN save closes it",
+  );
+  assert.equal(shouldCloseSavedField(okStatus("auto_update"), null, true), false);
+  assert.equal(shouldCloseSavedField(null, "network.listen_addr", true), false);
 });

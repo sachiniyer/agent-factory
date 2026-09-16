@@ -7624,6 +7624,9 @@ function controlKind(e) {
 function canCommit(shown, current) {
   return shown !== current;
 }
+function shouldCloseSavedField(status, editing, statusIsNew) {
+  return statusIsNew && status !== null && !status.error && status.key === editing;
+}
 function saveNotice(resp) {
   const parts = [];
   if (resp.result.requires_restart && resp.restart_notice !== "") {
@@ -7673,6 +7676,11 @@ var ConfigPane = class {
   // The live controls a rebuild replaces, so focus can be handed back to whichever of
   // them had it (#2933). Null whenever that control is not currently rendered.
   editingInput = null;
+  /** The config key whose input held DOM focus when the in-progress rebuild started,
+   *  so render() can re-point `editingInput` at that row's replacement even when the
+   *  row is no longer the open edit. Live only for the duration of one render (set
+   *  and cleared around the single `this.render()` call). */
+  restoreKey = null;
   advancedToggle = null;
   lastEntries = null;
   lastStatus = null;
@@ -7683,6 +7691,7 @@ var ConfigPane = class {
     if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
       return;
     }
+    const statusIsNew = status !== this.lastStatus;
     const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status && accounts.status.name === "" && !accounts.status.error;
     if (registrationSucceeded) {
       const submitted = this.accountInput(accounts.status.agent);
@@ -7695,7 +7704,7 @@ var ConfigPane = class {
     this.path = path;
     this.status = status;
     this.accounts = accounts;
-    if (status && !status.error && status.key === this.editing) {
+    if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
     }
@@ -7728,7 +7737,9 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
+    this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
+    this.restoreKey = null;
     this.restoreAccountDrafts(accountDrafts);
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
@@ -7897,7 +7908,7 @@ var ConfigPane = class {
     if (this.editing === e.key) {
       this.editingInput = input;
     }
-    if (this.status && !this.status.error && this.status.key === e.key && this.editingInput === null) {
+    if (this.restoreKey === e.key && this.editingInput === null) {
       this.editingInput = input;
     }
     input.setAttribute("aria-label", e.key);
