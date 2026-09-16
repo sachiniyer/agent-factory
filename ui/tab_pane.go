@@ -717,7 +717,7 @@ func (p *TabPane) String() string {
 
 	// In scroll/copy mode always use the viewport.
 	if p.scroll.Active() {
-		return layout.ClampToRect(p.viewport.View(), rect)
+		return layout.ClampToRectMarkingCut(p.viewport.View(), rect)
 	}
 
 	if p.content.fallback {
@@ -759,6 +759,15 @@ func (p *TabPane) String() string {
 		lines = lines[len(lines)-p.height:]
 	}
 
+	// Captured rows can be wider than the pane — a preview-only session's tmux
+	// pane stays 80 columns while the preview box is narrower (#4175). Mark each
+	// raw row before Render: the style pass pads every row of the block to its
+	// widest line, and a marker applied after it would read that padding as
+	// content and stamp "…" on rows that fit. The marking cut leaves "…" in the
+	// last cell of a shortened row so the amputation reads as truncation.
+	for i := range lines {
+		lines[i] = layout.MarkCutRow(lines[i], p.width)
+	}
 	return layout.ClampToRect(tabPaneStyle.Render(strings.Join(lines, "\n")), rect)
 }
 
