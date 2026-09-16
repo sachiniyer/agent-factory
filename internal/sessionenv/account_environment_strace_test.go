@@ -140,6 +140,80 @@ func TestCommandMutatesAccountEnvironment_StraceLongFlatArgv(t *testing.T) {
 		"ordinary long strace argv must not exhaust the shared budget")
 }
 
+// Judging every suffix re-walks the tail, so a flat argv costs quadratic real
+// work below the meter's one slot per suffix. straceFlatArgvLimit is the cap
+// that keeps that quadratic sub-second: a command line past it is not an
+// ordinary invocation and refuses instead of stalling validation.
+func TestCommandMutatesAccountEnvironment_StraceFlatArgvLimit(t *testing.T) {
+	codex := accountScopedNames("codex", "CODEX_HOME")
+	flat := "strace codex " + strings.Repeat("src/file.o ", straceFlatArgvLimit)
+	require.True(t, commandMutatesAccountEnvironment(flat, codex),
+		"flat argv past the cap must refuse rather than do unbounded quadratic work")
+}
+
+// Wrapper and builtin names compare after shell escape resolution — `s\trace`
+// is `strace` to /bin/sh, and a match that only reads the raw spelling misses
+// it. Shell expansion is the same class: an unquoted glob, tilde, or brace
+// word can split or rewrite argv before the command sees it, so it fails
+// closed wherever a fixed literal is required.
+func TestCommandMutatesAccountEnvironment_EscapeAndExpansionResolved(t *testing.T) {
+	codex := accountScopedNames("codex", "CODEX_HOME")
+	for name := range accountShellStartupNames {
+		codex[name] = struct{}{}
+	}
+	cases := []struct {
+		command string
+		want    bool
+	}{
+		// Backslash escapes resolve before name matching, at the head, in a
+		// wrapper tail, and inside a strace argv's suffix judgments.
+		{`s\trace -E CODEX_HOME codex`, true},
+		{`un\set CODEX_HOME`, true},
+		{`e\nv CODEX_HOME=/other codex`, true},
+		{`valgrind s\trace -E CODEX_HOME codex`, true},
+		{`strace s\h -c 'unset CODEX_HOME; codex'`, true},
+		// An unquoted glob in command position can expand to env or another
+		// mutator, so the tail is judged as that invocation's argv.
+		{`strace* -E CODEX_HOME codex`, true},
+		{`e* CODEX_HOME=/other codex`, true},
+		// Unquoted brace expansion splits one word into several argv entries
+		// even under POSIX parsing; a brace word carrying -E or -o operands
+		// cannot be judged as the literal it spells.
+		{`strace {-E,CODEX_HOME} codex`, true},
+		{`e{nv,} CODEX_HOME=/other codex`, true},
+		{`strace {-o,'|env CODEX_HOME=/x true'} codex`, true},
+		// Quoted braces never expand, '{}'-shaped words are not brace
+		// expansions (xargs -I{} is its own marker syntax), and a glob head
+		// with a benign tail stays accepted.
+		{`strace '{-E,CODEX_HOME}' codex`, false},
+		{`xargs -I{} env codex {}`, false},
+		{`strace* codex`, false},
+		{`~/bin/tool arg`, false},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, commandMutatesAccountEnvironment(tc.command, codex),
+			"command %q", tc.command)
+	}
+}
+
+// The refusal names an unprovable word only when that word is why the command
+// refused — pinning it would change the verdict. A literal cause (the unset
+// builtin, a denied NAME=) keeps the generic guidance instead of sending the
+// user to pin an unrelated expansion.
+func TestValidateAccountEnvironmentCommand_UnprovableWordBlameIsCausal(t *testing.T) {
+	err := ValidateAccountEnvironmentCommand(
+		`echo "$HOME"; unset CODEX_HOME`, scopedProcessTabAccount())
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "$HOME",
+		"literal-cause refusal must not blame an unrelated dynamic word")
+
+	err = ValidateAccountEnvironmentCommand(
+		`env "$AF_WRAPPER" codex`, scopedProcessTabAccount())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "$AF_WRAPPER",
+		"pinning the named word must clear the refusal it is blamed for")
+}
+
 // The refusal error names the exact word af could not prove literal so the
 // user can pin a literal and self-correct — without it a fail-closed change is
 // a support burden, not a fixable message.

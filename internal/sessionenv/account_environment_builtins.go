@@ -11,7 +11,7 @@ func unwrapNohup(words []*syntax.Word) ([]*syntax.Word, bool) {
 		words = words[1:]
 	}
 	if len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal || strings.HasPrefix(option, "-") {
 			return nil, true
 		}
@@ -21,7 +21,7 @@ func unwrapNohup(words []*syntax.Word) ([]*syntax.Word, bool) {
 
 func unwrapNice(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -32,7 +32,7 @@ func unwrapNice(words []*syntax.Word) ([]*syntax.Word, bool) {
 			if len(words) < 2 {
 				return nil, true
 			}
-			if _, literal := literalShellWord(words[1]); !literal {
+			if _, literal := literalShellWordExpandableSafe(words[1]); !literal {
 				return nil, true
 			}
 			words = words[2:]
@@ -53,7 +53,7 @@ func unwrapNice(words []*syntax.Word) ([]*syntax.Word, bool) {
 
 func unwrapTimeout(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -68,7 +68,7 @@ func unwrapTimeout(words []*syntax.Word) ([]*syntax.Word, bool) {
 			if len(words) < 2 {
 				return nil, true
 			}
-			if _, literal := literalShellWord(words[1]); !literal {
+			if _, literal := literalShellWordExpandableSafe(words[1]); !literal {
 				return nil, true
 			}
 			words = words[2:]
@@ -90,7 +90,7 @@ func unwrapTimeout(words []*syntax.Word) ([]*syntax.Word, bool) {
 
 func unwrapSetsid(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -119,7 +119,7 @@ func unwrapSetsid(words []*syntax.Word) ([]*syntax.Word, bool) {
 
 func unwrapStdbuf(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -134,7 +134,7 @@ func unwrapStdbuf(words []*syntax.Word) ([]*syntax.Word, bool) {
 			if len(words) < 2 {
 				return nil, true
 			}
-			if _, literal := literalShellWord(words[1]); !literal {
+			if _, literal := literalShellWordExpandableSafe(words[1]); !literal {
 				return nil, true
 			}
 			words = words[2:]
@@ -162,7 +162,7 @@ func unwrapStdbuf(words []*syntax.Word) ([]*syntax.Word, bool) {
 // return and the nested shell removed the selected root before launch.
 func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -175,7 +175,7 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 			if len(words) < 2 {
 				return nil, true
 			}
-			if _, literal := literalShellWord(words[1]); !literal {
+			if _, literal := literalShellWordExpandableSafe(words[1]); !literal {
 				return nil, true
 			}
 			words = words[2:]
@@ -198,7 +198,7 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 // command it runs begins only after it.
 func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -223,7 +223,7 @@ func tasksetCommandAfterMask(words []*syntax.Word) ([]*syntax.Word, bool) {
 	if len(words) == 0 {
 		return nil, false
 	}
-	if _, literal := literalShellWord(words[0]); !literal {
+	if _, literal := literalShellWordExpandableSafe(words[0]); !literal {
 		return nil, true
 	}
 	return words[1:], false
@@ -243,7 +243,7 @@ func unwrapXargs(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Wor
 	marker := "{}"
 options:
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -290,7 +290,7 @@ options:
 					if len(words) < 2 {
 						return nil, true
 					}
-					arg, argLiteral = literalShellWord(words[1])
+					arg, argLiteral = literalShellWordExpandableSafe(words[1])
 					words = words[1:]
 				}
 				if !argLiteral || accountEnvironmentOperandDenied(arg, names) {
@@ -324,7 +324,7 @@ options:
 						if len(words) < 2 {
 							return nil, true
 						}
-						arg, argLiteral = literalShellWord(words[1])
+						arg, argLiteral = literalShellWordExpandableSafe(words[1])
 						words = words[1:]
 					}
 					if flags[idx] == 'I' {
@@ -348,7 +348,7 @@ options:
 		// item — nothing here to unwrap.
 		return nil, false
 	}
-	if _, literal := literalShellWord(words[0]); !literal {
+	if _, literal := literalShellWordExpandableSafe(words[0]); !literal {
 		return nil, true
 	}
 	for j := 0; j < len(words); j++ {
@@ -373,7 +373,7 @@ options:
 				return nil, true
 			}
 			for k := 0; k < operandEnd; k++ {
-				lit, ok := literalShellWord(words[j+1+k])
+				lit, ok := literalShellWordExpandableSafe(words[j+1+k])
 				if !ok {
 					return nil, true
 				}
@@ -418,7 +418,7 @@ func isLastBackgroundPidWord(word *syntax.Word) bool {
 
 func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			// `$!` is the ONE expansion that cannot turn into an option: the shell
 			// sets it to the last background pid and it is not assignable, so it is
@@ -452,7 +452,7 @@ func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct
 				if idx != len(flags)-1 || len(words) < 2 {
 					return true
 				}
-				target, literal := literalShellWord(words[1])
+				target, literal := literalShellWordExpandableSafe(words[1])
 				if !literal || accountEnvironmentOperandDenied(target, names) {
 					return true
 				}
@@ -468,7 +468,7 @@ func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct
 
 func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
 	for _, word := range words {
-		expression, literal := literalShellWord(word)
+		expression, literal := literalShellWordExpandableSafe(word)
 		if !literal || accountSubscriptInArithmetic(expression, names) {
 			return true
 		}
@@ -515,7 +515,7 @@ func isShellNameByte(value byte) bool {
 func arrayReadMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
 	options := true
 	for len(words) > 0 {
-		value, literal := literalShellWord(words[0])
+		value, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return true
 		}
@@ -531,7 +531,7 @@ func arrayReadMutatesAccountEnvironment(words []*syntax.Word, names map[string]s
 				if len(words) == 0 {
 					return true
 				}
-				if _, literal := literalShellWord(words[0]); !literal {
+				if _, literal := literalShellWordExpandableSafe(words[0]); !literal {
 					return true
 				}
 				words = words[1:]

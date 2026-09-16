@@ -320,17 +320,17 @@ func shellWordAssignmentName(word *syntax.Word) (string, bool) {
 }
 
 func wordEquals(word *syntax.Word, want string) bool {
-	value, literal := literalShellWord(word)
+	value, literal := literalShellWordExpandableSafe(word)
 	return literal && value == want
 }
 
 func wordBaseEquals(word *syntax.Word, want string) bool {
-	value, literal := literalShellWord(word)
+	value, literal := literalShellWordExpandableSafe(word)
 	return literal && strings.EqualFold(filepath.Base(value), want)
 }
 
 func isTrustedEnvWord(word *syntax.Word) bool {
-	value, literal := literalShellWord(word)
+	value, literal := literalShellWordExpandableSafe(word)
 	return literal && isTrustedEnvExecutable(value)
 }
 
@@ -376,7 +376,9 @@ func literalShellWord(word *syntax.Word) (string, bool) {
 
 // literalShellWordExpandableSafe is literalShellWord plus the guarantee that
 // /bin/sh -c cannot expand the word into different argv: unquoted literal parts
-// must carry no glob metacharacters (* ? [) and no leading ~, and backslash
+// must carry no glob metacharacters (* ? [), no unquoted brace-expansion open
+// ({ — {a,b} and {a..z} split one word into several argv entries under bash,
+// the /bin/sh of the supported macOS case), and no leading ~, and backslash
 // escapes are resolved so an escaped \| still reads as | to hazard checks that
 // inspect the resolved string. Quoted parts cannot glob and keep their raw
 // value, matching what strace would receive.
@@ -385,11 +387,12 @@ func literalShellWordExpandableSafe(word *syntax.Word) (string, bool) {
 		return "", false
 	}
 	var value strings.Builder
+	var braces braceExpansionState
 	first := true
 	for _, part := range word.Parts {
 		switch part := part.(type) {
 		case *syntax.Lit:
-			if !appendUnexpandedLit(&value, part.Value, first) {
+			if !appendUnexpandedLit(&value, part.Value, first, &braces) {
 				return "", false
 			}
 		case *syntax.SglQuoted:
@@ -414,7 +417,62 @@ func literalShellWordExpandableSafe(word *syntax.Word) (string, bool) {
 	return value.String(), true
 }
 
-func appendUnexpandedLit(value *strings.Builder, s string, wordStart bool) bool {
+// braceExpansionState tracks unquoted '{', '}', ',', and '..' across a word's
+// literal parts: an open brace region closed by '}' that contained a separator
+// is a brace expansion — bash splits it into several argv entries even in POSIX
+// mode. '{a}', '{}', and unclosed '{' stay literal, and quoted parts contribute
+// neither braces nor separators ('{a','b}' is literal to bash).
+type braceExpansionState struct {
+	depth int
+	sep   bool
+}
+
+func (b *braceExpansionState) feed(c byte, next byte, hasNext bool) (expanded bool, skip bool) {
+	switch c {
+	case '{':
+		b.depth++
+	case '}':
+		if b.depth > 0 {
+			b.depth--
+			if b.depth == 0 {
+				return b.sep, false
+			}
+		}
+	case ',':
+		if b.depth > 0 {
+			b.sep = true
+		}
+	case '.':
+		if b.depth > 0 && hasNext && next == '.' {
+			b.sep = true
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// unquotedBracketCloses reports whether the literal text starting at an
+// unquoted '[' forms a glob bracket expression: an unquoted ']' appears after
+// the member list. The first character after '[' is always a member (or the
+// '!'/ '^' negation marker), never a close.
+func unquotedBracketCloses(s string) bool {
+	members := 1
+	if len(s) > 1 && (s[1] == '!' || s[1] == '^') {
+		members = 2
+	}
+	for i := members; i < len(s); i++ {
+		if s[i] == '\\' {
+			i++
+			continue
+		}
+		if s[i] == ']' && i > members {
+			return true
+		}
+	}
+	return false
+}
+
+func appendUnexpandedLit(value *strings.Builder, s string, wordStart bool, braces *braceExpansionState) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c == '\\' {
@@ -427,8 +485,31 @@ func appendUnexpandedLit(value *strings.Builder, s string, wordStart bool) bool 
 			continue
 		}
 		switch c {
-		case '*', '?', '[':
+		case '*', '?':
 			return false
+		case '[':
+			// A bracket expression needs an unquoted ']' after the member
+			// list; a bare '[' or '[a' is literal to the shell, and a ']'
+			// as the first member (after an optional '!'/ '^' negation) is a
+			// literal member, not a close.
+			if !unquotedBracketCloses(s[i:]) {
+				break
+			}
+			return false
+		case '{', '}', ',', '.':
+			hasNext := i+1 < len(s)
+			var next byte
+			if hasNext {
+				next = s[i+1]
+			}
+			expanded, skip := braces.feed(c, next, hasNext)
+			if expanded {
+				return false
+			}
+			if skip {
+				i++
+				value.WriteByte('.')
+			}
 		case '~':
 			if wordStart && i == 0 {
 				return false
@@ -439,38 +520,94 @@ func appendUnexpandedLit(value *strings.Builder, s string, wordStart bool) bool 
 	return true
 }
 
-// firstUnprovableCommandWord names the first argv word af cannot prove is a
-// literal — an expansion or an expandable literal — so a refusal can point the
-// user at the exact word to pin. Empty when every word proves out (the refusal
-// then comes from a literal denied shape, which the generic message covers).
-func firstUnprovableCommandWord(command string) string {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
-		Parse(strings.NewReader(command), "")
-	if err != nil {
-		return ""
-	}
-	var found *syntax.Word
-	syntax.Walk(file, func(node syntax.Node) bool {
-		call, ok := node.(*syntax.CallExpr)
-		if !ok || found != nil {
-			return found == nil
+// unprovableWordCausedRefusal names the first argv word whose unprovability is
+// WHY the command refused — so the diagnostic can point the user at the exact
+// word to pin. It returns empty when the refusal has a literal cause instead:
+// a denied name, a mutating builtin, or a mutating node no word-pinning can
+// clear. Naming a dynamic word that is unrelated to the verdict would send the
+// user to fix something that cannot make the command pass, so
+// `echo "$HOME"; unset CODEX_HOME` keeps the generic message (the cause is the
+// literal unset) while `env "$X" codex` names "$X" (pinning it clears the
+// refusal).
+//
+// The test is causal, not positional: a call whose mutation survives pinning
+// every unprovable word to an inert literal — or that has no unprovable word at
+// all — is a literal cause. An assignment-shaped word keeps its provable name
+// when pinned (the denial lives in the name, not the dynamic value), so
+// `env CODEX_HOME=$X codex` is likewise a literal-cause refusal.
+func unprovableWordCausedRefusal(command string, names map[string]struct{}) string {
+	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
+		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
+		if err != nil {
+			continue
 		}
-		for _, word := range call.Args {
-			if _, safe := literalShellWordExpandableSafe(word); !safe {
-				found = word
+		var blamed *syntax.Word
+		literalCause := false
+		syntax.Walk(file, func(node syntax.Node) bool {
+			if literalCause {
 				return false
 			}
+			call, isCall := node.(*syntax.CallExpr)
+			if !isCall {
+				if nodeMutatesAccountEnvironment(node, names) {
+					literalCause = true
+					return false
+				}
+				return true
+			}
+			if !callMutatesAccountEnvironment(call, names) {
+				return true
+			}
+			pinned, first := pinnedCallArgs(call)
+			if first == nil {
+				literalCause = true
+				return false
+			}
+			substituted := &syntax.CallExpr{Assigns: call.Assigns, Args: pinned}
+			if callMutatesAccountEnvironment(substituted, names) {
+				literalCause = true
+				return false
+			}
+			if blamed == nil {
+				blamed = first
+			}
+			return true
+		})
+		if literalCause {
+			return ""
 		}
-		return true
-	})
-	if found == nil {
-		return ""
+		if blamed != nil {
+			var sb strings.Builder
+			if err := syntax.NewPrinter().Print(&sb, blamed); err != nil {
+				return ""
+			}
+			return sb.String()
+		}
 	}
-	var sb strings.Builder
-	if err := syntax.NewPrinter().Print(&sb, found); err != nil {
-		return ""
+	return ""
+}
+
+// pinnedCallArgs returns call.Args with every unprovable word replaced by an
+// inert literal placeholder, plus the first such word. An assignment-shaped
+// word keeps its provable NAME= prefix so a denied name still denies.
+func pinnedCallArgs(call *syntax.CallExpr) ([]*syntax.Word, *syntax.Word) {
+	var first *syntax.Word
+	args := make([]*syntax.Word, len(call.Args))
+	copy(args, call.Args)
+	for idx, arg := range call.Args {
+		if _, safe := literalShellWordExpandableSafe(arg); safe {
+			continue
+		}
+		if first == nil {
+			first = arg
+		}
+		replacement := "AF_UNPROVABLE_WORD"
+		if name, assignment := shellWordAssignmentName(arg); assignment {
+			replacement = name + "=AF_UNPROVABLE_WORD"
+		}
+		args[idx] = &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: replacement}}}
 	}
-	return sb.String()
+	return args, first
 }
 
 func appendLiteralShellPart(value *strings.Builder, part syntax.WordPart) bool {

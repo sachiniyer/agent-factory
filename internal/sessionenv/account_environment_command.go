@@ -113,7 +113,7 @@ func arithmeticAccountEnvironmentName(expr syntax.ArithmExpr) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return literalShellWord(word)
+	return literalShellWordExpandableSafe(word)
 }
 
 // accountEnvironmentEvaluationBudget bounds the work one command validation
@@ -222,7 +222,7 @@ func unwrapAccountCommand(
 		case isBareName(words[0], "exec"):
 			words = words[1:]
 			if len(words) > 0 {
-				option, literal := literalShellWord(words[0])
+				option, literal := literalShellWordExpandableSafe(words[0])
 				if !literal {
 					return nil, true
 				}
@@ -257,7 +257,7 @@ func unwrapAccountCommand(
 				words = words[1:]
 			}
 			if len(words) > 0 {
-				if _, literal := literalShellWord(words[0]); !literal {
+				if _, literal := literalShellWordExpandableSafe(words[0]); !literal {
 					return nil, true
 				}
 			}
@@ -373,6 +373,15 @@ func unrecognizedWrapperHidesAccountAssignment(
 	evaluation *evaluationBudget,
 ) bool {
 	strace := isAccountCommandName(words[0], "strace")
+	if _, safe := literalShellWordExpandableSafe(words[0]); !safe {
+		// The command name itself cannot be resolved to a fixed literal —
+		// glob or brace expansion can produce `env` (or another mutator) from
+		// a word like `e*`. Judge the tail as that invocation's argv, the same
+		// rule the scan applies to unprovable tail words below.
+		if envCallMutatesAccountEnvironment(words[1:], names, true, evaluation) {
+			return true
+		}
+	}
 	for i := 1; i < len(words); i++ {
 		word := words[i]
 		if isAccountCommandName(word, "env") {
@@ -384,7 +393,7 @@ func unrecognizedWrapperHidesAccountAssignment(
 			}
 			continue
 		}
-		literal, ok := literalShellWord(word)
+		literal, ok := literalShellWordExpandableSafe(word)
 		if !ok {
 			// An unprovable tail word can itself expand to `env` (or to a
 			// multiword `env NAME=value` after word splitting); judge the
@@ -428,7 +437,7 @@ func unrecognizedWrapperHidesAccountAssignment(
 				if i >= len(words) {
 					return true
 				}
-				value, ok := literalShellWord(words[i])
+				value, ok := literalShellWordExpandableSafe(words[i])
 				if !ok || accountEnvironmentOperandDenied(value, names) {
 					return true
 				}
@@ -457,7 +466,7 @@ func unrecognizedWrapperHidesAccountAssignment(
 
 func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {
 	for idx := 0; idx < len(words); idx++ {
-		option, literal := literalShellWord(words[idx])
+		option, literal := literalShellWordExpandableSafe(words[idx])
 		if !literal {
 			return true
 		}
@@ -467,7 +476,7 @@ func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {
 		if idx+1 >= len(words) {
 			return true
 		}
-		operand, literal := literalShellWord(words[idx+1])
+		operand, literal := literalShellWordExpandableSafe(words[idx+1])
 		if !literal || strings.Contains(operand, "[") {
 			return true
 		}
@@ -484,13 +493,13 @@ func unaryTestMutatesAccountEnvironment(test *syntax.UnaryTest) bool {
 	if !ok {
 		return true
 	}
-	operand, literal := literalShellWord(word)
+	operand, literal := literalShellWordExpandableSafe(word)
 	return !literal || strings.Contains(operand, "[")
 }
 
 func unwrapCommandBuiltin(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -513,7 +522,7 @@ func unwrapCommandBuiltin(words []*syntax.Word) ([]*syntax.Word, bool) {
 		words = words[1:]
 	}
 	if len(words) > 0 {
-		if _, literal := literalShellWord(words[0]); !literal {
+		if _, literal := literalShellWordExpandableSafe(words[0]); !literal {
 			return nil, true
 		}
 	}
@@ -526,7 +535,7 @@ func unwrapCommandBuiltin(words []*syntax.Word) ([]*syntax.Word, bool) {
 func envCallArgvParse(words []*syntax.Word) (envcommand.Invocation, error) {
 	literals := make([]string, 0, len(words))
 	for _, word := range words {
-		value, literal := literalShellWord(word)
+		value, literal := literalShellWordExpandableSafe(word)
 		if !literal {
 			name, assignment := shellWordAssignmentName(word)
 			if !assignment {
@@ -595,7 +604,7 @@ func shellCommandIsUnproven(words []*syntax.Word) bool {
 	if len(words) == 0 {
 		return false
 	}
-	command, literal := literalShellWord(words[0])
+	command, literal := literalShellWordExpandableSafe(words[0])
 	if !literal || !knownShellName(filepath.Base(command)) {
 		return false
 	}
@@ -606,12 +615,19 @@ func accountShellCommandWordsProven(words []*syntax.Word) bool {
 	if len(words) == 0 {
 		return false
 	}
-	command, _ := literalShellWord(words[0])
+	command, _ := literalShellWordExpandableSafe(words[0])
 	// A sibling shell may read profiles, stdin, a script, or a command string.
 	// The only statically proven form is the same absolute, startup-free command
 	// AccountShellCommand generates for a dedicated shell tab.
-	args, literal := literalCommandArgs(words)
-	if !literal || !filepath.IsAbs(command) {
+	args := make([]string, len(words))
+	for idx, word := range words {
+		arg, literal := literalShellWordExpandableSafe(word)
+		if !literal {
+			return false
+		}
+		args[idx] = arg
+	}
+	if !filepath.IsAbs(command) {
 		return false
 	}
 	want := trustedAccountShellArgs(command)
@@ -628,7 +644,7 @@ func knownShellName(name string) bool {
 }
 
 func isAccountCommandName(word *syntax.Word, want string) bool {
-	value, literal := literalShellWord(word)
+	value, literal := literalShellWordExpandableSafe(word)
 	return literal && filepath.Base(value) == want
 }
 
@@ -636,7 +652,7 @@ func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struc
 	functionsOnly := false
 	options := true
 	for _, word := range words {
-		value, literal := literalShellWord(word)
+		value, literal := literalShellWordExpandableSafe(word)
 		if !literal {
 			return true
 		}
@@ -699,7 +715,7 @@ func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struc
 func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 	keywordMode := false
 	for idx := 0; idx < len(words); idx++ {
-		value, literal := literalShellWord(words[idx])
+		value, literal := literalShellWordExpandableSafe(words[idx])
 		if !literal {
 			// An operand this parser cannot evaluate could expand to -k.
 			return true
@@ -730,7 +746,7 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 				// A bare `set -o` prints the current settings.
 				continue
 			}
-			mode, ok := literalShellWord(words[idx+1])
+			mode, ok := literalShellWordExpandableSafe(words[idx+1])
 			if !ok {
 				return true
 			}
@@ -764,7 +780,7 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 			if idx+1 >= len(words) {
 				// No following word: bare cluster with `o`, prints settings.
 			} else {
-				mode, ok := literalShellWord(words[idx+1])
+				mode, ok := literalShellWordExpandableSafe(words[idx+1])
 				if !ok {
 					return true
 				}
@@ -804,7 +820,7 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 // maintain the lookup cache and leave every name meaning what it meant.
 func hashMutatesAccountEnvironment(words []*syntax.Word) bool {
 	for _, word := range words {
-		value, literal := literalShellWord(word)
+		value, literal := literalShellWordExpandableSafe(word)
 		if !literal {
 			return true
 		}
@@ -837,7 +853,7 @@ func declarationMutatesAccountEnvironment(words []*syntax.Word, names map[string
 			options = false
 			continue
 		}
-		value, literal := literalShellWord(word)
+		value, literal := literalShellWordExpandableSafe(word)
 		if !literal {
 			return true
 		}
@@ -869,7 +885,7 @@ func readMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct
 		words = words[1:]
 	}
 	for _, word := range words {
-		value, literal := literalShellWord(word)
+		value, literal := literalShellWordExpandableSafe(word)
 		if !literal {
 			return true
 		}
@@ -887,7 +903,7 @@ func getoptsMutatesAccountEnvironment(words []*syntax.Word, names map[string]str
 	if len(words) < 2 {
 		return false
 	}
-	name, literal := literalShellWord(words[1])
+	name, literal := literalShellWordExpandableSafe(words[1])
 	if !literal {
 		return true
 	}
@@ -898,7 +914,7 @@ func printfMutatesAccountEnvironment(words []*syntax.Word, names map[string]stru
 	if len(words) == 0 {
 		return false
 	}
-	option, literal := literalShellWord(words[0])
+	option, literal := literalShellWordExpandableSafe(words[0])
 	if !literal {
 		return true
 	}
@@ -908,7 +924,7 @@ func printfMutatesAccountEnvironment(words []*syntax.Word, names map[string]stru
 	if option != "-v" || len(words) < 2 {
 		return false
 	}
-	name, literal := literalShellWord(words[1])
+	name, literal := literalShellWordExpandableSafe(words[1])
 	if !literal {
 		return true
 	}

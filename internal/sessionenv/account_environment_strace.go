@@ -8,8 +8,12 @@ import (
 
 // straceFlatArgvLimit bounds the suffix scan's flat fan-out. A command line
 // with more words than this is not an ordinary invocation, and scanning every
-// suffix would do quadratic real work below the shared meter.
-const straceFlatArgvLimit = 8192
+// suffix would do quadratic real work below the shared meter: each suffix
+// judgment re-walks its tail, so the meter's one slot per suffix understates
+// the true cost. The cap is set where the quadratic stays sub-second — a
+// measured ~8000-word flat argv took ~13s, while this bound lands under half
+// a million pair-judgments per parse pass.
+const straceFlatArgvLimit = 1024
 
 // unwrapStrace judges a strace invocation without a grammar for its options.
 // strace's option set is an open grammar — operand spellings and long-option

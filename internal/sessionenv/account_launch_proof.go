@@ -146,7 +146,7 @@ func ValidateAccountEnvironmentCommand(command string, account Account) error {
 		overrideNames[name] = struct{}{}
 	}
 	if commandMutatesAccountEnvironment(command, overrideNames) {
-		if word := firstUnprovableCommandWord(command); word != "" {
+		if word := unprovableWordCausedRefusal(command, overrideNames); word != "" {
 			return accountCommandValidationErrorf(
 				"account %q cannot scope sibling environment for agent %q: its command sets an identity or shell-startup variable itself, which can override the account directory — the command word %q is not provably a literal, so af cannot prove what it expands to: replace it with a literal value (a fixed path, name, or option) and retry",
 				account.Name, account.Agent, word)
