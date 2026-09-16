@@ -180,8 +180,8 @@ func TestLifecycleActionIsProjectionOnly(t *testing.T) {
 func TestIsRootIsSharedAcrossInstanceAndProjection(t *testing.T) {
 	for _, title := range []string{"root", "Root", "  root  ", "worker", ""} {
 		data := (&Instance{ID: "id", Title: title, liveness: LiveReady}).ToInstanceData()
-		require.Equal(t, IsReservedTitle(title), data.IsRoot,
-			"projected IsRoot must equal session.IsReservedTitle for %q", title)
+		require.Equal(t, IsReservedRecordTitle(title, data.BackendType), data.IsRoot,
+			"projected IsRoot must equal session.IsReservedRecordTitle for %q", title)
 	}
 
 	rootData := (&Instance{ID: "root-id", Title: "root", liveness: LiveReady}).ToInstanceData()

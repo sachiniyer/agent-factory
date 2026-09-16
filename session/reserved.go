@@ -49,11 +49,31 @@ var reservedTmuxName = tmux.SanitizedNameForRepo(RootSessionTitle, "")
 // The admission question (ReservedTitleCollision) is the wider one: a create
 // may not take even a lookalike of the reserved name, while a record that
 // predates admission keeps the identity its tmux name actually claims.
+//
+// IsReservedTitle answers the LOCAL-tmux question: whether the title claims
+// the reserved name in the local tmux namespace. That is the right form for
+// admission-time callers and for a record bound to the local backend; a record
+// whose persisted backend is known must go through IsReservedRecordTitle.
 func IsReservedTitle(title string) bool {
-	if tmux.SanitizedNameForRepo(title, "") == reservedTmuxName {
+	return IsReservedRecordTitle(title, config.BackendLocal)
+}
+
+// IsReservedRecordTitle is IsReservedTitle asked of a persisted record whose
+// backend type is known (InstanceData.BackendType / Instance.BackendType). The
+// derived-tmux-name clause only applies to a record that claims a name in the
+// LOCAL tmux namespace ("" or "local"): a separately provisioned backend
+// (docker/ssh/sandbox/remote) has no local tmux name for af_root to collide
+// with, so a pre-#3732 remote record titled "ro ot" keeps ordinary identity —
+// archivable, recoverable, and unable to arm rootKilledAt — while the spelling
+// clause still marks a remote "root" as the reserved session it is.
+func IsReservedRecordTitle(title, backendType string) bool {
+	if strings.EqualFold(strings.TrimSpace(title), RootSessionTitle) {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(title), RootSessionTitle)
+	if backendType == "" || backendType == config.BackendLocal {
+		return tmux.SanitizedNameForRepo(title, "") == reservedTmuxName
+	}
+	return false
 }
 
 // ReservedTitleCollision returns the reserved title a candidate would claim,

@@ -273,7 +273,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 	}
 	compared, drifted, unresolved := 0, 0, 0
 	for _, inst := range instances {
-		if !session.IsReservedTitle(inst.Title) || rootSessionIsInert(inst) {
+		if !session.IsReservedRecordTitle(inst.Title, inst.BackendType) || rootSessionIsInert(inst) {
 			continue
 		}
 		if inst.InFlightOp != session.OpNone || inst.Status == session.Loading || inst.Status == session.Deleting {

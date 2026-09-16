@@ -288,7 +288,7 @@ func lostSessionWantsRestore(v session.LifecycleView) bool {
 	if v.ValidateRuntimeAction(session.RuntimeActionRecoverLost) != nil {
 		return false
 	}
-	return !session.IsReservedTitle(v.Title) && !v.LostRestoreGaveUp
+	return !session.IsReservedRecordTitle(v.Title, v.BackendType) && !v.LostRestoreGaveUp
 }
 
 // canAutoRestoreLostSession reports whether RestoreLostSessions will keep trying

@@ -408,7 +408,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		// cannot outlive the session it describes (#3031).
 		m.forgetSessionRuntimeStateLocked(repoID, instance)
 	}
-	if session.IsReservedTitle(req.Title) {
+	if session.IsReservedRecordTitle(instance.Title, instance.BackendType()) {
 		// An explicit kill is honored only briefly: the ensure loop suppresses
 		// re-creation for rootKillHealDelay, then self-heals a still-configured
 		// root (#1223). Config (root_agents) is the source of truth — removing

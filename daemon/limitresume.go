@@ -178,7 +178,7 @@ func (m *Manager) resumeLimitedSession(
 			return
 		}
 	}
-	if inst.UserKilled() || session.IsReservedTitle(inst.Title) {
+	if inst.UserKilled() || session.IsReservedRecordTitle(inst.Title, inst.BackendType()) {
 		return
 	}
 
@@ -286,7 +286,7 @@ func (m *Manager) resumeLimitedSession(
 	current := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
-	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || !accountSwapScheduledResumeEligible(inst) {
+	if killing || current != inst || inst.UserKilled() || session.IsReservedRecordTitle(inst.Title, inst.BackendType()) || !accountSwapScheduledResumeEligible(inst) {
 		return
 	}
 	if accountSwap != nil {

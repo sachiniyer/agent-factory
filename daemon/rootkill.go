@@ -287,7 +287,7 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		m.forgetSessionRuntimeStateLocked(repoID, instance)
 		removed = true
 	}
-	if session.IsReservedTitle(instance.Title) {
+	if session.IsReservedRecordTitle(instance.Title, instance.BackendType()) {
 		// Arm the grace window the interrupted KillSession never reached
 		// (#1844). Without this the ensure loop sees no rootKilledAt and
 		// re-creates the root on the next tick, so a kill that happened to be

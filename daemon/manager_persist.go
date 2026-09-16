@@ -699,8 +699,10 @@ func (m *Manager) clearGhostCleanupStall(key, stableID string) {
 // completeLateGhostKill applies the same observable tail as a synchronous ghost
 // kill after its identity-anchored worker removes the durable row. Root grace is
 // armed before publishing removal so observers cannot reinterpret it as live.
-func (m *Manager) completeLateGhostKill(repoID, title, stableID string) {
-	if session.IsReservedTitle(title) {
+// The deleted row's backend type scopes the reserved-title identity: a ghost
+// record bound to a provisioned backend never claimed the local af_root name.
+func (m *Manager) completeLateGhostKill(repoID, title, stableID, backendType string) {
+	if session.IsReservedRecordTitle(title, backendType) {
 		m.mu.Lock()
 		m.rootKilledAt[repoID] = nowFunc()
 		m.mu.Unlock()
@@ -742,14 +744,14 @@ var (
 // set, so it must fail closed before deletion.
 func deleteLateGhostSessionRecord(
 	m *Manager, repoID, title, stableID string, teardownErr error,
-) (bool, error) {
+) (bool, string, error) {
 	storage, err := session.NewStorage(config.LoadState(), repoID)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	rows, err := storage.LoadInstanceData()
 	if err != nil {
-		return false, fmt.Errorf("load account-limit evidence for late ghost session %q: %w", title, err)
+		return false, "", fmt.Errorf("load account-limit evidence for late ghost session %q: %w", title, err)
 	}
 	var evidence session.InstanceData
 	for _, row := range rows {
@@ -762,7 +764,11 @@ func deleteLateGhostSessionRecord(
 		evidence = row
 		break
 	}
-	return m.deleteSessionRecord(repoID, title, stableID, teardownErr, evidence)
+	deleted, err := m.deleteSessionRecord(repoID, title, stableID, teardownErr, evidence)
+	// The deleted row's BackendType rides out with the verdict so the caller can
+	// scope reserved-title identity (IsReservedRecordTitle) to the record that
+	// was actually removed rather than guessing it from the title.
+	return deleted, evidence.BackendType, err
 }
 
 // reconcileLateGhostCleanup consumes the descriptor worker's definitive result.
@@ -791,11 +797,12 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 			err := m.stopVSCodeForInstance(key, stableID)
 			if err == nil {
 				var deleted bool
-				deleted, err = lateGhostDeleteSessionRecord(m, repoID, title, stableID, nil)
+				var backendType string
+				deleted, backendType, err = lateGhostDeleteSessionRecord(m, repoID, title, stableID, nil)
 				if err == nil {
 					m.clearGhostCleanupStall(key, stableID)
 					if deleted {
-						m.completeLateGhostKill(repoID, title, stableID)
+						m.completeLateGhostKill(repoID, title, stableID, backendType)
 						m.info().Printf("ghost session %q: reconciled late descriptor cleanup and removed its durable row", title)
 					} else {
 						m.info().Printf("ghost session %q: late descriptor cleanup belongs to a replaced row; releasing its process fence", title)

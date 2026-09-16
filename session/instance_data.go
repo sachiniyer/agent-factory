@@ -34,7 +34,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		CanKill:                  canKillFor(i.ID, i.inFlightOp),
 		CanHandoff:               i.canHandoffLocked(),
 		CurrentAgent:             i.currentAgentNameLocked(),
-		IsRoot:                   IsReservedTitle(i.Title),
+		IsRoot:                   IsReservedRecordTitle(i.Title, i.backendTypeLocked()),
 		ModelChange:              agentModelChangeForLiveness(i.agentModelChange, i.liveness),
 		ArchiveWarning:           i.archiveWarning,
 		LostRestoreFailure:       cloneLostRestoreFailure(i.lostRestoreFailure),
@@ -63,7 +63,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	data.archivePushCompleted = i.archivePushCompleted
 
 	if i.backend != nil {
-		data.BackendType = i.backend.Type()
+		data.BackendType = i.backendTypeLocked()
 		// Project the per-kind tab verdict rather than leaving clients to infer one
 		// from BackendType (#3060). Computed here, on the snapshot every surface
 		// reads, so the TUI, the web UI and the API all get the same answer.

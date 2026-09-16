@@ -603,9 +603,10 @@ func instanceTitleExistsInScope(repoID, title string) (bool, error) {
 // scopedInstance is a persisted session paired with the repo ID it belongs to,
 // which the broadcast delivery path needs to address the daemon SendPrompt RPC.
 type scopedInstance struct {
-	RepoID string
-	Title  string
-	Status session.Status
+	RepoID      string
+	Title       string
+	Status      session.Status
+	BackendType string
 }
 
 // scopedInstancesForRepo lists one repo's persisted sessions with their repo ID
@@ -619,7 +620,7 @@ func scopedInstancesForRepo(repoID string) ([]scopedInstance, error) {
 	}
 	out := make([]scopedInstance, 0, len(instances))
 	for i := range instances {
-		out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
+		out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status, BackendType: instances[i].BackendType})
 	}
 	return out, nil
 }

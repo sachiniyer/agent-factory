@@ -164,12 +164,12 @@ func TestLateGhostCleanup_DeleteFailureIsRetriedFromDefinitiveSuccess(t *testing
 	var attempts atomic.Int32
 	retried := make(chan struct{})
 	lateGhostCleanupRetryInterval = 5 * time.Millisecond
-	lateGhostDeleteSessionRecord = func(_ *Manager, _, _, _ string, _ error) (bool, error) {
+	lateGhostDeleteSessionRecord = func(_ *Manager, _, _, _ string, _ error) (bool, string, error) {
 		if attempts.Add(1) == 1 {
-			return false, errors.New("transient instances lock failure")
+			return false, "", errors.New("transient instances lock failure")
 		}
 		retried <- struct{}{}
-		return true, nil
+		return true, "", nil
 	}
 	t.Cleanup(func() {
 		lateGhostDeleteSessionRecord = previousDelete
@@ -294,9 +294,9 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 
 	previousLateDelete := lateGhostDeleteSessionRecord
 	releaseFinalizer := make(chan struct{})
-	lateGhostDeleteSessionRecord = func(*Manager, string, string, string, error) (bool, error) {
+	lateGhostDeleteSessionRecord = func(*Manager, string, string, string, error) (bool, string, error) {
 		<-releaseFinalizer
-		return false, nil
+		return false, "", nil
 	}
 	previousDeleteTimeout := session.InstanceDeleteLockTimeout
 	session.InstanceDeleteLockTimeout = 25 * time.Millisecond
@@ -436,9 +436,9 @@ func TestLateGhostCleanup_SuccessCompletesRootKill(t *testing.T) {
 
 	previousDelete := lateGhostDeleteSessionRecord
 	deleted := make(chan struct{})
-	lateGhostDeleteSessionRecord = func(*Manager, string, string, string, error) (bool, error) {
+	lateGhostDeleteSessionRecord = func(*Manager, string, string, string, error) (bool, string, error) {
 		close(deleted)
-		return true, nil
+		return true, "", nil
 	}
 	t.Cleanup(func() { lateGhostDeleteSessionRecord = previousDelete })
 

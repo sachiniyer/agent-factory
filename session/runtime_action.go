@@ -145,7 +145,7 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 		// had picked an agent and confirmed the swap (#2436). A rule each caller has
 		// to remember separately is one a caller will forget; this is the question
 		// they already share.
-		if IsReservedTitle(v.Title) {
+		if IsReservedRecordTitle(v.Title, v.BackendType) {
 			return fmt.Errorf("session %q is the daemon-managed root agent and cannot be handed off", v.Title)
 		}
 		if v.InFlightOp != OpNone {

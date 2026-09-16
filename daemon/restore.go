@@ -122,7 +122,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreLostOrDead); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
-	if session.IsReservedTitle(instance.Title) {
+	if session.IsReservedRecordTitle(instance.Title, instance.BackendType()) {
 		return "", fmt.Errorf("cannot manually restore reserved session %q", title)
 	}
 	if !instance.Capabilities().Recover {

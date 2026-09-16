@@ -123,3 +123,31 @@ func TestIsReservedTitleCoversExactlyWhatARecordCanClaim(t *testing.T) {
 		}
 	}
 }
+
+// TestIsReservedRecordTitleScopesDerivedNameToLocalTmux pins the record-identity
+// boundary: the derived-tmux-name clause exists because two records cannot own
+// one local tmux session, so it only applies to a record that claims a name in
+// the local tmux namespace. A pre-#3732 remote record titled "ro ot" has no
+// local tmux name to collide with af_root and keeps ordinary identity; the
+// spelling clause still marks a remote "root" as reserved.
+func TestIsReservedRecordTitleScopesDerivedNameToLocalTmux(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		for _, title := range []string{"ro ot", "r o o t", "ro\tot", "ro  ot"} {
+			if IsReservedRecordTitle(title, backendType) {
+				t.Fatalf("IsReservedRecordTitle(%q, %q) = true: a provisioned-backend record claims no local tmux name", title, backendType)
+			}
+		}
+		for _, title := range []string{"root", "Root", " ROOT "} {
+			if !IsReservedRecordTitle(title, backendType) {
+				t.Fatalf("IsReservedRecordTitle(%q, %q) = false: the reserved spelling holds on any backend", title, backendType)
+			}
+		}
+	}
+	for _, backendType := range []string{"", "local"} {
+		for _, title := range []string{"ro ot", "r o o t"} {
+			if !IsReservedRecordTitle(title, backendType) {
+				t.Fatalf("IsReservedRecordTitle(%q, %q) = false: a local record deriving af_root IS the reserved session", title, backendType)
+			}
+		}
+	}
+}

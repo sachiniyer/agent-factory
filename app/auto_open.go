@@ -15,7 +15,7 @@ func firstAutoOpenCandidate(instances []*session.Instance) *session.Instance {
 		return nil
 	}
 	for _, inst := range instances {
-		if !session.IsReservedTitle(inst.Title) {
+		if !session.IsReservedRecordTitle(inst.Title, inst.BackendType()) {
 			return inst
 		}
 	}
