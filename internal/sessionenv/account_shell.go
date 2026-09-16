@@ -46,7 +46,7 @@ func AccountShellCommand(shell string) (string, error) {
 
 	args := trustedAccountShellArgs(words[0])
 	if args == nil {
-		return "", fmt.Errorf("shell %q has no credential-safe account launch mode; supported system shells are bash, csh, dash, ksh, mksh, sh, and tcsh directly under /bin or /usr/bin", words[0])
+		return "", fmt.Errorf("shell %q has no credential-safe account launch mode; supported system shells are bash, csh, dash, ksh, mksh, sh, tcsh, and zsh directly under /bin or /usr/bin", words[0])
 	}
 	command := shellquote.Quote(words[0])
 	for _, arg := range args {
@@ -63,6 +63,15 @@ func accountShellArgs(name string) []string {
 		return []string{"-f", "-i"}
 	case "sh", "dash", "ksh", "mksh":
 		return []string{"-i"}
+	case "zsh":
+		// -f (NO_RCS) skips every startup file zsh can skip — the user's
+		// .zshenv/.zprofile/.zshrc/.zlogin and the global zprofile/zshrc/zlogin.
+		// The one residue is /etc/zshenv, which zsh reads unconditionally by
+		// design; it is root-owned, the same operator-controlled trust class
+		// this list already assigns to /bin and /usr/bin executables, so
+		// refusing zsh over it would trust the binary less than the file
+		// system it execs from (#4471).
+		return []string{"-f", "-i"}
 	default:
 		return nil
 	}

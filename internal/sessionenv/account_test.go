@@ -281,6 +281,7 @@ func TestAccountShellCommandDisablesStartupFiles(t *testing.T) {
 	for shell, want := range map[string]string{
 		"/bin/bash": "/bin/bash --noprofile --norc -i",
 		"/bin/csh":  "/bin/csh -f -i",
+		"/bin/zsh":  "/bin/zsh -f -i",
 	} {
 		command, err := AccountShellCommand(shell)
 		require.NoError(t, err)
@@ -300,7 +301,7 @@ func TestAccountShellCommandDisablesStartupFiles(t *testing.T) {
 }
 
 func TestAccountShellCommandRefusesShellsWithoutCredentialSafeStartup(t *testing.T) {
-	for _, shell := range []string{"/bin/fish", "/bin/zsh", "/opt/company/bash"} {
+	for _, shell := range []string{"/bin/fish", "/opt/company/bash"} {
 		_, err := AccountShellCommand(shell)
 		require.Error(t, err, "%s can restore identity variables after the account environment is installed", shell)
 		require.Contains(t, err.Error(), "no credential-safe account launch mode")
