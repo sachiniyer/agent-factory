@@ -11323,13 +11323,14 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   let accounts = { entries: [], agents: [] };
   let accountsLoaded = !callbacks.loadAccounts;
   let accountsFailed = false;
-  const requiresAccount = (agent) => agent === currentAgent || !!callbacks.currentAccount;
+  const scopableTarget = (agent) => accountsFailed || accountAgentSupported(accounts, agent);
+  const requiresAccount = (agent) => agent === currentAgent || !!callbacks.currentAccount && scopableTarget(agent);
   let accountRows = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
   accountSelect.setAttribute("aria-label", "New account");
   const syncAccountSelection = () => {
-    accountHint.textContent = accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
+    accountHint.textContent = callbacks.currentAccount && !scopableTarget(agentSelect.value) ? `${agentSelect.value} cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
     confirmBtn.disabled = !accountsLoaded || !agentSelect.value || requiresAccount(agentSelect.value) && !accountSelect.value;
   };
   const refreshAccounts2 = () => {
@@ -11364,7 +11365,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
       agent,
       agent === currentAgent ? callbacks.currentAccount : ""
     ).length > 0;
-    const choices = catalogChoices.filter((choice) => !callbacks.currentAccount || hasAccount(choice.value));
+    const choices = catalogChoices.filter((choice) => !callbacks.currentAccount || hasAccount(choice.value) || !scopableTarget(choice.value));
     if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
       choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
     }

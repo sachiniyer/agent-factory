@@ -124,7 +124,7 @@ func TestHandoffScopedOffersAmbientDropRows(t *testing.T) {
 	require.Equal(t, []string{"", "", "", ""}, h.handoffAccounts)
 	h.selectionOverlay.SetSelectedIndex(0)
 	h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
-	rendered := h.confirmationOverlay.Render()
+	rendered := flatten(h.confirmationOverlay.Render())
 	require.Contains(t, rendered, "aider cannot carry an account")
 	require.Contains(t, rendered, `"work" scope is dropped`)
 }
