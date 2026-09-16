@@ -668,6 +668,46 @@ function isDefinitiveRateLimitResponse(error) {
   return Boolean(error?.response) && isRateLimitError(error);
 }
 
+// The rate-limit answer for a WRAPPED error. retryFailure preserves the
+// transport error on `cause` but strips its headers and GraphQL name, so
+// isRateLimitError alone can miss the failure it wraps; the retry-exhausted
+// message ("could not invalidate aggregate …: API rate limit exceeded for
+// installation") is itself the record. Walking the chain covers both (#4461).
+function isRateLimitFailure(error) {
+  for (let current = error; current; current = current.cause) {
+    if (isRateLimitError(current)) {
+      return true;
+    }
+    if (/(?:API|secondary) rate limit|rate limit exceeded|abuse detection/i.test(current?.message || "")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A sentence naming the throttle window when the failure carries it, so an
+// UNKNOWN verdict can say when evaluation is worth retrying (#4461).
+function rateLimitResetSentence(error) {
+  for (let current = error; current; current = current.cause) {
+    if (!isRateLimitFailure(current)) {
+      continue;
+    }
+    const headers = githubErrorHeaders(current);
+    const resetSeconds = Number(headers["x-ratelimit-reset"]);
+    if (Number.isFinite(resetSeconds) && resetSeconds > 0) {
+      return ` GitHub reports the rate limit resets at ${new Date(resetSeconds * 1000).toISOString()}.`;
+    }
+    const retryAfter = Number(headers["retry-after"]);
+    if (Number.isFinite(retryAfter) && retryAfter >= 0) {
+      return ` GitHub asks for a retry in ${retryAfter}s.`;
+    }
+  }
+  if (isRateLimitFailure(error)) {
+    return " Retry once the GitHub API rate-limit window resets.";
+  }
+  return "";
+}
+
 function retryDelayMilliseconds(error, fallback) {
   if (!isRateLimitError(error)) {
     return fallback;
@@ -1585,11 +1625,14 @@ async function invalidateAggregateDecision({ github, context, core, headSha }) {
     throw new Error(`Invalid head SHA for Auto Gate aggregate invalidation: ${headSha}`);
   }
   const decision = {
-    // Create a new failure before any API-dependent reads. If target resolution,
-    // association lookup, or evaluation fails, the newest fixed check is already
-    // non-green and the prior PASS cannot remain authoritative.
+    // Make the newest fixed check non-green before any API-dependent reads. If
+    // target resolution, association lookup, or evaluation fails, the prior
+    // PASS cannot remain authoritative. The conclusion is neutral, not failure:
+    // "waiting for a fresh evaluation" is not a verdict about the code, and a
+    // red that can mean "the gate ran out of API quota" trains people to
+    // ignore red (#4461). Neutral still blocks the required check.
     status: "completed",
-    conclusion: "failure",
+    conclusion: "neutral",
     output: {
       title: AGGREGATE_WAITING_TITLE,
       summary:
@@ -1627,20 +1670,35 @@ async function blockAggregateEvaluation({
   headSha,
   checkRunId,
   reason,
+  cause,
 }) {
   const sha = normalizeHeadSha(headSha);
   if (!sha) {
     throw new Error(`Invalid head SHA for blocked Auto Gate aggregate: ${headSha}`);
   }
   const detail = String(reason || "required GitHub read failed").replace(/^BLOCKED:\s*/i, "");
+  // The reset detail rides the error where one exists; where only the reason
+  // string survives (a cross-job env, an evaluate() summary) the message itself
+  // is the record that the throttle was the cause.
+  const resetClause =
+    rateLimitResetSentence(cause) ||
+    (/(?:API|secondary) rate limit|rate limit exceeded|abuse detection/i.test(detail)
+      ? " Retry once the GitHub API rate-limit window resets."
+      : "");
   const summary =
-    `${detail}. Auto Gate did not infer an empty PR set or any PR state from the failed read; ` +
-    "this commit remains blocked until a complete evaluation succeeds.";
+    `${detail}. Auto Gate did not evaluate this commit and published no verdict about it: ` +
+    "it did not infer an empty PR set or any PR state from the failed read, and no " +
+    "previously reached decision for an exact (PR, head) pair was consumed. This commit " +
+    `remains blocked until a complete evaluation succeeds.${resetClause}`;
   const decision = {
+    // Neutral, not failure: a could-not-evaluate state is not a defect verdict,
+    // and the check-run API has a real conclusion for it. Neutral never rounds
+    // to green — a required check still needs success — but it must not render
+    // the same red as a PR that was actually evaluated and failed (#4461).
     status: "completed",
-    conclusion: "failure",
+    conclusion: "neutral",
     output: {
-      title: "BLOCKED: Auto Gate could not complete a required GitHub read",
+      title: "UNKNOWN: Auto Gate could not evaluate this commit",
       summary,
     },
   };
@@ -1653,7 +1711,7 @@ async function blockAggregateEvaluation({
     decision,
     checkRunId,
   });
-  core.notice(`BLOCKED: ${detail}`);
+  core.notice(`UNKNOWN: ${detail}`);
   return {
     ok: false,
     headSha: sha,
@@ -1692,6 +1750,7 @@ async function beginAggregateDecision({ github, context, core, headSha }) {
       headSha: sha,
       checkRunId: invalidated.checkRunId,
       reason: formatError(error),
+      cause: error,
     });
   }
   return {
@@ -1844,6 +1903,7 @@ async function reportAggregateDecision({
       headSha,
       checkRunId,
       reason: formatError(error),
+      cause: error,
     });
   }
   if (checkRunId) {
@@ -2036,6 +2096,7 @@ async function processAggregateHead({
         headSha: pending.headSha,
         checkRunId: pending.checkRunId,
         reason: formatError(error),
+        cause: error,
       });
       return { state: "evaluation-error", pending, aggregate };
     }
@@ -2107,6 +2168,7 @@ async function processAggregateHead({
       headSha: pending.headSha,
       checkRunId: pending.checkRunId,
       reason: formatError(error),
+      cause: error,
     });
     return { state: "evaluation-error", pending, aggregate: blocked };
   }
@@ -2239,6 +2301,7 @@ async function processAggregateHead({
           headSha: pending.headSha,
           checkRunId: invalidated.checkRunId,
           reason: formatError(error),
+          cause: error,
         });
         return { state: "evaluation-error", pending, aggregate: blocked, invalidated };
       }
@@ -3253,7 +3316,9 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
           check.name === AUTO_GATE_DECISION_CHECK &&
           check.external_id === aggregateExternalId &&
           check.app?.id === GITHUB_ACTIONS_APP_ID &&
-          check.conclusion === "failure" &&
+          // The WAITING title is the invalidation marker itself; its conclusion
+          // was failure before #4461 made it neutral, and either generation can
+          // be the newer one while both shapes coexist.
           check.output?.title?.startsWith(AGGREGATE_WAITING_TITLE)
         );
       }),
@@ -6468,6 +6533,7 @@ module.exports = {
   evaluateAggregateDecision,
   evaluateAggregateFresh,
   invalidateAggregateDecision,
+  isRateLimitFailure,
   isReadFailure,
   merge,
   processAggregateHead,

@@ -122,6 +122,25 @@ jobs:
                   readFailureReason: process.env.READ_FAILURE,
                 });
               } catch (error) {
+                // A could-not-evaluate error — an exhausted read, or a check
+                // write the API rate limit rejected — is infrastructure, not a
+                // defect verdict (#4461). Whatever the transaction managed to
+                // publish is already non-green: the head's invalidation, or the
+                // NEUTRAL UNKNOWN it wrote when the write itself landed. A red
+                // job here would be indistinguishable from a PR that actually
+                // failed the gate, so the failure stays loud in the log instead.
+                const couldNotEvaluate =
+                  autoGate.isReadFailure?.(error) === true ||
+                  autoGate.isRateLimitFailure?.(error) === true;
+                if (couldNotEvaluate) {
+                  const detail = error && error.message ? error.message : String(error);
+                  core.warning(`Auto Gate could not evaluate ${process.env.HEAD_SHA}: ${detail}`);
+                  core.notice(
+                    "No verdict was published for this head and none was consumed; " +
+                      "a later subscribed event re-runs the evaluation.",
+                  );
+                  return;
+                }
                 if (!error?.autoGateMergeConceded) throw error;
               }
               return;
