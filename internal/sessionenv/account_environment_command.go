@@ -24,19 +24,94 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		if err != nil {
 			return true
 		}
-		// Process top-level statements in execution order. The tainted set is
-		// built incrementally: each statement is checked using only the taint
-		// accumulated from preceding statements, so a command substitution that
-		// appears AFTER an arithmetic expression does not cause that earlier
-		// expression to be refused. Compound statements (blocks, AND/OR lists)
-		// are processed recursively so that taint advances through sequential
-		// children within them as well.
-		acc := newTaintAccumulator(names)
-		if stmtsMutate(file.Stmts, names, acc) {
+		// Coarse rule: if the command contains both a command substitution
+		// anywhere and an arithmetic context anywhere, refuse without modelling
+		// scope. bash re-evaluates the stdout of a command substitution as fresh
+		// arithmetic when the variable holding it appears in an arithmetic
+		// context, so any combination of the two is unprovable without
+		// tracking taint across all compound-statement boundaries. Rather than
+		// enumerating compound forms (if/elif, while/until, for, case, FuncDecl,
+		// etc.) and maintaining a per-scope accumulator that accrues a new gap
+		// each time a missing form is discovered, the guard rejects the
+		// combination structurally. Commands that combine command substitutions
+		// with arithmetic are uncommon in agent invocation strings; the class
+		// that IS common — arithmetic alone, command substitutions alone, or the
+		// two in separate statements without a re-evaluation path — stays allowed.
+		if fileHasCmdSubst(file) && fileHasArithmeticContext(file) {
+			return true
+		}
+		mutates := false
+		syntax.Walk(file, func(node syntax.Node) bool {
+			if nodeMutatesAccountEnvironment(node, names, nil) {
+				mutates = true
+				return false
+			}
+			return true
+		})
+		if mutates {
 			return true
 		}
 	}
 	return false
+}
+
+// fileHasCmdSubst reports whether a parsed shell file contains any command
+// substitution ($(…) or backtick form) anywhere in its AST, including inside
+// subshells and nested constructs.
+func fileHasCmdSubst(file syntax.Node) bool {
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		if _, ok := node.(*syntax.CmdSubst); ok {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// fileHasArithmeticContext reports whether a parsed shell file contains any
+// arithmetic-evaluation context: $(( )), (( )), let, or a C-style for loop.
+// These are the shell constructs that re-evaluate a variable's string value as
+// fresh arithmetic, making a prior command substitution stored in a variable
+// into a deferred arithmetic mutation.
+//
+// The check also covers numeric [[ ]] operators (-eq/-ne/-lt/-gt/-le/-ge) and
+// arithmetic subscripts and slice offsets in parameter expansions and indexed
+// assignments, all of which trigger the same re-evaluation.
+func fileHasArithmeticContext(file syntax.Node) bool {
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		switch n := node.(type) {
+		case *syntax.ArithmExp, *syntax.ArithmCmd, *syntax.LetClause, *syntax.CStyleLoop:
+			found = true
+			return false
+		case *syntax.BinaryTest:
+			switch n.Op {
+			case syntax.TsEql, syntax.TsNeq, syntax.TsLeq, syntax.TsGeq, syntax.TsLss, syntax.TsGtr:
+				found = true
+				return false
+			}
+		case *syntax.ParamExp:
+			if n.Index != nil || n.Slice != nil {
+				found = true
+				return false
+			}
+		case *syntax.Assign:
+			if n.Index != nil {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}, tainted map[string]struct{}) bool {
