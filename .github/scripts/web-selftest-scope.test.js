@@ -361,7 +361,29 @@ test("the visual gate diffs stills against committed goldens and cannot regenera
   // combination instead of trusting the environment — so the committed
   // artifact is always compared, never regenerated-and-blessed.
   const entry = fs.readFileSync(path.join(__dirname, "..", "..", "scripts/container/web-demo-entry.sh"), "utf8");
-  assert.match(entry, /CI cannot update baselines or goldens/);
+  // Pin the guard's BEHAVIOR, not its diagnostic. Matching the message text
+  // alone still passes a file whose guard was deleted or inverted while the
+  // string survived in a comment — so the actual if..fi block is sliced out
+  // and its truth table executed (#4399 review). The environment is explicit:
+  // this test itself runs under CI, so ambient CI/update variables must not
+  // leak in.
+  const guard = entry.match(/if \[ -n "\$\{CI:-\}" \][\s\S]*?\nfi\n/);
+  assert.ok(guard, "web-demo-entry.sh must guard CI against the update/record variables");
+  const { spawnSync } = require("node:child_process");
+  const runGuard = (vars) =>
+    spawnSync("bash", ["-c", guard[0]], {
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...vars },
+      encoding: "utf8",
+    });
+  const refused = runGuard({ CI: "1", AF_UPDATE_GOLDENS: "1" });
+  assert.equal(refused.status, 1, "CI + AF_UPDATE_GOLDENS must be refused");
+  assert.match(refused.stderr, /CI cannot update baselines or goldens/);
+  assert.equal(runGuard({ CI: "1", AF_PERF_RECORD: "1" }).status, 1,
+    "CI + AF_PERF_RECORD must be refused");
+  assert.equal(runGuard({ CI: "1" }).status, 0,
+    "a plain CI run must reach the script — the guard is about the update variables, not CI");
+  assert.equal(runGuard({ AF_UPDATE_GOLDENS: "1" }).status, 0,
+    "a human-run update outside CI is the path the guard exists to keep");
   const visual = fs.readFileSync(path.join(__dirname, "..", "..", "web/playwright.visual.config.ts"), "utf8");
   assert.match(visual, /process\.env\.CI && process\.env\.AF_UPDATE_GOLDENS === "1"\) throw/);
   assert.match(
