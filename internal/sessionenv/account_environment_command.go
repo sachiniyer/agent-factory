@@ -154,6 +154,26 @@ func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}, 
 			}
 		}
 		return false
+	case *syntax.CStyleLoop:
+		// C-style `for (( init; cond; post ))`. All three clauses are
+		// evaluated as arithmetic by bash; the same command-substitution and
+		// tainted-variable hazards apply. Fail closed on either. Returning
+		// true here prevents the walk from descending into Init/Cond/Post a
+		// second time; the BinaryArithm/UnaryArithm arms below still catch
+		// literal assignments when the loop is safe (no substitution, no
+		// tainted variable).
+		for _, expr := range []syntax.ArithmExpr{node.Init, node.Cond, node.Post} {
+			if expr == nil {
+				continue
+			}
+			if arithmeticExprHasCommandSubstitution(expr) {
+				return true
+			}
+			if arithmeticExprReferencesTaintedVar(expr, tainted) {
+				return true
+			}
+		}
+		return false
 	case *syntax.UnaryTest:
 		return unaryTestMutatesAccountEnvironment(node)
 	default:

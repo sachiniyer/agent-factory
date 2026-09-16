@@ -1025,6 +1025,21 @@ func cmdSubstAssignedVars(file syntax.Node) map[string]struct{} {
 					topLevelAssigns = append(topLevelAssigns, assignRecord{n.Name.Value, n.Value})
 				}
 			}
+		case *syntax.ParamExp:
+			// A parameter expansion with an assignment operator (${x:=...} or
+			// ${x=...}) assigns to x when x is unset (or null for :=). If the
+			// assignment word contains a command substitution, x is tainted —
+			// bash re-evaluates x's value as fresh arithmetic when x later
+			// appears in an arithmetic context.
+			if n.Param != nil && n.Exp != nil &&
+				(n.Exp.Op == syntax.AssignUnset || n.Exp.Op == syntax.AssignUnsetOrNull) &&
+				n.Exp.Word != nil {
+				if wordHasCommandSubstitution(n.Exp.Word) {
+					tainted[n.Param.Value] = struct{}{}
+				} else {
+					topLevelAssigns = append(topLevelAssigns, assignRecord{n.Param.Value, n.Exp.Word})
+				}
+			}
 		}
 		return true
 	})
