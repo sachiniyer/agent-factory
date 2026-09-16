@@ -481,10 +481,11 @@ func (t *TmuxSession) ClosedConclusivelyAndStillAbsent() bool {
 	case known && exists:
 		// The name is live again: the stored proof is superseded, not stale-
 		// but-still-usable. Drop it so no later consumer re-checks it. The
-		// teardown mark goes with it: the session behind the name is not the one
-		// af closed.
+		// teardown mark retires only if the live session is the generation the
+		// monitor polls — a replacement behind the name is not the session af
+		// closed, and its mark still describes af's own teardown.
 		t.setClosedConclusively(false)
-		t.setTeardownInitiated(false)
+		t.clearTeardownMarkForConfirmedGeneration()
 		return false
 	default:
 		return known && !exists
@@ -532,22 +533,32 @@ func (t *TmuxSession) setClosedConclusively(closed bool) {
 func (t *TmuxSession) TeardownInitiated() bool {
 	t.monitorMu.Lock()
 	defer t.monitorMu.Unlock()
-	return t.monitor != nil && t.monitor.teardownInitiated
+	return t.monitor != nil && t.monitor.generation != nil && t.monitor.generation.teardownInitiated
 }
 
-// setTeardownInitiated writes the mark on the CURRENT monitor. A clear
-// applies to the generation being polled now — it cannot reach back and
-// rewrite an old monitor's attribution, which is what keeps an in-flight
-// poll's late read honest across a monitor swap.
-func (t *TmuxSession) setTeardownInitiated(initiated bool) {
+// clearTeardownMarkForConfirmedGeneration retires the current monitor's
+// teardown mark at a call site that has already established the NAME is live
+// — close()'s survived-kill answer, Start's exists gate,
+// ClosedConclusivelyAndStillAbsent's re-probe. A live name is only proof that
+// the POLLED generation survived when the monitor is unbound (the pre-binding
+// name semantics) or when the session answering resolves to that same
+// generation: a bound monitor watching a replaced name must keep its mark, or
+// af's own teardown of the old generation reads as an unrequested vanish
+// (Codex on #4473). An unresolvable live session is not proof either way —
+// the mark stays.
+func (t *TmuxSession) clearTeardownMarkForConfirmedGeneration() {
+	live := t.confirmedGeneration()
 	t.monitorMu.Lock()
 	defer t.monitorMu.Unlock()
-	if t.monitor != nil {
-		t.monitor.teardownInitiated = initiated
-		if !initiated {
-			t.monitor.teardownSettledAt = time.Time{}
-		}
+	if t.monitor == nil || t.monitor.generation == nil {
+		return
 	}
+	g := t.monitor.generation
+	if g.sessionID != "" && (live == nil || !g.sameAs(live)) {
+		return
+	}
+	g.teardownInitiated = false
+	g.teardownSettledAt = time.Time{}
 }
 
 // SanitizedName returns the sanitized tmux session name.

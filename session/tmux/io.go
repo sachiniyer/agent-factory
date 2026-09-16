@@ -27,20 +27,46 @@ type statusMonitor struct {
 	// Restore replaces the monitor with a fresh one, which naturally clears
 	// this state on respawn.
 	dead bool
-	// teardownInitiated records that af itself asked for the teardown of the
-	// session generation THIS monitor is polling — set by close() before
-	// kill-session runs so the ErrSessionGone branch can tell "af asked"
-	// (INFO) from "vanished on its own" (ERROR) (#4472). It lives on the
-	// monitor, not the TmuxSession, because the fact a poll needs is the
-	// attribution of the generation it started on: a session-level flag can
-	// be cleared by a same-object restart while an in-flight poll of the OLD
-	// session is still descheduled, turning af's own teardown into an ERROR
-	// when the poll resumes (Codex on #4473). The mark clears only on tmux
-	// ANSWERING that a session is live behind the name — see the clear sites
-	// in close(), Start, and ClosedConclusivelyAndStillAbsent — except on an
-	// unanswered rebind, where it is carried to the replacement monitor
-	// because a wedged probe is no evidence the request resolved.
-	// Guarded by monitorMu.
+	// generation is the concrete tmux session this monitor polls, resolved
+	// when a live session answered during restore — see tmuxGeneration. The
+	// reused NAME cannot bind a generation: a poll that straddles a
+	// same-object restart and lands on the replacement would consult this
+	// monitor's teardown attribution against the new session's death, and a
+	// $id alone cannot either, because tmux ids are per-server counters a
+	// replacement server reissues (#4473 review). nil — or an id-less
+	// generation — means unbound: the pre-binding name target, no worse
+	// than before.
+	// Written before the monitor is installed; read under monitorMu.
+	generation *tmuxGeneration
+}
+
+// tmuxGeneration is one concrete tmux session as tmux can prove it: the
+// session id ($N) plus the SERVER's process id and the session's creation
+// stamp. The pair beyond the id matters because tmux ids are per-server
+// counters — tearing down the last session exits the server and the next
+// server reissues $0 — so a captured $id can name a foreign session after a
+// server restart. serverPID and created together distinguish that reuse.
+//
+// The teardown mark lives HERE, not on the monitor: every monitor bound to
+// the same generation shares af's attribution for ITS death. A pure rebind
+// installs a fresh monitor for the same live generation, and a close()
+// during an in-flight poll on the swapped-out monitor must still classify
+// the shared generation's teardown as af-initiated (#4473 review).
+// Fields are guarded by monitorMu.
+type tmuxGeneration struct {
+	sessionID string
+	serverPID string
+	created   string
+	// teardownInitiated records that af itself asked for this generation's
+	// teardown — set by close() before kill-session runs so the
+	// ErrSessionGone branch can tell "af asked" (INFO) from "vanished on its
+	// own" (ERROR) (#4472). It clears only on tmux ANSWERING that the SAME
+	// generation is live — a live name is not proof, since the name may
+	// already belong to a replacement — see the clear sites in close(),
+	// Start, and ClosedConclusivelyAndStillAbsent — except on an unanswered
+	// rebind, where the generation object itself is carried to the
+	// replacement monitor because a wedged probe is no evidence the request
+	// resolved.
 	teardownInitiated bool
 	// teardownSettledAt is when the asking close() RETURNED; zero while the
 	// request is still running or when there is none. A successful capture
@@ -48,17 +74,15 @@ type statusMonitor struct {
 	// proven before the request finished says nothing about its outcome, so
 	// a poll that straddled the close cannot retire the mark just before the
 	// kill lands (Codex on #4473).
-	// Guarded by monitorMu.
 	teardownSettledAt time.Time
-	// sessionID is the confirmed tmux session id ($N) of the generation this
-	// monitor polls — resolved when the generation answered live, and the
-	// target the mark-consulting capture uses. The reused NAME cannot bind a
-	// generation: a poll that straddles a same-object restart and lands on
-	// the replacement would consult THIS monitor's mark against the new
-	// session's death (#4473 review). "" when no id was resolved — the
-	// pre-binding name target, no worse than before.
-	// Written before the monitor is installed; read under monitorMu.
-	sessionID string
+}
+
+// sameAs reports whether two resolved generations are the same concrete tmux
+// session. An id-less generation (one created only to carry a mark on an
+// unbound monitor) never matches: it describes no provable session.
+func (g *tmuxGeneration) sameAs(o *tmuxGeneration) bool {
+	return g != nil && o != nil && g.sessionID != "" &&
+		g.sessionID == o.sessionID && g.serverPID == o.serverPID && g.created == o.created
 }
 
 func newStatusMonitor() *statusMonitor {
@@ -69,33 +93,43 @@ func newReattachStatusMonitor() *statusMonitor {
 	return &statusMonitor{baselinePending: true}
 }
 
-// markTeardownInitiated records on the CURRENT monitor that af asked for this
-// session's teardown and returns the monitor it marked, so the asking close()
-// can settle the same one. Marking must reach the monitor the polls are
-// reading — not a flag on the session object — or a mid-close monitor swap
-// would leave the old generation's in-flight polls reading a cleared shared
-// flag (Codex on #4473). A nil monitor means nothing is polling: there is no
-// one to attribute a disappearance to.
+// markTeardownInitiated records on the CURRENT monitor's generation that af
+// asked for this session's teardown and returns the monitor it marked, so the
+// asking close() can settle the same one. Marking must reach the generation
+// the polls are reading — not a flag on the session object — or a mid-close
+// monitor swap would leave the old generation's in-flight polls reading a
+// cleared shared flag (Codex on #4473). Because the mark lives on the
+// generation, a monitor installed later for the SAME live session shares it
+// rather than restarting attribution from zero. A nil monitor means nothing
+// is polling: there is no one to attribute a disappearance to. An unbound
+// monitor gets an id-less generation to carry the mark — the pre-binding
+// name-scoped behavior.
 func (t *TmuxSession) markTeardownInitiated() *statusMonitor {
 	t.monitorMu.Lock()
 	defer t.monitorMu.Unlock()
 	if t.monitor != nil {
-		t.monitor.teardownInitiated = true
-		t.monitor.teardownSettledAt = time.Time{}
+		if t.monitor.generation == nil {
+			t.monitor.generation = &tmuxGeneration{}
+		}
+		t.monitor.generation.teardownInitiated = true
+		t.monitor.generation.teardownSettledAt = time.Time{}
 	}
 	return t.monitor
 }
 
-// settleTeardown stamps that the asking close() returned on the monitor it
+// settleTeardown stamps that the asking close() returned on the generation it
 // marked — what lets a later post-settle successful poll retire a mark whose
-// teardown demonstrably did not take. It lands on the marked monitor itself,
-// so a monitor swap mid-close cannot carry the settle onto the replacement.
+// teardown demonstrably did not take. It lands on the marked generation
+// itself, so a monitor swap mid-close cannot carry the settle onto the
+// replacement.
 func (t *TmuxSession) settleTeardown(mon *statusMonitor) {
 	if mon == nil {
 		return
 	}
 	t.monitorMu.Lock()
-	mon.teardownSettledAt = time.Now()
+	if mon.generation != nil {
+		mon.generation.teardownSettledAt = time.Now()
+	}
 	t.monitorMu.Unlock()
 }
 
@@ -190,9 +224,13 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 	t.monitorMu.Lock()
 	mon := t.monitor
 	alive := mon != nil && !mon.dead
+	var gen *tmuxGeneration
 	target := exactTarget(t.sanitizedName)
-	if alive && mon.sessionID != "" {
-		target = mon.sessionID
+	if alive {
+		gen = mon.generation
+		if gen != nil && gen.sessionID != "" {
+			target = gen.sessionID
+		}
 	}
 	t.monitorMu.Unlock()
 	if !alive {
@@ -200,7 +238,24 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 	}
 
 	captureStartedAt := time.Now()
-	content, err := t.capturePaneContentTarget(context.Background(), target)
+	var err error
+	// An id-bound monitor owes its liveness question to the GENERATION, not
+	// to whatever session currently answers at the id: tmux ids are
+	// per-server counters, so a replacement server can reissue the same $N
+	// for an unrelated session — and capture-pane would then read that
+	// session forever without ever noticing the polled generation died.
+	// The identity probe asks the id's owner for the server pid and creation
+	// stamp resolved at bind time; a mismatch IS the bound generation's
+	// death. An unanswered probe means a wedged server — unknown, so fall
+	// through to the capture, which takes the ordinary bounded-timeout path.
+	if gen != nil && gen.sessionID != "" {
+		if same, known := t.generationMatches(gen); known && !same {
+			err = fmt.Errorf("%w: tmux session id %s no longer resolves to the bound generation", ErrSessionGone, gen.sessionID)
+		}
+	}
+	if err == nil {
+		content, err = t.capturePaneContentTarget(context.Background(), target, gen)
+	}
 	if err != nil {
 		// If the tmux session no longer exists, log once and latch the
 		// monitor as dead so the daemon's per-second poll doesn't spam
@@ -210,16 +265,16 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 		// error path, so use the wrapped sentinel rather than re-probing.
 		if errors.Is(err, ErrSessionGone) {
 			// af-initiated teardown (kill, archive, task completion, handoff
-			// swap, root reap) routes through close(), which marks THIS
-			// monitor before kill-session runs — that disappearance is the
+			// swap, root reap) routes through close(), which marks the
+			// GENERATION before kill-session runs — that disappearance is the
 			// request completing, not an anomaly, and at ~5,800 lines per log
 			// rotation it buried the errors that matter (#4472). The mark is
-			// read off the snapshotted monitor: a poll in flight across a
-			// same-object restart still attributes the OLD session's death to
-			// the teardown af asked for (Codex on #4473), and a vanish af
-			// never asked for stays at ERROR.
+			// read off the snapshotted monitor's generation: a poll in flight
+			// across a same-object restart still attributes the OLD session's
+			// death to the teardown af asked for (Codex on #4473), and a
+			// vanish af never asked for stays at ERROR.
 			t.monitorMu.Lock()
-			initiated := mon.teardownInitiated
+			initiated := mon.generation != nil && mon.generation.teardownInitiated
 			mon.dead = true
 			t.monitorMu.Unlock()
 			if initiated {
@@ -242,9 +297,9 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 	// request's outcome and must leave the mark for the kill that is about
 	// to land.
 	t.monitorMu.Lock()
-	if !mon.teardownSettledAt.IsZero() && captureStartedAt.After(mon.teardownSettledAt) {
-		mon.teardownInitiated = false
-		mon.teardownSettledAt = time.Time{}
+	if gen := mon.generation; gen != nil && !gen.teardownSettledAt.IsZero() && captureStartedAt.After(gen.teardownSettledAt) {
+		gen.teardownInitiated = false
+		gen.teardownSettledAt = time.Time{}
 	}
 	t.monitorMu.Unlock()
 
@@ -329,7 +384,7 @@ func (t *TmuxSession) CapturePaneContent() (string, error) {
 // ErrSessionGone — callers tear sessions down on "gone"). The parent is checked
 // first so a cancel racing the deadline is attributed to the caller.
 func (t *TmuxSession) CapturePaneContentContext(ctx context.Context) (string, error) {
-	return t.capturePaneContentTarget(ctx, exactTarget(t.sanitizedName))
+	return t.capturePaneContentTarget(ctx, exactTarget(t.sanitizedName), nil)
 }
 
 // capturePaneContentTarget is CapturePaneContentContext addressed to an
@@ -337,10 +392,12 @@ func (t *TmuxSession) CapturePaneContentContext(ctx context.Context) (string, er
 // session id ($N): a poll that straddles a same-object restart must not land
 // on the replacement that reused the name and consult the old generation's
 // teardown mark against ITS death — the name alone cannot tell them apart
-// (#4473 review). The gone-probe is bound to the same target for the same
-// reason: the name answering "live" proves only that SOME generation stands
-// behind it.
-func (t *TmuxSession) capturePaneContentTarget(ctx context.Context, target string) (string, error) {
+// (#4473 review). The gone-probe is bound to the same generation for the
+// same reason: neither the name answering "live" nor the bare id answering
+// proves the POLLED generation stands behind it, because tmux reissues ids
+// per server lifetime — so a bound generation's probe verifies the server
+// pid and creation stamp, not just the id.
+func (t *TmuxSession) capturePaneContentTarget(ctx context.Context, target string, gen *tmuxGeneration) (string, error) {
 	// Add -e flag to preserve escape sequences (ANSI color codes). `=` forces
 	// an exact session match: without it tmux would prefix-match a surviving
 	// sibling session (e.g. the `__shell` tab) when the agent session has
@@ -355,7 +412,7 @@ func (t *TmuxSession) capturePaneContentTarget(ctx context.Context, target strin
 		if bctx.Err() != nil {
 			return "", fmt.Errorf("%w: capture-pane after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		if !t.captureTargetExistsOrUnknown(target) {
+		if !t.captureTargetAliveOrUnknown(gen) {
 			return "", t.sessionGoneError("capture-pane", err)
 		}
 		return "", fmt.Errorf("error capturing pane content: %v", err)
@@ -363,36 +420,67 @@ func (t *TmuxSession) capturePaneContentTarget(ctx context.Context, target strin
 	return string(output), nil
 }
 
-// captureTargetExistsOrUnknown is the gone-probe for a possibly id-bound
-// capture target: a $id needs has-session against THAT id, not the reused
-// name, or the replacement's liveness would mask the polled generation's
+// captureTargetAliveOrUnknown is the gone-probe for a possibly id-bound
+// capture: a bound generation needs the identity answer for THAT generation,
+// not the reused name, or a replacement's liveness — whether it took the name
+// or reissued the id on a new server — would mask the polled generation's
 // death. Same conservative timeout lie as ExistsOrUnknown.
-func (t *TmuxSession) captureTargetExistsOrUnknown(target string) bool {
-	if !strings.HasPrefix(target, "$") {
+func (t *TmuxSession) captureTargetAliveOrUnknown(gen *tmuxGeneration) bool {
+	if gen == nil || gen.sessionID == "" {
 		return t.ExistsOrUnknown()
 	}
-	exists, known := probeSessionTarget(t.cmdExec, target)
+	same, known := t.generationMatches(gen)
 	if !known {
 		return true
 	}
-	return exists
+	return same
 }
 
-// confirmedSessionID resolves the tmux session id ($N) currently standing
-// behind the session name — the generation token a reused name cannot
-// provide. "" on any failure: the caller falls back to the name target,
-// which is the pre-binding behavior and no worse than it.
-func (t *TmuxSession) confirmedSessionID() string {
+// confirmedGeneration resolves the concrete tmux session currently standing
+// behind the session name — the identity a reused name cannot provide. The
+// tuple beyond the id matters: #{session_id} is a per-server counter a
+// replacement server reissues, while #{pid} and #{session_created} pin the
+// server lifetime and the session within it. nil on any failure or malformed
+// answer: callers fall back to the name target, the pre-binding behavior.
+func (t *TmuxSession) confirmedGeneration() *tmuxGeneration {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	out, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), "#{session_id}")
+	out, err := t.outputTmuxBounded(ctx, "display-message", "-p",
+		"-t", exactTarget(t.sanitizedName),
+		"#{session_id} #{pid} #{session_created}")
 	if err != nil {
-		return ""
+		return nil
 	}
-	if id := strings.TrimSpace(string(out)); strings.HasPrefix(id, "$") {
-		return id
+	f := strings.Fields(strings.TrimSpace(string(out)))
+	if len(f) < 3 || !strings.HasPrefix(f[0], "$") {
+		return nil
 	}
-	return ""
+	return &tmuxGeneration{sessionID: f[0], serverPID: f[1], created: f[2]}
+}
+
+// generationMatches reports whether the session answering at gen's id is
+// still gen itself: the id is asked for the server pid and creation stamp
+// resolved when the generation was confirmed, and any mismatch means the id
+// was reissued — the bound generation is gone even though a session answers.
+// Three answers, like the name probes: (false, false) on a timed-out probe,
+// because a wedged server is no evidence of the generation's fate.
+func (t *TmuxSession) generationMatches(gen *tmuxGeneration) (same bool, known bool) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := t.outputTmuxBounded(ctx, "display-message", "-p",
+		"-t", gen.sessionID,
+		"#{pid} #{session_created}")
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, false
+		}
+		return false, true
+	}
+	f := strings.Fields(strings.TrimSpace(string(out)))
+	if len(f) < 2 {
+		return false, true
+	}
+	return f[0] == gen.serverPID && f[1] == gen.created, true
 }
 
 // CaptureVisiblePaneGrid captures the visible pane as a GRID — one output line per

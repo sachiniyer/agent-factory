@@ -913,7 +913,7 @@ func TestSubmitBaselinesFirstPollAfterPartialBoundaryCaptureFailure(t *testing.T
 	}
 
 	s := newTmuxSession("af_partial_delivery_boundary", ProgramCodex, NewMockPtyFactory(t), cmdExec)
-	s.setMonitor(newStatusMonitor(), false)
+	s.setMonitor(newStatusMonitor(), nil, false)
 	status, err := s.SendKeysCommandObserved(prompt)
 	require.NoError(t, err, "the sentinel proves Enter reached tmux")
 	require.Equal(t, PromptDelivered, status)
@@ -1445,7 +1445,7 @@ func TestSubmitSeedsTheDeliveryBoundaryWithoutHidingFastOutput(t *testing.T) {
 	}
 
 	s := newTmuxSession("af_delivery_boundary", ProgramCodex, NewMockPtyFactory(t), cmdExec)
-	s.setMonitor(newStatusMonitor(), false)
+	s.setMonitor(newStatusMonitor(), nil, false)
 	require.NoError(t, s.SendKeysCommand(prompt))
 
 	updated, _, _, baseline := s.HasUpdatedWithBaseline()

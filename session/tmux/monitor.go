@@ -1,5 +1,7 @@
 package tmux
 
+import "time"
+
 // Status-monitor accessors for TmuxSession.
 //
 // monitor is not immutable: Restore() swaps in a fresh statusMonitor on every
@@ -13,19 +15,39 @@ package tmux
 // can't stall Restore's setMonitor(). setMonitor() is the only other writer of
 // the pointer (#1528).
 
-// setMonitor swaps in a new status monitor under monitorMu. carryTeardownMark
-// copies the outgoing monitor's teardown attribution onto the replacement —
-// the rebind passes it only when the probe did not answer, because a wedged
-// has-session is no evidence the request resolved, while an answered live
-// session behind the name is not the one af closed (Codex on #4473). The copy
-// and the swap happen under one lock so a close() marking the current monitor
-// mid-rebind cannot fall between them and be lost.
-func (t *TmuxSession) setMonitor(m *statusMonitor, carryTeardownMark bool) {
+// setMonitor swaps in a new status monitor under monitorMu and binds its
+// generation. resolved is the generation confirmed live by display-message
+// during RestoreWithResult (nil when it did not answer); answered is whether
+// the earlier has-session probe answered at all.
+//
+//   - resolved matches the outgoing monitor's generation: the SAME concrete
+//     session answered — the fresh monitor SHARES the generation object, so a
+//     close() marking the current monitor still reaches a poll in flight on
+//     the swapped-out one (Codex on #4473). A settled mark on a session that
+//     just answered live proves the teardown did not take, so the resolution
+//     retires it — while an in-flight (unsettled) teardown keeps its mark.
+//   - resolved is a different generation: the confirmed-live replacement is
+//     not the session af closed, so it starts unmarked — a resolved id is
+//     affirmative liveness even when the earlier has-session timed out.
+//   - nothing answered (resolved nil, probe unanswered): a wedged server is
+//     no evidence the request resolved, so the outgoing generation — mark
+//     included — carries to the replacement monitor.
+//   - answered but unresolved (has-session answered, display-message gave no
+//     id): confirmed live but unbindable — fresh unbound monitor, unmarked.
+func (t *TmuxSession) setMonitor(m *statusMonitor, resolved *tmuxGeneration, answered bool) {
 	t.monitorMu.Lock()
 	defer t.monitorMu.Unlock()
-	if carryTeardownMark && t.monitor != nil {
-		m.teardownInitiated = t.monitor.teardownInitiated
-		m.teardownSettledAt = t.monitor.teardownSettledAt
+	switch {
+	case resolved != nil && t.monitor != nil && t.monitor.generation.sameAs(resolved):
+		m.generation = t.monitor.generation
+		if !m.generation.teardownSettledAt.IsZero() {
+			m.generation.teardownInitiated = false
+			m.generation.teardownSettledAt = time.Time{}
+		}
+	case resolved != nil:
+		m.generation = resolved
+	case !answered && t.monitor != nil:
+		m.generation = t.monitor.generation
 	}
 	t.monitor = m
 }

@@ -36,6 +36,14 @@ type teardownMarkTmux struct {
 	killFails   atomic.Bool // kill-session answers a failure instead of removing the session
 	captureOK   atomic.Bool // capture-pane succeeds
 	probeWedged atomic.Bool // has-session stalls past the shortened deadline
+	// nameGen, when set, is what display-message answers for the NAME target:
+	// "$id pid created" — the session generation currently behind the name.
+	// Unset answers empty, so monitors stay unbound (the pre-binding shape).
+	nameGen atomic.Value
+	// idGen, when set, is what display-message answers for a $id target:
+	// "pid created" — the identity of whatever currently owns that id. Unset
+	// answers "can't find session": the id resolves to nothing.
+	idGen atomic.Value
 	// duringSetup, if set, runs inside Start's post-confirmation set-option call,
 	// between the existence poll and the inner Restore.
 	duringSetup func()
@@ -64,6 +72,18 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 			return []byte("pane content"), nil
 		}
 		return nil, errors.New("exit status 1")
+	case strings.Contains(args, "display-message") && strings.Contains(args, "session_id"):
+		// confirmedGeneration's name-targeted bind probe.
+		if v := m.nameGen.Load(); v != nil {
+			return []byte(v.(string)), nil
+		}
+		return nil, nil
+	case strings.Contains(args, "display-message") && strings.Contains(args, "session_created"):
+		// generationMatches' id-targeted identity probe.
+		if v := m.idGen.Load(); v != nil {
+			return []byte(v.(string)), nil
+		}
+		return nil, errors.New("can't find session")
 	case strings.Contains(args, "show-options"):
 		// importClientEnvironmentArgs: the ordinary first-session case.
 		return nil, errors.New("no server running")
@@ -360,7 +380,7 @@ func TestSurvivedTeardownRetiresMarkOnProvenLiveness(t *testing.T) {
 func TestClosedConclusivelyLiveAgainClearsTeardownMark(t *testing.T) {
 	session, _ := newMarkedTeardownSession(t)
 	session.setClosedConclusively(true)
-	session.setTeardownInitiated(true)
+	session.markTeardownInitiated()
 
 	require.False(t, session.ClosedConclusivelyAndStillAbsent())
 	require.False(t, session.ClosedConclusively())

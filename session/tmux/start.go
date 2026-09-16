@@ -33,8 +33,12 @@ func (t *TmuxSession) Start(workDir string) error {
 	}
 	if exists {
 		// A live session af did not just create holds the name, so no teardown
-		// request describes it.
-		t.setTeardownInitiated(false)
+		// request describes it — but only when the live session IS the
+		// generation the current monitor polls. An old monitor bound to a
+		// prior generation keeps its mark while a replacement owns the name:
+		// its poll must still read af's own teardown of that generation as
+		// expected (Codex on #4473).
+		t.clearTeardownMarkForConfirmedGeneration()
 		return fmt.Errorf("%w: tmux session already exists: %s", ErrSessionNotStarted, t.sanitizedName)
 	}
 	// The name is positively absent, so any Start from here creates a new pane
@@ -616,20 +620,24 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 		monitor = newReattachStatusMonitor()
 	}
 	// Bind the fresh monitor to the generation that just answered live: the
-	// session id targets exactly that tmux session, which the reused name
-	// cannot do — a poll holding the OLD monitor across this swap must not
-	// land a capture on the replacement and read the old mark against the
-	// new generation's death (#4473 review). "" degrades to the name target.
-	monitor.sessionID = t.confirmedSessionID()
+	// resolved (id, server pid, created) tuple names exactly that tmux
+	// session, which neither the reused name nor the bare id can do — a poll
+	// holding the OLD monitor across this swap must not land a capture on
+	// the replacement and read the old mark against the new generation's
+	// death, and a replacement server reissuing the same $id must not
+	// impersonate it either (#4473 review). nil degrades to the name target.
+	resolved := t.confirmedGeneration()
 	if err := t.refreshRestoredAccountEnvironment(); err != nil {
 		return RestoreReattached, fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
 	}
-	// The teardown mark carries to the fresh monitor only when the probe did
-	// NOT answer: an answered live session behind the name is not the one af
-	// closed, while a wedged probe is no evidence the request resolved —
-	// carrying it keeps af's own teardown at INFO once the server answers
-	// (Codex on #4473). Either way the OLD monitor keeps its mark, so an
-	// in-flight poll of the old generation still reads its own attribution.
-	t.setMonitor(monitor, !answered)
+	// Teardown attribution follows the GENERATION, not the monitor slot: a
+	// resolved id matching the outgoing monitor's generation shares its mark
+	// (retiring a settled one — the session just answered live), a resolved
+	// different generation starts unmarked, and only a fully unanswered
+	// rebind carries the old generation — a wedged probe is no evidence the
+	// request resolved, so carrying keeps af's own teardown at INFO once the
+	// server answers (Codex on #4473). Either way the OLD monitor keeps its
+	// generation, so an in-flight poll still reads its own attribution.
+	t.setMonitor(monitor, resolved, answered)
 	return RestoreReattached, nil
 }
