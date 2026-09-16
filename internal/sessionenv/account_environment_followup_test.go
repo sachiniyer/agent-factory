@@ -480,3 +480,38 @@ func TestValidateAccountEnvironmentCommand_FollowupsStayNarrow(t *testing.T) {
 			"command %q touches no identity name and must stay allowed", command)
 	}
 }
+
+// Judging every literal suffix of a childless tail (Codex on #4465) must not
+// refuse the tails the real binaries take: several PIDs, options getopt
+// permutes past the selector, a path-qualified binary with an ordinary tail,
+// and a terminal option on its own.
+func TestValidateAccountEnvironmentCommand_ChildlessTailsStayAdmitted(t *testing.T) {
+	for _, command := range []string{
+		"ionice -c3 -p 101 102 103",
+		"ionice -p 123 -c 3 -n 7",
+		"ionice -t -p 1 2",
+		"ionice -P 4242 4243",
+		"taskset -a -p 0x3 1234",
+		"taskset -p -c 0-3 1234",
+		"./ionice -p 123 456",
+		"/usr/bin/taskset -p 0x1 123",
+		"ionice --version",
+		"taskset --help",
+		"ionice -p " + strings.TrimSpace(strings.Repeat("1 ", shadowedTailOperandLimit)),
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
+	}
+}
+
+// The every-suffix scan is quadratic in the tail's length, so a tail past the
+// cap refuses rather than stalling validation: 8000 literal PIDs took 8s before
+// the cap.
+func TestValidateAccountEnvironmentCommand_ChildlessTailIsBounded(t *testing.T) {
+	over := "./ionice -p " + strings.TrimSpace(strings.Repeat("1 ", shadowedTailOperandLimit+1))
+	require.Error(t, ValidateAccountEnvironmentCommand(over, scopedProcessTabAccount()))
+
+	huge := "./taskset -p " + strings.TrimSpace(strings.Repeat("nice ", 8000))
+	start := time.Now()
+	require.Error(t, ValidateAccountEnvironmentCommand(huge, scopedProcessTabAccount()))
+	require.Less(t, time.Since(start), 2*time.Second, "a long childless tail must not stall validation")
+}

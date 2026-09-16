@@ -59,6 +59,13 @@ func wrapperOperandTailMutatesUncached(words []*syntax.Word, names map[string]st
 	return unwrappedAccountCommandMutates(tail, names, memo)
 }
 
+// shadowedTailOperandLimit bounds a childless tail. The real binaries take a
+// handful of words there — PIDs and the odd permuted option; taskset takes one
+// PID — and a saved command has no use for more: PIDs do not survive a
+// restart, and `$(pgrep …)` is dynamic and already refused. The bound is per
+// tail, so total work stays linear in the command's length.
+const shadowedTailOperandLimit = 64
+
 // shadowedOperandTailMutates fails closed when any word in a returned tail is
 // not provably a single literal argv word — and when any literal boundary of
 // that tail judges as a mutating command. It guards the childless tails —
@@ -77,7 +84,14 @@ func wrapperOperandTailMutatesUncached(words []*syntax.Word, names map[string]st
 // account root (Codex on #4465). A shadowed wrapper may discard ANY count of
 // operands, so every literal suffix is a possible exec boundary and each is
 // judged as one; the memoized wrapper walk keeps the scan polynomial.
+//
+// Each suffix judgment re-walks the rest of the tail, so the scan is quadratic
+// in its length — 8000 literal PIDs took 8s against 6ms on master — and a tail
+// past shadowedTailOperandLimit fails closed instead.
 func shadowedOperandTailMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
+	if len(words) > shadowedTailOperandLimit {
+		return true
+	}
 	for i := range words {
 		if wrapperOperandTailMutates(words[i:], names, memo) {
 			return true
