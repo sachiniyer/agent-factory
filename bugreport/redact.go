@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/credscrub"
 	"github.com/sachiniyer/agent-factory/internal/programprivacy"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -654,6 +655,13 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 		}
 		if d.PendingAccountSwap.To != "" {
 			d.PendingAccountSwap.To = redactedMarker
+		}
+		// AccountAgent names the registry To was selected in (#4430). af only
+		// writes the credential-boundary agent enum there, and that enum is what
+		// makes the redacted pair legible; any other value did not come from af
+		// and is marked like the labels.
+		if agent := d.PendingAccountSwap.AccountAgent; agent != "" && !tmux.IsSupportedProgram(agent) {
+			d.PendingAccountSwap.AccountAgent = redactedMarker
 		}
 		// The same provider conversation id AgentConversation.ID is cleared for,
 		// and cleared the same way rather than marked: it is a resumable handle,
