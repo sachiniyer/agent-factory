@@ -607,8 +607,20 @@ func (s *TaskPane) runSelectedTask() {
 		s.listNotice = watchRunNowRefusal
 		return
 	}
+	// Cancel any pending deletion retry for this task. saveContentPaneState
+	// calls saveContentPaneState before handleTaskTrigger, so a queued
+	// RemoveTask could commit — deleting the task and reloading it out of the
+	// pane — before ConsumePendingTrigger resolves the queued ID, leaving
+	// run-now with no selected task while unexpectedly committing the deletion.
+	// markTaskDirty already does the same cancellation for edits and toggles.
+	id := s.tasks[s.selectedIdx].ID
+	for i := len(s.deleted) - 1; i >= 0; i-- {
+		if s.deleted[i].ID == id {
+			s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
+		}
+	}
 	s.pendingTrigger = true
-	s.pendingTriggerID = s.tasks[s.selectedIdx].ID
+	s.pendingTriggerID = id
 }
 
 func (s *TaskPane) enterEditMode() {
