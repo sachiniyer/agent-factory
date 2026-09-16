@@ -567,6 +567,14 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			// cannot answer is reported once as blindness below (via
 			// observations.blindSessions) rather than classified either way.
 			tree, paneErr := tmux.CaptureSessionProcessTrees(ctx.opts.Exec, name)
+			// Build the captured-PID set from whatever the partial tree
+			// returned (may be non-empty even when paneErr != nil, e.g. one
+			// pane vanished between list-panes and the process snapshot while
+			// other panes' descendants were captured successfully).
+			capturedPIDs := map[int]bool{}
+			for _, p := range tree {
+				capturedPIDs[p.PID] = true
+			}
 			if paneErr != nil {
 				// A session that vanished between the memoized listing and the
 				// pane capture is conclusively gone: route its surviving
@@ -579,27 +587,24 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 				} else {
 					// Revalidate candidates before declaring blindness: if every
 					// marked process for this session already exited (normal churn),
-					// there is nothing left to be blind about and no row is needed.
-					var anyPresent bool
+					// or is already verified by the partial tree, there is nothing
+					// left to be blind about and no row is needed.
+					var anyBlind bool
 					for _, p := range procs {
-						if observations.stillPresent(p) {
-							anyPresent = true
+						if observations.stillPresent(p) && !capturedPIDs[p.PID] {
+							anyBlind = true
 							break
 						}
 					}
-					if anyPresent {
+					if anyBlind {
 						observations.blindSessions = append(observations.blindSessions, name)
 					}
 					continue
 				}
 			}
 			if sessionLive {
-				inSession := map[int]bool{}
-				for _, p := range tree {
-					inSession[p.PID] = true
-				}
 				for _, p := range procs {
-					if inSession[p.PID] || !observations.stillPresent(p) {
+					if capturedPIDs[p.PID] || !observations.stillPresent(p) {
 						continue
 					}
 					report.addAdvisoryFinding(Finding{
