@@ -677,31 +677,9 @@ func (s *TaskPane) deleteSelectedTask() {
 	// ID-keyed loadedRanks entry, which only records the FIRST occurrence's
 	// rank — incorrect when deleting a later duplicate (PRRT_kwDORdIFwM6i06TN).
 	//
-	// Compute occurrence rank: count prior occurrences of the same ID visible
-	// in s.tasks (occBefore) plus those already pending in s.deleted
-	// (pendBefore). The sum is this occurrence's index into loadedRanks[id].
-	// The wasRestored cleanup above runs first so pendBefore reflects only
-	// genuine prior deletions, not the stale retry being replaced.
-	occBefore := 0
-	for i := 0; i < s.selectedIdx; i++ {
-		if s.tasks[i].ID == deleted.ID {
-			occBefore++
-		}
-	}
-	pendBefore := 0
-	for _, t := range s.deleted {
-		if t.ID == deleted.ID {
-			pendBefore++
-		}
-	}
-	occIdx := occBefore + pendBefore
-	if ranks, ok := s.loadedRanks[deleted.ID]; ok && occIdx < len(ranks) {
-		s.deletedRanks = append(s.deletedRanks, deletedRankEntry{expect: deleted, rank: ranks[occIdx]})
-	} else if ranks, ok := s.loadedRanks[deleted.ID]; ok && len(ranks) > 0 {
-		// Fallback: use the first occurrence's rank if occIdx is out of bounds
-		// (can happen when tasks were created in the pane and not yet reloaded).
-		s.deletedRanks = append(s.deletedRanks, deletedRankEntry{expect: deleted, rank: ranks[0]})
-	}
+	// Capture the load-order rank for this specific occurrence. See
+	// captureOccurrenceRank in task_pane_state.go for the full algorithm.
+	s.captureOccurrenceRank(deleted)
 	s.deletedDisplays = append(s.deletedDisplays, deletedDisplayPair{expect: deleted, display: display})
 	s.deleted = append(s.deleted, deleted)
 	s.tasks = append(s.tasks[:s.selectedIdx], s.tasks[s.selectedIdx+1:]...)

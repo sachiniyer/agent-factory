@@ -23,13 +23,18 @@ type deletedRankEntry struct {
 
 // restoredEntry tracks a single restored-deletion occurrence. expect is the
 // stable CAS record used as occurrence identity; display is the currently
-// visible row value, updated in place on each retry refresh. Keying by expect
-// (not display) means a concurrent rebind that changes a field never causes the
-// second-retry dedup check to miss and insert a ghost row
-// (PRRT_kwDORdIFwM6i6kOK).
+// visible row value, updated in place on each retry refresh. ordinal is the
+// original load-order rank captured at delete time, used to disambiguate two
+// duplicate-ID deletions that share an identical expect record because
+// originals[id] is ID-keyed and stores the last duplicate for both
+// (PRRT_kwDORdIFwM6i7iHM). Keying dedup by (expect, ordinal) rather than
+// expect alone means a concurrent rebind that changes display between retries
+// still matches the same entry (PRRT_kwDORdIFwM6i6kOK), while two distinct
+// occurrences with the same expect but different ordinals are not conflated.
 type restoredEntry struct {
 	expect  task.Task
 	display task.Task
+	ordinal int // load-order rank at delete time; -1 if unknown
 }
 
 // SetTasks sets the task data.
@@ -126,8 +131,8 @@ func (s *TaskPane) markTaskDirty(id string) {
 // save (PRRT_kwDORdIFwM6i5gqa).
 func (s *TaskPane) cancelQueuedDeletion(id string) {
 	// Collect the expect records being removed so we can remove the parallel
-	// deletedDisplays entries. Walk backwards so index removal does not shift
-	// unvisited positions.
+	// deletedDisplays and deletedRanks entries. Walk backwards so index removal
+	// does not shift unvisited positions.
 	for i := len(s.deleted) - 1; i >= 0; i-- {
 		d := s.deleted[i]
 		if d.ID != id {
@@ -144,6 +149,16 @@ func (s *TaskPane) cancelQueuedDeletion(id string) {
 		for j, p := range s.deletedDisplays {
 			if reflect.DeepEqual(p.expect, d) {
 				s.deletedDisplays = append(s.deletedDisplays[:j], s.deletedDisplays[j+1:]...)
+				break
+			}
+		}
+		// Remove the parallel deletedRanks entry. Leaving a stale rank
+		// entry for a cancelled deletion allows a later deletion of a
+		// different same-ID occurrence to match it and restore to the
+		// wrong position (PRRT_kwDORdIFwM6i7iHT).
+		for k, e := range s.deletedRanks {
+			if reflect.DeepEqual(e.expect, d) {
+				s.deletedRanks = append(s.deletedRanks[:k], s.deletedRanks[k+1:]...)
 				break
 			}
 		}
@@ -258,6 +273,82 @@ func (s *TaskPane) RestoreFailedDeleteWithFresh(fresh, expect task.Task) {
 	s.restoreFailedDeleteImpl(fresh, expect, fresh)
 }
 
+// captureOccurrenceRank records the original load-order rank for the pending
+// deletion of deleted into s.deletedRanks. restorePosition uses this rank
+// instead of the ID-keyed loadedRanks entry, which only records the FIRST
+// occurrence's rank — incorrect when deleting a later duplicate
+// (PRRT_kwDORdIFwM6i06TN).
+//
+// The algorithm walks loadedRanks[id] in order, assigning each slot to either
+// a surviving row before s.selectedIdx or a pending deletion with that rank.
+// The first unassigned slot is the current occurrence's position. Using the
+// rank of pending deletions (from s.deletedRanks) rather than a raw count of
+// pending same-ID entries avoids inflating the occurrence index when duplicate
+// occurrences are deleted right-to-left: a pending deletion of a later
+// occurrence (higher rank) must not shift the index of an earlier one
+// (PRRT_kwDORdIFwM6i7iHh).
+func (s *TaskPane) captureOccurrenceRank(deleted task.Task) {
+	ranks, ok := s.loadedRanks[deleted.ID]
+	if !ok || len(ranks) == 0 {
+		return
+	}
+	// Collect loaded ranks of all current pending same-ID deletions.
+	pendingRanks := map[int]int{} // rank -> count
+	for _, e := range s.deletedRanks {
+		if e.expect.ID == deleted.ID {
+			pendingRanks[e.rank]++
+		}
+	}
+	// Count surviving same-ID rows before the cursor in current slice order.
+	occBefore := 0
+	for i := 0; i < s.selectedIdx; i++ {
+		if s.tasks[i].ID == deleted.ID {
+			occBefore++
+		}
+	}
+	// Walk loadedRanks in order. Each slot is consumed by either a surviving
+	// row-before or a pending deletion at that exact rank. The first unconsumed
+	// slot at the occBefore-th survivor position is this occurrence's rank.
+	survivorsSeen := 0
+	occIdx := -1
+	for i, r := range ranks {
+		if pendingRanks[r] > 0 {
+			pendingRanks[r]--
+			continue
+		}
+		if survivorsSeen == occBefore {
+			occIdx = i
+			break
+		}
+		survivorsSeen++
+	}
+	if occIdx >= 0 && occIdx < len(ranks) {
+		s.deletedRanks = append(s.deletedRanks, deletedRankEntry{expect: deleted, rank: ranks[occIdx]})
+	} else {
+		// Fallback: use the first occurrence's rank if occIdx is out of bounds
+		// (tasks created in the pane and not yet reloaded have no rank entry).
+		s.deletedRanks = append(s.deletedRanks, deletedRankEntry{expect: deleted, rank: ranks[0]})
+	}
+}
+
+// applyDeferredBaselines applies all pending deferred originals baselines that
+// were withheld because the target row was in edit mode when the authoritative
+// record arrived. Call this whenever editing transitions to false through any
+// path other than a delete (which calls deleteSelectedTask directly) or an edit
+// submission (which calls markTaskDirty, which advances originals via
+// AcknowledgeSavedEdit). Without this, pressing Esc then D uses the stale
+// originals baseline — the daemon refuses the CAS and the deletion fails
+// (PRRT_kwDORdIFwM6i7iHX).
+func (s *TaskPane) applyDeferredBaselines() {
+	if s.originals == nil {
+		s.originals = make(map[string]task.Task)
+	}
+	for id, baseline := range s.deferredRestoreBaseline {
+		s.originals[id] = baseline
+	}
+	s.deferredRestoreBaseline = nil
+}
+
 // restoreFailedDeleteImpl is the shared implementation for RestoreFailedDelete,
 // RestoreFailedDeleteWithExpect, and RestoreFailedDeleteWithFresh. display is
 // inserted into s.tasks; baseline is snapshotted into s.originals; expect is
@@ -279,18 +370,32 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) 
 		s.originals[display.ID] = deferredBaseline
 		delete(s.deferredRestoreBaseline, display.ID)
 	}
-	// Check whether THIS specific occurrence (keyed by expect, the stable CAS
-	// record) has already been restored. Keying by expect rather than display
-	// means a concurrent field change between retries (e.g. another client
-	// rebinds the task) does not cause the second retry to miss the dedup check
-	// and insert a ghost row (PRRT_kwDORdIFwM6i6kOK). Storing per-ID slices
-	// (not a single entry per ID) allows two duplicate-ID deletions to each get
-	// their own restored occurrence (PRRT_kwDORdIFwM6i4rk4).
+	// Resolve the ordinal (load-order rank) for this specific occurrence so
+	// the dedup check can distinguish two duplicate-ID deletions that share an
+	// identical expect record (because originals[id] is ID-keyed and returns
+	// the same value for both). The ordinal does not change between retries
+	// for the same occurrence, so it is a stable discriminator that does not
+	// break the rebind dedup case (PRRT_kwDORdIFwM6i7iHM).
+	occOrdinal := -1
+	for _, e := range s.deletedRanks {
+		if reflect.DeepEqual(e.expect, expect) {
+			occOrdinal = e.rank
+			break
+		}
+	}
+	// Check whether THIS specific occurrence (keyed by expect+ordinal) has
+	// already been restored. Keying by expect rather than display means a
+	// concurrent field change between retries (e.g. another client rebinds the
+	// task) does not cause the second retry to miss the dedup check and insert a
+	// ghost row (PRRT_kwDORdIFwM6i6kOK). When two duplicate-ID deletions share
+	// an identical expect record, the ordinal (load-order rank) distinguishes
+	// them so each gets its own restored occurrence (PRRT_kwDORdIFwM6i7iHM,
+	// PRRT_kwDORdIFwM6i4rk4).
 	storedEntries := s.restoredDeletes[display.ID]
 	alreadyRestored := false
 	storedIdx := -1
 	for i, e := range storedEntries {
-		if reflect.DeepEqual(e.expect, expect) {
+		if reflect.DeepEqual(e.expect, expect) && (e.ordinal < 0 || occOrdinal < 0 || e.ordinal == occOrdinal) {
 			alreadyRestored = true
 			storedIdx = i
 			break
@@ -318,12 +423,13 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) 
 		if pos <= s.selectedIdx && s.selectedIdx < len(s.tasks)-1 {
 			s.selectedIdx++
 		}
-		// Record the expect-display pair for this occurrence. The expect field
-		// is the stable occurrence identity used for dedup on subsequent
-		// retries; the display field is the currently visible row value, updated
-		// in place on refresh passes so the in-place-update branch below can
-		// locate the exact row (PRRT_kwDORdIFwM6i06TU, PRRT_kwDORdIFwM6i6kOK).
-		s.restoredDeletes[display.ID] = append(storedEntries, restoredEntry{expect: expect, display: display})
+		// Record the expect-display-ordinal tuple for this occurrence. The
+		// expect+ordinal pair is the stable occurrence identity used for dedup
+		// on subsequent retries; the display field is the currently visible row
+		// value, updated in place on refresh passes so the in-place-update
+		// branch below can locate the exact row (PRRT_kwDORdIFwM6i06TU,
+		// PRRT_kwDORdIFwM6i6kOK, PRRT_kwDORdIFwM6i7iHM).
+		s.restoredDeletes[display.ID] = append(storedEntries, restoredEntry{expect: expect, display: display, ordinal: occOrdinal})
 	} else {
 		// Second or later retry failure for this specific occurrence (same
 		// expect): a fresh record may have been supplied (e.g. another client

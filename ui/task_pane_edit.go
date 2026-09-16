@@ -85,6 +85,11 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.toggleSelectedTask()
 			return true
 		case "D":
+			// Apply any deferred originals baselines before deleting: the
+			// CAS expectation must use durable state, not a stale binding
+			// from before the authoritative refresh arrived
+			// (PRRT_kwDORdIFwM6i7iHX).
+			s.applyDeferredBaselines()
 			s.deleteSelectedTask()
 			s.editing = false
 			s.editError = ""
@@ -104,6 +109,11 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 		s.creating = false
 		s.editError = ""
 		s.editErrorField = -1
+		// Apply any deferred originals baselines that were withheld while
+		// the form was open. Without this, a D press after Esc uses the
+		// stale baseline and the daemon refuses the CAS
+		// (PRRT_kwDORdIFwM6i7iHX).
+		s.applyDeferredBaselines()
 	case tea.KeyEnter:
 		// The prompt keeps Enter for newlines; every other field submits, so
 		// the footer's blanket "enter save" holds wherever focus is (#1098 —
