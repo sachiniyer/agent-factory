@@ -79,27 +79,39 @@ func builtInProgramOverride(resolved *config.ResolvedConfig, agent, command stri
 // It resolves configuration before Instance.Program is rewritten, so an invalid
 // incoming override can be rejected while the outgoing process is still alive.
 func resolveProgramForAgent(i *Instance, agent string) string {
-	cfg := resolveConfigForInstance(i)
 	// Read the enum through the accessor, not the bare field: a handoff (#2013)
 	// rewrites Program in place while the instance is live and shared, so this
 	// is a genuinely concurrent read now. Every other reader of the field
 	// (ToInstanceData, ReconcileTabsFromData) already holds the instance lock.
-	return config.ResolveProgram(cfg, agent)
+	return resolveProgramForPath(i.Path, agent)
+}
+
+// resolveProgramForPath is the session-free half of resolveProgramForAgent: the
+// same repo-then-global config chain over an explicit path. The daemon's
+// account-list response resolves handoff targets through it for callers that
+// hold no Instance — a resolved command means the same thing whichever caller
+// asked (#4430 review).
+func resolveProgramForPath(path, agent string) string {
+	return config.ResolveProgram(resolveConfigForPath(path), agent)
 }
 
 func resolveConfigForInstance(i *Instance) *config.Config {
+	return resolveConfigForPath(i.Path)
+}
+
+func resolveConfigForPath(path string) *config.Config {
 	var cfg *config.Config
-	if repo, err := config.RepoFromPath(i.Path); err == nil {
+	if repo, err := config.RepoFromPath(path); err == nil {
 		if resolved, rerr := config.ResolveConfigForRepo(repo); rerr == nil {
 			cfg = &resolved.Config
 		} else {
-			log.WarningLog.Printf("failed to resolve repo config when resolving program for %q: %v", i.Title, rerr)
+			log.WarningLog.Printf("failed to resolve repo config when resolving program for path %q: %v", path, rerr)
 		}
 	}
 	if cfg == nil {
 		loaded, err := config.LoadConfig()
 		if err != nil {
-			log.WarningLog.Printf("failed to load config when resolving program for %q: %v", i.Title, err)
+			log.WarningLog.Printf("failed to load config when resolving program for path %q: %v", path, err)
 			loaded = nil
 		}
 		cfg = loaded

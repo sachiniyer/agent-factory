@@ -11323,19 +11323,22 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   let accounts = { entries: [], agents: [] };
   let accountsLoaded = !callbacks.loadAccounts;
   let accountsFailed = false;
-  const scopableTarget = (agent) => accountsFailed || accountAgentSupported(accounts, agent);
+  const resolvedAgent = (agent) => accounts.resolved_agents?.[agent] ?? agent;
+  const scopableTarget = (agent) => accountsFailed || accountAgentSupported(accounts, resolvedAgent(agent));
   const requiresAccount = (agent) => agent === currentAgent || !!callbacks.currentAccount && scopableTarget(agent);
   let accountRows = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
   accountSelect.setAttribute("aria-label", "New account");
   const syncAccountSelection = () => {
-    accountHint.textContent = callbacks.currentAccount && !scopableTarget(agentSelect.value) ? `${agentSelect.value} cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
+    const target = agentSelect.value;
+    const resolved = resolvedAgent(target);
+    accountHint.textContent = callbacks.currentAccount && !scopableTarget(target) ? resolved !== target ? `${target} launches ${resolved}, which cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : `${target} cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
     confirmBtn.disabled = !accountsLoaded || !agentSelect.value || requiresAccount(agentSelect.value) && !accountSelect.value;
   };
   const refreshAccounts2 = () => {
     const agent = agentSelect.value;
-    const choices = handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "");
+    const choices = resolvedAgent(agent) === agent ? handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "") : [];
     accountRows = choices;
     accountSelect.replaceChildren();
     if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
@@ -11360,7 +11363,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   };
   const refreshAgentChoices = () => {
     if (catalogChoices === null || !accountsLoaded) return;
-    const hasAccount = (agent) => handoffAccountChoices(
+    const hasAccount = (agent) => resolvedAgent(agent) === agent && handoffAccountChoices(
       accounts,
       agent,
       agent === currentAgent ? callbacks.currentAccount : ""

@@ -129,6 +129,44 @@ func TestHandoffScopedOffersAmbientDropRows(t *testing.T) {
 	require.Contains(t, rendered, `"work" scope is dropped`)
 }
 
+// A scoped session must classify targets by the command they launch, not the
+// requested enum (#4430 review): resolved_agents is the daemon's report of
+// DetectAgentFromCommand over this repo's program_overrides.
+//   - codex → aider: the target gets the ambient drop row its resolved launch
+//     warrants, the warning names the resolution, and codex's account rows are
+//     NOT offered — a resolved aider has no use for them.
+//   - aider → codex: the target is hidden entirely — an ambient row would be
+//     refused by admission, and a codex account row could never apply through
+//     the aider enum.
+func TestHandoffScopedClassifiesTargetsByResolvedAgent(t *testing.T) {
+	h := newTestHome(t)
+	inst := handoffActionInstance(t, "worker", "claude")
+	inst.Account = "work"
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+	restore := SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
+		return daemon.ListAccountsResponse{
+			Agents: []string{"claude", "codex", "gemini"},
+			Entries: []daemon.AccountEntry{
+				{Agent: "claude", Name: "work", LoggedIn: true},
+				{Agent: "codex", Name: "spare", LoggedIn: true},
+			},
+			ResolvedAgents: map[string]string{"codex": "aider", "aider": "codex"},
+		}, nil
+	})
+	defer restore()
+	_, cmd := h.handleHandoff()
+	h.Update(cmd())
+	require.Equal(t, []string{"codex", "amp", "opencode", "devin"}, h.handoffChoices)
+	require.Equal(t, []string{"", "", "", ""}, h.handoffAccounts,
+		"redirected targets drop their enum's account rows — codex:spare cannot apply to a resolved aider")
+	h.selectionOverlay.SetSelectedIndex(0)
+	h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+	rendered := flatten(h.confirmationOverlay.Render())
+	require.Contains(t, rendered, "codex launches aider")
+	require.Contains(t, rendered, `"work" scope is dropped`)
+}
+
 func TestHandoffCredentialWarning(t *testing.T) {
 	h := newTestHome(t)
 	h.store.AddInstance(handoffActionInstance(t, "worker", "claude"))

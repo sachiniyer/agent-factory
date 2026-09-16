@@ -176,37 +176,39 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		return HandoffSessionResponse{}, err
 	}
 	// A scoped account belongs to one agent, so it can never be carried onto a
-	// different one unchanged (#4428). A target WITH an account namespace must be
-	// given its own account explicitly — handoffAccount owns that transaction,
-	// and this refusal names the flag that reaches it. A target WITHOUT one has
-	// no namespace the name could resolve in, so there is no identity to guess:
-	// the record drops the scope in the same mutation that rewrites the program,
-	// and the response reports the drop on from_account.
+	// different one unchanged (#4428). The capability question is judged on the
+	// command the plan froze, in exactly one place: an earlier enum check would
+	// misclassify an override in both directions — `program_overrides.aider =
+	// "codex"` would drop the scope onto a scopable launch, and
+	// `program_overrides.codex = "aider"` would refuse a --account no Aider
+	// namespace could ever honor (#4430 review). An incoming agent WITH an
+	// account namespace must be given its own account explicitly —
+	// handoffAccount owns that transaction, and this refusal names the flag
+	// that reaches it. One WITHOUT has no namespace the name could resolve in,
+	// so there is no identity to guess: the record drops the scope in the same
+	// mutation that rewrites the program, and the response reports the drop on
+	// from_account.
 	fromAccount, _ := instance.AccountSelection()
-	if fromAccount != "" {
-		if _, scopable := sessionenv.SupportsAccounts(target); scopable {
-			return HandoffSessionResponse{}, fmt.Errorf(
-				"session %q is scoped to %s account %q; specify a target account with --account before handing it off to %s",
-				req.Title, instance.CurrentAgentName(), fromAccount, target)
-		}
-	}
 	plan, err := instance.PrepareAgentSwap(target)
 	if err != nil {
 		return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", req.Title, target, err)
 	}
-	// The enum check above judges the requested target; this one judges the
-	// command the plan actually froze. A program_overrides command like
-	// `program_overrides.aider = "codex"` passes the enum check (aider has no
-	// account namespace) yet launches Codex — which does. Without this, the
-	// record would drop the scope and Codex would start with ambient
-	// credentials (#4430 review).
+	// Unconditional on scopable(effective): gating this on effective != target
+	// would let a config flip between admission and the plan freeze slip a
+	// scopable command past the only check that sees it. The frozen command is
+	// the authority — a refusal here can never describe a launch the plan did
+	// not already commit to.
 	if fromAccount != "" {
-		if effectiveAgent := plan.EffectiveAgent(); effectiveAgent != target {
-			if _, scopable := sessionenv.SupportsAccounts(effectiveAgent); scopable {
+		effective := plan.EffectiveAgent()
+		if _, scopable := sessionenv.SupportsAccounts(effective); scopable {
+			if effective != target {
 				return HandoffSessionResponse{}, fmt.Errorf(
 					"session %q is scoped to %s account %q, and %q resolves to %s — specify a target account with --account before handing it off",
-					req.Title, instance.CurrentAgentName(), fromAccount, target, effectiveAgent)
+					req.Title, instance.CurrentAgentName(), fromAccount, target, effective)
 			}
+			return HandoffSessionResponse{}, fmt.Errorf(
+				"session %q is scoped to %s account %q; specify a target account with --account before handing it off to %s",
+				req.Title, instance.CurrentAgentName(), fromAccount, target)
 		}
 	}
 

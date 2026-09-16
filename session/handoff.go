@@ -278,7 +278,17 @@ func (i *Instance) RecordHandoffSwap(target, effectiveAgent, reason, headSHA str
 // exists its EffectiveAgent is the same answer computed once, and preferred:
 // a re-resolution could see a different config than the plan already froze.
 func handoffEffectiveAgent(i *Instance, target string) string {
-	if detected := tmux.DetectAgentFromCommand(resolveProgramForAgent(i, target)); detected != "" {
+	return HandoffEffectiveAgentForPath(i.Path, target)
+}
+
+// HandoffEffectiveAgentForPath is the Instance-free half of
+// handoffEffectiveAgent: the same resolution over a path whose repo (or the
+// global config, when the path is not one) supplies program_overrides. The
+// daemon's account-list response answers with it for clients that hold no
+// Instance, so a picker classifies a target by the agent its command launches,
+// never by the enum the request happened to name (#4430 review).
+func HandoffEffectiveAgentForPath(path, target string) string {
+	if detected := tmux.DetectAgentFromCommand(resolveProgramForPath(path, target)); detected != "" {
 		return detected
 	}
 	return target

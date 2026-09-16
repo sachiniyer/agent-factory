@@ -176,6 +176,39 @@ func TestHandoffScopedSessionRefusesCrossAgentProgramOverride(t *testing.T) {
 	require.Empty(t, prompts)
 }
 
+// The inverse override direction of the test above (#4430 review):
+// `program_overrides.codex = "aider"` makes a "codex" handoff launch Aider,
+// which has no account namespace — the honest answer is the scope drop, not a
+// --account refusal that could never name an Aider account. The capability
+// check reads the frozen plan's EffectiveAgent, so admission must see the same
+// aider the launch will.
+func TestHandoffScopedSessionDescopesCrossAgentProgramOverride(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	inst.SetBackend(&handoffRealPlanBackend{backend})
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "aider"), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	writeLimitAccountCandidates(t, "[program_overrides]\ncodex = \"aider\"\n")
+
+	resp, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, To: "codex"})
+	require.NoError(t, err,
+		"a target whose resolved command cannot carry a scope must take the descope, not a --account refusal")
+	require.Equal(t, "work", resp.FromAccount)
+	require.Empty(t, resp.ToAccount)
+	account, _ := inst.AccountSelection()
+	require.Empty(t, account, "the record dropped the scope — aider has no namespace for it")
+	handoffs := inst.Handoffs()
+	require.Len(t, handoffs, 1)
+	require.Equal(t, "work", handoffs[0].FromAccount)
+	_, _, prompts := backend.snapshot()
+	require.Len(t, prompts, 1)
+}
+
 func TestHandoffAccountHealthyDeliveryFailureDoesNotInventQuota(t *testing.T) {
 	for _, live := range []session.Liveness{session.LiveRunning, session.LiveReady} {
 		t.Run(fmt.Sprint(live), func(t *testing.T) {

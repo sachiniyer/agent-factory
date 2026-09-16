@@ -8,7 +8,9 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/accountlogin"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The daemon half of `af accounts login` (#3384).
@@ -126,7 +128,15 @@ func (m *Manager) ListAccounts(req ListAccountsRequest) (ListAccountsResponse, e
 	if m != nil {
 		defaults = defaultAccountsFor(m.Config(), req.RepoPath, roster)
 	}
-	return ListAccountsResponse{Entries: entries, Agents: roster, Defaults: defaults}, nil
+	// Handoff targets are classified by the command they launch, not the enum —
+	// resolved through the same session-layer chain the swap's frozen plan uses,
+	// so a picker and the admission check can never read different answers from
+	// the same configuration (#4430 review).
+	resolved := make(map[string]string, len(tmux.SupportedPrograms))
+	for _, agent := range tmux.SupportedPrograms {
+		resolved[agent] = session.HandoffEffectiveAgentForPath(req.RepoPath, agent)
+	}
+	return ListAccountsResponse{Entries: entries, Agents: roster, Defaults: defaults, ResolvedAgents: resolved}, nil
 }
 
 // RegisterAccount creates an account's credential directory without logging in.

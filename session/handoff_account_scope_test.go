@@ -278,3 +278,21 @@ func TestPrepareAgentSwapEffectiveAgentFollowsResolvedCommand(t *testing.T) {
 	require.Equal(t, tmux.ProgramCodex, plan.EffectiveAgent(),
 		"the frozen plan must name the agent the resolved command launches, not the requested enum")
 }
+
+// The daemon's resolved_agents response and the swap pipeline must read the
+// same answer: HandoffEffectiveAgentForPath is handoffEffectiveAgent's
+// instance-free form over the same path, so a picker classifying by the
+// response and the plan that froze the command can never disagree about which
+// agent a target launches — the bug moved if they could (#4430 review).
+func TestHandoffEffectiveAgentForPath_MatchesInstanceResolution(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	_, err := config.SetGlobalConfigValue("program_overrides."+tmux.ProgramCodex, tmux.ProgramAider)
+	require.NoError(t, err)
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	for _, target := range tmux.SupportedPrograms {
+		require.Equal(t, handoffEffectiveAgent(inst, target),
+			HandoffEffectiveAgentForPath(inst.Path, target), target)
+	}
+	require.Equal(t, tmux.ProgramAider,
+		HandoffEffectiveAgentForPath(inst.Path, tmux.ProgramCodex))
+}

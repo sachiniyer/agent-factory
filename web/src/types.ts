@@ -531,6 +531,14 @@ export interface AccountsResponse {
    *  than this client does not send it at all — in which case the picker simply
    *  offers no preselection, which is what it did before this field existed. */
   defaults?: Record<string, string>;
+  /** Per agent name, the agent its resolved program_overrides command actually
+   *  launches for this repo. A handoff picker classifies a target's account
+   *  capability by this value, not the enum: codex→aider drops the scope rather
+   *  than needing an account no Aider registry could honor (#4430 review).
+   *
+   *  Optional for the same reason as defaults — an older daemon does not send
+   *  it, and the enum fallback restores the old classification. */
+  resolved_agents?: Record<string, string>;
 }
 
 /** RegisterAccountResponse (daemon/control_types_accounts.go). */

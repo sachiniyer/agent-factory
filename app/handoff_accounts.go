@@ -47,22 +47,44 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 		scopable[entry.Agent] = true
 	}
 	for _, agent := range append([]string{msg.agent}, handoffAgentChoices(msg.agent)...) {
+		// Classify by the command the target LAUNCHES, not the enum: the
+		// daemon's resolved_agents map answers "which agent runs" for this
+		// session's repo, so program_overrides.codex = "aider" shows the ambient
+		// row Aider's launch warrants rather than Codex accounts a resolved
+		// Aider could never use (#4430 review). A missing entry means an older
+		// daemon; the enum is the safe fallback.
+		resolved := msg.response.ResolvedAgents[agent]
+		if resolved == "" {
+			resolved = agent
+		}
+		canCarry := scopable[resolved]
 		// The ambient row is also the honest offer for a scoped session aimed at
 		// a target that cannot carry a scope: the swap drops it and reports the
 		// drop on from_account (#4428), so the target is offered with its
 		// warning rather than hidden.
-		if agent != msg.agent && (current == "" || !scopable[agent]) {
+		if agent != msg.agent && (current == "" || !canCarry) {
 			if preselected < 0 {
 				preselected = len(labels)
 			}
 			warning := ""
 			if current != "" {
-				warning = fmt.Sprintf("%s cannot carry an account — the %q scope is dropped on handoff. ", agent, current)
+				if resolved != agent {
+					warning = fmt.Sprintf("%s launches %s, which cannot carry an account — the %q scope is dropped on handoff. ", agent, resolved, current)
+				} else {
+					warning = fmt.Sprintf("%s cannot carry an account — the %q scope is dropped on handoff. ", agent, current)
+				}
 			}
 			agents = append(agents, agent)
 			accounts = append(accounts, "")
 			labels = append(labels, agent+" (ambient)")
 			warnings = append(warnings, warning)
+		}
+		// Account rows are honest only when the requested enum IS the agent the
+		// command launches: the daemon's --account transaction registers against
+		// the resolved command's namespace, so a redirected target could never
+		// apply an account the picker offered under its own name.
+		if resolved != agent {
+			continue
 		}
 		for _, entry := range msg.response.Entries {
 			if entry.Agent != agent || (agent == msg.agent && entry.Name == current) || entry.RegistrationOnly {
