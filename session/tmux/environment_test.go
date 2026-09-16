@@ -81,3 +81,42 @@ func TestCodexHomeFromCommandUsesEffectiveCwd(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(string(filepath.Separator), "tmp", "relative"), got)
 }
+
+// ConfigRootFromCommand is the one answer to "where does this launch read its
+// config" (#4501): Codex capture and af's skill placement both take it, so the
+// two agents' shapes and the daemon fallback are pinned here once.
+func TestConfigRootFromCommand(t *testing.T) {
+	launchDir := filepath.Join(string(filepath.Separator), "launch")
+	t.Setenv("HOME", "/daemon-home")
+	t.Setenv("CODEX_HOME", "/daemon-codex")
+	t.Setenv("GEMINI_CLI_HOME", "")
+	tests := []struct {
+		name, agent, command, want, wantErr string
+	}{
+		{name: "codex inherits the daemon variable", agent: ProgramCodex, command: "codex", want: "/daemon-codex"},
+		{name: "codex command variable wins", agent: ProgramCodex, command: "CODEX_HOME=/srv/codex codex", want: "/srv/codex"},
+		{name: "codex HOME fallback names the config dir", agent: ProgramCodex, command: "env -u CODEX_HOME HOME=/h codex", want: "/h/.codex"},
+		{name: "gemini empty daemon variable falls back to HOME", agent: ProgramGemini, command: "gemini", want: "/daemon-home"},
+		{name: "gemini command variable wins", agent: ProgramGemini, command: "GEMINI_CLI_HOME=/srv/gemini gemini", want: "/srv/gemini"},
+		{name: "gemini root is HOME-like", agent: ProgramGemini, command: "HOME=/h gemini", want: "/h"},
+		{name: "gemini empty command variable falls back to HOME", agent: ProgramGemini, command: "GEMINI_CLI_HOME= HOME=/h gemini", want: "/h"},
+		{name: "gemini relative variable uses launch cwd", agent: ProgramGemini, command: "env -C sub GEMINI_CLI_HOME=rel gemini", want: "/launch/sub/rel"},
+		{name: "gemini dynamic variable refused", agent: ProgramGemini, command: "GEMINI_CLI_HOME=$X gemini", wantErr: "uses shell expansion"},
+		{name: "gemini dynamic HOME refused", agent: ProgramGemini, command: "HOME=$X gemini", wantErr: "uses shell expansion"},
+		{name: "gemini parse failure names the agent", agent: ProgramGemini, command: "env --future-option gemini", wantErr: "cannot resolve Gemini environment"},
+		{name: "cleared environment names the variable", agent: ProgramGemini, command: "env -i gemini", wantErr: "GEMINI_CLI_HOME is unset and the launched command has no literal HOME fallback"},
+		{name: "agent without a followed root", agent: ProgramClaude, command: "claude", wantErr: "does not follow a config root"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ConfigRootFromCommand(tc.agent, tc.command, launchDir)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				require.Empty(t, got)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, filepath.FromSlash(tc.want), got)
+		})
+	}
+}
