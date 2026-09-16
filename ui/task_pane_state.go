@@ -100,6 +100,19 @@ func (s *TaskPane) cancelQueuedDeletion(id string) {
 	for i, d := range s.deleted {
 		if d.ID == id {
 			s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
+			// Remove the parallel deletedDisplays entry so a subsequent
+			// deleteSelectedTask (after the user edits then re-deletes this
+			// row) does not find a stale snapshot from the cancelled
+			// deletion. GetDeletedDisplay matches by full expect record, so
+			// the pre-edit display would be returned for the new deletion —
+			// causing the restore to show the pre-edit draft instead of the
+			// newly-edited content (PRRT_kwDORdIFwM6i3K61).
+			for j, p := range s.deletedDisplays {
+				if reflect.DeepEqual(p.expect, d) {
+					s.deletedDisplays = append(s.deletedDisplays[:j], s.deletedDisplays[j+1:]...)
+					break
+				}
+			}
 			break
 		}
 	}
@@ -276,7 +289,14 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) 
 				continue
 			}
 			if !(s.editing && s.selectedIdx == i) {
-				s.originals[display.ID] = display
+				// Use baseline (not display) to update originals, matching
+				// what the first-restore branch does. display may contain
+				// draft values that were never persisted; setting originals
+				// to display would make those draft fields appear persisted:
+				// a later toggle omits them from ConsumeDirty, and a
+				// re-delete uses an unsaved ProjectPath as its CAS
+				// expectation (PRRT_kwDORdIFwM6i3K68).
+				s.originals[display.ID] = baseline
 				s.tasks[i] = display
 				// Update the stored display so subsequent retries match the
 				// newly refreshed row, not the stale original.
@@ -478,9 +498,16 @@ func (s *TaskPane) ConsumeDeleted() []task.Task {
 // for both (PRRT_kwDORdIFwM6i2XFw). The slice persists until SetTasks
 // (successful reload) or AcknowledgeDeletedRestored (successful retry) removes
 // entries.
+//
+// Entries are consumed on match: when two deletions of the same ID share
+// identical expect records (deleteSelectedTask replaces both with the same
+// originals[id]), the first call returns and removes the first match so the
+// second call returns the next occurrence — preventing both failed deletions
+// from being given the same display record (PRRT_kwDORdIFwM6i3K64).
 func (s *TaskPane) GetDeletedDisplay(expect task.Task) (task.Task, bool) {
-	for _, p := range s.deletedDisplays {
+	for i, p := range s.deletedDisplays {
 		if reflect.DeepEqual(p.expect, expect) {
+			s.deletedDisplays = append(s.deletedDisplays[:i], s.deletedDisplays[i+1:]...)
 			return p.display, true
 		}
 	}
