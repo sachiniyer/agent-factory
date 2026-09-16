@@ -1689,7 +1689,7 @@ af sessions archive [title] [flags]
 
 Attach to a session's terminal
 
-Attach to a running session's tmux terminal. Detach with the configured detach key (default: Ctrl-w).
+Attach to a running session's tmux terminal. Detach with the configured detach key (default: ctrl+w).
 
 ```
 af sessions attach <title>
