@@ -5476,10 +5476,14 @@ test.describe("create → kill (one session, two flows)", () => {
 
     // An account belongs to ONE agent, so changing the program drops the pick rather
     // than carrying a claude account name into another agent's registry, where the
-    // same spelling is a different identity. codex has no registered accounts here,
-    // so the honest list is the ambient row alone.
+    // same spelling is a different identity. codex is in the daemon's roster but
+    // has no registered accounts here, so the routable row admits it lands on the
+    // agent's own login — and the explicit ambient pin still renders beside it.
     await programSelect.selectOption("codex");
-    await expect(accountSelect.locator("option")).toHaveText(["Use agent login (nothing to route)"]);
+    await expect(accountSelect.locator("option")).toHaveText([
+      "Use agent login (nothing to route)",
+      "Use the ambient identity (no account)",
+    ]);
     await expect(accountSelect).toHaveValue("");
     await expect(accountHint).toHaveText("");
 
