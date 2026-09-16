@@ -274,6 +274,9 @@ func (i *Instance) handoffStorageCheckpoint() InstanceData {
 	data.Liveness = LiveRunning
 	data.InFlightOp = OpNone
 	data.LimitResetAt = time.Time{}
+	data.LimitObservedAt = time.Time{}
+	data.LimitAgent = ""
+	data.LimitAccount = ""
 	return data
 }
 
