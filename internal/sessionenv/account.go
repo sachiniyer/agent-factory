@@ -421,21 +421,40 @@ func ApplyAccountEnvironment(env []string, command string, account Account) ([]s
 	// /bin/sh -c. Strip shell startup code before that outer shell runs, not only
 	// when the user's command is itself an interactive shell.
 	scoped = stripAccountShellStartupEnvironment(scoped)
-	// ZDOTDIR is pinned, not merely stripped — and only at the generated zsh
-	// launch boundary. Unset, it falls back to HOME, and /etc/zsh/zshenv — the
-	// one startup file `zsh -f` cannot skip — can `setopt RCS` and re-admit the
-	// entire user chain past -f (no invocation flag survives it; measured on
-	// zsh 5.9, #4474 review). Defined-and-empty, zsh has no dotfile directory
-	// to read at all, so the only startup files still reachable are the
-	// root-owned global ones — the same operator trust class as the /bin/zsh
-	// executable this launches. Everywhere else the pin is wrong: this env
-	// also reaches code-server, process panes, and login shells, and a
-	// defined-empty ZDOTDIR would stop every zsh THEY spawn from reading
-	// ~/.zshenv and ~/.zshrc (#4474 review).
-	if isGeneratedAccountZsh(command) {
+	// ZDOTDIR is pinned, not merely stripped — and on every admitted zsh
+	// launch, not only the exact generated spelling. Unset, it falls back to
+	// HOME, and /etc/zsh/zshenv — the one startup file `zsh -f` cannot skip —
+	// can `setopt RCS` and re-admit the entire user chain past -f (no
+	// invocation flag survives it; measured on zsh 5.9, #4474 review).
+	// Defined-and-empty, zsh has no dotfile directory to read at all, so the
+	// only startup files still reachable are the root-owned global ones —
+	// the same operator trust class as the /bin/zsh executable this launches.
+	// The launch detector walks the same judged positions the validator
+	// admits, so compound and wrapped forms such as `nice /bin/zsh -f -i`
+	// and `/bin/zsh -f -i; true` get the pin too. Everywhere else the pin is
+	// wrong: this env also reaches code-server, process panes, and login
+	// shells, and a defined-empty ZDOTDIR would stop every zsh THEY spawn
+	// from reading ~/.zshenv and ~/.zshrc (#4474 review).
+	if commandAdmitsZshLaunch(command, accountEnvironmentOverrideNames(account)) {
 		scoped = append(scoped, "ZDOTDIR=")
 	}
 	return scoped, nil
+}
+
+// accountEnvironmentOverrideNames is the denied set the sibling-command
+// validator enforces and the zsh-launch detector walks with: the account's
+// scoped variables, its auth selectors, and the shell-startup names — every
+// variable a command could use to replace the selected identity.
+func accountEnvironmentOverrideNames(account Account) map[string]struct{} {
+	configVar, _ := SupportsAccounts(account.Agent)
+	overrideNames := accountScopedNames(account.Agent, configVar)
+	for _, selector := range AgentAuthSelectors(account.Agent) {
+		overrideNames[selector] = struct{}{}
+	}
+	for name := range accountShellStartupNames {
+		overrideNames[name] = struct{}{}
+	}
+	return overrideNames
 }
 
 func applyAccount(env []string, command string, account Account, validateCommand bool) ([]string, error) {

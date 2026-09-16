@@ -134,18 +134,10 @@ func ValidateAccountEnvironmentCommand(command string, account Account) error {
 	if isAccountShellCommand(command) {
 		return nil
 	}
-	configVar, supported := SupportsAccounts(account.Agent)
-	if !supported {
+	if _, supported := SupportsAccounts(account.Agent); !supported {
 		return nil
 	}
-	overrideNames := accountScopedNames(account.Agent, configVar)
-	for _, selector := range AgentAuthSelectors(account.Agent) {
-		overrideNames[selector] = struct{}{}
-	}
-	for name := range accountShellStartupNames {
-		overrideNames[name] = struct{}{}
-	}
-	if commandMutatesAccountEnvironment(command, overrideNames) {
+	if commandMutatesAccountEnvironment(command, accountEnvironmentOverrideNames(account)) {
 		return accountCommandValidationErrorf(
 			"account %q cannot scope sibling environment for agent %q: its command sets an identity or shell-startup variable itself, which can override the account directory",
 			account.Name, account.Agent)

@@ -16,6 +16,44 @@ import (
 // PORT=3000 remains allowed. Shell decorations do not hide calls from the walk,
 // and an unsupported form of a recognized environment mutator fails closed.
 func commandMutatesAccountEnvironment(command string, names map[string]struct{}) bool {
+	return commandEnvironmentWalkMutates(command, names, nil)
+}
+
+// commandAdmitsZshLaunch reports whether any position the command validator
+// judges resolves to the admitted zsh launch: a top-level call after wrapper
+// removal (`nice /bin/zsh -f -i`), a compound-list sibling (`/bin/zsh -f -i;
+// true`), env's command word, or a shell word inside an unrecognized
+// wrapper's argv. isGeneratedAccountZsh saw only the exact generated
+// spelling, so those admitted forms ran zsh with ZDOTDIR merely unset — where
+// a `setopt RCS` in /etc/zsh/zshenv re-admits the user startup chain that can
+// rewrite the account root (Codex on #4474). The pin this feeds still lands
+// only on commands that can execute zsh: `echo /bin/zsh` never reaches a
+// judged zsh position, and unrelated surfaces such as code-server and login
+// panes keep their unpinned environment (#4474 review).
+func commandAdmitsZshLaunch(command string, names map[string]struct{}) bool {
+	launchesZsh := false
+	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
+		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
+		if err != nil {
+			continue
+		}
+		syntax.Walk(file, func(node syntax.Node) bool {
+			if launchesZsh {
+				return false
+			}
+			// The verdict is deliberately unused: the traversal itself is what
+			// visits every judged command position and records a proven zsh.
+			nodeMutatesAccountEnvironment(node, names, &launchesZsh)
+			return true
+		})
+		if launchesZsh {
+			return true
+		}
+	}
+	return false
+}
+
+func commandEnvironmentWalkMutates(command string, names map[string]struct{}, launchesZsh *bool) bool {
 	if command == "" {
 		return false
 	}
@@ -26,7 +64,7 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		}
 		mutates := false
 		syntax.Walk(file, func(node syntax.Node) bool {
-			if nodeMutatesAccountEnvironment(node, names) {
+			if nodeMutatesAccountEnvironment(node, names, launchesZsh) {
 				mutates = true
 				return false
 			}
@@ -39,10 +77,10 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 	return false
 }
 
-func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) bool {
+func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}, launchesZsh *bool) bool {
 	switch node := node.(type) {
 	case *syntax.CallExpr:
-		return callMutatesAccountEnvironment(node, names)
+		return callMutatesAccountEnvironment(node, names, launchesZsh)
 	case *syntax.Assign:
 		return node.Name != nil && accountEnvironmentNameDenied(node.Name.Value, names)
 	case *syntax.WordIter:
@@ -116,7 +154,7 @@ func arithmeticAccountEnvironmentName(expr syntax.ArithmExpr) (string, bool) {
 	return literalShellWord(word)
 }
 
-func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}) bool {
+func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}, launchesZsh *bool) bool {
 	for _, assign := range call.Assigns {
 		if assign != nil && assign.Name != nil {
 			if _, denied := names[assign.Name.Value]; denied {
@@ -125,14 +163,14 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 		}
 	}
 
-	words, unsafe := unwrapAccountCommand(call.Args, names)
+	words, unsafe := unwrapAccountCommand(call.Args, names, launchesZsh)
 	if unsafe || len(words) == 0 {
 		return unsafe
 	}
-	return unwrappedAccountCommandMutates(words, names)
+	return unwrappedAccountCommandMutates(words, names, launchesZsh)
 }
 
-func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}) bool {
+func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}, launchesZsh *bool) bool {
 	if _, literal := literalShellWord(words[0]); !literal {
 		// A dynamic command name can resolve to env or a same-shell builtin such
 		// as unset/export, so its effect on the selected identity is unprovable.
@@ -140,7 +178,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 	}
 	switch {
 	case isAccountCommandName(words[0], "env"):
-		return envCallMutatesAccountEnvironment(words[1:], names, false)
+		return envCallMutatesAccountEnvironment(words[1:], names, false, launchesZsh)
 	case isBareName(words[0], "unset"):
 		return unsetMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "set"):
@@ -172,7 +210,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 		// Proving their effects would require a second parser pass with runtime
 		// expansion, so a scoped sibling refuses them.
 		return true
-	case shellCommandIsUnproven(words):
+	case shellCommandIsUnproven(words, launchesZsh):
 		return true
 	default:
 		return false
@@ -182,7 +220,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 // unwrapAccountCommand removes shell wrappers that still execute the remaining
 // words in the current environment. Dynamic or unsupported wrapper forms are
 // unsafe because they could resolve to env or an environment-mutating builtin.
-func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
+func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}, launchesZsh *bool) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		switch {
 		case isBareName(words[0], "exec"):
@@ -276,7 +314,7 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 				return nil, true
 			}
 		default:
-			if unrecognizedWrapperHidesAccountAssignment(words, names) {
+			if unrecognizedWrapperHidesAccountAssignment(words, names, launchesZsh) {
 				return nil, true
 			}
 			return words, false
@@ -314,7 +352,7 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 // denied name or assignment (xargs --process-slot-var=NAME, strace -E var=val
 // and --env=var=val) is refused — a wrapper's own options can place the
 // mutation without any env word.
-func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}) bool {
+func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}, launchesZsh *bool) bool {
 	strace := isAccountCommandName(words[0], "strace")
 	for i := 1; i < len(words); i++ {
 		word := words[i]
@@ -322,7 +360,7 @@ func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[s
 			// A nested env only mutates the child it execs; requireCommand
 			// keeps an `env CODEX_HOME=/tmp` whose argv ends there — env's
 			// print mode, which overrides nothing — allowed.
-			if envCallMutatesAccountEnvironment(words[i+1:], names, true) {
+			if envCallMutatesAccountEnvironment(words[i+1:], names, true, launchesZsh) {
 				return true
 			}
 			continue
@@ -332,7 +370,7 @@ func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[s
 			// An unprovable tail word can itself expand to `env` (or to a
 			// multiword `env NAME=value` after word splitting); judge the
 			// words after it as that invocation's argv.
-			if envCallMutatesAccountEnvironment(words[i+1:], names, true) {
+			if envCallMutatesAccountEnvironment(words[i+1:], names, true, launchesZsh) {
 				return true
 			}
 			continue
@@ -345,7 +383,7 @@ func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[s
 			// proves out. A trailing shell name with no argv (echo sh,
 			// strace -p 1 sh) has nothing to judge and stays allowed.
 			if i+1 < len(words) && knownShellName(filepath.Base(literal)) &&
-				shellCommandIsUnproven(words[i:]) {
+				shellCommandIsUnproven(words[i:], launchesZsh) {
 				return true
 			}
 			continue
@@ -480,7 +518,7 @@ func envCallArgvParse(words []*syntax.Word) (envcommand.Invocation, error) {
 // sit in an unrecognized wrapper's tail rather than forming the command itself —
 // an `env CODEX_HOME=/tmp` with nothing after it runs env's print path, not an
 // override of a running agent.
-func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}, requireCommand bool) bool {
+func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}, requireCommand bool, launchesZsh *bool) bool {
 	invocation, err := envCallArgvParse(words)
 	if err != nil || invocation.ClearEnvironment {
 		return true
@@ -494,19 +532,19 @@ func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]str
 		}
 	}
 	if invocation.CommandIndex >= 0 {
-		commandWords, unsafe := unwrapAccountCommand(words[invocation.CommandIndex:], names)
+		commandWords, unsafe := unwrapAccountCommand(words[invocation.CommandIndex:], names, launchesZsh)
 		if unsafe {
 			return true
 		}
 		if len(commandWords) == 0 {
 			return false
 		}
-		return unwrappedAccountCommandMutates(commandWords, names)
+		return unwrappedAccountCommandMutates(commandWords, names, launchesZsh)
 	}
 	return false
 }
 
-func shellCommandIsUnproven(words []*syntax.Word) bool {
+func shellCommandIsUnproven(words []*syntax.Word, launchesZsh *bool) bool {
 	if len(words) == 0 {
 		return false
 	}
@@ -514,7 +552,16 @@ func shellCommandIsUnproven(words []*syntax.Word) bool {
 	if !literal || !knownShellName(filepath.Base(command)) {
 		return false
 	}
-	return !accountShellCommandWordsProven(words)
+	proven := accountShellCommandWordsProven(words)
+	if proven && filepath.Base(command) == "zsh" && launchesZsh != nil {
+		// A judged command position resolved to the admitted zsh launch —
+		// top-level call, wrapper tail, env's command word, or a shell word
+		// inside an unrecognized wrapper's argv. Unproven zsh forms are
+		// refused by this same check, so the flag names exactly the
+		// executions the ZDOTDIR pin exists to cover (Codex on #4474).
+		*launchesZsh = true
+	}
+	return !proven
 }
 
 func accountShellCommandWordsProven(words []*syntax.Word) bool {

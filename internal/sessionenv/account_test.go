@@ -849,3 +849,39 @@ func TestAccountAgentsSummary_NamesTheAlternativesInARefusal(t *testing.T) {
 	require.False(t, ok, "an agent that is not on the roster at all is not registration-only")
 	require.Empty(t, reason)
 }
+
+// The ZDOTDIR pin must reach every zsh the command can launch, not only the
+// exact generated spelling: `nice /bin/zsh -f -i` and a compound
+// `/bin/zsh -f -i; true` pass validation, and without the pin an
+// /etc/zsh/zshenv running `setopt RCS` re-admits the whole user startup chain
+// that can rewrite the account root (Codex on #4474). A proven `zsh -f -i`
+// argv of an unrecognized wrapper is treated as a launch too — strace execs
+// its tail and an unknown wrapper might, so the pin fails closed there; a
+// command whose zsh is only data keeps the unpinned environment other
+// surfaces rely on.
+func TestApplyAccountEnvironment_PinsZdotdirOnEveryAdmittedZshLaunch(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: t.TempDir()}
+	for _, command := range []string{
+		"/bin/zsh -f -i",
+		"/usr/bin/zsh -f -i",
+		"nice /bin/zsh -f -i",
+		"/bin/zsh -f -i; true",
+		"echo hi; nice /bin/zsh -f -i",
+		"env PATH=/bin /bin/zsh -f -i",
+	} {
+		scoped, err := ApplyAccountEnvironment([]string{"PATH=/bin"}, command, account)
+		require.NoError(t, err, command)
+		pinned, ok := envValue(scoped, "ZDOTDIR")
+		require.True(t, ok && pinned == "", "%q launches an admitted zsh and must pin ZDOTDIR empty", command)
+	}
+	for _, command := range []string{
+		"make -j4",
+		"echo zsh", // a bare name in argv is data; only argv judged as a command counts
+		"/bin/bash --noprofile --norc -i",
+	} {
+		scoped, err := ApplyAccountEnvironment([]string{"PATH=/bin"}, command, account)
+		require.NoError(t, err, command)
+		_, ok := envValue(scoped, "ZDOTDIR")
+		require.False(t, ok, "%q launches no zsh and must not pin ZDOTDIR", command)
+	}
+}
