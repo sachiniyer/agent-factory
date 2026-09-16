@@ -193,6 +193,9 @@ func TestEnsureRootAgentsInspectsTheCarriedAccountsTranscriptStore(t *testing.T)
 func TestEnsureRootAgentsDropsTheAccountPinAcrossAnAgentChange(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
+	// Keep the codex create's conversation discovery off the runner's real
+	// ~/.codex: the capture poll is what must settle before the reap below.
+	t.Setenv("CODEX_HOME", t.TempDir())
 	// The profile is codex from the first create, so the backend must report
 	// codex readiness — readyFakeBackend's claude marker would leave the first
 	// ensure waiting out the create timeout with no root ever published.
@@ -208,6 +211,15 @@ func TestEnsureRootAgentsDropsTheAccountPinAcrossAnAgentChange(t *testing.T) {
 	first := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, first, "root instance missing after first ensure")
 	require.Len(t, *seen, 1)
+
+	// A codex create registers a provider-conversation capture, and
+	// reapDeadRoot defers while one is in flight — the Lost staging below
+	// produces no reap until discovery has settled. Drain it first.
+	require.Eventually(t, func() bool {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		return manager.pendingConversationCaptures[first] == 0
+	}, 10*time.Second, 20*time.Millisecond, "codex conversation capture never settled")
 
 	// The pin was selected under claude — the reaped record's tmux binding is
 	// what proves that — while the replacement's profile already resolves to
