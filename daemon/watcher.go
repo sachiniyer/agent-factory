@@ -284,12 +284,6 @@ type taskWatcher struct {
 	lastDroppedAt   time.Time
 	lastDeliveredAt time.Time
 	terminalStatus  string
-	// parkedHeadReconciled bounds the recorded-head resume's republish of the
-	// durable parked status to once per terminal publication — every retry of
-	// the recorded head observes it again, so without the flag the base cadence
-	// would rewrite tasks.json. persistTerminalStatus clears it when it
-	// publishes over an unverifiable queue, re-owing the reconcile.
-	parkedHeadReconciled bool
 	// draining marks a live drainLoop goroutine, so at most one drains the
 	// queue at a time and replay order is preserved.
 	draining bool

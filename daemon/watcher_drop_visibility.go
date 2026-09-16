@@ -73,11 +73,6 @@ func (w *taskWatcher) persistTerminalStatus(status string) {
 	}
 	w.mu.Lock()
 	w.terminalStatus = status
-	// Re-owe the recorded-head reconcile: this publication may have committed
-	// over a park the queue could not verify, so the recorded head's next
-	// resume must republish the durable parked status and retire the latch
-	// (#4226 review).
-	w.parkedHeadReconciled = false
 	w.mu.Unlock()
 	w.sup.setStatus(w.taskID, status)
 }
@@ -92,11 +87,6 @@ func (w *taskWatcher) persistSupervisorStatus(status string) {
 	if w.parkedHeadSupersedesSupervisorStatus(status) {
 		return
 	}
-	// Same re-owed reconcile, durable half only: this write can overwrite a
-	// parked row the unverifiable check could not see (#4226 review).
-	w.mu.Lock()
-	w.parkedHeadReconciled = false
-	w.mu.Unlock()
 	w.sup.setStatus(w.taskID, status)
 }
 
