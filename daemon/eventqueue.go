@@ -141,8 +141,10 @@ type eventQueue struct {
 	// durable while the backlog file stayed appendable — the protection state
 	// is then as unverifiable as an unreadable queue, so the stdout reader
 	// blocks fail-closed while any backlog the failed write would guard
-	// remains (#4226 review). Cleared when a marker lands durably, when the
-	// protection state is deliberately torn down, or once the backlog drains.
+	// remains, and that backlog is held against age and cap eviction exactly
+	// as the marker would have held it (#4226 review). Cleared when a marker
+	// lands durably, when the protection state is deliberately torn down, or
+	// once the backlog drains.
 	limitParkedErr error
 
 	dropped     int // events dropped to the overflow caps, for the drop log
@@ -480,10 +482,16 @@ func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusR
 	if err := q.retryLoadNowLocked(); err != nil {
 		return false, fmt.Errorf("%w; refusing to append: %w", errEventQueueLoadFailed, err)
 	}
-	if q.pending == 0 && q.limitParked && !parkThisEvent {
-		if err := q.clearLimitParkedLocked(); err != nil {
-			return false, fmt.Errorf("failed to clear stale usage-limit queue marker: %w", err)
+	if q.pending == 0 && !parkThisEvent {
+		if q.limitParked {
+			if err := q.clearLimitParkedLocked(); err != nil {
+				return false, fmt.Errorf("failed to clear stale usage-limit queue marker: %w", err)
+			}
 		}
+		// A marker write that failed for a backlog now gone protects nothing.
+		// Left set, it would count this ordinary event as protected the moment
+		// the append makes pending nonzero.
+		q.limitParkedErr = nil
 	}
 	// A direct delivery can discover the limit before the event has a queue
 	// sequence. The queue is empty on that path, so the next sequence is the
@@ -575,7 +583,7 @@ func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusR
 }
 
 func (q *eventQueue) enforceCapsLocked() error {
-	if q.limitParked {
+	if q.limitProtectedLocked() {
 		return nil
 	}
 	return q.dropOldestOverCapsLocked()

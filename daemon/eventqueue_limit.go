@@ -173,7 +173,18 @@ func (q *eventQueue) retainLimitParked() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	_ = q.retryLoadLocked()
-	return q.loadErr == nil && q.limitParked
+	return q.loadErr == nil && q.limitProtectedLocked()
+}
+
+// limitProtectedLocked is the one answer to "may retention policy evict from
+// this backlog?" — cap enforcement and drain-time age expiry both ask it. A
+// marker write that failed while events remain protects what the marker would
+// have: the failure leaves protection unverifiable, not absent, and answering
+// "unprotected" there lets the enqueue or replay that discovered the limit
+// evict the distinct events the write existed to keep (#4226 review). Callers
+// hold q.mu.
+func (q *eventQueue) limitProtectedLocked() bool {
+	return q.limitParked || (q.limitParkedErr != nil && q.pending > 0)
 }
 
 // limitBackpressureState tells the stdout reader whether consuming another line
