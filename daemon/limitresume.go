@@ -157,7 +157,9 @@ func (m *Manager) ResumeLimitedSessions() {
 // resumeLimitedSession auto-resumes one eligible session when its ordinary retry
 // is due or an account swap permits an earlier attempt. Eligibility mirrors
 // restoreLostSession: started, LiveLimitReached, not tombstoned, not the reserved
-// root (the manual retry and the poll own those), and no kill in flight. It takes
+// root (the manual retry and the ensure loop own that lifecycle — except for a
+// committed manual account swap, whose settlement the handoff path left to this
+// pass), and no kill in flight. It takes
 // the per-target lock and then the per-session op lock in that canonical order
 // (#2006) before invoking resumeFromLimitLockedWithAccount; the op lock is only
 // TryLock'd so the poll goroutine never stalls behind a kill teardown, and
@@ -178,7 +180,7 @@ func (m *Manager) resumeLimitedSession(
 			return
 		}
 	}
-	if inst.UserKilled() || session.IsReservedTitle(inst.Title) {
+	if inst.UserKilled() || (session.IsReservedTitle(inst.Title) && !committedManualAccountSwap(inst)) {
 		return
 	}
 
@@ -286,7 +288,7 @@ func (m *Manager) resumeLimitedSession(
 	current := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
-	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || !accountSwapScheduledResumeEligible(inst) {
+	if killing || current != inst || inst.UserKilled() || (session.IsReservedTitle(inst.Title) && !committedManualAccountSwap(inst)) || !accountSwapScheduledResumeEligible(inst) {
 		return
 	}
 	if accountSwap != nil {

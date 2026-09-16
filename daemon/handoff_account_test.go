@@ -243,6 +243,35 @@ func TestHandoffAccountRecoversPinnedDelivery(t *testing.T) {
 	require.Len(t, inst.ToInstanceData().Tabs[0].Handoffs, 1)
 }
 
+// TestResumeLimitedSessionsFinishesCommittedRootAccountSwap is the #4395
+// settlement guarantee on the reserved title: once the handoff path checkpoints
+// root's new identity, its durable mission belongs to the scheduler — the
+// reserved-title refusal protects root's lifecycle from the scheduler, not a
+// transaction the scheduler is designated to finish. A bare limit park on root
+// stays refused either way.
+func TestResumeLimitedSessionsFinishesCommittedRootAccountSwap(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeRootManager(t, true, "keep the fleet healthy", time.Now().Add(5*24*time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	m.cfg.LimitAutoResume = false
+	require.NoError(t, inst.BeginManualAccountSwap())
+	require.NoError(t, inst.ValidateManualAccountSwap("personal", "claude"))
+	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", session.HandoffReasonManual, "tip", "keep the fleet healthy")
+	require.NoError(t, err)
+	require.NoError(t, m.persistSettlement(repo, daemonInstanceKey(repo, inst.Title), inst))
+	inst.EndLimitResume()
+
+	m.ResumeLimitedSessions()
+
+	_, respawns, prompts := backend.snapshot()
+	require.Equal(t, 1, respawns)
+	require.Len(t, prompts, 1)
+	require.Contains(t, prompts[0], "keep the fleet healthy")
+	_, _, pending := inst.PendingAccountSwap()
+	require.False(t, pending, "the scheduler must settle the committed transaction, not leave it pending")
+}
+
 func TestHandoffAccountRecoversHealthyCheckpoint(t *testing.T) {
 	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
 	configureLimitAccountCandidate(t, m, "personal")

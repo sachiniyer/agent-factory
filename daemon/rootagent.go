@@ -730,6 +730,12 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 type reapedRootState struct {
 	// conversation is the provider conversation the vanished root was in (#2616).
 	conversation session.AgentConversationData
+	// account is the credential account the vanished root ran as (#4395). A
+	// root's account is only ever an explicit pin — applyDefaultAccount exempts
+	// reserved creates and the scheduler never reaches this title — so whatever
+	// the record held is the operator's choice, and a replacement create that
+	// dropped it would silently resume work on the ambient identity.
+	account string
 	// tabs is its full persisted roster, agent tab included (#2628). The create
 	// ignores index 0 and rebuilds the rest; keeping the roster whole means the
 	// snapshot is exactly what the record held, not a pre-filtered view of it.

@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -268,10 +270,38 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 			skipRecordedResume = true
 		}
 	}
+	// A reaped root's account pin rides into its replacement like its
+	// conversation does: an account handoff is the one way root acquires an
+	// account (#4395), and silently dropping it would resume the guaranteed
+	// session's work on the ambient identity. Re-prove the pin against the live
+	// registry in the namespace the replacement program resolves to — a stale
+	// name would stamp an identity the launch cannot honour — and fall back to
+	// ambient with a named warning rather than strand the always-on guarantee
+	// on a boundary refusal.
+	account := carried.account
+	if account != "" {
+		agent := sessionenv.AgentForCommand(program)
+		home, homeErr := config.GetConfigDir()
+		var accountErr error
+		switch {
+		case agent == "":
+			accountErr = fmt.Errorf("no agent resolvable from program %q", program)
+		case homeErr != nil:
+			accountErr = homeErr
+		default:
+			_, accountErr = agentaccount.Selected(home, agent, account)
+		}
+		if accountErr != nil {
+			m.warn().Printf("re-created root agent for %s cannot keep its recorded account %q: %v; it starts on the ambient identity",
+				workspace, account, accountErr)
+			account = ""
+		}
+	}
 	req := CreateSessionRequest{
 		Title:    session.RootSessionTitle,
 		RepoPath: workspace,
 		Program:  program,
+		Account:  account,
 		InPlace:  true,
 		// Say local out loud, because InPlace already decided it. A root agent is
 		// documented as the `af sessions create --here` shape — in-place at the

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -99,6 +100,42 @@ func TestEnsureRootAgentsCarriesConversationAcrossTmuxVanish(t *testing.T) {
 		"the re-created root must resume the conversation the vanished one held, not mint a new id")
 	require.Equal(t, prior.Agent, carried.Agent)
 	require.NotNil(t, findRootInstance(t, manager, repoPath), "always-ensure: the root must exist again")
+}
+
+// TestEnsureRootAgentsCarriesAccountAcrossTmuxVanish is the #4395 half of the
+// heal path: an account handoff is the one way root acquires an account, so a
+// re-created root that silently dropped the pin would resume the guaranteed
+// session's work on the ambient identity — the wrong-credentials outcome the
+// account boundary exists to refuse.
+func TestEnsureRootAgentsCarriesAccountAcrossTmuxVanish(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+	manager.ensureRootAgentsAndWait()
+
+	first := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, first, "root instance missing after first ensure")
+	require.Len(t, *seen, 1)
+
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	_, err = agentaccount.Register(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
+	first.Account = "work"
+
+	// The #1104 outage class: tmux vanished under a healthy daemon.
+	first.SetStatusForTest(session.Lost)
+	manager.ensureRootAgentsAndWait()
+
+	require.Len(t, *seen, 2, "the vanished root must be reaped and re-created")
+	require.Equal(t, "work", (*seen)[1].Account,
+		"the re-created root must keep the account its predecessor was pinned to")
+	recreated := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, recreated, "always-ensure: the root must exist again")
+	require.Equal(t, "work", recreated.Account)
 }
 
 // TestReapDeadRootSnapshotsConversationOnlyAfterOwningTheOperation pins the
