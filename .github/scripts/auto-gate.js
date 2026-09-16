@@ -2934,10 +2934,9 @@ async function merge({
         github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
       );
       // The residual the pre-write read cannot close: the PUT was accepted on
-      // a PR GitHub had already merged. Its merge commit sits on a head branch
-      // whose delete-on-merge then never fires — #4398's and #4452's orphans —
-      // so the branch goes through the pruner's own keep-conditions and the
-      // lane refuses as the lost race it is, below the catch.
+      // a PR GitHub had already merged. The lane refuses as the lost race it
+      // is, below the catch — the head branch it may have moved is branch
+      // cleanup's concern, not this transaction's.
       if (pullRequestEnded(updated?.data)) {
         endedDuringUpdate = updated.data;
       } else {
@@ -2981,21 +2980,6 @@ async function merge({
       recoveryError = error;
     }
     if (endedDuringUpdate) {
-      // Only a MERGED PR has proven its head's content landed — a closed-
-      // unmerged one leaves the branch as the work's only copy, so the prune
-      // below runs for the merged case alone. Even there it goes through the
-      // same keep-conditions the sweep uses: a tip whose tree is the base's
-      // deletes, and a tip carrying real post-merge work — or one that cannot
-      // be read — keeps the branch.
-      if (endedDuringUpdate.merged === true) {
-        try {
-          await headRefPruner.deleteMergedHeadRef({ github, context, core, gate, prNumber });
-        } catch (pruneError) {
-          core.notice(
-            `Could not prune ${gate.headRefName} after a lost update race: ${formatError(pruneError)}.`,
-          );
-        }
-      }
       throw pullRequestEndedRefusal(prNumber, endedDuringUpdate, "was in flight");
     }
 
@@ -3408,30 +3392,6 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
   return null;
 }
 
-// The squash-only oracle for "does this tip hold anything the merge did not
-// take" (#4462). Commit identity cannot answer it — a squash-merged head is
-// never an ancestor of the base — and an empty diff alone cannot either: a
-// diff over an unfetched ref reads as zero files, not as an error. Two
-// `getCommit` reads compare the complete tree objects instead; equal trees are
-// byte-identical content regardless of history. Every failure answers false —
-// "cannot prove inert" is never proof that unique work is absent.
-async function commitTreesMatch({ github, owner, repo }, tip, baseRef) {
-  if (!tip || !baseRef) {
-    return false;
-  }
-  try {
-    const [tipCommit, baseCommit] = await Promise.all([
-      github.rest.repos.getCommit({ owner, repo, ref: tip }),
-      github.rest.repos.getCommit({ owner, repo, ref: baseRef }),
-    ]);
-    const tipTree = normalizeHeadSha(tipCommit?.data?.commit?.tree?.sha);
-    const baseTree = normalizeHeadSha(baseCommit?.data?.commit?.tree?.sha);
-    return Boolean(tipTree) && tipTree === baseTree;
-  } catch {
-    return false;
-  }
-}
-
 // Delete the merged head branch. The repository's delete_branch_on_merge setting
 // does not fire for a GITHUB_TOKEN merge, so every auto-gate merge left its
 // branch behind and origin regrew to 201 (#3603).
@@ -3484,16 +3444,15 @@ async function deleteMergedHeadRef({ github, context, core, gate, prNumber }) {
       return { branch, prNumber, outcome: "kept", reason };
     }
 
-    // (b) The ref must still resolve to content the merge took. A lane that
-    // pushed after the merge keeps its branch — that work is not in master,
-    // and the pushed ref may be the only copy of it anywhere.
+    // (b) The ref must still point at the commit that was merged. A lane that
+    // pushed after the merge keeps its branch — that work is not in master, and
+    // the pushed ref may be the only copy of it anywhere.
     //
-    // A ref READ is the last read before the delete, deliberately, because the
-    // delete itself cannot carry the condition: neither the REST ref API nor
-    // GraphQL's deleteRef accepts an expected OID (introspected), so the pair
-    // cannot be made atomic from here. Ordering is the only lever this side of
-    // pushing a lease with git, and it is used — when the tree comparison
-    // below widens the window, a second ref read closes it again.
+    // This is the LAST read before the delete, deliberately, because the delete
+    // itself cannot carry the condition: neither the REST ref API nor GraphQL's
+    // deleteRef accepts an expected OID (introspected), so the pair cannot be
+    // made atomic from here. Ordering is the only lever this side of pushing a
+    // lease with git, and it is used.
     //
     // It matters MORE on the sweep than on the merge path, not less: the merge
     // path reads it seconds after the merge, while the sweep can reach a branch
@@ -3503,35 +3462,11 @@ async function deleteMergedHeadRef({ github, context, core, gate, prNumber }) {
     const ref = await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
     const tip = String(ref?.data?.object?.sha || "").toLowerCase();
     if (tip !== String(gate.headSha || "").toLowerCase()) {
-      // "The tip moved" cannot mean "it carries work" by itself here: the
-      // repository squash-merges, so the merged head is never an ancestor of
-      // the base and ancestry cannot separate a real post-merge push from the
-      // update-branch commit the gate itself writes when its update loses the
-      // #4462 merge race (#4398's and #4452's orphaned branches). The tree is
-      // the oracle — a tip whose tree is the base's holds nothing the merge
-      // did not take, and a tip that differs or cannot be read keeps the
-      // branch.
-      if (!(await commitTreesMatch({ github, owner, repo }, tip, gate.baseRefName))) {
-        const reason =
-          `it now points at ${tip || "an unreadable commit"}, not the merged ` +
-          `${gate.headSha}, and its tree differs from ` +
-          `${gate.baseRefName || "the base branch"}'s (or could not be read), so ` +
-          `it carries work this merge did not take`;
-        core.notice(`Keeping ${branch}: ${reason}.`);
-        return { branch, prNumber, outcome: "kept", reason };
-      }
-      // The tip was read before the tree round trips, so prove it is still the
-      // commit the trees were compared for — a push in that window lands on
-      // the ref this delete would otherwise take with it.
-      const rechecked = await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
-      const stillTip = String(rechecked?.data?.object?.sha || "").toLowerCase();
-      if (stillTip !== tip) {
-        const reason =
-          `it moved to ${stillTip || "an unreadable commit"} under the tree comparison, ` +
-          `so it carries work this merge did not take`;
-        core.notice(`Keeping ${branch}: ${reason}.`);
-        return { branch, prNumber, outcome: "kept", reason };
-      }
+      const reason =
+        `it now points at ${tip || "an unreadable commit"}, not the merged ` +
+        `${gate.headSha}, so it carries work this merge did not take`;
+      core.notice(`Keeping ${branch}: ${reason}.`);
+      return { branch, prNumber, outcome: "kept", reason };
     }
 
     await github.rest.git.deleteRef({ owner, repo, ref: `heads/${branch}` });
@@ -3614,13 +3549,6 @@ const BRANCH_SWEEP_QUERY = `
     repository(owner: $owner, name: $repo) {
       defaultBranchRef {
         name
-        target {
-          ... on Commit {
-            tree {
-              oid
-            }
-          }
-        }
       }
       refs(refPrefix: "refs/heads/", first: $branches, after: $cursor) {
         pageInfo {
@@ -3631,11 +3559,6 @@ const BRANCH_SWEEP_QUERY = `
           name
           target {
             oid
-            ... on Commit {
-              tree {
-                oid
-              }
-            }
           }
           branchProtectionRule {
             id
@@ -3653,7 +3576,6 @@ const BRANCH_SWEEP_QUERY = `
               merged
               mergedAt
               headRefOid
-              baseRefName
               headRepository {
                 nameWithOwner
               }
@@ -3681,7 +3603,6 @@ async function listSweepBranches({ github, context }) {
   const branches = [];
   let cursor = null;
   let defaultBranch = "";
-  let defaultTreeOid = "";
   for (let page = 0; page < BRANCH_SWEEP_MAX_PAGES; page += 1) {
     const response = await retryRead("could not list branches for the head-ref sweep", () =>
       github.graphql(BRANCH_SWEEP_QUERY, {
@@ -3694,12 +3615,10 @@ async function listSweepBranches({ github, context }) {
     );
     const repository = response?.repository;
     defaultBranch = repository?.defaultBranchRef?.name || defaultBranch;
-    defaultTreeOid =
-      normalizeHeadSha(repository?.defaultBranchRef?.target?.tree?.oid) || defaultTreeOid;
     const refs = repository?.refs;
     branches.push(...(refs?.nodes || []).filter(Boolean));
     if (refs?.pageInfo?.hasNextPage !== true) {
-      return { branches, defaultBranch, defaultTreeOid, truncated: false };
+      return { branches, defaultBranch, truncated: false };
     }
     cursor = refs.pageInfo.endCursor || null;
     if (!cursor) {
@@ -3708,7 +3627,7 @@ async function listSweepBranches({ github, context }) {
       break;
     }
   }
-  return { branches, defaultBranch, defaultTreeOid, truncated: true };
+  return { branches, defaultBranch, truncated: true };
 }
 
 // Whether one enumerated branch is worth spending the three conditions on, and
@@ -3766,12 +3685,7 @@ function sweepCandidate(branch, { owner, repo, defaultBranch }) {
     prNumber: merged.number,
     mergedAt: merged.mergedAt,
     headSha: String(merged.headRefOid || "").toLowerCase(),
-    baseRefName: merged.baseRefName || "",
     tip,
-    // The tip commit's tree, as the same enumeration row reports it — the
-    // squash-only "does it carry work" oracle (#4462). Empty when the read
-    // cannot say, and "cannot say" is never "is inert".
-    tipTree: normalizeHeadSha(branch?.target?.tree?.oid),
   };
 }
 
@@ -3784,10 +3698,7 @@ async function sweepMergedHeadRefs({
   limit = BRANCH_SWEEP_CANDIDATE_LIMIT,
 }) {
   const { owner, repo } = context.repo;
-  const { branches, defaultBranch, defaultTreeOid, truncated } = await listSweepBranches({
-    github,
-    context,
-  });
+  const { branches, defaultBranch, truncated } = await listSweepBranches({ github, context });
   if (truncated) {
     core.warning(
       `Head-ref sweep stopped at its page cap after ${branches.length} branch(es); ` +
@@ -3817,26 +3728,13 @@ async function sweepMergedHeadRefs({
     // itself. Without this filter the branches carrying post-merge commits
     // (eleven of fifteen, in #3603's count) would fill the per-run cap forever
     // and spend three API calls each on an answer that cannot change.
-    //
-    // Squash-only merges mean "moved" cannot BE that answer by itself (#4462):
-    // the merged head is never an ancestor of the base, and the update-branch
-    // orphan the merge race leaves — #4398's and #4452's branches — lands with
-    // the base's tree byte-identical. That debris is a candidate; only a
-    // differing or unreadable tip tree stays out. The enumeration only carries
-    // the default branch's tree, so the filter below applies it to master-base
-    // merges — anything else reaches the pruner, whose live reads answer the
-    // same question against the PR's own base.
     if (candidate.tip !== candidate.headSha) {
-      const filterable = candidate.baseRefName === defaultBranch;
-      if (filterable && (!defaultTreeOid || candidate.tipTree !== defaultTreeOid)) {
-        moved += 1;
-        core.info(
-          `Head-ref sweep: ${candidate.branch} is at ${candidate.tip}, not PR #${candidate.prNumber}'s ` +
-            `merged ${candidate.headSha}; its tree differs from ${defaultBranch}'s (or could not ` +
-            `be read), so it carries work that merge did not take.`,
-        );
-        continue;
-      }
+      moved += 1;
+      core.info(
+        `Head-ref sweep: ${candidate.branch} is at ${candidate.tip}, not PR #${candidate.prNumber}'s ` +
+          `merged ${candidate.headSha}; it carries work that merge did not take.`,
+      );
+      continue;
     }
     candidates.push(candidate);
   }
@@ -3859,7 +3757,6 @@ async function sweepMergedHeadRefs({
           headRefName: candidate.branch,
           headRepository: `${owner}/${repo}`,
           headSha: candidate.headSha,
-          baseRefName: candidate.baseRefName || defaultBranch,
         },
         prNumber: candidate.prNumber,
       });
