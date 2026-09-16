@@ -363,6 +363,13 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 				workspace, account, accountErr)
 			account = ""
 			accountRejected = true
+			// The carried tmux tabs are account-scoped state too: their shell
+			// and process commands ran inside the selected account's
+			// environment, so restoring them now would relaunch those commands
+			// on ambient credentials — the same split identity the pin drop
+			// itself refuses. Web and editor tabs hold no process environment
+			// and survive (#4400 review round 4).
+			carried.tabs = ambientSafeCarriedTabs(carried.tabs)
 		}
 	}
 	// A rejected pin also retires the carried resume: registration relocates the
@@ -429,6 +436,13 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// carry — that is the heal whose replacement most needs the marker.
 		replacesReapedRecord:  reapedRoot,
 		pendingRecreateNotice: carried.notice,
+		// A committed account swap owed delivery survives the reap with the
+		// rest of the carry: the replacement record holds the obligation the
+		// deleted one did, so the settlement path finishes it on a live
+		// instance instead of the transaction vanishing with its record (#4400
+		// review round 4).
+		pendingAccountSwap:    carried.pendingSwap,
+		pendingHandoffMission: carried.pendingHandoffMission,
 	}
 	if skipRecordedResume {
 		req.resumeConversation = session.AgentConversationData{}
@@ -488,4 +502,9 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		reportRootTabCarry(workspace, carried.tabs, data.Tabs)
 	}
 	m.rootEnsureSucceeded(repo.ID, st)
+	// The in-flight mark is still held here — the deferred finishRootCreate
+	// clears it only after this function returns — so rootEnsureSucceeded left
+	// the carry in place. This create's own success is the proof that retires
+	// it (#4400 review round 4).
+	m.retireReapedRootCarry(repo.ID)
 }

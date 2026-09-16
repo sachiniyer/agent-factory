@@ -752,6 +752,16 @@ type reapedRootState struct {
 	// the replacement'"'"'s own verdict so the older, unseen loss is not erased by a
 	// cleaner second heal.
 	notice session.RootRecreateContext
+	// pendingSwap is a committed account-swap transaction the reaped record
+	// still owed delivery on (#4400 review round 4). The checkpoint already
+	// mutated the durable identity, so deleting the record without it would
+	// silently cancel an obligation the scheduler was created to finish; the
+	// replacement carries it instead and the settlement path resumes on a live
+	// instance that can actually complete it.
+	pendingSwap *session.AccountSwapData
+	// pendingHandoffMission is the rendered takeover brief riding the same
+	// delivery obligation — durable for exactly the reason the swap is.
+	pendingHandoffMission string
 }
 
 // rootEnsureSucceeded resets a repo's retry state after a pass that left a
@@ -766,13 +776,24 @@ func (m *Manager) rootEnsureSucceeded(repoID string, st *rootEnsureState) {
 	st.escalatedPersistent = false
 	st.nextAttempt = time.Time{}
 	st.suppressLogged = false
-	_, carryPending := m.reapedRootCarries[repoID]
-	delete(m.reapedRootCarries, repoID)
+	// A create still in flight owns the carry: the row this pass adopted can
+	// be that create's provisional publication — CreateSession registers it
+	// before startup and readiness finish — and retiring the carry now would
+	// delete the state the running create still needs if it fails and removes
+	// its provisional row. The create retires it after recording its own
+	// outcome; the next pass covers every other exit (#4400 review round 4).
+	_, inFlight := m.rootCreatesInFlight[repoID]
+	if !inFlight {
+		delete(m.reapedRootCarries, repoID)
+	}
 	m.mu.Unlock()
-	// The durable half of the carry goes when the parked state does — gated on
-	// the map so a healthy root's every-tick adopt does not pay a syscall for a
-	// file that only exists while a heal is unresolved.
-	if carryPending {
+	if !inFlight {
+		// Unconditional, not gated on the map: after a restart the file can
+		// outlive the map — this pass adopted a healthy root and never
+		// hydrated the carry — and a stale durable carry would be consumed by
+		// the NEXT no-record create long after this root was healthy. One
+		// ENOENT unlink per healthy tick is the cost of never resurrecting an
+		// obsolete pin.
 		m.removeReapedRootCarry(repoID)
 	}
 }

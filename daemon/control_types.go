@@ -128,6 +128,19 @@ type CreateSessionRequest struct {
 	// its siblings: a client-settable one would let a caller stamp any session
 	// with a history-loss warning.
 	pendingRecreateNotice session.RootRecreateContext
+
+	// pendingAccountSwap carries a committed account-swap transaction the
+	// reaped record still owed delivery on (#4400 review round 4): its identity
+	// checkpoint already mutated durable state, so deleting the record cannot
+	// silently cancel the obligation — the replacement inherits it and the
+	// settlement path resumes on an instance that can finish it. Unexported
+	// like its siblings: a client-settable pending swap would let a caller
+	// stamp an ordinary session with a delivery obligation it never entered.
+	pendingAccountSwap *session.AccountSwapData
+
+	// pendingHandoffMission is the rendered takeover brief riding the same
+	// delivery obligation.
+	pendingHandoffMission string
 }
 
 type CreateSessionResponse struct {

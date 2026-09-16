@@ -106,6 +106,15 @@ type InstanceOptions struct {
 	// warning about the first that nobody has seen yet. Set by the same single
 	// caller as the two fields above. Empty for every ordinary create.
 	PendingRecreateNotice RootRecreateContext
+	// PendingAccountSwap seeds the committed account-swap transaction the
+	// reaped record still owed (#4400 review round 4): the identity checkpoint
+	// already mutated durable state, so the replacement inherits the delivery
+	// obligation rather than silently cancelling it with the deleted record.
+	// Nil for every ordinary create.
+	PendingAccountSwap *AccountSwapData
+	// PendingHandoffMission is the rendered takeover brief riding the same
+	// obligation.
+	PendingHandoffMission string
 	// RemoteAgentServer, when set, points the instance's AgentServer() at a REMOTE
 	// `af agent-server` reachable at the endpoint's authed URL (#1592 Phase 4)
 	// instead of the local in-process runtime. Validated at NewInstance (a bad URL
@@ -602,6 +611,8 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		carriedConversation:   opts.ResumeConversation,
 		carriedTabs:           append([]TabData(nil), opts.RestoreTabs...),
 		carriedRecreateNotice: opts.PendingRecreateNotice,
+		pendingAccountSwap:    cloneAccountSwapData(opts.PendingAccountSwap),
+		pendingHandoffMission: opts.PendingHandoffMission,
 		backend:               backend,
 		remoteClient:          remoteClient,
 		runtimeTeardown:       res.Teardown,

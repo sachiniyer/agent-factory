@@ -173,6 +173,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		ResumeConversation:             req.resumeConversation,
 		RestoreTabs:                    req.restoreTabs,
 		PendingRecreateNotice:          req.pendingRecreateNotice,
+		PendingAccountSwap:             req.pendingAccountSwap,
+		PendingHandoffMission:          req.pendingHandoffMission,
 		BranchPrefix:                   &frozenBranchPrefix,
 		ProvisionSessionEnvPassthrough: append([]string(nil), cfg.SessionEnvPassthrough...),
 		// Mints and revokes this session's credential, driven by the RUNTIME's

@@ -25,30 +25,36 @@ import (
 // the file's schema: they land on disk in every user's AF home, so renaming
 // one is a format change, not a refactor.
 type reapedRootCarryDisk struct {
-	Conversation session.AgentConversationData `json:"conversation,omitempty"`
-	Account      string                        `json:"account,omitempty"`
-	Agent        string                        `json:"agent,omitempty"`
-	Tabs         []session.TabData             `json:"tabs,omitempty"`
-	Notice       session.RootRecreateContext   `json:"notice,omitempty"`
+	Conversation          session.AgentConversationData `json:"conversation,omitempty"`
+	Account               string                        `json:"account,omitempty"`
+	Agent                 string                        `json:"agent,omitempty"`
+	Tabs                  []session.TabData             `json:"tabs,omitempty"`
+	Notice                session.RootRecreateContext   `json:"notice,omitempty"`
+	PendingSwap           *session.AccountSwapData      `json:"pending_swap,omitempty"`
+	PendingHandoffMission string                        `json:"pending_handoff_mission,omitempty"`
 }
 
 func (s reapedRootState) carryDisk() reapedRootCarryDisk {
 	return reapedRootCarryDisk{
-		Conversation: s.conversation,
-		Account:      s.account,
-		Agent:        s.agent,
-		Tabs:         s.tabs,
-		Notice:       s.notice,
+		Conversation:          s.conversation,
+		Account:               s.account,
+		Agent:                 s.agent,
+		Tabs:                  s.tabs,
+		Notice:                s.notice,
+		PendingSwap:           s.pendingSwap,
+		PendingHandoffMission: s.pendingHandoffMission,
 	}
 }
 
 func (d reapedRootCarryDisk) state() reapedRootState {
 	return reapedRootState{
-		conversation: d.Conversation,
-		account:      d.Account,
-		agent:        d.Agent,
-		tabs:         d.Tabs,
-		notice:       d.Notice,
+		conversation:          d.Conversation,
+		account:               d.Account,
+		agent:                 d.Agent,
+		tabs:                  d.Tabs,
+		notice:                d.Notice,
+		pendingSwap:           d.PendingSwap,
+		pendingHandoffMission: d.PendingHandoffMission,
 	}
 }
 
@@ -103,6 +109,36 @@ func (m *Manager) loadReapedRootCarry(repoID string) (state reapedRootState, pre
 		return reapedRootState{}, false, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return disk.state(), true, nil
+}
+
+// ambientSafeCarriedTabs filters a carried roster for a replacement whose
+// account pin was rejected: every tmux-backed tab ran its command inside the
+// dropped account's environment, so restoring it would relaunch that command
+// on ambient credentials. Index 0 (the agent tab) is rebuilt by the launch
+// anyway, and web/editor tabs hold no process environment — the only rows
+// kept (#4400 review round 4).
+func ambientSafeCarriedTabs(tabs []session.TabData) []session.TabData {
+	kept := tabs[:0]
+	for _, td := range tabs {
+		if td.Kind.HasTmux() {
+			continue
+		}
+		kept = append(kept, td)
+	}
+	return kept
+}
+
+// retireReapedRootCarry drops both halves of the parked carry. The create
+// goroutine calls it after a successful publish: rootEnsureSucceeded leaves
+// the carry alone while this repo's in-flight mark is held — the mark only
+// clears in the deferred finishRootCreate AFTER runRootCreate returns — so
+// the create that owns the mark retires the carry itself once its outcome is
+// known (#4400 review round 4).
+func (m *Manager) retireReapedRootCarry(repoID string) {
+	m.mu.Lock()
+	delete(m.reapedRootCarries, repoID)
+	m.mu.Unlock()
+	m.removeReapedRootCarry(repoID)
 }
 
 // removeReapedRootCarry drops the parked carry once a pass makes it moot.
