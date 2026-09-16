@@ -244,7 +244,7 @@ func (o ApplyOutcome) StatusForKey(key string) ApplyStatus {
 	// Only EffectAppliedLive reaches here, and both apply-result branches above
 	// already returned for it — the unconfirmed guard passes for a live key, and
 	// failure is unconditional — so neither is repeated below.
-	if o.listenerRebindFailed(key) {
+	if o.ListenerRebindFailed(key) {
 		return ApplyStatusDeferred
 	}
 	if o.DaemonApplied {
@@ -266,8 +266,10 @@ func deferredEffectClass(key string) bool {
 	return false
 }
 
-// listenerRebindFailed reports whether key is one of the socket keys whose live
-// rebind failed in this apply.
+// ListenerRebindFailed reports whether key is one of the socket keys whose live
+// rebind failed in this apply. A failed rebind defers the key dynamically: the
+// running daemon keeps the old listener and the value only reaches one at the
+// next start, which reads the file — so save readbacks must verify it there.
 //
 // Both sides are canonicalized, which today is belt and braces: every producer of
 // FailedListenerKeys is a hardcoded canonical literal in webListeners.reconcile,
@@ -278,7 +280,7 @@ func deferredEffectClass(key string) bool {
 // the invariant a raw comparison would fail silently — printing "Applied" over a
 // rebind warning, which is the bug this function exists to prevent. A map lookup is
 // cheaper than the standing risk.
-func (o ApplyOutcome) listenerRebindFailed(key string) bool {
+func (o ApplyOutcome) ListenerRebindFailed(key string) bool {
 	key = canonicalConfigKey(key)
 	for _, failed := range o.FailedListenerKeys {
 		if canonicalConfigKey(failed) == key {
@@ -337,7 +339,7 @@ func EffectNotice(key string, outcome ApplyOutcome) string {
 	// Only EffectAppliedLive reaches here; uncertainty and failure both returned
 	// above, so what remains is a rebind that kept the old listener, then the plain
 	// applied / no-daemon answers.
-	if outcome.listenerRebindFailed(key) {
+	if outcome.ListenerRebindFailed(key) {
 		return listenerRebindDeferredNotice(key)
 	}
 	if outcome.DaemonApplied {

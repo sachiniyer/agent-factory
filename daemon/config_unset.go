@@ -35,7 +35,7 @@ func (s *controlServer) UnsetConfigValue(req UnsetConfigValueRequest, resp *Unse
 			// live snapshot for a live key, the file for a deferred one — and
 			// only a resolved readback may contradict the apply.
 			outcome.SavedValueSuperseded =
-				appliedSavedValue(s.manager.Config(), result.Key, unsetExpectedValue(result.Key)) == savedValueSuperseded
+				appliedSavedValue(s.manager.Config(), outcome, result.Key, unsetExpectedValue(result.Key)) == savedValueSuperseded
 		} else {
 			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+applyErr.Error())
 			outcome.DaemonApplyFailed = true

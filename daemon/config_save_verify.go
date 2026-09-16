@@ -104,11 +104,16 @@ func deferredEffectKey(key string) bool {
 //     competing write that lands after the apply's own load — it would still
 //     hold this save and promise a deferred effect the stored file will not
 //     deliver.
+//   - A key whose live rebind FAILED is deferred the same way even though its
+//     static class is live: the apply loaded this save into the snapshot, but
+//     the old listener keeps serving and the value only reaches a daemon at
+//     the next start — which reads the file. Checking the snapshot there would
+//     confirm this save while the stored file already holds a competing write.
 //
 // An unloadable file reads as unverifiable, not superseded: it proves the
 // caller cannot say which value won, never that a competing one did.
-func appliedSavedValue(cfg *config.Config, key, expected string) savedValueVerdict {
-	if deferredEffectKey(key) {
+func appliedSavedValue(cfg *config.Config, outcome config.ApplyOutcome, key, expected string) savedValueVerdict {
+	if deferredEffectKey(key) || outcome.ListenerRebindFailed(key) {
 		return diskSavedValue(key, expected)
 	}
 	return liveSavedValue(cfg, key, expected)

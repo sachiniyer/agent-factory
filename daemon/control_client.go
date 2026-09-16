@@ -518,6 +518,15 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 		var warning string
 		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
 		resp.Warnings = append(resp.Warnings, warning)
+		// An unconfirmed apply still promises a deferred key's next-start
+		// effect, and the file decides whether that promise holds — a competing
+		// write can land while the apply is refused or its reply is lost. Run
+		// the same definitive readback the success branch does. A proven reload
+		// failure is left alone: the live-key downgrade inside the verdict
+		// would mask it, and the failure notice is already the honest answer.
+		if outcome.DaemonApplyUnconfirmed {
+			applyFallbackDiskVerdict(&outcome, &resp.Warnings, result.Key, result.Value)
+		}
 	}
 	resp.Warnings = completeConfigSaveWarnings(outcome, result.Warnings, resp.Warnings)
 	resp.ApplyOutcome = outcome.StatusForKey(result.Key)
@@ -583,6 +592,12 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 		var warning string
 		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
 		resp.Warnings = append(resp.Warnings, warning)
+		// Same unconfirmed-apply readback as the set fallback: a deferred key's
+		// next-start promise rests on the file, which a competing write can
+		// hold by the time a refused or lost apply returns.
+		if outcome.DaemonApplyUnconfirmed {
+			applyFallbackDiskVerdict(&outcome, &resp.Warnings, result.Key, unsetExpectedValue(result.Key))
+		}
 	}
 	resp.ApplyOutcome = outcome.StatusForKey(result.Key)
 	resp.RestartNotice = config.EffectNotice(result.Key, outcome)

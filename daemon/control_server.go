@@ -250,7 +250,7 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 			// contradict the apply: an unverifiable one leaves the claim where
 			// the apply left it.
 			outcome.SavedValueSuperseded =
-				appliedSavedValue(s.manager.Config(), result.Key, result.Value) == savedValueSuperseded
+				appliedSavedValue(s.manager.Config(), outcome, result.Key, result.Value) == savedValueSuperseded
 		} else {
 			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+aerr.Error())
 			outcome.DaemonApplyFailed = true

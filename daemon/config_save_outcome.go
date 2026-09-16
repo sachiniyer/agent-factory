@@ -46,6 +46,9 @@ func failedConfigApplyOutcome(err error) (config.ApplyOutcome, string) {
 //   - A deferred key: the file IS what the next daemon start or af launch will
 //     read, so a divergence means this save will not take effect. Definitive,
 //     and reported as superseded.
+//   - A key whose live rebind failed is deferred the same way: the old listener
+//     keeps serving and the next daemon start reads the file, so a divergence
+//     is definitive there too.
 //   - A live key: the read happens after the apply RPC returned and cannot
 //     establish which generation the daemon loaded, so a divergence means only
 //     that the client cannot confirm what the daemon is serving.
@@ -56,7 +59,7 @@ func applyFallbackDiskVerdict(outcome *config.ApplyOutcome, warnings *[]string, 
 	if diskSavedValue(key, expected) != savedValueSuperseded {
 		return
 	}
-	if deferredEffectKey(key) {
+	if deferredEffectKey(key) || outcome.ListenerRebindFailed(key) {
 		outcome.SavedValueSuperseded = true
 		return
 	}

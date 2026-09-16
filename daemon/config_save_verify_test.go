@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -186,11 +187,87 @@ func TestAppliedSavedValueVerifiesDeferredKeyAgainstDisk(t *testing.T) {
 	// the competing write reads as superseded even though the snapshot still
 	// holds this save — the case the live-snapshot check could not see.
 	require.Equal(t, savedValueSuperseded,
-		appliedSavedValue(snapshot, "branch_prefix", "mine"))
+		appliedSavedValue(snapshot, config.ApplyOutcome{}, "branch_prefix", "mine"))
 
 	// default_program is consumed by the running daemon: the snapshot decides,
 	// so a write that landed after the apply does not contradict what the
 	// daemon is serving.
 	require.Equal(t, savedValueConfirmed,
-		appliedSavedValue(snapshot, "default_program", "aider"))
+		appliedSavedValue(snapshot, config.ApplyOutcome{}, "default_program", "aider"))
+}
+
+// A failed listener rebind defers the key dynamically: its static class is
+// live, but the daemon keeps the old listener and the value only reaches one
+// at the next start — which reads the file. A competing write landing between
+// the apply's load and the readback must read as a lost race, not confirm
+// against the snapshot that still holds this save (#4247).
+func TestAppliedSavedValueVerifiesFailedListenerKeyAgainstDisk(t *testing.T) {
+	configClientHome(t)
+	// The snapshot the apply swapped in holds THIS save's address; the file
+	// now holds the competing write's.
+	snapshot := config.DefaultConfig()
+	snapshot.ListenAddr = "127.0.0.1:8080"
+	_, err := config.SetGlobalConfigValue("network.listen_addr", "127.0.0.1:9090")
+	require.NoError(t, err)
+
+	rebindFailed := config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: []string{"network.listen_addr"}}
+	require.Equal(t, savedValueSuperseded,
+		appliedSavedValue(snapshot, rebindFailed, "network.listen_addr", "127.0.0.1:8080"),
+		"a failed-listener key is consumed from the file at next start, so the file decides")
+
+	// The same key with a successful rebind stays live-checked: the snapshot
+	// holds this save, so the post-apply write does not contradict it.
+	require.Equal(t, savedValueConfirmed,
+		appliedSavedValue(snapshot, config.ApplyOutcome{DaemonApplied: true}, "network.listen_addr", "127.0.0.1:8080"))
+}
+
+// The version-skewed fallback runs its definitive disk verdict on a successful
+// apply; a FAILED-listener key needs the same treatment, because a diverged
+// file means the deferred next-start effect will not happen — not merely an
+// unconfirmable live value.
+func TestApplyFallbackDiskVerdictReadsFailedListenerKeyFromDisk(t *testing.T) {
+	configClientHome(t)
+	_, err := config.SetGlobalConfigValue("network.listen_addr", "127.0.0.1:9090")
+	require.NoError(t, err)
+
+	outcome := config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: []string{"network.listen_addr"}}
+	var warnings []string
+	applyFallbackDiskVerdict(&outcome, &warnings, "network.listen_addr", "127.0.0.1:8080")
+	require.True(t, outcome.SavedValueSuperseded,
+		"a failed-listener key defers to the file, so a diverged file is a lost race")
+	require.False(t, outcome.DaemonApplyUnconfirmed,
+		"the live-key unconfirmed downgrade must not fire for a dynamically deferred key")
+}
+
+// refusingSupersedingControl models an old daemon whose ApplyConfig lands a
+// competing write and then refuses the apply (upgrade admission, quiescing):
+// the client sees an unconfirmed apply while the file already holds the
+// competing value.
+type refusingSupersedingControl struct {
+	key   string
+	value string
+}
+
+func (s *refusingSupersedingControl) ApplyConfig(_ ApplyConfigRequest, _ *ApplyConfigResponse) error {
+	_, _ = config.SetGlobalConfigValue(s.key, s.value)
+	return errors.New("apply refused during upgrade")
+}
+
+// An unconfirmed apply still promises a deferred key's next-start effect, but
+// the file decides whether that promise holds — a competing write landing
+// before the refused or lost apply returns leaves a different value stored.
+// The unconfirmed branch must run the same definitive disk readback as the
+// success branch, or it promises an effect the file will not deliver (#4247).
+func TestClientFallbackUnconfirmedApplyVerifiesDeferredKeyOnDisk(t *testing.T) {
+	configClientHome(t)
+	_, err := config.SetGlobalConfigValue("branch_prefix", "orig")
+	require.NoError(t, err)
+	serveControlStub(t, &refusingSupersedingControl{key: "branch_prefix", value: "winner"})
+
+	resp, err := SetGlobalConfigValue("branch_prefix", "mine")
+	require.NoError(t, err)
+	require.Equal(t, config.ApplyStatusSuperseded, resp.ApplyOutcome,
+		"the competing write reached the file while the apply was unconfirmed")
+	require.NotContains(t, resp.RestartNotice, "takes effect",
+		"a lost race must not promise the save takes effect next start")
 }
