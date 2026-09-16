@@ -504,7 +504,10 @@ func (t *TermPane) assertSize(stream Stream) {
 // exactly width cells. It only reads the grid — safe at any cadence; the TUI's
 // tick drives it. showCursor overlays the terminal cursor (reverse-video) when the
 // inner app has it visible — the interactive-mode typing cue. There is no status
-// offset: the streamed bytes are the pane itself (§ package doc).
+// offset: the streamed bytes are the pane itself (§ package doc). A row whose
+// grid cells run past width — transient while a resize catches up, or a pane
+// resized behind the attachment's back — gets "…" in its last cell rather
+// than a silent hard cut (#4175).
 func (t *TermPane) Render(width, height int, showCursor bool) string {
 	t.gridMu.RLock()
 	defer t.gridMu.RUnlock()
