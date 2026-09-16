@@ -486,9 +486,28 @@ func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusR
 	if parkThisEvent && statusRecorded && q.pending == 0 {
 		parkedStatusSeq = q.seq + 1
 	}
+	markerExisted := q.limitParked
 	if parkThisEvent && (!q.limitParked || parkedStatusSeq != q.parkedStatusSeq) {
 		if err := q.persistLimitParkedLocked(parkedStatusSeq); err != nil {
 			return false, fmt.Errorf("failed to persist usage-limit queue marker: %w", err)
+		}
+		if !markerExisted {
+			// The marker just persisted describes a parked event that is not in
+			// the queue yet. If any later step drops that event — a failed
+			// cursor reset or append — an empty queue would keep the marker:
+			// an ordinary stop then trusts it and routes prefetched and
+			// kernel-buffered lines through protected persistence instead of
+			// ordinary-stop discard, and the cap check treats the backlog as
+			// protected. Roll back only a marker THIS call created; one that
+			// already protected earlier events is not this enqueue's to remove.
+			defer func() {
+				if retained {
+					return
+				}
+				if clearErr := q.clearLimitParkedLocked(); clearErr != nil {
+					log.WarningLog.Printf("watch task %s: failed to roll back usage-limit queue marker after the parked event was not retained: %v", q.taskID, clearErr)
+				}
+			}()
 		}
 	}
 	if err := q.resetCursorBeforeFreshAppendLocked(); err != nil {

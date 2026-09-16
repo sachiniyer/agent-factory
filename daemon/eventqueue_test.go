@@ -1200,3 +1200,76 @@ func TestWatcherReloadRemovesDeletedTaskQueue(t *testing.T) {
 		t.Fatal("deleted task's backlog must be removed on reload")
 	}
 }
+
+// TestEventQueue_ParkedEnqueueRollbackWhenAppendFails is the regression for
+// the stale usage-limit marker: the first limit-held event on an empty queue
+// persists .limit-parked BEFORE the record append runs. If the append fails,
+// the event is not retained and the marker must not survive — an ordinary stop
+// would trust it and route prefetched and kernel-buffered lines through
+// protected persistence instead of ordinary-stop discard.
+func TestEventQueue_ParkedEnqueueRollbackWhenAppendFails(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "parked-append-fail")
+	q.appendRecord = func(string, []byte) (int, error) {
+		return 0, errors.New("simulated append failure")
+	}
+
+	retained, err := q.enqueueWithParkedStatus("held-for-limit", true, true)
+	if err == nil {
+		t.Fatal("enqueue with a failing append returned nil error")
+	}
+	if retained {
+		t.Fatal("a failed append reported the event retained")
+	}
+	if q.retainLimitParked() {
+		t.Fatal("a dropped parked event left its usage-limit marker behind")
+	}
+	if _, statErr := os.Lstat(q.limitPath); !os.IsNotExist(statErr) {
+		t.Fatalf("usage-limit marker sidecar survived the dropped event: %v", statErr)
+	}
+	if got := q.pendingCount(); got != 0 {
+		t.Fatalf("dropped event counted as pending: %d", got)
+	}
+
+	// A subsequent healthy parked enqueue still marks retention normally.
+	q.appendRecord = appendRecordToFile
+	retained, err = q.enqueueWithParkedStatus("held-for-limit", true, true)
+	if err != nil || !retained {
+		t.Fatalf("healthy enqueue after rollback: retained=%v err=%v", retained, err)
+	}
+	if !q.retainLimitParked() {
+		t.Fatal("healthy parked enqueue did not mark retention")
+	}
+	if got := q.pendingCount(); got != 1 {
+		t.Fatalf("healthy enqueue after rollback: pending=%d", got)
+	}
+}
+
+// The rollback removes only a marker the failed call created: a marker that
+// already protects an earlier parked event must survive a later dropped
+// enqueue.
+func TestEventQueue_ParkedEnqueueRollbackKeepsPreexistingMarker(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "parked-keep-marker")
+	if err := q.enqueue("held-one", true); err != nil {
+		t.Fatalf("seed parked event: %v", err)
+	}
+	q.appendRecord = func(string, []byte) (int, error) {
+		return 0, errors.New("simulated append failure")
+	}
+	defer func() { q.appendRecord = appendRecordToFile }()
+
+	retained, err := q.enqueueWithParkedStatus("held-two", true, true)
+	if err == nil {
+		t.Fatal("enqueue with a failing append returned nil error")
+	}
+	if retained {
+		t.Fatal("a failed append reported the event retained")
+	}
+	if !q.retainLimitParked() {
+		t.Fatal("rollback removed a marker that protects an earlier parked event")
+	}
+	if got := q.pendingCount(); got != 1 {
+		t.Fatalf("dropped event changed the backlog: pending=%d", got)
+	}
+}

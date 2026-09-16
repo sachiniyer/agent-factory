@@ -12,7 +12,12 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
-func TestWatchWriterExitBreaksLimitCapacityWait(t *testing.T) {
+// An exited writer does NOT break the capacity wait: its finite pipe is the
+// staging buffer while the protected queue is full, so draining on exit would
+// append past the cap once per restart. The wait ends on stop — which drains
+// the finite pipe into protected storage once, at teardown — or when replay
+// makes room (TestExitedWriterPipeStagesUntilQueueHasRoom).
+func TestWatchWriterExitKeepsLimitCapacityWaitUntilStop(t *testing.T) {
 	queue := newEventQueue(t.TempDir(), "writer-exit-at-capacity")
 	for i := 0; i < watcherQueueMaxEvents; i++ {
 		if err := queue.enqueue(fmt.Sprintf("event-%03d", i), true); err != nil {
@@ -31,16 +36,29 @@ func TestWatchWriterExitBreaksLimitCapacityWait(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		w.consumeLines(strings.NewReader(""), &tailBuffer{}, writersStopped)
+		w.consumeLines(strings.NewReader("staged-one\nstaged-two\n"), &tailBuffer{}, writersStopped)
 		close(done)
 	}()
 
 	select {
 	case <-done:
-	case <-time.After(250 * time.Millisecond):
-		stop()
-		<-done
-		t.Fatal("stdout reader stayed capacity-blocked after its writer exited")
+		t.Fatal("stdout reader drained an exited writer's finite pipe past the queue cap")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := queue.pendingCount(); got != watcherQueueMaxEvents {
+		t.Fatalf("exited writer's pipe drained past the cap: pending=%d", got)
+	}
+
+	// Stop is what ends the wait: the staged finite input is drained into the
+	// protected queue once, and the reader returns.
+	stop()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not finish draining the finite pipe after stop")
+	}
+	if got := queue.pendingCount(); got != watcherQueueMaxEvents+2 {
+		t.Fatalf("stop did not retain the staged events: pending=%d", got)
 	}
 }
 
