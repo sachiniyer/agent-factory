@@ -374,3 +374,61 @@ func TestApplyConfigUnrelatedChangeWhileExposedDoesNotResurfaceWithRealListener(
 		"the notice must not resurface on an unrelated save while already exposed. Warnings:\n%s",
 		strings.Join(second.Warnings, "\n"))
 }
+
+// TestApplyConfigExposureNoticeFiresWhenAbsentListenerBecomesExposed pins the
+// absent-listener case identified in the P2 review: when webListeners exists but
+// the bound address is "" (initial bind failed or an unexpected Serve exit cleared
+// webBoundAddr), the pre-reconcile serving posture is "no listener" — NOT the
+// requested address sitting in old.ListenAddr. If old.ListenAddr carries a
+// tokenless non-loopback address and we incorrectly retain it as the serving
+// address, wasExposed becomes true, and a subsequent apply that successfully
+// restores a tokenless non-loopback listener suppresses the exposure notice
+// (the transition from "no listener" to "exposed listener" is silent). The fix
+// always uses ListenerAddress() when webListeners != nil, preserving "" here.
+func TestApplyConfigExposureNoticeFiresWhenAbsentListenerBecomesExposed(t *testing.T) {
+	// Start with a tokenless non-loopback listener so old.ListenAddr is a
+	// non-loopback address — the value that pre-fix incorrectly stood in for the
+	// serving address when the listener was absent.
+	server, oldBound := exposureRebindFixture(t,
+		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = false\n", false)
+	require.False(t, config.IsLoopbackListenAddr(oldBound),
+		"anti-vacuous: the start address must be non-loopback")
+
+	// Simulate an unexpected Serve exit that cleared both webBoundAddr and
+	// webConfigAddr: the listener machinery (webListeners) still exists, but
+	// no socket is accepting. An unexpected Serve exit (lines 242-243 of
+	// listener_reload.go) sets both fields to "". The webHandle is left pointing
+	// to the stale (dead) handle, matching the "unexpected death" path.
+	server.manager.webListeners.mu.Lock()
+	server.manager.webListeners.webBoundAddr = ""
+	server.manager.webListeners.webConfigAddr = ""
+	server.manager.webListeners.mu.Unlock()
+	require.Empty(t, server.manager.ListenerAddress("network.listen_addr"),
+		"anti-vacuous: the absent-listener state must be visible through ListenerAddress")
+
+	// Now apply a config that causes the listener to be (re-)established at a
+	// tokenless non-loopback address. The rebind succeeds (listenTCP is not forced
+	// to fail). webConfigAddr is "" so reconcile sees a diff ("0.0.0.0:0" != "")
+	// and triggers bindWebLocked, which starts a new accepting socket.
+	setGlobalConfigValue(t, "network.listen_addr", "0.0.0.0:0")
+
+	result, err := server.manager.ApplyConfig()
+	require.NoError(t, err)
+	require.Empty(t, result.FailedListenerKeys,
+		"the rebind to the restored listener must succeed")
+
+	newBound := server.manager.ListenerAddress("network.listen_addr")
+	require.NotEmpty(t, newBound, "anti-vacuous: the listener must now be serving")
+	require.False(t, config.IsLoopbackListenAddr(newBound),
+		"anti-vacuous: the restored serving address must be non-loopback (exposed)")
+
+	// The exposure notice MUST fire: this is a transition from "no listener" to an
+	// exposed one. Pre-fix it was suppressed because old.ListenAddr (non-loopback
+	// tokenless) was used as the serving address, yielding wasExposed=true.
+	notice := exposureNotice(result.Warnings)
+	require.NotEmpty(t, notice,
+		"the notice must fire for the transition from absent listener to an exposed one. Warnings:\n%s",
+		strings.Join(result.Warnings, "\n"))
+	require.Contains(t, notice, newBound,
+		"the notice must name the newly serving bound address, got: %s", notice)
+}

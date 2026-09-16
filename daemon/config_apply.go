@@ -207,11 +207,18 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// still serves the previously bound one — using it for wasExposed would compute
 	// false even though the daemon has been exposed throughout, causing the
 	// transition gate (!wasExposed) to fire on every subsequent unrelated save.
+	//
+	// When listener machinery exists, always use the kernel-resolved bound address
+	// (even "" when the listener is absent — initial bind failed or an unexpected
+	// Serve exit cleared webBoundAddr). Preserving "" here prevents old.ListenAddr
+	// (a tokenless non-loopback requested address) from being treated as "serving"
+	// when no listener is actually accepting: a later apply that successfully
+	// restores the listener would then see wasExposed=true and suppress the
+	// exposure notice for the transition from no listener to an exposed one.
+	// Reserve the old.ListenAddr fallback for managers with no webListeners at all.
 	preReconcileServingAddr := old.ListenAddr
 	if m.webListeners != nil {
-		if pre := m.ListenerAddress("network.listen_addr"); pre != "" {
-			preReconcileServingAddr = pre
-		}
+		preReconcileServingAddr = m.ListenerAddress("network.listen_addr")
 		if failed, rerr := m.webListeners.reconcile(newCfg); rerr != nil {
 			result.Warnings = append(result.Warnings, rerr.Error())
 			result.FailedListenerKeys = append(result.FailedListenerKeys, failed...)
