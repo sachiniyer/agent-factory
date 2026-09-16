@@ -528,6 +528,21 @@ func envCallMutatesAccountEnvironment(
 	requireCommand bool,
 	evaluation *straceBoundaryEvaluation,
 ) bool {
+	if evaluation == nil {
+		evaluation = &straceBoundaryEvaluation{}
+	}
+	if evaluation.work >= accountEnvironmentEvaluationBudget {
+		// Same bound as the strace boundary evaluation: each nested env that
+		// re-enters the command walk is one recursive descent, and an
+		// attacker-sized chain of them overflows the stack or fans out
+		// exponentially rather than returning a verdict.
+		return true
+	}
+	// The argv parse below costs one unit per word, and an unrecognized
+	// wrapper tail can reach this once per env word it finds — charging the
+	// suffix length keeps both the deep-nesting and the fan-out shapes inside
+	// the same budget.
+	evaluation.work += len(words)
 	invocation, err := envCallArgvParse(words)
 	if err != nil || invocation.ClearEnvironment {
 		return true

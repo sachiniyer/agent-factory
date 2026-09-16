@@ -719,3 +719,51 @@ func TestValidateAccountEnvironmentCommand_NestedStraceWrappersShareTheBoundaryM
 		"strace -Z nice strace -Z npm run dev", scopedProcessTabAccount()),
 		"mixed wrappers around an ordinary child must not be refused")
 }
+
+// A request body can carry ~1M nested `strace -Z ` prefixes under the HTTP body
+// limit (daemon.maxHTTPBodyBytes ~16MiB). Each level used to cost several stack
+// frames, so that input overflowed the goroutine stack and killed the process
+// instead of returning a verdict — daemon-fatal, not a refusal. The evaluation
+// budget must refuse it closed while real nesting orders of magnitude below it
+// stays proven.
+func TestValidateAccountEnvironmentCommand_WrapperNestingBudgetFailsClosed(t *testing.T) {
+	// Over the budget but cheap to build: every level charges at least one
+	// unit, so the budget must trip far below the fatal stack depth.
+	nest := strings.TrimSpace(strings.Repeat("strace -Z ", accountEnvironmentEvaluationBudget+2000))
+	require.Error(t, ValidateAccountEnvironmentCommand(
+		nest+" npm run dev", scopedProcessTabAccount()),
+		"nesting past the evaluation budget must fail closed around an ordinary child")
+	require.Error(t, ValidateAccountEnvironmentCommand(
+		nest+" env CODEX_HOME=/other codex", scopedProcessTabAccount()),
+		"nesting past the evaluation budget must fail closed around a mutating child")
+
+	// The reported crash shape — ~1M levels inside one body-size request —
+	// must come back as a refusal rather than a fatal stack overflow.
+	deep := strings.TrimSpace(strings.Repeat("strace -Z ", 1_000_000))
+	require.Error(t, ValidateAccountEnvironmentCommand(
+		deep+" npm run dev", scopedProcessTabAccount()),
+		"a ~1M-level wrapper chain must refuse rather than crash the process")
+}
+
+// env nesting is the same attack through a different descent: an unrecognized
+// wrapper's tail scan reaches envCallMutatesAccountEnvironment once per env
+// word it finds and the env arm reaches it again after, so a chain of env
+// invocations fans out instead of recursing in a straight line. Charging the
+// argv length against the same budget refuses both the deep chain and the
+// fan-out before either exhausts the process.
+func TestValidateAccountEnvironmentCommand_EnvNestingBudgetFailsClosed(t *testing.T) {
+	for _, levels := range []int{200, 5000} {
+		require.Error(t, ValidateAccountEnvironmentCommand(
+			strings.Repeat("env ", levels)+"npm run dev", scopedProcessTabAccount()),
+			"%d nested env invocations must fail closed, not fan out", levels)
+	}
+	// A wrapper tail packed with env words spends the same budget: every
+	// position the scan delegates is a recursive descent.
+	packed := "perf" + strings.Repeat(" env", 5000) + " true"
+	require.Error(t, ValidateAccountEnvironmentCommand(packed, scopedProcessTabAccount()),
+		"a tail of env words must fail closed rather than evaluate each one recursively")
+	// Ordinary env usage stays untouched far below the budget.
+	require.NoError(t, ValidateAccountEnvironmentCommand(
+		"env PORT=8080 npm run dev", scopedProcessTabAccount()),
+		"a plain env invocation must stay allowed")
+}

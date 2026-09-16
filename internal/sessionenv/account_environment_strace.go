@@ -19,8 +19,26 @@ type straceOptionAction struct {
 	result   straceOptionResult
 }
 
+// accountEnvironmentEvaluationBudget bounds the recursive work one command
+// validation may spend descending into nested same-process wrappers. A strace
+// boundary evaluation charges one unit; an env invocation charges one unit per
+// argv word it must re-parse. The counter never refunds, so the budget caps
+// BOTH live recursion depth and total evaluations: an account-scoped request
+// body may carry ~16MiB (daemon.maxHTTPBodyBytes), enough for ~1M `strace -Z `
+// prefixes or `env ` repetitions, and unbounded descent either overflows the
+// goroutine stack outright or fans out exponentially instead of returning a
+// verdict. Real wrapper chains are a handful of levels and the deepest
+// exercised ones stay in the low thousands of units, so the budget sits far
+// above any plausible command and far below the depth a stack cannot survive.
+const accountEnvironmentEvaluationBudget = 32768
+
 type straceBoundaryEvaluation struct {
 	memo map[straceBoundaryState]bool
+	// work is the running total charged against
+	// accountEnvironmentEvaluationBudget — one unit per strace boundary
+	// evaluation, one per argv word an env invocation re-parses — so the budget
+	// above can refuse before the stack or the fan-out does.
+	work int
 }
 
 type straceBoundaryState struct {
@@ -767,6 +785,13 @@ func straceTailMutatesAccountEnvironment(
 	if result, found := evaluation.memo[state]; found {
 		return result
 	}
+	if evaluation.work >= accountEnvironmentEvaluationBudget {
+		// A nested-wrapper chain this deep is attacker-sized input, not a real
+		// command. Refusing fails closed; recursing further overflows the
+		// goroutine stack and kills the process.
+		return true
+	}
+	evaluation.work++
 	if evaluation.memo == nil {
 		evaluation.memo = make(map[straceBoundaryState]bool)
 	}
