@@ -379,7 +379,11 @@ func literalShellWord(word *syntax.Word) (string, bool) {
 // must carry no glob metacharacters (* ? and a bracket expression that closes),
 // no unquoted brace-expansion open ({ — {a,b} and {a..z} split one word into
 // several argv entries under bash, the /bin/sh of the supported macOS case),
-// and no leading ~, and backslash escapes are resolved so an escaped \| still
+// and no leading ~ unless tildePrefixNamesAPath proves it a directory prefix —
+// the word then keeps its literal ~ spelling, which matches as a path by
+// basename and never as a builtin, option, or assignment, and
+// withTildeBindingNames makes the walk refuse any command that could rebind
+// that directory. Backslash escapes are resolved so an escaped \| still
 // reads as | to hazard checks that inspect the resolved string. Glob and brace
 // syntax are tracked across part boundaries because quote removal runs before
 // pathname expansion — `["|"]` is the bracket `[|]`, and `{-E,CODEX_HOME}`
@@ -437,55 +441,18 @@ func literalShellWordExpandableSafe(word *syntax.Word) (string, bool) {
 }
 
 // provableCommandHead reports whether the word in command position resolves to
-// a fixed executable: literalShellWordExpandableSafe, plus a leading-~
-// carve-out for the forms that always land on a path. Every other unprovable
-// head fails closed: an unquoted glob or brace can expand to a builtin name
-// (u* to unset, e{val,} to eval) that mutates the environment in this shell,
-// and judging the tail as env's argv cannot model that.
-//
-// The tilde carve-out needs the remainder to resolve under a fixed root.
-// `~/x` and `~name/x` expand to an absolute home path, and `~name` falls
-// back to a bare (PATH-relative) name when the user does not exist. Every
-// other shape fails closed:
-//
-//   - An EMPTY remainder is bare `~`: the shell substitutes its current HOME
-//     verbatim, so `HOME=unset; ~ CODEX_HOME` expands the head to the `unset`
-//     builtin and strips the account variable outright (Codex on #4466). The
-//     same applies when quoting reduces the remainder to empty.
-//   - `~+`, `~-`, and their `~+N`/`~-N` forms expand from the mutable PWD,
-//     OLDPWD, and directory stack rather than a fixed path — `PWD=unset;
-//     ~+ CODEX_HOME` runs the builtin — so a remainder opening with '+' or
-//     '-' is refused even when a slash follows (Codex on #4466).
-//   - A `..` segment escapes the home root entirely, and '~' resolves
-//     against the runtime HOME rather than a fixed one, so any tilde path
-//     can name a modeled wrapper the basename checks never see:
-//     `~/../../usr/bin/env` reaches the real env outright and `HOME=/usr;
-//     ~/bin/env` resolves to it at exec time (Codex on #4466).
+// a fixed executable: literalShellWordExpandableSafe, which admits a leading ~
+// only as a directory prefix ending in a slash. Every other unprovable head
+// fails closed: an unquoted glob or brace can expand to a builtin name (u* to
+// unset, e{val,} to eval), and a bare tilde form is replaced by HOME, PWD, or
+// OLDPWD outright — `PWD=unset; ~+ CODEX_HOME` runs the unset builtin under
+// bash (Codex on #4466) — so judging the tail as env's argv cannot model it.
 func provableCommandHead(word *syntax.Word) bool {
 	if word == nil || len(word.Parts) == 0 {
 		return false
 	}
-	if _, ok := literalShellWordExpandableSafe(word); ok {
-		return true
-	}
-	first, isLit := word.Parts[0].(*syntax.Lit)
-	if !isLit || !strings.HasPrefix(first.Value, "~") {
-		return false
-	}
-	rest := *word
-	rest.Parts = make([]syntax.WordPart, len(word.Parts))
-	copy(rest.Parts, word.Parts)
-	rest.Parts[0] = &syntax.Lit{Value: first.Value[1:]}
-	restValue, ok := literalShellWordExpandableSafe(&rest)
-	if !ok || restValue == "" || restValue[0] == '+' || restValue[0] == '-' {
-		return false
-	}
-	for _, segment := range strings.Split(restValue, "/") {
-		if segment == ".." {
-			return false
-		}
-	}
-	return !accountModeledCommandName(filepath.Base(restValue))
+	_, ok := literalShellWordExpandableSafe(word)
+	return ok
 }
 
 // braceExpansionState tracks unquoted '{', '}', ',', and '..' across a word's
@@ -647,7 +614,7 @@ func appendUnexpandedLit(
 				value.WriteByte('.')
 			}
 		case '~':
-			if wordStart && i == 0 {
+			if wordStart && i == 0 && !tildePrefixNamesAPath(s) {
 				return false
 			}
 		}

@@ -272,31 +272,40 @@ func TestCommandMutatesAccountEnvironment_ExpandableCommandHead(t *testing.T) {
 		{`HOME=unset; ~ CODEX_HOME; codex`, true},
 		{`~ CODEX_HOME`, true},
 		{`~"" CODEX_HOME`, true},
-		// `~+`/`~-` are the same hole one variable over: they expand PWD,
-		// OLDPWD, or a directory-stack entry verbatim, so PWD=unset makes
-		// the head a builtin name, and even `~+/x` keeps a mutable root
-		// (Codex on #4466).
+		// `~+`/`~-` are the same hole one variable over: bare, they expand
+		// PWD or OLDPWD verbatim, so PWD=unset makes the head a builtin name
+		// (Codex on #4466). A bare `~name` and every directory-stack index
+		// (`~0` is PWD too, measured under bash) are no fixed path either.
 		{`PWD=unset; ~+ CODEX_HOME; codex`, true},
+		{`OLDPWD=unset; ~- CODEX_HOME; codex`, true},
+		{`PWD=unset; ~0 CODEX_HOME; codex`, true},
 		{`~+ CODEX_HOME`, true},
 		{`~- CODEX_HOME`, true},
 		{`~+2 CODEX_HOME`, true},
-		{`~+/bin/tool arg`, true},
-		{`~-/bin/tool arg`, true},
-		// A `..` segment escapes the home root: `~/../../usr/bin/env` can
-		// name the real util-linux env while the word still carries its ~
-		// and never reaches the modeled-name check (Codex on #4466).
+		{`~+0 CODEX_HOME`, true},
+		{`~root CODEX_HOME`, true},
+		// With a slash they are paths, but only while the command leaves the
+		// directory alone: rebinding PWD or OLDPWD next to a tilde word is
+		// refused (withTildeBindingNames), and cd only ever sets them to an
+		// absolute directory.
+		{`PWD=/usr; ~+/bin/env CODEX_HOME=/other codex`, true},
+		{`PWD=/tmp; ~+/bin/tool arg`, true},
+		{`OLDPWD=/tmp; ~-/bin/tool arg`, true},
+		{`~+/bin/tool arg`, false},
+		{`~-/bin/tool arg`, false},
+		{`cd /srv && ~+/bin/tool arg`, false},
+		// A tilde path names its executable by its literal final component,
+		// so a modeled wrapper is judged as that wrapper however many `..`
+		// segments lead to it (Codex on #4466), and HOME cannot be rebound
+		// to aim `~/bin/env` somewhere else.
 		{`~/../../usr/bin/env CODEX_HOME=/other codex`, true},
 		{`~root/../../usr/bin/env CODEX_HOME=/other codex`, true},
-		// `..` is not even needed: '~' resolves against the runtime HOME,
-		// so `HOME=/usr; ~/bin/env` names the real env at exec time while
-		// the word's '~' still skips the modeled-name check. Any tilde
-		// path whose basename is a modeled wrapper or shell fails closed.
 		{`~/bin/env CODEX_HOME=/other codex`, true},
 		{`~root/bin/env CODEX_HOME=/other codex`, true},
+		{`HOME=/usr; ~/bin/env CODEX_HOME=/other codex`, true},
 		{`~/bin/sh -c 'echo x'`, true},
-		// The remaining tilde forms stay accepted: `~/x` keeps a literal
-		// slash under HOME, and `~name` resolves to that user's absolute
-		// home (or stays a bare `~name` name).
+		// The remaining tilde forms stay accepted: the word is a path whose
+		// final component is its own literal text.
 		{`~/bin/tool arg`, false},
 		{`~/.local/bin/tool arg`, false},
 		{`~root/bin/tool arg`, false},

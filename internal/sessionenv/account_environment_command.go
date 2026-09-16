@@ -15,7 +15,16 @@ import (
 // path launches arbitrary user processes, so unrelated configuration such as
 // PORT=3000 remains allowed. Shell decorations do not hide calls from the walk,
 // and an unsupported form of a recognized environment mutator fails closed.
+//
+// A command that uses a tilde prefix is walked with HOME, PWD and OLDPWD denied
+// as well, because the walk reads `~/…` words as fixed paths and that reading
+// holds only while the command leaves those directories alone (see
+// account_environment_tilde.go).
 func commandMutatesAccountEnvironment(command string, names map[string]struct{}) bool {
+	return commandWalkMutatesAccountEnvironment(command, withTildeBindingNames(command, names))
+}
+
+func commandWalkMutatesAccountEnvironment(command string, names map[string]struct{}) bool {
 	if command == "" {
 		return false
 	}
@@ -650,22 +659,6 @@ func knownShellName(name string) bool {
 func isAccountCommandName(word *syntax.Word, want string) bool {
 	value, literal := literalShellWordExpandableSafe(word)
 	return literal && filepath.Base(value) == want
-}
-
-// accountModeledCommandName names every executable the validator judges
-// specially — the wrapper set isAccountCommandName is invoked with at the
-// command dispatch — plus the shells. A tilde-expanded head can never reach
-// isAccountCommandName (its word still carries '~'), so a tilde path whose
-// basename is one of these must fail closed in provableCommandHead rather
-// than slip past the wrapper judgment (Codex on #4466).
-func accountModeledCommandName(name string) bool {
-	switch name {
-	case "env", "nohup", "nice", "timeout", "setsid", "stdbuf",
-		"ionice", "taskset", "strace", "xargs":
-		return true
-	default:
-		return knownShellName(name)
-	}
 }
 
 func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
