@@ -76,6 +76,7 @@ import {
 import { confirmDeleteTabModal } from "./delete_tab_modal.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
+import { restoreShortcutFocus } from "./shortcut-focus.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, projectDeletionBreakdown, reconcileProject, scopeToProject } from "./project.js";
 import {
@@ -2692,22 +2693,11 @@ function onKeydown(e: KeyboardEvent): void {
       const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       shell?.openNewTabPicker(() => {
         focusRail();
-        if (navigationTarget?.isConnected && navigationTarget !== document.body) {
-          navigationTarget.focus({ preventScroll: true });
-        }
         // Control+] commonly leaves document.body as the nominal focus target.
         // Focusing body is a no-op, which can leave the picker item focused after
         // its hidden ancestors close; the next shortcut is then swallowed as a
         // native-button key. Give rail navigation a stable DOM focus target.
-        if (document.activeElement !== navigationTarget || navigationTarget === document.body) {
-          const rail = root?.querySelector<HTMLElement>(".af-rail");
-          if (rail) {
-            rail.tabIndex = -1;
-            rail.focus({ preventScroll: true });
-          } else {
-            (document.activeElement as HTMLElement | null)?.blur();
-          }
-        }
+        restoreShortcutFocus(navigationTarget, root?.querySelector<HTMLElement>(".af-rail") ?? null);
       });
       break;
     }

@@ -1,6 +1,7 @@
 package agentaccount
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -70,7 +71,40 @@ func LoginAgents() []string {
 // The af- prefix keeps it inside the namespace every af cleanup path recognizes
 // (tmux.NewTmuxSession adds the af_ prefix on top, exactly as the config agent's
 // name is built).
+//
+// The name is HEX-ENCODED before it reaches tmux's own naming sanitizer
+// (toTmuxName, which rewrites every rune that is not a letter, digit, mark, '_'
+// or '-' to '_'). ValidateName permits '.', but '.' is not stable under that
+// sanitizer, so without encoding the names `work.proj` and `work_proj` collapse
+// onto one tmux session name and a second login can adopt the OTHER account's
+// in-flight pane. Hex digits [0-9a-f] are all stable, and the encoding is
+// injective, so two distinct names can never produce one tmux session name
+// regardless of which characters ValidateName admits.
+//
+// The version marker "x" lives in the FIXED prefix segment — "af-loginx-<agent>-"
+// — which no account name can ever reach. Legacy titles match "af-login-<agent>-<rawname>"
+// (ValidateName permits any starting letter or digit, so "x-<rawname>" is a legal
+// legacy raw name). Placing the marker in the fixed prefix guarantees the two
+// namespaces are disjoint regardless of what ValidateName permits now or permitted
+// in any earlier release: "af-login-…" can only ever be a legacy pane and
+// "af-loginx-…" can only ever be a new-format pane, and Supervisor.adopt cannot
+// mistake one for the other.
+//
+// LegacyLoginSessionName returns the old raw-name format; Supervisor.Start probes
+// it during upgrades to detect a still-running legacy pane for this account.
 func LoginSessionName(agent, name string) string {
+	return "af-loginx-" + agent + "-" + hex.EncodeToString([]byte(name))
+}
+
+// LegacyLoginSessionName returns the pre-hex-encoding session name for one
+// account's login pane — the format used by binaries that predated this
+// encoding change.
+//
+// It is used only to DETECT a still-running legacy pane during upgrades: if a
+// daemon was killed while a login was open, the successor needs to find that pane
+// under its original name rather than creating a second one against the same
+// account directory. It must never be used to create a new pane.
+func LegacyLoginSessionName(agent, name string) string {
 	return "af-login-" + agent + "-" + name
 }
 

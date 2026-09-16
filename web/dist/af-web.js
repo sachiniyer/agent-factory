@@ -8331,8 +8331,13 @@ var TerminalSoftInput = class {
         continue;
       }
       matchedComposition = true;
-      prefix += rest.slice(0, length);
-      rest = rest.slice(length);
+      if (queued) {
+        prefix += this.applyQueuedInput(range, applyModifiers);
+        rest = rest.slice(length);
+      } else {
+        prefix += rest.slice(0, length);
+        rest = rest.slice(length);
+      }
       const flush = range.trailingFlush;
       if (flush && rest.startsWith(flush.text)) {
         this.cancelTrailingFlush(flush);
@@ -8395,7 +8400,7 @@ var TerminalSoftInput = class {
   }
   queueTrailingFlush(range) {
     const trailingLength = range.trailingLength ?? 0;
-    if (!trailingLength || !range.frozenText || range.trailingFlush) return;
+    if (!trailingLength || !range.frozenText || range.trailingFlush || range.queuedInput) return;
     const text = range.frozenText.slice(-trailingLength);
     const flush = { text };
     range.trailingFlush = flush;
@@ -11760,6 +11765,24 @@ var InstallAffordance = class {
     });
   }
 };
+
+// src/shortcut-focus.ts
+function restoreShortcutFocus(navigationTarget, rail) {
+  if (navigationTarget?.isConnected && navigationTarget !== document.body) {
+    navigationTarget.focus({ preventScroll: true });
+  }
+  if (document.activeElement === navigationTarget && navigationTarget !== document.body) {
+    return;
+  }
+  if (rail) {
+    rail.tabIndex = -1;
+    rail.focus({ preventScroll: true });
+    if (document.activeElement === rail) {
+      return;
+    }
+  }
+  document.activeElement?.blur();
+}
 
 // src/time.ts
 function formatDuration(ms) {
@@ -19022,18 +19045,7 @@ function onKeydown(e) {
       const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       shell?.openNewTabPicker(() => {
         focusRail();
-        if (navigationTarget?.isConnected && navigationTarget !== document.body) {
-          navigationTarget.focus({ preventScroll: true });
-        }
-        if (document.activeElement !== navigationTarget || navigationTarget === document.body) {
-          const rail = root?.querySelector(".af-rail");
-          if (rail) {
-            rail.tabIndex = -1;
-            rail.focus({ preventScroll: true });
-          } else {
-            document.activeElement?.blur();
-          }
-        }
+        restoreShortcutFocus(navigationTarget, root?.querySelector(".af-rail") ?? null);
       });
       break;
     }

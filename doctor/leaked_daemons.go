@@ -299,8 +299,14 @@ func leakedDaemonOldEnough(ctx *scanContext, p proctree.Process) bool {
 // asymmetry #1989 was fought over: under-cleaning is cosmetic, over-cleaning is
 // not.
 func checkDeadSocketHomes(ctx *scanContext, report *Report) {
-	tempDir := filepath.Clean(ctx.opts.TempDir)
-	activeHome := filepath.Clean(ctx.opts.ConfigDir)
+	// normalizeHome (filepath.EvalSymlinks), not filepath.Clean, so a symlinked
+	// active home compares equal to the sweep's real-target candidate. The
+	// sibling checkStaleTempHomes and checkLeakedDaemonBinaries canonicalise
+	// this way; checkDeadSocketHomes shares the same active-home guard, and
+	// consistency keeps the comparison sound even though this check's removal
+	// is bounded by holdsOnlyADaemonSocket / os.Remove.
+	tempDir := normalizeHome(ctx.opts.TempDir)
+	activeHome := normalizeHome(ctx.opts.ConfigDir)
 
 	// A tmux listing that FAILED is not an empty one, and this set is one of the
 	// things that can spare a directory. Derived from a failed read it would
@@ -328,7 +334,7 @@ func checkDeadSocketHomes(ctx *scanContext, report *Report) {
 	}
 
 	for _, dir := range sweep.candidates {
-		dir = filepath.Clean(dir)
+		dir = normalizeHome(dir)
 		if dir == activeHome || !pathutil.IsStrictlyInside(dir, tempDir) {
 			continue
 		}
@@ -519,7 +525,7 @@ func (c *scanContext) liveWorkingDirs() map[int]string {
 	c.cwds = map[int]string{}
 	for pid := range c.snap {
 		if dir, ok := daemonProcessCwd(pid); ok && dir != "" {
-			c.cwds[pid] = filepath.Clean(dir)
+			c.cwds[pid] = normalizeHome(dir)
 		}
 	}
 	return c.cwds

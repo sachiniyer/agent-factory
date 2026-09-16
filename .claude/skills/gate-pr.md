@@ -551,7 +551,7 @@ worktree registered and blocks the next run's `git worktree add`.
   See `scripts/tui-2599-scenario.sh` for the shape.
 - **A PR-specific scenario does not replace the shared acceptance gate.** Your scenario proves your change works; `make tui-driver-selftest` proves you did not break someone else's. Run both. Require the self-test to report **all** steps green — match the `N/N` in its final `SELF-TEST PASSED` line rather than a hard-coded number, because the suite grows.
 
-  These two are the **only** container runs that survive the no-routine-containers rule above, and only for a TUI-touching PR. They are not exempt because TUI work is special — they are exempt because **CI does not run them at all.** `go test -race ./...` covers the Go suite, but nothing in `.github/workflows/` invokes `scripts/testbox.sh selftest`, so skipping them locally means the interaction is never exercised anywhere. That is also why `auto-gate.js` demands the `play-tested` label on TUI paths. If your PR touches no TUI path, run neither.
+  These two are the **only** container runs that survive the no-routine-containers rule above, and only for a TUI-touching PR. They are not exempt because TUI work is special — they are exempt because **no PR gate runs them.** `go test -race ./...` covers the Go suite, but no workflow in `.github/workflows/` runs `scripts/testbox.sh selftest` as a PR gate — the `TUI driver selftest` workflow fires on Auto Gate's post-merge dispatch after every merge and on native pushes touching TUI paths — never on a PR head — so skipping the local run means the regression shows up post-merge on `master` rather than on your PR head. That is also why `auto-gate.js` demands the `play-tested` label on TUI paths. If your PR touches no TUI path, run neither.
 - **tmux work: isolated socket only.** `-L <unique-name>`, removed afterward. Never the default server, never `tmux kill-server`, never `af reset`. An agent once destroyed every live session on this box that way (#2175).
 - **A fake must model production's real error shape**, not the shape your assertion needs. #2711 shipped a test that injected `context.DeadlineExceeded` directly while production returned `signal: killed` — green, and proving a property the code did not have.
 
@@ -771,13 +771,21 @@ Two things the gate insists on, and both matter:
   Codex artifacts are held to (#3702). Push after approving and the PR returns to
   the manual pass; a sign-off is about the code it was written against.
 
-  **An update-branch is not such a push (#3803).** When the head is a merge commit
-  with exactly two parents whose SECOND is contained in `master`, the anchors —
-  the approval and every Codex artifact — bind to the merge's FIRST parent, the
-  content head, because nothing about the reviewed change moved. Without that the
-  gate's own update-branch voided the approval it had just acted on, and #3799
-  livelocked: approve, update-branch, anchors reset, approve again. Any other head
-  resets as before. Reading it by hand:
+  **An update-branch is not such a push (#3803, #4235).** A merge commit with
+  exactly two parents whose SECOND is contained in `master` is the shape `PUT
+  update-branch` produces — but a cheap pre-filter only, since a hand-written
+  conflict resolution has the same parents. The full gate also reads the merge
+  base and both parent trees and requires the merge commit's tree to equal the
+  path-level three-way result, or carry is refused. When the proof passes, the
+  anchors — the approval and every Codex artifact — bind to the merge's FIRST
+  parent, the content head, because nothing about the reviewed change moved.
+  Without that the gate's own update-branch voided the approval it had just
+  acted on, and #3799 livelocked: approve, update-branch, anchors reset, approve
+  again. Any other head resets as before. Differing blob SHAs between the PR's
+  files and the content head rule carry out immediately (cheap negative); the
+  shape check and tree proof in `auto-gate.js` are only needed when blobs
+  match. Reading it by hand (this is the shape pre-filter; the tree proof runs
+  in `auto-gate.js`):
 
 ```bash
 set -euo pipefail
@@ -794,7 +802,7 @@ else
   # Contained in base? "identical" or "behind" means yes.
   ST=$(gh api "repos/{owner}/{repo}/compare/$BASE...$2" --jq '.status')
   if [[ "$ST" == "identical" || "$ST" == "behind" ]]; then
-    echo "update-branch: content head $1, current head $HEAD — bind evidence to $1"
+    echo "update-branch shape: content head $1, current head $HEAD — bind evidence to $1 only if the merge tree preserves the reviewed content (auto-gate.js verifies)"
   else
     echo "merge of something other than $BASE — anchors bind to $HEAD"
   fi
