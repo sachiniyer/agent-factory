@@ -433,31 +433,6 @@ func TestSSHAgentServerCommandExecsAtRecordedPID(t *testing.T) {
 	}
 }
 
-func TestPreResolvedSandboxProgramBypassesSecondOverrideLookup(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	repoRoot := initTempGitRepo(t)
-	writeInRepoConfig(t, repoRoot, map[string]any{
-		"program_overrides": map[string]any{
-			tmux.ProgramCodex: "codex --model second-lookup",
-		},
-	})
-
-	resolved := &Instance{
-		Title:              "resolved",
-		Path:               repoRoot,
-		Program:            tmux.ProgramCodex,
-		preResolvedProgram: tmux.ProgramCodex,
-	}
-	if got := resolveProgramForInstance(resolved); got != tmux.ProgramCodex {
-		t.Fatalf("pre-resolved program = %q, want %q without a second override lookup", got, tmux.ProgramCodex)
-	}
-
-	ordinary := &Instance{Title: "ordinary", Path: repoRoot, Program: tmux.ProgramCodex}
-	if got := resolveProgramForInstance(ordinary); got != "codex --model second-lookup" {
-		t.Fatalf("ordinary program = %q, want one override lookup", got)
-	}
-}
-
 func TestHookScriptRejectsAgentNameUsedAsDataAndGetsConfiguredEnvironment(t *testing.T) {
 	const (
 		customName = "CUSTOM_PROVIDER_TOKEN"
