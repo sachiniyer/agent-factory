@@ -63,35 +63,50 @@ func BoundedLoop(period, lifetime time.Duration, body string) string {
 }
 
 // ExpectedParentEnv names the environment variable a spawner uses to tell a
-// re-exec'd fixture its INTENDED parent pid (the spawner's own os.Getpid()).
-// ExitWhenOrphaned prefers it over the process's current ppid: a fixture can
-// still be booting when its owner dies — especially on a loaded runner — and
-// a ppid captured AFTER the reparent is init or a subreaper, a parent that
-// never goes away, which leaves the watchdog watching nothing forever.
+// re-exec'd fixture the pid of the process whose survival keeps it alive —
+// the spawner's own os.Getpid() for a direct child, or the TEST's pid for a
+// fixture launched through an intermediary (a tmux pane, a supervising
+// shell) whose immediate parent is a daemon that outlives the test.
+// ExitWhenOrphaned watches it by existence rather than by ppid: a fixture
+// can still be booting when its owner dies — especially on a loaded runner —
+// and a ppid captured AFTER the reparent is init or a subreaper, a parent
+// that never goes away, which leaves a drift-only watchdog watching nothing
+// forever.
 const ExpectedParentEnv = "AF_TESTGUARD_EXPECTED_PPID"
 
 // ExitWhenOrphaned starts a watchdog that exits the current process once its
-// original parent is gone. It exists for fixtures that are re-exec'd copies
+// original owner is gone. It exists for fixtures that are re-exec'd copies
 // of the test binary (exec.Command(os.Args[0], ...)): the test binary is
 // their only legitimate owner, and once they are reparented nothing else
 // will ever signal or reap them — which is how `daemon.test --socket`
 // fixtures survived for weeks (#4412). Call it at the top of the re-exec'd
-// fixture main. poll is the getppid sampling interval.
+// fixture main. poll is the sampling interval.
 //
-// The watched parent is ExpectedParentEnv when the spawner exported it, else
-// the ppid captured HERE, at call time. The capture fallback is also the
-// right answer for a fixture spawned through an intermediary (a tmux pane, a
-// supervising shell): its legitimate owner IS that immediate parent, which
-// no env value could name anyway.
+// Two arms, because "owner is gone" has two shapes:
+//
+//   - the IMMEDIATE parent changed: the process was reparented, which is
+//     what an owner's death looks like from inside. This fires on pane-shell
+//     and supervisor death too — a tmux-pane fixture whose pane dies has no
+//     owner left even when the test that spawned it is alive.
+//   - the pid named by ExpectedParentEnv no longer EXISTS: the owner the
+//     spawner named is gone outright, reparent or no reparent. This is the
+//     arm that covers the intermediary case — a fixture in a detached tmux
+//     pane is parented to the tmux server, which outlives the test; without
+//     it the ppid arm watches a survivor and a crashed test leaves the
+//     fixture running forever.
 func ExitWhenOrphaned(poll time.Duration) {
-	parent := os.Getppid()
-	if expected, err := strconv.Atoi(os.Getenv(ExpectedParentEnv)); err == nil && expected > 0 {
-		parent = expected
+	ppid := os.Getppid()
+	expected := 0
+	if v, err := strconv.Atoi(os.Getenv(ExpectedParentEnv)); err == nil && v > 0 {
+		expected = v
 	}
 	go func() {
 		for {
 			time.Sleep(poll)
-			if os.Getppid() != parent {
+			if os.Getppid() != ppid {
+				os.Exit(0)
+			}
+			if expected != 0 && !processAlive(expected) {
 				os.Exit(0)
 			}
 		}

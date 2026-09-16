@@ -144,12 +144,18 @@ func TestExitWhenOrphaned(t *testing.T) {
 	if childPID <= 0 {
 		t.Fatal("watchdog child never wrote its pid")
 	}
+	// Adopt the about-to-be-orphaned child where a subreaper exists, so its
+	// zombie does not linger under a container init that never collects — the
+	// death assertion below treats the zombie as dead either way, which is
+	// why the leak needed its own mechanism (#4412).
+	becomeOrphanReaper(t)
 	if err := wrapper.Process.Kill(); err != nil {
 		t.Fatalf("kill wrapper (child's parent): %v", err)
 	}
 	if !waitForProcessDeath(childPID, 2*time.Second) {
 		t.Errorf("orphaned watchdog child %d was still alive 2s after its parent died", childPID)
 	}
+	reapOrphanedChild(t, childPID)
 }
 
 // waitForProcessDeath asks proctree, not kill(pid, 0): signal-0 answers for a
