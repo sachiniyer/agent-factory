@@ -159,10 +159,11 @@ func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch 
 		conversationID = pending.ConversationID
 	}
 	launchProgram, conversation := planLaunchConversation(conversationID, resolvedProgram)
-	// The CANDIDATE, not i.Account: the recorded account is still the identity
-	// being replaced, and the af skill has to land in the root the replacement
-	// pane will actually read (see resolveSkillTargetForAccount).
-	launchProgram = injectSystemPrompt(launchProgram, resolveSkillTargetForAccount(i, launchProgram, name))
+	// The CANDIDATE account and program, not the still-recorded fields: validation
+	// must leave the outgoing identity intact, while the af skill has to land in
+	// the root the replacement pane will actually read.
+	launchProgram = injectSystemPrompt(launchProgram,
+		resolveSkillTargetForAccount(launchProgram, program, name))
 	workDir := i.GetWorktreePath()
 	// Same-agent manual swaps with a worktree always preflight, including an
 	// unchanged command whose binary disappeared after the current process
@@ -492,13 +493,13 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) 
 		return fmt.Errorf("account swap: session %q has no local agent runtime", i.Title)
 	}
 	for idx, tab := range tabs {
-		if agentAlreadyAbsent && idx == 0 && tab != nil && tab.tmux != nil && tab.tmux.ProvenNoPane() {
+		if agentAlreadyAbsent && idx == 0 && tab != nil && tab.tmux != nil && (tab.tmux.ProvenNoPane() || tab.tmux.ClosedConclusivelyAndStillAbsent()) {
 			continue
 		}
 		if tab == nil || !tab.Kind.HasTmux() || tab.tmux == nil {
 			continue
 		}
-		if tab.tmux.ProvenNoPane() {
+		if tab.tmux.ProvenNoPane() || tab.tmux.ClosedConclusivelyAndStillAbsent() {
 			continue
 		}
 		state, blind, err := tab.tmux.CloseAndWaitForPaneExitReportingBlindness()

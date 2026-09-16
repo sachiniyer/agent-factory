@@ -226,6 +226,42 @@ func TestValidateManualAccountSwapAcceptsHealthySiblingBinary(t *testing.T) {
 	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 }
 
+func TestValidateManualCrossAgentAccountSwapWritesSkillToIncomingAccount(t *testing.T) {
+	for _, tc := range []struct {
+		agent     string
+		skillPath func(string) string
+	}{
+		{agent: tmux.ProgramCodex, skillPath: codexSkillPathUnder},
+		{agent: tmux.ProgramGemini, skillPath: geminiSkillPathUnder},
+	} {
+		t.Run(tc.agent, func(t *testing.T) {
+			bin := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(bin, tc.agent), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+			t.Setenv("PATH", bin+":/usr/bin:/bin")
+			agentHome(t)
+			grantGlobalAgentSkills(t)
+
+			cfg, err := config.LoadConfig()
+			require.NoError(t, err)
+			cfg.ProgramOverrides = map[string]string{tc.agent: tc.agent}
+			require.NoError(t, config.SaveConfig(cfg))
+			accountDir := registerAccount(t, tc.agent, "work")
+
+			inst := accountSwapTestInstance(tmux.ProgramClaude)
+			inst.Path = initTempGitRepo(t)
+			gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+			require.NoError(t, err)
+			inst.SetGitWorktreeForTest(gw)
+
+			require.NoError(t, inst.ValidateManualAccountSwap("work", tc.agent))
+			require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(),
+				"validation must not rewrite the outgoing runtime identity")
+			require.FileExists(t, tc.skillPath(accountDir),
+				"the incoming agent must find the af skill in its selected account root")
+		})
+	}
+}
+
 func TestCheckManualAccountSwapDoesNotRecordLaunchPlan(t *testing.T) {
 	bin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bin, tmux.ProgramClaude), []byte("#!/bin/sh\nexit 0\n"), 0o700))
