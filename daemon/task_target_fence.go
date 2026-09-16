@@ -112,6 +112,24 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 	if t.RepoID == "" {
 		return fmt.Errorf("cannot determine project identity for enabled task %q target %q; nothing was changed", t.ID, target)
 	}
+	m.mu.Lock()
+	instance := m.instances[daemonInstanceKey(t.RepoID, target)]
+	m.mu.Unlock()
+	loaded := instance != nil
+	recordExists := loaded
+	var state session.InstanceData
+	if loaded {
+		state = instance.ToInstanceData()
+	} else {
+		persisted, _, err := findInstanceDataByTitle(target, t.RepoID)
+		if err != nil && !errors.Is(err, errSessionNotFound) {
+			return fmt.Errorf("cannot enable task %q: could not determine target session %q state from storage; nothing was changed: %w", t.ID, target, err)
+		}
+		if persisted != nil {
+			state = *persisted
+			recordExists = true
+		}
+	}
 	// Reserved root delivery is safe only while the daemon owns its future, not
 	// merely because a process happens to exist now. A disabled root-agent policy
 	// deliberately leaves a surviving live root alone, but will not recreate it
@@ -123,7 +141,15 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 	// write keeps a task that could only fail on every run from being committed
 	// at all — the arm below reports it, and does so without consulting ctx,
 	// which prepareTaskTargetValidation only fills for the exact spelling.
-	if session.ReservedTitleCollision(target) != "" {
+	//
+	// The refusal is about CREATION, not delivery: an existing record keeps the
+	// identity its tmux name actually claims, and a case-variant title like
+	// "Ro ot" owns the distinct af_Root — the fold that widened admission must
+	// not retroactively un-deliver tasks from a session that already exists
+	// (#4407 review). A record that is itself reserved-identity still falls
+	// through to the refusal.
+	if session.ReservedTitleCollision(target) != "" &&
+		!(recordExists && !session.IsReservedRecordTitle(state.Title, state.BackendType)) {
 		if target != session.RootSessionTitle {
 			return fmt.Errorf("cannot enable task %q: reserved target session %q cannot materialize under that spelling; use %q exactly; nothing was changed", t.ID, target, session.RootSessionTitle)
 		}
@@ -138,22 +164,8 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 			return fmt.Errorf("cannot enable task %q: target session %q is reserved for the daemon-managed root agent, and %s; or choose a different target; nothing was changed", t.ID, target, rootAgentUnavailableDetail(ctx.rootVerdict))
 		}
 	}
-	m.mu.Lock()
-	instance := m.instances[daemonInstanceKey(t.RepoID, target)]
-	m.mu.Unlock()
-	loaded := instance != nil
-	var state session.InstanceData
-	if loaded {
-		state = instance.ToInstanceData()
-	} else {
-		persisted, _, err := findInstanceDataByTitle(target, t.RepoID)
-		if errors.Is(err, errSessionNotFound) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("cannot enable task %q: could not determine target session %q state from storage; nothing was changed: %w", t.ID, target, err)
-		}
-		state = *persisted
+	if !recordExists {
+		return nil
 	}
 	switch {
 	case state.InFlightOp == session.OpArchiving:

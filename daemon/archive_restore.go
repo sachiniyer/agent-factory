@@ -84,6 +84,16 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreArchived); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
+	// A record claiming the reserved root identity is archivable only through
+	// project deletion's allowReserved bypass — the worktree deserves
+	// preservation, but a restore would start the session under the daemon
+	// root's af_root tmux name, colliding with any live root or wedging the
+	// row on a startup that cannot resolve the collision. Preserved is not
+	// restorable here: the archived row and worktree survive untouched, and
+	// the restore refuses (#4407 review).
+	if session.IsReservedRecordTitle(req.Title, instance.BackendType()) {
+		return "", fmt.Errorf("cannot restore the reserved %q session", req.Title)
+	}
 
 	key := daemonInstanceKey(repoID, req.Title)
 
