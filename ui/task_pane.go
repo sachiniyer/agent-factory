@@ -129,6 +129,15 @@ type TaskPane struct {
 	// another writer changed out-of-band while the editor was open (#1700).
 	originals map[string]task.Task
 	deleted   []task.Task
+	// deletedDisplays holds the task record as it was DISPLAYED at delete time
+	// (keyed by ID), separate from the CAS expectation queued in s.deleted.
+	// The two can differ when tasks.json has duplicate IDs: originals[id] is
+	// the LAST duplicate (SetTasks keeps only one entry per ID), so deleting
+	// an EARLIER duplicate makes s.deleted carry the later row's content.
+	// By capturing s.tasks[s.selectedIdx] before the originals lookup we
+	// preserve the exact visible row for the restore path. Cleared together
+	// with s.deleted by SetTasks and AcknowledgeDeletedRestored.
+	deletedDisplays map[string]task.Task
 	// restoredDeletes tracks task IDs that RestoreFailedDelete has already
 	// re-appended to s.tasks, keyed by task ID. When a deletion retry also
 	// fails, the second call must not append another visible copy — the first
@@ -570,7 +579,13 @@ func (s *TaskPane) deleteSelectedTask() {
 	if s.unavailable != "" || !s.selectedTaskInRange() {
 		return
 	}
-	deleted := s.tasks[s.selectedIdx]
+	// Capture the exact record the user sees before the originals lookup,
+	// so the restore path can show the right row when tasks.json has duplicate
+	// IDs. originals[id] is always the LAST duplicate (SetTasks stores one
+	// entry per ID), so deleting an EARLIER duplicate would otherwise restore
+	// the later one's content. deletedDisplays preserves the selected row.
+	display := s.tasks[s.selectedIdx]
+	deleted := display
 	// Queue the record as LOADED, not the pane copy: an unsaved edit (which the
 	// delete below discards) may have retargeted ProjectPath, and the deletion's
 	// project CAS must pin the binding the daemon actually stores — pinning a
@@ -587,6 +602,7 @@ func (s *TaskPane) deleteSelectedTask() {
 	// return "not found", producing a false save failure).
 	if s.restoredDeletes[deleted.ID] {
 		delete(s.restoredDeletes, deleted.ID)
+		delete(s.deletedDisplays, deleted.ID)
 		for i, t := range s.deleted {
 			if t.ID == deleted.ID {
 				s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
@@ -594,6 +610,10 @@ func (s *TaskPane) deleteSelectedTask() {
 			}
 		}
 	}
+	if s.deletedDisplays == nil {
+		s.deletedDisplays = make(map[string]task.Task)
+	}
+	s.deletedDisplays[deleted.ID] = display
 	s.deleted = append(s.deleted, deleted)
 	s.tasks = append(s.tasks[:s.selectedIdx], s.tasks[s.selectedIdx+1:]...)
 	// A task queued for deletion must not also be in the update set:

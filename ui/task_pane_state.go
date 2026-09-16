@@ -28,6 +28,7 @@ func (s *TaskPane) SetTasks(tasks []task.Task) {
 		s.loadedRank[t.ID] = i
 	}
 	s.deleted = nil
+	s.deletedDisplays = nil
 	s.restoredDeletes = nil
 	s.editing = false
 	// A reload replaces the create-form buffers a pending create was captured
@@ -276,6 +277,7 @@ func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
 		return
 	}
 	delete(s.restoredDeletes, id)
+	delete(s.deletedDisplays, id)
 	// Remove all rows with the given ID (tasks.json allows duplicate IDs;
 	// RemoveTask removes every matching row from disk, so we must do the same
 	// in the pane). Iterate backwards so index removal does not shift
@@ -326,6 +328,18 @@ func (s *TaskPane) ConsumeDeleted() []task.Task {
 	s.deleted = nil
 	s.dirty = len(s.dirtyIDs) > 0
 	return deleted
+}
+
+// GetDeletedDisplay returns the display record captured at delete time for the
+// given task ID, and whether one was recorded. This is the exact row the user
+// selected, before deleteSelectedTask replaced it with originals[id] for CAS
+// purposes. When tasks.json contains duplicate IDs, originals[id] is the LAST
+// duplicate, so this display record preserves the SELECTED row's content for
+// the restore path. The map persists until SetTasks (successful reload) or
+// AcknowledgeDeletedRestored (successful retry) clears it.
+func (s *TaskPane) GetDeletedDisplay(id string) (task.Task, bool) {
+	t, ok := s.deletedDisplays[id]
+	return t, ok
 }
 
 // IsDirty returns true if tasks were modified.

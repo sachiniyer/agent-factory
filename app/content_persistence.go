@@ -201,13 +201,21 @@ func (m *home) saveContentPaneState() error {
 				//
 				// When there are duplicate IDs in the freshly loaded set, the
 				// map holds only the last occurrence and we cannot tell which
-				// one corresponds to the row the user was deleting. Use tsk
-				// itself as the display record in that case, preserving the
-				// exact row's content rather than silently substituting a
-				// different duplicate.
+				// one corresponds to the row the user was deleting.
+				//
+				// tsk itself (the CAS expectation from s.deleted) is also
+				// already the LAST duplicate: deleteSelectedTask replaces the
+				// selected record with originals[id], which SetTasks keyed by
+				// ID and therefore also kept only the last. To recover the
+				// exact selected row's content, use the display record captured
+				// by deleteSelectedTask before the originals lookup.
 				fresh := tsk
 				if loadedCount[tsk.ID] == 1 {
 					fresh = loaded[tsk.ID]
+				} else if display, ok := sp.GetDeletedDisplay(tsk.ID); ok {
+					// Duplicate IDs: the display record preserves the actual
+					// selected row, independent of the ID-keyed originals map.
+					fresh = display
 				}
 				sp.RestoreFailedDeleteWithExpect(fresh, tsk)
 			} else {
@@ -225,8 +233,14 @@ func (m *home) saveContentPaneState() error {
 		// No authoritative set to consult, so fall back to the conservative
 		// answer: keep the rows visible and the retries queued. Dropping a row
 		// on an unproven absence is the failure this restore exists to prevent.
+		// Use the captured display record if available, so the pane shows the
+		// exact selected row rather than the ID-keyed originals entry.
 		for _, tsk := range failedDeletes {
-			sp.RestoreFailedDelete(tsk)
+			if display, ok := sp.GetDeletedDisplay(tsk.ID); ok {
+				sp.RestoreFailedDeleteWithExpect(display, tsk)
+			} else {
+				sp.RestoreFailedDelete(tsk)
+			}
 		}
 		saveErr = errors.Join(saveErr, fmt.Errorf("failed to reload tasks after save: %w", err))
 	}
