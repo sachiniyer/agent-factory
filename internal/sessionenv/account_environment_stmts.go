@@ -66,6 +66,23 @@ func stmtsMutate(stmts []*syntax.Stmt, names map[string]struct{}, acc *taintAccu
 // Constructs whose children run in a subshell (Subshell, pipes) do not
 // propagate taint outward and fall through to the default walk.
 func stmtMutates(stmt *syntax.Stmt, names map[string]struct{}, acc *taintAccumulator) bool {
+	// A background statement (`cmd &`) runs in a child process; its
+	// assignments cannot affect the parent shell. Analyze it with an isolated
+	// accumulator so that it does not clear or add taint in the parent.
+	if stmt.Background || stmt.Coprocess {
+		isolated := newTaintAccumulator(names)
+		for k := range acc.Tainted() {
+			isolated.tainted[k] = struct{}{}
+		}
+		isolated.allAssigns = append(isolated.allAssigns, acc.allAssigns...)
+		return stmtMutatesCmd(stmt, names, isolated)
+	}
+	return stmtMutatesCmd(stmt, names, acc)
+}
+
+// stmtMutatesCmd is the inner implementation of stmtMutates, called after the
+// background-statement check has been applied.
+func stmtMutatesCmd(stmt *syntax.Stmt, names map[string]struct{}, acc *taintAccumulator) bool {
 	switch cmd := stmt.Cmd.(type) {
 	case *syntax.Block:
 		// { stmts } — all children execute in the current shell sequentially.
@@ -105,23 +122,48 @@ func stmtMutates(stmt *syntax.Stmt, names map[string]struct{}, acc *taintAccumul
 				acc.tainted[k] = struct{}{}
 			}
 			return false
+		case syntax.Pipe:
+			// X | Y: both sides run in subshells (on most shells including
+			// bash-as-sh in the common pipeline case); their assignments do
+			// not persist in the parent. Check both sides for mutations using
+			// isolated accumulators so they cannot clear parent-shell taint.
+			xAcc := newTaintAccumulator(names)
+			for k := range acc.Tainted() {
+				xAcc.tainted[k] = struct{}{}
+			}
+			xAcc.allAssigns = append(xAcc.allAssigns, acc.allAssigns...)
+			if stmtMutates(cmd.X, names, xAcc) {
+				return true
+			}
+			yAcc := newTaintAccumulator(names)
+			for k := range acc.Tainted() {
+				yAcc.tainted[k] = struct{}{}
+			}
+			yAcc.allAssigns = append(yAcc.allAssigns, acc.allAssigns...)
+			if stmtMutates(cmd.Y, names, yAcc) {
+				return true
+			}
+			return false
 		}
 	case *syntax.IfClause:
-		// if/then/elif/else — branches execute sequentially in the current
-		// shell and may reference or assign variables visible to later
-		// statements. We use a conservative union: any taint acquired in ANY
-		// branch is committed to the accumulator, but taint cleared in only
-		// one branch is retained (the other branch may not run).
+		// if/then/elif/else — the condition runs first in the current shell
+		// and may assign variables that are visible inside the branch bodies.
+		// Branches execute sequentially in the current shell and may reference
+		// or assign variables visible to later statements. We use a
+		// conservative union: any taint acquired in ANY branch is committed to
+		// the accumulator, but taint cleared in only one branch is retained
+		// (the other branch may not run).
 		if cmd == nil {
 			break
 		}
+		// Walk the chain: if → elif → else. For each clause, process the Cond
+		// statements first (they always run when the clause is reached), then
+		// the branch body (which may not run).
 		// unionAcc collects the union of taint from all branches.
 		unionAcc := newTaintAccumulator(names)
 		for k := range acc.Tainted() {
 			unionAcc.tainted[k] = struct{}{}
 		}
-		// Walk the chain: if → elif → else. Each IfClause node has a .Then
-		// body and a .Else pointing to the next elif/else IfClause.
 		clause := cmd
 		for clause != nil {
 			branchAcc := newTaintAccumulator(names)
@@ -129,6 +171,13 @@ func stmtMutates(stmt *syntax.Stmt, names map[string]struct{}, acc *taintAccumul
 				branchAcc.tainted[k] = struct{}{}
 			}
 			branchAcc.allAssigns = append(branchAcc.allAssigns, acc.allAssigns...)
+			// Process the condition statements in execution order first; their
+			// assignments persist in the current shell and are visible inside
+			// Then. An if condition such as `x=$(printf CODEX_HOME=1)` taints
+			// x before the branch body is checked.
+			if stmtsMutate(clause.Cond, names, branchAcc) {
+				return true
+			}
 			if stmtsMutate(clause.Then, names, branchAcc) {
 				return true
 			}
@@ -140,6 +189,65 @@ func stmtMutates(stmt *syntax.Stmt, names map[string]struct{}, acc *taintAccumul
 		}
 		// Commit the union back to the parent accumulator.
 		for k := range unionAcc.Tainted() {
+			acc.tainted[k] = struct{}{}
+		}
+		return false
+	case *syntax.WhileClause:
+		// while/until — the condition and body may each assign variables, but
+		// the body may not execute at all. Check both with a forked
+		// accumulator and union the resulting taint rather than committing
+		// assignments as definite. This prevents `while false; do x=0; done`
+		// from clearing taint on x that was set before the loop.
+		bodyAcc := newTaintAccumulator(names)
+		for k := range acc.Tainted() {
+			bodyAcc.tainted[k] = struct{}{}
+		}
+		bodyAcc.allAssigns = append(bodyAcc.allAssigns, acc.allAssigns...)
+		if stmtsMutate(cmd.Cond, names, bodyAcc) {
+			return true
+		}
+		if stmtsMutate(cmd.Do, names, bodyAcc) {
+			return true
+		}
+		// Union: taint acquired inside the loop is possible; taint cleared
+		// inside the loop may not have happened.
+		for k := range bodyAcc.Tainted() {
+			acc.tainted[k] = struct{}{}
+		}
+		return false
+	case *syntax.ForClause:
+		// for — first check the loop header (WordIter or CStyleLoop) for
+		// direct mutations (e.g. `for CODEX_HOME in /other`), then check the
+		// body with a forked accumulator so that assignments in a body that
+		// may never execute do not clear parent-shell taint.
+		if cmd.Loop != nil {
+			// Walk just the loop header for mutations.
+			loopMutates := false
+			syntax.Walk(cmd.Loop, func(node syntax.Node) bool {
+				if nodeMutatesAccountEnvironment(node, names, acc.Tainted()) {
+					loopMutates = true
+					return false
+				}
+				return true
+			})
+			if loopMutates {
+				return true
+			}
+			// Record taint from the loop header (WordIter items) before
+			// checking the body.
+			acc.AddStmt(cmd.Loop)
+		}
+		bodyAcc := newTaintAccumulator(names)
+		for k := range acc.Tainted() {
+			bodyAcc.tainted[k] = struct{}{}
+		}
+		bodyAcc.allAssigns = append(bodyAcc.allAssigns, acc.allAssigns...)
+		if stmtsMutate(cmd.Do, names, bodyAcc) {
+			return true
+		}
+		// Union: taint acquired inside the loop is possible; taint cleared
+		// inside the loop may not have happened.
+		for k := range bodyAcc.Tainted() {
 			acc.tainted[k] = struct{}{}
 		}
 		return false

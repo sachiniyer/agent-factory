@@ -130,16 +130,24 @@ func (t *taintAccumulator) AddStmt(node syntax.Node) {
 		case *syntax.Subshell, *syntax.CmdSubst:
 			return false
 		case *syntax.CallExpr:
-			// A CallExpr WITH Args has a command: its Assigns list contains
-			// prefix assignments that only affect the child process's
-			// environment, not the parent shell. We must NOT process
-			// n.Assigns as persistent taint changes.
+			// A CallExpr WITH Args has a command: its Assigns list normally
+			// contains prefix assignments that only affect the child process's
+			// environment, not the parent shell. We must NOT process n.Assigns
+			// as persistent taint changes — UNLESS the command is a POSIX
+			// special builtin.
 			//
-			// However, we DO need to walk the Args words because they may
-			// contain ParamExp assignment expansions (e.g. `${x:=...}`) that
-			// persist in the parent shell. We handle this by manually
-			// processing only the args (not n.Assigns) and then tracking
-			// certain builtins (printf -v) that write to parent-shell vars.
+			// Exception: POSIX special builtins (`:`, `.`, `break`,
+			// `continue`, `eval`, `exec`, `exit`, `export`, `readonly`,
+			// `return`, `set`, `shift`, `times`, `trap`, `unset`) preserve
+			// prefix assignments in the current shell when bash is /bin/sh.
+			// So `x=$(printf CODEX_HOME=1) :; : $((x))` leaves the payload
+			// in x. We process n.Assigns as persistent for these builtins.
+			//
+			// We DO need to walk the Args words because they may contain
+			// ParamExp assignment expansions (e.g. `${x:=...}`) that persist
+			// in the parent shell. We handle this by manually processing only
+			// the args (not n.Assigns) and then tracking certain builtins
+			// (printf -v) that write to parent-shell vars.
 			if len(n.Args) > 0 {
 				// Track printf -v VAR taint.
 				if len(n.Args) >= 3 {
@@ -153,6 +161,36 @@ func (t *taintAccumulator) AddStmt(node syntax.Node) {
 				// We use a nested walk that SKIPS any sub-CallExpr nodes
 				// to avoid double-processing.
 				t.walkWordsForTaint(n.Args)
+				// For POSIX special builtins, also process prefix assignments
+				// as persistent (they persist in the current shell).
+				if isPosixSpecialBuiltin(n.Args[0]) {
+					for _, assign := range n.Assigns {
+						if assign == nil || assign.Name == nil || assign.Value == nil {
+							continue
+						}
+						if assign.Index != nil || assign.Append {
+							// Indexed/append only: taint if CmdSubst.
+							if wordHasCommandSubstitution(assign.Value) {
+								t.tainted[assign.Name.Value] = struct{}{}
+							}
+							continue
+						}
+						if wordHasCommandSubstitution(assign.Value) {
+							t.tainted[assign.Name.Value] = struct{}{}
+							t.removeAllAssigns(assign.Name.Value)
+						} else {
+							t.removeAllAssigns(assign.Name.Value)
+							val, isLiteral := literalShellWord(assign.Value)
+							if isLiteral && literalContainsDeniedArithAssignment(val, t.names) {
+								t.tainted[assign.Name.Value] = struct{}{}
+							} else {
+								delete(t.tainted, assign.Name.Value)
+								t.allAssigns = append(t.allAssigns, taintAssignRecord{assign.Name.Value, assign.Value})
+							}
+						}
+					}
+					t.propagate()
+				}
 				return false
 			}
 			// No Args: standalone assignments — fall through to walk the
@@ -198,7 +236,17 @@ func (t *taintAccumulator) AddStmt(node syntax.Node) {
 					t.tainted[n.Param.Value] = struct{}{}
 					t.removeAllAssigns(n.Param.Value)
 				} else {
-					t.allAssigns = append(t.allAssigns, taintAssignRecord{n.Param.Value, n.Exp.Word})
+					// A literal default value that is an arithmetic assignment
+					// expression to a denied name is itself a hazard: bash
+					// re-evaluates the variable's contents as fresh arithmetic,
+					// so `x=; : "${x:=CODEX_HOME=1}"; : $((x))` changes CODEX_HOME.
+					val, isLiteral := literalShellWord(n.Exp.Word)
+					if isLiteral && literalContainsDeniedArithAssignment(val, t.names) {
+						t.tainted[n.Param.Value] = struct{}{}
+						t.removeAllAssigns(n.Param.Value)
+					} else {
+						t.allAssigns = append(t.allAssigns, taintAssignRecord{n.Param.Value, n.Exp.Word})
+					}
 				}
 			}
 		case *syntax.WordIter:
@@ -254,7 +302,13 @@ func (t *taintAccumulator) walkWordsForTaint(words []*syntax.Word) {
 						t.tainted[n.Param.Value] = struct{}{}
 						t.removeAllAssigns(n.Param.Value)
 					} else {
-						t.allAssigns = append(t.allAssigns, taintAssignRecord{n.Param.Value, n.Exp.Word})
+						val, isLiteral := literalShellWord(n.Exp.Word)
+						if isLiteral && literalContainsDeniedArithAssignment(val, t.names) {
+							t.tainted[n.Param.Value] = struct{}{}
+							t.removeAllAssigns(n.Param.Value)
+						} else {
+							t.allAssigns = append(t.allAssigns, taintAssignRecord{n.Param.Value, n.Exp.Word})
+						}
 					}
 				}
 			}
@@ -582,6 +636,24 @@ func wordReferencesTaintedVar(word syntax.Node, tainted map[string]struct{}) boo
 		return true
 	})
 	return found
+}
+
+// isPosixSpecialBuiltin reports whether a shell word names a POSIX special
+// builtin. When bash is /bin/sh, prefix assignments to special builtins persist
+// in the current shell: `x=$(printf CODEX_HOME=1) :` stores the payload in x.
+// The POSIX special builtins are: . : break continue eval exec exit export
+// readonly return set shift times trap unset.
+func isPosixSpecialBuiltin(word *syntax.Word) bool {
+	name, literal := literalShellWord(word)
+	if !literal {
+		return false
+	}
+	switch name {
+	case ".", ":", "break", "continue", "eval", "exec", "exit",
+		"export", "readonly", "return", "set", "shift", "times", "trap", "unset":
+		return true
+	}
+	return false
 }
 
 func accountSubscriptInArithmetic(expression string, names map[string]struct{}) bool {
