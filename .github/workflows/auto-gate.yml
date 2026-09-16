@@ -204,18 +204,29 @@ jobs:
                 ),
               );
               // A retry-exhausted read is a could-not-evaluate, not a defect:
-              // downstream publishes a NEUTRAL UNKNOWN aggregate verdict per
-              // head, which is the distinct state (#4461). Failing this job too
+              // downstream marks each known head's fixed aggregate UNKNOWN, and
+              // fails its own job if it cannot (#4461). Failing this job too
               // would paint the run the same red as a real gate failure, while
               // rethrowing would discard the heads the lane still has to mark.
+              //
+              // That only holds when there IS a head to mark. A
+              // workflow_dispatch or schedule payload names none, so nothing
+              // downstream runs, nothing is published, and a green run here
+              // would be the only record of a recovery that did nothing. That
+              // exit stays red.
+              if (readFailure && knownEventHeads.length === 0) {
+                core.setFailed(summary);
+                return;
+              }
               if (readFailure) {
                 core.warning(`Auto Gate could not evaluate: ${message}`);
                 try {
                   await core.summary
                     ?.addRaw(
                       `## Auto Gate could not evaluate\n\n${summary}\n\n` +
-                        "No verdict was computed or published for the affected heads; " +
-                        "their aggregate checks are neutral, not failing.",
+                        "No verdict was computed for the affected heads. Downstream jobs mark " +
+                        "each head's fixed aggregate UNKNOWN (a failing, non-mergeable " +
+                        "conclusion), and fail if they cannot leave it non-passing.",
                     )
                     .write();
                 } catch {
@@ -345,15 +356,17 @@ jobs:
                     // A rate-limited or exhausted-transport invalidation is
                     // infrastructure, not a verdict: keep the head in the lane
                     // so the serialized transaction retries the invalidation
-                    // itself — and publishes a NEUTRAL UNKNOWN if the quota is
-                    // still gone — instead of this job going the same red as a
-                    // real gate failure (#4461).
+                    // itself — and publishes UNKNOWN if the quota is still
+                    // gone — instead of this job going the same red as a real
+                    // gate failure (#4461). If the lane cannot write either,
+                    // no replacement exists and the lane's job fails instead.
                     deferredHeads.push({ headSha, error: retryError });
                     invalidatedHeads.push(aggregate);
                     core.warning(
                       `Could not invalidate aggregate ${headSha} after the pre-lane retry ` +
                         `(${retryError.message || String(retryError)}); the serialized lane ` +
-                        "will retry it and publish UNKNOWN if evaluation still cannot run.",
+                        "will retry it, publish UNKNOWN if evaluation still cannot run, and fail " +
+                        "if it cannot write either.",
                     );
                     continue;
                   }

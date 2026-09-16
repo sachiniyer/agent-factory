@@ -1619,6 +1619,32 @@ function resolveAggregateHeads({ context, targets = [] }) {
   return [...new Set(candidates.map(normalizeHeadSha).filter(Boolean))];
 }
 
+// The conclusion every non-passing fixed-aggregate write carries: the WAITING
+// invalidation marker and the UNKNOWN could-not-evaluate verdict alike.
+//
+// It is `failure` because the aggregate is a REQUIRED check, and GitHub documents
+// "Successful check statuses are `success`, `skipped`, and `neutral`"
+// (troubleshooting-required-status-checks). A neutral UNKNOWN therefore does not
+// block the ruleset, a manual `gh pr merge`, or any merger that defers to it —
+// it would turn "Auto Gate could not look" into a merge nobody evaluated (#4461).
+// What distinguishes UNKNOWN from a defect verdict is its title and summary.
+const AGGREGATE_NOT_PASSING = "failure";
+const REQUIRED_CHECK_SATISFYING_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
+
+// Whether a fixed-aggregate check run, as a write returned it, leaves its commit
+// unmergeable: anything but a completed run whose conclusion GitHub counts as
+// satisfying a required check. Null — no write landed — is not non-passing: it
+// proves nothing about what the newest generation says.
+function isNonPassingAggregate(check) {
+  if (!check) {
+    return false;
+  }
+  if (check.status !== "completed") {
+    return true;
+  }
+  return !REQUIRED_CHECK_SATISFYING_CONCLUSIONS.has(String(check.conclusion || "").toLowerCase());
+}
+
 async function invalidateAggregateDecision({ github, context, core, headSha }) {
   const sha = normalizeHeadSha(headSha);
   if (!sha) {
@@ -1627,12 +1653,12 @@ async function invalidateAggregateDecision({ github, context, core, headSha }) {
   const decision = {
     // Make the newest fixed check non-green before any API-dependent reads. If
     // target resolution, association lookup, or evaluation fails, the prior
-    // PASS cannot remain authoritative. The conclusion is neutral, not failure:
-    // "waiting for a fresh evaluation" is not a verdict about the code, and a
-    // red that can mean "the gate ran out of API quota" trains people to
-    // ignore red (#4461). Neutral still blocks the required check.
+    // PASS cannot remain authoritative. The conclusion is AGGREGATE_NOT_PASSING,
+    // never neutral: GitHub counts a neutral required check as satisfied, so a
+    // neutral marker would leave the commit mergeable (#4461). The title is
+    // what says "waiting", not a verdict about the code.
     status: "completed",
-    conclusion: "neutral",
+    conclusion: AGGREGATE_NOT_PASSING,
     output: {
       title: AGGREGATE_WAITING_TITLE,
       summary:
@@ -1691,12 +1717,13 @@ async function blockAggregateEvaluation({
     "previously reached decision for an exact (PR, head) pair was consumed. This commit " +
     `remains blocked until a complete evaluation succeeds.${resetClause}`;
   const decision = {
-    // Neutral, not failure: a could-not-evaluate state is not a defect verdict,
-    // and the check-run API has a real conclusion for it. Neutral never rounds
-    // to green — a required check still needs success — but it must not render
-    // the same red as a PR that was actually evaluated and failed (#4461).
+    // A could-not-evaluate state is not a defect verdict, and the UNKNOWN title
+    // and summary are what say so (#4461). The conclusion cannot: GitHub counts
+    // neutral and skipped required checks as satisfied, so the only completed
+    // conclusions that keep an unevaluated commit unmergeable in every consumer
+    // are the failing ones. See AGGREGATE_NOT_PASSING.
     status: "completed",
-    conclusion: "neutral",
+    conclusion: AGGREGATE_NOT_PASSING,
     output: {
       title: "UNKNOWN: Auto Gate could not evaluate this commit",
       summary,
@@ -3316,9 +3343,7 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
           check.name === AUTO_GATE_DECISION_CHECK &&
           check.external_id === aggregateExternalId &&
           check.app?.id === GITHUB_ACTIONS_APP_ID &&
-          // The WAITING title is the invalidation marker itself; its conclusion
-          // was failure before #4461 made it neutral, and either generation can
-          // be the newer one while both shapes coexist.
+          check.conclusion === "failure" &&
           check.output?.title?.startsWith(AGGREGATE_WAITING_TITLE)
         );
       }),
@@ -6533,6 +6558,7 @@ module.exports = {
   evaluateAggregateDecision,
   evaluateAggregateFresh,
   invalidateAggregateDecision,
+  isNonPassingAggregate,
   isRateLimitFailure,
   isReadFailure,
   merge,
