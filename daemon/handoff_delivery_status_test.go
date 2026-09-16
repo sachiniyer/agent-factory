@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestHandoffSession_NonDeliveryVerdictKeepsPendingMission(t *testing.T) {
+func TestHandoffSession_AmbiguousVerdictKeepsPendingMission(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &handoffBackend{
 		FakeBackend:    session.NewFakeBackend(),
@@ -31,10 +31,56 @@ func TestHandoffSession_NonDeliveryVerdictKeepsPendingMission(t *testing.T) {
 		"the response must carry the recorded boundary; an unborn or unbound fixture may have no HEAD")
 	require.NotEmpty(t, inst.PendingHandoffMission(),
 		"an ambiguous delivery must retain the in-memory mission obligation")
+	require.Equal(t, session.OpNone, inst.GetInFlightOp(),
+		"readiness proved the incoming runtime live, so the replacement fence settles (#4429): "+
+			"fencing a possibly-running agent freezes its status forever and hides every lifecycle action")
+	require.True(t, inst.CanRetryPendingHandoffMissionDelivery(),
+		"the ambiguous verdict on a known-live pane must admit explicit retry after inspection")
 	rec := recordFor(t, repoID, inst.Title)
 	require.NotEmpty(t, rec.PendingHandoffMission,
 		"an ambiguous delivery must retain the durable mission obligation")
 	require.Equal(t, session.PromptCouldNotConfirm, rec.HandoffDeliveryStatus)
+}
+
+// TestHandoffSession_AmbiguousVerdictSettlesFenceKeepsMission is the #4429
+// regression: an ambiguous mission verdict must not leave the replacement fence
+// raised. Readiness already proved the incoming runtime live, so fencing the
+// row freezes a possibly-working agent at its checkpoint state, skips every
+// status poll, and hides every lifecycle action — the reported wedge. The
+// fence settles while the pending mission remains the durable obligation for
+// explicit retry; automatic replay still requires positive non-delivery.
+func TestHandoffSession_AmbiguousVerdictSettlesFenceKeepsMission(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{
+		FakeBackend:    session.NewFakeBackend(),
+		deliveryStatus: session.PromptSentUnverified,
+	}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "ambiguous-settle", backend)
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: inst.Title, RepoID: repoID, To: tmux.ProgramGemini,
+	})
+	require.ErrorIs(t, err, task.ErrPromptDelivery,
+		"the handoff still reports its mission delivery as unconfirmed — settling the fence must not read as success")
+	require.Equal(t, session.OpNone, inst.GetInFlightOp(),
+		"the replacement fence must settle once readiness proved the incoming runtime live")
+	require.NotEmpty(t, inst.PendingHandoffMission(),
+		"the exact mission stays pending for explicit retry after inspection")
+	require.False(t, inst.PendingHandoffMissionAutoRetryable(),
+		"an ambiguous verdict must never authorize automatic replay")
+	require.True(t, inst.CanRetryPendingHandoffMissionDelivery(),
+		"the ambiguous verdict on a known-live pane must admit explicit retry")
+
+	// With the fence down the status poll observes the row normally instead of
+	// freezing it at its checkpoint state.
+	manager.refreshInstanceStatus(repoID, inst)
+	_, _, statusPolls := backend.eventSnapshot()
+	require.Positive(t, statusPolls,
+		"an ambiguous verdict must not fence the row out of the status poll")
+
+	rec := recordFor(t, repoID, inst.Title)
+	require.NotEmpty(t, rec.PendingHandoffMission)
+	require.Equal(t, session.PromptSentUnverified, rec.HandoffDeliveryStatus)
 }
 
 func TestResumeFromLimit_ExplicitlyRetriesAmbiguousAgentHandoff(t *testing.T) {
@@ -78,7 +124,7 @@ func TestResumePendingHandoffs_RetriesObservedNonDelivery(t *testing.T) {
 		"mission-scoped not-delivered evidence must retain automatic recovery")
 }
 
-func TestResumePendingHandoffs_NonDeliveryVerdictKeepsPendingMission(t *testing.T) {
+func TestResumePendingHandoffs_AmbiguousVerdictKeepsPendingMission(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &handoffBackend{
 		FakeBackend:    session.NewFakeBackend(),

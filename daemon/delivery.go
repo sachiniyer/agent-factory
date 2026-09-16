@@ -173,8 +173,9 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 
 // DeliverPromptWithStatus retains DeliverPrompt's task lifecycle status and
 // also reports the closed delivery observation used by send-prompt --create.
-// A newly started session is could-not-confirm: creation succeeded, but this
-// path has no pane observation that could honestly prove its initial prompt.
+// A newly started session reports the verdict its startup send actually
+// observed; could-not-confirm is reserved for the cases where that observation
+// never ran (a limit park, or a remote backend that owns its own delivery).
 func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, session.PromptDeliveryStatus, error) {
 	// These all fail before any create or send — nothing was delivered — so they
 	// are pre-flight and tagged notAttempted so the watch path refunds the rate
@@ -279,7 +280,20 @@ func (m *Manager) DeliverPromptWithStatus(req DeliverPromptRequest) (string, ses
 		}
 		return "", session.PromptCouldNotConfirm, fmt.Errorf("failed to auto-create target session %q: %w", req.Title, err)
 	}
-	return createdTaskStatus(created), session.PromptCouldNotConfirm, nil
+	// The auto-create path DID observe the initial prompt's delivery:
+	// CreateSession's startup send records the sender's verdict on the row.
+	// Report that verdict verbatim rather than flattening it to
+	// could-not-confirm — an observed sent-unverified or not-delivered is a
+	// real signal the task layer and the send-prompt caller must hear (#4200).
+	// Only an UNRECORDED verdict stays could-not-confirm: the send never ran
+	// (a limit park keeps its prompt for resume) or ran on a non-interactive
+	// backend whose prompt is delivered remotely, where no local observation
+	// exists.
+	deliveryStatus := created.LastPromptDeliveryStatus
+	if !deliveryStatus.Valid() {
+		deliveryStatus = session.PromptCouldNotConfirm
+	}
+	return createdTaskStatus(created), deliveryStatus, nil
 }
 
 // createMissingPromptTarget owns the auto-create interval before CreateSession.

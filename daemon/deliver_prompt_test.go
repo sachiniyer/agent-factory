@@ -157,6 +157,43 @@ func (b observedPromptBackend) SendPromptCommandWithStatus(_ *session.Instance, 
 	return b.status, nil
 }
 
+// TestDeliverPromptWithStatus_AutoCreateReportsRecordedVerdict is the #4200
+// regression at the daemon boundary: the auto-create path must report the
+// verdict the startup send actually recorded on the created row, not a
+// hardcoded could-not-confirm. An observed sent-unverified or not-delivered is
+// a real signal the send-prompt caller and the task layer must hear verbatim —
+// flattening it to could-not-confirm hides "the pane rendered no proof" behind
+// "the observer never ran".
+func TestDeliverPromptWithStatus_AutoCreateReportsRecordedVerdict(t *testing.T) {
+	for _, observed := range []session.PromptDeliveryStatus{
+		session.PromptDelivered,
+		session.PromptSentUnverified,
+		session.PromptNotDelivered,
+		session.PromptCouldNotConfirm,
+	} {
+		t.Run(string(observed), func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			restore := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
+				fake := session.NewFakeBackend()
+				fake.CompleteStart()
+				return observedPromptBackend{readyFakeBackend{fake}, observed}, nil
+			})
+			t.Cleanup(restore)
+			repoPath := setupControlRepo(t)
+			manager, err := NewManager(config.DefaultConfig())
+			require.NoError(t, err)
+
+			taskStatus, deliveryStatus, err := manager.DeliverPromptWithStatus(DeliverPromptRequest{
+				Title: "worker", RepoPath: repoPath, Program: "claude", Prompt: "triage the queue",
+			})
+			require.NoError(t, err)
+			require.Equal(t, "started", taskStatus)
+			require.Equal(t, observed, deliveryStatus,
+				"auto-create must report the verdict the startup send recorded, not a flattened could-not-confirm")
+		})
+	}
+}
+
 func TestSendPromptWithStatusPreservesObservedAbsence(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := observedPromptBackend{
