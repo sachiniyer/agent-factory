@@ -153,7 +153,9 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			// daemon is up whenever an enabled task exists (#782). This lifecycle
 			// check is independent of the TUI target: --daemon-url remains dial-only,
 			// while local scheduled work still needs the local daemon. Run it in the
-			// background because daemon launch must not delay the TUI.
+			// background because daemon launch must not delay the TUI — which also
+			// makes it best-effort: an early exit can outrun the goroutine, so no
+			// user-facing text may promise this start.
 			go launchEnsureDaemonForTasks()
 
 			app.Version = version

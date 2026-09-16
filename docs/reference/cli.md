@@ -350,15 +350,16 @@ the same REST + WebSocket protocol the daemon speaks, behind a plain-HTTP
 listener that requires a bearer token on every request.
 
 This does not start the web UI, and serves no frontend at all — opening its port
-in a browser returns a 404 saying so. The browser app starts with the local
-daemon lifecycle: a bare 'af' launch on the default local target ensures the
-daemon, and any bare launch also starts the local daemon when its task store has
-an enabled task. 'af daemon install' starts it under the user service manager
-and keeps it available without an open TUI. Once the daemon is running, open
-http://localhost:8443. The web UI is bundled into the daemon and served from its
-network.listen_addr; agent-server is only the headless per-workspace backend that
-a daemon drives, and it exists to be consumed by a daemon rather than opened by
-a person.
+in a browser returns a 404 saying so. The browser app starts where the daemon's
+own lifecycle does: a call that needs the local daemon ensures it — a bare 'af'
+launch on the default local target is the usual such call — and a bare launch
+also checks the local task store for enabled work, a best-effort background
+start that can lose to an early exit. 'af daemon install' starts it under the
+user service manager and keeps it available without an open TUI. Once the
+daemon is running, open http://localhost:8443. The web UI is bundled into the
+daemon and served from its network.listen_addr; agent-server is only the
+headless per-workspace backend that a daemon drives, and it exists to be
+consumed by a daemon rather than opened by a person.
 
 This is the process that runs inside a docker container or on an ssh remote
 (#1592 Phase 4): the owning daemon dials the authed URL it exposes and drives
@@ -1050,13 +1051,15 @@ The agent-factory daemon runs task cron schedules in-process, supervises
 watch-task scripts, monitors sessions, and serves the bundled web UI.
 
 The web UI is part of the daemon — there is no separate web command — so it is
-served whenever the daemon is running. On-demand process startup belongs to the
-default local target: opening a locally targeted TUI ensures its daemon, while
---daemon-url or AF_DAEMON_URL selects a remote daemon that af only dials and
-never starts. A bare 'af' launch separately checks the local task store and may
-start the local daemon for enabled tasks, even when the TUI target is remote.
-Cobra subcommands do not run that task check; a local daemon operation may own
-its own ensure.
+served whenever the daemon is running. af starts the daemon lazily, and only
+the local one: a call that needs a running local daemon ensures it as part of
+the call — opening af on the default local target, creating a session, adding
+a task. Commands built to answer without one ('af daemon status', 'af sessions
+list', config reads and writes) and every remote --daemon-url/AF_DAEMON_URL
+target never start anything. Outside any call, a bare 'af' launch checks the
+local task store and asks for the daemon when an enabled task exists
+(best-effort), and 'af daemon install' starts it under the user service
+manager. That is the whole list.
 
 With af running, open:
 

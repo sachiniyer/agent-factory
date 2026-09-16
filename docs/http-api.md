@@ -46,13 +46,12 @@ $AGENT_FACTORY_HOME/daemon-http.sock
 So on a default install the socket is `~/.agent-factory/daemon-http.sock`. `af
 api` prints the resolved path for your environment.
 
-The socket is created when the local daemon starts. On-demand startup belongs to
-this default local target: a locally targeted TUI ensures it, while
-`--daemon-url` or `AF_DAEMON_URL` only dials the selected remote daemon. A bare
-`af` launch separately checks the local task store for enabled tasks; subcommands
-do not run that root-command check. An autostart unit can start the local daemon
-independently — see [tasks.md](tasks.md#daemon-lifecycle). If the socket does not
-exist, the local daemon is not running.
+The socket is created when the local daemon starts. The daemon starts only for
+a caller that needs the local one running — a locally targeted call ensures it
+as part of the call — plus a best-effort bare-launch check of the local task
+store. An autostart unit can also start the local daemon independently — see
+[tasks.md](tasks.md#daemon-lifecycle). If the socket does not exist, the local
+daemon is not running.
 
 ## Authentication
 

@@ -4,8 +4,9 @@
 // session/task projection reads and a large set of control operations, including
 // session lifecycle, tabs, tasks, projects, accounts, and configuration. The
 // transport is chosen by the caller and target, not by whether an operation
-// reads or writes. Local account management (list, register, login), config-agent
-// spawn/reap, and config-editor writes still use the daemon's gob control client.
+// reads or writes. The config pane's local account verbs (list/register/login),
+// config-agent spawn/reap, and local config-editor saves still use the daemon's
+// gob control client.
 // The local config editor reads config in-process and saves through
 // daemon.SetGlobalConfigValue, which may fall back to a local-file write
 // if the daemon is unreachable (ui/config_target.go); a remote-target editor

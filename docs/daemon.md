@@ -59,13 +59,21 @@ paragraph because it's why `af` doesn't corrupt itself:
 
 ## Lifecycle
 
-On-demand startup is scoped to the **default local target**. A locally targeted
-TUI makes sure its daemon is running, whether or not a task or root agent is
-configured. `--daemon-url` or `AF_DAEMON_URL` selects a remote daemon that af
-only dials and never starts. A bare `af` launch separately checks the local task
-store and may start the local daemon for enabled tasks, even when its TUI target
-is remote. Subcommands do not run that root-command check; a local operation
-that needs the daemon may perform its own ensure. For interactive local use you
+af starts a daemon **only for a caller that needs the local one running** — the
+start is part of the call. That ensure path is the whole on-demand mechanism:
+the TUI's calls on the default local target and the local control verbs
+(creating a session, writing a task, an account login, and the like) each make
+sure the daemon is up before doing their work. Commands built to answer
+without a daemon — `af daemon status`, `af sessions list`, `af tasks list`,
+config reads and writes — take the no-spawn path, and every remote
+`--daemon-url`/`AF_DAEMON_URL` target is dial-only, so none of them can start
+one.
+
+Two starters exist outside any call, and they complete the list: a bare `af`
+launch checks the local task store in the background and asks the local daemon
+to start when an enabled task exists (best-effort — an early exit can outrun
+it), and `af daemon install` hands startup to the user service manager, which
+is also what keeps tasks firing across logouts. For interactive local use you
 usually don't have to think about it at all.
 
 To keep tasks and sessions running across logouts and reboots, install the
@@ -91,9 +99,9 @@ unavailable manager or older daemon is reported as unknown rather than guessed.
 The daemon listens on two local Unix sockets under `$AGENT_FACTORY_HOME`
 (default `~/.agent-factory`): the gob control socket (`daemon.sock`) and the
 HTTP/JSON socket (`daemon-http.sock`). The TUI uses HTTP for session/task reads
-and many controls. Callers choose the transport by operation and target: local
-account management, config-agent spawn/reap, and config-editor writes still use
-gob. The local config editor reads config in-process and writes through
+and many controls. Callers choose the transport by operation and target: the
+config pane's local account verbs, config-agent spawn/reap, and local
+config-editor saves still use gob. The local config editor reads config in-process and writes through
 `daemon.SetGlobalConfigValue`, which may fall back to a local-file write if no
 daemon is reachable; a remote-target editor reads and writes through HTTP. CLI
 callers also use both transports. The HTTP socket serves public and internal

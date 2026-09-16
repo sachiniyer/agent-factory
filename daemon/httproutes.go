@@ -422,8 +422,9 @@ var httpRoutes = []HTTPRoute{
 // internalHTTPRoutes are routes the daemon serves over HTTP but deliberately
 // keeps out of the public `af api` catalog (#1592 Phase 2 PR3). They expose
 // coordination operations to HTTP clients without making them public API.
-// Their availability does not mean every TUI caller uses HTTP: local account
-// management, config-agent spawn/reap, and config-editor writes still use gob.
+// Their availability does not mean every TUI caller uses HTTP: the config
+// pane's local account verbs, config-agent spawn/reap, and local config-editor
+// saves still use gob.
 // newHTTPMux registers these alongside httpRoutes, but HTTPRoutes() (the `af api` catalog)
 // returns only httpRoutes, so the discovery surface stays exactly the
 // client-facing session/task ops it promised.

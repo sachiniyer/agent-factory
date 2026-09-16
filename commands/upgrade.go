@@ -336,14 +336,14 @@ func stopDaemonHint(h daemon.HealthStatus) string {
 //
 // Also NOT `af daemon restart`: with no daemon up there is no socket, so it
 // reports "no running daemon to restart" and starts nothing — it restarts, it
-// does not start. Opening af against the default local target does start one
-// (the TUI cold start calls daemon.EnsureDaemon, as does the local
-// ensureDaemonForTasks check); a selected remote target is dial-only.
+// does not start. A call that needs the local daemon starts one (the TUI cold
+// start's withDaemonHTTP ensure, the local control verbs' callDaemon, and the
+// bare-launch ensureDaemonForTasks check all converge on daemon.EnsureDaemon).
 // `af daemon install` both starts one and re-registers it for this home
 // (systemctl --user enable --now / a RunAtLoad launchd agent), which is the only
 // option here that ends with the daemon supervised.
 func startDaemonHint() string {
-	return "Opening af against the default local target starts one from the new binary; `af daemon install` starts it and keeps it supervised across logins."
+	return "A local call that needs the daemon starts one from the new binary; `af daemon install` starts it and keeps it supervised across logins."
 }
 
 // reportUpgradeRestart tells the user what the restart actually did.

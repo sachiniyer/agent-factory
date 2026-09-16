@@ -49,7 +49,7 @@ writability, config materialization and parsing, git and this repo, git
 identity, tmux, your configured agent commands, state and log storage, daemon
 health, and remote-hook setup when the repo configures one. Anything it reports
 needs attention if it fails — see [Troubleshooting](troubleshooting.md).
-On a fresh install, `daemon: not running; starts on demand` is expected. The
+On a fresh install, `daemon: not running; local calls that need it start it on demand` is expected. The
 `autostart: not installed` warning does not block your first session; the
 optional autostart step appears below.
 
