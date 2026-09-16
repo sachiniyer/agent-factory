@@ -44,6 +44,9 @@ func newLaunchRootFixture(t *testing.T, agent, variable string, daemonVar bool) 
 		root:    filepath.Join(t.TempDir(), "command-root"),
 		work:    t.TempDir(),
 	}
+	// A regression that resolved a relative root against the process cwd would
+	// write there; keep that inside the test rather than in the package source.
+	t.Chdir(t.TempDir())
 	t.Setenv(variable, f.ambient)
 	if !daemonVar {
 		require.NoError(t, os.Unsetenv(variable)) // t.Setenv restores it
