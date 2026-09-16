@@ -664,6 +664,7 @@ func allScopedInstances() ([]scopedInstance, []string, error) {
 // wraps the payload in the shared success Envelope.
 func jsonOut(v any) error {
 	if envelopeOutput {
+		log.CloseQuiet() // close quietly so a dirty --json success leaves stderr empty, matching jsonError (#3169)
 		return apiproto.WriteEnvelope(os.Stdout, apiproto.Success(v))
 	}
 	data, err := apiproto.MarshalIndented(v)
