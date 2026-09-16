@@ -1,7 +1,9 @@
 package sessionenv
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -98,40 +100,60 @@ func TestValidateAccountEnvironmentCommand_AllowsProcessOnlyWrapperModes(t *test
 //
 // But ONE-word-ness is not inertness. The basename match cannot prove the
 // binary is real util-linux, and a shadowed wrapper can exec the "operand"
-// onward, so the operand stays a candidate for inspection: a literal operand
-// is judged as a command head, and a dynamic operand is judged like the tail
-// scan's unprovable words — it can expand to `env`, so the words after it are
-// judged as env's argv.
+// onward — so the operand stays a candidate for inspection, and a literal one
+// is judged as a command head. A DYNAMIC operand is the shadowed command's
+// head itself: the expansion can resolve to `env`, a same-shell builtin such
+// as unset/export, or a shell reading the tail as a script — the position
+// unwrappedAccountCommandMutates refuses outright — so it fails closed for
+// every tail, not only the option-shaped ones (Codex on #4465: `$CLASS` may
+// expand to `sh`, making `ionice -c "$CLASS" /tmp/x` the `sh /tmp/x` reading
+// the literal spelling already refused).
 //
 // Measured on util-linux 2.39.3: an empty or unknown class exits with "unknown
 // scheduling class", and an empty or unparseable mask with "failed to parse CPU
 // mask"/"CPU list", both BEFORE launching anything; a valid value goes on to
 // --help, -p mode, or the child. So every runtime value of a single-word operand
-// leaves these no-child modes reachable.
+// leaves these no-child modes reachable — which is why the operand is allowed
+// to be dynamic for the REAL binary at all, and only the shadowed reading
+// refuses.
 func TestValidateAccountEnvironmentCommand_SingleWordWrapperOperandsStayVisible(t *testing.T) {
 	for _, command := range []string{
-		// `npm run dev` is a safe tail under both readings: env runs npm.
+		// A shadowed wrapper can exec the operand onward: "$CLASS" may expand
+		// to `env` and the tail to env's argv — or to `sh` and the tail to a
+		// script. The head being unprovable fails all of these closed.
 		"ionice -c \"$CLASS\" npm run dev",
 		// taskset's mask is positional, so this applies once `--` has ended
 		// option parsing and the next word is unambiguously the mask.
 		"taskset -- \"$MASK\" npm run dev",
-	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
-			"%q keeps the operand a candidate and the tail proves safe under both readings", command)
-	}
-	for _, command := range []string{
-		// A shadowed wrapper can exec the operand onward: "$CLASS" may expand
-		// to `env`, and env's parse of the option-shaped tail (--help, -V,
-		// -p 123) cannot be proven safe, so these fail closed.
+		// The option-shaped tails fail closed under either head reading.
 		"ionice -c \"$CLASS\" --help",
 		"ionice -c \"$CLASS\" -V",
 		"ionice -c \"$CLASS\" -p 123",
 		"ionice -n \"$N\" --help",
 		"ionice --class \"$CLASS\" -p 123",
 		"ionice --classdata \"$N\" -p 123",
+		// And the empty tail: the expansion could be `sh` itself, which the
+		// command walk already refuses unproven.
+		"ionice -c \"$CLASS\"",
 	} {
 		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
-			"%q leaves a tail env cannot prove safe under the shadowed-wrapper reading", command)
+			"%q leaves a dynamic operand the shadowed wrapper can exec as a command head", command)
+	}
+}
+
+// The operand-candidate check walks the operand-onward tail once per operand,
+// and the enclosing unwrap loop walks the same suffix again — without the
+// operandTailMemo the walk is exponential in the depth of nested value-taking
+// wrappers (Codex on #4465 measured ~3s at depth 20 and gave up at 25; this
+// runs synchronously inside command validation). The memo keys each remaining
+// suffix by its first element pointer, so depth 60 answers in milliseconds.
+func TestValidateAccountEnvironmentCommand_NestedOperandWalkIsBounded(t *testing.T) {
+	command := "nice " + strings.Repeat("-n nice ", 60) + "codex"
+	start := time.Now()
+	err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+	require.NoError(t, err)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("nested operand walk took %s — the suffix answers must be memoized", elapsed)
 	}
 }
 
