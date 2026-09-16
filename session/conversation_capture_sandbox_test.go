@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // TestPackageSandboxKeepsAgentRootsOffTheRealHome is #4469's red. It needs no
@@ -19,7 +21,7 @@ import (
 // its side effect, so the red run on an unfixed tree reads nothing from the real
 // store. ensureDevinSkillDir is deliberately absent: it has no separate resolver,
 // and calling it under the sandbox's default config runs the declined-consent
-// cleanup against whatever root it resolves, which before the fix is the
+// cleanup against whatever root it resolves. Before the fix, that is the
 // developer's real ~/.config/devin/skills.
 //
 // The oracle is the passwd home rather than $HOME, because $HOME is the value
@@ -35,9 +37,14 @@ func TestPackageSandboxKeepsAgentRootsOffTheRealHome(t *testing.T) {
 		t.Skipf("the temp dir %s is inside the real home %s, so the sandbox itself lives there", os.TempDir(), realHome)
 	}
 
-	codexSkills, err := codexSkillsBaseDir(skillTarget{})
+	// Each resolver's fallback reads the ambient environment. The skill bases
+	// are deliberately not called here: #4501 moves them onto the launch command,
+	// and a zero skillTarget no longer resolves anything. The command resolver
+	// covers that fallback instead. The fallbacks that read HOME alone (gemini,
+	// amp, devin) are covered by os.UserHomeDir.
+	home, err := os.UserHomeDir()
 	require.NoError(t, err)
-	geminiSkills, err := geminiSkillsBaseDir(skillTarget{})
+	launchCodexStore, err := tmux.CodexHomeFromCommand("codex", t.TempDir())
 	require.NoError(t, err)
 	ampSkills, err := ampSkillsBaseDir()
 	require.NoError(t, err)
@@ -45,11 +52,11 @@ func TestPackageSandboxKeepsAgentRootsOffTheRealHome(t *testing.T) {
 	require.NoError(t, err)
 
 	for name, root := range map[string]string{
-		"codex conversation capture (codexHomeDir)":          codexHomeDir(),
-		"codex skills (codexSkillsBaseDir)":                  codexSkills,
-		"gemini skills (geminiSkillsBaseDir)":                geminiSkills,
-		"amp skills (ampSkillsBaseDir)":                      ampSkills,
-		"claude transcripts (claudeTranscriptLaunchContext)": claudeStore,
+		"HOME (os.UserHomeDir)":                                home,
+		"codex conversation capture (codexHomeDir)":            codexHomeDir(),
+		"codex store for a bare launch (CodexHomeFromCommand)": launchCodexStore,
+		"amp skills (ampSkillsBaseDir)":                        ampSkills,
+		"claude transcripts (claudeTranscriptLaunchContext)":   claudeStore,
 	} {
 		require.NotEmpty(t, root, name)
 		require.Falsef(t, pathWithin(root, realHome),
