@@ -294,3 +294,60 @@ func TestRecordedParkedHeadResumeRetiresTerminalOverlay(t *testing.T) {
 	require.Equal(t, writes, statusWrites,
 		"the recorded head's later retries must not rewrite the store")
 }
+
+// TestRecordedParkedHeadResumeKeepsDeliveredSentRow is the cursor-loss half of
+// the reconcile gate: a recorded parked head that delivered "sent" but whose
+// cursor-advance persist failed is still the durable queue head after a
+// restart, and redelivering it under at-least-once must not first republish
+// "parked: usage limit" over the real sent outcome — if that retry then
+// defers or fails, the false limit status would sit indefinitely (Codex on
+// #4226). Only terminal publications (stopped/errored) owe the reconcile.
+func TestRecordedParkedHeadResumeKeepsDeliveredSentRow(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	dir := t.TempDir()
+	tsk := watchTask("d4357012", `printf 'x\n'`, dir)
+	require.NoError(t, task.AddTask(tsk))
+	when := time.Now()
+	_, err := task.UpdateTaskStatus(tsk.ID, &when, "sent")
+	require.NoError(t, err)
+
+	seed := newEventQueue(dir, "d4357012")
+	if _, err := seed.enqueueWithParkedStatus("held occurrence", true, true); err != nil {
+		t.Fatalf("seed recorded parked head: %v", err)
+	}
+
+	statusWrites := 0
+	originalUpdate := updateWatchTaskStatus
+	updateWatchTaskStatus = func(taskID string, at *time.Time, status string) (task.Task, error) {
+		statusWrites++
+		require.NotEqual(t, TaskStatusLimitParked, status,
+			"a delivered head must never be republished as parked")
+		return originalUpdate(taskID, at, status)
+	}
+	t.Cleanup(func() { updateWatchTaskStatus = originalUpdate })
+
+	queue := newEventQueue(dir, "d4357012")
+	delivered := ""
+	s := &watcherSupervisor{
+		setStatus: func(taskID, status string) { persistWatcherStatus(taskID, status) },
+	}
+	s.deliver = func(_, line string, _ watchDeliveryOptions) error {
+		delivered = line
+		return nil
+	}
+	w := &taskWatcher{taskID: "d4357012", queue: queue, sup: s}
+	s.watchers = map[string]*taskWatcher{w.taskID: w}
+
+	ev, cursor, ok, err := queue.peek()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, w.deliverQueuedEvent(ev, cursor))
+	require.Equal(t, "held occurrence", delivered)
+	require.Zero(t, statusWrites,
+		"a sent row is not a terminal overwrite — the reconcile owes nothing")
+
+	stored, err := task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	require.Equal(t, "sent", stored.LastRunStatus,
+		"the real delivered outcome must survive the parked head's redelivery")
+}

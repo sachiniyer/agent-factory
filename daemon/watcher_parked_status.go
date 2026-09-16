@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
@@ -109,7 +110,13 @@ func (w *taskWatcher) parkedStatusOverwritten() bool {
 	if err != nil {
 		return true
 	}
-	return stored.LastRunStatus != TaskStatusLimitParked
+	// Only a terminal publication counts as an overwrite. Any other row is a
+	// real outcome the republish must not hide: a parked head that delivered
+	// "sent" but lost its cursor-advance persist is still the queue head
+	// after restart, and republishing the park before that retry would leave
+	// a false limit status behind if the retry then defers or fails (Codex
+	// on #4226).
+	return stored.LastRunStatus == "stopped" || strings.HasPrefix(stored.LastRunStatus, "errored:")
 }
 
 // commitParkedStatus publishes the user-visible parked occurrence and the
