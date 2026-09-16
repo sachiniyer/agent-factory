@@ -66,27 +66,6 @@ type deletedDisplayPair struct {
 	display task.Task
 }
 
-// deletedRankEntry pairs the CAS expectation of a pending deletion with the
-// load-order rank captured for that specific occurrence. Stored as a slice so
-// that two deletions of the same task ID each carry their own rank — an
-// ID-keyed map would overwrite the first occurrence's rank with the second's
-// (PRRT_kwDORdIFwM6i6kOR).
-type deletedRankEntry struct {
-	expect task.Task
-	rank   int
-}
-
-// restoredEntry tracks a single restored-deletion occurrence. expect is the
-// stable CAS record used as occurrence identity; display is the currently
-// visible row value, updated in place on each retry refresh. Keying by expect
-// (not display) means a concurrent rebind that changes a field never causes the
-// second-retry dedup check to miss and insert a ghost row
-// (PRRT_kwDORdIFwM6i6kOK).
-type restoredEntry struct {
-	expect  task.Task
-	display task.Task
-}
-
 // TaskPane renders an inline task editor in the right pane.
 type TaskPane struct {
 	showActions bool
