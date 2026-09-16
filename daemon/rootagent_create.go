@@ -276,8 +276,6 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		switch {
 		case agent == "":
 			accountErr = fmt.Errorf("no agent resolvable from program %q", program)
-		case carried.agent != agent:
-			accountErr = fmt.Errorf("the account was pinned under agent %q and the replacement resolves to %q", carried.agent, agent)
 		case homeErr != nil:
 			accountErr = homeErr
 		default:
