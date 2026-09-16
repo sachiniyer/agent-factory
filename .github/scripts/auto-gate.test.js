@@ -4,6 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 const os = require("node:os");
 const { spawnSync } = require("node:child_process");
+const { createHash } = require("node:crypto");
 const autoGate = require("./auto-gate.js");
 const { __test } = autoGate;
 
@@ -5808,6 +5809,265 @@ test("renaming one test file to another stays outside the TUI gate", async () =>
   assert.doesNotMatch(result.reasons.join("\n"), /play-tested/);
   assert.equal(result.shouldMerge, true);
   assert.match(result.summary, /^PASS:/);
+});
+
+// #4477: a production file whose change is provably comment-only is subtracted
+// the same way. The patch only nominates a file; the proof reads both complete
+// blobs, because a hunk cannot see a raw string opened above its context.
+function gitBlobSha(text) {
+  const bytes = Buffer.from(text);
+  return createHash("sha1").update(`blob ${bytes.length}\x00`).update(bytes).digest("hex");
+}
+
+// A single-hunk unified diff over the whole file — the same line tags GitHub's
+// `patch` carries, without needing a diff implementation in the test.
+function wholeFilePatch(before, after) {
+  const a = before.replace(/\n$/, "").split("\n");
+  const b = after.replace(/\n$/, "").split("\n");
+  let prefix = 0;
+  while (prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < a.length - prefix && suffix < b.length - prefix &&
+      a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix += 1;
+  return [
+    `@@ -1,${a.length} +1,${b.length} @@`,
+    ...a.slice(0, prefix).map((line) => ` ${line}`),
+    ...a.slice(prefix, a.length - suffix).map((line) => `-${line}`),
+    ...b.slice(prefix, b.length - suffix).map((line) => `+${line}`),
+    ...a.slice(a.length - suffix).map((line) => ` ${line}`),
+  ].join("\n");
+}
+
+const TUI_MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+// #4231's gated file, reduced: every changed line is package prose.
+const PROSE_BEFORE =
+  "package app\n\n// The TUI drives every daemon control + read call over the HTTP API client.\n" +
+  "func control() {}\n";
+const PROSE_AFTER =
+  "package app\n\n// The session, task, project, tab, preview, and snapshot seams in this file use\n" +
+  "// the HTTP API client (#1592 Phase 2 PR3).\nfunc control() {}\n";
+const HELP_ROWS = Array.from({ length: 6 }, (_, i) => `row ${i}`).join("\n");
+
+function commentOnlyFixture({
+  path = "app/session_control.go",
+  before = PROSE_BEFORE,
+  after = PROSE_AFTER,
+  patch = wholeFilePatch(before, after),
+  status = "modified",
+  previousFilename = undefined,
+  headBlob = gitBlobSha(after),
+  baseMode = "100644",
+  extraFiles = [],
+  ...overrides
+} = {}) {
+  return {
+    files: [
+      { filename: path, previous_filename: previousFilename, status, sha: headBlob, patch },
+      ...extraFiles,
+    ],
+    mergeBaseSha: TUI_MERGE_BASE,
+    treeEntriesByCommit: {
+      [TUI_MERGE_BASE]: { [path]: { sha: gitBlobSha(before), mode: baseMode, type: "blob" } },
+      [HEAD_SHA]: { [path]: gitBlobSha(after) },
+    },
+    blobsBySha: { [gitBlobSha(before)]: before, [gitBlobSha(after)]: after },
+    ...overrides,
+  };
+}
+
+async function evaluateCommentOnly(options) {
+  const github = fakeGateGithub(commentOnlyFixture(options));
+  const result = await autoGate.evaluate({
+    github, context: fakeContext(), core: fakeCore(), prNumber: 1465, setOutputs: false,
+  });
+  return { github, result };
+}
+
+test("#4477: a comment-only change to a gated file does not demand the play-tested label", async () => {
+  const { github, result } = await evaluateCommentOnly();
+
+  assert.doesNotMatch(result.reasons.join("\n"), /play-tested/);
+  assert.equal(result.shouldMerge, true, result.summary);
+  assert.match(result.notes.join("\n"), /app\/session_control\.go changed only in comments/);
+  // The subtraction is a proof over both blobs, not a reading of the patch.
+  assert.deepEqual(new Set(github.blobReads), new Set([gitBlobSha(PROSE_BEFORE), gitBlobSha(PROSE_AFTER)]));
+  assert.ok(
+    github.compareRequests.some((request) => request.basehead === `master...${HEAD_SHA}`),
+    "the proof reads the merge base the patch was taken against",
+  );
+});
+
+// Canaries: each LOOKS like a comment edit and changes what the toolchain builds.
+// The first two pass the patch filter, so only the whole-file proof catches them.
+for (const [name, before, after] of [
+  [
+    "a // line inside a raw string, far from its backticks",
+    `package ui\n\nconst help = \`\n${HELP_ROWS}\n// shown to the user\n${HELP_ROWS}\n\`\n`,
+    `package ui\n\nconst help = \`\n${HELP_ROWS}\n// SHOWN to the user\n${HELP_ROWS}\n\`\n`,
+  ],
+  [
+    "a cgo preamble comment",
+    'package ui\n\n// #include "a.h"\nimport "C"\n',
+    'package ui\n\n// #include "b.h"\nimport "C"\n',
+  ],
+  [
+    "a //go:embed pattern",
+    'package ui\n\nimport _ "embed"\n\n//go:embed help.txt\nvar help string\n',
+    'package ui\n\nimport _ "embed"\n\n//go:embed usage.txt\nvar help string\n',
+  ],
+  [
+    "a struct tag",
+    'package ui\n\ntype row struct {\n\tA int `json:"a"`\n}\n',
+    'package ui\n\ntype row struct {\n\tA int `json:"b"`\n}\n',
+  ],
+  [
+    "commented-out code",
+    "package ui\n\nfunc draw() {\n\tpaint()\n}\n",
+    "package ui\n\nfunc draw() {\n\t// paint()\n}\n",
+  ],
+]) {
+  test(`#4477 canary: ${name} still demands the play-tested label`, async () => {
+    const { result } = await evaluateCommentOnly({ path: "ui/help.go", before, after });
+
+    assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+    assert.equal(result.shouldMerge, false);
+    assert.doesNotMatch(result.notes.join("\n"), /changed only in comments/);
+  });
+}
+
+// The patch is a hint, never evidence: a patch that claims prose while the blobs
+// hold a code change is gated on the blobs.
+test("#4477: a patch that disagrees with the blobs keeps the gate", async () => {
+  const { result } = await evaluateCommentOnly({
+    after: PROSE_AFTER.replace("func control() {}", "func control() { panic(1) }"),
+    patch: wholeFilePatch(PROSE_BEFORE, PROSE_AFTER),
+  });
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+});
+
+// Shapes the proof never attempts: each keeps the gate without reading a blob.
+for (const [name, options] of Object.entries({
+  "an added file": { status: "added" },
+  "a removed file": { status: "removed" },
+  // A rename moves a file between packages or out of the binary; its content
+  // proves nothing about that.
+  "a renamed file": { status: "renamed", previousFilename: "app/session_control_old.go" },
+  "a missing patch": { patch: null },
+  "a non-Go file under a gated prefix": { path: "app/testdata/banner.ansi" },
+  "an edited trailing comment (the patch filter is stricter than the proof)": {
+    before: "package app\n\nvar x = 1 // old\n",
+    after: "package app\n\nvar x = 1 // new\n",
+  },
+  "a comment-only file beside a real change": {
+    extraFiles: [{ filename: "ui/pane.go", status: "modified", sha: "2".repeat(40), patch: "@@ -1 +1 @@\n-a()\n+b()" }],
+  },
+  "more candidates than the proof will read": {
+    extraFiles: Array.from({ length: 20 }, (_, i) => ({
+      filename: `ui/prose_${i}.go`, status: "modified", sha: "3".repeat(40), patch: "@@ -1 +1 @@\n-// a\n+// b",
+    })),
+  },
+})) {
+  test(`#4477: ${name} keeps the play-tested label without reading blobs`, async () => {
+    const { github, result } = await evaluateCommentOnly(options);
+
+    assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+    assert.equal(result.shouldMerge, false);
+    assert.deepEqual(github.blobReads, []);
+  });
+}
+
+// Every way the proof can fail to finish keeps the gate, and none of them turns
+// into an evaluation error that would take the gate down (#4484).
+for (const [name, options] of Object.entries({
+  "a blob read that fails": { blobsBySha: { [gitBlobSha(PROSE_BEFORE)]: PROSE_BEFORE, [gitBlobSha(PROSE_AFTER)]: new Error("blob unavailable") } },
+  "a blob whose content is not the blob asked for": {
+    blobsBySha: { [gitBlobSha(PROSE_BEFORE)]: PROSE_BEFORE, [gitBlobSha(PROSE_AFTER)]: PROSE_BEFORE },
+  },
+  "a blob that is not valid UTF-8": {
+    blobsBySha: {
+      [gitBlobSha(PROSE_BEFORE)]: PROSE_BEFORE,
+      [gitBlobSha(PROSE_AFTER)]: { encoding: "base64", content: Buffer.from([0xff, 0xfe]).toString("base64") },
+    },
+  },
+  "a head blob other than the one listFiles described": { headBlob: "4".repeat(40) },
+  "a mode change": { baseMode: "100755" },
+  "a truncated head tree": { truncatedTreeCommits: [HEAD_SHA] },
+  "an unreadable merge base": { compareError: new Error("compare unavailable") },
+})) {
+  test(`#4477: ${name} keeps the gate without an evaluation error`, async () => {
+    const { result } = await evaluateCommentOnly(options);
+
+    assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+    assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
+    assert.doesNotMatch(result.notes.join("\n"), /changed only in comments/);
+  });
+}
+
+// #4477, at the other seam: a follow-up push after the play-test that only
+// rewords comments leaves the tested program intact, so the attestation holds.
+// The same proof decides, so the same canaries still make it stale.
+const ENVMARKER = "session/tmux/envmarker.go";
+function attestedFollowUp(before, after, { path = ENVMARKER, extraHeadEntries = {}, blobsBySha, ...overrides } = {}) {
+  return playTestFixture({
+    files: [path],
+    treesByOid: {
+      [OTHER_SHA]: tuiTree({ [path]: gitBlobSha(before) }),
+      [HEAD_SHA]: tuiTree({ [path]: gitBlobSha(after), ...extraHeadEntries }),
+    },
+    blobsBySha: blobsBySha || { [gitBlobSha(before)]: before, [gitBlobSha(after)]: after },
+    ...overrides,
+  });
+}
+
+test("#4477: a comment-only follow-up keeps the play-test attestation", async () => {
+  const result = await evaluateGate(attestedFollowUp(PROSE_BEFORE, PROSE_AFTER));
+
+  assert.equal(result.shouldMerge, true, result.summary);
+  assert.match(
+    result.notes.join("\n"),
+    new RegExp(`play-tested commit ${OTHER_SHA} covers head ${HEAD_SHA} \\(gated paths changed only in comments: session/tmux/envmarker\\.go\\)`),
+  );
+});
+
+for (const [name, before, after, extra = {}] of [
+  [
+    "a // line inside a raw string",
+    `package tmux\n\nconst help = \`\n${HELP_ROWS}\n// shown to the user\n${HELP_ROWS}\n\`\n`,
+    `package tmux\n\nconst help = \`\n${HELP_ROWS}\n// SHOWN to the user\n${HELP_ROWS}\n\`\n`,
+  ],
+  [
+    "a //go:build constraint",
+    "//go:build linux\n\npackage tmux\n",
+    "//go:build !linux\n\npackage tmux\n",
+  ],
+  ["a comment edit beside an added gated file", PROSE_BEFORE, PROSE_AFTER, { extraHeadEntries: { "ui/pane.go": "2".repeat(40) } }],
+  // Only Go reads `//` as a comment. A golden or asset under a gated prefix is
+  // content, whatever its lines start with.
+  ["a //-led line in a non-Go file", "// row one\n", "// row two\n", { path: "ui/testdata/help.golden" }],
+]) {
+  test(`#4477 canary: ${name} after the play-test makes the attestation stale`, async () => {
+    const github = fakeGateGithub(attestedFollowUp(before, after, extra));
+    const result = await autoGate.evaluate({
+      github, context: fakeContext(), core: fakeCore(), prNumber: 1465, setOutputs: false,
+    });
+
+    assert.equal(result.shouldMerge, false);
+    assert.match(result.reasons.join("\n"), /attestation.*is stale: gated paths changed/);
+    if (extra.extraHeadEntries || extra.path) {
+      // Structurally ineligible: decided before any blob is read.
+      assert.deepEqual(github.blobReads, []);
+    }
+  });
+}
+
+test("#4477: an unreadable follow-up blob makes the attestation stale, not the evaluation fail", async () => {
+  const result = await evaluateGate(attestedFollowUp(PROSE_BEFORE, PROSE_AFTER, {
+    blobsBySha: { [gitBlobSha(PROSE_BEFORE)]: PROSE_BEFORE, [gitBlobSha(PROSE_AFTER)]: new Error("blob unavailable") },
+  }));
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /is stale: gated paths changed/);
+  assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
 });
 
 test("a usage-limited reviewer does not waive unresolved inline findings", async () => {
@@ -11779,6 +12039,10 @@ function fakeGateGithub({
   files = [],
   labels = [],
   treesByOid = {},
+  // Blob contents by blob SHA, for the TUI gate's comment-only proof (#4477): a
+  // string is served base64-encoded the way the API sends it, an object is served
+  // as the raw response body, and an Error is thrown. An unlisted SHA is a 404.
+  blobsBySha = {},
   associatedPullRequests = [
     { number: 1465, state: "open", base: { ref: "master" }, head: { sha: headSha } },
   ],
@@ -11981,6 +12245,7 @@ function fakeGateGithub({
     reviewCommentReadsByNumber: {},
     createdChecks: [],
     compareRequests: [],
+    blobReads: [],
     updateBranchCalls: [],
     graphqlReadsByNumber: {},
     updatedChecks: [],
@@ -12072,6 +12337,19 @@ function fakeGateGithub({
                 sha: typeof entry === "string" ? entry : entry.sha,
               })),
             },
+          };
+        },
+        getBlob: async ({ file_sha }) => {
+          github.blobReads.push(file_sha);
+          const blob = blobsBySha[file_sha];
+          if (blob instanceof Error) throw blob;
+          if (blob === undefined) {
+            throw Object.assign(new Error("Not Found"), { status: 404 });
+          }
+          return {
+            data: typeof blob === "string"
+              ? { sha: file_sha, encoding: "base64", content: Buffer.from(blob).toString("base64") }
+              : blob,
           };
         },
         getRef: async ({ ref }) => {
@@ -12166,6 +12444,9 @@ function fakeGateGithub({
               behind_by: behindByRaw === undefined ? behindBy : behindByRaw,
               ahead_by: 1,
               status: behindBy > 0 ? "diverged" : "ahead",
+              // Only for the PR head itself — the one comparison whose merge base
+              // the TUI gate's comment-only proof reads (#4477).
+              ...(target === headSha ? { merge_base_commit: { sha: mergeBaseSha } } : {}),
             },
           };
         },
