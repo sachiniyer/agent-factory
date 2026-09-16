@@ -91,13 +91,9 @@ func sandboxUserHome() (func(), error) {
 	// A test binary that a sandboxed test launched as a fixture keeps what it
 	// inherited. That is the parent's sandbox, or an override a parent test set
 	// on purpose (the daemon's fake Codex writes to the CODEX_HOME its parent
-	// reads). Applying a fresh sandbox here would clear that override. A marker
-	// whose directory is gone came from a run that has ended, so it does not
-	// count.
-	if inherited := os.Getenv(envSandboxUserHome); inherited != "" {
-		if info, err := os.Stat(inherited); err == nil && info.IsDir() {
-			return func() {}, nil
-		}
+	// reads). Applying a fresh sandbox here would clear that override.
+	if inheritsSandboxUserHome() {
+		return func() {}, nil
 	}
 
 	ambientHome, homeErr := os.UserHomeDir()
@@ -110,7 +106,7 @@ func sandboxUserHome() (func(), error) {
 	_, hadDockerConfig := os.LookupEnv("DOCKER_CONFIG")
 
 	ambient := saveEnv(append([]string{"HOME"}, userRootOverrides...)...)
-	names := append([]string{"DOCKER_CONFIG", envSandboxUserHome}, goToolchainVars...)
+	names := append([]string{"DOCKER_CONFIG"}, goToolchainVars...)
 	saved := append(saveEnv(names...), ambient...)
 
 	home, err := os.MkdirTemp("", "af-test-user-home-")
@@ -133,6 +129,9 @@ func sandboxUserHome() (func(), error) {
 	// hang. The pane then starts with a bare zsh, as it does on CI.
 	if err := os.WriteFile(filepath.Join(home, ".zshrc"), nil, 0o600); err != nil {
 		return fail(fmt.Errorf("seed sandbox .zshrc: %w", err))
+	}
+	if err := os.WriteFile(filepath.Join(home, sandboxHomeMarker), []byte("testguard.SandboxHome (#4469)\n"), 0o600); err != nil {
+		return fail(fmt.Errorf("mark sandbox HOME: %w", err))
 	}
 	// git reads its global config from HOME. Include the real files so identity
 	// and safe.directory still apply. A test's `git config --global` then writes
@@ -164,18 +163,28 @@ func sandboxUserHome() (func(), error) {
 			return fail(fmt.Errorf("clear %s: %w", name, err))
 		}
 	}
-	if err := set(envSandboxUserHome, home); err != nil {
-		return fail(err)
-	}
 	if err := set("HOME", home); err != nil {
 		return fail(err)
 	}
 	return restore, nil
 }
 
-// envSandboxUserHome names the live sandbox HOME, so a child test binary can
-// tell that it runs inside one.
-const envSandboxUserHome = "AF_TESTGUARD_USER_HOME"
+// sandboxHomeMarker is a file sandboxUserHome writes into the sandbox HOME, so
+// a child test binary can tell that it runs inside one. It is a file, not an
+// environment variable, because a fixture reaches its child through an af
+// session pane. That pane's environment is an allowlist (internal/sessionenv),
+// which passes HOME and drops any testguard variable. A real home never has
+// this file, since only a fresh MkdirTemp dir ever receives it.
+const sandboxHomeMarker = ".af-testguard-sandbox-home"
+
+func inheritsSandboxUserHome() bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	info, err := os.Lstat(filepath.Join(home, sandboxHomeMarker))
+	return err == nil && info.Mode().IsRegular()
+}
 
 var (
 	ambientUserEnvMu sync.Mutex
@@ -209,8 +218,8 @@ func UseAmbientHome(t testing.TB) {
 	states := append([]envState(nil), ambientUserEnv...)
 	ambientUserEnvMu.Unlock()
 	if states == nil {
-		if inherited := os.Getenv(envSandboxUserHome); inherited != "" {
-			t.Fatalf("testguard: this process inherited the HOME sandbox %s from a parent test and does not know the ambient HOME", inherited)
+		if inheritsSandboxUserHome() {
+			t.Fatalf("testguard: this process inherited the HOME sandbox %s from a parent test and does not know the ambient HOME", os.Getenv("HOME"))
 		}
 		return
 	}

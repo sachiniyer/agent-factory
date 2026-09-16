@@ -298,6 +298,12 @@ func TestSandboxHomeChildProcess(t *testing.T) {
 // and launches the test binary as the fake Codex. That child must keep writing
 // where the parent reads, so a child of a live sandbox inherits the sandbox
 // instead of applying a fresh one that clears CODEX_HOME.
+//
+// The child gets a stripped environment, not os.Environ(). af launches the
+// fake Codex in a session pane whose environment passes only an allowlist
+// (internal/sessionenv), which keeps HOME and CODEX_HOME and drops anything
+// testguard-specific. The first version of this test passed the full
+// environment, so it passed while CI's pane-launched fixture still failed.
 func TestSandboxHome_ChildInheritsTheParentsSandbox(t *testing.T) {
 	fakeHome(t)
 	restore := SandboxHome()
@@ -307,7 +313,14 @@ func TestSandboxHome_ChildInheritsTheParentsSandbox(t *testing.T) {
 	t.Setenv("CODEX_HOME", fixtureStore)
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestSandboxHomeChildProcess$", "-test.count=1")
-	cmd.Env = append(os.Environ(), sandboxChildEnv+"=1")
+	// What sessionenv passes for a codex pane, plus the fixture's own flag, which
+	// the daemon test adds through SessionEnvPassthrough.
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + parentHome,
+		"CODEX_HOME=" + fixtureStore,
+		sandboxChildEnv + "=1",
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("child test binary: %v\n%s", err, out)
@@ -319,17 +332,23 @@ func TestSandboxHome_ChildInheritsTheParentsSandbox(t *testing.T) {
 	}
 }
 
-// TestSandboxHome_IgnoresAStaleMarker: a marker whose sandbox is gone came from
-// a run that has ended, and must not switch the sandbox off for this one.
-func TestSandboxHome_IgnoresAStaleMarker(t *testing.T) {
-	realHome := fakeHome(t)
-	t.Setenv(envSandboxUserHome, filepath.Join(t.TempDir(), "removed-sandbox"))
+// TestSandboxHome_IgnoresAnUnmarkedHome: only the marker file makes a HOME
+// count as an inherited sandbox. A home that merely looks like one (a temp dir
+// with the same name prefix) is sandboxed as usual.
+func TestSandboxHome_IgnoresAnUnmarkedHome(t *testing.T) {
+	fakeHome(t)
+	lookalike, err := os.MkdirTemp("", "af-test-user-home-")
+	if err != nil {
+		t.Fatalf("create lookalike home: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(lookalike) })
+	t.Setenv("HOME", lookalike)
 
 	restore := SandboxHome()
 	home := os.Getenv("HOME")
 	restore()
-	if home == realHome {
-		t.Fatalf("a stale %s marker kept HOME at the real %q", envSandboxUserHome, realHome)
+	if home == lookalike {
+		t.Fatalf("an unmarked HOME %q was treated as an inherited sandbox", lookalike)
 	}
 }
 
@@ -373,7 +392,6 @@ func TestUseAmbientHome_RestoresThePreSandboxHomeForOneTest(t *testing.T) {
 func TestUseAmbientHome_NoSandboxIsANoOp(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	unsetForTest(t, envSandboxUserHome)
 	UseAmbientHome(t)
 	if got := os.Getenv("HOME"); got != home {
 		t.Fatalf("UseAmbientHome without a sandbox changed HOME to %q", got)
