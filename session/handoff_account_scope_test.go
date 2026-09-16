@@ -2,7 +2,9 @@ package session
 
 import (
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -249,4 +251,30 @@ func TestLocalBackendSwapAgent_LaunchesAmbientAfterScopeDrop(t *testing.T) {
 	require.NotEmpty(t, launch, "the incoming agent never launched")
 	require.NotContains(t, launch, "__af-session-env-exec-account",
 		"a descoped handoff must launch on the ambient boundary, not the account shim")
+}
+
+// The production plan pipeline half of the override contract (#4430 review):
+// LocalBackend.PrepareAgentSwap must freeze the RESOLVED command, and
+// EffectiveAgent must name the agent that command actually launches. The
+// daemon's cross-agent refusal reads only this pair — a fake that freezes
+// program=target proves nothing about it, which is how the daemon test once
+// asserted a refusal its fixture could never produce.
+func TestPrepareAgentSwapEffectiveAgentFollowsResolvedCommand(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	_, err := config.SetGlobalConfigValue("program_overrides."+tmux.ProgramAider, tmux.ProgramCodex)
+	require.NoError(t, err)
+	repoRoot := initTempGitRepo(t)
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, t.TempDir(), "plan-effective", "plan-effective-branch", "", false, false)
+	require.NoError(t, err)
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.Path = repoRoot
+	inst.SetGitWorktreeForTest(gw)
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, tmux.ProgramCodex), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	plan, err := (&LocalBackend{}).PrepareAgentSwap(inst, tmux.ProgramAider)
+	require.NoError(t, err)
+	require.Equal(t, tmux.ProgramCodex, plan.EffectiveAgent(),
+		"the frozen plan must name the agent the resolved command launches, not the requested enum")
 }

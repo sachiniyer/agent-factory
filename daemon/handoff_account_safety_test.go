@@ -132,6 +132,18 @@ func TestHandoffAccountRechecksChangedProgramOverrideUnderProjectLock(t *testing
 	}
 }
 
+// handoffRealPlanBackend keeps limitResumeBackend's recorded surface but runs
+// the REAL LocalBackend.PrepareAgentSwap, so the daemon judges the command a
+// production handoff actually froze. The plain fake freezes program=target —
+// it never resolves program_overrides, which is exactly the indirection the
+// cross-agent refusal reads: with the fake's plan, EffectiveAgent returns the
+// enum and the refusal can never fire, no matter what the override says.
+type handoffRealPlanBackend struct{ *limitResumeBackend }
+
+func (b *handoffRealPlanBackend) PrepareAgentSwap(i *session.Instance, target string) (session.AgentSwapPlan, error) {
+	return (&session.LocalBackend{}).PrepareAgentSwap(i, target)
+}
+
 // The ordinary (no --account) handoff must judge account capability on the
 // resolved command, not the target enum (#4430 review). `program_overrides.
 // aider = "codex"` passes the enum check — aider has no account namespace — but
@@ -140,6 +152,7 @@ func TestHandoffAccountRechecksChangedProgramOverrideUnderProjectLock(t *testing
 // and name the resolution, before any pane is touched.
 func TestHandoffScopedSessionRefusesCrossAgentProgramOverride(t *testing.T) {
 	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	inst.SetBackend(&handoffRealPlanBackend{backend})
 	inst.Account = "work"
 	inst.ClearLimitReached()
 	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
