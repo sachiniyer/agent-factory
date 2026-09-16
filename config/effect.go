@@ -131,6 +131,36 @@ func KeyEffectClass(key string) EffectClass {
 	return keyEffectClasses[base]
 }
 
+// DaemonApply is the one mutually exclusive answer to "what did a running
+// daemon do with this save" — the fact #4482 pulled out of three bools, whose
+// two-bits-set combinations were unrepresentable-in-practice but
+// representable-in-code.
+type DaemonApply int
+
+const (
+	// DaemonApplyUnset is the zero value: NO producer recorded an apply result.
+	// It is not an outcome and never means "no daemon" — a producer that
+	// genuinely reached no daemon records DaemonApplyNotReached instead. A save
+	// surface handed an unset outcome reports unknown rather than guessing, so
+	// a forgotten assignment cannot masquerade as a real answer.
+	DaemonApplyUnset DaemonApply = iota
+	// DaemonApplyNotReached means no daemon was reached to apply the save: the
+	// dial failed, or the in-daemon handler had no manager. The write is on
+	// disk and the next daemon start reads it.
+	DaemonApplyNotReached
+	// DaemonApplyApplied means a running daemon applied the on-disk config
+	// (daemon.Manager.ApplyConfig returned without error).
+	DaemonApplyApplied
+	// DaemonApplyFailed means the daemon returned a failure response instead of
+	// applying the saved config — ApplyConfig's one error return, the "reload
+	// config:" wrap of a file that did not load.
+	DaemonApplyFailed
+	// DaemonApplyUnconfirmed distinguishes a lost RPC response or an admission
+	// refusal from a daemon error: the daemon may have applied the config
+	// before the connection failed, and the client cannot tell.
+	DaemonApplyUnconfirmed
+)
+
 // ApplyOutcome is what a running daemon actually DID with the write a save surface
 // is about to report — the WHOLE outcome, not the single "did the apply call
 // return nil" bit EffectNotice used to take.
@@ -146,19 +176,22 @@ func KeyEffectClass(key string) EffectClass {
 // new value now." over a warning saying the daemon was still serving the old
 // address. Carrying the outcome makes EffectNotice the one owner of the decision.
 //
-// The zero value means no daemon was reached to apply the save. An apply
-// failure must set DaemonApplyFailed instead of claiming that no daemon ran.
+// The daemon's apply result is ONE mutually exclusive fact, so it is one
+// DaemonApply field rather than three bools (#4482): the bool form admitted
+// eight combinations, of which the four with two bits set were unreachable —
+// code and tests nonetheless existed to settle states nothing could produce.
+//
+// The zero value is DaemonApplyUnset: no producer recorded an apply result.
+// That is deliberately NOT an outcome — it is distinguishable from every real
+// answer, including DaemonApplyNotReached, and StatusForKey reports it as
+// unknown rather than letting "never set" pass for "no daemon". A zero value
+// standing for both an outcome and an absence is the shape that wrongly granted
+// #4224 and wrongly refused #4356.
 type ApplyOutcome struct {
-	// DaemonApplied reports that a running daemon applied the on-disk config
-	// (daemon.Manager.ApplyConfig returned without error). It does NOT report that
-	// every changed key took effect — FailedListenerKeys is the rest of the answer.
-	DaemonApplied bool
-	// DaemonApplyFailed means the daemon returned a failure response instead of
-	// applying the saved config.
-	DaemonApplyFailed bool
-	// DaemonApplyUnconfirmed distinguishes a lost RPC response from a daemon
-	// error: the daemon may have applied the config before the connection failed.
-	DaemonApplyUnconfirmed bool
+	// DaemonApply is what the running daemon did with the saved config. It does
+	// NOT report that every changed key took effect — FailedListenerKeys is the
+	// rest of that answer.
+	DaemonApply DaemonApply
 	// FailedListenerKeys names the socket keys (network.listen_addr /
 	// network.preview_listen_addr) whose live rebind failed, so bind-new-before-close
 	// left the OLD listener serving. Both daemon.ApplyConfigResult and
@@ -226,6 +259,16 @@ type saveRule struct {
 // status and differ only in their sentence; that is a difference of projection,
 // not of ordering, and it is why the rows are per meaning rather than per status.
 var saveRules = []saveRule{
+	// An unset apply result outranks everything else in the struct: it means the
+	// producer never recorded what the daemon did, so no other field is
+	// trustworthy enough to report on. The honest status is unknown — never the
+	// no-daemon row, which would let a forgotten assignment pass for a real
+	// "no daemon reached" (#4482).
+	{
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyUnset },
+		status:  ApplyStatusUnknown,
+		notice:  staticNotice("Saved — the daemon's apply result was never recorded, which is an af bug; the file holds the new value."),
+	},
 	// A lost race outranks everything: it is the one answer about WHICH value is
 	// stored, and it contradicts every "takes effect" promise below. Only a
 	// readback that resolved the key sets it.
@@ -246,22 +289,23 @@ var saveRules = []saveRule{
 	},
 	// Uncertainty about a LIVE key: once the reply is lost the client cannot claim
 	// the daemon kept its previous config. It deliberately does not reach a
-	// deferred key, because every cause of this bit — a lost reply, an admission
+	// deferred key, because every cause of this state — a lost reply, an admission
 	// refusal, a live key's unconfirmable readback — leaves the file written, so
 	// the next start still reads this save's value and the class rows stay true.
 	{
 		applies: func(key string, o ApplyOutcome) bool {
-			return o.DaemonApplyUnconfirmed && !deferredEffectClass(key)
+			return o.DaemonApply == DaemonApplyUnconfirmed && !deferredEffectClass(key)
 		},
 		status: ApplyStatusUnconfirmed,
 		notice: staticNotice("Saved — the daemon’s live config apply could not be confirmed. See warnings for details."),
 	},
-	// A failed apply is evidence about the FILE: DaemonApplyFailed is set only for
-	// a "reload config" failure (Manager.ApplyConfig's one error return), so the
-	// file did not load — and the next start reads it. It therefore outranks the
-	// class rows, which would promise an effect that file cannot deliver.
+	// A failed apply is evidence about the FILE: DaemonApplyFailed is recorded
+	// only for a "reload config" failure (Manager.ApplyConfig's one error
+	// return), so the file did not load — and the next start reads it. It
+	// therefore outranks the class rows, which would promise an effect that file
+	// cannot deliver.
 	{
-		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApplyFailed },
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyFailed },
 		status:  ApplyStatusFailed,
 		notice:  staticNotice("Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."),
 	},
@@ -292,16 +336,24 @@ var saveRules = []saveRule{
 		notice:  listenerRebindDeferredNotice,
 	},
 	{
-		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApplied },
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyApplied },
 		status:  ApplyStatusApplied,
 		notice:  staticNotice("Applied — the running daemon is using the new value now."),
 	},
-	// The zero outcome: no daemon was reached. It always applies, so the table is
-	// total and every save gets exactly one row.
+	// No daemon was reached — a recorded answer, distinct from the unset state
+	// the first row and the catch-all below report.
 	{
-		applies: func(string, ApplyOutcome) bool { return true },
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyNotReached },
 		status:  ApplyStatusNoDaemon,
 		notice:  staticNotice("Saved — no daemon is running to apply it, so it takes effect on the next daemon start."),
+	},
+	// The total row: a DaemonApply value this table does not enumerate is no
+	// recorded outcome either, so it reports unknown exactly as unset does. It
+	// always applies, so the table is total and every save gets exactly one row.
+	{
+		applies: func(string, ApplyOutcome) bool { return true },
+		status:  ApplyStatusUnknown,
+		notice:  staticNotice("Saved — the daemon's apply result was never recorded, which is an af bug; the file holds the new value."),
 	},
 }
 

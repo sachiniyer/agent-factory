@@ -21,13 +21,15 @@ func (s *controlServer) UnsetConfigValue(req UnsetConfigValueRequest, resp *Unse
 	// drop that half, so an unset whose rebind failed claimed "Applied" on stdout
 	// while resp.Warnings said the opposite. config.EffectNotice owns that decision
 	// now, so the two set surfaces and the two unset surfaces cannot diverge again.
-	var outcome config.ApplyOutcome
+	// Same explicit not-reached answer as SetConfigValue for a nil manager — an
+	// unset DaemonApply reports unknown, not no-daemon (#4482).
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyNotReached}
 	if s.manager != nil {
 		if applied, applyErr := s.manager.ApplyConfig(); applyErr == nil {
 			resp.Applied = applied.Applied
 			resp.Pending = applied.Pending
 			resp.Warnings = applied.Warnings
-			outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applied.FailedListenerKeys}
+			outcome = config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: applied.FailedListenerKeys}
 			// Same race as SetConfigValue: an unset's live value is the default,
 			// so a competing write between the file-lock release and the apply's
 			// load leaves the daemon serving that write instead (#4247). The same
@@ -36,7 +38,7 @@ func (s *controlServer) UnsetConfigValue(req UnsetConfigValueRequest, resp *Unse
 			recordSavedValueReadback(&outcome, &resp.Warnings, result.Key, readbackSnapshot, verdict, loadErr)
 		} else {
 			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+applyErr.Error())
-			outcome.DaemonApplyFailed = true
+			outcome.DaemonApply = config.DaemonApplyFailed
 		}
 	}
 	resp.ApplyOutcome = outcome.StatusForKey(result.Key)

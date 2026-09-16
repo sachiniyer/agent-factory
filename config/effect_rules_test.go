@@ -43,10 +43,11 @@ func TestSaveRulesAreCompleteAndTotal(t *testing.T) {
 			t.Errorf("no row produces %q: a wire value nothing can emit", status)
 		}
 	}
-	// The last row must match anything, or some save would get no answer.
+	// The last row must match anything, or some save would get no answer —
+	// including an outcome carrying facts but no recorded apply result.
 	last := saveRules[len(saveRules)-1]
 	for _, key := range saveRuleKeys {
-		if !last.applies(key, ApplyOutcome{DaemonApplied: true, DaemonApplyFailed: true, SavedValueSuperseded: true}) {
+		if !last.applies(key, ApplyOutcome{DaemonApply: DaemonApplyUnset, SavedValueSuperseded: true}) {
 			t.Errorf("the final row does not apply to %q, so the table is not total", key)
 		}
 	}
@@ -78,7 +79,7 @@ func TestNoWithholdingRowPromisesAnEffect(t *testing.T) {
 // of DaemonApplyUnconfirmed leaves the file written and loadable (#4247).
 func TestDeferredKeyDistinguishesAFailedReloadFromAnUnconfirmedOne(t *testing.T) {
 	for _, key := range []string{"branch_prefix", "root_agents", "appearance", "debug_pprof"} {
-		failed := ApplyOutcome{DaemonApplyFailed: true}
+		failed := ApplyOutcome{DaemonApply: DaemonApplyFailed}
 		if got := failed.StatusForKey(key); got != ApplyStatusFailed {
 			t.Errorf("StatusForKey(%q) with a failed reload = %q, want %q", key, got, ApplyStatusFailed)
 		}
@@ -86,7 +87,7 @@ func TestDeferredKeyDistinguishesAFailedReloadFromAnUnconfirmedOne(t *testing.T)
 			t.Errorf("EffectNotice(%q) promised an effect from a file that did not load: %q", key, notice)
 		}
 
-		unconfirmed := ApplyOutcome{DaemonApplyUnconfirmed: true}
+		unconfirmed := ApplyOutcome{DaemonApply: DaemonApplyUnconfirmed}
 		if got := unconfirmed.StatusForKey(key); got != ApplyStatusDeferred {
 			t.Errorf("StatusForKey(%q) with an unconfirmed apply = %q, want %q", key, got, ApplyStatusDeferred)
 		}
@@ -109,13 +110,13 @@ func TestUnreadableFileWithholdsTheDeferredPromise(t *testing.T) {
 		outcome ApplyOutcome
 		when    string
 	}{
-		{"next daemon start", "branch_prefix", ApplyOutcome{DaemonApplied: true, SavedFileUnreadable: true}, "the next daemon start"},
-		{"next af launch", "appearance", ApplyOutcome{DaemonApplied: true, SavedFileUnreadable: true}, "the next af launch"},
+		{"next daemon start", "branch_prefix", ApplyOutcome{DaemonApply: DaemonApplyApplied, SavedFileUnreadable: true}, "the next daemon start"},
+		{"next af launch", "appearance", ApplyOutcome{DaemonApply: DaemonApplyApplied, SavedFileUnreadable: true}, "the next af launch"},
 		{"failed listener rebind", "network.listen_addr",
-			ApplyOutcome{DaemonApplied: true, FailedListenerKeys: rebindFailed, SavedFileUnreadable: true},
+			ApplyOutcome{DaemonApply: DaemonApplyApplied, FailedListenerKeys: rebindFailed, SavedFileUnreadable: true},
 			"the next daemon start"},
 		{"alongside an unconfirmed apply", "branch_prefix",
-			ApplyOutcome{DaemonApplyUnconfirmed: true, SavedFileUnreadable: true}, "the next daemon start"},
+			ApplyOutcome{DaemonApply: DaemonApplyUnconfirmed, SavedFileUnreadable: true}, "the next daemon start"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,14 +135,14 @@ func TestUnreadableFileWithholdsTheDeferredPromise(t *testing.T) {
 
 	// A lost race still outranks it: that is a statement about which value is
 	// stored, and the unreadable-file row would describe a save that never won.
-	both := ApplyOutcome{DaemonApplied: true, SavedValueSuperseded: true, SavedFileUnreadable: true}
+	both := ApplyOutcome{DaemonApply: DaemonApplyApplied, SavedValueSuperseded: true, SavedFileUnreadable: true}
 	if got := both.StatusForKey("branch_prefix"); got != ApplyStatusSuperseded {
 		t.Errorf("superseded + unreadable file = %q, want %q", got, ApplyStatusSuperseded)
 	}
 
 	// The row is gated on FileAuthoritative, so the fact cannot rewrite a LIVE
 	// key's answer even if a caller set it there.
-	live := ApplyOutcome{DaemonApplied: true, SavedFileUnreadable: true}
+	live := ApplyOutcome{DaemonApply: DaemonApplyApplied, SavedFileUnreadable: true}
 	if got := live.StatusForKey("default_program"); got != ApplyStatusApplied {
 		t.Errorf("a live key with the unreadable-file fact = %q, want %q", got, ApplyStatusApplied)
 	}
@@ -151,16 +152,17 @@ func TestUnreadableFileWithholdsTheDeferredPromise(t *testing.T) {
 // now share; before it, each spelled the condition out over a second copy of the
 // class test living in the daemon package.
 func TestFileAuthoritative(t *testing.T) {
-	rebind := ApplyOutcome{FailedListenerKeys: []string{"network.listen_addr"}}
+	rebind := ApplyOutcome{DaemonApply: DaemonApplyApplied, FailedListenerKeys: []string{"network.listen_addr"}}
+	applied := ApplyOutcome{DaemonApply: DaemonApplyApplied}
 	cases := []struct {
 		key     string
 		outcome ApplyOutcome
 		want    bool
 	}{
-		{"branch_prefix", ApplyOutcome{}, true},
-		{"appearance", ApplyOutcome{}, true},
-		{"default_program", ApplyOutcome{}, false},
-		{"network.listen_addr", ApplyOutcome{}, false},
+		{"branch_prefix", applied, true},
+		{"appearance", applied, true},
+		{"default_program", applied, false},
+		{"network.listen_addr", applied, false},
 		{"network.listen_addr", rebind, true},
 		{"listen_addr", rebind, true}, // the legacy alias spelling
 		{"network.preview_listen_addr", rebind, false},

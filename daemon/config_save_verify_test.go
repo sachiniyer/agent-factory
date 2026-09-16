@@ -188,14 +188,14 @@ func TestAppliedSavedValueVerifiesDeferredKeyAgainstDisk(t *testing.T) {
 	// branch_prefix is consumed at the next daemon start: the file decides, so
 	// the competing write reads as superseded even though the snapshot still
 	// holds this save — the case the live-snapshot check could not see.
-	verdict, err := appliedSavedValue(snapshot, config.ApplyOutcome{}, "branch_prefix", "mine")
+	verdict, err := appliedSavedValue(snapshot, config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}, "branch_prefix", "mine")
 	require.NoError(t, err)
 	require.Equal(t, savedValueSuperseded, verdict)
 
 	// default_program is consumed by the running daemon: the snapshot decides,
 	// so a write that landed after the apply does not contradict what the
 	// daemon is serving.
-	verdict, err = appliedSavedValue(snapshot, config.ApplyOutcome{}, "default_program", "aider")
+	verdict, err = appliedSavedValue(snapshot, config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}, "default_program", "aider")
 	require.NoError(t, err)
 	require.Equal(t, savedValueConfirmed, verdict)
 }
@@ -214,7 +214,7 @@ func TestAppliedSavedValueVerifiesFailedListenerKeyAgainstDisk(t *testing.T) {
 	_, err := config.SetGlobalConfigValue("network.listen_addr", "127.0.0.1:9090")
 	require.NoError(t, err)
 
-	rebindFailed := config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: []string{"network.listen_addr"}}
+	rebindFailed := config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: []string{"network.listen_addr"}}
 	verdict, err := appliedSavedValue(snapshot, rebindFailed, "network.listen_addr", "127.0.0.1:8080")
 	require.NoError(t, err)
 	require.Equal(t, savedValueSuperseded, verdict,
@@ -222,7 +222,7 @@ func TestAppliedSavedValueVerifiesFailedListenerKeyAgainstDisk(t *testing.T) {
 
 	// The same key with a successful rebind stays live-checked: the snapshot
 	// holds this save, so the post-apply write does not contradict it.
-	verdict, err = appliedSavedValue(snapshot, config.ApplyOutcome{DaemonApplied: true}, "network.listen_addr", "127.0.0.1:8080")
+	verdict, err = appliedSavedValue(snapshot, config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}, "network.listen_addr", "127.0.0.1:8080")
 	require.NoError(t, err)
 	require.Equal(t, savedValueConfirmed, verdict)
 }
@@ -236,12 +236,12 @@ func TestApplyFallbackDiskVerdictReadsFailedListenerKeyFromDisk(t *testing.T) {
 	_, err := config.SetGlobalConfigValue("network.listen_addr", "127.0.0.1:9090")
 	require.NoError(t, err)
 
-	outcome := config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: []string{"network.listen_addr"}}
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: []string{"network.listen_addr"}}
 	var warnings []string
 	applyFallbackDiskVerdict(&outcome, &warnings, "network.listen_addr", "127.0.0.1:8080")
 	require.True(t, outcome.SavedValueSuperseded,
 		"a failed-listener key defers to the file, so a diverged file is a lost race")
-	require.False(t, outcome.DaemonApplyUnconfirmed,
+	require.NotEqual(t, config.DaemonApplyUnconfirmed, outcome.DaemonApply,
 		"the live-key unconfirmed downgrade must not fire for a dynamically deferred key")
 }
 
@@ -300,16 +300,16 @@ func TestUnreadableFileBlocksTheDeferredPromise(t *testing.T) {
 		store   readbackStore
 	}{
 		{name: "next daemon start, in daemon", key: "branch_prefix",
-			outcome: config.ApplyOutcome{DaemonApplied: true}, store: readbackSnapshot},
+			outcome: config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}, store: readbackSnapshot},
 		{name: "next af launch, in daemon", key: "appearance",
-			outcome: config.ApplyOutcome{DaemonApplied: true}, store: readbackSnapshot},
+			outcome: config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}, store: readbackSnapshot},
 		{name: "failed listener rebind, in daemon", key: "network.listen_addr",
-			outcome: config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: []string{"network.listen_addr"}},
+			outcome: config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: []string{"network.listen_addr"}},
 			store:   readbackSnapshot},
 		{name: "next daemon start, version-skewed fallback", key: "branch_prefix",
-			outcome: config.ApplyOutcome{DaemonApplied: true}, store: readbackFileAfterApply},
+			outcome: config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}, store: readbackFileAfterApply},
 		{name: "next daemon start, fallback after an unconfirmed apply", key: "branch_prefix",
-			outcome: config.ApplyOutcome{DaemonApplyUnconfirmed: true}, store: readbackFileAfterApply},
+			outcome: config.ApplyOutcome{DaemonApply: config.DaemonApplyUnconfirmed}, store: readbackFileAfterApply},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -350,7 +350,7 @@ func TestUnreadableFileLeavesALiveKeyOutcomeAlone(t *testing.T) {
 	verdict, loadErr := diskSavedValue("default_program", "aider")
 	require.Equal(t, savedValueFileUnreadable, verdict)
 
-	outcome := config.ApplyOutcome{DaemonApplied: true}
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}
 	var warnings []string
 	recordSavedValueReadback(&outcome, &warnings, "default_program", readbackFileAfterApply, verdict, loadErr)
 
@@ -365,7 +365,7 @@ func TestApplyFallbackDiskVerdictReportsUnreadableFileForDeferredKey(t *testing.
 	configClientHome(t)
 	breakConfigFile(t)
 
-	outcome := config.ApplyOutcome{DaemonApplied: true}
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}
 	var warnings []string
 	applyFallbackDiskVerdict(&outcome, &warnings, "branch_prefix", "mine")
 

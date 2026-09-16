@@ -33,9 +33,9 @@ const unconfirmedReadbackWarning = "saved config, but this daemon is too old to 
 func failedConfigApplyOutcome(err error) (config.ApplyOutcome, string) {
 	var serverErr rpc.ServerError
 	if errors.As(err, &serverErr) && strings.HasPrefix(string(serverErr), "reload config:") {
-		return config.ApplyOutcome{DaemonApplyFailed: true}, "saved config, but live apply failed: " + err.Error()
+		return config.ApplyOutcome{DaemonApply: config.DaemonApplyFailed}, "saved config, but live apply failed: " + err.Error()
 	}
-	return config.ApplyOutcome{DaemonApplyUnconfirmed: true}, "saved config, but live apply could not be confirmed: " + err.Error()
+	return config.ApplyOutcome{DaemonApply: config.DaemonApplyUnconfirmed}, "saved config, but live apply could not be confirmed: " + err.Error()
 }
 
 // readbackStore is which store a post-apply readback could consult. It is what
@@ -82,8 +82,7 @@ func recordSavedValueReadback(outcome *config.ApplyOutcome, warnings *[]string, 
 		// A live key read from the file after the apply returned: the file may
 		// have moved after the daemon loaded this save, so this proves only that
 		// the client cannot confirm what the daemon is serving.
-		outcome.DaemonApplied = false
-		outcome.DaemonApplyUnconfirmed = true
+		outcome.DaemonApply = config.DaemonApplyUnconfirmed
 		*warnings = append(*warnings, unconfirmedReadbackWarning)
 	}
 }

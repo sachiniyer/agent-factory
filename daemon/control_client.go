@@ -502,14 +502,15 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 	}
 	resp = SetConfigValueResponse{Result: result}
 	// Keep dial failure distinct from an RPC error: only the former means
-	// no daemon was reached. A started RPC may have failed or lost its reply.
+	// no daemon was reached (recorded explicitly — unset reports unknown, #4482).
+	// A started RPC may have failed or lost its reply.
 	applyResp, applyAttempt := requestApplyConfigAttempt()
-	var outcome config.ApplyOutcome
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyNotReached}
 	if applyAttempt.err == nil {
 		resp.Applied = applyResp.Applied
 		resp.Pending = applyResp.Pending
 		resp.Warnings = applyResp.Warnings
-		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
+		outcome = config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: applyResp.FailedListenerKeys}
 		// A daemon this old cannot report its live config back (GetConfig arrived
 		// with SetConfigValue in #1960), so the only readback available is the
 		// file (#4247).
@@ -524,7 +525,7 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 		// the same definitive readback the success branch does. A proven reload
 		// failure is left alone: the live-key downgrade inside the verdict
 		// would mask it, and the failure notice is already the honest answer.
-		if outcome.DaemonApplyUnconfirmed {
+		if outcome.DaemonApply == config.DaemonApplyUnconfirmed {
 			applyFallbackDiskVerdict(&outcome, &resp.Warnings, result.Key, result.Value)
 		}
 	}
@@ -577,14 +578,15 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 	// network.listen_addr / network.preview_listen_addr rebind that failed left the
 	// OLD listener serving, and this surface used to report that as "Applied".
 	// Keep dial failure distinct from an RPC error: only the former means
-	// no daemon was reached. A started RPC may have failed or lost its reply.
+	// no daemon was reached (recorded explicitly — unset reports unknown, #4482).
+	// A started RPC may have failed or lost its reply.
 	applyResp, applyAttempt := requestApplyConfigAttempt()
-	var outcome config.ApplyOutcome
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyNotReached}
 	if applyAttempt.err == nil {
 		resp.Applied = applyResp.Applied
 		resp.Pending = applyResp.Pending
 		resp.Warnings = applyResp.Warnings
-		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
+		outcome = config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: applyResp.FailedListenerKeys}
 		// Same readback as the set fallback; an unset's expected value is the
 		// key's default (#4247).
 		applyFallbackDiskVerdict(&outcome, &resp.Warnings, result.Key, unsetExpectedValue(result.Key))
@@ -595,7 +597,7 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 		// Same unconfirmed-apply readback as the set fallback: a deferred key's
 		// next-start promise rests on the file, which a competing write can
 		// hold by the time a refused or lost apply returns.
-		if outcome.DaemonApplyUnconfirmed {
+		if outcome.DaemonApply == config.DaemonApplyUnconfirmed {
 			applyFallbackDiskVerdict(&outcome, &resp.Warnings, result.Key, unsetExpectedValue(result.Key))
 		}
 	}
