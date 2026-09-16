@@ -125,16 +125,16 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// confirmed. Moving it into the predicate both sides already call is what stops
 	// the two from disagreeing about the same session again.
 	//
-	// An account request asks the account form of the same guard: moving which
-	// identity the agent authenticates as does not change what the reserved root
-	// IS, so root is admitted this far — and handoffAccount then refuses any
-	// --to that names a different agent, which is the axis the refusal covers
-	// (#4395).
-	action := session.RuntimeActionHandoff
-	if strings.TrimSpace(req.Account) != "" {
-		action = session.RuntimeActionHandoffAccount
-	}
-	if err := instance.ValidateRuntimeAction(action); err != nil {
+	// The check sees the request's target AND its axis: a handoff that names
+	// the account a committed swap already moved this session to is the retry
+	// that refusal advertises, not a second lifecycle action (#4393), and an
+	// account request asks the account form of the same guard — moving which
+	// identity the agent authenticates as does not change what the reserved
+	// root IS, so root is admitted this far, with handoffAccount then refusing
+	// any --to that names a different agent, which is the axis the refusal
+	// covers (#4395). Every other target — and every other lifecycle axis —
+	// still refuses.
+	if err := instance.ValidateHandoffRuntimeAction(req.To, req.Account); err != nil {
 		return HandoffSessionResponse{}, err
 	}
 	if strings.TrimSpace(req.Account) != "" {

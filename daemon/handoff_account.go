@@ -66,21 +66,35 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 	if !instance.Capabilities().Handoff {
 		return HandoffSessionResponse{}, session.ErrHandoffUnsupported
 	}
-	from, _ := instance.AccountSelection()
-	if from == strings.TrimSpace(req.Account) && target == instance.CurrentAgentName() {
-		return HandoffSessionResponse{}, fmt.Errorf("session %q already uses %s account %q", instance.Title, target, from)
-	}
-	reason := session.HandoffReasonManual
-	if instance.LimitReached() {
-		reason = session.HandoffReasonUsageLimit
-	}
 	outgoing := instance.CurrentAgentName()
-	swap := &autoAccountSwap{
-		manual: true, promptOverride: req.Brief, from: from, to: strings.TrimSpace(req.Account),
-		fromAgent: outgoing, agent: target, reason: reason,
+	from, _ := instance.AccountSelection()
+	var swap *autoAccountSwap
+	if from == strings.TrimSpace(req.Account) && target == outgoing {
+		// The request names the identity a committed swap already recorded —
+		// the retry the pending-swap refusal advertises (#4393), not a no-op.
+		// Finish the recorded transaction, whose stored mission and durable
+		// (from, to) pair a fresh admission would overwrite.
+		if swap = committedAccountSwap(instance); swap == nil {
+			return HandoffSessionResponse{}, fmt.Errorf("session %q already uses %s account %q", instance.Title, target, from)
+		}
+		if strings.TrimSpace(req.Brief) != "" {
+			// The committed transaction already owns the mission it delivers; a
+			// replacement brief cannot amend it, and silently dropping one the
+			// operator typed is worse than refusing.
+			return HandoffSessionResponse{}, fmt.Errorf("session %q has a committed account swap to %s whose recorded mission is what the retry delivers; retry without --brief", instance.Title, accountSwapIdentity(target, swap.to))
+		}
+	} else {
+		reason := session.HandoffReasonManual
+		if instance.LimitReached() {
+			reason = session.HandoffReasonUsageLimit
+		}
+		swap = &autoAccountSwap{
+			manual: true, promptOverride: req.Brief, from: from, to: strings.TrimSpace(req.Account),
+			fromAgent: outgoing, agent: target, reason: reason,
+		}
 	}
 	outcome, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, instance.Title, swap)
-	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, FromAccount: from, ToAccount: swap.to, HeadSHA: swap.headSHA}
+	response := HandoffSessionResponse{OK: true, From: swap.fromAgent, To: target, FromAccount: swap.from, ToAccount: swap.to, HeadSHA: swap.headSHA}
 	if err != nil {
 		if outcome == resumePerformed || isMutationCommitted(err) {
 			return response, err

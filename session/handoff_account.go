@@ -2,8 +2,47 @@ package session
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
+
+// ValidateHandoffRuntimeAction evaluates RuntimeActionHandoff for a request
+// that names its target. A committed account swap fences every other lifecycle
+// action, but a request carrying that swap's own account and agent is the retry
+// the refusal's message advertises — the pending-swap axis alone cannot refuse
+// it (#4393). Every other axis still applies, and a request naming a different
+// account or agent remains a new transaction the pending swap still owns.
+func (i *Instance) ValidateHandoffRuntimeAction(agent, account string) error {
+	i.mu.RLock()
+	view := i.lifecycleViewLocked()
+	if view.PendingAccountSwap && i.pendingAccountSwapRetryTargetLocked(agent, account) {
+		view.PendingAccountSwap = false
+	}
+	i.mu.RUnlock()
+	// The account form of the shared gate when the request carries one: an
+	// identity move keeps the session's agent, so the reserved root — which an
+	// agent swap can never take — is eligible here (#4395).
+	action := RuntimeActionHandoff
+	if strings.TrimSpace(account) != "" {
+		action = RuntimeActionHandoffAccount
+	}
+	return view.ValidateRuntimeAction(action)
+}
+
+// pendingAccountSwapRetryTargetLocked reports whether agent and account name
+// the committed swap's own target: the account the identity checkpoint already
+// moved this session to and — when the request names an agent — the agent the
+// record already runs. Callers hold i.mu.
+func (i *Instance) pendingAccountSwapRetryTargetLocked(agent, account string) bool {
+	pending := i.pendingAccountSwap
+	if pending == nil || pending.To != i.Account || strings.TrimSpace(account) != pending.To {
+		return false
+	}
+	if agent = strings.TrimSpace(agent); agent != "" {
+		return agent == i.currentAgentNameLocked()
+	}
+	return true
+}
 
 // BeginManualAccountSwap raises the existing account-replacement fence after
 // validating the handoff lifecycle, including healthy and limit-blocked rows.
