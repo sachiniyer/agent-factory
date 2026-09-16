@@ -1,6 +1,10 @@
 package daemon
 
-import "github.com/sachiniyer/agent-factory/config"
+import (
+	"errors"
+
+	"github.com/sachiniyer/agent-factory/config"
+)
 
 // A save's apply outcome may claim "applied" only when the daemon is actually
 // serving the value THIS save wrote. The file lock inside the writer releases
@@ -31,9 +35,9 @@ const (
 	// neither of the answers above may be claimed. This says nothing about the
 	// store itself.
 	savedValueUnresolved
-	// savedValueFileUnreadable: the config FILE did not load. For a key served
-	// from that file this is not neutral: the next daemon start or af launch
-	// reads the same file.
+	// savedValueFileUnreadable: the config FILE did not load, or is empty or
+	// missing. For a key served from that file this is not neutral: the next
+	// daemon start or af launch reads the same file.
 	savedValueFileUnreadable
 )
 
@@ -71,12 +75,30 @@ func unsetExpectedValue(key string) string {
 // savedValueFileUnreadable so the report can name what is wrong with the file.
 // What any verdict proves depends on the key and on which store the caller could
 // consult, and only recordSavedValueReadback decides that.
+//
+// It must never write. LoadConfig is not observational: its empty-stub self-heal
+// deletes a config.toml it finds empty and materializes defaults, so a readback
+// that lands while an editor rewrites the file in place removes the file the
+// editor is still writing — the editor finishes into an unlinked inode and the
+// user's whole config is replaced by defaults (#4247). LoadConfigReadOnly
+// reports those states instead of repairing them. This closes the window for
+// this read only; the running daemon's other loads still reach the self-heal
+// (#4483).
 func diskSavedValue(key, expected string) (savedValueVerdict, error) {
-	cfg, err := config.LoadConfig()
+	loaded, err := config.LoadConfigReadOnly()
 	if err != nil {
 		return savedValueFileUnreadable, err
 	}
-	return liveSavedValue(cfg, key, expected), nil
+	// Check the states before the values: for an empty stub LoadConfigReadOnly
+	// fills Config with defaults, and comparing against those would judge this
+	// save by values nobody wrote. None of these states can confirm the save.
+	switch {
+	case loaded.EmptyStub:
+		return savedValueFileUnreadable, errors.New("config.toml is empty")
+	case loaded.Missing, loaded.LegacyJSON:
+		return savedValueFileUnreadable, errors.New("config.toml is missing")
+	}
+	return liveSavedValue(loaded.Config, key, expected), nil
 }
 
 // appliedSavedValue is the in-daemon post-apply readback behind a successful

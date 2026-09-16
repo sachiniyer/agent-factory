@@ -373,3 +373,56 @@ func TestApplyFallbackDiskVerdictReportsUnreadableFileForDeferredKey(t *testing.
 	require.False(t, outcome.SavedValueSuperseded, "an unloadable file proves nothing about which value won")
 	require.Equal(t, config.ApplyStatusUnconfirmed, outcome.StatusForKey("branch_prefix"))
 }
+
+// The disk readback is observational and must stay that way. An editor that
+// rewrites config.toml in place truncates it first; a readback landing in that
+// window used to go through LoadConfig, whose empty-stub self-heal deleted the
+// file and materialized defaults — the editor then finished into an unlinked
+// inode and the user's whole config was replaced by defaults (#4247).
+func TestDiskReadbackNeverRepairsAFileAnEditorIsRewriting(t *testing.T) {
+	configClientHome(t)
+	_, err := config.SetGlobalConfigValue("branch_prefix", "mine")
+	require.NoError(t, err)
+	dir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	path := filepath.Join(dir, config.TomlConfigFileName)
+
+	editor, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	require.NoError(t, err)
+
+	verdict, loadErr := diskSavedValue("branch_prefix", "mine")
+	require.Equal(t, savedValueFileUnreadable, verdict,
+		"an empty file cannot confirm the save, and must not be judged against defaults")
+	require.Error(t, loadErr)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err, "the readback must not remove the file the editor is writing")
+	require.Empty(t, data, "the readback must not materialize defaults over it")
+
+	const edit = "branch_prefix = \"theirs\"\n"
+	_, err = editor.WriteString(edit)
+	require.NoError(t, err)
+	require.NoError(t, editor.Close())
+
+	data, err = os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, edit, string(data), "the editor's write must land in the live config file")
+}
+
+// A missing file is the same kind of answer, and the readback must not create
+// one: only startup regenerates config.
+func TestDiskReadbackDoesNotRecreateAMissingFile(t *testing.T) {
+	configClientHome(t)
+	_, err := config.SetGlobalConfigValue("branch_prefix", "mine")
+	require.NoError(t, err)
+	dir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	path := filepath.Join(dir, config.TomlConfigFileName)
+	require.NoError(t, os.Remove(path))
+
+	verdict, loadErr := diskSavedValue("branch_prefix", "mine")
+	require.Equal(t, savedValueFileUnreadable, verdict)
+	require.Error(t, loadErr)
+	_, statErr := os.Stat(path)
+	require.True(t, os.IsNotExist(statErr), "the readback must not materialize a config file")
+}
