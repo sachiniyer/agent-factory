@@ -57,9 +57,9 @@ closing any of them does not stop the work.
 
 It also keeps sessions alive across process death and reboots, runs the
 scheduler, handles usage-limit parking and resume, and serves the web client.
-The daemon starts only for a caller that needs the local one running — a
-locally targeted call ensures it as part of the call — plus a best-effort
-bare-launch check of the local task store for enabled work. Install its
+af starts it on your machine when a request needs it — opening the TUI without
+`--daemon-url` is one — or when a bare `af` launch finds an enabled task;
+[the daemon's lifecycle](daemon.md#lifecycle) has the exact rules. Install its
 autostart unit once to keep tasks firing across logouts:
 
 ```bash

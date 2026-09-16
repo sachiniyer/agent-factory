@@ -55,12 +55,10 @@ surface — each overrides the repo config for that one session:
     separately provisioned workspace — a headless, single-workspace process
     that a daemon dials and drives. It serves **no frontend**: opening its port
     in a browser gets you a 404 telling you so. The **web UI is served by the
-    daemon**, and it starts where the daemon's own lifecycle does: a bare `af`
-    launch on the default local target ensures it on demand, and a bare launch
-    also checks the local task store for enabled work (best-effort). `af daemon
-    install` starts it under the user service manager and keeps it available
-    without an open TUI. Once it is running, open
-    <http://localhost:8443>. See [The web client](web.md).
+    daemon**: open the TUI with `af` and no `--daemon-url` to start this
+    machine's daemon, or run `af daemon install` to start it and keep it
+    running without af open, then open <http://localhost:8443>. See
+    [The web client](web.md) and [the daemon's lifecycle](daemon.md#lifecycle).
 
 ---
 

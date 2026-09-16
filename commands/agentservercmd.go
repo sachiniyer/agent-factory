@@ -39,23 +39,25 @@ the same REST + WebSocket protocol the daemon speaks, behind a plain-HTTP
 listener that requires a bearer token on every request.
 
 This does not start the web UI, and serves no frontend at all — opening its port
-in a browser returns a 404 saying so. The browser app starts where the daemon's
-own lifecycle does: a call that needs the local daemon ensures it — a bare 'af'
-launch on the default local target is the usual such call — and a bare launch
-also checks the local task store for enabled work, a best-effort background
-start that can lose to an early exit. 'af daemon install' starts it under the
-user service manager and keeps it available without an open TUI. Once the
-daemon is running, open http://localhost:8443. The web UI is bundled into the
-daemon and served from its network.listen_addr; agent-server is only the
-headless per-workspace backend that a daemon drives, and it exists to be
-consumed by a daemon rather than opened by a person.
+in a browser returns a 404 saying so. The browser app is served by this
+machine's daemon. To start that daemon, open the TUI with a bare 'af' and no
+--daemon-url (af never starts a daemon at that address), or run
+'af daemon install' to start it and keep it running without af open;
+'af daemon --help' lists every way it starts. Once the daemon is running, open
+http://localhost:8443. The web UI is bundled into the daemon and served from its
+network.listen_addr; agent-server is only the headless per-workspace backend
+that a daemon drives, and it exists to be consumed by a daemon rather than
+opened by a person.
 
-This is the process that runs inside a docker container or on an ssh remote
-(#1592 Phase 4): the owning daemon dials the authed URL it exposes and drives
-the workspace exactly as it drives a local in-process session. Docker publishes
-that URL on the daemon host's loopback; SSH tunnels it from another machine. Run
-agent-server directly only to expose one separately provisioned workspace to a
-daemon.
+This is the process that runs inside a separately provisioned workspace (#1592
+Phase 4): a Docker container, the host an ssh or sandbox backend is configured
+to reach, or wherever a hook provisioner starts it. The owning daemon dials the
+authed URL it exposes and drives the workspace exactly as it drives a local
+in-process session. Docker publishes that URL on the daemon host's loopback;
+ssh and sandbox forward it to a daemon-local loopback port over an 'ssh -L'
+tunnel to their configured target, which may be this machine; a hook
+provisioner reports the URL itself. Run agent-server directly only to expose
+one separately provisioned workspace to a daemon.
 
 The listener always requires the token and serves plain HTTP (no TLS) — reach it
 over a private network or a tunnel (the docker/ssh runtimes forward a loopback

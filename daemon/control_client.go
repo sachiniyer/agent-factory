@@ -155,8 +155,8 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 	// Fail-open — only a provably live upgrade stops the spawn, as a typed
 	// retryable error; a stale, corrupt, or absent journal proceeds. The gate is
 	// bounded, so a bad journal can never wedge this launch path (which fronts
-	// every on-demand start of the default local daemon; remote targets never
-	// enter this lifecycle path).
+	// every on-demand start, and only ever starts this home's daemon; a request
+	// routed to a --daemon-url target never reaches it).
 	if homeDir, ok := configHomeDir(); ok {
 		switch decision, gateErr := checkUpgradeGateUntil(homeDir, false, deadline); decision {
 		case upgradeGateInProgress, upgradeGateRestoringPrevious:

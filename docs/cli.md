@@ -81,8 +81,8 @@ session "foo" exists in multiple projects: /repos/alpha, /repos/beta — pass --
 
 Against a remote daemon (`--daemon-url`/`AF_DAEMON_URL`), the split follows the transport:
 
-- **Served by the targeted daemon** — `list`, `get`, `watch`, `preview`, `attach` — ignore the current directory rather than sending it as a scope, since it names a repo on *your* machine, not the daemon's. A bare title resolves across the remote's projects.
-- **Everything else** — `kill`, `archive`, `restore`, `retry-limit`, `send-prompt`, tab create/delete — reaches the *local* daemon regardless of `--daemon-url`, so it stays scoped to the current directory.
+- **Served by the targeted daemon** — `list`, `get`, `watch`, `preview`, `attach`, `whoami` — ignore the current directory rather than sending it as a scope, since it names a repo on *your* machine, not the daemon's. A bare title resolves across the remote's projects.
+- **Everything else** — `create`, `backends`, `send-prompt`, `kill`, `archive`, `restore`, `handoff`, `retry-limit`, and every tab verb (`tab-create`, `tab-delete`, `tab-rename`, `tab-reorder`, and their `tabs` aliases) — sends its work to *this machine's* daemon regardless of `--daemon-url`. It stays scoped to the current directory and, like any request to this machine's daemon, starts that daemon if it is not running (see [the daemon's lifecycle](daemon.md#lifecycle)).
 
 Caveat for the reads: `--repo` becomes an id by hashing the path **as given on this machine**, so it only disambiguates when the daemon has that project checked out at the same absolute path. Prefer a bare title against a remote and let the ambiguity error tell you when to narrow it.
 
@@ -181,7 +181,7 @@ Because the binding is inherited from the current directory, running `tasks add`
 
 ## `af daemon`
 
-The background daemon hosts task cron schedules, watch-task scripts, session monitoring, and the web UI. It starts only for a caller that needs the local one running — a locally targeted call ensures it as part of the call — plus a best-effort bare-launch check of the local task store. Installing the daemon as a user-level autostart unit (systemd user service on Linux, launchd agent on macOS) keeps scheduled tasks firing after reboots. See [tasks.md](tasks.md#daemon-lifecycle).
+The background daemon hosts task cron schedules, watch-task scripts, session monitoring, and the web UI. af starts this machine's daemon on its own only when a request needs it — opening the TUI without `--daemon-url`, or a command whose work only this machine's daemon can do — or when a bare `af` launch finds an enabled task (best-effort); it never starts one at a `--daemon-url` address. [The daemon's lifecycle](daemon.md#lifecycle) has the exact rules. Installing the daemon as a user-level autostart unit (systemd user service on Linux, launchd agent on macOS) keeps scheduled tasks firing after reboots. See [tasks.md](tasks.md#daemon-lifecycle).
 
 ```bash
 af daemon install      # register autostart at login

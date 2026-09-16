@@ -16,16 +16,27 @@ import (
 )
 
 // The daemon is the single always-on host for task schedules (cron and watch
-// scripts), session monitoring, and the web UI. On-demand startup is exactly
-// one mechanism — daemon.EnsureDaemon — and a caller reaches it only when the
-// call needs the local daemon running: the TUI's calls on the default local
-// target (withDaemonHTTP), the local control verbs (callDaemon), the CLI
-// attach's own ensure dial (api/sessions.go), the bare root launch's
-// enabled-task check, and the post-upgrade respawn. Callers built to
-// answer without a daemon — the no-spawn reads, config file paths, and every
-// remote target — never enter it. `af daemon install` is the separate,
-// supervised mechanism: it registers a user-level autostart unit so schedules
-// and the web UI survive logouts and reboots without ever opening af.
+// scripts), session monitoring, and the web UI. af starts only the daemon for
+// this process's AF home (daemon.DaemonSocketPath); nothing here can start one
+// at a --daemon-url address. On its own, af starts it only through
+// daemon.EnsureDaemon, and all but one caller run that just before a request
+// to this home's daemon:
+//
+//   - callDaemon — every gob control verb in daemon/control_client.go. It
+//     always dials this home's socket and never consults --daemon-url, so a
+//     CLI verb that does not route the flag elsewhere first (for example
+//     `af sessions kill`) ensures this home's daemon with the flag set.
+//   - withDaemonHTTP (app/session_control.go) — TUI calls, local target only.
+//   - `af sessions attach` (api/sessions.go) — local target only.
+//
+// The exception, an ensure that precedes no request, is ensureDaemonForTasks:
+// the bare root launch's enabled-task check, which reads this home's task
+// store whatever the TUI targets. EnsureDaemon asks the service manager first
+// when the installed unit serves this home, and defers to a live upgrade.
+// Every other start is an explicit lifecycle command: install (the autostart
+// unit), adopt, reset's unit resume, and the restart/upgrade respawn, which
+// runs only after stopping a live daemon (restartDaemonFromPathDetailed).
+// docs/daemon.md#lifecycle is the user-facing copy of this inventory.
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
@@ -34,20 +45,31 @@ var daemonCmd = &cobra.Command{
 watch-task scripts, monitors sessions, and serves the bundled web UI.
 
 The web UI is part of the daemon — there is no separate web command — so it is
-served whenever the daemon is running. af starts the daemon lazily, and only
-the local one: a call that needs a running local daemon ensures it as part of
-the call — opening af on the default local target, creating a session,
-attaching to one, adding a task. Commands built to answer without one
-('af daemon status', 'af sessions list', config reads and writes) and every
-call that genuinely routes to a remote --daemon-url/AF_DAEMON_URL daemon
-never start anything — but the session mutation verbs that always act
-locally (kill, archive, restore, retry-limit, send-prompt, tab create/delete)
-still ensure the local daemon even when the flag is set. Outside any
-call, a bare 'af' launch checks the local task store and asks for the daemon
-when an enabled task exists (best-effort), and 'af daemon install' starts it
-under the user service manager. That is the whole list.
+served whenever the daemon is running.
 
-With af running, open:
+af only ever starts the daemon for this machine's AF home; it never starts one
+at a --daemon-url/AF_DAEMON_URL address. It starts that daemon on its own in
+exactly two cases:
+
+  - A request needs it. Before af sends a request that only the daemon can
+    answer, it makes sure the daemon is running: opening the TUI without
+    --daemon-url, and every command whose work only this machine's daemon can
+    do ('af sessions create' and 'af sessions kill' always; 'af tasks add' and
+    'af sessions attach' when no --daemon-url is set). Commands that can answer
+    without a daemon, such as 'af daemon status' and 'af sessions list', never
+    start it.
+  - A bare 'af' launch finds an enabled task in this machine's task store. The
+    check runs in the background and is best-effort.
+
+--daemon-url changes only where a command that supports it sends its requests;
+it switches neither case off. When the installed autostart unit serves this
+home, an on-demand start asks the service manager to start it first. Otherwise
+the daemon starts only through the commands that manage it:
+'af daemon install', 'af daemon adopt', 'af reset' (which restarts the unit it
+paused), and 'af daemon restart' or an upgrade, which replace a running daemon
+and start nothing when none is running.
+
+With the daemon running, open:
 
     http://localhost:8443
 

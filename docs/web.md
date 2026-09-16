@@ -10,12 +10,12 @@ are the web client's own.
 With the daemon running, open **<http://127.0.0.1:8443>** on the same machine.
 The default listener needs no configuration or token. If nothing answers,
 `af daemon status` reports whether the daemon is running without starting it.
-The local daemon starts only for a caller that needs it running: run `af` in a
-git repository on the default local target to open the TUI, which ensures it as
-part of the call — a `--daemon-url`/`AF_DAEMON_URL` target is dial-only and can
-never be started this way. A port conflict can leave the local daemon running
-without the web listener; check its logs if the browser still cannot connect.
-For automatic startup at login, use `af daemon install`.
+To start it, open the TUI with `af` and no `--daemon-url`: that starts this
+machine's daemon, and af never starts one at a `--daemon-url` address.
+[The daemon's lifecycle](daemon.md#lifecycle) lists every other way it starts.
+A port conflict can leave the daemon running without the web listener; check its
+logs if the browser still cannot connect. For automatic startup at login, use
+`af daemon install`.
 
 For another machine or a shared host, read [Beyond localhost](#beyond-localhost)
 after the tour. [Remote daemon access](remote-http-auth.md) is the full setup guide.

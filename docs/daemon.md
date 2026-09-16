@@ -59,22 +59,42 @@ paragraph because it's why `af` doesn't corrupt itself:
 
 ## Lifecycle
 
-af starts a daemon **only for a caller that needs the local one running** — the
-start is part of the call. That ensure path is the whole on-demand mechanism:
-the TUI's calls on the default local target and the local control verbs
-(creating a session, writing a task, an account login, attaching, and the
-like) each make sure the daemon is up before doing their work. Commands built to answer
-without a daemon — `af daemon status`, `af sessions list`, `af tasks list`,
-config reads and writes — take the no-spawn path, and every remote
-`--daemon-url`/`AF_DAEMON_URL` target is dial-only, so none of them can start
-one.
+af only ever starts the daemon for **this machine's** af home
+(`$AGENT_FACTORY_HOME`, default `~/.agent-factory`). It has no way to start a
+daemon anywhere else, so it never starts one at a
+`--daemon-url`/`AF_DAEMON_URL` address.
 
-Two starters exist outside any call, and they complete the list: a bare `af`
-launch checks the local task store in the background and asks the local daemon
-to start when an enabled task exists (best-effort — an early exit can outrun
-it), and `af daemon install` hands startup to the user service manager, which
-is also what keeps tasks firing across logouts. For interactive local use you
-usually don't have to think about it at all.
+af starts this machine's daemon on its own in exactly two cases:
+
+- **A request needs it.** Before af sends a request that only the daemon can
+  answer, it makes sure the daemon is running. Opening the TUI without
+  `--daemon-url` is such a request. So is every command whose work only this
+  machine's daemon can do — for example `af sessions create` and
+  `af sessions kill` always, and `af tasks add`, `af accounts login`, and
+  `af sessions attach` when no `--daemon-url` is set. Commands that can answer
+  without a daemon, such as `af daemon status`, `af sessions list`, and
+  `af tasks list`, never start it.
+- **A bare `af` launch finds an enabled task** in this home's task store. The
+  check runs in the background and is best-effort: if `af` exits first,
+  nothing starts.
+
+`--daemon-url` changes only where a command that supports it sends its
+requests. It switches neither case off: a command that still sends its work to
+this machine's daemon with the flag set — the local session commands listed
+under [`af sessions`](cli.md#af-sessions) — starts that daemon like any other
+request, and a bare `af --daemon-url …` still runs the task check.
+
+When an installed autostart unit serves this home, an on-demand start asks the
+service manager to start that unit, and launches the daemon directly only if
+the manager fails. While an upgrade is handing over to a new daemon, an
+on-demand start defers to the upgrade instead of starting a second daemon.
+
+Otherwise the daemon starts only when you run a command that manages it:
+`af daemon install` starts it and has the service manager start it at every
+login, `af daemon adopt` starts it under the installed unit, `af reset`
+restarts the installed unit it paused for the wipe, and `af daemon restart` and
+upgrades replace a running daemon and start nothing when none is running. For
+interactive local use you usually don't have to think about any of this.
 
 To keep tasks and sessions running across logouts and reboots, install the
 daemon's autostart unit once:
