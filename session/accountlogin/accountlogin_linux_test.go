@@ -588,6 +588,55 @@ func TestLoginDoesNotCreditACollisionAsACompletedFlow(t *testing.T) {
 	}
 }
 
+// TestCollisionVerdictSurvivesBlockerExit is the finding's exact scenario: the
+// markerless pane that made pane.Start fail exits before the post-Start
+// re-diagnosis probes tmux, so the name reads free — but the collision Start
+// positively observed is still the launch failure. finishedOrFailed's artifact
+// check must never see it: the staged credential would be credited to a flow
+// that never ran. The re-probe is stubbed rather than raced — a real blocker's
+// exit lands wherever tmux scheduling puts it (#4217 flake class).
+func TestCollisionVerdictSurvivesBlockerExit(t *testing.T) {
+	isolateLoginTmux(t)
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	binDir := t.TempDir()
+	dir, err := agentaccount.Register(home, "codex", "work")
+	if err != nil {
+		t.Fatalf("register account: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("stage credential: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	occupyLoginPaneName(t, "codex", "work")
+
+	// The blocker is still up — the collision is real — but the verdict's own
+	// re-probe answers as if it had already exited.
+	previousProbe := collisionProbeSession
+	collisionProbeSession = func(*tmux.TmuxSession) (bool, bool) { return false, true }
+	t.Cleanup(func() { collisionProbeSession = previousProbe })
+
+	supervisor := New()
+	t.Cleanup(supervisor.Stop)
+	_, err = supervisor.Start(context.Background(), Request{Home: home, Agent: "codex", Name: "work"})
+	if err == nil {
+		t.Fatal("a collision whose blocker exited mid-diagnosis was reported as a completed login")
+	}
+	if !errors.Is(err, tmux.ErrSessionNameTaken) {
+		t.Fatalf("the preserved collision verdict must carry ErrSessionNameTaken: %v", err)
+	}
+	if !strings.Contains(err.Error(), "already existed") {
+		t.Fatalf("the blocker that vanished mid-diagnosis must still be reported as the launch failure: %v", err)
+	}
+	if strings.Contains(err.Error(), "credential") {
+		t.Fatalf("the stale artifact must not be credited to a flow that never ran: %v", err)
+	}
+}
+
 // TestLoginReportsANoOpAsFailure is #3384's verification requirement at its
 // sharpest: a flow that exits leaving the account empty must report failure. The
 // alternative is a registered account that looks fine and fails much later, at

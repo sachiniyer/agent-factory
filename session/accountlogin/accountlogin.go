@@ -162,6 +162,14 @@ func New() *Supervisor {
 // different accounts and must not share a flow.
 func key(agent, name string) string { return agent + "/" + name }
 
+// collisionProbeSession is the post-Start re-probe in the collision verdict —
+// a seam because the scenario it decides (the blocker exiting between Start's
+// positive name-collision and this second probe) is a real-tmux race no test
+// can stage deterministically; the test stubs the probe's answer instead.
+var collisionProbeSession = func(pane *tmux.TmuxSession) (bool, bool) {
+	return pane.ProbeSession()
+}
+
 // Start opens (or rejoins) the login flow for one account.
 //
 // The order is load-bearing. Everything that can refuse runs BEFORE anything is
@@ -412,11 +420,22 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 				"cannot start the %s login flow for account %q: a pane named %s already exists on the shared tmux server "+
 					"and is owned by a different agent-factory home — stop the conflicting flow first or use a distinct {agent, name}",
 				req.Agent, req.Name, pane.SanitizedName())
-		} else if exists, known := pane.ProbeSession(); known && exists {
+		} else if exists, known := collisionProbeSession(pane); known && exists {
 			return Session{}, fmt.Errorf(
 				"cannot start the %s login flow for account %q: a pane named %s already exists on the shared tmux server "+
 					"and its owning home cannot be proven — stop the conflicting flow first or use a distinct {agent, name} "+
 					"(underlying launch error: %w)",
+				req.Agent, req.Name, pane.SanitizedName(), err)
+		} else if errors.Is(err, tmux.ErrSessionNameTaken) {
+			// The blocker exited between Start's positive collision verdict and
+			// the re-diagnosis above: the name is free now, but no login command
+			// ever ran, so finishedOrFailed's artifact check would credit a
+			// stale credential to a flow that never started. The collision IS
+			// the launch failure; it survives the blocker's exit.
+			return Session{}, fmt.Errorf(
+				"cannot start the %s login flow for account %q: a pane named %s already existed on the shared tmux server "+
+					"at launch and exited before its owning home could be proven — stop conflicting flows first or use a "+
+					"distinct {agent, name} (underlying launch error: %w)",
 				req.Agent, req.Name, pane.SanitizedName(), err)
 		}
 		return finishedOrFailed(req, base, err)
