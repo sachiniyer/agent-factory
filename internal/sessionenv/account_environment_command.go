@@ -105,6 +105,20 @@ func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) 
 			}
 		}
 		return false
+	case *syntax.BinaryTest:
+		// Numeric comparison operators in `[[ ]]` (-eq, -ne, -lt, -gt, -le,
+		// -ge) cause bash to evaluate both operands as arithmetic. A command
+		// substitution in either operand is re-evaluated as fresh arithmetic by
+		// bash and can assign a denied name via its output, e.g.
+		// `[[ 0 -eq $(printf CODEX_HOME=1) ]]`. Fail closed when either
+		// operand of a numeric operator contains a command substitution.
+		switch node.Op {
+		case syntax.TsEql, syntax.TsNeq, syntax.TsLeq, syntax.TsGeq, syntax.TsLss, syntax.TsGtr:
+			if wordHasCommandSubstitution(node.X) || wordHasCommandSubstitution(node.Y) {
+				return true
+			}
+		}
+		return false
 	case *syntax.UnaryTest:
 		return unaryTestMutatesAccountEnvironment(node)
 	default:
