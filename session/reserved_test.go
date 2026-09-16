@@ -151,3 +151,36 @@ func TestIsReservedRecordTitleScopesDerivedNameToLocalTmux(t *testing.T) {
 		}
 	}
 }
+
+// TestIsReservedTitleSpellingExcludesDerivedNames pins the recovery question's
+// boundary (#4407 review). Ordinary Lost/Dead recovery withholds itself from a
+// record so the root ensure loop can heal it — but that loop only finds the
+// exact "root" key, and cannot re-create while a derived-name record holds
+// af_root. So the spelling predicate must be a strict subset of record
+// identity: every spelled root is reserved identity on every backend, and the
+// local derived-name records are reserved identity WITHOUT being spelled.
+func TestIsReservedTitleSpellingExcludesDerivedNames(t *testing.T) {
+	for _, title := range []string{"root", "Root", "ROOT", " root ", " ROOT ", "rOoT"} {
+		if !IsReservedTitleSpelling(title) {
+			t.Fatalf("IsReservedTitleSpelling(%q) = false, want the reserved spelling", title)
+		}
+		for _, backendType := range []string{"", "local", "docker", "ssh", "sandbox", "remote"} {
+			if !IsReservedRecordTitle(title, backendType) {
+				t.Fatalf("IsReservedRecordTitle(%q, %q) = false: a spelled root must be reserved identity everywhere", title, backendType)
+			}
+		}
+	}
+	for _, title := range []string{"ro ot", "r o o t", "ro\tot", "ro  ot"} {
+		if !IsReservedRecordTitle(title, "local") {
+			t.Fatalf("premise: IsReservedRecordTitle(%q, local) = false, want the derived-name identity", title)
+		}
+		if IsReservedTitleSpelling(title) {
+			t.Fatalf("IsReservedTitleSpelling(%q) = true: a derived-name record is not spelled as the root, and withholding its recovery strands it", title)
+		}
+	}
+	for _, title := range []string{"Ro ot", "worker", "root-2", "ro-ot", "rooted", ""} {
+		if IsReservedTitleSpelling(title) {
+			t.Fatalf("IsReservedTitleSpelling(%q) = true, want an ordinary title", title)
+		}
+	}
+}

@@ -41,11 +41,11 @@ var reservedTmuxName = tmux.SanitizedNameForRepo(RootSessionTitle, "")
 // before #4396 and can sit in storage as an ordinary session beside the root.
 // Folding case on the derived name would reclassify that record as a root it
 // is not — unarchivable (daemon/archive.go), refused handoff and limit-resume,
-// skipped by Lost-restore, and arming rootKilledAt on kill against a repo
-// whose real root it is not.
+// and arming rootKilledAt on kill against a repo whose real root it is not.
 //
 // It is asked of records that already exist — whether to pin the row to the
-// top of the sidebar, to skip Lost-restore, to arm the re-create grace window.
+// top of the sidebar, to arm the re-create grace window. Whether to skip
+// Lost-restore is the narrower IsReservedTitleSpelling question.
 // The admission question (ReservedTitleCollision) is the wider one: a create
 // may not take even a lookalike of the reserved name, while a record that
 // predates admission keeps the identity its tmux name actually claims.
@@ -67,13 +67,29 @@ func IsReservedTitle(title string) bool {
 // archivable, recoverable, and unable to arm rootKilledAt — while the spelling
 // clause still marks a remote "root" as the reserved session it is.
 func IsReservedRecordTitle(title, backendType string) bool {
-	if strings.EqualFold(strings.TrimSpace(title), RootSessionTitle) {
+	if IsReservedTitleSpelling(title) {
 		return true
 	}
 	if backendType == "" || backendType == config.BackendLocal {
 		return tmux.SanitizedNameForRepo(title, "") == reservedTmuxName
 	}
 	return false
+}
+
+// IsReservedTitleSpelling reports whether a title is SPELLED as the reserved
+// one — trimmed and case-folded ("root", " ROOT ") — without the derived-name
+// clause. It is IsReservedRecordTitle's spelling half, and the whole of the
+// pre-#4396 IsReservedTitle.
+//
+// Ordinary Lost/Dead recovery withholds itself from exactly these records and
+// no more (#4407 review). The withholding hands recovery to the root ensure
+// loop, but that loop looks up only the exact "root" key, and its re-create is
+// refused while any record already claims the root's tmux name. A local
+// derived-name record ("ro ot") is therefore one the loop can neither find nor
+// replace: withholding ordinary recovery from it too would leave a recoverable
+// worktree with kill as its only exit.
+func IsReservedTitleSpelling(title string) bool {
+	return strings.EqualFold(strings.TrimSpace(title), RootSessionTitle)
 }
 
 // ReservedTitleCollision returns the reserved title a candidate would claim,
