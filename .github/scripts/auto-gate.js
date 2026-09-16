@@ -803,15 +803,19 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // a merge that CHANGES workflow definitions may be re-raising a stale set —
   // most sharply when it adds a push-gated workflow, which cannot be in the list
   // the running copy holds.
-  const workflowsChanged = files.some((path) => path.startsWith(".github/workflows/"));
+  const workflowsChanged = files.some((file) => file.filename.startsWith(".github/workflows/"));
   // A `_test.go` file is not compiled into the shipped binary, so it cannot
   // change what a user sees — and the label this gate demands is a claim that
   // someone drove the TUI and looked. #3601's only file under these prefixes was
   // `ui/config_pane_test.go`, and the lane had to run a play-test to satisfy a
-  // gate for a diff with nothing to look at. The subtraction is per FILE, not
-  // per PR: a production file under any prefix still requires the label, and so
-  // does a diff that changes a test and a production file together.
-  const touchesTui = files.some(isGatedTuiPath);
+  // gate for a diff with nothing to look at. A diff whose every changed line is
+  // a `//` comment is the same category by the same argument (#4477): #4231's
+  // only gated-prefix file was `app/session_control.go` and every changed line
+  // in it was prose. The subtraction is per FILE, not per PR: a production file
+  // under any prefix still requires the label, and so does a diff that changes
+  // a test and a production file together — or a file mixing comment and code
+  // lines in one patch.
+  const touchesTui = files.some(isGatedTuiChange);
   const labels = new Set(pr.labels.map((label) => label.toLowerCase()));
 
   const requiredChecks = await evaluateRequiredChecks({
@@ -4606,6 +4610,55 @@ function isGatedTuiPath(path) {
   return !path.endsWith("_test.go") && TUI_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
 }
 
+// A `//`-leading line that is not a plain comment: compiler and toolchain
+// directives are spelled like comments and still change what a build or a
+// check produces — `//go:build`/`//go:embed`/`//go:generate`, `//line`, the
+// legacy `// +build` constraint, cgo's `//export`/`//extern`/`// #cgo`, and
+// linter pragmas (`//nolint`, `//nosec`, `//lint:`) that the required Lint
+// check itself reads. Matching is looser than the real directive syntax
+// (directives take no space after `//`); over-matching only ever costs a
+// play-test, while under-matching waives a change that needed one.
+const TUI_DIRECTIVE_COMMENT = /^\/\/\s*(?:go:|line[\s:]|\+build|#\s*cgo|export\b|extern\b|nolint|nosec|lint:)/;
+
+// The diff-level version of isGatedTuiPath. A file under a TUI prefix is gated
+// unless its patch proves every changed line is an inert comment; the
+// tree-snapshot comparison in evaluatePlayTest keeps isGatedTuiPath because a
+// blob listing carries no diff to prove anything from. Every doubt resolves
+// toward gated — that is what keeps a naive detector from converting the
+// label into a formality (#4477).
+function isGatedTuiChange(file) {
+  return isGatedTuiPath(file.filename) && !isProvablyInertPatch(file.patch);
+}
+
+// True only when the patch itself proves the change is comment-only. The
+// proof fails — and the file stays gated — when:
+//   - `patch` is absent or empty: listFiles omits it for large or binary
+//     diffs, and a patch that was never seen proves nothing;
+//   - a backtick appears anywhere: a `//`-leading line inside a raw string
+//     literal is string content, not a comment, and the literal's delimiters
+//     usually sit in the patch's context lines. (A literal whose backticks
+//     fall outside every hunk's context still slips through — closing that
+//     needs file content, which this deliberately narrow rule does not buy);
+//   - any added or removed line is not a `//`-leading line — code, a struct
+//     tag, a blank line that could be raw-string content — or is a directive.
+// Context lines are ignored: they are unchanged by definition. A patch must
+// contain at least one changed line to prove anything at all.
+function isProvablyInertPatch(patch) {
+  if (typeof patch !== "string" || patch.length === 0 || patch.includes("`")) {
+    return false;
+  }
+  const changedLines = patch
+    .split("\n")
+    .filter((line) => /^[+-]/.test(line) && !line.startsWith("+++") && !line.startsWith("---"));
+  return (
+    changedLines.length > 0 &&
+    changedLines.every((line) => {
+      const content = line.slice(1).trimStart();
+      return content.startsWith("//") && !TUI_DIRECTIVE_COMMENT.test(content);
+    })
+  );
+}
+
 // Like a prose review verdict, the attestation names its commit explicitly.
 // The latest recognized attestation wins; a label alone cannot identify tested code.
 async function evaluatePlayTest({ github, context, pr, comments, subject }) {
@@ -4686,8 +4739,8 @@ async function listPullRequestFiles({ github, context, number, subject = null })
   // binary while leaving one path that ends in `_test.go`.
   return files.flatMap((file) =>
     file.previous_filename && file.previous_filename !== file.filename
-      ? [file.filename, file.previous_filename]
-      : [file.filename],
+      ? [{ filename: file.filename, patch: file.patch }, { filename: file.previous_filename }]
+      : [{ filename: file.filename, patch: file.patch }],
   );
 }
 

@@ -5810,6 +5810,197 @@ test("renaming one test file to another stays outside the TUI gate", async () =>
   assert.match(result.summary, /^PASS:/);
 });
 
+// #4477: the `_test.go` subtraction's own argument — not compiled into the
+// shipped binary, so there is nothing a play-test could look at — covers a
+// file whose every changed line is a `//` comment. The patch rides along in
+// the listFiles response the gate already fetches, so the proof costs no extra
+// read. This is the #4231 shape: its only gated-prefix file was
+// app/session_control.go with a pure-prose diff, and its user-visible change
+// was CLI help text under an ungated prefix.
+test("a comment-only change under a TUI prefix does not demand the play-tested label", async () => {
+  const result = await evaluateGate({
+    files: [
+      {
+        filename: "app/session_control.go",
+        status: "modified",
+        patch:
+          "@@ -10,5 +10,6 @@\n" +
+          " func control() {\n" +
+          "-// The TUI drives every daemon control + read call over the HTTP API client\n" +
+          "+// The session, task, project, tab, and snapshot seams in this file use\n" +
+          "+// the HTTP API client (#1592 Phase 2 PR3).\n" +
+          " }",
+      },
+    ],
+  });
+
+  assert.doesNotMatch(
+    result.reasons.join("\n"),
+    /play-tested/,
+    "a comment cannot reach the shipped binary, so there is nothing a play-test could see",
+  );
+  assert.equal(result.shouldMerge, true);
+  assert.match(result.summary, /^PASS:/);
+});
+
+// The same proof holds for a diff that only deletes comments, and for
+// comments inside a function body — indentation before `//` is still a
+// comment.
+test("comment deletions and indented comments under a TUI prefix stay inert", async () => {
+  const result = await evaluateGate({
+    files: [
+      {
+        filename: "ui/pane.go",
+        status: "modified",
+        patch:
+          "@@ -20,6 +20,4 @@\n" +
+          " func pane() {\n" +
+          "-// a stale note\n" +
+          "-\t// an indented stale note\n" +
+          "-   // a deeply indented stale note\n" +
+          " \trender()\n" +
+          " }",
+      },
+    ],
+  });
+
+  assert.doesNotMatch(result.reasons.join("\n"), /play-tested/);
+  assert.equal(result.shouldMerge, true);
+});
+
+// …and the #4231 shape whole: the comment-only gated file plus a real change
+// under an ungated prefix never enters the gate's field at all.
+test("a comment-only TUI file beside an ungated change does not demand the label", async () => {
+  const result = await evaluateGate({
+    files: [
+      {
+        filename: "app/session_control.go",
+        status: "modified",
+        patch: "@@ -1,2 +1,2 @@\n-// old wording\n+// new wording",
+      },
+      {
+        filename: "commands/daemoncmd.go",
+        status: "modified",
+        patch: "@@ -1,2 +1,2 @@\n-\tUse: \"old\"\n+\tUse: \"new\"",
+      },
+    ],
+  });
+
+  assert.doesNotMatch(result.reasons.join("\n"), /play-tested/);
+  assert.equal(result.shouldMerge, true);
+});
+
+// The subtraction stays per FILE: a comment-only file does not launder a real
+// change in a second gated file.
+test("a comment-only file beside a real TUI change still demands the label", async () => {
+  const result = await evaluateGate({
+    files: [
+      {
+        filename: "app/session_control.go",
+        status: "modified",
+        patch: "@@ -1,2 +1,2 @@\n-// old wording\n+// new wording",
+      },
+      {
+        filename: "ui/pane.go",
+        status: "modified",
+        patch: "@@ -1,2 +1,2 @@\n-\trender(a)\n+\trender(b)",
+      },
+    ],
+  });
+
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+  assert.equal(result.shouldMerge, false);
+});
+
+// …and inside one file: a patch that mixes a comment line and a code line is
+// not comment-only, however small the code line is.
+test("a patch mixing comment and code lines keeps the TUI gate", async () => {
+  const result = await evaluateGate({
+    files: [
+      {
+        filename: "app/session_control.go",
+        status: "modified",
+        patch: "@@ -1,4 +1,4 @@\n-// old doc\n+// new doc\n-\tmaxRows = 10\n+\tmaxRows = 20",
+      },
+    ],
+  });
+
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+  assert.equal(result.shouldMerge, false);
+});
+
+// Directives are spelled like comments and change what a build or the Lint
+// check produces. Each one keeps the requirement, added or removed.
+for (const directive of [
+  "//go:build linux",
+  "//go:embed icon.png",
+  "//go:generate ./gen",
+  "//line generated.go:12",
+  "// +build linux",
+  "//export CSymbols",
+  "// #cgo LDFLAGS: -lm",
+  "//nolint:errcheck",
+  "//nosec G101",
+  "//lint:ignore X reason",
+]) {
+  test(`a ${directive} line keeps the TUI gate`, async () => {
+    const result = await evaluateGate({
+      files: [
+        {
+          filename: "app/dirs.go",
+          status: "modified",
+          patch: `@@ -1,2 +1,2 @@\n-// old comment\n+${directive}`,
+        },
+      ],
+    });
+
+    assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+    assert.equal(result.shouldMerge, false);
+  });
+}
+
+// A `//`-leading line inside a raw string literal is string content, not a
+// comment. When the literal's backtick delimiters sit inside the patch's
+// context lines the proof fails here; when they sit outside every hunk the
+// patch cannot see them at all, which is the documented residual this rule
+// deliberately accepts.
+test("a comment-shaped line inside a raw string literal keeps the TUI gate", async () => {
+  const result = await evaluateGate({
+    files: [
+      {
+        filename: "ui/help.go",
+        status: "modified",
+        patch:
+          "@@ -3,5 +3,5 @@\n" +
+          " const usage = `\n" +
+          " usage text\n" +
+          "-// old flag line\n" +
+          "+// new flag line\n" +
+          " `",
+      },
+    ],
+  });
+
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+  assert.equal(result.shouldMerge, false);
+});
+
+// Everything the patch cannot prove stays gated: no patch field at all
+// (listFiles omits it for large or binary diffs), a patch with no changed
+// lines, and a changed blank line — whitespace can be raw-string content.
+for (const [kind, entry] of Object.entries({
+  "no patch": { filename: "app/huge.go", status: "modified" },
+  "no changed lines": { filename: "app/moved.go", status: "modified", patch: "@@ -1,2 +1,2 @@\n func a() {}\n func b() {}" },
+  "a blank line": { filename: "app/pad.go", status: "modified", patch: "@@ -1,2 +1,3 @@\n // a comment\n+\n func a() {}" },
+})) {
+  test(`a gated file with ${kind} keeps the TUI gate`, async () => {
+    const result = await evaluateGate({ files: [entry] });
+
+    assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+    assert.equal(result.shouldMerge, false);
+  });
+}
+
 test("a usage-limited reviewer does not waive unresolved inline findings", async () => {
   const result = await evaluateGate({
     issueComments: [codexRateLimit()],
