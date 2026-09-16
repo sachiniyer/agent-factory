@@ -17341,6 +17341,17 @@ function beginTabRename(btn, tab, actions2, editedId, editedSessionId) {
   input.focus();
   input.select();
 }
+function inertRowReason(s) {
+  let cause = "";
+  if (s.user_killed === true) {
+    cause = "kill pending";
+  } else if (s.startup_state_unknown === true) {
+    cause = "startup could not be confirmed";
+  } else if (s.pending_account_swap !== void 0) {
+    cause = "account swap in progress";
+  }
+  return cause === "" ? "cannot be opened" : `cannot be opened \xB7 ${cause}`;
+}
 function sessionRow(s, selected, openSession, buildActions, previous) {
   const status = rowStatus(s);
   const operator = operatorKind(s);
@@ -17385,24 +17396,30 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   row.append(statusSlot);
   row.append(main);
   if (managed) {
-    row.append(buildActions(s));
+    const actions2 = buildActions(s);
+    if (!actionable) {
+      actions2.setAttribute("aria-disabled", "false");
+    }
+    row.append(actions2);
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   const modelChange = s.model_change ? `; model changed from ${s.model_change.before} to ${s.model_change.after}` : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
+  const inertReason = managed && !actionable ? `; ${inertRowReason(s)}` : "";
   row.dataset.idleTitleBase = `${s.title} \u2014 ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
+  row.dataset.idleTitleInert = inertReason;
   row.setAttribute(
     "title",
-    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}`
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${inertReason}`
   );
-  if (!actionable && !managed) {
-    row.setAttribute("aria-disabled", "true");
-  } else if (actionable) {
+  if (actionable) {
     row.onclick = () => openSession(s.id);
+  } else {
+    row.setAttribute("aria-disabled", "true");
   }
   return row;
 }
@@ -17421,7 +17438,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}`
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`
       );
     }
   }
