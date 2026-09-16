@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"path"
 	"strconv"
@@ -606,11 +607,110 @@ func resolveConflictingDockerSelectors(ctx context.Context, environ []string, ra
 	}
 	hostEndpoint := strings.TrimSpace(endpoints[0])
 	contextEndpoint := strings.TrimSpace(endpoints[1])
-	if hostEndpoint != contextEndpoint {
+	if !sameDockerEndpoint(hostEndpoint, contextEndpoint) {
 		return "", fmt.Errorf("DOCKER_HOST and DOCKER_CONTEXT are both set and select different Docker engines (DOCKER_HOST resolves to %q, DOCKER_CONTEXT=%q to %q); the docker CLI dials DOCKER_HOST but its reference documents DOCKER_CONTEXT as the override, so af will not guess — unset the one you did not mean",
 			hostEndpoint, rawContext, contextEndpoint)
 	}
 	return hostEndpoint, nil
+}
+
+// sameDockerEndpoint reports whether two endpoint strings provably name the
+// same engine. Byte-equal strings always do — a context storing the literal
+// DOCKER_HOST value needs no further proof. Otherwise both are canonicalized
+// and compared, so differently SERIALIZED spellings of one endpoint (case,
+// default port, trailing dot or slash) still agree: refusing those would be a
+// fail-closed guard rejecting a legitimate configuration (#4413 review).
+//
+// When an endpoint cannot be canonicalized at all the comparison reports
+// false rather than leaning either way: af could not prove the selectors
+// agree, and unprovable agreement is exactly the ambiguity this guard exists
+// to refuse. The same conclusion follows when both are unparseable but
+// byte-different.
+func sameDockerEndpoint(a, b string) bool {
+	if a == b {
+		return true
+	}
+	canonicalA, okA := canonicalDockerEndpoint(a)
+	canonicalB, okB := canonicalDockerEndpoint(b)
+	return okA && okB && canonicalA == canonicalB
+}
+
+// canonicalDockerEndpoint normalizes an endpoint string for the same-engine
+// comparison and reports whether the normalization applied. It covers only
+// spelling, never identity:
+//
+//   - scheme and host letter case (`TCP://LOCALHOST:2375`),
+//   - a scheme's default port (tcp 2375, ssh 22 — `tcp://x` is `tcp://x:2375`),
+//   - one trailing dot on a hostname (`localhost.` is `localhost`),
+//   - IPv6 in any spelling netip accepts (`[0:0:0:0:0:0:0:1]` is `::1`),
+//   - a trailing path slash, and the unix:// split url.Parse makes between
+//     host and path (`unix://var/run/docker.sock` joins to the same socket as
+//     `unix:///var/run/docker.sock`).
+//
+// It deliberately does NOT resolve names or equate addresses: tcp://localhost
+// and tcp://127.0.0.1 likely reach one daemon, but proving that needs DNS —
+// and DNS answers in a refusal guard are a fail-open hazard. They still
+// compare different. url.Parse has already rejected non-numeric ports, so a
+// port that survives here is a number Docker will dial.
+func canonicalDockerEndpoint(endpoint string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Scheme == "" {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	switch scheme {
+	case "unix", "npipe", "fd":
+		// The socket is host+path rejoined: url.Parse puts the first segment
+		// into Host for unix://sock/..., leaving Path to carry the rest. No
+		// case folding or dot-segment cleaning — the path is what docker opens.
+		socket := u.Host + u.Path
+		if scheme == "unix" && !strings.HasPrefix(socket, "/") {
+			socket = "/" + socket
+		}
+		return scheme + "://" + socket, true
+	case "tcp", "ssh":
+		host := u.Hostname()
+		if host == "" {
+			return "", false
+		}
+		if addr, aerr := netip.ParseAddr(host); aerr == nil {
+			host = addr.String()
+		} else {
+			host = strings.TrimSuffix(strings.ToLower(host), ".")
+		}
+		port := u.Port()
+		if port == "" {
+			if scheme == "tcp" {
+				port = "2375"
+			} else {
+				port = "22"
+			}
+		}
+		var b strings.Builder
+		b.WriteString(scheme)
+		b.WriteString("://")
+		if u.User != nil {
+			b.WriteString(u.User.String())
+			b.WriteString("@")
+		}
+		b.WriteString(host)
+		b.WriteString(":")
+		b.WriteString(port)
+		if p := strings.TrimSuffix(u.Path, "/"); p != "" {
+			b.WriteString(p)
+		}
+		if u.ForceQuery || u.RawQuery != "" {
+			b.WriteString("?")
+			b.WriteString(u.RawQuery)
+		}
+		if u.Fragment != "" {
+			b.WriteString("#")
+			b.WriteString(u.Fragment)
+		}
+		return b.String(), true
+	default:
+		return "", false
+	}
 }
 
 // dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will

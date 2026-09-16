@@ -309,9 +309,12 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex
   same endpoint. When both are set, the docker CLI dials `DOCKER_HOST`, but its
   reference documents `DOCKER_CONTEXT` as the override. af cannot tell which one
   you meant, so it refuses the combination and names both variables in the
-  error. With only one of them set, af follows the CLI: `DOCKER_HOST` wins over
-  the context selected with `docker context use`, and `DOCKER_CONTEXT` wins over
-  it too.
+  error — including in the daemon-startup orphan sweep, which skips its
+  destructive pass rather than guess an engine. Endpoint spellings that provably
+  name one engine still pass: letter case, a scheme's default port, and trailing
+  dots or slashes are normalized before af compares them. With only one of them
+  set, af follows the CLI: `DOCKER_HOST` wins over the context selected with
+  `docker context use`, and `DOCKER_CONTEXT` wins over it too.
 - The repo must have an `origin` remote the container can clone from (GitHub for
   a real repo; a `file://` path + a `run_args` bind-mount for a self-contained
   test).

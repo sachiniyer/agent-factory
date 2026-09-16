@@ -49,7 +49,11 @@ var precedenceContexts = map[string]string{
 // source rather than from af's resolver, so agreeing with it is evidence about
 // Docker, not a restatement of af.
 type fakeDockerContextCLI struct {
-	active   string
+	active string
+	// contexts replaces precedenceContexts when set, so a test can store
+	// endpoint spellings the real `docker context create` would normalize or
+	// refuse outright (the canonicalization table below).
+	contexts map[string]string
 	inspects [][]string
 }
 
@@ -73,7 +77,11 @@ func (f *fakeDockerContextCLI) endpoint(environ []string, name string) (string, 
 		}
 		return precedenceDefaultSocket, nil
 	}
-	if endpoint, ok := precedenceContexts[name]; ok {
+	contexts := f.contexts
+	if contexts == nil {
+		contexts = precedenceContexts
+	}
+	if endpoint, ok := contexts[name]; ok {
 		return endpoint, nil
 	}
 	return "", fmt.Errorf("context %q: context not found", name)
@@ -190,6 +198,66 @@ func TestResolveDockerEngineEndpoint_PrecedenceTable(t *testing.T) {
 			dial, dialErr := cli.dial(tc.environ)
 			require.NoError(t, dialErr)
 			assert.Equal(t, dial, endpoint, "af must judge the endpoint docker will dial")
+		})
+	}
+}
+
+// TestResolveDockerEngineEndpoint_CanonicalSameEngine pins the comparison the
+// both-selectors case makes: differently serialized spellings of ONE endpoint
+// must be accepted, while spellings af cannot prove equal must still refuse.
+// The contexts live in a per-test table because several spellings (host in the
+// unix:// authority position, a missing port) are not ones `docker context
+// create` would store verbatim.
+func TestResolveDockerEngineEndpoint_CanonicalSameEngine(t *testing.T) {
+	contexts := map[string]string{
+		"localhost-lowercase": "tcp://localhost:2375",
+		"remote-noport":       "tcp://203.0.113.9",
+		"remote-slash":        "tcp://203.0.113.9:2375/",
+		"v6-expanded":         "tcp://[0:0:0:0:0:0:0:1]:2375",
+		"localhost-dot":       "tcp://localhost.:2375",
+		"ssh-noport":          "ssh://user@203.0.113.9",
+		"unix-authority":      "unix://var/run/docker.sock",
+		"remote-tls-port":     "tcp://203.0.113.9:2376",
+		"ssh-other-user":      "ssh://other@203.0.113.9",
+		"loopback-ip":         "tcp://127.0.0.1:2375",
+		"not-an-endpoint":     "not-an-endpoint",
+	}
+	cases := []struct {
+		name    string
+		environ []string
+		want    string // the resolved endpoint; the DOCKER_HOST value verbatim
+		refuse  bool
+	}{
+		{name: "scheme and host case", environ: []string{"DOCKER_HOST=TCP://LOCALHOST:2375", "DOCKER_CONTEXT=localhost-lowercase"}, want: "TCP://LOCALHOST:2375"},
+		{name: "default tcp port implied", environ: []string{"DOCKER_HOST=tcp://203.0.113.9:2375", "DOCKER_CONTEXT=remote-noport"}, want: "tcp://203.0.113.9:2375"},
+		{name: "trailing slash", environ: []string{"DOCKER_HOST=tcp://203.0.113.9:2375", "DOCKER_CONTEXT=remote-slash"}, want: "tcp://203.0.113.9:2375"},
+		{name: "IPv6 spelled long", environ: []string{"DOCKER_HOST=tcp://[::1]:2375", "DOCKER_CONTEXT=v6-expanded"}, want: "tcp://[::1]:2375"},
+		{name: "hostname trailing dot", environ: []string{"DOCKER_HOST=tcp://localhost:2375", "DOCKER_CONTEXT=localhost-dot"}, want: "tcp://localhost:2375"},
+		{name: "ssh default port", environ: []string{"DOCKER_HOST=ssh://user@203.0.113.9:22", "DOCKER_CONTEXT=ssh-noport"}, want: "ssh://user@203.0.113.9:22"},
+		{name: "unix authority spelling", environ: []string{"DOCKER_HOST=unix:///var/run/docker.sock", "DOCKER_CONTEXT=unix-authority"}, want: "unix:///var/run/docker.sock"},
+
+		// Still refused: the same engine is plausible but unproven.
+		{name: "different port", environ: []string{"DOCKER_HOST=tcp://203.0.113.9:2375", "DOCKER_CONTEXT=remote-tls-port"}, refuse: true},
+		{name: "different ssh user", environ: []string{"DOCKER_HOST=ssh://user@203.0.113.9:22", "DOCKER_CONTEXT=ssh-other-user"}, refuse: true},
+		{name: "hostname vs its loopback IP", environ: []string{"DOCKER_HOST=tcp://localhost:2375", "DOCKER_CONTEXT=loopback-ip"}, refuse: true},
+		{name: "unparseable endpoint", environ: []string{"DOCKER_HOST=still-unparseable", "DOCKER_CONTEXT=not-an-endpoint"}, refuse: true},
+		{name: "unparseable host, valid context", environ: []string{"DOCKER_HOST=still-unparseable", "DOCKER_CONTEXT=localhost-lowercase"}, refuse: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cli := &fakeDockerContextCLI{contexts: contexts}
+			t.Cleanup(SetDockerExecForTest(cli.exec))
+
+			endpoint, _, err := resolveDockerEngineEndpoint(tc.environ)
+
+			if tc.refuse {
+				require.Error(t, err, "resolved to %q instead of refusing", endpoint)
+				assert.Contains(t, err.Error(), "DOCKER_HOST")
+				assert.Contains(t, err.Error(), "DOCKER_CONTEXT")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, endpoint)
 		})
 	}
 }
