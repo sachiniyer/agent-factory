@@ -47,9 +47,9 @@ Because each session gets its own worktree:
    and branch. Restore it later and the worktree comes back and the agent
    re-spawns.
 4. **Delete session.** Killing a session permanently ends the agent, removes the worktree,
-   and deletes the branch when Agent Factory owns it. It always destroys the
-   session, including uncommitted or unmerged work; use archive instead when you
-   need the work to remain restorable.
+   and deletes the branch when Agent Factory owns it. Uncommitted or unmerged work
+   in af-owned resources may be lost; use archive instead when you need the work
+   to remain restorable.
 
 ## In-place sessions
 
