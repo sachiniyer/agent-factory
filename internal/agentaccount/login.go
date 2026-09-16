@@ -1,6 +1,7 @@
 package agentaccount
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -303,7 +304,7 @@ func codexCredentialStore(path string) (string, bool, error) {
 	var settings struct {
 		Store string `toml:"cli_auth_credentials_store"`
 	}
-	if err := toml.Unmarshal(data, &settings); err != nil {
+	if err := toml.Unmarshal(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf")), &settings); err != nil {
 		return "", false, err
 	}
 	return settings.Store, settings.Store != "", nil
