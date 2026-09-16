@@ -57,9 +57,6 @@ func (m *home) saveContentPaneState() error {
 	// can never clobber one another (#1001).
 	var saveErr error
 	failedEdit := false
-	// Deletions whose removal did not commit. Their restore decision is settled
-	// after the reload below, against the freshly loaded repo-scoped set.
-	var failedDeletes []task.Task
 
 	hp := m.hooksPane
 	if hp.IsDirty() {
@@ -131,145 +128,26 @@ func (m *home) saveContentPaneState() error {
 				// it. Keep the schedule failure visible without telling the user
 				// to retry a deletion that already happened.
 				log.WarningLog.Printf("task removal committed but schedule refresh failed: %v", err)
-				sp.AcknowledgeDeletedRestored(tsk.ID)
 				saveErr = errors.Join(saveErr, fmt.Errorf(
 					"task %q was removed, but the daemon could not refresh its schedules: %w", tsk.Name, err))
 				continue
 			}
 			log.ErrorLog.Printf("failed to remove task: %v", err)
-			// Whether to restore this row depends on whether the record still
-			// belongs to this repo — which the ERROR cannot answer. Defer the
-			// decision to the reload below, which loads the repo-scoped set and
-			// can simply be asked. Deriving it from the error text was wrong in
-			// both directions: an intermediary's "404 page not found" claimed an
-			// absence that never happened, and a rebind WITHIN this repo (root
-			// to a subdirectory or a linked worktree) produces the project-rebind
-			// error while repoScope.matches still resolves the task into this
-			// repo by identity (task/repo_scope.go:76-98), so a task that is
-			// still listed was treated as gone and dropped from the pane.
-			failedDeletes = append(failedDeletes, tsk)
+			// The removal did not commit: the record still exists on disk and in
+			// the sidebar (which reloads unconditionally below). Keep the row
+			// visible in the TaskPane and re-queue the delete for retry — the
+			// disk reload that would otherwise re-show it (sp.SetTasks below) is
+			// gated on !failedEdit, and a concurrent failed edit leaves that gate
+			// closed, so without this restore the pane would lose the row until a
+			// later successful edit save re-opened the reload.
+			sp.RestoreFailedDelete(tsk)
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to remove task %q: %w", tsk.Name, err))
-		} else {
-			// Deletion committed cleanly: if this task was previously restored
-			// into s.tasks after a failed attempt, remove it now so it does not
-			// stay visible while SetTasks is gated on !failedEdit.
-			sp.AcknowledgeDeletedRestored(tsk.ID)
 		}
 	}
-	// Reload the sidebar unconditionally from disk. The TaskPane reload is
-	// gated on !failedEdit so user edits survive for retry. This deliberately
-	// narrows the #934 invariant ("the two panes can never diverge"): when a
-	// save fails and the user's draft must be preserved, keeping the TaskPane
-	// in its draft state is the right trade — the sidebar shows committed state
-	// while the editor retains the pending edit. The divergence is bounded: it
-	// ends when the edit is saved (SetTasks runs) or discarded (SetFocus(false)
-	// drops the draft). Any restored-but-deleted row is removed synchronously by
-	// AcknowledgeDeletedRestored above, so that class of divergence is closed.
+	// Reload BOTH panes from disk so the TaskPane and sidebar can never diverge
+	// (#934): whatever actually committed, both panes now show it.
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err == nil {
-		// The authoritative answer to "does this record still belong to this
-		// repo?" — the same set the sidebar is about to show. Present means the
-		// removal genuinely did not land, so restore the row and keep the retry
-		// queued; absent means it is gone (deleted elsewhere, or rebound out of
-		// this repo), so drop any copy an earlier pass restored rather than
-		// showing a row the sidebar does not have.
-		// Build an index of the freshly loaded set so we can both decide
-		// presence and pass the authoritative record to RestoreFailedDelete.
-		// The stale tsk is used only as the retry expectation; the pane
-		// displays and baselines against the freshly loaded record so a
-		// subsequent user action (e.g. re-pressing D) submits the current
-		// binding rather than a never-persisted one that the CAS would refuse.
-		//
-		// tasks.json permits duplicate IDs in hand-edited stores. When multiple
-		// rows share an ID, we cannot identify which freshly-loaded row
-		// corresponds to the deleted one; using any of them as the display
-		// record would show the wrong row's content in the pane. Count
-		// occurrences so RestoreFailedDeleteWithExpect is only given a fresh
-		// record when the ID is unambiguous (exactly one match in the reload).
-		loadedCount := make(map[string]int, len(tasks))
-		loaded := make(map[string]task.Task, len(tasks))
-		for _, t := range tasks {
-			loadedCount[t.ID]++
-			loaded[t.ID] = t
-		}
-		// processedByID tracks how many failed deletions for each ID have been
-		// processed in this loop iteration. When tasks.json has duplicate IDs
-		// and two deletions of the same ID both fail, the first restore call
-		// makes IsRestoredDelete(id) return true — but the second deletion has
-		// its own display that still needs to be inserted. We use this counter
-		// alongside CountRestoredDeletes to decide, per-occurrence, whether
-		// THIS deletion has already been restored or not (PRRT_kwDORdIFwM6i5gqZ).
-		processedByID := make(map[string]int)
-		for _, tsk := range failedDeletes {
-			processedIdx := processedByID[tsk.ID]
-			processedByID[tsk.ID]++
-			if _, present := loaded[tsk.ID]; present {
-				// Restore the authoritative record so the pane and originals
-				// are up-to-date; pass the original tsk as the retry
-				// expectation so the deletion CAS still pins the binding it
-				// was authorised against.
-				//
-				// When there are duplicate IDs in the freshly loaded set, the
-				// map holds only the last occurrence and we cannot tell which
-				// one corresponds to the row the user was deleting.
-				//
-				// tsk itself (the CAS expectation from s.deleted) is also
-				// already the LAST duplicate: deleteSelectedTask replaces the
-				// selected record with originals[id], which SetTasks keyed by
-				// ID and therefore also kept only the last. To recover the
-				// exact selected row's content, use the display record captured
-				// by deleteSelectedTask before the originals lookup.
-				//
-				// Per-occurrence restore check: compare how many occurrences
-				// of this ID are already restored (CountRestoredDeletes) with
-				// the loop index for this ID (processedIdx). If processedIdx
-				// is less than the restored count, this occurrence is already
-				// restored — use the unambiguous-reload refresh path or just
-				// requeue. If processedIdx equals or exceeds the restored count,
-				// this is a not-yet-restored occurrence and must be inserted
-				// (PRRT_kwDORdIFwM6i5gqZ).
-				alreadyRestored := processedIdx < sp.CountRestoredDeletes(tsk.ID)
-				if alreadyRestored && loadedCount[tsk.ID] == 1 {
-					// Already restored AND the reload is unambiguous: refresh
-					// the display and originals with the authoritative record
-					// so a rebind by another client between retries is picked
-					// up. Without this update the pane retains a stale binding
-					// that would cause repeated CAS failures on re-delete or
-					// edit (PRRT_kwDORdIFwM6i5gqU).
-					sp.RestoreFailedDeleteWithFresh(loaded[tsk.ID], tsk)
-				} else if alreadyRestored {
-					// Already restored but ambiguous (duplicate IDs in the
-					// fresh set): cannot safely update the display from the
-					// reload. Just requeue the expectation so the retry fires,
-					// without touching the already-authoritative display or
-					// originals.
-					sp.RequeueFailedDelete(tsk)
-				} else if loadedCount[tsk.ID] == 1 {
-					// Single unambiguous match: pass the authoritative loaded
-					// record as both display and originals baseline. Using
-					// RestoreFailedDeleteWithFresh (not WithExpect) stores
-					// loaded[tsk.ID] in originals, so a subsequent re-delete
-					// or edit uses the current authoritative state rather than
-					// tsk (a potentially stale binding the daemon would refuse,
-					// PRRT_kwDORdIFwM6i06TE).
-					sp.RestoreFailedDeleteWithFresh(loaded[tsk.ID], tsk)
-				} else if display, ok := sp.GetDeletedDisplay(tsk); ok {
-					// Duplicate IDs: the display record preserves the actual
-					// selected row for this specific deletion, looked up by the
-					// full expect record so that two deletions of the same ID
-					// each return their own display (PRRT_kwDORdIFwM6i2XFw).
-					// Use WithExpect so originals baseline stays the loaded
-					// original (tsk), not the potentially-draft display.
-					sp.RestoreFailedDeleteWithExpect(display, tsk)
-				} else {
-					// Duplicate IDs but no captured display: fall back to tsk
-					// for both display and baseline.
-					sp.RestoreFailedDeleteWithExpect(tsk, tsk)
-				}
-			} else {
-				sp.AcknowledgeDeletedRestored(tsk.ID)
-			}
-		}
 		m.store.SetTasks(tasks)
 		if !failedEdit {
 			sp.SetTasks(tasks)
@@ -278,38 +156,6 @@ func (m *home) saveContentPaneState() error {
 		// reflow so an add/delete grows or shrinks the section immediately.
 		m.relayout()
 	} else {
-		// No authoritative set to consult, so fall back to the conservative
-		// answer: keep the rows visible and the retries queued. Dropping a row
-		// on an unproven absence is the failure this restore exists to prevent.
-		// Use the captured display record if available, so the pane shows the
-		// exact selected row rather than the ID-keyed originals entry.
-		//
-		// When a row was already restored with authoritative data by an earlier
-		// pass (e.g. a successful reload that called RestoreFailedDeleteWithFresh),
-		// do not update it from the stale pre-delete deletedDisplays snapshot.
-		// GetDeletedDisplay returns the value captured at delete time, which may
-		// predate a concurrent rebind that the earlier reload had already
-		// reconciled: overwriting the fresh row and its originals baseline with
-		// the old snapshot would cause a subsequent re-delete to submit the stale
-		// ProjectPath and suffer repeated CAS rejections (PRRT_kwDORdIFwM6i3wJ2).
-		// processedByID tracks per-occurrence restore state in the fallback path
-		// for the same reason as in the success path above (PRRT_kwDORdIFwM6i5gqZ).
-		fallbackProcessedByID := make(map[string]int)
-		for _, tsk := range failedDeletes {
-			processedIdx := fallbackProcessedByID[tsk.ID]
-			fallbackProcessedByID[tsk.ID]++
-			alreadyRestored := processedIdx < sp.CountRestoredDeletes(tsk.ID)
-			if alreadyRestored {
-				// Row already visible with up-to-date content; just re-queue
-				// the deletion expectation for the next retry without touching
-				// the display or originals baseline.
-				sp.RequeueFailedDelete(tsk)
-			} else if display, ok := sp.GetDeletedDisplay(tsk); ok {
-				sp.RestoreFailedDeleteWithExpect(display, tsk)
-			} else {
-				sp.RestoreFailedDelete(tsk)
-			}
-		}
 		saveErr = errors.Join(saveErr, fmt.Errorf("failed to reload tasks after save: %w", err))
 	}
 	if failedEdit {
