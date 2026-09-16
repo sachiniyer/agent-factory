@@ -556,8 +556,22 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 		procs := marked[name]
 		sort.Slice(procs, func(i, j int) bool { return procs[i].PID < procs[j].PID })
 		if live[name] {
+			// The pane tree comes from the EVIDENCE-BEARING capture. The
+			// best-effort SessionProcessTrees returns nil on any list-panes
+			// failure, and reading that nil as a proven-empty tree is the
+			// defect this arm exists to avoid: with inSession empty, every
+			// marked process for this live session would render as an
+			// escaped-process finding the check has no evidence for, because
+			// the read that would prove membership never returned. A read that
+			// cannot answer is reported once as blindness below (via
+			// observations.blindSessions) rather than classified either way.
+			tree, paneErr := tmux.CaptureSessionProcessTrees(ctx.opts.Exec, name)
+			if paneErr != nil {
+				observations.blindSessions = append(observations.blindSessions, name)
+				continue
+			}
 			inSession := map[int]bool{}
-			for _, p := range tmux.SessionProcessTrees(ctx.opts.Exec, name) {
+			for _, p := range tree {
 				inSession[p.PID] = true
 			}
 			for _, p := range procs {
@@ -658,10 +672,14 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 
 // processLeakObservations keeps every unprovable state visible without mixing
 // it into the leak counts. A vanished process is normal churn and needs no row;
-// missing age or an identity-read failure means the check was blind.
+// missing age or an identity-read failure means the check was blind; a live
+// session whose pane tree could not be read is blind to membership rather than
+// proven empty (added so a failed list-panes no longer renders as a row of
+// false escaped-process findings for that session's ordinary in-pane children).
 type processLeakObservations struct {
 	unknownAge      int
 	unknownIdentity int
+	blindSessions   []string
 }
 
 func (o *processLeakObservations) oldEnough(ctx *scanContext, p proctree.Process) bool {
@@ -691,12 +709,25 @@ func (o processLeakObservations) report(report *Report) {
 		blind = append(blind, fmt.Sprintf("could not revalidate the identity of %s",
 			plural(o.unknownIdentity, "candidate process", "candidate processes")))
 	}
-	if len(blind) == 0 {
-		return
+	if len(blind) > 0 {
+		report.Warn(sectionProcesses, "process-leak-inspection",
+			strings.Join(blind, " and ")+"; they are omitted from the escaped, orphaned, and possible-orphan counts",
+			"those candidates are UNKNOWN, not proven leaks; rerun doctor or inspect them manually", false)
 	}
-	report.Warn(sectionProcesses, "process-leak-inspection",
-		strings.Join(blind, " and ")+"; they are omitted from the escaped, orphaned, and possible-orphan counts",
-		"those candidates are UNKNOWN, not proven leaks; rerun doctor or inspect them manually", false)
+	// A live session whose pane tree could not be read is not a proven-empty
+	// tree: the escaped-process arm's membership check had no answer, so it
+	// declined to classify that session's marked processes either way. Report
+	// it once per session as blindness rather than letting it render as a row
+	// of false escaped-process findings (the way an unreadable process table or
+	// session list already gets its own row). Reported here, not in the arm
+	// itself, so a single blind session is one row rather than one per pid.
+	for _, name := range o.blindSessions {
+		report.Warn(sectionProcesses, "process-leak-inspection",
+			fmt.Sprintf("could not read the pane tree of live session %s, so whether its "+
+				"marked processes escaped is UNKNOWN rather than empty", name),
+			"that session's processes are unclassified, not proven escapes; restore access to the "+
+				"tmux server and rerun `af doctor`", false)
+	}
 }
 
 // tmuxServerDead parses a TMUX env value ("socketPath,serverPID,sessionIdx")

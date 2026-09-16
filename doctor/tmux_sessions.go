@@ -99,11 +99,22 @@ func checkRunawayChildren(ctx *scanContext, report *Report) {
 		return
 	}
 	unmeasurable := 0
+	var blindSessions []string
 	for _, name := range names {
 		if !strings.HasPrefix(name, tmux.TmuxPrefix) {
 			continue
 		}
-		procs := tmux.SessionProcessTrees(ctx.opts.Exec, name)
+		// The pane tree comes from the EVIDENCE-BEARING capture so a per-session
+		// list-panes failure is not swallowed as an empty result. A session
+		// whose pane tree could not be read contributes nothing to the runaway
+		// counts below AND is named in a blindness row, so the function does
+		// not print "no runaway processes" over a session it never inspected —
+		// the same treatment the unmeasurable counter gives CPU blindness.
+		procs, paneErr := tmux.CaptureSessionProcessTrees(ctx.opts.Exec, name)
+		if paneErr != nil {
+			blindSessions = append(blindSessions, name)
+			continue
+		}
 		sort.Slice(procs, func(i, j int) bool { return procs[i].PID < procs[j].PID })
 		for _, p := range procs {
 			if ctx.selfAncestors[p.PID] {
@@ -129,6 +140,20 @@ func checkRunawayChildren(ctx *scanContext, report *Report) {
 					"check the session; doctor never kills children of live sessions", describeProc(p), name),
 			})
 		}
+	}
+	if len(blindSessions) > 0 {
+		// Pane-listing blindness, not swallowed. A session whose pane tree
+		// could not be read renders no runaway finding for itself, so the
+		// function's "refuses to print 'no runaway processes'" principle
+		// applies to it exactly as it does to the unmeasurable counter below.
+		// The session names are sorted for deterministic output and printed so
+		// the operator knows WHICH sessions were blind rather than a count only.
+		sort.Strings(blindSessions)
+		report.Warn(sectionProcesses, "runaway-cpu",
+			fmt.Sprintf("could not read the pane tree of %s (%s), so this check reports nothing about them",
+				plural(len(blindSessions), "live session", "live sessions"),
+				strings.Join(blindSessions, ", ")),
+			"a process pegging a core in those sessions would not be spotted here; inspect the tmux server and rerun", false)
 	}
 	if unmeasurable > 0 {
 		report.Warn(sectionProcesses, "runaway-cpu",

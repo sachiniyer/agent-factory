@@ -323,7 +323,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	preMarkerCaptureErrs := make(map[string]error, len(prefixed))
 	preMarkerGenerations := make(map[string]orphanGenerationSet, len(prefixed))
 	for _, match := range prefixed {
-		preMarkerProcesses[match], preMarkerCaptureErrs[match] = captureSessionProcessTrees(cmdExec, match)
+		preMarkerProcesses[match], preMarkerCaptureErrs[match] = CaptureSessionProcessTrees(cmdExec, match)
 		// Retain the generation while the captured pane tree is still alive.
 		// Waiting until a vanished-session recovery begins may be too late to
 		// read its immutable environment, especially when a helper starts after
@@ -400,7 +400,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	var incompleteCaptures error
 	var killErr error
 	for _, match := range matches {
-		leaked, captureErr := captureSessionProcessTrees(cmdExec, match)
+		leaked, captureErr := CaptureSessionProcessTrees(cmdExec, match)
 		if captureErr != nil {
 			vanished := errors.Is(captureErr, ErrSessionVanishedBeforeCapture)
 			var probeErr error
