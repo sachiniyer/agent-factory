@@ -1,6 +1,10 @@
 package ui
 
-import "github.com/sachiniyer/agent-factory/task"
+import (
+	"reflect"
+
+	"github.com/sachiniyer/agent-factory/task"
+)
 
 // This file holds the TaskPane's task-list, selection, dirty-tracking, and
 // focus/mode state accessors — the non-rendering, non-key-handling surface the
@@ -17,26 +21,20 @@ func (s *TaskPane) SetTasks(tasks []task.Task) {
 	// value type (its only pointer field, LastRunAt, is scheduler-owned and never
 	// diffed), so a by-value copy is a sufficient baseline.
 	s.originals = make(map[string]task.Task, len(tasks))
-	// loadedRank is the ordinal of each record in the set the pane loaded. It is
-	// the stable baseline the restore path orders against: a LIVE slice index
-	// stops describing the row the moment any other deletion renumbers the rows
-	// after it, so a second pending deletion recorded against it points at the
-	// wrong slot.
-	s.loadedRank = make(map[string]int, len(tasks))
+	// loadedRanks records the ordinal(s) of each record in the set the pane
+	// loaded, i.e. disk order, keyed by ID. Each ID maps to the slice of
+	// load-order indices for every occurrence with that ID (tasks.json permits
+	// duplicate IDs in hand-edited stores). The restore path orders against these
+	// to put a row back where it belongs — a LIVE slice index is too unstable
+	// because any other pending deletion renumbers the rows after it.
+	s.loadedRanks = make(map[string][]int, len(tasks))
 	for i, t := range tasks {
 		s.originals[t.ID] = t
-		// When tasks.json contains duplicate IDs, keep the FIRST occurrence's
-		// rank. The first duplicate occupied the lowest position in the loaded
-		// set; restoring it there is at least order-consistent with the
-		// sidebar, which loads in file order. Overwriting with later duplicates
-		// would use a rank that belongs to a different row (the finding from
-		// PRRT_kwDORdIFwM6i0U5V).
-		if _, alreadyRanked := s.loadedRank[t.ID]; !alreadyRanked {
-			s.loadedRank[t.ID] = i
-		}
+		s.loadedRanks[t.ID] = append(s.loadedRanks[t.ID], i)
 	}
 	s.deleted = nil
 	s.deletedDisplays = nil
+	s.deletedRank = nil
 	s.restoredDeletes = nil
 	s.editing = false
 	// A reload replaces the create-form buffers a pending create was captured
@@ -190,40 +188,52 @@ func (s *TaskPane) RestoreFailedEdit(id string) {
 // SetTasks (a successful reload) or AcknowledgeDeletedRestored (a successful
 // retry), so the dedupe key is live for the entire retry sequence.
 func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
-	s.restoreFailedDeleteImpl(tsk, tsk)
+	s.restoreFailedDeleteImpl(tsk, tsk, tsk)
 }
 
 // RestoreFailedDeleteWithExpect is like RestoreFailedDelete but separates the
-// record the pane displays (fresh) from the one it queues for the deletion
-// retry (expect). Use this when the freshly loaded set contains an updated
-// copy of the record — e.g. after a same-repository rebind — so the pane and
-// originals baseline reflect the current authoritative state, while the retry
-// still carries the expectation the deletion was originally authorised against.
-func (s *TaskPane) RestoreFailedDeleteWithExpect(fresh, expect task.Task) {
-	s.restoreFailedDeleteImpl(fresh, expect)
+// record the pane displays (display) from the one it queues for the deletion
+// retry (expect). The originals baseline is set to expect so that a subsequent
+// D uses the loaded original's project binding as the CAS — not a draft that
+// was never persisted. Use this for the fallback path where display may be a
+// draft the user was editing before pressing D.
+func (s *TaskPane) RestoreFailedDeleteWithExpect(display, expect task.Task) {
+	s.restoreFailedDeleteImpl(display, expect, expect)
 }
 
-// restoreFailedDeleteImpl is the shared implementation for RestoreFailedDelete
-// and RestoreFailedDeleteWithExpect. display is inserted into s.tasks and
-// snapshotted into s.originals; expect is queued in s.deleted for the retry.
-func (s *TaskPane) restoreFailedDeleteImpl(display, expect task.Task) {
+// RestoreFailedDeleteWithFresh is like RestoreFailedDeleteWithExpect but sets
+// the originals baseline to fresh (the display) rather than expect. Use this
+// when the freshly-loaded set contains an authoritative record — one confirmed
+// present by the daemon's own file — so that the pane and originals baseline
+// reflect the current state and subsequent user actions (edits, re-deletes) are
+// authorised against durable data rather than a stale binding that the daemon
+// would refuse (PRRT_kwDORdIFwM6i06TE).
+func (s *TaskPane) RestoreFailedDeleteWithFresh(fresh, expect task.Task) {
+	s.restoreFailedDeleteImpl(fresh, expect, fresh)
+}
+
+// restoreFailedDeleteImpl is the shared implementation for RestoreFailedDelete,
+// RestoreFailedDeleteWithExpect, and RestoreFailedDeleteWithFresh. display is
+// inserted into s.tasks; baseline is snapshotted into s.originals; expect is
+// queued in s.deleted for the retry.
+func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) {
 	if s.restoredDeletes == nil {
-		s.restoredDeletes = make(map[string]bool)
+		s.restoredDeletes = make(map[string]task.Task)
 	}
 	if s.originals == nil {
 		s.originals = make(map[string]task.Task)
 	}
-	if !s.restoredDeletes[display.ID] {
+	if _, alreadyRestored := s.restoredDeletes[display.ID]; !alreadyRestored {
 		pos := s.restorePosition(display.ID)
-		// Use expect as the originals baseline, not display. expect is the
-		// record the deletion was authorised against (the loaded original),
-		// while display may be a draft — a field the user changed without
-		// saving before pressing D. Recording the draft path as originals[id]
-		// would make the next D submit that never-persisted path as the CAS
-		// expectation, which the daemon would refuse (PRRT_kwDORdIFwM6i0U5Z).
-		// When no separate expectation was provided (RestoreFailedDelete),
-		// display == expect, so this is a no-op relative to the old behaviour.
-		s.originals[display.ID] = expect
+		// baseline is the record to store in originals — the copy subsequent
+		// user actions (re-delete via D, edit via ConsumeDirty) will diff
+		// against and use as the CAS expectation. The caller selects it:
+		// - RestoreFailedDelete: baseline == display == expect (all same)
+		// - RestoreFailedDeleteWithExpect: baseline == expect (loaded original,
+		//   for drafts where display may carry a never-persisted ProjectPath)
+		// - RestoreFailedDeleteWithFresh: baseline == display (fresh authoritative
+		//   reload, so subsequent actions use the durable current state)
+		s.originals[display.ID] = baseline
 		s.tasks = append(s.tasks[:pos], append([]task.Task{display}, s.tasks[pos:]...)...)
 		// Carry the cursor over an insertion at or above it, so it keeps
 		// naming the same record. This is not cosmetic: the edit form submits
@@ -235,13 +245,23 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect task.Task) {
 		if pos <= s.selectedIdx && s.selectedIdx < len(s.tasks)-1 {
 			s.selectedIdx++
 		}
-		s.restoredDeletes[display.ID] = true
+		// Record the display value that was inserted so the second-retry path
+		// can locate the exact restored row when tasks.json has duplicate IDs.
+		// An ID-only lookup would find the FIRST occurrence, which may be the
+		// untouched earlier duplicate — replacing it corrupts that row and
+		// leaves the actual restored row stale (PRRT_kwDORdIFwM6i06TU).
+		s.restoredDeletes[display.ID] = display
 	} else {
 		// Second or later retry failure: a fresh record may have been supplied
 		// (e.g. another client changed the task between retries). Update the
 		// visible row and originals baseline in place without inserting a
 		// duplicate — the dedupe guard above already ensures exactly one visible
 		// row exists for this ID.
+		//
+		// Find the SPECIFIC restored row by matching the display value stored at
+		// restore time, not the first ID match. For duplicate-ID stores, an
+		// ID-only search would update the FIRST occurrence instead of the
+		// restored one, corrupting the earlier duplicate's content.
 		//
 		// Skip the in-place refresh if the user is currently editing this row:
 		// the form buffers still contain the pre-refresh values, so replacing
@@ -250,14 +270,19 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect task.Task) {
 		// when the form is submitted (PRRT_kwDORdIFwM6i0U5R). Leave both the
 		// row and originals as-is; the form reflects what the user is editing
 		// and the baseline stays consistent with it.
+		storedDisplay := s.restoredDeletes[display.ID]
 		for i, t := range s.tasks {
-			if t.ID == display.ID {
-				if !(s.editing && s.selectedIdx == i) {
-					s.originals[display.ID] = display
-					s.tasks[i] = display
-				}
-				break
+			if !reflect.DeepEqual(t, storedDisplay) {
+				continue
 			}
+			if !(s.editing && s.selectedIdx == i) {
+				s.originals[display.ID] = display
+				s.tasks[i] = display
+				// Update the stored display so subsequent retries match the
+				// newly refreshed row, not the stale original.
+				s.restoredDeletes[display.ID] = display
+			}
+			break
 		}
 	}
 	s.deleted = append(s.deleted, expect)
@@ -268,18 +293,32 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect task.Task) {
 // the pane keeps the order of the set it loaded — the order the sidebar reloads
 // in, and the order showTasksOverlay's index-based selection transfer assumes.
 //
-// It orders against loadedRank rather than a remembered slice index because any
-// number of deletions may be pending at once and each one renumbers the rows
-// after it. Rows the pane loaded keep their loaded order; anything without a
-// rank (created in the pane, not yet reloaded) sorts after them, which is where
-// it already sits.
+// It orders against the rank captured in deletedRank at delete time rather than
+// a live slice index (which is renumbered by every other deletion) or the
+// ID-keyed loadedRanks entry (which is the FIRST occurrence's rank — incorrect
+// when a later duplicate is deleted, PRRT_kwDORdIFwM6i06TN). Rows the pane
+// loaded keep their loaded order; anything without a rank (created in the pane,
+// not yet reloaded) sorts after them, which is where it already sits.
 func (s *TaskPane) restorePosition(id string) int {
-	rank, ok := s.loadedRank[id]
+	rank, ok := s.deletedRank[id]
 	if !ok {
-		return len(s.tasks)
+		// Fall back to the first-occurrence rank from loadedRanks when no
+		// per-deletion rank was captured (e.g. an earlier code path that did
+		// not go through deleteSelectedTask).
+		if ranks, known := s.loadedRanks[id]; known && len(ranks) > 0 {
+			rank = ranks[0]
+		} else {
+			return len(s.tasks)
+		}
 	}
 	for i, t := range s.tasks {
-		other, known := s.loadedRank[t.ID]
+		var other int
+		var known bool
+		if dr, hasDR := s.deletedRank[t.ID]; hasDR {
+			other, known = dr, true
+		} else if ranks, hasLR := s.loadedRanks[t.ID]; hasLR && len(ranks) > 0 {
+			other, known = ranks[0], true
+		}
 		if !known || other > rank {
 			return i
 		}
@@ -297,19 +336,29 @@ func (s *TaskPane) restorePosition(id string) int {
 // hand-edited stores and task.RemoveTask removes every matching row from disk,
 // so leaving extra ghost rows behind after a successful retry is incorrect.
 //
+// The row-removal loop runs even when id was not tracked in restoredDeletes —
+// this handles the explicit-re-delete case: if a restored row's user re-presses
+// D (clearing restoredDeletes[id] in deleteSelectedTask) and that new deletion
+// later commits, AcknowledgeDeletedRestored must still sweep any remaining
+// duplicate rows from s.tasks (PRRT_kwDORdIFwM6i06Tg).
+//
 // If a removed row is the currently selected entry and the pane is in edit
 // mode, edit mode is exited to prevent renderEditMode from evaluating
 // s.tasks[s.selectedIdx] against a removed entry and panicking.
 func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
-	if !s.restoredDeletes[id] {
-		return
+	// Clear restore bookkeeping only when this ID was actually restored; the
+	// early-exit is removed so the cleanup loop below always runs even for
+	// explicit re-deletes that cleared the marker.
+	if _, wasRestored := s.restoredDeletes[id]; wasRestored {
+		delete(s.restoredDeletes, id)
+		delete(s.deletedDisplays, id)
+		delete(s.deletedRank, id)
 	}
-	delete(s.restoredDeletes, id)
-	delete(s.deletedDisplays, id)
 	// Remove all rows with the given ID (tasks.json allows duplicate IDs;
 	// RemoveTask removes every matching row from disk, so we must do the same
 	// in the pane). Iterate backwards so index removal does not shift
-	// unvisited positions.
+	// unvisited positions. The loop is a no-op for normal (non-duplicate-ID)
+	// deletions because deleteSelectedTask already removed the row from s.tasks.
 	for i := len(s.tasks) - 1; i >= 0; i-- {
 		if s.tasks[i].ID != id {
 			continue

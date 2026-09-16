@@ -209,15 +209,26 @@ func (m *home) saveContentPaneState() error {
 				// ID and therefore also kept only the last. To recover the
 				// exact selected row's content, use the display record captured
 				// by deleteSelectedTask before the originals lookup.
-				fresh := tsk
 				if loadedCount[tsk.ID] == 1 {
-					fresh = loaded[tsk.ID]
+					// Single unambiguous match: pass the authoritative loaded
+					// record as both display and originals baseline. Using
+					// RestoreFailedDeleteWithFresh (not WithExpect) stores
+					// loaded[tsk.ID] in originals, so a subsequent re-delete
+					// or edit uses the current authoritative state rather than
+					// tsk (a potentially stale binding the daemon would refuse,
+					// PRRT_kwDORdIFwM6i06TE).
+					sp.RestoreFailedDeleteWithFresh(loaded[tsk.ID], tsk)
 				} else if display, ok := sp.GetDeletedDisplay(tsk.ID); ok {
 					// Duplicate IDs: the display record preserves the actual
 					// selected row, independent of the ID-keyed originals map.
-					fresh = display
+					// Use WithExpect so originals baseline stays the loaded
+					// original (tsk), not the potentially-draft display.
+					sp.RestoreFailedDeleteWithExpect(display, tsk)
+				} else {
+					// Duplicate IDs but no captured display: fall back to tsk
+					// for both display and baseline.
+					sp.RestoreFailedDeleteWithExpect(tsk, tsk)
 				}
-				sp.RestoreFailedDeleteWithExpect(fresh, tsk)
 			} else {
 				sp.AcknowledgeDeletedRestored(tsk.ID)
 			}

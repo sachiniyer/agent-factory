@@ -138,21 +138,29 @@ type TaskPane struct {
 	// preserve the exact visible row for the restore path. Cleared together
 	// with s.deleted by SetTasks and AcknowledgeDeletedRestored.
 	deletedDisplays map[string]task.Task
-	// restoredDeletes tracks task IDs that RestoreFailedDelete has already
-	// re-appended to s.tasks, keyed by task ID. When a deletion retry also
-	// fails, the second call must not append another visible copy — the first
-	// restore already has the row in the pane. Cleared by SetTasks (successful
-	// reload) and AcknowledgeDeletedRestored (successful retry).
-	restoredDeletes map[string]bool
-	// loadedRank is each loaded record's ordinal in the set SetTasks received,
-	// i.e. disk order. RestoreFailedDelete orders against it to put a restored
-	// row back where it belongs, so the pane's order keeps matching the
-	// sidebar's — showTasksOverlay carries the rail's selection across BY INDEX,
-	// so a divergent order makes that index name a different record. A live
-	// slice index cannot serve here: several deletions can be pending at once
-	// and each renumbers the rows after it.
-	loadedRank map[string]int
-	hasFocus   bool
+	// restoredDeletes tracks the display value inserted by RestoreFailedDelete
+	// for each task ID. When a deletion retry also fails, the second call must
+	// not append another visible copy — the first restore already has the row in
+	// the pane (dedupe check via map presence). Storing the display value (not
+	// just a bool) allows the second-retry refresh to locate the SPECIFIC
+	// restored row for duplicate-ID stores, where an ID-only search would update
+	// the wrong occurrence (PRRT_kwDORdIFwM6i06TU). Cleared by SetTasks
+	// (successful reload) and AcknowledgeDeletedRestored (successful retry).
+	restoredDeletes map[string]task.Task
+	// loadedRanks records the load-order index of every occurrence of each ID
+	// in the set SetTasks received, i.e. disk order. For unique IDs the slice
+	// has exactly one element; for duplicate IDs (hand-edited tasks.json) it
+	// has one entry per occurrence. RestoreFailedDelete orders against these via
+	// deletedRank to put a restored row back where it belongs.
+	loadedRanks map[string][]int
+	// deletedRank records the original load-order rank of the specific occurrence
+	// that was deleted, captured in deleteSelectedTask. It is used by
+	// restorePosition in preference to loadedRanks so that deleting the SECOND
+	// duplicate uses rank 2 (its actual position), not rank 0 (the first
+	// duplicate's position from the ID-keyed loadedRanks entry,
+	// PRRT_kwDORdIFwM6i06TN). Cleared by SetTasks and AcknowledgeDeletedRestored.
+	deletedRank map[string]int
+	hasFocus    bool
 
 	// now is inherited from the owning AutomationsPane and passed to each
 	// schedule picker for its custom-cron next-run preview.
@@ -594,13 +602,51 @@ func (s *TaskPane) deleteSelectedTask() {
 	if original, ok := s.originals[deleted.ID]; ok {
 		deleted = original
 	}
-	// If this task was previously restored after a failed deletion, clear the
-	// restore tracking and drop the existing stale queue entry: the user is
-	// explicitly re-deleting, so we replace it with a fresh one rather than
-	// appending a second copy (which would cause RemoveTask to be called twice
-	// on the next save — the first call would succeed and the second would
-	// return "not found", producing a false save failure).
-	if s.restoredDeletes[deleted.ID] {
+	// Capture the rank of the SPECIFIC occurrence being deleted, before the row
+	// is removed from s.tasks. restorePosition uses this instead of the
+	// ID-keyed loadedRanks entry, which only records the FIRST occurrence's
+	// rank — incorrect when deleting a later duplicate (PRRT_kwDORdIFwM6i06TN).
+	//
+	// Compute occurrence rank: count prior occurrences of the same ID visible
+	// in s.tasks (occBefore) plus those already pending in s.deleted
+	// (pendBefore). The sum is this occurrence's index into loadedRanks[id].
+	occBefore := 0
+	for i := 0; i < s.selectedIdx; i++ {
+		if s.tasks[i].ID == deleted.ID {
+			occBefore++
+		}
+	}
+	pendBefore := 0
+	for _, t := range s.deleted {
+		if t.ID == deleted.ID {
+			pendBefore++
+		}
+	}
+	occIdx := occBefore + pendBefore
+	if s.deletedRank == nil {
+		s.deletedRank = make(map[string]int)
+	}
+	if ranks, ok := s.loadedRanks[deleted.ID]; ok && occIdx < len(ranks) {
+		s.deletedRank[deleted.ID] = ranks[occIdx]
+	} else if ranks, ok := s.loadedRanks[deleted.ID]; ok && len(ranks) > 0 {
+		// Fallback: use the first occurrence's rank if occIdx is out of bounds
+		// (can happen when tasks were created in the pane and not yet reloaded).
+		s.deletedRank[deleted.ID] = ranks[0]
+	}
+	// If this task was previously restored after a failed deletion, drop the
+	// existing stale queue entry: the user is explicitly re-deleting, so we
+	// replace it with a fresh one rather than appending a second copy (which
+	// would cause RemoveTask to be called twice on the next save — the first
+	// call would succeed and the second would return "not found", producing a
+	// false save failure). Unlike the old code, we do NOT clear restoredDeletes
+	// here: AcknowledgeDeletedRestored relies on running the row-removal loop
+	// even after an explicit re-delete, to sweep remaining duplicate-ID ghost
+	// rows that RemoveTask deletes from disk but SetTasks (gated on !failedEdit)
+	// cannot reload (PRRT_kwDORdIFwM6i06Tg). Clearing restoredDeletes[id]
+	// would make AcknowledgeDeletedRestored return early and leave those ghosts.
+	// Instead reset only the dedupe marker so the next RestoreFailedDelete (if
+	// this new deletion also fails) can re-insert without hitting the dedupe.
+	if _, wasRestored := s.restoredDeletes[deleted.ID]; wasRestored {
 		delete(s.restoredDeletes, deleted.ID)
 		delete(s.deletedDisplays, deleted.ID)
 		for i, t := range s.deleted {
@@ -654,9 +700,28 @@ func (s *TaskPane) runSelectedTask() {
 	// the row is removed from disk, after which the trigger cannot find its ID
 	// and reports that no task is selected instead of running it. Cancelling
 	// the deletion here ensures the run happens against a live record.
-	s.cancelQueuedDeletion(s.tasks[s.selectedIdx].ID)
+	//
+	// Before cancelling, check for an unsaved draft. A restored row may carry
+	// display content that was edited before the delete (e.g. a changed
+	// ProjectPath or prompt that was never persisted). cancelQueuedDeletion
+	// recomputes s.dirty from dirtyIDs and deleted; if neither retains a dirty
+	// entry for this task, dirty becomes false and saveContentPaneState is
+	// skipped — the trigger then runs against the daemon's stored (older)
+	// record, silently ignoring the draft fields (PRRT_kwDORdIFwM6i06Tb).
+	// Marking the task dirty here ensures saveContentPaneState runs and
+	// reconciles the draft to disk before the trigger fires.
+	tsk := s.tasks[s.selectedIdx]
+	if _, isRestored := s.restoredDeletes[tsk.ID]; isRestored {
+		if baseline, ok := s.originals[tsk.ID]; ok && !task.DiffTask(baseline, tsk).IsEmpty() {
+			// The displayed row differs from the baseline — it carries a draft
+			// that was never saved. Mark it dirty so saveContentPaneState
+			// persists the draft before the trigger runs.
+			s.markTaskDirty(tsk.ID)
+		}
+	}
+	s.cancelQueuedDeletion(tsk.ID)
 	s.pendingTrigger = true
-	s.pendingTriggerID = s.tasks[s.selectedIdx].ID
+	s.pendingTriggerID = tsk.ID
 }
 
 func (s *TaskPane) enterEditMode() {
