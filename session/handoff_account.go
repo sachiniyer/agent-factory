@@ -80,7 +80,26 @@ func (i *Instance) SelectAccountForHandoff(from, name, target, effectiveAgent, r
 	}
 	i.pendingAccountSwap.Manual = true
 	i.pendingAccountSwap.Mission = mission
+	// The namespace the account was just selected in travels with the durable
+	// transaction: post-commit recovery must answer it even after a restart
+	// under changed program_overrides, when neither the pane's (rewritten)
+	// program metadata nor a fresh resolution can still prove it (#4430 review).
+	i.pendingAccountSwap.AccountAgent = effectiveAgent
 	return entry, nil
+}
+
+// PendingAccountSwapAgent reports the account namespace the committed manual
+// swap's replacement account was selected in, or "" when the pending record
+// predates the field or is not a committed manual swap. Recovery prefers it
+// over any re-derivation: it is the one answer a config flip plus daemon
+// restart cannot move (#4430 review).
+func (i *Instance) PendingAccountSwapAgent() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual {
+		return ""
+	}
+	return i.pendingAccountSwap.AccountAgent
 }
 
 func (i *Instance) PendingManualAccountSwap() (bool, string) {

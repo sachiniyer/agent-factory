@@ -119,6 +119,48 @@ func TestValidateAccountSwapRefusesUnprovableSiblingIdentityOverride(t *testing.
 		"an interpreter wrapper must not hide an identity assignment from the swap boundary")
 }
 
+// A committed manual swap's retry must resolve the replacement account inside
+// the namespace the transaction recorded at commit — not the namespace CURRENT
+// configuration derives (#4430 review). Commit under aider→codex records
+// AccountAgent=codex; a restart after the override flips to aider→gemini must
+// still consult the codex registry, where the drift check then names the real
+// mismatch instead of silently binding a gemini-launched pane to a codex
+// credential. The un-pinned path would find the decoy "work" in gemini's
+// registry and pass the drift check — the exact wrong-namespace recovery the
+// durable field exists to prevent.
+func TestValidateAccountSwapCommittedRetryUsesRecordedNamespace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramAider: tmux.ProgramCodex}
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err := agentaccount.Register(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err)
+
+	inst := accountSwapTestInstance(tmux.ProgramAider)
+	inst.Path = initTempGitRepo(t)
+	_, err = inst.SelectAccountForHandoff("", "work", tmux.ProgramAider, tmux.ProgramCodex,
+		HandoffReasonManual, "head", "")
+	require.NoError(t, err)
+	require.Equal(t, tmux.ProgramCodex, inst.PendingAccountSwapAgent(),
+		"the committed transaction must carry the namespace the account was selected in")
+	require.Equal(t, tmux.ProgramCodex, inst.ToInstanceData().PendingAccountSwap.AccountAgent,
+		"the namespace must survive a daemon restart — it is the only answer a config flip cannot move")
+
+	// The restart's view: the override moved, and a decoy registration now
+	// exists in the namespace current config would resolve.
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramAider: tmux.ProgramGemini}
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err = agentaccount.Register(home, tmux.ProgramGemini, "work")
+	require.NoError(t, err)
+
+	err = inst.ValidateAccountSwap("work")
+	require.ErrorContains(t, err, "is a codex account",
+		"the retry must consult the recorded codex registry, not the flipped resolution's gemini")
+	require.ErrorContains(t, err, "runs gemini",
+		"the drift refusal names the launch the current override now produces")
+}
+
 func TestValidateAccountSwapPreflightsStartupFreeShellReplacement(t *testing.T) {
 	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
 	inst.Tabs = append(inst.Tabs, &Tab{

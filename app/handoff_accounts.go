@@ -4,6 +4,7 @@ import (
 	"fmt"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
@@ -46,25 +47,50 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 	for _, entry := range msg.response.Entries {
 		scopable[entry.Agent] = true
 	}
-	for _, agent := range append([]string{msg.agent}, handoffAgentChoices(msg.agent)...) {
-		// Classify by the command the target LAUNCHES, not the enum: the
-		// daemon's resolved_agents map answers "which agent runs" for this
-		// session's repo, so program_overrides.codex = "aider" shows the ambient
-		// row Aider's launch warrants rather than Codex accounts a resolved
-		// Aider could never use (#4430 review). An absent map means an older
-		// daemon; the enum is the safe fallback. A KNOWN empty answer means the
-		// resolved command is not a provable agent invocation — that is
-		// non-scopable, not the enum.
+	// Group the target enums by resolved identity, not by name: "the current
+	// agent" is the enum whose resolved command IS this session's running
+	// agent, and an enum that resolves to a DIFFERENT agent stays offerable
+	// even when its name equals the resolved current — program_overrides can
+	// point the current agent's name at another agent's command, so
+	// program_overrides.codex = "aider" beside a codex pane makes codex a real
+	// cross-agent target while aider (resolving to codex) is the same-agent
+	// account section (#4430 review). The daemon's same-target guard compares
+	// the same resolved identities, so a row the daemon would refuse or a
+	// refusal the picker hides are both lies. An absent map means an older
+	// daemon; the enum is the safe fallback. A KNOWN empty answer means the
+	// resolved command is not a provable agent invocation — that is
+	// non-scopable, and never the current agent.
+	resolvedFor := func(agent string) string {
 		resolved, resolvedKnown := msg.response.ResolvedAgents[agent]
 		if !resolvedKnown {
 			resolved = agent
 		}
+		return resolved
+	}
+	sameAgent := make(map[string]bool, len(tmux.SupportedPrograms))
+	ordered := make([]string, 0, len(tmux.SupportedPrograms))
+	for _, agent := range tmux.SupportedPrograms {
+		if resolved := resolvedFor(agent); resolved != "" && resolved == msg.agent {
+			sameAgent[agent] = true
+			ordered = append(ordered, agent)
+		}
+	}
+	for _, agent := range tmux.SupportedPrograms {
+		if !sameAgent[agent] {
+			ordered = append(ordered, agent)
+		}
+	}
+	for _, agent := range ordered {
+		resolved := resolvedFor(agent)
+		isCurrent := sameAgent[agent]
 		canCarry := scopable[resolved]
 		// The ambient row is also the honest offer for a scoped session aimed at
 		// a target that cannot carry a scope: the swap drops it and reports the
 		// drop on from_account (#4428), so the target is offered with its
-		// warning rather than hidden.
-		if agent != msg.agent && (current == "" || !canCarry) {
+		// warning rather than hidden. The current agent's own section never
+		// carries one: the daemon refuses a resolved-identity self-handoff, so
+		// the offer would only error.
+		if !isCurrent && (current == "" || !canCarry) {
 			if preselected < 0 {
 				preselected = len(labels)
 			}
@@ -91,7 +117,7 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 		// target unreachable even though the daemon accepts the handoff
 		// (#4430 review round 3).
 		for _, entry := range msg.response.Entries {
-			if entry.Agent != resolved || (agent == msg.agent && entry.Name == current) || entry.RegistrationOnly {
+			if entry.Agent != resolved || (isCurrent && entry.Name == current) || entry.RegistrationOnly {
 				continue
 			}
 			label := fmt.Sprintf("%s: %s", agent, entry.Name)

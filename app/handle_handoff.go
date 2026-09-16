@@ -19,16 +19,28 @@ type handoffPickerTarget = sessionActionTarget
 // handoffAgentChoices returns the agents the selected session may be handed to:
 // every supported agent except the one already running.
 //
+// "Already running" is a resolved-identity question, not an enum one (#4430
+// review): program_overrides.aider = "codex" makes the aider enum a
+// self-handoff the daemon's guard refuses, while the codex enum — resolving
+// to aider — is a legitimate cross-agent target the enum compare would hide.
+// resolvedAgents maps each enum to the agent its configured command launches
+// ("" when the command is not a provable agent invocation — never the current
+// agent); a nil map falls back to the enum answer for callers without one.
+//
 // It returns the display list and a parallel slice of agent names rather than
 // indexing SupportedPrograms directly the way the create-time picker does. That
 // picker can index the canonical slice because it offers all of it; this one
 // filters, so positions no longer line up — and SupportedPrograms is explicitly
 // documented as positionally load-bearing. Carrying the names alongside removes
 // the chance of an off-by-one silently handing off to the wrong agent.
-func handoffAgentChoices(current string) []string {
+func handoffAgentChoices(current string, resolvedAgents map[string]string) []string {
 	choices := make([]string, 0, len(tmux.SupportedPrograms))
 	for _, agent := range tmux.SupportedPrograms {
-		if agent == current {
+		resolved, known := resolvedAgents[agent]
+		if !known {
+			resolved = agent
+		}
+		if resolved != "" && resolved == current {
 			continue
 		}
 		choices = append(choices, agent)
@@ -71,7 +83,12 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	}
 
 	current := selected.CurrentAgentName()
-	choices := handoffAgentChoices(current)
+	// Resolve every enum's launch identity for this session's repo — the same
+	// inspection-scope read the daemon's picker answer makes — so the
+	// unscoped picker filters by the same resolved identities the daemon's
+	// same-target guard compares (#4430 review).
+	choices := handoffAgentChoices(current,
+		session.HandoffEffectiveAgentsForPathInspection(selected.GetRepoPath(), tmux.SupportedPrograms))
 	if len(choices) == 0 {
 		return m, m.handleNotice(fmt.Errorf("no other agent is available to hand '%s' off to", selected.Title))
 	}

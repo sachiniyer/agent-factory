@@ -233,6 +233,18 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 				"session %q is scoped to %s account %q and %s cannot carry that scope, but tab(s) %s still run under the dropped account's environment — close them first, or hand off to an account-capable target with --account",
 				req.Title, instance.CurrentAgentName(), fromAccount, target, strings.Join(names, ", "))
 		}
+		// The same fence must cover the processes whose close already committed:
+		// a PendingTabCleanup handle is a tmux session whose teardown was never
+		// confirmed, so its process can still be running under the dropped
+		// account's environment while the roster reports it gone (#4430 review).
+		// Closing again is impossible — the tab is already removed — so the
+		// remedy is the cleanup sweep the next daemon start runs, exactly the
+		// refusal the account-swap path gives for the same handle set.
+		if pending := instance.PendingTabCleanup(); len(pending) > 0 {
+			return HandoffSessionResponse{}, fmt.Errorf(
+				"session %q is scoped to %s account %q and %s cannot carry that scope, but %d prior tab teardown(s) remain unconfirmed and may still run under the dropped account's environment — restart af to retry that cleanup, then retry the handoff, or hand off to an account-capable target with --account",
+				req.Title, instance.CurrentAgentName(), fromAccount, target, len(pending))
+		}
 	}
 
 	outgoing := instance.CurrentAgentName()

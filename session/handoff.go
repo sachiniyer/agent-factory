@@ -121,20 +121,35 @@ func (i *Instance) LastHandoff() (AgentHandoff, bool) {
 // the CLI, the RPC, and the TUI so all three refuse the same inputs with the
 // same words.
 //
-// The target is compared against CurrentAgentName, not ResolvedAgent. See that
-// function for why: ResolvedAgent answers "which binary is running" and is
-// documented to return "" for a wrapper script, which silently disables this
-// guard exactly when a user has customized their setup.
+// The same-target guard compares the agent the target's resolved command would
+// LAUNCH against CurrentAgentName — resolved against resolved — because an
+// enum is not an identity (#4430 review): program_overrides.aider = "codex"
+// makes an aider request a self-handoff the enum compare would permit, and
+// program_overrides.codex = "aider" makes a codex request a real cross-agent
+// handoff the enum compare refused as "already running". A target whose
+// resolved command is not a provable agent invocation (effective "") can never
+// be the same agent, so it passes this check and the scope decision decides
+// its fate downstream.
 func (i *Instance) ValidateHandoffTarget(target string) error {
+	target = strings.TrimSpace(target)
+	// Resolve the target's effective agent BEFORE the lock — the resolution
+	// does config I/O and must not run under i.mu.
+	effective := ""
+	if tmux.IsSupportedProgram(target) {
+		effective = handoffEffectiveAgent(i, target)
+	}
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return i.validateHandoffTargetLocked(target)
+	return i.validateHandoffTargetLocked(target, effective)
 }
 
 // validateHandoffTargetLocked is ValidateHandoffTarget's already-locked half.
 // Keeping target identity and runtime eligibility checks in the same instance
 // critical section lets SwapAgentProgram validate and mutate one state snapshot.
-func (i *Instance) validateHandoffTargetLocked(target string) error {
+// effective is the agent target's resolved command launches ("" when it is not
+// a provable agent invocation); callers that already resolved it — a frozen
+// plan or a pre-lock handoffEffectiveAgent — pass it rather than re-resolve.
+func (i *Instance) validateHandoffTargetLocked(target, effective string) error {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return fmt.Errorf("handoff target agent is required (one of %s)", tmux.SupportedProgramsString())
@@ -142,8 +157,8 @@ func (i *Instance) validateHandoffTargetLocked(target string) error {
 	if !tmux.IsSupportedProgram(target) {
 		return fmt.Errorf("unknown agent %q: handoff target must be one of %s", target, tmux.SupportedProgramsString())
 	}
-	if current := i.currentAgentNameLocked(); current == target {
-		return fmt.Errorf("session is already running %s", target)
+	if current := i.currentAgentNameLocked(); current != "" && current == effective {
+		return fmt.Errorf("session is already running %s", current)
 	}
 	return nil
 }
@@ -237,7 +252,7 @@ func (i *Instance) SwapAgentProgram(target, reason, headSHA string, automatic bo
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if err := i.validateHandoffTargetLocked(target); err != nil {
+	if err := i.validateHandoffTargetLocked(target, effectiveAgent); err != nil {
 		return HandoffSwap{}, err
 	}
 	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
@@ -264,7 +279,7 @@ func (i *Instance) RecordHandoffSwap(target, effectiveAgent, reason, headSHA str
 	if i.inFlightOp != OpReplacing {
 		return HandoffSwap{}, fmt.Errorf("session %q has no agent replacement in flight", i.Title)
 	}
-	if err := i.validateHandoffTargetLocked(target); err != nil {
+	if err := i.validateHandoffTargetLocked(target, effectiveAgent); err != nil {
 		return HandoffSwap{}, err
 	}
 	return i.recordHandoffSwapLocked(target, effectiveAgent, reason, headSHA, automatic)
@@ -387,7 +402,14 @@ func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent, reason, headS
 		previousAccount: i.Account,
 		previousAuto:    i.accountAutoSelected,
 	}
-	sameAgent := i.currentAgentNameLocked() == target
+	// Same-agent is judged on the resolved identity, not the enum: an enum whose
+	// override resolves to the running agent is a same-agent swap (keep Program —
+	// its override still produces the running command), while an enum merely
+	// NAMED like the running agent but resolving elsewhere is a real handoff
+	// that must rewrite Program so the respawn launches the target's command
+	// (#4430 review). An unidentifiable resolved command (effectiveAgent "") is
+	// never provably the same agent.
+	sameAgent := effectiveAgent != "" && i.currentAgentNameLocked() == effectiveAgent
 
 	i.Tabs[0].Handoffs = append(i.Tabs[0].Handoffs, entry)
 	i.touchLocked()

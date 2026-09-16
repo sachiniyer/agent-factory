@@ -6,10 +6,21 @@ import "time"
 // From may be empty for the ambient identity; the pointer's presence, rather
 // than either string, is the recovery obligation.
 type AccountSwapData struct {
-	Manual                  bool                 `json:"manual,omitempty"`
-	Mission                 string               `json:"mission,omitempty"`
-	From                    string               `json:"from,omitempty"`
-	To                      string               `json:"to"`
+	Manual  bool   `json:"manual,omitempty"`
+	Mission string `json:"mission,omitempty"`
+	From    string `json:"from,omitempty"`
+	To      string `json:"to"`
+	// AccountAgent is the agent namespace the To account was selected in — the
+	// credential-boundary agent of the command frozen at commit (#4430 review).
+	// It must be durable because the post-commit recovery otherwise re-derives
+	// the namespace from CURRENT configuration: a program_overrides flip plus a
+	// daemon restart would resolve the same account name in a different
+	// registry, and even ResolvedPaneProgram cannot arbitrate that — the attach
+	// path rewrites the tmux program metadata from current config before any
+	// retry reads it. Empty on automatic swaps (their namespace is the session's
+	// agent) and on records written before the field existed, where recovery
+	// falls back to the old derivation.
+	AccountAgent            string               `json:"account_agent,omitempty"`
 	ConversationID          string               `json:"conversation_id,omitempty"`
 	ReplacementPanesStarted bool                 `json:"replacement_panes_started,omitempty"`
 	MissionDeliveryStatus   PromptDeliveryStatus `json:"mission_delivery_status,omitempty"`

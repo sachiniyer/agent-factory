@@ -820,10 +820,6 @@ func accountRefusalWithSource(opts InstanceOptions, err error) error {
 // account surface names one: an account belongs to an agent, and "codex" and
 // "claude" keep separate registries.
 func resolveAccountForProvision(repoRoot, program, accountName string) (sessionenv.Account, error) {
-	home, err := config.GetConfigDir()
-	if err != nil {
-		return sessionenv.Account{}, fmt.Errorf("cannot resolve account %q: %w", accountName, err)
-	}
 	resolved, err := resolveRepoConfig(repoRoot)
 	if err != nil {
 		return sessionenv.Account{}, fmt.Errorf("cannot resolve account %q against the session program: %w", accountName, err)
@@ -834,8 +830,21 @@ func resolveAccountForProvision(repoRoot, program, accountName string) (sessione
 	// different agent's command, and the identity the session spends is the
 	// resolved one. Selecting under the requested name would either find no
 	// account or pin an identity the session never uses (#4430 review).
-	resolvedAgent := sessionenv.AgentForCommand(resolvedProgram)
-	account, err := agentaccount.Selected(home, resolvedAgent, accountName)
+	return selectAccountInNamespace(sessionenv.AgentForCommand(resolvedProgram), accountName)
+}
+
+// selectAccountInNamespace resolves accountName inside agent's account
+// registry. It is the shared tail of account resolution: fresh provisions reach
+// it through resolveAccountForProvision's current-config answer, while a
+// committed manual swap's retry reaches it with the namespace the transaction
+// recorded at commit — the one answer a later config flip cannot move (#4430
+// review).
+func selectAccountInNamespace(agent, accountName string) (sessionenv.Account, error) {
+	home, err := config.GetConfigDir()
+	if err != nil {
+		return sessionenv.Account{}, fmt.Errorf("cannot resolve account %q: %w", accountName, err)
+	}
+	account, err := agentaccount.Selected(home, agent, accountName)
 	if err != nil {
 		return sessionenv.Account{}, err
 	}

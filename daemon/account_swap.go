@@ -139,10 +139,16 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 		// recorded requested enum while the committed account was selected in
 		// the resolved command's namespace — the one Selected, the limit
 		// ledger, and the conversation-id repair must all answer in (#4430
-		// review round 3). The pane's frozen launch program is that namespace's
-		// authority; a re-resolution of the enum only covers a pane that can no
-		// longer report it.
-		accountAgent = sessionenv.AgentForCommand(instance.ResolvedPaneProgram())
+		// review round 3). The durable transaction now carries that namespace:
+		// after a restart under changed overrides, ResolvedPaneProgram answers
+		// the NEW config (attach rewrites the metadata before any retry reads
+		// it) and HandoffEffectiveAgentForPath is current-config by
+		// construction — neither can still name the registry the commit used
+		// (#4430 review round 4).
+		accountAgent = instance.PendingAccountSwapAgent()
+		if accountAgent == "" {
+			accountAgent = sessionenv.AgentForCommand(instance.ResolvedPaneProgram())
+		}
 		if accountAgent == "" {
 			accountAgent = session.HandoffEffectiveAgentForPath(instance.Path, agent)
 		}

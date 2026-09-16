@@ -317,6 +317,43 @@ func TestHandoffScopedSessionScopeRefusalBeatsPreflightFailure(t *testing.T) {
 	}
 }
 
+// The descope sibling fence must cover teardowns that already committed: a
+// PendingTabCleanup handle is a tmux session whose kill was never confirmed,
+// so its process may still run under the dropped account's environment while
+// the live roster reports it gone (#4430 review). The handoff must refuse
+// there exactly as validateAccountSwap does, and name the remedy — the
+// cleanup sweep the next daemon start runs — because the removed tab cannot
+// be closed again.
+func TestHandoffScopedSessionDescopeRefusesPendingTabCleanup(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	inst.SetBackend(&handoffRealPlanBackend{backend})
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "aider"), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	writeLimitAccountCandidates(t, "[program_overrides]\ncodex = \"aider\"\n")
+	inst.SetPendingTabCleanupForTest([]session.TabCleanupData{
+		{TabID: "build", TmuxName: inst.Title + "__build"},
+	})
+
+	_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, To: "codex"})
+	require.ErrorContains(t, err, "unconfirmed",
+		"a pending teardown can still run under the dropped account — the descope must refuse it")
+	require.ErrorContains(t, err, "restart af",
+		"the refusal must name the remedy: the next start retries the cleanup sweep")
+	account, _ := inst.AccountSelection()
+	require.Equal(t, "work", account,
+		"a refused handoff leaves the recorded scope untouched")
+	require.Empty(t, inst.Handoffs())
+	_, respawns, prompts := backend.snapshot()
+	require.Zero(t, respawns)
+	require.Empty(t, prompts)
+}
+
 func TestHandoffAccountHealthyDeliveryFailureDoesNotInventQuota(t *testing.T) {
 	for _, live := range []session.Liveness{session.LiveRunning, session.LiveReady} {
 		t.Run(fmt.Sprint(live), func(t *testing.T) {

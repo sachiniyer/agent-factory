@@ -155,8 +155,17 @@ func (m *Manager) evaluateManualAccountSwap(instance *session.Instance, swap *au
 	// one — so the namespace consulted here is the one the frozen launch plan
 	// proves, even when overrides point at each other (aider→codex beside
 	// codex→aider).
+	//
+	// "Same agent" is judged on the resolved identity, not the enum (#4430
+	// review): with program_overrides.aider = "codex" running a codex pane, a
+	// `--to codex` request whose own override resolves to aider is a CROSS-agent
+	// handoff — its account must come from aider's registry — while `--to aider`
+	// is the same-agent account change despite the enum differing from the
+	// recorded Program. Comparing the enum to CurrentAgentName gets both
+	// backwards.
 	program := instance.AgentProgram()
-	if swap.agent != "" && swap.agent != instance.CurrentAgentName() {
+	if swap.agent != "" &&
+		session.HandoffEffectiveAgentForPath(instance.Path, swap.agent) != instance.CurrentAgentName() {
 		program = swap.agent
 	}
 	swap.accountAgent = session.HandoffEffectiveAgentForPath(instance.Path, program)

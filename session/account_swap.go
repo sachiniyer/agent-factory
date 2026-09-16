@@ -143,7 +143,14 @@ func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch 
 		return fmt.Errorf("cannot switch accounts for session %q while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the account swap", i.Title, pendingCleanup)
 	}
 	resolution := resolveLaunchProgramForInstance(i)
-	crossAgent := agent != "" && agent != i.CurrentAgentName()
+	// "Cross-agent" is a resolved-identity question, not an enum one: the target
+	// enum's own override decides what it launches, so with
+	// program_overrides.aider = "codex" running a codex pane, `--to codex` whose
+	// override resolves to aider IS a cross-agent swap (resolve the codex enum's
+	// command and namespace), while `--to aider` is the same-agent account
+	// change even though the enum differs from the recorded Program (#4430
+	// review).
+	crossAgent := agent != "" && HandoffEffectiveAgentForPath(path, agent) != i.CurrentAgentName()
 	if crossAgent {
 		program = agent
 		resolved := resolveResolvedConfigForInstance(i)
@@ -182,7 +189,20 @@ func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch 
 	if err := tmux.ValidateAccountLaunchSupport(name); err != nil {
 		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
 	}
-	accountScope, err := resolveAccountForProvision(path, program, name)
+	// The committed manual transaction is the one caller whose account
+	// namespace is a matter of record rather than configuration: the swap
+	// already moved this session to name inside pending.AccountAgent's
+	// registry, so its retry must resolve there even when program_overrides
+	// have since moved the enum's resolution — resolveAccountForProvision
+	// answers the namespace the CURRENT config would pick, which is the
+	// wrong registry for finishing an already-committed move (#4430 review).
+	var accountScope sessionenv.Account
+	var err error
+	if pending != nil && pending.Manual && pending.To == name && pending.AccountAgent != "" {
+		accountScope, err = selectAccountInNamespace(pending.AccountAgent, name)
+	} else {
+		accountScope, err = resolveAccountForProvision(path, program, name)
+	}
 	if err != nil {
 		return fmt.Errorf("cannot select account %q for session %q: %w", name, i.Title, err)
 	}

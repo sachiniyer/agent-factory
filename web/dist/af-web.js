@@ -11325,7 +11325,11 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   let accountsFailed = false;
   const resolvedAgent = (agent) => accounts.resolved_agents?.[agent] ?? agent;
   const scopableTarget = (agent) => accountsFailed || accountAgentSupported(accounts, resolvedAgent(agent));
-  const requiresAccount = (agent) => agent === currentAgent || !!callbacks.currentAccount && scopableTarget(agent);
+  const isCurrentAgent = (agent) => {
+    const resolved = resolvedAgent(agent);
+    return currentAgent !== "" && resolved !== "" && resolved === currentAgent;
+  };
+  const requiresAccount = (agent) => isCurrentAgent(agent) || !!callbacks.currentAccount && scopableTarget(agent);
   let accountRows = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
@@ -11341,7 +11345,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     const choices = handoffAccountChoices(
       accounts,
       resolvedAgent(agent),
-      agent === currentAgent ? callbacks.currentAccount : ""
+      isCurrentAgent(agent) ? callbacks.currentAccount : ""
     );
     accountRows = choices;
     accountSelect.replaceChildren();
@@ -11370,11 +11374,12 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     const hasAccount = (agent) => handoffAccountChoices(
       accounts,
       resolvedAgent(agent),
-      agent === currentAgent ? callbacks.currentAccount : ""
+      isCurrentAgent(agent) ? callbacks.currentAccount : ""
     ).length > 0;
-    const choices = catalogChoices.filter((choice) => !callbacks.currentAccount || hasAccount(choice.value) || !scopableTarget(choice.value));
-    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
-      choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
+    const currentTarget = catalogChoices.find((choice) => isCurrentAgent(choice.value))?.value ?? currentAgent;
+    const choices = catalogChoices.filter((choice) => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || !scopableTarget(choice.value)));
+    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentTarget)) {
+      choices.unshift({ value: currentTarget, label: currentTarget + " (another account)" });
     }
     const previous = agentSelect.value;
     renderChoices(choices);
@@ -11393,7 +11398,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     )
   );
   void callbacks.loadPrograms().then((catalog) => {
-    catalogChoices = handoffAgentChoices(catalog, currentAgent);
+    catalogChoices = handoffAgentChoices(catalog, "");
     refreshAgentChoices();
   }).catch(() => {
     renderChoices([]);

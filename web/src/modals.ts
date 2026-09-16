@@ -469,8 +469,19 @@ export function handoffModal(
   // so it is treated as requiring one — the daemon refuses the carry either way.
   const resolvedAgent = (agent: string): string => accounts.resolved_agents?.[agent] ?? agent;
   const scopableTarget = (agent: string): boolean => accountsFailed || accountAgentSupported(accounts, resolvedAgent(agent));
+  // "The current agent" is judged on resolved identity, not enum name: with
+  // program_overrides.aider = "codex" running a codex pane, the aider ENUM is
+  // the same-agent target (its command resolves to the running codex) while
+  // the codex enum — resolving to aider — is a cross-agent handoff the
+  // daemon's resolved-identity guard permits (#4430 review). A target whose
+  // command is not a provable agent invocation resolves to "" and can never
+  // be the current agent.
+  const isCurrentAgent = (agent: string): boolean => {
+    const resolved = resolvedAgent(agent);
+    return currentAgent !== "" && resolved !== "" && resolved === currentAgent;
+  };
   const requiresAccount = (agent: string): boolean =>
-    agent === currentAgent || (!!callbacks.currentAccount && scopableTarget(agent));
+    isCurrentAgent(agent) || (!!callbacks.currentAccount && scopableTarget(agent));
   let accountRows: ReturnType<typeof handoffAccountChoices> = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
@@ -498,7 +509,7 @@ export function handoffModal(
     // daemon accepts the handoff (#4430 review round 3). An empty resolution
     // (a command af cannot prove is an agent) matches no rows.
     const choices = handoffAccountChoices(accounts, resolvedAgent(agent),
-      agent === currentAgent ? callbacks.currentAccount : "");
+      isCurrentAgent(agent) ? callbacks.currentAccount : "");
     accountRows = choices;
     accountSelect.replaceChildren();
     if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
@@ -530,13 +541,21 @@ export function handoffModal(
   const refreshAgentChoices = (): void => {
     if (catalogChoices === null || !accountsLoaded) return;
     const hasAccount = (agent: string): boolean => handoffAccountChoices(accounts, resolvedAgent(agent),
-      agent === currentAgent ? callbacks.currentAccount : "").length > 0;
+      isCurrentAgent(agent) ? callbacks.currentAccount : "").length > 0;
+    // The same-agent row spells the account change through the enum whose
+    // resolved command IS the running agent — usually currentAgent's own
+    // enum, but an override pointing its name elsewhere (the codex enum
+    // resolving to aider while aider launches the codex pane) makes a
+    // different enum the same-agent target (#4430 review). Falls back to
+    // currentAgent when no catalog enum resolves to it, matching the
+    // pre-resolved-agents behavior against older daemons.
+    const currentTarget = catalogChoices.find(choice => isCurrentAgent(choice.value))?.value ?? currentAgent;
     // A scoped session keeps every target it can honestly reach: an agent with
     // a registered account to name, or one with no account support at all,
     // which drops the scope rather than needing it (#4428).
-    const choices = catalogChoices.filter(choice => !callbacks.currentAccount || hasAccount(choice.value) || !scopableTarget(choice.value));
-    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
-      choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
+    const choices = catalogChoices.filter(choice => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || !scopableTarget(choice.value)));
+    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentTarget)) {
+      choices.unshift({ value: currentTarget, label: currentTarget + " (another account)" });
     }
     const previous = agentSelect.value;
     renderChoices(choices);
@@ -561,7 +580,11 @@ export function handoffModal(
   void callbacks
     .loadPrograms()
     .then((catalog) => {
-      catalogChoices = handoffAgentChoices(catalog, currentAgent);
+      // The current agent is NOT excluded here: "same agent" is a resolved-
+      // identity question refreshAgentChoices answers per render — an enum
+      // whose name equals currentAgent can still resolve to a different
+      // agent and must stay offerable (#4430 review).
+      catalogChoices = handoffAgentChoices(catalog, "");
       refreshAgentChoices();
     })
     .catch(() => {
