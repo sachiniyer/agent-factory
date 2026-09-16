@@ -555,7 +555,8 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 	for _, name := range sortedKeys(marked) {
 		procs := marked[name]
 		sort.Slice(procs, func(i, j int) bool { return procs[i].PID < procs[j].PID })
-		if live[name] {
+		sessionLive := live[name]
+		if sessionLive {
 			// The pane tree comes from the EVIDENCE-BEARING capture. The
 			// best-effort SessionProcessTrees returns nil on any list-panes
 			// failure, and reading that nil as a proven-empty tree is the
@@ -567,36 +568,50 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			// observations.blindSessions) rather than classified either way.
 			tree, paneErr := tmux.CaptureSessionProcessTrees(ctx.opts.Exec, name)
 			if paneErr != nil {
-				// Revalidate candidates before declaring blindness: if every
-				// marked process for this session already exited (normal churn),
-				// there is nothing left to be blind about and no row is needed.
-				var anyPresent bool
-				for _, p := range procs {
-					if observations.stillPresent(p) {
-						anyPresent = true
-						break
+				// A session that vanished between the memoized listing and the
+				// pane capture is conclusively gone: route its surviving
+				// candidates through the dead-session (orphaned-process)
+				// classification below, just like a session that was never in
+				// the live list. The vanished sentinel is not a blindness event
+				// because the absence is authoritative, not a failed read.
+				if errors.Is(paneErr, tmux.ErrSessionVanishedBeforeCapture) {
+					sessionLive = false
+				} else {
+					// Revalidate candidates before declaring blindness: if every
+					// marked process for this session already exited (normal churn),
+					// there is nothing left to be blind about and no row is needed.
+					var anyPresent bool
+					for _, p := range procs {
+						if observations.stillPresent(p) {
+							anyPresent = true
+							break
+						}
 					}
+					if anyPresent {
+						observations.blindSessions = append(observations.blindSessions, name)
+					}
+					continue
 				}
-				if anyPresent {
-					observations.blindSessions = append(observations.blindSessions, name)
+			}
+			if sessionLive {
+				inSession := map[int]bool{}
+				for _, p := range tree {
+					inSession[p.PID] = true
+				}
+				for _, p := range procs {
+					if inSession[p.PID] || !observations.stillPresent(p) {
+						continue
+					}
+					report.addAdvisoryFinding(Finding{
+						Check: "escaped-process",
+						Detail: fmt.Sprintf("%s escaped the pane tree of live session %s "+
+							"(left alone while the session is alive)", describeProc(p), name),
+					})
 				}
 				continue
 			}
-			inSession := map[int]bool{}
-			for _, p := range tree {
-				inSession[p.PID] = true
-			}
-			for _, p := range procs {
-				if inSession[p.PID] || !observations.stillPresent(p) {
-					continue
-				}
-				report.addAdvisoryFinding(Finding{
-					Check: "escaped-process",
-					Detail: fmt.Sprintf("%s escaped the pane tree of live session %s "+
-						"(left alone while the session is alive)", describeProc(p), name),
-				})
-			}
-			continue
+			// sessionLive was cleared by ErrSessionVanishedBeforeCapture:
+			// fall through to the orphaned-process classification below.
 		}
 		for _, p := range procs {
 			if !observations.stillPresent(p) {
