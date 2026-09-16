@@ -102,7 +102,14 @@ func tmuxResidue(t *testing.T, root, name, shape string) (dir, socket string) {
 
 func residueFinding(t *testing.T, r *Report, dir string) Finding {
 	t.Helper()
-	// Doctor reports resolved paths (/private/tmp on macOS), so compare those.
+	// A no-op for every caller here, by construction: each root comes from
+	// socketTempHome, which resolved it while it existed, so every path built
+	// under it is already canonical. It has to be, because resolution is only
+	// reliable while the path exists — this is called after --fix runs that
+	// removed the directory, and on a removed path normalizeHome falls back to
+	// the unresolved spelling, which on macOS never matches the /private/tmp/…
+	// doctor reports (#4496). Kept so a caller passing a path that still exists
+	// is compared correctly, not as the mechanism these tests rely on.
 	dir = normalizeHome(dir)
 	var found []Finding
 	for _, f := range findByCheck(r, checkTestResidueDir) {
@@ -525,4 +532,34 @@ func TestAHarnessNameSwappedForASymlinkAfterTheListingIsNotJudged(t *testing.T) 
 		normalizeHome(ctx.opts.ConfigDir), testresidue.TmuxSocketDir)
 	require.Error(t, fix())
 	require.DirExists(t, target)
+}
+
+// #4496, reproduced where CI cannot see it. The macOS runner's /tmp is a
+// symlink; Linux's is not, so a test that resolved its paths only after --fix
+// removed them passed here and failed there. This stages the macOS shape on
+// every platform: doctor is handed the temp dir through a symlink, as
+// os.TempDir() hands it out on macOS, and the fixture paths are named from the
+// root resolved at creation.
+func TestResidueUnderASymlinkedTempDirIsMatchedAfterItIsRemoved(t *testing.T) {
+	alias, canonical := aliasedSocketTempHome(t)
+	require.NotEqual(t, alias, canonical, "precondition: the temp dir is reached through a symlink")
+	stubOpenFiles(t, true, nil)
+	home := sandboxHomeResidue(t, canonical, testresidue.SandboxHomePrefix+"9800", "agent-factory.log")
+	tmuxDir, _ := tmuxResidue(t, canonical, testresidue.PackageTmuxPrefix+"9801", "dead")
+
+	report, err := Run(residueOptions(t, alias, true))
+	require.NoError(t, err)
+
+	for _, dir := range []string{home, tmuxDir} {
+		require.NoDirExists(t, dir)
+		f := residueFinding(t, report, dir)
+		require.True(t, f.Fixed, "fix error for %s: %v", dir, f.FixErr)
+
+		// The hazard, stated: the same directory spelled through the symlink can
+		// no longer be resolved, so resolving at assert time yields a path doctor
+		// never reported.
+		viaAlias := filepath.Join(alias, filepath.Base(dir))
+		require.NotEqual(t, dir, normalizeHome(viaAlias),
+			"resolution needs the path to exist; a removed one comes back unresolved")
+	}
 }
