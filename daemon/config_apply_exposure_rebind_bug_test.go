@@ -299,6 +299,53 @@ func TestApplyConfigExposureNoticeFiresOnLiveRequireTokenFlipWithoutRebind(t *te
 		"the notice must name the serving bound address, got: %s", notice)
 }
 
+// TestApplyConfigExposureNoticeDoesNotResurfaceAfterFailedRebindFromExposed pins the
+// scenario identified in the P2 review: a tokenless non-loopback listener (exposed)
+// attempts to rebind to a loopback address — the rebind FAILS, so the config advances
+// to the (requested) loopback address while the socket remains serving the old
+// non-loopback one. On every subsequent unrelated ApplyConfig while that rebind is
+// still pending, old (= m.Config()) carries the requested-but-never-bound loopback
+// address, so wasExposed computed from old.ListenAddr is false even though the daemon
+// is continuously exposed. The fix captures the serving address before reconcile.
+func TestApplyConfigExposureNoticeDoesNotResurfaceAfterFailedRebindFromExposed(t *testing.T) {
+	server, oldBound := exposureRebindFixture(t,
+		"[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = false\n", true)
+	require.False(t, config.IsLoopbackListenAddr(oldBound),
+		"anti-vacuous: the start address must be non-loopback (exposed)")
+
+	// Step 1: attempt to rebind to loopback — rebind FAILS. Config advances to
+	// loopback, but the socket keeps serving the old non-loopback bound address.
+	setGlobalConfigValue(t, "network.listen_addr", "127.0.0.1:0")
+	first, err := server.manager.ApplyConfig()
+	require.NoError(t, err)
+	require.Contains(t, first.FailedListenerKeys, "network.listen_addr",
+		"anti-vacuous: the rebind must have failed")
+	require.True(t, hasRebindFailure(first.Warnings),
+		"anti-vacuous: the rebind must have warned")
+	require.Equal(t, oldBound, server.manager.ListenerAddress("network.listen_addr"),
+		"the old non-loopback listener must still be serving after the failed rebind")
+	// No exposure notice on this step: the daemon was ALREADY exposed before the
+	// rebind was attempted (tokenless non-loopback), so !wasExposed is false.
+	require.Empty(t, exposureNotice(first.Warnings),
+		"no exposure notice on step 1: the daemon was already exposed before the rebind. Warnings:\n%s",
+		strings.Join(first.Warnings, "\n"))
+
+	// Step 2: an unrelated save while the failed rebind is still pending. The
+	// live config carries the requested loopback address (which never bound), but
+	// the daemon is still serving the old non-loopback socket and IS exposed. The
+	// notice must NOT resurface: the transition into exposure happened before step
+	// 1, not here. Pre-fix this fired because wasExposed was computed from
+	// old.ListenAddr (the requested loopback) rather than the serving address.
+	setGlobalConfigValue(t, "default_program", "codex")
+	second, err := server.manager.ApplyConfig()
+	require.NoError(t, err)
+	require.Contains(t, second.Applied, "default_program")
+	require.Empty(t, exposureNotice(second.Warnings),
+		"the notice must not resurface on an unrelated save while the daemon is "+
+			"continuously exposed (failed rebind from an already-exposed socket). Warnings:\n%s",
+		strings.Join(second.Warnings, "\n"))
+}
+
 // TestApplyConfigUnrelatedChangeWhileExposedDoesNotResurfaceWithRealListener is the
 // stronger sibling of TestApplyConfig_UnrelatedChangeWhileExposedDoesNotResurfaceExposureNotice:
 // it exercises the !wasExposed warning-fatigue gate against a REAL bound web listener

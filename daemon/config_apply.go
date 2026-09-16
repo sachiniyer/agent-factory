@@ -200,7 +200,18 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// change is a socket operation: reconcile rebinds it bind-new-before-close. A
 	// rebind that fails keeps the OLD listener serving and is reported deferred with
 	// the reason — never silently dropped.
+	//
+	// Capture the serving address BEFORE reconcile so the exposure transition check
+	// below uses the pre-reconciliation serving posture. If a prior rebind failed,
+	// old.ListenAddr already carries the (failed) requested address while the socket
+	// still serves the previously bound one — using it for wasExposed would compute
+	// false even though the daemon has been exposed throughout, causing the
+	// transition gate (!wasExposed) to fire on every subsequent unrelated save.
+	preReconcileServingAddr := old.ListenAddr
 	if m.webListeners != nil {
+		if pre := m.ListenerAddress("network.listen_addr"); pre != "" {
+			preReconcileServingAddr = pre
+		}
 		if failed, rerr := m.webListeners.reconcile(newCfg); rerr != nil {
 			result.Warnings = append(result.Warnings, rerr.Error())
 			result.FailedListenerKeys = append(result.FailedListenerKeys, failed...)
@@ -279,7 +290,16 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// listener machinery at all (a unix-socket-only daemon / a test manager). In
 	// that last case the requested config IS the honest posture: nothing
 	// rebound, so requested and serving cannot have diverged.
-	wasExposed := config.ListenerServesUnauthenticatedNetwork(old.ListenAddr, old.RequireToken)
+	//
+	// wasExposed uses preReconcileServingAddr (captured before reconcile, above)
+	// rather than old.ListenAddr. When a prior rebind failed, old (= m.Config()
+	// at entry) already carries the previously-requested address (which reconcile
+	// failed to bind), while the socket is still serving the address bound before
+	// that failure. Using old.ListenAddr for wasExposed would compute false for a
+	// daemon that has been continuously exposed since the prior apply, causing the
+	// transition gate to fire — and the notice to re-emit — on every subsequent
+	// unrelated save.
+	wasExposed := config.ListenerServesUnauthenticatedNetwork(preReconcileServingAddr, old.RequireToken)
 	servingAddr := newCfg.ListenAddr
 	if m.webListeners != nil {
 		servingAddr = m.ListenerAddress("network.listen_addr")
