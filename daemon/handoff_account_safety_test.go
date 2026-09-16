@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -191,6 +192,40 @@ func TestHandoffAccountReresolvesAccountNamespaceUnderProjectLock(t *testing.T) 
 	case <-time.After(5 * time.Second):
 		t.Fatal("manual handoff did not finish")
 	}
+}
+
+// An account-only handoff (no --to) keeps the recorded program. The pane runs
+// codex through program_overrides.claude, and program_overrides.codex points
+// elsewhere; the request's defaulted agent is that running IDENTITY, not an
+// enum, so the account must resolve in codex's registry. Re-resolving the
+// identity through codex's own override admitted a gemini launch instead
+// (#4430 review). "work" exists only in gemini's registry here, so the old
+// resolution passes the namespace check while the fixed one names codex.
+func TestHandoffAccountOnlyResolvesTheRecordedProgramNamespace(t *testing.T) {
+	m, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal") // registered under claude only
+	project, err := config.RegisterProject(inst.Path)
+	require.NoError(t, err)
+	_, err = config.SetProjectConfigValue(project.ID, "program_overrides.claude", "codex")
+	require.NoError(t, err)
+	_, err = config.SetProjectConfigValue(project.ID, "program_overrides.codex", "gemini")
+	require.NoError(t, err)
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	_, err = agentaccount.Register(home, tmux.ProgramGemini, "work")
+	require.NoError(t, err)
+	prepareHandoffTargetPreflight(t, inst)
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	inst.ClearLimitReached()
+	require.Equal(t, tmux.ProgramCodex, inst.CurrentAgentName(), "precondition: the pane runs codex")
+
+	_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repoID, Account: "work"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `account "work" is not registered for codex`,
+		"an account-only request resolves in the running agent's registry")
+	require.NotContains(t, err.Error(), tmux.ProgramGemini)
+	require.False(t, isMutationCommitted(err))
+	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram())
 }
 
 // handoffRealPlanBackend keeps limitResumeBackend's recorded surface but runs

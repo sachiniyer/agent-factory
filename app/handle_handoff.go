@@ -40,7 +40,7 @@ func handoffAgentChoices(current string, resolvedAgents map[string]string) []str
 		if !known {
 			resolved = agent
 		}
-		if resolved != "" && resolved == current {
+		if session.HandoffTargetIsCurrent(current, agent, resolved) {
 			continue
 		}
 		choices = append(choices, agent)

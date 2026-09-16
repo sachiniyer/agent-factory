@@ -39,9 +39,17 @@ type autoAccountSwap struct {
 	// explicitly so `program_overrides.aider = "codex"` resolves the account in
 	// codex's registry while program resolution still reads aider's override.
 	accountAgent string
-	alreadySet   bool
-	fallbackDue  bool
-	fellBack     bool
+	// accountOnly records that the manual request named no --to: its agent is
+	// the running identity, not an enum whose override produced the pane, so it
+	// must never be re-resolved into a cross-agent launch (#4430 review).
+	accountOnly bool
+	// crossAgent is manual admission's one decision about whether the swap
+	// launches agent's command or keeps the recorded program. The launch
+	// preflight and the identity commit both read it.
+	crossAgent  bool
+	alreadySet  bool
+	fallbackDue bool
+	fellBack    bool
 }
 
 // accountNamespace is the agent whose account registry answers the swap's
@@ -401,7 +409,7 @@ func (m *Manager) commitNewAccountSwapIdentity(
 		brief := instance.BuildMissionBrief(scheduled.agent, scheduled.promptOverride, scheduled.reason)
 		scheduled.headSHA = brief.Work.HeadSHA
 		scheduled.mission = brief.Render()
-		handoff, err = instance.SelectAccountForHandoff(scheduled.from, scheduled.to, scheduled.agent, scheduled.accountNamespace(), scheduled.reason, scheduled.headSHA, scheduled.mission)
+		handoff, err = instance.SelectAccountForHandoff(scheduled.from, scheduled.to, scheduled.agent, scheduled.accountNamespace(), scheduled.crossAgent, scheduled.reason, scheduled.headSHA, scheduled.mission)
 		previousConversation = handoff.From
 	} else {
 		previousConversation, err = instance.SelectAccountAutomatically(scheduled.from, scheduled.to)

@@ -474,11 +474,13 @@ export function handoffModal(
   // the same-agent target (its command resolves to the running codex) while
   // the codex enum — resolving to aider — is a cross-agent handoff the
   // daemon's resolved-identity guard permits (#4430 review). A target whose
-  // command is not a provable agent invocation resolves to "" and can never
-  // be the current agent.
+  // command is not a provable agent invocation resolves to "", and then its
+  // enum alone decides — the daemon's HandoffTargetIsCurrent does the same, so
+  // a claude session behind program_overrides.claude = "./agent-wrapper" is
+  // never offered claude again.
   const isCurrentAgent = (agent: string): boolean => {
     const resolved = resolvedAgent(agent);
-    return currentAgent !== "" && resolved !== "" && resolved === currentAgent;
+    return currentAgent !== "" && (resolved !== "" ? resolved : agent) === currentAgent;
   };
   const requiresAccount = (agent: string): boolean =>
     isCurrentAgent(agent) || (!!callbacks.currentAccount && scopableTarget(agent));

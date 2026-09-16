@@ -60,6 +60,23 @@ func TestHandoffAgentChoices_FiltersByResolvedIdentity(t *testing.T) {
 		"the codex enum resolves to aider — a real cross-agent handoff despite the matching name")
 }
 
+// A resolution af cannot prove (a wrapper script) comes back "", and the enum
+// alone then decides sameness (#4430 review): behind
+// program_overrides.claude = "./agent-wrapper" a claude session is still
+// claude, so claude is not offered, while another enum's opaque override is
+// still a real target.
+func TestHandoffAgentChoices_OpaqueResolutionFallsBackToTheEnum(t *testing.T) {
+	choices := handoffAgentChoices(tmux.ProgramClaude, map[string]string{
+		tmux.ProgramClaude: "",
+		tmux.ProgramAider:  "",
+	})
+
+	require.NotContains(t, choices, tmux.ProgramClaude,
+		"the wrapper-backed claude is the running agent — the daemon refuses the self-handoff")
+	require.Contains(t, choices, tmux.ProgramAider, "an opaque override of another enum is a real handoff")
+	require.Contains(t, choices, tmux.ProgramCodex)
+}
+
 // Opening the picker must not dispatch anything: the swap happens only after the
 // user picks an agent AND confirms.
 func TestHandleHandoff_OpensPickerWithoutDispatching(t *testing.T) {

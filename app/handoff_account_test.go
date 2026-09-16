@@ -181,6 +181,31 @@ func TestHandoffScopedClassifiesTargetsByResolvedAgent(t *testing.T) {
 	require.Contains(t, rendered, `"spare" is a codex account`)
 }
 
+// The account picker applies the same fallback (#4430 review): a scoped claude
+// session behind an opaque claude override is still claude, so its own enum is
+// neither offered as a self-handoff nor as an ambient "scope dropped" row —
+// the daemon refuses both.
+func TestHandoffScopedOpaqueCurrentAgentIsNotOffered(t *testing.T) {
+	h := newTestHome(t)
+	inst := handoffActionInstance(t, "worker", "claude")
+	inst.Account = "work"
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+	restore := SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
+		return daemon.ListAccountsResponse{
+			Agents:         []string{"claude", "codex", "gemini"},
+			Entries:        []daemon.AccountEntry{{Agent: "claude", Name: "personal", LoggedIn: true}},
+			ResolvedAgents: map[string]string{"claude": "", "aider": ""},
+		}, nil
+	})
+	defer restore()
+	_, cmd := h.handleHandoff()
+	h.Update(cmd())
+	require.Equal(t, []string{"aider", "amp", "opencode", "devin"}, h.handoffChoices,
+		"only targets that drop the scope remain; claude is the running agent")
+	require.Equal(t, []string{"", "", "", ""}, h.handoffAccounts)
+}
+
 func TestHandoffCredentialWarning(t *testing.T) {
 	h := newTestHome(t)
 	h.store.AddInstance(handoffActionInstance(t, "worker", "claude"))

@@ -236,8 +236,8 @@ func TestHandoffAccountRecoversHealthyCheckpoint(t *testing.T) {
 	inst.ClearLimitReached()
 	m.cfg.LimitAutoResume = false
 	require.NoError(t, inst.BeginManualAccountSwap())
-	require.NoError(t, inst.ValidateManualAccountSwap("personal", "claude"))
-	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", "claude", session.HandoffReasonManual, "tip", "continue")
+	require.NoError(t, inst.ValidateManualAccountSwap("personal", "claude", false))
+	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", "claude", false, session.HandoffReasonManual, "tip", "continue")
 	require.NoError(t, err)
 	require.NoError(t, m.persistSettlement(repo, daemonInstanceKey(repo, inst.Title), inst))
 	inst.EndLimitResume()

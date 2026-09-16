@@ -121,15 +121,12 @@ func (i *Instance) LastHandoff() (AgentHandoff, bool) {
 // the CLI, the RPC, and the TUI so all three refuse the same inputs with the
 // same words.
 //
-// The same-target guard compares the agent the target's resolved command would
-// LAUNCH against CurrentAgentName — resolved against resolved — because an
-// enum is not an identity (#4430 review): program_overrides.aider = "codex"
+// The same-target guard is HandoffTargetIsCurrent: the target's identity is
+// the agent its resolved command would LAUNCH when af can prove one, because an
+// enum is not an identity (#4430 review) — program_overrides.aider = "codex"
 // makes an aider request a self-handoff the enum compare would permit, and
 // program_overrides.codex = "aider" makes a codex request a real cross-agent
-// handoff the enum compare refused as "already running". A target whose
-// resolved command is not a provable agent invocation (effective "") can never
-// be the same agent, so it passes this check and the scope decision decides
-// its fate downstream.
+// handoff the enum compare refused as "already running".
 func (i *Instance) ValidateHandoffTarget(target string) error {
 	target = strings.TrimSpace(target)
 	// Resolve the target's effective agent BEFORE the lock — the resolution
@@ -157,10 +154,35 @@ func (i *Instance) validateHandoffTargetLocked(target, effective string) error {
 	if !tmux.IsSupportedProgram(target) {
 		return fmt.Errorf("unknown agent %q: handoff target must be one of %s", target, tmux.SupportedProgramsString())
 	}
-	if current := i.currentAgentNameLocked(); current != "" && current == effective {
+	if current := i.currentAgentNameLocked(); HandoffTargetIsCurrent(current, target, effective) {
 		return fmt.Errorf("session is already running %s", current)
 	}
 	return nil
+}
+
+// HandoffTargetIsCurrent reports whether a handoff to target would relaunch
+// the agent this session already runs. It is the one same-target predicate the
+// guard and every picker share, so a row a picker offers is a row the daemon
+// accepts.
+//
+// The target's identity follows CurrentAgentName's own precedence: the agent
+// its resolved command provably launches (effective) when there is one, and
+// otherwise the configured enum. The fallback is what keeps an opaque wrapper
+// honest — with program_overrides.claude = "./agent-wrapper", the current
+// agent is claude by that same enum rule, and treating the unresolvable
+// target as "never current" would admit a self-handoff that stops a working
+// agent and restarts the same wrapper with no conversation (#4430 review).
+//
+// The fallback decides SAMENESS only. Whether the target can carry an account
+// is still judged on effective, where "" stays non-scopable.
+func HandoffTargetIsCurrent(current, target, effective string) bool {
+	if current == "" {
+		return false
+	}
+	if effective != "" {
+		return current == effective
+	}
+	return current == strings.TrimSpace(target)
 }
 
 // CurrentAgentName reports which agent enum this session should be treated AS.
@@ -258,7 +280,8 @@ func (i *Instance) SwapAgentProgram(target, reason, headSHA string, automatic bo
 	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
 		return HandoffSwap{}, err
 	}
-	return i.recordHandoffSwapLocked(target, effectiveAgent, reason, headSHA, automatic)
+	// The guard just refused the same-agent case, so this is a cross-agent swap.
+	return i.recordHandoffSwapLocked(target, effectiveAgent, true, reason, headSHA, automatic)
 }
 
 // RecordHandoffSwap is the transaction-owned mutation used by the daemon after
@@ -282,7 +305,7 @@ func (i *Instance) RecordHandoffSwap(target, effectiveAgent, reason, headSHA str
 	if err := i.validateHandoffTargetLocked(target, effectiveAgent); err != nil {
 		return HandoffSwap{}, err
 	}
-	return i.recordHandoffSwapLocked(target, effectiveAgent, reason, headSHA, automatic)
+	return i.recordHandoffSwapLocked(target, effectiveAgent, true, reason, headSHA, automatic)
 }
 
 // handoffEffectiveAgent resolves the agent identity of the command a handoff
@@ -372,7 +395,12 @@ func (i *Instance) handoffStorageCheckpoint() InstanceData {
 	return data
 }
 
-func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent, reason, headSHA string, automatic bool) (HandoffSwap, error) {
+// recordHandoffSwapLocked takes crossAgent from its caller rather than
+// re-deriving it: the decision belongs to the admission that froze the launch
+// plan. An account-only request's target is the current agent's IDENTITY, not
+// an enum whose override produced the pane, so re-resolving it here could turn
+// "change the account" into a Program rewrite (#4430 review).
+func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent string, crossAgent bool, reason, headSHA string, automatic bool) (HandoffSwap, error) {
 
 	if len(i.Tabs) == 0 {
 		return HandoffSwap{}, fmt.Errorf("session %q has no agent tab to hand off", i.Title)
@@ -402,21 +430,15 @@ func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent, reason, headS
 		previousAccount: i.Account,
 		previousAuto:    i.accountAutoSelected,
 	}
-	// Same-agent is judged on the resolved identity, not the enum: an enum whose
-	// override resolves to the running agent is a same-agent swap (keep Program —
-	// its override still produces the running command), while an enum merely
-	// NAMED like the running agent but resolving elsewhere is a real handoff
-	// that must rewrite Program so the respawn launches the target's command
-	// (#4430 review). An unidentifiable resolved command (effectiveAgent "") is
-	// never provably the same agent.
-	sameAgent := effectiveAgent != "" && i.currentAgentNameLocked() == effectiveAgent
-
 	i.Tabs[0].Handoffs = append(i.Tabs[0].Handoffs, entry)
 	i.touchLocked()
 	i.Tabs[0].Conversation = AgentConversationData{}
-	// Account-only handoffs retain the exact configured command for subsequent
-	// restarts; the detected agent enum is only the ledger's identity.
-	if !sameAgent && i.Program != target {
+	// Same-agent (account-only) handoffs retain the exact configured command for
+	// subsequent restarts — its override still produces the running command, and
+	// the detected agent enum is only the ledger's identity. A cross-agent swap
+	// rewrites Program so the respawn launches the target's command, even when
+	// the enum is merely NAMED like the running agent (#4430 review).
+	if crossAgent && i.Program != target {
 		i.Program = target
 		i.touchLocked()
 	}
@@ -434,7 +456,7 @@ func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent, reason, headS
 	// Effectively-scopable commands keep the recorded scope so their swap can
 	// name the incoming account explicitly or refuse; selectAccountLocked
 	// replaces it on the --account path.
-	if !sameAgent && i.Account != "" {
+	if crossAgent && i.Account != "" {
 		if _, scopable := sessionenv.SupportsAccounts(effectiveAgent); !scopable {
 			i.Account = ""
 			i.accountAutoSelected = false

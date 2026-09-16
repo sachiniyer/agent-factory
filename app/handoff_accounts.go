@@ -4,6 +4,7 @@ import (
 	"fmt"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
@@ -59,7 +60,8 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 	// refusal the picker hides are both lies. An absent map means an older
 	// daemon; the enum is the safe fallback. A KNOWN empty answer means the
 	// resolved command is not a provable agent invocation — that is
-	// non-scopable, and never the current agent.
+	// non-scopable, and the target's enum alone says whether it is the current
+	// agent (session.HandoffTargetIsCurrent).
 	resolvedFor := func(agent string) string {
 		resolved, resolvedKnown := msg.response.ResolvedAgents[agent]
 		if !resolvedKnown {
@@ -70,7 +72,7 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 	sameAgent := make(map[string]bool, len(tmux.SupportedPrograms))
 	ordered := make([]string, 0, len(tmux.SupportedPrograms))
 	for _, agent := range tmux.SupportedPrograms {
-		if resolved := resolvedFor(agent); resolved != "" && resolved == msg.agent {
+		if session.HandoffTargetIsCurrent(msg.agent, agent, resolvedFor(agent)) {
 			sameAgent[agent] = true
 			ordered = append(ordered, agent)
 		}

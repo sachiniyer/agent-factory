@@ -139,7 +139,7 @@ func TestValidateAccountSwapCommittedRetryUsesRecordedNamespace(t *testing.T) {
 
 	inst := accountSwapTestInstance(tmux.ProgramAider)
 	inst.Path = initTempGitRepo(t)
-	_, err = inst.SelectAccountForHandoff("", "work", tmux.ProgramAider, tmux.ProgramCodex,
+	_, err = inst.SelectAccountForHandoff("", "work", tmux.ProgramAider, tmux.ProgramCodex, true,
 		HandoffReasonManual, "head", "")
 	require.NoError(t, err)
 	require.Equal(t, tmux.ProgramCodex, inst.PendingAccountSwapAgent(),
@@ -220,7 +220,7 @@ func TestValidateManualAccountSwapPreflightsMissingUnchangedBinary(t *testing.T)
 	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
-	err = inst.ValidateManualAccountSwap("work", tmux.ProgramClaude)
+	err = inst.ValidateManualAccountSwap("work", tmux.ProgramClaude, false)
 	require.ErrorContains(t, err, "launch preflight")
 	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(), "admission must leave the outgoing runtime untouched")
 	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
@@ -241,7 +241,7 @@ func TestValidateManualAccountSwapPreflightsMissingSiblingBinary(t *testing.T) {
 		tmux: tmux.NewTmuxSession("worker", missing),
 	})
 
-	err = inst.ValidateManualAccountSwap("work", tmux.ProgramClaude)
+	err = inst.ValidateManualAccountSwap("work", tmux.ProgramClaude, false)
 	require.ErrorContains(t, err, `tab "worker"`)
 	require.ErrorContains(t, err, "launch preflight")
 	require.ErrorContains(t, err, "not installed or not on PATH")
@@ -263,7 +263,7 @@ func TestValidateManualAccountSwapAcceptsHealthySiblingBinary(t *testing.T) {
 		tmux: tmux.NewTmuxSession("worker", "/usr/bin/true"),
 	})
 
-	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramClaude))
+	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramClaude, false))
 	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram())
 	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 }
@@ -295,7 +295,7 @@ func TestValidateManualCrossAgentAccountSwapWritesSkillToIncomingAccount(t *test
 			require.NoError(t, err)
 			inst.SetGitWorktreeForTest(gw)
 
-			require.NoError(t, inst.ValidateManualAccountSwap("work", tc.agent))
+			require.NoError(t, inst.ValidateManualAccountSwap("work", tc.agent, true))
 			require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(),
 				"validation must not rewrite the outgoing runtime identity")
 			require.FileExists(t, tc.skillPath(accountDir),
@@ -314,9 +314,9 @@ func TestCheckManualAccountSwapDoesNotRecordLaunchPlan(t *testing.T) {
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
 
-	require.NoError(t, inst.CheckManualAccountSwap("work", tmux.ProgramClaude))
+	require.NoError(t, inst.CheckManualAccountSwap("work", tmux.ProgramClaude, false))
 	require.Nil(t, inst.accountSwapLaunch, "the unlocked check must not leave mutation authority behind")
-	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramClaude))
+	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramClaude, false))
 	require.NotNil(t, inst.accountSwapLaunch, "locked admission still records the launch plan")
 }
 
@@ -609,7 +609,7 @@ func TestPendingAccountSwapFencesArchiveAndHandoffButAllowsDelivery(t *testing.T
 func TestPendingAccountSwapHandoffAdmitsOnlySameTargetRetry(t *testing.T) {
 	newPending := func() *Instance {
 		inst := accountSwapTestInstance("claude")
-		_, err := inst.SelectAccountForHandoff("ambient", "work", "claude", "claude", HandoffReasonManual, "", "continue the mission")
+		_, err := inst.SelectAccountForHandoff("ambient", "work", "claude", "claude", false, HandoffReasonManual, "", "continue the mission")
 		require.NoError(t, err)
 		inst.inFlightOp = OpNone
 		return inst
@@ -636,7 +636,7 @@ func TestPendingAccountSwapHandoffAdmitsOnlySameTargetRetry(t *testing.T) {
 	// committed transaction (#4430 review round 3).
 	redirected := accountSwapTestInstance(tmux.ProgramAider)
 	redirected.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSession("swap", tmux.ProgramCodex))}
-	_, selectErr := redirected.SelectAccountForHandoff("ambient", "work", tmux.ProgramAider, tmux.ProgramCodex, HandoffReasonManual, "", "continue the mission")
+	_, selectErr := redirected.SelectAccountForHandoff("ambient", "work", tmux.ProgramAider, tmux.ProgramCodex, false, HandoffReasonManual, "", "continue the mission")
 	require.NoError(t, selectErr)
 	redirected.inFlightOp = OpNone
 	require.NoError(t, redirected.ValidateHandoffRuntimeAction(tmux.ProgramAider, "work"),

@@ -12,7 +12,7 @@ func TestHandoffAccountPreservesCustomProgram(t *testing.T) {
 	inst.Program = "claude --model opus"
 	inst.Account = "work"
 	require.NoError(t, inst.BeginManualAccountSwap())
-	entry, err := inst.SelectAccountForHandoff("work", "personal", "claude", "claude", HandoffReasonManual, "tip", "continue")
+	entry, err := inst.SelectAccountForHandoff("work", "personal", "claude", "claude", false, HandoffReasonManual, "tip", "continue")
 	require.NoError(t, err)
 	require.Equal(t, "claude --model opus", inst.AgentProgram())
 	require.Equal(t, "claude --model opus", inst.ToInstanceData().Program)

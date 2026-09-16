@@ -98,23 +98,53 @@ func (i *Instance) SupportsAutomaticAccountSwap() bool {
 // account creation remains supported, but a crash-safe automatic reprovision
 // needs a durable container identity and immutable provision plan of its own.
 func (i *Instance) ValidateAccountSwap(name string) error {
-	return i.validateAccountSwap(name, "", false, true)
+	return i.validateAccountSwap(name, "", false, false, true)
 }
 
-// ValidateManualAccountSwap uses the same launch proof with an operator-selected identity.
-func (i *Instance) ValidateManualAccountSwap(name, agent string) error {
-	return i.validateAccountSwap(name, agent, true, true)
+// ManualAccountSwapProgram decides which program a manual account swap
+// launches: agent's own command for a cross-agent handoff, the recorded
+// program otherwise. The daemon asks it once, at admission, and hands the same
+// crossAgent to ValidateManualAccountSwap and SelectAccountForHandoff so the
+// frozen launch and the record cannot disagree.
+//
+// "Same agent" is HandoffTargetIsCurrent, the same-target guard's predicate:
+// with program_overrides.aider = "codex" running a codex pane, `--to codex`
+// whose own override resolves to aider is CROSS-agent, while `--to aider` is
+// the same-agent account change despite the enum differing from Program.
+//
+// accountOnly (no --to) is same-agent by construction and skips the predicate.
+// Its agent is the running IDENTITY, not an enum whose override produced the
+// pane, so resolving it through its own override answers a question nobody
+// asked: with program_overrides.claude = "codex" and program_overrides.codex =
+// "gemini", a claude-configured codex pane would read "codex" as a gemini
+// launch and turn `--account work` into a cross-agent handoff (#4430 review).
+// Resolution does config I/O, so this must not run under i.mu.
+func (i *Instance) ManualAccountSwapProgram(agent string, accountOnly bool) (program string, crossAgent bool) {
+	program = i.AgentProgram()
+	agent = strings.TrimSpace(agent)
+	if accountOnly || agent == "" ||
+		HandoffTargetIsCurrent(i.CurrentAgentName(), agent, handoffEffectiveAgent(i, agent)) {
+		return program, false
+	}
+	return agent, true
+}
+
+// ValidateManualAccountSwap uses the same launch proof with an operator-selected
+// identity. agent names the handoff target; crossAgent is
+// ManualAccountSwapProgram's decision for it.
+func (i *Instance) ValidateManualAccountSwap(name, agent string, crossAgent bool) error {
+	return i.validateAccountSwap(name, agent, crossAgent, true, true)
 }
 
 // CheckManualAccountSwap performs the manual launch proof without recording a
 // launch plan. The daemon uses it before a project-lock identity probe so an
 // independent domain refusal can remain visible; a successful check grants no
 // authority to mutate and is repeated under the proven policy lock.
-func (i *Instance) CheckManualAccountSwap(name, agent string) error {
-	return i.validateAccountSwap(name, agent, true, false)
+func (i *Instance) CheckManualAccountSwap(name, agent string, crossAgent bool) error {
+	return i.validateAccountSwap(name, agent, crossAgent, true, false)
 }
 
-func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch bool) error {
+func (i *Instance) validateAccountSwap(name, agent string, crossAgent, manual, recordLaunch bool) error {
 	backend := i.currentBackend()
 	i.mu.RLock()
 	program := i.Program
@@ -143,14 +173,12 @@ func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch 
 		return fmt.Errorf("cannot switch accounts for session %q while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the account swap", i.Title, pendingCleanup)
 	}
 	resolution := resolveLaunchProgramForInstance(i)
-	// "Cross-agent" is a resolved-identity question, not an enum one: the target
-	// enum's own override decides what it launches, so with
-	// program_overrides.aider = "codex" running a codex pane, `--to codex` whose
-	// override resolves to aider IS a cross-agent swap (resolve the codex enum's
-	// command and namespace), while `--to aider` is the same-agent account
-	// change even though the enum differs from the recorded Program (#4430
+	// A cross-agent swap resolves the target enum's own command and namespace;
+	// a same-agent one keeps the recorded program. With program_overrides.aider
+	// = "codex" running a codex pane, `--to codex` whose override resolves to
+	// aider IS cross-agent, while `--to aider` — and an account-only request,
+	// whose agent is the running identity rather than an enum — is not (#4430
 	// review).
-	crossAgent := agent != "" && HandoffEffectiveAgentForPath(path, agent) != i.CurrentAgentName()
 	if crossAgent {
 		program = agent
 		resolved := resolveResolvedConfigForInstance(i)

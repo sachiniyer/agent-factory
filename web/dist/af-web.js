@@ -11327,7 +11327,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   const scopableTarget = (agent) => accountsFailed || accountAgentSupported(accounts, resolvedAgent(agent));
   const isCurrentAgent = (agent) => {
     const resolved = resolvedAgent(agent);
-    return currentAgent !== "" && resolved !== "" && resolved === currentAgent;
+    return currentAgent !== "" && (resolved !== "" ? resolved : agent) === currentAgent;
   };
   const requiresAccount = (agent) => isCurrentAgent(agent) || !!callbacks.currentAccount && scopableTarget(agent);
   let accountRows = [];

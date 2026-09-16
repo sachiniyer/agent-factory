@@ -63,13 +63,15 @@ func (i *Instance) BeginManualAccountSwap() error {
 // recordHandoffSwapLocked: an override can redirect the launch — the ledger's
 // To and the recorded Program name the enum the operator asked for, while the
 // scope judgment is made on the agent the command resolves to (#4430 review).
-func (i *Instance) SelectAccountForHandoff(from, name, target, effectiveAgent, reason, head, mission string) (HandoffSwap, error) {
+// crossAgent is the decision ValidateManualAccountSwap froze the launch plan
+// under; passing the same value keeps the record describing that launch.
+func (i *Instance) SelectAccountForHandoff(from, name, target, effectiveAgent string, crossAgent bool, reason, head, mission string) (HandoffSwap, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning {
 		return HandoffSwap{}, fmt.Errorf("account handoff requires the replacement fence")
 	}
-	entry, err := i.recordHandoffSwapLocked(target, effectiveAgent, reason, head, false)
+	entry, err := i.recordHandoffSwapLocked(target, effectiveAgent, crossAgent, reason, head, false)
 	if err != nil {
 		return HandoffSwap{}, err
 	}

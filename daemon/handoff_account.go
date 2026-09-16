@@ -104,6 +104,7 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 		swap = &autoAccountSwap{
 			manual: true, promptOverride: req.Brief, from: from, to: strings.TrimSpace(req.Account),
 			fromAgent: outgoing, agent: target, reason: reason,
+			accountOnly: strings.TrimSpace(req.To) == "",
 		}
 	}
 	outcome, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, instance.Title, swap)
@@ -150,24 +151,14 @@ func (m *Manager) evaluateManualAccountSwap(instance *session.Instance, swap *au
 	// refuse it directly rather than fall back to the requested enum and
 	// report the wrong agent.
 	//
-	// The input mirrors validateAccountSwap's program selection — the swap's
-	// target for a cross-agent handoff, the recorded program for a same-agent
-	// one — so the namespace consulted here is the one the frozen launch plan
-	// proves, even when overrides point at each other (aider→codex beside
-	// codex→aider).
-	//
-	// "Same agent" is judged on the resolved identity, not the enum (#4430
-	// review): with program_overrides.aider = "codex" running a codex pane, a
-	// `--to codex` request whose own override resolves to aider is a CROSS-agent
-	// handoff — its account must come from aider's registry — while `--to aider`
-	// is the same-agent account change despite the enum differing from the
-	// recorded Program. Comparing the enum to CurrentAgentName gets both
-	// backwards.
-	program := instance.AgentProgram()
-	if swap.agent != "" &&
-		session.HandoffEffectiveAgentForPath(instance.Path, swap.agent) != instance.CurrentAgentName() {
-		program = swap.agent
-	}
+	// The program selection is decided HERE, once, and handed to both the
+	// launch preflight and the identity commit — the swap's target for a
+	// cross-agent handoff, the recorded program for a same-agent or
+	// account-only one — so the namespace consulted here is the one the frozen
+	// launch plan proves, even when overrides point at each other (aider→codex
+	// beside codex→aider). ManualAccountSwapProgram documents the rule.
+	program, crossAgent := instance.ManualAccountSwapProgram(swap.agent, swap.accountOnly)
+	swap.crossAgent = crossAgent
 	swap.accountAgent = session.HandoffEffectiveAgentForPath(instance.Path, program)
 	if swap.accountAgent == "" {
 		return nil, fmt.Errorf("cannot hand %q off to %s with account %q: the program it resolves to cannot carry an account scope",
@@ -192,7 +183,7 @@ func (m *Manager) evaluateManualAccountSwap(instance *session.Instance, swap *au
 	if recordLaunch {
 		validate = instance.ValidateManualAccountSwap
 	}
-	if err := validate(swap.to, swap.agent); err != nil {
+	if err := validate(swap.to, swap.agent, crossAgent); err != nil {
 		return nil, err
 	}
 	admitted := *swap
