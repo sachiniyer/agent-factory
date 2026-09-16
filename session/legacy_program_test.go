@@ -69,23 +69,8 @@ func TestInjectSystemPrompt_BareEnumStillInjects(t *testing.T) {
 	}
 }
 
-// A legacy free-form program is returned unchanged. Approval flags are now the
-// user's program_overrides choice; af does not append one based on agent type.
-func TestResolveProgramForInstance_LegacyProgramUnchanged(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-
-	i := &Instance{
-		Program: "/home/foo/bin/claude",
-	}
-	result := resolveProgramForInstance(i)
-	if result != i.Program {
-		t.Errorf("expected legacy program unchanged, got %q", result)
-	}
-}
-
 // saveOverrideConfig writes a global config whose program_overrides redirect
-// the claude enum to the given command, so resolveProgramForInstance exercises
-// the real override-resolution path (instance path outside any git repo →
+// the claude enum to the given command (instance path outside any git repo →
 // global config applies).
 func saveOverrideConfig(t *testing.T, claudeOverride string) {
 	t.Helper()
@@ -94,35 +79,5 @@ func saveOverrideConfig(t *testing.T, claudeOverride string) {
 	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: claudeOverride}
 	if err := config.SaveConfig(cfg); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
-	}
-}
-
-func TestResolveProgramForInstance_OverrideToNonAgent(t *testing.T) {
-	saveOverrideConfig(t, "bash")
-
-	i := &Instance{
-		Title:   "cheap-instance",
-		Program: tmux.ProgramClaude,
-		Path:    t.TempDir(),
-	}
-	result := resolveProgramForInstance(i)
-	if result != "bash" {
-		t.Errorf("expected override resolved to bare %q with no injected flags, got %q", "bash", result)
-	}
-}
-
-// A custom Claude command is also returned verbatim. This is where users put
-// any approval mode they deliberately chose.
-func TestResolveProgramForInstance_OverrideToClaudePathUnchanged(t *testing.T) {
-	saveOverrideConfig(t, "/opt/claude-next/bin/claude --model opus")
-
-	i := &Instance{
-		Title:   "custom-claude",
-		Program: tmux.ProgramClaude,
-		Path:    t.TempDir(),
-	}
-	result := resolveProgramForInstance(i)
-	if result != "/opt/claude-next/bin/claude --model opus" {
-		t.Errorf("expected override unchanged, got %q", result)
 	}
 }
