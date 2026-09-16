@@ -443,13 +443,24 @@ func literalShellWordExpandableSafe(word *syntax.Word) (string, bool) {
 // (u* to unset, e{val,} to eval) that mutates the environment in this shell,
 // and judging the tail as env's argv cannot model that.
 //
-// The tilde carve-out needs the remainder to be nonempty. `~/x` keeps a
-// literal slash, `~name` resolves to that user's absolute home (or stays a
-// harmless `~name` when the user does not exist), and `~+`/`~-` expand to
-// PWD/OLDPWD — all path-shaped. A BARE `~` is different: the shell substitutes
-// its current HOME verbatim, so `HOME=unset; ~ CODEX_HOME` expands the head to
-// the `unset` builtin and strips the account variable outright (Codex on
-// #4466). The same applies when quoting reduces the remainder to empty.
+// The tilde carve-out needs the remainder to resolve under a fixed root.
+// `~/x` and `~name/x` expand to an absolute home path, and `~name` falls
+// back to a bare (PATH-relative) name when the user does not exist. Every
+// other shape fails closed:
+//
+//   - An EMPTY remainder is bare `~`: the shell substitutes its current HOME
+//     verbatim, so `HOME=unset; ~ CODEX_HOME` expands the head to the `unset`
+//     builtin and strips the account variable outright (Codex on #4466). The
+//     same applies when quoting reduces the remainder to empty.
+//   - `~+`, `~-`, and their `~+N`/`~-N` forms expand from the mutable PWD,
+//     OLDPWD, and directory stack rather than a fixed path — `PWD=unset;
+//     ~+ CODEX_HOME` runs the builtin — so a remainder opening with '+' or
+//     '-' is refused even when a slash follows (Codex on #4466).
+//   - A `..` segment escapes the home root entirely, and '~' resolves
+//     against the runtime HOME rather than a fixed one, so any tilde path
+//     can name a modeled wrapper the basename checks never see:
+//     `~/../../usr/bin/env` reaches the real env outright and `HOME=/usr;
+//     ~/bin/env` resolves to it at exec time (Codex on #4466).
 func provableCommandHead(word *syntax.Word) bool {
 	if word == nil || len(word.Parts) == 0 {
 		return false
@@ -466,7 +477,15 @@ func provableCommandHead(word *syntax.Word) bool {
 	copy(rest.Parts, word.Parts)
 	rest.Parts[0] = &syntax.Lit{Value: first.Value[1:]}
 	restValue, ok := literalShellWordExpandableSafe(&rest)
-	return ok && restValue != ""
+	if !ok || restValue == "" || restValue[0] == '+' || restValue[0] == '-' {
+		return false
+	}
+	for _, segment := range strings.Split(restValue, "/") {
+		if segment == ".." {
+			return false
+		}
+	}
+	return !accountModeledCommandName(filepath.Base(restValue))
 }
 
 // braceExpansionState tracks unquoted '{', '}', ',', and '..' across a word's

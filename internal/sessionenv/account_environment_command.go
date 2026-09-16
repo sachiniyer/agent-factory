@@ -652,6 +652,22 @@ func isAccountCommandName(word *syntax.Word, want string) bool {
 	return literal && filepath.Base(value) == want
 }
 
+// accountModeledCommandName names every executable the validator judges
+// specially — the wrapper set isAccountCommandName is invoked with at the
+// command dispatch — plus the shells. A tilde-expanded head can never reach
+// isAccountCommandName (its word still carries '~'), so a tilde path whose
+// basename is one of these must fail closed in provableCommandHead rather
+// than slip past the wrapper judgment (Codex on #4466).
+func accountModeledCommandName(name string) bool {
+	switch name {
+	case "env", "nohup", "nice", "timeout", "setsid", "stdbuf",
+		"ionice", "taskset", "strace", "xargs":
+		return true
+	default:
+		return knownShellName(name)
+	}
+}
+
 func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
 	functionsOnly := false
 	options := true
