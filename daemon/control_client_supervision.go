@@ -54,11 +54,11 @@ const (
 var systemdBootedDir = "/run/systemd/system"
 
 // systemdUserBusBase roots the user-manager probe: while `systemd --user`
-// runs, its bus socket lives at <base>/<uid>/bus — present on hosts where a
-// user manager exists WITHOUT systemd as PID 1 (a container or foreign root
-// running `systemd --user` independently), where the boot marker alone would
-// misread a live manager as absent (#4475 review). A var so tests can point
-// it at a sandbox.
+// runs, its private socket lives at <base>/<uid>/systemd/private — present
+// on hosts where a user manager exists WITHOUT systemd as PID 1 (a container
+// or foreign root running `systemd --user` independently), where the boot
+// marker alone would misread a live manager as absent (#4475 review). A var
+// so tests can point it at a sandbox.
 var systemdUserBusBase = "/run/user"
 
 // supervisorPresence is the three-way answer the unit-start gate needs. The
@@ -94,15 +94,15 @@ func probeUnitSupervisor() (supervisorPresence, error) {
 	switch autostartGOOS {
 	case "linux":
 		// Presence is "a manager this unit can be started through exists": the
-		// sd_booted marker proves systemd-as-PID-1, and the user manager's
-		// runtime state dir covers `systemd --user` running under a
-		// non-systemd init — the boot marker cannot prove THAT manager absent
-		// because `systemctl --user` drives the user manager, not PID 1. The
-		// bus endpoint deliberately does NOT prove presence: a foreign
-		// dbus-daemon (an OpenRC session, a container inheriting
-		// DBUS_SESSION_BUS_ADDRESS) owns a bus with no manager behind it
-		// (#4475 review). Neither marker existing is the only proven-absent
-		// case.
+		// sd_booted marker proves systemd-as-PID-1, and the user manager's own
+		// private socket proves a live `systemd --user` under a non-systemd
+		// init — the boot marker cannot prove THAT manager absent because
+		// `systemctl --user` drives the user manager, not PID 1. The runtime
+		// dir and any bus endpoint deliberately prove NOTHING: the dir
+		// outlives a dead manager, and a foreign dbus-daemon (an OpenRC
+		// session, a container inheriting DBUS_SESSION_BUS_ADDRESS) owns a
+		// bus with no manager behind it (#4475 review). Neither marker
+		// existing is the only proven-absent case.
 		_, bootErr := os.Stat(systemdBootedDir)
 		booted := bootErr == nil
 		if !booted && !systemdUserManagerPresent() {
@@ -111,13 +111,9 @@ func probeUnitSupervisor() (supervisorPresence, error) {
 		if _, err := exec.LookPath("systemctl"); err != nil {
 			return supervisorUnreachable, fmt.Errorf("systemd is present but no systemctl binary is reachable in PATH: %w", err)
 		}
-		// A user manager under a foreign init can be invoked ONLY through its
-		// own endpoints — unlike the booted case, there is no PID-1 activation
-		// path. Its marker proves the manager ran, so a dead endpoint is an
-		// invocation failure (fail closed), not absence.
-		if !booted && !systemdUserManagerInvocable() {
-			return supervisorUnreachable, fmt.Errorf("a systemd user manager runs in this session but it is unreachable from this environment (no session bus and no private manager socket)")
-		}
+		// Presence already implies invocable: the booted arm reaches the
+		// system manager's activation path, and the user-manager arm was
+		// proven by the private socket `systemctl --user` itself connects to.
 		return supervisorPresent, nil
 	case "darwin":
 		// launchd is always PID 1 on macOS — there is no "not booted under
@@ -195,7 +191,10 @@ func unitStartRemedy(startErr error) string {
 // whole window (RestartSec=5 alone outlasts the 5s budget), and an expired
 // deadline handed to is-active reads an active unit as dead — so a reclaim
 // drawn from `deadline` could never run for an ordinary callDaemon RPC, the
-// only path that reaches it (Codex on #4475).
+// only path that reaches it (Codex on #4475). The matching half lives in
+// callDaemon: a successful ensure that outlived the window renews the
+// follow-up dial via postEnsureDialDeadline, so a repair that worked does
+// not surface as a deadline error.
 //
 // When the wait failed because the admission budget expired, the returned
 // error keeps the context.DeadlineExceeded identity so callDaemon does not
@@ -280,38 +279,20 @@ func runEnsureManagerCommand(deadline time.Time, name string, args ...string) er
 	return fmt.Errorf("%s %s failed: %w\n%s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 }
 
-// systemdUserManagerPresent reports whether a `systemd --user` manager runs
-// in this session, proven by its runtime state dir <runtime>/systemd — created
-// by the manager itself at startup, under the same runtime dir chain
-// `systemctl --user` resolves ($XDG_RUNTIME_DIR, else /run/user/<uid>). This —
-// not the session bus — is the evidence a manager exists: a standalone
-// dbus-daemon or an inherited DBUS_SESSION_BUS_ADDRESS owns a bus endpoint
-// with nothing systemd behind it, and taking it as presence read that foreign
-// session as supervised and failed every command closed (#4475 review).
+// systemdUserManagerPresent reports whether a `systemd --user` manager is
+// LIVE for this uid under an init that is not systemd — a container or
+// foreign root running `systemd --user` independently. Liveness is the
+// manager's own `systemd/private` socket, not the `systemd/` runtime
+// directory: the directory is not reliably reaped when the manager exits, so
+// a failed `systemd --user` leaves it behind while unlinking the private
+// socket — reading the dir as presence would fail every command closed on a
+// dead manager (Codex on #4475). The private socket is also an invocation
+// path — `systemctl --user` connects to it directly when no session broker
+// runs — so presence implies invocable and no separate "present but
+// unreachable" user-manager state exists. A bus socket or
+// DBUS_SESSION_BUS_ADDRESS deliberately proves NOTHING: a foreign
+// dbus-daemon owns a bus with no manager behind it (#4475 review).
 func systemdUserManagerPresent() bool {
-	// Check both plausible locations: a marker under EITHER proves a manager
-	// ran here — a session whose XDG_RUNTIME_DIR points elsewhere can then
-	// only fail to invoke it, which reads as unreachable, not absent.
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" && isDir(filepath.Join(dir, "systemd")) {
-		return true
-	}
-	return isDir(filepath.Join(systemdUserBusBase, strconv.Itoa(os.Getuid()), "systemd"))
-}
-
-// systemdUserManagerInvocable reports whether this process can invoke the
-// systemd USER manager — resolved the way `systemctl --user` reaches it:
-// DBUS_SESSION_BUS_ADDRESS, else $XDG_RUNTIME_DIR/bus, else
-// /run/user/<uid>/bus, and finally the manager's own private socket at
-// <runtime>/systemd/private, which systemctl connects to directly when no
-// session D-Bus broker runs at all — the exact shape of a `systemd --user`
-// under a foreign init (Codex on #4475). Endpoint presence is what the boot
-// marker cannot show: a manager that can start the user unit even under a
-// non-systemd init (#4475 review). A declared-but-dead address still counts —
-// the start attempt, not the probe, is what surfaces that connect failure.
-func systemdUserManagerInvocable() bool {
-	if os.Getenv("DBUS_SESSION_BUS_ADDRESS") != "" {
-		return true
-	}
 	for _, dir := range []string{
 		os.Getenv("XDG_RUNTIME_DIR"),
 		filepath.Join(systemdUserBusBase, strconv.Itoa(os.Getuid())),
@@ -319,10 +300,7 @@ func systemdUserManagerInvocable() bool {
 		if dir == "" {
 			continue
 		}
-		// The private socket is the manager's own endpoint, not the session
-		// broker's — systemctl --user uses it directly when no bus exists.
-		if isSocket(filepath.Join(dir, "bus")) ||
-			isSocket(filepath.Join(dir, "systemd", "private")) {
+		if isSocket(filepath.Join(dir, "systemd", "private")) {
 			return true
 		}
 	}
@@ -332,11 +310,6 @@ func systemdUserManagerInvocable() bool {
 func isSocket(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.Mode()&os.ModeSocket != 0
-}
-
-func isDir(path string) bool {
-	st, err := os.Stat(path)
-	return err == nil && st.IsDir()
 }
 
 // systemdUnitActive reports whether the manager considers the unit's process
