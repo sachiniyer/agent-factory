@@ -314,7 +314,7 @@ func TestAccountPickerRefusesARegistrationOnlyAccount(t *testing.T) {
 	startNaming(t, h, "cannot-scope-this")
 
 	openAccountField(t, h)
-	require.Contains(t, accountItems(h)[1], "registration only",
+	require.Contains(t, strings.Join(accountItems(h), "\n"), "unproven — registration only",
 		"a registration-only row must be marked in the list, before any keypress")
 	pickAccount(t, h, "unproven")
 
@@ -354,7 +354,7 @@ func TestAccountPickerKeepsANotLoggedInAccountSelectable(t *testing.T) {
 	startNaming(t, h, "about-to-log-in")
 
 	openAccountField(t, h)
-	require.Contains(t, accountItems(h)[1], "not logged in",
+	require.Contains(t, strings.Join(accountItems(h), "\n"), "just-registered — not logged in",
 		"a not-logged-in row must say so in the list, before any keypress")
 	pickAccount(t, h, "just-registered")
 
