@@ -176,9 +176,9 @@ differ ([#1986](https://github.com/sachiniyer/agent-factory/issues/1986)):
   never an identifier: accepting it would make two strings address one tab, the
   ambiguity #1929/#1904 removed from the tab surface.
 - `session.TabIdentifiers` — renders a tab as both spellings, so *"no tab named
-  X"* lists the valid options with their labels. This is the whole mechanism
-  now: the label never resolves, but a user who read `Terminal` off the bar is
-  told the real name `shell` rather than left at a dead end.
+  X"* lists the valid options with their labels. The label never resolves at
+  the wire or CLI, but a user who read `Terminal` off the bar is told the real
+  name `shell` rather than left at a dead end.
 
 [#1937](https://github.com/sachiniyer/agent-factory/issues/1937) first closed
 the gap by accepting the label as an alias; #1986 reversed that so the label

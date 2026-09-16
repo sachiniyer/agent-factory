@@ -96,8 +96,9 @@ On a fresh project the sidebar has no sessions. From here:
 4. Keep this session active for the browser step below. After that, when you
    are done, select it, press **`a`**, and confirm with
    Enter or `y` to archive it: tmux is torn down, the worktree is moved aside, and the session can be restored later. **`D`**
-   permanently kills a session and removes its worktree and branch, including
-   any uncommitted or unmerged work. If a session is marked Lost or Dead after a
+   permanently kills a session, removing only the worktrees and branches af
+   owns — user-owned resources stay; uncommitted or unmerged work in af-owned
+   resources may be lost. If a session is marked Lost or Dead after a
    crash, reboot, or missing worktree, select it and press **`r`** (or run
    `af sessions restore <title>`) to recover it and resume its recorded agent
    conversation when possible.

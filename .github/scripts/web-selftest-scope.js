@@ -74,10 +74,15 @@ const SELFTEST_PATHS = [
 ];
 
 // The narrower client-performance scope requested in #3908 review. web/**
-// includes the Playwright configs, committed bundle, and per-theme goldens;
-// config/** includes the manifest that supplies the Config pane's rows, so a
-// key added there moves the stills (#4362). Docs-only and CI-gate-only edits
-// do not pay for a second container job.
+// includes the Playwright configs, committed bundle, and per-theme goldens.
+// Docs-only and CI-gate-only edits do not pay for a second container job.
+//
+// config/** is on the list because the Config view renders the daemon's
+// manifest — keys, purposes, tiers — verbatim: a schema change there moves
+// pixels (the "Config N" count and the advanced fold) without touching web/**.
+// #4358 added watcher_events_per_minute under exactly that shape, the perf
+// job never ran, and the committed goldens drifted until the next web PR ate
+// the failure.
 const PERF_PATHS = ["web/**", "app/**", "ui/**", "config/**", "scripts/perf/**", "scripts/container/**"];
 
 function scopePerf(changedPaths) {

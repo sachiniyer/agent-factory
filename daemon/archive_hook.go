@@ -27,6 +27,29 @@ import (
 // reassigns it.
 var onArchiveHookTimeout = 30 * time.Minute
 
+// onArchiveHookAfterStart, if non-nil, is called after cmd.Start() succeeds
+// and before cmd.Wait() is called. Tests set it to inject a synchronization
+// point between the shell's exit and the context cancellation, enabling a
+// deterministic race between process exit and deadline without relying on
+// wall-clock timing. Production always leaves it nil.
+var onArchiveHookAfterStart func(cmd *exec.Cmd, cancel context.CancelFunc)
+
+// onArchiveHookMakeContext, if non-nil, overrides the context used to run the
+// hook command. Tests set it to supply a context whose deadline can be triggered
+// at a precise moment — specifically after the shell has confirmed its own exit
+// — so that the spliced error is context.DeadlineExceeded rather than
+// context.Canceled. Production always leaves it nil.
+var onArchiveHookMakeContext func() (context.Context, context.CancelFunc)
+
+// onArchiveHookBeforeStart, if non-nil, is called with the fully configured
+// hook command immediately before cmd.Start(). Tests use it to attach an
+// exit-observation pipe through cmd.ExtraFiles — the hook shell inherits the
+// write end and the kernel closes it only when the process image is destroyed,
+// so an EOF on the read side proves the shell terminated rather than guessing
+// it has had time to — and to observe cmd.Cancel running, which is what proves
+// os/exec's watchCtx took its ctx.Done() arm. Production always leaves it nil.
+var onArchiveHookBeforeStart func(cmd *exec.Cmd)
+
 const onArchiveHookWaitDelay = 2 * time.Second
 
 type onArchiveHookContext struct {
@@ -94,7 +117,13 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), onArchiveHookTimeout)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if onArchiveHookMakeContext != nil {
+		ctx, cancel = onArchiveHookMakeContext()
+	} else {
+		ctx, cancel = context.WithTimeout(context.Background(), onArchiveHookTimeout)
+	}
 	defer cancel()
 
 	outputFile, err := hooklog.Open(hooklog.OnArchive)
@@ -143,7 +172,15 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 		return nil
 	}
 
-	err = cmd.Run()
+	if onArchiveHookBeforeStart != nil {
+		onArchiveHookBeforeStart(cmd)
+	}
+	if err = cmd.Start(); err == nil {
+		if onArchiveHookAfterStart != nil {
+			onArchiveHookAfterStart(cmd, cancel)
+		}
+		err = cmd.Wait()
+	}
 	if cmd.Process != nil {
 		// A hook may background a descendant and exit. Kill the process group on
 		// every path so no cleanup process survives the archive operation with a
@@ -195,7 +232,17 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	if ctx.Err() != nil && (cmd.ProcessState == nil || !cmd.ProcessState.Exited()) {
 		return fmt.Errorf("timed out after %s%s", onArchiveHookTimeout, outputReport)
 	}
-	if err != nil {
+	// os/exec's Wait() can splice context.DeadlineExceeded over a nil exit-0
+	// error when the deadline fires the same instant the process exits its
+	// own accord (watchCtx's <-ctx.Done() arm reaching `if err == nil &&
+	// watch.err != nil { err = watch.err }`). Exited() is true in that case,
+	// so the timed-out guard above skips, and without this guard the spliced
+	// error would surface as a false failure for a hook that reached a clean
+	// exit — exactly the false report the comment above promises is gone.
+	// ExitCode()==0 is load-bearing: Exited() is also true for exit 23,
+	// where err is a real *ExitError that must be preserved, and for a
+	// SIGKILL'd shell, which the timed-out guard above handles first.
+	if err != nil && !(errors.Is(err, context.DeadlineExceeded) && cmd.ProcessState != nil && cmd.ProcessState.Exited() && cmd.ProcessState.ExitCode() == 0) {
 		return fmt.Errorf("%w%s", err, outputReport)
 	}
 	if outputReadErr == nil {
