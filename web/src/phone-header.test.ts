@@ -93,7 +93,7 @@ test("phone overflow has native keyboard activation and Escape returns focus to 
 
 test("truncated session title retains the complete name for pointer and accessible text", () => {
   const title = "Review the focused-session header across all phone widths";
-  const chrome = components.terminalChrome({ title, copyLink() {}, handoff() {}, retry() {} });
+  const chrome = components.terminalChrome({ title, copyLink() {}, handoff() {}, retry() {}, markDelivered() {} });
   assert.equal(chrome.title.title, title, "ellipsis must have a full-name route");
   assert.equal(chrome.title.textContent, title);
   assert.equal(chrome.title.getAttribute("aria-label"), title);

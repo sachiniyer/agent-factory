@@ -292,19 +292,81 @@ export function isPendingManualHandoffDeliveryUnconfirmed(s: SessionData): boole
 
 /** True when an agent-only handoff has a known incoming pane whose mission
  * submission was ambiguous. The operator may inspect that pane and explicitly
- * override the replay fence; positive non-delivery stays owned by automation. */
+ * override the replay fence; positive non-delivery stays owned by automation.
+ *
+ * A startup-unknown row DOES admit the explicit retry (#4429): the send path
+ * re-runs the real readiness wait — polling the pane IS the runtime proof the
+ * flag says is missing — before the composer is touched. Dead liveness states
+ * still refuse: restore owns a runtime that no longer exists. Mirrors
+ * session.Instance.CanRetryPendingHandoffMissionDelivery. */
 export function isPendingAgentHandoffDeliveryUnconfirmed(s: SessionData): boolean {
   const liveness = livenessOf(s);
   const status = s.pending_handoff_delivery_status;
   const op = s.in_flight_op ?? InFlightOp.None;
+  const dead =
+    liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
   return (
     s.pending_handoff_mission !== undefined &&
     s.pending_handoff_mission !== "" &&
     (status === "sent-unverified" || status === "could-not-confirm") &&
-    s.startup_state_unknown !== true &&
     s.user_killed !== true &&
-    (liveness === Liveness.Running || liveness === Liveness.Ready) &&
+    !dead &&
+    (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) &&
     (op === InFlightOp.None || op === InFlightOp.Replacing)
+  );
+}
+
+/** True when the operator can attest the agent handoff's pending mission
+ * already landed and retire it WITHOUT a resend (#4429) — the "mark delivered"
+ * exit for an ambiguous verdict, and the supported way out of a startup-unknown
+ * wedge. A delivered verdict is included: it is the crash window between a
+ * confirmed send and its clearing settle. Not-delivered belongs to automatic
+ * recovery; dead liveness belongs to restore. Mirrors
+ * session.Instance.CanConfirmPendingHandoffDelivery. */
+export function isPendingAgentHandoffDeliveryConfirmable(s: SessionData): boolean {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead =
+    liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return (
+    s.pending_handoff_mission !== undefined &&
+    s.pending_handoff_mission !== "" &&
+    (status === "sent-unverified" || status === "could-not-confirm" || status === "delivered") &&
+    s.user_killed !== true &&
+    !dead &&
+    (op === InFlightOp.None || op === InFlightOp.Replacing) &&
+    (s.startup_state_unknown === true ||
+      liveness === Liveness.Running ||
+      liveness === Liveness.Ready ||
+      liveness === Liveness.LimitReached)
+  );
+}
+
+/** True when a manual account swap's pending mission can be retired on the
+ * operator's attestation that it already landed — the account-swap half of
+ * #4429's confirm verb. Unlike the retry gate this admits startup-unknown and
+ * an orphaned respawn fence: the daemon probes the pane before honoring the
+ * attestation. Mirrors
+ * session.Instance.CanConfirmPendingManualAccountSwapDelivery. */
+export function isPendingManualSwapDeliveryConfirmable(s: SessionData): boolean {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead =
+    liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  const status = pending?.mission_delivery_status;
+  return (
+    pending?.manual === true &&
+    pending.replacement_panes_started === true &&
+    (status === "sent-unverified" || status === "could-not-confirm" || status === "delivered") &&
+    s.user_killed !== true &&
+    !dead &&
+    (op === InFlightOp.None || op === InFlightOp.Respawning) &&
+    (s.startup_state_unknown === true ||
+      liveness === Liveness.Running ||
+      liveness === Liveness.Ready ||
+      liveness === Liveness.LimitReached)
   );
 }
 

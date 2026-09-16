@@ -294,15 +294,21 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// PendingHandoffMission is the one operation marker that IS durable: it says
 	// an irreversible runtime swap completed but its takeover brief did not. Disk
 	// still scrubs the generic op enum, then this specific proof reconstructs the
-	// replacement fence so status polling cannot call the idle incoming composer a
-	// completed task before recovery delivers its mission. A kill tombstone
-	// outranks every process-local op, including one carried by a live snapshot;
-	// startup-unknown likewise prevents synthesizing a replacement fence. Both
-	// terminal markers must retain an explicit teardown handle rather than load as
-	// an in-flight replacement.
+	// replacement fence — but only for the verdicts that still own an in-flight
+	// obligation the daemon resolves itself (#4429): positive non-delivery (the
+	// automatic replay) and the delivered crash window (the recovery settle). An
+	// ambiguous verdict can only be recorded after the send path proved the
+	// incoming runtime, so its swap is complete; rebuilding the fence there would
+	// make the row inert while the only remaining decision — confirm or retry —
+	// is the operator's, and an inert row is exactly the wedge this issue fixes.
+	// A kill tombstone outranks every process-local op, including one carried by
+	// a live snapshot; startup-unknown likewise prevents synthesizing a
+	// replacement fence. Both terminal markers must retain an explicit teardown
+	// handle rather than load as an in-flight replacement.
 	if data.UserKilled {
 		inFlightOp = OpNone
-	} else if data.PendingHandoffMission != "" && !data.StartupStateUnknown && inFlightOp == OpNone {
+	} else if data.PendingHandoffMission != "" && !data.StartupStateUnknown && inFlightOp == OpNone &&
+		pendingHandoffMissionNeedsFence(data.HandoffDeliveryStatus) {
 		inFlightOp = OpReplacing
 	}
 	// Legacy records retain their last save time. Only truly missing timestamps

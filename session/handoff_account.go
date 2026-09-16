@@ -178,6 +178,76 @@ func (i *Instance) CanRetryPendingManualAccountSwapDelivery() bool {
 		i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
 }
 
+// CanConfirmPendingManualAccountSwapDelivery reports whether an operator can
+// retire a pending manual account swap's mission on the attestation that it
+// already landed — the same "it is already running" exit the agent-handoff
+// path gained in #4429. Unlike the retry predicate this DOES admit
+// startup-unknown and orphaned-fence rows: the daemon probes the pane before
+// honoring the attestation, which is the runtime proof those rows were missing.
+func (i *Instance) CanConfirmPendingManualAccountSwapDelivery() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady || i.liveness == LiveLimitReached
+	dead := i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived
+	if !i.userKilled && !dead && (i.startupStateUnknown || knownLive) &&
+		(i.inFlightOp == OpNone || i.inFlightOp == OpRespawning) &&
+		i.pendingAccountSwap != nil && i.pendingAccountSwap.Manual &&
+		i.pendingAccountSwap.ReplacementPanesStarted {
+		switch i.pendingAccountSwap.MissionDeliveryStatus {
+		case PromptSentUnverified, PromptCouldNotConfirm, PromptDelivered:
+			return true
+		}
+	}
+	return false
+}
+
+// ConfirmPendingManualAccountSwapDelivery retires the pending manual account
+// swap on the operator's attestation that its mission already landed (#4429).
+// It is the account-swap half of ConfirmPendingHandoffDelivery: the daemon has
+// already probed the pane alive, so this method re-checks the durable facts and
+// then clears the transaction, lifts any orphaned replacement fence, and
+// resolves a startup-unknown flag the probe just disproved — all in one
+// critical section so no later reader can rebuild the wedge.
+func (i *Instance) ConfirmPendingManualAccountSwapDelivery(from, to string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	pending := i.pendingAccountSwap
+	if pending == nil || !pending.Manual || pending.From != from || pending.To != to {
+		return fmt.Errorf("manual account swap from %q to %q is no longer pending", from, to)
+	}
+	if !pending.ReplacementPanesStarted {
+		return fmt.Errorf("manual account swap from %q to %q has no replacement panes; nothing could have been delivered", from, to)
+	}
+	switch pending.MissionDeliveryStatus {
+	case PromptSentUnverified, PromptCouldNotConfirm, PromptDelivered:
+	default:
+		return fmt.Errorf("manual account swap from %q to %q has no ambiguous delivery to confirm (status %q); retry-limit owns the resend", from, to, pending.MissionDeliveryStatus)
+	}
+	if i.userKilled {
+		return fmt.Errorf("session %q has a pending kill", i.Title)
+	}
+	if i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived {
+		return fmt.Errorf("session %q has no live runtime to confirm against (liveness %v); restore owns this row", i.Title, i.liveness)
+	}
+	if i.inFlightOp != OpNone && i.inFlightOp != OpRespawning {
+		return fmt.Errorf("session %q is busy (%v)", i.Title, i.inFlightOp)
+	}
+	lv, op, resetAt := i.lifecycleStateLocked()
+	i.resolveStartupStateLocked()
+	if i.inFlightOp == OpRespawning {
+		// The daemon holds the op lock while calling, so a respawn fence still
+		// up here is orphaned bookkeeping — a crashed/abandoned resume — not a
+		// live operation. ClearOp preserves liveness and releases the row.
+		if err := i.transitionLocked(ClearOp()); err != nil {
+			return err
+		}
+	}
+	i.pendingAccountSwap = nil
+	i.touchLocked()
+	i.noteStateChangeLocked(lv, op, resetAt)
+	return nil
+}
+
 // ReconcileAccountHandoffSnapshot mirrors the daemon-owned account identity and
 // pending delivery transaction onto an existing client projection.
 func (i *Instance) ReconcileAccountHandoffSnapshot(account string, auto bool, pending *AccountSwapData) bool {

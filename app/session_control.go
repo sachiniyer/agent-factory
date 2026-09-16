@@ -241,6 +241,16 @@ var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) e
 	})
 }
 
+// confirmHandoffDeliveryThroughDaemon routes the "mark delivered" half of the
+// resolve-delivery picker (#4429) through the daemon: retire the pending
+// mission on the operator's attestation without a resend. A package var so the
+// app test suite can stub it without dialing a real daemon.
+var confirmHandoffDeliveryThroughDaemon = func(request daemon.ConfirmHandoffDeliveryRequest) error {
+	return withDaemonHTTP(func(c *apiclient.Client) error {
+		return c.ConfirmHandoffDelivery(request)
+	})
+}
+
 // handoffSessionThroughDaemon routes the TUI's handoff verb (#2013) through the
 // daemon — the single writer (#960) — which swaps the session's agent program in
 // place, re-launches it in the same worktree, and delivers the mission brief. It

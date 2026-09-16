@@ -91,6 +91,24 @@ var (
 	// line in the transcript forever, and "Build ·" also sits inside the live
 	// composer — keying on either would pin an idle session at Running permanently.
 	opencodeWorkingIndicator = regexp.MustCompile(`esc +interrupt`)
+	// escToInterruptHint matches the "esc to interrupt" chrome several supported
+	// agents draw only while a turn is in flight. It is matched on the
+	// ANSI-stripped pane and always scoped per agent in submittedTurnContent —
+	// never trusted whole-pane, where transcript prose could quote it.
+	escToInterruptHint = regexp.MustCompile(`esc +to +interrupt`)
+	// runningTimer matches the elapsed-seconds fragment claude and devin print on
+	// the SAME row as their interrupt hint ("(12s · esc to interrupt)"). Requiring
+	// the timer co-occurrence is what excludes transcript prose that merely names
+	// the chrome.
+	runningTimer = regexp.MustCompile(`\d+s`)
+	// postSubmitDeliveredBudget bounds the post-Enter observation that may
+	// upgrade a sent-unverified verdict to delivered (#4429), and
+	// postSubmitDeliveredPoll is its re-check interval. The send path proved the
+	// pane readable at submit, so a brief watch for the agent's own mid-turn
+	// chrome is cheap; the poll exits on the first positive frame, well under
+	// the cap. Package vars so tests can compress them.
+	postSubmitDeliveredBudget = 3 * time.Second
+	postSubmitDeliveredPoll   = 200 * time.Millisecond
 )
 
 // postWorktreeHooksDoneForWait resolves the instance's post-worktree hook
@@ -471,6 +489,84 @@ func IsWorkingContent(content, agent string) bool {
 	default:
 		return false
 	}
+}
+
+// submittedTurnVisible is the post-submit positive observation for
+// WaitForReadyAndSendPromptWithStatus (#4429). A sent-unverified verdict means
+// every capture succeeded but none rendered prompt-specific proof; this poll
+// adds the one signal that can still settle it — the agent's own in-turn
+// indicator. The send runs only after readiness proved the composer idle, so
+// mid-turn chrome appearing inside the window is this submission's work
+// starting: positive delivery evidence, not a readability guess. A miss claims
+// nothing — an agent with no working signature, or chrome that has not painted
+// yet, keeps the ambiguous verdict.
+func submittedTurnVisible(ctx context.Context, target ReadinessTarget) bool {
+	agent := target.ResolvedAgent()
+	if agent == "" {
+		return false
+	}
+	deadline := time.Now().Add(postSubmitDeliveredBudget)
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		content, err := target.PreviewContent(ctx)
+		if err == nil && submittedTurnContent(content, agent) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(postSubmitDeliveredPoll):
+		}
+	}
+}
+
+// submittedTurnContent reports whether the captured pane shows the resolved
+// agent mid-turn — its own "I am busy" chrome, never an inference from the
+// pane changing. Per-arm scoping is the whole contract: each agent's indicator
+// is matched where the agent actually draws it, so transcript prose quoting
+// the hint cannot pass.
+func submittedTurnContent(content, agent string) bool {
+	switch agent {
+	case tmux.ProgramAmp, tmux.ProgramOpencode:
+		return IsWorkingContent(content, agent)
+	case tmux.ProgramCodex:
+		// Codex draws "esc to interrupt" as a bare hint row BELOW its
+		// line-leading "›" composer (the daemon/configagent_delivery_test.go
+		// pane shape). Anchoring on the composer keeps a transcript that quotes
+		// the hint from qualifying.
+		lines := strings.Split(paneAnsiEscape.ReplaceAllString(content, ""), "\n")
+		composer := -1
+		for i, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "›") {
+				composer = i
+			}
+		}
+		if composer < 0 {
+			return false
+		}
+		for _, line := range lines[composer+1:] {
+			if escToInterruptHint.MatchString(line) {
+				return true
+			}
+		}
+		return false
+	case tmux.ProgramClaude, tmux.ProgramDevin:
+		// Claude and devin embed the hint in a timed status row —
+		// "✻ … (12s · esc to interrupt)", "Thinking · 3s (esc to interrupt)".
+		// Requiring the running timer on the same row excludes transcript prose
+		// that merely names the chrome.
+		for _, line := range strings.Split(paneAnsiEscape.ReplaceAllString(content, ""), "\n") {
+			if escToInterruptHint.MatchString(line) && runningTimer.MatchString(line) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isDocTrustPrompt reports whether content shows the documentation-link trust

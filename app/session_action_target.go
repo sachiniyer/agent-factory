@@ -135,6 +135,10 @@ func (target sessionActionTarget) resumeFromLimitRequest() daemon.ResumeFromLimi
 	return daemon.ResumeFromLimitRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
 }
 
+func (target sessionActionTarget) confirmHandoffDeliveryRequest() daemon.ConfirmHandoffDeliveryRequest {
+	return daemon.ConfirmHandoffDeliveryRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
+}
+
 func (target sessionActionTarget) createTabRequest(kind session.TabKind) (daemon.CreateTabRequest, bool) {
 	switch kind {
 	case session.TabKindShell:

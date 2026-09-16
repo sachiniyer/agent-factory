@@ -878,3 +878,27 @@ export function removeTaskModal(name: string, onConfirm: () => void, onCancel: (
   asForm(handle.el.firstElementChild as HTMLElement, onConfirm);
   return handle;
 }
+
+/** The "mark delivered" attestation for an ambiguous handoff mission (#4429).
+ *  The modal IS the confirmation: the daemon will retire the pending mission
+ *  WITHOUT resending it, so the copy makes the operator's claim — the pane
+ *  already shows the incoming agent acting on its brief — the explicit
+ *  precondition, and names the alternative (Retry sends it again). Failures
+ *  retain the open confirmation so a stale click surfaces the daemon's refusal
+ *  rather than looking like it landed. */
+export function markDeliveredModal(sessionTitle: string, onConfirm: () => void, onCancel: () => void): ModalHandle {
+  const { handle, body } = modalChrome({
+    title: `Mark ${sessionTitle} delivered?`,
+    confirmLabel: "Mark delivered",
+    confirmClass: "af-primary",
+    onCancel,
+  });
+  body.append(
+    h("p", { class: "af-modal-text" },
+      "Confirm only if the pane already shows the incoming agent acting on its handoff mission. " +
+      "This retires the pending delivery and clears the leftover operation state WITHOUT sending the mission again. " +
+      "If the pane does not show it, cancel and use Retry instead — that submits the mission a second time."),
+  );
+  asForm(handle.el.firstElementChild as HTMLElement, onConfirm);
+  return handle;
+}

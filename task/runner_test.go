@@ -764,3 +764,156 @@ func TestWaitForReadyDoesNotParkNonLimitAgent(t *testing.T) {
 		t.Fatal("WaitForReady never returned for a non-limit agent")
 	}
 }
+
+// TestSubmittedTurnContent pins the per-agent scoping of the post-submit
+// upgrade signal (#4429): each arm matches the agent's own in-turn chrome where
+// the agent actually draws it, so transcript prose quoting the hint cannot
+// upgrade a sent-unverified verdict to delivered.
+func TestSubmittedTurnContent(t *testing.T) {
+	tests := []struct {
+		name    string
+		agent   string
+		content string
+		want    bool
+	}{
+		{
+			name:  "codex working hint below the composer",
+			agent: "codex",
+			// The daemon/configagent_delivery_test.go pane shape: the collapsed
+			// paste sits on the "›" composer line with the interrupt hint below.
+			content: "\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n",
+			want:    true,
+		},
+		{
+			name:    "codex hint in transcript without a composer is not proof",
+			agent:   "codex",
+			content: "earlier output mentioned esc to interrupt\nplain text",
+			want:    false,
+		},
+		{
+			name:    "codex hint above the composer is transcript prose",
+			agent:   "codex",
+			content: "the agent wrote esc to interrupt in prose\n› ",
+			want:    false,
+		},
+		{
+			name:    "codex idle composer has no hint",
+			agent:   "codex",
+			content: "some output\n› ",
+			want:    false,
+		},
+		{
+			name:    "claude timed status row",
+			agent:   "claude",
+			content: "transcript\n✻ Whirring… (12s · esc to interrupt)\n╭──╮\n│ ❯ │\n╰──╯",
+			want:    true,
+		},
+		{
+			name:    "claude hint without the running timer is prose",
+			agent:   "claude",
+			content: "the agent printed press esc to interrupt in prose\n❯ ",
+			want:    false,
+		},
+		{
+			name:    "claude idle composer is not working",
+			agent:   "claude",
+			content: "transcript\n❯ ",
+			want:    false,
+		},
+		{
+			name:    "devin timed thinking row",
+			agent:   "devin",
+			content: "⠀⡆ Thinking · 3s (esc to interrupt) · (425c · ctrl+o for details)\n",
+			want:    true,
+		},
+		{
+			name:    "devin hint without timer is prose",
+			agent:   "devin",
+			content: "docs say esc to interrupt\n❭ ",
+			want:    false,
+		},
+		{
+			name:    "amp working bottom rule",
+			agent:   "amp",
+			content: "╭──────── medium ────────╮\n│ > \n╰ ∼ Streaming ── repo (main) ─╯",
+			want:    true,
+		},
+		{
+			name:    "amp idle frame is not working",
+			agent:   "amp",
+			content: "╭──────── medium ────────╮\n│ > \n╰──────── /tmp/repo ─────╯",
+			want:    false,
+		},
+		{
+			name:    "opencode interrupt hint below composer",
+			agent:   "opencode",
+			content: "┃  Ask anything…\n╹▀▀▀▀▀▀▀▀▀▀\nesc  interrupt\n",
+			want:    true,
+		},
+		{
+			name:    "opencode hint above composer is transcript prose",
+			agent:   "opencode",
+			content: "esc  interrupt\n┃  Ask anything…\n╹▀▀▀▀▀▀▀▀▀▀\n",
+			want:    false,
+		},
+		{
+			name:    "no resolved agent never upgrades",
+			agent:   "",
+			content: "✻ Whirring… (12s · esc to interrupt)",
+			want:    false,
+		},
+		{
+			name:    "unmatched agent never upgrades",
+			agent:   "aider",
+			content: "esc to interrupt\n> ",
+			want:    false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := submittedTurnContent(tc.content, tc.agent); got != tc.want {
+				t.Errorf("submittedTurnContent(%q, %q) = %v, want %v", tc.content, tc.agent, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSubmittedTurnVisible polls until the agent's in-turn chrome renders and
+// stops claiming anything when the budget expires (#4429).
+func TestSubmittedTurnVisible(t *testing.T) {
+	oldBudget, oldPoll := postSubmitDeliveredBudget, postSubmitDeliveredPoll
+	postSubmitDeliveredBudget = 300 * time.Millisecond
+	postSubmitDeliveredPoll = time.Millisecond
+	t.Cleanup(func() { postSubmitDeliveredBudget, postSubmitDeliveredPoll = oldBudget, oldPoll })
+
+	t.Run("chrome appearing mid-window upgrades", func(t *testing.T) {
+		var calls atomic.Int32
+		inst := newPreviewInstanceWithProgram(t, "claude", func() (string, error) {
+			if calls.Add(1) >= 3 {
+				return "✻ Whirring… (2s · esc to interrupt)\n❯ ", nil
+			}
+			return "❯ ", nil
+		})
+		if !submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
+			t.Fatal("in-turn chrome inside the budget must upgrade the verdict")
+		}
+	})
+
+	t.Run("idle pane keeps the ambiguous verdict", func(t *testing.T) {
+		inst := newPreviewInstanceWithProgram(t, "claude", func() (string, error) {
+			return "❯ ", nil
+		})
+		if submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
+			t.Fatal("a merely readable pane must never upgrade sent-unverified")
+		}
+	})
+
+	t.Run("non-agent pane never upgrades", func(t *testing.T) {
+		inst := newPreviewInstanceWithProgram(t, "bash", func() (string, error) {
+			return "✻ Whirring… (2s · esc to interrupt)", nil
+		})
+		if submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
+			t.Fatal("a runtime with no resolved agent has no working signature")
+		}
+	})
+}

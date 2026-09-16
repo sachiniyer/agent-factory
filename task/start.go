@@ -198,6 +198,16 @@ func WaitForReadyAndSendPromptWithStatus(
 		if err != nil {
 			return status, fmt.Errorf("%w: %w", ErrPromptDelivery, err)
 		}
+		// A sent-unverified verdict means every capture succeeded but none
+		// rendered prompt-specific proof. One signal can still settle it (#4429):
+		// the agent's own mid-turn chrome. Readiness proved the composer idle
+		// before the send, so in-turn chrome appearing inside the window is this
+		// submission's work starting — positive delivery evidence, not a
+		// readability guess. A miss claims nothing; the ambiguous verdict stands.
+		if status == session.PromptSentUnverified &&
+			submittedTurnVisible(ctx, instanceReadinessTarget{inst: instance}) {
+			return session.PromptDelivered, nil
+		}
 		return status, nil
 	}
 

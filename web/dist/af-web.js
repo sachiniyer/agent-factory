@@ -6654,6 +6654,24 @@ async function resumeFromLimit(id, title, token2) {
     throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
   }
 }
+var CONFIRM_HANDOFF_UNSUPPORTED = "daemon does not serve ConfirmHandoffDelivery (likely an older daemon \u2014 upgrade it); the pending mission was left untouched";
+async function confirmHandoffDelivery(id, title, token2) {
+  let result;
+  try {
+    result = await af("ConfirmHandoffDelivery", { id, title, repo_id: "" }, token2);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404 && e.daemonRejected) {
+      throw new ApiError(404, CONFIRM_HANDOFF_UNSUPPORTED, e.code, true);
+    }
+    throw e;
+  }
+  if (!result.ok) {
+    throw new Error(result.reason || "delivery was not confirmed");
+  }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+}
 var ACCOUNT_AWARE_HANDOFF_METHOD = "HandoffSessionV2";
 var ACCOUNT_AWARE_HANDOFF_UNSUPPORTED = "daemon does not serve the version-bound account-aware handoff endpoint (likely an older daemon \u2014 upgrade it); the handoff was not sent";
 async function handoffSession(id, title, to, token2, account = "") {
@@ -7305,6 +7323,9 @@ function terminalChrome(opts) {
   actions2.hidden = true;
   const retry = action("Retry limit", "", opts.retry);
   retry.title = "Retry after the usage limit";
+  const deliver = action("Mark delivered", "", opts.markDelivered);
+  deliver.title = "Retire the pending handoff mission without resending \u2014 the pane already shows it landed";
+  deliver.hidden = true;
   const handoff = action("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under another agent or account";
   const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
@@ -7317,9 +7338,9 @@ function terminalChrome(opts) {
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(newTabSlot, copy, handoff, actions2, closePane);
+  menu.panel.append(newTabSlot, copy, handoff, deliver, actions2, closePane);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
-  return { head, title, tabs, keyboard, retry, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+  return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
@@ -11626,6 +11647,23 @@ function removeTaskModal(name, onConfirm, onCancel) {
   asForm(handle.el.firstElementChild, onConfirm);
   return handle;
 }
+function markDeliveredModal(sessionTitle, onConfirm, onCancel) {
+  const { handle, body } = modalChrome({
+    title: `Mark ${sessionTitle} delivered?`,
+    confirmLabel: "Mark delivered",
+    confirmClass: "af-primary",
+    onCancel
+  });
+  body.append(
+    h(
+      "p",
+      { class: "af-modal-text" },
+      "Confirm only if the pane already shows the incoming agent acting on its handoff mission. This retires the pending delivery and clears the leftover operation state WITHOUT sending the mission again. If the pane does not show it, cancel and use Retry instead \u2014 that submits the mission a second time."
+    )
+  );
+  asForm(handle.el.firstElementChild, onConfirm);
+  return handle;
+}
 
 // src/types.ts
 var Liveness = {
@@ -11950,7 +11988,23 @@ function isPendingAgentHandoffDeliveryUnconfirmed(s) {
   const liveness = livenessOf(s);
   const status = s.pending_handoff_delivery_status;
   const op = s.in_flight_op ?? InFlightOp.None;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && (status === "sent-unverified" || status === "could-not-confirm") && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && (status === "sent-unverified" || status === "could-not-confirm") && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+}
+function isPendingAgentHandoffDeliveryConfirmable(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && (status === "sent-unverified" || status === "could-not-confirm" || status === "delivered") && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function isPendingManualSwapDeliveryConfirmable(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  const status = pending?.mission_delivery_status;
+  return pending?.manual === true && pending.replacement_panes_started === true && (status === "sent-unverified" || status === "could-not-confirm" || status === "delivered") && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
 }
 function canHandoff(s) {
   return s.can_handoff === true;
@@ -15343,6 +15397,16 @@ function patchRetryButton(button, action) {
     button.title = action.title;
   }
 }
+function markDeliveredActionForSession(s) {
+  if (isPendingAgentHandoffDeliveryConfirmable(s) || isPendingManualSwapDeliveryConfirmable(s)) {
+    return {
+      kind: "handoff",
+      label: "Mark delivered",
+      title: "The pane already shows the mission landed \u2014 retire it without resending"
+    };
+  }
+  return null;
+}
 function isKillableSession(s) {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
 }
@@ -15843,6 +15907,11 @@ var AppShell = class {
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
   retryBtn = null;
   retryKind = null;
+  // The "Mark delivered" button and whether it is currently shown (#4429). Same
+  // in-place treatment as retryBtn: a verdict becomes confirmable — or settles —
+  // on a session.updated event with no selection change to rebuild the header.
+  deliverBtn = null;
+  deliverVisible = false;
   // The Handoff button and whether it is currently shown (#2013). Same in-place
   // treatment as retryBtn: a session becomes (or stops being) handoff-capable —
   // e.g. it goes Ready, or is archived from another client — WITHOUT a selection
@@ -16699,6 +16768,8 @@ var AppShell = class {
       this.headActionSig = "";
       this.retryBtn = null;
       this.retryKind = null;
+      this.deliverBtn = null;
+      this.deliverVisible = false;
       this.tabBar = null;
       this.main.className = "af-main af-main-empty";
       delete this.main.dataset.afTheme;
@@ -16731,6 +16802,7 @@ var AppShell = class {
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
       retry: () => this.actions.retryLimit(),
+      markDelivered: () => this.actions.markDelivered(),
       closePane: () => this.actions.closePane?.()
     });
     this.terminalChrome = chrome;
@@ -16739,6 +16811,9 @@ var AppShell = class {
     const retryAction = retryActionForSession(selected);
     this.retryKind = retryAction?.kind ?? null;
     patchRetryButton(chrome.retry, retryAction);
+    this.deliverBtn = chrome.deliver;
+    this.deliverVisible = markDeliveredActionForSession(selected) !== null;
+    chrome.deliver.hidden = !this.deliverVisible;
     this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
     chrome.handoff.hidden = !this.handoffVisible;
@@ -17192,6 +17267,11 @@ var AppShell = class {
     if (this.retryBtn && retryKind !== this.retryKind) {
       this.retryKind = retryKind;
       patchRetryButton(this.retryBtn, retryAction);
+    }
+    const nowDeliver = markDeliveredActionForSession(selected) !== null;
+    if (this.deliverBtn && nowDeliver !== this.deliverVisible) {
+      this.deliverVisible = nowDeliver;
+      this.deliverBtn.hidden = !nowDeliver;
     }
     const nowHandoff = canHandoff(selected);
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
@@ -18655,6 +18735,37 @@ function doRetryLimit() {
     surfaceTabError(e);
   });
 }
+function doMarkDelivered() {
+  const sel = selectedSessionData();
+  if (!sel || !sel.id) {
+    return;
+  }
+  const target = { id: sel.id, title: sel.title };
+  openModal(
+    markDeliveredModal(
+      target.title,
+      () => {
+        const tok = token;
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void confirmHandoffDelivery(target.id, target.title, tok).then(closeModal).catch((e) => {
+          if (isMutationCommittedError(e)) {
+            if (modal === m) closeModal();
+            requestResync();
+            surfaceMutationError(e, "confirmed");
+            return;
+          }
+          m.setBusy(false);
+          m.setError(errorText(e));
+        });
+      },
+      closeModal
+    )
+  );
+}
 function doHandoff() {
   const sel = selectedSessionData();
   if (!sel || !sel.id || !canHandoff(sel)) {
@@ -18751,6 +18862,7 @@ var actions = {
   archive: (session) => openConfirm("archive", session),
   restore: (session) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
   layoutChanged: () => splitView.refit(),

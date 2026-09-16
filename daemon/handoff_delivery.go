@@ -157,13 +157,36 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 	// delivery constructor already cleared every predecessor-scoped limit, so the
 	// retry cannot be diverted into the outgoing provider's reset schedule.
 	m.captureAgentConversationAsync(delivery.repoID, delivery.key, delivery.instance, delivery.conversationCapture)
-	if evidenceErr := m.persistSettlement(delivery.repoID, delivery.key, delivery.instance); evidenceErr != nil {
-		serr = errors.Join(serr, evidenceErr)
+	if status == session.PromptNotDelivered {
+		// Positive non-delivery keeps the replacement fence: automatic recovery
+		// owns the resend, and the row stays inert until that lands or exhausts.
+		if evidenceErr := m.persistSettlement(delivery.repoID, delivery.key, delivery.instance); evidenceErr != nil {
+			serr = errors.Join(serr, evidenceErr)
+		}
+		return fmt.Errorf(
+			"handed %q off to %s, but its mission brief could not be delivered (%w); "+
+				"the exact mission remains pending behind the replacement fence; automatic redelivery requires "+
+				"positive evidence that this mission did not land "+
+				"(the outgoing provider's limit state was cleared at the runtime boundary)",
+			delivery.title, delivery.target, serr)
+	}
+	// Ambiguous verdicts (sent-unverified, could-not-confirm): the readiness
+	// wait already proved the incoming runtime is live and answering, so the
+	// swap is complete and the replacement fence settles on that proof — not on
+	// the prompt verdict (#4429). What stays pending is the MISSION alone: the
+	// durable obligation, its recorded verdict, and the operator's
+	// confirm-or-retry exits. Keeping the fence here instead would leave the
+	// row inert exactly when its owner needs to inspect and act on it.
+	if err := settle(func() error {
+		return delivery.instance.Transition(session.CommitHandoff())
+	}, false); err != nil {
+		return fmt.Errorf(
+			"handed %q off to %s, but its mission delivery stayed unconfirmed (%w) and the replacement fence could not be settled: %w",
+			delivery.title, delivery.target, serr, err)
 	}
 	return fmt.Errorf(
-		"handed %q off to %s, but its mission brief could not be delivered (%w); "+
-			"the exact mission remains pending behind the replacement fence; automatic redelivery requires "+
-			"positive evidence that this mission did not land "+
-			"(the outgoing provider's limit state was cleared at the runtime boundary)",
+		"handed %q off to %s, but could not confirm whether its mission brief landed (%w); "+
+			"the swap is settled and the exact mission remains pending — inspect the pane, then "+
+			"`af sessions retry-limit` resends it or `af sessions retry-limit --delivered` retires it",
 		delivery.title, delivery.target, serr)
 }

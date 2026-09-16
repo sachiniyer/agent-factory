@@ -739,6 +739,26 @@ func ResumeFromLimit(req ResumeFromLimitRequest) error {
 	return nil
 }
 
+// ConfirmHandoffDelivery asks the daemon to retire a pending handoff mission
+// on the operator's attestation that it already landed (#4429) — the "mark
+// delivered" exit for a sent-unverified or could-not-confirm verdict. A
+// pre-verb daemon cannot serve the method; isRPCMethodMissing surfaces that as
+// a clean refusal rather than a silent retry.
+func ConfirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) error {
+	var resp ConfirmHandoffDeliveryResponse
+	err := callDaemon("ConfirmHandoffDelivery", req, &resp)
+	if isRPCMethodMissing(err) {
+		return fmt.Errorf("this daemon does not support confirming a handoff delivery (upgrade the daemon), so the pending mission was left untouched")
+	}
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("delivery was not confirmed: %s", resp.Reason)
+	}
+	return nil
+}
+
 // HandoffSession asks the daemon to continue a session under a different agent,
 // in place (#2013): swap the agent program, keep the worktree and branch, and
 // deliver a mission brief to the incoming agent.
