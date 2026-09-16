@@ -289,6 +289,20 @@ test("performance path list is pinned to the reviewed client and harness scope",
   assert.deepEqual(scopePerf(["docs/dev/perf-baselines.md", "app/app.go"]), { run: true, matched: ["app/app.go"] });
 });
 
+test("config changes run the visual baselines — the Config pane renders the manifest", () => {
+  // #4362: the web Config pane's rows come from the config manifest over RPC, so
+  // a key added in config/ moves the stills while matching none of the old
+  // PERF_PATHS globs — the drift then surfaced on the next unrelated web PR
+  // (#4231). The whole directory is watched, not only the file that happened to
+  // drift: config_parse.go/config_types.go/resolve.go decide what the pane
+  // renders too.
+  for (const changed of ["config/manifest.go", "config/config_types.go", "config/resolve.go"]) {
+    assert.deepEqual(scopePerf([changed]), { run: true, matched: [changed] }, changed);
+  }
+  // Same-prefixed siblings must not match: config/** means under config/.
+  assert.deepEqual(scopePerf(["configs/other.go"]), { run: false, matched: [] });
+});
+
 test("docs-only, gate-only, empty, and similarly prefixed paths skip performance", () => {
   for (const changed of [
     "docs/dev/perf-baselines.md", "mkdocs.yml", "README.md", ".github/workflows/pr.yml",
@@ -335,4 +349,74 @@ test("performance preflight does not duplicate the Web job's application checks"
   assert.doesNotMatch(entry, /npm (test|run typecheck)/);
   assert.match(entry, /npx tsc -p tsconfig\.selftest\.json/);
   assert.match(entry, /node --test \/work\/scripts\/perf\/check\.test\.mjs/);
+});
+
+test("the visual gate diffs stills against committed goldens and cannot regenerate in CI", () => {
+  // The drift gate is a diff, not a rerun: the visual spec pixel-diffs each
+  // capture against the committed golden, so a stale artifact fails the job.
+  // That property only holds if CI can never reach update mode — a run that
+  // rewrites the snapshots passes whatever the browser painted, which turns
+  // the oracle into a tautology (#3984). Both guards are pinned: the entry
+  // script refuses update/record under CI, and the config throws on the same
+  // combination instead of trusting the environment — so the committed
+  // artifact is always compared, never regenerated-and-blessed.
+  const entry = fs.readFileSync(path.join(__dirname, "..", "..", "scripts/container/web-demo-entry.sh"), "utf8");
+  // Pin the guard's BEHAVIOR, not its diagnostic. Matching the message text
+  // alone still passes a file whose guard was deleted or inverted while the
+  // string survived in a comment — so the actual if..fi block is sliced out
+  // and its truth table executed (#4399 review). The environment is explicit:
+  // this test itself runs under CI, so ambient CI/update variables must not
+  // leak in.
+  const guard = entry.match(/if \[ -n "\$\{CI:-\}" \][\s\S]*?\nfi\n/);
+  assert.ok(guard, "web-demo-entry.sh must guard CI against the update/record variables");
+  const { spawnSync } = require("node:child_process");
+  const runGuard = (vars) =>
+    spawnSync("bash", ["-c", guard[0]], {
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...vars },
+      encoding: "utf8",
+    });
+  const refused = runGuard({ CI: "1", AF_UPDATE_GOLDENS: "1" });
+  assert.equal(refused.status, 1, "CI + AF_UPDATE_GOLDENS must be refused");
+  assert.match(refused.stderr, /CI cannot update baselines or goldens/);
+  assert.equal(runGuard({ CI: "1", AF_PERF_RECORD: "1" }).status, 1,
+    "CI + AF_PERF_RECORD must be refused");
+  assert.equal(runGuard({ CI: "1" }).status, 0,
+    "a plain CI run must reach the script — the guard is about the update variables, not CI");
+  assert.equal(runGuard({ AF_UPDATE_GOLDENS: "1" }).status, 0,
+    "a human-run update outside CI is the path the guard exists to keep");
+  // The TypeScript guards get the same treatment as the shell guard above:
+  // EXECUTE the config under each environment combination rather than assert
+  // its source text — a regex still passes while the line is commented out or
+  // evaluates as dead code. The module body is evaluated verbatim with its two
+  // imports stubbed, so every guard statement runs at its real position and
+  // updateSnapshots is resolved by the file's own expression. A refactor that
+  // moves the logic behind a shape the replaces miss leaves `import` or
+  // `export` tokens behind and the Function constructor throws — the test
+  // fails loudly instead of passing on a stale pattern.
+  const visual = fs.readFileSync(path.join(__dirname, "..", "..", "web/playwright.visual.config.ts"), "utf8");
+  const loadVisualConfig = (env) => new Function(
+    "process",
+    "defineConfig",
+    "demo",
+    visual
+      .replace(/import \{ defineConfig \} from "@playwright\/test";/, "")
+      .replace(/import demo from "\.\/playwright\.demo\.config\.js";/, "")
+      .replace(/export default /, "return "),
+  )({ env }, (base, over) => ({ ...base, ...over }), {});
+  assert.throws(
+    () => loadVisualConfig({ AF_PERF_MODE: "1", CI: "1", AF_UPDATE_GOLDENS: "1" }),
+    /CI cannot update goldens/,
+    "CI + AF_UPDATE_GOLDENS must be refused by the config's own guard",
+  );
+  assert.throws(
+    () => loadVisualConfig({ CI: "1", AF_UPDATE_GOLDENS: "1" }),
+    /testbox\.sh perf/,
+    "the perf-mode guard fires before the CI guard ever matters",
+  );
+  assert.equal(loadVisualConfig({ AF_PERF_MODE: "1", CI: "1" }).updateSnapshots, "none",
+    "CI must always diff against the committed goldens (updateSnapshots: none)");
+  assert.equal(loadVisualConfig({ AF_PERF_MODE: "1" }).updateSnapshots, "none",
+    "a plain human run diffs; it does not rewrite baselines");
+  assert.equal(loadVisualConfig({ AF_PERF_MODE: "1", AF_UPDATE_GOLDENS: "1" }).updateSnapshots, "all",
+    "update mode belongs to AF_UPDATE_GOLDENS runs a human reviews");
 });
