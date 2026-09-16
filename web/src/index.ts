@@ -1706,7 +1706,14 @@ function doRegisterAccount(agent: string, name: string): void {
   const requestGeneration = connectionGeneration;
   void registerAccountRPC(agent, name, tok)
     .then((resp) => {
-      if (requestGeneration !== connectionGeneration || token !== tok) return;
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        // Stale connection: suppress the row status, but still reconcile the
+        // current session's account view — the registration succeeded and the
+        // daemon's account list changed; an open config view would otherwise
+        // show the pre-registration state until the user leaves and re-enters.
+        refreshAccounts();
+        return;
+      }
       const notices = resp.notices?.length ? ` · ${resp.notices.join(" · ")}` : "";
       setAccountStatus(agent, "", `Registered ${agent} account "${resp.entry.name}"${notices}`, false);
       refreshAccounts();
@@ -1800,7 +1807,14 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
   const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok)
     .then((resp) => {
-      if (requestGeneration !== connectionGeneration || token !== tok) return;
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        // Stale connection: suppress the status write, but still reconcile the
+        // current session's config view — the write committed and the daemon
+        // holds the new value; an open config view would otherwise display the
+        // pre-write state until the user leaves and re-enters.
+        refreshConfig();
+        return;
+      }
       store.set({
         configStatus: {
           key: resp.result.key,
