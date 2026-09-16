@@ -179,9 +179,15 @@ func (s *TaskPane) PruneRestoredAbsent(loaded []task.Task) {
 	for _, t := range loaded {
 		present[t.ID] = true
 	}
-	for _, queued := range s.deleted {
+	// Walk backwards so index removals don't invalidate the remaining positions.
+	for i := len(s.deleted) - 1; i >= 0; i-- {
+		queued := s.deleted[i]
 		if !present[queued.ID] {
 			s.AcknowledgeDeletedRestored(queued.ID)
+			// Also remove from the retry queue so the impossible deletion is
+			// not re-submitted on the next save (the authoritative reload
+			// confirmed the record is gone from disk).
+			s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
 		}
 	}
 }

@@ -130,6 +130,10 @@ func (m *home) saveContentPaneState() error {
 				log.WarningLog.Printf("task removal committed but schedule refresh failed: %v", err)
 				saveErr = errors.Join(saveErr, fmt.Errorf(
 					"task %q was removed, but the daemon could not refresh its schedules: %w", tsk.Name, err))
+				// The removal committed: if this task was previously restored to
+				// s.tasks by RestoreFailedDelete, remove it now so the ghost row
+				// does not persist when failedEdit suppresses SetTasks below.
+				sp.AcknowledgeDeletedRestored(tsk.ID)
 				continue
 			}
 			log.ErrorLog.Printf("failed to remove task: %v", err)
