@@ -1853,8 +1853,20 @@ const TASK_HEALTH_POLL_MS = 60_000;
 // tick cannot get out of step with it.
 window.setInterval(() => {
   const state = store.get();
-  if (state.phase === "app" && state.view === "tasks") {
+  if (state.phase !== "app") {
+    return;
+  }
+  if (state.view === "tasks") {
     refreshTasks();
+  }
+  if (state.view === "config") {
+    // The usage report is a snapshot of account-limit state that changes behind
+    // the page: a session can reach or clear a wall, be killed, or be created
+    // while the config view stays open, and session events update the session
+    // store without touching this one — so the rows and their relative times
+    // ("just now", "in 5m") went stale until the next view switch (#4361
+    // review). Same cadence and the same fenced refetcher as the task poll.
+    refreshUsage();
   }
 }, TASK_HEALTH_POLL_MS);
 
