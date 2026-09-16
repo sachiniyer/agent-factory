@@ -36,6 +36,7 @@ func (s *TaskPane) SetTasks(tasks []task.Task) {
 	s.deletedDisplays = nil
 	s.deletedRank = nil
 	s.restoredDeletes = nil
+	s.deferredRestoreBaseline = nil
 	s.editing = false
 	// A reload replaces the create-form buffers a pending create was captured
 	// against, so a create left un-consumed by a failed save must be dropped —
@@ -117,6 +118,7 @@ func (s *TaskPane) cancelQueuedDeletion(id string) {
 		}
 	}
 	delete(s.restoredDeletes, id)
+	delete(s.deferredRestoreBaseline, id)
 	s.dirty = len(s.dirtyIDs) > 0 || len(s.deleted) > 0
 }
 
@@ -231,12 +233,38 @@ func (s *TaskPane) RestoreFailedDeleteWithFresh(fresh, expect task.Task) {
 // queued in s.deleted for the retry.
 func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) {
 	if s.restoredDeletes == nil {
-		s.restoredDeletes = make(map[string]task.Task)
+		s.restoredDeletes = make(map[string][]task.Task)
 	}
 	if s.originals == nil {
 		s.originals = make(map[string]task.Task)
 	}
-	if _, alreadyRestored := s.restoredDeletes[display.ID]; !alreadyRestored {
+	// Apply any deferred originals baseline that was withheld because the row
+	// was in edit mode when the fresh authoritative record arrived. Now that we
+	// are processing another retry for this ID, check if editing has ended and
+	// apply the deferred baseline so subsequent re-deletes or edits use durable
+	// state rather than the stale binding the edit form was opened against
+	// (PRRT_kwDORdIFwM6i4rlG).
+	if deferredBaseline, hasDeferral := s.deferredRestoreBaseline[display.ID]; hasDeferral && !s.editing {
+		s.originals[display.ID] = deferredBaseline
+		delete(s.deferredRestoreBaseline, display.ID)
+	}
+	// Check whether THIS specific display value has already been restored, so
+	// a second retry failure for the same occurrence does not append another
+	// visible copy. Checking by value (not just by ID) allows two rows that
+	// share an ID to each get their own restored occurrence: when a second
+	// duplicate-ID row's display differs from the first, it is not found in the
+	// slice and IS inserted as a new row (PRRT_kwDORdIFwM6i4rk4).
+	storedDisplays := s.restoredDeletes[display.ID]
+	alreadyRestored := false
+	storedIdx := -1
+	for i, stored := range storedDisplays {
+		if reflect.DeepEqual(stored, display) {
+			alreadyRestored = true
+			storedIdx = i
+			break
+		}
+	}
+	if !alreadyRestored {
 		pos := s.restorePosition(display.ID)
 		// baseline is the record to store in originals — the copy subsequent
 		// user actions (re-delete via D, edit via ConsumeDirty) will diff
@@ -263,13 +291,13 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) 
 		// An ID-only lookup would find the FIRST occurrence, which may be the
 		// untouched earlier duplicate — replacing it corrupts that row and
 		// leaves the actual restored row stale (PRRT_kwDORdIFwM6i06TU).
-		s.restoredDeletes[display.ID] = display
+		s.restoredDeletes[display.ID] = append(storedDisplays, display)
 	} else {
-		// Second or later retry failure: a fresh record may have been supplied
-		// (e.g. another client changed the task between retries). Update the
-		// visible row and originals baseline in place without inserting a
-		// duplicate — the dedupe guard above already ensures exactly one visible
-		// row exists for this ID.
+		// Second or later retry failure for this specific display value: a fresh
+		// record may have been supplied (e.g. another client changed the task
+		// between retries). Update the visible row and originals baseline in
+		// place without inserting a duplicate — the dedupe guard above already
+		// ensures exactly one visible row exists for this display value.
 		//
 		// Find the SPECIFIC restored row by matching the display value stored at
 		// restore time, not the first ID match. For duplicate-ID stores, an
@@ -280,15 +308,25 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) 
 		// the form buffers still contain the pre-refresh values, so replacing
 		// the row and its originals baseline would turn those stale buffer
 		// values into a "patch" that silently overwrites the concurrent change
-		// when the form is submitted (PRRT_kwDORdIFwM6i0U5R). Leave both the
-		// row and originals as-is; the form reflects what the user is editing
-		// and the baseline stays consistent with it.
-		storedDisplay := s.restoredDeletes[display.ID]
+		// when the form is submitted (PRRT_kwDORdIFwM6i0U5R). In that case,
+		// defer the baseline update for the next pass when editing has ended
+		// (PRRT_kwDORdIFwM6i4rlG).
+		storedDisplay := storedDisplays[storedIdx]
 		for i, t := range s.tasks {
 			if !reflect.DeepEqual(t, storedDisplay) {
 				continue
 			}
-			if !(s.editing && s.selectedIdx == i) {
+			if s.editing && s.selectedIdx == i {
+				// Defer the originals update: the form is open against the
+				// current baseline; applying it now would make the form's
+				// current buffer values appear as a patch against a moved
+				// baseline. The next restoreFailedDeleteImpl call applies
+				// it once editing has ended.
+				if s.deferredRestoreBaseline == nil {
+					s.deferredRestoreBaseline = make(map[string]task.Task)
+				}
+				s.deferredRestoreBaseline[display.ID] = baseline
+			} else {
 				// Use baseline (not display) to update originals, matching
 				// what the first-restore branch does. display may contain
 				// draft values that were never persisted; setting originals
@@ -300,7 +338,7 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) 
 				s.tasks[i] = display
 				// Update the stored display so subsequent retries match the
 				// newly refreshed row, not the stale original.
-				s.restoredDeletes[display.ID] = display
+				s.restoredDeletes[display.ID][storedIdx] = display
 			}
 			break
 		}
@@ -416,8 +454,9 @@ func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
 	// Clear restore bookkeeping only when this ID was actually restored; the
 	// early-exit is removed so the cleanup loop below always runs even for
 	// explicit re-deletes that cleared the marker.
-	if _, wasRestored := s.restoredDeletes[id]; wasRestored {
+	if len(s.restoredDeletes[id]) > 0 {
 		delete(s.restoredDeletes, id)
+		delete(s.deferredRestoreBaseline, id)
 		delete(s.deletedRank, id)
 		// Remove all deletedDisplays entries for this ID (there may be more
 		// than one when duplicate-ID rows were both deleted and both failed).
@@ -520,8 +559,7 @@ func (s *TaskPane) GetDeletedDisplay(expect task.Task) (task.Task, bool) {
 // restored row with the stale pre-delete snapshot from deletedDisplays
 // (PRRT_kwDORdIFwM6i3wJ2).
 func (s *TaskPane) IsRestoredDelete(id string) bool {
-	_, ok := s.restoredDeletes[id]
-	return ok
+	return len(s.restoredDeletes[id]) > 0
 }
 
 // RequeueFailedDelete re-queues a deletion for retry without touching the

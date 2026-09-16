@@ -209,7 +209,17 @@ func (m *home) saveContentPaneState() error {
 				// ID and therefore also kept only the last. To recover the
 				// exact selected row's content, use the display record captured
 				// by deleteSelectedTask before the originals lookup.
-				if loadedCount[tsk.ID] == 1 {
+				if sp.IsRestoredDelete(tsk.ID) {
+					// Row already restored with authoritative data from a
+					// prior pass. A reload that was unambiguous then may now
+					// be ambiguous (another client added a same-ID row), or
+					// the same single-match path would fire again — but the
+					// already-installed fresh row and its originals baseline
+					// are more authoritative than the stale pre-delete snapshot
+					// in deletedDisplays. Just requeue the expectation so the
+					// retry fires, without touching the display or originals.
+					sp.RequeueFailedDelete(tsk)
+				} else if loadedCount[tsk.ID] == 1 {
 					// Single unambiguous match: pass the authoritative loaded
 					// record as both display and originals baseline. Using
 					// RestoreFailedDeleteWithFresh (not WithExpect) stores

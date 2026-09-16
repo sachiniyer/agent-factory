@@ -150,15 +150,25 @@ type TaskPane struct {
 	// (PRRT_kwDORdIFwM6i2XFw). Each entry is appended when the deletion is
 	// queued and removed when it is acknowledged or the pane is reloaded.
 	deletedDisplays []deletedDisplayPair
-	// restoredDeletes tracks the display value inserted by RestoreFailedDelete
-	// for each task ID. When a deletion retry also fails, the second call must
-	// not append another visible copy — the first restore already has the row in
-	// the pane (dedupe check via map presence). Storing the display value (not
-	// just a bool) allows the second-retry refresh to locate the SPECIFIC
-	// restored row for duplicate-ID stores, where an ID-only search would update
-	// the wrong occurrence (PRRT_kwDORdIFwM6i06TU). Cleared by SetTasks
+	// restoredDeletes tracks the display values inserted by RestoreFailedDelete
+	// for each task ID. When a deletion retry also fails, a second call for the
+	// SAME display must not append another visible copy — the first restore
+	// already has the row in the pane (dedupe check via slice membership).
+	// Storing all display values (not just one per ID) allows duplicate-ID rows
+	// to each restore their own occurrence: a second ID-sharing deletion receives
+	// a different display value and is correctly inserted as a new row rather
+	// than being silently merged into the first (PRRT_kwDORdIFwM6i4rk4). The
+	// second-retry refresh locates the SPECIFIC row to update by matching the
+	// stored display value (PRRT_kwDORdIFwM6i06TU). Cleared by SetTasks
 	// (successful reload) and AcknowledgeDeletedRestored (successful retry).
-	restoredDeletes map[string]task.Task
+	restoredDeletes map[string][]task.Task
+	// deferredRestoreBaseline holds an originals update deferred because the
+	// target row was open in the edit form when the fresh authoritative record
+	// arrived. The update is applied the next time restoreFailedDeleteImpl runs
+	// for this ID with editing no longer active, ensuring that after the user
+	// cancels the form the originals baseline reflects durable state for a
+	// subsequent re-delete or edit (PRRT_kwDORdIFwM6i4rlG).
+	deferredRestoreBaseline map[string]task.Task
 	// loadedRanks records the load-order index of every occurrence of each ID
 	// in the set SetTasks received, i.e. disk order. For unique IDs the slice
 	// has exactly one element; for duplicate IDs (hand-edited tasks.json) it
@@ -629,7 +639,7 @@ func (s *TaskPane) deleteSelectedTask() {
 	// leave those ghosts. Instead reset only the dedupe marker so the next
 	// RestoreFailedDelete (if this new deletion also fails) can re-insert without
 	// hitting the dedupe.
-	if _, wasRestored := s.restoredDeletes[deleted.ID]; wasRestored {
+	if len(s.restoredDeletes[deleted.ID]) > 0 {
 		delete(s.restoredDeletes, deleted.ID)
 		// Remove the stale s.deleted entry for this ID and its parallel
 		// deletedDisplays entry. Both are found by the same index so we remove
@@ -735,7 +745,7 @@ func (s *TaskPane) runSelectedTask() {
 	// Marking the task dirty here ensures saveContentPaneState runs and
 	// reconciles the draft to disk before the trigger fires.
 	tsk := s.tasks[s.selectedIdx]
-	if _, isRestored := s.restoredDeletes[tsk.ID]; isRestored {
+	if len(s.restoredDeletes[tsk.ID]) > 0 {
 		if baseline, ok := s.originals[tsk.ID]; ok && !task.DiffTask(baseline, tsk).IsEmpty() {
 			// The displayed row differs from the baseline — it carries a draft
 			// that was never saved. Mark it dirty so saveContentPaneState
