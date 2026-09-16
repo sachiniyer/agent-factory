@@ -966,6 +966,20 @@ func arithmeticExprHasCommandSubstitution(expr syntax.ArithmExpr) bool {
 	return found
 }
 
+// wordHasCommandSubstitution reports whether a shell word contains a command
+// substitution (`$(...)` or backticks).
+func wordHasCommandSubstitution(word syntax.Node) bool {
+	found := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if _, ok := node.(*syntax.CmdSubst); ok {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 func accountSubscriptInArithmetic(expression string, names map[string]struct{}) bool {
 	for name := range names {
 		for offset := 0; offset < len(expression); {

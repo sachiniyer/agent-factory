@@ -102,6 +102,38 @@ func TestValidateAccountEnvironmentCommand_RefusesArithmeticCommandSubstitution(
 	}
 }
 
+// TestValidateAccountEnvironmentCommand_RefusesBinaryTestNumericCmdSubst verifies
+// that `[[ ]]` numeric comparison operators (-eq, -ne, -lt, -gt, -le, -ge)
+// fail closed when either operand contains a command substitution.
+//
+// On a bash-as-/bin/sh host, bash evaluates the operands of numeric [[ ]]
+// operators as arithmetic. A command substitution in either operand is
+// re-evaluated as fresh arithmetic by bash, so `[[ 0 -eq $(printf CODEX_HOME=1) ]]`
+// assigns CODEX_HOME=1 in the current shell before the agent is launched.
+func TestValidateAccountEnvironmentCommand_RefusesBinaryTestNumericCmdSubst(t *testing.T) {
+	for _, command := range []string{
+		// All six numeric operators with a command substitution in the right operand.
+		"[[ 0 -eq $(printf CODEX_HOME=1) ]]; codex",
+		"[[ 0 -ne $(printf CODEX_HOME=1) ]]; codex",
+		"[[ 0 -lt $(printf CODEX_HOME=1) ]]; codex",
+		"[[ 0 -gt $(printf CODEX_HOME=1) ]]; codex",
+		"[[ 0 -le $(printf CODEX_HOME=1) ]]; codex",
+		"[[ 0 -ge $(printf CODEX_HOME=1) ]]; codex",
+		// Command substitution in the left operand.
+		"[[ $(printf CODEX_HOME=1) -eq 0 ]]; codex",
+		// Backtick form of command substitution.
+		"[[ 0 -eq `printf CODEX_HOME=1` ]]; codex",
+		// Other denied names are reachable too.
+		"[[ 0 -eq $(printf OPENAI_API_KEY=x) ]]; codex",
+		"[[ 0 -eq $(printf BASH_ENV=/tmp/p) ]]; codex",
+		// An inner command whose argv look inert is still unprovable.
+		"[[ 0 -eq $(cat /tmp/x) ]]; codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q hides a denied-name assignment behind a [[ ]] numeric operator", command)
+	}
+}
+
 // The refusal above must stay narrow. A process tab is an arbitrary user
 // command, so ordinary arithmetic — including `$(( ))` that contains NO
 // command substitution — and command substitutions that appear OUTSIDE an
@@ -130,6 +162,13 @@ func TestValidateAccountEnvironmentCommand_AllowsProvableArithmeticAndExternalCm
 		// Non-arithmetic commands are unaffected.
 		"cd /tmp && codex",
 		"npm run dev",
+		// [[ ]] string-comparison operators do NOT evaluate operands as
+		// arithmetic, so a command substitution in them is plain data.
+		"[[ $(echo CODEX_HOME=1) == \"CODEX_HOME=1\" ]]; codex",
+		"[[ $(echo hi) != \"bye\" ]]; codex",
+		// [[ ]] numeric operators with no command substitution are fine.
+		"[[ 0 -eq 0 ]]; codex",
+		"[[ 1 -lt 2 ]]; codex",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"command %q is provably free of identity mutation and must stay allowed", command)
