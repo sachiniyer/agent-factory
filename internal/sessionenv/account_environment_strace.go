@@ -6,6 +6,11 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
+// straceFlatArgvLimit bounds the suffix scan's flat fan-out. A command line
+// with more words than this is not an ordinary invocation, and scanning every
+// suffix would do quadratic real work below the shared meter.
+const straceFlatArgvLimit = 8192
+
 // unwrapStrace judges a strace invocation without a grammar for its options.
 // strace's option set is an open grammar — operand spellings and long-option
 // abbreviations change with each release — so this wrapper never computes
@@ -31,18 +36,22 @@ func unwrapStrace(
 	names map[string]struct{},
 	evaluation *evaluationBudget,
 ) ([]*syntax.Word, bool) {
+	if len(words) > straceFlatArgvLimit {
+		return nil, true
+	}
 	if straceArgvHazardous(words, names) {
 		return nil, true
 	}
 	for i := range words {
-		// Each suffix runs a full command walk of its own length; charging
-		// the suffix length keeps the quadratic total inside the shared
-		// budget so an attacker-sized argv refuses instead of fanning out.
-		evaluation.work += len(words[i:])
+		// One metered slot per suffix judgment: the flat fan-out is bounded by
+		// straceFlatArgvLimit above, while each descent draws on the shared
+		// budget for its own argv — a plain long argv costs only its length in
+		// slots, but nested strace/env recursion stays bounded.
+		evaluation.work += 1
 		if evaluation.work >= accountEnvironmentEvaluationBudget {
 			return nil, true
 		}
-		if head, ok := literalShellWord(words[i]); ok {
+		if head, ok := literalShellWordExpandableSafe(words[i]); ok {
 			// A NAME=value word at the head of a suffix works like a shell
 			// env-prefix: it mutates whatever runs after it.
 			if eq := strings.IndexByte(head, '='); eq > 0 &&
@@ -59,12 +68,13 @@ func unwrapStrace(
 
 // straceArgvHazardous runs the declared hazard record over a strace argv
 // (without the leading strace word — the caller may pass it anyway, a bare
-// "strace" literal is benign). A non-literal word is unreducible and fails
-// closed. Also used from the unrecognized-wrapper tail scan for a strace
-// nested inside another wrapper's argv.
+// "strace" literal is benign). A word that is not provably literal — an
+// expansion or a glob that /bin/sh -c would expand before strace sees argv —
+// is unreducible and fails closed. Also used from the unrecognized-wrapper
+// tail scan for a strace nested inside another wrapper's argv.
 func straceArgvHazardous(words []*syntax.Word, names map[string]struct{}) bool {
 	for i, word := range words {
-		literal, ok := literalShellWord(word)
+		literal, ok := literalShellWordExpandableSafe(word)
 		if !ok {
 			return true
 		}
@@ -149,22 +159,22 @@ func straceOptionMutatesAccountEnvironment(
 }
 
 // straceSeparateOperandDenied judges the next argv word as a -E/--env
-// operand, failing closed when there is no literal operand to judge.
+// operand, failing closed when there is no provably literal operand to judge.
 func straceSeparateOperandDenied(next *syntax.Word, names map[string]struct{}) bool {
 	if next == nil {
 		return true
 	}
-	value, ok := literalShellWord(next)
+	value, ok := literalShellWordExpandableSafe(next)
 	return !ok || accountEnvironmentOperandDenied(value, names)
 }
 
 // straceSeparateOperandExecs judges the next argv word as a -o/--output
-// operand, failing closed when there is no literal operand to judge.
+// operand, failing closed when there is no provably literal operand to judge.
 func straceSeparateOperandExecs(next *syntax.Word) bool {
 	if next == nil {
 		return true
 	}
-	value, ok := literalShellWord(next)
+	value, ok := literalShellWordExpandableSafe(next)
 	return !ok || straceOutputOperandExecs(value)
 }
 

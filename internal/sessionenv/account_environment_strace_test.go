@@ -75,6 +75,25 @@ func TestCommandMutatesAccountEnvironment_StraceSuffixModel(t *testing.T) {
 		{"strace -o $f codex", true},
 		{"strace $W codex", true},
 		{"strace ${W:-env} CODEX_HOME=/other codex", true},
+		// Unquoted glob metacharacters are not literals either: /bin/sh -c
+		// expands them into different argv before strace runs, so a filename
+		// such as CODEX_HOME=x or |cmd could silently become the operand.
+		{"strace -E * codex", true},
+		{"strace -o * codex", true},
+		{"strace -o /tmp/*.out codex", true},
+		{"strace -e 'trace=*' codex", false},
+		{"strace -o '/tmp/*.out' codex", false},
+		// An escaped metacharacter resolves to its literal value: \* is a
+		// literal asterisk operand (benign), but \| resolves to | and still
+		// trips the output-command hazard the raw string would have missed.
+		{"strace -E \\* codex", false},
+		{"strace -o \\|env CODEX_HOME=/other codex true", true},
+		// A nested strace behind an unrecognized argv-passthrough wrapper runs
+		// the full suffix model, not just the hazard record: its xargs child
+		// is judged as a command line exactly as at top level.
+		{"valgrind strace xargs -I{} env {} codex", true},
+		{"perf strace xargs -I{} env {} codex", true},
+		{"valgrind strace -o /tmp/t true", false},
 		// Class-B over-refusals, priced by the design: an option operand that
 		// spells a denied assignment mutates nothing as a filename or filter,
 		// but the same words as a command-line suffix would — so they refuse.
@@ -108,4 +127,28 @@ func TestCommandMutatesAccountEnvironment_StraceBudgetRefusal(t *testing.T) {
 		"attacker-sized nesting must refuse inside the budget")
 	// A few nested layers stay decidable.
 	require.False(t, commandMutatesAccountEnvironment("strace strace strace codex", codex))
+}
+
+// The suffix scan meters one slot per suffix judgment, so an ordinary long
+// flat argv (a compiler-style command with hundreds of file arguments) is not
+// refused by cumulative charging — the shared budget only bounds the nested
+// work each suffix descent actually does.
+func TestCommandMutatesAccountEnvironment_StraceLongFlatArgv(t *testing.T) {
+	codex := accountScopedNames("codex", "CODEX_HOME")
+	flat := "strace codex " + strings.Repeat("src/file.o ", 400)
+	require.False(t, commandMutatesAccountEnvironment(flat, codex),
+		"ordinary long strace argv must not exhaust the shared budget")
+}
+
+// The refusal error names the exact word af could not prove literal so the
+// user can pin a literal and self-correct — without it a fail-closed change is
+// a support burden, not a fixable message.
+func TestValidateAccountEnvironmentCommand_NamesUnprovableWord(t *testing.T) {
+	err := ValidateAccountEnvironmentCommand(
+		`strace -o "$AF_TRACE_FILE" codex`, scopedProcessTabAccount())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `$AF_TRACE_FILE`,
+		"refusal must name the word that failed proof")
+	require.Contains(t, err.Error(), "replace it with a literal",
+		"refusal must tell the user how to fix it")
 }

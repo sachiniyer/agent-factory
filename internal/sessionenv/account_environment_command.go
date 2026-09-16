@@ -395,11 +395,14 @@ func unrecognizedWrapperHidesAccountAssignment(
 			continue
 		}
 		if !strings.HasPrefix(literal, "-") {
-			// A strace nested in another wrapper's tail keeps its own option
-			// hazards: run the same declared record over its argv.
-			if isAccountCommandName(word, "strace") &&
-				straceArgvHazardous(words[i:], names) {
-				return true
+			// A strace nested in another wrapper's tail gets the same verdict a
+			// top-level one gets: the hazard record plus every-suffix command
+			// judgment — a passthrough child such as `xargs -I{} env {} codex`
+			// refuses the same under any wrapper, not just bare.
+			if isAccountCommandName(word, "strace") {
+				if _, unsafe := unwrapStrace(words[i+1:], names, evaluation); unsafe {
+					return true
+				}
 			}
 			// A shell in the wrapper's tail gets the same verdict a bare
 			// shell command gets: `strace sh -c 'unset CODEX_HOME; codex'`

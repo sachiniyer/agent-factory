@@ -374,6 +374,105 @@ func literalShellWord(word *syntax.Word) (string, bool) {
 	return value.String(), true
 }
 
+// literalShellWordExpandableSafe is literalShellWord plus the guarantee that
+// /bin/sh -c cannot expand the word into different argv: unquoted literal parts
+// must carry no glob metacharacters (* ? [) and no leading ~, and backslash
+// escapes are resolved so an escaped \| still reads as | to hazard checks that
+// inspect the resolved string. Quoted parts cannot glob and keep their raw
+// value, matching what strace would receive.
+func literalShellWordExpandableSafe(word *syntax.Word) (string, bool) {
+	if word == nil {
+		return "", false
+	}
+	var value strings.Builder
+	first := true
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			if !appendUnexpandedLit(&value, part.Value, first) {
+				return "", false
+			}
+		case *syntax.SglQuoted:
+			if part.Dollar {
+				return "", false
+			}
+			value.WriteString(part.Value)
+		case *syntax.DblQuoted:
+			if part.Dollar {
+				return "", false
+			}
+			for _, nested := range part.Parts {
+				if !appendLiteralShellPart(&value, nested) {
+					return "", false
+				}
+			}
+		default:
+			return "", false
+		}
+		first = false
+	}
+	return value.String(), true
+}
+
+func appendUnexpandedLit(value *strings.Builder, s string, wordStart bool) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\\' {
+			if i+1 < len(s) {
+				i++
+				value.WriteByte(s[i])
+			} else {
+				value.WriteByte(c)
+			}
+			continue
+		}
+		switch c {
+		case '*', '?', '[':
+			return false
+		case '~':
+			if wordStart && i == 0 {
+				return false
+			}
+		}
+		value.WriteByte(c)
+	}
+	return true
+}
+
+// firstUnprovableCommandWord names the first argv word af cannot prove is a
+// literal — an expansion or an expandable literal — so a refusal can point the
+// user at the exact word to pin. Empty when every word proves out (the refusal
+// then comes from a literal denied shape, which the generic message covers).
+func firstUnprovableCommandWord(command string) string {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
+		Parse(strings.NewReader(command), "")
+	if err != nil {
+		return ""
+	}
+	var found *syntax.Word
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || found != nil {
+			return found == nil
+		}
+		for _, word := range call.Args {
+			if _, safe := literalShellWordExpandableSafe(word); !safe {
+				found = word
+				return false
+			}
+		}
+		return true
+	})
+	if found == nil {
+		return ""
+	}
+	var sb strings.Builder
+	if err := syntax.NewPrinter().Print(&sb, found); err != nil {
+		return ""
+	}
+	return sb.String()
+}
+
 func appendLiteralShellPart(value *strings.Builder, part syntax.WordPart) bool {
 	switch part := part.(type) {
 	case *syntax.Lit:
