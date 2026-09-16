@@ -7,6 +7,9 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -28,6 +31,13 @@ func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, in
 		m.logRootClaudeTranscriptWarning(st,
 			"root agent for %s could not verify its recorded claude conversation %s against the project transcript store: live pane launch command is unavailable",
 			repoRoot, recorded.ID)
+		return
+	}
+	program, scopeErr := claudeAccountTranscriptProgram(program, inst.Account)
+	if scopeErr != nil {
+		m.logRootClaudeTranscriptWarning(st,
+			"root agent for %s could not verify its recorded claude conversation %s against the account-scoped transcript store: %v",
+			repoRoot, recorded.ID, scopeErr)
 		return
 	}
 	state, inspected, err := m.inspectRootClaudeTranscript(st, program, repoRoot, recorded)
@@ -209,4 +219,33 @@ func rootAgentTranscriptProgram(repoRoot string, ra config.RootAgent) (string, e
 		return "", err
 	}
 	return config.ResolveProgram(&resolved.Config, program), nil
+}
+
+// claudeAccountTranscriptProgram scopes a claude transcript inspection to the
+// account the root launches as. Registration relocates claude's ENTIRE config
+// root — transcripts included — so the ambient store a bare program inspects
+// never holds an account-scoped root's conversation: the recorded id reads
+// absent there and is substituted or dropped exactly while being carried
+// (#4400 review). The CLAUDE_CONFIG_DIR prefix lands where
+// CommandEnvironmentFromCommand models leading shell assignments — the same
+// position a program-local override would occupy — so it loses to a
+// command-string assignment exactly the way the launch's exported injection
+// does. Returns the program unchanged when the account is empty or the
+// resolved program is not claude.
+func claudeAccountTranscriptProgram(program, account string) (string, error) {
+	if strings.TrimSpace(account) == "" {
+		return program, nil
+	}
+	if agent := sessionenv.AgentForCommand(program); agent != tmux.ProgramClaude {
+		return program, nil
+	}
+	home, err := config.GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	dir, err := agentaccount.Dir(home, tmux.ProgramClaude, account)
+	if err != nil {
+		return "", err
+	}
+	return "CLAUDE_CONFIG_DIR=" + shellquote.Quote(dir) + " " + program, nil
 }

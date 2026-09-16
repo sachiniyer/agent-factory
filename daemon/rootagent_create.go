@@ -249,27 +249,6 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	}
 
 	program := rootAgentProgramForProfile(workspace, resolution.RootAgent)
-	skipRecordedResume := false
-	if carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
-		transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
-		state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
-		if inspectErr == nil {
-			state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, carried.conversation)
-		}
-		switch {
-		case inspectErr != nil:
-			m.warn().Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
-				workspace, carried.conversation.ID, inspectErr)
-		case !state.RecordedExists && state.Resume.HasID():
-			m.warn().Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
-				workspace, carried.conversation.ID, state.Resume.ID)
-			carried.conversation = state.Resume
-		case !state.RecordedExists:
-			m.warn().Printf("root agent for %s recorded claude conversation %s has no transcript and the project has no replacement transcript; starting fresh",
-				workspace, carried.conversation.ID)
-			skipRecordedResume = true
-		}
-	}
 	// A reaped root's account pin rides into its replacement like its
 	// conversation does: an account handoff is the one way root acquires an
 	// account (#4395), and silently dropping it would resume the guaranteed
@@ -278,6 +257,12 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	// name would stamp an identity the launch cannot honour — and fall back to
 	// ambient with a named warning rather than strand the always-on guarantee
 	// on a boundary refusal.
+	//
+	// Resolved BEFORE the transcript check: registration relocates claude's
+	// entire transcript store, so an inspection that does not scope to the
+	// carried account reads the recorded conversation as absent and
+	// substitutes or drops it exactly while the account survives (#4400
+	// review).
 	account := carried.account
 	if account != "" {
 		agent := sessionenv.AgentForCommand(program)
@@ -295,6 +280,30 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 			m.warn().Printf("re-created root agent for %s cannot keep its recorded account %q: %v; it starts on the ambient identity",
 				workspace, account, accountErr)
 			account = ""
+		}
+	}
+	skipRecordedResume := false
+	if carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
+		transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
+		if resolveErr == nil {
+			transcriptProgram, resolveErr = claudeAccountTranscriptProgram(transcriptProgram, account)
+		}
+		state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
+		if inspectErr == nil {
+			state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, carried.conversation)
+		}
+		switch {
+		case inspectErr != nil:
+			m.warn().Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
+				workspace, carried.conversation.ID, inspectErr)
+		case !state.RecordedExists && state.Resume.HasID():
+			m.warn().Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
+				workspace, carried.conversation.ID, state.Resume.ID)
+			carried.conversation = state.Resume
+		case !state.RecordedExists:
+			m.warn().Printf("root agent for %s recorded claude conversation %s has no transcript and the project has no replacement transcript; starting fresh",
+				workspace, carried.conversation.ID)
+			skipRecordedResume = true
 		}
 	}
 	req := CreateSessionRequest{
@@ -346,6 +355,9 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// would be worse than the bug.
 		if req.resumeConversation.Agent == tmux.ProgramClaude {
 			transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
+			if resolveErr == nil {
+				transcriptProgram, resolveErr = claudeAccountTranscriptProgram(transcriptProgram, account)
+			}
 			state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
 			if inspectErr == nil {
 				state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, req.resumeConversation)

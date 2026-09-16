@@ -13,6 +13,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -136,6 +137,82 @@ func TestEnsureRootAgentsCarriesAccountAcrossTmuxVanish(t *testing.T) {
 	recreated := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, recreated, "always-ensure: the root must exist again")
 	require.Equal(t, "work", recreated.Account)
+}
+
+// TestEnsureRootAgentsInspectsTheCarriedAccountsTranscriptStore is the #4400
+// review finding. Registration relocates claude's ENTIRE config root —
+// transcripts included — so an ambient inspection of the carried conversation
+// reads it as absent and substitutes whatever the ambient project store
+// holds: the root comes back on the right account resuming the WRONG
+// conversation.
+func TestEnsureRootAgentsInspectsTheCarriedAccountsTranscriptStore(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	ambientConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", ambientConfigDir)
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+	manager.ensureRootAgentsAndWait()
+
+	first := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, first, "root instance missing after first ensure")
+	require.Len(t, *seen, 1)
+	prior := seedRootConversation(t, first)
+
+	accountDir, err := agentaccount.Register(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
+	first.Account = "work"
+
+	// The carried transcript exists ONLY in the account's store; the ambient
+	// store's newest transcript is a different conversation. The substitution
+	// the finding describes needs both halves on disk to be observable.
+	writeRootClaudeTranscript(t, accountDir, repoPath, prior.ID)
+	writeRootClaudeTranscript(t, ambientConfigDir, repoPath, "22222222-3333-4444-5555-666666666666")
+
+	// The #1104 outage class: tmux vanished under a healthy daemon.
+	first.SetStatusForTest(session.Lost)
+	manager.ensureRootAgentsAndWait()
+
+	require.Len(t, *seen, 2, "the vanished root must be reaped and re-created")
+	require.Equal(t, "work", (*seen)[1].Account,
+		"the re-created root must keep the account its predecessor was pinned to")
+	require.Equal(t, prior.ID, (*seen)[1].ResumeConversation.ID,
+		"the re-created root must resume the recorded conversation from the ACCOUNT's transcript store, not substitute the ambient project's newest")
+	require.NotNil(t, findRootInstance(t, manager, repoPath), "always-ensure: the root must exist again")
+}
+
+// TestClaudeAccountTranscriptProgramScope pins the helper's contract: the
+// account's config dir rides as a leading shell assignment — the same
+// position a program-local override would occupy — and only when there is
+// both an account and a resolved claude program to scope.
+func TestClaudeAccountTranscriptProgramScope(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	accountDir, err := agentaccount.Dir(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
+
+	scoped, err := claudeAccountTranscriptProgram("claude --verbose", "work")
+	require.NoError(t, err)
+	require.Equal(t, "CLAUDE_CONFIG_DIR="+shellquote.Quote(accountDir)+" claude --verbose", scoped)
+
+	for _, tc := range []struct{ program, account string }{
+		{"claude", ""},      // ambient root: nothing to scope
+		{"aider", "work"},   // not claude: no claude transcript store
+		{"echo hi", "work"}, // not an agent command at all
+	} {
+		got, err := claudeAccountTranscriptProgram(tc.program, tc.account)
+		require.NoError(t, err)
+		require.Equal(t, tc.program, got)
+	}
+
+	// A name the registry would refuse is an inspection error, not an
+	// ambient fallthrough — inspecting the wrong store is worse than
+	// inspecting none.
+	_, err = claudeAccountTranscriptProgram("claude", "not a valid name!")
+	require.Error(t, err)
 }
 
 // TestReapDeadRootSnapshotsConversationOnlyAfterOwningTheOperation pins the
