@@ -686,6 +686,10 @@ async function recordControls(page: Page, shot: (name: string) => Promise<unknow
   await expect(page.locator(".af-defaults summary")).toContainText("Program:");
   await expect(page.locator(".af-defaults summary")).not.toContainText("Account:");
   await page.getByLabel("Session title", { exact: true }).fill("review-followup");
+  // The account row's label reads the backend catalog too (#4404 review), so
+  // wait for it as the new-session beat does — the frame must not depend on
+  // which of the two daemon answers lands first.
+  await expect(page.locator('select[aria-label="Backend"] option')).not.toHaveCount(1);
   await shot("create-compact");
   if (!await page.locator(".af-defaults").evaluate((el) => (el as HTMLDetailsElement).open)) await page.locator(".af-defaults summary").click();
   await shot("create-defaults");

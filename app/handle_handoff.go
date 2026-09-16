@@ -79,7 +79,11 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	m.handoffChoices = choices
 	m.handoffAccounts = nil
 	m.handoffWarnings = nil
-	if account, _ := selected.AccountSelection(); account != "" {
+	// Only a PINNED account forces the account picker. An account af chose —
+	// the create-time router's pick or the limit scheduler's — is released by
+	// an agent-only handoff (the daemon clears it in the swap transaction), so
+	// a routed session keeps the ordinary agent picker (#4404 review).
+	if account, automatic := selected.AccountSelection(); account != "" && !automatic {
 		m.handoffChoices = nil
 		choices = []string{"Loading accounts…"}
 	}

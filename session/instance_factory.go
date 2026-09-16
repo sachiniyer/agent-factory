@@ -65,6 +65,18 @@ type InstanceOptions struct {
 	// an account af selected. Persisted via the instance record's
 	// account_auto_selected field.
 	AccountAutoSelected bool
+	// AccountRouteAgent is the agent the daemon's create-time account router
+	// resolved Program to when it decided this create's account (#4404) — the
+	// agent of ResolveLaunchProgram's answer, "" for a command no agent owns.
+	// Meaningful only with AccountRouteEvaluated.
+	AccountRouteAgent string
+	// AccountRouteEvaluated marks that the router made that decision. The launch
+	// boundary resolves the program again and refuses a create whose answer
+	// moved (#4404 review): a program_overrides edit landing while the create
+	// waited behind its repo's start lock means the account decision — a pooled
+	// pick, or none because the override pointed elsewhere — was made for a
+	// command this launch would no longer run.
+	AccountRouteEvaluated bool
 	// ProgramResolved marks Program as the final command selected by an outer
 	// runtime. It is internal to the sandbox agent-server handoff; ordinary
 	// callers pass an agent enum and leave this false.
@@ -519,6 +531,9 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	if accountBackendErr != nil {
 		return nil, accountBackendErr
 	}
+	if err := refuseAccountRouteDrift(opts, absPath); err != nil {
+		return nil, err
+	}
 	if err := refuseUnsupportedAccountAgent(opts, absPath); err != nil {
 		return nil, err
 	}
@@ -719,6 +734,65 @@ func offBoxAccountRefusal(kind BackendKind) string {
 // This remains an ALLOWLIST, not a denylist: an agent added later is unsupported
 // until someone proves the boundary accepts its launch, which fails in the safe
 // direction (#3051, #3083).
+// ResolveLaunchProgram answers the command a program label launches as, read
+// from the sources the launch itself reads: the repository's resolved config
+// (repo over global, the global layer from disk), else the global config when
+// the path does not resolve to a repository. An unreadable config leaves the
+// label unchanged — the pre-override answer, so a failed read can never admit
+// a cross-agent override.
+//
+// It is the one resolver both halves of an account decision use: the launch
+// boundary below, and the daemon's create-time router (#4404), which used to
+// resolve against its op-entry config snapshot instead. That snapshot is only
+// refreshed by ApplyConfig or a restart, so a hand-edited program_overrides
+// made the router and the launch disagree on EVERY create until the daemon
+// reloaded (#4404 review). Read-only: it records no in-repo load observation,
+// which is the launch's to record when it actually runs.
+func ResolveLaunchProgram(program, absPath string) string {
+	var cfg *config.Config
+	if repo, err := config.RepoFromPath(absPath); err == nil {
+		if resolved, rerr := config.ResolveConfigForRepoInspection(repo); rerr == nil {
+			cfg = &resolved.Config
+		}
+	}
+	if cfg == nil {
+		if loaded, lerr := config.LoadConfig(); lerr == nil {
+			cfg = loaded
+		}
+	}
+	return config.ResolveProgram(cfg, program)
+}
+
+// refuseAccountRouteDrift is the launch-time half of the router's decision
+// (#4404 review): the router chose this create's account — or chose none —
+// for the agent its program resolved to then, and the create has since waited
+// behind reserveCreate and the repo's start lock. A program_overrides edit in
+// that window leaves the decision describing a command this launch will not
+// run: routed nothing because codex pointed at a shim, then real codex starts
+// on the ambient identity; or routed a codex account that the moved override
+// now launches under another agent's namespace. Resolving again with the same
+// function and refusing on disagreement makes either outcome a retryable
+// error instead of a silent identity. Nothing has been provisioned yet.
+func refuseAccountRouteDrift(opts InstanceOptions, absPath string) error {
+	if !opts.AccountRouteEvaluated {
+		return nil
+	}
+	launched := sessionenv.AgentForCommand(ResolveLaunchProgram(opts.Program, absPath))
+	if launched == opts.AccountRouteAgent {
+		return nil
+	}
+	return fmt.Errorf("program_overrides for %q changed while session %q was being created: its account was "+
+		"decided for %s, but the launch now resolves to %s. Nothing was started — create the session again",
+		opts.Program, opts.Title, routeAgentPhrase(opts.AccountRouteAgent), routeAgentPhrase(launched))
+}
+
+func routeAgentPhrase(agent string) string {
+	if agent == "" {
+		return "a command af does not recognize as an agent"
+	}
+	return "a " + agent + " command"
+}
+
 func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 	if strings.TrimSpace(opts.Account) == "" {
 		return nil
@@ -736,24 +810,14 @@ func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 	//
 	// config.ResolveProgram is the resolver the launch itself uses
 	// (resolveProgramForAgent), so this gate and the launch cannot disagree about
-	// what the command is.
-	// The config is resolved HERE rather than threaded in, because the gate must read
-	// the same overrides the launch will: resolveRepoConfig is what the launch path
-	// uses too. A failure to resolve leaves cfg nil, and config.ResolveProgram on a
-	// nil config returns the label unchanged — which is the pre-override answer, so an
-	// unreadable config cannot silently admit a cross-agent override.
-	// Repo config, then GLOBAL — mirroring resolveConfigForInstance exactly, because
-	// that is what the launch uses. Trying only the repo would miss a global
-	// program_overrides entry that the launch then applies, which is the very
-	// gate-disagrees-with-launch divergence this check exists to close.
-	var cfg *config.Config
-	if resolved, rerr := resolveRepoConfig(absPath); rerr == nil {
-		cfg = &resolved.Config
-	} else if loaded, lerr := config.LoadConfig(); lerr == nil {
-		cfg = loaded
-	}
+	// what the command is. The config comes from ResolveLaunchProgram rather than
+	// being threaded in, because the gate must read the same overrides the launch
+	// will: repo config, then GLOBAL — mirroring resolveConfigForInstance, since
+	// trying only the repo would miss a global program_overrides entry the launch
+	// then applies. An unreadable config returns the label unchanged, the
+	// pre-override answer, so it cannot silently admit a cross-agent override.
 	requested := sessionenv.AgentForCommand(opts.Program)
-	agent := sessionenv.AgentForCommand(config.ResolveProgram(cfg, opts.Program))
+	agent := sessionenv.AgentForCommand(ResolveLaunchProgram(opts.Program, absPath))
 	if agent != requested {
 		return accountRefusalWithSource(opts, fmt.Errorf(
 			"account %q was validated as a %s account, but this session's program_overrides resolves %s to "+

@@ -361,6 +361,29 @@ func TestRouteCreateAccountDoesNotRouteACrossAgentOverride(t *testing.T) {
 	assert.Empty(t, req.Account,
 		"the label resolves to a non-codex command — no codex account can ride this launch")
 	assert.False(t, req.accountAutoSelected)
+	assert.True(t, req.accountRouteEvaluated,
+		"declining is a decision too: the launch must refuse if the override is gone by then")
+	assert.Empty(t, req.accountRouteAgent, "made for a command no agent owns")
+}
+
+// #4404 review: the router must resolve program_overrides from the sources the
+// launch reads. The op-entry snapshot follows only ApplyConfig or a restart, so
+// a snapshot still carrying an override the operator removed by hand left every
+// create ambient while the launch ran the real agent — not a race, a standing
+// disagreement.
+func TestRouteCreateAccountResolvesOverridesLikeTheLaunch(t *testing.T) {
+	_, repoPath, _ := defaultAccountFixture(t, "codex", "codex1")
+	stubAccountLimitEvidence(t, nil)
+	stale := &config.Config{ProgramOverrides: map[string]string{"codex": "/bin/fake-agent"}}
+
+	req := CreateSessionRequest{Title: "reloaded", RepoPath: repoPath, Program: "codex", AccountAuto: true}
+	require.NoError(t, routerTestManager(t).routeCreateAccount(stale, &req))
+	assert.Equal(t, "codex1", req.Account,
+		"nothing on disk overrides codex, so the launch runs codex and the pool applies")
+	assert.True(t, req.accountAutoSelected)
+	assert.True(t, req.accountRouteEvaluated)
+	assert.Equal(t, "codex", req.accountRouteAgent,
+		"the decision's agent rides to NewInstance's drift check")
 }
 
 func TestRouteCreateAccountAppliesTheDefaultOnANonCarryingBackend(t *testing.T) {
@@ -373,6 +396,8 @@ func TestRouteCreateAccountAppliesTheDefaultOnANonCarryingBackend(t *testing.T) 
 		"the configured default still applies — NewInstance's off-box refusal reports it by name")
 	assert.False(t, req.accountAutoSelected,
 		"and routing never ran, so the selection is not marked automatic")
+	assert.False(t, req.accountRouteEvaluated,
+		"a backend that cannot carry an account owes the launch no drift check")
 }
 
 // #4404 review: an empty Account alone is not consent to routing — it is the

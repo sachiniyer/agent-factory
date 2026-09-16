@@ -97,7 +97,13 @@ type accountChoice struct {
 // response, which matters because the failure it prevents is the identity kind: a
 // codex account offered to a claude session is a create that fails, or worse, one
 // that quietly does not.
-func accountChoicesFrom(resp daemon.ListAccountsResponse, agent string) []accountChoice {
+//
+// backendRoutable is whether the form's backend can run an account at all
+// (session.BackendKind.LaunchesWithAccount). The daemon's router leaves an
+// ssh/sandbox/hook create on the legacy contract however many accounts are
+// logged in, so a row calling itself "Automatic" there promises a pool pick
+// the daemon will not make (#4404 review).
+func accountChoicesFrom(resp daemon.ListAccountsResponse, agent string, backendRoutable bool) []accountChoice {
 	fallback := resp.Defaults[agent]
 	anyLoggedIn := false
 	for _, entry := range resp.Entries {
@@ -118,16 +124,20 @@ func accountChoicesFrom(resp daemon.ListAccountsResponse, agent string) []accoun
 	// refuses to make (#4404 review). The same is true of CAPABILITY: a daemon
 	// without PoolRouting has no router at all, so its empty account is the
 	// ambient identity and the label must say so (#4404 review).
+	routing := resp.PoolRouting && backendRoutable
 	routableLabel := "Use the agent's own login (nothing to route)"
-	if !resp.PoolRouting {
+	switch {
+	case !resp.PoolRouting:
 		routableLabel = "Use the agent's own login"
+	case !backendRoutable:
+		routableLabel = "Use the agent's own login (this backend runs no account)"
 	}
 	switch {
 	case fallback != "":
 		routableLabel = "Use configured default (" + fallback + ")"
 	case resp.AmbientOptOuts[agent]:
 		routableLabel = "Use the ambient identity (routing is off)"
-	case anyLoggedIn && resp.PoolRouting:
+	case anyLoggedIn && routing:
 		routableLabel = "Automatic — af picks a healthy account"
 	}
 	choices := []accountChoice{{
@@ -142,7 +152,9 @@ func accountChoicesFrom(resp daemon.ListAccountsResponse, agent string) []accoun
 	// review). The pick maps to Account "" + AccountAmbient on the wire.
 	// A daemon without the router has no pool to be kept off — the first row
 	// already IS the ambient identity there, so the pin row would be a
-	// duplicate that silently sends a bit the daemon drops.
+	// duplicate. The backend does NOT gate it: a pin made before the backend
+	// field moved must survive the move back, and on a backend the router
+	// skips it simply says what happens anyway.
 	if accountRosterHas(resp.Agents, agent) && resp.PoolRouting {
 		choices = append(choices, accountChoice{
 			value:       ambientAccount,
@@ -372,7 +384,14 @@ func (m *home) handleAccountDefault(msg accountDefaultMsg) (tea.Model, tea.Cmd) 
 	if sessionenv.AgentForCommand(m.pendingProgram) != msg.agent {
 		return m, nil
 	}
-	if msg.err != nil || m.pendingAccountChosen {
+	if msg.err != nil {
+		return m, nil
+	}
+	// The capability is recorded before the chosen-guard below: a user who
+	// picked the routable row before this answer landed still needs it for
+	// the create to opt in.
+	m.pendingAccountRouting = msg.resp.PoolRouting
+	if m.pendingAccountChosen {
 		return m, nil
 	}
 	// Read off the response rather than held on the model: the picker builds its
@@ -431,7 +450,8 @@ func (m *home) handleAccountRegistry(msg accountRegistryMsg) (tea.Model, tea.Cmd
 	if !accountRosterHas(msg.resp.Agents, msg.agent) {
 		return m, m.handleNotice(accountRosterNotice(msg.agent, msg.resp.Agents))
 	}
-	choices := accountChoicesFrom(msg.resp, msg.agent)
+	m.pendingAccountRouting = msg.resp.PoolRouting
+	choices := accountChoicesFrom(msg.resp, msg.agent, m.accountBackendRoutable(m.pendingBackend))
 	named := false
 	for _, choice := range choices {
 		if choice.value != ambientAccount {
@@ -472,6 +492,18 @@ func (m *home) handleAccountRegistry(msg accountRegistryMsg) (tea.Model, tea.Cmd
 	m.layoutSelectionOverlay()
 	m.state = stateSelectAccount
 	return m, nil
+}
+
+// accountBackendRoutable asks the router's own predicate whether backend — the
+// form's pick, "" for the repo's `backend` key — can run an account, resolved
+// the way the create will be. A backend this build cannot resolve is not one it
+// may promise a pool pick on; the daemon owns that refusal at submit. The pick
+// is a parameter because submit reads it after clearing the form.
+func (m *home) accountBackendRoutable(backend string) bool {
+	kind, err := session.BackendKindFor(session.InstanceOptions{
+		Backend: session.BackendKind(backend),
+	}, m.repoRoot)
+	return err == nil && kind.LaunchesWithAccount()
 }
 
 // accountRosterHas reports whether an agent is on the daemon's account roster.

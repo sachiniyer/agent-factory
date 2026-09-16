@@ -28,6 +28,7 @@ func TestPing_ReportsRecordedVersion(t *testing.T) {
 	require.NoError(t, s.Ping(PingRequest{}, &resp))
 	require.True(t, resp.OK)
 	require.True(t, resp.AccountHandoff)
+	require.True(t, resp.PoolRouting, "a CLI decides whether an omitted --account can be routed from this bit")
 	require.Equal(t, "1.0.192", resp.Version)
 }
 

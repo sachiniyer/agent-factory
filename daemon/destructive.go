@@ -44,7 +44,18 @@ var testHookRetainedAccountLimitFence = func() {}
 // quiet (false, nil): callers must not read a refusal as "nothing to delete". That
 // distinction is what arms reapDeadRoot's backoff and what makes KillSession report
 // something actionable rather than success.
-func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownErr error, evidence session.InstanceData) (bool, error) {
+//
+// evidence reads the row whose account-limit observations are retained into the
+// ledger, and it is called INSIDE accountLimitMu rather than by the caller
+// beforehand (#4404 review). A refute retracts a sibling's in-memory
+// observation under that same fence, so a snapshot captured before it could
+// carry an observation the refute had already disproven: the retain below would
+// then re-publish it, delete the row, and leave the deferred row settlement
+// nothing to repair — an unknown-reset wall excluding a healthy account until
+// the next affirmative work under it. Read inside the fence, the snapshot lands
+// wholly before a refute (whose ledger check then finds no mark, because the
+// un-mark below cleared it) or wholly after one (and carries nothing stale).
+func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownErr error, evidence func() session.InstanceData) (bool, error) {
 	if session.TeardownStateUnknown(teardownErr) {
 		return false, fmt.Errorf("refusing to delete the record for session %q: its teardown did not complete safely, so its workspace is still on disk and this record is the only handle left on it: %w", title, teardownErr)
 	}
@@ -53,8 +64,7 @@ func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownEr
 		// fate is unknown. The record may go; the error is the caller's to report.
 		m.warn().Printf("session %q: teardown reported an error that does not leave its workspace state unknown; deleting the record as normal: %v", title, teardownErr)
 	}
-	_, observations := session.AccountLimitEvidenceFromData(evidence)
-	// The retain and the cache un-mark are ONE publication against
+	// The snapshot, the retain and the cache un-mark are ONE publication against
 	// refuteAccountLimitEvidence, fenced by the same accountLimitMu the refute
 	// and swap admission already take — accountLimitMu → m.mu is the
 	// established order, and unrefuteRetainedAccountLimits acquires m.mu
@@ -63,6 +73,7 @@ func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownEr
 	// retraction while the mark inserted afterwards says it was already
 	// checked, and the account stays excluded until restart (#4404 review).
 	m.accountLimitMu.Lock()
+	_, observations := session.AccountLimitEvidenceFromData(evidence())
 	err := retainAccountLimitObservations(observations)
 	if err == nil {
 		testHookRetainedAccountLimitFence()
@@ -81,4 +92,13 @@ func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownEr
 		return false, err
 	}
 	return storage.DeleteInstanceByStableID(title, stableID)
+}
+
+// recordedEvidence adapts a row the caller already holds to deleteSessionRecord's
+// evidence reader. Only for rows no in-memory refute can reach — a ghost or a
+// late-ghost record read from disk, which is not a registered instance — or for
+// tests; a live instance must pass its own ToInstanceData so the read happens
+// inside the fence.
+func recordedEvidence(data session.InstanceData) func() session.InstanceData {
+	return func() session.InstanceData { return data }
 }

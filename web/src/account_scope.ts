@@ -130,12 +130,17 @@ export function accountAgentSupported(accounts: AccountsResponse | null, agent: 
  * account offered to a claude session is a create that fails, or worse, one that
  * quietly does not.
  */
-export function accountChoices(accounts: AccountsResponse | null, agent: string, failed = false): AccountChoice[] {
+export function accountChoices(
+  accounts: AccountsResponse | null, agent: string, failed = false, backendScoped: boolean | null = true,
+): AccountChoice[] {
   if (accounts === null) {
+    // A failed load leaves the router's capability unknown too, so the create
+    // does not opt into routing (AccountSelection.wireAccount): the configured
+    // default applies if there is one, else the agent's own login (#4404 review).
     return [{ value: AMBIENT_ACCOUNT, agent, projectDefault: false,
       label: failed ? "Accounts unavailable" : "Loading accounts…",
       blocked: failed ? "" : "Wait for the account policy to load.",
-      note: failed ? "Accounts could not be loaded. The daemon default, if any, applies." : "",
+      note: failed ? "Accounts could not be loaded, so af will not pick one. The daemon default, if any, applies — otherwise the agent's own login." : "",
     }];
   }
   const fallback = accountDefaultFor(accounts, agent);
@@ -146,6 +151,12 @@ export function accountChoices(accounts: AccountsResponse | null, agent: string,
   // ambient identity — labelling it "Automatic" would promise a pick the
   // daemon cannot make (#4404 review).
   const routing = accounts.pool_routing === true;
+  // And the backend decides whether it may promise a PICK: the router leaves
+  // ssh/sandbox/hook on the ambient/default contract however many accounts are
+  // logged in, and an unknown backend is not one to promise anything on
+  // (#4404 review). It does not gate the pin row below — a pin made before the
+  // backend field moved must survive the move back.
+  const routes = routing && backendScoped === true;
   // The first row is the ROUTABLE choice — a create that names no account.
   // What af does with it changed with the pool router (#4404): it is no longer
   // a synonym for the ambient identity. With a configured default it prefers
@@ -162,7 +173,9 @@ export function accountChoices(accounts: AccountsResponse | null, agent: string,
       label: agent === "" ? "Use daemon default" : fallback !== ""
         ? `Use configured default (${fallback})`
         : optedOut ? "Use the ambient identity (routing is off)"
-        : anyLoggedIn && routing ? "Automatic — af picks a healthy account"
+        : anyLoggedIn && routes ? "Automatic — af picks a healthy account"
+        : anyLoggedIn && routing && backendScoped === false ? "Use the agent's own login (this backend runs no account)"
+        : anyLoggedIn && routing ? "Use the agent's own login (backend not confirmed)"
         : routing ? "Use agent login (nothing to route)" : "Use the agent's own login",
       agent,
       blocked: "",

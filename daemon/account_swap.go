@@ -518,14 +518,18 @@ func (m *Manager) settleReplacementRuntime(
 	case errors.As(err, &limitErr):
 		// The incoming identity is itself at a wall — the same classification
 		// deliverManualAccountMission applies when its send-path wait sees one.
+		// Both arms charge the wall to the INCOMING identity: the plain re-park
+		// kept limit_account on the outgoing one, so the router and the swap
+		// scheduler read the credential readiness had just proven walled as
+		// healthy (#4404 review).
 		var parkErr error
+		m.accountLimitMu.Lock()
 		if swap.manual {
-			m.accountLimitMu.Lock()
 			parkErr = instance.ParkManualAccountSwapAtLimit(limitErr.ResetAt)
-			m.accountLimitMu.Unlock()
 		} else {
-			parkErr = m.reparkLimitUnderResumeFence(instance, limitErr.ResetAt)
+			parkErr = instance.ReparkReplacementLimitUnderResumeFence(limitErr.ResetAt)
 		}
+		m.accountLimitMu.Unlock()
 		return errors.Join(
 			fmt.Errorf("account replacement for %q reached a usage limit on the incoming identity before its runtime became usable: %w", requestedTitle, err),
 			parkErr, m.persistSettlement(repoID, key, instance))

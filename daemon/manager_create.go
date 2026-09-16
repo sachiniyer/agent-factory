@@ -187,6 +187,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		Account:                        req.Account,
 		AccountSource:                  req.AccountSource,
 		AccountAutoSelected:            req.accountAutoSelected,
+		AccountRouteAgent:              req.accountRouteAgent,
+		AccountRouteEvaluated:          req.accountRouteEvaluated,
 		InPlace:                        req.InPlace,
 		ForceRemote:                    req.ForceRemote,
 		Backend:                        session.BackendKind(req.Backend),

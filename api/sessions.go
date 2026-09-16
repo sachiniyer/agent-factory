@@ -35,6 +35,7 @@ var (
 	archiveSessionViaDaemon = daemon.ArchiveSession
 	restoreSessionViaDaemon = daemon.RestoreSession
 	listAccountsViaDaemon   = daemon.ListAccounts
+	pingDaemonCapabilities  = daemon.PingCapabilities
 	sessionsArchiveSelf     bool
 	sendPromptViaDaemon     = daemon.SendPromptWithStatus
 	deliverPromptViaDaemon  = daemon.DeliverPromptWithStatus
@@ -476,48 +477,12 @@ pointing at one).`,
 		accountAuto := !cmd.Flags().Changed("account")
 
 		// A PRE-ROUTER daemon's gob decoder silently drops account_auto, so an
-		// omitted --account runs that daemon's legacy contract instead of the
-		// pool pick --account's help promises: a configured default_accounts
-		// entry applied WITHOUT the router's wall check, or the ambient
-		// identity where a pool pick was possible. The response cannot tell
-		// skew from honor — a configured default applied by an old daemon
-		// reads exactly like the same default the new contract prefers — so
-		// the capability must be checked BEFORE the create, not against what
-		// comes back (#4404 review).
-		//
-		// Refusing fires only when the outcome can differ: an agent with no
-		// logged-in accounts and no configured default lands on the ambient
-		// identity under either contract, so a plain create there is not a
-		// version-skewed request at all. A failed probe stays open — the
-		// create's own transport error and the account/ambient response
-		// checks below still name real failures, and a daemon so old it has
-		// no ListAccounts predates accounts entirely.
+		// omitted --account would run that daemon's legacy contract instead of
+		// the pool pick --account's help promises. accountAutoSkewRefusal checks
+		// the capability BEFORE the create (#4404 review).
 		if accountAuto {
-			if agent := sessionenv.AgentForCommand(program); agent != "" {
-				if _, ok := sessionenv.SupportsAccounts(agent); ok {
-					if accounts, aerr := listAccountsViaDaemon(daemon.ListAccountsRequest{Agent: agent, RepoPath: workspace}); aerr == nil && !accounts.PoolRouting {
-						routable := false
-						for _, entry := range accounts.Entries {
-							if entry.LoggedIn {
-								routable = true
-								break
-							}
-						}
-						def := strings.TrimSpace(accounts.Defaults[agent])
-						if routable || def != "" {
-							would := "launch on the ambient identity while logged-in accounts sit unrouted"
-							if def != "" {
-								would = fmt.Sprintf("apply the configured default %q without the router's wall check", def)
-							}
-							return jsonError(fmt.Errorf(
-								"omitting --account asks the daemon to pick the account, but the running daemon "+
-									"predates pool routing and would %s. Upgrade the daemon (af daemon restart "+
-									"after upgrading) and recreate, or pin the identity yourself — --account <name> "+
-									"for a registered account, --account \"\" for ambient",
-								would))
-						}
-					}
-				}
+			if err := accountAutoSkewRefusal(program, workspace, createBackendFlag, inPlace); err != nil {
+				return jsonError(err)
 			}
 		}
 

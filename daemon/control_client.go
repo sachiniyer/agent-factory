@@ -897,6 +897,16 @@ func TriggerTask(id string, expect task.ProjectExpectation) error {
 	return callDaemon("TriggerTask", TriggerTaskRequest{ID: id, Expect: expect}, &resp)
 }
 
+// PingCapabilities asks the daemon a create is about to reach which protocol
+// capabilities it has, through the same ensuring transport CreateSession uses —
+// so a probe cannot answer from a different daemon than the create lands on
+// short of a restart in between.
+func PingCapabilities() (PingResponse, error) {
+	var resp PingResponse
+	err := callDaemon("Ping", PingRequest{}, &resp)
+	return resp, err
+}
+
 // ListAccounts reads the registered accounts and their logged-in state from the
 // daemon that owns them.
 func ListAccounts(req ListAccountsRequest) (ListAccountsResponse, error) {

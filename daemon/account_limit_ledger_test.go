@@ -128,6 +128,37 @@ func TestLoadAccountLimitLedgerReportsNoEvidenceForAnAbsentFile(t *testing.T) {
 	require.Empty(t, observations)
 }
 
+// TestDeleteSessionRecordReadsEvidenceInsideTheRefuteFence is the #4404 review
+// race one step earlier than the one below: a kill that captured its row
+// snapshot BEFORE taking accountLimitMu could carry a sibling observation a
+// refute retracted in between, and the retain would re-publish it into the
+// ledger right before the row — the only place the deferred settlement could
+// have repaired — was deleted. The reader must therefore run with the fence
+// held, and what it returns at that moment is what gets retained.
+func TestDeleteSessionRecordReadsEvidenceInsideTheRefuteFence(t *testing.T) {
+	manager, repoID, _ := installRaceBackend(t, &raceBackend{}, "fenced-snapshot")
+
+	inFence := session.InstanceData{AccountLimitObservations: []session.AccountLimitObservationData{
+		{Agent: "claude", Account: "personal", ResetAt: time.Now().Add(time.Hour)},
+	}}
+	read := false
+	deleted, err := manager.deleteSessionRecord(repoID, "fenced-snapshot", "", nil, func() session.InstanceData {
+		read = true
+		require.False(t, manager.accountLimitMu.TryLock(),
+			"the evidence snapshot must be read under accountLimitMu — refuteAccountLimitEvidence retracts under it")
+		return inFence
+	})
+	require.NoError(t, err)
+	require.True(t, deleted)
+	require.True(t, read, "the choke point must read the evidence itself")
+
+	observations, err := loadAccountLimitLedger()
+	require.NoError(t, err)
+	require.Len(t, observations, 1)
+	require.Equal(t, "personal", observations[0].Account,
+		"what the row held inside the fence is what gets retained")
+}
+
 // TestDeleteSessionRecordUnmarksRetainedEvidenceUnderTheFence is the #4404
 // review race: a refute whose ledger check lands between a delete's retain and
 // its cache un-mark leaves fresh evidence standing next to an "already
@@ -155,7 +186,7 @@ func TestDeleteSessionRecordUnmarksRetainedEvidenceUnderTheFence(t *testing.T) {
 	evidence := session.InstanceData{AccountLimitObservations: []session.AccountLimitObservationData{
 		{Agent: "claude", Account: "work", ResetAt: time.Now().Add(time.Hour)},
 	}}
-	deleted, err := manager.deleteSessionRecord(repoID, "fenced-retain", "", nil, evidence)
+	deleted, err := manager.deleteSessionRecord(repoID, "fenced-retain", "", nil, recordedEvidence(evidence))
 	require.NoError(t, err)
 	require.True(t, deleted)
 

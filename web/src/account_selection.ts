@@ -6,13 +6,16 @@ export class AccountSelection {
   picked = false;
   private agent = "";
   private value = AMBIENT_ACCOUNT;
+  /** Whether the last render could promise a pool pick: a loaded registry from
+   *  a routing daemon, on a backend the daemon routes (#4404 review). */
+  private routes = false;
 
   pick(value: string): void {
     this.picked = true;
     this.value = value;
   }
 
-  render(accounts: AccountsResponse | null, agent: string, failed = false): string {
+  render(accounts: AccountsResponse | null, agent: string, failed = false, backendScoped: boolean | null = true): string {
     // A pick is scoped to the agent it was made for: account names and the
     // ambient bit mean nothing across an agent switch, so drop it even while
     // the new agent's rows have not loaded — accounts === null is a loading
@@ -29,9 +32,10 @@ export class AccountSelection {
       }
       this.agent = agent;
     }
+    this.routes = accounts !== null && !failed && accounts.pool_routing === true && backendScoped === true;
     // Loading rows are not evidence that a selected identity has disappeared.
     if (accounts === null || (!agent && this.namedChoicePending)) return AMBIENT_ACCOUNT;
-    const rows = accountChoices(accounts, agent, failed);
+    const rows = accountChoices(accounts, agent, failed, backendScoped);
     if (this.picked && !rows.some(row => row.value === this.value)) {
       this.picked = false;
       this.value = AMBIENT_ACCOUNT;
@@ -61,7 +65,13 @@ export class AccountSelection {
     if (this.picked && this.value !== AMBIENT_ACCOUNT) {
       return { account: this.value, accountAmbient: false, accountAuto: false };
     }
-    // Untouched field or the routable first row: the routable ask.
-    return { account: AMBIENT_ACCOUNT, accountAmbient: false, accountAuto: true };
+    // Untouched field or the routable first row: the routable ask — made only
+    // when the last render SAW a routing daemon and a backend it routes. A
+    // pre-router daemon rejects the unknown field outright (the web sends no
+    // client-version header, so it decodes strictly), and a failed or pending
+    // catalog is not evidence of a router; either way the row was labelled
+    // with the ambient/default contract, which is what omitting it asks for
+    // (#4404 review).
+    return { account: AMBIENT_ACCOUNT, accountAmbient: false, accountAuto: this.routes };
   }
 }

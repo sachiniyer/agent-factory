@@ -88,3 +88,42 @@ func TestResumeFromLimit_ParkedManualIncomingResetAllowsExplicitRetry(t *testing
 	_, _, pending := inst.PendingAccountSwap()
 	require.False(t, pending)
 }
+
+// #4404 review: an AUTOMATIC replacement whose readiness wait meets the
+// incoming account's own wall must be charged to that account, as the manual
+// arm above already is. The plain re-park it used kept limit_account on the
+// outgoing identity and recorded nothing for the incoming one, so the swap
+// scheduler and the create-time router both read the credential readiness had
+// just proven walled as healthy.
+func TestResumeLimitedSessions_AutomaticReplacementWallChargesTheIncomingAccount(t *testing.T) {
+	t.Cleanup(task.SetTrustPromptTimingForTest(time.Millisecond))
+	advance := withFrozenClock(t)
+	m, repo, inst, base := newAutoResumeManager(t, "", true, "finish the migration", nowFunc().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "work")
+	b := &accountReadinessBackend{
+		limitResumeBackend: base,
+		previewed:          make(chan struct{}),
+		release:            make(chan struct{}),
+		limited:            true,
+	}
+	close(b.release)
+	inst.SetBackend(b)
+
+	advance(time.Second)
+	m.ResumeLimitedSessions()
+
+	account, automatic := inst.AccountSelection()
+	require.Equal(t, "work", account, "the scheduler committed the replacement identity")
+	require.True(t, automatic)
+	require.True(t, inst.LimitReached(), "the replacement is parked at the wall readiness met")
+	limitedAccount, limited := inst.LimitAccount()
+	require.True(t, limited)
+	require.Equal(t, "work", limitedAccount, "the wall belongs to the incoming identity, not the outgoing one")
+	var charged bool
+	for _, observation := range inst.AccountLimitObservations() {
+		charged = charged || (observation.Agent == "claude" && observation.Account == "work")
+	}
+	require.True(t, charged, "the incoming identity carries durable evidence the router and scheduler read")
+	require.Equal(t, "work", persistedInstanceByTitle(t, repo, inst.Title).LimitAccount,
+		"and the settled row a restart or a delete reads agrees")
+}

@@ -762,7 +762,7 @@ func deleteLateGhostSessionRecord(
 		evidence = row
 		break
 	}
-	return m.deleteSessionRecord(repoID, title, stableID, teardownErr, evidence)
+	return m.deleteSessionRecord(repoID, title, stableID, teardownErr, recordedEvidence(evidence))
 }
 
 // reconcileLateGhostCleanup consumes the descriptor worker's definitive result.

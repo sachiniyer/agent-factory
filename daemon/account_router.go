@@ -92,14 +92,24 @@ func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionReque
 		InPlace:     req.InPlace,
 	}, req.RepoPath)
 	if _, supported := sessionenv.SupportsAccounts(agent); !supported ||
-		kindErr != nil || (kind != session.BackendLocal && !kind.CarriesAccount()) {
+		kindErr != nil || !kind.LaunchesWithAccount() {
 		// Not routable: either the agent has no account registry at all, or the
 		// backend an account would land on cannot carry it — including a backend
 		// value that will not resolve, whose refusal NewInstance owns. The
 		// configured default still applies and refuses exactly as before.
 		return applyResolvedDefaultAccount(req, selection)
 	}
-	if sessionenv.AgentForCommand(resolvedCreateProgram(cfg, req.RepoPath, req.Program)) != agent {
+	// Resolved with the launch boundary's own resolver, not the op-entry
+	// snapshot: the launch reads program_overrides from disk, and the snapshot
+	// only follows ApplyConfig or a restart — a hand-edited override made the
+	// two disagree on every create until the daemon reloaded (#4404 review).
+	// The answer rides to NewInstance, which resolves again and refuses a
+	// create whose command moved while it waited, so this decision can never
+	// be applied to a launch it was not made for.
+	resolvedAgent := sessionenv.AgentForCommand(session.ResolveLaunchProgram(req.Program, req.RepoPath))
+	req.accountRouteAgent = resolvedAgent
+	req.accountRouteEvaluated = true
+	if resolvedAgent != agent {
 		// program_overrides redirects this label to a different agent's command —
 		// or to no agent's command at all, as a fixture shim does. The launch
 		// boundary refuses ANY account whose validation namespace disagrees with
@@ -207,21 +217,6 @@ func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionReque
 			agent)
 	}
 	return nil
-}
-
-// resolvedCreateProgram answers the command a create's program label will
-// actually launch, resolved through the same repo-over-global program_overrides
-// layering the launch boundary reads (session.refuseUnsupportedAccountAgent).
-// An unresolvable repo falls back to the op-entry global snapshot, which
-// resolves to the label unchanged when it names no override either — so the
-// router and the boundary cannot disagree about which agent the command runs.
-func resolvedCreateProgram(cfg *config.Config, repoPath, program string) string {
-	if repo, err := config.RepoFromPath(repoPath); err == nil {
-		if resolved, rerr := config.ResolveConfigForRepoInspectionWithGlobal(repo, cfg); rerr == nil {
-			return config.ResolveProgram(&resolved.Config, program)
-		}
-	}
-	return config.ResolveProgram(cfg, program)
 }
 
 // claimCreateAccount picks this create's account and reserves the pick in the

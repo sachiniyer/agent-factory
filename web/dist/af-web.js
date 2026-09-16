@@ -7956,7 +7956,7 @@ function accountAgentSupported(accounts, agent) {
   }
   return accounts.agents.includes(agent);
 }
-function accountChoices(accounts, agent, failed = false) {
+function accountChoices(accounts, agent, failed = false, backendScoped = true) {
   if (accounts === null) {
     return [{
       value: AMBIENT_ACCOUNT,
@@ -7964,17 +7964,18 @@ function accountChoices(accounts, agent, failed = false) {
       projectDefault: false,
       label: failed ? "Accounts unavailable" : "Loading accounts\u2026",
       blocked: failed ? "" : "Wait for the account policy to load.",
-      note: failed ? "Accounts could not be loaded. The daemon default, if any, applies." : ""
+      note: failed ? "Accounts could not be loaded, so af will not pick one. The daemon default, if any, applies \u2014 otherwise the agent's own login." : ""
     }];
   }
   const fallback = accountDefaultFor(accounts, agent);
   const optedOut = accounts.ambient_opt_outs?.[agent] === true;
   const anyLoggedIn = accounts.entries.some((entry) => entry.agent === agent && entry.logged_in);
   const routing = accounts.pool_routing === true;
+  const routes = routing && backendScoped === true;
   const choices = [
     {
       value: AMBIENT_ACCOUNT,
-      label: agent === "" ? "Use daemon default" : fallback !== "" ? `Use configured default (${fallback})` : optedOut ? "Use the ambient identity (routing is off)" : anyLoggedIn && routing ? "Automatic \u2014 af picks a healthy account" : routing ? "Use agent login (nothing to route)" : "Use the agent's own login",
+      label: agent === "" ? "Use daemon default" : fallback !== "" ? `Use configured default (${fallback})` : optedOut ? "Use the ambient identity (routing is off)" : anyLoggedIn && routes ? "Automatic \u2014 af picks a healthy account" : anyLoggedIn && routing && backendScoped === false ? "Use the agent's own login (this backend runs no account)" : anyLoggedIn && routing ? "Use the agent's own login (backend not confirmed)" : routing ? "Use agent login (nothing to route)" : "Use the agent's own login",
       agent,
       blocked: "",
       note: agent === "" ? "The daemon default, if any, applies." : "",
@@ -10818,6 +10819,9 @@ var EventStream = class {
 };
 
 // src/handoff_accounts.ts
+function handoffAccountPinned(currentAccount, currentAccountAuto) {
+  return !!currentAccount && currentAccountAuto !== true;
+}
 function handoffAccountChoices(accounts, agent, currentAccount = "") {
   const rows = accountChoices(accounts, agent);
   return accounts.entries.filter((entry) => entry.agent === agent && entry.name !== currentAccount && !entry.registration_only).map((entry) => ({ ...rows.find((row) => row.value === entry.name), logged_in: entry.logged_in }));
@@ -10828,11 +10832,14 @@ var AccountSelection = class {
   picked = false;
   agent = "";
   value = AMBIENT_ACCOUNT;
+  /** Whether the last render could promise a pool pick: a loaded registry from
+   *  a routing daemon, on a backend the daemon routes (#4404 review). */
+  routes = false;
   pick(value) {
     this.picked = true;
     this.value = value;
   }
-  render(accounts, agent, failed = false) {
+  render(accounts, agent, failed = false, backendScoped = true) {
     if (agent !== "") {
       if (agent !== this.agent) {
         this.picked = false;
@@ -10840,8 +10847,9 @@ var AccountSelection = class {
       }
       this.agent = agent;
     }
+    this.routes = accounts !== null && !failed && accounts.pool_routing === true && backendScoped === true;
     if (accounts === null || !agent && this.namedChoicePending) return AMBIENT_ACCOUNT;
-    const rows = accountChoices(accounts, agent, failed);
+    const rows = accountChoices(accounts, agent, failed, backendScoped);
     if (this.picked && !rows.some((row) => row.value === this.value)) {
       this.picked = false;
       this.value = AMBIENT_ACCOUNT;
@@ -10866,7 +10874,7 @@ var AccountSelection = class {
     if (this.picked && this.value !== AMBIENT_ACCOUNT) {
       return { account: this.value, accountAmbient: false, accountAuto: false };
     }
-    return { account: AMBIENT_ACCOUNT, accountAmbient: false, accountAuto: true };
+    return { account: AMBIENT_ACCOUNT, accountAmbient: false, accountAuto: this.routes };
   }
 };
 
@@ -10899,6 +10907,14 @@ function backendChoices(catalog) {
     });
   }
   return choices;
+}
+function backendAccountScoped(catalog, selected) {
+  if (catalog === null) {
+    return null;
+  }
+  const name = selected === REPO_DEFAULT ? catalog.default : selected;
+  const option = catalog.backends.find((opt) => opt.name === name);
+  return option === void 0 ? null : option.account_scoped === true;
 }
 function backendNotice(choices, selected) {
   const choice = choices.find((c) => c.value === selected);
@@ -11175,6 +11191,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   const backendHint = h("p", { class: "af-modal-hint af-backend-hint" });
   backendHint.setAttribute("role", "status");
   let choices = backendChoices(null);
+  let backendCatalog = null;
   const accountSelect = h("select", { class: "af-input" });
   accountSelect.setAttribute("aria-label", "Account");
   const accountHint = h("p", { class: "af-modal-hint af-account-hint" });
@@ -11232,8 +11249,9 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   const renderAccounts = () => {
     const agent = accountAgentFor(programSelect.value, programCatalog);
     const knownAccounts = programsPending ? null : accounts;
-    accountRows = accountChoices(knownAccounts, agent, accountsFailed);
-    const selected = accountSelection.render(knownAccounts, agent, accountsFailed);
+    const backendScoped = backendAccountScoped(backendCatalog, backendSelect.value);
+    accountRows = accountChoices(knownAccounts, agent, accountsFailed, backendScoped);
+    const selected = accountSelection.render(knownAccounts, agent, accountsFailed, backendScoped);
     accountSelect.replaceChildren();
     for (const choice of accountRows) {
       accountSelect.append(h("option", { value: choice.value }, choice.label));
@@ -11246,6 +11264,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     syncSubmitState();
   });
   programSelect.addEventListener("change", renderAccounts);
+  backendSelect.addEventListener("change", renderAccounts);
   const renderPrograms = () => {
     const previous = programSelect.value;
     programSelect.replaceChildren();
@@ -11259,6 +11278,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   const loadCatalogsFor = (repoPath) => {
     const seq = ++loadSeq;
     accounts = null;
+    backendCatalog = null;
     programsPending = true;
     accountsFailed = false;
     renderAccounts();
@@ -11296,20 +11316,25 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     if (repoPath === "") {
       choices = backendChoices(null);
       renderChoices();
+      renderAccounts();
       return;
     }
     void callbacks.loadBackends(repoPath).then((catalog) => {
       if (seq !== loadSeq) {
         return;
       }
+      backendCatalog = catalog;
       choices = backendChoices(catalog);
       renderChoices();
+      renderAccounts();
     }).catch(() => {
       if (seq !== loadSeq) {
         return;
       }
+      backendCatalog = null;
       choices = backendChoices(null);
       renderChoices();
+      renderAccounts();
     });
   };
   projectSelect.addEventListener("change", () => loadCatalogsFor(projectSelect.value));
@@ -11375,7 +11400,8 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   let accounts = { entries: [], agents: [] };
   let accountsLoaded = !callbacks.loadAccounts;
   let accountsFailed = false;
-  const requiresAccount = (agent) => agent === currentAgent || !!callbacks.currentAccount;
+  const pinned = handoffAccountPinned(callbacks.currentAccount, callbacks.currentAccountAuto);
+  const requiresAccount = (agent) => agent === currentAgent || pinned;
   let accountRows = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
@@ -11416,7 +11442,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
       agent,
       agent === currentAgent ? callbacks.currentAccount : ""
     ).length > 0;
-    const choices = catalogChoices.filter((choice) => !callbacks.currentAccount || hasAccount(choice.value));
+    const choices = catalogChoices.filter((choice) => !pinned || hasAccount(choice.value));
     if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
       choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
     }
@@ -11424,7 +11450,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     renderChoices(choices);
     if (choices.some((choice) => choice.value === previous)) agentSelect.value = previous;
     refreshAccounts2();
-    if (accountsLoaded) handle.setError(choices.length === 0 ? callbacks.currentAccount ? "No registered target account is available to hand off to." : "No other agent is available to hand off to." : null);
+    if (accountsLoaded) handle.setError(choices.length === 0 ? pinned ? "No registered target account is available to hand off to." : "No other agent is available to hand off to." : null);
   };
   body.append(
     field("New agent", agentSelect),
@@ -11454,7 +11480,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
       accountsLoaded = true;
       accountsFailed = true;
       refreshAgentChoices();
-      handle.setError(callbacks.currentAccount ? "Could not load accounts. Try again to choose a registered target account." : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
+      handle.setError(pinned ? "Could not load accounts. Try again to choose a registered target account." : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
     });
   }
   const card = handle.el.firstElementChild;
@@ -18719,6 +18745,7 @@ function doHandoff() {
       loadPrograms: () => loadPrograms(""),
       loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
       currentAccount: sel.account,
+      currentAccountAuto: sel.account_auto_selected === true,
       onSubmit: (to, account) => {
         const tok = token;
         if (tok === null || !modal) {

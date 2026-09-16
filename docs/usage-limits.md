@@ -495,6 +495,11 @@ blocked on:
 - **Local-worktree sessions only.** A docker/ssh/hook session runs its agent
   inside a provisioned sandbox, where swapping the agent is a different
   lifecycle; those sessions refuse the handoff rather than half-perform it.
+- **Account names belong to one agent.** A session pinned to an account needs a
+  target account (`--account`) to change agents. An account af picked for the
+  session is not a pin: a handoff to another agent releases it, and the incoming
+  agent starts on its own login unless you pick one of its accounts. The TUI and
+  web pickers offer the ambient target for those sessions for the same reason.
 
 Handing off is **reversible**. Each agent's conversation history is stored per
 directory, so the outgoing agent's thread is still in the worktree — hand back

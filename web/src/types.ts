@@ -148,6 +148,10 @@ export interface SessionData {
    *  silently, and a UI reporting an identity the session does not have is the
    *  exact failure the feature exists to prevent. */
   account?: string;
+  /** True when af — the create-time account router or the limit scheduler —
+   *  chose `account`, rather than the user pinning it (#4404). A handoff
+   *  releases such an account instead of demanding a target one. */
+  account_auto_selected?: boolean;
   /** Daemon-owned reserved-root decision (#2513): true for the always-on root
    *  agent. The web pins root to the top of the rail and draws the demarcation rule
    *  by CONSUMING this decision (session.IsReservedTitle, projected) rather than

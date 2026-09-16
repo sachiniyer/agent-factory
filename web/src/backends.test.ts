@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { REPO_DEFAULT, type BackendCatalog, backendChoices, backendNotice, backendSelectable } from "./backends.js";
+import { REPO_DEFAULT, type BackendCatalog, backendAccountScoped, backendChoices, backendNotice, backendSelectable } from "./backends.js";
 
 /** A catalog in the daemon's own shape: canonical order, availability per backend. */
 function catalog(over: Partial<BackendCatalog> = {}): BackendCatalog {
@@ -185,4 +185,27 @@ test("an unavailable catalog degrades to the repo default alone", () => {
   assert.deepEqual(choices.map((c) => c.value), [REPO_DEFAULT]);
   assert.equal(choices[0].label, "Repo default");
   assert.equal(backendSelectable(choices, REPO_DEFAULT), true, "a create must still be possible when the catalog is unknown");
+});
+
+// #4404 review: which backends the create-time router can land an account on is
+// the daemon's answer, carried on the catalog — the web keeps no list of it.
+test("backendAccountScoped reads the daemon's answer, through the repo default", () => {
+  const catalog: BackendCatalog = {
+    backends: [
+      { name: "local", label: "local", status: "available", account_scoped: true },
+      { name: "ssh", label: "ssh", status: "available" },
+      { name: "docker", label: "docker", status: "unavailable", reason: "set docker.image", account_scoped: true },
+    ],
+    default: "ssh",
+    default_status: "available",
+  };
+  assert.equal(backendAccountScoped(null, REPO_DEFAULT), null, "no catalog, no answer");
+  assert.equal(backendAccountScoped(catalog, REPO_DEFAULT), false, "the repo default resolves through the catalog");
+  assert.equal(backendAccountScoped({ ...catalog, default: "local" }, REPO_DEFAULT), true);
+  assert.equal(backendAccountScoped(catalog, "local"), true);
+  assert.equal(backendAccountScoped(catalog, "docker"), true, "availability is a separate question");
+  assert.equal(backendAccountScoped(catalog, "ssh"), false, "an absent field is not a promise");
+  assert.equal(backendAccountScoped({ ...catalog, default: "" }, REPO_DEFAULT), null,
+    "a repo default the daemon could not name cannot be answered for");
+  assert.equal(backendAccountScoped(catalog, "fargate"), null);
 });

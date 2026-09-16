@@ -67,7 +67,13 @@ type CreateSessionRequest struct {
 	// claim is the daemon's own bookkeeping, and a client-settable one would let
 	// a request name a reservation it never paid for.
 	routedAccountClaim string
-	Prompt             string `json:"prompt"`
+	// accountRouteAgent/accountRouteEvaluated carry the agent the router
+	// resolved this create's program to when it decided the account, so
+	// NewInstance can refuse a launch whose program_overrides moved in the
+	// meantime (#4404 review). Unexported: the decision is the daemon's own.
+	accountRouteAgent     string
+	accountRouteEvaluated bool
+	Prompt                string `json:"prompt"`
 	// TaskID records which task's delivery spawned this session, and
 	// MaxConcurrentRuns carries that task's cap so the manager can decide
 	// admission under its own lock — the only place a burst cannot race the check
@@ -714,6 +720,13 @@ type PingResponse struct {
 	// safe account-aware admission rules. Older daemons omit the field, decode
 	// as false, and therefore never receive the destructive mutation.
 	AccountHandoff bool `json:"account_handoff,omitempty"`
+	// PoolRouting is the create-time account router's capability (#4404), on the
+	// one RPC that answers regardless of account-registry health. It is the same
+	// bit ListAccountsResponse.PoolRouting carries for the pickers; the CLI asks
+	// it here because a ListAccounts that fails on one unreadable account would
+	// otherwise leave "does this daemon route?" unknown on a daemon that does.
+	// Older daemons omit it and decode as false.
+	PoolRouting bool `json:"pool_routing,omitempty"`
 	// Version is the af build version the responding daemon is running, so a
 	// client can compare it against its own and detect skew (#1044). It rides
 	// Ping because Ping is the one RPC that answers throughout the daemon's

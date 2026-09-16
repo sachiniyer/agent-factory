@@ -336,3 +336,33 @@ test("an ambient opt-out labels the routable row as ambient, not automatic", () 
   const codex = accountChoices(registry({ ambient_opt_outs: { claude: true } }), "codex");
   assert.match(codex[0].label, /Automatic/, "an agent with no opt-out entry keeps the pool promise");
 });
+
+// #4404 review: the router leaves ssh/sandbox/hook creates on the ambient/default
+// contract, so the routable row may promise a pool pick only on a backend the
+// daemon's catalog says takes an account — and the ambient pin stays either way.
+test("the routable row promises a pick only on a backend that takes an account", () => {
+  const pool = registry({});
+  assert.match(accountChoices(pool, "claude", false, true)[0].label, /Automatic/);
+
+  const offBox = accountChoices(pool, "claude", false, false);
+  assert.equal(offBox[0].label, "Use the agent's own login (this backend runs no account)");
+  assert.ok(offBox.some((c) => c.value === AMBIENT_PIN_ACCOUNT),
+    "a pin made before the backend moved must not vanish with it");
+
+  const unknown = accountChoices(pool, "claude", false, null);
+  assert.equal(unknown[0].label, "Use the agent's own login (backend not confirmed)");
+
+  const empty = registry({ entries: [] });
+  assert.equal(accountChoices(empty, "claude", false, false)[0].label, "Use agent login (nothing to route)",
+    "with nothing logged in there is nothing to promise on any backend");
+  assert.equal(accountChoices(registry({ defaults: { claude: "work" } }), "claude", false, false)[0].label,
+    "Use configured default (work)", "the default is still what the daemon applies there");
+});
+
+// #4404 review: a failed registry load leaves the router unknown too, so the
+// create does not opt in — the note says what happens instead.
+test("a failed registry says af will not pick an account", () => {
+  const choices = accountChoices(null, "claude", true);
+  assert.match(choices[0].note, /af will not pick one/);
+  assert.match(choices[0].note, /agent's own login/);
+});
