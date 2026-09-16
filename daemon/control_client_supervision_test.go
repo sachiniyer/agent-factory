@@ -107,18 +107,15 @@ func TestEnsureDaemonPrefersHomeServingLaunchdUnit(t *testing.T) {
 	}
 }
 
-// TestEnsureDaemonManagerHangFallsBackToReachableDaemon: a hung service manager
-// must fall back to an ad-hoc daemon and report SUCCESS. EnsureDaemon's contract
-// is "daemon reachable when I return nil", and every caller hard-returns on a
-// non-nil result and skips the RPC — so a non-nil supervision-degradation return
-// after a working fallback broke the first client action on hosts without a
-// systemd user bus (#2373). The degradation stays visible through the warning
-// log, not through a caller-breaking error.
-func TestEnsureDaemonManagerHangFallsBackToReachableDaemon(t *testing.T) {
+// TestEnsureDaemonManagerHangRefusesAdHocSpawn: a wedged service manager on a
+// unit-claimed home must NOT fall back to an ad-hoc daemon (#4470). A timed-out
+// `systemctl --user start` is ambiguous — the start may already be queued with
+// ExecStart pending — and any ad-hoc spawn in that state becomes the permanent
+// unsupervised escapee that keeps the unit inactive. EnsureDaemon refuses with
+// an actionable error within the bounded manager slice instead.
+func TestEnsureDaemonManagerHangRefusesAdHocSpawn(t *testing.T) {
 	marker, _ := installEnsureTestUnitAndManager(t, true)
-	startServer, serverErr := ensureTestServerStarter(t)
-
-	warnBuf := captureWarnings(t)
+	startServer, _ := ensureTestServerStarter(t)
 
 	adHocLaunched := false
 	started := time.Now()
@@ -128,75 +125,178 @@ func TestEnsureDaemonManagerHangFallsBackToReachableDaemon(t *testing.T) {
 	})
 	elapsed := time.Since(started)
 
-	if err != nil {
-		t.Fatalf("successful ad-hoc fallback must return nil (callers skip the RPC on any error), got: %v", err)
+	if err == nil {
+		t.Fatal("a wedged manager on a unit-claimed home produced an ad-hoc daemon — the #4470 escape")
 	}
-	if err := serverErr(); err != nil {
-		t.Fatalf("start fake ad-hoc daemon: %v", err)
+	if !strings.Contains(err.Error(), "unsupervised") || !strings.Contains(err.Error(), "af daemon adopt") {
+		t.Fatalf("refusal must name the supervision problem and the remedy, got: %v", err)
 	}
-	if !adHocLaunched {
-		t.Fatal("hung manager left no daemon instead of falling back")
-	}
-	// The fallback daemon is actually reachable over the control socket.
-	if err := pingDaemon(); err != nil {
-		t.Fatalf("fallback returned nil but the daemon is not reachable: %v", err)
-	}
-	// The degradation is not silent: it is surfaced through the warning log.
-	if !strings.Contains(warnBuf.String(), "falling back to an ad-hoc daemon") {
-		t.Fatalf("fallback did not warn about the supervision downgrade; log = %q", warnBuf.String())
+	if adHocLaunched {
+		t.Fatal("wedged manager spawned an unsupervised daemon")
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("the manager hang was not actually exercised: %v", err)
 	}
 	if elapsed >= daemonReadyTimeout {
-		t.Fatalf("manager fallback took %s, want less than the existing %s readiness budget", elapsed, daemonReadyTimeout)
+		t.Fatalf("refusal took %s, want the bounded %s manager slice", elapsed, ensureUnitStartTimeout)
 	}
 }
 
-func TestEnsureDaemonFallbackGetsFreshReadinessWindow(t *testing.T) {
-	_, _ = installEnsureTestUnitAndManager(t, true)
+// TestEnsureDaemonPendingUnitStartNeverSpawnsAdHoc is the #4470 incident shape:
+// the manager ACCEPTS `systemctl --user start` while the unit's ExecStart is
+// still pending (RestartSec after an on-failure kill), so no socket serves
+// inside the bounded start slice. The fallback used to fire there and win the
+// socket race against the pending ExecStart — the unsupervised daemon that
+// left the unit inactive for hours. EnsureDaemon must wait out the whole
+// readiness budget and let the supervised daemon answer instead.
+func TestEnsureDaemonPendingUnitStartNeverSpawnsAdHoc(t *testing.T) {
+	marker, _ := installEnsureTestUnitAndManager(t, false)
 	startServer, serverErr := ensureTestServerStarter(t)
 
-	// The manager consumes its bounded two-second slice. Reclaiming a stale
-	// daemon and launching its replacement are allowed to take longer than the
-	// remainder of that manager window; the compatibility path historically
-	// starts its five-second readiness clock only after launch returns.
+	// The unit's daemon answers only after the old bounded start slice would
+	// have expired — the ExecStart-pending window the fallback used to lose.
+	stopWatcher := startServerWhenMarked(marker, func() error {
+		time.Sleep(ensureUnitStartTimeout + 500*time.Millisecond)
+		return startServer()
+	})
+	defer stopWatcher()
+
+	adHocLaunched := false
+	if err := ensureDaemonWithLauncher(func() error {
+		adHocLaunched = true
+		return startServer()
+	}); err != nil {
+		t.Fatalf("a slow supervised start must return nil once the unit daemon answers, got: %v", err)
+	}
+	if err := serverErr(); err != nil {
+		t.Fatalf("start delayed supervised daemon: %v", err)
+	}
+	if adHocLaunched {
+		t.Fatal("a pending ExecStart was raced by an ad-hoc spawn — the #4470 escape")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("bounded systemctl start was not invoked: %v", err)
+	}
+}
+
+// TestEnsureDaemonUnitStartRefusedDoesNotSpawn: a manager that answers but
+// refuses the start — masked unit, start-limit hit, a caller without a
+// session bus — must not produce an ad-hoc daemon either: the unit still owns
+// this home, and the escapee would outlive the transient refusal (#4470).
+func TestEnsureDaemonUnitStartRefusedDoesNotSpawn(t *testing.T) {
+	_, _ = installEnsureTestUnitAndManager(t, false)
+
+	// Replace the accepting fake with one that refuses the start outright.
+	managerDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(managerDir, "systemctl"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatalf("write refusing systemctl: %v", err)
+	}
+	t.Setenv("PATH", managerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	startServer, _ := ensureTestServerStarter(t)
+	adHocLaunched := false
 	err := ensureDaemonWithLauncher(func() error {
-		time.Sleep(daemonReadyTimeout - ensureUnitStartTimeout + 250*time.Millisecond)
+		adHocLaunched = true
+		return startServer()
+	})
+	if err == nil {
+		t.Fatal("a refused start produced an ad-hoc daemon — the #4470 escape")
+	}
+	if !strings.Contains(err.Error(), "af daemon adopt") {
+		t.Fatalf("refusal must name the adopt remedy, got: %v", err)
+	}
+	if adHocLaunched {
+		t.Fatal("refused start spawned an unsupervised daemon")
+	}
+}
+
+// TestEnsureDaemonSupervisorAbsentFallsBackToAdHoc: where the unit's manager
+// provably cannot exist in this environment — no systemd as init — the ad-hoc
+// fallback remains the only way af runs, and there is no supervision for it
+// to escape (#2373's constraint, preserved under #4470). The fallback daemon
+// is reachable and the manager binary is never invoked.
+func TestEnsureDaemonSupervisorAbsentFallsBackToAdHoc(t *testing.T) {
+	marker, _ := installEnsureTestUnitAndManager(t, false)
+	systemdBootedDir = filepath.Join(t.TempDir(), "no-such-dir")
+	startServer, serverErr := ensureTestServerStarter(t)
+
+	warnBuf := captureWarnings(t)
+
+	adHocLaunched := false
+	err := ensureDaemonWithLauncher(func() error {
+		adHocLaunched = true
 		return startServer()
 	})
 	if err != nil {
-		t.Fatalf("delayed ad-hoc fallback must return nil, got: %v", err)
-	}
-	if err := serverErr(); err != nil {
-		t.Fatalf("start delayed ad-hoc daemon: %v", err)
-	}
-}
-
-// TestCallDaemonCompletesAfterManagerHangFallback drives a real caller
-// (callDaemon) through a hung service manager and proves the RPC still completes.
-// This is the #2373 regression at the layer users hit: before the fix EnsureDaemon
-// returned a supervision-degradation error after the working ad-hoc fallback, and
-// callDaemon — like withDaemonHTTP and attach — hard-returned it without ever
-// issuing the RPC, so the first `af sessions create` / TUI action / attach failed
-// on a serving daemon and only self-healed on the second call.
-func TestCallDaemonCompletesAfterManagerHangFallback(t *testing.T) {
-	marker, _ := installEnsureTestUnitAndManager(t, true)
-	startServer, serverErr := ensureTestServerStarter(t)
-
-	// callDaemon uses the real EnsureDaemon(), which spawns through
-	// launchDaemonProcessFn. Inject the fake control server as that launcher so the
-	// ad-hoc fallback binds the testbox socket instead of a real daemon.
-	prevLaunch := launchDaemonProcessFn
-	launchDaemonProcessFn = func() error { return startServer() }
-	t.Cleanup(func() { launchDaemonProcessFn = prevLaunch })
-
-	var resp PingResponse
-	if err := callDaemon("Ping", PingRequest{}, &resp); err != nil {
-		t.Fatalf("callDaemon must complete the RPC after a supervised-start fallback, got: %v", err)
+		t.Fatalf("supervisor-absent fallback must return a reachable daemon: %v", err)
 	}
 	if err := serverErr(); err != nil {
 		t.Fatalf("start fake ad-hoc daemon: %v", err)
+	}
+	if !adHocLaunched {
+		t.Fatal("a host with no supervisor skipped the only launch path that can work")
+	}
+	if err := pingDaemon(); err != nil {
+		t.Fatalf("fallback returned nil but the daemon is not reachable: %v", err)
+	}
+	if !strings.Contains(warnBuf.String(), "falling back to an ad-hoc daemon") {
+		t.Fatalf("fallback did not warn about the supervision downgrade; log = %q", warnBuf.String())
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a provably-absent supervisor was still invoked; marker stat = %v", err)
+	}
+}
+
+// TestEnsureDaemonNoManagerBinaryFallsBackToAdHoc covers the second absence
+// arm: the unit file claims the home but no manager binary exists on PATH at
+// all — a container or minimal image where the unit can never run. The
+// ad-hoc fallback is again the only working path.
+func TestEnsureDaemonNoManagerBinaryFallsBackToAdHoc(t *testing.T) {
+	_, _ = installEnsureTestUnitAndManager(t, false)
+	// An empty PATH makes the manager binary unresolvable without affecting
+	// the in-process fake daemon, which needs no external tools.
+	t.Setenv("PATH", t.TempDir())
+	startServer, serverErr := ensureTestServerStarter(t)
+
+	adHocLaunched := false
+	err := ensureDaemonWithLauncher(func() error {
+		adHocLaunched = true
+		return startServer()
+	})
+	if err != nil {
+		t.Fatalf("no-manager fallback must return a reachable daemon: %v", err)
+	}
+	if err := serverErr(); err != nil {
+		t.Fatalf("start fake ad-hoc daemon: %v", err)
+	}
+	if !adHocLaunched {
+		t.Fatal("a host with no manager binary skipped the only launch path that can work")
+	}
+}
+
+// TestCallDaemonSurfacesUnitStartRefusal drives a real caller (callDaemon)
+// through a wedged manager on a unit-claimed home: the RPC layer must surface
+// the refusal instead of silently producing the unsupervised daemon #4470
+// removed. The ad-hoc launcher is never invoked.
+func TestCallDaemonSurfacesUnitStartRefusal(t *testing.T) {
+	marker, _ := installEnsureTestUnitAndManager(t, true)
+	startServer, _ := ensureTestServerStarter(t)
+
+	prevLaunch := launchDaemonProcessFn
+	adHocLaunched := false
+	launchDaemonProcessFn = func() error { adHocLaunched = true; return startServer() }
+	t.Cleanup(func() { launchDaemonProcessFn = prevLaunch })
+
+	var resp PingResponse
+	err := callDaemon("Ping", PingRequest{}, &resp)
+	if err == nil {
+		t.Fatal("a wedged manager on a unit-claimed home surfaced a silent ad-hoc daemon — the #4470 escape")
+	}
+	if !strings.Contains(err.Error(), "unsupervised") {
+		t.Fatalf("refusal must name the supervision problem, got: %v", err)
+	}
+	if adHocLaunched {
+		t.Fatal("wedged manager spawned an unsupervised daemon")
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("the manager hang was not exercised: %v", err)
@@ -319,6 +419,13 @@ func installEnsureTestUnitAndManager(t *testing.T, block bool) (string, string) 
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	unitDir := withAutostartTestEnv(t, "linux")
+	// A testbox/container has no real /run/systemd/system, so point the
+	// supervisor-presence marker at a directory that exists: the fake
+	// environment claims a live supervisor, and tests that want "absent"
+	// repoint it at a missing path.
+	prevBooted := systemdBootedDir
+	t.Cleanup(func() { systemdBootedDir = prevBooted })
+	systemdBootedDir = t.TempDir()
 	unit := systemdAutostartUnit("/opt/agent-factory/bin/af", "", "", home)
 	if err := os.WriteFile(filepath.Join(unitDir, autostartUnitName), []byte(unit), 0o600); err != nil {
 		t.Fatalf("write home-serving unit: %v", err)

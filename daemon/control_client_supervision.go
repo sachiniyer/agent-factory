@@ -45,6 +45,42 @@ const (
 	ensureUnitStartWaitDelay = 250 * time.Millisecond
 )
 
+// systemdBootedDir is the marker sd_booted(3) uses for "systemd is PID 1":
+// present only while systemd actually runs the system, so a container or
+// foreign root that merely carries a systemctl binary still reads absent.
+// A var so tests can point it at a sandbox.
+var systemdBootedDir = "/run/systemd/system"
+
+// checkUnitSupervisorAbsent returns a non-nil error when the service manager
+// an installed unit is started through provably cannot exist in this
+// environment — no manager binary, no systemd as init, or a platform with no
+// autostart support. That is the sole condition under which an ad-hoc daemon
+// remains permitted on a unit-claimed home (#4470): a refusal, a hang, or a
+// missing session bus all leave a manager that could run the unit later, and
+// an ad-hoc spawn there becomes a permanent unsupervised escapee.
+func checkUnitSupervisorAbsent() error {
+	switch autostartGOOS {
+	case "linux":
+		if _, err := exec.LookPath("systemctl"); err != nil {
+			return fmt.Errorf("no systemctl binary in PATH: %w", err)
+		}
+		if _, err := os.Stat(systemdBootedDir); err != nil {
+			return fmt.Errorf("systemd is not running this system: %w", err)
+		}
+		return nil
+	case "darwin":
+		// launchd is always PID 1 on macOS; only a missing binary counts as
+		// "no supervisor could exist" — a gui-domain or bus failure is a
+		// refusal case, not absence.
+		if _, err := exec.LookPath("launchctl"); err != nil {
+			return fmt.Errorf("no launchctl binary in PATH: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("daemon autostart is not supported on %s", autostartGOOS)
+	}
+}
+
 func runEnsureUnitStartCommand(deadline time.Time) error {
 	switch autostartGOOS {
 	case "linux":
