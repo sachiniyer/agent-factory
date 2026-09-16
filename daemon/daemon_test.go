@@ -17,7 +17,6 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
-	"github.com/sachiniyer/agent-factory/task"
 )
 
 func TestMain(m *testing.M) {
@@ -44,16 +43,9 @@ func TestMain(m *testing.M) {
 	// that forgets IsolateTmux can never create or sweep sessions on the
 	// developer's real server.
 	restoreTmux := testguard.SandboxTmux()
-	// #4464: the readiness loop looks at the pane only when its ticker fires, so
-	// at the production 500ms every create against this package's ready fakes
-	// waited half a second before its first look — once per create, in a serial
-	// package that creates sessions by the hundred. Tests that time the loop
-	// themselves still override this and restore back to it.
-	restorePoll := task.SetReadinessPollIntervalForTest(10 * time.Millisecond)
 	log.Initialize(false)
 	code := m.Run()
 	log.Close()
-	restorePoll()
 	restoreTmux()
 	restoreHome()
 	if err := verifyRealConfig(); err != nil {

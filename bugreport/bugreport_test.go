@@ -1272,26 +1272,24 @@ func TestBuildIssueDraftBodyIsFinalAfterBudgeting(t *testing.T) {
 		t.Run("username="+user, func(t *testing.T) {
 			r := &redactor{home: "/tmp/" + user, users: []string{user}}
 
-			// A collision grows the body by only a few bytes, and the fitted tail can
-			// leave up to a line of slack under the cap, so a log shape overflows only
-			// if it lands flush — which a sweep of shapes finds only by luck. So land
-			// it by construction: render once, read the slack, and lengthen the newest
-			// line by that much plus d. Each "x" costs one encoded byte, so correct
-			// budgeting puts the draft at cap+d until the pad outgrows the true slack
-			// and an older line drops. A post-budget growth is already in the length
-			// the calibration read, so at d=1 the tail still fits and the draft lands
-			// one byte past the cap — for any growth big enough to overflow at all,
-			// i.e. larger than the bytes fitLogTail reserves (see window below).
-			// Lines are long so the BYTE budget binds rather than issueLogMaxLines.
-			draftLen := func(pad int) int {
+			// Sweep the log line length. Each collision only grows the body by a
+			// few bytes, while the fitted tail leaves 0..one-line of slack under
+			// the cap — so ANY single log shape overflows only by luck, and a test
+			// pinned to one shape would pass against the broken ordering and prove
+			// nothing. Sweeping makes the near-cap case deterministic: some shape
+			// lands flush against the cap, where the growth has nowhere to go.
+			// Lines are realistically long so the BYTE budget binds rather than
+			// issueLogMaxLines, which would cap the body at ~4.3KB and make every
+			// assertion vacuous.
+			nearCap := 0
+			for lineLen := 60; lineLen <= 260; lineLen += 2 {
 				var log strings.Builder
-				for i := 0; i < issueLogMaxLines; i++ {
-					fill := 80
-					if i == issueLogMaxLines-1 {
-						fill += pad
+				for i := 0; i < 120; i++ {
+					line := fmt.Sprintf("[DAEMON] INFO:2026/07/16 05:03:33 taskrun.go:100: task %06d reconciled session ", i)
+					for len(line) < lineLen {
+						line += "x"
 					}
-					fmt.Fprintf(&log, "[DAEMON] INFO:2026/07/16 05:03:33 taskrun.go:100: task %06d reconciled session %s\n",
-						i, strings.Repeat("x", fill))
+					log.WriteString(line[:lineLen] + "\n")
 				}
 				b := Bundle{
 					Versions:   Versions{AF: "9.9.9", Go: "go1.25.0", OS: "linux", Arch: "amd64"},
@@ -1301,42 +1299,28 @@ func TestBuildIssueDraftBodyIsFinalAfterBudgeting(t *testing.T) {
 
 				_, body := buildIssueDraft(r, b)
 
-				n := encodedLen(body)
-				if n > maxIssueBodyEncodedBytes {
-					t.Errorf("pad=%d: encoded body is %d bytes, past the %d cap — "+
+				if n := encodedLen(body); n > maxIssueBodyEncodedBytes {
+					t.Errorf("lineLen=%d: encoded body is %d bytes, past the %d cap — "+
 						"something changed the body after the budget was computed",
-						pad, n, maxIssueBodyEncodedBytes)
+						lineLen, n, maxIssueBodyEncodedBytes)
 				}
 				// The general invariant, asserted per shape: the returned body is a
 				// fixed point of the redactor, so no later pass — the one that used
 				// to run here, or any a future change adds — can grow it.
 				if again := r.scrub(body); again != body {
-					t.Errorf("pad=%d: body is not a redactor fixed point: a further scrub "+
+					t.Errorf("lineLen=%d: body is not a redactor fixed point: a further scrub "+
 						"would change it (%d -> %d encoded bytes), so its measured size is not final",
-						pad, n, encodedLen(again))
+						lineLen, encodedLen(body), encodedLen(again))
 				}
-				return n
+				if encodedLen(body) > maxIssueBodyEncodedBytes-40 {
+					nearCap++
+				}
 			}
-
-			// window must cover the bytes fitLogTail reserves past the tail it keeps
-			// (a newline per kept line, one more than the join writes), which is how
-			// far below the cap a flush tail actually lands. Calibrating at pad=window
-			// leaves room to probe below that point.
-			const window = 8
-			slack := maxIssueBodyEncodedBytes - draftLen(window)
-			if slack < 0 {
-				return // the calibration draft is already past the cap, and said so
-			}
-			closest := 0
-			for d := -window; d <= 1; d++ {
-				closest = max(closest, draftLen(window+slack+d))
-			}
-			// Proof the probes actually reached the boundary, so the assertions above
+			// Proof the sweep actually reached the boundary, so the assertions above
 			// were exercised where they bite rather than passing on slack.
-			if closest < maxIssueBodyEncodedBytes-window {
-				t.Errorf("no probe landed within %d bytes of the %d cap (closest %d) — the "+
-					"calibration missed the boundary, so it is not testing the overflow",
-					window, maxIssueBodyEncodedBytes, closest)
+			if nearCap == 0 {
+				t.Errorf("no log shape landed within 40 bytes of the %d cap — the sweep never "+
+					"reached the boundary, so it is not testing the overflow", maxIssueBodyEncodedBytes)
 			}
 		})
 	}
@@ -1392,17 +1376,15 @@ func TestFenceForOutrunsLongestRun(t *testing.T) {
 // TestBuildIssueDraftBoundsBodyToURLCap is the guard on the inline summary's
 // core risk: the draft reaches GitHub as an issues/new URL, and a body past the
 // cap yields a dead link (or a 414) instead of a draft. A pathological bundle —
-// the longest log tail collectLog will hand over (logTailMaxLines), a verbose
-// daemon status, a pile of collection errors — must still produce a body that
-// fits ONCE PERCENT-ENCODED, which is the length that actually matters: these
-// log lines are newline- and space-dense, so the encoded form is far larger than
-// the raw one. More lines than the collector can deliver buy no coverage, only
-// redaction time, which the race detector multiplies (#4464).
+// a megabyte of log, a verbose daemon status, a pile of collection errors — must
+// still produce a body that fits ONCE PERCENT-ENCODED, which is the length that
+// actually matters: these log lines are newline- and space-dense, so the encoded
+// form is far larger than the raw one.
 func TestBuildIssueDraftBoundsBodyToURLCap(t *testing.T) {
 	r := &redactor{home: "/home/tester", users: []string{"tester"}}
 
 	var hugeLog strings.Builder
-	for i := 0; i < logTailMaxLines; i++ {
+	for i := 0; i < 20000; i++ {
 		fmt.Fprintf(&hugeLog, "2026-01-01 12:00:00 daemon: reconciled session %d of many, state=Ready\n", i)
 	}
 	b := Bundle{
@@ -1426,7 +1408,7 @@ func TestBuildIssueDraftBoundsBodyToURLCap(t *testing.T) {
 		"Earlier lines elided", truncatedNote,
 		"more (see the attached bundle)", "~/af-bug-report-20260716-080519.txt")
 	// The newest lines are what explain a bug, so those are the ones kept.
-	mustContain(t, "capped body", body, fmt.Sprintf("session %d of many", logTailMaxLines-1))
+	mustContain(t, "capped body", body, "session 19999 of many")
 	mustNotContain(t, "capped body", body, "session 0 of many")
 }
 

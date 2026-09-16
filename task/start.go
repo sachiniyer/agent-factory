@@ -54,22 +54,6 @@ func SetTrustPromptTimingForTest(retryDelay time.Duration) func() {
 	}
 }
 
-// SetReadinessPollIntervalForTest moves only how often WaitForReady samples the
-// pane, leaving the trust-prompt backoff alone, and returns a restore func. The
-// loop samples on its ticker and never before the first tick, so every wait
-// costs at least one interval even against a fake backend that is ready from
-// the start — which, at the production 500ms, a package that creates sessions
-// by the hundred pays once per create (#4464). Test-only.
-func SetReadinessPollIntervalForTest(interval time.Duration) func() {
-	old := waitForReadyPollInterval
-	if interval <= 0 {
-		// time.NewTicker panics on a non-positive duration.
-		interval = time.Nanosecond
-	}
-	waitForReadyPollInterval = interval
-	return func() { waitForReadyPollInterval = old }
-}
-
 // TrustPromptTarget is a ReadinessTarget that can also dismiss its own first-run
 // trust dialog — the narrow contract DismissTrustPrompt drives, implemented both
 // by a full session.Instance and by the daemon's bare tmux config agent.

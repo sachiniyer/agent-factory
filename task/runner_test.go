@@ -369,44 +369,6 @@ func TestWaitForReadyNonAgentBecomesReadyOnAnyOutput(t *testing.T) {
 	}
 }
 
-// TestSetReadinessPollIntervalForTestMovesOnlyThePoll pins the seam the daemon
-// package's TestMain uses (#4464). The readiness loop samples only when its
-// ticker fires, so the interval it ticks at is what a ready fake backend costs
-// per wait — the seam must move exactly that, leave the trust-prompt backoff
-// alone, never hand time.NewTicker a non-positive interval, and restore.
-func TestSetReadinessPollIntervalForTestMovesOnlyThePoll(t *testing.T) {
-	prodPoll, prodDelay := waitForReadyPollInterval, trustPromptRetryDelay
-	restore := SetReadinessPollIntervalForTest(7 * time.Millisecond)
-	defer restore() // idempotent; covers a Fatal before the explicit call below
-
-	clock := newObservedReadinessClock()
-	inst := newPreviewInstanceWithProgram(t, "bash", func() (string, error) { return "sandbox$ ", nil })
-	done := make(chan error, 1)
-	go func() {
-		done <- waitForReadyOn(context.Background(), instanceReadinessTarget{inst: inst}, clock.clock())
-	}()
-	receiveReadinessEvent(t, clock.timers, "initial readiness timer")
-	if got := receiveReadinessEvent(t, clock.tickerStarted, "readiness ticker"); got != 7*time.Millisecond {
-		t.Fatalf("readiness loop ticked at %s, want the seam's 7ms", got)
-	}
-	clock.ticks <- time.Time{}
-	if err := receiveReadinessEvent(t, done, "readiness result"); err != nil {
-		t.Fatalf("WaitForReady: %v", err)
-	}
-	if trustPromptRetryDelay != prodDelay {
-		t.Fatalf("trust-prompt backoff = %s, want it untouched at %s", trustPromptRetryDelay, prodDelay)
-	}
-
-	restore()
-	if waitForReadyPollInterval != prodPoll {
-		t.Fatalf("restore left the poll at %s, want %s", waitForReadyPollInterval, prodPoll)
-	}
-	defer SetReadinessPollIntervalForTest(0)()
-	if waitForReadyPollInterval <= 0 {
-		t.Fatalf("a zero request set the poll to %s; time.NewTicker panics on that", waitForReadyPollInterval)
-	}
-}
-
 // TestWaitForReadyReadyAtTimeoutBoundaryIsReady pins #1783: an agent whose ready
 // prompt is on the pane when the readiness deadline fires must be reported READY,
 // not timed out. The timeout branch captures the pane just like the ticker branch
