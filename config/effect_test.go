@@ -235,6 +235,47 @@ func TestEffectNoticeSupersededDeferredKeyDropsTheTakesEffectPromise(t *testing.
 	}
 }
 
+// A listener key can carry BOTH a failed rebind and a lost race: the rebind
+// failure rides on an apply that SUCCEEDED, so nothing stops a competing write
+// from having won the value that apply loaded. The rebind-deferred sentence
+// promises the save takes effect at the next daemon start, which is the same
+// false promise the deferred classes had — made here about the winner's value.
+// EffectNotice must therefore rank these the way StatusForKey does, or the
+// sentence and the wire status describe different worlds for one save (#4247).
+func TestEffectNoticeRanksSupersededAndUnconfirmedAboveAFailedRebind(t *testing.T) {
+	const key = "network.listen_addr"
+	rebindPromise := listenerRebindDeferredNotice(key)
+
+	superseded := ApplyOutcome{
+		DaemonApplied:        true,
+		FailedListenerKeys:   []string{key},
+		SavedValueSuperseded: true,
+	}
+	got := EffectNotice(key, superseded)
+	if got == rebindPromise {
+		t.Errorf("EffectNotice(%q) returned the rebind-deferred promise for a save that lost the race: %q", key, got)
+	}
+	if want := supersededNotice(key); got != want {
+		t.Errorf("EffectNotice(%q) = %q, want %q", key, got, want)
+	}
+	if status := superseded.StatusForKey(key); status != ApplyStatusSuperseded {
+		t.Errorf("StatusForKey(%q) = %q, want %q — the notice and the status must agree", key, status, ApplyStatusSuperseded)
+	}
+
+	unconfirmed := ApplyOutcome{
+		DaemonApplied:          true,
+		FailedListenerKeys:     []string{key},
+		DaemonApplyUnconfirmed: true,
+	}
+	got = EffectNotice(key, unconfirmed)
+	if got == rebindPromise {
+		t.Errorf("EffectNotice(%q) promised a next-start effect for an unconfirmed apply: %q", key, got)
+	}
+	if status := unconfirmed.StatusForKey(key); status != ApplyStatusUnconfirmed {
+		t.Errorf("StatusForKey(%q) = %q, want %q — the notice and the status must agree", key, status, ApplyStatusUnconfirmed)
+	}
+}
+
 func TestEffectNoticeDaemonApplyUnconfirmed(t *testing.T) {
 	const want = "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
 	outcome := ApplyOutcome{DaemonApplyFailed: true, DaemonApplyUnconfirmed: true}

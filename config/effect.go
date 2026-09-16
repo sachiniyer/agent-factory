@@ -273,46 +273,62 @@ func (o ApplyOutcome) listenerRebindFailed(key string) bool {
 // Sentence case, one clause set off with an em dash, per the copy conventions.
 func EffectNotice(key string, outcome ApplyOutcome) string {
 	key = canonicalConfigKey(key)
-	// Ahead of the class switch, mirroring exactly where the two already-correct
-	// save surfaces made this check before #3397 moved it in here, so those two come
-	// out behaviourally identical. The placement is not load-bearing either way: only
-	// the two socket keys ever appear in FailedListenerKeys and both are
-	// EffectAppliedLive, so testing it inside that case would decide every real input
-	// the same way.
+	// This prefix mirrors StatusForKey's precedence deliberately. The two answer the
+	// same question for the same save — one as prose, one as a wire status — so an
+	// ordering that differs between them lets a save be reported as `superseded`
+	// while its sentence promises the value takes effect.
+	//
+	// A lost race comes first, because it is the one answer about WHICH value is
+	// stored, and it contradicts every "takes effect" promise below — including the
+	// rebind-deferred one.
+	if outcome.SavedValueSuperseded {
+		return supersededNotice(key)
+	}
+	// Then uncertainty, for the same reason and one rung down. On the version-skewed
+	// fallback these genuinely co-occur with a failed rebind: the outcome carries
+	// FailedListenerKeys from an apply that SUCCEEDED, while the post-apply file read
+	// could not confirm which value the daemon loaded.
+	if outcome.DaemonApplyUnconfirmed {
+		return "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
+	}
+	// Only now the rebind. Both socket keys are EffectAppliedLive, so this could sit
+	// inside that case; it stays ahead of the switch because it must outrank the
+	// class sentence, which is what #3397 moved in here to guarantee.
 	if outcome.listenerRebindFailed(key) {
 		return listenerRebindDeferredNotice(key)
 	}
 	switch KeyEffectClass(key) {
 	case EffectAppliedLive:
-		if outcome.DaemonApplyUnconfirmed {
-			return "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
-		}
 		if outcome.DaemonApplyFailed {
 			return "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
-		}
-		if outcome.SavedValueSuperseded {
-			return "Saved — a newer write raced this save, so the running daemon may be using a different value."
 		}
 		if outcome.DaemonApplied {
 			return "Applied — the running daemon is using the new value now."
 		}
 		return "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
 	case EffectNextDaemonStart:
-		// A deferred key is raced on disk exactly like a live one, and the
-		// stored value is precisely what the next start will read — so the
-		// "takes effect" promise below would be made about someone else's write.
-		if outcome.SavedValueSuperseded {
-			return "Saved — a newer write raced this save, so the value waiting for the next daemon start is not the one this save wrote."
-		}
 		notice := "Saved — this setting takes effect on the next daemon start."
 		return WithRootAgentAdoptionNotice(key, notice)
 	case EffectNextAfLaunch:
-		if outcome.SavedValueSuperseded {
-			return "Saved — a newer write raced this save, so the value waiting for the next af launch is not the one this save wrote."
-		}
 		return "Saved — this setting takes effect the next time you launch af."
 	default:
 		return "Saved."
+	}
+}
+
+// supersededNotice is the one sentence for a save that lost a race, worded for
+// what the key's class makes the stored value mean. A live key's loser is about
+// what the daemon is serving now; a deferred key's loser is about what the next
+// daemon start or af launch will read. Both must avoid the "takes effect"
+// promise, which would be made about the winner's value rather than this save's.
+func supersededNotice(key string) string {
+	switch KeyEffectClass(key) {
+	case EffectNextDaemonStart:
+		return "Saved — a newer write raced this save, so the value waiting for the next daemon start is not the one this save wrote."
+	case EffectNextAfLaunch:
+		return "Saved — a newer write raced this save, so the value waiting for the next af launch is not the one this save wrote."
+	default:
+		return "Saved — a newer write raced this save, so the running daemon may be using a different value."
 	}
 }
 
