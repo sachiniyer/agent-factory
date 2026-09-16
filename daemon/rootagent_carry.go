@@ -8,6 +8,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The reaped root's carry is durable, not only parked in memory (#4400 review
@@ -117,15 +118,48 @@ func (m *Manager) loadReapedRootCarry(repoID string) (state reapedRootState, pre
 // on ambient credentials. Index 0 (the agent tab) is rebuilt by the launch
 // anyway, and web/editor tabs hold no process environment — the only rows
 // kept (#4400 review round 4).
+//
+// Index 0 is kept as a PLACEHOLDER even though the agent row is tmux-backed:
+// restoreCarriedTabs and countNonAgentTabs both skip position 0
+// unconditionally, so dropping it here would silently consume the first
+// surviving web/editor tab (Codex on #4400) — and its Handoffs are the
+// account-swap ledger the replacement's fresh agent tab must keep.
 func ambientSafeCarriedTabs(tabs []session.TabData) []session.TabData {
-	kept := tabs[:0]
-	for _, td := range tabs {
-		if td.Kind.HasTmux() {
+	// A fresh backing array, not tabs[:0]: the caller's slice header is a
+	// shallow copy of the repo-scoped parked carry's, and compacting in place
+	// would overwrite the roster the NEXT create attempt still needs to read
+	// after this one fails (Codex on #4400).
+	kept := make([]session.TabData, 0, len(tabs))
+	for idx, td := range tabs {
+		if idx != 0 && td.Kind.HasTmux() {
 			continue
 		}
 		kept = append(kept, td)
 	}
 	return kept
+}
+
+// reconcilePendingSwapConversation keeps the committed swap a replacement
+// record carries aligned with the conversation this create is actually
+// launching. The carried ConversationID named the committed replacement pane
+// on the REAPED root; when the recreate substitutes a newer project
+// conversation or falls back to a fresh start, attaching the obsolete id
+// makes the settlement sync stamp it over the live agent's — or reject the
+// live conversation — on every tick (Codex on #4400). The swap is cloned, not
+// mutated: pendingAccountSwap is a pointer shared with the repo-scoped parked
+// carry, and writing through it would corrupt the state a later retry reads.
+func reconcilePendingSwapConversation(req *CreateSessionRequest) {
+	swap := req.pendingAccountSwap
+	if swap == nil || swap.ConversationID == "" {
+		return
+	}
+	reconciled := *swap
+	if req.resumeConversation.Agent == tmux.ProgramClaude && req.resumeConversation.HasID() {
+		reconciled.ConversationID = req.resumeConversation.ID
+	} else {
+		reconciled.ConversationID = ""
+	}
+	req.pendingAccountSwap = &reconciled
 }
 
 // retireReapedRootCarry drops both halves of the parked carry. The create

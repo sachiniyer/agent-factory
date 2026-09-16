@@ -372,6 +372,19 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 			carried.tabs = ambientSafeCarriedTabs(carried.tabs)
 		}
 	}
+	// A committed swap the replacement cannot honor must not ride the new
+	// record: pendingSwap.To names the identity the transaction committed to,
+	// so a launch under a different account leaves committedAccountSwap
+	// unable to recognize it (current != to) while the non-nil marker still
+	// fences every later handoff — a replacement parked permanently behind a
+	// swap that can never settle (Codex on #4400). The rendered takeover
+	// brief serves that transaction, so it is released with it.
+	if carried.pendingSwap != nil && (strings.TrimSpace(carried.pendingSwap.To) == "" || carried.pendingSwap.To != account) {
+		m.warn().Printf("re-created root agent for %s cannot finish the committed account swap to %q: the replacement launches as account %q; releasing the parked transaction rather than fencing the session behind a swap that can never commit",
+			workspace, carried.pendingSwap.To, account)
+		carried.pendingSwap = nil
+		carried.pendingHandoffMission = ""
+	}
 	// A rejected pin also retires the carried resume: registration relocates the
 	// agent's whole transcript store, so the recorded conversation is only
 	// resumable under the credentials just discarded. Inspecting the ambient
@@ -447,7 +460,16 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	if skipRecordedResume {
 		req.resumeConversation = session.AgentConversationData{}
 	}
-	data, err := m.createVerifiedRoot(repo.ID, identity, req)
+	// Every attempt reconciles the attached swap's recorded conversation with
+	// the one being launched: the substitute and fresh-start retries below
+	// change req.resumeConversation, and an obsolete ConversationID on the
+	// record makes the settlement sync reject — or stamp — the wrong id on
+	// every tick (Codex on #4400).
+	create := func() (session.InstanceData, error) {
+		reconcilePendingSwapConversation(&req)
+		return m.createVerifiedRoot(repo.ID, identity, req)
+	}
+	data, err := create()
 	if err != nil && !isRootCheckoutRefusal(err) && req.resumeConversation.HasID() {
 		// The always-on guarantee outranks continuity. A conversation the provider
 		// can no longer resume (cleared history, a transcript store the agent no
@@ -473,7 +495,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 					workspace, req.resumeConversation.ID, err, state.Resume.ID)
 				req.resumeConversation = state.Resume
 				carried.conversation = state.Resume
-				data, err = m.createVerifiedRoot(repo.ID, identity, req)
+				data, err = create()
 			}
 		}
 	}
@@ -481,7 +503,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		m.warn().Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
 			workspace, req.resumeConversation.Agent, req.resumeConversation.ID, err)
 		req.resumeConversation = session.AgentConversationData{}
-		data, err = m.createVerifiedRoot(repo.ID, identity, req)
+		data, err = create()
 	}
 	if err != nil {
 		if isRootCheckoutRefusal(err) {
