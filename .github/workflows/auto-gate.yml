@@ -50,14 +50,42 @@ permissions:
   statuses: read
   issues: write
 
-# A scheduled run carries no unique event: each one scans every open master PR,
-# so a newer pending schedule may replace an older pending copy without losing an
-# invalidation. Keep the active run alive through its aggregate transaction so
-# the next scan cannot select the same per-PR decisions while they are queued.
-# Every webhook/comment run gets its own run-id group and still reaches the
-# ungrouped invalidation below; those events are not fungible and never coalesce.
+# A concurrency group holds one running and one pending run: a newer pending
+# run replaces the older one, and cancel-in-progress stays false so an active
+# transaction always finishes uninterrupted. Replacement is safe only when the
+# survivor's invalidation covers every head the cancelled pending run would
+# have covered — a run cancelled while pending never reaches the ungrouped
+# invalidation below, and an uncovered head keeps its stale verdict. Each group
+# is keyed so that guarantee holds:
+#
+# - schedule: every run scans every open master PR, so pending copies are
+#   fungible and the older one carries nothing the newer one misses.
+# - workflow_dispatch: keyed by (pr_number, previous_head_sha). Recovery polls
+#   for the head AFTER that one; only an identical request reproduces it.
+# - pull_request_target synchronize: keyed by (before, after). It alone carries
+#   the previous head, which no later event reproduces, so only a redelivery of
+#   the same transition may replace it — never a different push or a comment.
+# - pull_request_target other actions: keyed by (PR, payload head). A head can
+#   move while a PR is closed with no synchronize event bridging it, so closed
+#   on the old head must not be replaced by reopened on the new one.
+# - issue_comment / pull_request_review / pull_request_review_comment: one
+#   group per PR. They cover only the PR's current head, resolved at run time,
+#   and every transition away from an older head is carried by a synchronize
+#   run that never coalesces — so a burst of comments collapses to at most one
+#   pending run and loses no invalidation.
+# - check_suite / status / workflow_run: one group per named commit. Coverage
+#   is exactly that head, so same-commit copies are identical by construction.
 concurrency:
-  group: auto-gate-${{ github.event_name == 'schedule' && 'required-check-reconciliation' || github.run_id }}
+  group: >-
+    auto-gate-${{
+      github.event_name == 'schedule' && 'required-check-reconciliation' ||
+      github.event_name == 'workflow_dispatch' && format('recovery-{0}-{1}', inputs.pr_number, inputs.previous_head_sha) ||
+      github.event_name == 'pull_request_target' && github.event.action == 'synchronize' && format('synchronize-{0}-{1}', github.event.before, github.event.after) ||
+      github.event_name == 'pull_request_target' && format('pr-{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) ||
+      (github.event.issue.number || github.event.pull_request.number) && format('pr-{0}', github.event.issue.number || github.event.pull_request.number) ||
+      (github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) && format('head-{0}', github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) ||
+      github.run_id
+    }}
   cancel-in-progress: false
 
 jobs:
