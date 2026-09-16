@@ -850,38 +850,58 @@ func TestAccountAgentsSummary_NamesTheAlternativesInARefusal(t *testing.T) {
 	require.Empty(t, reason)
 }
 
-// The ZDOTDIR pin must reach every zsh the command can launch, not only the
-// exact generated spelling: `nice /bin/zsh -f -i` and a compound
-// `/bin/zsh -f -i; true` pass validation, and without the pin an
-// /etc/zsh/zshenv running `setopt RCS` re-admits the whole user startup chain
-// that can rewrite the account root (Codex on #4474). A proven `zsh -f -i`
-// argv of an unrecognized wrapper is treated as a launch too — strace execs
-// its tail and an unknown wrapper might, so the pin fails closed there; a
-// command whose zsh is only data keeps the unpinned environment other
-// surfaces rely on.
-func TestApplyAccountEnvironment_PinsZdotdirOnEveryAdmittedZshLaunch(t *testing.T) {
+// Admission and the ZDOTDIR pin are one predicate: the exact generated zsh
+// command is admitted AND pinned, every other zsh execution is refused, and no
+// other command is pinned. Three review rounds on #4474 found the pin wrong in
+// both directions while it tried to follow zsh into longer commands — missing
+// on `nice /bin/zsh -f -i`, stranded outside a sudo that drops ZDOTDIR, and
+// leaking into code-server through `printf '%s\n' /bin/zsh -f -i`. The sets
+// below are the rule, not a list of those incidents: whatever the command, an
+// admitted zsh is a pinned zsh.
+func TestApplyAccountEnvironment_AdmitsZshOnlyAsThePinnedGeneratedLaunch(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: t.TempDir()}
-	for _, command := range []string{
-		"/bin/zsh -f -i",
-		"/usr/bin/zsh -f -i",
-		"nice /bin/zsh -f -i",
-		"/bin/zsh -f -i; true",
-		"echo hi; nice /bin/zsh -f -i",
-		"env PATH=/bin /bin/zsh -f -i",
-	} {
+	// Canaries: the generated form is the only zsh af itself launches — shell
+	// tabs, their extra tmux windows, and an account swap's replacement — and
+	// all three must keep working (#4471).
+	for _, shell := range []string{"/bin/zsh", "/usr/bin/zsh"} {
+		command, err := AccountShellCommand(shell)
+		require.NoError(t, err, shell)
+		require.True(t, IsAccountShellCommand(command), command)
 		scoped, err := ApplyAccountEnvironment([]string{"PATH=/bin"}, command, account)
 		require.NoError(t, err, command)
 		pinned, ok := envValue(scoped, "ZDOTDIR")
-		require.True(t, ok && pinned == "", "%q launches an admitted zsh and must pin ZDOTDIR empty", command)
+		require.True(t, ok && pinned == "", "%q is the admitted zsh launch and must pin ZDOTDIR empty", command)
 	}
 	for _, command := range []string{
-		"make -j4",
-		"echo zsh", // a bare name in argv is data; only argv judged as a command counts
-		"/bin/bash --noprofile --norc -i",
+		"nice /bin/zsh -f -i",
+		"exec /bin/zsh -f -i",
+		"/bin/zsh -f -i; true",
+		"echo hi; nice /bin/zsh -f -i",
+		"env PATH=/bin /bin/zsh -f -i",
+		"nohup /usr/bin/zsh -f -i",
+		"sudo --preserve-env=HOME,CODEX_HOME -u root /bin/zsh -f -i",
+		"printf '%s\\n' /bin/zsh -f -i; code-server",
+		"/bin/zsh -f -i < ./repo-script",
+		"/bin/zsh -f -i <<'EOF'\nexport CODEX_HOME=/other\ncodex\nEOF",
+		"cat ./repo-script | /bin/zsh -f -i",
+		"/bin/zsh -f -i >/dev/null",
 	} {
-		scoped, err := ApplyAccountEnvironment([]string{"PATH=/bin"}, command, account)
+		_, err := ApplyAccountEnvironment([]string{"PATH=/bin"}, command, account)
+		require.Error(t, err, "%q runs zsh with an environment af did not hand it directly", command)
+	}
+	// No zsh launch, no pin: code-server ("") and process panes keep the
+	// environment their own zsh children need to read ~/.zshenv and ~/.zshrc.
+	for _, command := range []string{
+		"",
+		"make -j4",
+		"echo zsh",
+		"/bin/bash --noprofile --norc -i",
+		"/bin/csh -f -i",
+		"/bin/sh -i",
+	} {
+		scoped, err := ApplyAccountEnvironment([]string{"PATH=/bin", "ZDOTDIR=/home/u/.config/zsh"}, command, account)
 		require.NoError(t, err, command)
 		_, ok := envValue(scoped, "ZDOTDIR")
-		require.False(t, ok, "%q launches no zsh and must not pin ZDOTDIR", command)
+		require.False(t, ok, "%q launches no zsh and must neither pin nor keep ZDOTDIR", command)
 	}
 }

@@ -478,7 +478,7 @@ func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{
 		}
 		mutates := false
 		syntax.Walk(parsed, func(node syntax.Node) bool {
-			if nodeMutatesAccountEnvironment(node, names, nil) {
+			if nodeMutatesAccountEnvironment(node, names) {
 				mutates = true
 				return false
 			}
