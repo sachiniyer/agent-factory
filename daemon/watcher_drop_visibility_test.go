@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -107,7 +108,8 @@ func TestLiveDropOverlayPreservesTerminalWatcherStatus(t *testing.T) {
 
 func TestLiveDropOverlayPreservesRecordedParkedHeadOverTerminalStatus(t *testing.T) {
 	queue := newEventQueue(t.TempDir(), "d4357005")
-	require.NoError(t, queue.enqueueWithParkedStatus("held occurrence", true, true))
+	_, err := queue.enqueueWithParkedStatus("held occurrence", true, true)
+	require.NoError(t, err)
 	var persisted string
 	w := &taskWatcher{taskID: "d4357005", queue: queue}
 	s := &watcherSupervisor{
@@ -126,6 +128,58 @@ func TestLiveDropOverlayPreservesRecordedParkedHeadOverTerminalStatus(t *testing
 	terminalStatus := w.terminalStatus
 	w.mu.Unlock()
 	require.Empty(t, terminalStatus, "live overlay must not latch a terminal status over a parked head")
+}
+
+// TestEnqueueAppendFailureCountsTheUnretainedEvent is the finding's core: a
+// queue that exists but cannot retain the record loses the event exactly as a
+// missing queue does, so the loss must reach the same drop accounting rather
+// than vanish behind a log line.
+func TestEnqueueAppendFailureCountsTheUnretainedEvent(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "d4357007")
+	require.NoError(t, queue.enqueue("seed backlog"))
+	persisted := -1
+	s := &watcherSupervisor{
+		recordDrops: func(_ string, total int, _ time.Time) error { persisted = total; return nil },
+	}
+	w := &taskWatcher{taskID: "d4357007", queue: queue, sup: s}
+	denyAccess(t, queue.path, queue.path, 0o644)
+
+	tail := &tailBuffer{}
+	w.enqueueEvent("limit-held occurrence", tail, true)
+
+	w.mu.Lock()
+	dropped := w.dropped
+	w.mu.Unlock()
+	require.Equal(t, 1, dropped, "an event the queue could not retain must be counted")
+	require.Equal(t, 1, persisted, "the loss must reach the durable drop checkpoint")
+}
+
+// TestTerminalStatusPublishesWithoutEvidenceOfRecordedParkedHead pins both
+// halves of the parked-head contract: an unverifiable queue is not evidence of
+// a parked head, so a real terminal outcome publishes rather than leaving an
+// ordinary backlog displaying stale status past a permanently stopped watcher;
+// and once storage heals the same check reads fresh state rather than
+// deferring to a stale cached outage.
+func TestTerminalStatusPublishesWithoutEvidenceOfRecordedParkedHead(t *testing.T) {
+	dir := t.TempDir()
+	seed := newEventQueue(dir, "d4357008")
+	require.NoError(t, seed.enqueue("ordinary backlog"))
+	denyAccess(t, seed.path, seed.path, 0o644)
+
+	queue := newEventQueue(dir, "d4357008")
+	var persisted string
+	s := &watcherSupervisor{setStatus: func(_, status string) { persisted = status }}
+	w := &taskWatcher{taskID: "d4357008", queue: queue, sup: s}
+
+	w.persistTerminalStatus("stopped")
+	require.Equal(t, "stopped", persisted,
+		"unverifiable queue state is not evidence of a parked head; the terminal outcome must publish")
+
+	persisted = ""
+	require.NoError(t, os.Chmod(seed.path, 0o644))
+	w.persistTerminalStatus("stopped")
+	require.Equal(t, "stopped", persisted,
+		"once queue state is readable and shows no parked head, the terminal outcome publishes")
 }
 
 func TestNewerParkRetiresEarlierLiveTerminalOverlay(t *testing.T) {

@@ -452,10 +452,16 @@ func (q *eventQueue) loadFailedFresh() bool {
 // enqueueWithParkedStatus so the queue persists both facts together.
 func (q *eventQueue) enqueue(line string, limitParked ...bool) error {
 	parkThisEvent := len(limitParked) > 0 && limitParked[0]
-	return q.enqueueWithParkedStatus(line, parkThisEvent, false)
+	_, err := q.enqueueWithParkedStatus(line, parkThisEvent, false)
+	return err
 }
 
-func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusRecorded bool) error {
+// enqueueWithParkedStatus reports retained alongside err because an error here
+// is not proof of loss: the append can fail AFTER the record landed in full
+// (a close/flush fault), or after the record was already counted into the
+// backlog (cap enforcement). Callers that account for dropped events must not
+// count a retained record — the queue will still replay it.
+func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusRecorded bool) (retained bool, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -465,11 +471,11 @@ func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusR
 	// boundary. Retry the load; refuse (caller drops the event, logged) only
 	// while the state stays unknown.
 	if err := q.retryLoadNowLocked(); err != nil {
-		return fmt.Errorf("%w; refusing to append: %w", errEventQueueLoadFailed, err)
+		return false, fmt.Errorf("%w; refusing to append: %w", errEventQueueLoadFailed, err)
 	}
 	if q.pending == 0 && q.limitParked && !parkThisEvent {
 		if err := q.clearLimitParkedLocked(); err != nil {
-			return fmt.Errorf("failed to clear stale usage-limit queue marker: %w", err)
+			return false, fmt.Errorf("failed to clear stale usage-limit queue marker: %w", err)
 		}
 	}
 	// A direct delivery can discover the limit before the event has a queue
@@ -482,16 +488,16 @@ func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusR
 	}
 	if parkThisEvent && (!q.limitParked || parkedStatusSeq != q.parkedStatusSeq) {
 		if err := q.persistLimitParkedLocked(parkedStatusSeq); err != nil {
-			return fmt.Errorf("failed to persist usage-limit queue marker: %w", err)
+			return false, fmt.Errorf("failed to persist usage-limit queue marker: %w", err)
 		}
 	}
 	if err := q.resetCursorBeforeFreshAppendLocked(); err != nil {
-		return err
+		return false, err
 	}
 	q.seq++
 	rec, err := json.Marshal(queuedEvent{Seq: q.seq, TS: q.now(), Line: line})
 	if err != nil {
-		return err
+		return false, err
 	}
 	rec = append(rec, '\n')
 	n, err := q.appendRecord(q.path, rec)
@@ -516,7 +522,7 @@ func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusR
 			if capErr := q.enforceCapsLocked(); capErr != nil {
 				log.WarningLog.Printf("watch task %s: failed to enforce event-queue caps after a close failure: %v", q.taskID, capErr)
 			}
-			return err
+			return true, err
 		}
 		// A short write leaves a torn record that would corrupt the NEXT append:
 		// O_APPEND writes at the real end of file, so the next record glues onto
@@ -528,12 +534,12 @@ func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusR
 				q.recoverTornRecordLocked(n, terr, false)
 			}
 		}
-		return err
+		return false, err
 	}
 	q.size += int64(n)
 	q.pending++
 
-	return q.enforceCapsLocked()
+	return true, q.enforceCapsLocked()
 }
 
 func (q *eventQueue) enforceCapsLocked() error {

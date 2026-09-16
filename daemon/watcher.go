@@ -812,17 +812,33 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 
 // enqueueEvent appends the line to the durable backlog and wakes the drainer.
 // The line also lands in the run's failure tail — it did not become a
-// delivered event this run (#797). When the queue is unavailable or the append
-// fails, this degrades to the pre-#1129 behavior: logged and dropped.
+// delivered event this run (#797). When the queue is unavailable the caller's
+// own accounting decides the loss (there is none to record here); when the
+// append fails WITHOUT retaining the record, the event is neither delivered
+// nor durably held and goes through the same drop accounting as the rate-full
+// and queue-unavailable losses — an error is not proof of loss, because a
+// close/flush or cap fault can follow a landed record, so retention decides.
 func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer, limitParked bool, parkedStatusRecorded ...bool) {
 	tail.add(line)
 	if w.queue == nil {
 		return
 	}
 	statusRecorded := len(parkedStatusRecorded) > 0 && parkedStatusRecorded[0]
-	err := w.queue.enqueueWithParkedStatus(line, limitParked, statusRecorded)
+	retained, err := w.queue.enqueueWithParkedStatus(line, limitParked, statusRecorded)
 	if err != nil {
+		if retained {
+			// The record is in the backlog despite the degraded write; it will
+			// replay, so it is no loss — but the drainer still needs waking.
+			log.ErrorLog.Printf("watch task %s: queued event for replay, but the queue reported a degraded append: %v", w.taskID, err)
+			w.ensureDrainer()
+			return
+		}
 		log.ErrorLog.Printf("watch task %s: failed to queue event for replay; dropping it: %v", w.taskID, err)
+		now := time.Now()
+		dropped, outcomeChanged, logIt := w.countEventDrop(now)
+		if logIt || outcomeChanged {
+			w.persistDroppedEvents(dropped, now)
+		}
 		return
 	}
 	w.ensureDrainer()

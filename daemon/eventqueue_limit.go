@@ -136,7 +136,10 @@ func (q *eventQueue) recordParkedStatus(cursor eventQueueCursor) (bool, error) {
 func (q *eventQueue) headParkedStatusRecorded() (bool, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if err := q.retryLoadLocked(); err != nil {
+	// This check stands behind one-time terminal/lifecycle publications, so it
+	// must not route on a stale outage: retry the load unconditionally, the
+	// same discipline the event-carrying entries use.
+	if err := q.retryLoadNowLocked(); err != nil {
 		return false, err
 	}
 	if q.pending == 0 || q.parkedStatusSeq == 0 {

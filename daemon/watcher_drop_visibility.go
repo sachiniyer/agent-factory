@@ -91,17 +91,21 @@ func (w *taskWatcher) persistSupervisorStatus(status string) {
 }
 
 // parkedHeadSupersedesSupervisorStatus is the queue side of statusMu's
-// publication. An unreadable identity is unknown and therefore preserves the
-// actionable task status rather than guessing that a terminal report may hide
-// it. Caller holds statusMu.
+// publication. Only POSITIVE evidence of a recorded parked head defers a
+// supervisor report: the parked occurrence's durable marker survives a status
+// overwrite and is re-derived on recovery, so publishing a real terminal
+// outcome over an unverifiable queue loses only presentation in a window the
+// queue is already broken — while suppressing it has no recovery path and
+// would leave an ordinary backlog showing stale status past a permanently
+// stopped watcher. Caller holds statusMu.
 func (w *taskWatcher) parkedHeadSupersedesSupervisorStatus(status string) bool {
 	if w.queue == nil {
 		return false
 	}
 	recorded, err := w.queue.headParkedStatusRecorded()
 	if err != nil {
-		log.WarningLog.Printf("watch task %s: cannot verify parked queue-head status; preserving it rather than publishing %q: %v", w.taskID, status, err)
-		return true
+		log.WarningLog.Printf("watch task %s: cannot verify parked queue-head status; publishing %q rather than hiding a real lifecycle outcome: %v", w.taskID, status, err)
+		return false
 	}
 	return recorded
 }
