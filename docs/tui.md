@@ -120,7 +120,8 @@ For a named long-running command or a web preview with a URL/port, use
 - **`a`** archives the selected live session as the default done action, behind
   a confirmation — on an archived, Lost, or Dead row it does nothing. **`r`**
   restores an archived, Lost, or Dead session. **`D`** permanently kills a
-  session, including any uncommitted or unmerged work.
+  session, removing only the worktrees and branches af owns — user-owned
+  resources stay; uncommitted or unmerged work in af-owned resources may be lost.
 - **`m`** opens the tasks view to manage [scheduled and event-driven
   automations](tasks.md).
 
