@@ -18,6 +18,11 @@ func (q *eventQueue) loadLimitParkedLocked() error {
 		if os.IsNotExist(err) {
 			q.limitParked = false
 			q.parkedStatusSeq = 0
+			if q.pending == 0 {
+				// No marker on disk and no backlog left for a failed marker
+				// write to protect — the failure is moot here too.
+				q.limitParkedErr = nil
+			}
 			return nil
 		}
 		return fmt.Errorf("inspect usage-limit queue marker: %w", err)
@@ -33,6 +38,7 @@ func (q *eventQueue) loadLimitParkedLocked() error {
 		return fmt.Errorf("read usage-limit queue marker: %w", err)
 	}
 	q.limitParked = true
+	q.limitParkedErr = nil
 	q.parkedStatusSeq = 0
 	fields := strings.Fields(string(raw))
 	if len(fields) == 2 && fields[0] == "parked" {
@@ -56,10 +62,17 @@ func (q *eventQueue) persistLimitParkedLocked(statusSeq int64) error {
 		data = []byte("parked " + strconv.FormatInt(statusSeq, 10) + "\n")
 	}
 	if err := config.AtomicWriteFileRefusingLink(q.limitPath, data, 0644); err != nil {
+		// The marker could not be made durable, but the backlog file may still
+		// be appendable. Record the failure so the stdout reader blocks
+		// fail-closed instead of each later parked enqueue retrying this same
+		// write and dropping its event through the whole limit episode (#4226
+		// review).
+		q.limitParkedErr = err
 		return err
 	}
 	q.limitParked = true
 	q.parkedStatusSeq = statusSeq
+	q.limitParkedErr = nil
 	return nil
 }
 
@@ -81,6 +94,7 @@ func (q *eventQueue) clearLimitParkedLocked() error {
 	}
 	q.limitParked = false
 	q.parkedStatusSeq = 0
+	q.limitParkedErr = nil
 	return nil
 }
 
@@ -176,6 +190,19 @@ func (q *eventQueue) limitBackpressureState() (blocked, unknown bool) {
 	_ = q.retryLoadLocked()
 	if q.loadErr != nil {
 		return true, true
+	}
+	if q.limitParkedErr != nil {
+		if q.pending == 0 {
+			// The backlog the failed marker write guarded has fully drained —
+			// nothing is left for it to protect, so the block is moot.
+			q.limitParkedErr = nil
+		} else {
+			// A marker write that cannot land leaves protection durability
+			// unverifiable: fail closed rather than let the reader consume
+			// events that each retry of the same write would drop (#4226
+			// review).
+			return true, true
+		}
 	}
 	if !q.limitParked {
 		return false, false

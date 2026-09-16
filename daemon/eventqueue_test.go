@@ -1273,3 +1273,55 @@ func TestEventQueue_ParkedEnqueueRollbackKeepsPreexistingMarker(t *testing.T) {
 		t.Fatalf("dropped event changed the backlog: pending=%d", got)
 	}
 }
+
+// TestEventQueue_ParkedEnqueueRetainsAndBlocksWhenMarkerWriteFails reproduces
+// the failure where .limit-parked cannot be written while the JSONL stays
+// appendable — e.g., the events directory loses write permission after the
+// backlog file already exists: O_APPEND on an existing file needs no
+// directory write, but the atomic marker write creates a temp file in the
+// same directory and fails. Before the fix, every subsequent parked enqueue
+// retried that same write and dropped its event while the reader kept
+// consuming; now the event is retained and the reader blocks fail-closed
+// until the marker write recovers or the backlog drains (#4226 review).
+func TestEventQueue_ParkedEnqueueRetainsAndBlocksWhenMarkerWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "marker-write-fail")
+	if err := q.enqueue("seed-ordinary"); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	// The backlog file exists and stays appendable; nothing new can be
+	// created in the directory, so the marker temp file cannot land.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("read-only events dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	retained, err := q.enqueueWithParkedStatus("held-for-limit", true, true)
+	if err == nil {
+		t.Fatal("a failed marker write must still surface an error")
+	}
+	if !retained {
+		t.Fatal("a parked event was dropped although the backlog stayed appendable")
+	}
+	if got := q.pendingCount(); got != 2 {
+		t.Fatalf("retained event did not count as pending: %d", got)
+	}
+	if blocked, unknown := q.limitBackpressureState(); !blocked || !unknown {
+		t.Fatalf("marker write failure must block the reader fail-closed: blocked=%v unknown=%v", blocked, unknown)
+	}
+
+	// Recovery: once the directory is writable again the next mark lands the
+	// marker durably and the block releases with protection intact.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("restore events dir: %v", err)
+	}
+	if err := q.markLimitParked(); err != nil {
+		t.Fatalf("marker persist after recovery: %v", err)
+	}
+	if blocked, _ := q.limitBackpressureState(); blocked {
+		t.Fatal("reader stayed blocked after the marker landed durably")
+	}
+	if !q.retainLimitParked() {
+		t.Fatal("recovered marker did not restore limit retention")
+	}
+}

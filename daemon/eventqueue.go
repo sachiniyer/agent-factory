@@ -137,6 +137,13 @@ type eventQueue struct {
 	// not LastRunStatus: watcher lifecycle reporting may legitimately replace the
 	// display status without turning a retry of this head into a new occurrence.
 	parkedStatusSeq int64
+	// limitParkedErr records a usage-limit marker write the queue could not make
+	// durable while the backlog file stayed appendable — the protection state
+	// is then as unverifiable as an unreadable queue, so the stdout reader
+	// blocks fail-closed while any backlog the failed write would guard
+	// remains (#4226 review). Cleared when a marker lands durably, when the
+	// protection state is deliberately torn down, or once the backlog drains.
+	limitParkedErr error
 
 	dropped     int // events dropped to the overflow caps, for the drop log
 	lastDropLog time.Time
@@ -487,11 +494,17 @@ func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusR
 		parkedStatusSeq = q.seq + 1
 	}
 	markerExisted := q.limitParked
+	var markerErr error
 	if parkThisEvent && (!q.limitParked || parkedStatusSeq != q.parkedStatusSeq) {
 		if err := q.persistLimitParkedLocked(parkedStatusSeq); err != nil {
-			return false, fmt.Errorf("failed to persist usage-limit queue marker: %w", err)
-		}
-		if !markerExisted {
+			// The marker could not be made durable, but that is no reason to
+			// drop the event while the backlog file itself stays appendable —
+			// retaining it keeps the occurrence replayable, and limitParkedErr
+			// (set inside the persist) blocks the reader fail-closed so later
+			// events stage in the pipe rather than each retrying this same
+			// write and dropping through the whole episode (#4226 review).
+			markerErr = err
+		} else if !markerExisted {
 			// The marker just persisted describes a parked event that is not in
 			// the queue yet. If any later step drops that event — a failed
 			// cursor reset or append — an empty queue would keep the marker:
@@ -541,7 +554,7 @@ func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusR
 			if capErr := q.enforceCapsLocked(); capErr != nil {
 				log.WarningLog.Printf("watch task %s: failed to enforce event-queue caps after a close failure: %v", q.taskID, capErr)
 			}
-			return true, err
+			return true, errors.Join(markerErr, err)
 		}
 		// A short write leaves a torn record that would corrupt the NEXT append:
 		// O_APPEND writes at the real end of file, so the next record glues onto
@@ -558,7 +571,7 @@ func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusR
 	q.size += int64(n)
 	q.pending++
 
-	return true, q.enforceCapsLocked()
+	return true, errors.Join(markerErr, q.enforceCapsLocked())
 }
 
 func (q *eventQueue) enforceCapsLocked() error {
