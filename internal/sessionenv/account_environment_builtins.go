@@ -914,6 +914,17 @@ func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{
 		if err != nil {
 			return true
 		}
+		// A command substitution (`$(...)` or backticks) inside a literal `let`
+		// argument is unprovable: bash re-evaluates the substitution's stdout as
+		// FRESH arithmetic before using it, so `arr[$(echo CODEX_HOME=1)]` runs
+		// `echo CODEX_HOME=1`, splices `CODEX_HOME=1` back into the expression,
+		// and evaluates it as an arithmetic assignment to a denied name. The
+		// walk below judges the inner `echo` as inert data and never models that
+		// re-evaluation; accountSubscriptInArithmetic only finds a literal
+		// `name[`. Fail closed on any substitution the parser can see.
+		if arithmeticExprHasCommandSubstitution(parsed) {
+			return true
+		}
 		mutates := false
 		syntax.Walk(parsed, func(node syntax.Node) bool {
 			if nodeMutatesAccountEnvironment(node, names) {
@@ -927,6 +938,32 @@ func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{
 		}
 	}
 	return false
+}
+
+// arithmeticExprHasCommandSubstitution reports whether an arithmetic
+// expression tree contains a command substitution (`$(...)` or backticks).
+//
+// bash re-evaluates the stdout of a command substitution as FRESH arithmetic
+// before using it, including inside an array subscript that the parser reports
+// as a plain read. The substitution can therefore print `NAME=value` and have
+// bash execute it as an arithmetic assignment to a denied account-identity
+// variable while the surrounding expression only appears to read it. The
+// guard's own analysis judges the substitution's inner command (an `echo`) as
+// inert data and never models the re-evaluation, and accountSubscriptInArithmetic
+// only finds a literal `name[`, so neither can prove safety. Wherever a parsed
+// arithmetic AST is treated as authoritative — `let`, `(( ))`, `$(( ))`, or a
+// bash `let` clause — the presence of a command substitution makes the
+// expression unprovable and the guard fails closed.
+func arithmeticExprHasCommandSubstitution(expr syntax.ArithmExpr) bool {
+	found := false
+	syntax.Walk(expr, func(node syntax.Node) bool {
+		if _, ok := node.(*syntax.CmdSubst); ok {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func accountSubscriptInArithmetic(expression string, names map[string]struct{}) bool {
