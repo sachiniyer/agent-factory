@@ -169,6 +169,82 @@ func TestValidateAccountEnvironmentCommand_RefusesIndirectArithmeticTaint(t *tes
 	}
 }
 
+// TestValidateAccountEnvironmentCommand_RefusesTaintPropagation verifies that
+// taint propagates transitively through parameter-expansion copies. When `y=$x`
+// and `x` is tainted by a command substitution, bash stores x's value in y, so
+// `: $((y))` re-evaluates y as arithmetic — the same bypass as `: $((x))`.
+func TestValidateAccountEnvironmentCommand_RefusesTaintPropagation(t *testing.T) {
+	for _, command := range []string{
+		// One-hop copy: y=$x; y is tainted because x is.
+		"x=$(printf CODEX_HOME=1); y=$x; : $((y)); codex",
+		// Two-hop chain: z=$y; z is also tainted.
+		"x=$(printf CODEX_HOME=1); y=$x; z=$y; (( z )); codex",
+		// Copy used in a [[ ]] numeric comparison.
+		"x=$(printf CODEX_HOME=1); y=$x; [[ y -eq 0 ]]; codex",
+		// Copy used in let.
+		"x=$(printf CODEX_HOME=1); y=$x; let y; codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q propagates a tainted variable through a copy and must be refused", command)
+	}
+}
+
+// TestValidateAccountEnvironmentCommand_RefusesBareArithmeticVarInTest verifies
+// that a bare (un-prefixed) variable name used as a numeric [[ ]] operand is
+// caught when that variable is tainted. In bash arithmetic, `x` and `$x` are
+// equivalent; the guard must refuse both spellings.
+func TestValidateAccountEnvironmentCommand_RefusesBareArithmeticVarInTest(t *testing.T) {
+	for _, command := range []string{
+		// Bare variable name without $ in numeric [[ ]] operand.
+		"x=$(printf CODEX_HOME=1); [[ x -eq 0 ]]; codex",
+		"x=$(printf CODEX_HOME=1); [[ 0 -eq x ]]; codex",
+		// Other numeric operators.
+		"x=$(printf CODEX_HOME=1); [[ x -ne 0 ]]; codex",
+		"x=$(printf CODEX_HOME=1); [[ x -lt 0 ]]; codex",
+		"x=$(printf CODEX_HOME=1); [[ x -gt 0 ]]; codex",
+		"x=$(printf CODEX_HOME=1); [[ x -le 0 ]]; codex",
+		"x=$(printf CODEX_HOME=1); [[ x -ge 0 ]]; codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q uses a bare tainted variable in a numeric [[ ]] and must be refused", command)
+	}
+}
+
+// TestValidateAccountEnvironmentCommand_RefusesTaintedVarInSubscript verifies
+// that a tainted variable used as an array subscript is caught. In
+// `$((arr[x]))`, bash evaluates the subscript `x` as arithmetic, so if x is
+// tainted, its contents are re-evaluated — the same hazard as `: $((x))`.
+func TestValidateAccountEnvironmentCommand_RefusesTaintedVarInSubscript(t *testing.T) {
+	for _, command := range []string{
+		// Tainted variable as subscript in $(( )) arithmetic expansion.
+		"x=$(printf CODEX_HOME=1); : $((arr[x])); codex",
+		// Tainted variable as subscript in (( )) arithmetic command.
+		"x=$(printf CODEX_HOME=1); (( arr[x] )); codex",
+		// Tainted variable as subscript in let.
+		"x=$(printf CODEX_HOME=1); let 'arr[x]'; codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q uses a tainted variable as an array subscript and must be refused", command)
+	}
+}
+
+// TestValidateAccountEnvironmentCommand_RefusesExpandedTaintedVarInArithm verifies
+// that `$x` (a ParamExp) inside arithmetic is caught when x is tainted. The
+// `$(( $x ))` form expands x and re-evaluates the result as arithmetic.
+func TestValidateAccountEnvironmentCommand_RefusesExpandedTaintedVarInArithm(t *testing.T) {
+	for _, command := range []string{
+		// $x (ParamExp) inside $(( )).
+		"x=$(printf CODEX_HOME=1); : $(( $x )); codex",
+		// $x inside (( )).
+		"x=$(printf CODEX_HOME=1); (( $x )); codex",
+		// $x as subscript.
+		"x=$(printf CODEX_HOME=1); : $(( arr[$x] )); codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q uses $tainted in arithmetic and must be refused", command)
+	}
+}
+
 // The refusal above must stay narrow. A process tab is an arbitrary user
 // command, so ordinary arithmetic — including `$(( ))` that contains NO
 // command substitution — and command substitutions that appear OUTSIDE an
@@ -212,6 +288,11 @@ func TestValidateAccountEnvironmentCommand_AllowsProvableArithmeticAndExternalCm
 		// and used in arithmetic is provable.
 		"x=42; : $((x)); codex",
 		"x=1; (( x )); codex",
+		// Non-tainted variables in subscripts and bare [[ ]] forms are fine.
+		"x=42; : $((arr[x])); codex",
+		"x=42; [[ x -eq 0 ]]; codex",
+		// A variable copy from a non-tainted source is not tainted.
+		"x=42; y=$x; : $((y)); codex",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"command %q is provably free of identity mutation and must stay allowed", command)
