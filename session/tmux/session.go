@@ -247,7 +247,18 @@ type TmuxSession struct {
 	// time so a stale latch cannot pass a recreated session.
 	// Guarded by provenMu.
 	closedConclusively bool
-	provenMu           sync.RWMutex
+	// teardownInitiated records that af itself asked for this session's
+	// teardown. Every af-initiated teardown — kill, archive, task completion,
+	// handoff swap, root-agent reap — routes through close(), which sets it
+	// before kill-session runs; the status monitor reads it to keep an
+	// expected disappearance at INFO. A session vanishing WITHOUT the mark is
+	// the anomaly ERROR exists for (#4472). Cleared wherever this object is
+	// re-bound to a live session — Start and RestoreWithResult's live-session
+	// branch — so a stale mark cannot quiet a restored session's unexpected
+	// vanish.
+	// Guarded by provenMu.
+	teardownInitiated bool
+	provenMu          sync.RWMutex
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.
@@ -512,6 +523,21 @@ func (t *TmuxSession) setProvenNoPane(proven bool) {
 func (t *TmuxSession) setClosedConclusively(closed bool) {
 	t.provenMu.Lock()
 	t.closedConclusively = closed
+	t.provenMu.Unlock()
+}
+
+// TeardownInitiated reports whether af itself asked for this session's
+// teardown — the predicate the status monitor uses to keep expected
+// disappearances out of ERROR (#4472).
+func (t *TmuxSession) TeardownInitiated() bool {
+	t.provenMu.RLock()
+	defer t.provenMu.RUnlock()
+	return t.teardownInitiated
+}
+
+func (t *TmuxSession) setTeardownInitiated(initiated bool) {
+	t.provenMu.Lock()
+	t.teardownInitiated = initiated
 	t.provenMu.Unlock()
 }
 

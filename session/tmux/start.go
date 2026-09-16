@@ -16,6 +16,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// established about this name, it is about to be re-established or replaced.
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
+	t.setTeardownInitiated(false)
 	// Check if the session already exists. This is a POSITIVE existence gate, so
 	// it must not read the lossy bool: a wedged/timed-out has-session is NOT proof
 	// the name is taken, and ExistsOrUnknown would launder it into "already
@@ -595,6 +596,7 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	// liveness check for a pane that is still running.
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
+	t.setTeardownInitiated(false)
 	monitor := newStatusMonitor()
 	if workDir != "" {
 		monitor = newReattachStatusMonitor()

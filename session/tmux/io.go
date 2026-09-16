@@ -141,7 +141,17 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 		// CapturePaneContent has already probed ExistsOrUnknown on the
 		// error path, so use the wrapped sentinel rather than re-probing.
 		if errors.Is(err, ErrSessionGone) {
-			log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
+			// af-initiated teardown (kill, archive, task completion, handoff
+			// swap, root reap) routes through close(), which marks the session
+			// before kill-session runs — that disappearance is the request
+			// completing, not an anomaly, and at ~5,800 lines per log rotation
+			// it buried the errors that matter (#4472). Only a vanish af never
+			// asked for stays at ERROR.
+			if t.TeardownInitiated() {
+				log.InfoLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
+			} else {
+				log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
+			}
 			t.monitorMu.Lock()
 			mon.dead = true
 			t.monitorMu.Unlock()

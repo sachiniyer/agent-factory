@@ -135,6 +135,11 @@ func (t *TmuxSession) Close() (PaneState, error) {
 // false for interactive teardown (the captured-tree reaper remains asynchronous)
 // and true only when a caller will mutate the worktree immediately afterward.
 func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProcessOutcome) {
+	// Every af-initiated teardown of a tracked session routes here, so marking
+	// before kill-session runs is what lets the status monitor tell "af asked"
+	// from "vanished on its own" (#4472). A capture already in flight during
+	// teardown then reads the mark on its error path.
+	t.setTeardownInitiated(true)
 	var errs []error
 	r := &closeRun{t: t}
 
