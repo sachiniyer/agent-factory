@@ -65,7 +65,12 @@ jobs:
           exit 1
         fi
         go vet ./...
-        go test -v -race -count=1 ./...
+        # -race roughly triples the daemon package, which spawns real af daemons:
+        # it took 468s of Go's default 600s per-package budget at v1.0.287 and
+        # crossed it four days later, failing a release with a timeout rather than
+        # a real defect. PR CI never catches this because build.yml runs without
+        # -race. The default is Go's, not a considered budget for this suite.
+        go test -v -race -count=1 -timeout=30m ./...
         go build ./...
 
   build:
