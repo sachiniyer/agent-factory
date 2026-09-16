@@ -16,6 +16,10 @@ func TestMain(m *testing.M) {
 	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux
 	// server (preview tests issue real tmux kill-session commands).
 	verifyTmux := testguard.TmuxTripwire()
+	// #4469: fail loudly if a test-owned Codex process writes into the real
+	// ~/.codex store, and default CODEX_HOME into the sandbox alongside
+	// AGENT_FACTORY_HOME.
+	verifyCodex := testguard.CodexHomeTripwire()
 	// #1056: default the whole package into a sandboxed AGENT_FACTORY_HOME.
 	// Many tests here call log.Initialize without setting a home of their
 	// own; the sandbox routes those log files (and any stray config/state
@@ -41,6 +45,10 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	if err := verifyTmux(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	if err := verifyCodex(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}

@@ -39,6 +39,10 @@ func TestMain(m *testing.M) {
 	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux
 	// server (doctor tests drive real tmux via IsolateTmux).
 	verifyTmux := testguard.TmuxTripwire()
+	// #4469: fail loudly if a test-owned Codex process writes into the real
+	// ~/.codex store, and default CODEX_HOME into the sandbox alongside
+	// AGENT_FACTORY_HOME.
+	verifyCodex := testguard.CodexHomeTripwire()
 	restoreHome := testguard.SandboxHome()
 	// #1122: default the whole package onto a private tmux server so a test
 	// that forgets IsolateTmux can never create or sweep sessions on the
@@ -52,6 +56,10 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	if err := verifyTmux(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	if err := verifyCodex(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}

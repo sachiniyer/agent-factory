@@ -38,6 +38,10 @@ func TestMain(m *testing.M) {
 	// instead of the developer's real one. Sandbox AFTER the tripwires
 	// snapshot the real environment, BEFORE logging resolves its file path.
 	verifyTmux := testguard.TmuxTripwire()
+	// #4469: fail loudly if a test-owned Codex process writes into the real
+	// ~/.codex store, and default CODEX_HOME into the sandbox alongside
+	// AGENT_FACTORY_HOME so captures can never poll the live store.
+	verifyCodex := testguard.CodexHomeTripwire()
 	restoreHome := testguard.SandboxHome()
 	// #1122: default the whole package onto a private tmux server so a test
 	// that forgets IsolateTmux can never create or sweep sessions on the
@@ -53,6 +57,10 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	if err := verifyTmux(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	if err := verifyCodex(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}

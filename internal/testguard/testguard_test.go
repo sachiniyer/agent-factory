@@ -1,6 +1,7 @@
 package testguard
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -249,6 +250,225 @@ func TestSandboxHome_ScrubsAndRestoresMarkers(t *testing.T) {
 	if got := os.Getenv(envMarkerTestRun); got != "pre-sandbox-run" {
 		t.Fatalf("restore did not put %s back; got %q", envMarkerTestRun, got)
 	}
+}
+
+// TestSandboxHome_SetsAndRestoresCodexHome pins the #4469 fix: SandboxHome must
+// repoint CODEX_HOME at a usable directory INSIDE the Agent Factory sandbox —
+// the capture path falls back to the real ~/.codex when CODEX_HOME is unset —
+// and restore the ambient value afterwards.
+func TestSandboxHome_SetsAndRestoresCodexHome(t *testing.T) {
+	t.Setenv("CODEX_HOME", "/pre-sandbox-codex")
+
+	restore := SandboxHome()
+	afHome := os.Getenv("AGENT_FACTORY_HOME")
+	codexHome := os.Getenv("CODEX_HOME")
+	if codexHome == "/pre-sandbox-codex" || codexHome == "" {
+		t.Fatalf("SandboxHome did not repoint CODEX_HOME; got %q", codexHome)
+	}
+	if !strings.HasPrefix(codexHome, afHome+string(os.PathSeparator)) {
+		t.Fatalf("CODEX_HOME %q must live inside the sandbox %q", codexHome, afHome)
+	}
+	if _, err := os.Stat(codexHome); err != nil {
+		t.Fatalf("sandbox CODEX_HOME %q not usable: %v", codexHome, err)
+	}
+
+	restore()
+	if got := os.Getenv("CODEX_HOME"); got != "/pre-sandbox-codex" {
+		t.Fatalf("restore did not put CODEX_HOME back; got %q", got)
+	}
+}
+
+// TestSandboxHome_RestoresAbsentCodexHome is the other half of the #4469
+// contract: CODEX_HOME absent before the sandbox must be absent after it —
+// a restore that leaves it set leaks the sandbox path into the developer's
+// environment.
+func TestSandboxHome_RestoresAbsentCodexHome(t *testing.T) {
+	t.Setenv("CODEX_HOME", "placeholder")
+	if err := os.Unsetenv("CODEX_HOME"); err != nil {
+		t.Fatalf("unset CODEX_HOME: %v", err)
+	}
+
+	restore := SandboxHome()
+	if got := os.Getenv("CODEX_HOME"); got == "" {
+		t.Fatal("SandboxHome did not set CODEX_HOME")
+	}
+
+	restore()
+	if v, ok := os.LookupEnv("CODEX_HOME"); ok {
+		t.Fatalf("restore must unset CODEX_HOME (absent pre-sandbox); still set to %q", v)
+	}
+}
+
+// TestSandboxHome_PerTestCodexHomeOverrideWins pins the override contract a
+// capture-focused test relies on: t.Setenv("CODEX_HOME", fixture) inside a
+// test must beat the package-level sandbox default for that test's duration.
+func TestSandboxHome_PerTestCodexHomeOverrideWins(t *testing.T) {
+	t.Setenv("CODEX_HOME", "/pre-sandbox-codex")
+	restore := SandboxHome()
+	t.Cleanup(restore)
+	if got := os.Getenv("CODEX_HOME"); got == "/pre-sandbox-codex" || got == "" {
+		t.Fatalf("sandbox did not repoint CODEX_HOME; got %q", got)
+	}
+
+	override := t.TempDir()
+	t.Setenv("CODEX_HOME", override)
+	if got := os.Getenv("CODEX_HOME"); got != override {
+		t.Fatalf("per-test CODEX_HOME did not override the sandbox; got %q", got)
+	}
+}
+
+// codexSandbox points the codex tripwire's ambient resolution at a temp dir
+// and returns the fake store root.
+func codexSandbox(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+	return dir
+}
+
+// writeRollout materializes a minimal Codex rollout — session_meta header only —
+// under root/sessions/… the way Codex lays it out, with cwd as the session's
+// recorded working directory. name must be unique within the store.
+func writeRollout(t *testing.T, root, cwd, name string) string {
+	t.Helper()
+	path := filepath.Join(root, "sessions", "2026", "09", "16", name+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir rollout tree: %v", err)
+	}
+	header, err := json.Marshal(map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"id": name, "cwd": cwd},
+	})
+	if err != nil {
+		t.Fatalf("marshal rollout header: %v", err)
+	}
+	if err := os.WriteFile(path, append(header, '\n'), 0o644); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+	return path
+}
+
+// TestCodexHomeTripwire_AttributesTestOwnedRollout pins the firing half of the
+// tripwire: a rollout whose session_meta cwd sits under this test's temp dir
+// is provably this run's write into the ambient store — the signature of a
+// test that escaped its CODEX_HOME sandbox.
+func TestCodexHomeTripwire_AttributesTestOwnedRollout(t *testing.T) {
+	root := codexSandbox(t)
+	verify := CodexHomeTripwire()
+
+	path := writeRollout(t, root, t.TempDir(), "rollout-2026-09-16T12-00-00-3f7c9b1a")
+
+	err := verify()
+	if err == nil {
+		t.Fatal("tripwire did not report the test-owned rollout in the ambient store")
+	}
+	if !strings.Contains(err.Error(), filepath.Base(path)) {
+		t.Fatalf("tripwire error should name the rollout file, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "AF_DISABLE_CODEX_TRIPWIRE=1") {
+		t.Fatalf("tripwire diagnostic should name the disable switch, got: %v", err)
+	}
+}
+
+// TestCodexHomeTripwire_IgnoresForeignRollout pins the silent half: a rollout
+// written by a live Codex working in ITS project dir is not attributable to
+// this run — arrival during the package window is not ownership (#4194).
+func TestCodexHomeTripwire_IgnoresForeignRollout(t *testing.T) {
+	root := codexSandbox(t)
+	verify := CodexHomeTripwire()
+
+	writeRollout(t, root, "/opt/someones-real-project", "rollout-2026-09-16T12-05-00-8a1b2c3d")
+
+	if err := verify(); err != nil {
+		t.Fatalf("tripwire attributed a foreign rollout to this run: %v", err)
+	}
+}
+
+// TestCodexHomeTripwire_IgnoresUnattributableChange pins the documented blind
+// spot: a live Codex churns non-rollout files constantly (sqlites, history,
+// indices), and none of them carry anything tying them to this run — the
+// tripwire must stay silent rather than cry wolf.
+func TestCodexHomeTripwire_IgnoresUnattributableChange(t *testing.T) {
+	root := codexSandbox(t)
+	state := filepath.Join(root, "state_5.sqlite")
+	if err := os.WriteFile(state, []byte("v1"), 0o644); err != nil {
+		t.Fatalf("seed store file: %v", err)
+	}
+
+	verify := CodexHomeTripwire()
+	if err := os.WriteFile(state, []byte("v2-live-churn"), 0o644); err != nil {
+		t.Fatalf("modify store file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "history.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("create store file: %v", err)
+	}
+
+	if err := verify(); err != nil {
+		t.Fatalf("tripwire fired on unattributable store churn: %v", err)
+	}
+}
+
+// TestCodexHomeTripwire_SeesAmbientStoreThroughSandbox pins the construction
+// order TestMain relies on: the tripwire snapshots the ambient store BEFORE
+// SandboxHome repoints CODEX_HOME, so a test-owned rollout landing in the
+// ambient store mid-run is still caught even though CODEX_HOME elsewhere.
+func TestCodexHomeTripwire_SeesAmbientStoreThroughSandbox(t *testing.T) {
+	root := codexSandbox(t)
+	verify := CodexHomeTripwire()
+	restore := SandboxHome()
+	if got := os.Getenv("CODEX_HOME"); got == root {
+		restore()
+		t.Fatal("SandboxHome did not repoint CODEX_HOME")
+	}
+
+	writeRollout(t, root, t.TempDir(), "rollout-2026-09-16T12-10-00-5e6f7a8b")
+	// Mirror TestMain: the sandbox is restored before the tripwire verifies.
+	restore()
+
+	if err := verify(); err == nil {
+		t.Fatal("tripwire lost sight of the ambient store once CODEX_HOME was sandboxed")
+	}
+}
+
+func TestCodexHomeTripwire_SilentWhenUntouched(t *testing.T) {
+	codexSandbox(t)
+	verify := CodexHomeTripwire()
+	if err := verify(); err != nil {
+		t.Fatalf("tripwire fired on an untouched store: %v", err)
+	}
+}
+
+func TestCodexHomeTripwire_DisabledByEnv(t *testing.T) {
+	root := codexSandbox(t)
+	t.Setenv("AF_DISABLE_CODEX_TRIPWIRE", "1")
+	verify := CodexHomeTripwire()
+
+	writeRollout(t, root, t.TempDir(), "rollout-2026-09-16T12-15-00-9c0d1e2f")
+
+	if err := verify(); err != nil {
+		t.Fatalf("disabled tripwire must not fire, got: %v", err)
+	}
+}
+
+func TestAmbientCodexHome(t *testing.T) {
+	t.Run("CodexHomeEnvWins", func(t *testing.T) {
+		t.Setenv("CODEX_HOME", "/custom/codex")
+		if got := ambientCodexHome(); got != "/custom/codex" {
+			t.Fatalf("ambientCodexHome() = %q, want %q", got, "/custom/codex")
+		}
+	})
+	t.Run("FallsBackToDotCodex", func(t *testing.T) {
+		fakeHome := t.TempDir()
+		t.Setenv("HOME", fakeHome)
+		t.Setenv("CODEX_HOME", "placeholder")
+		if err := os.Unsetenv("CODEX_HOME"); err != nil {
+			t.Fatalf("unset CODEX_HOME: %v", err)
+		}
+		want := filepath.Join(fakeHome, ".codex")
+		if got := ambientCodexHome(); got != want {
+			t.Fatalf("ambientCodexHome() = %q, want %q", got, want)
+		}
+	})
 }
 
 // TestSandboxTmux_SetsAndRestores pins the #1122 backstop: SandboxTmux must

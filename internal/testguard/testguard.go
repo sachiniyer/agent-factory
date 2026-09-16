@@ -5,11 +5,12 @@
 // touches the real config.json, the package run fails loudly instead of the
 // user discovering days later that their settings were silently replaced
 // (#837). TmuxTripwire does the same for real tmux sessions leaked onto the
-// developer's tmux server, SandboxHome defaults a whole package into a
-// throwaway AGENT_FACTORY_HOME, SandboxTmux defaults a whole package onto a
-// private tmux server so no test can even see the developer's real one
-// (#1122), and IsolateTmux gives a single test a private server of its own so
-// nothing it creates can outlive it (#1056).
+// developer's tmux server, CodexHomeTripwire does it for test-owned writes
+// into the real ~/.codex store (#4469), SandboxHome defaults a whole package
+// into a throwaway AGENT_FACTORY_HOME and CODEX_HOME, SandboxTmux defaults a
+// whole package onto a private tmux server so no test can even see the
+// developer's real one (#1122), and IsolateTmux gives a single test a private
+// server of its own so nothing it creates can outlive it (#1056).
 //
 // This package deliberately has no dependency on the config package — config
 // imports session/tmux, and the tripwire must be usable from that package's
@@ -18,10 +19,13 @@
 package testguard
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +36,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
 )
 
@@ -268,13 +273,175 @@ func TmuxTripwire() func() error {
 	}
 }
 
+// ambientCodexHome resolves the Codex store the test process could touch with
+// its ambient environment: $CODEX_HOME when set, else ~/.codex — the same
+// fallback session.codexHomeDir applies when conversation capture runs with
+// no explicit home (#4469). "" when unresolvable, in which case the tripwire
+// is a no-op.
+func ambientCodexHome() string {
+	if home := strings.TrimSpace(os.Getenv("CODEX_HOME")); home != "" {
+		return home
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".codex")
+	}
+	return ""
+}
+
+// codexStoreFile is the stat-level record codexStoreSnapshot keeps per file —
+// size and mtime, never contents: a live store can hold gigabytes, and a
+// rewrite preserving both to the nanosecond is not a realistic test shape.
+type codexStoreFile struct {
+	size    int64
+	modNano int64
+}
+
+func codexStoreSnapshot(root string) map[string]codexStoreFile {
+	files := make(map[string]codexStoreFile)
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		files[rel] = codexStoreFile{size: info.Size(), modNano: info.ModTime().UnixNano()}
+		return nil
+	})
+	return files
+}
+
+// codexSessionWorkingDir reads the cwd a rollout's session_meta header records
+// — the same first line session.codexRolloutWorkingDir parses, in miniature so
+// testguard stays dependency-free. It is the one ownership signal in the store
+// a live Codex cannot forge for us: a rollout written by a test-spawned
+// process names the directory that process ran in.
+func codexSessionWorkingDir(path string) (string, bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = file.Close() }()
+	// The header is one small line; cap the read so a changed gigabyte file
+	// is not scanned for a newline it does not contain.
+	line, err := bufio.NewReader(io.LimitReader(file, 64<<10)).ReadBytes('\n')
+	if err != nil && len(line) == 0 {
+		return "", false
+	}
+	var header struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Cwd string `json:"cwd"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(line), &header); err != nil ||
+		header.Type != "session_meta" || !filepath.IsAbs(header.Payload.Cwd) {
+		return "", false
+	}
+	return header.Payload.Cwd, true
+}
+
+// codexTestRoots resolves the directories a test-owned Codex process plausibly
+// ran in: every sandbox SandboxHome recorded since checkpoint, plus the test
+// temp root (t.TempDir(), IsolateTmux, MkdirTemp all live under it) — and
+// /tmp literally, because SocketTempDir bypasses os.TempDir() on darwin. Both
+// sides are canonicalized with ResolveForCompare because the recorded cwd may
+// no longer exist by verify time (#1918, #2110).
+func codexTestRoots(checkpoint int) []string {
+	roots := []string{os.TempDir(), "/tmp"}
+	for dir := range sandboxRunsSince(checkpoint) {
+		roots = append(roots, dir)
+	}
+	resolved := make([]string, 0, len(roots))
+	for _, root := range roots {
+		resolved = append(resolved, pathutil.ResolveForCompare(root))
+	}
+	return resolved
+}
+
+// CodexHomeTripwire snapshots the ambient Codex store — $CODEX_HOME, else
+// ~/.codex — and returns a verify func for TestMain to call after m.Run().
+// Call it BEFORE SandboxHome so the snapshot reads the ambient store, and call
+// the returned verify AFTER SandboxHome's restore.
+//
+// Verify fails when a file under the real store was created or changed during
+// the run AND provably belongs to it: the file must parse as a Codex rollout
+// whose session_meta records a working directory under a sandbox this run
+// created or under the test temp root — the signature of a test that spawned
+// Codex with the ambient CODEX_HOME instead of a sandboxed one.
+//
+// Two deliberate blind spots, both forced by the shape of the thing guarded:
+//
+//   - Reads leave no trace a filesystem diff can see. What actually stops a
+//     capture polling the real store is SandboxHome pointing CODEX_HOME into
+//     the sandbox (#4469); this tripwire backs it up only on the write side a
+//     bypass could still reach.
+//   - A change that is not a rollout carries nothing tying it to this run, and
+//     a live Codex legitimately rewrites its own store constantly — sqlites,
+//     WALs, history, indices. Arrival time is not ownership (#4194): an
+//     unattributable change is ignored rather than reported, because a
+//     tripwire that cries wolf on every real Codex turn gets disabled.
+//
+// No-ops when the ambient home cannot be resolved or with
+// AF_DISABLE_CODEX_TRIPWIRE=1.
+func CodexHomeTripwire() func() error {
+	if os.Getenv("AF_DISABLE_CODEX_TRIPWIRE") == "1" {
+		return func() error { return nil }
+	}
+	root := ambientCodexHome()
+	if root == "" {
+		return func() error { return nil }
+	}
+	checkpoint := sandboxRunCheckpoint()
+	before := codexStoreSnapshot(root)
+	return func() error {
+		roots := codexTestRoots(checkpoint)
+		var owned []string
+		for rel, cur := range codexStoreSnapshot(root) {
+			if prev, existed := before[rel]; existed && prev == cur {
+				continue
+			}
+			cwd, ok := codexSessionWorkingDir(filepath.Join(root, rel))
+			if !ok {
+				continue
+			}
+			cwd = pathutil.ResolveForCompare(cwd)
+			for _, testRoot := range roots {
+				if pathutil.IsAtOrInside(cwd, testRoot) {
+					owned = append(owned, fmt.Sprintf("%s (cwd %s)", rel, cwd))
+					break
+				}
+			}
+		}
+		if len(owned) == 0 {
+			return nil
+		}
+		sort.Strings(owned)
+		return fmt.Errorf("codex tripwire: rollout file(s) %v in the real Codex store %s record a working directory owned by this test run — "+
+			"a test spawned Codex against the ambient store instead of a sandboxed CODEX_HOME (#4469). "+
+			"If these belong to a live Codex that genuinely ran inside the test's temp dirs, set AF_DISABLE_CODEX_TRIPWIRE=1", owned, root)
+	}
+}
+
 // SandboxHome points AGENT_FACTORY_HOME at a fresh temp dir for the whole
 // package run and returns a restore func. Call it from TestMain AFTER
-// ConfigTripwire (which must snapshot the real, pre-sandbox config) and
-// BEFORE log.Initialize (so the package's log file lands in the sandbox
-// instead of the production daemon log — #1056). Individual tests that
-// t.Setenv their own home still win for their duration; this is the default
-// for tests that never set one.
+// ConfigTripwire and CodexHomeTripwire (which must snapshot the real,
+// pre-sandbox stores) and BEFORE log.Initialize (so the package's log file
+// lands in the sandbox instead of the production daemon log — #1056).
+// Individual tests that t.Setenv their own home still win for their duration;
+// this is the default for tests that never set one.
+//
+// It also points CODEX_HOME at an empty codex-home/ inside the sandbox. The
+// name is the trap this exists to close: SandboxHome sandboxes
+// AGENT_FACTORY_HOME, not $HOME, and the capture path falls back to the real
+// ~/.codex when CODEX_HOME is unset — so without this a test that triggers a
+// capture polls the developer's live conversation store (#4469). Tests that
+// t.Setenv CODEX_HOME themselves keep working.
 //
 // It also scrubs the AF_SESSION/AF_SESSION_GEN/AF_HOME ancestry markers (#1120,
 // session/tmux/envmarker.go — string literals here because testguard stays
@@ -310,6 +477,34 @@ func SandboxHome() func() {
 	_ = os.Unsetenv("AF_SESSION")
 	_ = os.Unsetenv("AF_SESSION_GEN")
 	_ = os.Unsetenv("AF_HOME")
+	// codexHomeDir (session/conversation_capture.go) falls back to the real
+	// ~/.codex when CODEX_HOME is unset, so a test that triggers conversation
+	// capture — even indirectly through a spawn or handoff path — would
+	// otherwise snapshot and poll the developer's live store, holding its
+	// capture window open against files it was never meant to see (#4469).
+	// Point it inside this sandbox. Tests that t.Setenv their own CODEX_HOME
+	// still win for their duration; an ambient CODEX_HOME names a real store
+	// too, so it is redirected rather than respected.
+	prevCodexHome, hadCodexHome := os.LookupEnv("CODEX_HOME")
+	codexDir := filepath.Join(dir, "codex-home")
+	err = os.MkdirAll(codexDir, 0o755)
+	if err == nil {
+		err = os.Setenv("CODEX_HOME", codexDir)
+	}
+	if err != nil {
+		if had {
+			_ = os.Setenv("AGENT_FACTORY_HOME", prev)
+		} else {
+			_ = os.Unsetenv("AGENT_FACTORY_HOME")
+		}
+		if hadTestRun {
+			_ = os.Setenv(envMarkerTestRun, prevTestRun)
+		} else {
+			_ = os.Unsetenv(envMarkerTestRun)
+		}
+		_ = os.RemoveAll(dir)
+		panic("testguard: cannot set up sandbox CODEX_HOME: " + err.Error())
+	}
 	return func() {
 		if had {
 			_ = os.Setenv("AGENT_FACTORY_HOME", prev)
@@ -335,6 +530,11 @@ func SandboxHome() func() {
 			_ = os.Setenv(envMarkerTestRun, prevTestRun)
 		} else {
 			_ = os.Unsetenv(envMarkerTestRun)
+		}
+		if hadCodexHome {
+			_ = os.Setenv("CODEX_HOME", prevCodexHome)
+		} else {
+			_ = os.Unsetenv("CODEX_HOME")
 		}
 		_ = os.RemoveAll(dir)
 	}

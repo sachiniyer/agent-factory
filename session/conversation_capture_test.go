@@ -396,3 +396,21 @@ func TestWaitForPromptReceipt_UnsupportedAgentDoesNotInventReceipt(t *testing.T)
 	err := WaitForPromptReceipt(context.Background(), tmux.ProgramClaude, ConversationCaptureSnapshot{}, "briefing", 0)
 	require.True(t, errors.Is(err, ErrPromptReceiptUnavailable))
 }
+
+// TestCodexHomeDir_EnvWinsAndFallsBack pins the contract SandboxHome relies on:
+// CODEX_HOME wins when set, and unset falls back to $HOME/.codex — the ambient
+// store a test reaches when nothing sandboxes the env (#4469).
+func TestCodexHomeDir_EnvWinsAndFallsBack(t *testing.T) {
+	t.Run("EnvWins", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("CODEX_HOME", dir)
+		require.Equal(t, dir, codexHomeDir())
+	})
+	t.Run("FallsBackToDotCodex", func(t *testing.T) {
+		fakeHome := t.TempDir()
+		t.Setenv("HOME", fakeHome)
+		t.Setenv("CODEX_HOME", "placeholder")
+		require.NoError(t, os.Unsetenv("CODEX_HOME"))
+		require.Equal(t, filepath.Join(fakeHome, ".codex"), codexHomeDir())
+	})
+}

@@ -18,6 +18,10 @@ func TestMain(m *testing.M) {
 	sessionenv.HandleInternalExec()
 	verifyRealConfig := testguard.ConfigTripwire()
 	verifyTmux := testguard.TmuxTripwire()
+	// #4469: fail loudly if a test-owned Codex process writes into the real
+	// ~/.codex store, and default CODEX_HOME into the sandbox alongside
+	// AGENT_FACTORY_HOME.
+	verifyCodex := testguard.CodexHomeTripwire()
 	// #1056: default the package into a sandboxed AGENT_FACTORY_HOME so any
 	// in-process config/state/log access outside a per-test home stays out
 	// of the developer's real one.
@@ -34,6 +38,10 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	if err := verifyTmux(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	if err := verifyCodex(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}

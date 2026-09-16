@@ -25,6 +25,10 @@ func TestMain(m *testing.M) {
 	tmux.HandleDedicatedServerExec()
 	verifyRealConfig := testguard.ConfigTripwire()
 	verifyTmux := testguard.TmuxTripwire()
+	// #4469: fail loudly if a test-owned Codex process writes into the real
+	// ~/.codex store, and default CODEX_HOME into the sandbox alongside
+	// AGENT_FACTORY_HOME.
+	verifyCodex := testguard.CodexHomeTripwire()
 	restoreHome := testguard.SandboxHome()
 	restoreTmux := testguard.SandboxTmux()
 	aflog.Initialize(false)
@@ -37,6 +41,10 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	if err := verifyTmux(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	if err := verifyCodex(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}

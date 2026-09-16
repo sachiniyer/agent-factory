@@ -47,10 +47,14 @@ func captureLogs(t *testing.T) (info, errLog *logtest.Buffer) {
 func TestMain(m *testing.M) {
 	// #837: fail the package loudly if any test touches the real config.json.
 	verifyRealConfig := testguard.ConfigTripwire()
+	// #4469: fail loudly if a test-owned Codex process writes into the real
+	// ~/.codex store.
+	verifyCodex := testguard.CodexHomeTripwire()
 	// #1056: default the whole package into a sandboxed AGENT_FACTORY_HOME so
 	// stray config/state/log writes land in a temp dir instead of the
-	// developer's real one. Sandbox AFTER the tripwire snapshots the real
-	// environment, BEFORE logging resolves its file path.
+	// developer's real one. Sandbox AFTER the tripwires snapshot the real
+	// environment, BEFORE logging resolves its file path. SandboxHome also
+	// defaults CODEX_HOME into the same sandbox (#4469).
 	restoreHome := testguard.SandboxHome()
 	// #3661: the local-only `af config` guard reads the remote-daemon target, so a
 	// developer with AF_DAEMON_URL exported would otherwise get the refusal in
@@ -73,6 +77,10 @@ func TestMain(m *testing.M) {
 	restoreDaemonTarget()
 	restoreHome()
 	if err := verifyRealConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	if err := verifyCodex(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}

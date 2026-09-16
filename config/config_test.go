@@ -23,17 +23,25 @@ import (
 func TestMain(m *testing.M) {
 	// #837: fail the package loudly if any test touches the real config.json.
 	verifyRealConfig := testguard.ConfigTripwire()
+	// #4469: fail loudly if a test-owned Codex process writes into the real
+	// ~/.codex store.
+	verifyCodex := testguard.CodexHomeTripwire()
 	// #1056: default the whole package into a sandboxed AGENT_FACTORY_HOME so
 	// stray config/state/log writes land in a temp dir instead of the
-	// developer's real one. Sandbox AFTER the tripwire snapshots the real
+	// developer's real one. Sandbox AFTER the tripwires snapshot the real
 	// environment, BEFORE logging resolves its file path. Tests that assert
-	// env-dependent resolution set AGENT_FACTORY_HOME themselves.
+	// env-dependent resolution set AGENT_FACTORY_HOME themselves. SandboxHome
+	// also defaults CODEX_HOME into the same sandbox (#4469).
 	restoreHome := testguard.SandboxHome()
 	log.Initialize(false)
 	exitCode := m.Run()
 	log.Close()
 	restoreHome()
 	if err := verifyRealConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		exitCode = 1
+	}
+	if err := verifyCodex(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		exitCode = 1
 	}
