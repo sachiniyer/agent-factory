@@ -18,8 +18,10 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/shellquote"
 )
 
@@ -74,6 +76,44 @@ func BoundedLoop(period, lifetime time.Duration, body string) string {
 // forever.
 const ExpectedParentEnv = "AF_TESTGUARD_EXPECTED_PPID"
 
+// ExpectedOwnerStartEnv names the optional companion to ExpectedParentEnv:
+// the owner's proctree StartID recorded at spawn time. A bare pid names a
+// SLOT, not a process — once the owner's number is reissued, an
+// existence-only arm accepts the recycled replacement as the owner and holds
+// the fixture for as long as that stranger lives, the same leak the arm
+// exists to close (#4417 review). Spawners set both through ExpectedOwnerEnv
+// rather than formatting either by hand; a fixture launched with only the
+// pid keeps the existence semantics.
+const ExpectedOwnerStartEnv = "AF_TESTGUARD_EXPECTED_STARTID"
+
+// ExpectedOwnerEnv returns the environment a spawner passes a re-exec'd
+// fixture so ExitWhenOrphaned watches THIS process instance: the caller's
+// pid under ExpectedParentEnv plus its proctree StartID under
+// ExpectedOwnerStartEnv when the process table can read one. A platform
+// where proctree cannot identify the caller degrades to the pid-only
+// contract — the watchdog keeps existence semantics there rather than
+// refusing to arm.
+func ExpectedOwnerEnv() []string {
+	env := []string{ExpectedParentEnv + "=" + strconv.Itoa(os.Getpid())}
+	if self, err := proctree.Lookup(os.Getpid()); err == nil && self.StartID != 0 {
+		env = append(env, ExpectedOwnerStartEnv+"="+strconv.FormatUint(self.StartID, 10))
+	}
+	return env
+}
+
+// ExpectedOwnerEnvPairs is ExpectedOwnerEnv as key/value pairs, for callers
+// that export the pair by name (t.Setenv) rather than appending "K=V"
+// strings to an exec environment.
+func ExpectedOwnerEnvPairs() [][2]string {
+	var out [][2]string
+	for _, kv := range ExpectedOwnerEnv() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			out = append(out, [2]string{k, v})
+		}
+	}
+	return out
+}
+
 // ExitWhenOrphaned starts a watchdog that exits the current process once its
 // original owner is gone. It exists for fixtures that are re-exec'd copies
 // of the test binary (exec.Command(os.Args[0], ...)): the test binary is
@@ -100,13 +140,22 @@ func ExitWhenOrphaned(poll time.Duration) {
 	if v, err := strconv.Atoi(os.Getenv(ExpectedParentEnv)); err == nil && v > 0 {
 		expected = v
 	}
+	// The stamp binds the arm to the owner's process instance, not its slot:
+	// an owner that dies before this watchdog starts — or between two polls —
+	// frees its pid for reissue, and existence alone would then watch the
+	// unrelated replacement (#4417 review). No stamp means the spawner could
+	// not record one; the arm keeps existence semantics.
+	expectedStart := uint64(0)
+	if v, err := strconv.ParseUint(os.Getenv(ExpectedOwnerStartEnv), 10, 64); err == nil {
+		expectedStart = v
+	}
 	go func() {
 		for {
 			time.Sleep(poll)
 			if os.Getppid() != ppid {
 				os.Exit(0)
 			}
-			if expected != 0 && !processAlive(expected) {
+			if expected != 0 && !processAlive(expected, expectedStart) {
 				os.Exit(0)
 			}
 		}

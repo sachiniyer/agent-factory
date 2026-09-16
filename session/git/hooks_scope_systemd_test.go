@@ -273,11 +273,11 @@ func TestRestoreAdoptsAHookRunStillLiveInItsRealScope(t *testing.T) {
 	// prevents it from finishing the journal or launching entry 2; entry 1 must
 	// survive in its real unbound scope and only the adopter can run the suffix.
 	previous := exec.Command(os.Args[0], "-test.run=^TestRestoreAdoptsAHookRunStillLiveInItsRealScope$", "-test.v")
-	previous.Env = append(os.Environ(),
+	previous.Env = append(append(os.Environ(),
 		"AF_TEST_REAL_SCOPE_HELPER=1", "AF_TEST_REAL_SCOPE_HOME="+home,
 		"AF_TEST_REAL_SCOPE_REPO="+repoPath, "AF_TEST_REAL_SCOPE_TREE="+worktreePath,
 		"AF_TEST_REAL_SCOPE_SESSION="+sessionID,
-		testguard.ExpectedParentEnv+"="+strconv.Itoa(os.Getpid()))
+	), testguard.ExpectedOwnerEnv()...)
 	previous.Stdout, previous.Stderr = os.Stdout, os.Stderr
 	testguard.StartGroupProcess(t, previous)
 	previousReaped := false

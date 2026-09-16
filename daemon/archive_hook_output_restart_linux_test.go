@@ -47,13 +47,12 @@ func TestArchiveHookOutputSurvivesRunnerExit(t *testing.T) {
 	)
 
 	runner := exec.Command(os.Args[0], "-test.run=^TestArchiveHookOutputSurvivesRunnerExit$")
-	runner.Env = append(os.Environ(),
+	runner.Env = append(append(os.Environ(),
 		archiveRestartHelperEnv+"=1",
 		"AF_TEST_RESTART_HOME="+home,
 		"AF_TEST_RESTART_WORKTREE="+worktree,
 		"AF_TEST_RESTART_COMMAND="+command,
-		testguard.ExpectedParentEnv+"="+strconv.Itoa(os.Getpid()),
-	)
+	), testguard.ExpectedOwnerEnv()...)
 	testguard.StartGroupProcess(t, runner)
 
 	hookPID := waitForArchiveRestartValue(t, pidFile, 5*time.Second)

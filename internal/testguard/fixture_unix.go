@@ -25,10 +25,21 @@ import (
 // fixtures deliberately `trap "" TERM` and must stay uncooperative for the
 // test to remain meaningful; cleanup kills them from the harness side.
 //
+// The group kill also ORPHANS those mid-flight grandchildren, so the test
+// process is marked a child subreaper for the test's duration and the
+// cleanup reaps the reparented dead after the kill: on a containerized
+// runner whose PID 1 never collects, each killed grandchild would otherwise
+// sit as a permanent zombie under it (#4417 review). Platforms without a
+// subreaper mechanism no-op both halves — their init does reap.
+//
 // The returned cmd is started; callers may still Wait on it themselves — the
 // cleanup reap is a harmless no-op then — and should not Setpgid twice.
 func StartGroupProcess(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 	t.Helper()
+	// Adopt the group's orphans BEFORE any can exist: reparenting only lands
+	// on a subreaper that was marked before the orphan's parent died, so this
+	// must precede the fixture's first child, not the kill that orphans them.
+	becomeOrphanReaper(t)
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -79,8 +90,12 @@ func StartGroupProcess(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 	// Process.Wait rather than cmd.Wait: a test may already hold a cmd.Wait
 	// goroutine, and concurrent Cmd.Wait calls are a data race on
 	// ProcessState — os.Process.Wait is the concurrent-safe reap.
+	// reapGroupOrphans sits between the kill and the Waits so the grandchildren
+	// the kill just orphaned are collected while the group's members are
+	// confirmed dead — the Waits then no-op on whatever the drain took first.
 	t.Cleanup(func() { _, _ = pin.Process.Wait() })
 	t.Cleanup(func() { _, _ = cmd.Process.Wait() })
+	t.Cleanup(func() { reapGroupOrphans(t, cmd.Process.Pid) })
 	KillProcessGroupOnCleanup(t, cmd.Process.Pid)
 	return cmd
 }
@@ -135,19 +150,27 @@ func StartGroupProcessUnpinned(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 // pin it was bought for.
 const groupPinScript = `if command -v ps >/dev/null 2>&1; then _af_pin_i=0; while [ "$_af_pin_i" -lt 86400 ]; do _af_pin_stat=$(ps -o stat= -p "$1" 2>/dev/null); case "$_af_pin_stat" in ""|Z*|X*|x*) exit 0;; esac; sleep 1; _af_pin_i=$((_af_pin_i + 1)); done; else sleep 86400; fi`
 
-// processAlive reports whether pid currently names a RUNNING process. It reads
-// the process table rather than kill(pid, 0): signal-0 succeeds on a ZOMBIE,
-// and the owner an ExitWhenOrphaned watchdog watches can be exactly that — a
-// fixture that booted after its spawner died gets reparented before its first
-// check, so only the expected-pid arm can stop it, and a kill-0 arm would hold
-// it alive over a corpse the spawner's parent has not collected (#4417
-// review). Lookup reports zombies and gone processes alike as exited, and any
-// unreadable pid collapses to dead — the safe direction for a watchdog, which
-// loses a test process to a false positive but never leaks one to a false
-// negative (the #4412 failure shape).
-func processAlive(pid int) bool {
-	_, err := proctree.Lookup(pid)
-	return err == nil
+// processAlive reports whether pid currently names a RUNNING process — the
+// instance stamped start when the spawner recorded one, any live process
+// when start is 0. It reads the process table rather than kill(pid, 0):
+// signal-0 succeeds on a ZOMBIE, and the owner an ExitWhenOrphaned watchdog
+// watches can be exactly that — a fixture that booted after its spawner died
+// gets reparented before its first check, so only the expected-pid arm can
+// stop it, and a kill-0 arm would hold it alive over a corpse the spawner's
+// parent has not collected (#4417 review). The stamp matters for the same
+// arm: a bare pid names a slot, and once the owner's number is reissued the
+// recycled process still answers Lookup — the watchdog would hold the
+// fixture to a stranger for as long as the replacement lives, which is the
+// leak this arm exists to close. Lookup reports zombies and gone processes
+// alike as exited, and any unreadable pid collapses to dead — the safe
+// direction for a watchdog, which loses a test process to a false positive
+// but never leaks one to a false negative (the #4412 failure shape).
+func processAlive(pid int, start uint64) bool {
+	p, err := proctree.Lookup(pid)
+	if err != nil {
+		return false
+	}
+	return start == 0 || p.StartID == start
 }
 
 // KillProcessGroupOnCleanup registers a t.Cleanup that SIGKILLs process

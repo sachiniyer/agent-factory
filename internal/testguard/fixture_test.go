@@ -3,15 +3,21 @@
 package testguard
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"golang.org/x/sys/unix"
 )
 
 // #4412: every fixture loop these builders emit must self-terminate — the
@@ -111,6 +117,79 @@ func TestStartGroupProcessKillReachesGrandchildren(t *testing.T) {
 	}
 }
 
+// The whole-group kill orphans the grandchildren it takes down — including
+// the pin's own `sleep 1`, so even a childless fixture leaves one — and on a
+// containerized runner whose PID 1 never collects, each would sit as a
+// permanent zombie (#4417 review). StartGroupProcess marks this process the
+// subreaper before the fixture forks, so the kill lands them here; the
+// drain must then collect the group rather than leave it held.
+func TestReapGroupOrphansCollectsKilledGrandchildren(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the orphan drain exists where a container init may not reap")
+	}
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdoutR.Close()
+	cmd := exec.Command("sh", "-c", "sleep 60 & echo $!; exec sleep 60")
+	cmd.Stdout = stdoutW
+	StartGroupProcess(t, cmd)
+	stdoutW.Close()
+	var grandchild int
+	if _, err := fmt.Fscanf(stdoutR, "%d", &grandchild); err != nil {
+		t.Fatalf("read grandchild pid: %v", err)
+	}
+	pgid := cmd.Process.Pid
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill group: %v", err)
+	}
+	// The kill orphans the grandchild into the subreaper mark: /proc shows it
+	// a zombie CHILD OF THIS TEST — the in-flight state that makes a lone
+	// ECHILD premature, and the proof the drain below had work to do.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		state, ppid := procStatStatePPID(grandchild)
+		if state == "Z" && ppid == os.Getpid() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("grandchild %d never reparented here as a zombie (state %q ppid %d)", grandchild, state, ppid)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	reapGroupOrphans(t, pgid)
+	var status unix.WaitStatus
+	var rusage unix.Rusage
+	if _, err := unix.Wait4(grandchild, &status, unix.WNOHANG, &rusage); !errors.Is(err, unix.ECHILD) {
+		t.Errorf("grandchild %d still waits to be collected after the group reap (err %v)", grandchild, err)
+	}
+}
+
+// procStatStatePPID reads a process's state letter and parent pid from
+// /proc — the zombie-observable proof of reparenting: proctree.Lookup
+// reports a zombie as exited without a Process, so the adoption check reads
+// the stat entry itself.
+func procStatStatePPID(pid int) (string, int) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return "", -1
+	}
+	closeIdx := bytes.LastIndexByte(data, ')')
+	if closeIdx < 0 || closeIdx+2 > len(data) {
+		return "", -1
+	}
+	fields := strings.Fields(string(data[closeIdx+2:]))
+	if len(fields) < 2 {
+		return "", -1
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return fields[0], -1
+	}
+	return fields[0], ppid
+}
+
 // A re-exec'd fixture must die when its owner does (#4412): spawn a wrapper
 // that starts the watchdog child, kill the wrapper, and the child — now
 // reparented — must exit on its own.
@@ -176,12 +255,41 @@ func TestProcessAliveReportsZombieDead(t *testing.T) {
 	t.Cleanup(func() { _, _ = cmd.Process.Wait() })
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if !processAlive(cmd.Process.Pid) {
+		if !processAlive(cmd.Process.Pid, 0) {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Errorf("unreaped zombie %d still reported alive by processAlive", cmd.Process.Pid)
+}
+
+// The existence arm must bind the owner's process INSTANCE, not its pid slot
+// (#4417 review): a dead owner's number is reissued, and a pid-only watch
+// would then hold the fixture to the unrelated replacement for as long as it
+// lives. A stamped owner answers alive only while pid AND StartID match —
+// the same identity pair the editor registry cleanup validates.
+func TestProcessAliveBindsOwnerStartStamp(t *testing.T) {
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start stamped candidate: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	self, err := proctree.Lookup(cmd.Process.Pid)
+	if err != nil {
+		t.Fatalf("look up live fixture %d: %v", cmd.Process.Pid, err)
+	}
+	if self.StartID == 0 {
+		t.Skip("proctree reports no start stamp on this platform")
+	}
+	if !processAlive(cmd.Process.Pid, self.StartID) {
+		t.Errorf("live process %d with its own StartID reported dead", cmd.Process.Pid)
+	}
+	if processAlive(cmd.Process.Pid, self.StartID+1) {
+		t.Errorf("process %d accepted a foreign StartID — a recycled pid would pass as the owner", cmd.Process.Pid)
+	}
+	if !processAlive(cmd.Process.Pid, 0) {
+		t.Errorf("process %d with no stamp must keep existence semantics", cmd.Process.Pid)
+	}
 }
 
 // The group pin must die with the test process it watches, not with the

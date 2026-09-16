@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -49,14 +48,13 @@ func TestPostWorktreeHookOutputSurvivesRunnerExit(t *testing.T) {
 
 	command := restartProbeCommand(pidFile, releaseFile, statusFile, writer)
 	runner := exec.Command(os.Args[0], "-test.run=^TestPostWorktreeHookOutputSurvivesRunnerExit$")
-	runner.Env = append(os.Environ(),
+	runner.Env = append(append(os.Environ(),
 		postWorktreeRestartHelperEnv+"=1",
 		"AF_TEST_RESTART_HOME="+home,
 		"AF_TEST_RESTART_REPO="+repo,
 		"AF_TEST_RESTART_WORKTREE="+worktree,
 		"AF_TEST_RESTART_COMMAND="+command,
-		testguard.ExpectedParentEnv+"="+strconv.Itoa(os.Getpid()),
-	)
+	), testguard.ExpectedOwnerEnv()...)
 	testguard.StartGroupProcess(t, runner)
 
 	hookPID := waitForPidFile(t, pidFile, 20*time.Second)

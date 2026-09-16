@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,8 +45,8 @@ func TestHookListResumesAfterRestart(t *testing.T) {
 	}})
 	home, _ := config.GetConfigDir()
 	runner := exec.Command(os.Args[0], "-test.run=^TestHookListResumesAfterRestart$")
-	runner.Env = append(os.Environ(), "AF_TEST_LIST_HELPER=1", "AF_TEST_LIST_REPO="+repo, "AF_TEST_LIST_TREE="+tree, "AF_TEST_LIST_HOME="+home,
-		testguard.ExpectedParentEnv+"="+strconv.Itoa(os.Getpid()))
+	runner.Env = append(append(os.Environ(), "AF_TEST_LIST_HELPER=1", "AF_TEST_LIST_REPO="+repo, "AF_TEST_LIST_TREE="+tree, "AF_TEST_LIST_HOME="+home),
+		testguard.ExpectedOwnerEnv()...)
 	testguard.StartGroupProcess(t, runner)
 	hookPID := waitForPidFile(t, pid, 10*time.Second)
 	t.Cleanup(func() { _ = killProcessGroup(hookPID) })
