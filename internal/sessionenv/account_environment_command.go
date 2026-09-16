@@ -55,65 +55,6 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 	return false
 }
 
-// fileHasCmdSubst reports whether a parsed shell file contains any command
-// substitution ($(…) or backtick form) anywhere in its AST, including inside
-// subshells and nested constructs.
-func fileHasCmdSubst(file syntax.Node) bool {
-	found := false
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if found {
-			return false
-		}
-		if _, ok := node.(*syntax.CmdSubst); ok {
-			found = true
-			return false
-		}
-		return true
-	})
-	return found
-}
-
-// fileHasArithmeticContext reports whether a parsed shell file contains any
-// arithmetic-evaluation context: $(( )), (( )), let, or a C-style for loop.
-// These are the shell constructs that re-evaluate a variable's string value as
-// fresh arithmetic, making a prior command substitution stored in a variable
-// into a deferred arithmetic mutation.
-//
-// The check also covers numeric [[ ]] operators (-eq/-ne/-lt/-gt/-le/-ge) and
-// arithmetic subscripts and slice offsets in parameter expansions and indexed
-// assignments, all of which trigger the same re-evaluation.
-func fileHasArithmeticContext(file syntax.Node) bool {
-	found := false
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if found {
-			return false
-		}
-		switch n := node.(type) {
-		case *syntax.ArithmExp, *syntax.ArithmCmd, *syntax.LetClause, *syntax.CStyleLoop:
-			found = true
-			return false
-		case *syntax.BinaryTest:
-			switch n.Op {
-			case syntax.TsEql, syntax.TsNeq, syntax.TsLeq, syntax.TsGeq, syntax.TsLss, syntax.TsGtr:
-				found = true
-				return false
-			}
-		case *syntax.ParamExp:
-			if n.Index != nil || n.Slice != nil {
-				found = true
-				return false
-			}
-		case *syntax.Assign:
-			if n.Index != nil {
-				found = true
-				return false
-			}
-		}
-		return true
-	})
-	return found
-}
-
 func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}, tainted map[string]struct{}) bool {
 	switch node := node.(type) {
 	case *syntax.CallExpr:
