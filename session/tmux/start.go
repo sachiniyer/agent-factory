@@ -111,6 +111,7 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("%w: error starting tmux session: %w", ErrSessionNotStarted, err)
 	}
 
+	t.observeStart(StartBeforeExistencePoll)
 	// Poll for session existence with exponential backoff. Break only on a probe
 	// that ANSWERED "exists" (known && exists): reading the lossy bool here let a
 	// mid-poll wedge exit the loop as if the session had come up, so Start reported
@@ -219,6 +220,7 @@ func (t *TmuxSession) Start(workDir string) error {
 
 	// Attach to the session we just created. Pass empty workDir so a missing
 	// session here surfaces as an error rather than recursively re-spawning.
+	t.observeStart(StartBeforeAttachProbe)
 	err = t.Restore("")
 	if err != nil {
 		// Probe BEFORE Close (which kills the session): the existence poll
