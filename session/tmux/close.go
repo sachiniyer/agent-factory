@@ -176,6 +176,12 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 				leaked = nil
 			case exists:
 				errs = append(errs, errors.Join(fmt.Errorf("error killing tmux session: %w", err), ErrSessionStillAlive))
+				// tmux refused the teardown and answered that the session is live, so
+				// no af request describes it any more. Callers such as the account swap
+				// keep monitoring it, and a later vanish af never asked for must reach
+				// ERROR (Codex on #4473). The timed-out branches above leave the mark:
+				// af asked, and nothing answered that the request failed.
+				t.setTeardownInitiated(false)
 				// Idempotent teardown (#967): a kill-session that fails because the
 				// session is already gone has achieved Close's goal — a dead session is
 				// the desired end state. Only a session that survives the kill is a

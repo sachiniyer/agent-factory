@@ -252,10 +252,20 @@ type TmuxSession struct {
 	// handoff swap, root-agent reap — routes through close(), which sets it
 	// before kill-session runs; the status monitor reads it to keep an
 	// expected disappearance at INFO. A session vanishing WITHOUT the mark is
-	// the anomaly ERROR exists for (#4472). Cleared wherever this object is
-	// re-bound to a live session — Start and RestoreWithResult's live-session
-	// branch — so a stale mark cannot quiet a restored session's unexpected
-	// vanish.
+	// the anomaly ERROR exists for (#4472).
+	//
+	// The mark tracks one fact, so it clears on exactly one kind of evidence:
+	// tmux ANSWERING that a session is live behind this name, which means no af
+	// request describes the session there now. That answer arrives at five
+	// sites — close()'s probe finding the session survived its kill, Start's
+	// gate finding the name taken, Start's poll confirming the replacement,
+	// RestoreWithResult rebinding on an answered probe, and
+	// ClosedConclusivelyAndStillAbsent finding the name live again. Every other
+	// path leaves it as it was: a timed-out kill or probe, and a Start that fails
+	// before a replacement is live, have learned nothing that makes af's request
+	// stale. Clearing on those turned af's own teardown into an ERROR, and
+	// keeping it past a refused kill quieted a live session's later vanish
+	// (Codex on #4473).
 	// Guarded by provenMu.
 	teardownInitiated bool
 	provenMu          sync.RWMutex
@@ -483,8 +493,11 @@ func (t *TmuxSession) ClosedConclusivelyAndStillAbsent() bool {
 	switch {
 	case known && exists:
 		// The name is live again: the stored proof is superseded, not stale-
-		// but-still-usable. Drop it so no later consumer re-checks it.
+		// but-still-usable. Drop it so no later consumer re-checks it. The
+		// teardown mark goes with it: the session behind the name is not the one
+		// af closed.
 		t.setClosedConclusively(false)
+		t.setTeardownInitiated(false)
 		return false
 	default:
 		return known && !exists

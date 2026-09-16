@@ -16,7 +16,12 @@ func (t *TmuxSession) Start(workDir string) error {
 	// established about this name, it is about to be re-established or replaced.
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
-	t.setTeardownInitiated(false)
+	// The teardown mark is NOT a proof and is not superseded by the attempt: on a
+	// same-object restart (agent swap) it describes the session af just closed,
+	// which is still what the status monitor would report gone if this Start
+	// fails before a replacement exists. It clears below only on tmux's answer
+	// that a session is live behind the name (Codex on #4473).
+	//
 	// Check if the session already exists. This is a POSITIVE existence gate, so
 	// it must not read the lossy bool: a wedged/timed-out has-session is NOT proof
 	// the name is taken, and ExistsOrUnknown would launder it into "already
@@ -27,6 +32,9 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("%w: has-session probe for session %q did not answer", ErrTmuxTimeout, t.sanitizedName)
 	}
 	if exists {
+		// A live session af did not just create holds the name, so no teardown
+		// request describes it.
+		t.setTeardownInitiated(false)
 		return fmt.Errorf("%w: tmux session already exists: %s", ErrSessionNotStarted, t.sanitizedName)
 	}
 	// The name is positively absent, so any Start from here creates a new pane
@@ -122,6 +130,9 @@ func (t *TmuxSession) Start(workDir string) error {
 	sleepDuration := 5 * time.Millisecond
 	for {
 		if exists, known := t.ProbeSession(); known && exists {
+			// The replacement is live: from here on a vanish is this session's,
+			// and af has not asked for it.
+			t.setTeardownInitiated(false)
 			break
 		}
 		select {
@@ -558,13 +569,14 @@ func (t *TmuxSession) Restore(workDir string) error {
 // branch successfully created a replacement process. Callers that retain facts
 // about one concrete pane use this result to retire them only on replacement.
 func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
-	// !ExistsOrUnknown is the definitively-absent branch (#1962): only a session
+	// !existsOrUnknown is the definitively-absent branch (#1962): only a session
 	// tmux CONFIRMED gone triggers the re-spawn. A wedged→"exists" falls through
 	// to the pure rebind below, which is the safe direction — re-spawning against
 	// a server that is merely wedged around a still-live session would create a
 	// duplicate. The #386 respawn design has always fired only on definitive
 	// absence, and this preserves it.
-	if !t.ExistsOrUnknown() {
+	existsOrUnknown, answered := sessionExistsReportingAnswer(t.cmdExec, t.sanitizedName)
+	if !existsOrUnknown {
 		if workDir == "" {
 			return RestoreReattached, fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
 		}
@@ -596,7 +608,13 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	// liveness check for a pane that is still running.
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
-	t.setTeardownInitiated(false)
+	// The teardown mark clears only on an ANSWERED probe. Clearing a proof on
+	// "exists or unknown" is the safe direction; clearing the mark is not — a
+	// wedged probe after af closed this session would turn af's own teardown
+	// into an ERROR once the server answers (Codex on #4473).
+	if answered {
+		t.setTeardownInitiated(false)
+	}
 	monitor := newStatusMonitor()
 	if workDir != "" {
 		monitor = newReattachStatusMonitor()
