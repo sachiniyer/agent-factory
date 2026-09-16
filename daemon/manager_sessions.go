@@ -23,7 +23,7 @@ var errSessionNotFound = errors.New("not found")
 // request's own (possibly stale) id under a cross-repo title collision (#1592
 // Phase 5 follow-up).
 func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, error) {
-	return m.killSessionRequestedBy(req, "internal daemon caller", nil)
+	return m.killSessionRequestedBy(req, "internal daemon caller", nil, false)
 }
 
 // sessionTeardownGuard is an extra precondition a caller may attach to a
@@ -55,7 +55,12 @@ func (m *Manager) runSessionTeardownGuard(guard sessionTeardownGuard, key string
 	return guard(current)
 }
 
-func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester string, guard sessionTeardownGuard) (session.InstanceData, error) {
+// taskTargetHeld reports that the caller already holds taskTargetMu — only
+// DeleteProject, which keeps it for its whole run and whose blocker preflight
+// already refused enabled tasks targeting every session it removes. For that
+// caller the kill-side collision fence is both redundant and impossible to
+// re-enter; everyone else takes the mutex inside the fence branch below.
+func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester string, guard sessionTeardownGuard, taskTargetHeld bool) (session.InstanceData, error) {
 	instance, repoID, title, resolvedID, data, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return session.InstanceData{}, err
@@ -67,6 +72,44 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	req.Title = title
 	resolved := session.InstanceData{ID: resolvedID, Title: title}
 	targetID := killTargetStableID(instance, data)
+
+	// A record whose title merely COLLIDES with the reserved tmux name — the
+	// local case variant "Ro ot" owning af_Root, or a remote "ro ot" with no
+	// local name at all — is the one deletion that permanently strands the
+	// tasks bound to it: delivery's auto-create can never respawn the title,
+	// because ReservedTitleCollision refuses it on every later run (#4407
+	// review). The task-enable gate refuses NEW bindings to these titles now,
+	// so the only bindings this fence can meet were enabled before the widened
+	// admission — and they are still armed and delivering to the live record
+	// until the next arming pass re-validates them. Killing the record inside
+	// that window turns a working automation into a permanent per-run failure;
+	// mirror the archive fence instead: refuse the kill while enabled tasks
+	// target the title, naming each one to disable or retarget first. Ordinary
+	// titles need no fence — the next delivery auto-creates the record afresh —
+	// and the canonical reserved record is excluded by its own symmetry: the
+	// task-enable gate only accepts a "root" binding it has proven the ensure
+	// loop will materialize. taskTargetMu is the same mutex the task-writer
+	// validation runs under, held from this read through the record's deletion
+	// so an enable cannot commit in the gap.
+	backendType := ""
+	if data != nil {
+		backendType = data.BackendType
+	} else if instance != nil {
+		backendType = instance.BackendType()
+	}
+	if session.ReservedTitleCollision(title) != "" &&
+		!session.IsReservedRecordTitle(title, backendType) &&
+		!taskTargetHeld {
+		m.taskTargetMu.Lock()
+		defer m.taskTargetMu.Unlock()
+		targeted, taskErr := m.enabledTasksTargetingSession(repoID, title)
+		if taskErr != nil {
+			return session.InstanceData{}, fmt.Errorf("cannot kill session %q: could not determine whether enabled tasks target it; nothing was changed: %w", title, taskErr)
+		}
+		if len(targeted) > 0 {
+			return session.InstanceData{}, fmt.Errorf("cannot kill session %q: enabled task(s) target it and this title can never be re-created once the record is gone (its tmux name collides with the reserved root name, which admission refuses): %s; disable or retarget them, then kill again", title, describeTargetTasks(targeted))
+		}
+	}
 	// Kill destroys the session unconditionally (#1579). The old unmerged-work
 	// guard that refused kills with commits-not-on-base / a dirty worktree / a
 	// branch mismatch was dropped by owner decision: it over-refused ordinary

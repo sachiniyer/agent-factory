@@ -421,7 +421,11 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 			// lookup. Besides making a concurrent completed kill distinguishable,
 			// this prevents a same-title replacement from being torn down in the
 			// original target's place. Legacy id-less rows retain title lookup.
-			killed, err := m.KillSession(KillSessionRequest{ID: t.id, Title: t.title, RepoID: repoID})
+			// taskTargetMu is already held for this whole run, and the
+			// blocker preflight above already refused enabled tasks targeting
+			// every session it removes — the kill-side collision fence would
+			// only re-enter the mutex. held=true says so.
+			killed, err := m.killSessionRequestedBy(KillSessionRequest{ID: t.id, Title: t.title, RepoID: repoID}, "project deletion", nil, true)
 			if errors.Is(err, errSessionNotFound) {
 				// This is idempotent success only because t came from DeleteProject's
 				// own under-lock snapshot: the target existed then and is gone now,
