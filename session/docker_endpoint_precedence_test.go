@@ -233,10 +233,12 @@ func TestResolveDockerEngineEndpoint_CanonicalSameEngine(t *testing.T) {
 		{name: "trailing slash", environ: []string{"DOCKER_HOST=tcp://203.0.113.9:2375", "DOCKER_CONTEXT=remote-slash"}, want: "tcp://203.0.113.9:2375"},
 		{name: "IPv6 spelled long", environ: []string{"DOCKER_HOST=tcp://[::1]:2375", "DOCKER_CONTEXT=v6-expanded"}, want: "tcp://[::1]:2375"},
 		{name: "hostname trailing dot", environ: []string{"DOCKER_HOST=tcp://localhost:2375", "DOCKER_CONTEXT=localhost-dot"}, want: "tcp://localhost:2375"},
-		{name: "ssh default port", environ: []string{"DOCKER_HOST=ssh://user@203.0.113.9:22", "DOCKER_CONTEXT=ssh-noport"}, want: "ssh://user@203.0.113.9:22"},
 		{name: "unix authority spelling", environ: []string{"DOCKER_HOST=unix:///var/run/docker.sock", "DOCKER_CONTEXT=unix-authority"}, want: "unix:///var/run/docker.sock"},
 
 		// Still refused: the same engine is plausible but unproven.
+		// ssh has no safe default port — Docker passes -p only for an explicit
+		// URL port, so an omitted one can still mean OpenSSH config's Port.
+		{name: "ssh omitted vs explicit port", environ: []string{"DOCKER_HOST=ssh://user@203.0.113.9:22", "DOCKER_CONTEXT=ssh-noport"}, refuse: true},
 		{name: "different port", environ: []string{"DOCKER_HOST=tcp://203.0.113.9:2375", "DOCKER_CONTEXT=remote-tls-port"}, refuse: true},
 		{name: "different ssh user", environ: []string{"DOCKER_HOST=ssh://user@203.0.113.9:22", "DOCKER_CONTEXT=ssh-other-user"}, refuse: true},
 		{name: "hostname vs its loopback IP", environ: []string{"DOCKER_HOST=tcp://localhost:2375", "DOCKER_CONTEXT=loopback-ip"}, refuse: true},

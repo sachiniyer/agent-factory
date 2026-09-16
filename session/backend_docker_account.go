@@ -640,7 +640,10 @@ func sameDockerEndpoint(a, b string) bool {
 // spelling, never identity:
 //
 //   - scheme and host letter case (`TCP://LOCALHOST:2375`),
-//   - a scheme's default port (tcp 2375, ssh 22 — `tcp://x` is `tcp://x:2375`),
+//   - tcp's default port (`tcp://x` is `tcp://x:2375`) — but NOT ssh's: Docker's
+//     ssh connhelper passes `-p` only for an explicit URL port and otherwise
+//     lets OpenSSH config supply one, so `ssh://h` and `ssh://h:22` can reach
+//     different daemons when ~/.ssh/config sets Port on an alias (#4413 review).
 //   - one trailing dot on a hostname (`localhost.` is `localhost`),
 //   - IPv6 in any spelling netip accepts (`[0:0:0:0:0:0:0:1]` is `::1`),
 //   - a trailing path slash, and the unix:// split url.Parse makes between
@@ -679,12 +682,11 @@ func canonicalDockerEndpoint(endpoint string) (string, bool) {
 			host = strings.TrimSuffix(strings.ToLower(host), ".")
 		}
 		port := u.Port()
-		if port == "" {
-			if scheme == "tcp" {
-				port = "2375"
-			} else {
-				port = "22"
-			}
+		if port == "" && scheme == "tcp" {
+			// tcp's default is fixed in docker/cli; ssh has no safe default —
+			// an omitted port there defers to OpenSSH config, which this
+			// function cannot see, so the canonical form keeps it absent.
+			port = "2375"
 		}
 		var b strings.Builder
 		b.WriteString(scheme)
@@ -694,8 +696,10 @@ func canonicalDockerEndpoint(endpoint string) (string, bool) {
 			b.WriteString("@")
 		}
 		b.WriteString(host)
-		b.WriteString(":")
-		b.WriteString(port)
+		if port != "" {
+			b.WriteString(":")
+			b.WriteString(port)
+		}
 		if p := strings.TrimSuffix(u.Path, "/"); p != "" {
 			b.WriteString(p)
 		}
