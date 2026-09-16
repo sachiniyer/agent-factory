@@ -158,6 +158,70 @@ func TestExitWhenOrphaned(t *testing.T) {
 	reapOrphanedChild(t, childPID)
 }
 
+// A zombie owner must read as dead to the watchdog's existence arm (#4417
+// review): kill(pid, 0) succeeds on a zombie, so a signal-based processAlive
+// held an orphaned fixture alive over its owner's uncollected corpse forever.
+// Hold a killed child unreaped — that is the zombie — and the answer must be
+// not-alive.
+func TestProcessAliveReportsZombieDead(t *testing.T) {
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start zombie candidate: %v", err)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill zombie candidate: %v", err)
+	}
+	// No Wait: the corpse stays held until the cleanup reaps it, so the
+	// process is a zombie for the whole assertion window.
+	t.Cleanup(func() { _, _ = cmd.Process.Wait() })
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processAlive(cmd.Process.Pid) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Errorf("unreaped zombie %d still reported alive by processAlive", cmd.Process.Pid)
+}
+
+// The group pin must die with the test process it watches, not with the
+// test's cleanups: the crash/timeout case the pin exists for never runs them,
+// and an unguarded sleeper survives a day per StartGroupProcess call (#4417
+// review). Spawn the pin script under a killable stand-in for the test
+// binary, kill it while it is still an UNREAPED ZOMBIE of this test — the
+// case a kill-0 check would miss — and the pin must exit on its own.
+func TestGroupPinExitsWithItsSpawner(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pin.pid")
+	// `sh -c '...' &` makes the pin a REAL child of the wrapper — the same
+	// spawner→pin shape StartGroupProcess creates — and $$ hands it the
+	// wrapper's pid as its $1 owner, which `exec sleep 60` keeps as its pid
+	// until the kill.
+	wrapper := exec.Command("sh", "-c", fmt.Sprintf(
+		"sh -c '%s' af-testguard-pin $$ & echo $! > %q; exec sleep 60", groupPinScript, pidFile))
+	StartGroupProcess(t, wrapper)
+
+	pinPID := -1
+	for i := 0; i < 200; i++ {
+		if data, err := os.ReadFile(pidFile); err == nil {
+			if _, err := fmt.Sscanf(string(data), "%d", &pinPID); err == nil && pinPID > 0 {
+				break
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if pinPID <= 0 {
+		t.Fatal("group pin never wrote its pid")
+	}
+	becomeOrphanReaper(t)
+	if err := wrapper.Process.Kill(); err != nil {
+		t.Fatalf("kill pin's spawner: %v", err)
+	}
+	if !waitForProcessDeath(pinPID, 3*time.Second) {
+		t.Errorf("group pin %d survived its spawner's death — the abandoned-pin leak is back", pinPID)
+	}
+	reapOrphanedChild(t, pinPID)
+}
+
 // waitForProcessDeath asks proctree, not kill(pid, 0): signal-0 answers for a
 // ZOMBIE, and a watchdog-killed orphan stays one until whatever it reparented
 // to collects it — on that reaper's schedule, which a container init may never

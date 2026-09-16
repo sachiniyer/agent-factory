@@ -4,9 +4,13 @@ package testguard
 
 import (
 	"errors"
+	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
 // StartGroupProcess starts cmd in its own process group
@@ -43,7 +47,19 @@ func StartGroupProcess(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 	// after their own Wait (daemon/vscode_server.go reap). The pin dies with
 	// the group when the kill lands; if a test kills the group itself first,
 	// its held zombie keeps pinning.
-	pin := exec.Command("sh", "-c", "exec sleep 86400")
+	//
+	// The pin cannot be an unguarded `sleep 86400`: the crash/kill case it
+	// exists for never runs the cleanup, so the sleeper would be reparented
+	// and survive a day for EVERY StartGroupProcess call — confirmed on a
+	// `go test -timeout` kill, which left the pin under PID 1 (#4417 review).
+	// It watches the test's own pid instead — the same existence arm
+	// ExitWhenOrphaned uses for fixtures under an intermediary, made
+	// zombie-aware through ps state because a killed owner still answers
+	// kill -0 while it awaits collection. ppid drift cannot stand in for
+	// this: a pin orphaned between fork and first poll captures the reaper
+	// as its parent and watches a process that never goes away.
+	pin := exec.Command("sh", "-c", groupPinScript, "af-testguard-pin",
+		strconv.Itoa(os.Getpid()))
 	pin.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: cmd.Process.Pid}
 	if err := pin.Start(); err != nil {
 		t.Fatalf("start fixture group pin: %v", err)
@@ -61,14 +77,30 @@ func StartGroupProcess(t testing.TB, cmd *exec.Cmd) *exec.Cmd {
 	return cmd
 }
 
-// processAlive reports whether pid currently names a process: kill(pid, 0)
-// delivers no signal and answers ESRCH only when no such process exists.
-// EPERM counts as alive — a pid owned by another user still exists, so an
-// owner watched by ExitWhenOrphaned is reported correctly even when it is
-// not ours to signal.
+// groupPinScript is the pin process's body; $1 is the pid it must outlive —
+// its spawner, the test binary. See StartGroupProcess for why a bare `sleep
+// 86400` leaks and why the death signal is the owner's ps STATE rather than
+// the pin's ppid or a kill -0: a zombie owner still answers signal-0, and a
+// ppid captured after reparenting names a reaper that never dies. Empty ps
+// output means the owner is gone outright; Z/X/x mean it is dead but
+// uncollected — both end the pin. command -v degrades a ps-less minimal box
+// to the bounded sleeper, which can still leak for a day but keeps the pgid
+// pin it was bought for.
+const groupPinScript = `if command -v ps >/dev/null 2>&1; then _af_pin_i=0; while [ "$_af_pin_i" -lt 86400 ]; do _af_pin_stat=$(ps -o stat= -p "$1" 2>/dev/null); case "$_af_pin_stat" in ""|Z*|X*|x*) exit 0;; esac; sleep 1; _af_pin_i=$((_af_pin_i + 1)); done; else sleep 86400; fi`
+
+// processAlive reports whether pid currently names a RUNNING process. It reads
+// the process table rather than kill(pid, 0): signal-0 succeeds on a ZOMBIE,
+// and the owner an ExitWhenOrphaned watchdog watches can be exactly that — a
+// fixture that booted after its spawner died gets reparented before its first
+// check, so only the expected-pid arm can stop it, and a kill-0 arm would hold
+// it alive over a corpse the spawner's parent has not collected (#4417
+// review). Lookup reports zombies and gone processes alike as exited, and any
+// unreadable pid collapses to dead — the safe direction for a watchdog, which
+// loses a test process to a false positive but never leaks one to a false
+// negative (the #4412 failure shape).
 func processAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+	_, err := proctree.Lookup(pid)
+	return err == nil
 }
 
 // KillProcessGroupOnCleanup registers a t.Cleanup that SIGKILLs process
