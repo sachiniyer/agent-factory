@@ -514,6 +514,26 @@ func (s *TaskPane) GetDeletedDisplay(expect task.Task) (task.Task, bool) {
 	return task.Task{}, false
 }
 
+// IsRestoredDelete reports whether the task with id has already been restored
+// to the visible pane by a prior RestoreFailedDelete pass. Used by the fallback
+// (failed-reload) restore path to avoid overwriting an already-authoritative
+// restored row with the stale pre-delete snapshot from deletedDisplays
+// (PRRT_kwDORdIFwM6i3wJ2).
+func (s *TaskPane) IsRestoredDelete(id string) bool {
+	_, ok := s.restoredDeletes[id]
+	return ok
+}
+
+// RequeueFailedDelete re-queues a deletion for retry without touching the
+// already-restored visible row or its originals baseline. Use this when the
+// row was restored with authoritative data from a prior pass and a subsequent
+// fallback pass (no authoritative reload) must not regress it to the stale
+// pre-delete display snapshot (PRRT_kwDORdIFwM6i3wJ2).
+func (s *TaskPane) RequeueFailedDelete(tsk task.Task) {
+	s.deleted = append(s.deleted, tsk)
+	s.dirty = true
+}
+
 // IsDirty returns true if tasks were modified.
 func (s *TaskPane) IsDirty() bool {
 	return s.dirty

@@ -248,8 +248,22 @@ func (m *home) saveContentPaneState() error {
 		// on an unproven absence is the failure this restore exists to prevent.
 		// Use the captured display record if available, so the pane shows the
 		// exact selected row rather than the ID-keyed originals entry.
+		//
+		// When a row was already restored with authoritative data by an earlier
+		// pass (e.g. a successful reload that called RestoreFailedDeleteWithFresh),
+		// do not update it from the stale pre-delete deletedDisplays snapshot.
+		// GetDeletedDisplay returns the value captured at delete time, which may
+		// predate a concurrent rebind that the earlier reload had already
+		// reconciled: overwriting the fresh row and its originals baseline with
+		// the old snapshot would cause a subsequent re-delete to submit the stale
+		// ProjectPath and suffer repeated CAS rejections (PRRT_kwDORdIFwM6i3wJ2).
 		for _, tsk := range failedDeletes {
-			if display, ok := sp.GetDeletedDisplay(tsk); ok {
+			if sp.IsRestoredDelete(tsk.ID) {
+				// Row already visible with up-to-date content; just re-queue
+				// the deletion expectation for the next retry without touching
+				// the display or originals baseline.
+				sp.RequeueFailedDelete(tsk)
+			} else if display, ok := sp.GetDeletedDisplay(tsk); ok {
 				sp.RestoreFailedDeleteWithExpect(display, tsk)
 			} else {
 				sp.RestoreFailedDelete(tsk)

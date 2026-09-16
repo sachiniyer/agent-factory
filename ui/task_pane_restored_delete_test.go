@@ -277,6 +277,72 @@ func TestRestoreFailedDeleteKeepsDiskOrderForMultipleDeletions(t *testing.T) {
 // TestEditingRestoredRowCancelsPendingDeletion: editing a restored row must
 // cancel the deletion still queued against it.
 //
+// TestRequeueFailedDeleteDoesNotReplaceAuthoritativeRow: when a row was
+// correctly restored with fresh authoritative data (e.g. from
+// RestoreFailedDeleteWithFresh after a successful reload), a subsequent
+// RequeueFailedDelete call — used by the fallback path when no authoritative
+// reload is available — must not overwrite the fresh row with the pre-delete
+// snapshot (PRRT_kwDORdIFwM6i3wJ2).
+func TestRequeueFailedDeleteDoesNotReplaceAuthoritativeRow(t *testing.T) {
+	repo := newGitRepo(t)
+	mk := func(id, name string) task.Task {
+		return task.Task{
+			ID: id, Name: name, Prompt: "p", CronExpr: "* * * * *",
+			ProjectPath: repo, Program: "claude", Enabled: true,
+		}
+	}
+	tp := NewTaskPane()
+	original := mk("a", "alpha")
+	tp.SetTasks([]task.Task{original, mk("b", "bravo")})
+	tp.SetFocus(true)
+
+	tp.SelectTask(0)
+	tp.deleteSelectedTask()
+	queued := tp.ConsumeDeleted()
+	require.Len(t, queued, 1)
+	require.Equal(t, "a", queued[0].ID)
+
+	// First retry: successful reload found a concurrently changed record.
+	// The pane now shows the fresh binding, and originals[id] is the fresh record.
+	fresh := mk("a", "alpha-fresh")
+	tp.RestoreFailedDeleteWithFresh(fresh, queued[0])
+	require.Equal(t, "alpha-fresh", tp.GetTasks()[0].Name,
+		"pane must show the fresh authoritative record after first restore")
+
+	// Simulate the end of the first retry cycle: the save loop called
+	// ConsumeDeleted before calling RestoreFailedDeleteWithFresh, but
+	// restoreFailedDeleteImpl re-queues the deletion; drain it now to model
+	// the state at the start of the SECOND retry cycle.
+	tp.ConsumeDeleted()
+
+	// Second retry: reload fails. The fallback path should re-queue the deletion
+	// without regressing the row to the stale pre-delete display snapshot.
+	// IsRestoredDelete gates this: the row is already present with fresh content.
+	require.True(t, tp.IsRestoredDelete("a"),
+		"IsRestoredDelete must report the row is already restored")
+	tp.RequeueFailedDelete(queued[0])
+
+	// The visible row must still carry the fresh authoritative data, not the
+	// original pre-delete snapshot that deletedDisplays would have provided.
+	tasks := tp.GetTasks()
+	var row *task.Task
+	for i := range tasks {
+		if tasks[i].ID == "a" {
+			row = &tasks[i]
+			break
+		}
+	}
+	require.NotNil(t, row, "the row must remain visible after RequeueFailedDelete")
+	assert.Equal(t, "alpha-fresh", row.Name,
+		"RequeueFailedDelete must not overwrite the fresh row with the stale pre-delete snapshot")
+
+	// The deletion must be re-queued so the next retry attempt runs.
+	requeued := tp.ConsumeDeleted()
+	require.Len(t, requeued, 1)
+	assert.Equal(t, "a", requeued[0].ID,
+		"the deletion must still be queued for the next retry after RequeueFailedDelete")
+}
+
 // A restored row is an ordinary editable row, but it is also still in s.deleted
 // awaiting retry. The save runs edits before deletions, so a user who edits or
 // toggles the row they can plainly see gets both: UpdateTask writes the change,
