@@ -522,6 +522,20 @@ func (w *TabbedWindow) ScrollDown() {
 	}
 }
 
+// ScrollHalfPageUp is the keyboard's half-page step (ctrl+u); the wheel's
+// one-line step stays on ScrollUp.
+func (w *TabbedWindow) ScrollHalfPageUp() {
+	if err := w.tab.ScrollHalfPageUp(w.effectiveInstance(), w.effectiveTab()); err != nil {
+		log.InfoLog.Printf("tabbed window failed to scroll up half a page: %v", err)
+	}
+}
+
+func (w *TabbedWindow) ScrollHalfPageDown() {
+	if err := w.tab.ScrollHalfPageDown(w.effectiveInstance(), w.effectiveTab()); err != nil {
+		log.InfoLog.Printf("tabbed window failed to scroll down half a page: %v", err)
+	}
+}
+
 // GetActiveTab returns the pane's current tab index.
 func (w *TabbedWindow) GetActiveTab() int {
 	return w.activeTab()
