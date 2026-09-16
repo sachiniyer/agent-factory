@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -573,7 +574,24 @@ func (s *TaskPane) deleteSelectedTask() {
 	if s.deletedPositions == nil {
 		s.deletedPositions = make(map[string]int)
 	}
-	s.deletedPositions[deleted.ID] = s.selectedIdx
+	// Compute the stable original-list position of the task being deleted.
+	// s.selectedIdx is its index in the already-shortened slice (prior
+	// deletions have been removed). Adding the count of prior deletions whose
+	// original positions are at or before the candidate recovers the position
+	// in the original load order. The prior positions must be iterated in
+	// ascending order so each adjustment is applied before the next is tested.
+	originalPos := s.selectedIdx
+	priorPositions := make([]int, 0, len(s.deletedPositions))
+	for _, p := range s.deletedPositions {
+		priorPositions = append(priorPositions, p)
+	}
+	sort.Ints(priorPositions)
+	for _, p := range priorPositions {
+		if p <= originalPos {
+			originalPos++
+		}
+	}
+	s.deletedPositions[deleted.ID] = originalPos
 	s.deleted = append(s.deleted, deleted)
 	s.tasks = append(s.tasks[:s.selectedIdx], s.tasks[s.selectedIdx+1:]...)
 	// A task queued for deletion must not also be in the update set:

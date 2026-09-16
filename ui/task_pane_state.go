@@ -1,6 +1,10 @@
 package ui
 
-import "github.com/sachiniyer/agent-factory/task"
+import (
+	"sort"
+
+	"github.com/sachiniyer/agent-factory/task"
+)
 
 // This file holds the TaskPane's task-list, selection, dirty-tracking, and
 // focus/mode state accessors — the non-rendering, non-key-handling surface the
@@ -158,14 +162,44 @@ func (s *TaskPane) RestoreFailedEdit(id string) {
 // disk (the removal did not commit), so retrying RemoveTask is not the
 // already-deleted re-run ConsumeDeleted drains to avoid (fixes #763).
 func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
-	// Re-insert at the position the task held when it was deleted so the pane
-	// order matches the sidebar's disk-order view. showTasksOverlay transfers
-	// the sidebar's selected index directly into the TaskPane, so a position
-	// mismatch would cause subsequent actions to target the wrong task.
-	insertAt := len(s.tasks) // default: append
-	if pos, ok := s.deletedPositions[tsk.ID]; ok && pos <= len(s.tasks) {
-		insertAt = pos
+	// Re-insert at the position the task held in the original load order so the
+	// pane order matches the sidebar's disk-order view. showTasksOverlay
+	// transfers the sidebar's selected index directly into the TaskPane, so a
+	// position mismatch would cause subsequent actions to target the wrong task.
+	//
+	// deletedPositions stores each task's ORIGINAL rank (its index in the slice
+	// at load time, adjusted at delete time to account for all prior deletions).
+	// To convert that rank into a current s.tasks insertion index we subtract
+	// the count of still-absent tasks whose original ranks precede this one —
+	// each such gap lowers the effective current index by one.
+	insertAt := len(s.tasks) // default: append when no entry or second retry
+	if originalRank, ok := s.deletedPositions[tsk.ID]; ok {
+		// Always remove the entry so a second retry falls back to append rather
+		// than trying to re-insert at a stale position.
 		delete(s.deletedPositions, tsk.ID)
+
+		// Count still-absent peers with a lower original rank. Each one
+		// occupies a slot before originalRank in the original order but is
+		// absent from s.tasks, so the effective insertion index is reduced by
+		// one for each.
+		absentBefore := 0
+		priorRanks := make([]int, 0, len(s.deletedPositions))
+		for _, r := range s.deletedPositions {
+			priorRanks = append(priorRanks, r)
+		}
+		sort.Ints(priorRanks)
+		for _, r := range priorRanks {
+			if r < originalRank {
+				absentBefore++
+			}
+		}
+		insertAt = originalRank - absentBefore
+		if insertAt < 0 {
+			insertAt = 0
+		}
+		if insertAt > len(s.tasks) {
+			insertAt = len(s.tasks)
+		}
 	}
 	s.tasks = append(s.tasks[:insertAt], append([]task.Task{tsk}, s.tasks[insertAt:]...)...)
 	// If the restored row was inserted at or before the current selection,
@@ -189,6 +223,15 @@ func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
 	for i, t := range s.tasks {
 		if t.ID == id {
 			s.tasks = append(s.tasks[:i], s.tasks[i+1:]...)
+			// If the removed row was before the cursor, shift the cursor back
+			// so it still points at the same surviving task. Without this, the
+			// cursor silently advances to the following task, and the next
+			// edit, run, or delete targets the wrong row.
+			if i < s.selectedIdx {
+				s.selectedIdx--
+			}
+			// Clamp to a valid range after the removal (covers the case where
+			// the cursor was on or after the last row).
 			if s.selectedIdx >= len(s.tasks) && s.selectedIdx > 0 {
 				s.selectedIdx--
 			}
