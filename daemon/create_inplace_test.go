@@ -24,6 +24,17 @@ import (
 // join is the happens-before edge. Reading it while a create is still in flight
 // is a race whatever this mutex does, so do not.
 func installOptionsRecordingBackend(t *testing.T) *[]session.InstanceOptions {
+	return installOptionsRecordingBackendAs(t, func(b *session.FakeBackend) session.Backend {
+		return readyFakeBackend{b}
+	})
+}
+
+// installOptionsRecordingBackendAs is installOptionsRecordingBackend with the
+// readiness the resolved program reports: the create path waits for readiness
+// like production, so a codex-profile create needs the codex marker (›) — a
+// backend that only ever reports claude's (❯) leaves the create waiting out
+// its timeout and the session is never published (#4400).
+func installOptionsRecordingBackendAs(t *testing.T, as func(*session.FakeBackend) session.Backend) *[]session.InstanceOptions {
 	t.Helper()
 	var (
 		mu   sync.Mutex
@@ -35,7 +46,7 @@ func installOptionsRecordingBackend(t *testing.T) *[]session.InstanceOptions {
 		mu.Unlock()
 		backend := session.NewFakeBackend()
 		backend.CompleteStart()
-		return readyFakeBackend{backend}, nil
+		return as(backend), nil
 	})
 	t.Cleanup(restore)
 	return &seen

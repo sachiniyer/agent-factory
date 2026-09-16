@@ -193,7 +193,12 @@ func TestEnsureRootAgentsInspectsTheCarriedAccountsTranscriptStore(t *testing.T)
 func TestEnsureRootAgentsDropsTheAccountPinAcrossAnAgentChange(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
-	seen := installOptionsRecordingBackend(t)
+	// The profile is codex from the first create, so the backend must report
+	// codex readiness — readyFakeBackend's claude marker would leave the first
+	// ensure waiting out the create timeout with no root ever published.
+	seen := installOptionsRecordingBackendAs(t, func(b *session.FakeBackend) session.Backend {
+		return codexReadyFakeBackend{b}
+	})
 	repoPath := setupControlRepo(t)
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{Program: "codex"}))
