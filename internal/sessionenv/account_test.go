@@ -1,6 +1,9 @@
 package sessionenv
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -296,7 +299,7 @@ func TestAccountShellCommandDisablesStartupFiles(t *testing.T) {
 			"PS1=$((CODEX_HOME=42))",
 		}, command, account)
 		require.NoError(t, err)
-		require.ElementsMatch(t, []string{"PATH=/bin", "CODEX_HOME=" + account.Dir}, scoped)
+		require.ElementsMatch(t, []string{"PATH=/bin", "ZDOTDIR=", "CODEX_HOME=" + account.Dir}, scoped)
 	}
 }
 
@@ -306,6 +309,50 @@ func TestAccountShellCommandRefusesShellsWithoutCredentialSafeStartup(t *testing
 		require.Error(t, err, "%s can restore identity variables after the account environment is installed", shell)
 		require.Contains(t, err.Error(), "no credential-safe account launch mode")
 	}
+}
+
+// TestAccountShellCommandDisablesStartupFiles asserts the command STRING; this
+// asserts what the flags achieve (#4474 review): a user's .zshrc exporting an
+// identity variable must never reach the account shell. The generated command
+// runs through /bin/sh -c exactly as the launch boundary execs it, with HOME
+// pointed at marker dotfiles and an ambient ZDOTDIR aimed at the same place —
+// if either -f or the pinned-empty ZDOTDIR failed, the ambient value would
+// replace the account directory below.
+func TestAccountZshShellCannotReadUserStartupFiles(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Fatal("zsh is required here: CI installs it via scripts/ci-apt-install.sh " +
+			"and the macOS runner ships it — a miss must fail loudly rather than skip the check")
+	}
+	home := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".zshrc"),
+		[]byte("export CODEX_HOME=/tmp/ambient-codex\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".zshenv"),
+		[]byte("export AF_TEST_ZSHENV_SEEN=yes\n"), 0o644))
+
+	account := Account{Agent: "codex", Name: "work", Dir: t.TempDir()}
+	command, err := AccountShellCommand(zsh)
+	require.NoError(t, err)
+	scoped, err := ApplyAccountEnvironment([]string{
+		"PATH=/usr/bin:/bin",
+		"HOME=" + home,
+		"ZDOTDIR=" + home, // an ambient redirect must die with the other startup names
+	}, command, account)
+	require.NoError(t, err)
+	pinned, ok := envValue(scoped, "ZDOTDIR")
+	require.True(t, ok, "the scoped env must pin ZDOTDIR — unset falls back to HOME")
+	require.Empty(t, pinned, "empty is the pin: zsh has no dotfile directory to read at all")
+
+	cmd := exec.Command("/bin/sh", "-c", command)
+	cmd.Env = scoped
+	cmd.Stdin = strings.NewReader(
+		"print -r -- \"SEEN CODEX_HOME=${CODEX_HOME-<unset>} ZSHENV=${AF_TEST_ZSHENV_SEEN-<unset>}\"\nexit\n")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.Contains(t, string(out), "CODEX_HOME="+account.Dir,
+		"the account directory must survive launch — a sourced .zshrc would have overwritten it")
+	require.Contains(t, string(out), "ZSHENV=<unset>")
+	require.NotContains(t, string(out), "/tmp/ambient-codex")
 }
 
 // Two sessions on different accounts must get different roots. This is the

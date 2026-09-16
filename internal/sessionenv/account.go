@@ -421,6 +421,14 @@ func ApplyAccountEnvironment(env []string, command string, account Account) ([]s
 	// /bin/sh -c. Strip shell startup code before that outer shell runs, not only
 	// when the user's command is itself an interactive shell.
 	scoped = stripAccountShellStartupEnvironment(scoped)
+	// ZDOTDIR is pinned, not merely stripped: unset, it falls back to HOME,
+	// and /etc/zsh/zshenv — the one startup file `zsh -f` cannot skip — can
+	// `setopt RCS` and re-admit the entire user chain past -f (no invocation
+	// flag survives it; measured on zsh 5.9, #4474 review). Defined-and-empty,
+	// zsh has no dotfile directory to read at all, so the only startup files
+	// still reachable are the root-owned global ones — the same operator
+	// trust class as the /bin/zsh executable this launches.
+	scoped = append(scoped, "ZDOTDIR=")
 	return scoped, nil
 }
 

@@ -66,11 +66,15 @@ func accountShellArgs(name string) []string {
 	case "zsh":
 		// -f (NO_RCS) skips every startup file zsh can skip — the user's
 		// .zshenv/.zprofile/.zshrc/.zlogin and the global zprofile/zshrc/zlogin.
-		// The one residue is /etc/zshenv, which zsh reads unconditionally by
-		// design; it is root-owned, the same operator-controlled trust class
-		// this list already assigns to /bin and /usr/bin executables, so
-		// refusing zsh over it would trust the binary less than the file
-		// system it execs from (#4471).
+		// The residue is /etc/zsh/zshenv, which zsh reads unconditionally by
+		// design and which CAN `setopt RCS`, re-admitting every file -f
+		// skipped; no invocation flag survives that (measured on zsh 5.9,
+		// #4474 review). The user chain still cannot return: the scoped
+		// environment pins ZDOTDIR empty (ApplyAccountEnvironment), leaving
+		// zsh no dotfile directory to read. What a re-enabling zshenv can
+		// then reach is only the root-owned global files — the same operator
+		// trust class this list already assigns to the /bin and /usr/bin
+		// executables it launches.
 		return []string{"-f", "-i"}
 	default:
 		return nil
