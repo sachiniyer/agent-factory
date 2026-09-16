@@ -24,21 +24,59 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
+// controlRepoTemplate is one real `git init` + empty-commit repository built
+// once per test-binary run. Each test then receives a file copy of it instead
+// of paying four more git execs — ~400 call sites × ~60-120ms was a material
+// slice of the package's serial wall-clock under -race (#4464). A copy of .git
+// is indistinguishable from a fresh init to the code under test: same HEAD,
+// same objects, no remotes. Tests that mutate the repo only touch their own
+// copy. TestMain removes the template after the run.
+var (
+	controlRepoTemplateOnce sync.Once
+	controlRepoTemplateDir  string
+	controlRepoTemplateErr  error
+)
+
+func controlRepoTemplate(t *testing.T) string {
+	t.Helper()
+	controlRepoTemplateOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "af-control-repo-template-")
+		if err != nil {
+			controlRepoTemplateErr = err
+			return
+		}
+		for _, args := range [][]string{
+			{"init", dir},
+			{"-C", dir, "config", "user.email", "test@example.com"},
+			{"-C", dir, "config", "user.name", "Test User"},
+			{"-C", dir, "commit", "--allow-empty", "-m", "init"},
+		} {
+			if err = exec.Command("git", args...).Run(); err != nil {
+				controlRepoTemplateErr = fmt.Errorf("git %v: %w", args, err)
+				return
+			}
+		}
+		controlRepoTemplateDir = dir
+	})
+	if controlRepoTemplateErr != nil {
+		t.Fatalf("control repo template: %v", controlRepoTemplateErr)
+	}
+	return controlRepoTemplateDir
+}
+
+// cloneRepoTemplate copies the shared empty-commit template into dst. Pure file
+// copy — no git exec, ~1ms against the ~80ms an init+config+commit costs.
+func cloneRepoTemplate(t *testing.T, dst string) {
+	t.Helper()
+	if err := os.CopyFS(dst, os.DirFS(controlRepoTemplate(t))); err != nil {
+		t.Fatalf("clone repo template: %v", err)
+	}
+}
+
 func setupControlRepo(t *testing.T) string {
 	t.Helper()
 	repo := filepath.Join(testguard.CanonicalTempDir(t), "repo")
-	if err := exec.Command("git", "init", repo).Run(); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-	if err := exec.Command("git", "-C", repo, "config", "user.email", "test@example.com").Run(); err != nil {
-		t.Fatalf("git config email: %v", err)
-	}
-	if err := exec.Command("git", "-C", repo, "config", "user.name", "Test User").Run(); err != nil {
-		t.Fatalf("git config name: %v", err)
-	}
-	if err := exec.Command("git", "-C", repo, "commit", "--allow-empty", "-m", "init").Run(); err != nil {
-		t.Fatalf("git commit: %v", err)
-	}
+	cloneRepoTemplate(t, repo)
 	return repo
 }
 

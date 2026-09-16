@@ -17,10 +17,13 @@ import (
 // initial EnsureDaemon gate check. Every retry sleep, dial, and re-ensure
 // receives this same absolute deadline; an inner gate/readiness timeout may
 // shorten it but may never extend it. daemonAdmissionRetryPoll is the cadence.
-const (
-	daemonAdmissionRetryWait = daemonReadyTimeout
-	daemonAdmissionRetryPoll = 100 * time.Millisecond
-)
+//
+// daemonAdmissionRetryWait is a var so tests proving the budget binds can
+// shrink the window instead of spending the real five seconds (#4464);
+// production never assigns it.
+var daemonAdmissionRetryWait = daemonReadyTimeout
+
+const daemonAdmissionRetryPoll = 100 * time.Millisecond
 
 // callDaemon retries exactly two kinds of transient failure: lifecycle
 // admission refusals, and failed dials during a proven upgrade hand-off. The

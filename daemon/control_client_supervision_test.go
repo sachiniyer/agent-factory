@@ -157,10 +157,18 @@ func TestEnsureDaemonFallbackGetsFreshReadinessWindow(t *testing.T) {
 	_, _ = installEnsureTestUnitAndManager(t, true)
 	startServer, serverErr := ensureTestServerStarter(t)
 
-	// The manager consumes its bounded two-second slice. Reclaiming a stale
+	// The launcher below sleeps past the remainder of the manager's slice, so
+	// the ready window and the slice are both shrunk together — the ordering
+	// the test proves (a fresh clock after launch returns) is unchanged while
+	// the real seconds are not spent (#4464).
+	prevReady := daemonReadyTimeout
+	daemonReadyTimeout = 1200 * time.Millisecond
+	t.Cleanup(func() { daemonReadyTimeout = prevReady })
+
+	// The manager consumes its bounded slice. Reclaiming a stale
 	// daemon and launching its replacement are allowed to take longer than the
 	// remainder of that manager window; the compatibility path historically
-	// starts its five-second readiness clock only after launch returns.
+	// starts its readiness clock only after launch returns.
 	err := ensureDaemonWithLauncher(func() error {
 		time.Sleep(daemonReadyTimeout - ensureUnitStartTimeout + 250*time.Millisecond)
 		return startServer()
@@ -339,6 +347,12 @@ func installEnsureTestUnitAndManager(t *testing.T, block bool) (string, string) 
 		// The child keeps the output pipe open too. A direct-child-only timeout
 		// therefore hangs unless the production runner owns and kills the group.
 		script += "sleep 300 &\nwait\n"
+		// The hang only has to outlive the unit's bounded start slice; shrinking
+		// the slice keeps the ordering while saving each caller the production
+		// two seconds of wall-clock (#4464).
+		prev := ensureUnitStartTimeout
+		ensureUnitStartTimeout = 300 * time.Millisecond
+		t.Cleanup(func() { ensureUnitStartTimeout = prev })
 	}
 	if err := os.WriteFile(filepath.Join(managerDir, "systemctl"), []byte(script), 0o700); err != nil {
 		t.Fatalf("write fake systemctl: %v", err)
