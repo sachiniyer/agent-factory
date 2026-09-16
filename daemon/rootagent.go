@@ -766,8 +766,15 @@ func (m *Manager) rootEnsureSucceeded(repoID string, st *rootEnsureState) {
 	st.escalatedPersistent = false
 	st.nextAttempt = time.Time{}
 	st.suppressLogged = false
+	_, carryPending := m.reapedRootCarries[repoID]
 	delete(m.reapedRootCarries, repoID)
 	m.mu.Unlock()
+	// The durable half of the carry goes when the parked state does — gated on
+	// the map so a healthy root's every-tick adopt does not pay a syscall for a
+	// file that only exists while a heal is unresolved.
+	if carryPending {
+		m.removeReapedRootCarry(repoID)
+	}
 }
 
 // rootEnsureFailed records a failed ensure attempt: exponential backoff up to

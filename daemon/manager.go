@@ -274,21 +274,18 @@ type Manager struct {
 	// checkout holding it rather than a repo-ID hash.
 	rootCreatesInFlight map[string]string
 	// reapedRootCarries parks what a reaped root record handed a replacement
-	// that has not been published yet (#4400 review). The record is deleted at
-	// the reap, so the carried account pin, conversation, and tab roster
-	// otherwise exist only in the one create invocation's stack — a create that
-	// then fails leaves the next ensure seeing no prior instance, rebuilding an
-	// empty carry, and silently demoting the guaranteed root to ambient
-	// credentials. Keyed by REPO ID for the same reason rootCreatesInFlight is:
-	// two root_agents spellings of one repository are two rootEnsureStates and
-	// one repo, so a carry parked under one candidate's state key must still be
-	// found by the other spelling's next ensure — otherwise the second spelling
-	// publishes an ambient root and the first's success sweep discards the carry
-	// nobody consumed (#4400 review round 2). Set under mu by the reaping
-	// create, consumed by the next create for that repo that finds no record,
-	// and cleared by rootEnsureSucceeded once a pass leaves a healthy root (or
-	// a disable/delete outcome makes it moot). rootEnsureFailed deliberately
-	// leaves it: the pin must survive transient create failure.
+	// that has not been published yet (#4400 review). Keyed by REPO ID for the
+	// same reason rootCreatesInFlight is: two root_agents spellings of one
+	// repository share the carry (#4400 review round 2). The in-memory park is
+	// the same-process half; the durable half is the carry file reapDeadRoot
+	// writes beside instances.json before deleting the record, so a daemon
+	// restart inside the reap→publish window cannot drop the pin either
+	// (#4400 review round 3). Set under mu by the reaping create, consumed by
+	// the next create for that repo that finds no record — hydrated from disk
+	// when the map is empty — and cleared by rootEnsureSucceeded once a pass
+	// leaves a healthy root (or a disable/delete outcome makes it moot).
+	// rootEnsureFailed deliberately leaves it: the pin must survive transient
+	// create failure.
 	reapedRootCarries map[string]reapedRootState
 	// rootCreateWG counts those goroutines, so shutdown can JOIN them instead of
 	// abandoning a half-provisioned session (waitRootAgentCreates). A WaitGroup is

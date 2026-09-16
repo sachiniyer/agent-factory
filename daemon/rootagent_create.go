@@ -271,11 +271,28 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// repository is consumed here — which spelling next publishes the
 		// replacement is irrelevant to what the replacement must carry.
 		m.mu.Lock()
-		if parked, ok := m.reapedRootCarries[repo.ID]; ok {
+		parked, parkedOk := m.reapedRootCarries[repo.ID]
+		m.mu.Unlock()
+		if !parkedOk {
+			// The map is empty after a daemon restart; the carry the reap
+			// wrote beside instances.json is not (#4400 review round 3). A
+			// read error keeps the carry as the fallback it always was —
+			// ambient rebuild — rather than failing the heal on a file the
+			// record's deletion already made advisory.
+			var loadErr error
+			if parked, parkedOk, loadErr = m.loadReapedRootCarry(repo.ID); loadErr != nil {
+				m.warn().Printf("root agent for %s could not read the parked reaped carry: %v", workspace, loadErr)
+			}
+			if parkedOk {
+				m.mu.Lock()
+				m.reapedRootCarries[repo.ID] = parked
+				m.mu.Unlock()
+			}
+		}
+		if parkedOk {
 			carried = parked
 			reapedRoot = true
 		}
-		m.mu.Unlock()
 	}
 
 	program := rootAgentProgramForProfile(workspace, resolution.RootAgent)
