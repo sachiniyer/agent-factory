@@ -53,3 +53,51 @@ func TestExplicitRestartSeedsReplacementFromPostFlushDropTotal(t *testing.T) {
 		"the explicit restart must inherit drops flushed after its task snapshot")
 	require.Equal(t, 7, got.persistedDrops)
 }
+
+func TestReconcileDoesNotSeedAReusedIDFromItsPredecessorGeneration(t *testing.T) {
+	dir := t.TempDir()
+	predecessor := watchTask("d4357007", "sleep 60", dir)
+	replacement := predecessor
+	replacement.GenerationID = "rebound-generation"
+	replacement.DroppedEvents = 2
+
+	s, _ := newTestSupervisor(t, staticTasks(replacement))
+	old := s.newTaskWatcher(predecessor)
+	old.dropped = 7
+	old.persistedDrops = 2
+	old.lastDroppedAt = time.Now()
+	close(old.doneCh)
+	s.watchers[old.taskID] = old
+
+	require.NoError(t, s.reconcile([]task.Task{replacement}, []task.Task{replacement}, everyWatchTask()))
+	got := s.watcherInstance(replacement.ID)
+	require.NotNil(t, got)
+	require.NotSame(t, old, got)
+	require.Zero(t, got.dropped,
+		"a flushed total belongs to the incarnation that earned it, not to the reused ID")
+	require.Zero(t, got.persistedDrops)
+}
+
+func TestExplicitRestartDoesNotSeedAReusedIDFromItsPredecessorGeneration(t *testing.T) {
+	dir := t.TempDir()
+	predecessor := watchTask("d4357008", "sleep 60", dir)
+	replacement := predecessor
+	replacement.GenerationID = "rebound-generation"
+	replacement.DroppedEvents = 2
+
+	s, _ := newTestSupervisor(t, staticTasks(replacement))
+	old := s.newTaskWatcher(predecessor)
+	old.dropped = 7
+	old.persistedDrops = 2
+	old.lastDroppedAt = time.Now()
+	close(old.doneCh)
+	s.watchers[old.taskID] = old
+
+	require.NoError(t, s.restart(replacement))
+	got := s.watcherInstance(replacement.ID)
+	require.NotNil(t, got)
+	require.NotSame(t, old, got)
+	require.Zero(t, got.dropped,
+		"the explicit restart must not transfer drops across task incarnations")
+	require.Zero(t, got.persistedDrops)
+}

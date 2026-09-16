@@ -35,6 +35,15 @@ func (m *Manager) nextTaskRunAdmission(taskID, expectedGenerationID string) (tas
 	if storedTask.GenerationID != expectedGenerationID {
 		return taskRunAdmission{}, fmt.Errorf("task %s was replaced before its run was admitted", taskID)
 	}
+	// Disabling does not mint a new generation, so the incarnation check above
+	// cannot see it — but a disable that lands between the caller's Enabled
+	// read and this fence must still stop the run. This read holds the same
+	// delivery fence DeliverPrompt checks Enabled under, so a mutation can
+	// only be serialized before it (run legitimately admitted) or after it
+	// (refused here) (#4224 review).
+	if !storedTask.Enabled {
+		return taskRunAdmission{}, fmt.Errorf("task %s was disabled before its run was admitted", taskID)
+	}
 	admission := taskRunAdmission{
 		generationID: storedTask.GenerationID,
 		sequence:     storedTask.LastRunSequence,

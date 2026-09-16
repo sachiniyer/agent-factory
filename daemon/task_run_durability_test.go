@@ -33,6 +33,24 @@ func TestTaskRunAdmissionRefusesUnreadableTaskRow(t *testing.T) {
 		"a refused admission must not consume an ordering sequence")
 }
 
+func TestTaskRunAdmissionRefusesATaskDisabledBehindTheReadersBack(t *testing.T) {
+	manager, _, repoPath := newStatusTestManager(t)
+	tsk := addStatusTestTask(t, enabledCronTask("disab001", repoPath))
+
+	// Disabling does not mint a new generation, so the caller's incarnation
+	// proof still matches — the admission must consult Enabled itself.
+	disabled := false
+	stored, err := task.UpdateTask(tsk.ID, task.TaskUpdate{Enabled: &disabled}, task.ProjectExpectation{})
+	require.NoError(t, err)
+	require.Equal(t, tsk.GenerationID, stored.GenerationID)
+
+	_, admissionErr := manager.nextTaskRunAdmission(tsk.ID, tsk.GenerationID)
+	require.Error(t, admissionErr)
+	require.ErrorContains(t, admissionErr, "was disabled")
+	require.Zero(t, manager.taskRunSequence,
+		"a refused admission must not consume an ordering sequence")
+}
+
 func TestInterruptedTaskStatusWriteFailureIsRetried(t *testing.T) {
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	tsk := addStatusTestTask(t, enabledCronTask("retry001", repoPath))

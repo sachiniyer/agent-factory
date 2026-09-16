@@ -129,7 +129,7 @@ type watcherSupervisor struct {
 	loadTasks   func() ([]task.Task, error)
 	deliver     func(taskID, taskGenerationID, line string) error
 	setStatus   func(taskID, taskGenerationID, status string)
-	recordDrops func(taskID string, total int, droppedAt time.Time) error
+	recordDrops func(taskID, generationID string, total int, droppedAt time.Time) error
 	logPath     func(taskID string) (string, error)
 	queueDir    func() (string, error)
 

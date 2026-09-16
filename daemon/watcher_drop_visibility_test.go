@@ -82,6 +82,23 @@ func TestLiveDropOverlayPreservesANewerSuccessfulDelivery(t *testing.T) {
 	require.Equal(t, "sent", record.LastRunStatus)
 }
 
+func TestLiveDropOverlayDoesNotCrossTaskGenerations(t *testing.T) {
+	droppedAt := time.Date(2026, time.September, 11, 12, 0, 0, 0, time.UTC)
+	w := &taskWatcher{
+		taskID: "d4357009", generationID: "removed-generation",
+		dropped: 4, lastDroppedAt: droppedAt, terminalStatus: "stopped",
+	}
+	s := &watcherSupervisor{watchers: map[string]*taskWatcher{w.taskID: w}}
+	record := task.Task{ID: "d4357009", GenerationID: "rebound-generation"}
+
+	s.applyLiveDropState(&record)
+
+	require.Zero(t, record.DroppedEvents,
+		"a predecessor watcher's drops must not overlay the rebound ID's listing")
+	require.Empty(t, record.LastRunStatus,
+		"its drop or terminal status must not overlay either")
+}
+
 func TestLiveDropOverlayPreservesTerminalWatcherStatus(t *testing.T) {
 	droppedAt := time.Date(2026, time.September, 11, 12, 0, 0, 0, time.UTC)
 	for _, terminal := range []string{"stopped", "errored: exit status 1"} {

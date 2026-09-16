@@ -45,3 +45,41 @@ func TestRecordWatchRateDropsOwnsCountAndPreservesNewerDelivery(t *testing.T) {
 	assert.Equal(t, 5, updated.DroppedEvents, "a stale absolute checkpoint must never reduce the count")
 	assert.Equal(t, "sent", updated.LastRunStatus)
 }
+
+func TestRecordWatchRateDropsForGenerationRefusesAReboundID(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	created := time.Date(2026, time.September, 11, 11, 0, 0, 0, time.UTC)
+	require.NoError(t, AddTask(Task{
+		ID: "d4357006", Name: "watcher", WatchCmd: "watch.sh", Program: "claude",
+		Enabled: true, CreatedAt: created,
+	}))
+	loaded, err := GetTask("d4357006")
+	require.NoError(t, err)
+	require.NotEmpty(t, loaded.GenerationID)
+	droppedAt := created.Add(time.Hour)
+
+	// A flush from a watcher that supervised a REMOVED incarnation must not
+	// stamp its count — or the dropped status — onto the namesake replacement.
+	updated, applied, err := RecordWatchRateDropsForGeneration(loaded.ID, "removed-generation", 7, droppedAt)
+	require.NoError(t, err, "a rebound ID is a clean refusal, not a storage fault")
+	assert.False(t, applied)
+	assert.Zero(t, updated)
+	stored, err := GetTask(loaded.ID)
+	require.NoError(t, err)
+	assert.Zero(t, stored.DroppedEvents)
+	assert.Empty(t, stored.LastRunStatus)
+
+	updated, applied, err = RecordWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID, 7, droppedAt)
+	require.NoError(t, err)
+	assert.True(t, applied)
+	assert.Equal(t, 7, updated.DroppedEvents)
+	assert.Equal(t, WatchRateDropStatus, updated.LastRunStatus)
+
+	_, applied, err = RecordWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID, 5, droppedAt)
+	require.NoError(t, err)
+	assert.False(t, applied, "a stale absolute checkpoint writes nothing for the right generation either")
+
+	require.NoError(t, RemoveTask(loaded.ID, ProjectExpectation{}))
+	_, _, err = RecordWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID, 9, droppedAt)
+	require.Error(t, err, "a flush for a fully removed task still surfaces as an error")
+}

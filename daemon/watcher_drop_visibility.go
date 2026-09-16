@@ -40,7 +40,7 @@ func (w *taskWatcher) persistTerminalStatus(status string) {
 // overlays the exact live count; stop flushes the final checkpoint so the disk
 // fallback sees the same total after a clean shutdown.
 func (w *taskWatcher) persistDroppedEvents(total int, droppedAt time.Time) {
-	if err := w.sup.recordDrops(w.taskID, total, droppedAt); err != nil {
+	if err := w.sup.recordDrops(w.taskID, w.generationID, total, droppedAt); err != nil {
 		log.WarningLog.Printf("watch task %s: failed to record %d dropped events: %v", w.taskID, total, err)
 		return
 	}
@@ -68,7 +68,11 @@ func (s *watcherSupervisor) applyLiveDropState(t *task.Task) {
 	s.mu.Lock()
 	w := s.watchers[t.ID]
 	s.mu.Unlock()
-	if w == nil {
+	// A stale watcher still in the map holds ITS generation's evidence: the
+	// overlay must not transfer its drops, drop status, or terminal status
+	// onto the replacement incarnation listed under the reused ID (#4224
+	// review).
+	if w == nil || w.generationID != t.GenerationID {
 		return
 	}
 	w.mu.Lock()
@@ -88,7 +92,7 @@ func (s *watcherSupervisor) applyLiveDropState(t *task.Task) {
 	}
 }
 
-func persistWatcherDrops(taskID string, total int, droppedAt time.Time) error {
-	_, err := task.RecordWatchRateDrops(taskID, total, droppedAt)
+func persistWatcherDrops(taskID, generationID string, total int, droppedAt time.Time) error {
+	_, _, err := task.RecordWatchRateDropsForGeneration(taskID, generationID, total, droppedAt)
 	return err
 }

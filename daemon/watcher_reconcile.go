@@ -149,8 +149,8 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 		if _, running := s.watchers[id]; running {
 			continue
 		}
-		if dropped := flushedDrops[id]; dropped > t.DroppedEvents {
-			t.DroppedEvents = dropped
+		if flushed := flushedDrops[id]; flushed.drops > t.DroppedEvents && flushed.generationID == t.GenerationID {
+			t.DroppedEvents = flushed.drops
 		}
 		w := s.newTaskWatcher(t)
 		s.watchers[id] = w
