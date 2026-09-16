@@ -164,7 +164,15 @@ func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
-			return nil, true
+			// `-c"$C"` / `-n"$N"` is admitted only when the empty-value reading
+			// cannot run a command. It then continues exactly as the non-empty
+			// reading `-c2` does, so the child is still judged (#4460).
+			flag, ok := ioniceDynamicValueFlag(words[0])
+			if !ok || ioniceEmptyValueReadingLive(flag, words[1:]) {
+				return nil, true
+			}
+			words = words[1:]
+			continue
 		}
 		switch {
 		case option == "--":
