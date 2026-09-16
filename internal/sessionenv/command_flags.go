@@ -376,28 +376,35 @@ func literalShellWord(word *syntax.Word) (string, bool) {
 
 // literalShellWordExpandableSafe is literalShellWord plus the guarantee that
 // /bin/sh -c cannot expand the word into different argv: unquoted literal parts
-// must carry no glob metacharacters (* ? [), no unquoted brace-expansion open
-// ({ — {a,b} and {a..z} split one word into several argv entries under bash,
-// the /bin/sh of the supported macOS case), and no leading ~, and backslash
-// escapes are resolved so an escaped \| still reads as | to hazard checks that
-// inspect the resolved string. Quoted parts cannot glob and keep their raw
-// value, matching what strace would receive.
+// must carry no glob metacharacters (* ? and a bracket expression that closes),
+// no unquoted brace-expansion open ({ — {a,b} and {a..z} split one word into
+// several argv entries under bash, the /bin/sh of the supported macOS case),
+// and no leading ~, and backslash escapes are resolved so an escaped \| still
+// reads as | to hazard checks that inspect the resolved string. Glob and brace
+// syntax are tracked across part boundaries because quote removal runs before
+// pathname expansion — `["|"]` is the bracket `[|]`, and `{-E,CODEX_HOME}`
+// spans Lits the same way — while quoted parts outside such an expression
+// cannot glob and keep their raw value, matching what strace would receive.
 func literalShellWordExpandableSafe(word *syntax.Word) (string, bool) {
 	if word == nil {
 		return "", false
 	}
 	var value strings.Builder
 	var braces braceExpansionState
+	var bracket bracketGlobState
 	first := true
 	for _, part := range word.Parts {
 		switch part := part.(type) {
 		case *syntax.Lit:
-			if !appendUnexpandedLit(&value, part.Value, first, &braces) {
+			if !appendUnexpandedLit(&value, part.Value, first, &braces, &bracket) {
 				return "", false
 			}
 		case *syntax.SglQuoted:
 			if part.Dollar {
 				return "", false
+			}
+			for i := 0; i < len(part.Value); i++ {
+				bracket.feedMember(part.Value[i])
 			}
 			value.WriteString(part.Value)
 		case *syntax.DblQuoted:
@@ -405,6 +412,17 @@ func literalShellWordExpandableSafe(word *syntax.Word) (string, bool) {
 				return "", false
 			}
 			for _, nested := range part.Parts {
+				if bracket.open {
+					lit, isLit := nested.(*syntax.Lit)
+					if !isLit {
+						return "", false
+					}
+					for i := 0; i < len(lit.Value); i++ {
+						bracket.feedMember(lit.Value[i])
+					}
+					value.WriteString(lit.Value)
+					continue
+				}
 				if !appendLiteralShellPart(&value, nested) {
 					return "", false
 				}
@@ -414,7 +432,34 @@ func literalShellWordExpandableSafe(word *syntax.Word) (string, bool) {
 		}
 		first = false
 	}
+	bracket.finish(&value)
 	return value.String(), true
+}
+
+// provableCommandHead reports whether the word in command position resolves to
+// a fixed executable: literalShellWordExpandableSafe, plus a leading-~
+// carve-out — tilde expands to a fixed absolute path that can never resolve to
+// a same-shell builtin. Every other unprovable head fails closed: an unquoted
+// glob or brace can expand to a builtin name (u* to unset, e{val,} to eval)
+// that mutates the environment in this shell, and judging the tail as env's
+// argv cannot model that.
+func provableCommandHead(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) == 0 {
+		return false
+	}
+	if _, ok := literalShellWordExpandableSafe(word); ok {
+		return true
+	}
+	first, isLit := word.Parts[0].(*syntax.Lit)
+	if !isLit || !strings.HasPrefix(first.Value, "~") {
+		return false
+	}
+	rest := *word
+	rest.Parts = make([]syntax.WordPart, len(word.Parts))
+	copy(rest.Parts, word.Parts)
+	rest.Parts[0] = &syntax.Lit{Value: first.Value[1:]}
+	_, ok := literalShellWordExpandableSafe(&rest)
+	return ok
 }
 
 // braceExpansionState tracks unquoted '{', '}', ',', and '..' across a word's
@@ -425,6 +470,90 @@ func literalShellWordExpandableSafe(word *syntax.Word) (string, bool) {
 type braceExpansionState struct {
 	depth int
 	sep   bool
+}
+
+// bracketGlobState tracks an unquoted '[' bracket expression across a word's
+// parts. Quote removal runs before pathname expansion, so the pattern can span
+// quoted and unquoted fragments — `["|"]` is the bracket `[|]` even though the
+// member sits in a quoted part a per-literal scan cannot see. Quoted bytes
+// therefore count as members while the expression is open, but only an
+// unquoted ']' closes it, and only after a real member: a ']' in first
+// position (or right after a leading '!'/'^' negation) is itself a member, and
+// an unquoted '\' escapes the next member byte. A '[' that never closes is a
+// literal character, not a glob.
+type bracketGlobState struct {
+	open     bool
+	negation bool
+	members  int
+	escape   bool
+}
+
+// feedMember counts one byte of a quoted part inside a bracket expression. A
+// quoted byte can never close it, but a '!' or '^' in first position is still
+// the negation marker — quote removal happens before the pattern is read.
+func (b *bracketGlobState) feedMember(c byte) {
+	b.escape = false
+	if b.members == 0 && !b.negation && (c == '!' || c == '^') {
+		b.negation = true
+		return
+	}
+	b.members++
+}
+
+// feedUnquoted applies one byte of an unquoted literal part to the bracket
+// state, reporting whether the byte closed a live expression — which makes
+// the whole word a pathname expansion — and whether the byte was consumed as
+// bracket syntax. An opener '[' and every member byte are written to value;
+// the escape '\' resolves like the word-level one and is not written.
+func (b *bracketGlobState) feedUnquoted(value *strings.Builder, c byte) (closed, handled bool) {
+	if b.escape {
+		b.escape = false
+		b.members++
+		value.WriteByte(c)
+		return false, true
+	}
+	if !b.open {
+		if c == '[' {
+			b.open = true
+			b.negation = false
+			b.members = 0
+			value.WriteByte(c)
+			return false, true
+		}
+		return false, false
+	}
+	switch c {
+	case '\\':
+		b.escape = true
+		return false, true
+	case ']':
+		if b.members > 0 {
+			return true, true
+		}
+		// First position (also right after the negation marker): a member.
+		b.members++
+		b.negation = false
+	case '!', '^':
+		if b.members == 0 && !b.negation {
+			b.negation = true
+		} else {
+			b.members++
+		}
+	default:
+		b.members++
+	}
+	value.WriteByte(c)
+	return false, true
+}
+
+// finish flushes a dangling escape at the end of a word: a '\' with no byte
+// after it is literal, matching the word-level rule.
+func (b *bracketGlobState) finish(value *strings.Builder) {
+	if b.escape {
+		b.escape = false
+		b.members++
+		value.WriteByte('\\')
+	}
 }
 
 func (b *braceExpansionState) feed(c byte, next byte, hasNext bool) (expanded bool, skip bool) {
@@ -451,30 +580,20 @@ func (b *braceExpansionState) feed(c byte, next byte, hasNext bool) (expanded bo
 	return false, false
 }
 
-// unquotedBracketCloses reports whether the literal text starting at an
-// unquoted '[' forms a glob bracket expression: an unquoted ']' appears after
-// the member list. The first character after '[' is always a member (or the
-// '!'/ '^' negation marker), never a close.
-func unquotedBracketCloses(s string) bool {
-	members := 1
-	if len(s) > 1 && (s[1] == '!' || s[1] == '^') {
-		members = 2
-	}
-	for i := members; i < len(s); i++ {
-		if s[i] == '\\' {
-			i++
-			continue
-		}
-		if s[i] == ']' && i > members {
-			return true
-		}
-	}
-	return false
-}
-
-func appendUnexpandedLit(value *strings.Builder, s string, wordStart bool, braces *braceExpansionState) bool {
+func appendUnexpandedLit(
+	value *strings.Builder,
+	s string,
+	wordStart bool,
+	braces *braceExpansionState,
+	bracket *bracketGlobState,
+) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		if closed, handled := bracket.feedUnquoted(value, c); closed {
+			return false
+		} else if handled {
+			continue
+		}
 		if c == '\\' {
 			if i+1 < len(s) {
 				i++
@@ -486,15 +605,6 @@ func appendUnexpandedLit(value *strings.Builder, s string, wordStart bool, brace
 		}
 		switch c {
 		case '*', '?':
-			return false
-		case '[':
-			// A bracket expression needs an unquoted ']' after the member
-			// list; a bare '[' or '[a' is literal to the shell, and a ']'
-			// as the first member (after an optional '!'/ '^' negation) is a
-			// literal member, not a close.
-			if !unquotedBracketCloses(s[i:]) {
-				break
-			}
 			return false
 		case '{', '}', ',', '.':
 			hasNext := i+1 < len(s)

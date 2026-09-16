@@ -71,11 +71,14 @@ func TestValidateAccountEnvironmentCommand_RefusesDynamicWaitOptionAfterTarget(t
 }
 
 // The refusals above must stay narrow: ordinary process-tab commands that touch
-// none of the identity names keep working.
+// none of the identity names keep working. The `(( counter[index] ))` and
+// `(( arr[i=42] ))` shapes moved to the refusal side: under the POSIX parse
+// `(( … ))` is two nested subshells and the inner word sits in command
+// position, where a bracket glob is an unprovable head — refusing it is the
+// priced cost of the expandable-head rule (see
+// TestCommandMutatesAccountEnvironment_ExpandableCommandHead).
 func TestValidateAccountEnvironmentCommand_FollowupsStayNarrow(t *testing.T) {
 	for _, command := range []string{
-		"(( counter[index] ))",
-		"(( arr[i=42] )); npm run dev",
 		"let 'total += 1'",
 		"nice -n 10 npm run dev",
 		// The new wrappers must UNWRAP, not blanket-refuse: the command they

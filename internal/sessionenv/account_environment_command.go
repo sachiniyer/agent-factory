@@ -163,9 +163,10 @@ func unwrappedAccountCommandMutates(
 	names map[string]struct{},
 	evaluation *evaluationBudget,
 ) bool {
-	if _, literal := literalShellWord(words[0]); !literal {
-		// A dynamic command name can resolve to env or a same-shell builtin such
-		// as unset/export, so its effect on the selected identity is unprovable.
+	if !provableCommandHead(words[0]) {
+		// A dynamic or expandable command name can resolve to env or a
+		// same-shell builtin such as unset/export, so its effect on the
+		// selected identity is unprovable.
 		return true
 	}
 	switch {
@@ -373,14 +374,12 @@ func unrecognizedWrapperHidesAccountAssignment(
 	evaluation *evaluationBudget,
 ) bool {
 	strace := isAccountCommandName(words[0], "strace")
-	if _, safe := literalShellWordExpandableSafe(words[0]); !safe {
+	if !provableCommandHead(words[0]) {
 		// The command name itself cannot be resolved to a fixed literal —
-		// glob or brace expansion can produce `env` (or another mutator) from
-		// a word like `e*`. Judge the tail as that invocation's argv, the same
-		// rule the scan applies to unprovable tail words below.
-		if envCallMutatesAccountEnvironment(words[1:], names, true, evaluation) {
-			return true
-		}
+		// glob or brace expansion can produce `env` from a word like `e*`,
+		// or a same-shell mutator such as `unset` from `u*`, which no argv
+		// tail judgment can model.
+		return true
 	}
 	for i := 1; i < len(words); i++ {
 		word := words[i]

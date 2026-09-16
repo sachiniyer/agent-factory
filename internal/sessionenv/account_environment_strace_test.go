@@ -172,10 +172,12 @@ func TestCommandMutatesAccountEnvironment_EscapeAndExpansionResolved(t *testing.
 		{`e\nv CODEX_HOME=/other codex`, true},
 		{`valgrind s\trace -E CODEX_HOME codex`, true},
 		{`strace s\h -c 'unset CODEX_HOME; codex'`, true},
-		// An unquoted glob in command position can expand to env or another
-		// mutator, so the tail is judged as that invocation's argv.
+		// An unquoted glob or brace in command position can expand to env or
+		// to a same-shell mutator such as unset (u* in a directory holding a
+		// file named "unset"), so the invocation fails closed.
 		{`strace* -E CODEX_HOME codex`, true},
 		{`e* CODEX_HOME=/other codex`, true},
+		{`u* CODEX_HOME; codex`, true},
 		// Unquoted brace expansion splits one word into several argv entries
 		// even under POSIX parsing; a brace word carrying -E or -o operands
 		// cannot be judged as the literal it spells.
@@ -183,12 +185,92 @@ func TestCommandMutatesAccountEnvironment_EscapeAndExpansionResolved(t *testing.
 		{`e{nv,} CODEX_HOME=/other codex`, true},
 		{`strace {-o,'|env CODEX_HOME=/x true'} codex`, true},
 		// Quoted braces never expand, '{}'-shaped words are not brace
-		// expansions (xargs -I{} is its own marker syntax), and a glob head
-		// with a benign tail stays accepted.
+		// expansions (xargs -I{} is its own marker syntax), and a leading ~
+		// head stays accepted: it expands to a fixed absolute path that can
+		// never name a same-shell builtin.
 		{`strace '{-E,CODEX_HOME}' codex`, false},
 		{`xargs -I{} env codex {}`, false},
-		{`strace* codex`, false},
 		{`~/bin/tool arg`, false},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, commandMutatesAccountEnvironment(tc.command, codex),
+			"command %q", tc.command)
+	}
+}
+
+// Quote removal runs before pathname expansion, so a glob bracket expression
+// can span quoted and unquoted fragments: `["|"]` is the bracket `[|]` to
+// /bin/sh even though the member lives in a quoted part. A per-literal scan
+// misses it; the bracket state must carry across part boundaries.
+func TestCommandMutatesAccountEnvironment_SpanningBracketGlob(t *testing.T) {
+	codex := accountScopedNames("codex", "CODEX_HOME")
+	for name := range accountShellStartupNames {
+		codex[name] = struct{}{}
+	}
+	cases := []struct {
+		command string
+		want    bool
+	}{
+		// The operand strace -o executes when it begins with |: in a working
+		// directory holding a file named `|env CODEX_HOME=x codex`, the word
+		// expands to it whether the brackets are spelled with double quotes,
+		// single quotes, or escapes.
+		{`strace -o ["|"]env[" "]CODEX_HOME=x[" "]codex true`, true},
+		{`strace -o ['|']env[' ']CODEX_HOME=x[' ']codex true`, true},
+		{`strace -o ["\|"]env[" "]CODEX_HOME=x[" "]codex true`, true},
+		// The same span can hide a denied -E operand behind a quoted member.
+		{`strace -E CODEX["_"]HOME=x codex`, true},
+		{`strace -E CODEX['"']HOME=x codex`, true},
+		// And the whole command name: ["e"]nv is env wherever "e" exists.
+		{`["e"]nv CODEX_HOME=/other codex`, true},
+		{`[u]nset CODEX_HOME`, true},
+		// Ordinary unquoted brackets already refused; spanning closes the
+		// quoted-member variant of the same check.
+		{`strace -o /tmp/t[!0-9] codex`, true},
+		{`strace -o /tmp/t[0-9]x codex`, true},
+		// An unclosed '[' is literal, a quoted ']' never closes, and an
+		// escaped ']' is a member — those words are not globs.
+		{`echo file[unfinished`, false},
+		{`echo ["]x"`, false},
+		{`echo [a\]b`, false},
+		{`strace -o '/tmp/t[0-9]' codex`, false},
+		{`strace -o /tmp/t\[0-9\] codex`, false},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, commandMutatesAccountEnvironment(tc.command, codex),
+			"command %q", tc.command)
+	}
+}
+
+// An expandable word in command position can resolve to a same-shell mutator
+// the tail-as-env judgment cannot model: `u*` in a directory holding a file
+// named "unset" runs `unset`, and a brace head picks any word it lists. The
+// invocation fails closed; only a leading ~ stays provable because tilde
+// expands to a fixed absolute path, never a bare builtin name.
+func TestCommandMutatesAccountEnvironment_ExpandableCommandHead(t *testing.T) {
+	codex := accountScopedNames("codex", "CODEX_HOME")
+	for name := range accountShellStartupNames {
+		codex[name] = struct{}{}
+	}
+	cases := []struct {
+		command string
+		want    bool
+	}{
+		{`u* CODEX_HOME`, true},
+		{`u* CODEX_HOME; codex`, true},
+		{`e* CODEX_HOME=/other codex`, true},
+		{`{unset,echo} CODEX_HOME`, true},
+		{`nice u* CODEX_HOME`, true},
+		{`strace u* CODEX_HOME`, true},
+		{`$COMMAND CODEX_HOME`, true},
+		{`(( counter[index] ))`, true},
+		{`(( arr[i=42] )); npm run dev`, true},
+		// A tilde head expands to one fixed path — the same trust class as an
+		// absolute executable — and an ordinary literal head stays accepted.
+		{`~/bin/tool arg`, false},
+		{`~/.local/bin/tool arg`, false},
+		{`npm run dev`, false},
+		{`ls CODEX_HOME`, false},
 	}
 	for _, tc := range cases {
 		require.Equal(t, tc.want, commandMutatesAccountEnvironment(tc.command, codex),
