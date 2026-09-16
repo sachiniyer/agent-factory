@@ -149,6 +149,43 @@ func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
 	s.dirty = true
 }
 
+// AcknowledgeDeletedRestored removes the task with the given ID from s.tasks
+// when a previously restored deletion finally succeeds. Without this, a task
+// re-inserted by RestoreFailedDelete stays visible after its retry RemoveTask
+// call commits — the failedEdit gate that suppresses SetTasks also suppresses
+// the reload that would otherwise remove it.
+func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
+	for i, t := range s.tasks {
+		if t.ID == id {
+			s.tasks = append(s.tasks[:i], s.tasks[i+1:]...)
+			if s.selectedIdx >= len(s.tasks) && s.selectedIdx > 0 {
+				s.selectedIdx--
+			}
+			return
+		}
+	}
+}
+
+// PruneRestoredAbsent removes tasks from s.tasks that were re-queued by
+// RestoreFailedDelete (and so appear in s.deleted) but are absent from the
+// authoritative reload. This prevents ghost rows when a task was deleted by
+// another client between the pane load and our RemoveTask call: the daemon
+// returns a non-committed "not found" so RestoreFailedDelete fires, but the
+// subsequent LoadTasksForCurrentRepo confirms the record is gone from disk.
+// When failedEdit suppresses SetTasks, calling this method prunes those rows
+// so the pane does not persist entries the disk no longer holds.
+func (s *TaskPane) PruneRestoredAbsent(loaded []task.Task) {
+	present := make(map[string]bool, len(loaded))
+	for _, t := range loaded {
+		present[t.ID] = true
+	}
+	for _, queued := range s.deleted {
+		if !present[queued.ID] {
+			s.AcknowledgeDeletedRestored(queued.ID)
+		}
+	}
+}
+
 // ConsumeDeleted returns the tasks pending deletion and clears the pane's
 // deletion state so a subsequent save can't reprocess already-deleted tasks.
 // Failed edits restored after ConsumeDirty keep the pane dirty until the final
