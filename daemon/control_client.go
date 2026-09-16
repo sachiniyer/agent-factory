@@ -185,23 +185,25 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error {
 	// The ONLY condition under which an ad-hoc launch remains legitimate on a
 	// unit-claimed home: the service manager the installed unit belongs to
-	// provably cannot exist in this environment — no systemctl/launchctl
-	// binary, or a platform with no autostart support. There is no
-	// supervision to escape, and the fallback keeps af usable on
-	// systemd-less boxes and containers (#2373). Every other outcome below —
-	// a refused, hung, or bus-unreachable start — instead returns an error:
-	// a manager that COULD run the unit makes an ad-hoc spawn an
-	// unsupervised escapee that outlives the transient failure, greets the
-	// unit's next start with an already-served socket (whose ExecStart exits
-	// 0 by design), and leaves the daemon permanently outside
-	// Restart=on-failure protection (#4470).
-	if absentErr := checkUnitSupervisorAbsent(); absentErr != nil {
+	// provably cannot exist in this environment — no systemd/launchd as init,
+	// or a platform with no autostart support. There is no supervision to
+	// escape, and the fallback keeps af usable on systemd-less boxes and
+	// containers (#2373). Every other outcome below — a refused, hung,
+	// bus-unreachable, or UNINVOKABLE start — instead returns an error: a
+	// manager that COULD run the unit makes an ad-hoc spawn an unsupervised
+	// escapee that outlives the transient failure, greets the unit's next
+	// start with an already-served socket (whose ExecStart exits 0 by
+	// design), and leaves the daemon permanently outside Restart=on-failure
+	// protection (#4470).
+	presence, probeErr := probeUnitSupervisor()
+	switch presence {
+	case supervisorAbsent:
 		if admissionDeadlineExpired(deadline) {
 			return daemonAdmissionDeadlineError()
 		}
-		log.WarningLog.Printf("installed daemon service cannot run in this environment; falling back to an ad-hoc daemon: %v", absentErr)
+		log.WarningLog.Printf("installed daemon service cannot run in this environment; falling back to an ad-hoc daemon: %v", probeErr)
 		if err := ensureDaemonAdHocUntil(launch, deadline); err != nil {
-			return fmt.Errorf("installed daemon service unavailable: %v; ad-hoc fallback failed: %w", absentErr, err)
+			return fmt.Errorf("installed daemon service unavailable: %v; ad-hoc fallback failed: %w", probeErr, err)
 		}
 		// The ad-hoc fallback brought up a reachable daemon. EnsureDaemon's
 		// contract is "daemon reachable when I return nil", and every caller
@@ -213,11 +215,17 @@ func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error
 		// looks: the warning above, and af doctor / af daemon status carry a
 		// supervision-owner row. Report success.
 		return nil
+	case supervisorUnreachable:
+		// The manager provably runs this system — only this process's ability
+		// to invoke it failed (e.g. a PATH that omits the binary). `af daemon
+		// adopt` would hit the same wall, so the remedy is an environment
+		// that can reach the manager.
+		return fmt.Errorf("the installed daemon service supervises this home but its service manager cannot be invoked from this environment (%v); refusing to launch an unsupervised daemon — fix PATH so the manager binary is reachable, or run this from a session with a service manager; if this home should be unmanaged, uninstall the autostart unit", probeErr)
 	}
 
 	unitDeadline := admissionBoundedDeadline(deadline, ensureUnitStartTimeout)
 	if startErr := runEnsureUnitStartCommand(unitDeadline); startErr != nil {
-		return fmt.Errorf("the installed daemon service supervises this home but could not be started (%v); refusing to launch an unsupervised daemon — run `af daemon adopt`, or start the unit from a session with a service manager; if this home should be unmanaged, uninstall the autostart unit", startErr)
+		return fmt.Errorf("the installed daemon service supervises this home but could not be started (%v); refusing to launch an unsupervised daemon — %s; if this home should be unmanaged, uninstall the autostart unit", startErr, unitStartRemedy(startErr))
 	}
 	// The manager accepted the start — but "accepted" is not "serving":
 	// after an on-failure kill the unit holds ExecStart for RestartSec, so a
@@ -227,7 +235,7 @@ func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error
 	// an unsupervised process, and is exactly the escape that left the unit
 	// inactive while an impostor served the home for hours (#4470).
 	if err := waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout)); err != nil {
-		return fmt.Errorf("the installed daemon service accepted the start but no daemon answered — it may still be starting (RestartSec after a crash); retry shortly or check `systemctl --user status %s`: %w", autostartUnitName, err)
+		return fmt.Errorf("the installed daemon service accepted the start but no daemon answered — it may still be starting (RestartSec after a crash); retry shortly or check `%s`: %w", unitStatusDiagnostic(), err)
 	}
 	return nil
 }

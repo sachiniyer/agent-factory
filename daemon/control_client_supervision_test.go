@@ -115,6 +115,9 @@ func TestEnsureDaemonPrefersHomeServingLaunchdUnit(t *testing.T) {
 // an actionable error within the bounded manager slice instead.
 func TestEnsureDaemonManagerHangRefusesAdHocSpawn(t *testing.T) {
 	marker, _ := installEnsureTestUnitAndManager(t, true)
+	// A session-bus address is configured, so the wedge is a manager hang,
+	// not a missing bus — the adopt remedy must lead.
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	startServer, _ := ensureTestServerStarter(t)
 
 	adHocLaunched := false
@@ -180,11 +183,16 @@ func TestEnsureDaemonPendingUnitStartNeverSpawnsAdHoc(t *testing.T) {
 }
 
 // TestEnsureDaemonUnitStartRefusedDoesNotSpawn: a manager that answers but
-// refuses the start — masked unit, start-limit hit, a caller without a
-// session bus — must not produce an ad-hoc daemon either: the unit still owns
-// this home, and the escapee would outlive the transient refusal (#4470).
+// refuses the start — masked unit, start-limit hit — must not produce an
+// ad-hoc daemon either: the unit still owns this home, and the escapee would
+// outlive the transient refusal (#4470). (A caller with no session bus at all
+// is the bus-unreachable class — covered below.)
 func TestEnsureDaemonUnitStartRefusedDoesNotSpawn(t *testing.T) {
 	_, _ = installEnsureTestUnitAndManager(t, false)
+	// A session-bus address is configured, so the refusal is a manager answer
+	// (masked unit, start-limit), not a bus reachability failure — the adopt
+	// remedy must lead.
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
 	// Replace the accepting fake with one that refuses the start outright.
 	managerDir := t.TempDir()
@@ -248,13 +256,16 @@ func TestEnsureDaemonSupervisorAbsentFallsBackToAdHoc(t *testing.T) {
 }
 
 // TestEnsureDaemonNoManagerBinaryFallsBackToAdHoc covers the second absence
-// arm: the unit file claims the home but no manager binary exists on PATH at
-// all — a container or minimal image where the unit can never run. The
-// ad-hoc fallback is again the only working path.
+// arm: the unit file claims the home but the host has neither systemd as
+// init nor a manager binary on PATH — a minimal image where the unit can
+// never run. The ad-hoc fallback is again the only working path.
 func TestEnsureDaemonNoManagerBinaryFallsBackToAdHoc(t *testing.T) {
 	_, _ = installEnsureTestUnitAndManager(t, false)
 	// An empty PATH makes the manager binary unresolvable without affecting
-	// the in-process fake daemon, which needs no external tools.
+	// the in-process fake daemon, which needs no external tools. The booted
+	// marker must ALSO be missing: on a systemd-booted host a PATH miss is an
+	// invocation failure that fails closed, not absence (the next test).
+	systemdBootedDir = filepath.Join(t.TempDir(), "no-such-dir")
 	t.Setenv("PATH", t.TempDir())
 	startServer, serverErr := ensureTestServerStarter(t)
 
@@ -271,6 +282,153 @@ func TestEnsureDaemonNoManagerBinaryFallsBackToAdHoc(t *testing.T) {
 	}
 	if !adHocLaunched {
 		t.Fatal("a host with no manager binary skipped the only launch path that can work")
+	}
+}
+
+// TestEnsureDaemonUnreachableSupervisorRefusesAdHoc is the Codex-finding
+// shape: on a systemd-BOOTED host, an `af` invoked by absolute path from an
+// env whose PATH omits systemctl cannot invoke the manager — but the
+// supervisor provably exists. Reading that PATH miss as absence would ad-hoc
+// spawn the exact unsupervised escapee this gate exists to refuse (#4470), so
+// the probe must fail closed instead.
+func TestEnsureDaemonUnreachableSupervisorRefusesAdHoc(t *testing.T) {
+	_, _ = installEnsureTestUnitAndManager(t, false) // booted marker present
+	t.Setenv("PATH", t.TempDir())                    // no systemctl anywhere
+	startServer, _ := ensureTestServerStarter(t)
+
+	adHocLaunched := false
+	err := ensureDaemonWithLauncher(func() error {
+		adHocLaunched = true
+		return startServer()
+	})
+	if err == nil {
+		t.Fatal("a PATH-omitted manager binary on a booted host produced an ad-hoc daemon — the #4470 escape")
+	}
+	if !strings.Contains(err.Error(), "cannot be invoked") || !strings.Contains(err.Error(), "session with a service manager") {
+		t.Fatalf("refusal must name the invocation failure and the session remedy, got: %v", err)
+	}
+	if adHocLaunched {
+		t.Fatal("unreachable supervisor spawned an unsupervised daemon")
+	}
+}
+
+// TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass: the refusal's remedy
+// order depends on WHY the start failed. Where the manager could not be
+// reached at all — no session bus configured (a user cron job, a system
+// service), or a configured bus that refused the connect — `af daemon adopt`
+// would drive the same manager through the same bus and fail identically, so
+// the session remedy leads and adopt is only named to say it cannot help. A
+// refusal under a reachable manager keeps adopt first.
+func TestEnsureDaemonUnitStartRefusalOrdersRemedyByBusClass(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		busConfigured bool
+		managerStderr string
+		wantAdoptLead bool
+	}{
+		{name: "no session bus (cron)", busConfigured: false, wantAdoptLead: false},
+		{
+			name:          "bus configured, connect failed",
+			busConfigured: true,
+			managerStderr: "Failed to connect to bus: No such file or directory",
+			wantAdoptLead: false,
+		},
+		{name: "refused under reachable manager", busConfigured: true, wantAdoptLead: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _ = installEnsureTestUnitAndManager(t, false)
+			if tc.busConfigured {
+				t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			} else {
+				t.Setenv("XDG_RUNTIME_DIR", "")
+				t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+			}
+			managerDir := t.TempDir()
+			script := "#!/bin/sh\n"
+			if tc.managerStderr != "" {
+				script += "echo " + shellQuote(tc.managerStderr) + " >&2\n"
+			}
+			script += "exit 1\n"
+			if err := os.WriteFile(filepath.Join(managerDir, "systemctl"), []byte(script), 0o700); err != nil {
+				t.Fatalf("write fake systemctl: %v", err)
+			}
+			t.Setenv("PATH", managerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			startServer, _ := ensureTestServerStarter(t)
+			adHocLaunched := false
+			err := ensureDaemonWithLauncher(func() error {
+				adHocLaunched = true
+				return startServer()
+			})
+			if err == nil {
+				t.Fatal("a refused start produced an ad-hoc daemon — the #4470 escape")
+			}
+			if adHocLaunched {
+				t.Fatal("refused start spawned an unsupervised daemon")
+			}
+			if tc.wantAdoptLead {
+				if !strings.Contains(err.Error(), "run `af daemon adopt`") {
+					t.Fatalf("reachable-manager refusal must lead with adopt, got: %v", err)
+				}
+			} else {
+				if !strings.Contains(err.Error(), "start the unit from a session with a service manager") {
+					t.Fatalf("bus-unreachable refusal must lead with the session remedy, got: %v", err)
+				}
+				if strings.Contains(err.Error(), "run `af daemon adopt`,") {
+					t.Fatalf("adopt cannot help in the bus-unreachable class and must not lead, got: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestProbeUnitSupervisorOrdering pins the probe's three states and its check
+// order: the boot marker is consulted before PATH, so "not booted" reads
+// absent even when the binary exists (a container shipping systemctl), while
+// "booted but binary missing" is an invocation failure that fails closed —
+// never absence. On darwin launchd is always PID 1, so a missing binary is
+// always unreachable.
+func TestProbeUnitSupervisorOrdering(t *testing.T) {
+	binaryDir := t.TempDir()
+	for _, name := range []string{"systemctl", "launchctl"} {
+		if err := os.WriteFile(filepath.Join(binaryDir, name), []byte("#!/bin/sh\n"), 0o700); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		goos   string
+		booted bool // linux only: the sd_booted marker exists
+		binary bool // the manager client binary is on PATH
+		want   supervisorPresence
+	}{
+		{"linux booted + binary", "linux", true, true, supervisorPresent},
+		{"linux booted, binary missing", "linux", true, false, supervisorUnreachable},
+		{"linux not booted + binary", "linux", false, true, supervisorAbsent},
+		{"linux not booted, no binary", "linux", false, false, supervisorAbsent},
+		{"darwin binary", "darwin", false, true, supervisorPresent},
+		{"darwin binary missing", "darwin", false, false, supervisorUnreachable},
+		{"unsupported platform", "plan9", false, false, supervisorAbsent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withAutostartTestEnv(t, tc.goos)
+			prevBooted := systemdBootedDir
+			t.Cleanup(func() { systemdBootedDir = prevBooted })
+			if tc.booted {
+				systemdBootedDir = t.TempDir()
+			} else {
+				systemdBootedDir = filepath.Join(t.TempDir(), "no-such-dir")
+			}
+			if tc.binary {
+				t.Setenv("PATH", binaryDir)
+			} else {
+				t.Setenv("PATH", t.TempDir())
+			}
+			got, err := probeUnitSupervisor()
+			if got != tc.want {
+				t.Fatalf("probeUnitSupervisor = %v (err %v), want %v", got, err, tc.want)
+			}
+		})
 	}
 }
 
