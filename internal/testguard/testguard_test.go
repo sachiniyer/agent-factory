@@ -438,6 +438,60 @@ func TestCodexHomeTripwire_SilentWhenUntouched(t *testing.T) {
 	}
 }
 
+// TestCodexHomeTripwire_SymlinkedStoreRoot pins the review finding on #4507:
+// when $CODEX_HOME itself is a symlink, WalkDir visits only the link and the
+// snapshot comes back empty — the tripwire must resolve the root before
+// walking or it misses every write into the real store.
+func TestCodexHomeTripwire_SymlinkedStoreRoot(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "codex-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("symlink store root: %v", err)
+	}
+	t.Setenv("CODEX_HOME", link)
+
+	verify := CodexHomeTripwire()
+	writeRollout(t, real, t.TempDir(), "rollout-2026-09-16T12-15-00-9c0d1e2f")
+
+	if err := verify(); err == nil {
+		t.Fatal("tripwire saw through no symlinked store root — snapshot was empty")
+	}
+}
+
+// TestCodexHomeTripwire_OversizedHeader pins the other #4507 review finding:
+// session_meta lines can carry large instruction payloads, so the header read
+// imposes no line-size cap — a rollout whose first line exceeds it must still
+// attribute, not silently drop to unattributable.
+func TestCodexHomeTripwire_OversizedHeader(t *testing.T) {
+	root := codexSandbox(t)
+	verify := CodexHomeTripwire()
+
+	cwd := t.TempDir()
+	path := filepath.Join(root, "sessions", "2026", "09", "16",
+		"rollout-2026-09-16T12-20-00-a1b2c3d4.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir rollout tree: %v", err)
+	}
+	header, err := json.Marshal(map[string]any{
+		"type": "session_meta",
+		"payload": map[string]any{
+			"id":           "a1b2c3d4",
+			"cwd":          cwd,
+			"instructions": strings.Repeat("x", 256<<10),
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal oversized header: %v", err)
+	}
+	if err := os.WriteFile(path, append(header, '\n'), 0o644); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+
+	if err := verify(); err == nil {
+		t.Fatal("tripwire dropped a test-owned rollout whose header exceeded the old cap")
+	}
+}
+
 func TestCodexHomeTripwire_DisabledByEnv(t *testing.T) {
 	root := codexSandbox(t)
 	t.Setenv("AF_DISABLE_CODEX_TRIPWIRE", "1")

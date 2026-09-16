@@ -25,7 +25,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -320,16 +319,17 @@ func codexStoreSnapshot(root string) map[string]codexStoreFile {
 // — the same first line session.codexRolloutWorkingDir parses, in miniature so
 // testguard stays dependency-free. It is the one ownership signal in the store
 // a live Codex cannot forge for us: a rollout written by a test-spawned
-// process names the directory that process ran in.
+// process names the directory that process ran in. Callers reach it only for
+// .jsonl files, so the unbounded first-line read mirrors the production parser
+// (a session_meta can carry a large instruction payload) without ever scanning
+// a gigabyte sqlite for a newline it does not contain.
 func codexSessionWorkingDir(path string) (string, bool) {
 	file, err := os.Open(path)
 	if err != nil {
 		return "", false
 	}
 	defer func() { _ = file.Close() }()
-	// The header is one small line; cap the read so a changed gigabyte file
-	// is not scanned for a newline it does not contain.
-	line, err := bufio.NewReader(io.LimitReader(file, 64<<10)).ReadBytes('\n')
+	line, err := bufio.NewReader(file).ReadBytes('\n')
 	if err != nil && len(line) == 0 {
 		return "", false
 	}
@@ -397,6 +397,10 @@ func CodexHomeTripwire() func() error {
 	if root == "" {
 		return func() error { return nil }
 	}
+	// ResolveForCompare, not the raw env value: a symlinked CODEX_HOME or
+	// ~/.codex makes WalkDir visit only the link itself, so both snapshots
+	// would silently come back empty.
+	root = pathutil.ResolveForCompare(root)
 	checkpoint := sandboxRunCheckpoint()
 	before := codexStoreSnapshot(root)
 	return func() error {
@@ -404,6 +408,12 @@ func CodexHomeTripwire() func() error {
 		var owned []string
 		for rel, cur := range codexStoreSnapshot(root) {
 			if prev, existed := before[rel]; existed && prev == cur {
+				continue
+			}
+			// Only .jsonl files can be rollouts under the store layout; for
+			// anything else the header read would scan whole files for a
+			// newline that may never come.
+			if !strings.HasSuffix(rel, ".jsonl") {
 				continue
 			}
 			cwd, ok := codexSessionWorkingDir(filepath.Join(root, rel))
