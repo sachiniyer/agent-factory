@@ -515,3 +515,32 @@ func TestValidateAccountEnvironmentCommand_ChildlessTailIsBounded(t *testing.T) 
 	require.Error(t, ValidateAccountEnvironmentCommand(huge, scopedProcessTabAccount()))
 	require.Less(t, time.Since(start), 2*time.Second, "a long childless tail must not stall validation")
 }
+
+// A self-contained option token cannot move the child boundary, so its value is
+// not a command head (#4465 review). Real util-linux rejects a non-numeric
+// class value before launching anything, and a shadowed wrapper that forwards
+// whole words execs the token as `--classd=env`, which is not found. Only a
+// script that cuts the value out of the token runs env — and that repo-local
+// file needs no argv to unset the root, so refusing these would only add false
+// positives. The first command is the review's exact shape, admitted on
+// purpose. A token whose empty expansion would leave a SEPARATE-value option
+// (`-c"$CLASS"`) can swallow the child and stays refused.
+func TestValidateAccountEnvironmentCommand_AttachedIoniceValuesAreSelfContained(t *testing.T) {
+	for _, command := range []string{
+		`CMD=env; ./ionice --classd="$CMD" -u CODEX_HOME codex`,
+		`./ionice --classdata=env -u CODEX_HOME codex`,
+		`ionice --classdata="$N" npm run dev`,
+		`ionice --class="$CLASS" npm run dev`,
+		`ionice --classd="$N" -p 123`,
+		`ionice -c3 npm run dev`,
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
+	}
+	for _, command := range []string{
+		`ionice -c"$CLASS" npm run dev`,
+		`ionice -n"$N" npm run dev`,
+		`ionice --classdata "$N" npm run dev`,
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
+	}
+}

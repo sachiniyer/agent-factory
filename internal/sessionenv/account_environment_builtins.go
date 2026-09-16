@@ -307,6 +307,13 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			if !ioniceQuotedOptionBoundaryPinned(prefix) {
 				return nil, true
 			}
+			// A pinned token is self-contained, so its value is never judged as
+			// a command head. The shadowed reading this file models forwards
+			// whole argv words (`shift N; exec "$@"`); the token then execs as
+			// `--classd=…`/`-c…`, never as env. Only a script that cuts the
+			// value out of the word runs it, and such a script needs no argv at
+			// all (`unset CODEX_HOME; exec codex`), so refusing the token would
+			// close nothing (#4465 review, measured).
 			words = words[1:]
 			continue
 		}
