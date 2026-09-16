@@ -1523,10 +1523,18 @@ export class SplitView {
       return false;
     }
     const zone = this.zoneAt(pane.container, clientX, clientY);
+    const shown = findLeaf(this.tree, pane.leafId)?.tab;
+    // A center drop on the pane already showing the tab is a third no-op:
+    // replaceTab would hand back this same tree, so committing it would report
+    // a change that never happened — and dismiss a disclosure the drop left
+    // untouched (#4434 review).
+    if (zone === "center" && shown === tab) {
+      return false;
+    }
     // Dragging the pane's OWN tab onto its edge still splits — but the new half must
     // open a DIFFERENT tab (#1901). Binding the dragged tab on both sides is what the
     // one-tab-one-pane dedupe undoes, collapsing the split back to where it started.
-    const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
+    const onItsOwnPane = zone !== "center" && shown === tab;
     const opened = onItsOwnPane
       ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs())
       : tab;

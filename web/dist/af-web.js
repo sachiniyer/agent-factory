@@ -13595,7 +13595,11 @@ var SplitView = class {
       return false;
     }
     const zone = this.zoneAt(pane.container, clientX, clientY);
-    const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
+    const shown = findLeaf(this.tree, pane.leafId)?.tab;
+    if (zone === "center" && shown === tab) {
+      return false;
+    }
+    const onItsOwnPane = zone !== "center" && shown === tab;
     const opened = onItsOwnPane ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs()) : tab;
     if (opened === null) {
       return false;
