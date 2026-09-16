@@ -189,6 +189,46 @@ func TestHandoffAccountRetriesCommittedSwapToSameTarget(t *testing.T) {
 		"the retry must finish the recorded transaction, not append a second handoff")
 }
 
+// TestHandoffAccountRetryReportsRecordedAgentBoundary is the cross-agent half
+// of the committed-retry path: once a codex→claude swap's identity checkpoint
+// lands, the live agent IS the incoming one, so a retry that re-derives "from"
+// from CurrentAgentName reports claude→claude. The response must come from the
+// durable ledger entry — the only place the recorded transition and its head
+// attribution boundary still exist.
+func TestHandoffAccountRetryReportsRecordedAgentBoundary(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "finish migration", time.Now().Add(time.Hour))
+	prepareHandoffTargetPreflight(t, inst)
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.Program = "codex"
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "codex"))
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	m.cfg.LimitAutoResume = false
+	backend.onRespawn = func(i *session.Instance) { i.SetTmuxSession(tmux.NewTmuxSession(i.Title, i.AgentProgram())) }
+	backend.sendPromptErr = errors.New("delivery interrupted")
+	_, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, To: "claude", Account: "personal"})
+	require.ErrorContains(t, err, "delivery interrupted")
+	_, _, pending := inst.PendingAccountSwap()
+	require.True(t, pending)
+	recorded, ok := inst.LastHandoff()
+	require.True(t, ok)
+	require.Equal(t, "codex", recorded.From.Agent)
+	require.Equal(t, "claude", recorded.To)
+	require.NotEmpty(t, recorded.HeadSHA, "the committed transaction must record its attribution boundary")
+
+	backend.sendPromptErr = nil
+	resp, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, To: "claude", Account: "personal"})
+	require.NoError(t, err)
+	require.True(t, resp.OK)
+	require.Equal(t, "codex", resp.From, "a committed retry reports the recorded outgoing agent, not the live incoming one")
+	require.Equal(t, "claude", resp.To)
+	require.Equal(t, "work", resp.FromAccount)
+	require.Equal(t, "personal", resp.ToAccount)
+	require.Equal(t, recorded.HeadSHA, resp.HeadSHA)
+	_, _, pending = inst.PendingAccountSwap()
+	require.False(t, pending)
+}
+
 func TestHandoffAccountRecoversHealthyCheckpoint(t *testing.T) {
 	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
 	configureLimitAccountCandidate(t, m, "personal")

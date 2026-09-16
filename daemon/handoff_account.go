@@ -88,7 +88,7 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 		}
 	}
 	outcome, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, instance.Title, swap)
-	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, FromAccount: swap.from, ToAccount: swap.to, HeadSHA: swap.headSHA}
+	response := HandoffSessionResponse{OK: true, From: swap.fromAgent, To: target, FromAccount: swap.from, ToAccount: swap.to, HeadSHA: swap.headSHA}
 	if err != nil {
 		if outcome == resumePerformed || isMutationCommitted(err) {
 			return response, err

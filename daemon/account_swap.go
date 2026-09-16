@@ -119,13 +119,21 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 		return nil
 	}
 	fromAgent := agent
+	var headSHA string
 	if manual {
-		if handoff, ok := instance.LastHandoff(); ok && strings.TrimSpace(handoff.From.Agent) != "" {
-			fromAgent = handoff.From.Agent
+		// The pending swap fences every other handoff, so the ledger's newest
+		// entry is this transaction's own record: the retry response owes the
+		// caller its recorded outgoing agent and attribution boundary, neither
+		// of which the post-checkpoint live state still knows.
+		if handoff, ok := instance.LastHandoff(); ok {
+			if strings.TrimSpace(handoff.From.Agent) != "" {
+				fromAgent = handoff.From.Agent
+			}
+			headSHA = handoff.HeadSHA
 		}
 	}
 	return &autoAccountSwap{
-		manual: manual, mission: mission,
+		manual: manual, mission: mission, headSHA: headSHA,
 		from:       from,
 		to:         to,
 		fromAgent:  fromAgent,
