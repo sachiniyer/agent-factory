@@ -14524,6 +14524,11 @@ function buildTask(input) {
     watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
     target_session: input.targetSession,
     on_complete: input.targetSession.trim() ? "" : input.onComplete ?? "",
+    max_concurrent_runs: (
+      // Same shape gate as on_complete above: a cap the task cannot carry is
+      // stored as 0 (unlimited), never a value ValidateTrigger refuses (#4180).
+      capUnavailableReason(input.trigger, input.targetSession) === null ? input.maxConcurrentRuns ?? 0 : 0
+    ),
     project_path: input.projectPath,
     program: input.program,
     enabled: true,
@@ -14532,6 +14537,29 @@ function buildTask(input) {
 }
 function onCompleteUnavailableReason(targetSession) {
   return targetSession.trim() ? "Target session will be reused." : null;
+}
+function capUnavailableReason(trigger, targetSession) {
+  if (trigger !== "watch") {
+    return "Cron fires already coalesce.";
+  }
+  if (targetSession.trim() !== "") {
+    return "Deliveries into one session already serialize.";
+  }
+  return null;
+}
+function parseCapInput(raw) {
+  const v = raw.trim();
+  if (v === "") {
+    return 0;
+  }
+  if (!/^[+-]?\d+$/.test(v)) {
+    return null;
+  }
+  const n = Number(v);
+  if (n < 0 || !Number.isSafeInteger(n)) {
+    return null;
+  }
+  return n === 0 ? 0 : n;
 }
 function triggerSummary(t) {
   if (t.watch_cmd && t.watch_cmd.trim() !== "") {
@@ -15104,6 +15132,19 @@ function taskFormModal(opts) {
     onCompleteReason.textContent = reason ?? "";
   };
   targetInput.addEventListener("input", syncOnComplete);
+  const capInput = h("input", { type: "text", inputMode: "numeric", class: "af-input", placeholder: "0 \xB7 unlimited", autocomplete: "off" });
+  capInput.setAttribute("aria-label", "Max concurrent runs");
+  const capField = field("Max concurrent runs", capInput);
+  const capReason = h("p", { class: "af-muted" });
+  const capReasonField = fieldGroup("Max concurrent runs", capReason);
+  const syncCap = () => {
+    const reason = capUnavailableReason(triggerSelect.value === "watch" ? "watch" : "cron", targetInput.value);
+    capField.hidden = reason !== null;
+    capReasonField.hidden = reason === null;
+    capReason.textContent = reason ?? "";
+  };
+  targetInput.addEventListener("input", syncCap);
+  triggerSelect.addEventListener("change", syncCap);
   let onCompleteOptions = [];
   const renderOnCompleteHint = () => {
     onCompleteHint.textContent = onCompleteOptions.find((option) => option.value === onCompleteSelect.value)?.hint ?? "";
@@ -15166,10 +15207,12 @@ function taskFormModal(opts) {
     syncTriggerFields();
     promptArea.value = s.prompt ?? "";
     targetInput.value = s.target_session ?? "";
+    capInput.value = s.max_concurrent_runs ? String(s.max_concurrent_runs) : "";
     programSelect.value = s.program ?? "";
   }
   loadProgramsFor(projectSelect.value);
   syncOnComplete();
+  syncCap();
   body.append(
     field("Name", nameInput),
     field("Project", projectSelect),
@@ -15180,6 +15223,8 @@ function taskFormModal(opts) {
     field("Target session", targetInput),
     onCompleteField,
     onCompleteReasonField,
+    capField,
+    capReasonField,
     field("Program", programSelect)
   );
   const card = handle.el.firstElementChild;
@@ -15206,6 +15251,15 @@ function taskFormModal(opts) {
       handle.setError("Enter a watch command.");
       return;
     }
+    let maxConcurrentRuns = 0;
+    if (capUnavailableReason(trigger, targetInput.value) === null) {
+      const parsed = parseCapInput(capInput.value);
+      if (parsed === null) {
+        handle.setError("Max concurrent runs must be a non-negative integer.");
+        return;
+      }
+      maxConcurrentRuns = parsed;
+    }
     handle.setError(null);
     opts.onSubmit({
       name,
@@ -15216,6 +15270,7 @@ function taskFormModal(opts) {
       prompt: promptArea.value,
       targetSession: targetInput.value.trim(),
       onComplete: onCompleteSelect.value,
+      maxConcurrentRuns,
       program: programSelect.value
     });
   });
@@ -18619,6 +18674,7 @@ function openEditTask(task) {
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
             on_complete: value.on_complete ?? "",
+            max_concurrent_runs: value.max_concurrent_runs ?? 0,
             project_path: input.projectPath,
             program: input.program
           },

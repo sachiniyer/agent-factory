@@ -863,17 +863,11 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 	return updated, nil
 }
 
-// capApplies reports whether this task's shape can carry a concurrency cap: it
-// bounds sessions a watch task spawns per event, so it is meaningful only for a
-// watch task that creates them (#1892). Cron fires already coalesce on RunTask's
-// lock, and target-session deliveries already serialize into one session.
-//
-// The TargetSession test goes through CanonicalTargetSession, the same function
-// deliverTaskPrompt's runtime "create a session per event" condition uses — the
-// two must agree on what an empty target session is, or a cap could validate
-// against one condition and be bypassed at delivery by the other.
+// capApplies reports whether this task's shape can carry a concurrency cap. It
+// is the record-shaped call into CapApplies, the one predicate every surface
+// asks (#4180): the store's ground truth for the trigger is IsWatch.
 func (t Task) capApplies() bool {
-	return t.IsWatch() && CanonicalTargetSession(t.TargetSession) == ""
+	return CapApplies(t.IsWatch(), t.TargetSession)
 }
 
 // clearInapplicableCap drops a stale positive cap from a task whose shape can no

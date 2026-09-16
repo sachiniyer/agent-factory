@@ -42,6 +42,9 @@ export interface AddTaskInput {
   prompt: string;
   targetSession: string;
   onComplete?: string;
+  /** The watch-task concurrency cap, already parsed to the stored int: 0 for
+   *  unlimited, and 0 when the submitted shape cannot carry one (#4180). */
+  maxConcurrentRuns?: number;
   program: string;
 }
 
@@ -88,6 +91,10 @@ export function buildTask(input: AddTaskInput): TaskData {
     watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
     target_session: input.targetSession,
     on_complete: input.targetSession.trim() ? "" : input.onComplete ?? "",
+    max_concurrent_runs:
+      // Same shape gate as on_complete above: a cap the task cannot carry is
+      // stored as 0 (unlimited), never a value ValidateTrigger refuses (#4180).
+      capUnavailableReason(input.trigger, input.targetSession) === null ? input.maxConcurrentRuns ?? 0 : 0,
     project_path: input.projectPath,
     program: input.program,
     enabled: true,
@@ -98,6 +105,47 @@ export function buildTask(input: AddTaskInput): TaskData {
 /** Targeted tasks reuse a session, so a spawned-session policy cannot apply. */
 export function onCompleteUnavailableReason(targetSession: string): string | null {
   return targetSession.trim() ? "Target session will be reused." : null;
+}
+
+/** THE one predicate for "can this task shape carry a concurrency cap" on the
+ *  web (#4180) — the browser twin of task.CapUnavailableReason, pinned to it by
+ *  the shared vectors in task/testdata/cap_vectors.json (the same
+ *  shared-source-of-truth contract as the schedule module). The cap bounds the
+ *  sessions a watch task spawns per event: cron fires already coalesce, and
+ *  deliveries into a named session already serialize, so those shapes show the
+ *  reason in place of the input rather than offering a value ValidateTrigger
+ *  would refuse. Reason order is part of the contract: a shape failing both
+ *  rules reports the trigger. */
+export function capUnavailableReason(trigger: "cron" | "watch", targetSession: string): string | null {
+  if (trigger !== "watch") {
+    return "Cron fires already coalesce.";
+  }
+  if (targetSession.trim() !== "") {
+    return "Deliveries into one session already serialize.";
+  }
+  return null;
+}
+
+/** The browser twin of task.ParseCapInput: empty means 0 (unlimited — the
+ *  stored default), and anything else must be a non-negative integer within the
+ *  ceiling both surfaces share (task.MaxCapValue = Number.MAX_SAFE_INTEGER —
+ *  above it the two sides could not represent the same digits identically).
+ *  Pinned by task/testdata/cap_vectors.json. Returns null for a refusal. */
+export function parseCapInput(raw: string): number | null {
+  const v = raw.trim();
+  if (v === "") {
+    return 0;
+  }
+  if (!/^[+-]?\d+$/.test(v)) {
+    return null;
+  }
+  const n = Number(v);
+  if (n < 0 || !Number.isSafeInteger(n)) {
+    return null;
+  }
+  // Go's strconv.Atoi("-0") is +0 while Number("-0") is -0 — same digits, two
+  // zeroes, and the vectors say the shared answer is the positive one.
+  return n === 0 ? 0 : n;
 }
 
 /** The task's trigger as a one-line summary, mirroring the TUI's row detail
@@ -895,6 +943,24 @@ function taskFormModal(opts: {
     onCompleteReason.textContent = reason ?? "";
   };
   targetInput.addEventListener("input", syncOnComplete);
+
+  // The watch-task concurrency cap (#4180): a plain text input like the target
+  // field, shown only while the shape can carry one (capUnavailableReason, the
+  // pinned twin of task.CapUnavailableReason). The reason row takes its place
+  // otherwise — the same inapplicable-row pattern as On done.
+  const capInput = h("input", { type: "text", inputMode: "numeric", class: "af-input", placeholder: "0 · unlimited", autocomplete: "off" });
+  capInput.setAttribute("aria-label", "Max concurrent runs");
+  const capField = field("Max concurrent runs", capInput);
+  const capReason = h("p", { class: "af-muted" });
+  const capReasonField = fieldGroup("Max concurrent runs", capReason);
+  const syncCap = (): void => {
+    const reason = capUnavailableReason(triggerSelect.value === "watch" ? "watch" : "cron", targetInput.value);
+    capField.hidden = reason !== null;
+    capReasonField.hidden = reason === null;
+    capReason.textContent = reason ?? "";
+  };
+  targetInput.addEventListener("input", syncCap);
+  triggerSelect.addEventListener("change", syncCap);
   let onCompleteOptions: OnCompleteOption[] = [];
   const renderOnCompleteHint = (): void => {
     onCompleteHint.textContent = onCompleteOptions.find(option => option.value === onCompleteSelect.value)?.hint ?? "";
@@ -980,6 +1046,10 @@ function taskFormModal(opts: {
     syncTriggerFields();
     promptArea.value = s.prompt ?? "";
     targetInput.value = s.target_session ?? "";
+    // 0/absent stores as unlimited and seeds an empty field — the same
+    // empty-means-default convention the target field uses — so only a positive
+    // cap is shown as a value.
+    capInput.value = s.max_concurrent_runs ? String(s.max_concurrent_runs) : "";
     programSelect.value = s.program ?? "";
   }
 
@@ -987,6 +1057,7 @@ function taskFormModal(opts: {
   // program as the current selection rather than clobbering it with the default.
   loadProgramsFor(projectSelect.value);
   syncOnComplete();
+  syncCap();
 
   body.append(
     field("Name", nameInput),
@@ -998,6 +1069,8 @@ function taskFormModal(opts: {
     field("Target session", targetInput),
     onCompleteField,
     onCompleteReasonField,
+    capField,
+    capReasonField,
     field("Program", programSelect),
   );
 
@@ -1028,6 +1101,20 @@ function taskFormModal(opts: {
       handle.setError("Enter a watch command.");
       return;
     }
+    // The cap field is shown only while the shape can carry one, so an
+    // inapplicable submission stores 0 (unlimited) — agreeing with what the
+    // daemon's merge would do anyway (task.clearInapplicableCap) — and an
+    // applicable one is parsed by the same rule the TUI uses (parseCapInput,
+    // pinned by the shared vectors in task/testdata/cap_vectors.json).
+    let maxConcurrentRuns = 0;
+    if (capUnavailableReason(trigger, targetInput.value) === null) {
+      const parsed = parseCapInput(capInput.value);
+      if (parsed === null) {
+        handle.setError("Max concurrent runs must be a non-negative integer.");
+        return;
+      }
+      maxConcurrentRuns = parsed;
+    }
     handle.setError(null);
     opts.onSubmit({
       name,
@@ -1038,6 +1125,7 @@ function taskFormModal(opts: {
       prompt: promptArea.value,
       targetSession: targetInput.value.trim(),
       onComplete: onCompleteSelect.value,
+      maxConcurrentRuns,
       program: programSelect.value,
     });
   });
