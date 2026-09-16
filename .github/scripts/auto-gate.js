@@ -1,6 +1,28 @@
 const { randomUUID } = require("node:crypto");
 
-const ALLOWED_AUTHORS = new Set(["sachiniyer", "app-detail-app", "app-detail-app[bot]"]);
+// GitHub renders one GitHub App actor under several logins depending on the
+// surface being read: the detail app has been observed as `app/detail-app` on a
+// pull request's author field, `detail-app[bot]` on its commits, and
+// `app-detail-app` / `app-detail-app[bot]` in the renderings this set was first
+// written for. Strip a leading `app/` and a trailing `[bot]` before the
+// membership test so a rename — or a rendering this gate has not seen before —
+// cannot silently fail closed into the manual-merge path again (#4425). The
+// predicate is applied at every ALLOWED_AUTHORS lookup; a site that skipped the
+// normalization would be an intermittent version of the same defect.
+function normalizeAuthorLogin(login) {
+  return String(login || "").replace(/^app\//, "").replace(/\[bot\]$/, "");
+}
+const ALLOWED_AUTHORS = new Set(["sachiniyer", "detail-app", "app-detail-app"]);
+function isAllowedAuthor(login) {
+  return ALLOWED_AUTHORS.has(normalizeAuthorLogin(login));
+}
+// The merge queue's own app authors its synthetic test PRs. Its login gets the
+// same normalization: `app/trunk-io` is what the author field reports. A batch
+// PR is recognized by this author AND the branch prefix together — either alone
+// would also match a hand-pushed `trunk-merge/*` branch or an ordinary PR that
+// happened to quote the queue's links.
+const TRUNK_MERGE_AUTHOR = "trunk-io";
+const TRUNK_MERGE_BRANCH_PREFIX = "trunk-merge/";
 const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 // Every workflow whose master-side run is triggered by `push: branches:
 // [master]`. A push made with GITHUB_TOKEN does not trigger further workflow
@@ -345,6 +367,14 @@ const AWAITING_MAINTAINER_REVIEW_REMEDY =
 const CODEX_VERDICT_REMEDY =
   "post `@codex review` on this head in a PR comment; requesting the review needs nothing from " +
   "the author, and the blocker clears when Codex returns a covering verdict";
+// The "author" reason a merge-queue batch PR reports instead of
+// MANUAL_MERGE_AUTHOR_REASON: the synthetic head's author is the queue's own
+// app, which says nothing about the pull requests under test. Each constituent
+// carries the gate's real evidence on its own head (#4418).
+const MERGE_QUEUE_BATCH_REASON =
+  "Auto Gate does not auto-merge a merge-queue batch head; the queue performs the merge once " +
+  "this check passes, which it does only when every constituent pull request carries a passing " +
+  "decision on its own head.";
 const RETRY_DELAYS_MS = [250, 1000];
 // A merge that has already STARTED needs longer than a read retry to land.
 // Reusing RETRY_DELAYS_MS gave the winner 1.25s total, and a slower merge then
@@ -716,13 +746,20 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   }
 
   const pr = await getPullRequest({ github, context, number });
+  const baseRepository = `${context.repo.owner}/${context.repo.repo}`;
   const reasons = [];
   const notes = [];
+  // A merge-queue batch head carries no reviewable content of its own — the
+  // approval and verdict it stands in for live on each constituent PR's own
+  // head — so the author gate is replaced by the constituent evaluation below
+  // (#4418). A PR that merely looks like a batch without parsing as one keeps
+  // the ordinary author check and fails closed exactly as it did before.
+  const batchConstituents = mergeQueueBatchConstituents({ pr, context });
   // Every cause that makes this PR maintainer-merged rather than auto-merged.
   // Each one is a full sentence because the decision summary is where a human
   // finds out why the gate stopped short of merging.
   const manualMergeReasons = [];
-  if (!ALLOWED_AUTHORS.has(pr.author)) {
+  if (!batchConstituents && !isAllowedAuthor(pr.author)) {
     manualMergeReasons.push(MANUAL_MERGE_AUTHOR_REASON);
   }
 
@@ -744,7 +781,6 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     reasons.push("PR is a draft");
   }
 
-  const baseRepository = `${context.repo.owner}/${context.repo.repo}`;
   if (pr.headRepository !== baseRepository) {
     reasons.push(
       `head repository ${pr.headRepository || "(unknown)"} is not ${baseRepository}; ` +
@@ -775,18 +811,8 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // gate for a diff with nothing to look at. The subtraction is per FILE, not
   // per PR: a production file under any prefix still requires the label, and so
   // does a diff that changes a test and a production file together.
-  const touchesTui = files.some(
-    (path) => !path.endsWith("_test.go") && TUI_PATH_PREFIXES.some((prefix) => path.startsWith(prefix)),
-  );
+  const touchesTui = files.some(isGatedTuiPath);
   const labels = new Set(pr.labels.map((label) => label.toLowerCase()));
-
-  if (touchesTui && !labels.has("play-tested")) {
-    reasons.push("PR touches visible TUI/pane paths and is missing the play-tested label");
-  } else if (touchesTui) {
-    notes.push("TUI path gate passed with play-tested label");
-  } else {
-    notes.push("TUI path gate not required");
-  }
 
   const requiredChecks = await evaluateRequiredChecks({
     github,
@@ -800,6 +826,47 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     reasons.push(...requiredChecks.reasons);
   }
   notes.push(...requiredChecks.notes);
+
+  // A recognized merge-queue batch skips everything below: no approval, verdict
+  // or play-test can ever be bound to a synthetic head, and requiring one is
+  // what ejected every batch (#4418). The structural requirements already
+  // computed still apply — open, master base, mergeable, and the required
+  // checks ON THIS HEAD, which are the combined-tree CI the queue exists to
+  // run. What replaces the per-head review evidence is the per-constituent
+  // check: every constituent must be an open master PR whose current head is
+  // contained in this batch head and carries a passing decision of its own.
+  //
+  // The decision is published on the manual path so shouldMerge stays false:
+  // the gate certifies the batch head for the QUEUE to merge and never merges
+  // the synthetic PR itself.
+  if (batchConstituents) {
+    const batch = await evaluateMergeQueueBatch({
+      github,
+      context,
+      pr,
+      constituents: batchConstituents,
+      subject,
+    });
+    notes.push(...batch.notes);
+    return finish(core, setOutputs, {
+      prNumber: String(pr.number),
+      pullRequestId: pr.id,
+      shouldMerge: false,
+      manualMergeRequired: true,
+      manualMergeReasons: [MERGE_QUEUE_BATCH_REASON],
+      manualMergeBlockers: batch.blockers,
+      mergeQueueBatch: true,
+      isOpen: pr.state === "OPEN" && !pr.merged,
+      baseRefName: pr.baseRefName,
+      headRefName: pr.headRefName,
+      headRepository: pr.headRepository,
+      headSha: pr.headRefOid,
+      workflowsChanged,
+      requiredCheckObservations: requiredChecks.observations,
+      reasons,
+      notes,
+    });
+  }
 
   // Whether this head is a merge the gate made to bring the branch up to date. If
   // it is, the anchors follow its first parent, so the approval and the Codex
@@ -835,6 +902,28 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     reasons.push(...codex.reasons);
   }
   notes.push(...codex.notes);
+
+  if (touchesTui && !labels.has("play-tested")) {
+    reasons.push("PR touches visible TUI/pane paths and is missing the play-tested label");
+  } else if (touchesTui) {
+    let playTest;
+    try {
+      playTest = await evaluatePlayTest({ github, context, pr, comments: codex.comments, subject });
+    } catch (error) {
+      // TUI evidence is advisory for authors the gate never auto-merges. Keep
+      // unreadable snapshots advisory too, without swallowing review/check
+      // failures or relaxing snapshot verification on the automatic path.
+      if (isAllowedAuthor(pr.author)) throw error;
+      playTest = {
+        ok: false,
+        message: `play-tested attestation could not be verified: ${error.message || String(error)}`,
+      };
+    }
+    if (playTest.ok) notes.push(playTest.message);
+    else reasons.push(playTest.message);
+  } else {
+    notes.push("TUI path gate not required");
+  }
 
   // A reviewer-unavailable response cannot provide the verdict this gate waits
   // for, so waiting may be a permanent stop on the whole repository (#3378).
@@ -992,9 +1081,211 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     headRepository: pr.headRepository,
     headSha: pr.headRefOid,
     workflowsChanged,
+    requiredCheckObservations: requiredChecks.observations,
     reasons,
     notes,
   });
+}
+
+// The pull-request numbers a merge-queue batch PR names as its constituents,
+// or null when this is not a recognizable Trunk batch (#4418).
+//
+// Three properties are required together. The branch prefix is what Trunk
+// names its synthetic test branches (`trunk-merge/pr-<number>/<uuid>`, with a
+// `-bisection` suffix on a bisected batch); the author — normalized like every
+// author read here, since GitHub reports the app as `app/trunk-io` — is what
+// keeps a hand-pushed lookalike branch off this path; and at least one
+// constituent must parse, from the `pr-<number>` the branch carries or from the
+// `…/pull/<number>` links the body's "Pull Requests Being Tested" list holds.
+// Both surfaces are unioned so a multi-PR batch is not under-counted when one
+// of them omits a member. A partial parse only ever fails closed: a named
+// constituent that is not really in the batch fails its containment check
+// below, and a batch that fails to name one at all simply is not a batch here
+// and takes the ordinary evaluation — which cannot pass a synthetic head.
+function mergeQueueBatchConstituents({ pr, context }) {
+  const headRefName = String(pr.headRefName || "");
+  if (!headRefName.startsWith(TRUNK_MERGE_BRANCH_PREFIX)) {
+    return null;
+  }
+  if (normalizeAuthorLogin(pr.author) !== TRUNK_MERGE_AUTHOR) {
+    return null;
+  }
+  const numbers = new Set();
+  const branchMatch = /^trunk-merge\/pr-(\d+)(?:\/|$)/.exec(headRefName);
+  if (branchMatch) {
+    numbers.add(Number(branchMatch[1]));
+  }
+  const repoName = `${context.repo.owner}/${context.repo.repo}`;
+  const escaped = repoName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pullLink = new RegExp(`github\\.com/${escaped}/pull/(\\d+)`, "gi");
+  for (const match of String(pr.body || "").matchAll(pullLink)) {
+    numbers.add(Number(match[1]));
+  }
+  return numbers.size > 0 ? [...numbers].sort((left, right) => left - right) : null;
+}
+
+// The gate evidence for a merge-queue batch head, as blockers on the synthetic
+// PR's manual-path decision (#4418).
+//
+// A batch head binds nothing of its own: nobody reviews the merge the queue
+// wrote, and an approval posted on the batch PR binds a head that exists only
+// to be closed when testing ends. What the head CAN prove is containment —
+// that the revision each constituent's own decision already certified is the
+// revision this batch contains. So every named constituent must be an open
+// master PR whose CURRENT head is an ancestor of the batch head and whose
+// newest (PR, head) decision run is a pass. A constituent whose head moved
+// since it was batched fails the containment check — the queue retests it on
+// its own — and one whose own decision is red surfaces its own wait reason
+// verbatim rather than re-deriving it.
+//
+// The synthetic head's own shape is checked too: it must be a merge whose
+// first parent is already base history. A linear commit appended to the batch
+// branch — the only write shape available to anyone holding push access —
+// would otherwise inherit the constituents' green while containing none of
+// the content they were gated on.
+async function evaluateMergeQueueBatch({ github, context, pr, constituents, subject }) {
+  const { owner, repo } = context.repo;
+  const notes = [];
+  const blockers = [];
+  const batchHead = normalizeHeadSha(pr.headRefOid);
+  const requeue = "close this pull request so the queue retests the current heads";
+
+  const parents = (pr.headParents || [])
+    .map((parent) => normalizeHeadSha(parent?.oid))
+    .filter(Boolean);
+  if (parents.length < 2) {
+    blockers.push({
+      reason:
+        `merge-queue batch head ${batchHead || pr.headRefOid} is not a merge commit, so the ` +
+        "gate cannot tell its tested content from commits appended to the batch branch",
+      remedy: requeue,
+    });
+  } else {
+    const firstParent = parents[0];
+    const comparison = await retryRead(
+      `could not compare ${pr.baseRefName} with batch head's first parent ${firstParent}`,
+      () =>
+        github.rest.repos.compareCommitsWithBasehead({
+          owner,
+          repo,
+          basehead: `${pr.baseRefName}...${firstParent}`,
+          per_page: 1,
+        }),
+      subject,
+    );
+    const status = comparison?.data?.status;
+    if (status !== "behind" && status !== "identical") {
+      blockers.push({
+        reason:
+          `merge-queue batch head's first parent ${firstParent} is not contained in ` +
+          `${pr.baseRefName} (compare reports ${JSON.stringify(status)}), so the batch does ` +
+          "not sit on base history",
+        remedy: requeue,
+      });
+    }
+  }
+
+  for (const number of constituents) {
+    let constituent;
+    try {
+      constituent = await getPullRequest({ github, context, number });
+    } catch (error) {
+      // An exhausted READ is an evaluation error everywhere else in this file
+      // and stays one here; only an absent PR is a gate verdict on the batch.
+      if (isReadFailure(error) || error?.autoGatePullRequestGone) {
+        throw error;
+      }
+      blockers.push({
+        reason:
+          `merge-queue batch constituent PR #${number} could not be read ` +
+          `(${formatError(error)})`,
+        remedy: requeue,
+      });
+      continue;
+    }
+    if (constituent.merged) {
+      // Its content already reached master by the merge that closed it; what
+      // the batch still holds of it is already-gated history, not new code.
+      notes.push(`constituent PR #${number} has already merged`);
+      continue;
+    }
+    if (constituent.state !== "OPEN" || constituent.baseRefName !== "master") {
+      blockers.push({
+        reason:
+          `merge-queue batch constituent PR #${number} is no longer an open master pull ` +
+          `request (${constituent.state.toLowerCase()} into ${constituent.baseRefName})`,
+        remedy: requeue,
+      });
+      continue;
+    }
+    const head = normalizeHeadSha(constituent.headRefOid);
+    if (!head || !batchHead) {
+      blockers.push({
+        reason: `merge-queue batch constituent PR #${number} has no readable head SHA`,
+        remedy: requeue,
+      });
+      continue;
+    }
+    const contained = await retryRead(
+      `could not compare constituent PR #${number} head ${head} with batch head ${batchHead}`,
+      () =>
+        github.rest.repos.compareCommitsWithBasehead({
+          owner,
+          repo,
+          basehead: `${head}...${batchHead}`,
+          per_page: 1,
+        }),
+      subject,
+    );
+    const status = contained?.data?.status;
+    if (status !== "ahead" && status !== "identical") {
+      blockers.push({
+        reason:
+          `constituent PR #${number}'s head ${head} is not contained in this batch head ` +
+          `(compare reports ${JSON.stringify(status)}); the batch tests a different revision`,
+        remedy: "let the queue retest the pull request's current head",
+      });
+      continue;
+    }
+    const checkRuns = await retryRead(
+      `could not read check runs at constituent PR #${number} head ${head}`,
+      () =>
+        github.paginate(github.rest.checks.listForRef, {
+          owner,
+          repo,
+          ref: head,
+          per_page: 100,
+        }),
+      subject,
+    );
+    const identity = decisionIdentity(number, head);
+    const decision = newestCheckGeneration(
+      checkRuns.filter(
+        (run) =>
+          run.name === identity.checkName &&
+          run.external_id === identity.externalId &&
+          run.app?.id === GITHUB_ACTIONS_APP_ID,
+      ),
+    );
+    if (!decision) {
+      blockers.push({
+        reason: `constituent PR #${number} has no Auto Gate decision at its head ${head}`,
+        remedy: `run Auto Gate manually for PR #${number} so its decision exists, then let the queue retest`,
+      });
+    } else if (decision.status !== "completed" || decision.conclusion !== "success") {
+      blockers.push({
+        reason:
+          `constituent PR #${number} at its head ${head} is waiting: ` +
+          decisionWaitingReason(decision),
+        remedy: `clear PR #${number}'s own Auto Gate requirements, then let the queue retest`,
+      });
+    } else {
+      notes.push(
+        `constituent PR #${number} is gate-green at its head ${head}, which this batch contains`,
+      );
+    }
+  }
+  return { notes, blockers };
 }
 
 // The first requirement a blocked decision is waiting on, for the title.
@@ -1011,6 +1302,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
 // stamp as the blocking reason — which is exactly what it did before this
 // constant existed.
 const DECISION_STAMP_PREFIX = "evaluated: ";
+const REQUIRED_CHECK_SNAPSHOT_PREFIX = "<!-- auto-gate-required-check-snapshot:";
 
 // A decision summary with the evaluation stamp removed, for readers that want the
 // REASON. The stamp is metadata about the write, not part of the decision.
@@ -1021,6 +1313,68 @@ function decisionSummaryBody(summary) {
   }
   const newline = text.indexOf("\n");
   return newline === -1 ? "" : text.slice(newline + 1).replace(/^\n+/, "");
+}
+
+function requiredCheckSnapshotText(observations) {
+  const payload = JSON.stringify({ version: 2, checks: observations || [] });
+  return `${REQUIRED_CHECK_SNAPSHOT_PREFIX}${payload} -->`;
+}
+
+function decisionRequiredCheckSnapshot(decision) {
+  const text = String(decision?.output?.text || "");
+  const line = text.split("\n").find((candidate) =>
+    candidate.startsWith(REQUIRED_CHECK_SNAPSHOT_PREFIX) && candidate.endsWith(" -->"),
+  );
+  if (!line) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(
+      line.slice(REQUIRED_CHECK_SNAPSHOT_PREFIX.length, -" -->".length),
+    );
+    return (payload?.version === 1 || payload?.version === 2) && Array.isArray(payload.checks)
+      ? payload.checks
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function sameRequiredCheckObservation(left, right) {
+  return (
+    left?.kind === right?.kind &&
+    left?.id === right?.id &&
+    left?.status === right?.status &&
+    left?.conclusion === right?.conclusion
+  );
+}
+
+function requiredCheckObservationKey(observation) {
+  return JSON.stringify([
+    observation?.kind || null,
+    observation?.id || null,
+    observation?.status || null,
+    observation?.conclusion ?? null,
+  ]);
+}
+
+function sameRequiredCheckGeneration(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+  const leftKeys = left.map(requiredCheckObservationKey).sort();
+  const rightKeys = right.map(requiredCheckObservationKey).sort();
+  return leftKeys.every((key, index) => key === rightKeys[index]);
+}
+
+function requiredCheckObservationIsTerminal(observation) {
+  if (observation?.kind === "check_run") {
+    return observation.status === "completed";
+  }
+  if (observation?.kind === "commit_status") {
+    return observation.status !== "" && observation.status !== "pending";
+  }
+  return false;
 }
 
 function firstUnmetRequirement(result) {
@@ -1124,9 +1478,11 @@ async function reportDecision({ github, context, core, result, manual = false })
       ? `NEVER_RAN: no prior decision; recovery ${decisionPasses ? "passed" : "is waiting"}`
       : result.manualMergeRequired
         ? manualMergePasses
-          ? result.degradedForUnavailableReviewer
-            ? `PASS: reviewer ${describeCodexUnavailable({ kind: result.reviewerUnavailableKind })}; maintainer review and manual merge required`
-            : "PASS: maintainer review and manual merge required"
+          ? result.mergeQueueBatch
+            ? "PASS: merge-queue batch — every constituent pull request is gate-green at its own head"
+            : result.degradedForUnavailableReviewer
+              ? `PASS: reviewer ${describeCodexUnavailable({ kind: result.reviewerUnavailableKind })}; maintainer review and manual merge required`
+              : "PASS: maintainer review and manual merge required"
           : `BLOCKED: ${firstManualMergeBlocker(result) || "a manual merge has an unanswered blocker"}`
         : result.shouldMerge
           ? "PASS: Auto Gate requirements are satisfied"
@@ -1162,6 +1518,11 @@ async function reportDecision({ github, context, core, result, manual = false })
     output: {
       title,
       summary,
+      // This is evidence about the state evaluateRequiredChecks actually read,
+      // not when this later write happened. The scheduled reconciler compares
+      // this identity/state tuple with the current check run and never needs to
+      // order clocks owned by different observations (#4242).
+      text: requiredCheckSnapshotText(result.requiredCheckObservations),
     },
   };
   try {
@@ -2293,6 +2654,13 @@ async function listParkedRuns({ github, context, headSha, subject = null }) {
 // Named, so a test can assert the file it points at actually accepts a dispatch.
 const VALIDATION_WORKFLOW = "pr.yml";
 const GATE_WORKFLOW = "auto-gate.yml";
+// A schedule is the backstop for terminal workflow_run events GitHub does not
+// deliver. It never fans one workflow's matrix out into one gate run per check:
+// completed Build/Lint checks select only decisions that name them as blockers,
+// each PR/head appears once, and one sweep starts at most this many evaluations.
+const REQUIRED_CHECK_REEVALUATION_LIMIT = 10;
+const REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE = 100;
+const PR_VALIDATION_REQUIRED_CHECK_NAMES = ["Build", "Lint"];
 
 // Reruns the successor of an accepted update, whichever lane failed to finish
 // it. Safe to repeat: the resolver re-reads the PR and approves only what is
@@ -3371,12 +3739,439 @@ async function sweepMergedHeadRefs({
   };
 }
 
+// A scheduled reconciliation may act only on the two source shapes the normal
+// evaluation snapshots below: GitHub Actions and legacy source-less checks. An
+// explicit different app is not source-less; treating it that way leaves no
+// matching snapshot and makes the PR consume the bounded wake budget forever.
+// Unknown parenthetical syntax is likewise not evidence of a source-less check.
+function blockedPRValidationSpec(body, context) {
+  const marker = `required check ${context}`;
+  let searchFrom = 0;
+  while (searchFrom < body.length) {
+    const foundAt = body.indexOf(marker, searchFrom);
+    if (foundAt < 0) {
+      return null;
+    }
+    const suffix = body.slice(foundAt + marker.length);
+    const app = suffix.match(/^ \(app ([1-9][0-9]*)\)(?: |$)/);
+    if (app) {
+      const sourceAppId = Number(app[1]);
+      if (Number.isSafeInteger(sourceAppId) && sourceAppId === GITHUB_ACTIONS_APP_ID) {
+        return { context, sourceAppId };
+      }
+      searchFrom = foundAt + marker.length;
+      continue;
+    }
+    // The source-less form carries no app suffix, so the context must end where
+    // the reason verb begins: a longer check name sharing the prefix ("required
+    // check Build & verify …") is not evidence for "Build". Only the delimiters
+    // this gate generates — ` has`, ` is`, ` did` — close the context boundary.
+    if (/^ (?:has|is|did) /.test(suffix)) {
+      return { context, sourceAppId: null };
+    }
+    searchFrom = foundAt + marker.length;
+  }
+  return null;
+}
+
+function requiredCheckReevaluationCandidates({ pulls, checkRunsByHead, statusesByHead }) {
+  const candidates = [];
+  for (const pull of pulls || []) {
+    const headSha = normalizeHeadSha(pull?.head?.sha || pull?.headRefOid);
+    const baseRefName = pull?.base?.ref || pull?.baseRefName;
+    const state = String(pull?.state || "").toLowerCase();
+    const prNumber = Number(pull?.number);
+    if (
+      !headSha ||
+      !Number.isSafeInteger(prNumber) ||
+      prNumber <= 0 ||
+      state !== "open" ||
+      baseRefName !== "master"
+    ) {
+      continue;
+    }
+
+    const identity = decisionIdentity(prNumber, headSha);
+    const headChecks = checkRunsByHead.get(headSha) || [];
+    const headStatuses = statusesByHead.get(headSha) || [];
+    const decision = newestCheckGeneration(
+      headChecks.filter(
+        (run) =>
+          run.name === identity.checkName &&
+          run.external_id === identity.externalId &&
+          run.app?.id === GITHUB_ACTIONS_APP_ID,
+      ),
+    );
+    if (decision) {
+      // An in-flight decision already owns the wake, and a success has nothing
+      // for PR Validation to clear. Other blockers do not earn runner work from
+      // this workflow's completion.
+      if (decision.status !== "completed" || decision.conclusion === "success") {
+        continue;
+      }
+    }
+
+    const body = decision
+      ? decisionSummaryBody(
+          decision.output?.summary || decision.summary || decision.output?.title || "",
+        )
+      : "";
+    const blockedSpecs = decision
+      ? PR_VALIDATION_REQUIRED_CHECK_NAMES.flatMap((name) => {
+          const spec = blockedPRValidationSpec(body, name);
+          return spec ? [spec] : [];
+        })
+      : PR_VALIDATION_REQUIRED_CHECK_NAMES.flatMap((context) => [
+          // With no decision to recover the blocked source from, check every
+          // shape evaluation can snapshot: forcing the Actions app here would
+          // leave a terminal source-less commit status forever unable to wake
+          // the PR whose decision was lost or never published.
+          { context, sourceAppId: GITHUB_ACTIONS_APP_ID },
+          { context, sourceAppId: null },
+        ]);
+    const snapshot = decision ? decisionRequiredCheckSnapshot(decision) : null;
+    const completedCheckChanged = blockedSpecs.some((spec) => {
+      const currentState = latestRequiredState(
+        spec,
+        headChecks,
+        headStatuses,
+      );
+      const current = currentState?.observation || {
+        kind: "missing",
+        id: null,
+        status: null,
+        conclusion: null,
+      };
+      const currentGeneration = currentState?.generation || [];
+      if (!currentGeneration.some(requiredCheckObservationIsTerminal)) {
+        return false;
+      }
+      const snapshotEntry = snapshot?.find(
+        (entry) => entry?.name === spec.context && entry?.appId === spec.sourceAppId,
+      );
+      const observed = snapshotEntry?.observed;
+      // An older or malformed decision has no snapshot. Reconcile it once and
+      // replace it with direct evidence rather than inventing another clock
+      // comparison. Ambiguity chooses a redundant read over a permanent freeze.
+      if (!observed) {
+        return true;
+      }
+      if (Array.isArray(snapshotEntry.generation)) {
+        return !sameRequiredCheckGeneration(snapshotEntry.generation, currentGeneration);
+      }
+      // Version-one snapshots named only the selected observation. A second
+      // kind at the same winning timestamp is new evidence they could not
+      // represent, so refresh once and replace them with the complete set.
+      return currentGeneration.length > 1 || !sameRequiredCheckObservation(observed, current);
+    });
+    if (!completedCheckChanged) {
+      continue;
+    }
+    candidates.push({
+      prNumber,
+      headSha,
+      decisionKey: identity.key,
+    });
+  }
+
+  // The page is already quota-bounded; PR order only makes a shared-head tie
+  // deterministic.
+  return candidates
+    .sort((left, right) => left.prNumber - right.prNumber)
+    .map(({ prNumber, headSha, decisionKey }) => ({ prNumber, headSha, decisionKey }));
+}
+
+const REQUIRED_CHECK_RECONCILIATION_QUERY = `
+  query RequiredCheckReconciliation($owner: String!, $repo: String!, $after: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequests(
+        first: ${REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE}
+        after: $after
+        states: OPEN
+        baseRefName: "master"
+        orderBy: {field: CREATED_AT, direction: ASC}
+      ) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          number
+          state
+          baseRefName
+          headRefOid
+          commits(last: 1) {
+            nodes {
+              commit {
+                oid
+                statusCheckRollup {
+                  contexts(first: 100) {
+                    pageInfo { hasNextPage }
+                    nodes {
+                      __typename
+                      ... on CheckRun {
+                        id
+                        databaseId
+                        name
+                        status
+                        conclusion
+                        startedAt
+                        completedAt
+                        externalId
+                        permalink
+                        title
+                        summary
+                        text
+                        checkSuite { app { databaseId slug } }
+                      }
+                      ... on StatusContext {
+                        id
+                        context
+                        state
+                        createdAt
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+function reconciliationCheckRunDatabaseID(run) {
+  if (Number.isSafeInteger(run.databaseId) && run.databaseId > 0) {
+    return run.databaseId;
+  }
+  const permalinkID = /\/runs\/([1-9]\d*)(?:[/?#]|$)/.exec(String(run.permalink || ""))?.[1];
+  const parsed = Number(permalinkID);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function reconciliationCheckRun(run) {
+  return {
+    // CheckRun.databaseId is a nullable GraphQL Int even though REST check-run
+    // IDs are wider. The non-null permalink names that same numeric run, so it
+    // retains the monotonic tiebreak when databaseId cannot represent it.
+    id: reconciliationCheckRunDatabaseID(run),
+    // GraphQL's non-null Node ID is the REST check run's node_id. Keep that
+    // common identity for snapshots; databaseId has a narrower/nullable
+    // GraphQL type even though REST exposes the database key as a full number.
+    node_id: run.id,
+    name: run.name,
+    external_id: run.externalId,
+    app: {
+      id: run.checkSuite?.app?.databaseId,
+      slug: run.checkSuite?.app?.slug,
+    },
+    status: String(run.status || "").toLowerCase(),
+    conclusion: run.conclusion == null ? null : String(run.conclusion).toLowerCase(),
+    // GraphQL's CheckRun exposes no createdAt (selecting it fails the whole
+    // query), and the suite's createdAt is wrong for a rerun inside an
+    // existing suite — every generation there shares the original timestamp.
+    // A queued run therefore arrives with no usable date at all, and
+    // latestRequiredState orders it by the per-run id above.
+    started_at: run.startedAt,
+    completed_at: run.completedAt,
+    output: {
+      title: run.title,
+      summary: run.summary,
+      text: run.text,
+    },
+  };
+}
+
+function reconciliationStatusContext(status) {
+  return {
+    node_id: status.id,
+    context: status.context,
+    state: String(status.state || "").toLowerCase(),
+    created_at: status.createdAt,
+  };
+}
+
+function undatedCheckRunFacesADatedRival(checkRuns, statuses) {
+  const undatedNames = new Set(
+    checkRuns
+      .filter((run) => run.started_at == null && run.completed_at == null)
+      .map((run) => run.name),
+  );
+  if (undatedNames.size === 0) {
+    return false;
+  }
+  return (
+    checkRuns.some(
+      (run) =>
+        undatedNames.has(run.name) &&
+        (run.started_at != null || run.completed_at != null),
+    ) || statuses.some((status) => undatedNames.has(status.context))
+  );
+}
+
+function statusContextsHaveTimestampTie(statuses) {
+  const seen = new Set();
+  for (const status of statuses) {
+    const key = `${status.context}\0${status.created_at || ""}`;
+    if (seen.has(key)) {
+      return true;
+    }
+    seen.add(key);
+  }
+  return false;
+}
+
+function tiedStatusGenerationIsOrdered(statuses) {
+  const groups = new Map();
+  for (const status of statuses) {
+    const key = `${status.context}\0${status.created_at || ""}`;
+    const group = groups.get(key) || [];
+    group.push(status);
+    groups.set(key, group);
+  }
+  return [...groups.values()].every((group) =>
+    group.length < 2 || group.every((status) => Number.isSafeInteger(status.id) && status.id > 0),
+  );
+}
+
+async function requiredCheckReconciliationSnapshot({ github, context, core }) {
+  const { owner, repo } = context.repo;
+  const pulls = [];
+  const checkRunsByHead = new Map();
+  const statusesByHead = new Map();
+  let after = null;
+  let pages = 0;
+  for (;;) {
+    const response = await retryRead(
+      `could not read required-check reconciliation page after ${after || "start"}`,
+      () => github.graphql(REQUIRED_CHECK_RECONCILIATION_QUERY, { owner, repo, after }),
+    );
+    pages += 1;
+    const connection = response?.repository?.pullRequests;
+    if (!connection || !Array.isArray(connection.nodes)) {
+      throw new Error("Required-check reconciliation returned an invalid pull-request page");
+    }
+    for (const pull of connection.nodes) {
+      const headSha = normalizeHeadSha(pull?.headRefOid);
+      const commit = pull?.commits?.nodes?.[0]?.commit;
+      const commitSha = normalizeHeadSha(commit?.oid);
+      const contexts = commit?.statusCheckRollup?.contexts;
+      if (!headSha || commitSha !== headSha) {
+        core.warning(
+          `Required-check reconciliation skipped PR #${pull?.number || "?"}: ` +
+            "its head and status-rollup commit did not match.",
+        );
+        continue;
+      }
+      if (contexts?.pageInfo?.hasNextPage) {
+        core.warning(
+          `Required-check reconciliation skipped PR #${pull.number}: its status rollup ` +
+            "exceeded 100 contexts.",
+        );
+        continue;
+      }
+      let checkRuns = (contexts?.nodes || [])
+        .filter((node) => node?.__typename === "CheckRun")
+        .map(reconciliationCheckRun);
+      if (checkRuns.some((run) => !Number.isSafeInteger(run.id))) {
+        core.warning(
+          `Required-check reconciliation skipped PR #${pull.number}: a check run had no ` +
+            "safe numeric generation ID.",
+        );
+        continue;
+      }
+      let statuses = (contexts?.nodes || [])
+        .filter((node) => node?.__typename === "StatusContext")
+        .map(reconciliationStatusContext);
+      // StatusContext exposes only its opaque node ID in GraphQL. A REST read is
+      // needed only for the rare same-context/same-second tie, where its numeric
+      // database ID is the one documented generation order available to us.
+      if (statusContextsHaveTimestampTie(statuses)) {
+        statuses = await retryRead(
+          `could not order tied commit statuses at ${headSha}`,
+          () => github.paginate(github.rest.repos.listCommitStatusesForRef, {
+            owner,
+            repo,
+            ref: headSha,
+            per_page: 100,
+          }),
+        );
+        if (!tiedStatusGenerationIsOrdered(statuses)) {
+          core.warning(
+            `Required-check reconciliation skipped PR #${pull.number}: tied commit statuses ` +
+              "had no safe numeric generation IDs.",
+          );
+          continue;
+        }
+      }
+      // GraphQL cannot order a run that has neither startedAt nor completedAt
+      // — CheckRun exposes no createdAt to stand in for one. When such a run
+      // shares its context with a dated observation — an older generation or
+      // a commit status — the order decides which evidence is newest, and the
+      // only timestamp that answers it lives on the REST check run. Read this
+      // head's runs the way the decision snapshots being compared were read,
+      // latest-per-name, so the two paths cannot disagree (#4427).
+      if (undatedCheckRunFacesADatedRival(checkRuns, statuses)) {
+        checkRuns = await retryRead(
+          `could not order a queued check run at ${headSha}`,
+          () =>
+            github.paginate(github.rest.checks.listForRef, {
+              owner,
+              repo,
+              ref: headSha,
+              per_page: 100,
+            }),
+        );
+      }
+      pulls.push(pull);
+      checkRunsByHead.set(headSha, checkRuns);
+      statusesByHead.set(headSha, statuses);
+    }
+    if (!connection.pageInfo?.hasNextPage) {
+      break;
+    }
+    if (!connection.pageInfo.endCursor || connection.pageInfo.endCursor === after) {
+      throw new Error("Required-check reconciliation pagination did not advance");
+    }
+    after = connection.pageInfo.endCursor;
+  }
+  return { pulls, checkRunsByHead, statusesByHead, pages };
+}
+
+async function listRequiredCheckReevaluationTargets({ github, context, core }) {
+  // One GraphQL page carries 100 PRs and each head's current check rollup. This
+  // makes every open PR eligible on every sweep without one REST read per head,
+  // wall-clock page assignment, or mutable cursor state. A truncated rollup is
+  // skipped fail-closed rather than combined with incomplete evidence.
+  const snapshot = await requiredCheckReconciliationSnapshot({ github, context, core });
+  const stale = requiredCheckReevaluationCandidates({
+    pulls: snapshot.pulls,
+    checkRunsByHead: snapshot.checkRunsByHead,
+    statusesByHead: snapshot.statusesByHead,
+  });
+  const targets = stale.slice(0, REQUIRED_CHECK_REEVALUATION_LIMIT);
+  if (stale.length > targets.length) {
+    core.warning(
+      `Required-check reconciliation deferred ${stale.length - targets.length} stale PR(s); ` +
+        `each sweep wakes at most ${REQUIRED_CHECK_REEVALUATION_LIMIT}.`,
+    );
+  }
+  core.notice(
+    `Required-check reconciliation read ${snapshot.pulls.length} PR(s) in ` +
+      `${snapshot.pages} GraphQL page(s), found ${stale.length} stale decision(s), and ` +
+      `selected ${targets.length}.`,
+  );
+  return targets;
+}
+
 async function resolveTargets({
   github, context, core, prNumber,
   headPollAttempts = 6,
   headPollDelayMs = 5000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
+  if (context.eventName === "schedule") {
+    return listRequiredCheckReevaluationTargets({ github, context, core });
+  }
   const numbers = [];
   const payload = context.payload;
   const rawPreviousHead = context.eventName === "workflow_dispatch"
@@ -3549,6 +4344,7 @@ async function getPullRequest({ github, context, number }) {
           number
           title
           url
+          body
           baseRefName
           headRefName
           headRefOid
@@ -3616,6 +4412,7 @@ async function getPullRequest({ github, context, number }) {
     number: pr.number,
     title: pr.title,
     url: pr.url,
+    body: pr.body || "",
     baseRefName: pr.baseRefName,
     headRefName: pr.headRefName,
     headRefOid: pr.headRefOid,
@@ -3805,6 +4602,69 @@ async function readNativeAutoMergeStates({ github, context, numbers, retry = tru
   return states;
 }
 
+function isGatedTuiPath(path) {
+  return !path.endsWith("_test.go") && TUI_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
+// Like a prose review verdict, the attestation names its commit explicitly.
+// The latest recognized attestation wins; a label alone cannot identify tested code.
+async function evaluatePlayTest({ github, context, pr, comments, subject }) {
+  const attestations = comments
+    .filter((comment) => isAllowedAuthor(comment.user?.login))
+    .map((comment) => ({
+      comment,
+      sha: /^Play-tested commit: ([0-9a-f]{40})$/i.exec(
+        String(comment.body || "").split("\n", 1)[0].trim(),
+      )?.[1].toLowerCase(),
+    }))
+    .filter(({ comment, sha }) => sha && reviewArtifactTime(comment) > 0)
+    // GitHub timestamps have second precision; IDs order comments within a
+    // second, regardless of pagination/API order. Time still takes precedence
+    // so editing an older attestation can supersede a newer comment.
+    .sort((a, b) => reviewArtifactTime(b.comment) - reviewArtifactTime(a.comment) ||
+      Number(b.comment.id || 0) - Number(a.comment.id || 0));
+  const testedSha = attestations[0]?.sha;
+  const remedy = `post a maintainer comment beginning "Play-tested commit: ${pr.headRefOid}" after play-testing that commit`;
+  if (!testedSha) {
+    return { ok: false, message: `play-tested label has no SHA-bound attestation; ${remedy}` };
+  }
+  if (testedSha !== pr.headRefOid.toLowerCase()) {
+    // Compare snapshots, not GitHub's three-dot/merge-base diff. Rebases can
+    // diverge and compare's file list can truncate. Tree equality covers adds,
+    // deletes, renames, modes and merge conflict resolutions as well as edits.
+    const snapshot = async (sha) => {
+      const { owner, repo } = context.repo;
+      const commit = await retryRead(`could not read play-tested commit ${sha}`, () =>
+        github.rest.repos.getCommit({ owner, repo, ref: sha }), subject);
+      const treeSha = normalizeHeadSha(commit?.data?.commit?.tree?.sha);
+      if (!treeSha) throw new Error(`play-tested commit ${sha} has no tree SHA`);
+      const response = await retryRead(`could not read play-tested tree for ${sha}`, () =>
+        github.rest.git.getTree({ owner, repo, tree_sha: treeSha, recursive: "1" }), subject);
+      const data = response?.data;
+      if (data?.truncated !== false || !Array.isArray(data.tree)) {
+        throw new Error(`play-tested tree for ${sha} is incomplete`);
+      }
+      const entries = [];
+      for (const entry of data.tree) {
+        if (typeof entry.path !== "string" || !normalizeHeadSha(entry.sha) ||
+            !["tree", "blob", "commit"].includes(entry.type) || !entry.mode) {
+          throw new Error(`play-tested tree for ${sha} has an invalid entry`);
+        }
+        if (entry.type !== "tree" && isGatedTuiPath(entry.path)) {
+          entries.push(JSON.stringify([entry.path, entry.type, entry.mode, entry.sha]));
+        }
+      }
+      return JSON.stringify(entries.sort());
+    };
+    const tested = await snapshot(testedSha);
+    const current = await snapshot(pr.headRefOid);
+    if (tested !== current) {
+      return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
+    }
+  }
+  return { ok: true, message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} (gated paths unchanged)` };
+}
+
 async function listPullRequestFiles({ github, context, number, subject = null }) {
   const { owner, repo } = context.repo;
   const files = await retryRead(
@@ -3845,6 +4705,7 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
   );
   const notes = [];
   const reasons = [...required.errors];
+  const observations = [];
 
   if (syntheticDecisionSpecs.length > 0) {
     notes.push("Synthetic Auto Gate decisions are excluded from their own prerequisites");
@@ -3902,6 +4763,22 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
 
   for (const spec of specs) {
     const state = latestRequiredState(spec, checkRuns, statuses);
+    if (
+      PR_VALIDATION_REQUIRED_CHECK_NAMES.includes(spec.context) &&
+      (spec.sourceAppId === GITHUB_ACTIONS_APP_ID || spec.sourceAppId == null)
+    ) {
+      observations.push({
+        name: spec.context,
+        appId: spec.sourceAppId,
+        observed: state?.observation || {
+          kind: "missing",
+          id: null,
+          status: null,
+          conclusion: null,
+        },
+        generation: state?.generation || [],
+      });
+    }
     if (!state) {
       if (parkedRuns.length > 0) {
         const named = parkedRuns.map((run) => `${run.name} (${run.id})`).join(", ");
@@ -3922,7 +4799,7 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
     }
   }
 
-  return { ok: reasons.length === 0, reasons, notes };
+  return { ok: reasons.length === 0, reasons, notes, observations };
 }
 
 function isSyntheticDecisionContext(contextName) {
@@ -4042,6 +4919,15 @@ function latestRequiredState(spec, checkRuns, statuses) {
     const state = checkRunState(run);
     candidates.push({
       date: parseTimestamp(run.completed_at || run.started_at || run.created_at) || 0,
+      generationID: Number.isSafeInteger(run.id) ? run.id : null,
+      observation: {
+        kind: "check_run",
+        // REST calls this node_id; the reconciliation GraphQL query calls it
+        // id. Its opaque string is non-null in both APIs, unlike databaseId.
+        id: String(run.node_id || run.id || ""),
+        status: String(run.status || ""),
+        conclusion: run.conclusion == null ? null : String(run.conclusion),
+      },
       ...state,
     });
   }
@@ -4053,6 +4939,15 @@ function latestRequiredState(spec, checkRuns, statuses) {
       }
       candidates.push({
         date: parseTimestamp(status.created_at) || 0,
+        generationID: Number.isSafeInteger(status.id) ? status.id : null,
+        observation: {
+          kind: "commit_status",
+          // The same cross-API identity rule as check runs: GraphQL id is the
+          // REST node_id, while a REST-only fixture can still fall back to id.
+          id: String(status.node_id || status.id || ""),
+          status: String(status.state || ""),
+          conclusion: null,
+        },
         ok: status.state === "success",
         waiting: status.state === "pending",
         description: `commit status ${status.state}`,
@@ -4060,8 +4955,64 @@ function latestRequiredState(spec, checkRuns, statuses) {
     }
   }
 
-  candidates.sort((a, b) => b.date - a.date);
-  return candidates[0] || null;
+  // Once any candidate of a kind has no timestamp to order by, the whole kind
+  // must order by the per-run id alone: mixing rules pairwise is not
+  // transitive — a queued run wins its dated pair by id while two dated runs
+  // order by completion, so three generations can cycle and leave a newer
+  // terminal generation unselected. The id strictly increases with creation,
+  // so one rule ranks every run of that kind: a newer queued generation
+  // outranks each older run, terminal or not. A missing id sorts last
+  // (#4427). All-dated kinds keep the timestamp ordering, and cross-kind
+  // pairs keep it too since the id spaces do not compare.
+  const undatedKinds = new Set();
+  for (const candidate of candidates) {
+    if (candidate.date === 0) {
+      undatedKinds.add(candidate.observation.kind);
+    }
+  }
+
+  candidates.sort((a, b) => {
+    const sameKind = a.observation.kind === b.observation.kind;
+    if (sameKind && undatedKinds.has(a.observation.kind)) {
+      const generationDifference = (b.generationID ?? -1) - (a.generationID ?? -1);
+      return generationDifference !== 0 ? generationDifference : b.date - a.date;
+    }
+    const timeDifference = b.date - a.date;
+    if (timeDifference !== 0) {
+      return timeDifference;
+    }
+    if (sameKind && a.generationID != null && b.generationID != null) {
+      return b.generationID - a.generationID;
+    }
+    return 0;
+  });
+  const selected = candidates[0] || null;
+  if (!selected) {
+    return null;
+  }
+  const newestByKind = new Map();
+  for (const candidate of candidates) {
+    if (candidate.date !== selected.date) {
+      continue;
+    }
+    const kind = candidate.observation.kind;
+    const prior = newestByKind.get(kind);
+    if (
+      !prior ||
+      (candidate.generationID != null &&
+        (prior.generationID == null || candidate.generationID > prior.generationID))
+    ) {
+      newestByKind.set(kind, candidate);
+    }
+  }
+  return {
+    ...selected,
+    generation: [...newestByKind.values()]
+      .map((candidate) => candidate.observation)
+      .sort((left, right) =>
+        requiredCheckObservationKey(left).localeCompare(requiredCheckObservationKey(right)),
+      ),
+  };
 }
 
 function checkRunMatchesSpec(run, spec) {
@@ -4214,7 +5165,7 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
     ),
   ].filter(
     (artifact) =>
-      ALLOWED_AUTHORS.has(artifact.user?.login || "") &&
+      isAllowedAuthor(artifact.user?.login) &&
       reviewArtifactTime(artifact) > headCurrentSince,
   );
   return approvals.sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a))[0] || null;
@@ -4493,7 +5444,7 @@ function unansweredFindingArtifacts({
 }) {
   const acknowledgements = acknowledgementCandidates.filter(
     (artifact) =>
-      ALLOWED_AUTHORS.has(artifact.user?.login || "") && hasResolutionMarker(artifact.body || ""),
+      isAllowedAuthor(artifact.user?.login) && hasResolutionMarker(artifact.body || ""),
   );
   //
   // An artifact is CLASSIFIED when something says which revision it is about.
@@ -4936,7 +5887,7 @@ async function evaluateCodex({
       .filter((comment) => {
         return (
           comment.in_reply_to_id &&
-          ALLOWED_AUTHORS.has(comment.user?.login || "") &&
+          isAllowedAuthor(comment.user?.login) &&
           hasResolutionMarker(comment.body || "")
         );
       })
@@ -4995,7 +5946,7 @@ async function evaluateCodex({
   // than the reply": the normal order is fix, push, reply, which leaves the head
   // older than the reply and would block a correctly fixed PR.
   const allowedReplies = reviewComments.filter(
-    (comment) => comment.in_reply_to_id && ALLOWED_AUTHORS.has(comment.user?.login || ""),
+    (comment) => comment.in_reply_to_id && isAllowedAuthor(comment.user?.login),
   );
   const claimedFixed = new Set(
     allowedReplies.filter((c) => FIX_CLAIM_RE.test(c.body || "")).map((c) => c.in_reply_to_id),
@@ -5053,6 +6004,7 @@ async function evaluateCodex({
     findingBlockers,
     // Read here because this is where the comments and reviews already are; the
     // caller decides what it means.
+    comments,
     maintainerApproval: maintainerApproval({ comments, reviews, headCurrentSince }),
   };
 }
@@ -5463,10 +6415,13 @@ function finish(core, setOutputs, result) {
     const blocked = blockers
       .map((blocker) => `${blocker.reason} — ${blocker.remedy}`)
       .join("\n- ");
+    const blockedLead = result.mergeQueueBatch
+      ? "The queue's merge is blocked until each of these is answered:"
+      : "A manual merge is blocked until each of these is answered:";
     summary =
       blockers.length === 0
         ? `PASS: ${manual}${unmetSuffix}`
-        : `BLOCKED: ${manual} A manual merge is blocked until each of these is answered:` +
+        : `BLOCKED: ${manual} ${blockedLead}` +
           `\n- ${blocked}${unmetSuffix}`;
   } else {
     summary =
@@ -5562,6 +6517,10 @@ module.exports = {
     DECISION_STAMP_PREFIX,
     maintainerApproval,
     MAINTAINER_APPROVAL_MARKER,
+    isAllowedAuthor,
+    normalizeAuthorLogin,
+    mergeQueueBatchConstituents,
+    evaluateMergeQueueBatch,
     unansweredFindingArtifacts,
     codexArtifactStatesItsCommit,
     isCodexSummaryArtifact,
