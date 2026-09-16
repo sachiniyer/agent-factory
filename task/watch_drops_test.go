@@ -83,3 +83,63 @@ func TestRecordWatchRateDropsForGenerationRefusesAReboundID(t *testing.T) {
 	_, _, err = RecordWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID, 9, droppedAt)
 	require.Error(t, err, "a flush for a fully removed task still surfaces as an error")
 }
+
+func TestResetWatchRateDropsForGenerationClearsReboundEvidence(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	created := time.Date(2026, time.September, 11, 11, 0, 0, 0, time.UTC)
+	require.NoError(t, AddTask(Task{
+		ID: "d4357009", Name: "watcher", WatchCmd: "watch.sh", Program: "claude",
+		Enabled: true, CreatedAt: created,
+	}))
+	loaded, err := GetTask("d4357009")
+	require.NoError(t, err)
+	droppedAt := created.Add(time.Hour)
+
+	// Stage the stale state a rebound can find on the row: a count and the
+	// status a drop record leaves behind.
+	_, applied, err := RecordWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID, 12, droppedAt)
+	require.NoError(t, err)
+	require.True(t, applied)
+
+	// A reset naming a different incarnation is the same clean refusal the
+	// checkpoint path gives — the row moved on and is not this caller's to
+	// edit.
+	updated, applied, err := ResetWatchRateDropsForGeneration(loaded.ID, "other-generation")
+	require.NoError(t, err)
+	assert.False(t, applied)
+	assert.Zero(t, updated)
+	stored, err := GetTask(loaded.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 12, stored.DroppedEvents)
+	assert.Equal(t, WatchRateDropStatus, stored.LastRunStatus)
+
+	updated, applied, err = ResetWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID)
+	require.NoError(t, err)
+	assert.True(t, applied)
+	assert.Zero(t, updated.DroppedEvents)
+	assert.Empty(t, updated.LastRunStatus)
+	stored, err = GetTask(loaded.ID)
+	require.NoError(t, err)
+	assert.Zero(t, stored.DroppedEvents)
+	assert.Empty(t, stored.LastRunStatus,
+		"the drop status is the predecessor's evidence and clears with its count")
+
+	// An already-clean row is a no-op, and a foreign status survives: the
+	// reset owns drop evidence, nothing else.
+	_, applied, err = ResetWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID)
+	require.NoError(t, err)
+	assert.False(t, applied)
+
+	deliveredAt := droppedAt.Add(time.Minute)
+	_, err = UpdateTaskStatus(loaded.ID, &deliveredAt, "sent")
+	require.NoError(t, err)
+	_, applied, err = ResetWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID)
+	require.NoError(t, err)
+	assert.False(t, applied)
+	stored, err = GetTask(loaded.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "sent", stored.LastRunStatus)
+
+	_, _, err = ResetWatchRateDropsForGeneration("d43570ff", "any")
+	require.Error(t, err, "a reset for a missing task still surfaces as an error")
+}

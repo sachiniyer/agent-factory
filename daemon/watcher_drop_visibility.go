@@ -96,3 +96,23 @@ func persistWatcherDrops(taskID, generationID string, total int, droppedAt time.
 	_, _, err := task.RecordWatchRateDropsForGeneration(taskID, generationID, total, droppedAt)
 	return err
 }
+
+// resetWatcherDrops is the durable half of a generation rebound: the local
+// copy's zeroed seed only reaches the watcher, so the row under the reused ID
+// must drop the predecessor's count too — otherwise the replacement's first
+// checkpoints read as stale and the next restart reseeds from them (#4224
+// review). A failure leaves the in-memory fix in place and only repeats the
+// pre-fix behavior on disk, so it is logged, never fatal.
+func resetWatcherDrops(taskID, generationID string) error {
+	_, _, err := task.ResetWatchRateDropsForGeneration(taskID, generationID)
+	return err
+}
+
+// clearReboundDropSeed persists the drop reset a generation rebound applies to
+// its in-memory copy of the task. The reset is generation-gated inside the
+// store, so a row rebound again since the caller's snapshot is a clean refusal.
+func (s *watcherSupervisor) clearReboundDropSeed(t task.Task) {
+	if err := s.resetDrops(t.ID, t.GenerationID); err != nil {
+		log.WarningLog.Printf("watch task %s: failed to clear inherited drop count: %v", t.ID, err)
+	}
+}

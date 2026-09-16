@@ -41,8 +41,11 @@ func (s *watcherSupervisor) restart(t task.Task) error {
 		} else {
 			// The generation rebound under the reused ID: the persisted total
 			// on the row is the predecessor incarnation's evidence just as
-			// the flush is, so the replacement starts clean (#4224).
+			// the flush is, so the replacement starts clean (#4224). The
+			// durable row needs the same reset or the stale count keeps
+			// reporting and reseeding across restarts.
 			t.DroppedEvents = 0
+			s.clearReboundDropSeed(t)
 		}
 	}
 

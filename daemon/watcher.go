@@ -130,6 +130,7 @@ type watcherSupervisor struct {
 	deliver     func(taskID, taskGenerationID, line string) error
 	setStatus   func(taskID, taskGenerationID, status string)
 	recordDrops func(taskID, generationID string, total int, droppedAt time.Time) error
+	resetDrops  func(taskID, generationID string) error
 	logPath     func(taskID string) (string, error)
 	queueDir    func() (string, error)
 
@@ -159,6 +160,7 @@ func newWatcherSupervisorWithEventsPerMinute(eventsPerMinute int) *watcherSuperv
 		deliver:          deliverWatchEvent,
 		setStatus:        persistWatcherStatus,
 		recordDrops:      persistWatcherDrops,
+		resetDrops:       resetWatcherDrops,
 		logPath:          watcherLogPath,
 		queueDir:         eventQueueDir,
 		shell:            watcherShell(),

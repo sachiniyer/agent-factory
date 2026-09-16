@@ -62,6 +62,7 @@ func newTestSupervisor(t *testing.T, tasks func() ([]task.Task, error)) (*watche
 	s.deliver = rec.deliver
 	s.setStatus = rec.setStatus
 	s.recordDrops = func(string, string, int, time.Time) error { return nil }
+	s.resetDrops = func(string, string) error { return nil }
 	s.logPath = func(taskID string) (string, error) {
 		return filepath.Join(logDir, "task-"+taskID+".log"), nil
 	}

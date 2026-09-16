@@ -153,8 +153,13 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 			// The generation rebound under the reused ID, so the row's
 			// persisted total is the predecessor incarnation's evidence just
 			// as the flush is — the replacement starts clean rather than
-			// inheriting a count its generation never earned (#4224).
+			// inheriting a count its generation never earned (#4224). Zeroing
+			// only this copy would leave tasks.json holding the stale total:
+			// ListTasks keeps reporting it, the replacement's own checkpoints
+			// read as stale lower totals, and the next restart reseeds from
+			// it — so the reset must reach the durable row too.
 			t.DroppedEvents = 0
+			s.clearReboundDropSeed(t)
 		} else if flushed.drops > t.DroppedEvents && flushed.generationID == t.GenerationID {
 			t.DroppedEvents = flushed.drops
 		}
