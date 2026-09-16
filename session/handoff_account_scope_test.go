@@ -296,3 +296,17 @@ func TestHandoffEffectiveAgentForPath_MatchesInstanceResolution(t *testing.T) {
 	require.Equal(t, tmux.ProgramAider,
 		HandoffEffectiveAgentForPath(inst.Path, tmux.ProgramCodex))
 }
+
+// The plan-failure precedence fix (daemon/handoff.go) resolves the same
+// command the plan already resolved — DetectAgentFromCommand reads the command
+// STRING, never the filesystem, so a binary that failed preflight still yields
+// its agent and the scope refusal can win the overlap (#4430 review).
+func TestHandoffEffectiveAgentForPath_NeedsNoBinary(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	_, err := config.SetGlobalConfigValue(
+		"program_overrides."+tmux.ProgramAider, "/nonexistent/codex")
+	require.NoError(t, err)
+	require.Equal(t, tmux.ProgramCodex,
+		HandoffEffectiveAgentForPath(t.TempDir(), tmux.ProgramAider),
+		"detection answers from the resolved command even when its binary cannot launch")
+}

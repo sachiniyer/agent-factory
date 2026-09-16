@@ -191,6 +191,23 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	fromAccount, _ := instance.AccountSelection()
 	plan, err := instance.PrepareAgentSwap(target)
 	if err != nil {
+		// PrepareAgentSwap resolves the command BEFORE preflight checks it, so
+		// a failed plan carries no frozen answer — but the same resolution can
+		// be re-run without preflight, and must be when a scope is at stake: a
+		// target that is BOTH unlaunchable AND scopable-resolved still gets the
+		// refusal, because --account is the remedy the user can act on while
+		// the preflight detail would send them to install an agent they were
+		// never going to reach. The plan failed, so this resolution is the best
+		// available answer — the same one the failed plan computed — and a
+		// retry re-resolves anyway. Only a scopable resolution earns the
+		// refusal; anything else leaves preflight to name the real blocker.
+		if fromAccount != "" {
+			effective := session.HandoffEffectiveAgentForPath(instance.Path, target)
+			if _, scopable := sessionenv.SupportsAccounts(effective); scopable {
+				return HandoffSessionResponse{}, scopedAccountHandoffRefusal(
+					req.Title, instance.CurrentAgentName(), fromAccount, target, effective)
+			}
+		}
 		return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", req.Title, target, err)
 	}
 	// Unconditional on scopable(effective): gating this on effective != target
@@ -199,16 +216,9 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// the authority — a refusal here can never describe a launch the plan did
 	// not already commit to.
 	if fromAccount != "" {
-		effective := plan.EffectiveAgent()
-		if _, scopable := sessionenv.SupportsAccounts(effective); scopable {
-			if effective != target {
-				return HandoffSessionResponse{}, fmt.Errorf(
-					"session %q is scoped to %s account %q, and %q resolves to %s — specify a target account with --account before handing it off",
-					req.Title, instance.CurrentAgentName(), fromAccount, target, effective)
-			}
-			return HandoffSessionResponse{}, fmt.Errorf(
-				"session %q is scoped to %s account %q; specify a target account with --account before handing it off to %s",
-				req.Title, instance.CurrentAgentName(), fromAccount, target)
+		if _, scopable := sessionenv.SupportsAccounts(plan.EffectiveAgent()); scopable {
+			return HandoffSessionResponse{}, scopedAccountHandoffRefusal(
+				req.Title, instance.CurrentAgentName(), fromAccount, target, plan.EffectiveAgent())
 		}
 	}
 
@@ -335,6 +345,23 @@ func shortSHA(sha string) string {
 		return "(no commits)"
 	}
 	return sha
+}
+
+// scopedAccountHandoffRefusal is the one refusal a scoped session gets for a
+// scopable incoming agent, named at the RESOLVED agent so a program_overrides
+// redirect explains itself. Both admission sites emit it — the frozen plan's
+// EffectiveAgent when PrepareAgentSwap succeeded, and the same resolution
+// re-run when it failed (the refusal, not the preflight detail, is what the
+// user can act on there).
+func scopedAccountHandoffRefusal(title, current, account, target, effective string) error {
+	if effective != target {
+		return fmt.Errorf(
+			"session %q is scoped to %s account %q, and %q resolves to %s — specify a target account with --account before handing it off",
+			title, current, account, target, effective)
+	}
+	return fmt.Errorf(
+		"session %q is scoped to %s account %q; specify a target account with --account before handing it off to %s",
+		title, current, account, target)
 }
 
 // IsHandoffUnsupported reports whether err is the backend-restriction sentinel,

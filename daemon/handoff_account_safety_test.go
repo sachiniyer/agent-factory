@@ -209,6 +209,53 @@ func TestHandoffScopedSessionDescopesCrossAgentProgramOverride(t *testing.T) {
 	require.Len(t, prompts, 1)
 }
 
+// Error precedence on the plan-failure path (#4430 review): PrepareAgentSwap
+// resolves the command BEFORE preflight checks it, so a target that is BOTH
+// unlaunchable AND scopable-resolved must still get the scope refusal —
+// --account is the remedy the user can act on, while the preflight detail
+// would send them to install an agent they were never going to reach. A
+// non-scopable resolution leaves the preflight error to name the real blocker.
+func TestHandoffScopedSessionScopeRefusalBeatsPreflightFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		override   string
+		wantErr    string
+		absentErr  string
+		wantDetail string
+	}{
+		{name: "scopable resolution wins over preflight",
+			override:   "aider = \"/nonexistent/codex\"",
+			wantErr:    "--account",
+			absentErr:  "preflight",
+			wantDetail: "resolves to codex"},
+		{name: "non-scopable resolution leaves preflight",
+			override:  "aider = \"/nonexistent/aider\"",
+			wantErr:   "preflight",
+			absentErr: "--account"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+			inst.SetBackend(&handoffRealPlanBackend{backend})
+			inst.Account = "work"
+			inst.ClearLimitReached()
+			gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+			require.NoError(t, err)
+			inst.SetGitWorktreeForTest(gw)
+			writeLimitAccountCandidates(t, "[program_overrides]\n"+tc.override+"\n")
+
+			_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, To: "aider"})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wantErr)
+			require.NotContains(t, err.Error(), tc.absentErr)
+			if tc.wantDetail != "" {
+				require.Contains(t, err.Error(), tc.wantDetail)
+			}
+			account, _ := inst.AccountSelection()
+			require.Equal(t, "work", account, "a refused handoff never touches the scope")
+		})
+	}
+}
+
 func TestHandoffAccountHealthyDeliveryFailureDoesNotInventQuota(t *testing.T) {
 	for _, live := range []session.Liveness{session.LiveRunning, session.LiveReady} {
 		t.Run(fmt.Sprint(live), func(t *testing.T) {
