@@ -5659,7 +5659,10 @@ for (const tree of [undefined, { truncated: true, tree: [] }, { truncated: false
       [OTHER_SHA]: tuiTree(PLAY_TEST_TREE), [HEAD_SHA]: tree,
     } }));
     assert.equal(result.shouldMerge, false);
-    assert.match(result.reasons.join("\n"), /auto-gate evaluation error:/);
+    // Fails closed as a decision reason, never an evaluation error that an
+    // aggregate run would abort on (#4484).
+    assert.match(result.reasons.join("\n"), /play-tested attestation could not be verified:/);
+    assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
   });
 }
 
@@ -5734,11 +5737,103 @@ for (const failure of ["commit unavailable", "tree unavailable", "tree incomplet
         assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
       } else {
         assert.match(result.summary, /^BLOCKED:/);
-        assert.match(result.reasons.join("\n"), /auto-gate evaluation error:.*(?:unavailable|incomplete)/);
+        // An unverifiable attestation fails closed as a decision reason on the
+        // automatic path too — it used to escape as "auto-gate evaluation
+        // error" and take the whole repository's gate down (#4484).
+        assert.match(result.reasons.join("\n"), /play-tested attestation could not be verified:.*(?:unavailable|incomplete)/);
+        assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
       }
     });
   }
 }
+
+// #4484: the incident shape, verbatim — a 40-hex attestation naming a SHA
+// GitHub cannot resolve (a padded short SHA) answered HTTP 422. For an
+// allowed-author PR that escaped the degradation catch, surfaced as
+// "auto-gate evaluation error", and the aggregate loop aborted the whole run.
+// The decision must instead be BLOCKED with the attestation named as the
+// reason — the same shape missing checks and unresolved findings already use.
+test("#4484: an unresolvable attested SHA blocks the PR instead of erroring evaluation", async () => {
+  const BAD_SHA = "2e7c8865e0de9e22f0fd624b01c3bcc49ef3caf9";
+  const github = fakeGateGithub(playTestFixture({
+    issueComments: [codexVerdict(HEAD_SHA), playTestComment(BAD_SHA)],
+  }));
+  const realGetCommit = github.rest.repos.getCommit;
+  github.rest.repos.getCommit = async ({ ref }) => {
+    if (ref === BAD_SHA) {
+      const error = new Error(`No commit found for SHA: ${ref}`);
+      error.status = 422;
+      throw error;
+    }
+    return realGetCommit({ ref });
+  };
+  const result = await autoGate.evaluate({
+    github, context: fakeContext(), core: fakeCore(), prNumber: 1465, setOutputs: false,
+  });
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.reasons.join("\n"), new RegExp(
+    `play-tested attestation names ${BAD_SHA}, which GitHub cannot resolve as a commit \\(HTTP 422\\)`));
+  assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
+});
+
+// #4484: the same unresolvable SHA inside an aggregate run must scope to its
+// own PR — the unrelated PR sharing the head still evaluates and publishes.
+// Before the fix the loop threw on the first failure: the job died, the
+// second PR's decision was never written, and every master-scoped run failed
+// until the comment was edited.
+test("#4484: a per-PR evaluation failure does not abort the aggregate run", async () => {
+  const BAD_SHA = "2e7c8865e0de9e22f0fd624b01c3bcc49ef3caf9";
+  const github = fakeGateGithub({
+    labels: ["play-tested"],
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2400, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+    ],
+    pullRequestsByNumber: {
+      1465: {
+        files: ["session/tmux/envmarker.go"],
+        issueComments: [codexVerdict(HEAD_SHA), playTestComment(BAD_SHA)],
+      },
+      // The unrelated PR: no TUI files, so its evaluation needs no play-test
+      // and nothing else to fail on.
+      2400: { files: [], issueComments: [codexVerdict(HEAD_SHA)] },
+    },
+  });
+  const realGetCommit = github.rest.repos.getCommit;
+  github.rest.repos.getCommit = async ({ ref }) => {
+    if (ref === BAD_SHA) {
+      const error = new Error(`No commit found for SHA: ${ref}`);
+      error.status = 422;
+      throw error;
+    }
+    return realGetCommit({ ref });
+  };
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [
+      { prNumber: 1465, headSha: HEAD_SHA },
+      { prNumber: 2400, headSha: HEAD_SHA },
+    ],
+  });
+
+  // The run completed instead of dying on PR #1465's error…
+  assert.notEqual(transaction.state, "merged");
+  // …the healthy PR still got its evaluated decision published…
+  const goodDecision = github.createdChecks.find(
+    (check) => check.name === decisionName(2400, HEAD_SHA),
+  );
+  assert.ok(goodDecision, "the unrelated PR's decision was never published");
+  assert.equal(goodDecision.conclusion, "success");
+  // …and the aggregate stayed non-green with the failed PR named as waiting.
+  const aggregate = github.createdChecks.find((check) => check.name === "Auto Gate decision");
+  assert.ok(aggregate, "the aggregate decision was never published");
+  assert.notEqual(aggregate.conclusion, "success");
+});
 
 test("#4205: advisory play-test read failures do not waive a manual verdict blocker", async () => {
   const result = await evaluateGate(playTestFixture({
@@ -9201,25 +9296,30 @@ test("a self-contradictory NOT_FOUND that never clears blocks instead of throwin
 test("a NOT_FOUND for an id the gate did not resolve stays loud", async () => {
   // The property #3346 established on purpose. NOT_FOUND is only tolerated for
   // the node id THIS run resolved; anything else is real breakage and is not
-  // retried even once.
+  // retried even once. #4484 then scopes that breakage to its PR: the run
+  // completes with the aggregate red for the failed PR rather than the job
+  // dying and taking unrelated PRs' evaluations with it.
   const github = fakeGateGithub({
     readErrorsByFn: { listReviews: [selfContradictoryNotFound("PR_some_other_node")] },
   });
 
-  await assert.rejects(
-    autoGate.processAggregateHead({
-      github,
-      context: fakeContext(),
-      core: fakeCore(),
-      headSha: HEAD_SHA,
-      targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
-      mergeEnabled: false,
-    }),
-    /Could not resolve to a node with the global id of 'PR_some_other_node'/,
-  );
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: false,
+  });
 
   assert.equal(github.readAttemptsByFn.listReviews, 1, "an unrelated NOT_FOUND must not retry");
   assert.equal(github.pullGetReads, 0, "an unrelated NOT_FOUND must not be cross-checked");
+  assert.notEqual(transaction.state, "merged");
+  assert.equal(transaction.aggregate.ok, false);
+  assert.ok(
+    transaction.aggregate.blockers.some((blocker) => blocker.includes("1465")),
+    `aggregate must name the failed PR as a blocker: ${transaction.aggregate.blockers}`,
+  );
 });
 
 test("a PR that genuinely vanished mid-run concludes cleanly", async () => {

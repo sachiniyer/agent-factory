@@ -910,10 +910,12 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     try {
       playTest = await evaluatePlayTest({ github, context, pr, comments: codex.comments, subject });
     } catch (error) {
-      // TUI evidence is advisory for authors the gate never auto-merges. Keep
-      // unreadable snapshots advisory too, without swallowing review/check
-      // failures or relaxing snapshot verification on the automatic path.
-      if (isAllowedAuthor(pr.author)) throw error;
+      // An attestation that cannot be verified fails closed as a BLOCKED
+      // reason for EVERY author class — never an unhandled error. Re-throwing
+      // on the automatic path used to surface this as "auto-gate evaluation
+      // error", which the aggregate run then aborted on: one unresolvable
+      // attested SHA took the whole repository's gate down (#4484). The
+      // reason still blocks the merge, so nothing relaxes verification.
       playTest = {
         ok: false,
         message: `play-tested attestation could not be verified: ${error.message || String(error)}`,
@@ -1996,7 +1998,13 @@ async function processAggregateHead({
         });
         return { state: "evaluation-error", pending, aggregate };
       }
-      throw new Error(`Auto Gate evaluation failed for PR #${prNumber}: ${result.summary}`);
+      // A deterministic evaluation failure is scoped to this PR: publishing
+      // nothing leaves it without a passing (PR, head) decision, so the
+      // aggregate stays red for it — while unrelated PRs sharing this run
+      // still evaluate and publish. Throwing here used to kill the whole job
+      // and take the gate down repo-wide (#4484).
+      core.warning(`Auto Gate evaluation failed for PR #${prNumber}; scoping the failure to that PR: ${result.summary}`);
+      continue;
     }
     if (result.headSha !== pending.headSha) {
       // The association changed after the snapshot. Keep the aggregate red;
@@ -2328,10 +2336,17 @@ async function evaluateAggregateFresh({ github, context, core, headSha }) {
       setOutputs: false,
     });
     if (evaluationFailed(result)) {
-      throw evaluationFailure(
-        `Auto Gate fresh aggregate evaluation failed for PR #${pull.number}: ${result.summary}`,
-        result,
-      );
+      if (result.readFailure) {
+        throw evaluationFailure(
+          `Auto Gate fresh aggregate evaluation failed for PR #${pull.number}: ${result.summary}`,
+          result,
+        );
+      }
+      // The same scoping as the pending loop: a deterministic failure on one
+      // PR is that PR's blocker, not an abort for every PR sharing the head
+      // (#4484). The aggregate stays red until that PR evaluates cleanly.
+      blockers.push(`PR #${pull.number} at this commit could not be evaluated: ${decisionWaitingReason(result)}`);
+      continue;
     }
     if (result.headSha !== sha) {
       blockers.push(`PR #${pull.number} no longer evaluates at this commit`);
@@ -4656,7 +4671,21 @@ async function evaluatePlayTest({ github, context, pr, comments, subject }) {
       }
       return JSON.stringify(entries.sort());
     };
-    const tested = await snapshot(testedSha);
+    let tested;
+    try {
+      tested = await snapshot(testedSha);
+    } catch (error) {
+      // A well-formed SHA naming no commit is a bad attestation — user input
+      // with its own blocking reason, not a gate-read failure (#4484).
+      const status = Number(error?.status ?? error?.cause?.status);
+      if (status === 404 || status === 422) {
+        return {
+          ok: false,
+          message: `play-tested attestation names ${testedSha}, which GitHub cannot resolve as a commit (HTTP ${status}); ${remedy}`,
+        };
+      }
+      throw error;
+    }
     const current = await snapshot(pr.headRefOid);
     if (tested !== current) {
       return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
