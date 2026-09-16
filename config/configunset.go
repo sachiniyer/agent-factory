@@ -168,7 +168,17 @@ func applyGlobalUnset(locked lockedTarget, prettyPath, canonicalKey string, alia
 	// second time inside the lock (#3688, #3697).
 	current, err := locked.read()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
+		// A missing config.toml under the lock is an empty document, exactly
+		// as loadConfigLocked answers it: a zero-byte config.json can satisfy
+		// the pre-lock LoadConfig with in-memory defaults while this file
+		// stays absent (#4483 review), or the file was removed in the window
+		// between that load and acquisition. Either way there is no key to
+		// remove — the answer is "not set", not an ENOENT the user cannot act
+		// on. Materializing a file just to report that would write where a
+		// mid-flight rewrite may be landing.
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
+		}
 	}
 	current = stripUTF8BOM(current)
 	updated, groupedRemoved := deleteTOMLScalar(string(current), alias.section, alias.leaf)
