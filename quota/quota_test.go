@@ -217,14 +217,18 @@ func TestRows_AreTheSameCellsTheTablePrints(t *testing.T) {
 	}
 
 	// RenderRows renders exactly those cells — it is what a remote daemon's
-	// answer hands the CLI.
+	// answer hands the CLI — under the note the caller hands it, so a remote
+	// daemon's framing is never replaced by this binary's during a skew.
 	var out bytes.Buffer
-	if err := RenderRows(&out, rows); err != nil {
+	if err := RenderRows(&out, rows, "DAEMON NOTE SENTINEL"); err != nil {
 		t.Fatalf("RenderRows: %v", err)
 	}
 	rendered := out.String()
 	if !strings.Contains(rendered, "limit reached") || !strings.Contains(rendered, "not reported") {
 		t.Fatalf("RenderRows must render the wire cells, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "DAEMON NOTE SENTINEL") || strings.Contains(rendered, ReportNote) {
+		t.Fatalf("RenderRows must render the passed note, not ReportNote, got:\n%s", rendered)
 	}
 }
 

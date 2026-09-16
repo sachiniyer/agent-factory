@@ -51,20 +51,31 @@ reports the targeted daemon's host instead of this machine's.`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		var rows []quota.Row
 		var caveats []string
+		// The framing note is the answering daemon's, verbatim: a remote target's
+		// note can legitimately differ from this binary's during a rolling
+		// upgrade, and the response contract carries it for exactly that reason.
+		// A daemon that sends none still gets this binary's standing wording.
+		note := quota.ReportNote
 		if apiclient.IsRemoteTarget() {
 			resp, err := quotaReportRemote()
 			if err != nil {
 				return err
 			}
 			rows, caveats = resp.Rows, resp.Caveats
+			if resp.Note != "" {
+				note = resp.Note
+			}
 		} else {
 			result, err := quotahost.Report(time.Now())
 			if err != nil {
 				return err
 			}
 			rows, caveats = result.Rows, result.Caveats
+			if result.Note != "" {
+				note = result.Note
+			}
 		}
-		if err := quota.RenderRows(cmd.OutOrStdout(), rows); err != nil {
+		if err := quota.RenderRows(cmd.OutOrStdout(), rows, note); err != nil {
 			return err
 		}
 

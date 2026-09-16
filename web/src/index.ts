@@ -2382,6 +2382,9 @@ function stopStream(): void {
   tasksRefetcher.invalidate();
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
+  // The usage read is the same shape: issued for the config view beside config
+  // itself, and its answer describes the daemon the PREVIOUS stream talked to.
+  usageRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

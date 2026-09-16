@@ -179,9 +179,10 @@ func (m *Manager) persistPollChange(
 	instance *session.Instance,
 	before session.Liveness,
 	beforeReset time.Time,
+	beforeObserved time.Time,
 	projectionChanged bool,
 ) {
-	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, false)
+	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, beforeObserved, projectionChanged, false)
 }
 
 func (m *Manager) persistPollChangeWithIdleEvidence(
@@ -189,6 +190,7 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	instance *session.Instance,
 	before session.Liveness,
 	beforeReset time.Time,
+	beforeObserved time.Time,
 	projectionChanged bool,
 	settlementCheckpoint bool,
 ) {
@@ -204,7 +206,14 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	data := instance.ToInstanceData()
 	livenessChanged := data.Liveness != before
 	resetChanged := !data.LimitResetAt.Equal(beforeReset)
-	durableChanged := livenessChanged || resetChanged || settlementCheckpoint
+	// The FIRST sighting of a wall is durable evidence of its own: a record
+	// loaded with LiveLimitReached but no observation time (every row written
+	// before the field existed) changes neither liveness nor reset when the
+	// poll re-observes the same banner, so the stamp it just earned would stay
+	// memory-only. The gate is the zero edge, so per-tick re-observation of a
+	// still-parked session costs no write.
+	observedNewlyStamped := beforeObserved.IsZero() && !data.LimitObservedAt.IsZero()
+	durableChanged := livenessChanged || resetChanged || observedNewlyStamped || settlementCheckpoint
 	publishChanged := durableChanged || projectionChanged
 	if !publishChanged {
 		return

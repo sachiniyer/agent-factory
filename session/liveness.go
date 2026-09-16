@@ -552,7 +552,13 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	i.limitResetAt = resetAt
 	// This call site is a real sighting — the detector or a create-time limit
 	// error just observed the wall — so the observation's clock is now (#4361).
-	i.limitObservedAt = instanceNow()
+	// Only the FIRST sighting of an episode stamps: a poll re-observing the same
+	// banner every tick must not keep re-dating the evidence, or a session
+	// parked for days would always read "observed just now" — the staleness the
+	// field exists to show (#4361 review).
+	if i.limitObservedAt.IsZero() {
+		i.limitObservedAt = instanceNow()
+	}
 	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
 		i.limitAgent = agent
 		i.touchLocked()
@@ -688,6 +694,19 @@ func (i *Instance) LimitResetAt() (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return i.limitResetAt, true
+}
+
+// LimitObservedAt returns when af recorded the current wall (#4361), for the
+// daemon's persist gate: it reports (zero, false) off the limit wall or on a
+// record written before the field existed, so the gate can see the exact edge
+// where a first sighting stamps the field.
+func (i *Instance) LimitObservedAt() (time.Time, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.liveness != LiveLimitReached || i.limitObservedAt.IsZero() {
+		return time.Time{}, false
+	}
+	return i.limitObservedAt, true
 }
 
 // LimitAccount returns the account whose runtime produced the current limit

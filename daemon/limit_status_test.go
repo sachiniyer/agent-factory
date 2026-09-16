@@ -87,8 +87,9 @@ func TestPersistPollChange_LaterResetTime_PersistsIndependentOfLiveness(t *testi
 	// transition and persists.
 	before1 := inst.GetLiveness()
 	beforeReset1, _ := inst.LimitResetAt()
+	beforeObserved1, _ := inst.LimitObservedAt()
 	inst.SetLimitReached(time.Time{})
-	manager.persistPollChange(repoID, inst, before1, beforeReset1, false)
+	manager.persistPollChange(repoID, inst, before1, beforeReset1, beforeObserved1, false)
 
 	if got := persistedLiveness(t, repoID, "limited"); got != session.LiveLimitReached {
 		t.Fatalf("after tick 1 persisted liveness = %v, want LiveLimitReached", got)
@@ -103,8 +104,9 @@ func TestPersistPollChange_LaterResetTime_PersistsIndependentOfLiveness(t *testi
 	resetAt := time.Date(2026, 7, 6, 15, 0, 0, 0, time.UTC)
 	before2 := inst.GetLiveness()
 	beforeReset2, _ := inst.LimitResetAt()
+	beforeObserved2, _ := inst.LimitObservedAt()
 	inst.SetLimitReached(resetAt)
-	manager.persistPollChange(repoID, inst, before2, beforeReset2, false)
+	manager.persistPollChange(repoID, inst, before2, beforeReset2, beforeObserved2, false)
 
 	got := persistedLimitReset(t, repoID, "limited")
 	if !got.Equal(resetAt) {

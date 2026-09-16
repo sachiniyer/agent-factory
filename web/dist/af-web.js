@@ -18942,6 +18942,7 @@ function stopStream() {
   tasksRefetcher.invalidate();
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
+  usageRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

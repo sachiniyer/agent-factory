@@ -244,6 +244,34 @@ func TestSetLimitReachedStampsWhenAfObservedTheWall(t *testing.T) {
 		"the durable account evidence must carry the same sighting time")
 }
 
+// Re-observing the same wall inside one episode must not re-date the sighting:
+// a poll ticks over a parked session for days, and if every tick re-stamped the
+// field the record would always read "observed just now" — the staleness the
+// field exists to show. The zero edge is also what the daemon's persist gate
+// keys on to write the stamp exactly once.
+func TestSetLimitReachedKeepsFirstSightingWithinAnEpisode(t *testing.T) {
+	first := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	second := first.Add(3 * 24 * time.Hour)
+	oldClock := instanceNow
+	t.Cleanup(func() { instanceNow = oldClock })
+
+	i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+	instanceNow = func() time.Time { return first }
+	i.SetLimitReached(first.Add(5 * 24 * time.Hour))
+
+	instanceNow = func() time.Time { return second }
+	i.SetLimitReached(first.Add(5 * 24 * time.Hour))
+	require.True(t, i.limitObservedAt.Equal(first),
+		"a re-observation inside the episode must keep the first sighting, got %v", i.limitObservedAt)
+
+	// A new episode — the wall cleared, then observed again — stamps afresh:
+	// ClearLimitReached zeroes the field, so the next sighting is a new edge.
+	i.ClearLimitReached()
+	i.SetLimitReached(first.Add(6 * 24 * time.Hour))
+	require.True(t, i.limitObservedAt.Equal(second),
+		"a wall observed after the clear is a new sighting, got %v", i.limitObservedAt)
+}
+
 // The sighting time rides the same JSON round-trip as the reset time: a daemon
 // restart must not make an old observation read as a fresh one.
 func TestLimitObservedAtPersistRoundTrip(t *testing.T) {

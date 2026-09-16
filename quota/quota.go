@@ -250,14 +250,16 @@ func (r Report) Rows(now time.Time) []Row {
 // is the rendering half of the rule the types enforce: a blank in a quota table
 // is read as zero remaining, and af does not know that about any provider.
 func Render(w io.Writer, report Report, now time.Time) error {
-	return RenderRows(w, report.Rows(now))
+	return RenderRows(w, report.Rows(now), ReportNote)
 }
 
 // RenderRows writes the table for rows that are already rendered cells — what a
 // remote daemon's QuotaReport answer hands the CLI, so a remote readout is
-// word-for-word a local one. The legend travels with the table because it is
-// the standing warning against reading either column as something it is not.
-func RenderRows(w io.Writer, rows []Row) error {
+// word-for-word a local one. The note travels with the table and is the
+// report's own framing — the caller passes the daemon's wording verbatim, so a
+// remote readout never silently substitutes this binary's note for the note
+// the answering daemon sent.
+func RenderRows(w io.Writer, rows []Row, note string) error {
 	if len(rows) == 0 {
 		_, err := fmt.Fprintln(w, "No agent CLIs are configured, so there is nothing to report.")
 		return err
@@ -278,7 +280,7 @@ func RenderRows(w io.Writer, rows []Row) error {
 			return err
 		}
 	}
-	_, err := fmt.Fprint(w, "\n"+ReportNote+"\n")
+	_, err := fmt.Fprint(w, "\n"+note+"\n")
 	return err
 }
 
