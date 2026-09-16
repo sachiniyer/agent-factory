@@ -71,9 +71,10 @@ func TestLoadConfig_BOMGlobalConfigFile(t *testing.T) {
 	assert.Equal(t, 30*60*1000, cfg.DaemonPollInterval)
 }
 
-// A BOM-only global config is still "effectively empty": re-materialize rather
-// than fail, mirroring the non-BOM empty-stub path (#864).
-func TestLoadConfig_BOMOnlyConfigMaterializes(t *testing.T) {
+// A BOM-only global config is still "effectively empty": it loads as in-memory
+// defaults rather than failing, mirroring the non-BOM empty-stub path
+// (#864/#4483 — the stub itself is left untouched).
+func TestLoadConfig_BOMOnlyConfigLoadsDefaults(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	require.NoError(t, os.WriteFile(filepath.Join(home, TomlConfigFileName), []byte(utf8BOM), 0o644))
