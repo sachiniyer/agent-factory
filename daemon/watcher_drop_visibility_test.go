@@ -212,3 +212,85 @@ func TestNewerParkRetiresEarlierLiveTerminalOverlay(t *testing.T) {
 	w.mu.Unlock()
 	require.Empty(t, terminalStatus, "newer parked publication must retire an older terminal overlay")
 }
+
+// TestRecordedParkedHeadResumeRetiresTerminalOverlay is the recovery half of
+// the unverifiable-exit contract: persistTerminalStatus legitimately latches
+// "stopped" — in memory AND on the durable row — while the queue cannot
+// confirm a recorded parked head, but once storage heals the retry skips
+// commitParkedStatus — the head's status is already durable — so resuming the
+// recorded head is what must republish the parked row and retire the latch.
+// Without it listings show the stale terminal status over the actionable park
+// and past the eventual replay outcome (#4226 review).
+func TestRecordedParkedHeadResumeRetiresTerminalOverlay(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	dir := t.TempDir()
+	tsk := watchTask("d4357010", `printf 'x\n'`, dir)
+	require.NoError(t, task.AddTask(tsk))
+	when := time.Now()
+	_, err := task.UpdateTaskStatus(tsk.ID, &when, TaskStatusLimitParked)
+	require.NoError(t, err)
+
+	seed := newEventQueue(dir, "d4357010")
+	if _, err := seed.enqueueWithParkedStatus("held occurrence", true, true); err != nil {
+		t.Fatalf("seed recorded parked head: %v", err)
+	}
+	denyAccess(t, seed.path, seed.path, 0o644)
+
+	statusWrites := 0
+	originalUpdate := updateWatchTaskStatus
+	updateWatchTaskStatus = func(taskID string, at *time.Time, status string) (task.Task, error) {
+		statusWrites++
+		return originalUpdate(taskID, at, status)
+	}
+	t.Cleanup(func() { updateWatchTaskStatus = originalUpdate })
+
+	queue := newEventQueue(dir, "d4357010")
+	s := &watcherSupervisor{
+		setStatus: func(taskID, status string) {
+			persistWatcherStatus(taskID, status)
+		},
+	}
+	delivered := ""
+	s.deliver = func(_, line string, _ watchDeliveryOptions) error {
+		delivered = line
+		return nil
+	}
+	w := &taskWatcher{taskID: "d4357010", queue: queue, sup: s}
+	s.watchers = map[string]*taskWatcher{w.taskID: w}
+
+	w.persistTerminalStatus("stopped")
+	stored, err := task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	require.Equal(t, "stopped", stored.LastRunStatus,
+		"the terminal publication reaches the durable row, not just the overlay")
+	s.applyLiveDropState(stored)
+	require.Equal(t, "stopped", stored.LastRunStatus,
+		"the latched overlay wins while the parked head cannot be verified")
+
+	require.NoError(t, os.Chmod(seed.path, 0o644))
+	ev, cursor, ok, err := queue.peek()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, w.deliverQueuedEvent(ev, cursor))
+	require.Equal(t, "held occurrence", delivered)
+
+	w.mu.Lock()
+	latch := w.terminalStatus
+	w.mu.Unlock()
+	require.Empty(t, latch,
+		"a recorded parked head resuming must retire the stale terminal overlay")
+	stored, err = task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	require.Equal(t, TaskStatusLimitParked, stored.LastRunStatus,
+		"the reconcile must republish the durable parked status the terminal overwrote")
+	s.applyLiveDropState(stored)
+	require.Equal(t, TaskStatusLimitParked, stored.LastRunStatus,
+		"listings must show the actionable park again, not the terminal it replaced")
+
+	// The reconcile is bounded: retrying the still-recorded head must not
+	// rewrite the store every cadence.
+	writes := statusWrites
+	require.NoError(t, w.deliverQueuedEvent(ev, cursor))
+	require.Equal(t, writes, statusWrites,
+		"the recorded head's later retries must not rewrite the store")
+}

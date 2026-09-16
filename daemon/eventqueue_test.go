@@ -1289,12 +1289,10 @@ func TestEventQueue_ParkedEnqueueRetainsAndBlocksWhenMarkerWriteFails(t *testing
 	if err := q.enqueue("seed-ordinary"); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
-	// The backlog file exists and stays appendable; nothing new can be
-	// created in the directory, so the marker temp file cannot land.
-	if err := os.Chmod(dir, 0o555); err != nil {
-		t.Fatalf("read-only events dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	// The backlog file exists and stays appendable; a directory at the marker
+	// path refuses the atomic rename for any user, root included — a read-only
+	// events directory does not block a UID-0 suite (#4226 review).
+	failLimitMarkerWrites(t, q)
 
 	retained, err := q.enqueueWithParkedStatus("held-for-limit", true, true)
 	if err == nil {
@@ -1310,10 +1308,10 @@ func TestEventQueue_ParkedEnqueueRetainsAndBlocksWhenMarkerWriteFails(t *testing
 		t.Fatalf("marker write failure must block the reader fail-closed: blocked=%v unknown=%v", blocked, unknown)
 	}
 
-	// Recovery: once the directory is writable again the next mark lands the
-	// marker durably and the block releases with protection intact.
-	if err := os.Chmod(dir, 0o755); err != nil {
-		t.Fatalf("restore events dir: %v", err)
+	// Recovery: once the marker path is clear the next mark lands the marker
+	// durably and the block releases with protection intact.
+	if err := os.Remove(q.limitPath); err != nil {
+		t.Fatalf("unblock marker path: %v", err)
 	}
 	if err := q.markLimitParked(); err != nil {
 		t.Fatalf("marker persist after recovery: %v", err)

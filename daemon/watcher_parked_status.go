@@ -49,7 +49,50 @@ func (w *taskWatcher) deliverQueuedEvent(ev queuedEvent, cursor eventQueueCursor
 			return w.commitParkedStatus(cursor, writeStatus)
 		},
 	}
+	if options.parkedStatusRecorded {
+		// The head's parked occurrence is already durable, so its retry skips
+		// commitParkedStatus — the only place a terminal publication committed
+		// while the queue was unverifiable can be reconciled. The recorded head
+		// resuming IS that reconcile: republish the parked status and retire
+		// the latch under the same publication mutex so listings stop hiding
+		// the actionable park and its later replay outcome (#4226 review).
+		w.reconcileRecordedParkedHead(cursor)
+	}
 	return w.sup.deliver(w.taskID, ev.Line, options)
+}
+
+// reconcileRecordedParkedHead undoes the terminal publication a watcher exit
+// committed while the queue could not confirm its recorded parked head: both
+// halves of it — the durable row setStatus wrote and the terminalStatus
+// overlay applyLiveDropState prefers over it — stay stale while retries keep
+// skipping commitParkedStatus, and a later "sent" writes under the same
+// overlay. Re-running the recorded head's publication restores the parked row
+// and retires the latch in one statusMu transaction.
+//
+// parkedHeadReconciled bounds the republish to once per terminal publication
+// — persistTerminalStatus re-arms it — because without the bound every retry
+// cadence would rewrite the store, the per-tick write commitParkedStatus's
+// skip exists to prevent. A failed republish leaves the flag unset so the
+// next resume retries the reconcile.
+func (w *taskWatcher) reconcileRecordedParkedHead(cursor eventQueueCursor) {
+	w.mu.Lock()
+	if w.parkedHeadReconciled {
+		w.mu.Unlock()
+		return
+	}
+	w.mu.Unlock()
+	if _, err := w.commitParkedStatus(cursor, func() error {
+		// nil preserves the occurrence's original LastRunAt — this is a
+		// republish of the parked outcome, not a new run.
+		_, err := updateWatchTaskStatus(w.taskID, nil, TaskStatusLimitParked)
+		return err
+	}); err != nil {
+		log.WarningLog.Printf("watch task %s: could not republish the recorded park over a stale terminal status: %v", w.taskID, err)
+		return
+	}
+	w.mu.Lock()
+	w.parkedHeadReconciled = true
+	w.mu.Unlock()
 }
 
 // commitParkedStatus publishes the user-visible parked occurrence and the
