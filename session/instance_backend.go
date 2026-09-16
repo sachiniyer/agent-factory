@@ -428,7 +428,7 @@ func (i *Instance) SwapAgent(plan AgentSwapPlan) (InstanceData, error) {
 	}
 	// A record still carrying an account at this boundary skipped the handoff
 	// transaction's scope decision (#4428); refuse before any pane is touched.
-	if err := i.handoffUnsettledAccountError(plan.target); err != nil {
+	if err := i.handoffUnsettledAccountError(plan); err != nil {
 		return InstanceData{}, err
 	}
 	if plan.conversation.HasID() {

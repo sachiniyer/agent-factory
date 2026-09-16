@@ -194,6 +194,21 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err != nil {
 		return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", req.Title, target, err)
 	}
+	// The enum check above judges the requested target; this one judges the
+	// command the plan actually froze. A program_overrides command like
+	// `program_overrides.aider = "codex"` passes the enum check (aider has no
+	// account namespace) yet launches Codex — which does. Without this, the
+	// record would drop the scope and Codex would start with ambient
+	// credentials (#4430 review).
+	if fromAccount != "" {
+		if effectiveAgent := plan.EffectiveAgent(); effectiveAgent != target {
+			if _, scopable := sessionenv.SupportsAccounts(effectiveAgent); scopable {
+				return HandoffSessionResponse{}, fmt.Errorf(
+					"session %q is scoped to %s account %q, and %q resolves to %s — specify a target account with --account before handing it off",
+					req.Title, instance.CurrentAgentName(), fromAccount, target, effectiveAgent)
+			}
+		}
+	}
 
 	outgoing := instance.CurrentAgentName()
 
@@ -211,7 +226,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := instance.Transition(session.BeginHandoff()); err != nil {
 		return HandoffSessionResponse{}, err
 	}
-	entry, err := instance.RecordHandoffSwap(target, reason, "", false)
+	entry, err := instance.RecordHandoffSwap(target, plan.EffectiveAgent(), reason, "", false)
 	if err != nil {
 		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, err

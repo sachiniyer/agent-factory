@@ -230,6 +230,9 @@ func (i *Instance) currentAgentNameLocked() string {
 // takes only the instance lock.
 func (i *Instance) SwapAgentProgram(target, reason, headSHA string, automatic bool) (HandoffSwap, error) {
 	target = strings.TrimSpace(target)
+	// Resolve the effective agent before the lock — resolveProgramForAgent does
+	// config I/O and must not run under i.mu.
+	effectiveAgent := handoffEffectiveAgent(i, target)
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -239,7 +242,7 @@ func (i *Instance) SwapAgentProgram(target, reason, headSHA string, automatic bo
 	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
 		return HandoffSwap{}, err
 	}
-	return i.recordHandoffSwapLocked(target, reason, headSHA, automatic)
+	return i.recordHandoffSwapLocked(target, effectiveAgent, reason, headSHA, automatic)
 }
 
 // RecordHandoffSwap is the transaction-owned mutation used by the daemon after
@@ -247,7 +250,12 @@ func (i *Instance) SwapAgentProgram(target, reason, headSHA string, automatic bo
 // SwapAgentProgram makes both legal orderings explicit: ordinary state-only
 // tests require a settled live row, while production replacement requires the
 // fence and cannot accidentally validate itself as "busy".
-func (i *Instance) RecordHandoffSwap(target, reason, headSHA string, automatic bool) (HandoffSwap, error) {
+//
+// effectiveAgent is the agent the swap's frozen command will actually run —
+// the AgentSwapPlan's EffectiveAgent — because the scope-drop decision
+// belongs to the process that launches, not the enum it was requested under
+// (#4430 review).
+func (i *Instance) RecordHandoffSwap(target, effectiveAgent, reason, headSHA string, automatic bool) (HandoffSwap, error) {
 	target = strings.TrimSpace(target)
 
 	i.mu.Lock()
@@ -258,7 +266,34 @@ func (i *Instance) RecordHandoffSwap(target, reason, headSHA string, automatic b
 	if err := i.validateHandoffTargetLocked(target); err != nil {
 		return HandoffSwap{}, err
 	}
-	return i.recordHandoffSwapLocked(target, reason, headSHA, automatic)
+	return i.recordHandoffSwapLocked(target, effectiveAgent, reason, headSHA, automatic)
+}
+
+// handoffEffectiveAgent resolves the agent identity of the command a handoff
+// to target would launch — DetectAgentFromCommand over the resolved
+// program_overrides command — falling back to the enum when the command
+// names no supported agent (a wrapper or an arbitrary tool, which af cannot
+// scope either way). It resolves configuration OUTSIDE the instance lock;
+// callers holding i.mu must not invoke it. Where a frozen AgentSwapPlan
+// exists its EffectiveAgent is the same answer computed once, and preferred:
+// a re-resolution could see a different config than the plan already froze.
+func handoffEffectiveAgent(i *Instance, target string) string {
+	if detected := tmux.DetectAgentFromCommand(resolveProgramForAgent(i, target)); detected != "" {
+		return detected
+	}
+	return target
+}
+
+// EffectiveAgent is the agent identity of the plan's frozen launch command —
+// the handoffEffectiveAgent answer computed on the command preflight actually
+// froze, so it cannot see a different configuration than the swap will run.
+// Capability decisions (does this incoming process have an account namespace?)
+// must read it rather than the requested target enum.
+func (p AgentSwapPlan) EffectiveAgent() string {
+	if detected := tmux.DetectAgentFromCommand(p.program); detected != "" {
+		return detected
+	}
+	return p.target
 }
 
 // handoffStorageCheckpoint projects a runtime swap that has completed while its
@@ -282,7 +317,7 @@ func (i *Instance) handoffStorageCheckpoint() InstanceData {
 	return data
 }
 
-func (i *Instance) recordHandoffSwapLocked(target, reason, headSHA string, automatic bool) (HandoffSwap, error) {
+func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent, reason, headSHA string, automatic bool) (HandoffSwap, error) {
 
 	if len(i.Tabs) == 0 {
 		return HandoffSwap{}, fmt.Errorf("session %q has no agent tab to hand off", i.Title)
@@ -323,16 +358,22 @@ func (i *Instance) recordHandoffSwapLocked(target, reason, headSHA string, autom
 		i.Program = target
 		i.touchLocked()
 	}
-	// A target with no account namespace cannot carry the session's scope (#4428):
-	// an account names one identity of one agent, and nothing about the incoming
-	// agent can resolve the outgoing name. Dropping the scope inside the same
-	// locked mutation that rewrites Program makes ambient the only environment a
-	// later refresh can derive — a still-scoped record at the runtime boundary is
-	// the violation handoffUnsettledAccountError refuses on. Scopable targets keep
-	// the recorded scope so their swap can name the incoming account explicitly or
-	// refuse; selectAccountLocked replaces it on the --account path.
+	// An incoming agent with no account namespace cannot carry the session's
+	// scope (#4428): an account names one identity of one agent, and nothing
+	// about the incoming agent can resolve the outgoing name. The capability is
+	// judged on effectiveAgent — the agent the resolved command actually
+	// launches, not the enum it was requested under — because a
+	// program_overrides command like `program_overrides.aider = "codex"` runs
+	// Codex, which IS scopable: dropping the scope here would launch it with
+	// ambient credentials (#4430 review). Dropping the scope inside the same
+	// locked mutation that rewrites Program makes ambient the only environment
+	// a later refresh can derive — a still-scoped record at the runtime
+	// boundary is the violation handoffUnsettledAccountError refuses on.
+	// Effectively-scopable commands keep the recorded scope so their swap can
+	// name the incoming account explicitly or refuse; selectAccountLocked
+	// replaces it on the --account path.
 	if !sameAgent && i.Account != "" {
-		if _, scopable := sessionenv.SupportsAccounts(target); !scopable {
+		if _, scopable := sessionenv.SupportsAccounts(effectiveAgent); !scopable {
 			i.Account = ""
 			i.accountAutoSelected = false
 			i.touchLocked()
@@ -403,25 +444,28 @@ func (i *Instance) RevertHandoff(swap HandoffSwap) error {
 
 // handoffUnsettledAccountError refuses a runtime swap whose session record still
 // carries an account. The record transaction (#4428) settles the scope BEFORE the
-// runtime changes — dropped for a target with no account namespace, replaced by
-// an explicit --account for one that has it — so a non-empty Account here means a
-// caller skipped that transaction. Letting it through would let the environment
-// refresh reapply the name in the INCOMING agent's namespace, where it collides
-// with an identity the user never selected. Refusing before any pane is touched
-// is the only honest answer, and each class's message names its way through.
-func (i *Instance) handoffUnsettledAccountError(target string) error {
+// runtime changes — dropped for an incoming agent with no account namespace,
+// replaced by an explicit --account for one that has it — so a non-empty Account
+// here means a caller skipped that transaction. Letting it through would let the
+// environment refresh reapply the name in the INCOMING agent's namespace, where
+// it collides with an identity the user never selected. The namespace is judged
+// on the plan's effective agent — the command it will actually run — not the
+// requested enum (#4430 review). Refusing before any pane is touched is the only
+// honest answer, and each class's message names its way through.
+func (i *Instance) handoffUnsettledAccountError(plan AgentSwapPlan) error {
 	account, _ := i.AccountSelection()
 	if account == "" {
 		return nil
 	}
-	if _, scopable := sessionenv.SupportsAccounts(target); scopable {
+	effectiveAgent := plan.EffectiveAgent()
+	if _, scopable := sessionenv.SupportsAccounts(effectiveAgent); scopable {
 		return fmt.Errorf(
 			"session %q is scoped to account %q, and an account belongs to one agent — "+
 				"af cannot know which %s identity you meant; hand it off with --account to name the %s account",
-			i.Title, account, target, target)
+			i.Title, account, effectiveAgent, effectiveAgent)
 	}
 	return fmt.Errorf(
 		"session %q still records account %q on a handoff to %s, which cannot carry an account scope — "+
 			"the session record must drop the scope before the runtime changes",
-		i.Title, account, target)
+		i.Title, account, effectiveAgent)
 }

@@ -446,7 +446,7 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	// identity the user never selected for that agent, chosen by a name collision.
 	// Bare codex needs no declaration, so nothing downstream refuses it. Refusing
 	// here is the last wall; the message names each class's way through.
-	if err := i.handoffUnsettledAccountError(plan.target); err != nil {
+	if err := i.handoffUnsettledAccountError(plan); err != nil {
 		return fmt.Errorf("swap agent: %w", err)
 	}
 	// Checked BEFORE any runtime state: this is about intent, not about whether the

@@ -132,6 +132,37 @@ func TestHandoffAccountRechecksChangedProgramOverrideUnderProjectLock(t *testing
 	}
 }
 
+// The ordinary (no --account) handoff must judge account capability on the
+// resolved command, not the target enum (#4430 review). `program_overrides.
+// aider = "codex"` passes the enum check — aider has no account namespace — but
+// the plan's frozen command launches Codex, which does. Dropping the recorded
+// scope would start Codex with ambient credentials, so the handoff must refuse
+// and name the resolution, before any pane is touched.
+func TestHandoffScopedSessionRefusesCrossAgentProgramOverride(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	writeLimitAccountCandidates(t, "[program_overrides]\naider = \"codex\"\n")
+
+	_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, To: "aider"})
+	require.ErrorContains(t, err, "resolves to codex")
+	require.False(t, isMutationCommitted(err))
+	require.Equal(t, "claude", inst.AgentProgram())
+	account, _ := inst.AccountSelection()
+	require.Equal(t, "work", account,
+		"a refused handoff leaves the recorded scope untouched")
+	require.Empty(t, inst.Handoffs())
+	_, respawns, prompts := backend.snapshot()
+	require.Zero(t, respawns)
+	require.Empty(t, prompts)
+}
+
 func TestHandoffAccountHealthyDeliveryFailureDoesNotInventQuota(t *testing.T) {
 	for _, live := range []session.Liveness{session.LiveRunning, session.LiveReady} {
 		t.Run(fmt.Sprint(live), func(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -91,6 +92,44 @@ func TestSwapAgentProgram_KeepsScopeForScopableTarget(t *testing.T) {
 	}
 }
 
+// The scope capability belongs to the command a handoff resolves to, not the
+// enum it was requested under (#4430 review). `program_overrides.aider =
+// "codex"` passes the enum check — aider has no account namespace — yet
+// launches Codex, which does: dropping the scope there would start Codex with
+// ambient credentials. The inverse shape matters just as much — an enum that
+// claims Codex but resolves to aider launches a process with no namespace the
+// scope could occupy, so the record still drops it. Both directions are
+// exercised because a fix that only consulted the enum would pass one and
+// silently break the other.
+func TestSwapAgentProgram_ScopeDecisionFollowsResolvedCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		target      string
+		override    string
+		wantAccount string
+	}{
+		{name: "non-scopable enum resolving to scopable command",
+			target: tmux.ProgramAider, override: tmux.ProgramCodex, wantAccount: "work"},
+		{name: "scopable enum resolving to non-scopable command",
+			target: tmux.ProgramCodex, override: tmux.ProgramAider, wantAccount: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			_, err := config.SetGlobalConfigValue("program_overrides."+tc.target, tc.override)
+			require.NoError(t, err)
+			inst := handoffTestInstance(t, tmux.ProgramClaude)
+			inst.Account = "work"
+
+			_, err = inst.SwapAgentProgram(tc.target, HandoffReasonManual, "abc123", false)
+			require.NoError(t, err)
+			if account, _ := inst.AccountSelection(); account != tc.wantAccount {
+				t.Fatalf("Account = %q, want %q — the scope decision belongs to the resolved %q "+
+					"command, not the requested %q enum", account, tc.wantAccount, tc.override, tc.target)
+			}
+		})
+	}
+}
+
 // Instance.SwapAgent is the chokepoint every runtime replacement goes through.
 // A session record that still carries an account at that point is an invariant
 // violation — the daemon refuses scopable targets without --account, and the
@@ -115,7 +154,7 @@ func TestInstanceSwapAgent_RefusesUnsettledAccount(t *testing.T) {
 			inst := handoffTestInstance(t, tmux.ProgramClaude)
 			inst.Account = "work"
 			require.NoError(t, inst.Transition(BeginHandoff()))
-			entry, err := inst.RecordHandoffSwap(tc.target, HandoffReasonManual, "abc123", false)
+			entry, err := inst.RecordHandoffSwap(tc.target, tc.target, HandoffReasonManual, "abc123", false)
 			require.NoError(t, err)
 			if _, scopable := sessionenv.SupportsAccounts(tc.target); !scopable {
 				// The record correctly dropped the scope; put it back to simulate
@@ -192,7 +231,7 @@ func TestLocalBackendSwapAgent_LaunchesAmbientAfterScopeDrop(t *testing.T) {
 	// Drive the same record transaction the daemon does: fence, rewrite the
 	// record (which drops the scope for aider), then the runtime swap.
 	require.NoError(t, inst.Transition(BeginHandoff()))
-	_, err = inst.RecordHandoffSwap(tmux.ProgramAider, HandoffReasonManual, "abc123", false)
+	_, err = inst.RecordHandoffSwap(tmux.ProgramAider, tmux.ProgramAider, HandoffReasonManual, "abc123", false)
 	require.NoError(t, err)
 
 	checkpoint, err := inst.SwapAgent(AgentSwapPlan{target: tmux.ProgramAider, program: tmux.ProgramAider})

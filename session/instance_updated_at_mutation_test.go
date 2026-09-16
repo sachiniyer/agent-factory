@@ -106,7 +106,7 @@ func TestUpdatedAtMutations(t *testing.T) {
 			require.NoError(t, err)
 		}},
 		{"program swap under fence", func(t *testing.T, i *Instance) { i.inFlightOp = OpReplacing }, func(t *testing.T, i *Instance) {
-			_, err := i.RecordHandoffSwap("codex", "switch", "", false)
+			_, err := i.RecordHandoffSwap("codex", "codex", "switch", "", false)
 			require.NoError(t, err)
 		}},
 		{"revert program", func(t *testing.T, i *Instance) {

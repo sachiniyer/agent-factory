@@ -61,7 +61,7 @@ func (i *Instance) SelectAccountForHandoff(from, name, agent, reason, head, miss
 	if i.inFlightOp != OpRespawning {
 		return HandoffSwap{}, fmt.Errorf("account handoff requires the replacement fence")
 	}
-	entry, err := i.recordHandoffSwapLocked(agent, reason, head, false)
+	entry, err := i.recordHandoffSwapLocked(agent, agent, reason, head, false)
 	if err != nil {
 		return HandoffSwap{}, err
 	}
