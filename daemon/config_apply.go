@@ -259,9 +259,40 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// listener_reload.go) both exist to avoid. A daemon that STARTS exposed gets
 	// this notice from the bind-time caller, so gating the apply-time emitter to
 	// !wasExposed drops only the spam, not the legitimate first emission.
+	//
+	// The notice must describe the SERVING posture — the address the daemon is
+	// actually accepting on, with the live-applied require_token — not the
+	// REQUESTED one. The two diverge exactly when a network.listen_addr rebind
+	// FAILS (reconcile, above): config has already moved on to the requested
+	// address while the daemon keeps serving on the previous bound socket, and
+	// require_token applies live through a separate channel (per-request, no
+	// rebind). Keying the notice on newCfg.ListenAddr there would (1) fire a
+	// false-positive exposure notice when the previous listener is loopback (the
+	// daemon is not exposed at all), and (2) on a genuine exposure reached by a
+	// live require_token=false flip, name the un-bound requested address instead
+	// of the dialable bound one the daemon is actually serving on. A naive
+	// FailedListenerKeys-membership gate is no better: it would suppress (2)'s
+	// notice and hide a real exposure, because require_token lands independent of
+	// the listen_addr rebind. ListenerAddress returns the kernel-resolved bound
+	// address (webBoundAddr, NOT webConfigAddress — the two diverge exactly on a
+	// failed rebind); "" when nothing is bound, or when this manager has no
+	// listener machinery at all (a unix-socket-only daemon / a test manager). In
+	// that last case the requested config IS the honest posture: nothing
+	// rebound, so requested and serving cannot have diverged.
 	wasExposed := config.ListenerServesUnauthenticatedNetwork(old.ListenAddr, old.RequireToken)
-	if !wasExposed {
-		if notice := config.ListenerExposureNotice(newCfg); notice != "" {
+	servingAddr := newCfg.ListenAddr
+	if m.webListeners != nil {
+		servingAddr = m.ListenerAddress("network.listen_addr")
+	}
+	servingExposed := config.ListenerServesUnauthenticatedNetwork(servingAddr, newCfg.RequireToken)
+	if !wasExposed && servingExposed {
+		// ListenerExposureNotice formats the address out of cfg.ListenAddr, so
+		// build a throwaway config carrying the SERVING bound address: the notice
+		// must name the address the daemon is actually reachable on, not the one
+		// the operator merely asked for (and that may never have bound).
+		serving := *newCfg
+		serving.ListenAddr = servingAddr
+		if notice := config.ListenerExposureNotice(&serving); notice != "" {
 			result.Warnings = append(result.Warnings, notice)
 		}
 	}
