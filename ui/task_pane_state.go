@@ -91,30 +91,40 @@ func (s *TaskPane) markTaskDirty(id string) {
 	s.dirty = true
 }
 
-// cancelQueuedDeletion drops any pending deletion of id, along with the restore
-// bookkeeping that would otherwise keep treating the row as a retry in flight.
-// It also recomputes the pane-wide dirty flag so that canceling the last
-// queued deletion (with no edits pending) leaves dirty false — preventing
+// cancelQueuedDeletion drops ALL pending deletions of id, along with the
+// restore bookkeeping that would otherwise keep treating the row as a retry in
+// flight. It also recomputes the pane-wide dirty flag so that canceling the
+// last queued deletion (with no edits pending) leaves dirty false — preventing
 // saveContentPaneState from running an unnecessary reload that could block a
 // subsequent run trigger if the reload fails (PRRT_kwDORdIFwM6i0U5T).
+//
+// All same-ID deletions are removed, not just the first one: when tasks.json
+// contains duplicate IDs and the user edits or toggles a restored occurrence,
+// RemoveTask removes every occurrence sharing that ID — so leaving any same-ID
+// retry in the queue would delete the task the user just edited on the next
+// save (PRRT_kwDORdIFwM6i5gqa).
 func (s *TaskPane) cancelQueuedDeletion(id string) {
-	for i, d := range s.deleted {
-		if d.ID == id {
-			s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
-			// Remove the parallel deletedDisplays entry so a subsequent
-			// deleteSelectedTask (after the user edits then re-deletes this
-			// row) does not find a stale snapshot from the cancelled
-			// deletion. GetDeletedDisplay matches by full expect record, so
-			// the pre-edit display would be returned for the new deletion —
-			// causing the restore to show the pre-edit draft instead of the
-			// newly-edited content (PRRT_kwDORdIFwM6i3K61).
-			for j, p := range s.deletedDisplays {
-				if reflect.DeepEqual(p.expect, d) {
-					s.deletedDisplays = append(s.deletedDisplays[:j], s.deletedDisplays[j+1:]...)
-					break
-				}
+	// Collect the expect records being removed so we can remove the parallel
+	// deletedDisplays entries. Walk backwards so index removal does not shift
+	// unvisited positions.
+	for i := len(s.deleted) - 1; i >= 0; i-- {
+		d := s.deleted[i]
+		if d.ID != id {
+			continue
+		}
+		s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
+		// Remove the parallel deletedDisplays entry so a subsequent
+		// deleteSelectedTask (after the user edits then re-deletes this
+		// row) does not find a stale snapshot from the cancelled
+		// deletion. GetDeletedDisplay matches by full expect record, so
+		// the pre-edit display would be returned for the new deletion —
+		// causing the restore to show the pre-edit draft instead of the
+		// newly-edited content (PRRT_kwDORdIFwM6i3K61).
+		for j, p := range s.deletedDisplays {
+			if reflect.DeepEqual(p.expect, d) {
+				s.deletedDisplays = append(s.deletedDisplays[:j], s.deletedDisplays[j+1:]...)
+				break
 			}
-			break
 		}
 	}
 	delete(s.restoredDeletes, id)
@@ -560,6 +570,17 @@ func (s *TaskPane) GetDeletedDisplay(expect task.Task) (task.Task, bool) {
 // (PRRT_kwDORdIFwM6i3wJ2).
 func (s *TaskPane) IsRestoredDelete(id string) bool {
 	return len(s.restoredDeletes[id]) > 0
+}
+
+// CountRestoredDeletes returns the number of occurrences of id that have
+// already been restored to the visible pane by a prior RestoreFailedDelete
+// pass. This allows the caller to distinguish per-occurrence restore state
+// when tasks.json contains duplicate IDs: IsRestoredDelete returns true after
+// the FIRST occurrence is restored, but a second concurrent deletion of the
+// same ID must still insert its own row — it is not yet restored
+// (PRRT_kwDORdIFwM6i5gqZ).
+func (s *TaskPane) CountRestoredDeletes(id string) int {
+	return len(s.restoredDeletes[id])
 }
 
 // RequeueFailedDelete re-queues a deletion for retry without touching the

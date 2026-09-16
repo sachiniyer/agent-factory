@@ -192,7 +192,17 @@ func (m *home) saveContentPaneState() error {
 			loadedCount[t.ID]++
 			loaded[t.ID] = t
 		}
+		// processedByID tracks how many failed deletions for each ID have been
+		// processed in this loop iteration. When tasks.json has duplicate IDs
+		// and two deletions of the same ID both fail, the first restore call
+		// makes IsRestoredDelete(id) return true — but the second deletion has
+		// its own display that still needs to be inserted. We use this counter
+		// alongside CountRestoredDeletes to decide, per-occurrence, whether
+		// THIS deletion has already been restored or not (PRRT_kwDORdIFwM6i5gqZ).
+		processedByID := make(map[string]int)
 		for _, tsk := range failedDeletes {
+			processedIdx := processedByID[tsk.ID]
+			processedByID[tsk.ID]++
 			if _, present := loaded[tsk.ID]; present {
 				// Restore the authoritative record so the pane and originals
 				// are up-to-date; pass the original tsk as the retry
@@ -209,15 +219,30 @@ func (m *home) saveContentPaneState() error {
 				// ID and therefore also kept only the last. To recover the
 				// exact selected row's content, use the display record captured
 				// by deleteSelectedTask before the originals lookup.
-				if sp.IsRestoredDelete(tsk.ID) {
-					// Row already restored with authoritative data from a
-					// prior pass. A reload that was unambiguous then may now
-					// be ambiguous (another client added a same-ID row), or
-					// the same single-match path would fire again — but the
-					// already-installed fresh row and its originals baseline
-					// are more authoritative than the stale pre-delete snapshot
-					// in deletedDisplays. Just requeue the expectation so the
-					// retry fires, without touching the display or originals.
+				//
+				// Per-occurrence restore check: compare how many occurrences
+				// of this ID are already restored (CountRestoredDeletes) with
+				// the loop index for this ID (processedIdx). If processedIdx
+				// is less than the restored count, this occurrence is already
+				// restored — use the unambiguous-reload refresh path or just
+				// requeue. If processedIdx equals or exceeds the restored count,
+				// this is a not-yet-restored occurrence and must be inserted
+				// (PRRT_kwDORdIFwM6i5gqZ).
+				alreadyRestored := processedIdx < sp.CountRestoredDeletes(tsk.ID)
+				if alreadyRestored && loadedCount[tsk.ID] == 1 {
+					// Already restored AND the reload is unambiguous: refresh
+					// the display and originals with the authoritative record
+					// so a rebind by another client between retries is picked
+					// up. Without this update the pane retains a stale binding
+					// that would cause repeated CAS failures on re-delete or
+					// edit (PRRT_kwDORdIFwM6i5gqU).
+					sp.RestoreFailedDeleteWithFresh(loaded[tsk.ID], tsk)
+				} else if alreadyRestored {
+					// Already restored but ambiguous (duplicate IDs in the
+					// fresh set): cannot safely update the display from the
+					// reload. Just requeue the expectation so the retry fires,
+					// without touching the already-authoritative display or
+					// originals.
 					sp.RequeueFailedDelete(tsk)
 				} else if loadedCount[tsk.ID] == 1 {
 					// Single unambiguous match: pass the authoritative loaded
@@ -267,8 +292,14 @@ func (m *home) saveContentPaneState() error {
 		// reconciled: overwriting the fresh row and its originals baseline with
 		// the old snapshot would cause a subsequent re-delete to submit the stale
 		// ProjectPath and suffer repeated CAS rejections (PRRT_kwDORdIFwM6i3wJ2).
+		// processedByID tracks per-occurrence restore state in the fallback path
+		// for the same reason as in the success path above (PRRT_kwDORdIFwM6i5gqZ).
+		fallbackProcessedByID := make(map[string]int)
 		for _, tsk := range failedDeletes {
-			if sp.IsRestoredDelete(tsk.ID) {
+			processedIdx := fallbackProcessedByID[tsk.ID]
+			fallbackProcessedByID[tsk.ID]++
+			alreadyRestored := processedIdx < sp.CountRestoredDeletes(tsk.ID)
+			if alreadyRestored {
 				// Row already visible with up-to-date content; just re-queue
 				// the deletion expectation for the next retry without touching
 				// the display or originals baseline.
