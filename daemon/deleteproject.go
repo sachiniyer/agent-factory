@@ -398,6 +398,14 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		id       string
 		title    string
 		external bool
+		// reserved marks a record whose title claims the root's tmux name —
+		// a pre-#3732 session like "ro ot" on the local backend. Archive is
+		// refused for it (identity, not relocatability), so it takes the same
+		// teardown path as the in-place root and every external worktree: kill
+		// (#4407 review round 5). Without this routing the archive refusal
+		// wedges the whole delete AFTER the root_agents opt-in is already
+		// durably removed, and every retry fails on the same unarchivable row.
+		reserved bool
 	}
 	var targets []target
 	m.mu.Lock()
@@ -406,7 +414,8 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		if rid != repoID || inst == nil || inst.GetLiveness() == session.LiveArchived {
 			continue
 		}
-		targets = append(targets, target{id: inst.ID, title: title, external: inst.IsExternalWorktree()})
+		targets = append(targets, target{id: inst.ID, title: title, external: inst.IsExternalWorktree(),
+			reserved: session.IsReservedRecordTitle(title, inst.BackendType())})
 	}
 	m.mu.Unlock()
 
@@ -416,7 +425,7 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 
 	var errs []error
 	for _, t := range targets {
-		if t.external {
+		if t.external || t.reserved {
 			// Carry the stable identity captured under m.mu into the destructive
 			// lookup. Besides making a concurrent completed kill distinguishable,
 			// this prevents a same-title replacement from being torn down in the

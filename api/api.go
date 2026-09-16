@@ -654,7 +654,7 @@ func allScopedInstances() ([]scopedInstance, []string, error) {
 			continue
 		}
 		for i := range instances {
-			out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
+			out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status, BackendType: instances[i].BackendType})
 		}
 	}
 	return out, corrupted, nil
