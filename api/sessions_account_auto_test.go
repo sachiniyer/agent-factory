@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -88,6 +89,10 @@ func TestSessionsCreate_AccountAutoChecksPoolRouting(t *testing.T) {
 
 			repo := t.TempDir()
 			require.NoError(t, exec.Command("git", "init", repo).Run())
+			// The create resolves the worktree through git, which answers the
+			// canonical path — /var/... comes back /private/var/... on macOS.
+			wantRepo, err := filepath.EvalSymlinks(repo)
+			require.NoError(t, err)
 
 			var got *daemon.CreateSessionRequest
 			prevCreate := createSessionViaDaemon
@@ -100,14 +105,14 @@ func TestSessionsCreate_AccountAutoChecksPoolRouting(t *testing.T) {
 			setSessionsCreateFlags(t, "routed", repo, false, false)
 			listAccountsViaDaemon = func(req daemon.ListAccountsRequest) (daemon.ListAccountsResponse, error) {
 				assert.Equal(t, "codex", req.Agent, "the probe is scoped to the agent being created")
-				assert.Equal(t, repo, req.RepoPath, "the probe carries the project so per-project defaults resolve")
+				assert.Equal(t, wantRepo, req.RepoPath, "the probe carries the project so per-project defaults resolve")
 				return tc.resp, tc.probeErr
 			}
 			prevProgram := createProgramFlag
 			createProgramFlag = "codex"
 			t.Cleanup(func() { createProgramFlag = prevProgram })
 
-			err := sessionsCreateCmd.RunE(sessionsCreateCmd, nil)
+			err = sessionsCreateCmd.RunE(sessionsCreateCmd, nil)
 			if tc.wantRefused {
 				require.Error(t, err, "a divergent pre-router create must be refused, not silently run")
 				assert.Nil(t, got, "the refusal happens BEFORE the create — nothing to clean up")
