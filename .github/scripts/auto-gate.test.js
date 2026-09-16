@@ -9,6 +9,10 @@ const { __test } = autoGate;
 
 const HEAD_SHA = "0a5393dd71ddbbf66486d31939728f9947c843bb";
 const OTHER_SHA = "da0a05ea3b9036a12f67a3b3877d16dd0dac893d";
+// A tree oid the fixtures share when two commits must compare byte-identical —
+// the update-branch orphan the merge race leaves carries master's tree
+// wholesale (#4462).
+const BASE_TREE_OID = "b".repeat(40);
 const ACTIONS_APP_ID = 15368;
 // A check run's generation stamp. Named for `started_at`, which is the field the
 // API returns — `created_at` is not part of the check-run resource (#3827).
@@ -8020,6 +8024,128 @@ test("#4209: a failed follow-up dispatch names the manual recovery instead of cl
   assert.deepEqual(github.dispatchedWorkflows, []);
 });
 
+// ---------------------------------------------------------------------------
+// The update-branch merge race (#4462). evaluate() resolves a PR open and
+// behind; a hand or queue merge then closes it in the seconds before the
+// gate's own `PUT update-branch` executes — two writers on one PR with no
+// ordering between them. The loser's update is either rejected by a PR that no
+// longer exists to update, or accepted onto a dead branch whose tip it just
+// moved out from under delete-on-merge. Both are the race's losing outcome —
+// the merge the run wanted already happened — and neither is an update failure.
+// ---------------------------------------------------------------------------
+
+test("#4462: an update-branch refused because the PR already merged is a lost race, not an update failure", async () => {
+  // #4398's first shape: the PUT is rejected (422, the documented
+  // "unprocessable" for a merged or head-less PR) and the confirming read
+  // proves the merge landed. The update is a no-op — not a red gate.
+  const gone = new Error("Unprocessable Entity");
+  gone.status = 422;
+  const github = fakeGateGithub({
+    behindBy: 1,
+    updateBranchError: gone,
+    pullGetSnapshots: [
+      { merged: false },
+      { merged: true, state: "closed", merge_commit_sha: OTHER_SHA },
+    ],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was in flight/,
+  );
+  assert.equal(github.mergedWith, null, "the loser does not merge what already merged");
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.deepEqual(github.dispatchedWorkflows, [], "there is no successor work to schedule");
+});
+
+test("#4462: a PR already merged before the update is never written to", async () => {
+  // The merge landed in the wider window — between the evaluation and this
+  // lane reaching the update. The live read sees it and the PUT never fires:
+  // no write lands on a dead PR's branch at all.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    pullGetSnapshots: [{ merged: true, state: "closed", merge_commit_sha: OTHER_SHA }],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was pending/,
+  );
+  assert.equal(github.updateBranchCalls.length, 0, "the write is skipped entirely");
+  assert.equal(github.mergedWith, null);
+});
+
+test("#4462: an update-branch accepted onto a just-merged PR prunes the orphan and refuses", async () => {
+  // #4398's observed shape, exactly: the PUT was ACCEPTED and its merge commit
+  // (688928a) landed on the head branch inside the merge's own second —
+  // delete-on-merge saw a tip it did not recognize and left the branch. The
+  // post-update read sees the PR merged, the orphan goes through the same
+  // keep-conditions the sweep uses — its tree is master's, so it deletes — and
+  // the lane refuses as the lost race it is.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    headAfterUpdate: OTHER_SHA,
+    remoteRefSha: OTHER_SHA,
+    commitTreesByRef: { [OTHER_SHA]: BASE_TREE_OID, master: BASE_TREE_OID },
+    pullGetSnapshots: [
+      { merged: false },
+      { merged: true, state: "closed", merge_commit_sha: "f".repeat(40) },
+    ],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was in flight/,
+  );
+  assert.equal(github.mergedWith, null);
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.deepEqual(
+    github.deletedRefs,
+    ["heads/siyer/fix-3603"],
+    "the update's own write onto a dead PR's branch is debris — tree-identical to master — and goes with it",
+  );
+  assert.deepEqual(github.dispatchedWorkflows, [], "no successor: the merge already produced the outcome");
+});
+
+test("#4462: a merged PR's moved head whose tip tree differs keeps its branch", async () => {
+  // Same race, but the tip's tree is NOT master's — real work was pushed onto
+  // the branch under the merge. The tree oracle keeps it; deleting would take
+  // commits that exist nowhere else.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    headAfterUpdate: OTHER_SHA,
+    remoteRefSha: OTHER_SHA,
+    commitTreesByRef: { [OTHER_SHA]: "c".repeat(40), master: BASE_TREE_OID },
+    pullGetSnapshots: [
+      { merged: false },
+      { merged: true, state: "closed", merge_commit_sha: "f".repeat(40) },
+    ],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /was merged while its update-branch was in flight/,
+  );
+  assert.deepEqual(github.deletedRefs, [], "a tip the merge did not take is kept");
+});
+
+test("#4462: an update failure whose PR state cannot be re-read stays an update failure", async () => {
+  // The concession needs PROOF the race was lost — a read whose failure means
+  // "no evidence", never "a new error" (#3551's rule). An unreachable PR is
+  // not a merged PR.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    updateBranchError: new Error("update rejected"),
+    pullGetErrors: [null, new Error("PR read unavailable")],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /the update failed: error update rejected/,
+  );
+  assert.equal(github.mergedWith, null);
+});
+
 // #3807. The merge commit `PUT update-branch` writes is authored by the workflow
 // token, so every `pull_request` run it triggers is attributed to
 // `github-actions[bot]` and GitHub parks it in `action_required` behind "Approve
@@ -10502,6 +10628,148 @@ test("a deletion failure never reds a merge that already landed", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// The tree oracle for a moved merged head (#4462). Squash-only merges mean the
+// merged head is never an ancestor of the base, so "the tip moved" cannot
+// separate real post-merge work from the update-branch orphan the race leaves —
+// the orphan's tree is the base's, byte-identical. The tree is the oracle, and
+// every unreadable answer keeps the branch.
+// ---------------------------------------------------------------------------
+
+test("#4462: a moved merged head whose tip tree is the default branch's is swept", async () => {
+  // The #4398/#4452 leak, reproduced: an update-branch commit moved the tip
+  // inside the merge's own second, delete-on-merge never ran, and the
+  // tip != merged-head comparison used to keep the debris forever. The tip's
+  // tree is master's — nothing the merge did not take — so the branch is pruned.
+  const github = fakeGateGithub({
+    branchRefs: [
+      sweepBranch({
+        name: "siyer/fix-4398",
+        sha: OTHER_SHA,
+        tree: BASE_TREE_OID,
+        pulls: [{ number: 4398, headRefOid: HEAD_SHA }],
+      }),
+    ],
+    defaultBranchTree: BASE_TREE_OID,
+    commitTreesByRef: { [OTHER_SHA]: BASE_TREE_OID, master: BASE_TREE_OID },
+  });
+
+  const swept = await autoGate.sweepMergedHeadRefs({ github, context: fakeContext(), core: fakeCore() });
+
+  assert.deepEqual(swept.deleted, ["siyer/fix-4398"]);
+  assert.deepEqual(github.deletedRefs, ["heads/siyer/fix-4398"]);
+  assert.deepEqual(
+    github.refReads,
+    ["heads/siyer/fix-4398", "heads/siyer/fix-4398"],
+    "the tip is re-read after the tree comparison — the delete's condition is its last read",
+  );
+});
+
+test("#4462: a moved merged head whose tip tree differs is still kept by the filter", async () => {
+  // The filter's other half: a tip whose tree is NOT the default branch's
+  // still carries work the merge did not take, still stays out of the pass,
+  // and still costs the pruner no calls.
+  const github = fakeGateGithub({
+    branchRefs: [
+      sweepBranch({
+        name: "siyer/fix-1234",
+        sha: OTHER_SHA,
+        tree: "c".repeat(40),
+        pulls: [{ number: 1234, headRefOid: HEAD_SHA }],
+      }),
+    ],
+    defaultBranchTree: BASE_TREE_OID,
+  });
+
+  const swept = await autoGate.sweepMergedHeadRefs({ github, context: fakeContext(), core: fakeCore() });
+
+  assert.equal(swept.moved, 1);
+  assert.deepEqual(swept.deleted, []);
+  assert.deepEqual(github.deletedRefs, []);
+  assert.deepEqual(github.refReads, [], "the filter answers without spending the pruner's reads");
+});
+
+test("#4462: a moved merged head whose enumeration tree is unreadable is kept", async () => {
+  // `tree: null` omits the field — "the read did not say" is not "the trees
+  // match". The same holds when the enumeration cannot name the default
+  // branch's tree at all.
+  for (const options of [
+    { branch: { tree: null }, defaultBranchTree: BASE_TREE_OID },
+    { branch: { tree: BASE_TREE_OID }, defaultBranchTree: null },
+  ]) {
+    const github = fakeGateGithub({
+      branchRefs: [
+        sweepBranch({
+          name: "siyer/fix-1234",
+          sha: OTHER_SHA,
+          tree: options.branch.tree,
+          pulls: [{ number: 1234, headRefOid: HEAD_SHA }],
+        }),
+      ],
+      defaultBranchTree: options.defaultBranchTree,
+    });
+
+    const swept = await autoGate.sweepMergedHeadRefs({ github, context: fakeContext(), core: fakeCore() });
+
+    assert.equal(swept.moved, 1);
+    assert.deepEqual(github.deletedRefs, []);
+  }
+});
+
+test("#4462: a live tree read that fails keeps the branch", async () => {
+  // The enumeration said debris, but the live re-verification cannot read the
+  // tip's tree. Cannot-prove-inert keeps the branch — it never authorizes a
+  // delete.
+  const unreadable = new Error("tree read failed");
+  const github = fakeGateGithub({
+    branchRefs: [
+      sweepBranch({
+        name: "siyer/fix-4398",
+        sha: OTHER_SHA,
+        tree: BASE_TREE_OID,
+        pulls: [{ number: 4398, headRefOid: HEAD_SHA }],
+      }),
+    ],
+    defaultBranchTree: BASE_TREE_OID,
+    commitTreesByRef: { [OTHER_SHA]: unreadable, master: BASE_TREE_OID },
+  });
+
+  const swept = await autoGate.sweepMergedHeadRefs({ github, context: fakeContext(), core: fakeCore() });
+
+  assert.deepEqual(swept.deleted, []);
+  assert.deepEqual(github.deletedRefs, []);
+  assert.ok(
+    swept.kept.some((entry) => entry.branch === "siyer/fix-4398"),
+    `expected a keep, got ${JSON.stringify(swept.kept)}`,
+  );
+});
+
+test("#4462: a tip that moves to real work under the tree comparison is kept", async () => {
+  // The enumeration saw debris; by the live reads the branch carries real work
+  // (a push landed on the dead PR's branch). The live tip's tree no longer
+  // matches master's, and the branch stays.
+  const realWork = "e".repeat(40);
+  const github = fakeGateGithub({
+    branchRefs: [
+      sweepBranch({
+        name: "siyer/fix-4398",
+        sha: OTHER_SHA,
+        tree: BASE_TREE_OID,
+        pulls: [{ number: 4398, headRefOid: HEAD_SHA }],
+      }),
+    ],
+    defaultBranchTree: BASE_TREE_OID,
+    remoteRefShaByBranch: { "siyer/fix-4398": realWork },
+    commitTreesByRef: { [realWork]: "c".repeat(40), master: BASE_TREE_OID },
+  });
+
+  const swept = await autoGate.sweepMergedHeadRefs({ github, context: fakeContext(), core: fakeCore() });
+
+  assert.deepEqual(swept.deleted, []);
+  assert.deepEqual(github.deletedRefs, [], "the live reads decide — the enumeration is only a filter");
+  assert.ok(swept.kept.some((entry) => entry.branch === "siyer/fix-4398"));
+});
+
+// ---------------------------------------------------------------------------
 // The kept-branch sweep (#3852). A keep decided inside a merge is correct when
 // it is made and has nothing that revisits it, so the branch leaks the moment
 // the reason for the keep goes away.
@@ -11750,6 +12018,9 @@ function fakeGateGithub({
   // commit's own date.
   parentsByOid = {},
   commitDatesByOid = {},
+  // Per-ref tree oids for repos.getCommit — the answer the tree oracle reads
+  // (#4462). A value is a tree sha, or an Error for a read that fails.
+  commitTreesByRef = {},
   author = "sachiniyer",
   nativeAutoMergeEnabled = false,
   // Arms native auto-merge AFTER the PR read that used to snapshot it — the
@@ -11841,6 +12112,11 @@ function fakeGateGithub({
   // default: a fixture that never sweeps enumerates nothing.
   branchRefs = [],
   defaultBranchName = "master",
+  // The default branch's tree oid, as the enumeration reports it — the oracle
+  // the moved-since-merge filter compares a tip tree against (#4462). null
+  // means the enumeration could not say, which must keep a moved branch rather
+  // than sweep it.
+  defaultBranchTree = "b".repeat(40),
   // Forces the enumeration to keep claiming another page, so the page cap is
   // reachable without a fixture of 500 branches.
   branchRefsAlwaysHaveNextPage = false,
@@ -12114,18 +12390,31 @@ function fakeGateGithub({
       repos: {
         listCommitStatusesForRef,
         listPullRequestsAssociatedWithCommit,
-        getCommit: async ({ ref }) => ({
-          data: {
-            sha: ref,
-            commit: {
-              committer: { date: (commitDatesByOid || {})[ref] },
-              tree: { sha: ref },
+        getCommit: async ({ ref }) => {
+          // The commit's tree oid is the ref's own by default — a one-line
+          // stand-in for "every commit has a distinct tree". A fixture that
+          // needs two commits to share a tree (the squash-merge race's orphan
+          // shape, #4462) says so through commitTreesByRef, and an Error there
+          // is a read that fails rather than a tree that answers.
+          const treeSha = Object.prototype.hasOwnProperty.call(commitTreesByRef, ref)
+            ? commitTreesByRef[ref]
+            : ref;
+          if (treeSha instanceof Error) {
+            throw treeSha;
+          }
+          return {
+            data: {
+              sha: ref,
+              commit: {
+                committer: { date: (commitDatesByOid || {})[ref] },
+                tree: { sha: treeSha },
+              },
+              // Default: an ordinary one-parent commit, so the first-parent walk
+              // stops at the first link unless a fixture describes a chain.
+              parents: (parentsByOid[ref] || [{ oid: "0".repeat(40) }]).map((p) => ({ sha: p.oid })),
             },
-            // Default: an ordinary one-parent commit, so the first-parent walk
-            // stops at the first link unless a fixture describes a chain.
-            parents: (parentsByOid[ref] || [{ oid: "0".repeat(40) }]).map((p) => ({ sha: p.oid })),
-          },
-        }),
+          };
+        },
         compareCommitsWithBasehead: async (options) => {
           github.compareRequests.push(options);
           if (compareError) {
@@ -12229,7 +12518,11 @@ function fakeGateGithub({
           branchRefsAlwaysHaveNextPage || start + size < github.branchRefs.length;
         return {
           repository: {
-            defaultBranchRef: { name: defaultBranchName },
+            defaultBranchRef: {
+              name: defaultBranchName,
+              target:
+                defaultBranchTree === null ? {} : { tree: { oid: defaultBranchTree } },
+            },
             refs: {
               pageInfo: {
                 hasNextPage,
@@ -12994,10 +13287,14 @@ function sweepBranch({
   // "the rule list came back truncated" without listing twenty of them.
   unreadRules = 0,
   branchProtectionRule = null,
+  // The tip commit's tree oid, as the enumeration reports it (#4462). Defaults
+  // to the tip itself — distinct commits, distinct trees. null omits the field,
+  // the "the enumeration could not say" shape the moved filter must keep.
+  tree,
 }) {
   return {
     name,
-    target: { oid: sha },
+    target: { oid: sha, ...(tree === null ? {} : { tree: { oid: tree === undefined ? sha : tree } }) },
     branchProtectionRule,
     rules: {
       totalCount: rules.length + unreadRules,
@@ -13010,6 +13307,7 @@ function sweepBranch({
         merged: pull.merged !== false,
         mergedAt: pull.merged === false ? null : pull.mergedAt || "2026-09-04T16:10:59Z",
         headRefOid: pull.headRefOid || sha,
+        baseRefName: pull.baseRefName || "master",
         headRepository: pull.headRepository === null
           ? null
           : { nameWithOwner: pull.headRepository || "sachiniyer/agent-factory" },
