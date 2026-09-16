@@ -34,7 +34,7 @@ func (s *TaskPane) SetTasks(tasks []task.Task) {
 	}
 	s.deleted = nil
 	s.deletedDisplays = nil
-	s.deletedRank = nil
+	s.deletedRanks = nil
 	s.restoredDeletes = nil
 	s.deferredRestoreBaseline = nil
 	s.editing = false
@@ -243,7 +243,7 @@ func (s *TaskPane) RestoreFailedDeleteWithFresh(fresh, expect task.Task) {
 // queued in s.deleted for the retry.
 func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) {
 	if s.restoredDeletes == nil {
-		s.restoredDeletes = make(map[string][]task.Task)
+		s.restoredDeletes = make(map[string][]restoredEntry)
 	}
 	if s.originals == nil {
 		s.originals = make(map[string]task.Task)
@@ -258,24 +258,25 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) 
 		s.originals[display.ID] = deferredBaseline
 		delete(s.deferredRestoreBaseline, display.ID)
 	}
-	// Check whether THIS specific display value has already been restored, so
-	// a second retry failure for the same occurrence does not append another
-	// visible copy. Checking by value (not just by ID) allows two rows that
-	// share an ID to each get their own restored occurrence: when a second
-	// duplicate-ID row's display differs from the first, it is not found in the
-	// slice and IS inserted as a new row (PRRT_kwDORdIFwM6i4rk4).
-	storedDisplays := s.restoredDeletes[display.ID]
+	// Check whether THIS specific occurrence (keyed by expect, the stable CAS
+	// record) has already been restored. Keying by expect rather than display
+	// means a concurrent field change between retries (e.g. another client
+	// rebinds the task) does not cause the second retry to miss the dedup check
+	// and insert a ghost row (PRRT_kwDORdIFwM6i6kOK). Storing per-ID slices
+	// (not a single entry per ID) allows two duplicate-ID deletions to each get
+	// their own restored occurrence (PRRT_kwDORdIFwM6i4rk4).
+	storedEntries := s.restoredDeletes[display.ID]
 	alreadyRestored := false
 	storedIdx := -1
-	for i, stored := range storedDisplays {
-		if reflect.DeepEqual(stored, display) {
+	for i, e := range storedEntries {
+		if reflect.DeepEqual(e.expect, expect) {
 			alreadyRestored = true
 			storedIdx = i
 			break
 		}
 	}
 	if !alreadyRestored {
-		pos := s.restorePosition(display.ID)
+		pos := s.restorePosition(display.ID, expect)
 		// baseline is the record to store in originals — the copy subsequent
 		// user actions (re-delete via D, edit via ConsumeDirty) will diff
 		// against and use as the CAS expectation. The caller selects it:
@@ -296,18 +297,17 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) 
 		if pos <= s.selectedIdx && s.selectedIdx < len(s.tasks)-1 {
 			s.selectedIdx++
 		}
-		// Record the display value that was inserted so the second-retry path
-		// can locate the exact restored row when tasks.json has duplicate IDs.
-		// An ID-only lookup would find the FIRST occurrence, which may be the
-		// untouched earlier duplicate — replacing it corrupts that row and
-		// leaves the actual restored row stale (PRRT_kwDORdIFwM6i06TU).
-		s.restoredDeletes[display.ID] = append(storedDisplays, display)
+		// Record the expect-display pair for this occurrence. The expect field
+		// is the stable occurrence identity used for dedup on subsequent
+		// retries; the display field is the currently visible row value, updated
+		// in place on refresh passes so the in-place-update branch below can
+		// locate the exact row (PRRT_kwDORdIFwM6i06TU, PRRT_kwDORdIFwM6i6kOK).
+		s.restoredDeletes[display.ID] = append(storedEntries, restoredEntry{expect: expect, display: display})
 	} else {
-		// Second or later retry failure for this specific display value: a fresh
-		// record may have been supplied (e.g. another client changed the task
-		// between retries). Update the visible row and originals baseline in
-		// place without inserting a duplicate — the dedupe guard above already
-		// ensures exactly one visible row exists for this display value.
+		// Second or later retry failure for this specific occurrence (same
+		// expect): a fresh record may have been supplied (e.g. another client
+		// changed the task between retries). Update the visible row and originals
+		// baseline in place without inserting a duplicate.
 		//
 		// Find the SPECIFIC restored row by matching the display value stored at
 		// restore time, not the first ID match. For duplicate-ID stores, an
@@ -321,7 +321,7 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) 
 		// when the form is submitted (PRRT_kwDORdIFwM6i0U5R). In that case,
 		// defer the baseline update for the next pass when editing has ended
 		// (PRRT_kwDORdIFwM6i4rlG).
-		storedDisplay := storedDisplays[storedIdx]
+		storedDisplay := storedEntries[storedIdx].display
 		for i, t := range s.tasks {
 			if !reflect.DeepEqual(t, storedDisplay) {
 				continue
@@ -346,9 +346,9 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) 
 				// expectation (PRRT_kwDORdIFwM6i3K68).
 				s.originals[display.ID] = baseline
 				s.tasks[i] = display
-				// Update the stored display so subsequent retries match the
-				// newly refreshed row, not the stale original.
-				s.restoredDeletes[display.ID][storedIdx] = display
+				// Update the stored display so subsequent retries can locate
+				// the newly-refreshed row (not the stale pre-refresh value).
+				s.restoredDeletes[display.ID][storedIdx] = restoredEntry{expect: expect, display: display}
 			}
 			break
 		}
@@ -361,15 +361,22 @@ func (s *TaskPane) restoreFailedDeleteImpl(display, expect, baseline task.Task) 
 // the pane keeps the order of the set it loaded — the order the sidebar reloads
 // in, and the order showTasksOverlay's index-based selection transfer assumes.
 //
-// It orders against the rank captured in deletedRank at delete time rather than
-// a live slice index (which is renumbered by every other deletion) or the
-// ID-keyed loadedRanks entry (which is the FIRST occurrence's rank — incorrect
-// when a later duplicate is deleted, PRRT_kwDORdIFwM6i06TN). Rows the pane
-// loaded keep their loaded order; anything without a rank (created in the pane,
-// not yet reloaded) sorts after them, which is where it already sits.
-func (s *TaskPane) restorePosition(id string) int {
-	rank, ok := s.deletedRank[id]
-	if !ok {
+// It orders against the rank captured in deletedRanks at delete time for the
+// specific expect occurrence rather than a live slice index (which is renumbered
+// by every other deletion) or the ID-keyed loadedRanks entry (which is the
+// FIRST occurrence's rank — incorrect when a later duplicate is deleted,
+// PRRT_kwDORdIFwM6i06TN). Rows the pane loaded keep their loaded order;
+// anything without a rank (created in the pane, not yet reloaded) sorts after
+// them, which is where it already sits.
+func (s *TaskPane) restorePosition(id string, expect task.Task) int {
+	rank := -1
+	for _, e := range s.deletedRanks {
+		if reflect.DeepEqual(e.expect, expect) {
+			rank = e.rank
+			break
+		}
+	}
+	if rank < 0 {
 		// Fall back to the first-occurrence rank from loadedRanks when no
 		// per-deletion rank was captured (e.g. an earlier code path that did
 		// not go through deleteSelectedTask).
@@ -384,15 +391,25 @@ func (s *TaskPane) restorePosition(id string) int {
 		var known bool
 		if t.ID == id {
 			// Surviving row shares the restored ID — use its own occurrence
-			// rank, not the deleted occurrence's rank stored in deletedRank.
-			// Using deletedRank for the survivor would compare the deleted
+			// rank, not the deleted occurrence's rank stored in deletedRanks.
+			// Using the deleted rank for the survivor would compare the deleted
 			// row's rank against itself, placing the restored row on the
 			// wrong side of the duplicate (PRRT_kwDORdIFwM6i1oQb).
-			other, known = s.survivingSameIDRank(id, i)
-		} else if dr, hasDR := s.deletedRank[t.ID]; hasDR {
-			other, known = dr, true
-		} else if ranks, hasLR := s.loadedRanks[t.ID]; hasLR && len(ranks) > 0 {
-			other, known = ranks[0], true
+			other, known = s.survivingSameIDRank(id, i, rank)
+		} else {
+			// Use the first pending-deletion rank for this ID (if any), falling
+			// back to the first loaded occurrence rank.
+			for _, e := range s.deletedRanks {
+				if e.expect.ID == t.ID {
+					other, known = e.rank, true
+					break
+				}
+			}
+			if !known {
+				if lrranks, hasLR := s.loadedRanks[t.ID]; hasLR && len(lrranks) > 0 {
+					other, known = lrranks[0], true
+				}
+			}
 		}
 		if !known || other > rank {
 			return i
@@ -403,14 +420,15 @@ func (s *TaskPane) restorePosition(id string) int {
 
 // survivingSameIDRank returns the original load rank for a surviving row that
 // shares the given ID with the row being restored, at position pos in s.tasks.
-// It reports whether a rank is known.
+// It reports whether a rank is known. deletedRank is the rank of the specific
+// occurrence being restored (used to skip that slot in loadedRanks).
 //
 // When duplicate-ID rows exist and one was deleted, the survivor must not be
-// compared using deletedRank[id] (which is the deleted occurrence's rank).
-// Instead, count same-ID survivors before pos to find the occurrence index,
-// then pick the corresponding rank from loadedRanks while skipping the deleted
-// slot. This places each remaining duplicate in its own original position.
-func (s *TaskPane) survivingSameIDRank(id string, pos int) (rank int, known bool) {
+// compared using the deleted occurrence's rank. Instead, count same-ID
+// survivors before pos to find the occurrence index, then pick the
+// corresponding rank from loadedRanks while skipping the deleted slot. This
+// places each remaining duplicate in its own original position.
+func (s *TaskPane) survivingSameIDRank(id string, pos int, deletedRank int) (rank int, known bool) {
 	// Count how many surviving rows with the same ID appear before pos.
 	priorSurvivors := 0
 	for j := 0; j < pos; j++ {
@@ -422,15 +440,15 @@ func (s *TaskPane) survivingSameIDRank(id string, pos int) (rank int, known bool
 	if !hasLR || len(ranks) == 0 {
 		return 0, false
 	}
-	deletedR, hasDeleted := s.deletedRank[id]
+	skippedDeleted := false
 	// Walk the sorted loadedRanks list, skipping the deleted slot, and return
 	// the rank at the priorSurvivors-th surviving position.
 	occIdx := 0
 	for _, r := range ranks {
-		if hasDeleted && r == deletedR {
+		if !skippedDeleted && r == deletedRank {
 			// Skip the deleted occurrence's rank; consume the flag so it is
 			// only skipped once (defensive against duplicate rank values).
-			hasDeleted = false
+			skippedDeleted = true
 			continue
 		}
 		if occIdx == priorSurvivors {
@@ -467,7 +485,15 @@ func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
 	if len(s.restoredDeletes[id]) > 0 {
 		delete(s.restoredDeletes, id)
 		delete(s.deferredRestoreBaseline, id)
-		delete(s.deletedRank, id)
+		// Remove all deletedRanks entries for this ID.
+		j := 0
+		for _, e := range s.deletedRanks {
+			if e.expect.ID != id {
+				s.deletedRanks[j] = e
+				j++
+			}
+		}
+		s.deletedRanks = s.deletedRanks[:j]
 		// Remove all deletedDisplays entries for this ID (there may be more
 		// than one when duplicate-ID rows were both deleted and both failed).
 		// RemoveTask removes every matching row from disk, so all display

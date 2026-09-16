@@ -66,6 +66,27 @@ type deletedDisplayPair struct {
 	display task.Task
 }
 
+// deletedRankEntry pairs the CAS expectation of a pending deletion with the
+// load-order rank captured for that specific occurrence. Stored as a slice so
+// that two deletions of the same task ID each carry their own rank — an
+// ID-keyed map would overwrite the first occurrence's rank with the second's
+// (PRRT_kwDORdIFwM6i6kOR).
+type deletedRankEntry struct {
+	expect task.Task
+	rank   int
+}
+
+// restoredEntry tracks a single restored-deletion occurrence. expect is the
+// stable CAS record used as occurrence identity; display is the currently
+// visible row value, updated in place on each retry refresh. Keying by expect
+// (not display) means a concurrent rebind that changes a field never causes the
+// second-retry dedup check to miss and insert a ghost row
+// (PRRT_kwDORdIFwM6i6kOK).
+type restoredEntry struct {
+	expect  task.Task
+	display task.Task
+}
+
 // TaskPane renders an inline task editor in the right pane.
 type TaskPane struct {
 	showActions bool
@@ -150,18 +171,19 @@ type TaskPane struct {
 	// (PRRT_kwDORdIFwM6i2XFw). Each entry is appended when the deletion is
 	// queued and removed when it is acknowledged or the pane is reloaded.
 	deletedDisplays []deletedDisplayPair
-	// restoredDeletes tracks the display values inserted by RestoreFailedDelete
-	// for each task ID. When a deletion retry also fails, a second call for the
-	// SAME display must not append another visible copy — the first restore
-	// already has the row in the pane (dedupe check via slice membership).
-	// Storing all display values (not just one per ID) allows duplicate-ID rows
-	// to each restore their own occurrence: a second ID-sharing deletion receives
-	// a different display value and is correctly inserted as a new row rather
-	// than being silently merged into the first (PRRT_kwDORdIFwM6i4rk4). The
-	// second-retry refresh locates the SPECIFIC row to update by matching the
-	// stored display value (PRRT_kwDORdIFwM6i06TU). Cleared by SetTasks
-	// (successful reload) and AcknowledgeDeletedRestored (successful retry).
-	restoredDeletes map[string][]task.Task
+	// restoredDeletes tracks the restored-deletion occurrences per task ID.
+	// When a deletion retry also fails, a second call for the SAME occurrence
+	// must not append another visible copy — the first restore already has the
+	// row in the pane. Each entry pairs the stable CAS expect record (occurrence
+	// identity) with the currently visible display value (updated in place on
+	// each retry refresh). Storing all entries (not just one per ID) allows
+	// duplicate-ID rows to each restore their own occurrence: a second deletion
+	// with the same ID but a different expect record is inserted as a new row
+	// (PRRT_kwDORdIFwM6i4rk4). Keying dedup by expect (not display) prevents a
+	// concurrent rebind from causing a false miss on the second retry
+	// (PRRT_kwDORdIFwM6i6kOK). Cleared by SetTasks (successful reload) and
+	// AcknowledgeDeletedRestored (successful retry).
+	restoredDeletes map[string][]restoredEntry
 	// deferredRestoreBaseline holds an originals update deferred because the
 	// target row was open in the edit form when the fresh authoritative record
 	// arrived. The update is applied the next time restoreFailedDeleteImpl runs
@@ -175,14 +197,14 @@ type TaskPane struct {
 	// has one entry per occurrence. RestoreFailedDelete orders against these via
 	// deletedRank to put a restored row back where it belongs.
 	loadedRanks map[string][]int
-	// deletedRank records the original load-order rank of the specific occurrence
-	// that was deleted, captured in deleteSelectedTask. It is used by
-	// restorePosition in preference to loadedRanks so that deleting the SECOND
-	// duplicate uses rank 2 (its actual position), not rank 0 (the first
-	// duplicate's position from the ID-keyed loadedRanks entry,
-	// PRRT_kwDORdIFwM6i06TN). Cleared by SetTasks and AcknowledgeDeletedRestored.
-	deletedRank map[string]int
-	hasFocus    bool
+	// deletedRanks records the original load-order rank for each pending deletion
+	// occurrence. Stored as a slice of (expect, rank) pairs — not an ID-keyed
+	// map — so that two deletions of the same ID each carry their own rank; an
+	// ID-keyed map would overwrite the first occurrence's rank with the second's
+	// (PRRT_kwDORdIFwM6i6kOR). restorePosition looks up by expect record.
+	// Cleared by SetTasks and AcknowledgeDeletedRestored.
+	deletedRanks []deletedRankEntry
+	hasFocus     bool
 
 	// now is inherited from the owning AutomationsPane and passed to each
 	// schedule picker for its custom-cron next-run preview.
@@ -641,22 +663,33 @@ func (s *TaskPane) deleteSelectedTask() {
 	// hitting the dedupe.
 	if len(s.restoredDeletes[deleted.ID]) > 0 {
 		delete(s.restoredDeletes, deleted.ID)
-		// Remove the stale s.deleted entry for this ID and its parallel
-		// deletedDisplays entry. Both are found by the same index so we remove
-		// them together to keep the slices consistent.
-		for i, t := range s.deleted {
-			if t.ID == deleted.ID {
-				s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
-				// Remove the corresponding display entry by matching the same
-				// expect record. The slices may have drifted if a prior stale
-				// remove already ran, so search by expect value, not index.
-				for j, p := range s.deletedDisplays {
-					if reflect.DeepEqual(p.expect, t) {
-						s.deletedDisplays = append(s.deletedDisplays[:j], s.deletedDisplays[j+1:]...)
-						break
-					}
+		// Remove ALL stale s.deleted and parallel deletedDisplays and
+		// deletedRanks entries for this ID. When duplicate-ID deletions were
+		// all restored, there may be more than one queued retry for the same
+		// ID. Leaving any behind would cause RemoveTask to be called again on
+		// the next save: the first call would succeed and remove every
+		// matching row from disk, the later calls would return not-found and
+		// surface a false save failure (PRRT_kwDORdIFwM6i6kOV). Walk
+		// backwards so index removal does not shift unvisited positions.
+		for i := len(s.deleted) - 1; i >= 0; i-- {
+			t := s.deleted[i]
+			if t.ID != deleted.ID {
+				continue
+			}
+			s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
+			// Remove the corresponding deletedDisplays entry.
+			for j, p := range s.deletedDisplays {
+				if reflect.DeepEqual(p.expect, t) {
+					s.deletedDisplays = append(s.deletedDisplays[:j], s.deletedDisplays[j+1:]...)
+					break
 				}
-				break
+			}
+			// Remove the corresponding deletedRanks entry.
+			for k, e := range s.deletedRanks {
+				if reflect.DeepEqual(e.expect, t) {
+					s.deletedRanks = append(s.deletedRanks[:k], s.deletedRanks[k+1:]...)
+					break
+				}
 			}
 		}
 	}
@@ -683,15 +716,12 @@ func (s *TaskPane) deleteSelectedTask() {
 		}
 	}
 	occIdx := occBefore + pendBefore
-	if s.deletedRank == nil {
-		s.deletedRank = make(map[string]int)
-	}
 	if ranks, ok := s.loadedRanks[deleted.ID]; ok && occIdx < len(ranks) {
-		s.deletedRank[deleted.ID] = ranks[occIdx]
+		s.deletedRanks = append(s.deletedRanks, deletedRankEntry{expect: deleted, rank: ranks[occIdx]})
 	} else if ranks, ok := s.loadedRanks[deleted.ID]; ok && len(ranks) > 0 {
 		// Fallback: use the first occurrence's rank if occIdx is out of bounds
 		// (can happen when tasks were created in the pane and not yet reloaded).
-		s.deletedRank[deleted.ID] = ranks[0]
+		s.deletedRanks = append(s.deletedRanks, deletedRankEntry{expect: deleted, rank: ranks[0]})
 	}
 	s.deletedDisplays = append(s.deletedDisplays, deletedDisplayPair{expect: deleted, display: display})
 	s.deleted = append(s.deleted, deleted)
