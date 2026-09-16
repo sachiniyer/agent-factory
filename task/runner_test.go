@@ -377,6 +377,7 @@ func TestWaitForReadyNonAgentBecomesReadyOnAnyOutput(t *testing.T) {
 func TestSetReadinessPollIntervalForTestMovesOnlyThePoll(t *testing.T) {
 	prodPoll, prodDelay := waitForReadyPollInterval, trustPromptRetryDelay
 	restore := SetReadinessPollIntervalForTest(7 * time.Millisecond)
+	defer restore() // idempotent; covers a Fatal before the explicit call below
 
 	clock := newObservedReadinessClock()
 	inst := newPreviewInstanceWithProgram(t, "bash", func() (string, error) { return "sandbox$ ", nil })

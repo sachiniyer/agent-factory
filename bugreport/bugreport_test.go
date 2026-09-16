@@ -1272,15 +1272,16 @@ func TestBuildIssueDraftBodyIsFinalAfterBudgeting(t *testing.T) {
 		t.Run("username="+user, func(t *testing.T) {
 			r := &redactor{home: "/tmp/" + user, users: []string{user}}
 
-			// Each collision grows the body by only a few bytes, while the fitted tail
-			// leaves anywhere from 0 to one line of slack under the cap, so a log shape
-			// overflows only if it happens to land flush — and a sweep of shapes finds
-			// that point only by luck. So land it by construction: render once, read the
-			// slack, and lengthen the newest line by exactly that much plus d. An "x"
-			// costs one encoded byte, so under correct budgeting the draft sits at cap+d
-			// until the pad outgrows the true slack and an older line is dropped. Under
-			// a post-budget growth the calibration already read the GROWN length, so
-			// d=1 still fits the tail and the draft lands one byte past the cap.
+			// A collision grows the body by only a few bytes, and the fitted tail can
+			// leave up to a line of slack under the cap, so a log shape overflows only
+			// if it lands flush — which a sweep of shapes finds only by luck. So land
+			// it by construction: render once, read the slack, and lengthen the newest
+			// line by that much plus d. Each "x" costs one encoded byte, so correct
+			// budgeting puts the draft at cap+d until the pad outgrows the true slack
+			// and an older line drops. A post-budget growth is already in the length
+			// the calibration read, so at d=1 the tail still fits and the draft lands
+			// one byte past the cap — for any growth big enough to overflow at all,
+			// i.e. larger than the bytes fitLogTail reserves (see window below).
 			// Lines are long so the BYTE budget binds rather than issueLogMaxLines.
 			draftLen := func(pad int) int {
 				var log strings.Builder
