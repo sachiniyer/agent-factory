@@ -24,21 +24,32 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		if err != nil {
 			return true
 		}
-		// Pre-scan: collect variables assigned (at statement scope, not inside a
-		// subshell) from command substitutions. bash re-evaluates the stdout of a
-		// command substitution as fresh arithmetic when the variable is later used
-		// in an arithmetic context, so `x=$(printf CODEX_HOME=1); : $((x))` is
-		// the same bypass as `$(( $(printf CODEX_HOME=1) ))` — the re-evaluation
-		// just goes through a variable rather than being inline.
-		tainted := cmdSubstAssignedVars(file)
+		// Process top-level statements in execution order. The tainted set is
+		// built incrementally: each statement is checked using only the taint
+		// accumulated from preceding statements, so a command substitution that
+		// appears AFTER an arithmetic expression does not cause that earlier
+		// expression to be refused. Within each statement the full subtree is
+		// walked, preserving the existing handling of inline CmdSubst and
+		// same-statement arithmetic uses.
+		acc := newTaintAccumulator()
 		mutates := false
-		syntax.Walk(file, func(node syntax.Node) bool {
-			if nodeMutatesAccountEnvironment(node, names, tainted) {
-				mutates = true
-				return false
+		for _, stmt := range file.Stmts {
+			tainted := acc.Tainted()
+			syntax.Walk(stmt, func(node syntax.Node) bool {
+				if nodeMutatesAccountEnvironment(node, names, tainted) {
+					mutates = true
+					return false
+				}
+				return true
+			})
+			if mutates {
+				break
 			}
-			return true
-		})
+			// After checking this statement for mutations, record any
+			// command-substitution assignments it contains so they taint
+			// variables in subsequent statements.
+			acc.AddStmt(stmt)
+		}
 		if mutates {
 			return true
 		}
