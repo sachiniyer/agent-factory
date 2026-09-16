@@ -60,20 +60,26 @@ func wrapperOperandTailMutatesUncached(words []*syntax.Word, names map[string]st
 }
 
 // shadowedOperandTailMutates fails closed when any word in a returned tail is
-// not provably a single literal argv word. It guards the childless tails —
+// not provably a single literal argv word — and when any literal boundary of
+// that tail judges as a mutating command. It guards the childless tails —
 // process-only selectors and terminal options — where the real util-linux
 // binary consumes every remaining word as operand text (or never reaches
-// them) and only the shadowed reading can execute one. Judging that tail
-// from its first word alone let a literal operand mask a dynamic one deeper
-// in: `./ionice -p"$PID" 123 "$CMD" /tmp/launch-agent` returned
+// them) and only the shadowed reading can execute one.
+//
+// Judging that tail from its first word alone let a literal operand mask what
+// follows it: `./ionice -p"$PID" 123 "$CMD" /tmp/launch-agent` returned
 // [123, "$CMD", ...] whose literal head read as an unrecognized command,
 // while a repo-local ionice stripping a different operand count execs
-// `sh /tmp/launch-agent` when CMD=sh (Codex on #4465). A word that is
-// provably one argv word still fails here: the value is unknown, and as a
-// possible head it can resolve to env, a same-shell builtin, or a shell.
-func shadowedOperandTailMutates(words []*syntax.Word) bool {
-	for _, word := range words {
-		if _, literal := literalShellWord(word); !literal {
+// `sh /tmp/launch-agent` when CMD=sh (Codex on #4465). The all-literal case is
+// the same hole with a named command: `./ionice -p 123 xargs
+// --process-slot-var CODEX_HOME codex` is inert on the real binary, but a
+// shadowed `shift 2; exec "$@"` lands on the xargs boundary and replaces the
+// account root (Codex on #4465). A shadowed wrapper may discard ANY count of
+// operands, so every literal suffix is a possible exec boundary and each is
+// judged as one; the memoized wrapper walk keeps the scan polynomial.
+func shadowedOperandTailMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
+	for i := range words {
+		if wrapperOperandTailMutates(words[i:], names, memo) {
 			return true
 		}
 	}
@@ -279,7 +285,7 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// `invalid PID argument` and prints nothing — so inspecting it as a
 			// command refuses only what a shadowed wrapper could actually run.
 			if ioniceProcessOnlyOption(prefix) {
-				if shadowedOperandTailMutates(words[1:]) {
+				if shadowedOperandTailMutates(words[1:], names, memo) {
 					return nil, true
 				}
 				return words[1:], false
@@ -297,7 +303,7 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// --help/--version exit before reaching a child on the real
 			// binary, but the basename match cannot prove this IS that binary;
 			// the words after the option still get inspected as a command.
-			if shadowedOperandTailMutates(words[1:]) {
+			if shadowedOperandTailMutates(words[1:], names, memo) {
 				return nil, true
 			}
 			return words[1:], false
@@ -311,7 +317,7 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// PID operands judge as an unrecognized literal command and stay
 			// accepted; an env or shell tail is refused. Process-control policy
 			// is outside this validator's environment-mutation contract.
-			if shadowedOperandTailMutates(words[1:]) {
+			if shadowedOperandTailMutates(words[1:], names, memo) {
 				return nil, true
 			}
 			return words[1:], false
@@ -514,7 +520,7 @@ func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operand
 			// so the name is matched with any attached value cut away.
 			prefix, quoted := literalPrefixBeforeSimpleQuotedParameter(words[0])
 			if name, _, _ := strings.Cut(prefix, "="); quoted && tasksetProcessOnlyOption(name) {
-				if shadowedOperandTailMutates(words[1:]) {
+				if shadowedOperandTailMutates(words[1:], names, memo) {
 					return nil, true
 				}
 				return words[1:], false
@@ -525,7 +531,7 @@ func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operand
 		case option == "--":
 			return tasksetCommandAfterMask(words[1:], names, memo)
 		case utilLinuxTerminalOption(option, "acp"):
-			if shadowedOperandTailMutates(words[1:]) {
+			if shadowedOperandTailMutates(words[1:], names, memo) {
 				return nil, true
 			}
 			return words[1:], false
@@ -535,7 +541,7 @@ func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operand
 			// mutate on the real binary. The operand tail is still inspected:
 			// the basename match cannot distinguish taskset from a
 			// PATH-shadowed script that execs whatever follows the selector.
-			if shadowedOperandTailMutates(words[1:]) {
+			if shadowedOperandTailMutates(words[1:], names, memo) {
 				return nil, true
 			}
 			return words[1:], false

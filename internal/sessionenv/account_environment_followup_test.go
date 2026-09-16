@@ -265,6 +265,15 @@ func TestValidateAccountEnvironmentCommand_QuotedProcessSelectorsLaunchNoChild(t
 		// Terminal-option tails are childless the same way.
 		"./ionice --version 1 \"$CMD\" /tmp/launch-agent",
 		"./taskset --help 1 \"$CMD\" /tmp/launch-agent",
+		// An all-literal tail is not automatically safe: a shadowed wrapper can
+		// discard more operands than the model did and exec the suffix that
+		// begins at a modeled command, so every literal boundary of a childless
+		// tail is judged as a command (Codex on #4465).
+		"./ionice -p 123 xargs --process-slot-var CODEX_HOME codex",
+		"./taskset -p 123 xargs --process-slot-var=CODEX_HOME codex",
+		"./ionice -p 123 env CODEX_HOME=/other codex",
+		"./taskset --version 1 unset CODEX_HOME",
+		"./ionice -p 123 ionice -c 3 sh -c 'unset CODEX_HOME; codex'",
 	} {
 		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q hides a mutating tail behind a basename-matched selector", command)
