@@ -146,6 +146,16 @@ Because that loop brings a behind head up to date itself, the ruleset's strict
 required-status-checks policy can stay on: a hand merge no longer has to win a
 race against the fleet's merge rate.
 
+The gate re-reads the pull request immediately before issuing the update
+(#4462). The evaluation that decided on it is seconds old by the time the write
+lands, and a hand-merge processed inside those seconds is what orphaned two
+head branches: the update landed a merge-of-master commit on a head whose PR
+was already merged, and delete-on-merge found a tip it no longer matched. A PR
+that does not read open-and-unmerged — or whose state cannot be confirmed at
+all — refuses the write. The read narrows the race to the write's own latency;
+a merge that starts processing between it and the write is not observable, and
+the sweep's tree comparison reclaims the branch such a write leaves.
+
 **Every accepted update-branch schedules another Auto Gate evaluation (#4209).**
 The update endpoint can acknowledge before a PR read exposes its new head. The
 immediate approval and run-existence checks only execute when that read returns
@@ -485,11 +495,20 @@ problem is worth reporting it as a failure:
   and the token could not delete it anyway;
 - **(c)** no open PR is based on the branch, and no open PR still has it as a
   head — deleting it would close the first and leave the second headless;
-- **(b)**, last and immediately before the delete, the branch still points at the
-  commit that was merged. A lane that pushed after the merge keeps its branch:
-  that work is not in `master`, and the pushed ref may be its only copy. Neither
-  the REST ref API nor GraphQL's `deleteRef` accepts an expected OID, so ordering
-  is the only lever there is.
+- **(b)**, last and immediately before the delete, the branch still points at
+  the commit that was merged — or at a tip whose **tree** matches the merge
+  commit's or the default branch tip's (#4462). A lane that pushed unmerged
+  work after the merge keeps its branch: that work is not in `master`, and the
+  pushed ref may be its only copy. A tip that merely *moved* is not that: an
+  automation update-branch landing while the merge processed leaves a
+  merge-of-master commit whose content the merge already took, and
+  delete-on-merge skips it because the tip no longer matches the merged head.
+  The comparison is by tree object ids, never by ancestry — the repository
+  squash-merges, so the merged head is never an ancestor of `master` and
+  reachability would read every merged branch as carrying work. A side of the
+  comparison that cannot be read is not a difference; the branch is kept.
+  Neither the REST ref API nor GraphQL's `deleteRef` accepts an expected OID,
+  so ordering is the only lever there is.
 
 Those conditions are correct when the merge asks them and nothing revisits the
 answer, so a branch kept for a reason that later disappears leaks forever
@@ -498,14 +517,20 @@ answer, so a branch kept for a reason that later disappears leaks forever
 
 The resolver job therefore runs a **sweep** on every gate run, including the runs
 where nothing merges. It enumerates every branch on the repository in one
-GraphQL query — name, tip, ruleset rules, and the pull requests whose head it is
-— and treats a branch as a candidate only when a merged PR of this repository has
-it as a head and its tip still equals that merge's head. The default branch, a
-protected branch, and a branch whose rule list could not be read in full are
-never candidates. Each candidate then goes through the same helper the merge path
-uses, so the three conditions have one home and get fresh reads. The pass is
-capped per run, so a backlog drains over several runs rather than making one run
-slow, and its one-line summary is the `branch_sweep` output of the resolver job.
+GraphQL query — name, tip and its tree, ruleset rules, the default branch tip's
+tree, and the pull requests whose head it is (with each merge commit's tree) —
+and treats a branch as a candidate when a merged PR of this repository has it
+as a head and its tip still equals that merge's head, **or** when the tip moved
+but its tree matches the merge commit's or the default branch tip's — the
+update-branch debris #4462's sweep previously parked in a terminal "moved"
+bucket forever. A moved branch whose trees cannot all be read is kept and
+counted separately, because an unmeasured comparison is not a measured empty
+diff. The default branch, a protected branch, and a branch whose rule list
+could not be read in full are never candidates. Each candidate then goes
+through the same helper the merge path uses, so the conditions have one home
+and get fresh reads. The pass is capped per run, so a backlog drains over
+several runs rather than making one run slow, and its one-line summary is the
+`branch_sweep` output of the resolver job.
 
 Deleting a ref is the gate writing to the repository on its own, so the sweep is
 gated on `AUTO_GATE_ENABLED` like the merge itself. With that switch off nothing
