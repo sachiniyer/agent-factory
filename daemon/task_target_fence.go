@@ -139,17 +139,23 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 	// will ask: a target deriving the reserved tmux name ("ro ot") can no more
 	// materialize than a reserved spelling can (#3732). Refusing at the task
 	// write keeps a task that could only fail on every run from being committed
-	// at all — the arm below reports it, and does so without consulting ctx,
+	// at all — the arms below report it, and do so without consulting ctx,
 	// which prepareTaskTargetValidation only fills for the exact spelling.
 	//
-	// The refusal is about CREATION, not delivery: an existing record keeps the
-	// identity its tmux name actually claims, and a case-variant title like
-	// "Ro ot" owns the distinct af_Root — the fold that widened admission must
-	// not retroactively un-deliver tasks from a session that already exists
-	// (#4407 review). A record that is itself reserved-identity still falls
-	// through to the refusal.
-	if session.ReservedTitleCollision(target) != "" &&
-		!(recordExists && !session.IsReservedRecordTitle(state.Title, state.BackendType)) {
+	// An existing ordinary record under such a title does not lift the refusal
+	// (#4407 review). A case variant like "Ro ot" owns the distinct af_Root and
+	// keeps receiving prompts — the delivery path sends to an existing target
+	// without asking admission — but this write commits a DURABLE binding, and
+	// the record's lifetime is not fenced by it: KillSession does not consult
+	// target tasks, so once the record is gone (or a concurrent kill wins this
+	// validation) every later run lands on the auto-create refusal. Existence
+	// only chooses the message, so the operator is not told to use "root" for a
+	// session that is not the root. Tasks already enabled before the widened
+	// admission keep delivering to the record while it exists.
+	if session.ReservedTitleCollision(target) != "" {
+		if recordExists && !session.IsReservedRecordTitle(state.Title, state.BackendType) {
+			return fmt.Errorf("cannot enable task %q: target session %q exists, but its title claims the reserved %q session name (reservation ignores case and whitespace), so af cannot re-create it and the task would fail on every run once that session is gone; choose a target whose title does not claim the reserved name; nothing was changed", t.ID, target, session.RootSessionTitle)
+		}
 		if target != session.RootSessionTitle {
 			return fmt.Errorf("cannot enable task %q: reserved target session %q cannot materialize under that spelling; use %q exactly; nothing was changed", t.ID, target, session.RootSessionTitle)
 		}
