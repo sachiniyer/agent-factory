@@ -179,16 +179,36 @@ func (m *home) saveContentPaneState() error {
 		// displays and baselines against the freshly loaded record so a
 		// subsequent user action (e.g. re-pressing D) submits the current
 		// binding rather than a never-persisted one that the CAS would refuse.
+		//
+		// tasks.json permits duplicate IDs in hand-edited stores. When multiple
+		// rows share an ID, we cannot identify which freshly-loaded row
+		// corresponds to the deleted one; using any of them as the display
+		// record would show the wrong row's content in the pane. Count
+		// occurrences so RestoreFailedDeleteWithExpect is only given a fresh
+		// record when the ID is unambiguous (exactly one match in the reload).
+		loadedCount := make(map[string]int, len(tasks))
 		loaded := make(map[string]task.Task, len(tasks))
 		for _, t := range tasks {
+			loadedCount[t.ID]++
 			loaded[t.ID] = t
 		}
 		for _, tsk := range failedDeletes {
-			if fresh, present := loaded[tsk.ID]; present {
+			if _, present := loaded[tsk.ID]; present {
 				// Restore the authoritative record so the pane and originals
 				// are up-to-date; pass the original tsk as the retry
 				// expectation so the deletion CAS still pins the binding it
 				// was authorised against.
+				//
+				// When there are duplicate IDs in the freshly loaded set, the
+				// map holds only the last occurrence and we cannot tell which
+				// one corresponds to the row the user was deleting. Use tsk
+				// itself as the display record in that case, preserving the
+				// exact row's content rather than silently substituting a
+				// different duplicate.
+				fresh := tsk
+				if loadedCount[tsk.ID] == 1 {
+					fresh = loaded[tsk.ID]
+				}
 				sp.RestoreFailedDeleteWithExpect(fresh, tsk)
 			} else {
 				sp.AcknowledgeDeletedRestored(tsk.ID)
