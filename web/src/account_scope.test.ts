@@ -300,3 +300,20 @@ for (const failed of [false, true]) {
     if (failed) assert.match(accountNotice(choices, AMBIENT_ACCOUNT), /daemon default, if any, applies/);
   });
 }
+
+// THE opt-out case (#4404 review): a present-but-empty `default_accounts` entry
+// means "this project runs on the ambient identity" — a routable create
+// launches the agent's own login, never a pooled pick. With logged-in accounts
+// beside it the label must say so rather than promise "af picks a healthy
+// account" for a row that does the opposite.
+test("an ambient opt-out labels the routable row as ambient, not automatic", () => {
+  const choices = accountChoices(registry({ ambient_opt_outs: { claude: true } }), "claude");
+
+  assert.equal(choices[0].value, AMBIENT_ACCOUNT);
+  assert.match(choices[0].label, /ambient identity/);
+  assert.doesNotMatch(choices[0].label, /Automatic/, "the row launches ambient — 'af picks' would lie");
+
+  // The opt-out is per agent: codex, absent from the map, still routes.
+  const codex = accountChoices(registry({ ambient_opt_outs: { claude: true } }), "codex");
+  assert.match(codex[0].label, /Automatic/, "an agent with no opt-out entry keeps the pool promise");
+});

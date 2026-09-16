@@ -7959,11 +7959,12 @@ function accountChoices(accounts, agent, failed = false) {
     }];
   }
   const fallback = accountDefaultFor(accounts, agent);
+  const optedOut = accounts.ambient_opt_outs?.[agent] === true;
   const anyLoggedIn = accounts.entries.some((entry) => entry.agent === agent && entry.logged_in);
   const choices = [
     {
       value: AMBIENT_ACCOUNT,
-      label: agent === "" ? "Use daemon default" : fallback !== "" ? `Use configured default (${fallback})` : anyLoggedIn ? "Automatic \u2014 af picks a healthy account" : "Use agent login (nothing to route)",
+      label: agent === "" ? "Use daemon default" : fallback !== "" ? `Use configured default (${fallback})` : optedOut ? "Use the ambient identity (routing is off)" : anyLoggedIn ? "Automatic \u2014 af picks a healthy account" : "Use agent login (nothing to route)",
       agent,
       blocked: "",
       note: agent === "" ? "The daemon default, if any, applies." : "",

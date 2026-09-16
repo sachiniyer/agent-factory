@@ -113,20 +113,29 @@ func defaultAccountProvenance(selection config.DefaultAccountSelection, repoPath
 // catalog half of applyDefaultAccount and calls the same resolver, so a picker
 // cannot preselect an account the create would not have applied.
 //
+// The second result carries the agents whose resolved entry is present but
+// empty — the ambient opt-out a routable create honors by launching the
+// agent's own login. A picker that cannot see it labels that row "af picks a
+// healthy account" while the daemon does the opposite (#4404 review).
+//
 // Unvalidated on purpose: this answers "what is configured", and a listing that
 // silently dropped an unregistered default would hide exactly the misconfiguration
 // the create is about to refuse. The entry that comes back is what the create
 // will use, right or wrong.
-func defaultAccountsFor(cfg *config.Config, repoPath string, agents []string) map[string]string {
+func defaultAccountsFor(cfg *config.Config, repoPath string, agents []string) (map[string]string, map[string]bool) {
 	// ONE resolution for every agent, not one per agent: this runs on every open of
 	// a form nobody has submitted yet, and resolving a repository's config costs git
 	// probes.
-	effective := config.ResolvedDefaultAccountsFor(cfg, repoPath)
+	effective, optOuts := config.ResolvedDefaultAccountsFor(cfg, repoPath)
 	defaults := map[string]string{}
+	ambientOptOuts := map[string]bool{}
 	for _, agent := range agents {
 		if name := effective[agent]; name != "" {
 			defaults[agent] = name
 		}
+		if optOuts[agent] {
+			ambientOptOuts[agent] = true
+		}
 	}
-	return defaults
+	return defaults, ambientOptOuts
 }

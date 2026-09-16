@@ -139,8 +139,11 @@ func TestAnEmptyProjectEntryKeepsTheAmbientIdentity(t *testing.T) {
 	req := CreateSessionRequest{Title: "opted-out", RepoPath: repoPath, Program: "codex"}
 	require.NoError(t, applyDefaultAccount(&config.Config{}, &req))
 	assert.Empty(t, req.Account, "this project opted out, so the global default must not reach it")
-	assert.Empty(t, defaultAccountsFor(&config.Config{}, repoPath, []string{"codex"})["codex"],
+	catalogDefaults, catalogOptOuts := defaultAccountsFor(&config.Config{}, repoPath, []string{"codex"})
+	assert.Empty(t, catalogDefaults["codex"],
 		"and the picker must agree, or it would preselect an identity the create does not use")
+	assert.True(t, catalogOptOuts["codex"],
+		"and the catalog must expose the opt-out, or the routable row is labelled \"af picks a healthy account\" while the create launches ambient")
 }
 
 // An account belongs to ONE agent, and this is the property the map-shaped key
@@ -205,15 +208,17 @@ func TestListAccountsReportsTheProjectDefaults(t *testing.T) {
 	home, repoPath, project := defaultAccountFixture(t, "codex", "work")
 	writeProjectAccounts(t, project, "[default_accounts]\ncodex = \"work\"\n")
 
-	defaults := defaultAccountsFor(&config.Config{}, repoPath, []string{"claude", "codex"})
+	defaults, optOuts := defaultAccountsFor(&config.Config{}, repoPath, []string{"claude", "codex"})
 	assert.Equal(t, map[string]string{"codex": "work"}, defaults,
 		"only the agents the project actually scoped are reported")
+	assert.Empty(t, optOuts,
+		"a configured default is not an opt-out — the two answers must not be conflated")
 
 	// The unregistered case is reported too, deliberately: dropping it would hide a
 	// misconfiguration behind an "ambient identity" the picker would then be lying
 	// about, and the create is about to refuse it by name.
 	writeProjectAccounts(t, project, "[default_accounts]\ncodex = \"gone\"\n")
-	assert.Equal(t, map[string]string{"codex": "gone"},
-		defaultAccountsFor(&config.Config{}, repoPath, []string{"codex"}))
+	goneDefaults, _ := defaultAccountsFor(&config.Config{}, repoPath, []string{"codex"})
+	assert.Equal(t, map[string]string{"codex": "gone"}, goneDefaults)
 	assert.NoDirExists(t, filepath.Join(home, "accounts", "codex", "gone"))
 }

@@ -169,7 +169,7 @@ directory af prints holds the credential at <dir>/.gemini/oauth_creds.json or
 <dir>/.gemini/gemini-credentials.json.
 Point the variable at the printed directory, never at a .gemini path inside it.
 
-Pin an account for a session with:
+Select an account for a session with:
 
   af sessions create --account work
 
@@ -178,15 +178,6 @@ identity-bearing variable for the agent. The removal is what makes the selection
 real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the config
 directory, so without it a session would authenticate as whoever that key belongs
 to while every visible signal reported the selected account.
-
-Omitting --account does not mean ambient. On a backend that carries accounts,
-af routes the create across the agent's logged-in accounts: the configured
-default_accounts entry wins while it is healthy, otherwise the least-loaded
-account with no current usage-limit evidence, and a create that finds the whole
-pool walled refuses with the earliest known reset rather than launching into a
-known limit. When no logged-in account exists at all, the session keeps the
-ambient identity — and an explicit `--account ""` asks for ambient directly,
-the same pick the TUI and web pickers' ambient row makes.
 
 Account-scoped sessions require the local or docker backend, and tmux 3.2 or newer. af
 refuses rather than falling back, because a fallback would run on the ambient
@@ -1787,7 +1778,7 @@ af sessions create [title] [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--account` | `string` | Credential account `name` to run the agent as (register it with af accounts add; defaults to this project's default_accounts entry for the agent, else the ambient identity) |
+| `--account` | `string` | Credential account `name` to pin the agent to (register it with af accounts add; omit to route across the agent's logged-in accounts — preferring this project's default_accounts entry — and pass --account "" to pin the ambient identity) |
 | `--backend` | `string` | Runtime to run the session on (one of: local, docker, ssh, sandbox, hook; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run "af sessions backends" for which of these this project can actually use, and why not |
 | `--here` |  | Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both) |
 | `--in-place` |  | Alias for --here |

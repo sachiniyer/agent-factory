@@ -165,8 +165,11 @@ func TestAnEmptyProjectEntryOptsOutOfTheGlobalDefault(t *testing.T) {
 	codex, codexGlobal := DefaultAccountLayersFor(global, repoRoot, "codex")
 	assert.Empty(t, codex.Name, "the project turned the default off for this agent")
 	assert.Empty(t, codexGlobal.Name, "and the global entry must not come back as a fallback")
-	assert.Empty(t, ResolvedDefaultAccountsFor(global, repoRoot)["codex"],
+	effective, optOuts := ResolvedDefaultAccountsFor(global, repoRoot)
+	assert.Empty(t, effective["codex"],
 		"the catalog must agree, or a picker would preselect an identity the create does not use")
+	assert.True(t, optOuts["codex"],
+		"and the opt-out itself must be visible, or a picker labels the ambient row \"af picks a healthy account\"")
 
 	claude, _ := DefaultAccountLayersFor(global, repoRoot, "claude")
 	assert.Equal(t, "shared", claude.Name, "and the opt-out is per agent, like every other entry")
@@ -276,7 +279,7 @@ func TestResolvedDefaultAccountsAgreesWithThePerAgentResolution(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, repoPath := range []string{repoRoot, "", filepath.Join(t.TempDir(), "not-a-repo")} {
-		effective := ResolvedDefaultAccountsFor(global, repoPath)
+		effective, _ := ResolvedDefaultAccountsFor(global, repoPath)
 		for _, agent := range []string{"claude", "codex", "gemini"} {
 			project, globalLayer := DefaultAccountLayersFor(global, repoPath, agent)
 			want := project.Name
@@ -288,7 +291,8 @@ func TestResolvedDefaultAccountsAgreesWithThePerAgentResolution(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, "side", ResolvedDefaultAccountsFor(global, repoRoot)["codex"],
+	effective, _ := ResolvedDefaultAccountsFor(global, repoRoot)
+	assert.Equal(t, "side", effective["codex"],
 		"and the answer is the project's, not the global one")
 }
 

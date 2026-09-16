@@ -97,6 +97,13 @@ type ListAccountsResponse struct {
 	// — dropping it from this map would hide the misconfiguration behind an
 	// "ambient identity" the picker would then be lying about.
 	Defaults map[string]string `json:"defaults,omitempty"`
+	// AmbientOptOuts carries the agents whose resolved `default_accounts` entry
+	// is PRESENT but empty — the only spelling of "this project runs on the
+	// ambient identity" (#4404). A routable create against one launches the
+	// agent's own login rather than picking a pooled account, so a picker that
+	// cannot see the opt-out labels that row "af picks a healthy account" while
+	// the daemon does the opposite.
+	AmbientOptOuts map[string]bool `json:"ambient_opt_outs,omitempty"`
 }
 
 // RegisterAccountRequest creates an account's credential directory on the

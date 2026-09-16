@@ -319,7 +319,11 @@ func DefaultAccountAmbientOptOut(global *Config, repoPath, agent string) bool {
 
 // ResolvedDefaultAccountsFor reports the effective `default_accounts` map for
 // repoPath — every agent's configured default, with the personal per-project
-// layer merged over the global one exactly as a create resolves it.
+// layer merged over the global one exactly as a create resolves it. The second
+// result carries the agents whose entry is PRESENT but empty — the only
+// spelling of "this project runs on the ambient identity" (#4404) — from the
+// SAME resolution, so a catalog cannot pair a default read from one config
+// generation with an opt-out read from another.
 //
 // It exists beside DefaultAccountLayersFor because the two answer different
 // questions at different costs. A create needs ONE agent's value plus the
@@ -330,33 +334,42 @@ func DefaultAccountAmbientOptOut(global *Config, repoPath, agent string) bool {
 //
 // A repo that cannot be resolved falls back to the global map, which is the same
 // fallback the create applies, so the picker and the create agree there too.
-func ResolvedDefaultAccountsFor(global *Config, repoPath string) map[string]string {
+func ResolvedDefaultAccountsFor(global *Config, repoPath string) (map[string]string, map[string]bool) {
 	fallback := map[string]string{}
+	fallbackOptOuts := map[string]bool{}
 	if global != nil {
 		for agent, name := range global.DefaultAccounts {
 			if trimmed := strings.TrimSpace(name); trimmed != "" {
 				fallback[agent] = trimmed
+			} else {
+				// A present-empty global entry is how a global default is
+				// cleared — honored identically to the project-layer spelling
+				// (defaultAccountLayersAndOptOut's globalOptOut).
+				fallbackOptOuts[agent] = true
 			}
 		}
 	}
 	if strings.TrimSpace(repoPath) == "" {
-		return fallback
+		return fallback, fallbackOptOuts
 	}
 	repo, err := RepoFromPath(repoPath)
 	if err != nil {
-		return fallback
+		return fallback, fallbackOptOuts
 	}
 	resolved, err := ResolveConfigForRepoInspection(repo)
 	if err != nil {
-		return fallback
+		return fallback, fallbackOptOuts
 	}
 	effective := map[string]string{}
+	optOuts := map[string]bool{}
 	for agent, name := range resolved.DefaultAccounts {
 		if trimmed := strings.TrimSpace(name); trimmed != "" {
 			effective[agent] = trimmed
+		} else {
+			optOuts[agent] = true
 		}
 	}
-	return effective
+	return effective, optOuts
 }
 
 // sourceForLayerName maps a trace's layer string back to its ConfigSource. The

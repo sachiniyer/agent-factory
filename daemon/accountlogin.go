@@ -123,10 +123,11 @@ func (m *Manager) ListAccounts(req ListAccountsRequest) (ListAccountsResponse, e
 	// without another round trip (#3386). A nil manager (a test control server) has
 	// no config to resolve, so it reports no defaults rather than guessing one.
 	var defaults map[string]string
+	var ambientOptOuts map[string]bool
 	if m != nil {
-		defaults = defaultAccountsFor(m.Config(), req.RepoPath, roster)
+		defaults, ambientOptOuts = defaultAccountsFor(m.Config(), req.RepoPath, roster)
 	}
-	return ListAccountsResponse{Entries: entries, Agents: roster, Defaults: defaults}, nil
+	return ListAccountsResponse{Entries: entries, Agents: roster, Defaults: defaults, AmbientOptOuts: ambientOptOuts}, nil
 }
 
 // RegisterAccount creates an account's credential directory without logging in.

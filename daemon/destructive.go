@@ -7,6 +7,13 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
+// testHookRetainedAccountLimitFence fires inside deleteSessionRecord's
+// accountLimitMu section, between the durable retain and the cache un-mark —
+// the exact window in which an unfenced concurrent refute could observe the
+// fresh row while the "already checked" mark still stood (#4404 review). A
+// test uses it to prove the window is fenced.
+var testHookRetainedAccountLimitFence = func() {}
+
 // The one choke point for deleting a session's record (#1917).
 //
 // Deleting the record is the LAST destructive act of a kill and the most
@@ -47,14 +54,28 @@ func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownEr
 		m.warn().Printf("session %q: teardown reported an error that does not leave its workspace state unknown; deleting the record as normal: %v", title, teardownErr)
 	}
 	_, observations := session.AccountLimitEvidenceFromData(evidence)
-	if err := retainAccountLimitObservations(observations); err != nil {
+	// The retain and the cache un-mark are ONE publication against
+	// refuteAccountLimitEvidence, fenced by the same accountLimitMu the refute
+	// and swap admission already take — accountLimitMu → m.mu is the
+	// established order, and unrefuteRetainedAccountLimits acquires m.mu
+	// inside. Without the fence a refute can run its ledger check after this
+	// retain's write but before the un-mark lands: the fresh row survives the
+	// retraction while the mark inserted afterwards says it was already
+	// checked, and the account stays excluded until restart (#4404 review).
+	m.accountLimitMu.Lock()
+	err := retainAccountLimitObservations(observations)
+	if err == nil {
+		testHookRetainedAccountLimitFence()
+		// The ledger just gained rows, so any identity here is fresh evidence
+		// again: a prior "ledger already checked" mark would make the next
+		// successful session skip retracting it, and the account would stay
+		// walled behind the daemon-lifetime cache (#4404 review).
+		m.unrefuteRetainedAccountLimits(observations)
+	}
+	m.accountLimitMu.Unlock()
+	if err != nil {
 		return false, fmt.Errorf("retain account-limit evidence before deleting session %q: %w", title, err)
 	}
-	// The ledger just gained rows, so any identity here is fresh evidence again:
-	// a prior "ledger already checked" mark would make the next successful
-	// session skip retracting it, and the account would stay walled behind the
-	// daemon-lifetime cache (#4404 review).
-	m.unrefuteRetainedAccountLimits(observations)
 	storage, err := session.NewStorage(config.LoadState(), repoID)
 	if err != nil {
 		return false, err

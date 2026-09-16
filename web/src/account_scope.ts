@@ -139,6 +139,7 @@ export function accountChoices(accounts: AccountsResponse | null, agent: string,
     }];
   }
   const fallback = accountDefaultFor(accounts, agent);
+  const optedOut = accounts.ambient_opt_outs?.[agent] === true;
   const anyLoggedIn = accounts.entries.some((entry) => entry.agent === agent && entry.logged_in);
   // The first row is the ROUTABLE choice — a create that names no account.
   // What af does with it changed with the pool router (#4404): it is no longer
@@ -146,11 +147,16 @@ export function accountChoices(accounts: AccountsResponse | null, agent: string,
   // that account; with logged-in accounts and no default it picks the
   // least-loaded healthy one; only with nothing to route does it land on the
   // agent's own login, and the label says which applies.
+  // The ambient opt-out — a present-but-empty `default_accounts` entry — must
+  // be named rather than inferred: logged-in accounts exist beside it, and
+  // calling the row "Automatic" would promise a pool pick the daemon refuses
+  // to make (#4404 review).
   const choices: AccountChoice[] = [
     {
       value: AMBIENT_ACCOUNT,
       label: agent === "" ? "Use daemon default" : fallback !== ""
         ? `Use configured default (${fallback})`
+        : optedOut ? "Use the ambient identity (routing is off)"
         : anyLoggedIn ? "Automatic — af picks a healthy account" : "Use agent login (nothing to route)",
       agent,
       blocked: "",

@@ -112,10 +112,16 @@ func accountChoicesFrom(resp daemon.ListAccountsResponse, agent string) []accoun
 	// prefers that account; with logged-in accounts and no default it picks
 	// the least-loaded healthy one; only with nothing to route does it land
 	// on the agent's own login, and the label says which applies.
+	// The ambient opt-out — a present-but-empty `default_accounts` entry —
+	// must be named rather than inferred: logged-in accounts exist beside it,
+	// and calling the row "Automatic" would promise a pool pick the daemon
+	// refuses to make (#4404 review).
 	routableLabel := "Use the agent's own login (nothing to route)"
 	switch {
 	case fallback != "":
 		routableLabel = "Use configured default (" + fallback + ")"
+	case resp.AmbientOptOuts[agent]:
+		routableLabel = "Use the ambient identity (routing is off)"
 	case anyLoggedIn:
 		routableLabel = "Automatic — af picks a healthy account"
 	}

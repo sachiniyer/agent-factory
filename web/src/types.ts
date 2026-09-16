@@ -531,6 +531,14 @@ export interface AccountsResponse {
    *  than this client does not send it at all — in which case the picker simply
    *  offers no preselection, which is what it did before this field existed. */
   defaults?: Record<string, string>;
+  /** Per agent, whether the resolved `default_accounts` entry is present but
+   *  EMPTY — the only spelling of "this project runs on the ambient identity"
+   *  (#4404). A routable create against one launches the agent's own login
+   *  rather than picking a pooled account, so a picker that cannot see the
+   *  opt-out labels that row "af picks a healthy account" while the daemon
+   *  does the opposite. Optional because the daemon omits it when empty and
+   *  older daemons do not send it at all. */
+  ambient_opt_outs?: Record<string, boolean>;
 }
 
 /** RegisterAccountResponse (daemon/control_types_accounts.go). */
