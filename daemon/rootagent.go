@@ -157,6 +157,19 @@ type rootEnsureState struct {
 	// dedupe bits. Runtime evidence is committed separately under the instance
 	// lifecycle lock.
 	programDriftBeforeLatchForTest func()
+	// carriedReaped is what a reaped root record handed a replacement that has
+	// not been published yet (#4400 review). The record is deleted at the reap,
+	// so the carried account pin, conversation, and tab roster otherwise exist
+	// only in the one create invocation's stack — a create that then fails
+	// leaves the next ensure seeing no prior instance, rebuilding an empty
+	// carry, and silently demoting the guaranteed root to ambient credentials.
+	// The state parks here — the per-repo retry state that already outlives a
+	// single create attempt — until rootEnsureSucceeded publishes a
+	// replacement (or an adopt/disable/delete outcome makes it moot).
+	// rootEnsureFailed deliberately leaves it: the pin must survive transient
+	// create failure.
+	carriedReaped    reapedRootState
+	carriedReapedSet bool
 	// Claude transcript verification is advisory while the root is live. Keep
 	// its filesystem work and any persistent inspection warning off the hot
 	// one-second ensure path.
@@ -764,6 +777,8 @@ func (m *Manager) rootEnsureSucceeded(st *rootEnsureState) {
 	st.escalatedPersistent = false
 	st.nextAttempt = time.Time{}
 	st.suppressLogged = false
+	st.carriedReaped = reapedRootState{}
+	st.carriedReapedSet = false
 	m.mu.Unlock()
 }
 

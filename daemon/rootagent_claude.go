@@ -214,11 +214,13 @@ func (m *Manager) clearRootClaudeTranscriptWarning(st *rootEnsureState) {
 	m.mu.Unlock()
 }
 
-// rootAgentTranscriptProgram applies the same program_overrides lookup the
+// rootAgentResolvedProgram applies the same program_overrides lookup the
 // create path applies after the root profile selects its program. Transcript
 // verification must inspect the environment of the command that actually runs,
-// not the unresolved enum label stored in the profile.
-func rootAgentTranscriptProgram(repoRoot string, ra config.RootAgent) (string, error) {
+// not the unresolved enum label stored in the profile — and the account-pin
+// namespace check must derive the replacement's agent from the same resolved
+// command, because an override can cross registries entirely (#4400 review).
+func rootAgentResolvedProgram(repoRoot string, ra config.RootAgent) (string, error) {
 	program := rootAgentProgramForProfile(repoRoot, ra)
 	repo, err := config.RepoFromPath(repoRoot)
 	if err != nil {

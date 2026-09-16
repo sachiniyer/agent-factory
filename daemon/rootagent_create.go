@@ -246,9 +246,46 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		if !reapedRoot {
 			return
 		}
+		// Park what the reap carried on the ensure state before attempting the
+		// create: the record is already gone, so the carry exists only on this
+		// stack. A create that now fails would otherwise hand the next ensure
+		// an empty carry — a transient launch failure silently demoting the
+		// guaranteed root to ambient credentials and a fresh conversation
+		// (#4400 review). The park is re-armed on every successful reap; it is
+		// released only by a pass that publishes or obviates the replacement.
+		m.mu.Lock()
+		st.carriedReaped = carried
+		st.carriedReapedSet = true
+		m.mu.Unlock()
+	} else {
+		// No record to reap — but an earlier heal may have reaped one and
+		// parked its carry when the replacement then failed to publish.
+		// Adopting the parked carry is what keeps that transient failure from
+		// costing the root its account pin, conversation, and tab roster.
+		m.mu.Lock()
+		if st.carriedReapedSet {
+			carried = st.carriedReaped
+			reapedRoot = true
+		}
+		m.mu.Unlock()
 	}
 
 	program := rootAgentProgramForProfile(workspace, resolution.RootAgent)
+	// The launch program's second-stage resolution — program_overrides applied,
+	// exactly as CreateSession will apply it downstream. Shared by the account
+	// namespace check and the transcript inspection so both judge the command
+	// that actually runs rather than the profile's unresolved label; resolving
+	// once also keeps the two consistent when config moves mid-pass.
+	resolvedProgramOnce := false
+	var resolvedProgram string
+	var resolvedProgramErr error
+	resolveLaunchProgram := func() (string, error) {
+		if !resolvedProgramOnce {
+			resolvedProgram, resolvedProgramErr = rootAgentResolvedProgram(workspace, resolution.RootAgent)
+			resolvedProgramOnce = true
+		}
+		return resolvedProgram, resolvedProgramErr
+	}
 	// A reaped root's account pin rides into its replacement like its
 	// conversation does: an account handoff is the one way root acquires an
 	// account (#4395), and silently dropping it would resume the guaranteed
@@ -269,13 +306,26 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	// substitutes or drops it exactly while the account survives (#4400
 	// review).
 	account := carried.account
+	accountRejected := false
 	if account != "" {
-		agent := sessionenv.AgentForCommand(program)
+		// The comparison agent must come from the RESOLVED launch command, not
+		// the profile's program label: program_overrides can map a bare agent
+		// name onto another agent's command entirely, and an AgentForCommand on
+		// the unresolved label would then keep a pin for an agent the launch
+		// will not run — retained long enough for the record to be reaped and
+		// the create to fail on the account/agent drift (#4400 review).
+		resolved, resolveErr := resolveLaunchProgram()
+		var agent string
+		if resolveErr == nil {
+			agent = sessionenv.AgentForCommand(resolved)
+		}
 		home, homeErr := config.GetConfigDir()
 		var accountErr error
 		switch {
+		case resolveErr != nil:
+			accountErr = fmt.Errorf("the replacement's launch program cannot be resolved: %w", resolveErr)
 		case agent == "":
-			accountErr = fmt.Errorf("no agent resolvable from program %q", program)
+			accountErr = fmt.Errorf("no agent resolvable from program %q", resolved)
 		case carried.agent != agent:
 			accountErr = fmt.Errorf("the account was pinned under agent %q and the replacement resolves to %q", carried.agent, agent)
 		case homeErr != nil:
@@ -287,11 +337,18 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 			m.warn().Printf("re-created root agent for %s cannot keep its recorded account %q: %v; it starts on the ambient identity",
 				workspace, account, accountErr)
 			account = ""
+			accountRejected = true
 		}
 	}
-	skipRecordedResume := false
-	if carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
-		transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
+	// A rejected pin also retires the carried resume: registration relocates the
+	// agent's whole transcript store, so the recorded conversation is only
+	// resumable under the credentials just discarded. Inspecting the ambient
+	// store instead would substitute some unrelated project conversation and
+	// resume it under ambient credentials — worse than starting fresh (#4400
+	// review).
+	skipRecordedResume := accountRejected
+	if !accountRejected && carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
+		transcriptProgram, resolveErr := resolveLaunchProgram()
 		if resolveErr == nil {
 			transcriptProgram, resolveErr = claudeAccountTranscriptProgram(transcriptProgram, account)
 		}
@@ -361,7 +418,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// downtime. Losing the history is the bug this carry fixes; losing the ROOT
 		// would be worse than the bug.
 		if req.resumeConversation.Agent == tmux.ProgramClaude {
-			transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
+			transcriptProgram, resolveErr := resolveLaunchProgram()
 			if resolveErr == nil {
 				transcriptProgram, resolveErr = claudeAccountTranscriptProgram(transcriptProgram, account)
 			}
