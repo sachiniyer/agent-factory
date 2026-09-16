@@ -6613,6 +6613,9 @@ async function createSession(input, token2) {
   if (account !== "") {
     body.account = account;
   }
+  if (input.accountAmbient === true) {
+    body.account_ambient = true;
+  }
   const resp = await af("CreateSession", body, token2);
   if (resp.warning) {
     throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
@@ -11296,7 +11299,14 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       backend: backendSelect.value,
       // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
       // `account` entirely and the daemon applies its default, if any (#3844).
-      account: accountSelect.value
+      account: accountSelect.value,
+      // The ambient row is a deliberate choice only when the user picked it AND
+      // it did not stand in for a configured default ("Use configured default
+      // (X)" is row-empty too, and it is not ambient). Without this bit the
+      // daemon cannot tell that pick from an untouched field, and its pool
+      // router would re-identify the session the user chose to keep ambient
+      // (#4404 review).
+      accountAmbient: accountSelection.picked && accountSelect.value === AMBIENT_ACCOUNT && accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog)) === ""
     });
   });
   queueMicrotask(() => titleInput.focus());

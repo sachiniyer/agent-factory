@@ -84,3 +84,31 @@ func TestRefuteAccountLimitObservationDropsASupersededDecision(t *testing.T) {
 		"a refutation decided before an authoritative transition must not land")
 	require.Len(t, i.AccountLimitObservations(), 1)
 }
+
+// RetractAccountLimitObservation is the sibling half of the same refute: when
+// an identity is proven working on ONE session, its stored wall evidence is
+// stale on EVERY session that carries it (#4404 review). Unlike the epoch-fenced
+// refute, it clears by the NAMED identity — the caller proved the fact on
+// another session's pane, so this session's own state is not the decider.
+func TestRetractAccountLimitObservationClearsByNameNotByCurrentIdentity(t *testing.T) {
+	reset := time.Now().Add(time.Hour)
+	i := &Instance{Program: tmux.ProgramCodex, Account: "codex9"}
+	i.SetLimitReached(reset)
+	i.ClearLimitReached()
+	i.Account = "codex4"
+	i.SetLimitReached(reset)
+	require.Len(t, i.AccountLimitObservations(), 2)
+
+	require.True(t, i.RetractAccountLimitObservation(tmux.ProgramCodex, "codex9"),
+		"the named identity's row is retired even though the session now runs as another")
+	remaining := i.AccountLimitObservations()
+	require.Len(t, remaining, 1)
+	require.Equal(t, "codex4", remaining[0].Account)
+	require.True(t, i.LimitReached(),
+		"the live wall is this session's own claim and is deliberately not the retraction's business")
+
+	require.False(t, i.RetractAccountLimitObservation(tmux.ProgramCodex, "codex9"),
+		"already-retired is a no-op, not a change")
+	require.False(t, i.RetractAccountLimitObservation("claude", "codex4"),
+		"evidence belongs to one agent — a claude retraction never touches codex rows")
+}

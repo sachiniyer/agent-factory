@@ -50,6 +50,11 @@ func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownEr
 	if err := retainAccountLimitObservations(observations); err != nil {
 		return false, fmt.Errorf("retain account-limit evidence before deleting session %q: %w", title, err)
 	}
+	// The ledger just gained rows, so any identity here is fresh evidence again:
+	// a prior "ledger already checked" mark would make the next successful
+	// session skip retracting it, and the account would stay walled behind the
+	// daemon-lifetime cache (#4404 review).
+	m.unrefuteRetainedAccountLimits(observations)
 	storage, err := session.NewStorage(config.LoadState(), repoID)
 	if err != nil {
 		return false, err

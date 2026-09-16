@@ -71,3 +71,34 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 	_ = instance.Transition(session.ObserveLiveness(session.LiveReady).AtEpoch(epoch))
 	return false
 }
+
+// updatedPaneAccountVerdict applies the wall-or-refute verdict above to a pane
+// that CHANGED this tick — the changed-content sibling of the still-pane check.
+// Fresh bytes are affirmative-work evidence ONLY when they are not themselves a
+// usage-limit banner AND they show the agent working: a wall repainting (its
+// reset countdown ticking, the banner scrolling into view) produces updated
+// content too, and refuting on it retracts the very evidence the banner is
+// proving — then routes the next create onto an account that is still walled
+// (#4404 review). A detected banner is therefore parked at the wall it shows,
+// exactly as a still pane would be; churn that is neither banner nor working
+// content proves only that the pane is alive, not that the account answered, so
+// it settles Running without touching stored evidence — the same bar the
+// still-pane path applies before it refutes.
+//
+// Returns (walled, refuted): walled tells the caller NOT to transition the
+// session Running — the pane just proved the opposite — and refuted feeds the
+// caller's settlement checkpoint fold like the resolveIdleLiveness return does.
+func (m *Manager) updatedPaneAccountVerdict(instance *session.Instance, content string, epoch uint64) (walled, refuted bool) {
+	agent := instance.ResolvedAgent()
+	if hit, resetAt, _ := m.limitDetector.Load().Check(content, agent, time.Now()); hit {
+		// The wall could not have been re-parked on the still-pane path — the
+		// pane CHANGED — so this is the tick that must record it. A superseded
+		// epoch answer is harmless exactly as it is there.
+		_ = m.setLimitReachedAtEpoch(instance, resetAt, epoch)
+		return true, false
+	}
+	if !task.IsWorkingContent(content, agent) {
+		return false, false
+	}
+	return false, m.refuteAccountLimitEvidence(instance, epoch)
+}

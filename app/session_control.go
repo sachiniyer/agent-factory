@@ -114,6 +114,11 @@ type sessionStartRequest struct {
 	// create` applies with no --account. It is a directory name in the DAEMON's
 	// account registry and never carries credential material.
 	Account string
+	// AccountAmbient marks the empty Account as the user's own ambient pick
+	// rather than an untouched field (#4404 review) — forwarded verbatim as
+	// CreateSessionRequest.AccountAmbient, so the daemon's pool router does not
+	// re-identify a session the user chose to keep on the ambient identity.
+	AccountAmbient bool
 }
 
 var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartRequest) (*session.Instance, error) {
@@ -121,13 +126,14 @@ var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartReques
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
 		data, e = c.CreateSession(daemon.CreateSessionRequest{
-			Title:     req.Title,
-			TitleBase: req.TitleBase,
-			RepoPath:  req.RepoPath,
-			Program:   req.Program,
-			Prompt:    req.Prompt,
-			Backend:   req.Backend,
-			Account:   req.Account,
+			Title:          req.Title,
+			TitleBase:      req.TitleBase,
+			RepoPath:       req.RepoPath,
+			Program:        req.Program,
+			Prompt:         req.Prompt,
+			Backend:        req.Backend,
+			Account:        req.Account,
+			AccountAmbient: req.AccountAmbient,
 		})
 		return e
 	})

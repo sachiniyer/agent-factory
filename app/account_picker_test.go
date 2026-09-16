@@ -539,24 +539,41 @@ func TestAccountFieldSurvivesARegistryFailure(t *testing.T) {
 func TestAccountSkewRefusalReadsWhatCameBack(t *testing.T) {
 	applied := &session.Instance{Title: "s", Account: "work"}
 
-	assert.NoError(t, accountSkewRefusal(ambientAccount, &session.Instance{Title: "s"}),
+	assert.NoError(t, accountSkewRefusal(ambientAccount, false, &session.Instance{Title: "s"}),
 		"a create that asked for no account has nothing to compare")
-	assert.NoError(t, accountSkewRefusal(ambientAccount, applied),
+	assert.NoError(t, accountSkewRefusal(ambientAccount, false, applied),
 		"a daemon that volunteered an account nobody asked for is not this check's business")
-	assert.NoError(t, accountSkewRefusal("work", applied), "an applied account is the silent case")
+	assert.NoError(t, accountSkewRefusal("work", false, applied), "an applied account is the silent case")
 
-	dropped := accountSkewRefusal("work", &session.Instance{Title: "s"})
+	dropped := accountSkewRefusal("work", false, &session.Instance{Title: "s"})
 	require.Error(t, dropped, "a daemon that dropped the field must be reported")
 	assert.Contains(t, dropped.Error(), "ambient identity")
 
-	other := accountSkewRefusal("work", &session.Instance{Title: "s", Account: "personal"})
+	other := accountSkewRefusal("work", false, &session.Instance{Title: "s", Account: "personal"})
 	require.Error(t, other, "a daemon that applied a DIFFERENT account must be reported too")
 	assert.Contains(t, other.Error(), `account "personal"`,
 		"the message names what the session is actually running as, not just what was asked for")
 
-	missing := accountSkewRefusal("work", nil)
+	missing := accountSkewRefusal("work", false, nil)
 	require.Error(t, missing, "no session to check against is not a pass")
 	assert.Contains(t, missing.Error(), "af sessions list --json")
+}
+
+// TestAccountSkewRefusalCoversTheAmbientPickToo pins the mirror arm (#4404
+// review): an explicit ambient choice landing on an account is the same
+// wrong-identity outcome as a named account landing on ambient — the daemon
+// dropped account_ambient, a field only this build and newer know.
+func TestAccountSkewRefusalCoversTheAmbientPickToo(t *testing.T) {
+	assert.NoError(t, accountSkewRefusal(ambientAccount, true, &session.Instance{Title: "s"}),
+		"ambient asked and ambient came back — the silent case")
+
+	routed := accountSkewRefusal(ambientAccount, true, &session.Instance{Title: "s", Account: "work"})
+	require.Error(t, routed, "an ambient pick landing on an account must be reported")
+	assert.Contains(t, routed.Error(), `account "work"`,
+		"the message names the identity the session is actually running as")
+
+	missing := accountSkewRefusal(ambientAccount, true, nil)
+	require.Error(t, missing, "no session to check against is not a pass here either")
 }
 
 // TestAccountChoiceItemMarksBothStates pins the row text itself, which is the

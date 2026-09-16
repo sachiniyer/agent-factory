@@ -389,7 +389,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// who has navigated away: a wrong identity is not a message to skip because
 		// the user is looking elsewhere.
 		var accountSkew tea.Cmd
-		if err := accountSkewRefusal(msg.account, started); err != nil {
+		if err := accountSkewRefusal(msg.account, msg.accountAmbient, started); err != nil {
 			accountSkew = m.handleError(err)
 		}
 		if !userStillWatching {

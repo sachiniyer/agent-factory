@@ -349,7 +349,10 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	churnCheckpoint := false
 	if obs.Updated {
 		_, churnCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
-		if m.refuteAccountLimitEvidence(instance, epoch) {
+		// Changed bytes are affirmative work only once they are checked against
+		// the limit detector — a wall repainting updates the pane too, and
+		// refuting on it would retract the evidence the banner is proving.
+		if _, refuted := m.updatedPaneAccountVerdict(instance, obs.Content, epoch); refuted {
 			churnCheckpoint = true
 		}
 	}
@@ -643,13 +646,19 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// Fresh output. Only a live pane produces bytes, and a dead one yields "" —
 		// so this is affirmative on its own, no probe needed.
 		observedAlive = true
-		// An account whose pane is producing agent output has refuted any stored
-		// usage-limit evidence against it (#4404). Before the transition: a
-		// parked session unparking bumps the epoch this refutation is scoped to.
-		if m.refuteAccountLimitEvidence(instance, epoch) {
+		// ...but only once the bytes are checked against the limit detector:
+		// a usage-limit banner repainting is updated content too, and it is the
+		// OPPOSITE of affirmative work — the wall itself, which parks the session
+		// rather than retracting its own evidence (#4404). Refutation waits for
+		// the transition for the same reason as before: a parked session
+		// unparking bumps the epoch the refutation is scoped to.
+		walled, refuted := m.updatedPaneAccountVerdict(instance, content, epoch)
+		if refuted {
 			settlementCheckpoint = true
 		}
-		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
+		if !walled {
+			_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
+		}
 	case hasPrompt:
 		// A matched prompt means the CAPTURE SUCCEEDED: hasPrompt is a substring test
 		// over content, and every failure path in HasUpdated returns content "". So

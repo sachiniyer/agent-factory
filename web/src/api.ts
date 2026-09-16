@@ -378,6 +378,12 @@ export interface CreateSessionInput {
    *  did not choose, and createSession then sends NO account so the session runs
    *  on the ambient identity. It is a directory name, never credential material. */
   account?: string;
+  /** True only when the user picked the ambient row itself (#4404 review): the
+   *  wire cannot tell "no choice; the daemon decides" from "I chose ambient"
+   *  without this bit, and the daemon's pool router reads unspecified-empty as
+   *  routable — silently re-identifying a session the user chose to keep off
+   *  the account pool. */
+  accountAmbient?: boolean;
 }
 
 /** Lists the runtimes a session in this repo can be created on, whether the repo's
@@ -434,6 +440,11 @@ export async function createSession(input: CreateSessionInput, token: string): P
   const account = (input.account ?? "").trim();
   if (account !== "") {
     body.account = account;
+  }
+  // The ambient counterpart: sent only when the user picked the ambient row —
+  // an untouched field sends neither and lets the daemon's router decide.
+  if (input.accountAmbient === true) {
+    body.account_ambient = true;
   }
   const resp = await af<{ instance: SessionData; warning?: string }>("CreateSession", body, token);
   if (resp.warning) {

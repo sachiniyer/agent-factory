@@ -20,6 +20,12 @@ func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.repoStartLocks == nil {
+		// Lazily populated like refutedLedgerAccounts — a Manager built outside
+		// the constructor (test shells) gets the same guarantee without a nil
+		// map write.
+		m.repoStartLocks = make(map[string]*sync.Mutex)
+	}
 	lock := m.repoStartLocks[repoID]
 	if lock == nil {
 		lock = &sync.Mutex{}

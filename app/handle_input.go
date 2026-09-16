@@ -38,6 +38,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingBackend = ""
 		m.backendPickerPending = false
 		m.pendingAccount = ""
+		m.pendingAccountAmbient = false
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -183,8 +184,14 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingBackend = ""
 		m.backendPickerPending = false
 		// And for the ctrl+o account field (#3844), on the loop for the same reason.
+		// pendingAccountAmbient rides with it: "the ambient identity" is a pick
+		// the wire cannot tell from an untouched field without the flag (#4404
+		// review). pendingAccountChosen needs no clearing — the next
+		// startNewInstance's clearPendingAccount resets the whole field.
 		account := m.pendingAccount
+		accountAmbient := m.pendingAccountAmbient
 		m.pendingAccount = ""
+		m.pendingAccountAmbient = false
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.state = stateDefault
@@ -216,8 +223,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// (#3844), forwarded verbatim as CreateSessionRequest.Account — the
 				// field `af sessions create --account` fills. Empty means "the ambient
 				// identity", so an untouched field is byte-identical to every create
-				// before this field existed.
-				Account: account,
+				// before this field existed. AccountAmbient adds the one bit Account
+				// cannot carry: whether that empty was the user's own pick (#4404).
+				Account:        account,
+				AccountAmbient: accountAmbient,
 			}
 			started, err := start(instance, req)
 			return instanceStartedMsg{
@@ -229,7 +238,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// the daemon reports on the session it created (#3844 constraint 5).
 				// Read off the request rather than the model: by the time this lands
 				// the form has been reset, and a later create may hold a different one.
-				account: account,
+				account:        account,
+				accountAmbient: accountAmbient,
 			}
 		}
 

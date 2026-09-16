@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -30,7 +31,15 @@ func defaultAccountFixture(t *testing.T, agent, account string) (home, repoPath 
 	p, err := config.RegisterProject(repoPath)
 	require.NoError(t, err)
 	if account != "" {
-		require.NoError(t, os.MkdirAll(filepath.Join(home, "accounts", agent, account), 0o700))
+		dir := filepath.Join(home, "accounts", agent, account)
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+		// Registered WITH a credential: the pool router skips accounts with no
+		// login evidence, and most fixtures mean "an account af could launch
+		// under", which is the logged-in state. Tests for the unlogged-in path
+		// build the bare directory themselves.
+		artifacts := agentaccount.AccountCredentialArtifacts(agent)
+		require.NotEmpty(t, artifacts, "test agent %q has no known credential artifact", agent)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, artifacts[0]), []byte("{}"), 0o600))
 	}
 	return home, repoPath, p
 }

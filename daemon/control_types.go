@@ -20,6 +20,16 @@ type CreateSessionRequest struct {
 	// Account scopes the session to one of the agent's registered credential
 	// accounts (#3051). Empty leaves it on the ambient identity.
 	Account string `json:"account,omitempty"`
+	// AccountAmbient records that the client DELIBERATELY chose the ambient
+	// identity rather than leaving the account unspecified. The two were
+	// indistinguishable in Account alone — empty means both "no choice; the
+	// daemon decides" and "I chose ambient" — and the create-time router read
+	// every empty as routable, silently re-identifying sessions whose users had
+	// picked the ambient row to keep them OFF the account pool (#4404 review).
+	// True makes empty mean ambient again: no pool routing, and no configured
+	// default_accounts application — an explicit ambient choice outranks a
+	// configured default exactly as an explicit --account does.
+	AccountAmbient bool `json:"account_ambient,omitempty"`
 	// AccountSource explains where a NON-REQUESTED account came from — the
 	// `default_accounts` key, the layer, the file, and how to clear it (#3386).
 	// Empty when the client named the account itself.
@@ -37,7 +47,14 @@ type CreateSessionRequest struct {
 	// Unexported like the other provenance fields: a client-settable one would
 	// let a caller launder a pinned identity into a routable one.
 	accountAutoSelected bool
-	Prompt              string `json:"prompt"`
+	// routedAccountClaim is the claim key claimCreateAccount recorded when it
+	// picked this create's account — "agent\x00account". It is how CreateSession
+	// knows WHICH reservation to retire when the pending projection takes over
+	// the count, or when the create fails before publishing. Unexported: the
+	// claim is the daemon's own bookkeeping, and a client-settable one would let
+	// a request name a reservation it never paid for.
+	routedAccountClaim string
+	Prompt             string `json:"prompt"`
 	// TaskID records which task's delivery spawned this session, and
 	// MaxConcurrentRuns carries that task's cap so the manager can decide
 	// admission under its own lock — the only place a burst cannot race the check

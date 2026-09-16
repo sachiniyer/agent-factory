@@ -215,6 +215,20 @@ func retractAccountLimitObservation(agent, account string) error {
 // The ledger check is bounded rather than per-tick because it is a locked file
 // read on a path the poll reaches every time a pane produces output.
 //
+// The refute retires the identity's evidence EVERYWHERE it is stored, not just
+// on the reporting session's row: a sibling session that hit the same wall
+// earlier keeps contributing its observation to accountLimitEvidenceForSwap,
+// so clearing one row left the account walled by evidence the refute had just
+// disproven (#4404 review). What is deliberately NOT retired is live state — a
+// sibling still parked LiveLimitReached under the identity keeps claiming its
+// wall, the conservative direction, and clears it on its own affirmative work.
+// Cleared sibling rows are persisted through the settlement path so a restart
+// cannot resurrect them.
+//
+// accountLimitMu makes the whole retirement one publication against automatic
+// account-swap admission: a swap reads either all of the identity's evidence or
+// none of it, never a half-retracted mix.
+//
 // Returns whether the session's own row changed, so the caller can checkpoint
 // the cleared evidence through the settlement write path.
 func (m *Manager) refuteAccountLimitEvidence(instance *session.Instance, epoch uint64) bool {
@@ -223,6 +237,13 @@ func (m *Manager) refuteAccountLimitEvidence(instance *session.Instance, epoch u
 		return false
 	}
 	key := agent + "\x00" + account
+	type clearedRow struct {
+		repoID   string
+		key      string
+		instance *session.Instance
+	}
+	var cleared []clearedRow
+	m.accountLimitMu.Lock()
 	m.mu.Lock()
 	_, checked := m.refutedLedgerAccounts[key]
 	if !checked {
@@ -231,6 +252,16 @@ func (m *Manager) refuteAccountLimitEvidence(instance *session.Instance, epoch u
 		}
 		m.refutedLedgerAccounts[key] = struct{}{}
 	}
+	for instanceKey, other := range m.instances {
+		if other == nil || other == instance {
+			continue
+		}
+		if !other.RetractAccountLimitObservation(agent, account) {
+			continue
+		}
+		repoID, _ := splitDaemonInstanceKey(instanceKey)
+		cleared = append(cleared, clearedRow{repoID: repoID, key: instanceKey, instance: other})
+	}
 	m.mu.Unlock()
 	if !checked {
 		if err := retractAccountLimitObservation(agent, account); err != nil {
@@ -238,7 +269,37 @@ func (m *Manager) refuteAccountLimitEvidence(instance *session.Instance, epoch u
 				agent, account, err)
 		}
 	}
+	m.accountLimitMu.Unlock()
+	// A cleared row is durable evidence retired in memory; the settlement write
+	// makes the retirement durable too, and its retry obligation survives a
+	// failed write rather than resurrecting the wall on the next load.
+	for _, row := range cleared {
+		if err := m.persistSettlement(row.repoID, row.key, row.instance); err != nil {
+			m.warn().Printf("session %q: refuted limit evidence for %s account %q cleared in memory but not yet on disk: %v",
+				row.instance.Title, agent, account, err)
+		}
+	}
 	return changed
+}
+
+// unrefuteRetainedAccountLimits drops the daemon-lifetime "ledger already
+// checked" mark for identities whose evidence was just re-retained. The mark
+// bounds locked file reads; it is not a truth cache — new retained evidence
+// for {agent, account} means the next successful session under it is a fresh
+// refutation that must retract the ledger row again, not a skipped one (#4404
+// review). Called after every successful retain, with the same observations
+// the retain just wrote.
+func (m *Manager) unrefuteRetainedAccountLimits(observations []session.AccountLimitObservationData) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, observation := range observations {
+		agent := strings.TrimSpace(observation.Agent)
+		account := strings.TrimSpace(observation.Account)
+		if agent == "" || account == "" {
+			continue
+		}
+		delete(m.refutedLedgerAccounts, agent+"\x00"+account)
+	}
 }
 
 func mergeAccountLimitObservations(current, added []session.AccountLimitObservationData) ([]session.AccountLimitObservationData, error) {

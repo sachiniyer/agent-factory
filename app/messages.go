@@ -109,4 +109,9 @@ type instanceStartedMsg struct {
 	// the field silently, and the UI must never go on to report an identity the
 	// session does not have.
 	account string
+	// accountAmbient records that the create asked for the ambient identity
+	// OUTRIGHT (#4404 review): the skew check then treats a session that came
+	// back on an account as the same wrong-identity outcome in the other
+	// direction.
+	accountAmbient bool
 }

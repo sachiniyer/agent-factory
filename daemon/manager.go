@@ -136,7 +136,14 @@ type Manager struct {
 	// a concrete Instance exists. Snapshot and the events plane expose these rows;
 	// mutation lookups do not, so a half-built runtime cannot be acted on.
 	pendingCreates map[string]session.InstanceData
-	reservedTitles map[string]struct{}
+	// createAccountClaims reserves each router-picked account between the
+	// routing decision and the pending-create row that publishes it — the gap in
+	// which two concurrent creates could otherwise read the same least-loaded
+	// snapshot and both take it (#4404 review). Keyed agent+"\x00"+account; the
+	// count hands off to the pending row inside the m.mu section that publishes
+	// it, so a load snapshot can never observe the assignment uncounted.
+	createAccountClaims map[string]int
+	reservedTitles      map[string]struct{}
 	// projectDeletes is a short-lived admission fence keyed by repo ID. A delete
 	// installs it under m.mu in the same decision that proves no create is already
 	// reserved or pending; reserveCreate checks it under that lock before any title
@@ -732,6 +739,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		storage:                   storage,
 		instances:                 make(map[string]*session.Instance),
 		pendingCreates:            make(map[string]session.InstanceData),
+		createAccountClaims:       make(map[string]int),
 		reservedTitles:            make(map[string]struct{}),
 		projectDeletes:            make(map[string]struct{}),
 		projectDeleteLastSeq:      make(map[string]uint64),

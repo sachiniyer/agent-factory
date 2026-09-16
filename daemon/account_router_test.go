@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -29,10 +31,18 @@ func stubAccountLimitEvidence(t *testing.T, observations []session.AccountLimitO
 	t.Cleanup(func() { loadAccountLimitEvidenceForSwap = previous })
 }
 
+// registerAccounts creates registry directories WITH a credential artifact, so
+// each name is a logged-in account — the state an automatic route may pick.
+// Tests needing registered-but-not-logged-in accounts make the bare directory
+// themselves (os.MkdirAll), which is exactly what LoggedIn reports false for.
 func registerAccounts(t *testing.T, home, agent string, names ...string) {
 	t.Helper()
+	artifacts := agentaccount.AccountCredentialArtifacts(agent)
+	require.NotEmpty(t, artifacts, "test agent %q has no known credential artifact", agent)
 	for _, name := range names {
-		require.NoError(t, os.MkdirAll(filepath.Join(home, "accounts", agent, name), 0o700))
+		dir := filepath.Join(home, "accounts", agent, name)
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, artifacts[0]), []byte("{}"), 0o600))
 	}
 }
 
@@ -141,6 +151,127 @@ func TestRouteCreateAccountKeepsAmbientWhenNoAccountsAreRegistered(t *testing.T)
 	req := CreateSessionRequest{Title: "ambient", RepoPath: repoPath, Program: "codex"}
 	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
 	assert.Empty(t, req.Account, "no registry means no pool to route across")
+}
+
+// #4404 review: an explicit ambient choice is not an invitation to route. The
+// picker's "use the agent's own login" row sends Account "" — which the router
+// used to read as routable — so AccountAmbient carries the one bit the wire
+// could not: "this empty was chosen".
+func TestRouteCreateAccountHonorsAnExplicitAmbientPick(t *testing.T) {
+	home, repoPath, project := defaultAccountFixture(t, "codex", "codex1")
+	registerAccounts(t, home, "codex", "codex2")
+	writeProjectAccounts(t, project, "[default_accounts]\ncodex = \"codex1\"\n")
+	stubAccountLimitEvidence(t, nil)
+
+	req := CreateSessionRequest{Title: "chose-ambient", RepoPath: repoPath, Program: "codex", AccountAmbient: true}
+	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	assert.Empty(t, req.Account,
+		"an ambient pick keeps the ambient identity — neither routed nor defaulted")
+	assert.False(t, req.accountAutoSelected)
+}
+
+// #4404 review: registration is a directory name, not a launchable identity.
+// Automatic routing onto an account with no credential in it would put the new
+// session on an identity that cannot authenticate — silently, in place of the
+// ambient login that always worked.
+func TestRouteCreateAccountSkipsAccountsWithNoCredential(t *testing.T) {
+	home, repoPath, _ := defaultAccountFixture(t, "codex", "codex1")
+	// codex2 is registered but never logged in — a bare directory, exactly what
+	// `af accounts add` leaves before `af accounts login` runs.
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "accounts", "codex", "codex2"), 0o700))
+	stubAccountLimitEvidence(t, nil)
+
+	req := CreateSessionRequest{Title: "logged-in-only", RepoPath: repoPath, Program: "codex"}
+	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	assert.Equal(t, "codex1", req.Account,
+		"the only account with a completed login is the only one an automatic pick may land on")
+}
+
+func TestRouteCreateAccountKeepsAnUnloggedInConfiguredDefault(t *testing.T) {
+	home, repoPath, project := defaultAccountFixture(t, "codex", "")
+	// The configured default is registered but has no credential yet — the
+	// "runs as it until you log in" state its picker rows document. It is the
+	// user's own pin, so it stays a candidate where an automatic pick would not.
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "accounts", "codex", "work"), 0o700))
+	registerAccounts(t, home, "codex", "play")
+	writeProjectAccounts(t, project, "[default_accounts]\ncodex = \"work\"\n")
+	stubAccountLimitEvidence(t, nil)
+
+	req := CreateSessionRequest{Title: "unlogged-default", RepoPath: repoPath, Program: "codex"}
+	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	assert.Equal(t, "work", req.Account,
+		"a configured default is an explicit pin — honored while healthy even before login")
+}
+
+func TestRouteCreateAccountStaysAmbientWhenNoAccountIsLoggedIn(t *testing.T) {
+	home, repoPath, _ := defaultAccountFixture(t, "codex", "")
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "accounts", "codex", "work"), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "accounts", "codex", "play"), 0o700))
+	stubAccountLimitEvidence(t, nil)
+
+	req := CreateSessionRequest{Title: "all-unlogged", RepoPath: repoPath, Program: "codex"}
+	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	assert.Empty(t, req.Account,
+		"no credential anywhere means no automatic pick can produce a working session")
+}
+
+// #4404 review: the pick and its reservation must be one critical section.
+// Before the claim existed, two concurrent creates both read the same
+// least-loaded snapshot and both took the same account, because the pending row
+// that would have counted the first pick published long after.
+func TestClaimCreateAccountSpreadsConcurrentCreates(t *testing.T) {
+	m := &Manager{}
+	limited := map[string]time.Time{}
+	pool := []string{"codex1", "codex2"}
+
+	first, claim1, err := m.claimCreateAccount("codex", pool, limited, "")
+	require.NoError(t, err)
+	second, claim2, err := m.claimCreateAccount("codex", pool, limited, "")
+	require.NoError(t, err)
+	assert.NotEqual(t, first, second,
+		"the first claim counts against its account before the second pick runs")
+
+	m.releaseCreateAccountClaim(claim1)
+	m.releaseCreateAccountClaim(claim2)
+	third, _, err := m.claimCreateAccount("codex", pool, limited, "")
+	require.NoError(t, err)
+	assert.Equal(t, pool[0], third,
+		"released claims stop counting — the pool is equally loaded again")
+}
+
+func TestRefuteAccountLimitEvidenceRetiresSiblingRowsToo(t *testing.T) {
+	_, repoPath, project := defaultAccountFixture(t, "codex", "codex4")
+	reset := time.Now().Add(72 * time.Hour)
+
+	answered, err := session.NewInstance(session.InstanceOptions{
+		Title: "answered", Path: repoPath, Program: "codex", Account: "codex4",
+	})
+	require.NoError(t, err)
+	answered.SetLimitReached(reset)
+	answered.ClearLimitReached()
+	require.Len(t, answered.AccountLimitObservations(), 1, "precondition: the stale wall is stored")
+
+	// A SIBLING session carries the same {agent, account} wall evidence — the
+	// shape a deleted session's row used to leave behind, and the one that kept
+	// the account walled after the reporting session's own row was cleared.
+	sibling, err := session.NewInstance(session.InstanceOptions{
+		Title: "sibling", Path: repoPath, Program: "codex", Account: "codex4",
+	})
+	require.NoError(t, err)
+	sibling.SetLimitReached(reset)
+	require.Len(t, sibling.AccountLimitObservations(), 1)
+	m := &Manager{
+		instances:      map[string]*session.Instance{daemonInstanceKey(project.ID, "sibling"): sibling},
+		repoStartLocks: map[string]*sync.Mutex{},
+	}
+
+	_, epoch := answered.InFlightOpAndEpoch()
+	require.True(t, m.refuteAccountLimitEvidence(answered, epoch))
+	assert.Empty(t, answered.AccountLimitObservations())
+	assert.Empty(t, sibling.AccountLimitObservations(),
+		"the refuted identity's evidence retires on every session that carries it, not just the reporter's")
+	assert.True(t, sibling.LimitReached(),
+		"but a sibling's LIVE wall is its own claim — it clears on the sibling's own work, not another's")
 }
 
 // The web-selftest shape: program_overrides points the agent's label at a shim

@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"fmt"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
@@ -35,12 +37,17 @@ import (
 // branch or tmux session, and every surface (TUI, web, CLI, task deliveries)
 // gets the same routing with no re-implementation.
 //
-// Two cases keep the old answer exactly: an explicit --account, and a create
-// whose backend cannot carry an account (ssh/hook/sandbox — NewInstance refuses
-// an account there, so routing one would break a previously-working create).
-// For both, the configured default still applies and refuses by name as before.
+// Three cases keep the old answer exactly: an explicit --account, an explicit
+// AccountAmbient (a picker that offers "the ambient identity" must mean it —
+// routing that request onto the pool silently re-identifies a session the user
+// chose to keep OFF it, and an ambient pick outranks a configured default for
+// the same reason an explicit --account does), and a create whose backend
+// cannot carry an account (ssh/hook/sandbox — NewInstance refuses an account
+// there, so routing one would break a previously-working create). For the
+// first and last, the configured default still applies and refuses by name as
+// before.
 func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionRequest) error {
-	if strings.TrimSpace(req.Account) != "" || req.allowReserved {
+	if strings.TrimSpace(req.Account) != "" || req.allowReserved || req.AccountAmbient {
 		return nil
 	}
 	agent := sessionenv.AgentForCommand(req.Program)
@@ -95,12 +102,40 @@ func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionReque
 		// refused above, so ambient is the only identity left.
 		return nil
 	}
+	// An automatic pick may only land on an account the agent can actually
+	// launch as — one with a completed login. Registration alone is a directory
+	// name: routing onto an account with no credential in it would put the new
+	// session on an identity that cannot authenticate, silently, in place of
+	// the ambient login that always worked. A configured default is the one
+	// exception: it is the user's own pin (the same contract --account
+	// carries), and its picker rows already say "runs as it until you log in",
+	// so it stays a candidate the way an explicit choice would.
+	pool := make([]string, 0, len(registered))
+	for _, name := range registered {
+		loggedIn, lerr := agentaccount.LoggedIn(home, agent, name)
+		switch {
+		case lerr != nil:
+			m.warn().Printf("cannot verify the %s credential for account %q — leaving it out of automatic routing: %v",
+				agent, name, lerr)
+		case loggedIn:
+			pool = append(pool, name)
+		}
+	}
+	if selection.Name != "" && !slices.Contains(pool, selection.Name) {
+		pool = append(pool, selection.Name)
+	}
+	if len(pool) == 0 {
+		// Every registered account is missing its credential, so no automatic
+		// pick can produce a working session — and a configured default would
+		// have been refused above or sits in the pool, so ambient is the only
+		// identity left.
+		return nil
+	}
 	limited, err := m.accountLimitEvidenceForSwap(agent, loadAccountLimitEvidenceForSwap)
 	if err != nil {
 		return fmt.Errorf("cannot route %q to a healthy %s account: %w", req.Title, agent, err)
 	}
-	loads := m.accountSessionLoads(agent, registered)
-	chosen, err := quota.RouteAccountPool(agent, registered, limited, selection.Name, loads)
+	chosen, claim, err := m.claimCreateAccount(agent, pool, limited, selection.Name)
 	if err != nil {
 		return err
 	}
@@ -110,6 +145,7 @@ func (m *Manager) routeCreateAccount(cfg *config.Config, req *CreateSessionReque
 	}
 	req.Account = chosen
 	req.accountAutoSelected = true
+	req.routedAccountClaim = claim
 	if chosen == selection.Name {
 		req.AccountSource = defaultAccountProvenance(selection, req.RepoPath)
 	} else {
@@ -136,18 +172,63 @@ func resolvedCreateProgram(cfg *config.Config, repoPath, program string) string 
 	return config.ResolveProgram(cfg, program)
 }
 
-// accountSessionLoads counts the sessions currently holding each candidate
-// account, so RouteAccountPool can spread new work across the pool. Live
-// instances and in-flight creates both count — a burst of near-simultaneous
-// creates must not all pile onto the same least-loaded answer.
-func (m *Manager) accountSessionLoads(agent string, registered []string) map[string]int {
+// claimCreateAccount picks this create's account and reserves the pick in the
+// SAME m.mu critical section that computed the loads — the fix for the
+// read-then-pick gap the router opened (#4404 review). Before this, loads were
+// a snapshot: two near-simultaneous creates could both read "least loaded" for
+// the same account and both take it, because the pending-create projection that
+// would have counted the first pick was not published until long after. The
+// claim stands in for that row until CreateSession publishes it — the row then
+// carries the account itself, and the claim hands the count off under one lock
+// — or until the create fails before publishing and releases it.
+func (m *Manager) claimCreateAccount(agent string, pool []string, limited map[string]time.Time, preferred string) (chosen, claim string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	loads := m.accountSessionLoadsLocked(agent, pool)
+	chosen, err = quota.RouteAccountPool(agent, pool, limited, preferred, loads)
+	if err != nil {
+		return "", "", err
+	}
+	claim = agent + "\x00" + chosen
+	if m.createAccountClaims == nil {
+		m.createAccountClaims = make(map[string]int)
+	}
+	m.createAccountClaims[claim]++
+	return chosen, claim, nil
+}
+
+// releaseCreateAccountClaim drops one outstanding router claim — called by
+// CreateSession when the create exits before its pending row could take over
+// the count.
+func (m *Manager) releaseCreateAccountClaim(claim string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.releaseCreateAccountClaimLocked(claim)
+}
+
+// releaseCreateAccountClaimLocked retires one claim. The pending-row handoff
+// calls it inside the SAME m.mu section that publishes the row, so no load
+// snapshot can observe the assignment counted twice or not at all. Caller holds
+// m.mu.
+func (m *Manager) releaseCreateAccountClaimLocked(claim string) {
+	if n := m.createAccountClaims[claim]; n > 1 {
+		m.createAccountClaims[claim] = n - 1
+		return
+	}
+	delete(m.createAccountClaims, claim)
+}
+
+// accountSessionLoadsLocked counts the sessions currently holding each
+// candidate account, so RouteAccountPool can spread new work across the pool.
+// Live instances, in-flight creates AND outstanding router claims all count —
+// a burst of near-simultaneous creates must not all pile onto the same
+// least-loaded answer. Caller holds m.mu.
+func (m *Manager) accountSessionLoadsLocked(agent string, registered []string) map[string]int {
 	candidate := make(map[string]bool, len(registered))
 	for _, name := range registered {
 		candidate[name] = true
 	}
 	loads := make(map[string]int, len(registered))
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	for _, inst := range m.instances {
 		if inst == nil || inst.IsArchived() {
 			continue
@@ -169,6 +250,13 @@ func (m *Manager) accountSessionLoads(agent string, registered []string) map[str
 			continue
 		}
 		loads[pending.Account]++
+	}
+	for claim, n := range m.createAccountClaims {
+		claimAgent, account, ok := strings.Cut(claim, "\x00")
+		if !ok || claimAgent != agent || !candidate[account] {
+			continue
+		}
+		loads[account] += n
 	}
 	return loads
 }

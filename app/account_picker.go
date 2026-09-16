@@ -74,6 +74,13 @@ type accountChoice struct {
 	// behaviour: the row is selected like any other, and saying so is the point —
 	// the issue's complaint is a default applied in silence.
 	projectDefault bool
+	// defersToDefault marks the first row when it means "use configured default"
+	// rather than "use the ambient identity" — both send Account "", but only
+	// the no-default version asks for ambient outright. The submit turns that
+	// difference into CreateSessionRequest.AccountAmbient, so the daemon's pool
+	// router can tell "let the default decide" from "keep this session off the
+	// pool" (#4404 review).
+	defersToDefault bool
 	// unregistered marks a row that exists only because the project default names
 	// it: the daemon's registry did not list it, so a create with it will be
 	// refused. Distinct from !loggedIn, which is an account that exists and merely
@@ -100,6 +107,7 @@ func accountChoicesFrom(resp daemon.ListAccountsResponse, agent string) []accoun
 	fallback := resp.Defaults[agent]
 	if fallback != "" {
 		choices[0].label = "Use configured default (" + fallback + ")"
+		choices[0].defersToDefault = true
 	}
 	listed := false
 	for _, entry := range resp.Entries {
@@ -470,6 +478,11 @@ func (m *home) handleStateSelectAccount(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.pendingAccount = choice.value
 	m.pendingAccountChosen = true
+	// The empty row only means ambient when it did not stand in for a configured
+	// default — "use the agent's own login" is a deliberate keep-off-the-pool
+	// choice the daemon cannot distinguish from an untouched field without this
+	// flag (#4404 review).
+	m.pendingAccountAmbient = choice.value == ambientAccount && !choice.defersToDefault
 	m.menu.SetNamingAccount(m.pendingAccount != ambientAccount)
 	if choice.unregistered {
 		// A row that exists only because the project default names it. It is a
@@ -503,6 +516,7 @@ func (m *home) handleStateSelectAccount(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *home) clearPendingAccount() {
 	m.pendingAccount = ambientAccount
 	m.pendingAccountChosen = false
+	m.pendingAccountAmbient = false
 	m.menu.SetNamingAccount(false)
 }
 
@@ -548,7 +562,26 @@ func registrationOnlyRefusal(agent, name string) error {
 // The daemon is the authority on what it stored, so this reads what came back
 // rather than what was sent. It NAMES BOTH accounts, and it names the session,
 // because one now exists that has to be removed rather than used.
-func accountSkewRefusal(requested string, started *session.Instance) error {
+func accountSkewRefusal(requested string, ambientRequested bool, started *session.Instance) error {
+	if ambientRequested {
+		// The ambient identity is a choice too: a session that came back on an
+		// account when ambient was picked is the same silent wrong-identity
+		// outcome in the other direction — the daemon dropped account_ambient,
+		// which only exists since the router learned to honor it.
+		if started == nil {
+			return fmt.Errorf(
+				"session was created for the ambient identity but the daemon returned nothing to check it against — it may " +
+					"be running on an account. Verify with `af sessions list --json` before using it")
+		}
+		if started.Account == "" {
+			return nil
+		}
+		return fmt.Errorf(
+			"session %q was created for the ambient identity but the daemon put it on account %q — it is running as "+
+				"an identity you did not choose. The running daemon predates ambient requests; upgrade it (af daemon "+
+				"restart after an upgrade), then kill this session and create it again",
+			started.Title, started.Account)
+	}
 	if requested == ambientAccount {
 		return nil
 	}

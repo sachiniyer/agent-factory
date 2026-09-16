@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	xansi "github.com/charmbracelet/x/ansi"
@@ -459,14 +460,22 @@ pointing at one).`,
 			}
 		}
 
+		// An explicitly empty --account is the user's own ambient choice — the
+		// CLI's spelling of the picker's ambient row — and the daemon's pool
+		// router cannot tell it from an unset flag without the AccountAmbient
+		// bit: Changed distinguishes "--account \"\"" from "flag absent" (#4404
+		// review). Absent keeps the router's default: pool or configured default.
+		accountAmbient := cmd.Flags().Changed("account") && strings.TrimSpace(createAccountFlag) == ""
+
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
-			Title:    createTitle,
-			RepoPath: workspace,
-			Program:  program,
-			Account:  createAccountFlag,
-			Prompt:   createPromptFlag,
-			InPlace:  inPlace,
-			Backend:  createBackendFlag,
+			Title:          createTitle,
+			RepoPath:       workspace,
+			Program:        program,
+			Account:        createAccountFlag,
+			AccountAmbient: accountAmbient,
+			Prompt:         createPromptFlag,
+			InPlace:        inPlace,
+			Backend:        createBackendFlag,
 		})
 		if err != nil {
 			return jsonError(err)
@@ -501,6 +510,19 @@ pointing at one).`,
 				// parsing: `--name=-worker` is a valid title, and `af sessions kill
 				// '-worker'` still exits "unknown shorthand flag". The terminator lives in
 				// that helper so no call site has to remember it (#3432).
+				shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, data.Title)))
+		}
+		if accountAmbient && data.Account != "" {
+			// The mirror arm of the named-account check above: an explicitly
+			// empty --account asked for the ambient identity, and a session that
+			// came back on an account is the same wrong-identity outcome in the
+			// other direction — the daemon dropped account_ambient, a field only
+			// this build and newer know (#4404 review).
+			return jsonError(fmt.Errorf(
+				"session %q was created for the ambient identity but the daemon put it on account %q — it is running "+
+					"as an identity you did not choose. The running daemon predates ambient requests; upgrade it "+
+					"(af daemon restart after an upgrade) and recreate. Remove the session with `%s`",
+				data.Title, data.Account,
 				shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, data.Title)))
 		}
 

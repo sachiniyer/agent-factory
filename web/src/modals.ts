@@ -20,6 +20,7 @@ import { handoffAccountChoices } from "./handoff_accounts.js";
 import { AccountSelection } from "./account_selection.js";
 import type { CreateSessionInput, DirectoryListing } from "./api.js";
 import {
+  AMBIENT_ACCOUNT,
   type AccountChoice,
   accountAgentFor,
   accountChoices,
@@ -421,6 +422,14 @@ export function newSessionModal(
       // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
       // `account` entirely and the daemon applies its default, if any (#3844).
       account: accountSelect.value,
+      // The ambient row is a deliberate choice only when the user picked it AND
+      // it did not stand in for a configured default ("Use configured default
+      // (X)" is row-empty too, and it is not ambient). Without this bit the
+      // daemon cannot tell that pick from an untouched field, and its pool
+      // router would re-identify the session the user chose to keep ambient
+      // (#4404 review).
+      accountAmbient: accountSelection.picked && accountSelect.value === AMBIENT_ACCOUNT
+        && accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog)) === "",
     });
   });
 
