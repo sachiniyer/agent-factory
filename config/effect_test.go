@@ -206,6 +206,35 @@ func TestEffectNoticeSavedValueSuperseded(t *testing.T) {
 	t.Errorf("got %q, want %q", n, want)
 }
 
+// A deferred key is raced on disk exactly like a live one, and the value the
+// next start reads is the one that WON — so the "takes effect" promise must give
+// way to the race rather than be made about another writer's value (#4247).
+func TestEffectNoticeSupersededDeferredKeyDropsTheTakesEffectPromise(t *testing.T) {
+	for _, tc := range []struct {
+		key  string
+		want string
+	}{
+		{
+			key:  "branch_prefix",
+			want: "Saved — a newer write raced this save, so the value waiting for the next daemon start is not the one this save wrote.",
+		},
+		{
+			key:  "appearance",
+			want: "Saved — a newer write raced this save, so the value waiting for the next af launch is not the one this save wrote.",
+		},
+	} {
+		outcome := ApplyOutcome{DaemonApplied: true, SavedValueSuperseded: true}
+		got := EffectNotice(tc.key, outcome)
+		if got != tc.want {
+			t.Errorf("EffectNotice(%q) = %q, want %q", tc.key, got, tc.want)
+		}
+		if got == "Saved — this setting takes effect on the next daemon start." ||
+			got == "Saved — this setting takes effect the next time you launch af." {
+			t.Errorf("EffectNotice(%q) still promises this save takes effect", tc.key)
+		}
+	}
+}
+
 func TestEffectNoticeDaemonApplyUnconfirmed(t *testing.T) {
 	const want = "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
 	outcome := ApplyOutcome{DaemonApplyFailed: true, DaemonApplyUnconfirmed: true}
@@ -282,10 +311,25 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			want: ApplyStatusSuperseded,
 		},
 		{
-			name: "superseded never overrides a deferred class",
+			// A deferred key is raced on disk exactly like a live one, and the
+			// value the next daemon start will read is the one that WON. Reporting
+			// "deferred" here promised that this save takes effect at that start
+			// while another writer's value was waiting there instead (#4247).
+			name: "superseded outranks a deferred class, whose stored value it contradicts",
 			outcome: ApplyOutcome{
 				DaemonApplied:        true,
 				SavedValueSuperseded: true,
+			},
+			key:  "branch_prefix",
+			want: ApplyStatusSuperseded,
+		},
+		{
+			// The complement: an apply result that says nothing about WHICH value
+			// is stored still loses to the class, because no apply can make a
+			// startup-only key live.
+			name: "an unconfirmed apply still defers a startup-only key",
+			outcome: ApplyOutcome{
+				DaemonApplyUnconfirmed: true,
 			},
 			key:  "branch_prefix",
 			want: ApplyStatusDeferred,

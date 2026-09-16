@@ -194,9 +194,26 @@ const (
 )
 
 // StatusForKey projects the whole apply onto one saved key's stable wire value.
-// Uncertainty wins over failure if a malformed caller sets both: once the reply
-// is lost, the client cannot honestly claim the daemon kept its previous config.
+//
+// Precedence, and why it is this order: a lost race outranks everything, because
+// it is the one answer about which VALUE IS STORED rather than about what the
+// apply did with it. Below that, the key's effect class outranks the apply
+// result, since an apply cannot make a startup-only key live and an unconfirmed
+// or failed apply does not change when that stored value starts being used.
+// Within the apply result, uncertainty wins over failure if a malformed caller
+// sets both: once the reply is lost, the client cannot honestly claim the daemon
+// kept its previous config.
 func (o ApplyOutcome) StatusForKey(key string) ApplyStatus {
+	// Ahead of the class switch, because losing the race is a statement about
+	// WHICH VALUE IS STORED and the class only describes when a stored value
+	// starts being used. A startup-only key is raced on disk exactly like a live
+	// one, and "deferred" would promise that THIS save takes effect at the next
+	// daemon start while the value waiting there belongs to the writer that won
+	// (#4247). Only a readback that resolved the key sets this, so it cannot
+	// fire for a key whose value was never actually compared.
+	if o.SavedValueSuperseded {
+		return ApplyStatusSuperseded
+	}
 	// Match EffectNotice's key-first rule. A startup-only setting is deferred
 	// regardless of whether a daemon happened to receive this save; that apply
 	// call cannot make the key live. The same holds for client-side settings,
@@ -215,9 +232,6 @@ func (o ApplyOutcome) StatusForKey(key string) ApplyStatus {
 	}
 	if o.listenerRebindFailed(key) {
 		return ApplyStatusDeferred
-	}
-	if o.SavedValueSuperseded {
-		return ApplyStatusSuperseded
 	}
 	if o.DaemonApplied {
 		return ApplyStatusApplied
@@ -284,9 +298,18 @@ func EffectNotice(key string, outcome ApplyOutcome) string {
 		}
 		return "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
 	case EffectNextDaemonStart:
+		// A deferred key is raced on disk exactly like a live one, and the
+		// stored value is precisely what the next start will read — so the
+		// "takes effect" promise below would be made about someone else's write.
+		if outcome.SavedValueSuperseded {
+			return "Saved — a newer write raced this save, so the value waiting for the next daemon start is not the one this save wrote."
+		}
 		notice := "Saved — this setting takes effect on the next daemon start."
 		return WithRootAgentAdoptionNotice(key, notice)
 	case EffectNextAfLaunch:
+		if outcome.SavedValueSuperseded {
+			return "Saved — a newer write raced this save, so the value waiting for the next af launch is not the one this save wrote."
+		}
 		return "Saved — this setting takes effect the next time you launch af."
 	default:
 		return "Saved."

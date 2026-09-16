@@ -118,10 +118,17 @@ func (s *supersedingControl) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConfig
 	return nil
 }
 
-// TestClientFallbackConfigSaveReportsSupersededValue: the fallback cannot read
-// the old daemon's live config (GetConfig arrived with SetConfigValue in
-// #1960), so it verifies the post-apply disk — the file the apply loaded.
-func TestClientFallbackConfigSaveReportsSupersededValue(t *testing.T) {
+// The fallback cannot read the old daemon's live config (GetConfig arrived with
+// SetConfigValue in #1960), so the only readback it has is the post-apply disk.
+//
+// That read happens only after the apply RPC has
+// returned. A competing write landing between the old daemon's load and that
+// read leaves the daemon correctly serving THIS save while the file shows
+// another value, so the disk state is not evidence of which generation the
+// daemon loaded. The outcome is therefore unconfirmed rather than a definitive
+// lost race (#4247) — but the load-bearing half is unchanged: this path must
+// never claim the daemon is serving the value this save wrote.
+func TestClientFallbackConfigSaveCannotConfirmADivergedValue(t *testing.T) {
 	cases := []struct {
 		name      string
 		unset     bool
@@ -143,14 +150,16 @@ func TestClientFallbackConfigSaveReportsSupersededValue(t *testing.T) {
 			if tc.unset {
 				resp, uerr := UnsetGlobalConfigValue(tc.key)
 				require.NoError(t, uerr)
-				require.Equal(t, config.ApplyStatusSuperseded, resp.ApplyOutcome)
+				require.Equal(t, config.ApplyStatusUnconfirmed, resp.ApplyOutcome)
 				require.NotContains(t, resp.RestartNotice, "using the new value now")
+				require.Contains(t, resp.Warnings, unconfirmedReadbackWarning)
 				return
 			}
 			resp, serr := SetGlobalConfigValue(tc.key, tc.saveValue)
 			require.NoError(t, serr)
-			require.Equal(t, config.ApplyStatusSuperseded, resp.ApplyOutcome)
+			require.Equal(t, config.ApplyStatusUnconfirmed, resp.ApplyOutcome)
 			require.NotContains(t, resp.RestartNotice, "using the new value now")
+			require.Contains(t, resp.Warnings, unconfirmedReadbackWarning)
 		})
 	}
 }

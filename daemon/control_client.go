@@ -433,17 +433,6 @@ func requestApplyConfigAttempt() (ApplyConfigResponse, daemonCallAttempt) {
 	return resp, attempt
 }
 
-// failedConfigApplyOutcome keeps a daemon's explicit refusal distinct from a
-// lost RPC reply. The former proves that the saved config was not applied; the
-// latter proves only that the client cannot tell whether it was applied.
-func failedConfigApplyOutcome(err error) (config.ApplyOutcome, string) {
-	var serverErr rpc.ServerError
-	if errors.As(err, &serverErr) {
-		return config.ApplyOutcome{DaemonApplyFailed: true}, "saved config, but live apply failed: " + err.Error()
-	}
-	return config.ApplyOutcome{DaemonApplyUnconfirmed: true}, "saved config, but live apply could not be confirmed: " + err.Error()
-}
-
 // SetGlobalConfigValue writes one global config key through a running daemon's
 // SetConfigValue — the same admission-gated handler the web form posts to — so
 // every first-class save surface consults the same lifecycle predicate
@@ -522,11 +511,15 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 		resp.Warnings = applyResp.Warnings
 		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
 		// A daemon this old cannot report its live config back (GetConfig arrived
-		// with SetConfigValue in #1960), so verify against the file the apply
-		// loaded: if a competing write landed between the local write's lock
-		// release and the daemon's load, disk no longer holds this save's value
-		// and "applied" would be a claim the client cannot make (#4247).
-		outcome.SavedValueSuperseded = diskValueDiverged(result.Key, result.Value)
+		// with SetConfigValue in #1960), so the only readback available is the
+		// file — and it is read AFTER the apply returned. That cannot establish
+		// which generation the daemon loaded, so a divergence here downgrades the
+		// claim to unconfirmed rather than asserting a lost race (#4247).
+		if diskSavedValue(result.Key, result.Value) != savedValueConfirmed {
+			outcome.DaemonApplied = false
+			outcome.DaemonApplyUnconfirmed = true
+			resp.Warnings = append(resp.Warnings, unconfirmedReadbackWarning)
+		}
 	} else if applyAttempt.requestStarted {
 		var warning string
 		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
@@ -591,8 +584,12 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
 		// Same race as the set fallback: the unset's live value is the default,
 		// and a post-apply disk read is the only readback a pre-GetConfig daemon
-		// offers (#4247).
-		outcome.SavedValueSuperseded = diskValueDiverged(result.Key, unsetExpectedValue(result.Key))
+		// offers, so it downgrades rather than contradicts (#4247).
+		if diskSavedValue(result.Key, unsetExpectedValue(result.Key)) != savedValueConfirmed {
+			outcome.DaemonApplied = false
+			outcome.DaemonApplyUnconfirmed = true
+			resp.Warnings = append(resp.Warnings, unconfirmedReadbackWarning)
+		}
 	} else if applyAttempt.requestStarted {
 		var warning string
 		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
