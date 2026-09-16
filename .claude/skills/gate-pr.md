@@ -395,7 +395,7 @@ jq -s '
   | ($all
      | map(select(
          .in_reply_to_id != null
-         and ((.user.login | sub("^app/";"") | sub("\\[bot\\]$";"")) | IN($allowed[]))
+         and (((.user.login // "") | sub("^app/";"") | sub("\\[bot\\]$";"")) | IN($allowed[]))
          and ((((.body // "") | test("\\b(RESOLVED|ACCEPTED)\\b"))
                or ((.body // "") | contains("[gate-ack]"))))))
      | map(.in_reply_to_id)) as $resolved
@@ -426,7 +426,7 @@ jq -s -r --arg hd "$HD" '
   | ($all
      | map(select(
          .in_reply_to_id != null
-         and ((.user.login | sub("^app/";"") | sub("\\[bot\\]$";"")) | IN($allowed[]))
+         and (((.user.login // "") | sub("^app/";"") | sub("\\[bot\\]$";"")) | IN($allowed[]))
          and ((.body // "") | test("\\bRESOLVED\\b"))))
      | map(.in_reply_to_id)) as $claimed
   | $all
