@@ -987,74 +987,98 @@ func wordHasCommandSubstitution(word syntax.Node) bool {
 	return found
 }
 
-// cmdSubstAssignedVars returns the set of variable names that are assigned
-// (at the top-level, not inside a subshell) from command substitutions in the
-// given file. These variables are "tainted": bash re-evaluates their value as
-// fresh arithmetic when they appear inside an arithmetic context (`$(( ))`,
-// `(( ))`, `let`, numeric `[[ ]]`), so a prior `x=$(printf CODEX_HOME=1)`
-// followed by `: $((x))` carries the same bypass as an inline substitution.
+// taintAccumulator tracks the set of "tainted" variable names across a
+// sequence of shell statements, processing them in execution order. A variable
+// is tainted when its value originates from a command substitution at top-level
+// (not inside a subshell): bash re-evaluates such values as fresh arithmetic
+// when the variable appears inside an arithmetic context, so the substitution's
+// output becomes a deferred arithmetic mutation.
 //
 // Taint propagates transitively through parameter-expansion copies: when `y=$x`
-// and `x` is tainted, bash stores `x`'s contents in `y`, so `: $((y))` carries
-// the same re-evaluation hazard. A single fixed-point pass over the same
-// top-level Assign nodes handles chains of arbitrary length.
+// and `x` is tainted, bash stores x's contents in y, so `: $((y))` carries the
+// same re-evaluation hazard as `: $((x))`. The fixed-point propagation covers
+// chains of arbitrary length.
 //
-// Only top-level Assign nodes are collected; assignments inside a subshell or
-// command substitution run in a child process and cannot affect the parent's
-// environment, so they do not taint the outer scope.
-func cmdSubstAssignedVars(file syntax.Node) map[string]struct{} {
-	tainted := make(map[string]struct{})
+// Processing statements individually rather than whole-file ensures that an
+// assignment that appears AFTER an arithmetic expression does not cause that
+// earlier expression to be refused: the taint contributed by a statement is
+// only visible to SUBSEQUENT statements.
+type taintAccumulator struct {
+	// tainted is the set of variable names currently known to be tainted.
+	tainted map[string]struct{}
+	// allAssigns accumulates every non-CmdSubst assign seen in any statement
+	// processed so far, for use in the fixed-point propagation step.
+	allAssigns []taintAssignRecord
+}
 
-	// First pass: collect direct command-substitution assignments.
-	type assignRecord struct {
-		name  string
-		value *syntax.Word
-	}
-	var topLevelAssigns []assignRecord
-	syntax.Walk(file, func(node syntax.Node) bool {
-		switch n := node.(type) {
+// taintAssignRecord holds a non-CmdSubst assignment target and its RHS word,
+// which may transitively reference a tainted variable.
+type taintAssignRecord struct {
+	name  string
+	value *syntax.Word
+}
+
+// newTaintAccumulator creates an empty taintAccumulator.
+func newTaintAccumulator() *taintAccumulator {
+	return &taintAccumulator{tainted: make(map[string]struct{})}
+}
+
+// Tainted returns the current set of tainted variable names. The returned map
+// must not be modified by the caller.
+func (t *taintAccumulator) Tainted() map[string]struct{} {
+	return t.tainted
+}
+
+// AddStmt scans node for command-substitution assignments and updates the
+// tainted set. Call this AFTER checking node for mutations so that an
+// assignment in this statement does not taint variables used in this same
+// statement's arithmetic expressions; the taint only applies to subsequent
+// statements.
+//
+// Assignments inside a subshell or command substitution are skipped because
+// they run in a child process and cannot affect the parent's environment.
+func (t *taintAccumulator) AddStmt(node syntax.Node) {
+	syntax.Walk(node, func(n syntax.Node) bool {
+		switch n := n.(type) {
 		case *syntax.Subshell, *syntax.CmdSubst:
-			// Assignments inside a subshell or command substitution run in a
-			// child process; they cannot affect the parent environment.
 			return false
 		case *syntax.Assign:
 			if n.Name != nil && n.Value != nil {
 				if wordHasCommandSubstitution(n.Value) {
-					tainted[n.Name.Value] = struct{}{}
+					t.tainted[n.Name.Value] = struct{}{}
 				} else {
-					topLevelAssigns = append(topLevelAssigns, assignRecord{n.Name.Value, n.Value})
+					t.allAssigns = append(t.allAssigns, taintAssignRecord{n.Name.Value, n.Value})
 				}
 			}
 		case *syntax.ParamExp:
-			// A parameter expansion with an assignment operator (${x:=...} or
-			// ${x=...}) assigns to x when x is unset (or null for :=). If the
-			// assignment word contains a command substitution, x is tainted —
-			// bash re-evaluates x's value as fresh arithmetic when x later
-			// appears in an arithmetic context.
+			// ${x:=...} / ${x=...} assigns to x when x is unset (or null).
 			if n.Param != nil && n.Exp != nil &&
 				(n.Exp.Op == syntax.AssignUnset || n.Exp.Op == syntax.AssignUnsetOrNull) &&
 				n.Exp.Word != nil {
 				if wordHasCommandSubstitution(n.Exp.Word) {
-					tainted[n.Param.Value] = struct{}{}
+					t.tainted[n.Param.Value] = struct{}{}
 				} else {
-					topLevelAssigns = append(topLevelAssigns, assignRecord{n.Param.Value, n.Exp.Word})
+					t.allAssigns = append(t.allAssigns, taintAssignRecord{n.Param.Value, n.Exp.Word})
 				}
 			}
 		}
 		return true
 	})
+	t.propagate()
+}
 
-	// Second pass: propagate taint through parameter-expansion copies.
-	// `y=$x` assigns x's value to y; if x is tainted, so is y. Repeat until
-	// no new names are added (handles chains: x→y→z).
+// propagate runs a fixed-point pass over all accumulated non-CmdSubst assigns,
+// marking any whose RHS references an already-tainted variable as tainted.
+// Repeated until stable to handle transitive chains (x→y→z).
+func (t *taintAccumulator) propagate() {
 	for {
 		added := false
-		for _, rec := range topLevelAssigns {
-			if _, already := tainted[rec.name]; already {
+		for _, rec := range t.allAssigns {
+			if _, already := t.tainted[rec.name]; already {
 				continue
 			}
-			if wordReferencesTaintedVar(rec.value, tainted) {
-				tainted[rec.name] = struct{}{}
+			if wordReferencesTaintedVar(rec.value, t.tainted) {
+				t.tainted[rec.name] = struct{}{}
 				added = true
 			}
 		}
@@ -1062,8 +1086,21 @@ func cmdSubstAssignedVars(file syntax.Node) map[string]struct{} {
 			break
 		}
 	}
+}
 
-	return tainted
+// cmdSubstAssignedVars returns the set of variable names that are assigned
+// (at the top-level, not inside a subshell) from command substitutions in the
+// given file. These variables are "tainted": bash re-evaluates their value as
+// fresh arithmetic when they appear inside an arithmetic context (`$(( ))`,
+// `(( ))`, `let`, numeric `[[ ]]`), so a prior `x=$(printf CODEX_HOME=1)`
+// followed by `: $((x))` carries the same bypass as an inline substitution.
+//
+// This whole-file variant is kept for callers that do not need statement-level
+// ordering. Prefer taintAccumulator when ordering matters.
+func cmdSubstAssignedVars(file syntax.Node) map[string]struct{} {
+	acc := newTaintAccumulator()
+	acc.AddStmt(file)
+	return acc.Tainted()
 }
 
 // arithmeticExprReferencesTaintedVar reports whether an arithmetic expression

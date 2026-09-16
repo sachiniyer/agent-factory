@@ -297,6 +297,60 @@ func TestValidateAccountEnvironmentCommand_RefusesCStyleLoopArithmetic(t *testin
 	}
 }
 
+// TestValidateAccountEnvironmentCommand_RefusesDeclarationBuiltinTaint verifies
+// that a variable assigned from a command substitution via a declaration builtin
+// (declare, typeset, local, export) is refused when later used in an arithmetic
+// context. In bash, `declare x=$(printf CODEX_HOME=1)` is equivalent to
+// `x=$(printf CODEX_HOME=1)` for taint purposes: bash re-evaluates x's value
+// as fresh arithmetic when x appears in `$((x))`, `(( ))`, or `let`.
+//
+// The bash parser represents DeclClause arguments as `*syntax.Assign` nodes,
+// so the taint accumulator's Assign arm already catches them without any
+// special-case handling. This test locks down that behavior.
+func TestValidateAccountEnvironmentCommand_RefusesDeclarationBuiltinTaint(t *testing.T) {
+	for _, command := range []string{
+		// declare builtin: x gets the substitution output; : $((x)) re-evaluates it.
+		"declare x=$(printf CODEX_HOME=1); : $((x)); codex",
+		// typeset is an alias for declare in bash.
+		"typeset x=$(printf CODEX_HOME=1); : $((x)); codex",
+		// export with a command substitution also taints the variable.
+		"export x=$(printf CODEX_HOME=1); : $((x)); codex",
+		// Taint propagates through a copy: declare → variable copy → arithmetic.
+		"declare x=$(printf CODEX_HOME=1); y=$x; : $((y)); codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q routes a declaration-builtin substitution through a variable into arithmetic and must be refused", command)
+	}
+}
+
+// TestValidateAccountEnvironmentCommand_RespectsStatementOrderForTaint verifies
+// that a command-substitution assignment that appears AFTER an arithmetic
+// expression does not cause that earlier expression to be refused. Only
+// assignments that precede an arithmetic use contribute taint to it.
+//
+// Example: `x=0; : $((x)); x=$(printf CODEX_HOME=1); codex`
+//   - At the point of `$((x))`, x holds the literal 0; the substitution that
+//     would taint x has not yet run, so the arithmetic is safe.
+//   - The guard must not refuse this command because of a later assignment.
+func TestValidateAccountEnvironmentCommand_RespectsStatementOrderForTaint(t *testing.T) {
+	for _, command := range []string{
+		// Arithmetic uses x before x is assigned from a command substitution.
+		"x=0; : $((x)); x=$(printf CODEX_HOME=1); codex",
+		// (( )) form.
+		"x=0; (( x )); x=$(printf CODEX_HOME=1); codex",
+		// let form.
+		"x=0; let x; x=$(printf CODEX_HOME=1); codex",
+		// Taint-propagation chain where the copy and arithmetic both precede
+		// the tainted assignment: y=$x is not tainted at that point.
+		"x=0; y=$x; : $((y)); x=$(printf CODEX_HOME=1); codex",
+		// Numeric [[ ]] operand before tainted assignment.
+		"x=0; [[ x -eq 0 ]]; x=$(printf CODEX_HOME=1); codex",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"command %q uses arithmetic before the tainted assignment and must stay allowed", command)
+	}
+}
+
 // The refusal above must stay narrow. A process tab is an arbitrary user
 // command, so ordinary arithmetic — including `$(( ))` that contains NO
 // command substitution — and command substitutions that appear OUTSIDE an
