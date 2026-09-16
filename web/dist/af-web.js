@@ -18445,7 +18445,10 @@ function doRegisterAccount(agent, name) {
   }
   const requestGeneration = connectionGeneration;
   void registerAccount(agent, name, tok).then((resp) => {
-    if (requestGeneration !== connectionGeneration || token !== tok) return;
+    if (requestGeneration !== connectionGeneration || token !== tok) {
+      refreshAccounts();
+      return;
+    }
     const notices = resp.notices?.length ? ` \xB7 ${resp.notices.join(" \xB7 ")}` : "";
     setAccountStatus(agent, "", `Registered ${agent} account "${resp.entry.name}"${notices}`, false);
     refreshAccounts();
@@ -18496,7 +18499,10 @@ function applyConfigValue(key, value) {
 function applyConfigValueNow(key, value, tok) {
   const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok).then((resp) => {
-    if (requestGeneration !== connectionGeneration || token !== tok) return;
+    if (requestGeneration !== connectionGeneration || token !== tok) {
+      refreshConfig();
+      return;
+    }
     store.set({
       configStatus: {
         key: resp.result.key,
