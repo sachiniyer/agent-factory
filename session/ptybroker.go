@@ -307,6 +307,16 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 		resizeSeen: b.resizeGen,
 		notify:     make(chan struct{}, 1),
 	}
+	// A subscriber that has never seen a size echo is owed the authoritative one
+	// before its first repaint: NextEvent emits the echo ahead of screen content,
+	// so a viewer sizes its emulator to the pane's REAL size before the reflowed
+	// screen lands in it — painting first would wrap the snapshot at whatever
+	// geometry the client happened to start with (#4480). A seamless reconnect is
+	// owed it too: the client's emulator may have moved while it was gone.
+	// resizeGen >= 1 whenever hasSize holds, so the decrement cannot underflow.
+	if b.hasSize {
+		sub.resizeSeen = b.resizeGen - 1
+	}
 	b.subs[sub.id] = sub
 	b.mu.Unlock()
 
@@ -876,6 +886,19 @@ func (s *ptySub) NextEvent(ctx context.Context) (PTYEvent, error) {
 			}
 			return PTYEvent{}, io.EOF
 		}
+		// The authoritative size echo goes before ANY screen content — a fresh
+		// subscriber's repaint must land in an emulator already at the pane's real
+		// size, or the snapshot wraps at whatever geometry the client started with
+		// (#4480). A lagging subscriber likewise learns the new size before the
+		// reflowed bytes that follow it. The echo is size metadata, not screen
+		// content, so it also precedes the recovery barrier: an armed subscriber
+		// may hear the size while its repaint is still being captured.
+		if s.br.hasSize && s.resizeSeen != s.br.resizeGen {
+			s.resizeSeen = s.br.resizeGen
+			ev := PTYEvent{Kind: PTYResize, Rows: s.br.rows, Cols: s.br.cols}
+			s.br.mu.Unlock()
+			return ev, nil
+		}
 		// The initial screen repaint is delivered before anything else, so a fresh
 		// subscriber paints the current screen before the first live byte lands. It
 		// is a PTYRepaint (not PTYData) so the client renders it without advancing its
@@ -905,12 +928,6 @@ func (s *ptySub) NextEvent(ctx context.Context) (PTYEvent, error) {
 				return PTYEvent{}, err
 			}
 			continue
-		}
-		if s.br.hasSize && s.resizeSeen != s.br.resizeGen {
-			s.resizeSeen = s.br.resizeGen
-			ev := PTYEvent{Kind: PTYResize, Rows: s.br.rows, Cols: s.br.cols}
-			s.br.mu.Unlock()
-			return ev, nil
 		}
 		head := s.br.headLocked()
 		if s.cursor < s.br.base {

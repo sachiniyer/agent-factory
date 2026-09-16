@@ -286,13 +286,87 @@ func TestPTYBrokerInitialRepaint(t *testing.T) {
 	mustData(t, sub, "live-after-resize")
 
 	// A reconnecting subscriber (since > 0) gets NO repaint — it resumes seamlessly
-	// via replay. A since past the head clamps to the live tail.
+	// via replay. A since past the head clamps to the live tail. Because a size is
+	// already established, its FIRST event is the authoritative resize echo (#4480):
+	// the emulator must be at the pane's real size before any content lands.
 	re, err := br.subscribe(1 << 40)
 	if err != nil {
 		t.Fatalf("reconnect subscribe: %v", err)
 	}
+	ev, err = nextWithin(t, re, 2*time.Second)
+	if err != nil {
+		t.Fatalf("reconnect NextEvent: %v", err)
+	}
+	if ev.Kind != PTYResize || ev.Rows != 40 || ev.Cols != 100 {
+		t.Fatalf("reconnect first event = %+v, want the authoritative size echo", ev)
+	}
 	ch.emit(t, []byte("live"))
 	mustData(t, re, "live")
+}
+
+// TestPTYBrokerFreshSubscriberGetsSizeBeforeRepaint pins the #4480 ordering: a
+// subscriber that joins AFTER a size is established must receive the
+// authoritative resize echo BEFORE its initial repaint — the repaint's reflowed
+// rows only land correctly in an emulator already at the pane's real size.
+func TestPTYBrokerFreshSubscriberGetsSizeBeforeRepaint(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("SCREEN-80")}
+	br := newPTYBroker(ch)
+	if err := br.resize(30, 100); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("first NextEvent: %v", err)
+	}
+	if ev.Kind != PTYResize || ev.Rows != 30 || ev.Cols != 100 {
+		t.Fatalf("first event = %+v, want the authoritative resize echo before the repaint", ev)
+	}
+	ev, err = nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("second NextEvent: %v", err)
+	}
+	if ev.Kind != PTYRepaint {
+		t.Fatalf("second event = %+v, want the initial repaint after the size echo", ev)
+	}
+}
+
+// TestPTYBrokerRecoveryClearsStaleSize pins the #4480 recovery half: a
+// pane-replacing resetCapture (kill-session + new-session — every
+// onlyIfNoHealthyCapture=false path) brings the pane back at the server's
+// default-size, so the broker's recorded size no longer describes it. A fresh
+// subscriber must NOT be sized to the dead pane's geometry; the driving surface
+// re-asserts the real one.
+func TestPTYBrokerRecoveryClearsStaleSize(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("RECOVERED")}
+	br := newPTYBroker(ch)
+	if _, err := br.subscribe(0); err != nil { // bring the capture up
+		t.Fatalf("subscribe: %v", err)
+	}
+	if err := br.resize(30, 100); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+
+	br.resetCapture() // pane replaced: the recorded size died with it
+
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe after recovery: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("NextEvent: %v", err)
+	}
+	if ev.Kind == PTYResize {
+		t.Fatalf("first event after pane-replacing recovery = %+v — the dead pane's size must not be echoed", ev)
+	}
+	if ev.Kind != PTYRepaint {
+		t.Fatalf("first event after recovery = %+v, want the repaint", ev)
+	}
 }
 
 func TestPTYBrokerRepaintCarriesTerminalModes(t *testing.T) {

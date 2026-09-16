@@ -1,6 +1,8 @@
 package termpane
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,15 +77,20 @@ func TestMouseForwardingSuppressedWithoutInnerMouseMode(t *testing.T) {
 	assert.Empty(t, got, "no mouse mode set → no bytes reach the PTY")
 }
 
-// TestMouseResizeGapDropsEventPastGrid pins the #1534 finding: during a resize gap
-// the pane zone can grow before the emulator is resized to match, so a click below
-// or right of the current grid must be DROPPED, not forwarded as a bogus row the
-// inner app never drew. The streamed bytes are the pane itself, so grid row equals
-// content row (no status offset).
+// TestMouseResizeGapDropsEventPastGrid pins the #1534 finding: when the pane's
+// view box is larger than the emulator — the box grew while the emulator still
+// tracks a smaller authoritative size (a viewer mid-echo, #4480) — a click
+// below or right of the grid must be DROPPED, not forwarded as a bogus row the
+// inner app never drew. The streamed bytes are the pane itself, so grid row
+// equals content row (no status offset).
 func TestMouseResizeGapDropsEventPastGrid(t *testing.T) {
-	tp, _ := newSingleStreamPane(t, 30, 6)
-	require.Equal(t, 6, tp.emu.Height())
-	require.Equal(t, 30, tp.emu.Width())
+	tp, s := newSingleStreamPane(t, 30, 6)
+	// A viewer's emulator tracks the pane's AUTHORITATIVE size via the broker's
+	// echoes, not the view box — here the echo lands the emulator at 30x6.
+	s.feedResize(6, 30)
+	require.Eventually(t, func() bool {
+		return tp.emu.Height() == 6 && tp.emu.Width() == 30
+	}, 2*time.Second, 5*time.Millisecond)
 
 	click := mouseMsg(tea.MouseActionPress, tea.MouseButtonLeft, 0, 0)
 
@@ -95,6 +102,39 @@ func TestMouseResizeGapDropsEventPastGrid(t *testing.T) {
 		"a click well past the grid is dropped, not forwarded as a bogus row")
 	assert.False(t, tp.SendMouse(click, 30, 5),
 		"a click past the last column is dropped too")
+}
+
+// TestMouseClickTranslatesAcrossTheCrop pins the viewer-crop half of #4480: a
+// viewer's emulator can be TALLER than its box, in which case Render shows a
+// window anchored at the pane's working edge. A click must land on the cell it
+// was painted over, so the view row is translated by the same crop offset.
+func TestMouseClickTranslatesAcrossTheCrop(t *testing.T) {
+	tp, s := newSingleStreamPane(t, 40, 6)
+	// Authoritative size taller than the view: the pane is 40x10, the box 40x6.
+	s.feedResize(10, 40)
+	require.Eventually(t, func() bool {
+		return tp.emu.Height() == 10 && tp.emu.Width() == 40
+	}, 2*time.Second, 5*time.Millisecond)
+
+	// Fill the pane: ten rows of content in a 10-row emulator scroll "row-0" off
+	// the top and leave the cursor on the last row, so the crop anchors to the
+	// bottom window — view rows 0-5 show emulator rows 4-9.
+	for y := 0; y < 10; y++ {
+		s.feed(fmt.Sprintf("row-%d\r\n", y))
+	}
+	waitForRender(t, tp, 40, 6, "row-9")
+
+	// The inner app wants the mouse: SGR button-event tracking.
+	s.feed(sgrMouseModes)
+	waitTrackingEnabled(t, tp, true, "DECSET 1002 must enable tracking")
+
+	// A click on view row 5 maps to emulator row 9: encoded 1-based as ;10. An
+	// untranslated write would encode the view row (;6).
+	tp.SendMouse(mouseMsg(tea.MouseActionPress, tea.MouseButtonLeft, 0, 0), 2, 5)
+	require.Eventually(t, func() bool {
+		return strings.Contains(s.sentInput(), "\x1b[<0;3;10M")
+	}, 2*time.Second, 5*time.Millisecond,
+		"a click inside the crop must encode the EMULATOR row, not the view row")
 }
 
 // TestTranslateMouseUnknownButton: buttons with no encoding are refused, not

@@ -222,6 +222,16 @@ func (b *ptyBroker) recoverCapture(onlyIfNoHealthyCapture bool) {
 	// that resets it) invalidates the stale value; a same-pane eviction clamp,
 	// which advances base WITHOUT replacing the pane, never sets it.
 	b.recoveryDiscardAt = b.base
+	// The recorded pane size died with the pane it described: every path that
+	// reaches here with onlyIfNoHealthyCapture=false replaced the tmux window
+	// (kill-session + new-session), so the pane is back at the server's
+	// default-size until a driving surface asserts one. Keeping the stale value
+	// would have the next fresh subscriber's opening echo size its emulator for
+	// a pane that no longer exists (#4480). The remote re-dial path
+	// (onlyIfNoHealthyCapture) keeps it — that pane was never replaced.
+	if !onlyIfNoHealthyCapture {
+		b.hasSize = false
+	}
 	// The upstream is about to be re-established, so the pane's death stops being
 	// the terminal condition shouldWarnResizeFailure latched on (#3862) and a later
 	// one deserves its own line. Cleared here rather than after the restart because

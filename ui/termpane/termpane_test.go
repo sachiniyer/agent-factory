@@ -89,6 +89,12 @@ func (s *fakeStream) feedRepaint(b string) { s.events <- Event{Kind: EventRepain
 // announcing that it moved this subscription's cursor over bytes it no longer holds.
 func (s *fakeStream) feedCursor(seq uint64) { s.events <- Event{Kind: EventCursor, Seq: seq} }
 
+// feedResize pushes the broker's authoritative size echo (a server → client
+// resize control): the pane's REAL size a viewer's emulator reflows to (#4480).
+func (s *fakeStream) feedResize(rows, cols uint16) {
+	s.events <- Event{Kind: EventResize, Rows: rows, Cols: cols}
+}
+
 func (s *fakeStream) sentInput() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -177,6 +183,8 @@ func TestResizeSendsResizeFrame(t *testing.T) {
 	s.feed("hi")
 	waitForRender(t, tp, 80, 24, "hi")
 
+	// Only the size owner writes RESIZE frames (#4480) — promote first.
+	tp.SetSizeOwner(true)
 	tp.Resize(100, 30)
 	require.Eventually(t, func() bool {
 		r, ok := s.lastResize()
@@ -184,24 +192,85 @@ func TestResizeSendsResizeFrame(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond, "Resize must send a RESIZE frame (rows,cols)=(30,100)")
 }
 
+// TestViewerResizeNeverSendsFrame pins the #4480 fix: a pane that is only
+// VIEWING a session must never resize it — its box is a render crop, not
+// terminal geometry. Neither a RESIZE frame nor an emulator re-window may
+// follow the viewer's box change.
+func TestViewerResizeNeverSendsFrame(t *testing.T) {
+	tp, s := newSingleStreamPane(t, 80, 24)
+	s.feed("viewer-marker")
+	waitForRender(t, tp, 80, 24, "viewer-marker")
+
+	tp.Resize(40, 8)
+
+	// Give any wrongly-sent frame every chance to land.
+	require.Never(t, func() bool {
+		_, ok := s.lastResize()
+		return ok
+	}, 500*time.Millisecond, 10*time.Millisecond,
+		"a viewer's Resize must never write a RESIZE frame — watching a session must not reflow it (#4480)")
+
+	// The emulator keeps the pane's authoritative size (spawn 80x24 here), so a
+	// 40-wide box shows a CROP: the long row is clipped, not re-wrapped.
+	s.feed("\r\n" + strings.Repeat("q", 60))
+	require.Eventually(t, func() bool {
+		return strings.Contains(plainRender(tp, 40, 8), strings.Repeat("q", 39)+"…")
+	}, 2*time.Second, 10*time.Millisecond,
+		"a wider authoritative row must clip with the … marker at the view's edge")
+}
+
+// TestSetSizeOwnerAssertsViewBox pins the promotion contract: an interactive
+// pane takes over the pane's size, so promotion asserts the CURRENT view box
+// (not the emulator's stale tracked size) and re-windows the emulator to it.
+func TestSetSizeOwnerAssertsViewBox(t *testing.T) {
+	tp, s := newSingleStreamPane(t, 80, 24)
+	s.feed("x")
+	waitForRender(t, tp, 80, 24, "x")
+
+	// Shrink the box while still a viewer: no frame, emulator untouched.
+	tp.Resize(60, 10)
+	tp.SetSizeOwner(true)
+	require.Eventually(t, func() bool {
+		r, ok := s.lastResize()
+		return ok && r == [2]uint16{10, 60} // rows, cols
+	}, 2*time.Second, 10*time.Millisecond, "promotion must assert the current view box as the pane size")
+	assert.Equal(t, 60, tp.emu.Width())
+	assert.Equal(t, 10, tp.emu.Height())
+
+	// Demotion is local-only: no frame pushes the viewer's box back.
+	s.mu.Lock()
+	s.resizes = nil
+	s.mu.Unlock()
+	tp.SetSizeOwner(false)
+	tp.Resize(80, 24)
+	require.Never(t, func() bool {
+		_, ok := s.lastResize()
+		return ok
+	}, 500*time.Millisecond, 10*time.Millisecond,
+		"leaving interactive must not resize the session back to the viewer's box")
+}
+
 // TestReconnectResizeKeepsTheNewestSize is the #2417 regression: last-resize-wins
 // has to mean last-INTENT-wins, not last-frame-to-win-the-write-lock.
 //
 // Both senders write RESIZE frames — Resize() when the pane geometry changes, and
-// run() once per (re)connect, to re-assert a size the server has never been told
-// (the pane may have resized while disconnected). run() captured the desired size
-// under connMu and then wrote it after unlocking, so a Resize() landing in that
-// window updated the size and sent it FIRST, leaving run()'s now-stale frame to
-// arrive LAST and win. The server sizes the PTY to the stale value and echoes it
-// back, so the emulator grid is forced to the old size while the TUI frame is at
-// the new one — mismatched wrapping until something resizes again.
+// the assertSize path (per-(re)connect re-assert, or a SetSizeOwner promotion —
+// the owner-only writers since #4480), to tell the server a size it has never
+// been told (the pane may have resized while disconnected). The pre-fix code
+// captured the desired size under connMu and then wrote it after unlocking, so a
+// Resize() landing in that window updated the size and sent it FIRST, leaving
+// the in-flight stale frame to arrive LAST and win. The server sizes the PTY to
+// the stale value and echoes it back, so the emulator grid is forced to the old
+// size while the TUI frame is at the new one — mismatched wrapping until
+// something resizes again.
 //
-// The interleaving is driven, not raced: the gate fires inside run()'s write, which
+// The interleaving is driven, not raced: the gate fires inside the assertSize
+// write (here triggered by the owner promotion — a viewer sends nothing), which
 // is exactly the window between its capture and its send, and the test waits for
-// the new geometry to be committed before letting that write proceed. Asserting on
-// the LAST frame rather than the frame count is deliberate — either sender may
-// legitimately write, and which of them writes last is the only thing the server's
-// last-resize-wins rule reads.
+// the new geometry to be committed before letting that write proceed. Asserting
+// on the LAST frame rather than the frame count is deliberate — either sender
+// may legitimately write, and which of them writes last is the only thing the
+// server's last-resize-wins rule reads.
 func TestReconnectResizeKeepsTheNewestSize(t *testing.T) {
 	const (
 		oldWidth, oldHeight = 80, 24
@@ -211,8 +280,9 @@ func TestReconnectResizeKeepsTheNewestSize(t *testing.T) {
 	s := newFakeStream(0)
 	d := &queueDialer{streams: []*fakeStream{s}}
 
-	// The gate runs on the run goroutine and needs the pane New() has not returned
-	// yet, so publish it through a channel rather than racing the assignment.
+	// The gate runs on whichever goroutine owns the assertSize write and needs the
+	// pane New() has not returned yet, so publish it through a channel rather than
+	// racing the assignment.
 	paneCh := make(chan *TermPane, 1)
 	resized := make(chan struct{})
 	// Deliberately NOT sync.Once: Do blocks its concurrent callers until the first
@@ -228,9 +298,9 @@ func TestReconnectResizeKeepsTheNewestSize(t *testing.T) {
 				tp.Resize(newWidth, newHeight)
 			}()
 			// Wait for the new geometry to reach the pane's desired size. That commit
-			// is the precise moment run()'s captured value goes stale, and it happens
-			// under connMu before Resize() writes anything — so this cannot deadlock
-			// against a fix that serializes the two writers.
+			// is the precise moment the in-flight writer's captured value goes stale,
+			// and it happens under connMu before Resize() writes anything — so this
+			// cannot deadlock against a fix that serializes the two writers.
 			require.Eventually(t, func() bool {
 				tp.connMu.Lock()
 				defer tp.connMu.Unlock()
@@ -264,6 +334,13 @@ func TestReconnectResizeKeepsTheNewestSize(t *testing.T) {
 	tp := New(d.dial, oldWidth, oldHeight)
 	t.Cleanup(func() { _ = tp.Close() })
 	paneCh <- tp
+	// The pane starts a VIEWER (#4480): the connect-time assert stays silent.
+	// Promote it once the stream is live so the promotion's assertSize is the
+	// write the gate intercepts — the same capture-then-send window the original
+	// reconnect path had.
+	s.feed("x")
+	waitForRender(t, tp, oldWidth, oldHeight, "x")
+	tp.SetSizeOwner(true)
 	<-resized
 
 	// The server's last word must be the size the user actually resized to.
@@ -276,29 +353,29 @@ func TestReconnectResizeKeepsTheNewestSize(t *testing.T) {
 		newHeight, newWidth)
 }
 
-// TestResizeKeepsContentThenServerRepaints pins the PR6 resize behavior: unlike
+// TestResizeKeepsContentThenServerRedraws pins the PR6 resize behavior: unlike
 // the old tmux attach client (which blanked locally and relied on tmux's redraw),
-// the WS client does NOT blank on resize — pipe-pane never carries tmux's redraw,
-// so blanking would leave the pane empty until output. Instead the emulator
-// re-windows (content stays visible), and the daemon injects a clean capture-pane
-// repaint (ED 2 + reflowed screen) that the client applies a round-trip later.
-func TestResizeKeepsContentThenServerRepaints(t *testing.T) {
+// the WS client does NOT blank on resize — the emulator re-windows (content stays
+// visible), and the pane's program redraws itself at the new size on SIGWINCH,
+// streamed back through pipe-pane a round-trip later.
+func TestResizeKeepsContentThenServerRedraws(t *testing.T) {
 	tp, s := newSingleStreamPane(t, 40, 6)
 	s.feed("keep-me-on-resize\r\n")
 	waitForRender(t, tp, 40, 6, "keep-me-on-resize")
 
-	// Resize does not blank: the content is still there (re-windowed), never an
-	// empty pane.
+	// Only the size owner's Resize re-windows the emulator and drives the pane
+	// (#4480) — promote first, then resize.
+	tp.SetSizeOwner(true)
 	tp.Resize(30, 8)
 	assert.Contains(t, plainRender(tp, 30, 8), "keep-me-on-resize",
-		"resize must NOT blank the WS pane — pipe-pane carries no tmux redraw to recover from a blank")
+		"resize must NOT blank the WS pane — the pane's SIGWINCH redraw streams back a round-trip later")
 
-	// The daemon's repaint (clear + reflowed screen) arrives over the stream and
-	// cleanly redraws at the new size.
+	// The program's SIGWINCH redraw (clear + reflowed screen) arrives over the
+	// stream and cleanly redraws at the new size.
 	s.feed("\x1b[2J\x1b[Hreflowed-after-resize\r\n")
 	waitForRender(t, tp, 30, 8, "reflowed-after-resize")
 	assert.NotContains(t, plainRender(tp, 30, 8), "keep-me-on-resize",
-		"the server repaint (ED 2) must clear the stale grid before redrawing")
+		"the program's redraw (ED 2) must clear the stale grid before redrawing")
 }
 
 func TestSendKeyEmitsInputFrame(t *testing.T) {
@@ -415,9 +492,9 @@ func TestCursorEventReseedsReplayCursor(t *testing.T) {
 	assert.Equal(t, uint64(503), second, "the pane must adopt the server's announced cursor, not its own byte count")
 }
 
-// TestReconnectReassertsDesiredSize pins that a pane resized while disconnected
-// re-asserts its size to the server on reconnect (last-resize-wins), so the new
-// stream sizes the window to the pane.
+// TestReconnectReassertsDesiredSize pins that an OWNER pane resized while
+// disconnected re-asserts its size to the server on reconnect
+// (last-resize-wins), so the new stream sizes the window to the pane.
 func TestReconnectReassertsDesiredSize(t *testing.T) {
 	s1 := newFakeStream(0)
 	s2 := newFakeStream(0)
@@ -428,13 +505,39 @@ func TestReconnectReassertsDesiredSize(t *testing.T) {
 	s1.feed("x")
 	waitForRender(t, tp, 80, 24, "x")
 
-	tp.Resize(120, 40) // rows=40, cols=120
-	_ = s1.Close()     // drop; reconnect should re-assert the new size
+	tp.SetSizeOwner(true) // only the size owner re-asserts on reconnect (#4480)
+	tp.Resize(120, 40)    // rows=40, cols=120
+	_ = s1.Close()        // drop; reconnect should re-assert the new size
 
 	require.Eventually(t, func() bool {
 		r, ok := s2.lastResize()
 		return ok && r == [2]uint16{40, 120}
 	}, 2*time.Second, 10*time.Millisecond, "reconnect must re-assert the desired size to the new stream")
+}
+
+// TestViewerReconnectStaysSilent is the #4480 counterpart: a VIEWER reconnecting
+// must not re-assert a size — the pane belongs to whatever surface is driving
+// it, and a viewer's RESIZE on every reconnect is a reflow the user can see.
+func TestViewerReconnectStaysSilent(t *testing.T) {
+	s1 := newFakeStream(0)
+	s2 := newFakeStream(0)
+	d := &queueDialer{streams: []*fakeStream{s1, s2}}
+	tp := New(d.dial, 80, 24)
+	t.Cleanup(func() { _ = tp.Close() })
+
+	s1.feed("x")
+	waitForRender(t, tp, 80, 24, "x")
+
+	tp.Resize(40, 8) // viewer box change: no frame
+	_ = s1.Close()   // drop → reconnect to s2
+
+	s2.feed("y")
+	waitForRender(t, tp, 40, 8, "y")
+	require.Never(t, func() bool {
+		_, ok := s2.lastResize()
+		return ok
+	}, 500*time.Millisecond, 10*time.Millisecond,
+		"a viewer's reconnect must not write a RESIZE frame (#4480)")
 }
 
 // TestDialFailureRetriesThenConnects pins that a failed dial backs off and retries
