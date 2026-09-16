@@ -39,6 +39,10 @@ func withShortDockerReapTimeout(t *testing.T, d time.Duration) {
 // times out, both causes and the orphan risk must reach the session creator.
 func TestDockerProvisionFailureSurfacesUnknownReap(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// A local engine so the pre-run locality guard passes; this test exercises
+	// the create-then-fail reap path, not the remote-engine refusal.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	repoRoot := initTempGitRepo(t)
 	writeInRepoConfig(t, repoRoot, map[string]any{
 		"backend": "docker",

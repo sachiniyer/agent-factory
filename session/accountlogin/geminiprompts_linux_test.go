@@ -40,7 +40,7 @@ const (
 // BareSessionStreamer the web login overlay attaches to — rather than through a
 // capture-pane of af's making, so what the test reads is what a client reads.
 func TestGeminiLoginPaneOpensOnTheDeviceCodePrompt(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
@@ -83,7 +83,7 @@ func TestGeminiLoginPaneOpensOnTheDeviceCodePrompt(t *testing.T) {
 // of af's answer, and requires the picker. It is also the real behaviour worth
 // keeping: an account that chose a different auth type keeps it, prompt and all.
 func TestGeminiLoginPaneStillAsksWhenTheAccountAnsweredForItself(t *testing.T) {
-	testguard.IsolateTmux(t)
+	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 

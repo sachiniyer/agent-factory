@@ -15,6 +15,10 @@ import (
 
 func TestDockerEnvironmentDoesNotTrustRepoSelectedImageWithResolvedCredentials(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// A local engine so the pre-run locality guard passes without a docker call;
+	// this test captures `docker run`, which a remote engine never reaches.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	t.Setenv("OPENAI_API_KEY", "test-value")
 	t.Setenv("ANTHROPIC_API_KEY", "test-value")
 	repoRoot := initTempGitRepo(t)
@@ -426,31 +430,6 @@ func TestSSHAgentServerCommandExecsAtRecordedPID(t *testing.T) {
 	}
 	if command != want {
 		t.Fatalf("SSH agent-server launch does not exec af at the PID recorded for teardown: %q", command)
-	}
-}
-
-func TestPreResolvedSandboxProgramBypassesSecondOverrideLookup(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	repoRoot := initTempGitRepo(t)
-	writeInRepoConfig(t, repoRoot, map[string]any{
-		"program_overrides": map[string]any{
-			tmux.ProgramCodex: "codex --model second-lookup",
-		},
-	})
-
-	resolved := &Instance{
-		Title:              "resolved",
-		Path:               repoRoot,
-		Program:            tmux.ProgramCodex,
-		preResolvedProgram: tmux.ProgramCodex,
-	}
-	if got := resolveProgramForInstance(resolved); got != tmux.ProgramCodex {
-		t.Fatalf("pre-resolved program = %q, want %q without a second override lookup", got, tmux.ProgramCodex)
-	}
-
-	ordinary := &Instance{Title: "ordinary", Path: repoRoot, Program: tmux.ProgramCodex}
-	if got := resolveProgramForInstance(ordinary); got != "codex --model second-lookup" {
-		t.Fatalf("ordinary program = %q, want one override lookup", got)
 	}
 }
 

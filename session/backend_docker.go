@@ -373,6 +373,16 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 		if err := p.ensureAccountDockerEngineLocal(); err != nil {
 			return ProvisionResult{}, err
 		}
+	} else {
+		// A remote Docker engine publishes the agent-server port on the engine
+		// host's loopback while the daemon dials its own, so the dial-back is
+		// unreachable and the failure surfaces only later as `connection refused`
+		// to 127.0.0.1. The account path refuses the same engine for its own
+		// reason (bind-mount identity); refuse here too, before `docker run`, so a
+		// non-account session fails fast with the remote-engine cause instead.
+		if err := p.ensureDockerEngineLocal(); err != nil {
+			return ProvisionResult{}, err
+		}
 	}
 	engineID, err := p.currentEngineID(dockerShortStepTimeout)
 	if err != nil {

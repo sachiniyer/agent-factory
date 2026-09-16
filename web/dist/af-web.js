@@ -7200,7 +7200,8 @@ function icon(name, className = "") {
 }
 
 // src/components.ts
-function actionsDisclosure(label = "Session actions", enabled = () => true) {
+function actionsDisclosure(label = "Session actions", enabled = () => true, onDismiss = () => {
+}) {
   const trigger = h("button", { type: "button", class: "af-term-more" }, h("span", { class: "af-term-more-label" }, "Actions"), h("span", { class: "af-term-more-compact", ariaHidden: "true" }, "\u2026"));
   trigger.setAttribute("aria-label", label);
   trigger.setAttribute("aria-expanded", "false");
@@ -7209,7 +7210,7 @@ function actionsDisclosure(label = "Session actions", enabled = () => true) {
   panel.hidden = true;
   const el2 = h("div", { class: "af-term-more-wrap" }, trigger, panel);
   const outside = (event) => {
-    if (!el2.contains(event.target)) close();
+    if (!el2.contains(event.target)) dismiss();
   };
   const close = (restoreFocus = false) => {
     panel.hidden = enabled();
@@ -7217,25 +7218,30 @@ function actionsDisclosure(label = "Session actions", enabled = () => true) {
     document.removeEventListener("mousedown", outside);
     if (restoreFocus) trigger.focus();
   };
+  const dismiss = (restoreFocus = false) => {
+    close(restoreFocus);
+    onDismiss();
+  };
   const open = () => {
     if (!enabled()) return;
     panel.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
     document.addEventListener("mousedown", outside);
   };
-  trigger.addEventListener("click", () => panel.hidden ? open() : close());
+  trigger.addEventListener("click", () => panel.hidden ? open() : dismiss());
   el2.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && enabled() && !panel.hidden) {
       event.preventDefault();
       event.stopPropagation();
-      close(true);
+      dismiss(true);
     }
   });
-  return { el: el2, panel, trigger, open, close, dispose: close };
+  return { el: el2, panel, trigger, open, close, dismiss, dispose: close };
 }
 function appbarControls(controls, phone = window.matchMedia("(max-width: 768px)"), beforeSync = () => {
+}, onDismiss = () => {
 }) {
-  const menu = actionsDisclosure("More app controls", () => phone.matches);
+  const menu = actionsDisclosure("More app controls", () => phone.matches, onDismiss);
   menu.el.className = "af-appbar-tools-wrap";
   menu.trigger.className = "af-appbar-more";
   menu.trigger.replaceChildren(icon("ellipsis"));
@@ -8325,8 +8331,13 @@ var TerminalSoftInput = class {
         continue;
       }
       matchedComposition = true;
-      prefix += rest.slice(0, length);
-      rest = rest.slice(length);
+      if (queued) {
+        prefix += this.applyQueuedInput(range, applyModifiers);
+        rest = rest.slice(length);
+      } else {
+        prefix += rest.slice(0, length);
+        rest = rest.slice(length);
+      }
       const flush = range.trailingFlush;
       if (flush && rest.startsWith(flush.text)) {
         this.cancelTrailingFlush(flush);
@@ -8389,7 +8400,7 @@ var TerminalSoftInput = class {
   }
   queueTrailingFlush(range) {
     const trailingLength = range.trailingLength ?? 0;
-    if (!trailingLength || !range.frozenText || range.trailingFlush) return;
+    if (!trailingLength || !range.frozenText || range.trailingFlush || range.queuedInput) return;
     const text = range.frozenText.slice(-trailingLength);
     const flush = { text };
     range.trailingFlush = flush;
@@ -11755,6 +11766,24 @@ var InstallAffordance = class {
   }
 };
 
+// src/shortcut-focus.ts
+function restoreShortcutFocus(navigationTarget, rail) {
+  if (navigationTarget?.isConnected && navigationTarget !== document.body) {
+    navigationTarget.focus({ preventScroll: true });
+  }
+  if (document.activeElement === navigationTarget && navigationTarget !== document.body) {
+    return;
+  }
+  if (rail) {
+    rail.tabIndex = -1;
+    rail.focus({ preventScroll: true });
+    if (document.activeElement === rail) {
+      return;
+    }
+  }
+  document.activeElement?.blur();
+}
+
 // src/time.ts
 function formatDuration(ms) {
   const age = Math.max(0, ms);
@@ -12917,7 +12946,11 @@ var SplitView = class {
    *  settled tab keeps the store's claim and the pane's binding the same statement. */
   settledTab(sessionId, tabIds) {
     if (sessionId === this.sessionId) {
-      return this.tree && this.focusedId ? findLeaf(this.tree, this.focusedId)?.tab ?? 0 : 0;
+      if (!this.tree || !this.focusedId) {
+        return 0;
+      }
+      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds);
+      return findLeaf(remapped, this.focusedId)?.tab ?? 0;
     }
     const retained = this.retainedTree(sessionId, tabIds);
     return retained ? leaves(retained)[0]?.tab ?? 0 : 0;
@@ -15542,7 +15575,7 @@ var AppShell = class {
       this.themeOpts.set(choice, opt);
       themeToggle.append(opt);
     }
-    const { el: viewNav, tabs } = viewNavigation((view) => this.actions.switchView(view));
+    const { el: viewNav, tabs } = viewNavigation((view) => this.switchView(view));
     this.viewTabs = tabs;
     this.viewNav = viewNav;
     this.projectSwitchName = h("span", { class: "af-project-switch-name" }, "\u2014");
@@ -15560,7 +15593,7 @@ var AppShell = class {
     this.projectSwitchBtn.setAttribute("aria-label", "Switch project");
     this.projectSwitchBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      this.appControls.close();
+      this.appControls.dismiss();
       this.toggleProjectMenu();
     });
     this.projectMenu = h("div", { class: "af-project-menu" });
@@ -15582,7 +15615,10 @@ var AppShell = class {
       ...this.installEl ? [this.installEl] : [],
       themeToggle,
       disconnect2
-    ], this.phone, this.captureNewTabCancelReturn);
+    ], this.phone, this.captureNewTabCancelReturn, () => {
+      const slot = this.terminalChrome?.newTabSlot;
+      if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
+    });
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     disconnect2.addEventListener("click", () => {
       this.appControls.close();
@@ -15601,7 +15637,7 @@ var AppShell = class {
     this.phone.addEventListener("change", this.schedulePhoneSync);
     this.appControls.panel.addEventListener("click", (event) => {
       const target = event.target.closest("button, a");
-      if (this.el.classList.contains("af-session-first") && target && !target.closest(".af-theme-toggle")) this.appControls.close();
+      if (this.el.classList.contains("af-session-first") && target && !target.closest(".af-theme-toggle, .af-viewnav")) this.appControls.dismiss();
     });
     this.railCount = h("span", { class: "af-rail-count" }, "0");
     const newBtn = h(
@@ -15693,6 +15729,10 @@ var AppShell = class {
   viewNav;
   sessionFirst = null;
   terminalSelected = false;
+  // The disclosure context from the previous state update. Derived composition
+  // and focused kind are both too coarse: switching between same-kind panes must
+  // still invalidate carried actions, while viewport-only recomposition must not.
+  sessionComposition = null;
   newTabPickerPosition = null;
   phoneSyncQueued = false;
   schedulePhoneSync = () => {
@@ -15704,7 +15744,7 @@ var AppShell = class {
     });
   };
   syncPhone() {
-    const active = this.phone.matches && this.terminalSelected;
+    const active = this.phone.matches && this.terminalSelected === true;
     const compositionChanged = this.el.classList.contains("af-session-first") !== active;
     const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
     const responsiveState = this.responsiveNewTabState;
@@ -15922,6 +15962,13 @@ var AppShell = class {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
+    const selectedForPhone = selectedSession(state);
+    const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
+    const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
+    const focusedTab = focusedForPhone ? tabIdentity(focusedForPhone) : null;
+    const focusedTabSynth = focusedForPhone ? `${focusedForPhone.kind}:${focusedForPhone.name}` : null;
+    const focusedKind = focusedForPhone?.kind ?? null;
+    this.observeSessionComposition(state.view, state.selectedId, focusedTab, focusedKind, focusedTabSynth);
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
     if (this.lastKb !== kb) {
       this.lastKb = kb;
@@ -16026,9 +16073,6 @@ var AppShell = class {
         this.renderTabBar(state);
       }
     }
-    const selectedForPhone = selectedSession(state);
-    const kind = selectedForPhone ? sessionTabs(selectedForPhone)[state.activeTab]?.kind ?? 0 : null;
-    this.terminalSelected = isSessionFirst(true, state.view, kind);
     this.syncPhone();
     this.syncTabIdentityCaches(state);
   }
@@ -16162,7 +16206,7 @@ var AppShell = class {
     menu.trigger.replaceChildren("\u2026");
     menu.panel.append(...buttons);
     menu.el.addEventListener("click", (event) => event.stopPropagation());
-    menu.panel.addEventListener("click", () => menu.close(true), { capture: true });
+    menu.panel.addEventListener("click", () => menu.dismiss(true), { capture: true });
     host.append(menu.el);
     return host;
   }
@@ -16181,6 +16225,7 @@ var AppShell = class {
         if (surface2 === "rail") {
           this.runRailExit(run);
         } else {
+          this.appControls.dismiss();
           run();
         }
       });
@@ -16208,6 +16253,7 @@ var AppShell = class {
         if (surface2 === "rail") {
           this.runRailExit(() => this.actions.kill(killSession2));
         } else {
+          this.appControls.dismiss();
           this.actions.kill(killSession2);
         }
       });
@@ -16343,7 +16389,7 @@ var AppShell = class {
     add.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
-      this.appControls.close();
+      this.appControls.dismiss();
       this.actions.addProject();
     });
     footChildren.push(add);
@@ -16366,7 +16412,7 @@ var AppShell = class {
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
-          this.appControls.close();
+          this.appControls.dismiss();
           this.actions.deleteProject(currentSummary.root, currentSummary.name);
         });
       }
@@ -16397,10 +16443,49 @@ var AppShell = class {
     item.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
-      this.appControls.close();
+      this.appControls.dismiss();
       this.actions.switchProject(p.root);
     });
     return item;
+  }
+  /** Invalidates carried disclosure state when its owning context changes. */
+  observeSessionComposition(view, selectedId, focusedTab, focusedKind, focusedTabSynth) {
+    const previous = this.sessionComposition;
+    const sameFocusedTab = previous !== null && (previous.focusedTab === focusedTab || previous.focusedTab === previous.focusedTabSynth && focusedTabSynth !== null && previous.focusedTabSynth === focusedTabSynth);
+    if (previous && (previous.view !== view || previous.selectedId !== selectedId || !sameFocusedTab || previous.focusedKind !== focusedKind)) {
+      this.dismissCarriedActions();
+    }
+    this.sessionComposition = { view, selectedId, focusedTab, focusedTabSynth, focusedKind };
+    this.terminalSelected = isSessionFirst(true, view, focusedKind);
+  }
+  /** Retires carried actions before a user-owned transition can recompose them. */
+  dismissCarriedActions() {
+    if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
+    else this.terminalChrome?.menu.dismiss();
+  }
+  /** One user-owned view transition for both appbar tabs and document shortcuts. */
+  switchView(view) {
+    this.dismissCarriedActions();
+    this.actions.switchView(view);
+  }
+  /** Tab buttons and 1-9 shortcuts share the same pre-recomposition dismissal. */
+  openTab(index) {
+    this.dismissCarriedActions();
+    this.actions.openTab(index);
+  }
+  switchTab(index) {
+    this.dismissCarriedActions();
+    this.actions.switchTab(index);
+  }
+  closeTab(index) {
+    this.dismissCarriedActions();
+    this.actions.closeTab(index);
+  }
+  /** A touch pane drop is a user-owned tab transition, but only if a pane accepts it. */
+  dropTabOnPaneAt(clientX, clientY, drag) {
+    if (!this.actions.paneDropHintAt(clientX, clientY)) return false;
+    this.dismissCarriedActions();
+    return this.actions.dropTabOnPaneAt(clientX, clientY, drag);
   }
   /** Keyboard twin of the New tab button, including its per-kind availability. */
   openNewTabPicker(shortcutReturn) {
@@ -16728,7 +16813,19 @@ var AppShell = class {
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
     const shown = new Set(state.shownTabs);
     const children = tabs.map(
-      (tab, i) => tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions, () => this.liveTabIdentity(i), selected.id ?? "")
+      (tab, i) => tabButton(
+        tab,
+        i,
+        i === active,
+        shown.has(i),
+        canRename,
+        canClose,
+        this.actions,
+        () => this.openTab(i),
+        () => this.closeTab(i),
+        () => this.liveTabIdentity(i),
+        selected.id ?? ""
+      )
     );
     const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
@@ -16893,7 +16990,7 @@ var AppShell = class {
       if (!held) {
         return;
       }
-      if (!bar.contains(document.elementFromPoint(x, y)) && this.actions.dropTabOnPaneAt(x, y, drag)) {
+      if (!bar.contains(document.elementFromPoint(x, y)) && this.dropTabOnPaneAt(x, y, drag)) {
         return;
       }
       const r = bar.getBoundingClientRect();
@@ -17186,14 +17283,14 @@ function tabCenters(bar) {
     return r.left + r.width / 2;
   });
 }
-function tabButton(tab, index, active, shown, canRename, canClose, actions2, liveIdentity, selectedSessionId) {
+function tabButton(tab, index, active, shown, canRename, canClose, actions2, openTab2, closeTab2, liveIdentity, selectedSessionId) {
   const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
   const btn = h("button", { type: "button", class: cls, draggable: true });
   btn.setAttribute("role", "tab");
   btn.setAttribute("aria-selected", active ? "true" : "false");
   btn.dataset.tabIndex = String(index);
   btn.append(icon(tabIcon(tab.kind), "af-tab-glyph"), h("span", { class: "af-tab-label" }, tabLabel(tab)));
-  btn.addEventListener("click", () => actions2.openTab(index));
+  btn.addEventListener("click", openTab2);
   const renameable = canRename && isRenameableTab(tab.kind);
   btn.title = renameable ? `${tabDisplayLabel(tab)} \u2014 double-click to rename` : tabDisplayLabel(tab);
   if (renameable) {
@@ -17209,7 +17306,7 @@ function tabButton(tab, index, active, shown, canRename, canClose, actions2, liv
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
       e.stopPropagation();
-      actions2.closeTab(index);
+      closeTab2();
     });
     btn.append(close);
   }
@@ -17243,6 +17340,17 @@ function beginTabRename(btn, tab, actions2, editedId, editedSessionId) {
   btn.replaceWith(input);
   input.focus();
   input.select();
+}
+function inertRowReason(s) {
+  let cause = "";
+  if (s.user_killed === true) {
+    cause = "kill pending";
+  } else if (s.startup_state_unknown === true) {
+    cause = "startup could not be confirmed";
+  } else if (s.pending_account_swap !== void 0) {
+    cause = "account swap in progress";
+  }
+  return cause === "" ? "cannot be opened" : `cannot be opened \xB7 ${cause}`;
 }
 function sessionRow(s, selected, openSession, buildActions, previous) {
   const status = rowStatus(s);
@@ -17288,24 +17396,30 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   row.append(statusSlot);
   row.append(main);
   if (managed) {
-    row.append(buildActions(s));
+    const actions2 = buildActions(s);
+    if (!actionable) {
+      actions2.setAttribute("aria-disabled", "false");
+    }
+    row.append(actions2);
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   const modelChange = s.model_change ? `; model changed from ${s.model_change.before} to ${s.model_change.after}` : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
+  const inertReason = managed && !actionable ? `; ${inertRowReason(s)}` : "";
   row.dataset.idleTitleBase = `${s.title} \u2014 ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
+  row.dataset.idleTitleInert = inertReason;
   row.setAttribute(
     "title",
-    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}`
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${inertReason}`
   );
-  if (!actionable && !managed) {
-    row.setAttribute("aria-disabled", "true");
-  } else if (actionable) {
+  if (actionable) {
     row.onclick = () => openSession(s.id);
+  } else {
+    row.setAttribute("aria-disabled", "true");
   }
   return row;
 }
@@ -17324,7 +17438,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}`
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`
       );
     }
   }
@@ -18772,7 +18886,7 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
       selectedId = null;
     }
   }
-  const settled = selectedId === prevSel ? store.get().activeTab : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
+  const settled = selectedId ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId)) : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
   if (evidence) pendingRestores.observe(authoritative.map((s) => ({
@@ -18941,32 +19055,24 @@ function onKeydown(e) {
       focusRail();
       break;
     case "switchTab":
-      switchTab(action.index);
+      if (shell) shell.switchTab(action.index);
+      else switchTab(action.index);
       break;
     case "newTab": {
       const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       shell?.openNewTabPicker(() => {
         focusRail();
-        if (navigationTarget?.isConnected && navigationTarget !== document.body) {
-          navigationTarget.focus({ preventScroll: true });
-        }
-        if (document.activeElement !== navigationTarget || navigationTarget === document.body) {
-          const rail = root?.querySelector(".af-rail");
-          if (rail) {
-            rail.tabIndex = -1;
-            rail.focus({ preventScroll: true });
-          } else {
-            document.activeElement?.blur();
-          }
-        }
+        restoreShortcutFocus(navigationTarget, root?.querySelector(".af-rail") ?? null);
       });
       break;
     }
     case "closeTab":
-      closeSessionTab(store.get().activeTab);
+      if (shell) shell.closeTab(store.get().activeTab);
+      else closeSessionTab(store.get().activeTab);
       break;
     case "switchView":
-      switchView(action.view);
+      if (shell) shell.switchView(action.view);
+      else switchView(action.view);
       break;
     case "cyclePane":
       splitView.cyclePane(action.delta);

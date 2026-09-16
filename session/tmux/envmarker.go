@@ -116,6 +116,18 @@ func SessionGenerationMarker(cmdExec cmd.Executor, sanitizedName string) (genera
 	return sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerGeneration)
 }
 
+// SessionEnvVar reads a named variable from a tmux session's environment with
+// the same three-valued contract as SessionHomeMarker: (value, true, nil) when
+// tmux answered and the session carries the variable, ("", false, nil) when tmux
+// answered and it carries no such variable, and a non-nil error when tmux did
+// not answer — so the caller cannot mistake "absent" for "unknown".
+//
+// Used by the legacy-pane migration check to read the agent's credential-root
+// variable (e.g. CODEX_HOME) and verify account identity before refusing.
+func SessionEnvVar(cmdExec cmd.Executor, sanitizedName, varName string) (value string, present bool, err error) {
+	return sessionEnvMarker(cmdExec, sanitizedName, varName)
+}
+
 // sessionHomeMarker reads the AF_HOME ancestry marker from a tmux session's
 // environment (stamped via `new-session -e` at creation). A false present value
 // means tmux answered and the session carries no marker — created by a pre-marker

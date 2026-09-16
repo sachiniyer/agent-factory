@@ -152,19 +152,22 @@ func selinuxRelabelForHost() bool {
 // a mounted engine socket — selinuxRelabelForHost() measures the wrong machine. A
 // non-SELinux client in front of an enforcing engine would then emit plain :ro
 // and the engine would deny the read, which is #3451 with an extra hop. Unless
-// the endpoint is proven local, af keeps the relabel.
+// the endpoint is proven on this host, af keeps the relabel — and it uses the
+// stricter dockerEndpointOnThisHost proof rather than the loopback-connectivity
+// classification, because a tcp:// loopback endpoint can be a forwarded remote
+// daemon whose labels are applied on a different host.
 //
 // Costs nothing where it is unnecessary, by construction: every branch that
 // cannot prove "no relabel needed" resolves to z, and z is inert wherever SELinux
 // is not enforcing.
 func (p *dockerProvisioner) bindMountRelabel() bool {
-	endpoint, local, err := p.dockerEngineEndpoint()
+	endpoint, _, err := p.dockerEngineEndpoint()
 	if err != nil {
 		log.WarningLog.Printf("backend=docker: cannot establish whether the Docker engine is local (%v); applying the SELinux relabel anyway, which is a no-op where SELinux is not enforcing", err)
 		return true
 	}
-	if !local {
-		log.InfoLog.Printf("backend=docker: Docker endpoint %q is not local, so this host's SELinux mode does not describe where bind mounts are labeled; applying the SELinux relabel", endpoint)
+	if !dockerEndpointOnThisHost(endpoint) {
+		log.InfoLog.Printf("backend=docker: Docker endpoint %q is not proven on this host, so this host's SELinux mode does not describe where bind mounts are labeled; applying the SELinux relabel", endpoint)
 		return true
 	}
 	return selinuxRelabelForHost()
