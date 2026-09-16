@@ -284,36 +284,37 @@ func EffectNotice(key string, outcome ApplyOutcome) string {
 	if outcome.SavedValueSuperseded {
 		return supersededNotice(key)
 	}
-	// Then uncertainty, for the same reason and one rung down. On the version-skewed
-	// fallback these genuinely co-occur with a failed rebind: the outcome carries
-	// FailedListenerKeys from an apply that SUCCEEDED, while the post-apply file read
-	// could not confirm which value the daemon loaded.
-	if outcome.DaemonApplyUnconfirmed {
-		return "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
-	}
-	// Only now the rebind. Both socket keys are EffectAppliedLive, so this could sit
-	// inside that case; it stays ahead of the switch because it must outrank the
-	// class sentence, which is what #3397 moved in here to guarantee.
-	if outcome.listenerRebindFailed(key) {
-		return listenerRebindDeferredNotice(key)
-	}
+	// Then the class, exactly as StatusForKey does. An apply result says nothing
+	// about a key the apply cannot make live, so a startup-only or client-side key
+	// is deferred whether or not the apply was confirmed — the value is already on
+	// disk, which is what the next start reads.
 	switch KeyEffectClass(key) {
-	case EffectAppliedLive:
-		if outcome.DaemonApplyFailed {
-			return "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
-		}
-		if outcome.DaemonApplied {
-			return "Applied — the running daemon is using the new value now."
-		}
-		return "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
 	case EffectNextDaemonStart:
 		notice := "Saved — this setting takes effect on the next daemon start."
 		return WithRootAgentAdoptionNotice(key, notice)
 	case EffectNextAfLaunch:
 		return "Saved — this setting takes effect the next time you launch af."
-	default:
+	case EffectUnknown:
 		return "Saved."
 	}
+	// EffectAppliedLive from here, in StatusForKey's order: uncertainty, then
+	// failure, then a rebind that kept the old listener. The rebind sits below the
+	// first two because both can accompany it on the version-skewed fallback, where
+	// FailedListenerKeys comes from an apply that SUCCEEDED while the post-apply file
+	// read could not confirm which value the daemon loaded.
+	if outcome.DaemonApplyUnconfirmed {
+		return "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
+	}
+	if outcome.DaemonApplyFailed {
+		return "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
+	}
+	if outcome.listenerRebindFailed(key) {
+		return listenerRebindDeferredNotice(key)
+	}
+	if outcome.DaemonApplied {
+		return "Applied — the running daemon is using the new value now."
+	}
+	return "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
 }
 
 // supersededNotice is the one sentence for a save that lost a race, worded for

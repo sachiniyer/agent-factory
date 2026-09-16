@@ -35,11 +35,11 @@ const (
 // TestCurrentValueRoundTripsThroughConfigSet), so a plain string compare is
 // exact.
 func liveSavedValue(cfg *config.Config, key, expected string) savedValueVerdict {
-	live, ok := config.CurrentSavedValue(cfg, key)
+	match, ok := config.SavedValueMatches(cfg, key, expected)
 	if !ok {
 		return savedValueUnverifiable
 	}
-	if live != expected {
+	if !match {
 		return savedValueSuperseded
 	}
 	return savedValueConfirmed
@@ -57,20 +57,34 @@ func unsetExpectedValue(key string) string {
 // (both arrived together in #1960), so it cannot read the daemon's live config
 // back and must read the file instead.
 //
-// That file read happens AFTER the apply RPC returned, which is why this can
-// never report savedValueSuperseded. A competing write landing between the old
-// daemon's load and this read leaves the daemon correctly serving THIS save
-// while the file shows another value — the disk state at this instant is simply
-// not evidence of which generation the daemon loaded. A divergence here is
-// therefore reported as unverifiable, and the caller turns that into an
-// explicitly unconfirmed apply rather than a definitive lost race.
+// It reports what the FILE says and nothing more. What a divergence proves
+// depends on the key, and only the caller knows that:
+//
+//   - For a live key the file read happens after the apply RPC returned, so it
+//     cannot establish which generation the daemon loaded — a write landing
+//     between the daemon's load and this read leaves the daemon correctly
+//     serving THIS save. There, a divergence means "cannot confirm".
+//   - For a key that takes effect at the next daemon start or af launch, the
+//     file IS the thing that will be read, so a divergence means this save
+//     genuinely will not take effect: definitively superseded.
+//
+// Collapsing those two into one answer here is what made a deferred key's lost
+// race report as merely unconfirmed (#4247).
 func diskSavedValue(key, expected string) savedValueVerdict {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return savedValueUnverifiable
 	}
-	if liveSavedValue(cfg, key, expected) == savedValueConfirmed {
-		return savedValueConfirmed
+	return liveSavedValue(cfg, key, expected)
+}
+
+// deferredEffectKey reports whether key's value is consumed at the next daemon
+// start or af launch rather than by the running daemon — the condition that
+// makes a post-apply FILE read definitive for it.
+func deferredEffectKey(key string) bool {
+	switch config.KeyEffectClass(key) {
+	case config.EffectNextDaemonStart, config.EffectNextAfLaunch:
+		return true
 	}
-	return savedValueUnverifiable
+	return false
 }

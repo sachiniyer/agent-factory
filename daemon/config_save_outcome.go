@@ -29,3 +29,30 @@ func failedConfigApplyOutcome(err error) (config.ApplyOutcome, string) {
 	}
 	return config.ApplyOutcome{DaemonApplyUnconfirmed: true}, "saved config, but live apply could not be confirmed: " + err.Error()
 }
+
+// applyFallbackDiskVerdict folds the version-skewed fallback's post-apply FILE
+// read into outcome. What a divergence proves depends on when the key is
+// consumed, which is why the verdict is interpreted here rather than inside the
+// readback:
+//
+//   - A deferred key: the file IS what the next daemon start or af launch will
+//     read, so a divergence means this save will not take effect. Definitive,
+//     and reported as superseded.
+//   - A live key: the read happens after the apply RPC returned and cannot
+//     establish which generation the daemon loaded, so a divergence means only
+//     that the client cannot confirm what the daemon is serving.
+//
+// An unresolvable readback claims neither and leaves the apply's own answer
+// standing.
+func applyFallbackDiskVerdict(outcome *config.ApplyOutcome, warnings *[]string, key, expected string) {
+	if diskSavedValue(key, expected) != savedValueSuperseded {
+		return
+	}
+	if deferredEffectKey(key) {
+		outcome.SavedValueSuperseded = true
+		return
+	}
+	outcome.DaemonApplied = false
+	outcome.DaemonApplyUnconfirmed = true
+	*warnings = append(*warnings, unconfirmedReadbackWarning)
+}

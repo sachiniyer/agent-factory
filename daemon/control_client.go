@@ -512,14 +512,8 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
 		// A daemon this old cannot report its live config back (GetConfig arrived
 		// with SetConfigValue in #1960), so the only readback available is the
-		// file — and it is read AFTER the apply returned. That cannot establish
-		// which generation the daemon loaded, so a divergence here downgrades the
-		// claim to unconfirmed rather than asserting a lost race (#4247).
-		if diskSavedValue(result.Key, result.Value) != savedValueConfirmed {
-			outcome.DaemonApplied = false
-			outcome.DaemonApplyUnconfirmed = true
-			resp.Warnings = append(resp.Warnings, unconfirmedReadbackWarning)
-		}
+		// file (#4247).
+		applyFallbackDiskVerdict(&outcome, &resp.Warnings, result.Key, result.Value)
 	} else if applyAttempt.requestStarted {
 		var warning string
 		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)
@@ -582,14 +576,9 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 		resp.Pending = applyResp.Pending
 		resp.Warnings = applyResp.Warnings
 		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
-		// Same race as the set fallback: the unset's live value is the default,
-		// and a post-apply disk read is the only readback a pre-GetConfig daemon
-		// offers, so it downgrades rather than contradicts (#4247).
-		if diskSavedValue(result.Key, unsetExpectedValue(result.Key)) != savedValueConfirmed {
-			outcome.DaemonApplied = false
-			outcome.DaemonApplyUnconfirmed = true
-			resp.Warnings = append(resp.Warnings, unconfirmedReadbackWarning)
-		}
+		// Same readback as the set fallback; an unset's expected value is the
+		// key's default (#4247).
+		applyFallbackDiskVerdict(&outcome, &resp.Warnings, result.Key, unsetExpectedValue(result.Key))
 	} else if applyAttempt.requestStarted {
 		var warning string
 		outcome, warning = failedConfigApplyOutcome(applyAttempt.err)

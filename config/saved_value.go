@@ -1,6 +1,62 @@
 package config
 
-import "reflect"
+import (
+	"reflect"
+	"strconv"
+	"strings"
+)
+
+// SavedValueMatches reports whether cfg's stored value for key is the value this
+// save wrote. match is only meaningful when ok is true; ok is false when the key
+// does not resolve at all, which leaves the caller to say "cannot verify"
+// instead of guessing in either direction.
+//
+// It exists because a raw string compare answers the wrong question for some
+// keys. One instant has several accepted duration spellings ("1500ms", "2s", a
+// bare millisecond count), and a duration key can land in an INT field, so the
+// readback renders a different string for the very value this save wrote —
+// making a successful save look like a lost race with no competing writer
+// anywhere (#4247). Instants are therefore compared as instants.
+func SavedValueMatches(cfg *Config, key, written string) (match bool, ok bool) {
+	live, resolved := CurrentSavedValue(cfg, key)
+	if !resolved {
+		return false, false
+	}
+	if live == written {
+		return true, true
+	}
+	if durationSpelledKey(key) {
+		wroteMS, wroteOK := durationOrMillisecondCount(written)
+		liveMS, liveOK := durationOrMillisecondCount(live)
+		if wroteOK && liveOK {
+			return wroteMS == liveMS, true
+		}
+	}
+	return false, true
+}
+
+// durationSpelledKey reports whether key's writer accepts duration spellings, so
+// only those keys take the numeric comparison above. The kind comes from the one
+// allowlist the writer itself uses, rather than a second list that could drift.
+func durationSpelledKey(key string) bool {
+	_, _, spec, ok := resolveSettable(key)
+	return ok && spec.kind == cfgDuration
+}
+
+// durationOrMillisecondCount parses either accepted spelling into milliseconds,
+// trying the bare integer first exactly as validateDaemonPollIntervalValue does,
+// so the comparison accepts precisely what the writer accepts.
+func durationOrMillisecondCount(value string) (int, bool) {
+	trimmed := strings.TrimSpace(value)
+	if ms, err := strconv.Atoi(trimmed); err == nil {
+		return ms, true
+	}
+	ms, err := durationMilliseconds(trimmed)
+	if err != nil {
+		return 0, false
+	}
+	return ms, true
+}
 
 // CurrentSavedValue returns cfg's live value for any key a save surface can
 // WRITE, in the same form SetResult.Value records and `af config set` accepts

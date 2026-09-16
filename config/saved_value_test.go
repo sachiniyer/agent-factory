@@ -66,3 +66,44 @@ func TestCurrentSavedValueRefusesAnUnknownKey(t *testing.T) {
 		}
 	}
 }
+
+// A duration key accepts several spellings for one instant, and
+// daemon_poll_interval lands in an INT field of milliseconds — so the readback
+// renders "1500" for a save that wrote "1500ms". Comparing those as strings
+// declared every such save superseded with no competing writer anywhere, which
+// is the same false-positive class as the unresolved leaf keys above (#4247).
+func TestSavedValueMatchesComparesDurationsAsInstants(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DaemonPollInterval = 1500
+
+	for _, spelling := range []string{"1500ms", "1500", "1.5s"} {
+		match, ok := SavedValueMatches(cfg, "daemon_poll_interval", spelling)
+		if !ok {
+			t.Errorf("SavedValueMatches(daemon_poll_interval, %q) did not resolve", spelling)
+			continue
+		}
+		if !match {
+			t.Errorf("SavedValueMatches(daemon_poll_interval, %q) = false; 1500ms, 1500 and 1.5s "+
+				"are the same instant, so this reports a race that did not happen", spelling)
+		}
+	}
+
+	// The converse still has to work, or the check would be inert: a genuinely
+	// different instant must still read as a divergence.
+	for _, spelling := range []string{"3s", "2500ms", "10"} {
+		match, ok := SavedValueMatches(cfg, "daemon_poll_interval", spelling)
+		if !ok {
+			t.Errorf("SavedValueMatches(daemon_poll_interval, %q) did not resolve", spelling)
+			continue
+		}
+		if match {
+			t.Errorf("SavedValueMatches(daemon_poll_interval, %q) = true against a stored 1500ms; "+
+				"a real competing write would go unreported", spelling)
+		}
+	}
+
+	// A non-duration key must not be dragged into numeric comparison.
+	if match, ok := SavedValueMatches(cfg, "default_program", "claude"); !ok || !match {
+		t.Errorf("SavedValueMatches(default_program, \"claude\") = (%v, %v), want (true, true)", match, ok)
+	}
+}
