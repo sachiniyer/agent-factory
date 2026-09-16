@@ -248,11 +248,17 @@ func TestRestartSurvival_AccountScopedLiveTabsAreReplaced(t *testing.T) {
 	for _, name := range []string{shellName, processName} {
 		require.Equal(t, 1, killed[name],
 			"a live tab from before the daemon restart may carry ambient credentials and must be stopped")
-		require.Equal(t, 1, started[name],
-			"the persisted tab must be replaced so the scoped launch environment is applied to its process")
-		require.Contains(t, startCommands[name], sessionenv.AccountEnvironmentExecMarker,
-			"the replacement process must launch through the selected-account environment boundary")
 	}
+	// The shell is replaced so the scoped launch environment applies to its
+	// process. The process tab is only stopped: its command ran once at
+	// tab-create and restore never re-executes it — not even to re-scope it
+	// (#4479) — so the tab restores inert.
+	require.Equal(t, 1, started[shellName],
+		"the persisted shell must be replaced so the scoped launch environment is applied to its process")
+	require.Contains(t, startCommands[shellName], sessionenv.AccountEnvironmentExecMarker,
+		"the replacement shell must launch through the selected-account environment boundary")
+	assert.Zero(t, started[processName],
+		"a stopped process tab restores inert; its command is never re-executed")
 	for _, tab := range inst.GetTabs()[1:] {
 		require.False(t, tab.accountScopeProvenanceUnknown,
 			"a verified scoped replacement must survive a later same-daemon agent respawn")

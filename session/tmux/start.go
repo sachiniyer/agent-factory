@@ -60,6 +60,14 @@ func (t *TmuxSession) Start(workDir string) error {
 	if defaultCommand != "" {
 		args = append(args, ";", "set-option", "-t", exactTarget(t.sanitizedName), "default-command", defaultCommand)
 	}
+	t.programMu.RLock()
+	remainOnExit := t.remainOnExit
+	t.programMu.RUnlock()
+	if remainOnExit {
+		// Atomic with new-session so even a command that exits instantly is
+		// held as a dead pane rather than racing the option (#4479).
+		args = append(args, ";", "set-option", "-w", "-t", exactTarget(t.sanitizedName), "remain-on-exit", "on")
+	}
 	// Bootstrap before deciding whether new-session needs a temporary
 	// update-environment override. Otherwise the no-server probe below omits
 	// the override, the bootstrap creates a filtered server, and the first pane
@@ -593,6 +601,20 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	// so any earlier absence proof is invalidated. Without this clear, a reattach
 	// through this branch inherits a stale flag and stopForAccountSwap skips its
 	// liveness check for a pane that is still running.
+	return RestoreReattached, t.ReattachOnly(workDir)
+}
+
+// ReattachOnly performs only the live-session rebind half of
+// RestoreWithResult: it never takes the definitive-absence respawn branch, so
+// it is the restore primitive for a process tab, whose command must run
+// exactly once at creation and never be re-executed by af (#4479). Call it only
+// when the session exists or its state is unknown — a confirmed-absent session
+// gets no rebind and no respawn, because the pane it named is gone either way.
+//
+// On a pane held by remain-on-exit the rebind is equally correct: the session
+// still exists, the monitor simply never fires, and the pane's retained output
+// stays previewable.
+func (t *TmuxSession) ReattachOnly(workDir string) error {
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
 	monitor := newStatusMonitor()
@@ -600,8 +622,8 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 		monitor = newReattachStatusMonitor()
 	}
 	if err := t.refreshRestoredAccountEnvironment(); err != nil {
-		return RestoreReattached, fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
+		return fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
 	}
 	t.setMonitor(monitor)
-	return RestoreReattached, nil
+	return nil
 }

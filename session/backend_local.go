@@ -585,6 +585,14 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 					}
 				}
 			}
+			if tab.Kind == TabKindProcess {
+				// A process command runs once, at tab-create (#4479). The scope
+				// stop above still applies — a possibly-ambient pane is never
+				// left running — but restore only ever reattaches or records;
+				// it never re-executes the command, not even to re-scope it.
+				restoreProcessTab(i, tab, worktreePath)
+				continue
+			}
 			if err := refreshTabSessionEnvironment(i, tab); err != nil {
 				if account != "" {
 					return fmt.Errorf("prepare account-scoped tab %q for %q: %w", tab.Name, i.Title, err)
@@ -745,6 +753,68 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 		}
 	}
 	return nil
+}
+
+// restoreProcessTab reconnects a persisted process tab WITHOUT re-executing its
+// command (#4479): a process command runs once, at tab-create, so the
+// definitive-absence respawn every other tmux-backed kind relies on would
+// re-fire deploys and migrations on every af restart. Its three observable
+// states map to:
+//
+//   - session live, pane dead under remain-on-exit: the command finished.
+//     Stamp Tab.Exit with the status/time the pane reported, then rebind so
+//     its retained output stays previewable.
+//   - session live, pane running: rebind, after healing remain-on-exit for a
+//     tab persisted before #4479 so its eventual exit is observable too.
+//   - session definitively absent: the pane is gone entirely (tmux-server
+//     loss). The tab is left inert — nothing respawns, and nothing is stamped,
+//     because absence is not evidence of how the command ended.
+//
+// An unknown (wedged) probe reports "exists" and takes the live arm on
+// purpose: reattaching against a wedged server can fail but can never
+// re-execute the command, which is the only outcome this path must exclude.
+// All failures here are warnings — a process tab's failure mode is inert, and
+// aborting setupTabs over one would strand the tabs behind it for nothing.
+func restoreProcessTab(i *Instance, tab *Tab, worktreePath string) {
+	if !tab.tmux.ExistsOrUnknown() {
+		// Definitive absence also resolves an unknown-scope flag: whatever the
+		// pane was running as, it is gone — whether the scope stop above killed
+		// it or the tmux server lost it. Clearing keeps the next restore from
+		// re-entering the stop path for a pane that cannot exist.
+		if tab.accountScopeProvenanceUnknown {
+			i.mu.Lock()
+			for idx, current := range i.Tabs {
+				if current.ID == tab.ID {
+					i.replaceTabFieldLocked(idx, func(copy *Tab) { copy.accountScopeProvenanceUnknown = false })
+					break
+				}
+			}
+			i.mu.Unlock()
+		}
+		return
+	}
+	// Best-effort heal for a still-running pre-#4479 pane: with the option on,
+	// tmux holds the pane when the command exits and pane_dead records it.
+	tab.tmux.ApplyRemainOnExit()
+	if tab.Exit == nil {
+		if dead, status, statusKnown, at, known := tab.tmux.ProbePaneExit(); known && dead {
+			exit := &TabExit{Status: status, StatusKnown: statusKnown, At: at}
+			i.mu.Lock()
+			for idx, current := range i.Tabs {
+				if current.ID == tab.ID {
+					i.replaceTabFieldLocked(idx, func(copy *Tab) { copy.Exit = exit })
+					// replaceTabFieldLocked touches only on ID/Name/tmux
+					// changes; the exit stamp is itself a mutation to persist.
+					i.touchLocked()
+					break
+				}
+			}
+			i.mu.Unlock()
+		}
+	}
+	if err := tab.tmux.ReattachOnly(worktreePath); err != nil {
+		log.WarningLog.Printf("reattach process tab %q for %q failed: %v", tab.Name, i.Title, err)
+	}
 }
 
 // CloseAttachOnly releases this instance's hold on its tmux sessions — the

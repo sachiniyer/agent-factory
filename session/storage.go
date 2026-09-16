@@ -624,6 +624,18 @@ type TabData struct {
 	// indistinguishable from a session that was never handed off — and those two
 	// deserve the same treatment, so nothing has to be backfilled.
 	Handoffs []AgentHandoff `json:"handoffs,omitempty"`
+	// Exit records an observed process-tab completion (#4479): the pane was
+	// seen dead, not merely missing. nil for tabs af never saw finish — the
+	// load path maps that to "still in flight", never to "re-run me".
+	Exit *TabExitData `json:"exit,omitempty"`
+}
+
+// TabExitData is the wire form of Tab.Exit: only the fields a reader needs to
+// render or reason about a finished command.
+type TabExitData struct {
+	Status      int       `json:"status,omitempty"`
+	StatusKnown bool      `json:"status_known,omitempty"`
+	At          time.Time `json:"at,omitempty"`
 }
 
 // TabCleanupData is one durable cleanup handle for a closed tab whose tmux

@@ -121,6 +121,9 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		if len(tab.Handoffs) > 0 {
 			td.Handoffs = append([]AgentHandoff(nil), tab.Handoffs...)
 		}
+		if tab.Exit != nil {
+			td.Exit = &TabExitData{Status: tab.Exit.Status, StatusKnown: tab.Exit.StatusKnown, At: tab.Exit.At}
+		}
 		data.Tabs = append(data.Tabs, td)
 	}
 	// An archived off-box row is inert, but the web rail still renders its
@@ -595,6 +598,13 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 			var ts *tmux.TmuxSession
 			if td.TmuxName != "" {
 				ts = restoreTmuxSession(td.TmuxName, tabProgram(kind, td.Command, data.Program))
+				// Keep the restored handle consistent with a fresh process
+				// tab's: the flag only matters if Start is ever invoked, and
+				// after #4479 nothing invokes it — but the invariant costs
+				// nothing and keeps a future Start caller honest.
+				if ts != nil && kind == TabKindProcess {
+					ts.SetRemainOnExit()
+				}
 			}
 			var conversation AgentConversationData
 			if td.Conversation != nil {
@@ -613,6 +623,10 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 			if len(td.Handoffs) > 0 {
 				handoffs = append([]AgentHandoff(nil), td.Handoffs...)
 			}
+			var exit *TabExit
+			if td.Exit != nil {
+				exit = &TabExit{Status: td.Exit.Status, StatusKnown: td.Exit.StatusKnown, At: td.Exit.At}
+			}
 			instance.Tabs = append(instance.Tabs, &Tab{
 				ID:                            id,
 				Name:                          td.Name,
@@ -621,6 +635,7 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				URL:                           td.URL,
 				Conversation:                  conversation,
 				Handoffs:                      handoffs,
+				Exit:                          exit,
 				tmux:                          ts,
 				accountScopeProvenanceUnknown: data.Account != "" && idx > 0 && kind.HasTmux() && ts != nil,
 			})

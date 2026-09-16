@@ -138,6 +138,22 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 			}
 		}
 	}
+	// Process-tab exit state is stamped on the daemon's roster when a held dead
+	// pane is observed (#4479); sync it onto the already-present local row the
+	// same way a rename propagates, so the finished state is not a
+	// restart-only discovery.
+	for _, td := range target {
+		if td.ID == "" || td.Exit == nil {
+			continue
+		}
+		exit := &TabExit{Status: td.Exit.Status, StatusKnown: td.Exit.StatusKnown, At: td.Exit.At}
+		for idx, t := range i.Tabs {
+			if t.ID == td.ID && !tabExitEqual(t.Exit, exit) {
+				i.replaceTabFieldLocked(idx, func(c *Tab) { c.Exit = exit })
+				changed = true
+			}
+		}
+	}
 	i.mu.Unlock()
 
 	targetIDs := make(map[string]bool, len(target))
@@ -247,7 +263,11 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 		}
 		// URL rides along for a web tab (a vscode tab has none by design — its target
 		// is resolved at proxy time), or the pane would have nothing to iframe.
-		tab := &Tab{ID: id, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL, tmux: ts}
+		var exit *TabExit
+		if td.Exit != nil {
+			exit = &TabExit{Status: td.Exit.Status, StatusKnown: td.Exit.StatusKnown, At: td.Exit.At}
+		}
+		tab := &Tab{ID: id, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL, Exit: exit, tmux: ts}
 		// Adopt under the write lock, re-checking BOTH the already-present dedupe (a
 		// concurrent reconcile/AddTab may have added this tab while we reconnected
 		// outside the lock) and the teardown fence a Kill/archive can have raised in
@@ -325,4 +345,12 @@ func (i *Instance) TabRosterGeneration() uint64 {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.tabRosterGeneration
+}
+
+// tabExitEqual compares two TabExit pointers by value; nil matches only nil.
+func tabExitEqual(a, b *TabExit) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }

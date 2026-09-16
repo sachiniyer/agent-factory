@@ -408,8 +408,8 @@ func TestRespawnForAccountSwapPropagatesSiblingRestartFailure(t *testing.T) {
 	inst.Tabs[1].Command = "git status --short"
 	inst.Tabs[1].tmux.SetProgram("git status --short")
 	inst.Tabs = append(inst.Tabs, &Tab{
-		ID: "build", Name: "build", Kind: TabKindProcess, Command: "git status --short",
-		tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(processName, "git status --short",
+		ID: "build", Name: "build", Kind: TabKindShell, Command: "/bin/sh",
+		tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(processName, "/bin/sh",
 			failAccountSwapProcessPty{t: t, cmdExec: executor, name: processName}, executor),
 	})
 	inst.mu.Unlock()

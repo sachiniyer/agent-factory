@@ -180,6 +180,11 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	// exact name. The sibling inherits the agent session's PTY factory / executor
 	// — real in production, mock in tests.
 	procTmux := agentTmux.NewSiblingSession(tmuxName, command)
+	// remain-on-exit must be in place before the command can exit, so it goes
+	// into the new-session invocation itself (see SetRemainOnExit): a one-shot
+	// command can finish before any later set-option would land, and without a
+	// held pane its exit status is unobservable (#4479).
+	procTmux.SetRemainOnExit()
 	if err := procTmux.Start(worktreePath); err != nil {
 		return nil, fmt.Errorf("failed to start process tab: %w", err)
 	}

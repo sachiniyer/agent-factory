@@ -187,6 +187,17 @@ func TabKindRequires(kind TabKind) TabKindNeed {
 	}
 }
 
+// TabExit records an observed process-tab completion (#4479): the dead pane's
+// exit status and death time, stamped when af saw the pane dead rather than
+// inferred from the session's absence. Status is meaningful only when
+// StatusKnown — a pane held without a status (tmux predating pane_dead_status)
+// still proves the command finished.
+type TabExit struct {
+	Status      int
+	StatusKnown bool
+	At          time.Time
+}
+
 // Tab is one slot in an instance's tab roster (#930): the Agent tab at Tabs[0]
 // and any shell/process tabs each run a process backed by their own tmux
 // session, while web and VS Code tabs carry no tmux PTY (TabKind.HasTmux). The
@@ -239,6 +250,13 @@ type Tab struct {
 	// pins the branch tip at swap time, which is what makes per-agent attribution
 	// a checkable git range.
 	Handoffs []AgentHandoff
+	// Exit is the recorded finish of a process tab's command (#4479): the
+	// status and time af observed the pane dead. nil while the command is
+	// running, was never observed to exit, or the tab is not a process tab —
+	// a nil Exit never claims the command is still live, it claims nothing.
+	// It is what lets restore treat "session gone" as finished evidence
+	// instead of a command to re-execute.
+	Exit *TabExit
 	// tmux is the tab's tmux session. nil until the instance is started, and
 	// always nil for remote/hook-backed instances, which drive their agent
 	// session through hook commands rather than a local tmux session.

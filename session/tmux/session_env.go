@@ -14,6 +14,26 @@ import (
 
 var sessionEnvExecutable = os.Executable
 
+// SetRemainOnExit marks the session's pane to persist as a held dead pane after
+// its process exits, exposing pane_dead/pane_dead_status so a completed process
+// tab restores as finished evidence instead of an absence to re-spawn (#4479).
+// Call before Start; ApplyRemainOnExit is the already-running form.
+func (t *TmuxSession) SetRemainOnExit() {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	t.remainOnExit = true
+}
+
+// ApplyRemainOnExit sets the window option on a session that already exists,
+// healing a process tab spawned before #4479 so its eventual exit still records
+// a dead pane rather than vanishing into an ambiguous absence. Best-effort: a
+// wedged server just loses the heal, never the tab.
+func (t *TmuxSession) ApplyRemainOnExit() {
+	ctx, cancel := tmuxTimeoutContext()
+	_ = t.runTmuxBounded(ctx, "set-option", "-w", "-t", exactTarget(t.sanitizedName), "remain-on-exit", "on")
+	cancel()
+}
+
 // SetEnvPassthrough replaces the exact-name extension to this session's
 // default-deny environment. Call it before Start or Restore; sibling tabs copy
 // the normalized list from their agent session.
