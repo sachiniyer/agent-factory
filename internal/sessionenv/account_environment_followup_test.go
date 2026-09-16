@@ -253,6 +253,18 @@ func TestValidateAccountEnvironmentCommand_QuotedProcessSelectorsLaunchNoChild(t
 		"taskset -p 0x1 sh -c 'export CODEX_HOME=/x; codex'",
 		"./ionice -h env CODEX_HOME=/other codex",
 		"./taskset --help env CODEX_HOME=/other codex",
+		// A literal PID operand must not mask a dynamic word deeper in the
+		// selector tail: a shadowed wrapper can strip a different operand
+		// count and exec the expansion as the command head — "$CMD"=sh runs
+		// `sh /tmp/launch-agent` (Codex on #4465).
+		"./ionice -p\"$PID\" 123 \"$CMD\" /tmp/launch-agent",
+		"./ionice -p 123 \"$CMD\" /tmp/launch-agent",
+		"ionice --pid=\"$PID\" 123 \"$CMD\" /tmp/launch-agent",
+		"./taskset -p\"$PID\" 123 \"$CMD\" /tmp/launch-agent",
+		"./taskset -p 0x1 123 \"$CMD\" /tmp/launch-agent",
+		// Terminal-option tails are childless the same way.
+		"./ionice --version 1 \"$CMD\" /tmp/launch-agent",
+		"./taskset --help 1 \"$CMD\" /tmp/launch-agent",
 	} {
 		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q hides a mutating tail behind a basename-matched selector", command)
