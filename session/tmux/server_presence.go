@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -125,7 +126,8 @@ func NoServerRunning(err error) bool {
 		// server — an unrelated `tmux -L` session — made every missing-socket
 		// read answer "unknown" forever, which a routine caller cannot retry
 		// past.
-		return !tmuxSocketClaimed(absentTmuxSocketPath(diagnostic), tmuxServerProcessPIDs())
+		socket := absentTmuxSocketPath(diagnostic)
+		return !tmuxSocketClaimed(socket, tmuxServerProcessPIDs(socket))
 	default:
 		return false
 	}
@@ -145,39 +147,53 @@ const (
 	socketAbsent
 )
 
-// tmuxServerProcessAlive reports whether any tmux SERVER process is running for
-// this uid. A package var so tests can pin the answer: the real probe reads the
-// host's process table, so a developer box with tmux running would otherwise
-// give a different result from a container that has none.
+// tmuxServerProcessPIDs answers which same-uid tmux servers could own a
+// socket path — see liveTmuxServerPIDs. A package var so tests can pin the
+// answer: the real probe reads the host's process table, so a developer box
+// with tmux running would otherwise give a different result from a container
+// that has none.
 var tmuxServerProcessPIDs = liveTmuxServerPIDs
 
-// PinServerProbeForTest fixes the "is a tmux server alive for this uid?" answer
-// and returns the restore. It exists for internal/testguard.IsolateTmux, which
-// declares a private-socket world for a test; without it that isolation is
-// incomplete, because the probe reads the HOST process table and would see the
-// developer's own tmux servers inside a world that is supposed to have none.
+// PinServerProbeForTest fixes the "which servers could own this socket?"
+// answer and returns the restore. It exists for internal/testguard.IsolateTmux,
+// which declares a private-socket world for a test; without it that isolation
+// is incomplete, because the probe reads the HOST process table and would see
+// the developer's own tmux servers inside a world that is supposed to have
+// none.
 //
 // Test-only by contract, not by build tag: testguard lives in internal/ and is
 // the only caller.
 func PinServerProbeForTest(pids ...int) (restore func()) {
 	prev := tmuxServerProcessPIDs
-	tmuxServerProcessPIDs = func() []int { return pids }
+	tmuxServerProcessPIDs = func(string) []int { return pids }
 	return func() { tmuxServerProcessPIDs = prev }
 }
 
-// liveTmuxServerProcess looks for a tmux server owned by this uid.
+// liveTmuxServerPIDs answers "which server owns socketPath?" with the set of
+// same-uid pids that could: the socket's positively-attested owners when the
+// kernel names them (attestedSocketOwnerPIDs), else every process that could
+// own a socket at all — a tmux SERVER. A tmux CLIENT is the one tmux-named
+// process this set excludes: it can never own or recreate a socket, and
+// SIGUSR1's default disposition is terminate (#4349).
 //
-// It answers a deliberately BROAD question — "could any live server own an
-// unlinked socket?" — rather than "is the server for THIS socket alive?", which
-// would need the server's own socket path and is not worth the machinery. The
-// asymmetry is chosen: a false "yes" costs a refused sweep the user can retry
-// after checking; a false "no" lets reset delete worktrees out from under a live
-// agent. Over-refusal is also rare in practice, because a server on the DEFAULT
-// socket has a socket file, so it answers ECONNREFUSED rather than ENOENT.
+// "Could own" is decided by argv, not by the task name alone: on darwin
+// p_comm is "tmux" for server and client alike — setproctitle rewrites argv
+// (kern.procargs2) but never p_comm — so a comm test cannot separate them
+// there. Only a POSITIVE client sighting drops a pid out: an unreadable argv
+// or an unretitled "tmux" stays, because dropping a real server turns an
+// unknown into a confident unclaimed — and af would sweep under a live one.
+//
+// It still answers a deliberately BROAD question when ownership cannot be
+// read back — "could any live server own an unlinked socket?" — rather than
+// "is the server for THIS socket alive?". The asymmetry is chosen: a false
+// "yes" costs a refused sweep the user can retry after checking; a false "no"
+// lets reset delete worktrees out from under a live agent. Over-refusal is
+// also rare in practice, because a server on the DEFAULT socket has a socket
+// file, so it answers ECONNREFUSED rather than ENOENT.
 //
 // A process table we cannot read reports TRUE, for the same reason: an
 // unreadable table is not evidence of absence.
-func liveTmuxServerPIDs() []int {
+func liveTmuxServerPIDs(socketPath string) []int {
 	snap, err := proctree.Snapshot()
 	if err != nil {
 		// Not evidence of absence. A sentinel PID would be a lie, so report an
@@ -194,10 +210,29 @@ func liveTmuxServerPIDs() []int {
 		if owner, ok := proctree.UID(pid); ok && owner != uid {
 			continue
 		}
+		// comm is "tmux: server" or "tmux". "tmux" is the ambiguous arm —
+		// darwin's p_comm is "tmux" for the server AND every client — so argv
+		// gets the last word there. A positive "tmux: client" drops out;
+		// anything unreadable or unretitled stays, because dropping a real
+		// server turns an unknown into a confident unclaimed.
+		if p.Comm == "tmux" && tmuxArgvNamesClient(proctree.Argv(pid)) {
+			continue
+		}
 		pids = append(pids, pid)
 	}
 	sort.Ints(pids)
+	if owners := attestedSocketOwnerPIDs(socketPath, pids); owners != nil {
+		return owners
+	}
 	return pids
+}
+
+// tmuxArgvNamesClient reports whether argv positively names a tmux CLIENT —
+// "tmux: client" in argv[0], the retitle setproctitle leaves and darwin's
+// p_comm hides. Only a positive sighting counts: an unreadable argv cannot
+// disprove server-hood, so it reports false.
+func tmuxArgvNamesClient(argv []string) bool {
+	return len(argv) > 0 && filepath.Base(argv[0]) == "tmux: client"
 }
 
 // ListSessionNames returns the name of every session on the tmux server, or an
@@ -345,7 +380,11 @@ func recreateSocketAdvice(pids []int) string {
 		" — or stop that server — then re-run"
 }
 
-// isTmuxServerComm reports whether a kernel task name is a tmux SERVER.
+// isTmuxServerComm reports whether a kernel task name could be a tmux
+// SERVER. It is the cheap first filter of liveTmuxServerPIDs, not the
+// verdict: the "tmux" arm covers server and client alike wherever the
+// retitle lives in argv but never reaches p_comm (darwin, #4349), and that
+// arm is resolved against argv itself before a pid is kept.
 //
 // Measured on Linux: tmux retitles its processes, and the server and a client
 // are "tmux: server" and "tmux: client" respectively. A HasPrefix(comm, "tmux")
@@ -354,9 +393,9 @@ func recreateSocketAdvice(pids []int) string {
 // "a server is running", refuses the reset, and points `kill -USR1` at a process
 // that cannot recreate a server socket (Codex on #2956).
 //
-// The bare "tmux" fallback is for builds and platforms that do not retitle. It
-// is EXACT, never a prefix, for the reason above: a prefix is what swallowed
-// the client.
+// The bare "tmux" fallback is for builds and platforms that do not retitle —
+// and for the ones whose retitle does not reach p_comm. It is EXACT, never a
+// prefix, for the reason above: a prefix is what swallowed the client.
 func isTmuxServerComm(comm string) bool {
 	return comm == "tmux: server" || comm == "tmux"
 }
@@ -385,11 +424,14 @@ func absentTmuxSocketPath(diagnostic string) string {
 // recreates the path; the socket staying absent afterward means no live
 // server was bound to it, so a failed read against it is a determinate empty.
 //
-// pids comes from tmuxServerProcessPIDs — deliberately uid-wide, because which
-// server owns an unlinked socket is exactly what cannot be read back. A pid is
-// re-verified as a tmux server at signal time (IsTmuxServer, from its own
-// command line) so a pid reused since the snapshot cannot spray SIGUSR1 — whose
-// default disposition is TERMINATE — into an unrelated process.
+// pids comes from tmuxServerProcessPIDs(socketPath) — the socket's attested
+// owners where the kernel names them, else every same-uid process that could
+// own a socket. A pid is re-verified as a tmux server at signal time
+// (isLiveTmuxServer, from its own argv — NOT proctree.IsTmuxServer, whose
+// "tmux:" prefix counts clients) so a pid reused since the snapshot cannot
+// spray SIGUSR1 — whose default disposition is TERMINATE — into an unrelated
+// process, and a client that reached the list is refused a second time
+// (#4349).
 //
 // Ambiguity survives in one direction only: a table with live servers that
 // could not all be signaled answers "claimed" (unknown), because a live owner
@@ -397,7 +439,7 @@ func absentTmuxSocketPath(diagnostic string) string {
 func tmuxSocketClaimed(socketPath string, pids []int) bool {
 	signaled := false
 	for _, pid := range pids {
-		if pid <= 0 || !proctree.IsTmuxServer(pid) {
+		if pid <= 0 || !isLiveTmuxServer(pid) {
 			continue
 		}
 		if err := syscall.Kill(pid, syscall.SIGUSR1); err == nil {
@@ -417,6 +459,25 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+// isLiveTmuxServer re-verifies at signal time that pid names a tmux SERVER,
+// from its own argv — the check proctree.IsTmuxServer cannot do, because its
+// "tmux:" prefix match counts a client as a server, and a client must never
+// be signalled (#4349). A positive "tmux: server" or an unretitled "tmux"
+// passes; "tmux: client" and everything else — including an argv that has
+// gone unreadable — do not, because a signal needs a confirmed server, not a
+// plausible one.
+func isLiveTmuxServer(pid int) bool {
+	argv := proctree.Argv(pid)
+	if len(argv) == 0 {
+		return false
+	}
+	switch filepath.Base(argv[0]) {
+	case "tmux: server", "tmux":
+		return true
+	}
+	return false
 }
 
 // namedPIDs renders the PIDs we can actually name; the 0 sentinel means the
