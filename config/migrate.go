@@ -170,6 +170,15 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	// honest result, and writing a fresh file to say so would touch a file a
 	// mid-flight rewrite may be holding open.
 	if len(raw) == 0 || isEffectivelyEmptyToml(raw) {
+		// "Nothing to migrate" is a claim about a file, so it has to be about
+		// the right one — the same obligation the no-migrations path below
+		// carries. A config.toml link or symlinked AF home retargeted after
+		// the entry confirmation could now name a config that DOES have
+		// deprecated keys; returning here without the confirm would report a
+		// stale pinned target as a confident empty result (#4485 review).
+		if err := locked.confirm(); err != nil {
+			return nil, err
+		}
 		return &MigrationResult{Path: locked.link, Migrated: []MigratedKey{}}, nil
 	}
 	// The loader supports a leading BOM, so a migration must not quietly strip
