@@ -1270,3 +1270,92 @@ func TestSaveContentPaneState_DeleteFailureOnlyDoesNotPersistRetry(t *testing.T)
 	assert.False(t, tp.IsDirty(),
 		"SetTasks reconciled the pane; it must not be left dirty in the delete-fail-only path")
 }
+
+// TestSaveContentPaneState_RetryFindingRecordGoneDropsRestoredRow covers the
+// residual half of the "avoid restoring tasks already removed elsewhere"
+// finding. The recordGone guard stops a FIRST-pass restore of a record another
+// client already removed, but it said nothing about a copy an EARLIER pass had
+// already restored. That leaves a reachable divergence: pass 1 fails the delete
+// transiently (record still present) so RestoreFailedDelete makes the row
+// visible; between saves another client removes the record; pass 2's delete now
+// fails with the daemon's not-found, so recordGone is true and the restore is
+// skipped — but nothing drops the row restored in pass 1, and sp.SetTasks is
+// gated on !failedEdit, which the still-failing edit keeps true. The pane would
+// keep showing a task the sidebar no longer has, for the rest of the retry
+// sequence.
+//
+// The fix calls AcknowledgeDeletedRestored on the recordGone branch. Pre-fix
+// the final pane assertion below sees 2 tasks; post-fix it sees 1.
+func TestSaveContentPaneState_RetryFindingRecordGoneDropsRestoredRow(t *testing.T) {
+	h := newTestHome(t)
+
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	keep := task.Task{
+		ID: "keep-gone-retry", Name: "keep", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	gone := task.Task{
+		ID: "gone-gone-retry", Name: "gone", Prompt: "p", CronExpr: "* * * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	require.NoError(t, task.AddTask(keep))
+	require.NoError(t, task.AddTask(gone))
+
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, loaded, 2)
+	tp := h.automations.TaskPane()
+	tp.SetTasks(loaded)
+	h.store.SetTasks(loaded)
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+
+	// The edit fails non-committed on EVERY pass, so failedEdit stays true and
+	// sp.SetTasks — the only other thing that clears restoredDeletes — is never
+	// reached. That is the precondition for the residual row to survive.
+	t.Cleanup(SetTaskUpdaterForTest(func(string, task.TaskUpdate, task.ProjectExpectation) error {
+		return fmt.Errorf("update daemon RPC failure")
+	}))
+	// Pass 1: a transient failure. Not a not-found, so recordGone is false and
+	// the row is restored into the pane.
+	removeErr := fmt.Errorf("remove daemon RPC failure")
+	t.Cleanup(SetTaskRemoverForTest(func(string, task.ProjectExpectation) error {
+		return removeErr
+	}))
+
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	_, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+
+	require.Error(t, h.saveContentPaneState())
+	require.Len(t, tp.GetTasks(), 2, "pass 1 restores the failed-to-delete row (it still exists on disk)")
+	require.True(t, tp.IsDirty(), "pass 1 must leave the pane dirty so pass 2 retries")
+
+	// Between saves, another client removes the record — exactly the concurrent
+	// removal the sibling finding describes.
+	require.NoError(t, task.RemoveTask(gone.ID, task.ExpectProject(gone)))
+	// Pass 2: the daemon now answers with its own not-found (task/task.go:685),
+	// the confirmed signal recordGone tests for.
+	removeErr = fmt.Errorf("task with id %q not found", gone.ID)
+
+	require.Error(t, h.saveContentPaneState())
+
+	// Disk and sidebar agree: only `keep` survives.
+	disk, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	require.Len(t, disk, 1, "the other client's removal stands")
+	require.Len(t, h.store.GetTasks(), 1, "the sidebar reloads unconditionally")
+
+	// FIX: the pane must not keep showing the row restored in pass 1 once the
+	// record is known gone. Pre-fix this asserted 2 while the sidebar showed 1.
+	require.Len(t, tp.GetTasks(), 1,
+		"a row restored by an earlier pass must be dropped once the record is known gone")
+	assert.Empty(t, tp.ConsumeDeleted(), "a record known gone must not be re-queued for another retry")
+}

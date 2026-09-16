@@ -153,7 +153,16 @@ func (m *home) saveContentPaneState() error {
 			recordGone := !errors.As(err, &unconfirmed) &&
 				(strings.Contains(err.Error(), "not found") ||
 					strings.Contains(err.Error(), "re-bound to a different project"))
-			if !recordGone {
+			if recordGone {
+				// The record is gone from this repo. A copy restored into the
+				// pane by an EARLIER failed pass must be dropped now: sp.SetTasks
+				// below is gated on !failedEdit, so while a concurrent edit keeps
+				// failing nothing else would ever remove it, and the pane would
+				// keep showing a task the reload has already dropped from the
+				// sidebar — the same divergence this restore exists to prevent.
+				// A no-op when this task was never restored (the first-pass case).
+				sp.AcknowledgeDeletedRestored(tsk.ID)
+			} else {
 				sp.RestoreFailedDelete(tsk)
 			}
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to remove task %q: %w", tsk.Name, err))
