@@ -258,7 +258,10 @@ export class TerminalSoftInput {
 
   /** Queue custom input after xterm's already-scheduled composition finalizer. */
   deferAfterPendingComposition(action: () => void): boolean {
-    if (!this.pending.length) return false;
+    // Also queue behind custom input that is itself still waiting. Focus loss
+    // clears the pending ranges but keeps those keys (see reset), so a later key
+    // would otherwise find nothing pending and overtake them on the wire.
+    if (!this.pending.length && !this.postCompositionTimers.size) return false;
     // compositionend registered xterm's finalizer and our range release before
     // the custom keydown can reach this method. Timer FIFO therefore preserves
     // the user's commit-before-key order even though xterm rejects that keydown.
@@ -413,17 +416,28 @@ export class TerminalSoftInput {
     this.forwardingComposition = text;
     try { this.send(text); } finally { this.forwardingComposition = undefined; }
   }
+  /**
+   * Drop composition state on focus loss.
+   *
+   * Custom input queued by deferAfterPendingComposition is not composition state.
+   * It is a key the user pressed, waiting only for xterm's finalizer, and focus
+   * loss does not cancel that finalizer either: the committed text still reaches
+   * the wire. Cancelling the key here dropped it silently — Ctrl+C included,
+   * before signal bytes stopped being queued (#4151). It runs, in order.
+   */
   reset(): void {
     for (const range of this.pending) if (range.release !== undefined) clearTimeout(range.release);
     for (const flush of this.trailingFlushes) if (flush.release !== undefined) clearTimeout(flush.release);
-    for (const release of this.postCompositionTimers) clearTimeout(release);
     this.trailingFlushes.clear();
-    this.postCompositionTimers.clear();
     this.pending.length = 0;
     this.active = undefined;
   }
   dispose(): void {
     this.reset();
+    // Teardown is the one place queued custom input must not run: the terminal it
+    // would write to is going away.
+    for (const release of this.postCompositionTimers) clearTimeout(release);
+    this.postCompositionTimers.clear();
     this.textarea?.removeEventListener("compositionstart", this.onCompositionStart);
     this.textarea?.removeEventListener("compositionupdate", this.onCompositionUpdate);
     this.textarea?.removeEventListener("compositionend", this.onCompositionEnd);

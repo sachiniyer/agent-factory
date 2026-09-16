@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import {
   decodeKeyBytes, KEYBAR_ROWS, keyBytes, keyBytesDomain, KEY_BYTES_NAMED_KEYS, StickyModifiers, TerminalKeybar,
   keybarPointerDown,
@@ -400,7 +400,10 @@ test("custom hardware input carries physical identity into its matching onData",
   assert.equal(modifiers.state("Alt"), "off", "sticky Alt participated in the interrupt emission");
 });
 
-test("custom suppressed input waits behind a pending composition commit", t => {
+// A keybar wired to a real TerminalSoftInput, with xterm's CompositionHelper
+// finalizer modelled as the setTimeout(0) it schedules at compositionend (xterm
+// 5.5 _finalizeComposition(true)). `writes` is the wire, in order.
+function composingKeybar(t: TestContext) {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const host = new EventTarget();
   const textarea = Object.assign(new EventTarget(), { value: "" });
@@ -410,23 +413,122 @@ test("custom suppressed input waits behind a pending composition commit", t => {
     writes.push(keybar.transform(textarea.value));
   }, 0));
   const softInput = new TerminalSoftInput(host, textarea, () => true, () => false, () => {});
-  t.after(() => softInput.dispose());
   keybar = Object.assign(Object.create(TerminalKeybar.prototype) as object, {
     modifiers: new StickyModifiers(), textarea, rows: [], buttons: new Map(), focused: true,
     phone: { matches: true }, userInput: undefined, userInputGeneration: 0,
-    deferred229Generation: 0, softInput,
+    deferred229Generation: 0, softInput, physicalInput: false, arrows: false,
+    // setFocused repaints and re-lays-out the bar; neither is under test here.
+    paint: () => {}, layout: () => {},
     input: (text: string) => { writes.push(keybar.transform(text)); },
   }) as unknown as TerminalKeybar;
+  let disposed = false;
+  t.after(() => { if (!disposed) softInput.dispose(); });
+  return {
+    keybar, writes,
+    commit(text: string): void {
+      textarea.dispatchEvent(new Event("compositionstart"));
+      textarea.value = text;
+      textarea.dispatchEvent(Object.assign(new Event("compositionend"), { data: text }));
+    },
+    dispose(): void { disposed = true; softInput.dispose(); },
+  };
+}
 
-  textarea.dispatchEvent(new Event("compositionstart"));
-  textarea.value = "字";
-  textarea.dispatchEvent(Object.assign(new Event("compositionend"), { data: "字" }));
-  keybar.sendCustomUserInput("\x03", {
-    key: "c", shiftKey: false, altKey: false, ctrlKey: true, metaKey: false,
-  });
-  assert.deepEqual(writes, [], "the custom interrupt must not overtake xterm's finalizer");
+const physicalKey = (key: string, ctrlKey = false, shiftKey = false) =>
+  ({ key, shiftKey, altKey: false, ctrlKey, metaKey: false });
+
+test("custom suppressed text waits behind a pending composition commit", t => {
+  // Shift+Enter's LF is positional: it must follow the word the user just
+  // committed, or the newline lands before it. That ordering is what the
+  // post-composition deferral exists for.
+  const { keybar, writes, commit } = composingKeybar(t);
+  commit("字");
+  keybar.sendCustomUserInput("\n", physicalKey("Enter", false, true));
+  assert.deepEqual(writes, [], "the newline must not overtake xterm's finalizer");
   t.mock.timers.tick(0);
-  assert.deepEqual(writes, ["字", "\x03"]);
+  assert.deepEqual(writes, ["字", "\n"]);
+});
+
+test("a terminal signal byte is never queued behind a pending commit (#4151)", async t => {
+  // ^C, ^\ and ^Z act on the running program, not on the line being typed.
+  // Waiting is the failure — the user watches an interrupt not happen — and a
+  // queued byte is one a focus change could once discard. Arriving ahead of the
+  // commit only means the committed word lands afterwards, unsubmitted.
+  for (const [signal, key] of [["\x03", "c"], ["\x1c", "\\"], ["\x1a", "z"]] as const) {
+    await t.test(JSON.stringify(signal), st => {
+      const { keybar, writes, commit } = composingKeybar(st);
+      commit("字");
+      keybar.sendCustomUserInput(signal, physicalKey(key, true));
+      assert.deepEqual(writes, [signal], "the signal must reach the wire synchronously");
+      st.mock.timers.tick(0);
+      assert.deepEqual(writes, [signal, "字"], "the committed text still arrives, after the signal");
+    });
+  }
+});
+
+test("EOF and Escape keep their place behind a pending commit", async t => {
+  // Deliberately NOT signal bytes. ^D is EOF only on an empty line, and the
+  // committed word decides whether the line is empty: sent first, it can end
+  // the program instead of flushing the word. Escape switches mode in modal
+  // programs: sent first, the committed word is read as commands.
+  for (const [control, key] of [["\x04", "d"], ["\x1b", "Escape"]] as const) {
+    await t.test(JSON.stringify(control), st => {
+      const { keybar, writes, commit } = composingKeybar(st);
+      commit("字");
+      keybar.sendCustomUserInput(control, physicalKey(key, control === "\x04"));
+      assert.deepEqual(writes, [], "the control must not overtake the commit");
+      st.mock.timers.tick(0);
+      assert.deepEqual(writes, ["字", control]);
+    });
+  }
+});
+
+test("an interrupt pressed during a pending commit survives an immediate focus loss", t => {
+  // The #4151 repro: Ctrl+C, then focus loss before the next macrotask. The
+  // interrupt used to sit on a timer that setFocused(false) cleared unrun.
+  const { keybar, writes, commit } = composingKeybar(t);
+  commit("字");
+  keybar.sendCustomUserInput("\x03", physicalKey("c", true));
+  keybar.setFocused(false);
+  t.mock.timers.tick(0);
+  assert.ok(writes.includes("\x03"), `the interrupt was dropped: ${JSON.stringify(writes)}`);
+  assert.equal(writes.filter(w => w === "\x03").length, 1, "exactly one interrupt");
+});
+
+test("focus loss does not drop custom text already queued behind a commit", t => {
+  // Queued custom input is a key the user pressed, waiting only for xterm's
+  // finalizer — which focus loss does not cancel either. So the commit still
+  // arrives, and the newline must still follow it.
+  const { keybar, writes, commit } = composingKeybar(t);
+  commit("字");
+  keybar.sendCustomUserInput("\n", physicalKey("Enter", false, true));
+  keybar.setFocused(false);
+  assert.deepEqual(writes, [], "focus loss must not flush the newline ahead of the commit");
+  t.mock.timers.tick(0);
+  assert.deepEqual(writes, ["字", "\n"]);
+});
+
+test("custom text never overtakes earlier custom text still queued", t => {
+  // Once focus loss clears the pending ranges, a later key would otherwise see
+  // no pending commit and go straight to the wire, ahead of the queued one.
+  const { keybar, writes, commit } = composingKeybar(t);
+  commit("字");
+  keybar.sendCustomUserInput("\n", physicalKey("Enter", false, true));
+  keybar.setFocused(false);
+  keybar.sendCustomUserInput("\r", physicalKey("Enter"));
+  assert.deepEqual(writes, [], "the later key must wait behind the queued one");
+  t.mock.timers.tick(0);
+  assert.deepEqual(writes, ["字", "\n", "\r"]);
+});
+
+test("teardown cancels custom input still queued behind a commit", t => {
+  // The terminal the queued key would write to is going away.
+  const { keybar, writes, commit, dispose } = composingKeybar(t);
+  commit("字");
+  keybar.sendCustomUserInput("\n", physicalKey("Enter", false, true));
+  dispose();
+  t.mock.timers.tick(0);
+  assert.ok(!writes.includes("\n"), `a disposed terminal still received input: ${JSON.stringify(writes)}`);
 });
 
 test("pointerdown prevents focus transfer before acting", () => {

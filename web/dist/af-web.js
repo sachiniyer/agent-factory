@@ -6391,7 +6391,7 @@ function handleClipboardKeydown(ev, deps) {
       return false;
     }
     ev.preventDefault();
-    deps.sendInput(ETX);
+    deps.sendUserInput(ETX);
     return false;
   }
   return true;
@@ -8283,7 +8283,7 @@ var TerminalSoftInput = class {
   };
   /** Queue custom input after xterm's already-scheduled composition finalizer. */
   deferAfterPendingComposition(action) {
-    if (!this.pending.length) return false;
+    if (!this.pending.length && !this.postCompositionTimers.size) return false;
     const release = setTimeout(() => {
       this.postCompositionTimers.delete(release);
       action();
@@ -8432,17 +8432,26 @@ var TerminalSoftInput = class {
       this.forwardingComposition = void 0;
     }
   }
+  /**
+   * Drop composition state on focus loss.
+   *
+   * Custom input queued by deferAfterPendingComposition is not composition state.
+   * It is a key the user pressed, waiting only for xterm's finalizer, and focus
+   * loss does not cancel that finalizer either: the committed text still reaches
+   * the wire. Cancelling the key here dropped it silently — Ctrl+C included,
+   * before signal bytes stopped being queued (#4151). It runs, in order.
+   */
   reset() {
     for (const range of this.pending) if (range.release !== void 0) clearTimeout(range.release);
     for (const flush of this.trailingFlushes) if (flush.release !== void 0) clearTimeout(flush.release);
-    for (const release of this.postCompositionTimers) clearTimeout(release);
     this.trailingFlushes.clear();
-    this.postCompositionTimers.clear();
     this.pending.length = 0;
     this.active = void 0;
   }
   dispose() {
     this.reset();
+    for (const release of this.postCompositionTimers) clearTimeout(release);
+    this.postCompositionTimers.clear();
     this.textarea?.removeEventListener("compositionstart", this.onCompositionStart);
     this.textarea?.removeEventListener("compositionupdate", this.onCompositionUpdate);
     this.textarea?.removeEventListener("compositionend", this.onCompositionEnd);
@@ -8471,6 +8480,7 @@ function keyBytes(key, ctrl = false, alt = false, applicationCursor = false) {
   return (alt ? "\x1B" : "") + text;
 }
 var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
+var SIGNAL_BYTES = /* @__PURE__ */ new Set(["", "", ""]);
 function userSequence(text) {
   if (text.length < 3 || text.charCodeAt(0) !== 27) return void 0;
   const csi = /^\x1b\[([0-9;]*)([A-Za-z~])$/.exec(text);
@@ -8770,10 +8780,11 @@ var TerminalKeybar = class {
     return true;
   }
   sendUserInput(data, options = {}) {
-    if (options.afterComposition && this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
+    if (options.afterComposition && !SIGNAL_BYTES.has(data) && this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
     this.emitUserInput(data, options);
   }
-  /** Send an xterm-suppressed physical key after any commit that it could not flush. */
+  /** Send an xterm-suppressed physical key after any commit that it could not
+   *  flush. A terminal signal byte is sent at once instead (SIGNAL_BYTES). */
   sendCustomUserInput(data, physical) {
     this.sendUserInput(data, { physical, afterComposition: true });
   }
@@ -9352,9 +9363,10 @@ var AttachTerminal = class {
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
-        sendInput: (text) => this.keybar.sendCustomUserInput(text, ev),
         // Public Terminal.input(..., true) is xterm's genuine-user-input path:
         // it scrolls to bottom and clears selection, then fires onData above.
+        // The keybar holds ordinary bytes behind a pending IME commit and sends
+        // signal bytes such as the interrupt at once (#4151).
         sendUserInput: (text) => this.keybar.sendCustomUserInput(text, ev)
       });
       if (!accepted) this.keybar.markKeydownSuppressed(ev);
