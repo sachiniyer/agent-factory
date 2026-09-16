@@ -4,6 +4,7 @@ package accountlogin
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -581,6 +582,41 @@ func TestLoginReportsANoOpAsFailure(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("failure %q does not say the account is still not logged in (missing %q)", err, want)
 		}
+	}
+}
+
+// TestFinishedOrFailedReprobesTheAccount covers the transition a staged
+// credential cannot reach: the artifact landing AFTER the launch-time
+// snapshot. supervisor.Start reads LoggedIn into base before the flow runs,
+// so the proof that finishedOrFailed re-probes the account — rather than
+// trusting that snapshot — is a base whose LoggedIn is stale-false while the
+// account already holds the credential. A real launched flow would exercise
+// the same line, but its pane's death lands wherever tmux's probe sequence is
+// standing at that instant — the #4217 flake this file exists to remove — so
+// the post-launch boundary is staged directly instead.
+func TestFinishedOrFailedReprobesTheAccount(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	dir, err := agentaccount.Register(home, "codex", "work")
+	if err != nil {
+		t.Fatalf("register account: %v", err)
+	}
+	req := Request{Home: home, Agent: "codex", Name: "work"}
+	// The launch-time snapshot saw no credential — the flow had not run yet.
+	base := Session{Agent: "codex", Name: "work", Dir: dir, LoggedIn: false}
+	// Then the flow wrote it and ended before the handover: the answer must
+	// come from a fresh probe of the account, never from base.LoggedIn.
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("stage the post-launch credential: %v", err)
+	}
+	got, err := finishedOrFailed(req, base, errors.New("tmux session already exists"))
+	if err != nil {
+		t.Fatalf("a flow that left a credential was reported as a failure: %v", err)
+	}
+	if !got.Finished || !got.LoggedIn {
+		t.Fatalf("a post-snapshot credential must be re-probed, got %+v", got)
+	}
+	if got.TmuxName != "" {
+		t.Fatalf("a finished flow named %q to attach to", got.TmuxName)
 	}
 }
 
