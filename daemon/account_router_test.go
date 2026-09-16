@@ -15,6 +15,8 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/accountlogin"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // #4404: create-time account routing. These drive routeCreateAccount — the
@@ -48,6 +50,75 @@ func registerAccounts(t *testing.T, home, agent string, names ...string) {
 	}
 }
 
+// routerTestManager returns a Manager with every map, channel, and in-memory
+// registry NewManager initializes. These tests cannot call NewManager itself —
+// it reads the real config dir, mints secrets, and opens session storage — but
+// a bare &Manager{} leaves every map nil: reads on a nil map survive, writes
+// panic (instanceOpLocks under opLockFor is the one that crashed CI). The whole
+// set lives here in ONE place so a future NewManager field is mirrored once,
+// not scattered across fixtures — keep this in lockstep with NewManager's
+// literal.
+//
+// Excluded on purpose: cfg/storage/lifecycle/vscode/configAgents (disk or real
+// subsystems — the code under test takes cfg as an argument), and the
+// warn/info loggers (warn() and its siblings are nil-safe). Maps NewManager
+// itself leaves for lazy init under the lock (refutedLedgerAccounts) stay lazy
+// here too.
+func routerTestManager(t *testing.T) *Manager {
+	t.Helper()
+	m := &Manager{
+		pollReloadCh:              make(chan struct{}, 1),
+		ready:                     make(chan struct{}),
+		instances:                 make(map[string]*session.Instance),
+		pendingCreates:            make(map[string]session.InstanceData),
+		createAccountClaims:       make(map[string]int),
+		reservedTitles:            make(map[string]struct{}),
+		projectDeletes:            make(map[string]struct{}),
+		projectDeleteLastSeq:      make(map[string]uint64),
+		reservedTmuxNames:         make(map[string]string),
+		reservedRemoteNames:       make(map[string]struct{}),
+		reservedTaskRuns:          make(map[string]int),
+		ghostTaskRuns:             make(map[string]int),
+		repoStartLocks:            make(map[string]*sync.Mutex),
+		worktreeAdmissionLocks:    make(map[string]*sync.Mutex),
+		aliveObservations:         make(map[string]uint64),
+		targetLocks:               make(map[string]*sync.Mutex),
+		rootEnsureStates:          make(map[string]*rootEnsureState),
+		rootProgramDriftLogged:    make(map[string]bool),
+		rootProgramDriftInFlight:  make(map[string]int),
+		rootCreateRefusals:        make(map[string]rootCreateRefusal),
+		rootCreatesInFlight:       make(map[string]string),
+		rootKilledAt:              make(map[string]time.Time),
+		deletedRootRepos:          make(map[string]string),
+		killsInFlight:             make(map[string]struct{}),
+		killRetries:               make(map[string]*session.CleanupRetry),
+		ghostCleanupStalls:        make(map[string]string),
+		backgroundMutationStop:    make(chan struct{}),
+		restoresInFlight:          make(map[string]struct{}),
+		lostRestoreStates:         make(map[string]*lostRestoreState),
+		limitResumeStates:         make(map[string]*limitResumeState),
+		handoffRetryDue:           make(map[string]time.Time),
+		settleOwed:                make(map[string]settleOwedEntry),
+		remoteLossStates:          make(map[string]*remoteLossState),
+		instanceOpLocks:           make(map[string]*sync.Mutex),
+		pausedPolls:               make(map[string]map[string]time.Time),
+		taskRunProbeDue:           make(map[string]time.Time),
+		rootHealAbsenceStreaks:    make(map[string]int),
+		rootHealAbsenceLastStrike: make(map[string]time.Time),
+		rootHealProbes:            make(map[string]*rootReattributionProbe),
+		rootHealProbeFailures:     make(map[string]int),
+		events:                    newEventsHub(),
+		previewOrigins:            newPreviewOriginRegistry(),
+		editorLabels:              newEditorLabelIndex(),
+		accountLogins:             accountlogin.New(),
+	}
+	m.live.Store(&config.Config{})
+	m.rootAgentLayers.Store(&rootAgentSnapshot{})
+	limitDetector := task.NewLimitDetector(nil)
+	m.limitDetector.Store(&limitDetector)
+	return m
+}
+
 func TestRouteCreateAccountPicksAHealthyAccountOverAWalledDefault(t *testing.T) {
 	home, repoPath, project := defaultAccountFixture(t, "codex", "codex1")
 	registerAccounts(t, home, "codex", "codex2")
@@ -57,7 +128,7 @@ func TestRouteCreateAccountPicksAHealthyAccountOverAWalledDefault(t *testing.T) 
 	})
 
 	req := CreateSessionRequest{Title: "routed", RepoPath: repoPath, Program: "codex", AccountAuto: true}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Equal(t, "codex2", req.Account,
 		"a walled default is a preference, not a pin — the healthy registered account wins")
 	assert.True(t, req.accountAutoSelected, "a router pick is marked as chosen, not pinned")
@@ -70,7 +141,7 @@ func TestRouteCreateAccountKeepsAHealthyDefault(t *testing.T) {
 	stubAccountLimitEvidence(t, nil)
 
 	req := CreateSessionRequest{Title: "defaulted", RepoPath: repoPath, Program: "codex", AccountAuto: true}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Equal(t, "codex1", req.Account, "the configured default is honored while it is healthy")
 	assert.True(t, req.accountAutoSelected)
 	assert.Contains(t, req.AccountSource, "default_accounts.codex")
@@ -82,7 +153,7 @@ func TestRouteCreateAccountRoutesWithNoDefaultConfigured(t *testing.T) {
 	stubAccountLimitEvidence(t, nil)
 
 	req := CreateSessionRequest{Title: "pooled", RepoPath: repoPath, Program: "codex", AccountAuto: true}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Equal(t, "codex1", req.Account, "equally healthy accounts spread in registration order")
 	assert.True(t, req.accountAutoSelected)
 }
@@ -96,7 +167,8 @@ func TestRouteCreateAccountSpreadsAwayFromBusierAccounts(t *testing.T) {
 		Title: "busy", Path: repoPath, Program: "codex", Account: "codex1",
 	})
 	require.NoError(t, err)
-	m := &Manager{instances: map[string]*session.Instance{"k": busy}}
+	m := routerTestManager(t)
+	m.instances["k"] = busy
 
 	req := CreateSessionRequest{Title: "spread", RepoPath: repoPath, Program: "codex", AccountAuto: true}
 	require.NoError(t, m.routeCreateAccount(&config.Config{}, &req))
@@ -113,7 +185,7 @@ func TestRouteCreateAccountRefusesWhenEveryAccountIsWalled(t *testing.T) {
 	})
 
 	req := CreateSessionRequest{Title: "walled", RepoPath: repoPath, Program: "codex", AccountAuto: true}
-	err := (&Manager{}).routeCreateAccount(&config.Config{}, &req)
+	err := routerTestManager(t).routeCreateAccount(&config.Config{}, &req)
 	require.Error(t, err, "launching into a known wall is worse than failing the create")
 	assert.Contains(t, err.Error(), "codex1", "the refusal reports the earliest reset's account")
 	assert.Empty(t, req.Account, "nothing is applied when no account can be honored")
@@ -128,7 +200,7 @@ func TestRouteCreateAccountLeavesAnExplicitAccountAlone(t *testing.T) {
 	})
 
 	req := CreateSessionRequest{Title: "explicit", RepoPath: repoPath, Program: "codex", Account: "chosen"}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Equal(t, "chosen", req.Account,
 		"an explicit --account is a pin: the router neither rewrites nor second-guesses it")
 	assert.False(t, req.accountAutoSelected)
@@ -141,7 +213,7 @@ func TestRouteCreateAccountHonorsTheAmbientOptOut(t *testing.T) {
 	stubAccountLimitEvidence(t, nil)
 
 	req := CreateSessionRequest{Title: "opted-out", RepoPath: repoPath, Program: "codex", AccountAuto: true}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Empty(t, req.Account,
 		"a present-but-empty entry means this project runs on the ambient identity")
 }
@@ -151,7 +223,7 @@ func TestRouteCreateAccountKeepsAmbientWhenNoAccountsAreRegistered(t *testing.T)
 	stubAccountLimitEvidence(t, nil)
 
 	req := CreateSessionRequest{Title: "ambient", RepoPath: repoPath, Program: "codex", AccountAuto: true}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Empty(t, req.Account, "no registry means no pool to route across")
 }
 
@@ -166,7 +238,7 @@ func TestRouteCreateAccountHonorsAnExplicitAmbientPick(t *testing.T) {
 	stubAccountLimitEvidence(t, nil)
 
 	req := CreateSessionRequest{Title: "chose-ambient", RepoPath: repoPath, Program: "codex", AccountAmbient: true}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Empty(t, req.Account,
 		"an ambient pick keeps the ambient identity — neither routed nor defaulted")
 	assert.False(t, req.accountAutoSelected)
@@ -184,7 +256,7 @@ func TestRouteCreateAccountSkipsAccountsWithNoCredential(t *testing.T) {
 	stubAccountLimitEvidence(t, nil)
 
 	req := CreateSessionRequest{Title: "logged-in-only", RepoPath: repoPath, Program: "codex", AccountAuto: true}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Equal(t, "codex1", req.Account,
 		"the only account with a completed login is the only one an automatic pick may land on")
 }
@@ -200,7 +272,7 @@ func TestRouteCreateAccountKeepsAnUnloggedInConfiguredDefault(t *testing.T) {
 	stubAccountLimitEvidence(t, nil)
 
 	req := CreateSessionRequest{Title: "unlogged-default", RepoPath: repoPath, Program: "codex", AccountAuto: true}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Equal(t, "work", req.Account,
 		"a configured default is an explicit pin — honored while healthy even before login")
 }
@@ -212,7 +284,7 @@ func TestRouteCreateAccountStaysAmbientWhenNoAccountIsLoggedIn(t *testing.T) {
 	stubAccountLimitEvidence(t, nil)
 
 	req := CreateSessionRequest{Title: "all-unlogged", RepoPath: repoPath, Program: "codex", AccountAuto: true}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Empty(t, req.Account,
 		"no credential anywhere means no automatic pick can produce a working session")
 }
@@ -222,7 +294,7 @@ func TestRouteCreateAccountStaysAmbientWhenNoAccountIsLoggedIn(t *testing.T) {
 // least-loaded snapshot and both took the same account, because the pending row
 // that would have counted the first pick published long after.
 func TestClaimCreateAccountSpreadsConcurrentCreates(t *testing.T) {
-	m := &Manager{}
+	m := routerTestManager(t)
 	limited := map[string]time.Time{}
 	pool := []string{"codex1", "codex2"}
 
@@ -262,10 +334,8 @@ func TestRefuteAccountLimitEvidenceRetiresSiblingRowsToo(t *testing.T) {
 	require.NoError(t, err)
 	sibling.SetLimitReached(reset)
 	require.Len(t, sibling.AccountLimitObservations(), 1)
-	m := &Manager{
-		instances:      map[string]*session.Instance{daemonInstanceKey(project.ID, "sibling"): sibling},
-		repoStartLocks: map[string]*sync.Mutex{},
-	}
+	m := routerTestManager(t)
+	m.instances[daemonInstanceKey(project.ID, "sibling")] = sibling
 
 	_, epoch := answered.InFlightOpAndEpoch()
 	require.True(t, m.refuteAccountLimitEvidence(answered, epoch))
@@ -287,7 +357,7 @@ func TestRouteCreateAccountDoesNotRouteACrossAgentOverride(t *testing.T) {
 	stubAccountLimitEvidence(t, nil)
 
 	req := CreateSessionRequest{Title: "shimmed", RepoPath: repoPath, Program: "codex", AccountAuto: true}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Empty(t, req.Account,
 		"the label resolves to a non-codex command — no codex account can ride this launch")
 	assert.False(t, req.accountAutoSelected)
@@ -298,7 +368,7 @@ func TestRouteCreateAccountAppliesTheDefaultOnANonCarryingBackend(t *testing.T) 
 	writeProjectAccounts(t, project, "[default_accounts]\ncodex = \"codex1\"\n")
 
 	req := CreateSessionRequest{Title: "remote", RepoPath: repoPath, Program: "codex", Backend: "ssh", AccountAuto: true}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Equal(t, "codex1", req.Account,
 		"the configured default still applies — NewInstance's off-box refusal reports it by name")
 	assert.False(t, req.accountAutoSelected,
@@ -316,7 +386,7 @@ func TestRouteCreateAccountWithoutAutoKeepsThePreRouterContract(t *testing.T) {
 	stubAccountLimitEvidence(t, nil)
 
 	req := CreateSessionRequest{Title: "old-client", RepoPath: repoPath, Program: "codex"}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Empty(t, req.Account,
 		"an empty account from a client that did not opt in keeps the ambient identity")
 	assert.False(t, req.accountAutoSelected)
@@ -331,7 +401,7 @@ func TestRouteCreateAccountWithoutAutoStillAppliesTheDefault(t *testing.T) {
 	writeProjectAccounts(t, project, "[default_accounts]\ncodex = \"codex1\"\n")
 
 	req := CreateSessionRequest{Title: "old-defaulted", RepoPath: repoPath, Program: "codex"}
-	require.NoError(t, (&Manager{}).routeCreateAccount(&config.Config{}, &req))
+	require.NoError(t, routerTestManager(t).routeCreateAccount(&config.Config{}, &req))
 	assert.Equal(t, "codex1", req.Account,
 		"the configured default applies exactly as it did before the router existed")
 	assert.False(t, req.accountAutoSelected)
@@ -356,7 +426,7 @@ func TestRouteCreateAccountRefusesWhenEveryCredentialProbeFails(t *testing.T) {
 	stubAccountLimitEvidence(t, nil)
 
 	req := CreateSessionRequest{Title: "unverifiable", RepoPath: repoPath, Program: "codex", AccountAuto: true}
-	err := (&Manager{}).routeCreateAccount(&config.Config{}, &req)
+	err := routerTestManager(t).routeCreateAccount(&config.Config{}, &req)
 	require.Error(t, err, "a pool whose every probe errored is unknown, not empty")
 	assert.Contains(t, err.Error(), "no registered account's login could be verified")
 	assert.Empty(t, req.Account)
@@ -379,7 +449,7 @@ func TestRouteCreateAccountRefusesWhenTheProjectPolicyCannotBeRead(t *testing.T)
 	require.NoError(t, os.WriteFile(recordPath, []byte("{not json"), 0o600))
 
 	req := CreateSessionRequest{Title: "unknown-policy", RepoPath: repoPath, Program: "codex", AccountAuto: true}
-	err = (&Manager{}).routeCreateAccount(&config.Config{}, &req)
+	err = routerTestManager(t).routeCreateAccount(&config.Config{}, &req)
 	require.Error(t, err, "an unreadable project policy is a refusal, never an empty layer")
 	assert.Contains(t, err.Error(), "account policy")
 	assert.Empty(t, req.Account)
@@ -399,7 +469,8 @@ func TestRouteCreateAccountDoesNotCountTerminalSessionsAsLoad(t *testing.T) {
 	require.NoError(t, err)
 	lost.SetStatusForTest(session.Lost)
 	require.Equal(t, session.LiveLost, lost.GetLiveness(), "precondition: the fixture is terminal")
-	m := &Manager{instances: map[string]*session.Instance{"k": lost}}
+	m := routerTestManager(t)
+	m.instances["k"] = lost
 
 	req := CreateSessionRequest{Title: "after-loss", RepoPath: repoPath, Program: "codex", AccountAuto: true}
 	require.NoError(t, m.routeCreateAccount(&config.Config{}, &req))
@@ -432,7 +503,8 @@ func TestPersistRefutedRowWritesTheClearedRowInsideTheFence(t *testing.T) {
 	cleared.RetractAccountLimitObservation("codex", "codex4")
 	require.Empty(t, cleared.AccountLimitObservations())
 
-	m := &Manager{instances: map[string]*session.Instance{key: cleared}}
+	m := routerTestManager(t)
+	m.instances[key] = cleared
 	m.persistRefutedRow(key, cleared)
 
 	raw, err := config.LoadRepoInstances(project.ID)
@@ -466,7 +538,8 @@ func TestPersistRefutedRowOwesABusyRowToTheSettlementRetry(t *testing.T) {
 	busy.RetractAccountLimitObservation("codex", "codex4")
 	busy.SetInFlightOpForTest(session.OpReplacing)
 
-	m := &Manager{instances: map[string]*session.Instance{key: busy}}
+	m := routerTestManager(t)
+	m.instances[key] = busy
 	m.persistRefutedRow(key, busy)
 
 	m.mu.Lock()
@@ -515,7 +588,7 @@ func TestRefuteAccountLimitEvidenceRetractsTheLedgerEntry(t *testing.T) {
 	require.Len(t, instance.AccountLimitObservations(), 1, "precondition: the stale wall is stored")
 
 	_, epoch := instance.InFlightOpAndEpoch()
-	m := &Manager{}
+	m := routerTestManager(t)
 	require.True(t, m.refuteAccountLimitEvidence(instance, epoch),
 		"the session's own row must drop the entry its success contradicts")
 	require.Empty(t, instance.AccountLimitObservations())
