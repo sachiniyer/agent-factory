@@ -180,17 +180,18 @@ func (m *Manager) prepareRuntimeReplacementLiveBoundary(
 //
 // A current task row carries the stable ID of the session that owns its run.
 // That token is published before the session, so neither equal timestamps nor a
-// wall-clock correction can make one run impersonate another. A row left
-// unidentified by an earlier binary or a failed start-status write takes the
-// conservative compatibility path below.
+// wall-clock correction can make one run impersonate another. A row that names
+// this run still has to show that no later run exists (see
+// updateIdentifiedInterruptedTaskRun). A row left unidentified by an earlier
+// binary or a failed start-status write takes the conservative compatibility
+// path below.
 func (m *Manager) recordInterruptedTaskRun(
 	repoID, key string,
 	instance *session.Instance,
 	run session.TaskRunIdentity,
 ) error {
-	updated, applied, err := task.UpdateTaskRunOutcome(
-		run.TaskID, run.TaskGenerationID, run.SessionID, TaskStatusInterrupted)
-	if err == nil && !applied {
+	updated, applied, superseded, err := m.updateIdentifiedInterruptedTaskRun(repoID, run)
+	if err == nil && !applied && !superseded {
 		updated, applied, err = m.claimUnidentifiedInterruptedTaskRun(repoID, run)
 	}
 	if task.IsTaskNotFound(err) {
@@ -208,6 +209,12 @@ func (m *Manager) recordInterruptedTaskRun(
 		return err
 	}
 	settlementErr := m.clearInterruptedTaskRunObligation(repoID, key, instance, run)
+	if superseded {
+		m.warn().Printf(
+			"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, skipped on_complete, and left the session in place for inspection; did not replace last_run_status because a later run of this task exists and the task row has not recorded its start",
+			run.TaskID, run.Title)
+		return settlementErr
+	}
 	if !applied {
 		m.warn().Printf(
 			"task %s: session %q lost the runtime that received its run prompt; restored it without replaying the prompt, skipped on_complete, and left the session in place for inspection; did not replace last_run_status because the task row does not identify this run",
@@ -245,6 +252,66 @@ func (m *Manager) clearInterruptedTaskRunObligation(
 	return nil
 }
 
+// updateIdentifiedInterruptedTaskRun is the exact-ID half of
+// recordInterruptedTaskRun. A row that names this run proves the row belongs to
+// it. It does not prove this is still the task's newest run. A later session
+// whose BeginTaskRun and post-RPC UpdateTaskRunStart both failed (for example,
+// while tasks.json was unwritable) is committed with a greater sequence while
+// the row still names this run. Recording this interruption there would report
+// the task's newest run, which is still running, as interrupted. So a row that
+// names this run gets the same committed-successor check as the compatibility
+// claim, and superseded reports that the check refused the write.
+//
+// Pending creates are deliberately not counted. A pending create has not tried
+// to publish yet, and when it does, its greater sequence replaces this outcome.
+// If that publish fails too, the result is the same as the reverse order, where
+// this outcome landed before the later run was admitted.
+// unidentifiedClaimMayReplaceStatus lets that later run record its own outcome
+// over this one. Counting a pending create would instead lose this outcome for
+// good whenever that create never commits.
+//
+// The check runs only after the row read shows the write could apply, so a row
+// that already refuses never depends on unrelated session storage. An
+// unreadable store fails closed: the outcome stays owed and is retried.
+func (m *Manager) updateIdentifiedInterruptedTaskRun(
+	repoID string,
+	run session.TaskRunIdentity,
+) (updated task.Task, applied, superseded bool, err error) {
+	stored, err := task.GetTask(run.TaskID)
+	if err != nil {
+		return task.Task{}, false, false, err
+	}
+	if !task.RunOutcomeApplies(*stored, run.TaskGenerationID, run.SessionID) {
+		return task.Task{}, false, false, nil
+	}
+	superseded, err = m.taskRunSuccessorExists(repoID, run, false)
+	if err != nil || superseded {
+		return task.Task{}, false, superseded, err
+	}
+	updated, applied, err = task.UpdateTaskRunOutcome(
+		run.TaskID, run.TaskGenerationID, run.SessionID, TaskStatusInterrupted)
+	return updated, applied, false, err
+}
+
+// unidentifiedClaimMayReplaceStatus decides which stored statuses a run ordered
+// after the row's recorded run may replace. An active status is the ordinary
+// case: this run's start was never published. An interruption recorded for an
+// earlier run that the row names is the same case in the reverse order: that
+// outcome landed first, and then both of this run's start writes failed.
+// Refusing it would leave the earlier outcome in front of the task's newest run
+// for good. Any other status is watcher supervision or a delivery error, and
+// this run cannot show that the status belongs to it.
+func unidentifiedClaimMayReplaceStatus(stored task.Task) bool {
+	switch stored.LastRunStatus {
+	case "", task.RunStatusStarted, TaskStatusLimitParked:
+		return true
+	case TaskStatusInterrupted:
+		return stored.LastRunSessionID != ""
+	default:
+		return false
+	}
+}
+
 func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session.TaskRunIdentity) (task.Task, bool, error) {
 	stored, err := task.GetTask(run.TaskID)
 	if err != nil {
@@ -277,9 +344,7 @@ func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session
 			return task.Task{}, false, nil
 		}
 		desiredRunAt = *stored.LastRunAt
-	} else if stored.LastRunSequence >= run.Sequence ||
-		(stored.LastRunStatus != "" && stored.LastRunStatus != task.RunStatusStarted &&
-			stored.LastRunStatus != TaskStatusLimitParked) {
+	} else if stored.LastRunSequence >= run.Sequence || !unidentifiedClaimMayReplaceStatus(*stored) {
 		// A later/equal ordered run or a watcher supervision status cannot be
 		// attributed safely. Preserve it rather than turning evidence into an
 		// interruption. Decide before scanning session stores: unrelated unreadable
@@ -287,34 +352,9 @@ func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session
 		return task.Task{}, false, nil
 	}
 
-	// A committed session is durable before it enters m.instances, and an
-	// unloadable record never enters that map at all. Read the persisted universe,
-	// then add the only rows not there yet: pending creates. Candidate order uses
-	// the manager sequence when both records carry it and falls back to CreatedAt
-	// only for the bounded pre-field compatibility case.
-	persisted, err := loadPersistedTaskRunsForAttribution(repoID)
-	if err != nil {
+	if successor, err := m.taskRunSuccessorExists(repoID, run, true); err != nil || successor {
 		return task.Task{}, false, err
 	}
-	for i := range persisted {
-		if taskRunMayFollow(persisted[i], run) {
-			return task.Task{}, false, nil
-		}
-	}
-	m.mu.Lock()
-	for _, candidate := range m.instances {
-		if taskRunIdentityMayFollow(candidate.TaskRun(), run) {
-			m.mu.Unlock()
-			return task.Task{}, false, nil
-		}
-	}
-	for _, candidate := range m.pendingCreates {
-		if taskRunMayFollow(candidate, run) {
-			m.mu.Unlock()
-			return task.Task{}, false, nil
-		}
-	}
-	m.mu.Unlock()
 
 	return task.ClaimUnidentifiedTaskRunOutcome(
 		run.TaskID, run.SessionID, stored.LastRunAt, stored.LastRunStatus,
@@ -322,6 +362,47 @@ func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session
 		run.TaskGenerationID, desiredRunAt,
 		desiredSequence, TaskStatusInterrupted,
 	)
+}
+
+// taskRunSuccessorExists reports whether a session of run's task incarnation
+// may have been admitted after run. A committed session is on disk before it
+// enters m.instances, and a record that fails to load never enters that map at
+// all. So read everything persisted, then check m.instances. With
+// includePendingCreates, also check pending creates, which are the only
+// sessions in neither place. Both maps are read under one m.mu hold, so a
+// create moving from one to the other cannot be missed between them. Candidate
+// order uses the manager sequence when both records have one, and falls back to
+// CreatedAt only for records written before the sequence field existed.
+func (m *Manager) taskRunSuccessorExists(
+	repoID string,
+	run session.TaskRunIdentity,
+	includePendingCreates bool,
+) (bool, error) {
+	persisted, err := loadPersistedTaskRunsForAttribution(repoID)
+	if err != nil {
+		return false, err
+	}
+	for i := range persisted {
+		if taskRunMayFollow(persisted[i], run) {
+			return true, nil
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, candidate := range m.instances {
+		if taskRunIdentityMayFollow(candidate.TaskRun(), run) {
+			return true, nil
+		}
+	}
+	if !includePendingCreates {
+		return false, nil
+	}
+	for _, candidate := range m.pendingCreates {
+		if taskRunMayFollow(candidate, run) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 var loadPersistedTaskRunsForAttribution = persistedTaskRunsForAttribution

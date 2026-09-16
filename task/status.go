@@ -129,13 +129,21 @@ func UpdateTaskRunOutcome(taskID, taskGenerationID, runID, lastRunStatus string)
 		return Task{}, false, fmt.Errorf("task run id is required")
 	}
 	return mutateTaskStatus(taskID, func(t *Task) bool {
-		if t.GenerationID != taskGenerationID || t.LastRunSessionID != runID ||
-			!sessionRunStatusActive(t.LastRunStatus) {
+		if !RunOutcomeApplies(*t, taskGenerationID, runID) {
 			return false
 		}
 		t.LastRunStatus = lastRunStatus
 		return true
 	})
+}
+
+// RunOutcomeApplies reports whether UpdateTaskRunOutcome would change t. It is
+// the same predicate the write evaluates under the file lock, exposed so a
+// caller can decide whether to do extra work first. It is advisory only: the
+// write evaluates it again, so a row that changes in between is still refused.
+func RunOutcomeApplies(t Task, taskGenerationID, runID string) bool {
+	return runID != "" && t.GenerationID == taskGenerationID && t.LastRunSessionID == runID &&
+		sessionRunStatusActive(t.LastRunStatus)
 }
 
 // AdvanceTaskRunStatus changes the status of the identified active run without
