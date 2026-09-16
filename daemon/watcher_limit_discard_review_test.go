@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -261,8 +262,14 @@ func TestStopWithUnreadableQueueHoldsPipeUntilWritersStop(t *testing.T) {
 
 	stopCh := make(chan struct{})
 	close(stopCh)
+	s := newWatcherSupervisor()
+	recorded := 0
+	s.recordDrops = func(_ string, total int, _ time.Time) error {
+		recorded = total
+		return nil
+	}
 	w := &taskWatcher{
-		taskID: "stop-unreadable-hold", sup: newWatcherSupervisor(), queue: queue, stopCh: stopCh,
+		taskID: "stop-unreadable-hold", sup: s, queue: queue, stopCh: stopCh,
 	}
 	tail := &tailBuffer{}
 	writersStopped := make(chan struct{})
@@ -287,6 +294,11 @@ func TestStopWithUnreadableQueueHoldsPipeUntilWritersStop(t *testing.T) {
 	}
 	if !strings.Contains(tail.logSuffix(), "accepted-before-stop") {
 		t.Fatalf("unreadable-state stop did not keep the accepted event in the run tail: %q", tail.logSuffix())
+	}
+	// The event is neither replayable nor delivered, and a stop returns without
+	// logging the tail, so dropped_events is the only durable trace of it.
+	if w.dropped != 1 || recorded != 1 {
+		t.Fatalf("unreadable-state stop lost an event without drop accounting: dropped=%d recorded=%d", w.dropped, recorded)
 	}
 }
 
@@ -411,5 +423,38 @@ func TestLimitParkedEventWithoutQueueRecordsDrop(t *testing.T) {
 	}
 	if len(w.eventTimes) != 0 {
 		t.Fatalf("limit park did not refund its rate slot: %d reservations remain", len(w.eventTimes))
+	}
+}
+
+// TestUndeliveredEventWithoutQueueRecordsDrop extends the limit case above to
+// every other delivery outcome that hands the event to enqueueEvent. With no
+// durable queue, an attached target, a concurrency park, or a genuine failure
+// loses the event just as surely as a limit park does.
+func TestUndeliveredEventWithoutQueueRecordsDrop(t *testing.T) {
+	for name, deliverErr := range map[string]error{
+		"target attached":   errTargetBusy,
+		"concurrency limit": errAtConcurrencyLimit,
+		"delivery failure":  errors.New("target unreachable"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newWatcherSupervisor()
+			s.deliver = func(string, string, watchDeliveryOptions) error { return deliverErr }
+			recorded := 0
+			s.recordDrops = func(_ string, total int, _ time.Time) error {
+				recorded = total
+				return nil
+			}
+			w := &taskWatcher{taskID: "undelivered-without-queue", sup: s, stopCh: make(chan struct{})}
+			tail := &tailBuffer{}
+
+			w.handleEvent("held-nowhere", tail)
+
+			if w.dropped != 1 || recorded != 1 {
+				t.Fatalf("queue-less undelivered event disappeared without drop accounting: dropped=%d recorded=%d", w.dropped, recorded)
+			}
+			if !strings.Contains(tail.logSuffix(), "held-nowhere") {
+				t.Fatalf("queue-less undelivered event did not reach the run tail: %q", tail.logSuffix())
+			}
+		})
 	}
 }

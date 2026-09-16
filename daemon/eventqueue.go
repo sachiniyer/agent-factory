@@ -109,6 +109,9 @@ type eventQueue struct {
 	appendBoundary func(path string, rec []byte) (int, error)
 	truncate       func(path string, size int64) error
 	syncDirectory  func(string) error
+	// writeMarker is the .limit-parked write seam (nil means the production
+	// config.AtomicWriteFileRefusingLink).
+	writeMarker func(path string, data []byte, perm os.FileMode) error
 
 	mu      sync.Mutex
 	offset  int64 // byte offset of the first undelivered event
@@ -137,15 +140,18 @@ type eventQueue struct {
 	// not LastRunStatus: watcher lifecycle reporting may legitimately replace the
 	// display status without turning a retry of this head into a new occurrence.
 	parkedStatusSeq int64
-	// limitParkedErr records a usage-limit marker write the queue could not make
-	// durable while the backlog file stayed appendable — the protection state
-	// is then as unverifiable as an unreadable queue, so the stdout reader
-	// blocks fail-closed while any backlog the failed write would guard
-	// remains, and that backlog is held against age and cap eviction exactly
-	// as the marker would have held it (#4226 review). Cleared when a marker
-	// lands durably, when the protection state is deliberately torn down, or
-	// once the backlog drains.
-	limitParkedErr error
+	// limitParkedErr records a usage-limit marker the queue could not make
+	// durable while the backlog file stayed appendable. It is only ever set
+	// while limitParked is false: a failed rewrite of a durable marker leaves
+	// that marker in place. Protection is then as unverifiable as an unreadable
+	// queue, so the stdout reader blocks fail-closed while any backlog the
+	// failed write would guard remains, retrying the write at most once per
+	// eventQueueLoadRetryInterval (lastLimitMarkerRetry), and that backlog is
+	// held against age and cap eviction as the marker would have held it
+	// (#4226 review). Cleared when a marker lands durably, when the protection
+	// state is deliberately torn down, or once the backlog drains.
+	limitParkedErr       error
+	lastLimitMarkerRetry time.Time
 
 	dropped     int // events dropped to the overflow caps, for the drop log
 	lastDropLog time.Time
@@ -189,6 +195,7 @@ func newEventQueue(dir, taskID string) *eventQueue {
 		appendBoundary: appendRecordToFile,
 		truncate:       os.Truncate,
 		syncDirectory:  syncEventQueueDirectory,
+		writeMarker:    config.AtomicWriteFileRefusingLink,
 		now:            time.Now,
 	}
 	q.load()
@@ -483,15 +490,9 @@ func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusR
 		return false, fmt.Errorf("%w; refusing to append: %w", errEventQueueLoadFailed, err)
 	}
 	if q.pending == 0 && !parkThisEvent {
-		if q.limitParked {
-			if err := q.clearLimitParkedLocked(); err != nil {
-				return false, fmt.Errorf("failed to clear stale usage-limit queue marker: %w", err)
-			}
+		if err := q.clearStaleProtectionLocked(); err != nil {
+			return false, err
 		}
-		// A marker write that failed for a backlog now gone protects nothing.
-		// Left set, it would count this ordinary event as protected the moment
-		// the append makes pending nonzero.
-		q.limitParkedErr = nil
 	}
 	// A direct delivery can discover the limit before the event has a queue
 	// sequence. The queue is empty on that path, so the next sequence is the
@@ -501,35 +502,15 @@ func (q *eventQueue) enqueueWithParkedStatus(line string, parkThisEvent, statusR
 	if parkThisEvent && statusRecorded && q.pending == 0 {
 		parkedStatusSeq = q.seq + 1
 	}
-	markerExisted := q.limitParked
 	var markerErr error
-	if parkThisEvent && (!q.limitParked || parkedStatusSeq != q.parkedStatusSeq) {
-		if err := q.persistLimitParkedLocked(parkedStatusSeq); err != nil {
-			// The marker could not be made durable, but that is no reason to
-			// drop the event while the backlog file itself stays appendable —
-			// retaining it keeps the occurrence replayable, and limitParkedErr
-			// (set inside the persist) blocks the reader fail-closed so later
-			// events stage in the pipe rather than each retrying this same
-			// write and dropping through the whole episode (#4226 review).
-			markerErr = err
-		} else if !markerExisted {
-			// The marker just persisted describes a parked event that is not in
-			// the queue yet. If any later step drops that event — a failed
-			// cursor reset or append — an empty queue would keep the marker:
-			// an ordinary stop then trusts it and routes prefetched and
-			// kernel-buffered lines through protected persistence instead of
-			// ordinary-stop discard, and the cap check treats the backlog as
-			// protected. Roll back only a marker THIS call created; one that
-			// already protected earlier events is not this enqueue's to remove.
-			defer func() {
-				if retained {
-					return
-				}
-				if clearErr := q.clearLimitParkedLocked(); clearErr != nil {
-					log.WarningLog.Printf("watch task %s: failed to roll back usage-limit queue marker after the parked event was not retained: %v", q.taskID, clearErr)
-				}
-			}()
-		}
+	if parkThisEvent {
+		var undoMarker func()
+		markerErr, undoMarker = q.protectParkedEnqueueLocked(parkedStatusSeq)
+		defer func() {
+			if !retained {
+				undoMarker()
+			}
+		}()
 	}
 	if err := q.resetCursorBeforeFreshAppendLocked(); err != nil {
 		return false, err

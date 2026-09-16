@@ -729,17 +729,12 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 			w.enqueueEvent(line, tail, true)
 			return
 		}
-		now := time.Now()
-		dropped, outcomeChanged, logIt := w.countEventDrop(now)
 		// One warning per window, not per drop — a flooding script must not
 		// also flood the daemon log. The counter keeps the exact total.
 		// Rate-dropped events are deliberately NOT queued: the limiter is
 		// protective policy against a chatty script, not an outage signal.
-		if logIt {
+		if dropped, logIt := w.recordEventDrop(); logIt {
 			log.WarningLog.Printf("watch task %s: event rate exceeded %d/min; dropping excess events (%d dropped so far)", w.taskID, w.sup.eventsPerMinute, dropped)
-		}
-		if logIt || outcomeChanged {
-			w.persistDroppedEvents(dropped, now)
 		}
 		tail.add(line)
 		return
@@ -758,21 +753,6 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 			limitParked = true
 			parkedStatusRecorded = watchParkedStatusRecorded(err)
 			w.releaseEventSlot()
-			if w.queue == nil {
-				// enqueueEvent below retains the line only in the run tail when
-				// there is no durable queue, so this park is otherwise invisible:
-				// the event reserved a rate slot, failed only at the limit fence,
-				// and then vanished without reaching dropped_events. Count it
-				// through the same drop accounting the rate-full path uses.
-				now := time.Now()
-				dropped, outcomeChanged, logIt := w.countEventDrop(now)
-				if logIt {
-					log.WarningLog.Printf("watch task %s: usage-limit event cannot be retained; durable queue unavailable (%d dropped so far)", w.taskID, dropped)
-				}
-				if logIt || outcomeChanged {
-					w.persistDroppedEvents(dropped, now)
-				}
-			}
 			log.InfoLog.Printf("watch task %s: target session is at a usage limit; deferring event until the limit clears", w.taskID)
 		case errors.Is(err, errTargetBusy):
 			// Not a failure: a TUI is attached to the target, so the event is
@@ -812,15 +792,18 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 
 // enqueueEvent appends the line to the durable backlog and wakes the drainer.
 // The line also lands in the run's failure tail — it did not become a
-// delivered event this run (#797). When the queue is unavailable the caller's
-// own accounting decides the loss (there is none to record here); when the
-// append fails WITHOUT retaining the record, the event is neither delivered
-// nor durably held and goes through the same drop accounting as the rate-full
-// and queue-unavailable losses — an error is not proof of loss, because a
-// close/flush or cap fault can follow a landed record, so retention decides.
+// delivered event this run (#797). With no durable queue, or when the append
+// fails WITHOUT retaining the record, the event is neither delivered nor held
+// and is counted through recordEventDrop, whatever delivery outcome sent it
+// here — a usage-limit park, an attached target, a concurrency park, or a
+// genuine failure. An error is not proof of loss: a close/flush or cap fault
+// can follow a landed record, so retention decides.
 func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer, limitParked bool, parkedStatusRecorded ...bool) {
 	tail.add(line)
 	if w.queue == nil {
+		if dropped, logIt := w.recordEventDrop(); logIt {
+			log.WarningLog.Printf("watch task %s: undelivered event cannot be retained; durable event queue unavailable (%d dropped so far)", w.taskID, dropped)
+		}
 		return
 	}
 	statusRecorded := len(parkedStatusRecorded) > 0 && parkedStatusRecorded[0]
@@ -834,11 +817,7 @@ func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer, limitParked bo
 			return
 		}
 		log.ErrorLog.Printf("watch task %s: failed to queue event for replay; dropping it: %v", w.taskID, err)
-		now := time.Now()
-		dropped, outcomeChanged, logIt := w.countEventDrop(now)
-		if logIt || outcomeChanged {
-			w.persistDroppedEvents(dropped, now)
-		}
+		w.recordEventDrop()
 		return
 	}
 	w.ensureDrainer()

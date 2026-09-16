@@ -134,16 +134,28 @@ func (w *taskWatcher) targetLimitRequiresRetention() bool {
 // kernel pipe without reopening production. The queue is limit-protected, so
 // these already-emitted events may cross its ordinary cap without eviction.
 //
-// The destination is chosen at drain time behind one unthrottled load attempt:
-// a queue whose state is still unreadable refuses every enqueue, so the lines
-// go straight to the run tail — the only remaining place they can be seen —
-// rather than each producing a "failed to queue" error that implies they
-// reached storage. A queue that healed during teardown takes the enqueue path
-// and keeps the events durable.
+// The destination is chosen at drain time behind one unthrottled load attempt.
+// A queue that healed during teardown takes the enqueue path and keeps the
+// events durable. One whose state is still unreadable must refuse every
+// enqueue, and holding stop until storage recovers would hang reload and
+// shutdown, so these events are lost. The loss is counted in dropped_events
+// and logged once with the lines the run tail still holds. A stop returns
+// without the failure summary that would otherwise print that tail (#4226
+// review).
 func (w *taskWatcher) persistRemainingLimitEvents(br *bufio.Reader, tail *tailBuffer) {
 	emit := func(line string) { w.enqueueEvent(line, tail, true) }
-	if w.queue == nil || w.queue.loadFailedFresh() {
-		emit = tail.add
+	if w.queue != nil && w.queue.loadFailedFresh() {
+		lost := 0
+		emit = func(line string) {
+			tail.add(line)
+			lost++
+			w.recordEventDrop()
+		}
+		defer func() {
+			if lost > 0 {
+				log.ErrorLog.Printf("watch task %s: event queue still unreadable at stop; %d complete event(s) from the stopped command could not be retained and were counted as dropped%s", w.taskID, lost, tail.logSuffix())
+			}
+		}()
 	}
 	for {
 		chunk, err := br.ReadSlice('\n')

@@ -5,8 +5,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // loadLimitParkedLocked recovers the queue-level retention marker. A marker
@@ -61,13 +63,25 @@ func (q *eventQueue) persistLimitParkedLocked(statusSeq int64) error {
 	if statusSeq > 0 {
 		data = []byte("parked " + strconv.FormatInt(statusSeq, 10) + "\n")
 	}
-	if err := config.AtomicWriteFileRefusingLink(q.limitPath, data, 0644); err != nil {
-		// The marker could not be made durable, but the backlog file may still
-		// be appendable. Record the failure so the stdout reader blocks
-		// fail-closed instead of each later parked enqueue retrying this same
-		// write and dropping its event through the whole limit episode (#4226
-		// review).
-		q.limitParkedErr = err
+	write := q.writeMarker
+	if write == nil {
+		write = config.AtomicWriteFileRefusingLink
+	}
+	if err := write(q.limitPath, data, 0644); err != nil {
+		// A marker that is not durable yet leaves protection unverifiable while
+		// the backlog file may still be appendable: record it so the stdout
+		// reader blocks fail-closed instead of each later parked enqueue
+		// retrying this same write through the whole limit episode. A failed
+		// REWRITE is different — the atomic write replaces the file by rename
+		// or not at all, so the durable marker still protects the backlog and
+		// only its head-sequence annotation is lost, which a restart repeats at
+		// most once. Recording that would block the reader far below the cap
+		// with nothing left to retry: markLimitParked and the enqueue guard both
+		// skip a queue whose marker is set (#4226 review).
+		if !q.limitParked {
+			q.limitParkedErr = err
+			q.lastLimitMarkerRetry = time.Now()
+		}
 		return err
 	}
 	q.limitParked = true
@@ -86,6 +100,69 @@ func (q *eventQueue) markLimitParked() error {
 		return nil
 	}
 	return q.markLimitParkedLocked()
+}
+
+// retryLimitMarkerLocked re-attempts a marker write that failed, at most once
+// per eventQueueLoadRetryInterval: the blocked reader polls every
+// watcherLimitBackpressurePoll, and each attempt is disk I/O under q.mu. It is
+// what lets storage recovery alone release the fail-closed block. The drainer
+// retries only on a limit verdict, which an ordinary delivery failure never
+// produces. Callers hold q.mu.
+func (q *eventQueue) retryLimitMarkerLocked() error {
+	if q.limitParkedErr == nil || time.Since(q.lastLimitMarkerRetry) < eventQueueLoadRetryInterval {
+		return q.limitParkedErr
+	}
+	return q.markLimitParkedLocked()
+}
+
+// clearStaleProtectionLocked drops protection state an ordinary event must not
+// inherit on entering an empty queue: a marker left by a backlog that already
+// drained, and a failed marker write whose backlog is gone. Left set, the
+// latter would count this ordinary event as protected the moment the append
+// makes pending nonzero. Callers hold q.mu and have checked pending == 0.
+func (q *eventQueue) clearStaleProtectionLocked() error {
+	if q.limitParked {
+		if err := q.clearLimitParkedLocked(); err != nil {
+			return fmt.Errorf("failed to clear stale usage-limit queue marker: %w", err)
+		}
+	}
+	q.limitParkedErr = nil
+	return nil
+}
+
+// protectParkedEnqueueLocked makes the queue-level marker cover a parked event
+// before its append, and returns how to undo exactly what this call changed if
+// the event is then not retained. Callers hold q.mu.
+//
+// A failed write is no reason to drop the event while the backlog file stays
+// appendable: retaining it keeps the occurrence replayable, and limitParkedErr
+// (set by the persist when no marker existed) blocks the reader fail-closed so
+// later events stage in the pipe (#4226 review).
+//
+// The undo matters when a later step — the cursor reset or the append — drops
+// the event. Whatever this call established then describes an event that is
+// not in the queue. A new marker would make an ordinary stop route prefetched
+// and kernel-buffered lines through protected persistence. A new write failure
+// would block the reader and suspend eviction over a backlog no limited event
+// ever joined. Only this call's own change is reverted; a marker or failure
+// that already covered earlier events is not this enqueue's to remove.
+func (q *eventQueue) protectParkedEnqueueLocked(statusSeq int64) (markerErr error, undo func()) {
+	noop := func() {}
+	if q.limitParked && statusSeq == q.parkedStatusSeq {
+		return nil, noop
+	}
+	markerExisted, prevErr := q.limitParked, q.limitParkedErr
+	if err := q.persistLimitParkedLocked(statusSeq); err != nil {
+		return err, func() { q.limitParkedErr = prevErr }
+	}
+	if markerExisted {
+		return nil, noop
+	}
+	return nil, func() {
+		if clearErr := q.clearLimitParkedLocked(); clearErr != nil {
+			log.WarningLog.Printf("watch task %s: failed to roll back usage-limit queue marker after the parked event was not retained: %v", q.taskID, clearErr)
+		}
+	}
 }
 
 func (q *eventQueue) clearLimitParkedLocked() error {
@@ -207,11 +284,11 @@ func (q *eventQueue) limitBackpressureState() (blocked, unknown bool) {
 			// The backlog the failed marker write guarded has fully drained —
 			// nothing is left for it to protect, so the block is moot.
 			q.limitParkedErr = nil
-		} else {
+		} else if q.retryLimitMarkerLocked() != nil {
 			// A marker write that cannot land leaves protection durability
 			// unverifiable: fail closed rather than let the reader consume
 			// events that each retry of the same write would drop (#4226
-			// review).
+			// review). A retry that lands falls through to the capacity check.
 			return true, true
 		}
 	}

@@ -130,6 +130,21 @@ func (w *taskWatcher) countEventDrop(now time.Time) (dropped int, outcomeChanged
 	return dropped, outcomeChanged, logIt
 }
 
+// recordEventDrop is the one accounting exit for an event that will be neither
+// delivered nor durably retained: every branch that loses one — rate-full, no
+// durable queue, a refused enqueue, a stop drain into an unreadable queue —
+// counts it here, so dropped_events cannot miss a branch (#4226 review). It
+// checkpoints on the first drop after a delivery and once per log window, and
+// reports whether the caller's rate-limited warning is due.
+func (w *taskWatcher) recordEventDrop() (dropped int, logIt bool) {
+	now := time.Now()
+	dropped, outcomeChanged, logIt := w.countEventDrop(now)
+	if logIt || outcomeChanged {
+		w.persistDroppedEvents(dropped, now)
+	}
+	return dropped, logIt
+}
+
 // persistDroppedEvents checkpoints an absolute counter rather than one delta
 // per line. The first drop after a successful delivery and then at most one per
 // log window touch tasks.json, so the visibility fix cannot turn consecutive

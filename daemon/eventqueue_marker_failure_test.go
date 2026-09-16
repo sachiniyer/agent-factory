@@ -4,10 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 // failLimitMarkerWrites makes every .limit-parked write fail while the JSONL
@@ -97,6 +100,11 @@ func TestEventQueue_MarkerWriteFailureSuppressesCapEviction(t *testing.T) {
 	}
 }
 
+// failingMarkerWrite is a writeMarker seam that refuses every write.
+func failingMarkerWrite(string, []byte, os.FileMode) error {
+	return errors.New("events directory not writable")
+}
+
 // TestEventQueue_MarkerWriteFailureRetainsAgainstRetentionPolicy covers the
 // sibling reader of the same state: retainLimitParked drives the drainer's age
 // expiry and the stop-time pipe decision, and must not answer "unprotected"
@@ -105,6 +113,11 @@ func TestEventQueue_MarkerWriteFailureSuppressesCapEviction(t *testing.T) {
 func TestEventQueue_MarkerWriteFailureRetainsAgainstRetentionPolicy(t *testing.T) {
 	q := newEventQueue(t.TempDir(), "marker-fail-retain")
 	failLimitMarkerWrites(t, q)
+	// A file inside the blocking directory also makes the drained cleanup's
+	// marker removal fail, so the recorded failure outlives the backlog.
+	if err := os.WriteFile(filepath.Join(q.limitPath, "pin"), nil, 0o644); err != nil {
+		t.Fatalf("pin marker directory: %v", err)
+	}
 	if _, err := q.enqueueWithParkedStatus("held-for-limit", true, false); err == nil {
 		t.Fatal("a failed marker write must still surface an error")
 	}
@@ -121,15 +134,9 @@ func TestEventQueue_MarkerWriteFailureRetainsAgainstRetentionPolicy(t *testing.T
 		t.Fatal("protection outlived the backlog the failed marker write guarded")
 	}
 
-	// A parked enqueue that fails both its marker write and its append leaves
-	// the failure recorded on an empty queue. The next ordinary event must
-	// start unprotected rather than adopt it once pending becomes nonzero.
-	failLimitMarkerWrites(t, q)
-	q.appendRecord = func(string, []byte) (int, error) { return 0, errors.New("disk full") }
-	if retained, err := q.enqueueWithParkedStatus("lost-parked", true, false); retained || err == nil {
-		t.Fatalf("append failure was not reported as a drop: retained=%v err=%v", retained, err)
-	}
-	q.appendRecord = appendRecordToFile
+	// The failure is still recorded on the now-empty queue. The next ordinary
+	// event must start unprotected rather than adopt it once pending becomes
+	// nonzero.
 	if err := q.enqueue("ordinary-after-drain"); err != nil {
 		t.Fatalf("ordinary enqueue: %v", err)
 	}
@@ -138,6 +145,111 @@ func TestEventQueue_MarkerWriteFailureRetainsAgainstRetentionPolicy(t *testing.T
 	}
 	if blocked, _ := q.limitBackpressureState(); blocked {
 		t.Fatal("an ordinary event inherited the fail-closed block from a moot marker failure")
+	}
+}
+
+// TestEventQueue_FailedMarkerRewriteKeepsDurableProtection pins the second
+// #4226 finding in this family. A marker already on disk stays in place when
+// a rewrite of its head-sequence annotation fails, so protection still holds.
+// Recording that failure as unverifiable protection blocked the reader far
+// below the cap, and nothing retried the write: every retry path skips a queue
+// whose marker is set.
+func TestEventQueue_FailedMarkerRewriteKeepsDurableProtection(t *testing.T) {
+	q := newEventQueue(t.TempDir(), "marker-rewrite-fail")
+	if err := q.enqueue("held-for-limit", true); err != nil {
+		t.Fatalf("seed parked event: %v", err)
+	}
+	_, cursor, ok, err := q.peek()
+	if err != nil || !ok {
+		t.Fatalf("peek: ok=%v err=%v", ok, err)
+	}
+	q.writeMarker = failingMarkerWrite
+	if recorded, err := q.recordParkedStatus(cursor); recorded || err == nil {
+		t.Fatalf("annotation rewrite failure was not reported: recorded=%v err=%v", recorded, err)
+	}
+
+	if blocked, unknown := q.limitBackpressureState(); blocked || unknown {
+		t.Fatalf("a failed annotation rewrite blocked the reader below the cap: blocked=%v unknown=%v", blocked, unknown)
+	}
+	if !q.retainLimitParked() {
+		t.Fatal("a failed annotation rewrite dropped durable protection")
+	}
+	if raw, err := os.ReadFile(q.limitPath); err != nil || string(raw) != "parked\n" {
+		t.Fatalf("durable marker did not survive the failed rewrite: %q, %v", raw, err)
+	}
+	if !q.parkedStatusRecorded(cursor) {
+		t.Fatal("the committed status for this head was forgotten, so its write would repeat")
+	}
+}
+
+// TestEventQueue_FailedMarkerWriteRetriesWhenStorageRecovers pins the
+// recovery half: a marker that never landed blocks the reader fail-closed, and
+// storage recovery alone must release that block. Without a retry on the
+// reader's own poll, only a limit verdict from the drainer re-attempted the
+// write, and an ordinary delivery failure never produces one.
+func TestEventQueue_FailedMarkerWriteRetriesWhenStorageRecovers(t *testing.T) {
+	oldInterval := eventQueueLoadRetryInterval
+	eventQueueLoadRetryInterval = time.Hour
+	t.Cleanup(func() { eventQueueLoadRetryInterval = oldInterval })
+
+	q := newEventQueue(t.TempDir(), "marker-write-heal")
+	q.writeMarker = failingMarkerWrite
+	if retained, err := q.enqueueWithParkedStatus("held-for-limit", true, false); !retained || err == nil {
+		t.Fatalf("failed marker write: retained=%v err=%v, want retained with an error", retained, err)
+	}
+	q.writeMarker = config.AtomicWriteFileRefusingLink
+
+	if blocked, unknown := q.limitBackpressureState(); !blocked || !unknown {
+		t.Fatalf("the reader polled a retry before it was due: blocked=%v unknown=%v", blocked, unknown)
+	}
+	eventQueueLoadRetryInterval = 0
+	if blocked, unknown := q.limitBackpressureState(); blocked || unknown {
+		t.Fatalf("storage recovery alone did not release the fail-closed block: blocked=%v unknown=%v", blocked, unknown)
+	}
+	if _, err := os.Stat(q.limitPath); err != nil {
+		t.Fatalf("the retry did not make the marker durable: %v", err)
+	}
+	if !q.retainLimitParked() {
+		t.Fatal("the recovered marker does not protect the backlog")
+	}
+}
+
+// TestEventQueue_UnretainedParkedEnqueueRollsBackMarkerFailure is the
+// failure-state twin of the marker rollback. A parked enqueue whose marker
+// write fails and whose append then drops the event must not leave that
+// failure behind: it would block the reader and suspend eviction over an
+// ordinary backlog that no limited event ever joined. A failure that already
+// covered a retained event is not that enqueue's to remove.
+func TestEventQueue_UnretainedParkedEnqueueRollsBackMarkerFailure(t *testing.T) {
+	q := newEventQueue(t.TempDir(), "marker-fail-unretained")
+	if err := q.enqueue("ordinary-backlog"); err != nil {
+		t.Fatalf("seed ordinary event: %v", err)
+	}
+	q.writeMarker = failingMarkerWrite
+	failAppend := func(string, []byte) (int, error) { return 0, errors.New("disk full") }
+
+	q.appendRecord = failAppend
+	if retained, err := q.enqueueWithParkedStatus("lost-parked", true, false); retained || err == nil {
+		t.Fatalf("append failure was not reported as a drop: retained=%v err=%v", retained, err)
+	}
+	q.appendRecord = appendRecordToFile
+	if blocked, _ := q.limitBackpressureState(); blocked {
+		t.Fatal("a dropped parked event left the reader blocked over an ordinary backlog")
+	}
+	if q.retainLimitParked() {
+		t.Fatal("a dropped parked event left an ordinary backlog protected from eviction")
+	}
+
+	if retained, err := q.enqueueWithParkedStatus("held-for-limit", true, false); !retained || err == nil {
+		t.Fatalf("failed marker write: retained=%v err=%v, want retained with an error", retained, err)
+	}
+	q.appendRecord = failAppend
+	if retained, _ := q.enqueueWithParkedStatus("lost-after", true, false); retained {
+		t.Fatal("append failure reported the event retained")
+	}
+	q.appendRecord = appendRecordToFile
+	if !q.retainLimitParked() {
+		t.Fatal("rolling back a dropped enqueue removed protection a retained parked event still needs")
 	}
 }
 
