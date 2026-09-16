@@ -401,6 +401,17 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		return resolved, nil
 	}
 
+	// Classify the RECORD, never the instance: a ghost kill has no live
+	// instance to ask. Asking inside m.mu was worse than a plain nil
+	// dereference — the panic could not even finish unwinding, because the
+	// killsInFlight cleanup deferred above re-locks the same mutex, so the
+	// goroutine wedged holding it instead of crashing. evidence is the
+	// identity the record delete just used (the live instance's snapshot, or
+	// the persisted row for a ghost), so the grace decision classifies
+	// exactly the row that was removed — and no dereference remains inside
+	// the critical section for any future change to repeat the deadlock.
+	reserved := session.IsReservedRecordTitle(evidence.Title, evidence.BackendType)
+
 	m.mu.Lock()
 	if current := m.instances[key]; current == nil || current == instance || stableIDMatchesForDaemon(current.ID, targetID) {
 		delete(m.instances, key)
@@ -408,7 +419,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		// cannot outlive the session it describes (#3031).
 		m.forgetSessionRuntimeStateLocked(repoID, instance)
 	}
-	if session.IsReservedRecordTitle(instance.Title, instance.BackendType()) {
+	if reserved {
 		// An explicit kill is honored only briefly: the ensure loop suppresses
 		// re-creation for rootKillHealDelay, then self-heals a still-configured
 		// root (#1223). Config (root_agents) is the source of truth — removing

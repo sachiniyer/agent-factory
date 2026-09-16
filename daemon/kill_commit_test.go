@@ -408,6 +408,28 @@ func TestKillSession_GhostDeletionRetainsLegacyAccountLimitEvidence(t *testing.T
 	}
 }
 
+// A ghost record under the reserved title is still the repo's root: its kill
+// must arm the same ensure-loop grace a live kill does, or the loop
+// resurrects it on the next tick while the operator is mid-cleanup. This is
+// also the nil-instance regression pin — the reserved classification must
+// read the record (evidence), because a ghost has no instance to ask: the
+// last time it asked the instance, a nil dereference inside m.mu deadlocked
+// the deferred killsInFlight cleanup and wedged the manager.
+func TestKillSession_GhostRootDeletionArmsRootGrace(t *testing.T) {
+	manager, repoID := newGhostKillManager(t, session.RootSessionTitle, tmux.SanitizedNameForRepo(session.RootSessionTitle, ""))
+	stubGhostTmux(t, tmux.PaneStateKnown, nil)
+	stubGhostWorktree(t, git.CleanupSettled, nil)
+	if _, err := manager.KillSession(KillSessionRequest{Title: session.RootSessionTitle, RepoID: repoID}); err != nil {
+		t.Fatalf("KillSession: %v", err)
+	}
+	manager.mu.Lock()
+	_, armed := manager.rootKilledAt[repoID]
+	manager.mu.Unlock()
+	if !armed {
+		t.Fatal("kill of the reserved-title ghost must arm root grace — a ghost root is still the repo's root")
+	}
+}
+
 // unsafeKillBackend fails to START and cannot clean up safely afterwards: its Kill
 // reports the shape a wedged tmux / cut-off worktree removal produces, so the
 // create's cleanup leaves the workspace on disk.
