@@ -100,9 +100,23 @@ func resolveConfigForInstance(i *Instance) *config.Config {
 }
 
 func resolveConfigForPath(path string) *config.Config {
+	return resolveConfigForPathResolving(path, config.ResolveConfigForRepo)
+}
+
+// resolveConfigForPathInspection is resolveConfigForPath's read-only twin:
+// the same repo-then-global precedence answered without the durable in-repo
+// load observation ResolveConfigForRepo records. List and picker endpoints
+// use it so a read cannot claim the runtime-load log and inrepo-config-hash
+// marker the operation that actually consumes the config owes (#4430 review
+// round 2).
+func resolveConfigForPathInspection(path string) *config.Config {
+	return resolveConfigForPathResolving(path, config.ResolveConfigForRepoInspection)
+}
+
+func resolveConfigForPathResolving(path string, resolveRepo func(*config.RepoContext) (*config.ResolvedConfig, error)) *config.Config {
 	var cfg *config.Config
 	if repo, err := config.RepoFromPath(path); err == nil {
-		if resolved, rerr := config.ResolveConfigForRepo(repo); rerr == nil {
+		if resolved, rerr := resolveRepo(repo); rerr == nil {
 			cfg = &resolved.Config
 		} else {
 			log.WarningLog.Printf("failed to resolve repo config when resolving program for path %q: %v", path, rerr)

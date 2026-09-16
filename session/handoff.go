@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -292,6 +293,28 @@ func HandoffEffectiveAgentForPath(path, target string) string {
 		return detected
 	}
 	return target
+}
+
+// HandoffEffectiveAgentsForPathInspection answers HandoffEffectiveAgentForPath
+// for every target through ONE inspection-scope config read. List endpoints —
+// the account and handoff pickers — must use it rather than per-target calls
+// to the single-agent helper: that one goes through ResolveConfigForRepo,
+// which records the durable in-repo load observation, so a read-only picker
+// would emit the runtime-load log and write the inrepo-config-hash marker the
+// mutating operation is supposed to announce (#4430 review round 2). Same
+// two-step answer per target: the detected agent of the resolved command, or
+// the enum when the command names no supported agent.
+func HandoffEffectiveAgentsForPathInspection(path string, targets []string) map[string]string {
+	cfg := resolveConfigForPathInspection(path)
+	resolved := make(map[string]string, len(targets))
+	for _, target := range targets {
+		if detected := tmux.DetectAgentFromCommand(config.ResolveProgram(cfg, target)); detected != "" {
+			resolved[target] = detected
+		} else {
+			resolved[target] = target
+		}
+	}
+	return resolved
 }
 
 // EffectiveAgent is the agent identity of the plan's frozen launch command —

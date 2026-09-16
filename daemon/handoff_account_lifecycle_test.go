@@ -47,7 +47,7 @@ func TestHandoffAccountRestartRefreshPreservesHealthyCheckpoint(t *testing.T) {
 	inst.SetGitWorktreeForTest(gw)
 	require.NoError(t, inst.BeginManualAccountSwap())
 	require.NoError(t, inst.ValidateManualAccountSwap("personal", "claude"))
-	_, err = inst.SelectAccountForHandoff("work", "personal", "claude", session.HandoffReasonManual, "tip", "continue")
+	_, err = inst.SelectAccountForHandoff("work", "personal", "claude", "claude", session.HandoffReasonManual, "tip", "continue")
 	require.NoError(t, err)
 	require.NoError(t, m.persistSettlement(repo, daemonInstanceKey(repo, inst.Title), inst))
 	saved := persistedInstanceByTitle(t, repo, inst.Title)
@@ -126,7 +126,7 @@ func TestHandoffAccountHealthyPendingSwapRetainsResumeBackoff(t *testing.T) {
 	inst.ClearLimitReached()
 	m.cfg.LimitAutoResume = false
 	require.NoError(t, inst.BeginManualAccountSwap())
-	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", session.HandoffReasonManual, "tip", "continue")
+	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", "claude", session.HandoffReasonManual, "tip", "continue")
 	require.NoError(t, err)
 	inst.EndLimitResume()
 	// A replacement pane exists, but preflight cannot repair the incomplete pane set.
@@ -150,7 +150,7 @@ func TestHandoffAccountCommittedCustomCommandUsesAgentNamespace(t *testing.T) {
 	inst.Program = "claude --model opus"
 	inst.ClearLimitReached()
 	require.NoError(t, inst.BeginManualAccountSwap())
-	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", session.HandoffReasonManual, "tip", "continue")
+	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", "claude", session.HandoffReasonManual, "tip", "continue")
 	require.NoError(t, err)
 	inst.EndLimitResume()
 	swap := committedAccountSwap(inst)

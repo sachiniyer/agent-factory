@@ -132,10 +132,12 @@ func (m *Manager) ListAccounts(req ListAccountsRequest) (ListAccountsResponse, e
 	// resolved through the same session-layer chain the swap's frozen plan uses,
 	// so a picker and the admission check can never read different answers from
 	// the same configuration (#4430 review).
-	resolved := make(map[string]string, len(tmux.SupportedPrograms))
-	for _, agent := range tmux.SupportedPrograms {
-		resolved[agent] = session.HandoffEffectiveAgentForPath(req.RepoPath, agent)
-	}
+	// Resolved through the single inspection-scope read, not per-target
+	// HandoffEffectiveAgentForPath calls: this RPC is read-only, and the
+	// recording resolver would emit the runtime-load log and write the
+	// inrepo-config-hash marker once per agent for a request that consumes
+	// nothing (#4430 review round 2).
+	resolved := session.HandoffEffectiveAgentsForPathInspection(req.RepoPath, tmux.SupportedPrograms)
 	return ListAccountsResponse{Entries: entries, Agents: roster, Defaults: defaults, ResolvedAgents: resolved}, nil
 }
 

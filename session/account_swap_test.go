@@ -567,7 +567,7 @@ func TestPendingAccountSwapFencesArchiveAndHandoffButAllowsDelivery(t *testing.T
 func TestPendingAccountSwapHandoffAdmitsOnlySameTargetRetry(t *testing.T) {
 	newPending := func() *Instance {
 		inst := accountSwapTestInstance("claude")
-		_, err := inst.SelectAccountForHandoff("ambient", "work", "claude", HandoffReasonManual, "", "continue the mission")
+		_, err := inst.SelectAccountForHandoff("ambient", "work", "claude", "claude", HandoffReasonManual, "", "continue the mission")
 		require.NoError(t, err)
 		inst.inFlightOp = OpNone
 		return inst

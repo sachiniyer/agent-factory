@@ -31,9 +31,29 @@ type autoAccountSwap struct {
 	candidates               []string
 	fromAgent                string
 	agent                    string
-	alreadySet               bool
-	fallbackDue              bool
-	fellBack                 bool
+	// accountAgent is the registry namespace the swap's account name resolves
+	// in — the agent the launch command resolves to, which a program_overrides
+	// redirect can set apart from the requested target enum held in agent
+	// (#4430 review round 2). Empty on the auto and committed paths, where
+	// agent already IS the resolved/live agent; the manual handoff sets it
+	// explicitly so `program_overrides.aider = "codex"` resolves the account in
+	// codex's registry while program resolution still reads aider's override.
+	accountAgent string
+	alreadySet   bool
+	fallbackDue  bool
+	fellBack     bool
+}
+
+// accountNamespace is the agent whose account registry answers the swap's
+// name — accountAgent when an override redirect set it, otherwise agent
+// itself. Keeping it a method rather than another write site is what stops
+// the three namespace consumers (Selected, the limit ledger, the messages)
+// from drifting back to the requested enum.
+func (s *autoAccountSwap) accountNamespace() string {
+	if s.accountAgent != "" {
+		return s.accountAgent
+	}
+	return s.agent
 }
 
 var loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationData, error) {
@@ -362,7 +382,7 @@ func (m *Manager) commitNewAccountSwapIdentity(
 		brief := instance.BuildMissionBrief(scheduled.agent, scheduled.promptOverride, scheduled.reason)
 		scheduled.headSHA = brief.Work.HeadSHA
 		scheduled.mission = brief.Render()
-		handoff, err = instance.SelectAccountForHandoff(scheduled.from, scheduled.to, scheduled.agent, scheduled.reason, scheduled.headSHA, scheduled.mission)
+		handoff, err = instance.SelectAccountForHandoff(scheduled.from, scheduled.to, scheduled.agent, scheduled.accountNamespace(), scheduled.reason, scheduled.headSHA, scheduled.mission)
 		previousConversation = handoff.From
 	} else {
 		previousConversation, err = instance.SelectAccountAutomatically(scheduled.from, scheduled.to)
@@ -410,13 +430,13 @@ func accountSwapPrompt(swap *autoAccountSwap, prompt string) string {
 			fromAgent = swap.agent
 		}
 		return fmt.Sprintf("[Agent Factory] Handed off from %s to %s. Continue the same task.\n\n%s",
-			accountSwapIdentity(fromAgent, swap.from), accountSwapIdentity(swap.agent, swap.to), swap.mission)
+			accountSwapIdentity(fromAgent, swap.from), accountSwapIdentity(swap.accountNamespace(), swap.to), swap.mission)
 	}
 	notice := fmt.Sprintf(
 		"[Agent Factory] This session switched from %s to %s after the previous identity reached its usage limit. "+
 			"The replacement was explicitly allowed by limit_account_candidates and had no current limit observation. "+
 			"Continue the same task under the new identity.",
-		accountSwapIdentity(swap.agent, swap.from), accountSwapIdentity(swap.agent, swap.to))
+		accountSwapIdentity(swap.agent, swap.from), accountSwapIdentity(swap.accountNamespace(), swap.to))
 	if strings.TrimSpace(prompt) == "" {
 		return notice + "\n\ncontinue"
 	}

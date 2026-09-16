@@ -220,6 +220,19 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 			return HandoffSessionResponse{}, scopedAccountHandoffRefusal(
 				req.Title, instance.CurrentAgentName(), fromAccount, target, plan.EffectiveAgent())
 		}
+		// The descope path clears the account inside the record transaction,
+		// but SwapAgent restarts only the agent pane: a sibling shell or
+		// process tab — and the VS Code editor, which the account-swap family
+		// already refuses for this class — keeps running under the dropped
+		// account's environment while the record reports ambient. One session
+		// cannot carry two identities, so refuse rather than split it; the
+		// account-capable target above is the alternative that keeps the tabs
+		// (#4430 review round 2).
+		if names := credentialBearingHandoffSiblings(instance); len(names) > 0 {
+			return HandoffSessionResponse{}, fmt.Errorf(
+				"session %q is scoped to %s account %q and %s cannot carry that scope, but tab(s) %s still run under the dropped account's environment — close them first, or hand off to an account-capable target with --account",
+				req.Title, instance.CurrentAgentName(), fromAccount, target, strings.Join(names, ", "))
+		}
 	}
 
 	outgoing := instance.CurrentAgentName()

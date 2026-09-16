@@ -824,19 +824,18 @@ func resolveAccountForProvision(repoRoot, program, accountName string) (sessione
 	if err != nil {
 		return sessionenv.Account{}, fmt.Errorf("cannot resolve account %q: %w", accountName, err)
 	}
-	requestedAgent := sessionenv.AgentForCommand(program)
 	resolved, err := resolveRepoConfig(repoRoot)
 	if err != nil {
 		return sessionenv.Account{}, fmt.Errorf("cannot resolve account %q against the session program: %w", accountName, err)
 	}
 	resolvedProgram := config.ResolveProgram(&resolved.Config, program)
+	// The account lives under the agent the resolved command actually runs,
+	// not the requested program name: program_overrides can point an enum at a
+	// different agent's command, and the identity the session spends is the
+	// resolved one. Selecting under the requested name would either find no
+	// account or pin an identity the session never uses (#4430 review).
 	resolvedAgent := sessionenv.AgentForCommand(resolvedProgram)
-	if resolvedAgent != requestedAgent {
-		return sessionenv.Account{}, fmt.Errorf(
-			"account %q is a %s account, but this session resolves %s to a %s command; account namespaces are separate, so the Docker session would not use the identity you selected",
-			accountName, requestedAgent, requestedAgent, resolvedAgent)
-	}
-	account, err := agentaccount.Selected(home, requestedAgent, accountName)
+	account, err := agentaccount.Selected(home, resolvedAgent, accountName)
 	if err != nil {
 		return sessionenv.Account{}, err
 	}

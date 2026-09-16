@@ -36,7 +36,7 @@ func TestResumeLimitedSessions_CrossAgentSameLabelDoesNotUseOutgoingReset(t *tes
 	inst.SetLimitReached(nowFunc().Add(time.Hour))
 	require.NoError(t, inst.BeginManualAccountSwap())
 	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramCodex))
-	_, err = inst.SelectAccountForHandoff("work", "work", tmux.ProgramCodex,
+	_, err = inst.SelectAccountForHandoff("work", "work", tmux.ProgramCodex, tmux.ProgramCodex,
 		session.HandoffReasonManual, "tip", "continue")
 	require.NoError(t, err)
 	inst.EndLimitResume()
