@@ -39,13 +39,21 @@ func setSessionsCreateFlags(t *testing.T, name, repo string, here, inPlace bool)
 	prevName, prevPrompt, prevProgram, prevBackend := createNameFlag, createPromptFlag, createProgramFlag, createBackendFlag
 	prevHere, prevInPlace, prevRepo := createHereFlag, createInPlaceFlag, repoFlag
 	prevPreflight := preflightLocalSession
+	prevListAccounts := listAccountsViaDaemon
 	createNameFlag, createPromptFlag, createProgramFlag, createBackendFlag = name, "do the thing", "", ""
 	createHereFlag, createInPlaceFlag, repoFlag = here, inPlace, repo
 	preflightLocalSession = func(*config.Config, string) error { return nil }
+	// A current daemon: the routing-capability probe an omitted --account
+	// runs before the create must not reach the real control socket — it
+	// would try to ensure a daemon inside a unit test.
+	listAccountsViaDaemon = func(daemon.ListAccountsRequest) (daemon.ListAccountsResponse, error) {
+		return daemon.ListAccountsResponse{PoolRouting: true}, nil
+	}
 	t.Cleanup(func() {
 		createNameFlag, createPromptFlag, createProgramFlag, createBackendFlag = prevName, prevPrompt, prevProgram, prevBackend
 		createHereFlag, createInPlaceFlag, repoFlag = prevHere, prevInPlace, prevRepo
 		preflightLocalSession = prevPreflight
+		listAccountsViaDaemon = prevListAccounts
 	})
 }
 
