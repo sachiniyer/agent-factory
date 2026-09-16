@@ -16,6 +16,7 @@ import {
   retryActionForSession,
   isActionableSession,
   isKillableSession,
+  sessionRow,
   supportsTabManagement,
   tabBarSig,
   tabCreationUnavailableReason,
@@ -26,8 +27,50 @@ import {
 import type { AppState } from "./ui.js";
 import { InFlightOp, Liveness, type SessionData } from "./types.js";
 
+// Minimal DOM for sessionRow units (the same hand-rolled approach as
+// phone-header.test.ts): createElement/createElementNS feed h() and icon(),
+// and click() runs a row's onclick the way real activation does.
+class RowElement extends EventTarget {
+  children: RowElement[] = [];
+  className = "";
+  textContent = "";
+  onclick: ((e: Event) => void) | null = null;
+  dataset: Record<string, string> = {};
+  attrs = new Map<string, string>();
+  constructor(readonly tagName = "div") { super(); }
+  append(...children: (RowElement | string)[]) {
+    for (const child of children) {
+      if (typeof child === "string") this.textContent += child;
+      else this.children.push(child);
+    }
+  }
+  replaceChildren() { this.children = []; this.textContent = ""; }
+  setAttribute(k: string, v: string) { this.attrs.set(k, v); }
+  getAttribute(k: string) { return this.attrs.get(k) ?? null; }
+  removeAttribute(k: string) { this.attrs.delete(k); }
+  click() { this.onclick?.(new Event("click")); this.dispatchEvent(new Event("click")); }
+}
+Object.assign(globalThis, {
+  document: Object.assign(new EventTarget(), {
+    createElement: (tag: string) => new RowElement(tag),
+    createElementNS: (_ns: string, tag: string) => new RowElement(tag),
+  }),
+});
+
 function sess(over: Partial<SessionData> = {}): SessionData {
   return { id: "a", title: "s", branch: "b", ...over };
+}
+
+/** A row under the given projection, with a counting open spy and inert actions. */
+function row(over: Partial<SessionData> = {}) {
+  const open = { calls: 0 };
+  const el = sessionRow(
+    sess(over),
+    false,
+    () => { open.calls += 1; },
+    () => new RowElement() as unknown as HTMLElement,
+  ) as unknown as RowElement;
+  return { el, open };
 }
 
 /** A minimal AppState carrying only the fields tabBarSig reads. */
@@ -102,6 +145,66 @@ test("kill addressability is independent and fails closed", () => {
     false,
     "an id-less teardown capability fails closed",
   );
+});
+
+test("a managed-but-inert row is marked disabled and explains itself (#4394)", () => {
+  // can_kill without lifecycle_action — the observed shape: a pending account
+  // swap suppresses the verb while teardown stays available. Before the fix the
+  // row took NEITHER branch — no click handler AND no aria-disabled — so it
+  // drew its Kill button, looked live, and silently swallowed every click.
+  const { el, open } = row({ can_kill: true, pending_account_swap: {} });
+  assert.equal(el.getAttribute("aria-disabled"), "true", "an inert row must not read as live");
+  const actions = el.children[el.children.length - 1];
+  assert.equal(
+    actions.getAttribute("aria-disabled"),
+    "false",
+    "the row's disabled marker must not read onto its live Delete control",
+  );
+  el.click();
+  assert.equal(open.calls, 0, "a click on an inert row must not reach the open callback");
+  assert.match(
+    el.getAttribute("title") ?? "",
+    /cannot be opened · account swap in progress/,
+    "the title names why the row cannot be opened",
+  );
+});
+
+test("the inert reason names the suppressing condition the daemon projected", () => {
+  // Killable without the verb means lifecycleActionFor withheld it for one of
+  // the durable causes still on the wire; each gets its own short reason, and
+  // an unrecognized cause still refuses out loud rather than going silent.
+  for (const [over, reason] of [
+    // A kill tombstone is durable intent, not an active operation: a failed
+    // teardown leaves it as the retry handle, so the reason says pending.
+    [{ user_killed: true }, "cannot be opened · kill pending"],
+    [{ startup_state_unknown: true }, "cannot be opened · startup could not be confirmed"],
+    [{ pending_account_swap: {} }, "cannot be opened · account swap in progress"],
+    [{}, "cannot be opened"],
+  ] as const) {
+    const { el, open } = row({ can_kill: true, ...over });
+    assert.equal(el.getAttribute("aria-disabled"), "true", `${reason}: still marked inert`);
+    el.click();
+    assert.equal(open.calls, 0, `${reason}: no open on click`);
+    assert.match(el.getAttribute("title") ?? "", new RegExp(reason));
+  }
+});
+
+test("an actionable row still opens on click and carries no disabled marker", () => {
+  const { el, open } = row({ lifecycle_action: "archive", can_kill: true });
+  assert.equal(el.getAttribute("aria-disabled"), null);
+  assert.doesNotMatch(el.getAttribute("title") ?? "", /cannot be opened/);
+  el.click();
+  assert.equal(open.calls, 1, "the fix must not disable a row that CAN open");
+});
+
+test("an unmanaged inert row stays disabled without a managed-row reason", () => {
+  // A creating row has no session yet and no Kill button — the pre-existing
+  // aria-disabled case the fix must not regress or over-explain.
+  const { el, open } = row({ in_flight_op: InFlightOp.Creating });
+  assert.equal(el.getAttribute("aria-disabled"), "true");
+  el.click();
+  assert.equal(open.calls, 0);
+  assert.doesNotMatch(el.getAttribute("title") ?? "", /cannot be opened/);
 });
 
 test("Retry names an ambiguous handoff separately from a usage-limit retry", () => {
