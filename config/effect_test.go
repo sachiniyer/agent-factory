@@ -197,77 +197,23 @@ func TestEffectNoticeDaemonApplyFailed(t *testing.T) {
 	}
 }
 
-func TestEffectNoticeSavedValueSuperseded(t *testing.T) {
-	const want = "Saved — a newer write raced this save, so the running daemon may be using a different value."
-	n := EffectNotice("default_program", ApplyOutcome{DaemonApplied: true, SavedValueSuperseded: true})
-	if n == want {
-		return
-	}
-	t.Errorf("got %q, want %q", n, want)
-}
-
-// A deferred key is raced on disk exactly like a live one, and the value the
-// next start reads is the one that WON — so the "takes effect" promise must give
-// way to the race rather than be made about another writer's value (#4247).
-func TestEffectNoticeSupersededDeferredKeyDropsTheTakesEffectPromise(t *testing.T) {
-	for _, tc := range []struct {
-		key  string
-		want string
-	}{
-		{
-			key:  "branch_prefix",
-			want: "Saved — a newer write raced this save, so the value waiting for the next daemon start is not the one this save wrote.",
-		},
-		{
-			key:  "appearance",
-			want: "Saved — a newer write raced this save, so the value waiting for the next af launch is not the one this save wrote.",
-		},
-	} {
-		outcome := ApplyOutcome{DaemonApplied: true, SavedValueSuperseded: true}
-		got := EffectNotice(tc.key, outcome)
-		if got != tc.want {
-			t.Errorf("EffectNotice(%q) = %q, want %q", tc.key, got, tc.want)
-		}
-		if got == "Saved — this setting takes effect on the next daemon start." ||
-			got == "Saved — this setting takes effect the next time you launch af." {
-			t.Errorf("EffectNotice(%q) still promises this save takes effect", tc.key)
-		}
-	}
-}
-
-// A listener key can carry BOTH a failed rebind and a lost race: the rebind
-// failure rides on an apply that SUCCEEDED, so nothing stops a competing write
-// from having won the value that apply loaded. The rebind-deferred sentence
-// promises the save takes effect at the next daemon start, which is the same
-// false promise the deferred classes had — made here about the winner's value.
-// EffectNotice must therefore rank these the way StatusForKey does, or the
-// sentence and the wire status describe different worlds for one save (#4247).
-func TestEffectNoticeRanksSupersededAndUnconfirmedAboveAFailedRebind(t *testing.T) {
+// A listener key can carry BOTH a failed rebind and an unconfirmed apply: the
+// rebind failure rides on an apply that SUCCEEDED, so nothing stops the file
+// from having moved under the load that apply made. The rebind-deferred sentence
+// promises the save takes effect at the next daemon start, which would be a
+// promise about whatever bytes the winner left there. EffectNotice must
+// therefore rank these the way StatusForKey does, or the sentence and the wire
+// status describe different worlds for one save (#4247).
+func TestEffectNoticeRanksUnconfirmedAboveAFailedRebind(t *testing.T) {
 	const key = "network.listen_addr"
 	rebindPromise := listenerRebindDeferredNotice(key)
-
-	superseded := ApplyOutcome{
-		DaemonApplied:        true,
-		FailedListenerKeys:   []string{key},
-		SavedValueSuperseded: true,
-	}
-	got := EffectNotice(key, superseded)
-	if got == rebindPromise {
-		t.Errorf("EffectNotice(%q) returned the rebind-deferred promise for a save that lost the race: %q", key, got)
-	}
-	if want := supersededNotice(key); got != want {
-		t.Errorf("EffectNotice(%q) = %q, want %q", key, got, want)
-	}
-	if status := superseded.StatusForKey(key); status != ApplyStatusSuperseded {
-		t.Errorf("StatusForKey(%q) = %q, want %q — the notice and the status must agree", key, status, ApplyStatusSuperseded)
-	}
 
 	unconfirmed := ApplyOutcome{
 		DaemonApplied:          true,
 		FailedListenerKeys:     []string{key},
 		DaemonApplyUnconfirmed: true,
 	}
-	got = EffectNotice(key, unconfirmed)
+	got := EffectNotice(key, unconfirmed)
 	if got == rebindPromise {
 		t.Errorf("EffectNotice(%q) promised a next-start effect for an unconfirmed apply: %q", key, got)
 	}
@@ -358,26 +304,17 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			want:    ApplyStatusUnknown,
 		},
 		{
-			name: "applied but carrying a competing write is superseded",
+			// A successful apply whose digest did not match: the daemon loaded
+			// some other writer's file, so its live value is unproven and the
+			// applied claim is withheld rather than replaced by a stronger one
+			// (#4247).
+			name: "applied but not confirmed by the digest withholds the live claim",
 			outcome: ApplyOutcome{
-				DaemonApplied:        true,
-				SavedValueSuperseded: true,
+				DaemonApplied:          true,
+				DaemonApplyUnconfirmed: true,
 			},
 			key:  "default_program",
-			want: ApplyStatusSuperseded,
-		},
-		{
-			// A deferred key is raced on disk exactly like a live one, and the
-			// value the next daemon start will read is the one that WON. Reporting
-			// "deferred" here promised that this save takes effect at that start
-			// while another writer's value was waiting there instead (#4247).
-			name: "superseded outranks a deferred class, whose stored value it contradicts",
-			outcome: ApplyOutcome{
-				DaemonApplied:        true,
-				SavedValueSuperseded: true,
-			},
-			key:  "branch_prefix",
-			want: ApplyStatusSuperseded,
+			want: ApplyStatusUnconfirmed,
 		},
 		{
 			// The complement: an apply result that says nothing about WHICH value

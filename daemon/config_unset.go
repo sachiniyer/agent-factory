@@ -9,7 +9,7 @@ func (s *controlServer) UnsetConfigValue(req UnsetConfigValueRequest, resp *Unse
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	result, err := config.UnsetGlobalConfigValue(req.Key)
+	result, wroteDigest, err := config.UnsetGlobalConfigValueWithDigest(req.Key)
 	if err != nil {
 		return err
 	}
@@ -28,12 +28,11 @@ func (s *controlServer) UnsetConfigValue(req UnsetConfigValueRequest, resp *Unse
 			resp.Pending = applied.Pending
 			resp.Warnings = applied.Warnings
 			outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applied.FailedListenerKeys}
-			// Same race as SetConfigValue: an unset's live value is the default,
-			// so a competing write between the file-lock release and the apply's
-			// load leaves the daemon serving that write instead (#4247). The same
-			// readback and the same single verdict fold as SetConfigValue.
-			verdict, loadErr := appliedSavedValue(s.manager.Config(), outcome, result.Key, unsetExpectedValue(result.Key))
-			recordSavedValueReadback(&outcome, &resp.Warnings, result.Key, readbackSnapshot, verdict, loadErr)
+			// Same race and the same single comparison as SetConfigValue (#4247).
+			// An unset needs no special expected value here: the digest asks
+			// whether the apply loaded the file this unset left behind, which is
+			// the same question for a removed key as for a written one.
+			confirmSavedConfigDigest(&outcome, &resp.Warnings, wroteDigest, applied.Digest)
 		} else {
 			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+applyErr.Error())
 			outcome.DaemonApplyFailed = true

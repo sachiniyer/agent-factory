@@ -224,7 +224,7 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	result, err := config.SetGlobalConfigValue(req.Key, req.Value)
+	result, wroteDigest, err := config.SetGlobalConfigValueWithDigest(req.Key, req.Value)
 	if err != nil {
 		return err
 	}
@@ -240,14 +240,12 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 			resp.Pending = applied.Pending
 			resp.Warnings = applied.Warnings
 			outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applied.FailedListenerKeys}
-			// A successful apply claims "applied" only if the daemon is serving
-			// THIS save's value: a competing write can land between the writer's
-			// file-lock release and the apply's load, so the applied config may
-			// carry a different value for the same key (#4247). The readback
-			// checks the store that will serve the key, and recordSavedValueReadback
-			// decides what its verdict means — here, where the snapshot is readable.
-			verdict, loadErr := appliedSavedValue(s.manager.Config(), outcome, result.Key, result.Value)
-			recordSavedValueReadback(&outcome, &resp.Warnings, result.Key, readbackSnapshot, verdict, loadErr)
+			// A successful apply claims "applied" only if the daemon loaded THIS
+			// save's file: a competing write can land between the writer's
+			// file-lock release and the apply's load (#4247). Both digests are
+			// taken in this process — one by the write, one by the apply's own
+			// load — so the comparison needs nothing read back.
+			confirmSavedConfigDigest(&outcome, &resp.Warnings, wroteDigest, applied.Digest)
 		} else {
 			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+aerr.Error())
 			outcome.DaemonApplyFailed = true

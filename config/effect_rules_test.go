@@ -26,7 +26,6 @@ func TestSaveRulesAreCompleteAndTotal(t *testing.T) {
 	declared := map[ApplyStatus]bool{
 		ApplyStatusUnknown: true, ApplyStatusApplied: true, ApplyStatusNoDaemon: true,
 		ApplyStatusFailed: true, ApplyStatusUnconfirmed: true, ApplyStatusDeferred: true,
-		ApplyStatusSuperseded: true,
 	}
 	produced := map[ApplyStatus]bool{}
 	for i, rule := range saveRules {
@@ -46,7 +45,7 @@ func TestSaveRulesAreCompleteAndTotal(t *testing.T) {
 	// The last row must match anything, or some save would get no answer.
 	last := saveRules[len(saveRules)-1]
 	for _, key := range saveRuleKeys {
-		if !last.applies(key, ApplyOutcome{DaemonApplied: true, DaemonApplyFailed: true, SavedValueSuperseded: true}) {
+		if !last.applies(key, ApplyOutcome{DaemonApplied: true, DaemonApplyFailed: true, DaemonApplyUnconfirmed: true}) {
 			t.Errorf("the final row does not apply to %q, so the table is not total", key)
 		}
 	}
@@ -57,7 +56,7 @@ func TestSaveRulesAreCompleteAndTotal(t *testing.T) {
 // key, because two of those sentences vary with the key's class.
 func TestNoWithholdingRowPromisesAnEffect(t *testing.T) {
 	withholding := map[ApplyStatus]bool{
-		ApplyStatusSuperseded: true, ApplyStatusUnconfirmed: true, ApplyStatusFailed: true,
+		ApplyStatusUnconfirmed: true, ApplyStatusFailed: true,
 	}
 	for i, rule := range saveRules {
 		if !withholding[rule.status] {
@@ -96,79 +95,25 @@ func TestDeferredKeyDistinguishesAFailedReloadFromAnUnconfirmedOne(t *testing.T)
 	}
 }
 
-// A config file that no longer loads is the opposite case to an unconfirmed
-// apply: the next start reads the same unloadable file, so a key served from
-// that file must not keep its deferred promise. That is why it is its own fact
-// rather than another cause of DaemonApplyUnconfirmed, whose rows let the class
-// stand (#4247).
-func TestUnreadableFileWithholdsTheDeferredPromise(t *testing.T) {
-	rebindFailed := []string{"network.listen_addr"}
-	cases := []struct {
-		name    string
-		key     string
-		outcome ApplyOutcome
-		when    string
-	}{
-		{"next daemon start", "branch_prefix", ApplyOutcome{DaemonApplied: true, SavedFileUnreadable: true}, "the next daemon start"},
-		{"next af launch", "appearance", ApplyOutcome{DaemonApplied: true, SavedFileUnreadable: true}, "the next af launch"},
-		{"failed listener rebind", "network.listen_addr",
-			ApplyOutcome{DaemonApplied: true, FailedListenerKeys: rebindFailed, SavedFileUnreadable: true},
-			"the next daemon start"},
-		{"alongside an unconfirmed apply", "branch_prefix",
-			ApplyOutcome{DaemonApplyUnconfirmed: true, SavedFileUnreadable: true}, "the next daemon start"},
+// A digest mismatch is another cause of DaemonApplyUnconfirmed, so it ranks
+// exactly where the other causes do — and that ranking is the decision, not an
+// accident. A LIVE key withholds its claim, because the daemon may be serving
+// the other writer's value. A DEFERRED key keeps its class sentence, because the
+// file was written either way and a race at save time is indistinguishable from
+// a hand-edit a minute later, which no save could have reported either (#4247).
+func TestAnUnconfirmedApplyWithholdsOnlyTheLiveClaim(t *testing.T) {
+	unconfirmed := ApplyOutcome{DaemonApplied: true, DaemonApplyUnconfirmed: true}
+	for _, key := range []string{"default_program", "network.listen_addr", "network.require_token"} {
+		if got := unconfirmed.StatusForKey(key); got != ApplyStatusUnconfirmed {
+			t.Errorf("live key %q with an unconfirmed apply = %q, want %q", key, got, ApplyStatusUnconfirmed)
+		}
+		if notice := EffectNotice(key, unconfirmed); strings.Contains(notice, "using the new value now") {
+			t.Errorf("EffectNotice(%q) claimed the daemon is serving an unconfirmed save: %q", key, notice)
+		}
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.outcome.StatusForKey(tc.key); got != ApplyStatusUnconfirmed {
-				t.Errorf("StatusForKey(%q) = %q, want %q", tc.key, got, ApplyStatusUnconfirmed)
-			}
-			notice := EffectNotice(tc.key, tc.outcome)
-			if strings.Contains(notice, "takes effect") {
-				t.Errorf("EffectNotice(%q) promised an effect from an unloadable file: %q", tc.key, notice)
-			}
-			if !strings.Contains(notice, tc.when) {
-				t.Errorf("EffectNotice(%q) = %q, want it to name %q", tc.key, notice, tc.when)
-			}
-		})
-	}
-
-	// A lost race still outranks it: that is a statement about which value is
-	// stored, and the unreadable-file row would describe a save that never won.
-	both := ApplyOutcome{DaemonApplied: true, SavedValueSuperseded: true, SavedFileUnreadable: true}
-	if got := both.StatusForKey("branch_prefix"); got != ApplyStatusSuperseded {
-		t.Errorf("superseded + unreadable file = %q, want %q", got, ApplyStatusSuperseded)
-	}
-
-	// The row is gated on FileAuthoritative, so the fact cannot rewrite a LIVE
-	// key's answer even if a caller set it there.
-	live := ApplyOutcome{DaemonApplied: true, SavedFileUnreadable: true}
-	if got := live.StatusForKey("default_program"); got != ApplyStatusApplied {
-		t.Errorf("a live key with the unreadable-file fact = %q, want %q", got, ApplyStatusApplied)
-	}
-}
-
-// FileAuthoritative is the single definition the daemon's readback and fallback
-// now share; before it, each spelled the condition out over a second copy of the
-// class test living in the daemon package.
-func TestFileAuthoritative(t *testing.T) {
-	rebind := ApplyOutcome{FailedListenerKeys: []string{"network.listen_addr"}}
-	cases := []struct {
-		key     string
-		outcome ApplyOutcome
-		want    bool
-	}{
-		{"branch_prefix", ApplyOutcome{}, true},
-		{"appearance", ApplyOutcome{}, true},
-		{"default_program", ApplyOutcome{}, false},
-		{"network.listen_addr", ApplyOutcome{}, false},
-		{"network.listen_addr", rebind, true},
-		{"listen_addr", rebind, true}, // the legacy alias spelling
-		{"network.preview_listen_addr", rebind, false},
-	}
-	for _, tc := range cases {
-		if got := tc.outcome.FileAuthoritative(tc.key); got != tc.want {
-			t.Errorf("FileAuthoritative(%q, rebind=%v) = %v, want %v",
-				tc.key, tc.outcome.FailedListenerKeys, got, tc.want)
+	for _, key := range []string{"branch_prefix", "appearance"} {
+		if got := unconfirmed.StatusForKey(key); got != ApplyStatusDeferred {
+			t.Errorf("deferred key %q with an unconfirmed apply = %q, want %q", key, got, ApplyStatusDeferred)
 		}
 	}
 }
