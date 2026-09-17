@@ -56,14 +56,21 @@ import (
 // instance. It lives inside the dir so it is created and destroyed with it.
 const ownerStampFile = "owner"
 
-// orphanDirPrefixes are the temp-dir prefixes this package creates.
-// af-tmux- covers both IsolateTmux (af-tmux-*) and SandboxTmux
-// (af-tmux-pkg-*); af-test-home- covers SandboxHome. SocketTempDir's af-*
-// dirs are per-test t.TempDir-cleaned and deliberately not matched.
+// orphanDirPrefixes are the temp-dir prefixes this package creates, with
+// whether a match holds a tmux server worth killing. af-tmux- covers both
+// IsolateTmux (af-tmux-*) and SandboxTmux (af-tmux-pkg-*); af-test-home-
+// covers SandboxHome. SocketTempDir's af-* dirs are per-test
+// t.TempDir-cleaned and deliberately not matched.
 // Prefix matching rather than filepath.Glob on purpose: a TMPDIR
 // containing a glob metacharacter would make Glob misread or fail the
 // pattern and silently sweep nothing.
-var orphanDirPrefixes = []string{"af-tmux-", "af-test-home-"}
+var orphanDirPrefixes = []struct {
+	prefix string
+	tmux   bool
+}{
+	{"af-tmux-", true},
+	{"af-test-home-", false},
+}
 
 // orphanSweepBudget bounds the whole once-per-process sweep so a /tmp full
 // of wedged servers cannot stall a test binary at startup.
@@ -244,8 +251,14 @@ func (e *sweepEnv) sweep(baseDir string) sweepStats {
 		return stats // cannot list the temp base — sweep nothing, prove nothing
 	}
 	for _, entry := range entries {
-		isTmux := strings.HasPrefix(entry.Name(), "af-tmux-")
-		if !isTmux && !strings.HasPrefix(entry.Name(), "af-test-home-") {
+		isTmux, matched := false, false
+		for _, p := range orphanDirPrefixes {
+			if strings.HasPrefix(entry.Name(), p.prefix) {
+				isTmux, matched = p.tmux, true
+				break
+			}
+		}
+		if !matched {
 			continue
 		}
 		dir := filepath.Join(baseDir, entry.Name())
