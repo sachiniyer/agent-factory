@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -268,12 +269,13 @@ func TestRecordedParkedHeadResumeRetiresTerminalOverlay(t *testing.T) {
 		"the latched overlay wins while the parked head cannot be verified")
 
 	require.NoError(t, os.Chmod(seed.path, 0o644))
-	// peek's load retry is throttled to one disk attempt per
-	// eventQueueLoadRetryInterval and the outage above just consumed it, so a
-	// bare peek would answer with the latched error for up to five more
-	// seconds. The resume path takes the unthrottled fresh check
-	// (watcher_limit_park.go) before trusting the queue — mirror it rather
-	// than sleeping out the interval.
+	// Production resumes through the drainer's peek (watcher_drain.go), whose
+	// load retry is throttled to one disk attempt per
+	// eventQueueLoadRetryInterval. The outage above just consumed that attempt,
+	// so peek would answer with the latched error for up to five more seconds
+	// and the drainer would observe the heal on a later round. loadFailedFresh
+	// is only this test's shortcut to that same recovery without sleeping out
+	// the interval; production calls it solely at stop time.
 	require.False(t, queue.loadFailedFresh(),
 		"storage healed: the fresh check must observe the readable queue")
 	ev, cursor, ok, err := queue.peek()
@@ -358,4 +360,44 @@ func TestRecordedParkedHeadResumeKeepsDeliveredSentRow(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "sent", stored.LastRunStatus,
 		"the real delivered outcome must survive the parked head's redelivery")
+}
+
+// TestRecordedParkedHeadResumeKeepsArmingRefusal pins the one "errored:" row
+// that is not a terminal publication. Arming writes its refusal before
+// watchers.reconcile stops the watcher, and a drainer retry in that window must
+// not republish the park over it, even with an earlier terminal overlay still
+// latched (#2929, #4226 review).
+func TestRecordedParkedHeadResumeKeepsArmingRefusal(t *testing.T) {
+	for name, overlay := range map[string]string{"row only": "", "overlay latched": "stopped"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			dir := t.TempDir()
+			tsk := watchTask("d4357013", `printf 'x\n'`, dir)
+			require.NoError(t, task.AddTask(tsk))
+			refusal := notArmedStatus(errors.New("target session is archived"))
+			_, err := task.UpdateTaskStatus(tsk.ID, nil, refusal)
+			require.NoError(t, err)
+
+			seed := newEventQueue(dir, tsk.ID)
+			_, err = seed.enqueueWithParkedStatus("held occurrence", true, true)
+			require.NoError(t, err)
+
+			queue := newEventQueue(dir, tsk.ID)
+			s := &watcherSupervisor{deliver: func(string, string, watchDeliveryOptions) error { return nil }}
+			w := &taskWatcher{taskID: tsk.ID, queue: queue, sup: s, terminalStatus: overlay}
+			s.watchers = map[string]*taskWatcher{w.taskID: w}
+
+			ev, cursor, ok, err := queue.peek()
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.True(t, queue.parkedStatusRecorded(cursor),
+				"precondition: the head must be recorded, or the reconcile is never reached")
+			require.NoError(t, w.deliverQueuedEvent(ev, cursor))
+
+			stored, err := task.GetTask(tsk.ID)
+			require.NoError(t, err)
+			require.Equal(t, refusal, stored.LastRunStatus,
+				"a drainer retry must not republish the park over the arming refusal")
+		})
+	}
 }

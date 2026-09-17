@@ -97,17 +97,25 @@ func (w *taskWatcher) reconcileRecordedParkedHead(cursor eventQueueCursor) {
 // halves under statusMu, so reading under the same mutex keeps the check
 // atomic with respect to it. An unreadable store cannot prove the row still
 // reads parked, so it counts as overwritten and the republish is attempted.
+//
+// An arming refusal is never an overwrite, even over a latched overlay.
+// Arming writes it outside statusMu, before watchers.reconcile stops this
+// watcher, so a drainer retry can land in between. Republishing the park there
+// would hide the refusal again, the failure #2929 fixed.
 func (w *taskWatcher) parkedStatusOverwritten() bool {
 	w.statusMu.Lock()
 	defer w.statusMu.Unlock()
 	w.mu.Lock()
 	overlaid := w.terminalStatus != ""
 	w.mu.Unlock()
-	if overlaid {
-		return true
-	}
 	stored, err := task.GetTask(w.taskID)
 	if err != nil {
+		return true
+	}
+	if strings.HasPrefix(stored.LastRunStatus, notArmedPrefix) {
+		return false
+	}
+	if overlaid {
 		return true
 	}
 	// Only a terminal publication counts as an overwrite. Any other row is a

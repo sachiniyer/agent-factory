@@ -146,16 +146,23 @@ func (q *eventQueue) clearStaleProtectionLocked() error {
 // would block the reader and suspend eviction over a backlog no limited event
 // ever joined. Only this call's own change is reverted; a marker or failure
 // that already covered earlier events is not this enqueue's to remove.
+//
+// That includes a failure this call's successful write replaced. The failure
+// stood in for a marker that never landed, and this write is that marker —
+// the same one retryLimitMarkerLocked would write, since events already queued
+// mean statusSeq is the recorded parkedStatusSeq. Clearing it would leave the
+// earlier retained events covered by neither, and restoring only the in-memory
+// failure would leave them unprotected across a restart (#4226 review).
 func (q *eventQueue) protectParkedEnqueueLocked(statusSeq int64) (markerErr error, undo func()) {
 	noop := func() {}
 	if q.limitParked && statusSeq == q.parkedStatusSeq {
 		return nil, noop
 	}
-	markerExisted, prevErr := q.limitParked, q.limitParkedErr
+	protectedBefore, prevErr := q.limitProtectedLocked(), q.limitParkedErr
 	if err := q.persistLimitParkedLocked(statusSeq); err != nil {
 		return err, func() { q.limitParkedErr = prevErr }
 	}
-	if markerExisted {
+	if protectedBefore {
 		return nil, noop
 	}
 	return nil, func() {

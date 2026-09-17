@@ -219,9 +219,11 @@ func TestEventQueue_FailedMarkerWriteRetriesWhenStorageRecovers(t *testing.T) {
 // write fails and whose append then drops the event must not leave that
 // failure behind: it would block the reader and suspend eviction over an
 // ordinary backlog that no limited event ever joined. A failure that already
-// covered a retained event is not that enqueue's to remove.
+// covered a retained event is not that enqueue's to remove, and neither is the
+// marker a later enqueue wrote in that failure's place.
 func TestEventQueue_UnretainedParkedEnqueueRollsBackMarkerFailure(t *testing.T) {
-	q := newEventQueue(t.TempDir(), "marker-fail-unretained")
+	dir := t.TempDir()
+	q := newEventQueue(dir, "marker-fail-unretained")
 	if err := q.enqueue("ordinary-backlog"); err != nil {
 		t.Fatalf("seed ordinary event: %v", err)
 	}
@@ -250,6 +252,23 @@ func TestEventQueue_UnretainedParkedEnqueueRollsBackMarkerFailure(t *testing.T) 
 	q.appendRecord = appendRecordToFile
 	if !q.retainLimitParked() {
 		t.Fatal("rolling back a dropped enqueue removed protection a retained parked event still needs")
+	}
+
+	// Marker storage recovers but the append still fails: this enqueue's write
+	// lands and replaces the recorded failure, then its event is dropped. The
+	// marker now carries the retained event's protection, in memory and across
+	// a restart.
+	q.writeMarker = config.AtomicWriteFileRefusingLink
+	q.appendRecord = failAppend
+	if retained, _ := q.enqueueWithParkedStatus("lost-after-marker-heals", true, false); retained {
+		t.Fatal("append failure reported the event retained")
+	}
+	q.appendRecord = appendRecordToFile
+	if !q.retainLimitParked() {
+		t.Fatal("rolling back a dropped enqueue removed the marker that replaced a retained event's recorded failure")
+	}
+	if !newEventQueue(dir, "marker-fail-unretained").retainLimitParked() {
+		t.Fatal("the retained parked event lost its protection across a restart")
 	}
 }
 
