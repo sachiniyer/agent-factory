@@ -579,6 +579,14 @@ func SetLimitResumerForTest(f func(daemon.ResumeFromLimitRequest) error) func() 
 	return func() { resumeFromLimitThroughDaemon = prev }
 }
 
+// SetHandoffDeliveryConfirmerForTest swaps the resolve-picker's confirm seam
+// (#4429) so a test can assert the mark-delivered arm routes through the daemon.
+func SetHandoffDeliveryConfirmerForTest(f func(daemon.ConfirmHandoffDeliveryRequest) error) func() {
+	prev := confirmHandoffDeliveryThroughDaemon
+	confirmHandoffDeliveryThroughDaemon = f
+	return func() { confirmHandoffDeliveryThroughDaemon = prev }
+}
+
 func SetTabCreatorForTest(f func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error)) func() {
 	prev := createTabThroughDaemon
 	createTabThroughDaemon = f
