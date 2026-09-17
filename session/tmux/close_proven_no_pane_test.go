@@ -43,7 +43,7 @@ func TestCloseAndWaitForPaneExit_ConclusiveNonBlindLatchesClosedConclusively(t *
 				return []byte(fmt.Sprintf("%d\n", pid)), nil
 			}
 			// list-panes answers with an empty pane set: the replacement pane had
-			// no descendants, so captureSessionProcessTrees returns (nil, nil) and
+			// no descendants, so CaptureSessionProcessTrees returns (nil, nil) and
 			// blind is false.
 			return []byte(""), nil
 		},
@@ -73,7 +73,7 @@ func TestCloseAndWaitForPaneExit_BlindConclusiveDoesNotLatchClosedConclusively(t
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
 			if strings.Contains(cmd.String(), "list-panes") {
 				// tmux's real missing-session answer: exit 1 with the exact
-				// diagnostic, so captureSessionProcessTrees maps it to
+				// diagnostic, so CaptureSessionProcessTrees maps it to
 				// ErrSessionVanishedBeforeCapture.
 				return nil, tmuxCantFindSessionError(t, name)
 			}
@@ -145,7 +145,7 @@ func TestRestoreWithResult_LiveSessionClearsClosedConclusively(t *testing.T) {
 // nothing, so the backstop close in stopForAccountSwap still runs on the
 // ts.Start-failure path where no conclusive inner close ever ran.
 func TestCloseAndWaitForPaneExit_InconclusiveDoesNotLatchClosedConclusively(t *testing.T) {
-	// list-panes answers with an unparseable pane set: captureSessionProcessTrees
+	// list-panes answers with an unparseable pane set: CaptureSessionProcessTrees
 	// cannot establish the process tree, so the close refuses with
 	// PaneStateUnknown rather than latching absence.
 	cmdExec := cmd_test.MockCmdExec{
