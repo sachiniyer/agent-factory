@@ -418,6 +418,9 @@ test("the visual gate diffs stills against committed goldens and cannot regenera
     "CI must always diff against the committed goldens (updateSnapshots: none)");
   assert.equal(loadVisualConfig({ AF_PERF_MODE: "1" }).updateSnapshots, "none",
     "a plain human run diffs; it does not rewrite baselines");
-  assert.equal(loadVisualConfig({ AF_PERF_MODE: "1", AF_UPDATE_GOLDENS: "1" }).updateSnapshots, "all",
-    "update mode belongs to AF_UPDATE_GOLDENS runs a human reviews");
+  // "changed", not "all": "all" rewrites every golden whose bytes differ, and
+  // the capture is byte-nondeterministic below the gate threshold (#4557), so
+  // each update run would hand a human noise to review as if it were a change.
+  assert.equal(loadVisualConfig({ AF_PERF_MODE: "1", AF_UPDATE_GOLDENS: "1" }).updateSnapshots, "changed",
+    "update mode belongs to AF_UPDATE_GOLDENS runs a human reviews, and rewrites only goldens the gate rejects");
 });
