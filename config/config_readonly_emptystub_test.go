@@ -7,7 +7,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/sys/unix"
 )
 
 // seedHome writes content to config.toml in a fresh AGENT_FACTORY_HOME and
@@ -26,8 +25,9 @@ func seedHome(t *testing.T, content string, json ...string) string {
 }
 
 // effectivelyEmptyTomlInputs is every shape isEffectivelyEmptyToml treats as
-// empty — the fingerprint the bug report names. Each must self-heal at
-// startup and report EmptyStub (not an error) from the read-only diagnostics.
+// empty — the fingerprint the bug report names. Each must recover at startup
+// (in-memory defaults, file untouched — #4483) and report EmptyStub (not an
+// error) from the read-only diagnostics.
 func effectivelyEmptyTomlInputs() map[string]string {
 	return map[string]string{
 		"zero bytes":      "",
@@ -42,14 +42,12 @@ func effectivelyEmptyTomlInputs() map[string]string {
 // TestLoadConfigReadOnly_EmptyStubAgreesWithStartup is the core guarantee: for
 // every effectively-empty config.toml with no shadowing config.json, the read
 // -only diagnostic (LoadConfigReadOnly) and startup (LoadConfig) must return the
-// SAME verdict. Startup self-heals (removes the stub, materializes defaults,
-// returns (*Config, nil)); the no-write diagnostic returns EmptyStub=true with a
-// nil error. Before the fix the diagnostic raised a hard "config is empty"
-// error, so `af doctor`/`af config validate` rejected a state af boots on.
-//
-// The two loaders run against separate identical homes because LoadConfig
-// mutates disk (os.Remove + materializeDefaultConfig): the assertion is that
-// the two functions return the same verdict on the same INPUT state.
+// SAME verdict. Startup recovers in memory (defaults, file untouched — #4483:
+// a load can never tell a crashed write from one still in flight, so it must
+// not remove or rewrite the stub); the no-write diagnostic returns
+// EmptyStub=true with a nil error. Before the fix the diagnostic raised a hard
+// "config is empty" error, so `af doctor`/`af config validate` rejected a
+// state af boots on.
 func TestLoadConfigReadOnly_EmptyStubAgreesWithStartup(t *testing.T) {
 	for name, content := range effectivelyEmptyTomlInputs() {
 		t.Run(name, func(t *testing.T) {
@@ -59,7 +57,7 @@ func TestLoadConfigReadOnly_EmptyStubAgreesWithStartup(t *testing.T) {
 			homeRO := seedHome(t, content)
 			tomlPath := filepath.Join(homeRO, TomlConfigFileName)
 			loaded, roErr := LoadConfigReadOnly()
-			require.NoError(t, roErr, "read-only diagnostic must not fail a state startup self-heals")
+			require.NoError(t, roErr, "read-only diagnostic must not fail a state startup recovers from")
 			assert.True(t, loaded.EmptyStub, "an effectively-empty stub with no config.json must surface as EmptyStub")
 			assert.False(t, loaded.Missing, "a present stub is not Missing")
 			assert.NotNil(t, loaded.Config, "EmptyStub carries DefaultConfig() so downstream diagnostics can evaluate the next-start posture")
@@ -72,14 +70,15 @@ func TestLoadConfigReadOnly_EmptyStubAgreesWithStartup(t *testing.T) {
 			_, statErr := os.Stat(filepath.Join(homeRO, ConfigFileName))
 			assert.True(t, os.IsNotExist(statErr), "LoadConfigReadOnly must not materialize a config.json")
 
-			// Startup on a separate identical home: the self-heal verdict.
+			// Startup on a separate identical home: the recovery verdict —
+			// defaults in memory, the file left exactly as found (#4483).
 			homeLC := seedHome(t, content)
 			cfg, lcErr := LoadConfig()
-			require.NoError(t, lcErr, "startup must self-heal the empty stub")
-			require.NotNil(t, cfg, "startup must return a real (default) config after self-healing")
+			require.NoError(t, lcErr, "startup must recover past the empty stub")
+			require.NotNil(t, cfg, "startup must return a real (default) config")
 			lcAfter, err := os.ReadFile(filepath.Join(homeLC, TomlConfigFileName))
 			require.NoError(t, err)
-			assert.NotEmpty(t, lcAfter, "startup must re-materialize non-empty defaults over the stub")
+			assert.Equal(t, content, string(lcAfter), "startup must not remove or rewrite the stub (#4483)")
 		})
 	}
 }
@@ -148,12 +147,12 @@ func TestLoadConfigReadOnly_EmptyStubWithShadowStaysLoudError(t *testing.T) {
 	assert.Equal(t, "# oops, empty\n", string(stub), "the empty toml stub must be left intact")
 }
 
-// TestLoadConfigReadOnly_EmptyStubUnremovableDirIsError pins the case where
-// config.toml is readable but the containing directory is not writable, so
-// startup's os.Remove(tomlPath) would fail. The diagnostic must NOT return
-// EmptyStub (which implies "af will self-heal") when self-heal is impossible;
-// it must identify the directory permission failure without claiming a removal.
-func TestLoadConfigReadOnly_EmptyStubUnremovableDirIsError(t *testing.T) {
+// TestLoadConfigReadOnly_EmptyStubUnremovableDirIsStillEmptyStub pins the
+// #4483 consequence the old access gate could not express: startup never
+// removes the stub, so directory writability is irrelevant to the verdict. A
+// readable stub in a non-writable home is still EmptyStub — af runs on
+// in-memory defaults and leaves the file untouched either way.
+func TestLoadConfigReadOnly_EmptyStubUnremovableDirIsStillEmptyStub(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root bypasses mode bits, so a read-only directory cannot be staged here")
 	}
@@ -165,24 +164,18 @@ func TestLoadConfigReadOnly_EmptyStubUnremovableDirIsError(t *testing.T) {
 	require.NoError(t, os.WriteFile(tomlPath, []byte("# placeholder\n"), 0o644))
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
-	// Make the home directory read+execute only so os.Remove(tomlPath) would
-	// fail (remove requires write permission on the containing directory).
+	// Make the home directory read+execute only: a removal would fail here,
+	// which is exactly why the load must not attempt one (#4483).
 	require.NoError(t, os.Chmod(home, 0o500))
 	t.Cleanup(func() { _ = os.Chmod(home, 0o755) })
 
 	loaded, roErr := LoadConfigReadOnly()
-	require.Error(t, roErr, "an empty stub in a non-writable home must be a loud error, not EmptyStub")
-	assert.False(t, loaded.EmptyStub, "EmptyStub must not be set when the home is not writable (self-heal would fail)")
-	assert.Contains(t, roErr.Error(), "cannot write to config directory "+prettyHomePath(home))
-	assert.ErrorIs(t, roErr, os.ErrPermission)
-	assert.NotContains(t, roErr.Error(), TomlConfigFileName)
-	assert.NotContains(t, roErr.Error(), ".af-stub-check-")
+	require.NoError(t, roErr, "an empty stub in a non-writable home is still EmptyStub — nothing is removed")
+	assert.True(t, loaded.EmptyStub, "EmptyStub no longer depends on directory writability")
+	assert.NotNil(t, loaded.Config, "EmptyStub carries DefaultConfig()")
 	got, err := os.ReadFile(tomlPath)
 	require.NoError(t, err)
-	assert.Equal(t, "# placeholder\n", string(got))
-	probes, err := filepath.Glob(filepath.Join(home, ".af-stub-check-*"))
-	require.NoError(t, err)
-	assert.Empty(t, probes, "failed validation must leave no probe files")
+	assert.Equal(t, "# placeholder\n", string(got), "the stub must be left intact")
 }
 
 // TestLoadConfigReadOnly_EmptySymlinkStubStaysLoudError mirrors loadConfig: a
@@ -243,16 +236,13 @@ func stageDefaultAFHome(t *testing.T, content string, mode os.FileMode) string {
 	return afHome
 }
 
-// TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyRepairable is the headline
-// fix: a contentless config.toml in an owner-owned default ~/.agent-factory
-// tightened to a write-less mode (0500) is a state startup self-heals —
-// secureAFHomeForPath chmod-repairs the home to 0700 before its os.Remove. The
-// no-write diagnostic, which never runs secureAFHomeForPath, must NOT report a
-// removal failure here: it must agree with startup and return EmptyStub=true
-// with no error. Before the fix the directory-access gate probed the unrepaired
-// 0500 mode and errored with "cannot write to config directory: permission
-// denied" on a state af boots cleanly on.
-func TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyRepairable(t *testing.T) {
+// TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnly keeps the no-write
+// contract on the arrangement that used to need the repair-predicate: a
+// contentless config.toml in an owner-owned default ~/.agent-factory tightened
+// to a write-less mode (0500). Since #4483 nothing is removed or written for a
+// stub, so the mode is simply irrelevant — EmptyStub, no error, and the
+// diagnostic itself must not chmod-probe the home it reports on.
+func TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnly(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root bypasses mode bits, so a 0500 home cannot be staged as non-writable")
 	}
@@ -260,32 +250,32 @@ func TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyRepairable(t *testing.T)
 	tomlPath := filepath.Join(afHome, TomlConfigFileName)
 
 	loaded, err := LoadConfigReadOnly()
-	require.NoError(t, err, "a chmod-repairable default home self-heals at startup; the diagnostic must agree")
-	assert.True(t, loaded.EmptyStub, "an effectively-empty stub in a repairable default home must surface as EmptyStub")
+	require.NoError(t, err, "an empty stub is EmptyStub regardless of home writability (#4483)")
+	assert.True(t, loaded.EmptyStub, "an effectively-empty stub must surface as EmptyStub")
 	assert.False(t, loaded.Missing)
 	assert.NotNil(t, loaded.Config, "EmptyStub carries DefaultConfig() so downstream diagnostics can evaluate the next-start posture")
-	assert.Empty(t, loaded.DirectoryAccessWarning, "startup will repair the home; there is no access uncertainty to report")
 	assert.Equal(t, tomlPath, loaded.Path)
 
 	// No-write contract: the stub is intact, the home stays read-only, nothing
-	// was created.
+	// was created — and no chmod probe ran (the read-only path is side-effect
+	// free now that it does not predict a removal).
 	got, err := os.ReadFile(tomlPath)
 	require.NoError(t, err)
 	assert.Equal(t, "# placeholder; fill in later\n", string(got), "LoadConfigReadOnly must not remove or rewrite the stub")
 	info, err := os.Stat(afHome)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o500), info.Mode().Perm(), "the diagnostic must not chmod-repair the home it reports on")
+	assert.Equal(t, os.FileMode(0o500), info.Mode().Perm(), "the diagnostic must not chmod the home it reports on")
 	entries, err := os.ReadDir(afHome)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1, "the diagnostic must not materialize any file beside the stub")
 }
 
 // TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyAgreesWithStartup pins the
-// full guarantee the bug broke: the read-only diagnostic and startup must agree
-// on identical INPUT states. The two run against separate staged default homes
-// because LoadConfig mutates disk. On a default home @0500 the diagnostic must
-// return EmptyStub=true (no error) AND startup must self-heal (no error) — the
-// same verdict — rather than the diagnostic erroring while startup succeeds.
+// full guarantee: the read-only diagnostic and startup must agree on identical
+// INPUT states. On a default home @0500 the diagnostic returns EmptyStub=true
+// (no error) AND startup recovers (no error) — the same verdict. Startup's
+// secureAFHomeForPath still chmod-repairs the HOME to 0700 (that hardening is
+// unrelated to the stub), but the stub file itself is left untouched (#4483).
 func TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyAgreesWithStartup(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root bypasses mode bits, so a 0500 home cannot be staged as non-writable")
@@ -295,35 +285,34 @@ func TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyAgreesWithStartup(t *tes
 			// Read-only on a fresh default home @0500: the diagnostic verdict.
 			afHomeRO := stageDefaultAFHome(t, content, 0o500)
 			loaded, roErr := LoadConfigReadOnly()
-			require.NoError(t, roErr, "read-only diagnostic must not fail a state startup self-heals")
+			require.NoError(t, roErr, "read-only diagnostic must not fail a state startup recovers from")
 			assert.True(t, loaded.EmptyStub)
 			got, err := os.ReadFile(filepath.Join(afHomeRO, TomlConfigFileName))
 			require.NoError(t, err)
 			assert.Equal(t, content, string(got), "LoadConfigReadOnly must not mutate the stub")
 
 			// Startup on a separate identical default home @0500: the
-			// self-heal verdict. secureAFHomeForPath chmod-repairs to 0700,
-			// removes the stub, and materializes non-empty defaults.
+			// recovery verdict. secureAFHomeForPath chmod-repairs the home to
+			// 0700 (unrelated AF-home hardening), then the stub is left
+			// exactly as found — defaults come back in memory only.
 			afHomeLC := stageDefaultAFHome(t, content, 0o500)
 			cfg, lcErr := LoadConfig()
-			require.NoError(t, lcErr, "startup must self-heal the empty stub in a repairable default home")
+			require.NoError(t, lcErr, "startup must recover past the empty stub")
 			require.NotNil(t, cfg)
 			info, err := os.Stat(afHomeLC)
 			require.NoError(t, err)
-			assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(), "startup chmod-repairs the default home before removing the stub")
+			assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(), "startup still chmod-repairs the default home itself")
 			lcAfter, err := os.ReadFile(filepath.Join(afHomeLC, TomlConfigFileName))
 			require.NoError(t, err)
-			assert.NotEmpty(t, lcAfter, "startup must re-materialize non-empty defaults over the stub")
+			assert.Equal(t, content, string(lcAfter), "startup must not remove or rewrite the stub (#4483)")
 		})
 	}
 }
 
 // TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyAliasSymlink covers the
-// other repair arrangement secureAFHomeForPath chmods: an AGENT_FACTORY_HOME
-// that is an alias symlink whose target IS the concrete default home (the
-// "pin the default explicitly" case its own comments anticipate). The gate must
-// stand down here too, so the diagnostic agrees with startup's symlink-target
-// chmod repair.
+// alias-symlink arrangement: an AGENT_FACTORY_HOME that is a symlink whose
+// target IS the concrete default home. The verdict is the same — EmptyStub,
+// and neither the stub nor the home's mode is touched.
 func TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyAliasSymlink(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root bypasses mode bits, so a 0500 home cannot be staged as non-writable")
@@ -345,143 +334,50 @@ func TestLoadConfigReadOnly_EmptyStubDefaultHomeReadOnlyAliasSymlink(t *testing.
 	t.Setenv("AGENT_FACTORY_HOME", alias)
 
 	loaded, err := LoadConfigReadOnly()
-	require.NoError(t, err, "an alias symlink into the concrete default is repairable; the diagnostic must agree with startup")
+	require.NoError(t, err, "an alias symlink into the concrete default still reports EmptyStub")
 	assert.True(t, loaded.EmptyStub)
 	assert.NotNil(t, loaded.Config)
-	assert.Empty(t, loaded.DirectoryAccessWarning)
 	// No-write: the stub and the home's mode are untouched.
 	got, err := os.ReadFile(tomlPath)
 	require.NoError(t, err)
 	assert.Equal(t, "# placeholder\n", string(got))
 	info, err := os.Stat(afHome)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o500), info.Mode().Perm(), "the diagnostic must not chmod-repair the concrete default it reports on")
+	assert.Equal(t, os.FileMode(0o500), info.Mode().Perm(), "the diagnostic must not chmod the concrete default it reports on")
 }
 
-// TestStartupWouldRepairHome pins the predicate that decides whether the
-// directory-access gate stands down. It must return true only for the cases
-// secureAFHomeForPath chmod-repairs (concrete default, or an alias into it) that
-// the current user owns, and false for everything startup leaves to its raw
-// remove — custom homes, default-names-that-themselves-are-symlinks, and
-// foreign-owned defaults where the chmod startup attempts would fail.
-func TestStartupWouldRepairHome(t *testing.T) {
-	t.Run("custom home is not repaired", func(t *testing.T) {
-		home := t.TempDir()
-		t.Setenv("AGENT_FACTORY_HOME", home)
-		// A custom home never matches the default name, so concreteDefaultAFHome
-		// returns "" regardless of ownership or mode.
-		assert.False(t, startupWouldRepairHome(home))
-	})
+// A zero-byte config.json with no config.toml is the same stub startup
+// accepts (#4483): the load answers in-memory defaults and leaves the file.
+// The diagnostic must classify it EmptyStub rather than feed zero bytes to
+// the JSON parser and report "invalid" for a state af runs past — validate
+// and doctor disagreeing with startup is the defect this pins.
+func TestLoadConfigReadOnly_EmptyJSONStubAgreesWithStartup(t *testing.T) {
+	fastShell(t)
+	home := t.TempDir()
+	jsonPath := filepath.Join(home, ConfigFileName)
+	require.NoError(t, os.WriteFile(jsonPath, nil, 0o644))
+	t.Setenv("AGENT_FACTORY_HOME", home)
 
-	t.Run("concrete default home owned by current user is repaired", func(t *testing.T) {
-		afHome := stageDefaultAFHome(t, "", 0o755)
-		assert.True(t, startupWouldRepairHome(afHome), "owner-owned concrete default is chmod-repairable by startup")
-	})
+	loaded, err := LoadConfigReadOnly()
+	require.NoError(t, err, "read-only diagnostic must not fail a state startup recovers from")
+	assert.True(t, loaded.EmptyStub, "a zero-byte config.json is an empty stub, not invalid JSON")
+	assert.Equal(t, jsonPath, loaded.Path, "the stub verdict names the file that carries it")
+	assert.NotNil(t, loaded.Config, "EmptyStub carries DefaultConfig() for downstream diagnostics")
+	assert.False(t, loaded.LegacyJSON, "a contentless file is not a loadable legacy config")
+	assert.False(t, loaded.Missing, "a present stub is not Missing")
 
-	t.Run("alias symlink into concrete default is repaired", func(t *testing.T) {
-		fastShell(t)
-		userHome := t.TempDir()
-		afHome := filepath.Join(userHome, ".agent-factory")
-		require.NoError(t, os.Mkdir(afHome, 0o755))
-		aliasBase := t.TempDir()
-		alias := filepath.Join(aliasBase, "af-home-alias")
-		require.NoError(t, os.Symlink(afHome, alias))
-		t.Setenv("HOME", userHome)
-		t.Setenv("AGENT_FACTORY_HOME", alias)
-		assert.True(t, startupWouldRepairHome(alias), "an alias into the concrete default is chmod-repairable on its target")
-	})
-
-	t.Run("default name itself is a symlink is not repaired", func(t *testing.T) {
-		fastShell(t)
-		userHome := t.TempDir()
-		customDir := t.TempDir()
-		// The default name ~/.agent-factory is itself a symlink to a
-		// caller-owned directory; its target is caller-owned and not repairable.
-		require.NoError(t, os.Symlink(customDir, filepath.Join(userHome, ".agent-factory")))
-		t.Setenv("HOME", userHome)
-		t.Setenv("AGENT_FACTORY_HOME", "")
-		assert.False(t, startupWouldRepairHome(filepath.Join(userHome, ".agent-factory")),
-			"a default-name whose target is caller-owned is not chmod-repairable")
-	})
-
-	t.Run("foreign-owned default home is repairable by root", func(t *testing.T) {
-		if os.Getuid() != 0 {
-			t.Skip("staging a foreign-owned directory requires chown, which needs root")
-		}
-		afHome := stageDefaultAFHome(t, "", 0o755)
-		// Re-own the concrete default to another user. Root retains CAP_FOWNER
-		// and can chmod any directory regardless of ownership, so startup's
-		// secureAFHomeForPath succeeds and startupWouldRepairHome must agree.
-		require.NoError(t, os.Chmod(afHome, 0o700)) // restore writability for chown/cleanup
-		require.NoError(t, os.Chown(afHome, 65534, 65534))
-		t.Cleanup(func() {
-			_ = os.Chmod(afHome, 0o755)
-			_ = os.Chown(afHome, 0, 0)
-		})
-		assert.True(t, startupWouldRepairHome(afHome), "root can chmod a foreign-owned default home, so it is repairable")
-	})
-
-	t.Run("setgid default home keeps its bit through the probe", func(t *testing.T) {
-		// A setgid home in OUR OWN group is still probeable: the restore chmod
-		// can reinstate S_ISGID because the group matches. Pin both the verdict
-		// and the bit-for-bit restoration — a probe that stripped the bit would
-		// alter the directory from a read-only path.
-		afHome := stageDefaultAFHome(t, "", 0o2750)
-		var before unix.Stat_t
-		require.NoError(t, unix.Stat(afHome, &before))
-		if before.Mode&unix.S_ISGID == 0 {
-			t.Skip("this filesystem did not hold S_ISGID on the staged home")
-		}
-		assert.True(t, startupWouldRepairHome(afHome),
-			"an owner-owned setgid home whose group we are in is chmod-repairable")
-		var after unix.Stat_t
-		require.NoError(t, unix.Stat(afHome, &after))
-		assert.Equal(t, before.Mode&0o7777, after.Mode&0o7777,
-			"the probe must restore the mode bit-for-bit, including setgid")
-	})
-}
-
-// foreignGid returns a gid the current process is provably not a member of
-// (not the egid, not a supplementary group), for the cannot-restore case.
-func foreignGid(t *testing.T) uint32 {
-	t.Helper()
-	ours := map[uint32]bool{uint32(os.Getegid()): true}
-	groups, err := os.Getgroups()
+	// No-write contract: the stub is intact and no config.toml appeared.
+	got, err := os.ReadFile(jsonPath)
 	require.NoError(t, err)
-	for _, g := range groups {
-		ours[uint32(g)] = true
-	}
-	for candidate := uint32(60000); ; candidate++ {
-		if !ours[candidate] {
-			return candidate
-		}
-	}
-}
+	assert.Empty(t, got, "LoadConfigReadOnly must not touch the stub")
+	_, statErr := os.Stat(filepath.Join(home, TomlConfigFileName))
+	assert.True(t, os.IsNotExist(statErr), "LoadConfigReadOnly must not materialize config.toml")
 
-// TestCanRestoreMode pins the probe gate: a setgid directory whose group the
-// caller is not in cannot have its mode reinstated bit-for-bit — chmod silently
-// drops S_ISGID there — so startupWouldRepairHome must refuse to run the
-// mutating probe rather than risk a permanent alteration.
-func TestCanRestoreMode(t *testing.T) {
-	egid := uint32(os.Getegid())
-	t.Run("plain directory is restorable", func(t *testing.T) {
-		st := &unix.Stat_t{Mode: unix.S_IFDIR | 0o750, Gid: egid}
-		assert.True(t, canRestoreMode(st))
-	})
-	t.Run("setgid with our effective group is restorable", func(t *testing.T) {
-		st := &unix.Stat_t{Mode: unix.S_IFDIR | unix.S_ISGID | 0o750, Gid: egid}
-		assert.True(t, canRestoreMode(st))
-	})
-	t.Run("setuid and sticky are restorable", func(t *testing.T) {
-		st := &unix.Stat_t{Mode: unix.S_IFDIR | unix.S_ISUID | unix.S_ISVTX | 0o750, Gid: foreignGid(t)}
-		assert.True(t, canRestoreMode(st), "setuid/sticky have no group-membership rule")
-	})
-	t.Run("setgid with a foreign group is not restorable", func(t *testing.T) {
-		if os.Geteuid() == 0 {
-			t.Skip("root holds CAP_FSETID, so every group is restorable")
-		}
-		st := &unix.Stat_t{Mode: unix.S_IFDIR | unix.S_ISGID | 0o750, Gid: foreignGid(t)}
-		assert.False(t, canRestoreMode(st),
-			"chmod would silently drop S_ISGID for a group we are not in")
-	})
+	// Startup agrees on the same home: defaults in memory, file untouched.
+	cfg, err := LoadConfig()
+	require.NoError(t, err, "startup must recover past the empty JSON stub")
+	require.NotNil(t, cfg)
+	after, err := os.ReadFile(jsonPath)
+	require.NoError(t, err)
+	assert.Empty(t, after, "startup must not remove or rewrite the stub (#4483)")
 }
