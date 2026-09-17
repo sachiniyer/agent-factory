@@ -347,6 +347,17 @@ export class SplitView {
   // (blur A, then focus B) doesn't flap the nav mode through rail and back.
   private blurTimer: number | null = null;
 
+  // Whether one of this view's panes currently holds the keyboard in its xterm
+  // textarea — the DOM-focus half of the #1693 nav/terminal model, mirrored here so
+  // reconcile() can tell whether a focused-pane rebuild happened while the operator
+  // was keyboard-attached (store.focus="terminal"). Maintained alongside the
+  // onFocusChange echoes in onPaneFocus: set true when any pane's textarea gains
+  // focus, false when the debounced-blur corrector finds focus left every pane.
+  // Teardown resets it: a disposed terminal suppresses its own blur (terminal.ts
+  // sets stopped before xterm tears the textarea down), so the callback alone would
+  // leave it stale-true across a session switch and arm a spurious refocus.
+  private termHoldsFocus = false;
+
   // Last values reported via onLayout, so a no-op reconcile never re-fires it (which
   // would re-enter the store→rerender→setSession loop).
   private lastFocusedTab = -1;
@@ -500,7 +511,15 @@ export class SplitView {
    *  settled tab keeps the store's claim and the pane's binding the same statement. */
   settledTab(sessionId: string, tabIds: string[]): number {
     if (sessionId === this.sessionId) {
-      return this.tree && this.focusedId ? (findLeaf(this.tree, this.focusedId)?.tab ?? 0) : 0;
+      if (!this.tree || !this.focusedId) {
+        return 0;
+      }
+      // The store can receive a reordered roster before setSession gets its turn in
+      // rerender. Resolve the focused leaf against that incoming identity list now;
+      // reading its old ordinal would briefly name a neighbour and make observers
+      // mistake a roster repaint for a user focus change.
+      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds);
+      return findLeaf(remapped, this.focusedId)?.tab ?? 0;
     }
     // Read the REMAPPED tree, exactly as setSession will: this answers "which tab will
     // that pane show once selected?", and the two must agree or the bar highlights one
@@ -705,6 +724,11 @@ export class SplitView {
     this.host.replaceChildren();
     this.host.classList.remove("af-split-multi");
     this.focusedId = null;
+    // Disposing a terminal suppresses its blur (terminal.ts sets stopped before xterm
+    // tears the textarea down), so onPaneFocus never runs here — reset the DOM-focus
+    // mirror ourselves, or it would stay stale-true into the next session's first
+    // reconcile and trip spurious refocus in reEngageFocusAfterRebuild().
+    this.termHoldsFocus = false;
     // The DOM is gone, so the next reconcile must build it whatever the tree says.
     this.builtTree = null;
   }
@@ -758,6 +782,17 @@ export class SplitView {
     const multi = desired.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
 
+    // Whether the FOCUSED pane's terminal/iframe was torn down and rebuilt this
+    // pass. An out-of-band roster change (#1815) can rebuild the pane whose
+    // terminal held the keyboard: reconcile disposes the DOM-focused AttachTerminal
+    // and constructs a new one, but the old terminal's blur is suppressed during
+    // dispose, so no onFocusChange(false) fires to correct store.focus, and the new
+    // terminal never auto-focuses — leaving store.focus="terminal" pinned against a
+    // DOM that fell back to document.body. Tracking the rebuild lets
+    // reEngageFocusAfterRebuild() re-attach the new terminal (or correct to rail
+    // when it became a web pane) so the keyboard model matches reality again.
+    let focusedRebuilt = false;
+
     // (Re)create terminals for panes whose bound tab changed (or are brand new).
     for (const leaf of desired) {
       const pane = this.panes.get(leaf.id);
@@ -796,6 +831,9 @@ export class SplitView {
           staleAddress ||
           pane.webArchived !== this.archived
         ) {
+          if (this.focusedId === leaf.id) {
+            focusedRebuilt = true;
+          }
           pane.term?.dispose();
           pane.term = null;
           pane.webDispose?.();
@@ -811,6 +849,9 @@ export class SplitView {
           pane.tab = leaf.tab;
         }
       } else if (!pane.term || staleAddress) {
+        if (this.focusedId === leaf.id) {
+          focusedRebuilt = true;
+        }
         pane.term?.dispose();
         pane.webDispose?.();
         pane.webUrl = null;
@@ -864,6 +905,46 @@ export class SplitView {
     }
 
     this.applyFocusClass();
+    this.reEngageFocusAfterRebuild(focusedRebuilt);
+  }
+
+  /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, correcting
+   *  the desync where `store.focus` stays "terminal" while DOM focus fell back to
+   *  `document.body` (the disposed terminal's blur is suppressed, so nothing else
+   *  reports the loss).
+   *
+   *  Gated on BOTH a focused-pane rebuild AND `termHoldsFocus` so it only fires when
+   *  the operator was keyboard-attached at the moment of the rebuild: a passive
+   *  repaint (rename, archive flip on a sibling, proxy change) that reaches a user
+   *  who DELIBERATELY detached to rail via Ctrl+] does not rebuild the focused pane
+   *  (so `focusedRebuilt` is false anyway), and a same-session rebuild that happens
+   *  to reach a rail-mode user is skipped by `termHoldsFocus` — neither yanks a
+   *  detached operator back into "terminal" without intent.
+   *
+   *  Two rebuild outcomes land differently, and both are the correct one:
+   *
+   *    - Rebuilt as a TERMINAL: refocus() → focus() focuses the new textarea, whose
+   *      focus listener echoes onPaneFocus(_, true), re-confirming store.focus=
+   *      "terminal" against the new DOM-focal textarea. The desync is undone.
+   *    - Rebuilt as a WEB/VS Code pane (no terminal to hand the keyboard to): DOM
+   *      focus is on document.body and no textarea blur can arm onPaneFocus's
+   *      corrector, so report the loss ourselves — store.focus lands on "rail",
+   *      which is the right mode when the focused pane ceases to be a terminal.
+   *
+   *  Split out from reconcile() so the boolean contract is unit-testable without a
+   *  DOM/xterm/WS (split_focus.test.ts stages the pane map directly); the end-to-end
+   *  behavior is pinned by the Playwright selftest. */
+  private reEngageFocusAfterRebuild(focusedRebuilt: boolean): void {
+    if (!focusedRebuilt || !this.termHoldsFocus) {
+      return;
+    }
+    const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
+    if (focused?.term) {
+      this.refocus();
+    } else {
+      this.cb.onFocusChange(false);
+      this.termHoldsFocus = false;
+    }
   }
 
   private createPane(leaf: LeafNode): Pane {
@@ -1699,6 +1780,7 @@ export class SplitView {
       if (this.focusedId !== leafId) {
         this.focusPane(leafId);
       }
+      this.termHoldsFocus = true;
       this.cb.onFocusChange(true);
       return;
     }
@@ -1712,6 +1794,7 @@ export class SplitView {
       const active = document.activeElement;
       const stillInPane = active ? [...this.panes.values()].some((p) => p.host.contains(active)) : false;
       if (!stillInPane) {
+        this.termHoldsFocus = false;
         this.cb.onFocusChange(false);
       }
     }, 0);

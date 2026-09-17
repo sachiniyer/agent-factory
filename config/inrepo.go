@@ -98,7 +98,6 @@ func (c *InRepoConfig) CommandBearingFields() []string {
 var (
 	inRepoAllowedKeys    = manifestKeysForSource(SourceRepoShared)
 	inRepoGlobalOnlyKeys = manifestGlobalOnlyKeySet()
-	tomlOnlyGlobalKeys   = manifestTOMLOnlyGlobalKeySet()
 )
 
 // InRepoConfigPath returns the path of the in-repo JSON config file for a

@@ -14,7 +14,6 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/spf13/cobra"
@@ -650,25 +649,8 @@ func printListenerAddr(cmd *cobra.Command, addr string) {
 // checked. The value is deliberately not returned — the point is the verdict,
 // and a config that fails to load has no value to report.
 type configValidateResult struct {
-	OK        bool   `json:"ok"`
-	Path      string `json:"path"`
-	Warning   string `json:"warning,omitempty"`
-	Uncertain bool   `json:"-"`
-}
-
-// MarshalJSON preserves the established ok/path/warning member order and
-// appends uncertainty only when the read-only directory probe could not answer.
-// Re-encoding through a map would alphabetize the existing public payload.
-func (r configValidateResult) MarshalJSON() ([]byte, error) {
-	type alias configValidateResult
-	object, err := json.Marshal(alias(r))
-	if err != nil {
-		return nil, err
-	}
-	if !r.Uncertain {
-		return object, nil
-	}
-	return session.AppendJSONMember(object, "uncertain", []byte("true"))
+	OK   bool   `json:"ok"`
+	Path string `json:"path"`
 }
 
 var configValidateCmd = &cobra.Command{
@@ -681,9 +663,7 @@ materializes nothing — a read-only check.
 This is the companion to a raw hand-edit. "af config set" validates every scalar
 and structured key before it writes and so cannot leave a broken file. A manual
 edit bypasses that protection: exit 0 means no config defect was found, while a
-non-zero exit names what must be fixed before the next launch. An inconclusive
-read-only directory-access probe does not prove that a later startup can
-regenerate an empty stub; text output warns, and JSON appends uncertain=true.
+non-zero exit names what must be fixed before the next launch.
 
 Local-only: it checks the config on the machine it runs on, so
 --daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
@@ -701,10 +681,10 @@ host to check that host.`,
 		// can never itself change the thing it is checking. A missing file is not
 		// a failure: first run has no config yet, and af materializes defaults
 		// then. A contentless config.toml with no shadowing config.json is the
-		// same verdict from startup's side: af removes the stub and materializes
-		// defaults, so an empty stub is OK — the very state this command claims
-		// to mirror (the "same parse+validate af runs at startup") must not
-		// reject it.
+		// same verdict from startup's side: af runs on in-memory defaults and
+		// leaves the file untouched (#4483), so an empty stub is OK — the very
+		// state this command claims to mirror (the "same parse+validate af runs
+		// at startup") must not reject it.
 		loaded, err := configValidateLoadReadOnly()
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
@@ -712,18 +692,12 @@ host to check that host.`,
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(),
 				apiproto.Success(configValidateResult{
-					OK:        true,
-					Path:      loaded.Path,
-					Warning:   loaded.DirectoryAccessWarning,
-					Uncertain: loaded.DirectoryAccessWarning != "",
+					OK:   true,
+					Path: loaded.Path,
 				}))
 		}
-		if loaded.DirectoryAccessWarning != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "config warning: %s\n", loaded.DirectoryAccessWarning)
-			return nil
-		}
 		if loaded.EmptyStub {
-			fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s is an empty stub — af will attempt to regenerate defaults on the next start\n", prettyPath(loaded.Path))
+			fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s is an empty stub — af runs on built-in defaults and leaves it untouched; write your settings or delete it to regenerate\n", prettyPath(loaded.Path))
 			return nil
 		}
 		if loaded.Missing {
@@ -808,8 +782,11 @@ override file it clears is this machine's.`,
 		fmt.Fprintf(cmd.OutOrStdout(), "cleared %s override for project %s in %s\n",
 			res.Key, configUnsetProjectFlag, prettyPath(res.Path))
 		if res.RequiresRestart {
-			if rootAgentConfigKey(res.Key) {
+			if config.KeyEffectClass(res.Key) == config.EffectNextDaemonStart {
 				fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
+			} else if res.Key == "on_archive_command" {
+				fmt.Fprintln(cmd.OutOrStdout(),
+					"saved. It applies to archive operations in this project from now on.")
 			} else {
 				fmt.Fprintln(cmd.OutOrStdout(),
 					"saved. It applies to sessions created in this project from now on.")
@@ -817,10 +794,6 @@ override file it clears is this machine's.`,
 		}
 		return nil
 	},
-}
-
-func rootAgentConfigKey(key string) bool {
-	return key == "root_agent" || strings.HasPrefix(key, "root_agent.")
 }
 
 func projectConfigRestartNotice(key string) string {
