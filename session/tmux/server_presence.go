@@ -220,8 +220,19 @@ func liveTmuxServerPIDs() []int {
 // A tripped deadline is an error, never an empty list: a server that did not
 // answer has told us nothing about what is running on it.
 func ListSessionNames(cmdExec cmd.Executor) ([]string, error) {
+	return listSessionField(cmdExec, "#{session_name}")
+}
+
+// listSessionIDs is the ListSessionNames contract for #{session_id}: the
+// generation probe's corroboration asks which IDS the server still knows,
+// and a name list cannot answer that.
+func listSessionIDs(cmdExec cmd.Executor) ([]string, error) {
+	return listSessionField(cmdExec, "#{session_id}")
+}
+
+func listSessionField(cmdExec cmd.Executor, format string) ([]string, error) {
 	ctx, cancel := tmuxTimeoutContext()
-	out, err := outputTmuxBoundedWith(ctx, cmdExec, "ls", "-F", "#{session_name}")
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, "ls", "-F", format)
 	timedOut := ctx.Err() != nil
 	cancel()
 	if err != nil {
