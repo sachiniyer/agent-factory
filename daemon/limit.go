@@ -742,7 +742,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	case probeAbsent:
 		if accountSwap != nil && !forceRespawn {
 			if accountSwap.alreadySet {
-				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
+				if err := revalidateGoneAccountSwap(instance, accountSwap.to); err != nil {
 					return resumeNotPerformed, err
 				}
 			}

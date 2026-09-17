@@ -513,6 +513,9 @@ func (b *LocalBackend) respawnFresh(i *Instance) error {
 	if plan, err = i.ensureAccountSwapConversationCarried(plan); err != nil {
 		return err
 	}
+	if plan.carry != nil {
+		i.markCarriedLaunchStarted(plan.account)
+	}
 	if err := b.respawnWithConversation(i, false, plan); err != nil {
 		stopErr := b.stopForAccountSwap(i, false)
 		return fmt.Errorf("account swap: replacement pane set for %q is incomplete: %w",

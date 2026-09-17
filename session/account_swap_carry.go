@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -120,14 +122,25 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 	if carry.dstRoot, err = accountCarryRoot(home, req.agent, req.target, target.Dir); err != nil {
 		return nil, "the new account's home is not where af registers accounts"
 	}
-	srcRoot, reason := carrySourceHome(home, req.agent, carry.sourceAccount, req.program, req.workDir)
-	if reason != "" {
-		return nil, reason
+	srcRoot, sourceReason := carrySourceHome(home, req.agent, carry.sourceAccount, req.program, req.workDir)
+	if sourceReason != "" && !carry.committed {
+		return nil, sourceReason
 	}
+	// A committed carry's copy already landed in the new account, so a source
+	// home that is gone since — an unregistered account — only means there is
+	// nothing newer to bring; the zero root reads as a missing source.
 	carry.srcHome = srcRoot.dir()
 	carry.srcRoot = srcRoot
 	if reason := carry.locate(req.program, req.workDir); reason != "" {
+		if sourceReason != "" {
+			return nil, sourceReason
+		}
 		return nil, reason
+	}
+	if !carry.committed {
+		if reason := carry.staleReason(req.program, req.workDir); reason != "" {
+			return nil, reason
+		}
 	}
 	return carry, ""
 }
@@ -190,15 +203,28 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 	if resolved, err := filepath.EvalSymlinks(launch.WorkingDir); err == nil && resolved != launch.WorkingDir {
 		candidates = append(candidates, resolved)
 	}
+	var refused string
 	for _, dir := range candidates {
 		project := filepath.Join("projects", claudeProjectName(dir))
 		transcript := filepath.Join(project, c.id+".jsonl")
-		if carryArtifactPresent(c.srcRoot, transcript) ||
-			(c.committed && carryArtifactPresent(c.dstRoot, transcript)) {
-			c.transcript = transcript
-			c.aux = filepath.Join(project, c.id)
-			return ""
+		roots := []carryRoot{c.srcRoot}
+		if c.committed {
+			roots = append(roots, c.dstRoot)
 		}
+		for _, root := range roots {
+			present, err := probeCarryArtifact(root, transcript)
+			if present {
+				c.transcript = transcript
+				c.aux = filepath.Join(project, c.id)
+				return ""
+			}
+			if path := carrySymlinkPath(err); path != "" && refused == "" {
+				refused = symlinkCarryReason(path)
+			}
+		}
+	}
+	if refused != "" {
+		return refused
 	}
 	return "its transcript is missing from the previous account's home"
 }
@@ -213,9 +239,14 @@ func (c *conversationCarry) locateCodex() string {
 		return reason
 	}
 	switch {
-	case source == "" && existing == "":
-		return "its rollout is missing from the previous account's home"
-	case source == "" && !c.committed:
+	case source == "" && (existing == "" || !c.committed):
+		// The sessions tree is walked without following links, so a symlinked
+		// store reads as empty: name the link rather than a missing rollout.
+		for _, root := range []carryRoot{c.srcRoot, c.dstRoot} {
+			if path := carrySymlinkPath(probeCarryDir(root, "sessions")); path != "" {
+				return symlinkCarryReason(path)
+			}
+		}
 		return "its rollout is missing from the previous account's home"
 	case source == "":
 		c.transcript = existing
@@ -225,6 +256,79 @@ func (c *conversationCarry) locateCodex() string {
 		return "the new account already files this conversation under a different rollout"
 	default:
 		c.transcript = source
+	}
+	return ""
+}
+
+// staleCarryReason is what a replacement is told when the recorded
+// conversation is not the one the user was last in.
+const staleCarryReason = "the conversation af recorded is no longer the newest one in this worktree " +
+	"(a new one was started, for example with /clear or /new)"
+
+// staleReason refuses a carry whose recorded conversation is no longer the
+// newest in this worktree. The recorded id is written at launch and at
+// delivery capture only, so a /clear in Claude or /new in Codex leaves it
+// naming a conversation the user abandoned; resuming that and saying
+// "continue" is worse than a stated fresh start. Newer is by modification
+// time, strictly: the live runtime appends to the conversation it is in.
+func (c *conversationCarry) staleReason(program, workDir string) string {
+	switch c.agent {
+	case tmux.ProgramClaude:
+		transcripts, err := claudeProjectTranscripts(filepath.Join(c.srcHome, filepath.Dir(c.transcript)))
+		if err != nil {
+			return "af could not list the conversations in this worktree to confirm the recorded one is current"
+		}
+		var recorded *claudeTranscript
+		for idx := range transcripts {
+			if strings.EqualFold(transcripts[idx].id, c.id) {
+				recorded = &transcripts[idx]
+			}
+		}
+		if recorded == nil {
+			return "its transcript is missing from the previous account's home"
+		}
+		for _, transcript := range transcripts {
+			if transcript.id != recorded.id && transcript.modTime.After(recorded.modTime) {
+				return staleCarryReason
+			}
+		}
+	case tmux.ProgramCodex:
+		return c.staleCodexReason(program, workDir)
+	}
+	return ""
+}
+
+func (c *conversationCarry) staleCodexReason(program, workDir string) string {
+	recordedPath := filepath.Join(c.srcHome, c.transcript)
+	recorded, err := os.Lstat(recordedPath)
+	if err != nil {
+		return "its rollout is missing from the previous account's home"
+	}
+	// Only rollouts written after the recorded one can be a newer thread, so
+	// only those have their session metadata read: a shared home can hold
+	// thousands of rollouts for other worktrees.
+	var newer []string
+	for path := range codexRolloutFiles(c.srcHome) {
+		if path == recordedPath {
+			continue
+		}
+		if info, err := os.Lstat(path); err == nil && info.ModTime().After(recorded.ModTime()) {
+			newer = append(newer, path)
+		}
+	}
+	if len(newer) == 0 {
+		return ""
+	}
+	launchDir := workDir
+	if launch, err := tmux.CommandEnvironmentFromCommand(program, workDir); err == nil && launch.WorkingDirKnown() {
+		launchDir = launch.WorkingDir
+	}
+	matches, uncorrelated := codexRolloutFilesForWorkingDir(newer, pathutil.ResolveForCompare(launchDir))
+	switch {
+	case len(matches) > 0:
+		return staleCarryReason
+	case uncorrelated > 0:
+		return "af could not confirm the recorded conversation is still the newest one in this worktree"
 	}
 	return ""
 }
@@ -381,6 +485,7 @@ func (i *Instance) demotePendingAccountSwapCarry(account, reason string) error {
 	}
 	pending.CarriedConversationID = ""
 	pending.CarrySourceAccount = ""
+	pending.CarriedLaunchStarted = false
 	pending.CarryFallback = reason
 	pending.ConversationID = ""
 	if plan.conversation.HasID() {
@@ -511,4 +616,50 @@ func (i *Instance) synchronizeCarriedConversationLocked(agent, id string) error 
 			i.Title, agent, id, current.Agent, current.ID)
 	}
 	return nil
+}
+
+// abandonedCarryReason is what a replacement is told when a carried resume was
+// launched once and the replacement then had to be launched again.
+const abandonedCarryReason = "the replacement stopped before it was confirmed working on the carried conversation"
+
+// AbandonCarriedConversationAfterFailedLaunch gives up on a committed carry
+// whose resume was already launched once, before the replacement is launched
+// again. The daemon calls it only when the replacement agent is gone. Nothing
+// else can tell that the new account cannot run the carried conversation — a
+// replacement that never became ready is left inert, and every retry would
+// otherwise re-plan the same resume — so a second launch starts fresh and says
+// why. A carry that never launched (a restart between checkpoint and launch)
+// is kept.
+func (i *Instance) AbandonCarriedConversationAfterFailedLaunch(account string) error {
+	i.mu.RLock()
+	pending := i.pendingAccountSwap
+	abandon := pending != nil && pending.To == account &&
+		pending.CarriedConversationID != "" && pending.CarriedLaunchStarted
+	var id string
+	if abandon {
+		id = pending.CarriedConversationID
+	}
+	i.mu.RUnlock()
+	if !abandon {
+		return nil
+	}
+	log.WarningLog.Printf("account swap for %q launched carried conversation %s under account %q and must launch again; starting a fresh conversation instead",
+		i.Title, id, account)
+	if err := i.validateAccountSwapPlan(account, "", false, true, abandonedCarryReason); err != nil {
+		return fmt.Errorf("account swap for %q could not prepare a fresh conversation after its carried launch failed: %w", i.Title, err)
+	}
+	return i.demotePendingAccountSwapCarry(account, abandonedCarryReason)
+}
+
+// markCarriedLaunchStarted records that the replacement is about to resume
+// the carried conversation.
+func (i *Instance) markCarriedLaunchStarted(account string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	pending := i.pendingAccountSwap
+	if pending == nil || pending.To != account || pending.CarriedConversationID == "" || pending.CarriedLaunchStarted {
+		return
+	}
+	pending.CarriedLaunchStarted = true
+	i.touchLocked()
 }

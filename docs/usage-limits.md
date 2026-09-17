@@ -373,9 +373,12 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   pane before committing the new identity, then restores them with the selected
   account environment. A claude or codex agent keeps its conversation: af copies
   the transcript into the new account's home before committing the new identity,
-  and the replacement resumes it. If the copy cannot be made, the agent starts a
-  fresh conversation, and the notice it receives says why. Other agents start a
-  fresh provider conversation. New
+  and the replacement resumes it. The copy stays in the new account's home, and
+  the provider replays that history under the new account, so an automatic
+  rotation moves the conversation's content to the candidate account as well as
+  the work. If the conversation cannot be carried, the agent starts a fresh
+  conversation, and the notice it receives says why. Other agents start a fresh
+  provider conversation. New
   account-scoped terminal tabs remain interactive but skip shell startup files,
   because an rc file can otherwise replace the selected identity after af has
   established it. A resolved command that explicitly pins `--continue`,
@@ -414,11 +417,24 @@ provider home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), so after stopping the
 outgoing agent af copies that conversation's file into the new account's home:
 the transcript for claude, the rollout for codex. The new account then resumes
 the same conversation id. The copy only ever adds to the new account's home;
-nothing in the previous account's home changes. If the copy cannot be made (the
-file is missing, or the new account already holds a different version of it),
-the new account starts a fresh conversation, and the brief it receives says the
-carry was attempted and why it failed. Other agents always start fresh with a
-brief. Use `--brief` to replace the prompt, or combine
+nothing in the previous account's home changes.
+
+The copied transcript is kept in the new account's home, and from then on the
+provider replays that history under the new account, whose credentials send
+it. Treat a handoff, manual or automatic, as moving the conversation's content
+to that account.
+
+The new account starts a fresh conversation instead, and its brief says af
+tried to carry the conversation and why it could not, when:
+
+- the file is missing, or reached through a symbolic link;
+- the new account already holds a different version of it;
+- the conversation af recorded is no longer the newest one in this worktree,
+  because a new one was started with `/clear` or `/new`;
+- a replacement already launched on the carried conversation stopped before it
+  was confirmed working.
+
+Other agents always start fresh with a brief. Use `--brief` to replace the prompt, or combine
 `--to claude --account work` to change both agent and account; changing the
 agent always starts a fresh conversation. The recorded handoff includes the
 outgoing and incoming accounts and branch tip.

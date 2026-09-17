@@ -406,6 +406,17 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	return false, nil
 }
 
+// revalidateGoneAccountSwap re-plans a committed replacement whose runtime is
+// gone. If it had already been launched on a carried conversation, the new
+// account may be unable to run that resume, so this launch starts fresh and
+// its notice says why (#4367).
+func revalidateGoneAccountSwap(instance *session.Instance, to string) error {
+	if err := instance.AbandonCarriedConversationAfterFailedLaunch(to); err != nil {
+		return err
+	}
+	return instance.ValidateAccountSwap(to)
+}
+
 func accountSwapIdentity(agent, account string) string {
 	if strings.TrimSpace(account) == "" {
 		return "the ambient " + agent + " identity"

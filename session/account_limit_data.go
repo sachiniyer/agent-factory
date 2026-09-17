@@ -26,7 +26,12 @@ type AccountSwapData struct {
 	// CarryFallback says why a same-agent swap that should have carried its
 	// conversation starts a fresh one instead; the replacement's notice
 	// repeats it.
-	CarryFallback           string               `json:"carry_fallback,omitempty"`
+	CarryFallback string `json:"carry_fallback,omitempty"`
+	// CarriedLaunchStarted records that a replacement was launched to resume
+	// the carried conversation. A committed carry whose replacement then has
+	// to be launched again gives up on the resume rather than retrying it
+	// forever: the new account may be unable to run it.
+	CarriedLaunchStarted    bool                 `json:"carried_launch_started,omitempty"`
 	ReplacementPanesStarted bool                 `json:"replacement_panes_started,omitempty"`
 	MissionDeliveryStatus   PromptDeliveryStatus `json:"mission_delivery_status,omitempty"`
 	// OriginalStartupStateUnknown preserves the real lifecycle value while

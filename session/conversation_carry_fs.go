@@ -59,6 +59,41 @@ func carryFailure(reason string, err error) error {
 	return &carryError{reason: reason, err: err}
 }
 
+// carrySymlinkError marks a path af refused because it is a symbolic link, so
+// the notice can name the link instead of calling the conversation missing.
+type carrySymlinkError struct {
+	path string
+	err  error
+}
+
+func (e *carrySymlinkError) Error() string {
+	return e.path + " is a symbolic link: " + e.err.Error()
+}
+
+func (e *carrySymlinkError) Unwrap() error { return e.err }
+
+func symlinkCarryReason(path string) string {
+	return path + " is a symbolic link, which af does not follow when carrying a conversation"
+}
+
+// carrySymlinkPath returns the refused link err names, if any.
+func carrySymlinkPath(err error) string {
+	var symlinkErr *carrySymlinkError
+	if errors.As(err, &symlinkErr) {
+		return symlinkErr.path
+	}
+	return ""
+}
+
+// carryFailureAt is carryFailure for an error from opening a path: a refused
+// symlink is named rather than described by reason.
+func carryFailureAt(reason string, err error) error {
+	if path := carrySymlinkPath(err); path != "" {
+		return carryFailure(symlinkCarryReason(path), err)
+	}
+	return carryFailure(reason, err)
+}
+
 // carryFailureReason returns the notice-safe clause describing err.
 func carryFailureReason(err error) string {
 	var carryErr *carryError
@@ -138,8 +173,13 @@ func (r carryRoot) dir() string {
 	return filepath.Join(append([]string{r.base}, r.components...)...)
 }
 
-// openCarryAnchor opens the provider home r names.
+// openCarryAnchor opens the provider home r names. The zero root names no
+// home: a committed carry whose source account is gone reads as a missing
+// source.
 func openCarryAnchor(r carryRoot) (*os.File, error) {
+	if r.base == "" {
+		return nil, &os.PathError{Op: "open", Path: "", Err: fs.ErrNotExist}
+	}
 	base, err := openCarryRoot(r.base, r.follow)
 	if err != nil || len(r.components) == 0 {
 		return base, err
@@ -159,7 +199,13 @@ func openCarryRoot(path string, follow bool) (*os.File, error) {
 		return err
 	})
 	if err != nil {
-		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+		pathErr := &os.PathError{Op: "open", Path: path, Err: err}
+		if !follow && !errors.Is(err, unix.ENOENT) {
+			if info, statErr := os.Lstat(path); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+				return nil, &carrySymlinkError{path: path, err: pathErr}
+			}
+		}
+		return nil, pathErr
 	}
 	return os.NewFile(uintptr(fd), path), nil
 }
@@ -172,7 +218,15 @@ func openCarryAt(dir *os.File, name string, flags int, mode uint32) (*os.File, e
 		return err
 	})
 	if err != nil {
-		return nil, &os.PathError{Op: "openat", Path: path, Err: err}
+		pathErr := &os.PathError{Op: "openat", Path: path, Err: err}
+		if !errors.Is(err, unix.ENOENT) && flags&unix.O_CREAT == 0 {
+			var st unix.Stat_t
+			if unix.Fstatat(int(dir.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW) == nil &&
+				st.Mode&unix.S_IFMT == unix.S_IFLNK {
+				return nil, &carrySymlinkError{path: path, err: pathErr}
+			}
+		}
+		return nil, pathErr
 	}
 	return os.NewFile(uintptr(fd), path), nil
 }
@@ -230,29 +284,52 @@ func openCarryFileAt(dir *os.File, name string) (*os.File, os.FileInfo, error) {
 	return file, info, nil
 }
 
-// carryArtifactPresent reports whether rel is a regular file beneath home,
-// reachable without following a symlink below home's anchor.
-func carryArtifactPresent(home carryRoot, rel string) bool {
+// probeCarryArtifact reports whether rel is a regular file beneath home,
+// reachable without following a symlink below home's anchor. Absence is
+// (false, nil); any other failure, such as a refused symlink, is returned.
+func probeCarryArtifact(home carryRoot, rel string) (bool, error) {
 	dirs, name, err := splitCarryPath(rel, true)
 	if err != nil {
-		return false
+		return false, err
 	}
 	root, err := openCarryAnchor(home)
-	if err != nil {
-		return false
+	if err == nil {
+		defer root.Close()
+		var dir *os.File
+		if dir, err = openCarryDirChain(root, dirs, false); err == nil {
+			defer dir.Close()
+			var file *os.File
+			if file, _, err = openCarryFileAt(dir, name); err == nil {
+				_ = file.Close()
+				return true, nil
+			}
+		}
 	}
-	defer root.Close()
-	dir, err := openCarryDirChain(root, dirs, false)
-	if err != nil {
-		return false
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
 	}
-	defer dir.Close()
-	file, _, err := openCarryFileAt(dir, name)
+	return false, err
+}
+
+// probeCarryDir returns the error, if any, from opening the directory rel
+// beneath home; a missing directory is not an error.
+func probeCarryDir(home carryRoot, rel string) error {
+	parts, _, err := splitCarryPath(rel, false)
 	if err != nil {
-		return false
+		return err
 	}
-	_ = file.Close()
-	return true
+	root, err := openCarryAnchor(home)
+	if err == nil {
+		defer root.Close()
+		var dir *os.File
+		if dir, err = openCarryDirChain(root, parts, false); err == nil {
+			return dir.Close()
+		}
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // carryConversationFile makes dstHome/rel hold the whole append-only
@@ -270,12 +347,12 @@ func carryConversationFile(srcHome, dstHome carryRoot, rel string, requireSource
 	}
 	dstRoot, err := openCarryAnchor(dstHome)
 	if err != nil {
-		return carryFailure("the new account's home could not be opened safely", err)
+		return carryFailureAt("the new account's home could not be opened safely", err)
 	}
 	defer dstRoot.Close()
 	dstDir, err := openCarryDirChain(dstRoot, dirs, true)
 	if err != nil {
-		return carryFailure("the new account's conversation directory is not a plain directory", err)
+		return carryFailureAt("the new account's conversation directory is not a plain directory", err)
 	}
 	defer dstDir.Close()
 
@@ -290,7 +367,7 @@ func carryConversationFile(srcHome, dstHome carryRoot, rel string, requireSource
 		defer srcDir.Close()
 	case errors.Is(err, fs.ErrNotExist):
 	default:
-		return carryFailure("the conversation could not be read safely from the previous account", err)
+		return carryFailureAt("the conversation could not be read safely from the previous account", err)
 	}
 	return carryFileAt(srcDir, dstDir, name, requireSource)
 }
@@ -309,7 +386,7 @@ func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) error
 		case errors.Is(err, fs.ErrNotExist):
 			src = nil
 		default:
-			return carryFailure("the conversation could not be read safely from the previous account", err)
+			return carryFailureAt("the conversation could not be read safely from the previous account", err)
 		}
 	}
 	dst, dstInfo, err := openCarryFileAt(dstDir, name)
@@ -319,7 +396,7 @@ func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) error
 	case errors.Is(err, fs.ErrNotExist):
 		dst = nil
 	default:
-		return carryFailure("the new account holds something other than a plain file where the conversation belongs", err)
+		return carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err)
 	}
 
 	if src == nil {
@@ -447,6 +524,9 @@ func carryConversationTree(srcHome, dstHome carryRoot, rel string) error {
 		return err
 	}
 	srcRoot, err := openCarryAnchor(srcHome)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

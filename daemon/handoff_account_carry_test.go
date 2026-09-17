@@ -115,3 +115,30 @@ func TestAccountSwapPromptStatesTheConversationOutcome(t *testing.T) {
 	require.Contains(t, accountSwapPrompt(manual, "", session.HandoffConversation{Carried: true}), "the mission",
 		"a manual swap's mission already states its conversation outcome")
 }
+
+// TestResumeFromLimitAbandonsACarryWhoseLaunchDidNotSurvive is the daemon half
+// of the failed-carry fallback: a committed carry whose resume was already
+// launched, and whose replacement is gone, is relaunched fresh with a notice
+// that says so, rather than re-planning the same resume on every retry.
+func TestResumeFromLimitAbandonsACarryWhoseLaunchDidNotSurvive(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", false, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "work")
+	inst.ReconcileAccountHandoffSnapshot("work", true, &session.AccountSwapData{
+		To:                    "work",
+		CarriedConversationID: carryHandoffConversationID,
+		CarriedLaunchStarted:  true,
+	})
+
+	require.NoError(t, m.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}))
+
+	_, respawns, prompts := backend.snapshot()
+	require.Equal(t, 1, respawns)
+	require.Len(t, prompts, 1)
+	require.Contains(t, prompts[0], "af tried to carry the previous conversation over, but the replacement stopped "+
+		"before it was confirmed working on the carried conversation, so this is a fresh conversation")
+	conv := inst.AgentConversation()
+	require.NotEqual(t, carryHandoffConversationID, conv.ID, "the abandoned carry must not be resumed again")
+	require.Equal(t, session.ConversationCaptureInjected, conv.CaptureKind)
+	_, _, pending := inst.PendingAccountSwap()
+	require.False(t, pending)
+}
