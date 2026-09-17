@@ -54,19 +54,38 @@ func handoffDeliveryResultError(status session.PromptDeliveryStatus, err error) 
 // beginHandoffMissionDelivery durably changes the exact mission's retry verdict
 // to ambiguous before submission. A crash after the composer is touched can
 // therefore never reload positive permission to send the instruction again.
+//
+// It is the pre-submission boundary of task.WaitForReadyAndSubmitPrompt, so it
+// runs only after readiness has proved the incoming runtime (#4429): a crash
+// inside the readiness wait reloads the verdict that admitted the attempt.
 func (m *Manager) beginHandoffMissionDelivery(delivery handoffDelivery) error {
+	previous := delivery.instance.PendingHandoffDeliveryStatus()
 	if err := delivery.instance.BeginPendingHandoffMissionDelivery(delivery.mission); err != nil {
 		return err
 	}
 	if err := m.persistSettlement(delivery.repoID, delivery.key, delivery.instance); err != nil {
-		// Submission did not begin, so restoring positive non-delivery evidence is
-		// safe. The failed settlement retry snapshots current state when it runs.
-		_ = delivery.instance.RecordPendingHandoffMissionDelivery(
-			delivery.mission, session.PromptNotDelivered,
-		)
+		// Submission did not begin, so the verdict that admitted this attempt is
+		// still true — put THAT back, not positive non-delivery. An explicit
+		// retry is admitted by an ambiguous verdict, and turning it into
+		// not-delivered here would hand automatic recovery a mission that may
+		// already have landed. The failed settlement retry snapshots current
+		// state when it runs.
+		_ = delivery.instance.RecordPendingHandoffMissionDelivery(delivery.mission, previous)
 		return fmt.Errorf("could not record the handoff mission attempt before submission; mission was not submitted: %w", err)
 	}
 	return nil
+}
+
+// waitAndSubmitHandoffMission runs the readiness wait and the submission with
+// the attempt marker between them. beginErr is non-nil only when the marker
+// could not be made durable: nothing was submitted, the admitting verdict was
+// put back, and the caller must not record the returned status over it.
+func (m *Manager) waitAndSubmitHandoffMission(delivery handoffDelivery) (status session.PromptDeliveryStatus, err, beginErr error) {
+	status, err = task.WaitForReadyAndSubmitPrompt(context.Background(), delivery.instance, delivery.mission, func() error {
+		beginErr = m.beginHandoffMissionDelivery(delivery)
+		return beginErr
+	})
+	return status, err, beginErr
 }
 
 func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
@@ -97,10 +116,10 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 		return perr
 	}
 
-	if err := m.beginHandoffMissionDelivery(delivery); err != nil {
-		return err
+	status, serr, beginErr := m.waitAndSubmitHandoffMission(delivery)
+	if beginErr != nil {
+		return beginErr
 	}
-	status, serr := task.WaitForReadyAndSendPromptWithStatus(context.Background(), delivery.instance, delivery.mission)
 	if evidenceErr := delivery.instance.RecordPendingHandoffMissionDelivery(delivery.mission, status); evidenceErr != nil {
 		return errors.Join(serr, evidenceErr)
 	}

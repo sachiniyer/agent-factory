@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -200,6 +201,47 @@ func TestHandleLimitRetry_PickerMarkDeliveredDispatches(t *testing.T) {
 	require.True(t, ok)
 	require.NoError(t, done.err)
 	require.Equal(t, daemon.ConfirmHandoffDeliveryRequest{ID: base.ID, Title: base.Title, RepoID: h.repoID}, gotRequest)
+}
+
+// A row that is only usage-limited still opens the picker when its pending
+// mission is confirmable, and its resume row runs the plain limit resume —
+// which un-stalls the agent and does NOT resend the mission. Labelling that row
+// "Retry send" promised a resend the dispatch never performs.
+func TestHandleLimitRetry_LimitOnlyPickerDoesNotPromiseAResend(t *testing.T) {
+	h := newTestHome(t)
+	base := limitActionInstance(t, "worker", time.Now().Add(time.Hour))
+	mission := "continue the inherited work"
+	base.SetPendingHandoffMission(mission)
+	require.NoError(t, base.RecordPendingHandoffMissionDelivery(mission, session.PromptSentUnverified))
+	h.store.AddInstance(base)
+	h.sidebar.SetSelectedInstance(0)
+	require.True(t, base.LimitReached(), "fixture: the row is usage-limited")
+	require.False(t, base.CanRetryPendingHandoffMissionDelivery(), "fixture: no mission resend is admitted")
+	require.True(t, base.CanConfirmPendingHandoffDelivery(), "fixture: the mission is confirmable")
+
+	var gotRequest daemon.ResumeFromLimitRequest
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+		gotRequest = request
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.handleLimitRetry()
+	require.Nil(t, cmd)
+	require.Equal(t, stateSelectHandoffResolve, h.state)
+	require.Equal(t, []handoffResolveAction{handoffResolveResend, handoffResolveConfirm},
+		h.handoffResolve.actions, "the limit resume stays reachable from `c`")
+	rendered := ansi.Strip(h.selectionOverlay.Render())
+	require.Contains(t, rendered, "Resume from limit")
+	require.NotContains(t, rendered, "Retry send",
+		"a plain limit resume must not be offered as a mission resend")
+
+	_, cmd = h.handleStateSelectHandoffResolve(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, cmd)
+	done, ok := cmd().(limitRetriedMsg)
+	require.True(t, ok)
+	require.NoError(t, done.err)
+	require.Equal(t, daemon.ResumeFromLimitRequest{ID: base.ID, Title: base.Title, RepoID: h.repoID}, gotRequest)
 }
 
 func TestHandleLimitRetry_StartupUnknownAccountHandoffDoesNotDispatch(t *testing.T) {

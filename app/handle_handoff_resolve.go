@@ -20,13 +20,37 @@ import (
 type handoffResolveAction int
 
 const (
-	// handoffResolveResend re-runs the existing resume path: the daemon
-	// re-verifies readiness and submits the pending mission again.
+	// handoffResolveResend dispatches the existing ResumeFromLimit path.
+	// handoffResolveResendKind says what that call does on this row, and the
+	// row's label says the same.
 	handoffResolveResend handoffResolveAction = iota
 	// handoffResolveConfirm retires the mission on the operator's attestation
 	// that the pane already shows it landed — no resend.
 	handoffResolveConfirm
 )
+
+// handoffResolveResendKind picks the label for the picker's resume row. Both
+// kinds dispatch the same ResumeFromLimit call; what that call does differs,
+// and the label has to say which.
+type handoffResolveResendKind int
+
+const (
+	// handoffResolveNoResend offers no resume row: the daemon would refuse it.
+	handoffResolveNoResend handoffResolveResendKind = iota
+	// handoffResolveResendMission: the daemon re-verifies the pane and submits
+	// the pending mission again.
+	handoffResolveResendMission
+	// handoffResolveResumeLimit: the row is only usage-limited, so the daemon
+	// runs the plain limit resume. It un-stalls the agent and leaves the
+	// pending mission unsent.
+	handoffResolveResumeLimit
+)
+
+// handoffResolveResendLabels maps each resume kind to its picker row.
+var handoffResolveResendLabels = map[handoffResolveResendKind]string{
+	handoffResolveResendMission: "Retry send — submit the pending mission again",
+	handoffResolveResumeLimit:   "Resume from limit — restart the stalled agent; the pending mission is not resent",
+}
 
 // handoffResolveState is the resolve picker's retained context, held on home
 // alongside the overlay for the same reason handoffChoices is (#4429): the
@@ -45,12 +69,12 @@ type handoffResolveState struct {
 // has always been. A row that only supports confirm STILL sees it, with one
 // entry: the bar hint says "retry", and silently marking delivered under that
 // label would be the same class of surprise this picker exists to remove.
-func (m *home) openHandoffResolvePicker(selected *session.Instance, target sessionActionTarget, canRetry bool) (tea.Model, tea.Cmd) {
+func (m *home) openHandoffResolvePicker(selected *session.Instance, target sessionActionTarget, resend handoffResolveResendKind) (tea.Model, tea.Cmd) {
 	actions := make([]handoffResolveAction, 0, 2)
 	items := make([]string, 0, 2)
-	if canRetry {
+	if label, ok := handoffResolveResendLabels[resend]; ok {
 		actions = append(actions, handoffResolveResend)
-		items = append(items, "Retry send — submit the pending mission again")
+		items = append(items, label)
 	}
 	actions = append(actions, handoffResolveConfirm)
 	items = append(items, "Mark delivered — retire the pending mission without resending (the pane already shows it landed)")

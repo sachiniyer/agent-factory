@@ -189,25 +189,21 @@ func (i *Instance) CanConfirmPendingManualAccountSwapDelivery() bool {
 	defer i.mu.RUnlock()
 	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady || i.liveness == LiveLimitReached
 	dead := i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived
-	if !i.userKilled && !dead && (i.startupStateUnknown || knownLive) &&
+	return !i.userKilled && !dead && (i.startupStateUnknown || knownLive) &&
 		(i.inFlightOp == OpNone || i.inFlightOp == OpRespawning) &&
 		i.pendingAccountSwap != nil && i.pendingAccountSwap.Manual &&
-		i.pendingAccountSwap.ReplacementPanesStarted {
-		switch i.pendingAccountSwap.MissionDeliveryStatus {
-		case PromptSentUnverified, PromptCouldNotConfirm, PromptDelivered:
-			return true
-		}
-	}
-	return false
+		i.pendingAccountSwap.ReplacementPanesStarted &&
+		confirmableHandoffDelivery(i.pendingAccountSwap.MissionDeliveryStatus)
 }
 
 // ConfirmPendingManualAccountSwapDelivery retires the pending manual account
 // swap on the operator's attestation that its mission already landed (#4429).
 // It is the account-swap half of ConfirmPendingHandoffDelivery: the daemon has
 // already probed the pane alive, so this method re-checks the durable facts and
-// then clears the transaction, lifts any orphaned replacement fence, and
-// resolves a startup-unknown flag the probe just disproved — all in one
-// critical section so no later reader can rebuild the wedge.
+// then clears the transaction and its admitted launch plan, lifts any orphaned
+// replacement fence, and resolves a startup-unknown flag the probe just
+// disproved — all in one critical section so no later reader can rebuild the
+// wedge.
 func (i *Instance) ConfirmPendingManualAccountSwapDelivery(from, to string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -218,9 +214,7 @@ func (i *Instance) ConfirmPendingManualAccountSwapDelivery(from, to string) erro
 	if !pending.ReplacementPanesStarted {
 		return fmt.Errorf("manual account swap from %q to %q has no replacement panes; nothing could have been delivered", from, to)
 	}
-	switch pending.MissionDeliveryStatus {
-	case PromptSentUnverified, PromptCouldNotConfirm, PromptDelivered:
-	default:
+	if !confirmableHandoffDelivery(pending.MissionDeliveryStatus) {
 		return fmt.Errorf("manual account swap from %q to %q has no ambiguous delivery to confirm (status %q); retry-limit owns the resend", from, to, pending.MissionDeliveryStatus)
 	}
 	if i.userKilled {
@@ -242,7 +236,11 @@ func (i *Instance) ConfirmPendingManualAccountSwapDelivery(from, to string) erro
 			return err
 		}
 	}
+	// Retire the launch plan with the transaction, as ClearPendingAccountSwap
+	// does: tabSpawnBlockedLocked refuses on either, so leaving the plan behind
+	// would keep new tabs refused until the daemon restarted.
 	i.pendingAccountSwap = nil
+	i.accountSwapLaunch = nil
 	i.touchLocked()
 	i.noteStateChangeLocked(lv, op, resetAt)
 	return nil

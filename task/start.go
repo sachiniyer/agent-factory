@@ -174,14 +174,43 @@ func WaitForReadyAndSendPromptWithStatus(
 	instance *session.Instance,
 	prompt string,
 ) (session.PromptDeliveryStatus, error) {
+	return WaitForReadyAndSubmitPrompt(ctx, instance, prompt, nil)
+}
+
+// WaitForReadyAndSubmitPrompt is WaitForReadyAndSendPromptWithStatus with a
+// pre-submission boundary, for callers that owe a durable record of the attempt
+// (#4429). beforeSubmit runs once readiness and the trust dialog have proved
+// the runtime, and before the composer is touched. That is the one point where
+// a could-not-confirm attempt marker is both needed (a crash after it may have
+// submitted) and true about the runtime; a crash inside the readiness wait
+// then reloads the verdict that admitted the attempt.
+//
+// If beforeSubmit fails, nothing is sent: the result is PromptNotDelivered with
+// beforeSubmit's own error, wrapped by neither ErrAgentReadiness nor
+// ErrPromptDelivery. A nil beforeSubmit, or an empty prompt, skips it.
+func WaitForReadyAndSubmitPrompt(
+	ctx context.Context,
+	instance *session.Instance,
+	prompt string,
+	beforeSubmit func() error,
+) (session.PromptDeliveryStatus, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	boundary := func() error {
+		if prompt == "" || beforeSubmit == nil {
+			return nil
+		}
+		return beforeSubmit()
 	}
 
 	// Readiness polling, trust-prompt dismissal and prompt delivery below all
 	// drive the agent's PTY locally; a backend without interactive input (remote
 	// hook) handles readiness and prompts on its own host, so skip them.
 	if !instance.Capabilities().InteractiveInput {
+		if err := boundary(); err != nil {
+			return session.PromptNotDelivered, err
+		}
 		return session.PromptDelivered, nil
 	}
 
@@ -191,6 +220,10 @@ func WaitForReadyAndSendPromptWithStatus(
 
 	if err := DismissTrustPrompt(ctx, instanceTrustTarget{instanceReadinessTarget{inst: instance}}); err != nil {
 		return session.PromptCouldNotConfirm, fmt.Errorf("%w: %w", ErrAgentReadiness, err)
+	}
+
+	if err := boundary(); err != nil {
+		return session.PromptNotDelivered, err
 	}
 
 	if prompt != "" {

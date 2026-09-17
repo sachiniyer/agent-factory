@@ -296,11 +296,21 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// still scrubs the generic op enum, then this specific proof reconstructs the
 	// replacement fence — but only for the verdicts that still own an in-flight
 	// obligation the daemon resolves itself (#4429): positive non-delivery (the
-	// automatic replay) and the delivered crash window (the recovery settle). An
-	// ambiguous verdict can only be recorded after the send path proved the
-	// incoming runtime, so its swap is complete; rebuilding the fence there would
-	// make the row inert while the only remaining decision — confirm or retry —
-	// is the operator's, and an inert row is exactly the wedge this issue fixes.
+	// automatic replay) and the delivered crash window (the recovery settle).
+	//
+	// An ambiguous verdict loads without the fence. The send path writes its
+	// could-not-confirm attempt marker only after readiness has proved the
+	// incoming runtime, and before the composer is touched. A crash inside the
+	// readiness wait therefore reloads the verdict that admitted the attempt,
+	// fence included. An ambiguous verdict can also come from a readiness
+	// failure, which a fenced attempt records together with startup-unknown
+	// (refused below either way), or from a legacy record that had no verdict.
+	// However it arose, the row is in the same position: nothing resends the
+	// mission automatically, and both operator exits prove the runtime before
+	// acting — confirm probes the pane, and retry probes a startup-unknown row
+	// and then re-runs readiness. Rebuilding the fence would only make the row
+	// inert, which is the wedge this issue fixes.
+	//
 	// A kill tombstone outranks every process-local op, including one carried by
 	// a live snapshot; startup-unknown likewise prevents synthesizing a
 	// replacement fence. Both terminal markers must retain an explicit teardown

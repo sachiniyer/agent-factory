@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
 
@@ -60,10 +63,10 @@ func TestConfirmHandoffDelivery_RetiresAmbiguousWedgeWithoutResend(t *testing.T)
 }
 
 // The other half of the wedge exit: the operator inspected the pane, saw the
-// mission did NOT land, and explicitly resends it. The send path's own
-// readiness wait re-proves the binding the startup flag says is missing, so
-// the same row that was previously inert retries — and the fresh observation
-// resolves the flag.
+// mission did NOT land, and explicitly resends it. MarkStartupStateUnknown
+// lowered `started`, and handoffBackend — like LocalBackend — neither captures
+// nor sends on such a row, so the retry only works because the daemon probes
+// the pane first and restores the binding before readiness runs.
 func TestResumeFromLimit_ExplicitRetryClearsStartupUnknownWedge(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &handoffBackend{
@@ -85,10 +88,172 @@ func TestResumeFromLimit_ExplicitRetryClearsStartupUnknownWedge(t *testing.T) {
 	require.Empty(t, inst.PendingHandoffMission())
 	require.Equal(t, session.OpNone, inst.GetInFlightOp())
 	require.False(t, inst.StartupStateUnknown(),
-		"the send's real pane observation resolves the flag")
+		"the probe that admitted the retry resolves the flag")
+	require.True(t, inst.Started(), "and restores the binding the flag lowered")
 
 	_, prompts := backend.snapshot()
 	require.Equal(t, []string{mission}, prompts, "exactly one resend of the exact mission")
+}
+
+// absentPaneHandoffBackend answers the liveness probe with a definite "no such
+// pane" — the local backend's answer once the tmux session is gone.
+type absentPaneHandoffBackend struct {
+	*handoffBackend
+}
+
+func (b *absentPaneHandoffBackend) IsAlive(*session.Instance) (bool, error) { return false, nil }
+
+// A startup-unknown row whose pane does not answer the probe must refuse the
+// retry up front — not spend the readiness timeout under the session locks and
+// then fail on the lowered `started` bit — and must leave the row exactly as
+// it was, so restore or kill can still own it.
+func TestResumeFromLimit_ExplicitRetryRefusesStartupUnknownWithoutLivePane(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	base := &handoffBackend{
+		FakeBackend:    session.NewFakeBackend(),
+		deliveryStatus: session.PromptDelivered,
+	}
+	backend := &absentPaneHandoffBackend{handoffBackend: base}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "wedged-absent", backend)
+	mission := "continue the inherited work"
+	stageHandoffWedge(t, inst, mission, session.PromptSentUnverified)
+	require.True(t, inst.CanRetryPendingHandoffMissionDelivery(), "fixture: the row advertises Retry")
+
+	outcome, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{
+		ID: inst.ID, Title: inst.Title, RepoID: repoID,
+	})
+	require.ErrorContains(t, err, "could not be confirmed live")
+	require.Equal(t, resumeNotPerformed, outcome)
+
+	_, previews, _ := base.eventSnapshot()
+	require.Zero(t, previews, "a pane that failed the probe must not be polled for readiness")
+	_, prompts := base.snapshot()
+	require.Empty(t, prompts)
+	require.True(t, inst.StartupStateUnknown(), "a refused retry keeps the unknown marker")
+	require.False(t, inst.Started(), "a refused retry must not restore a binding nothing proved")
+	require.Equal(t, mission, inst.PendingHandoffMission())
+	require.Equal(t, session.PromptSentUnverified, inst.PendingHandoffDeliveryStatus())
+}
+
+// The automatic settle of a delivered crash window must not claim a runtime.
+// CommitHandoff always lands on Running, so using it on a reloaded Lost or Dead
+// row saved and published that row as a live agent; the fence has to drop
+// through an edge that keeps liveness.
+func TestResumePendingHandoffs_DeliveredSettleKeepsDeadLiveness(t *testing.T) {
+	for name, lv := range map[string]session.Liveness{"lost": session.LiveLost, "dead": session.LiveDead} {
+		t.Run(name, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			backend := &handoffBackend{
+				FakeBackend:    session.NewFakeBackend(),
+				deliveryStatus: session.PromptDelivered,
+			}
+			inst := registerHandoffSubject(t, manager, repoID, repoPath, "delivered-dead", backend)
+			mission := "continue the inherited work"
+			inst.SetPendingHandoffMission(mission)
+			require.NoError(t, inst.RecordPendingHandoffMissionDelivery(mission, session.PromptDelivered))
+			require.NoError(t, inst.Transition(session.BeginHandoff()))
+			require.NoError(t, inst.Transition(session.ObserveLiveness(lv)))
+			require.Equal(t, session.OpReplacing, inst.GetInFlightOp(), "fixture: the reloaded fence is up")
+
+			manager.ResumePendingHandoffs()
+
+			require.Empty(t, inst.PendingHandoffMission(), "the delivered obligation still retires")
+			require.Equal(t, session.OpNone, inst.GetInFlightOp(), "the fence still drops")
+			require.Equal(t, lv, inst.GetLiveness(), "settling a dead row must not claim a live runtime")
+			_, prompts := backend.snapshot()
+			require.Empty(t, prompts)
+
+			rec := recordFor(t, repoID, inst.Title)
+			require.NotNil(t, rec)
+			require.Empty(t, rec.PendingHandoffMission)
+			require.NotEqual(t, session.LiveRunning, rec.Liveness,
+				"the saved record must not describe a dead row as Running")
+		})
+	}
+}
+
+// The could-not-confirm attempt marker is written only once readiness has
+// proved the incoming runtime (#4429). While the readiness wait is still
+// running, the record on disk carries the verdict that admitted the attempt, so
+// a crash there reloads positive non-delivery — and with it the fence that
+// hands the mission to automatic recovery — rather than an ambiguous verdict
+// for a mission that was never sent.
+func TestHandoffSession_AttemptMarkerWaitsForReadiness(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	backend := &blockingReadinessHandoffBackend{
+		handoffBackend: base,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "marker-order", backend)
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.HandoffSession(HandoffSessionRequest{
+			Title: inst.Title, RepoID: repoID, To: tmux.ProgramGemini,
+		})
+		done <- err
+	}()
+
+	select {
+	case <-backend.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handoff never reached incoming-agent readiness")
+	}
+	rec := recordFor(t, repoID, inst.Title)
+	close(backend.release)
+	require.NoError(t, <-done)
+
+	require.NotNil(t, rec)
+	require.NotEmpty(t, rec.PendingHandoffMission, "fixture: the swap checkpoint carries the mission")
+	require.Equal(t, session.PromptNotDelivered, rec.HandoffDeliveryStatus,
+		"no attempt marker may be durable before readiness has proved the runtime")
+	crashed := *rec
+	crashed.BackendType = "docker"
+	reloaded, err := session.FromInstanceData(crashed)
+	require.NoError(t, err)
+	require.Equal(t, session.OpReplacing, reloaded.GetInFlightOp(),
+		"a crash inside the readiness wait reloads the fence automatic recovery owns")
+	require.True(t, reloaded.PendingHandoffMissionAutoRetryable())
+}
+
+// A failed attempt-marker write sends nothing and must put back the verdict
+// that admitted the attempt. An explicit retry is admitted by an AMBIGUOUS
+// verdict; restoring positive non-delivery instead would hand automatic
+// recovery a mission that may already have landed.
+func TestResumeFromLimit_MarkerWriteFailureKeepsTheAmbiguousVerdict(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{
+		FakeBackend:    session.NewFakeBackend(),
+		deliveryStatus: session.PromptDelivered,
+	}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "marker-write-fails", backend)
+	mission := "continue the inherited work"
+	inst.SetPendingHandoffMission(mission)
+	require.NoError(t, inst.RecordPendingHandoffMissionDelivery(mission, session.PromptSentUnverified))
+	manager.persistInstance(repoID, inst)
+
+	diskFull := errors.New("no space left on device")
+	prev := testHookPersistInstanceData
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if data.Title == inst.Title && data.HandoffDeliveryStatus == session.PromptCouldNotConfirm {
+			return diskFull
+		}
+		return nil
+	}
+
+	outcome, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{
+		ID: inst.ID, Title: inst.Title, RepoID: repoID,
+	})
+	require.ErrorIs(t, err, diskFull)
+	require.Equal(t, resumeNotPerformed, outcome)
+	_, prompts := backend.snapshot()
+	require.Empty(t, prompts, "a marker that is not durable must not be followed by a send")
+	require.Equal(t, session.PromptSentUnverified, inst.PendingHandoffDeliveryStatus(),
+		"the admitting verdict comes back, not positive non-delivery")
+	require.False(t, inst.PendingHandoffMissionAutoRetryable(),
+		"automatic recovery must never own a mission that may already have landed")
 }
 
 // Automatic recovery must NOT touch the wedge: an ambiguous verdict may mean

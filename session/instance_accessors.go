@@ -100,6 +100,16 @@ func (i *Instance) RecordPendingHandoffMissionDelivery(mission string, status Pr
 	return nil
 }
 
+// PendingHandoffDeliveryStatus returns the verdict recorded for the pending
+// handoff mission, or "" when no mission is pending. A caller that raises the
+// attempt marker reads it first, so a failed marker write can put back the
+// verdict it replaced instead of assuming one.
+func (i *Instance) PendingHandoffDeliveryStatus() PromptDeliveryStatus {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.handoffDeliveryStatus
+}
+
 // PendingHandoffMissionAutoRetryable permits automatic redelivery only after a
 // mission-scoped observation proved that the exact pending mission did not land.
 func (i *Instance) PendingHandoffMissionAutoRetryable() bool {
@@ -114,9 +124,10 @@ func (i *Instance) PendingHandoffMissionAutoRetryable() bool {
 // itself — positive non-delivery (automatic replay owns the resend; the row
 // stays inert until it lands) and the delivered crash window (the recovery
 // settle owns the bookkeeping). Ambiguous verdicts deliberately load WITHOUT
-// the fence: the send path could only record them after proving the incoming
-// runtime, the swap is complete, and the remaining confirm-or-retry decision
-// needs a usable row — rebuilding the fence there manufactures the wedge.
+// the fence: the remaining confirm-or-retry decision is the operator's, both
+// exits prove the runtime before acting, and rebuilding the fence there
+// manufactures the wedge. FromInstanceData spells out how an ambiguous verdict
+// can become durable.
 func pendingHandoffMissionNeedsFence(status PromptDeliveryStatus) bool {
 	return status == PromptNotDelivered || status == PromptDelivered
 }
@@ -137,17 +148,16 @@ func (i *Instance) PendingHandoffMissionSettleable() bool {
 // Positive non-delivery belongs to automatic recovery; delivered evidence and
 // an unknown/missing runtime never authorize another submission.
 //
-// A startup-unknown row DOES admit the explicit retry (#4429): it is the pane
-// whose identity could not be confirmed, and the send path re-runs the real
-// readiness wait — WaitForReady polling the pane IS the runtime proof the flag
-// says is missing — before the composer is touched. The operator's inspection
-// plus that wait together resolve the ambiguity; the retry itself settles the
-// flag once the pane answers.
+// A startup-unknown row DOES admit the explicit retry (#4429). Its `started`
+// bit is down, and every local send and pane capture refuses a row in that
+// state, so the daemon first probes the pane under the op lock: only a runtime
+// that answers restores `started` (ResolveStartupState) before the readiness
+// wait and the send run. A probe that does not answer refuses the retry and
+// leaves the row as it was.
 func (i *Instance) CanRetryPendingHandoffMissionDelivery() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	ambiguous := i.handoffDeliveryStatus == PromptSentUnverified ||
-		i.handoffDeliveryStatus == PromptCouldNotConfirm
+	ambiguous := ambiguousHandoffDelivery(i.handoffDeliveryStatus)
 	// Dead rows keep their restore/kill handles; neither a resend nor an
 	// attestation is meaningful against a runtime that no longer exists.
 	dead := i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived
@@ -167,12 +177,8 @@ func (i *Instance) CanConfirmPendingHandoffDelivery() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if i.pendingHandoffMission == "" || i.userKilled ||
-		(i.inFlightOp != OpNone && i.inFlightOp != OpReplacing) {
-		return false
-	}
-	switch i.handoffDeliveryStatus {
-	case PromptSentUnverified, PromptCouldNotConfirm, PromptDelivered:
-	default:
+		(i.inFlightOp != OpNone && i.inFlightOp != OpReplacing) ||
+		!confirmableHandoffDelivery(i.handoffDeliveryStatus) {
 		return false
 	}
 	if i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived {
@@ -207,9 +213,7 @@ func (i *Instance) ConfirmPendingHandoffDelivery(mission string) error {
 	if i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived {
 		return fmt.Errorf("session %q has no live runtime to confirm against (liveness %v); restore owns this row", i.Title, i.liveness)
 	}
-	switch i.handoffDeliveryStatus {
-	case PromptSentUnverified, PromptCouldNotConfirm, PromptDelivered:
-	default:
+	if !confirmableHandoffDelivery(i.handoffDeliveryStatus) {
 		return fmt.Errorf("session %q has no ambiguous handoff delivery to confirm (status %q); automatic recovery owns not-delivered missions", i.Title, i.handoffDeliveryStatus)
 	}
 	if i.inFlightOp != OpNone && i.inFlightOp != OpReplacing {
@@ -246,10 +250,10 @@ func (i *Instance) resolveStartupStateLocked() {
 	}
 }
 
-// ResolveStartupState is the locking form of resolveStartupStateLocked for the
-// daemon's explicit-retry settle: a send that produced a REAL pane observation
-// (delivered, sent-unverified, or not-delivered — never could-not-confirm,
-// where observation itself failed) proves a runtime answers at the binding.
+// ResolveStartupState is the locking form of resolveStartupStateLocked. The
+// daemon calls it once a liveness probe has answered: before an explicit retry
+// sends to a startup-unknown row, and when recovery settles a delivered
+// mission on a live row.
 func (i *Instance) ResolveStartupState() {
 	i.mu.Lock()
 	defer i.mu.Unlock()

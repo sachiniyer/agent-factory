@@ -372,7 +372,11 @@ worth keeping; here it holds everything the outgoing agent did.
 The §4.5 failure paragraph says a failed delivery leaves the swap standing — but
 "failed" was doing too much work. Prompt submission has **three** honest
 outcomes, and `daemon/handoff_delivery.go` records the attempt's verdict
-durably as `pending_handoff_delivery_status` before the result is known:
+durably as `pending_handoff_delivery_status`. Before the composer is touched,
+and only once readiness has proved the incoming runtime, it writes
+`could-not-confirm` as an attempt marker, so a crash mid-submit can never
+reload permission to send again. A crash inside the readiness wait reloads
+the verdict that admitted the attempt instead:
 
 | Verdict | Meaning | Who resolves it |
 |---|---|---|
@@ -394,9 +398,12 @@ exists to stop a half-completed swap being treated as complete. Once the
 incoming runtime is proven live and answering, the swap *is* complete — the
 unresolved question is whether its first prompt landed, which is a property of
 the mission record, not of the swap. So an ambiguous verdict commits the fence
-(and a crash-restart no longer reconstructs it — `daemon/instance_data.go`
-rebuilds `OpReplacing` only for `PromptNotDelivered`) while the mission stays
-pending. `startup_state_unknown` clears the same way: through an operation
+while the mission stays pending, and a crash-restart no longer reconstructs it:
+`session/instance_data.go` rebuilds `OpReplacing` only for
+`PromptNotDelivered` (automatic retry owns the row) and `PromptDelivered` (the
+recovery loop retires the mission without a resend). That recovery settle
+keeps a Lost or Dead row's liveness: it drops the fence without claiming a
+runtime that restore still owns. `startup_state_unknown` clears the same way: through an operation
 that actually confirmed the runtime, not through the passage of time. This is
 what un-wedges the #4429 state: the row stops being inert the moment the
 runtime answers, with the pending mission still advertised and resolvable.
@@ -404,9 +411,13 @@ runtime answers, with the pending mission still advertised and resolvable.
 **The exit is a verb, and it has two halves.** After inspecting the pane:
 
 - **Resend** — `af sessions retry-limit <title>`, the TUI `c` key, the web
-  Retry action. Retries the pending mission in place; the send path's own
-  readiness wait is the gate, and a positive observation after submit can
-  upgrade the ambiguous verdict to delivered.
+  Retry action. Retries the pending mission in place, with the send path's
+  readiness wait as the gate. A positive observation after submit can upgrade
+  the ambiguous verdict to delivered. On a `startup_state_unknown` row the
+  daemon probes the pane first: the flag lowered the row's `started` bit, and
+  the local backend neither captures nor sends without it. A pane that answers
+  gets its binding back before readiness runs; one that does not answer
+  refuses the retry and leaves the row untouched.
 - **Mark delivered** — `af sessions retry-limit <title> --delivered`, the
   picker's second choice under `c`, the web **Mark delivered** action. The
   operator attests the mission already landed; the daemon probes that a

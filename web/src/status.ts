@@ -12,7 +12,14 @@
 // and a filled diamond for LimitReached. Colors (the `kind`) map to the exact hexes
 // render.go paints (see styles.css .af-dot-*).
 
-import { InFlightOp, Liveness, Status, type IdleReason, type SessionData } from "./types.js";
+import {
+  InFlightOp,
+  Liveness,
+  Status,
+  type IdleReason,
+  type PromptDeliveryStatus,
+  type SessionData,
+} from "./types.js";
 import { formatDuration } from "./time.js";
 import type { IconName } from "./icon.js";
 
@@ -290,15 +297,29 @@ export function isPendingManualHandoffDeliveryUnconfirmed(s: SessionData): boole
   );
 }
 
+/** True when a mission verdict leaves it unknown whether the mission landed.
+ * The one list of those verdicts on this side; mirrors
+ * session.ambiguousHandoffDelivery. */
+function ambiguousHandoffDelivery(status: PromptDeliveryStatus | undefined): boolean {
+  return status === "sent-unverified" || status === "could-not-confirm";
+}
+
+/** True when an operator may retire a pending mission on the attestation that
+ * it already landed (#4429): any ambiguous verdict, plus a recorded delivery
+ * whose settle a crash interrupted. Mirrors session.confirmableHandoffDelivery. */
+function confirmableHandoffDelivery(status: PromptDeliveryStatus | undefined): boolean {
+  return ambiguousHandoffDelivery(status) || status === "delivered";
+}
+
 /** True when an agent-only handoff has a known incoming pane whose mission
  * submission was ambiguous. The operator may inspect that pane and explicitly
  * override the replay fence; positive non-delivery stays owned by automation.
  *
- * A startup-unknown row DOES admit the explicit retry (#4429): the send path
- * re-runs the real readiness wait — polling the pane IS the runtime proof the
- * flag says is missing — before the composer is touched. Dead liveness states
- * still refuse: restore owns a runtime that no longer exists. Mirrors
- * session.Instance.CanRetryPendingHandoffMissionDelivery. */
+ * A startup-unknown row DOES admit the explicit retry (#4429): the daemon
+ * probes the pane first and restores the runtime binding only if it answers,
+ * then runs readiness and the send; a pane that does not answer refuses the
+ * retry. Dead liveness states still refuse: restore owns a runtime that no
+ * longer exists. Mirrors session.Instance.CanRetryPendingHandoffMissionDelivery. */
 export function isPendingAgentHandoffDeliveryUnconfirmed(s: SessionData): boolean {
   const liveness = livenessOf(s);
   const status = s.pending_handoff_delivery_status;
@@ -308,7 +329,7 @@ export function isPendingAgentHandoffDeliveryUnconfirmed(s: SessionData): boolea
   return (
     s.pending_handoff_mission !== undefined &&
     s.pending_handoff_mission !== "" &&
-    (status === "sent-unverified" || status === "could-not-confirm") &&
+    ambiguousHandoffDelivery(status) &&
     s.user_killed !== true &&
     !dead &&
     (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) &&
@@ -332,7 +353,7 @@ export function isPendingAgentHandoffDeliveryConfirmable(s: SessionData): boolea
   return (
     s.pending_handoff_mission !== undefined &&
     s.pending_handoff_mission !== "" &&
-    (status === "sent-unverified" || status === "could-not-confirm" || status === "delivered") &&
+    confirmableHandoffDelivery(status) &&
     s.user_killed !== true &&
     !dead &&
     (op === InFlightOp.None || op === InFlightOp.Replacing) &&
@@ -359,7 +380,7 @@ export function isPendingManualSwapDeliveryConfirmable(s: SessionData): boolean 
   return (
     pending?.manual === true &&
     pending.replacement_panes_started === true &&
-    (status === "sent-unverified" || status === "could-not-confirm" || status === "delivered") &&
+    confirmableHandoffDelivery(status) &&
     s.user_killed !== true &&
     !dead &&
     (op === InFlightOp.None || op === InFlightOp.Respawning) &&
