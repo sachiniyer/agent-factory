@@ -268,6 +268,14 @@ func TestRecordedParkedHeadResumeRetiresTerminalOverlay(t *testing.T) {
 		"the latched overlay wins while the parked head cannot be verified")
 
 	require.NoError(t, os.Chmod(seed.path, 0o644))
+	// peek's load retry is throttled to one disk attempt per
+	// eventQueueLoadRetryInterval and the outage above just consumed it, so a
+	// bare peek would answer with the latched error for up to five more
+	// seconds. The resume path takes the unthrottled fresh check
+	// (watcher_limit_park.go) before trusting the queue — mirror it rather
+	// than sleeping out the interval.
+	require.False(t, queue.loadFailedFresh(),
+		"storage healed: the fresh check must observe the readable queue")
 	ev, cursor, ok, err := queue.peek()
 	require.NoError(t, err)
 	require.True(t, ok)
