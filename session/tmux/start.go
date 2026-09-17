@@ -125,10 +125,19 @@ func (t *TmuxSession) Start(workDir string) error {
 	// success for a session tmux never confirmed (#1962). A !known probe means keep
 	// waiting until the 2s deadline, then take the timeout path below — which
 	// threads pane-state / ErrTmuxTimeout correctly.
+	//
+	// Each probe is bounded by what is LEFT of the 2s budget, NOT the flat
+	// tmuxCommandTimeout. The select's `case <-timeout` (the give-up path) only
+	// runs AFTER this synchronous probe returns, so bounding the probe at the
+	// flat 10s would let one wedged has-session hold the goroutine for the whole
+	// 10s and leave that give-up case unreachable past the poll's own 2s deadline
+	// (#2099 poll-loop class). probeSessionWithin/tmuxTimeoutContextWithin are what
+	// make the deadline actually fire on time. Mirrors the paste-delivery poll.
 	timeout := time.After(2 * time.Second)
+	pollDeadline := time.Now().Add(2 * time.Second)
 	sleepDuration := 5 * time.Millisecond
 	for {
-		if exists, known := t.ProbeSession(); known && exists {
+		if exists, known := t.probeSessionWithin(time.Until(pollDeadline)); known && exists {
 			break
 		}
 		select {
