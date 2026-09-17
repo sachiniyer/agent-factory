@@ -46,7 +46,10 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 		// #3021: the unbounded jump-to-tab prompt. The digits reach the first nine
 		// tabs and nothing caps tab creation, so past nine the fastest path to a tab
 		// vanished — which is why the bar read as a nine-tab limit.
-		"g":      KeyJumpTabPrompt,
+		"g": KeyJumpTabPrompt,
+		// R: the TUI's tab-rename verb — the #1904/#1813 capability the web and
+		// CLI already expose. Capital like the other mutating verbs (D, S, F).
+		"R":      KeyRenameTab,
 		"?":      KeyHelp,
 		"s":      KeyOpenPane,
 		"S":      KeySplitPane,
