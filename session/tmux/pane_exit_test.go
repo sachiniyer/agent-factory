@@ -1,8 +1,8 @@
 package tmux
 
 import (
+	"os"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,36 +15,34 @@ import (
 // signal while still filling pane_dead_time. A whitespace split collapsed the
 // empty field and read the timestamp as the exit status.
 func TestProbePaneExitKeepsAnEmptyStatusUnknown(t *testing.T) {
+	gone := exitedProcess(t).PID
 	for _, tc := range []struct {
-		name          string
-		status, at    string
-		wantStatus    int
-		wantKnown     bool
-		wantAt        time.Time
-		wantDeadKnown bool
+		name                      string
+		status, signal, deadTime  string
+		pid                       int
+		wantDead, wantKnownStatus bool
+		wantStatus                int
+		wantAt                    time.Time
 	}{
-		{name: "signal-killed", status: "", at: "1726000000", wantAt: time.Unix(1726000000, 0)},
-		{name: "exited", status: "3", at: "1726000000", wantStatus: 3, wantKnown: true, wantAt: time.Unix(1726000000, 0)},
-		{name: "exited zero", status: "0", at: "1726000000", wantStatus: 0, wantKnown: true, wantAt: time.Unix(1726000000, 0)},
-		{name: "no death time", status: "5", at: "", wantStatus: 5, wantKnown: true},
-		{name: "nothing but dead", status: "", at: ""},
+		{name: "signal-killed", signal: "9", deadTime: "1726000000", pid: gone,
+			wantDead: true, wantAt: time.Unix(1726000000, 0)},
+		{name: "exited", status: "3", deadTime: "1726000000", pid: gone,
+			wantDead: true, wantKnownStatus: true, wantStatus: 3, wantAt: time.Unix(1726000000, 0)},
+		{name: "exited zero", status: "0", deadTime: "1726000000", pid: gone,
+			wantDead: true, wantKnownStatus: true, wantAt: time.Unix(1726000000, 0)},
+		{name: "no death time", status: "5", pid: gone,
+			wantDead: true, wantKnownStatus: true, wantStatus: 5},
+		// tmux reports nothing about the root: the pane pid decides.
+		{name: "unreported, root gone", pid: gone, wantDead: true},
+		{name: "unreported, root running", pid: os.Getpid()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ts := NewTmuxSessionWithDeps("pane-exit", "true", nil, cmd_test.MockCmdExec{
-				RunFunc: func(*exec.Cmd) error { return nil },
-				OutputFunc: func(c *exec.Cmd) ([]byte, error) {
-					format := c.Args[len(c.Args)-1]
-					sep := " "
-					if strings.Contains(format, "|") {
-						sep = "|"
-					}
-					return []byte("1" + sep + tc.status + sep + tc.at + "\n"), nil
-				},
-			})
+			ts := NewTmuxSessionWithDeps("pane-exit", "true", nil,
+				heldPaneExec(tc.pid, tc.status, tc.signal, tc.deadTime, nil))
 			dead, status, statusKnown, at, known := ts.ProbePaneExit()
 			assert.True(t, known)
-			assert.True(t, dead)
-			assert.Equal(t, tc.wantKnown, statusKnown)
+			assert.Equal(t, tc.wantDead, dead)
+			assert.Equal(t, tc.wantKnownStatus, statusKnown)
 			assert.Equal(t, tc.wantStatus, status)
 			assert.True(t, at.Equal(tc.wantAt), "at = %v, want %v", at, tc.wantAt)
 		})
@@ -56,7 +54,7 @@ func TestProbePaneExitLivePane(t *testing.T) {
 	ts := NewTmuxSessionWithDeps("pane-live", "true", nil, cmd_test.MockCmdExec{
 		RunFunc: func(*exec.Cmd) error { return nil },
 		OutputFunc: func(*exec.Cmd) ([]byte, error) {
-			return []byte("0||\n"), nil
+			return []byte("0||||123\n"), nil
 		},
 	})
 	dead, _, statusKnown, _, known := ts.ProbePaneExit()

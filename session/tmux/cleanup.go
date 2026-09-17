@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -115,53 +114,6 @@ func (t *TmuxSession) probeSessionWithin(budget time.Duration) (exists bool, kno
 func (t *TmuxSession) ProbeSessionStrict() (exists bool, known bool, err error) {
 	return probeSessionStrict(t.cmdExec, t.sanitizedName)
 }
-
-// ProbePaneExit reports whether the session's pane is a held dead pane — i.e.
-// the command it ran has exited — and, when it is, the exit status and death
-// time tmux recorded (pane_dead/pane_dead_status/pane_dead_time). It is how a
-// process tab's completion is observed rather than inferred from absence
-// (#4479): remain-on-exit keeps the pane around precisely so this probe can
-// answer.
-//
-// The known contract matches ProbeSession: known=false means tmux could not
-// answer (timeout, socket policy), never that the pane is alive. status is
-// meaningful only when statusKnown — tmux before pane_dead_status, or a pane
-// held by remain-on-exit=failed, reports a dead pane with no code.
-func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, at time.Time, known bool) {
-	ctx, cancel := tmuxTimeoutContext()
-	defer cancel()
-	out, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), paneExitFormat)
-	if err != nil {
-		return false, 0, false, time.Time{}, false
-	}
-	// Split, not Fields: an empty field is information (#4506 review).
-	fields := strings.Split(strings.TrimSpace(string(out)), paneExitSeparator)
-	if strings.TrimSpace(fields[0]) != "1" {
-		return false, 0, false, time.Time{}, true
-	}
-	dead, known = true, true
-	if len(fields) > 1 {
-		if code, perr := strconv.Atoi(strings.TrimSpace(fields[1])); perr == nil {
-			status, statusKnown = code, true
-		}
-	}
-	if len(fields) > 2 {
-		if unix, perr := strconv.ParseInt(strings.TrimSpace(fields[2]), 10, 64); perr == nil && unix > 0 {
-			at = time.Unix(unix, 0)
-		}
-	}
-	return dead, status, statusKnown, at, known
-}
-
-// paneExitFormat keeps the probe's fields positional. tmux leaves
-// pane_dead_status EMPTY for a command killed by a signal while still filling
-// pane_dead_time, so a whitespace-separated answer collapses to two fields and
-// reads the death time as the exit status (#4506 review). Every value is
-// numeric, so the separator cannot occur inside one.
-const (
-	paneExitSeparator = "|"
-	paneExitFormat    = "#{pane_dead}" + paneExitSeparator + "#{pane_dead_status}" + paneExitSeparator + "#{pane_dead_time}"
-)
 
 // probeSession is sessionExists WITHOUT the lossy collapse: it reports whether
 // the session exists AND whether tmux actually answered.
