@@ -122,6 +122,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			td.Handoffs = append([]AgentHandoff(nil), tab.Handoffs...)
 		}
 		td.Exit = tab.Exit.data()
+		td.AccountScope = tab.accountScope
 		data.Tabs = append(data.Tabs, td)
 	}
 	// An archived off-box row is inert, but the web rail still renders its
@@ -631,7 +632,8 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				Handoffs:                      handoffs,
 				Exit:                          tabExitFromData(td.Exit),
 				tmux:                          ts,
-				accountScopeProvenanceUnknown: data.Account != "" && idx > 0 && kind.HasTmux() && ts != nil,
+				accountScope:                  td.AccountScope,
+				accountScopeProvenanceUnknown: idx > 0 && kind.HasTmux() && ts != nil && siblingScopeUnknown(data.Account, td.AccountScope),
 			})
 		}
 		return

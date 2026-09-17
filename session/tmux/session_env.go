@@ -63,6 +63,14 @@ func (t *TmuxSession) SetAccount(name string) {
 	t.accountAgent = sessionenv.AgentForCommand(t.program)
 }
 
+// Account is the credential account this session's next Start launches under,
+// or "" for the ambient identity.
+func (t *TmuxSession) Account() string {
+	t.programMu.RLock()
+	defer t.programMu.RUnlock()
+	return t.account
+}
+
 // SetAccountForAgent selects name in the namespace the caller validated. The
 // namespace is explicit because program is override-resolved and may later be
 // rewritten; deriving it again would let the same string silently select a

@@ -3,8 +3,10 @@ package session
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // tabSpawnPreconditionErr reports why a tab cannot be spawned into this
@@ -104,6 +106,7 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 
 	tab := newShellTab(shellTmux)
 	tab.Name = displayName
+	tab.accountScope = shellTmux.Account()
 	i.mu.Lock()
 	// Re-check started AND status under the write lock before appending: we
 	// released the lock to spawn, and Kill (which does NOT take repoStartLock, so
@@ -188,8 +191,16 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	if err := procTmux.Start(worktreePath); err != nil {
 		return nil, fmt.Errorf("failed to start process tab: %w", err)
 	}
+	// Before remain-on-exit, a command that failed at once took its session
+	// down and Start reported it. The held pane hides that, so look for it
+	// (#4506 review).
+	exit := awaitImmediateProcessExit(procTmux)
+	if exit != nil && exit.StatusKnown && exit.Status != 0 {
+		return nil, failedProcessTabError(procTmux, command, exit.Status)
+	}
 
-	tab := &Tab{ID: newTabID(), Name: displayName, Kind: TabKindProcess, Command: command, tmux: procTmux}
+	tab := &Tab{ID: newTabID(), Name: displayName, Kind: TabKindProcess, Command: command, tmux: procTmux,
+		accountScope: procTmux.Account(), Exit: exit}
 	i.mu.Lock()
 	// Re-check started AND status under the write lock before appending (see
 	// AddShellTab): Kill can have flipped started=false and snapshotted Tabs for
@@ -346,4 +357,42 @@ func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
 	i.Tabs = append(i.Tabs, tab)
 	i.touchLocked()
 	return tab, nil
+}
+
+// processTabExitWatch is how long tab-create watches a new process tab for a
+// command that fails at once, such as a mistyped name (exit 127). A command
+// still running at the end of it is reported as started.
+var processTabExitWatch = 150 * time.Millisecond
+
+// awaitImmediateProcessExit returns the exit of a process tab's command if it
+// finishes within processTabExitWatch, or nil.
+func awaitImmediateProcessExit(ts *tmux.TmuxSession) *TabExit {
+	deadline := time.Now().Add(processTabExitWatch)
+	pause := 10 * time.Millisecond
+	for {
+		if dead, status, statusKnown, at, known := ts.ProbePaneExit(); known && dead {
+			return &TabExit{Status: status, StatusKnown: statusKnown, At: at}
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil
+		}
+		time.Sleep(min(pause, remaining))
+		pause = min(2*pause, 50*time.Millisecond)
+	}
+}
+
+// failedProcessTabError removes the held pane of a command that failed at once
+// and names the failure, with the command's last output, so tab-create fails
+// the way it did before remain-on-exit kept the pane.
+func failedProcessTabError(ts *tmux.TmuxSession, command string, status int) error {
+	output := ts.FinishedPaneOutput(5)
+	msg := fmt.Sprintf("process tab command %q exited immediately with status %d", command, status)
+	if output != "" {
+		msg += ":\n" + output
+	}
+	if _, err := ts.Close(); err != nil {
+		msg += fmt.Sprintf("\n(its finished tmux session %s could not be removed: %v)", ts.SanitizedName(), err)
+	}
+	return fmt.Errorf("failed to start process tab: %s", msg)
 }

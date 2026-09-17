@@ -40,6 +40,14 @@ func (p persistPtyFactory) Start(cmd *exec.Cmd) (*os.File, error) {
 // `alive` report existing immediately (the reconnect path); others come into
 // existence after their new-session.
 func nameKeyedExec(alive map[string]bool) cmd_test.MockCmdExec {
+	return nameKeyedExecWithFinishedPanes(alive, nil)
+}
+
+// nameKeyedExecWithFinishedPanes is nameKeyedExec where each session named in
+// finished holds a finished command's pane for as long as it exists, answered
+// the way tmux answers a held dead pane (#4506 review): its pane pid is absent
+// from the process table.
+func nameKeyedExecWithFinishedPanes(alive map[string]bool, finished map[string]finishedPane) cmd_test.MockCmdExec {
 	existing := map[string]bool{}
 	for k, v := range alive {
 		existing[k] = v
@@ -79,6 +87,11 @@ func nameKeyedExec(alive map[string]bool) cmd_test.MockCmdExec {
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if pane, ok := finished[tmuxTarget(cmd)]; ok && existing[tmuxTarget(cmd)] {
+				if answer, ok := pane.answer(cmd); ok {
+					return []byte(answer), nil
+				}
+			}
 			// list-panes is asked for `#{pane_pid}` and its answer is PARSED, so a
 			// generic "content" stub is not a neutral default — it reads as a pane
 			// whose pid is unparseable, i.e. a process set that could not be

@@ -79,10 +79,17 @@ func TestCloseAndWaitForPaneExit_HeldDeadPaneReapsItsDetachedSurvivor(t *testing
 	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
 	name := fmt.Sprintf("af_test_dead_pane_bg_%d", time.Now().UnixNano())
-	childFile := filepath.Join(t.TempDir(), "child.pid")
+	dir := t.TempDir()
+	childFile := filepath.Join(dir, "child.pid")
+	// The child writes its pid only after it ignores SIGHUP, and the root exits
+	// only after that: the root's exit hangs up the terminal, and a child still
+	// starting would die of it and leave nothing to reap.
+	childScript := filepath.Join(dir, "child.sh")
+	require.NoError(t, os.WriteFile(childScript, []byte(
+		"trap '' HUP\necho $$ > \"$1\"\nexec sleep 300 </dev/null >/dev/null 2>&1\n"), 0o600))
 	startHeldPane(t, name, fmt.Sprintf(
-		`sh -c '(trap "" HUP; exec sleep 300 </dev/null >/dev/null 2>&1) & echo $! > %s; exit 3'`,
-		strconv.Quote(childFile)))
+		`sh -c 'sh %[1]s %[2]s & while [ ! -s %[2]s ]; do sleep 0.02; done; exit 3'`,
+		strconv.Quote(childScript), strconv.Quote(childFile)))
 
 	childPID := readPIDFile(t, childFile)
 	child := processIdentity(t, childPID)
@@ -106,7 +113,9 @@ func TestCloseAndWaitForPaneExit_DeadPaneWithARunningRootStopsTheRoot(t *testing
 	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
 	name := fmt.Sprintf("af_test_dead_pane_eof_%d", time.Now().UnixNano())
-	startHeldPane(t, name, `sh -c 'exec </dev/null >/dev/null 2>&1; trap "" HUP; exec sleep 300'`)
+	// HUP is ignored before the terminal is closed: closing it is what makes tmux
+	// hang the pane up.
+	startHeldPane(t, name, `sh -c 'trap "" HUP; exec </dev/null >/dev/null 2>&1; exec sleep 300'`)
 
 	out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name),
 		"#{pane_pid}|#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}").Output()

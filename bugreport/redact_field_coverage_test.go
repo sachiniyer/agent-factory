@@ -125,6 +125,7 @@ var verbatimInstanceFields = map[string]string{
 	"Tabs[].Handoffs[].Reason":           "bounded HandoffReason* constant",
 	"Tabs[].Handoffs[].From.Agent":       "outgoing agent enum name; the resumable ID beside it is cleared (#3405)",
 	"Tabs[].Handoffs[].From.CaptureKind": "bounded capture-kind enum",
+	"Tabs[].Exit.StoppedBy":              "bounded TabStoppedBy* constant (#4506)",
 
 	"PendingTabs[].ID":                          "minted tab id (#1738)",
 	"PendingTabs[].Conversation.Agent":          "agent enum name; the resumable ID beside it is cleared",
@@ -134,6 +135,7 @@ var verbatimInstanceFields = map[string]string{
 	"PendingTabs[].Handoffs[].Reason":           "bounded HandoffReason* constant",
 	"PendingTabs[].Handoffs[].From.Agent":       "outgoing agent enum name; the resumable ID beside it is cleared (#3405)",
 	"PendingTabs[].Handoffs[].From.CaptureKind": "bounded capture-kind enum",
+	"PendingTabs[].Exit.StoppedBy":              "same bounded TabStoppedBy* constant under the staging roster",
 
 	"TabKinds[].Kind":   "bounded tab-kind enum",
 	"TabKinds[].Reason": "the daemon's OWN refusal text (#3060), not user input",

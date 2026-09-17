@@ -815,6 +815,11 @@ func redactTabData(tab *session.TabData) {
 	if tab.TmuxName != "" {
 		tab.TmuxName = redactedMarker
 	}
+	// An account label, the same fact InstanceData.Account is redacted for
+	// (#4506 review).
+	if tab.AccountScope != "" {
+		tab.AccountScope = redactedMarker
+	}
 	// A web tab's URL is user-supplied (any http/https target passes
 	// NormalizeWebTabURL) and can name internal infrastructure or a private
 	// repo (#1954). External targets are dropped wholesale. For a loopback

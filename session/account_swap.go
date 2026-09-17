@@ -431,12 +431,28 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) 
 		if tab.tmux.ProvenNoPane() || tab.tmux.ClosedConclusivelyAndStillAbsent() {
 			continue
 		}
+		process := idx > 0 && tab.Kind == TabKindProcess
+		if process && keepFinishedProcessPane(i, tab) {
+			// A finished command with nothing left running carries no identity
+			// to stop, and the swap never relaunches it (#4506 review).
+			continue
+		}
 		state, blind, err := tab.tmux.CloseAndWaitForPaneExitReportingBlindness()
 		if idx == 0 && blind {
 			return fmt.Errorf("account swap: cannot stop agent tab %q for %q: %w",
 				tab.Name, i.Title, errors.Join(ErrAccountSwapAgentTeardownBlind, err))
 		}
 		switch {
+		case process && state == tmux.PaneStateKnown && err == nil && !blind:
+			stampProcessTabStopped(i, tab, TabStoppedByAccountSwap)
+		case process && tab.inert && state == tmux.PaneStateKnown && err == nil:
+			// Blind is expected for an inert tab: restore already found its
+			// session gone, and nothing respawns a process tab, so this daemon
+			// never observed a pane of it. The close still ran the marked
+			// survivor sweep, and a survivor it could not stop comes back
+			// unknown instead (#4506 review). A process tab that was running
+			// until now and vanished unobserved is not inert, and still refuses
+			// below.
 		case state == tmux.PaneStateKnown && blind:
 			return fmt.Errorf("account swap: cannot stop credential-bearing tab %q for %q: %w", tab.Name, i.Title,
 				errors.Join(ErrAccountSwapAgentTeardownBlind, err))

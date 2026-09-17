@@ -44,9 +44,10 @@ func TestProcessTabExitStampEnrollsTheLoadCheckpoint(t *testing.T) {
 }
 
 // An account-scoped sibling reconstructed from disk is stopped before restore
-// continues. When it is a process tab already held dead, that stop destroys
-// pane_dead_status and pane_dead_time — so they are read first.
-func TestAccountScopedDeadProcessPaneIsStampedBeforeTheScopeStop(t *testing.T) {
+// continues. A process tab already held dead, with nothing of it still running,
+// has nothing to stop: it is kept, and its exit status and death time are
+// recorded rather than destroyed.
+func TestAccountScopedFinishedProcessPaneIsKeptWithItsExit(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -54,27 +55,15 @@ func TestAccountScopedDeadProcessPaneIsStampedBeforeTheScopeStop(t *testing.T) {
 
 	const agentName = "af_4506_scoped_dead"
 	processName := agentName + "__deploy"
-	cmdExec := nameKeyedExec(map[string]bool{agentName: true, processName: true})
+	// The mock answers the finished pane the way tmux does: its pane pid is
+	// absent from the process table.
+	cmdExec := nameKeyedExecWithFinishedPanes(map[string]bool{agentName: true, processName: true},
+		map[string]finishedPane{processName: {status: "7", at: "1726000000"}})
 	var commands []string
 	baseRun := cmdExec.RunFunc
 	cmdExec.RunFunc = func(c *exec.Cmd) error {
 		commands = append(commands, c.String())
 		return baseRun(c)
-	}
-	baseOutput := cmdExec.OutputFunc
-	cmdExec.OutputFunc = func(c *exec.Cmd) ([]byte, error) {
-		joined := strings.Join(c.Args, " ")
-		if strings.Contains(joined, "pane_dead") && strings.Contains(joined, processName) {
-			killed := false
-			for _, command := range commands {
-				killed = killed || (strings.Contains(command, "kill-session") && strings.Contains(command, processName))
-			}
-			if killed {
-				return nil, assertNoSession
-			}
-			return []byte(paneExitAnswer(c, "1", "7", "1726000000")), nil
-		}
-		return baseOutput(c)
 	}
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 	gw, err := git.NewGitWorktreeFromStorage("/tmp/4506-scoped-dead-repo", t.TempDir(), "scoped-dead",
@@ -103,9 +92,9 @@ func TestAccountScopedDeadProcessPaneIsStampedBeforeTheScopeStop(t *testing.T) {
 			killed++
 		}
 	}
-	assert.Equal(t, 1, killed, "the pre-scope pane is still stopped")
+	assert.Zero(t, killed, "a finished pane runs nothing on any identity, so its output is kept")
 	exit := inst.GetTabs()[1].Exit
-	require.NotNil(t, exit, "the exit the stop was about to destroy is recorded first")
+	require.NotNil(t, exit, "the finished pane's exit is recorded")
 	assert.Equal(t, 7, exit.Status)
 	assert.True(t, exit.StatusKnown)
 	assert.Equal(t, time.Unix(1726000000, 0), exit.At)
@@ -204,14 +193,4 @@ func TestTabExitDataOmitsAnUnknownTime(t *testing.T) {
 	var back TabExitData
 	require.NoError(t, json.Unmarshal(raw, &back))
 	assert.True(t, back.At.Equal(when), "a known time still round-trips")
-}
-
-// paneExitAnswer renders a probe answer in whatever field layout the probe asked
-// for, so the tests pin the parsed meaning rather than one separator.
-func paneExitAnswer(c *exec.Cmd, dead, status, at string) string {
-	format := c.Args[len(c.Args)-1]
-	if strings.Contains(format, "|") {
-		return dead + "|" + status + "|" + at + "\n"
-	}
-	return dead + " " + status + " " + at + "\n"
 }

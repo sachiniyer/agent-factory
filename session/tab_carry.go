@@ -97,7 +97,8 @@ func (i *Instance) restoreCarriedTabs() {
 			// The recorded finish is part of the logical tab (#4506 review): the
 			// session it could be re-read from is the one the reap just killed.
 			Exit:                          tabExitFromData(td.Exit),
-			accountScopeProvenanceUnknown: account != "" && kind.HasTmux(),
+			accountScope:                  td.AccountScope,
+			accountScopeProvenanceUnknown: kind.HasTmux() && siblingScopeUnknown(account, td.AccountScope),
 		}
 		if kind.HasTmux() {
 			token := ""

@@ -234,3 +234,40 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 // time as the exit status (#4506 review).
 const paneExitFormat = "#{pane_dead}" + paneFieldSeparator + "#{pane_dead_status}" + paneFieldSeparator +
 	"#{pane_dead_time}" + paneFieldSeparator + "#{pane_dead_signal}" + paneFieldSeparator + "#{pane_pid}"
+
+// FinishedAndQuiet reports whether the session holds only a finished command
+// with nothing of it still running: the pane's root has exited, and its kernel
+// session has no surviving member. Such a pane carries no process to stop, so a
+// caller can keep its output instead of killing it. Any doubt answers false.
+func (t *TmuxSession) FinishedAndQuiet() bool {
+	dead, _, _, _, known := t.ProbePaneExit()
+	if !known || !dead {
+		return false
+	}
+	procs, err := CaptureSessionProcessTrees(t.cmdExec, t.sanitizedName)
+	return err == nil && len(procs) == 0
+}
+
+// FinishedPaneOutput returns the last lines a finished command printed, as
+// plain text, for an error message. tmux's own "Pane is dead" banner is left
+// out. It is best-effort: any failure returns "".
+func (t *TmuxSession) FinishedPaneOutput(maxLines int) string {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-J", "-S", "-200", "-t", exactTarget(t.sanitizedName))
+	if err != nil {
+		return ""
+	}
+	var kept []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Pane is dead") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if len(kept) > maxLines {
+		kept = kept[len(kept)-maxLines:]
+	}
+	return strings.Join(kept, "\n")
+}
