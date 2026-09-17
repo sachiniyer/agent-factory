@@ -75,15 +75,7 @@ func TestTaskMutations_RefuseReservedLookalikeTargetWhileItExists(t *testing.T) 
 			},
 		},
 	}
-	records := []struct {
-		name    string
-		title   string
-		backend func() session.Backend
-	}{
-		{"local case variant", "Ro ot", func() session.Backend { return session.NewFakeBackend() }},
-		{"remote derived name", "ro ot", func() session.Backend { return fakeRemoteBackend{session.NewFakeBackend()} }},
-	}
-	for _, rec := range records {
+	for _, rec := range lookalikeRecordShapes {
 		for _, tc := range actions {
 			t.Run(rec.name+"/"+tc.name, func(t *testing.T) {
 				manager, repoID, repoPath := newStatusTestManager(t)
@@ -171,24 +163,27 @@ func TestTaskMutations_ReservedLookalikeTargetKeepsItsWayOut(t *testing.T) {
 	}
 }
 
+// lookalikeRecordShapes are the two ordinary records whose title admission
+// refuses: a local case variant, and a provisioned-backend derived name.
+var lookalikeRecordShapes = []struct {
+	name    string
+	title   string
+	backend func() session.Backend
+}{
+	{"local case variant", "Ro ot", func() session.Backend { return session.NewFakeBackend() }},
+	{"remote derived name", "ro ot", func() session.Backend { return fakeRemoteBackend{session.NewFakeBackend()} }},
+}
+
 // TestTaskArming_PersistedLookalikeBindingArmsWhileItsRecordExists pins option
 // (a) of the #4407 change request. The write-side refusal above cannot reach a
 // binding enabled before admission widened, so the arming pass is where such a
 // binding meets the widened fold — at the first daemon start after upgrade.
 // Delivery sends to an existing target without asking admission, so while the
 // ordinary record exists the task works, and arming must schedule it (cron)
-// and run it (watch), and so must an explicit watch restart. Once the record
-// is gone the binding can only fail, and the next arming pass refuses it.
+// and run it (watch). Once the record is gone the binding can only fail, and
+// the next arming pass refuses it.
 func TestTaskArming_PersistedLookalikeBindingArmsWhileItsRecordExists(t *testing.T) {
-	records := []struct {
-		name    string
-		title   string
-		backend func() session.Backend
-	}{
-		{"local case variant", "Ro ot", func() session.Backend { return session.NewFakeBackend() }},
-		{"remote derived name", "ro ot", func() session.Backend { return fakeRemoteBackend{session.NewFakeBackend()} }},
-	}
-	for _, rec := range records {
+	for _, rec := range lookalikeRecordShapes {
 		t.Run(rec.name, func(t *testing.T) {
 			manager, repoID, repoPath := newStatusTestManager(t)
 			registerReadyLookalike(t, manager, repoID, repoPath, rec.title, rec.backend())
@@ -211,11 +206,6 @@ func TestTaskArming_PersistedLookalikeBindingArmsWhileItsRecordExists(t *testing
 					"an armed task must not carry a not-armed status")
 			}
 
-			server := &controlServer{manager: manager, scheduler: scheduler, watchers: watchers}
-			require.NoError(t, server.RestartTask(RestartTaskRequest{ID: watchID}, &RestartTaskResponse{}),
-				"restarting an armed watch binding commits nothing and must not be refused")
-			assert.Contains(t, watchers.watchingTaskIDs(), watchID)
-
 			// The record goes away: the binding can no longer be delivered, and
 			// the next arming pass must refuse it rather than keep it scheduled.
 			manager.mu.Lock()
@@ -233,6 +223,29 @@ func TestTaskArming_PersistedLookalikeBindingArmsWhileItsRecordExists(t *testing
 			assert.Contains(t, joined.Error(), watchID)
 			assert.NotContains(t, scheduler.scheduledTaskIDs(), cronID)
 			assert.NotContains(t, watchers.watchingTaskIDs(), watchID)
+		})
+	}
+}
+
+// TestRestartTask_PersistedLookalikeBindingRestarts is the explicit-restart
+// sibling of the arming test above. RestartTask re-validates the binding before
+// replacing the watch process, and it commits nothing, so it must accept the
+// same persisted binding the arming pass accepts. Otherwise a watch the daemon
+// keeps running could not be restarted by hand.
+func TestRestartTask_PersistedLookalikeBindingRestarts(t *testing.T) {
+	for _, rec := range lookalikeRecordShapes {
+		t.Run(rec.name, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			registerReadyLookalike(t, manager, repoID, repoPath, rec.title, rec.backend())
+			watch := watchTask("rst00001", "sleep 60", repoPath)
+			watch.TargetSession = rec.title
+			require.NoError(t, task.AddTask(watch), "seeded without the fence: the binding an older daemon accepted")
+
+			watchers, _ := newTestSupervisor(t, task.LoadTasks)
+			server := &controlServer{manager: manager, scheduler: newTaskScheduler(), watchers: watchers}
+			require.NoError(t, server.RestartTask(RestartTaskRequest{ID: watch.ID}, &RestartTaskResponse{}),
+				"restarting a persisted watch binding whose ordinary record exists commits nothing and must not be refused")
+			assert.Equal(t, []string{watch.ID}, watchers.watchingTaskIDs())
 		})
 	}
 }
