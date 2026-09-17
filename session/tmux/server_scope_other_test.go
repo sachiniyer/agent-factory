@@ -11,7 +11,7 @@ import (
 // explicitly so a Linux-only systemd wrapper cannot go green by accident
 // (#2039): Darwin must keep invoking tmux directly.
 func TestNewTmuxServerCommandNonLinuxStaysDirect(t *testing.T) {
-	cmd, scoped := newTmuxServerCommand("new-session", "-d", "-s", "af_worker")
+	cmd, scoped := newTmuxServerCommandAfterEnsure(nil, "new-session", "-d", "-s", "af_worker")
 	if scoped {
 		t.Fatal("non-Linux tmux command was marked systemd-scoped")
 	}
