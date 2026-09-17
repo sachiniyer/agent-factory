@@ -524,9 +524,21 @@ func accountShellCommandWordsProven(words []*syntax.Word) bool {
 	command, _ := literalShellWord(words[0])
 	// A sibling shell may read profiles, stdin, a script, or a command string.
 	// The only statically proven form is the same absolute, startup-free command
-	// AccountShellCommand generates for a dedicated shell tab.
+	// AccountShellCommand generates for a dedicated shell tab. What stdin can
+	// carry is a property of the whole command, not of these words, so
+	// ValidateAccountEnvironmentCommand checks it separately
+	// (commandFeedsProvenShell).
 	args, literal := literalCommandArgs(words)
 	if !literal || !filepath.IsAbs(command) {
+		return false
+	}
+	// zsh's startup-freedom is only half in its argv: the other half is the
+	// ZDOTDIR pin, which ApplyAccountEnvironment attaches to the exact
+	// generated command alone. Inside a longer command, zsh runs with whatever
+	// environment a wrapper or earlier statement hands it, so it is never
+	// proven here; ValidateAccountEnvironmentCommand admits the exact form
+	// before this walk runs (#4474 review).
+	if filepath.Base(command) == "zsh" {
 		return false
 	}
 	want := trustedAccountShellArgs(command)
