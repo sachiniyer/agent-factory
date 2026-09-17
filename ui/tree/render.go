@@ -513,20 +513,25 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// goroutine) doesn't race with LocalBackend.Start's write on the
 	// instance-creation tea.Cmd goroutine.
 	branch := i.GetBranch()
+	hasBranch := branch != ""
 	if i.Started() && hasMultipleRepos {
 		repoName, err := i.RepoName()
 		if err != nil {
 			log.ErrorLog.Printf("could not get repo name in instance renderer: %v", err)
-		} else {
+		} else if hasBranch {
 			branch += fmt.Sprintf(" (%s)", repoName)
+		} else {
+			// No branch to attach the context to; the repo name still
+			// disambiguates, but the row must not pick up the branch glyph.
+			branch = fmt.Sprintf("(%s)", repoName)
 		}
 	}
 
 	// The ⎇ labels the row's branch, so it only leads a row that names one:
-	// in front of a bare idle detail it would mark a phrase that is not a
-	// branch (#4174).
+	// in front of a bare idle detail or a repo name it would mark a phrase
+	// that is not a branch (#4174).
 	branchMarker := ""
-	if branch != "" {
+	if hasBranch {
 		branchMarker = branchIcon + "-"
 	}
 
@@ -546,6 +551,12 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		}
 		if branch == "" {
 			description = detail
+		} else if restoreFailed {
+			// A restore-gave-up row exists to report the failure — it renders
+			// warning-colored and stays visible even unselected — so the
+			// actionable detail leads and the branch trails it, the one
+			// exception to the branch-first order.
+			description = detail + " · " + branch
 		} else {
 			// The branch leads so right-truncation eats the idle detail
 			// first: this row exists to name the branch, and a leading
