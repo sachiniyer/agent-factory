@@ -133,7 +133,15 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file %s: %w", prettyTomlPath, tomlErr)
 	}
 
-	// 2. No config.toml. Read the legacy config.json.
+	// 2. No config.toml. Read the legacy config.json. A DANGLING config.json
+	// symlink reads as ENOENT here too, which would fall through to
+	// materializeDefaultConfig as if no file existed — af would start on
+	// defaults without stopping or naming the link, diverging from the
+	// dangling-config.toml behavior the tomlPath guard above guarantees.
+	// Refuse it the same way, naming both ends (#3660 review).
+	if err := refuseDanglingConfigLink(configPath); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -218,6 +226,15 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 	}
 	if !os.IsNotExist(tomlErr) {
 		return ReadOnlyConfigLoad{Path: tomlPath}, fmt.Errorf("failed to read config file %s: %w", prettyTomlPath, tomlErr)
+	}
+
+	// The same refusal the config.json read below needs: a dangling
+	// config.json symlink reads as ENOENT, which would otherwise report
+	// Missing — the exact diagnostic/startup divergence the tomlPath guard
+	// above was written to close, reproduced on the legacy path. Refuse it
+	// the same way, naming both ends (#3660 review).
+	if err := refuseDanglingConfigLink(configPath); err != nil {
+		return ReadOnlyConfigLoad{Path: configPath}, err
 	}
 
 	data, err := os.ReadFile(configPath)
