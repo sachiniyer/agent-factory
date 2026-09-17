@@ -22,8 +22,7 @@ func TestRecordWatchRateDropsOwnsCountAndPreservesNewerDelivery(t *testing.T) {
 	assert.Zero(t, loaded.DroppedEvents, "create must discard client-supplied daemon history")
 
 	deliveredAt := created.Add(time.Hour)
-	_, err = UpdateTaskStatus(loaded.ID, &deliveredAt, "sent")
-	require.NoError(t, err)
+	setRunStatus(t, loaded.ID, &deliveredAt, "sent")
 	droppedAt := deliveredAt.Add(time.Minute)
 	updated, err := RecordWatchRateDrops(loaded.ID, 3, droppedAt)
 	require.NoError(t, err)
@@ -32,8 +31,7 @@ func TestRecordWatchRateDropsOwnsCountAndPreservesNewerDelivery(t *testing.T) {
 	assert.Equal(t, deliveredAt, *updated.LastRunAt, "a discarded event is not a delivered run")
 
 	newerDelivery := droppedAt.Add(time.Minute)
-	_, err = UpdateTaskStatus(loaded.ID, &newerDelivery, "sent")
-	require.NoError(t, err)
+	setRunStatus(t, loaded.ID, &newerDelivery, "sent")
 	updated, err = RecordWatchRateDrops(loaded.ID, 5, droppedAt)
 	require.NoError(t, err)
 	assert.Equal(t, 5, updated.DroppedEvents, "a delayed checkpoint must still persist the exact count")
@@ -131,8 +129,7 @@ func TestResetWatchRateDropsForGenerationClearsReboundEvidence(t *testing.T) {
 	assert.False(t, applied)
 
 	deliveredAt := droppedAt.Add(time.Minute)
-	_, err = UpdateTaskStatus(loaded.ID, &deliveredAt, "sent")
-	require.NoError(t, err)
+	setRunStatus(t, loaded.ID, &deliveredAt, "sent")
 	_, applied, err = ResetWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID)
 	require.NoError(t, err)
 	assert.False(t, applied)

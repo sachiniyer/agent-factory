@@ -327,7 +327,7 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 	// failure from here on — git missing, project path not a repo, or a
 	// delivery error — must be recorded so a cron task's LastRunStatus
 	// reflects the failure instead of going stale. Previously only the success
-	// path reached UpdateTaskStatus, so a bad project path left the TUI showing
+	// path reached the status writer, so a bad project path left the TUI showing
 	// the prior run forever while the scheduler merely logged the error (#924).
 	// The success path writes its own status below; this defer fires only when
 	// err is non-nil, so the status is never double-written. The "errored:"

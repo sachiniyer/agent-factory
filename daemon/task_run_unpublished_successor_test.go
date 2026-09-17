@@ -152,8 +152,7 @@ func TestLaterRunInterruptionPreservesSupervisionStatusOnEarlierRun(t *testing.T
 	tsk := addStatusTestTask(t, enabledCronTask("succ0004", repoPath))
 	olderAt := time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC)
 	older := publishedTaskRun(t, repoPath, tsk, "older-run", 1, olderAt)
-	_, err := task.UpdateTaskStatus(tsk.ID, nil, "errored: watcher exited")
-	require.NoError(t, err)
+	setTaskStatusForTest(t, tsk.ID, nil, "errored: watcher exited")
 	newer := newTaskRunInstance(t, repoPath, tsk, "newer-run", 2, olderAt.Add(time.Minute))
 	seedTaskRunStore(t, repoID, older.ToInstanceData(), newer.ToInstanceData())
 
@@ -166,8 +165,9 @@ func TestLaterRunInterruptionPreservesSupervisionStatusOnEarlierRun(t *testing.T
 	assert.Equal(t, older.ID, got.LastRunSessionID)
 }
 
-// If the later-run check cannot read the session stores, it fails closed. The
-// outcome stays owed and lands once the stores can be read again.
+// If the later-run check cannot read a session store that could hold a run of
+// this task, it fails closed. The outcome stays owed and lands once the store
+// can be read again.
 func TestIdentifiedInterruptionRetriesWhileSessionStoresAreUnreadable(t *testing.T) {
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	tsk := addStatusTestTask(t, enabledCronTask("succ0005", repoPath))
@@ -180,7 +180,8 @@ func TestIdentifiedInterruptionRetriesWhileSessionStoresAreUnreadable(t *testing
 	manager.mu.Unlock()
 
 	previous := loadPersistedTaskRunsForAttribution
-	loadPersistedTaskRunsForAttribution = func(string) ([]session.InstanceData, error) {
+	loadPersistedTaskRunsForAttribution = func(taskRepos map[string]bool) ([]session.InstanceData, error) {
+		assert.True(t, taskRepos[repoID], "the settled session's own project can hold a run of its task")
 		return nil, assert.AnError
 	}
 	t.Cleanup(func() { loadPersistedTaskRunsForAttribution = previous })
@@ -214,11 +215,10 @@ func TestRefusingIdentifiedRowDoesNotScanUnreadableSessionStores(t *testing.T) {
 	tsk := addStatusTestTask(t, enabledCronTask("succ0006", repoPath))
 	runAt := time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC)
 	inst := publishedTaskRun(t, repoPath, tsk, "refusing-row", 1, runAt)
-	_, err := task.UpdateTaskStatus(tsk.ID, nil, "errored: watcher exited")
-	require.NoError(t, err)
+	setTaskStatusForTest(t, tsk.ID, nil, "errored: watcher exited")
 
 	previous := loadPersistedTaskRunsForAttribution
-	loadPersistedTaskRunsForAttribution = func(string) ([]session.InstanceData, error) {
+	loadPersistedTaskRunsForAttribution = func(map[string]bool) ([]session.InstanceData, error) {
 		return nil, assert.AnError
 	}
 	t.Cleanup(func() { loadPersistedTaskRunsForAttribution = previous })

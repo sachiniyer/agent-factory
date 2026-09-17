@@ -22,8 +22,7 @@ func TestWatcherRateDropIsVisibleOnTaskAndListAPI(t *testing.T) {
 	tsk := watchTask("d4357001", `printf 'one\ntwo\nthree\n'; sleep 60`, dir)
 	require.NoError(t, task.AddTask(tsk))
 	when := time.Now()
-	_, err := task.UpdateTaskStatus(tsk.ID, &when, "sent")
-	require.NoError(t, err)
+	setTaskStatusForTest(t, tsk.ID, &when, "sent")
 
 	s := newWatcherSupervisor()
 	s.eventsPerMinute = 1

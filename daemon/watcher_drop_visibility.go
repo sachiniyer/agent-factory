@@ -10,12 +10,12 @@ import (
 // persistWatcherStatus records a watcher lifecycle status on the task:
 // "stopped", or "errored: <exit>: <first output line>" from the crash-loop
 // breaker (#797). LastRunAt is preserved — it tracks event deliveries, not
-// supervision changes. Passing nil for lastRunAt tells UpdateTaskStatus to
-// leave LastRunAt untouched: reading it here (outside the file lock) and
-// writing it back would revert a newer timestamp a concurrent deliverWatchEvent
-// committed in the gap — the TOCTOU race in #1215. UpdateTaskStatus skips
-// Program enum validation so legacy task records still receive status bumps
-// (#664).
+// supervision changes. Passing nil for lastRunAt tells
+// UpdateTaskStatusForGeneration to leave LastRunAt untouched: reading it here
+// (outside the file lock) and writing it back would revert a newer timestamp a
+// concurrent deliverWatchEvent committed in the gap — the TOCTOU race in #1215.
+// The writer skips Program enum validation so legacy task records still receive
+// status bumps (#664).
 func persistWatcherStatus(taskID, taskGenerationID, status string) {
 	if _, _, err := task.UpdateTaskStatusForGeneration(taskID, taskGenerationID, nil, status); err != nil {
 		log.WarningLog.Printf("failed to record watcher status %q on task %s: %v", status, taskID, err)

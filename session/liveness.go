@@ -60,6 +60,12 @@ const (
 // in daemon Snapshots so read-only TUIs can cold-start into the exact
 // archive/restore operation, but disk writers scrub it before persistence: a
 // transient overlay must not survive a daemon restart.
+//
+// An op that replaces a task session's runtime and then re-delivers the task
+// prompt must also be listed in interruptTaskRunAtRuntimeReplacementLocked
+// (task_run.go). An op missing from that list gets its run closed as
+// interrupted and its prompt is never replayed. That is the safe direction,
+// but it is a wrong outcome.
 type InFlightOp int
 
 const (

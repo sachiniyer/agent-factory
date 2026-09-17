@@ -8,15 +8,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// setRunStatus is the fixture form of UpdateTaskStatusForGeneration: it writes
+// to whatever incarnation the row holds now and fails the test when the write
+// does not apply, so a fixture cannot silently leave the previous status behind.
+func setRunStatus(t *testing.T, taskID string, lastRunAt *time.Time, status string) Task {
+	t.Helper()
+	current, err := GetTask(taskID)
+	require.NoError(t, err)
+	updated, applied, err := UpdateTaskStatusForGeneration(taskID, current.GenerationID, lastRunAt, status)
+	require.NoError(t, err)
+	require.True(t, applied, "fixture status write for task %s did not apply", taskID)
+	return updated
+}
+
 func TestTaskRunOutcomeClosesIdentifiedRunAfterArmingStatusClears(t *testing.T) {
 	runAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
 	_, _, err := BeginTaskRun("w1", "", "session-a", 1, 0, runAt, RunStatusStarted)
 	require.NoError(t, err)
-	_, err = UpdateTaskStatus("w1", nil, "errored: not armed: target unavailable")
-	require.NoError(t, err)
-	_, err = UpdateTaskStatus("w1", nil, "")
-	require.NoError(t, err)
+	setRunStatus(t, "w1", nil, "errored: not armed: target unavailable")
+	setRunStatus(t, "w1", nil, "")
 
 	_, applied, err := UpdateTaskRunOutcome("w1", "", "session-a", "interrupted: agent runtime lost")
 	require.NoError(t, err)
@@ -36,8 +47,7 @@ func TestTaskRunPublicationDoesNotOverwriteWatcherTerminationAfterAdmission(t *t
 	// provisioning long enough for the watch process to terminate.
 	admitted, err := GetTask("w1")
 	require.NoError(t, err)
-	_, err = UpdateTaskStatus("w1", nil, "errored: watcher exited")
-	require.NoError(t, err)
+	setRunStatus(t, "w1", nil, "errored: watcher exited")
 
 	_, applied, err := BeginTaskRun(
 		"w1", admitted.GenerationID, "session-a", admitted.LastRunSequence+1,

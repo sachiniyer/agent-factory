@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // Watch-task concurrency limit (#1892).
@@ -93,10 +94,27 @@ func isAtConcurrencyLimitErr(err error) bool {
 // (repo, task, generation) scope. Task IDs are reusable after removal; the
 // generation keeps predecessor sessions and unloadable rows from consuming the
 // replacement task's capacity. Empty remains its own legacy generation rather
-// than being guessed to belong to a later minted one; ambiguous pre-generation
-// rows therefore cannot charge a replacement task for work it may not own.
+// than being guessed to belong to a minted one; ambiguous pre-generation rows
+// therefore cannot charge a replacement task for work it may not own. The one
+// exception is taskRunChargesGeneration's.
 func taskRunReservationKey(repoID, taskID, taskGenerationID string) string {
 	return repoID + "\x00" + taskID + "\x00" + taskGenerationID
+}
+
+// taskRunChargesGeneration reports whether a run stamped runGenerationID holds
+// a slot of the task incarnation taskGenerationID. Besides an exact match, a
+// run with the empty generation charges a row whose generation the upgrade
+// backfilled (#4224 review). That row is the pre-field row the run was started
+// for, and without this, the first runs after an upgrade could exceed
+// max_concurrent_runs by the number of pre-upgrade runs still in flight. A
+// removed pre-field namesake's run can be charged here too; that only delays
+// this task until the run finishes. It is the same over-count the empty-to-empty
+// match made before the backfill, and the same one the ID-only count on older
+// daemons made. A row minted by an add is never charged for an empty-generation
+// run.
+func taskRunChargesGeneration(runGenerationID, taskGenerationID string) bool {
+	return runGenerationID == taskGenerationID ||
+		(runGenerationID == "" && task.IsBackfilledGeneration(taskGenerationID))
 }
 
 // holdsTaskRunSlot reports whether one of a task's sessions still occupies a
@@ -186,6 +204,10 @@ func holdsTaskRunSlot(v session.LifecycleView) bool {
 func (m *Manager) countTaskRunsLocked(repoID, taskID, taskGenerationID string) int {
 	key := taskRunReservationKey(repoID, taskID, taskGenerationID)
 	inFlight := m.reservedTaskRuns[key] + m.ghostTaskRuns[key]
+	if taskGenerationID != "" && taskRunChargesGeneration("", taskGenerationID) {
+		legacy := taskRunReservationKey(repoID, taskID, "")
+		inFlight += m.reservedTaskRuns[legacy] + m.ghostTaskRuns[legacy]
+	}
 	for key, inst := range m.instances {
 		if inst == nil {
 			continue
@@ -194,7 +216,7 @@ func (m *Manager) countTaskRunsLocked(repoID, taskID, taskGenerationID string) i
 		// m.mu, so splitting these reads would reopen the interleaving this view
 		// exists to prevent.
 		view := inst.LifecycleView()
-		if view.TaskID != taskID || view.TaskGenerationID != taskGenerationID {
+		if view.TaskID != taskID || !taskRunChargesGeneration(view.TaskGenerationID, taskGenerationID) {
 			continue
 		}
 		if rid, _ := splitDaemonInstanceKey(key); rid != repoID {

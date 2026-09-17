@@ -99,8 +99,7 @@ func TestListTasks_CarriesTheOverdueDerivation(t *testing.T) {
 	// Through the scheduler-owned writer: a create supplies the task's
 	// definition and the store supplies its history (task.resetStoreOwnedFields).
 	last := time.Now().Add(-18 * 24 * time.Hour)
-	_, err := task.UpdateTaskStatus("aaaa1004", &last, "started")
-	require.NoError(t, err)
+	setTaskStatusForTest(t, "aaaa1004", &last, "started")
 
 	srv := &controlServer{scheduler: newTaskScheduler()}
 	var resp ListTasksResponse

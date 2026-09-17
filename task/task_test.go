@@ -372,8 +372,9 @@ func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 	t2 := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
 	_, _, statusErr := BeginTaskRun("u1", "generation-a", "session-new", 1, 0, t2, "started")
 	require.NoError(t, statusErr)
-	_, statusErr = UpdateTaskStatus("u1", nil, "completed")
+	_, applied, statusErr := UpdateTaskStatusForGeneration("u1", "generation-a", nil, "completed")
 	require.NoError(t, statusErr)
+	require.True(t, applied)
 
 	// A user edit patches only user-editable fields; the scheduler-owned status
 	// fields and immutable CreatedAt are not part of TaskUpdate, so they can
@@ -590,15 +591,16 @@ func TestUpdateTask_RejectsInvalidID(t *testing.T) {
 // #664: scheduler/TUI status bumps must succeed on tasks whose stored Program
 // value would now fail enum validation (e.g. a legacy absolute path created
 // before #658 introduced the enum check).
-func TestUpdateTaskStatus_BypassesProgramValidation(t *testing.T) {
+func TestUpdateTaskStatusForGeneration_BypassesProgramValidation(t *testing.T) {
 	stored := []Task{
 		{ID: "legacy1", Name: "Pre-#658", Prompt: "p", CronExpr: "0 * * * *", ProjectPath: "/tmp", Program: "/home/foo/bin/claude", Enabled: true},
 	}
 	setupTestTasks(t, stored)
 
 	now := time.Now().Truncate(time.Second)
-	_, statusErr := UpdateTaskStatus("legacy1", &now, "started")
+	_, applied, statusErr := UpdateTaskStatusForGeneration("legacy1", "", &now, "started")
 	require.NoError(t, statusErr)
+	require.True(t, applied)
 
 	got, err := GetTask("legacy1")
 	require.NoError(t, err)
@@ -613,7 +615,7 @@ func TestUpdateTaskStatus_BypassesProgramValidation(t *testing.T) {
 // without touching the on-disk LastRunAt. persistWatcherStatus relies on this
 // so a supervision-status write can't revert a newer event-delivery timestamp
 // committed by a concurrent deliverWatchEvent.
-func TestUpdateTaskStatus_NilLastRunAtPreservesTimestamp(t *testing.T) {
+func TestUpdateTaskStatusForGeneration_NilLastRunAtPreservesTimestamp(t *testing.T) {
 	existing := time.Now().Truncate(time.Second)
 	stored := []Task{
 		{ID: "w1", Name: "Watcher", Prompt: "p", WatchCmd: "tail -f x", ProjectPath: "/tmp", Enabled: true, LastRunAt: &existing, LastRunStatus: "completed"},
@@ -622,11 +624,11 @@ func TestUpdateTaskStatus_NilLastRunAtPreservesTimestamp(t *testing.T) {
 
 	// A newer event delivery lands first (this is the value we must not lose).
 	newer := existing.Add(90 * time.Second)
-	_, statusErr := UpdateTaskStatus("w1", &newer, "completed")
+	_, _, statusErr := UpdateTaskStatusForGeneration("w1", "", &newer, "completed")
 	require.NoError(t, statusErr)
 
 	// A supervision-status write races in with a nil timestamp.
-	_, stopErr := UpdateTaskStatus("w1", nil, "stopped")
+	_, _, stopErr := UpdateTaskStatusForGeneration("w1", "", nil, "stopped")
 	require.NoError(t, stopErr)
 
 	got, err := GetTask("w1")
@@ -672,8 +674,7 @@ func TestNonSessionStatusRetainsTaskRunSequenceHighWater(t *testing.T) {
 	_, _, err := BeginTaskRun("w1", "", "session-a", 7, 0, runAt, RunStatusStarted)
 	require.NoError(t, err)
 	targetAt := runAt.Add(time.Minute)
-	_, err = UpdateTaskStatus("w1", &targetAt, "sent")
-	require.NoError(t, err)
+	setRunStatus(t, "w1", &targetAt, "sent")
 
 	got, err := GetTask("w1")
 	require.NoError(t, err)
@@ -690,8 +691,7 @@ func TestTaskRunOutcomePreservesLaterWatcherSupervisionStatus(t *testing.T) {
 				setupTestTasks(t, []Task{{ID: "w1", WatchCmd: "tail -f x", Enabled: true}})
 				_, _, err := BeginTaskRun("w1", "", "session-a", 1, 0, runAt, runStatus)
 				require.NoError(t, err)
-				_, err = UpdateTaskStatus("w1", nil, supervisionStatus)
-				require.NoError(t, err)
+				setRunStatus(t, "w1", nil, supervisionStatus)
 
 				_, applied, err := UpdateTaskRunOutcome("w1", "", "session-a", "interrupted: agent runtime lost")
 				require.NoError(t, err)
@@ -755,14 +755,14 @@ func TestTaskRunStartRepairsOnlyAnUnidentifiedRow(t *testing.T) {
 	assert.Equal(t, uint64(1), got.LastRunSequence)
 }
 
-// TestUpdateTaskStatus_NotFound verifies the not-found error path that the
+// TestUpdateTaskStatusForGeneration_NotFound verifies the not-found error path that the
 // runner / TUI rely on to log a meaningful failure when a task is deleted
 // mid-run.
-func TestUpdateTaskStatus_NotFound(t *testing.T) {
+func TestUpdateTaskStatusForGeneration_NotFound(t *testing.T) {
 	setupTestTasks(t, []Task{{ID: "exists"}})
 
 	now := time.Now()
-	_, err := UpdateTaskStatus("missing", &now, "started")
+	_, _, err := UpdateTaskStatusForGeneration("missing", "", &now, "started")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 	assert.True(t, IsTaskNotFound(err))

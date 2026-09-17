@@ -15,8 +15,7 @@ import (
 func TestTaskRunAdmissionRefusesUnreadableTaskRow(t *testing.T) {
 	manager, _, repoPath := newStatusTestManager(t)
 	tsk := addStatusTestTask(t, enabledCronTask("read0001", repoPath))
-	_, err := task.UpdateTaskStatus(tsk.ID, nil, "errored: watcher exited")
-	require.NoError(t, err)
+	setTaskStatusForTest(t, tsk.ID, nil, "errored: watcher exited")
 
 	tasksPath, err := task.MigrateOnLoadPath()
 	require.NoError(t, err)

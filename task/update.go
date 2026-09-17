@@ -285,7 +285,7 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 				// Validate the program ONLY when the patch sets it: a toggle or
 				// an unrelated field edit must not fail on a pre-existing Program
 				// value that would no longer pass current enum validation (the
-				// same tolerance UpdateTaskStatus applies to legacy records).
+				// same tolerance UpdateTaskStatusForGeneration applies to legacy records).
 				if update.Program != nil && merged.Program != "" {
 					if err := config.ValidateProgramEnum("task program", "task program", merged.Program, ""); err != nil {
 						return err

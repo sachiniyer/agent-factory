@@ -152,7 +152,7 @@ func TestSupersededInterruptedRunDoesNotScanUnreadableSessionStores(t *testing.T
 	require.NoError(t, err)
 
 	previous := loadPersistedTaskRunsForAttribution
-	loadPersistedTaskRunsForAttribution = func(string) ([]session.InstanceData, error) {
+	loadPersistedTaskRunsForAttribution = func(map[string]bool) ([]session.InstanceData, error) {
 		return nil, assert.AnError
 	}
 	t.Cleanup(func() { loadPersistedTaskRunsForAttribution = previous })
@@ -173,8 +173,7 @@ func TestRestoredTaskRuntimeOutcomeWinsRaceWithStartedStatus(t *testing.T) {
 	tsk.LastRunAt = &previousRunAt
 	tsk.LastRunStatus = "started"
 	tsk = addStatusTestTask(t, tsk)
-	_, err := task.UpdateTaskStatus(tsk.ID, &previousRunAt, "started")
-	require.NoError(t, err)
+	setTaskStatusForTest(t, tsk.ID, &previousRunAt, "started")
 
 	runAt := previousRunAt.Add(time.Hour)
 	inst, err := session.NewInstance(session.InstanceOptions{
@@ -215,8 +214,7 @@ func TestRestoredLegacyTaskRuntimeUsesAttributedLastRunTimestamp(t *testing.T) {
 	tsk.LastRunAt = &legacyRunAt
 	tsk.LastRunStatus = "started"
 	tsk = addStatusTestTask(t, tsk)
-	_, err := task.UpdateTaskStatus(tsk.ID, &legacyRunAt, "started")
-	require.NoError(t, err)
+	setTaskStatusForTest(t, tsk.ID, &legacyRunAt, "started")
 
 	// No TaskRunAt: this is the shape persisted by binaries before explicit run
 	// identity. Their task caller minted LastRunAt only after CreateSession returned.
@@ -253,8 +251,7 @@ func TestRestoredLegacyTaskRuntimeDoesNotClaimKnownSuccessor(t *testing.T) {
 	tsk.LastRunAt = &newerRunAt
 	tsk.LastRunStatus = "started"
 	tsk = addStatusTestTask(t, tsk)
-	_, err := task.UpdateTaskStatus(tsk.ID, &newerRunAt, "started")
-	require.NoError(t, err)
+	setTaskStatusForTest(t, tsk.ID, &newerRunAt, "started")
 
 	legacy, err := session.NewInstance(session.InstanceOptions{
 		Title: "legacy-older", Path: repoPath, Program: "claude", TaskID: tsk.ID,
@@ -293,8 +290,7 @@ func TestRestoredLegacyTaskRuntimeDoesNotReplaceTerminalOutcome(t *testing.T) {
 	tsk.LastRunAt = &terminalRunAt
 	tsk.LastRunStatus = "errored: successor failed"
 	tsk = addStatusTestTask(t, tsk)
-	_, err := task.UpdateTaskStatus(tsk.ID, &terminalRunAt, "errored: successor failed")
-	require.NoError(t, err)
+	setTaskStatusForTest(t, tsk.ID, &terminalRunAt, "errored: successor failed")
 
 	legacy, err := session.NewInstance(session.InstanceOptions{
 		Title: "legacy-before-terminal", Path: repoPath, Program: "claude", TaskID: tsk.ID,
@@ -332,8 +328,7 @@ func TestRestoredTaskRuntimePreservesLaterWatcherSupervisionStatus(t *testing.T)
 	require.NoError(t, err)
 	_, _, err = task.BeginTaskRun(tsk.ID, tsk.GenerationID, inst.ID, 1, 0, runAt, "started")
 	require.NoError(t, err)
-	_, err = task.UpdateTaskStatus(tsk.ID, nil, "errored: watcher exited")
-	require.NoError(t, err)
+	setTaskStatusForTest(t, tsk.ID, nil, "errored: watcher exited")
 	inst.SetStartedForTest(true)
 	inst.SetStatusForTest(session.Running)
 	key := daemonInstanceKey(repoID, inst.Title)
@@ -396,8 +391,7 @@ func TestRestoredLegacyTaskRuntimeDoesNotClaimPersistedUnloadedSuccessor(t *test
 	createdAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
 	successorAt := createdAt.Add(time.Minute)
 	tsk = addStatusTestTask(t, tsk)
-	_, err := task.UpdateTaskStatus(tsk.ID, &successorAt, task.RunStatusStarted)
-	require.NoError(t, err)
+	setTaskStatusForTest(t, tsk.ID, &successorAt, task.RunStatusStarted)
 
 	legacy, err := session.NewInstance(session.InstanceOptions{
 		Title: "legacy-materialized", Path: repoPath, Program: "claude",
@@ -449,8 +443,7 @@ func TestRestoredTaskRuntimeDoesNotClaimTargetSessionDelivery(t *testing.T) {
 	// Older binaries recorded a missing shared target's successful auto-create as
 	// "started". The task's declared target is the provenance that proves this is
 	// not the old per-run session's row.
-	_, err = task.UpdateTaskStatus(tsk.ID, &targetAt, task.RunStatusStarted)
-	require.NoError(t, err)
+	setTaskStatusForTest(t, tsk.ID, &targetAt, task.RunStatusStarted)
 	key := daemonInstanceKey(repoID, inst.Title)
 	seedDiskInstance(t, repoID, inst.Title, repoPath)
 	manager.mu.Lock()
@@ -467,6 +460,19 @@ func TestRestoredTaskRuntimeDoesNotClaimTargetSessionDelivery(t *testing.T) {
 	require.NotNil(t, got.LastRunAt)
 	assert.True(t, got.LastRunAt.Equal(targetAt))
 	assert.Contains(t, logs.warnings.String(), "the task row does not identify this run")
+}
+
+// setTaskStatusForTest seeds a task-wide status through the generation-gated
+// writer, addressed to whatever incarnation the row holds now. It fails the test
+// when the write does not apply, so a fixture cannot silently keep the old status.
+func setTaskStatusForTest(t *testing.T, taskID string, lastRunAt *time.Time, status string) task.Task {
+	t.Helper()
+	current, err := task.GetTask(taskID)
+	require.NoError(t, err)
+	updated, applied, err := task.UpdateTaskStatusForGeneration(taskID, current.GenerationID, lastRunAt, status)
+	require.NoError(t, err)
+	require.True(t, applied, "fixture status write for task %s did not apply", taskID)
+	return updated
 }
 
 func addStatusTestTask(t *testing.T, tsk task.Task) task.Task {

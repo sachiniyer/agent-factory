@@ -247,11 +247,14 @@ func (m *Manager) taskSessionLifecycle(repoID, taskID, taskGenerationID string) 
 	if err != nil {
 		return "", err
 	}
-	// Empty denotes a session and task row written before generations existed,
-	// not a shared generation. There is no token proving that a same-ID row owns
-	// the session, so keep it rather than applying archive/kill. Legacy task
-	// sessions may therefore remain for inspection after completion; that is the
-	// deliberate fail-closed side of an unprovable destructive lifecycle action.
+	// Empty denotes a session started before its task row had a generation, not
+	// a shared generation. There is no token proving that a same-ID row owns the
+	// session, so keep it rather than applying archive/kill. Such sessions may
+	// therefore remain for inspection after completion; that is the deliberate
+	// fail-closed side of an unprovable destructive lifecycle action. It is
+	// bounded to sessions that already existed at upgrade: the daemon's task
+	// load backfills a generation onto every pre-field row before arming it, so
+	// later runs carry one and apply the row's on_complete (#4224 review).
 	if taskGenerationID == "" {
 		return task.OnCompleteKeep, nil
 	}

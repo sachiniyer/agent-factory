@@ -185,6 +185,8 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 
 // cleanOrphanQueues removes event-queue files whose task ID is absent from
 // tasks.json entirely and queues owned by an older generation of a reused ID.
+// A backfilled row's legacy backlog is not an older generation's: it is kept
+// until that row's watcher adopts it (ownsQueueStem).
 //
 // Scoped the same way the watchers are, and for the same reason: outside the
 // scope this reconcile did not stop anything, so a still-running watcher would
@@ -200,10 +202,11 @@ func (s *watcherSupervisor) cleanOrphanQueues(
 	if err != nil {
 		return
 	}
+	// Task ID → the generation whose queue files survive.
 	known := make(map[string]string, len(tasks))
 	for _, t := range tasks {
 		if _, duplicate := known[t.ID]; !duplicate {
-			known[t.ID] = eventQueueStem(t.ID, t.GenerationID)
+			known[t.ID] = t.GenerationID
 		}
 	}
 	// A malformed duplicate-ID store can select a later enabled watch row after
@@ -212,7 +215,7 @@ func (s *watcherSupervisor) cleanOrphanQueues(
 	// first row for cleanup. Normal task arming de-duplicates before this boundary;
 	// keeping the rule here makes direct reloads and future callers safe too.
 	for id, selected := range desired {
-		known[id] = eventQueueStem(selected.ID, selected.GenerationID)
+		known[id] = selected.GenerationID
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -225,7 +228,7 @@ func (s *watcherSupervisor) cleanOrphanQueues(
 			continue
 		}
 		id, _, _ := strings.Cut(stem, ".")
-		if expected, ok := known[id]; ok && stem == expected {
+		if generationID, ok := known[id]; ok && ownsQueueStem(stem, id, generationID) {
 			continue
 		}
 		if !scope.covers(id) {

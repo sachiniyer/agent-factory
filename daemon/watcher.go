@@ -219,13 +219,14 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 	} else {
 		w.repoID = repo.ID
 	}
-	// Recover any backlog a previous watcher/daemon left behind (#1129); the
-	// run loop starts the drainer if the queue is non-empty. A queue-dir
-	// failure disables durability, never the watcher itself.
+	// Recover any backlog a previous watcher/daemon left behind (#1129),
+	// including one written before the row had a generation; the run loop
+	// starts the drainer if the queue is non-empty. A queue-dir failure
+	// disables durability, never the watcher itself.
 	if dir, err := s.queueDir(); err != nil {
 		log.WarningLog.Printf("watch task %s: event queue unavailable (failed deliveries will be dropped): %v", t.ID, err)
 	} else {
-		w.queue = newEventQueueForGeneration(dir, t.ID, t.GenerationID)
+		w.queue = openTaskEventQueue(dir, t)
 	}
 	return w
 }

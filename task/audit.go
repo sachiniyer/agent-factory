@@ -169,9 +169,9 @@ func changedFields(before, after Task) []string {
 //     reference past now and switches overdue detection off for that task forever.
 //   - GenerationID / LastRunAt / LastRunStatus / LastRunSessionID /
 //     LastRunSequence / LastRunRevision:
-//     daemon-owned by contract (see UpdateTaskStatus and the status helpers, and
-//     the surface-parity inventory, which already declared them "never a client
-//     input"). scheduleReference prefers a nonzero LastRunAt over CreatedAt, so a
+//     daemon-owned by contract (see UpdateTaskStatusForGeneration and the status
+//     helpers, and the surface-parity inventory, which already declared them
+//     "never a client input"). scheduleReference prefers a nonzero LastRunAt over CreatedAt, so a
 //     forged future run time suppresses detection the same way — a task that has
 //     never run claiming it just did.
 //   - DroppedEvents: watcher-owned delivery history. A forged value would claim

@@ -116,8 +116,7 @@ func seedArmingTask(t *testing.T, id, status string) task.Task {
 	}
 	require.NoError(t, task.AddTask(tsk))
 	ran := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
-	_, err := task.UpdateTaskStatus(id, &ran, status)
-	require.NoError(t, err)
+	setTaskStatusForTest(t, id, &ran, status)
 	return reloadArmingTask(t, id)
 }
 

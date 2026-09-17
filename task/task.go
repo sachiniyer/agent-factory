@@ -119,7 +119,8 @@ type Task struct {
 	// GenerationID distinguishes two task rows that reuse the same user-facing
 	// ID. The store mints it on every add and sessions retain it, so a runtime
 	// belonging to a removed task can never publish status onto its replacement.
-	// Empty denotes a row written before this field existed.
+	// A row written before this field existed is empty until the daemon's task
+	// load backfills a marked generation onto it (IsBackfilledGeneration).
 	GenerationID  string     `json:"generation_id,omitempty"`
 	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
 	LastRunStatus string     `json:"last_run_status,omitempty"`

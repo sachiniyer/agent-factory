@@ -15,9 +15,11 @@ func isLegacyTransientGhost(item session.InstanceData) bool {
 
 // rawTaskRunHoldsSlot is the storage-only counterpart of holdsTaskRunSlot for
 // rows refreshDaemonInstances cannot materialize. Terminal markers must release
-// capacity here too because no Instance exists to run their lifecycle edge.
+// capacity here too because no Instance exists to run their lifecycle edge. A
+// pending interruption means the run already ended, so the row counts as
+// inactive exactly as session.FromInstanceData would load it.
 func rawTaskRunHoldsSlot(item session.InstanceData) bool {
-	return item.TaskID != "" && item.TaskRunActive &&
+	return item.TaskID != "" && item.TaskRunActive && !item.TaskRunInterruptionPending &&
 		!item.StartupStateUnknown && !item.UserKilled &&
 		session.IdleReasonFor(item) != session.IdleReasonRestoreGaveUp
 }

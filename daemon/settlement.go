@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
@@ -271,8 +272,9 @@ func (m *Manager) clearInterruptedTaskRunObligation(
 // good whenever that create never commits.
 //
 // The check runs only after the row read shows the write could apply, so a row
-// that already refuses never depends on unrelated session storage. An
-// unreadable store fails closed: the outcome stays owed and is retried.
+// that already refuses never depends on unrelated session storage. A session
+// file that cannot be read fails closed only when it could hold a run of this
+// task (see taskRunStoreRepos): the outcome then stays owed and is retried.
 func (m *Manager) updateIdentifiedInterruptedTaskRun(
 	repoID string,
 	run session.TaskRunIdentity,
@@ -284,7 +286,7 @@ func (m *Manager) updateIdentifiedInterruptedTaskRun(
 	if !task.RunOutcomeApplies(*stored, run.TaskGenerationID, run.SessionID) {
 		return task.Task{}, false, false, nil
 	}
-	superseded, err = m.taskRunSuccessorExists(repoID, run, false)
+	superseded, err = m.taskRunSuccessorExists(repoID, *stored, run, false)
 	if err != nil || superseded {
 		return task.Task{}, false, superseded, err
 	}
@@ -320,7 +322,9 @@ func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session
 	// Task IDs are reusable user-facing handles. The generation is the durable
 	// proof that this session belongs to the current row; an old session that
 	// survives remove+add must not even enter compatibility attribution for the
-	// replacement. Empty==empty preserves rows and sessions from before the field.
+	// replacement. Empty==empty preserves rows and sessions from before the field
+	// until the daemon's task load backfills the row's generation. After that, a
+	// pre-field session's interruption is kept on its session record only.
 	if stored.GenerationID != run.TaskGenerationID {
 		return task.Task{}, false, nil
 	}
@@ -352,7 +356,7 @@ func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session
 		return task.Task{}, false, nil
 	}
 
-	if successor, err := m.taskRunSuccessorExists(repoID, run, true); err != nil || successor {
+	if successor, err := m.taskRunSuccessorExists(repoID, *stored, run, true); err != nil || successor {
 		return task.Task{}, false, err
 	}
 
@@ -373,12 +377,17 @@ func (m *Manager) claimUnidentifiedInterruptedTaskRun(repoID string, run session
 // create moving from one to the other cannot be missed between them. Candidate
 // order uses the manager sequence when both records have one, and falls back to
 // CreatedAt only for records written before the sequence field existed.
+//
+// repoID is the project of the session being settled and stored is the task row
+// just read for it; together they bound which unreadable session files may
+// block the answer.
 func (m *Manager) taskRunSuccessorExists(
 	repoID string,
+	stored task.Task,
 	run session.TaskRunIdentity,
 	includePendingCreates bool,
 ) (bool, error) {
-	persisted, err := loadPersistedTaskRunsForAttribution(repoID)
+	persisted, err := loadPersistedTaskRunsForAttribution(taskRunStoreRepos(repoID, stored))
 	if err != nil {
 		return false, err
 	}
@@ -405,16 +414,52 @@ func (m *Manager) taskRunSuccessorExists(
 	return false, nil
 }
 
+// taskRunStoreRepos names the projects whose session files could hold a run of
+// stored's task: the project of the session being settled, and the task's
+// current project. The daemon creates a task's runs in the task's own project,
+// so a later run lives somewhere else only if the task was moved, and a move
+// recomputes RepoID. A row written before RepoID existed resolves its path
+// instead.
+//
+// Any other project's file cannot hold a run of this task, so failing to read
+// it must not hold up this outcome. Failing closed there would keep the
+// session's interruption marker set, and deleteSessionRecord refuses while that
+// marker is set, so a corrupt file in an unrelated project would block
+// `af sessions kill` on this session (#4224 review). If the file this function
+// leaves out does hold a later run (the task moved twice, and that run is still
+// unpublished), the result is a wrong last_run_status on the row until that
+// run records its own outcome (unidentifiedClaimMayReplaceStatus).
+func taskRunStoreRepos(sessionRepoID string, stored task.Task) map[string]bool {
+	repos := map[string]bool{sessionRepoID: true}
+	taskRepoID := stored.RepoID
+	if taskRepoID == "" && strings.TrimSpace(stored.ProjectPath) != "" {
+		taskRepoID = config.ResolveProjectPath(stored.ProjectPath).ID
+	}
+	if taskRepoID != "" {
+		repos[taskRepoID] = true
+	}
+	return repos
+}
+
 var loadPersistedTaskRunsForAttribution = persistedTaskRunsForAttribution
 
-func persistedTaskRunsForAttribution(restoringRepoID string) ([]session.InstanceData, error) {
+// persistedTaskRunsForAttribution reads every session file it can. A file that
+// cannot be read or decoded is an error only if its project is in taskRepos.
+// Any other such file is skipped, because it cannot hold a run of this task.
+func persistedTaskRunsForAttribution(taskRepos map[string]bool) ([]session.InstanceData, error) {
 	all, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
 		return nil, fmt.Errorf("cannot inspect persisted task-run successors: %w", err)
 	}
-	if len(unreadable) > 0 {
-		return nil, fmt.Errorf("cannot inspect persisted task-run successors while restoring repo %s: %s",
-			restoringRepoID, config.DescribeRepoInstancesSkips(unreadable))
+	var blocking []config.RepoInstancesSkip
+	for _, skip := range unreadable {
+		if taskRepos[skip.RepoID] {
+			blocking = append(blocking, skip)
+		}
+	}
+	if len(blocking) > 0 {
+		return nil, fmt.Errorf("cannot inspect persisted task-run successors: %s",
+			config.DescribeRepoInstancesSkips(blocking))
 	}
 	var rows []session.InstanceData
 	for repoID, raw := range all {
@@ -423,6 +468,9 @@ func persistedTaskRunsForAttribution(restoringRepoID string) ([]session.Instance
 		}
 		var repoRows []session.InstanceData
 		if err := json.Unmarshal(raw, &repoRows); err != nil {
+			if !taskRepos[repoID] {
+				continue
+			}
 			return nil, fmt.Errorf("cannot inspect persisted task-run successors in repo %s: %w", repoID, err)
 		}
 		rows = append(rows, repoRows...)

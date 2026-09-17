@@ -16,9 +16,18 @@ const (
 	RunStatusLimitParked = "parked: usage limit"
 )
 
-// UpdateTaskStatus updates only the scheduler-owned last-run fields. Unlike
-// UpdateTask, it does not re-validate other fields (notably Program), so legacy
-// tasks can still receive status changes. A nil lastRunAt preserves the
+// UpdateTaskStatusForGeneration updates only the scheduler-owned last-run
+// fields, and only while the task ID still names the incarnation the caller
+// loaded. It is the one task-wide status writer: every delivery and supervisor
+// can finish after remove+re-add reused the user-facing ID, so there is no
+// ungated form (#4224 review). A generation mismatch is a clean refusal
+// (applied=false), not a storage error. An applied write replaces whatever
+// status the row holds, including a session run's outcome such as
+// interrupted: the latest supervision evidence wins on the row, and the
+// session record keeps its own outcome.
+//
+// Unlike UpdateTask, it does not re-validate other fields (notably Program), so
+// legacy tasks can still receive status changes. A nil lastRunAt preserves the
 // timestamp, session identity, and sequence; watcher supervision uses that form
 // so it cannot detach a live run from the token its outcome needs. Every applied
 // write advances LastRunRevision, including status-only supervision. Session-
@@ -27,32 +36,14 @@ const (
 // one another. A non-nil timestamp starts a non-session-backed status and clears
 // the session token, while retaining the sequence as the allocator's durable
 // high-water mark.
-func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) (Task, error) {
-	updated, _, err := updateTaskStatus(taskID, "", false, lastRunAt, lastRunStatus)
-	return updated, err
-}
-
-// UpdateTaskStatusForGeneration updates scheduler-owned fields only while the
-// task ID still names the incarnation the caller loaded. It is for deliveries
-// and supervisors that may finish after remove+re-add reused the user-facing ID.
-// A generation mismatch is a clean refusal (applied=false), not a storage error.
 func UpdateTaskStatusForGeneration(
 	taskID, expectedGenerationID string,
 	lastRunAt *time.Time,
 	lastRunStatus string,
 ) (Task, bool, error) {
-	return updateTaskStatus(taskID, expectedGenerationID, true, lastRunAt, lastRunStatus)
-}
-
-func updateTaskStatus(
-	taskID, expectedGenerationID string,
-	requireGeneration bool,
-	lastRunAt *time.Time,
-	lastRunStatus string,
-) (Task, bool, error) {
 	var revisionErr error
 	updated, applied, err := mutateTaskStatus(taskID, func(t *Task) bool {
-		if requireGeneration && t.GenerationID != expectedGenerationID {
+		if t.GenerationID != expectedGenerationID {
 			return false
 		}
 		if t.LastRunRevision == ^uint64(0) {
