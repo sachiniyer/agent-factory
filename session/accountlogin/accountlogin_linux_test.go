@@ -4,7 +4,9 @@ package accountlogin
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -482,25 +484,50 @@ func waitForLogin(t *testing.T, home, agent, name string) bool {
 	}
 }
 
+// occupyLoginPaneName holds the login pane's tmux session name on the isolated
+// server, so the supervisor's own pane.Start fails with "tmux session already
+// exists" before it spawns anything. That is the deterministic stand-in for a
+// flow that did not survive to the handover: finishedOrFailed decides on the
+// account's artifact and reads the launch error only as prose, so every Start
+// failure exercises the same decision — while a real instant-exit pane's death
+// lands wherever it lands inside Start's own probe sequence, and on a loaded
+// runner that can be after the last one, reporting a live handover for a
+// finished flow (the #4217 sightings at :502 and :533).
+//
+// The session is created by hand rather than through af, so it carries no
+// AF_HOME/AF_SESSION_GEN markers: adopt cannot prove it belongs to this home,
+// declines to reuse it, and the collision is what reaches pane.Start.
+func occupyLoginPaneName(t *testing.T, agent, name string) {
+	t.Helper()
+	sName := tmux.SanitizedNameForRepo(agentaccount.LoginSessionName(agent, name), "")
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", sName, "sleep", "300").CombinedOutput(); err != nil {
+		t.Fatalf("occupy login pane name %q: %v (%s)", sName, err, out)
+	}
+}
+
 // TestLoginReportsAFlowThatEndedBeforeTheHandover covers the login that
 // completes without ever needing the terminal — `codex login` against a
 // credential that is already there, or a flow that answers itself. tmux.Start
 // reports that as a pane that vanished, worded for a broken install; af has to
 // tell the two apart by the ACCOUNT, not by the launch error.
+//
+// The fixture is a REAL launched flow: the shim writes the credential the
+// agent's own flow would leave and exits, so the pane dies inside tmux.Start's
+// probe sequence — the exact shape the finding is about. Staging the artifact
+// and blocking the name instead would exercise the collision path, not this
+// one (#4217 review).
 func TestLoginReportsAFlowThatEndedBeforeTheHandover(t *testing.T) {
 	isolateLoginTmux(t)
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	binDir := t.TempDir()
-	dir, err := agentaccount.Register(home, "codex", "work")
-	if err != nil {
-		t.Fatalf("register account: %v", err)
-	}
-	// Writes the credential and exits at once — a completed login that never
-	// asked the human anything.
-	script := "#!/bin/sh\nprintf '{}' > " + shellquote.Quote(filepath.Join(dir, "auth.json")) + "\n"
-	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte(script), 0o700); err != nil {
+	// The agent's own flow against an already-provisioned account: write the
+	// credential the login command would leave, then exit — the pane is gone
+	// before af's handover. CODEX_HOME is the account root the login boundary
+	// injects, which is where codex writes auth.json.
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte(
+		"#!/bin/sh\nprintf '{}' > \"$CODEX_HOME/auth.json\"\n"), 0o700); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -522,6 +549,94 @@ func TestLoginReportsAFlowThatEndedBeforeTheHandover(t *testing.T) {
 	}
 }
 
+// TestLoginDoesNotCreditACollisionAsACompletedFlow is the misread adopt's
+// contract names: a same-named pane this home cannot prove ownership of blocks
+// the launch entirely, so the flow never ran — and the account's artifact,
+// left by some earlier flow, must not turn that collision into a reported
+// completion (#4217 review).
+func TestLoginDoesNotCreditACollisionAsACompletedFlow(t *testing.T) {
+	isolateLoginTmux(t)
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	binDir := t.TempDir()
+	dir, err := agentaccount.Register(home, "codex", "work")
+	if err != nil {
+		t.Fatalf("register account: %v", err)
+	}
+	// The artifact some earlier flow left — stale evidence the collision must
+	// not be allowed to spend.
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("stage credential: %v", err)
+	}
+	// codex has to resolve on PATH for Start's agent check, but the pane's
+	// name is already taken, so the program never runs.
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	occupyLoginPaneName(t, "codex", "work")
+
+	supervisor := New()
+	t.Cleanup(supervisor.Stop)
+	_, err = supervisor.Start(context.Background(), Request{Home: home, Agent: "codex", Name: "work"})
+	if err == nil {
+		t.Fatal("a name collision with a markerless foreign pane was reported as a completed login")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("the collision must be reported as a collision, not as the finished flow the artifact suggests: %v", err)
+	}
+}
+
+// TestCollisionVerdictSurvivesBlockerExit is the finding's exact scenario: the
+// markerless pane that made pane.Start fail exits before the post-Start
+// re-diagnosis probes tmux, so the name reads free — but the collision Start
+// positively observed is still the launch failure. finishedOrFailed's artifact
+// check must never see it: the staged credential would be credited to a flow
+// that never ran. The re-probe is stubbed rather than raced — a real blocker's
+// exit lands wherever tmux scheduling puts it (#4217 flake class).
+func TestCollisionVerdictSurvivesBlockerExit(t *testing.T) {
+	isolateLoginTmux(t)
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	binDir := t.TempDir()
+	dir, err := agentaccount.Register(home, "codex", "work")
+	if err != nil {
+		t.Fatalf("register account: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("stage credential: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	occupyLoginPaneName(t, "codex", "work")
+
+	// The blocker is still up — the collision is real — but the verdict's own
+	// re-probe answers as if it had already exited.
+	previousProbe := collisionProbeSession
+	collisionProbeSession = func(*tmux.TmuxSession) (bool, bool) { return false, true }
+	t.Cleanup(func() { collisionProbeSession = previousProbe })
+
+	supervisor := New()
+	t.Cleanup(supervisor.Stop)
+	_, err = supervisor.Start(context.Background(), Request{Home: home, Agent: "codex", Name: "work"})
+	if err == nil {
+		t.Fatal("a collision whose blocker exited mid-diagnosis was reported as a completed login")
+	}
+	if !errors.Is(err, tmux.ErrSessionNameTaken) {
+		t.Fatalf("the preserved collision verdict must carry ErrSessionNameTaken: %v", err)
+	}
+	if !strings.Contains(err.Error(), "already existed") {
+		t.Fatalf("the blocker that vanished mid-diagnosis must still be reported as the launch failure: %v", err)
+	}
+	if strings.Contains(err.Error(), "credential") {
+		t.Fatalf("the stale artifact must not be credited to a flow that never ran: %v", err)
+	}
+}
+
 // TestLoginReportsANoOpAsFailure is #3384's verification requirement at its
 // sharpest: a flow that exits leaving the account empty must report failure. The
 // alternative is a registered account that looks fine and fails much later, at
@@ -533,7 +648,10 @@ func TestLoginReportsANoOpAsFailure(t *testing.T) {
 
 	binDir := t.TempDir()
 	// Exits 0 and writes nothing: the shape of an OAuth flow the user abandoned
-	// at the browser step, which several of these CLIs report as success.
+	// at the browser step, which several of these CLIs report as success. The
+	// pane really launches and dies inside tmux.Start's probe sequence — a
+	// staged name collision would exercise the collision path instead of this
+	// one (#4217 review).
 	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
@@ -549,6 +667,41 @@ func TestLoginReportsANoOpAsFailure(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("failure %q does not say the account is still not logged in (missing %q)", err, want)
 		}
+	}
+}
+
+// TestFinishedOrFailedReprobesTheAccount covers the transition a staged
+// credential cannot reach: the artifact landing AFTER the launch-time
+// snapshot. supervisor.Start reads LoggedIn into base before the flow runs,
+// so the proof that finishedOrFailed re-probes the account — rather than
+// trusting that snapshot — is a base whose LoggedIn is stale-false while the
+// account already holds the credential. A real launched flow would exercise
+// the same line, but its pane's death lands wherever tmux's probe sequence is
+// standing at that instant — the #4217 flake this file exists to remove — so
+// the post-launch boundary is staged directly instead.
+func TestFinishedOrFailedReprobesTheAccount(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	dir, err := agentaccount.Register(home, "codex", "work")
+	if err != nil {
+		t.Fatalf("register account: %v", err)
+	}
+	req := Request{Home: home, Agent: "codex", Name: "work"}
+	// The launch-time snapshot saw no credential — the flow had not run yet.
+	base := Session{Agent: "codex", Name: "work", Dir: dir, LoggedIn: false}
+	// Then the flow wrote it and ended before the handover: the answer must
+	// come from a fresh probe of the account, never from base.LoggedIn.
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("stage the post-launch credential: %v", err)
+	}
+	got, err := finishedOrFailed(req, base, errors.New("tmux session already exists"))
+	if err != nil {
+		t.Fatalf("a flow that left a credential was reported as a failure: %v", err)
+	}
+	if !got.Finished || !got.LoggedIn {
+		t.Fatalf("a post-snapshot credential must be re-probed, got %+v", got)
+	}
+	if got.TmuxName != "" {
+		t.Fatalf("a finished flow named %q to attach to", got.TmuxName)
 	}
 }
 

@@ -39,7 +39,7 @@ func (t *TmuxSession) Start(workDir string) error {
 		// its poll must still read af's own teardown of that generation as
 		// expected (Codex on #4473).
 		t.clearTeardownMarkForConfirmedGeneration()
-		return fmt.Errorf("%w: tmux session already exists: %s", ErrSessionNotStarted, t.sanitizedName)
+		return fmt.Errorf("%w: %w: %s", ErrSessionNotStarted, ErrSessionNameTaken, t.sanitizedName)
 	}
 	// The name is positively absent, so any Start from here creates a new pane
 	// process. Drop diagnostics owned by the prior process at that proven runtime
