@@ -129,17 +129,21 @@ func TestProjectBranchPrefixNamesTheNextSessionInThatProjectOnly(t *testing.T) {
 
 // TestProjectBranchPrefixCollisionCheckUsesTheProjectsPrefix: the title-collision
 // rule has to derive branches with the prefix the worktree will be created with.
-// "x" and "-x" derive ONE branch under "proj-" (the dash run collapses, so both
-// are "proj-x") but two under "global/" ("global/x" and "global/-x"). A check that
-// still read the global prefix admits the second create, and its worktree then
-// asks git for the branch the first session already has.
+// "#x" and "-x" derive ONE branch under "proj-" (the "#" is dropped and the dash
+// run collapses, so both are "proj-x") but two under "global/" ("global/x" and
+// "global/-x"). Their archive-directory and tmux names differ ("#x"/"x",
+// "_x"/"-x"), so only the branch rule can refuse the pair. A check still reading
+// the global prefix admits the second create. The plain pair "x"/"-x" would not
+// show that, because it also collides on the archive directory.
 func TestProjectBranchPrefixCollisionCheckUsesTheProjectsPrefix(t *testing.T) {
 	m, first, _, firstProject := projectBranchPrefixFixture(t)
 	rec := installBranchPrefixRecorder(t)
 	setProjectBranchPrefix(t, firstProject, "proj-")
 
-	require.NoError(t, createWithTitle(m, first, "x"))
-	require.Equal(t, "proj-", rec.prefix(t, "x"), "precondition: the first session is named under the project's prefix")
+	require.NoError(t, createWithTitle(m, first, "#x"))
+	// Not fatal: the refusal below is the property under test, and it must be
+	// checked even when the create ignored the override.
+	assert.Equal(t, "proj-", rec.prefix(t, "#x"), "the first session is named under the project's prefix")
 
 	err := createWithTitle(m, first, "-x")
 	require.Error(t, err, "under the project's prefix both titles derive one branch, so the second create must be refused")

@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -18,11 +19,13 @@ import (
 //
 // This guards the footgun that produced the bug: PR #4088 added a divergent
 // rootAgentConfigKey prefix check on the unset side instead of the authoritative
-// config.KeyEffectClass map the set side already consulted, so branch_prefix
-// (EffectNextDaemonStart) and on_archive_command (EffectAppliedLive, per-archive)
-// fell into the generic "sessions created ..." notice — wrong timing for the
-// former, wrong surface for the latter. PR #4381 fixed the set side; this pins
-// the unset side so set and unset cannot re-diverge.
+// config.KeyEffectClass map the set side already consulted, so branch_prefix and
+// on_archive_command (EffectAppliedLive, per-archive) fell into the generic
+// "sessions created ..." notice — the wrong surface for the latter, and at the
+// time the wrong timing for the former, which was EffectNextDaemonStart until
+// #4539 made each create resolve branch_prefix from the live config plus the
+// project's override. PR #4381 fixed the set side; this pins the unset side so
+// set and unset cannot re-diverge.
 //
 // root_agent / root_agent.* on unset are covered separately by
 // TestRootAgentDottedProjectUnsetNamesAdoptedSessionRemedy (which pins the
@@ -40,6 +43,7 @@ func TestProjectUnsetNoticeMirrorsSet(t *testing.T) {
 		wantSubstr string
 	}{
 		{"default_program", "default_program", `default_program = "codex"` + "\n", "session"},
+		{"branch_prefix", "branch_prefix", `branch_prefix = "af-"` + "\n", "sessions created in this project"},
 		{"on_archive_command", "on_archive_command", `on_archive_command = "echo done"` + "\n", "archive operations"},
 	}
 	for _, c := range appliedLive {
@@ -59,19 +63,36 @@ func TestProjectUnsetNoticeMirrorsSet(t *testing.T) {
 		})
 	}
 
-	// branch_prefix is EffectNextDaemonStart (read from the frozen startup config),
-	// so unsetting it must print the restart notice, not the session-scoped sentence.
-	// This is the wrong-timing half of #4381's deferred unset-side follow-up.
-	t.Run("branch_prefix_must_restart", func(t *testing.T) {
-		projectUnsetNoticeRun(t, "branch_prefix", "branch_prefix = \"af-\"\n", func(t *testing.T, got string) {
-			require.Contains(t, got, "restart them to apply",
-				"`af config unset --project branch_prefix` (EffectNextDaemonStart) must "+
-					"print the restart notice like `af config set --project` does. Got: %q", got)
-			require.NotContains(t, got, "sessions created",
-				"`af config unset --project branch_prefix` must not print the "+
-					"session-scoped sentence. Got: %q", got)
+	// The mirror, stated as EQUALITY rather than as two lists of substrings.
+	// branch_prefix is the key that moved between the partitions above (#4539 made
+	// it EffectAppliedLive), and it is exactly the case where "neither verb says
+	// restart" would still pass while the two printed different live sentences —
+	// which is the divergence this whole test exists to prevent.
+	t.Run("branch_prefix_unset_and_set_print_the_same_notice", func(t *testing.T) {
+		var unsetNotice, setNotice string
+		projectUnsetNoticeRun(t, "branch_prefix", "branch_prefix = \"af-\"\n", func(_ *testing.T, got string) {
+			unsetNotice = lastNoticeLine(got)
 		})
+		projectSetNoticeRun(t, "branch_prefix", "af-", func(_ *testing.T, got string) {
+			setNotice = lastNoticeLine(got)
+		})
+		require.Equal(t, setNotice, unsetNotice,
+			"`af config unset --project branch_prefix` and `af config set --project branch_prefix` "+
+				"must print the SAME effect notice; a user who clears an override and one who writes "+
+				"it are told about the same key.")
+		require.Contains(t, unsetNotice, "sessions created in this project",
+			"branch_prefix is resolved per create since #4539, so both verbs must name the "+
+				"session-create surface. Got: %q", unsetNotice)
+		require.NotContains(t, unsetNotice, "restart them to apply",
+			"branch_prefix needs no restart since #4539. Got: %q", unsetNotice)
 	})
+}
+
+// lastNoticeLine is the effect notice: the final non-empty line the verb printed,
+// after the line naming what it wrote and where.
+func lastNoticeLine(out string) string {
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
 }
 
 // projectUnsetNoticeRun drives the --project branch of `af config unset` for one
