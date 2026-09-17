@@ -3,7 +3,7 @@ package sessionenv
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
 // The wrapper-operand candidates (#4465) and the expansion-safe word model
@@ -25,7 +25,7 @@ func TestValidateAccountEnvironmentCommand_WrapperOperandsMustBeExpansionSafe(t 
 		"timeout -k 1* 10 codex",
 		"nice -n 1* codex",
 	} {
-		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q hands the wrapper an operand /bin/sh can split", command)
 	}
 }
@@ -45,7 +45,7 @@ func TestValidateAccountEnvironmentCommand_LiteralWrapperOperandsStayAccepted(t 
 		"timeout -k 5 10 codex",
 		"nice -n 5 codex",
 	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q uses only literal, expansion-safe operands", command)
 	}
 }

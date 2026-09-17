@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,7 +38,7 @@ func TestValidateAccountEnvironmentCommand_RefusesArithmeticSubscriptAssignment(
 		"(( ${target}=1 )); codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
-		require.Error(t, err, "command %q assigns the selected root inside an arithmetic subscript", command)
+		assert.Error(t, err, "command %q assigns the selected root inside an arithmetic subscript", command)
 	}
 }
 
@@ -53,7 +54,7 @@ func TestValidateAccountEnvironmentCommand_RefusesUnprovableExecutableWrappers(t
 		"taskset 0x1 env CODEX_HOME=/other codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
-		require.Error(t, err, "command %q reaches the identity through a wrapper", command)
+		assert.Error(t, err, "command %q reaches the identity through a wrapper", command)
 	}
 }
 
@@ -88,7 +89,7 @@ func TestValidateAccountEnvironmentCommand_AllowsProcessOnlyWrapperModes(t *test
 		"taskset --pi 0x1 123",
 		"taskset --pid 0x1 123",
 	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"process-only command %q launches no child whose account environment could be changed", command)
 	}
 }
@@ -136,7 +137,7 @@ func TestValidateAccountEnvironmentCommand_SingleWordWrapperOperandsStayVisible(
 		// command walk already refuses unproven.
 		"ionice -c \"$CLASS\"",
 	} {
-		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q leaves a dynamic operand the shadowed wrapper can exec as a command head", command)
 	}
 }
@@ -178,7 +179,7 @@ func TestValidateAccountEnvironmentCommand_WrapperOperandsStayCandidates(t *test
 		"xargs --max-args env -u CODEX_HOME codex",
 		"xargs --process-slot-var env CODEX_HOME=/other codex",
 	} {
-		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q hides a mutating tail behind an operand the basename-matched wrapper consumed", command)
 	}
 	for _, command := range []string{
@@ -192,7 +193,7 @@ func TestValidateAccountEnvironmentCommand_WrapperOperandsStayCandidates(t *test
 		"stdbuf -oL codex",
 		"xargs -n 2 codex",
 	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q is safe under the real and shadowed readings alike", command)
 	}
 }
@@ -231,7 +232,7 @@ func TestValidateAccountEnvironmentCommand_QuotedProcessSelectorsLaunchNoChild(t
 		"ionice -p\"$PID\" 456",
 		"taskset -p\"$PID\" 456",
 	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q selects processes and launches no child under any expansion", command)
 	}
 	for _, command := range []string{
@@ -275,7 +276,7 @@ func TestValidateAccountEnvironmentCommand_QuotedProcessSelectorsLaunchNoChild(t
 		"./taskset --version 1 unset CODEX_HOME",
 		"./ionice -p 123 ionice -c 3 sh -c 'unset CODEX_HOME; codex'",
 	} {
-		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q hides a mutating tail behind a basename-matched selector", command)
 	}
 	for _, command := range []string{
@@ -289,7 +290,7 @@ func TestValidateAccountEnvironmentCommand_QuotedProcessSelectorsLaunchNoChild(t
 		"ionice -n\"$N\" --help",
 		"taskset -c\"$LIST\" npm",
 	} {
-		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q is not a process selector with a provable single word", command)
 	}
 }
@@ -308,7 +309,7 @@ func TestValidateAccountEnvironmentCommand_IonicePinnedQuotedOptionTokens(t *tes
 		"ionice --class=\"$CLASS\" npm run dev",
 		"ionice -c2\"$X\" npm run dev",
 	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q occupies one argv word for every value its expansion can take", command)
 	}
 	for _, command := range []string{
@@ -332,7 +333,7 @@ func TestValidateAccountEnvironmentCommand_IonicePinnedQuotedOptionTokens(t *tes
 		"ionice --class=\"$@\" --help",
 		"ionice \"$X\" --help",
 	} {
-		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q is not a pinned single-word option token with a safe child", command)
 	}
 }
@@ -356,7 +357,7 @@ func TestValidateAccountEnvironmentCommand_SingleWordOperandRuleStaysNarrow(t *t
 		// which moves the mask and the child by one.
 		"taskset \"$MASK\" npm run dev",
 	} {
-		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q does not prove a single unshifted boundary", command)
 	}
 }
@@ -372,7 +373,7 @@ func TestValidateAccountEnvironmentCommand_IoniceNonSelectorPrefixesKeepChildVis
 		"ionice -t env CODEX_HOME=/other codex",
 		"ionice -c 2 env CODEX_HOME=/other codex",
 	} {
-		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q executes a child whose account environment the assignment replaces", command)
 	}
 }
@@ -395,7 +396,7 @@ func TestValidateAccountEnvironmentCommand_IoniceClassValueAbbreviations(t *test
 		"ionice --clas 2 npm run dev",
 		"ionice --clas=2 npm run dev",
 	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q schedules an ordinary child the walk can see", command)
 	}
 	for _, command := range []string{
@@ -404,7 +405,7 @@ func TestValidateAccountEnvironmentCommand_IoniceClassValueAbbreviations(t *test
 		"ionice --classdat 2 env CODEX_HOME=/other codex",
 		"ionice --clas 2 env CODEX_HOME=/other codex",
 	} {
-		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"%q must not hide the mutating child behind an abbreviated option", command)
 	}
 	// A value-taking abbreviation with no value word left still fails closed.
@@ -432,7 +433,7 @@ func TestValidateAccountEnvironmentCommand_AllowsTerminalUtilLinuxWrapperModes(t
 		"taskset --version",
 		"taskset --ver",
 	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"terminal command %q launches no child whose account environment could be changed", command)
 	}
 }
@@ -448,7 +449,7 @@ func TestValidateAccountEnvironmentCommand_RefusesDynamicWaitOptionAfterTarget(t
 		`wait -p safe "$AF_OPT" CODEX_HOME`,
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
-		require.Error(t, err, "command %q can retarget wait at the selected root", command)
+		assert.Error(t, err, "command %q can retarget wait at the selected root", command)
 	}
 }
 
@@ -479,7 +480,7 @@ func TestValidateAccountEnvironmentCommand_FollowupsStayNarrow(t *testing.T) {
 		"wait",
 		"npm run dev",
 	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"command %q touches no identity name and must stay allowed", command)
 	}
 }
@@ -502,7 +503,7 @@ func TestValidateAccountEnvironmentCommand_ChildlessTailsStayAdmitted(t *testing
 		"taskset --help",
 		"ionice -p " + strings.TrimSpace(strings.Repeat("1 ", shadowedTailOperandLimit)),
 	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
+		assert.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
 	}
 }
 
@@ -537,13 +538,13 @@ func TestValidateAccountEnvironmentCommand_AttachedIoniceValuesAreSelfContained(
 		`ionice --classd="$N" -p 123`,
 		`ionice -c3 npm run dev`,
 	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
+		assert.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
 	}
 	for _, command := range []string{
 		`ionice -c"$CLASS" npm run dev`,
 		`ionice -n"$N" npm run dev`,
 		`ionice --classdata "$N" npm run dev`,
 	} {
-		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
+		assert.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
 	}
 }

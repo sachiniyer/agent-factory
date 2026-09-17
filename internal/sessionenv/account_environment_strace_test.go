@@ -3,7 +3,9 @@ package sessionenv
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -109,7 +111,7 @@ func TestCommandMutatesAccountEnvironment_StraceSuffixModel(t *testing.T) {
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, codex)
-		require.Equal(t, test.want, got, "command %q", test.command)
+		assert.Equal(t, test.want, got, "command %q", test.command)
 	}
 }
 
@@ -129,21 +131,25 @@ func TestCommandMutatesAccountEnvironment_StraceBudgetRefusal(t *testing.T) {
 	require.False(t, commandMutatesAccountEnvironment("strace strace strace codex", codex))
 }
 
-// The suffix scan meters one slot per suffix judgment, so an ordinary long
-// flat argv (a compiler-style command with hundreds of file arguments) is not
-// refused by cumulative charging — the shared budget only bounds the nested
-// work each suffix descent actually does.
+// The meter counts argv words JUDGED, so a flat argv pays for the tail each
+// suffix judgment re-walks — quadratic charging for quadratic work. An
+// ordinary long argv (a compiler-style command with a few hundred file
+// arguments) still fits; twice that length is four times the walk and does
+// not. One slot per suffix saw neither: every length under
+// straceFlatArgvLimit was admitted and the quadratic ran below the bound.
 func TestCommandMutatesAccountEnvironment_StraceLongFlatArgv(t *testing.T) {
 	codex := accountScopedNames("codex", "CODEX_HOME")
-	flat := "strace codex " + strings.Repeat("src/file.o ", 400)
-	require.False(t, commandMutatesAccountEnvironment(flat, codex),
+	assert.False(t, commandMutatesAccountEnvironment(
+		"strace codex "+strings.Repeat("src/file.o ", 400), codex),
 		"ordinary long strace argv must not exhaust the shared budget")
+	assert.True(t, commandMutatesAccountEnvironment(
+		"strace codex "+strings.Repeat("src/file.o ", 800), codex),
+		"four times the walk must exhaust it")
 }
 
-// Judging every suffix re-walks the tail, so a flat argv costs quadratic real
-// work below the meter's one slot per suffix. straceFlatArgvLimit is the cap
-// that keeps that quadratic sub-second: a command line past it is not an
-// ordinary invocation and refuses instead of stalling validation.
+// straceFlatArgvLimit is the O(1) early-out in front of that arithmetic: an
+// argv past it is not an ordinary invocation and refuses before the hazard
+// record reads a word.
 func TestCommandMutatesAccountEnvironment_StraceFlatArgvLimit(t *testing.T) {
 	codex := accountScopedNames("codex", "CODEX_HOME")
 	flat := "strace codex " + strings.Repeat("src/file.o ", straceFlatArgvLimit)
@@ -184,16 +190,34 @@ func TestCommandMutatesAccountEnvironment_EscapeAndExpansionResolved(t *testing.
 		{`strace {-E,CODEX_HOME} codex`, true},
 		{`e{nv,} CODEX_HOME=/other codex`, true},
 		{`strace {-o,'|env CODEX_HOME=/x true'} codex`, true},
+		// An unclosed '[' does not switch the rest of the word off. Brace
+		// expansion is an earlier phase than pathname expansion, so bash reads
+		// the ',' and the '}' whatever the '[' is doing — measured against
+		// `bash --posix` in #4579, which the first row is the control for.
+		{`{unset,echo} CODEX_HOME`, true},
+		{`{unset,a[b} CODEX_HOME; codex`, true},
+		{`{env,CODEX_HOME=/other[x} codex`, true},
+		{`strace {-E,CODEX_HOME,a[b} codex`, true},
+		// The same hole from the glob side: inside an unclosed '[' the '*' is
+		// no bracket member, it is a live wildcard, so the operand is not the
+		// literal it spells.
+		{`strace -o /tmp/t[a* codex`, true},
+		{`strace -E CODEX_HOME[a?b codex`, true},
 		// Quoted braces never expand, '{}'-shaped words are not brace
 		// expansions (xargs -I{} is its own marker syntax), and a leading ~
 		// head stays accepted: it expands to a fixed absolute path that can
-		// never name a same-shell builtin.
+		// never name a same-shell builtin. And an unclosed '[' with no live
+		// brace or glob syntax left in the word is still the literal text it
+		// spells: the fix reaches the syntax the bracket was hiding, not every
+		// word that happens to contain a '['.
 		{`strace '{-E,CODEX_HOME}' codex`, false},
 		{`xargs -I{} env codex {}`, false},
 		{`~/bin/tool arg`, false},
+		{`strace -o /tmp/t[unfinished codex`, false},
+		{`strace -o /tmp/t[a\*b codex`, false},
 	}
 	for _, tc := range cases {
-		require.Equal(t, tc.want, commandMutatesAccountEnvironment(tc.command, codex),
+		assert.Equal(t, tc.want, commandMutatesAccountEnvironment(tc.command, codex),
 			"command %q", tc.command)
 	}
 }
@@ -237,7 +261,7 @@ func TestCommandMutatesAccountEnvironment_SpanningBracketGlob(t *testing.T) {
 		{`strace -o /tmp/t\[0-9\] codex`, false},
 	}
 	for _, tc := range cases {
-		require.Equal(t, tc.want, commandMutatesAccountEnvironment(tc.command, codex),
+		assert.Equal(t, tc.want, commandMutatesAccountEnvironment(tc.command, codex),
 			"command %q", tc.command)
 	}
 }
@@ -314,7 +338,7 @@ func TestCommandMutatesAccountEnvironment_ExpandableCommandHead(t *testing.T) {
 		{`ls CODEX_HOME`, false},
 	}
 	for _, tc := range cases {
-		require.Equal(t, tc.want, commandMutatesAccountEnvironment(tc.command, codex),
+		assert.Equal(t, tc.want, commandMutatesAccountEnvironment(tc.command, codex),
 			"command %q", tc.command)
 	}
 }
@@ -337,6 +361,20 @@ func TestValidateAccountEnvironmentCommand_UnprovableWordBlameIsCausal(t *testin
 		"pinning the named word must clear the refusal it is blamed for")
 }
 
+// The blame must be computed against the names the VERDICT used. A command
+// carrying a ~ word is walked with HOME, PWD and OLDPWD denied too, because the
+// walk reads `~/…` as a fixed path only while nothing rebinds that directory.
+// Blaming against the un-extended set names a dynamic word whose pinning cannot
+// clear the refusal — the tilde-bound assignment still refuses — which is the
+// support burden the named-word message exists to prevent (#4466 review).
+func TestValidateAccountEnvironmentCommand_BlameUsesTheVerdictNameSet(t *testing.T) {
+	err := ValidateAccountEnvironmentCommand(
+		`HOME=/usr; ~/bin/env "$AF_WRAPPER" codex`, scopedProcessTabAccount())
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "$AF_WRAPPER",
+		"pinning the word leaves HOME=/usr refusing, so the message must not send the user after it")
+}
+
 // The refusal error names the exact word af could not prove literal so the
 // user can pin a literal and self-correct — without it a fail-closed change is
 // a support burden, not a fixable message.
@@ -350,18 +388,38 @@ func TestValidateAccountEnvironmentCommand_NamesUnprovableWord(t *testing.T) {
 		"refusal must tell the user how to fix it")
 }
 
-// The evaluation budget is one meter for the whole command, not a fresh
-// 32,768 per CallExpr — syntax.Walk runs the callback once per call, so a
-// program of individually admissible strace invocations (50 calls of a
-// ~900-word argv took ~8s measured) spent the full quadratic suffix cost on
-// each while every call stayed under straceFlatArgvLimit. Sharing the budget
-// across the walk makes the advertised bound cover multi-call programs
-// (Codex on #4466).
+// The evaluation budget is one meter for the whole command, not a fresh one
+// per CallExpr — syntax.Walk runs the callback once per call, so a program of
+// individually admissible strace invocations (50 calls of a ~900-word argv
+// took ~8s measured) spent the full quadratic suffix cost on each while every
+// call stayed under straceFlatArgvLimit. Sharing the budget across the walk
+// makes the advertised bound cover multi-call programs (Codex on #4466).
 func TestCommandMutatesAccountEnvironment_SharedBudgetAcrossCalls(t *testing.T) {
 	codex := accountScopedNames("codex", "CODEX_HOME")
-	// Each call is under the flat-argv cap and spends ~900 metered suffix
-	// slots; 40 of them exceed 32,768 only if the meter is shared.
-	command := strings.Repeat("strace "+strings.Repeat("f ", 900)+"; ", 40)
-	require.True(t, commandMutatesAccountEnvironment(command, codex),
+	// One call of this size is admissible on its own — that is what makes the
+	// pair of assertions a test of SHARING rather than of the cap. Four of
+	// them fit only if each opens a fresh meter.
+	call := "strace " + strings.Repeat("f ", 300) + "; "
+	require.False(t, commandMutatesAccountEnvironment(call, codex),
+		"one call of this size must stay individually admissible")
+	require.True(t, commandMutatesAccountEnvironment(strings.Repeat(call, 4), codex),
 		"a program of individually-admissible calls must exhaust the shared budget")
+}
+
+// The advertised bound is on the VALIDATION, not on a call inside it.
+// ValidateAccountEnvironmentCommand walks the same program up to three times —
+// the verdict, the tilde-cause check, the diagnostic blame — and each walk used
+// to open a fresh budget, so the bound covered a third of what the caller pays
+// for and nothing bounded the wall clock: measured through this function, one
+// 1000-word strace call took 0.54s, eight took 4.8s, and 32 took 18.9s, all
+// ACCEPTED (#4466 review). The meter now counts the walk and is shared across
+// the three, so the same program refuses in a fraction of a second.
+func TestValidateAccountEnvironmentCommand_WholeValidationIsMetered(t *testing.T) {
+	command := strings.Repeat("strace "+strings.Repeat("f ", 1000)+"; ", 32)
+	start := time.Now()
+	err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+	elapsed := time.Since(start)
+	require.Error(t, err, "a program past the meter must refuse, not be judged slowly")
+	require.Less(t, elapsed, 5*time.Second,
+		"one validation must stay inside the metered bound; 18.9s unmetered")
 }

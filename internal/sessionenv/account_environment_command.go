@@ -21,18 +21,29 @@ import (
 // holds only while the command leaves those directories alone (see
 // account_environment_tilde.go).
 func commandMutatesAccountEnvironment(command string, names map[string]struct{}) bool {
-	return commandWalkMutatesAccountEnvironment(command, withTildeBindingNames(command, names))
+	return commandWalkMutatesAccountEnvironment(
+		command, withTildeBindingNames(command, names), &evaluationBudget{})
 }
 
-func commandWalkMutatesAccountEnvironment(command string, names map[string]struct{}) bool {
+// commandWalkMutatesAccountEnvironment walks command under both parser variants
+// on the meter the CALLER owns. The meter is a parameter rather than a local
+// because one validation walks the same program more than once — the verdict,
+// the tilde-cause check, and the diagnostic blame — and a fresh budget per walk
+// bounds each walk while bounding nothing the caller pays for
+// (ValidateAccountEnvironmentCommand).
+func commandWalkMutatesAccountEnvironment(
+	command string,
+	names map[string]struct{},
+	evaluation *evaluationBudget,
+) bool {
 	if command == "" {
 		return false
 	}
-	// One meter for the whole validation: syntax.Walk invokes the callback once
-	// per CallExpr, so allocating the budget inside it let a program of many
-	// individually-admissible calls (50 × 900-word strace argv) spend the full
-	// quadratic suffix cost on each — ~8s on one validation (Codex on #4466).
-	evaluation := &evaluationBudget{}
+	// Both variants draw on the one meter as well: syntax.Walk invokes the
+	// callback once per CallExpr, so a budget allocated any further in let a
+	// program of many individually-admissible calls (50 × 900-word strace
+	// argv) spend the full quadratic suffix cost on each — ~8s on one
+	// validation (Codex on #4466).
 	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
 		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
 		if err != nil {
@@ -128,32 +139,6 @@ func arithmeticAccountEnvironmentName(expr syntax.ArithmExpr) (string, bool) {
 		return "", false
 	}
 	return literalShellWordExpandableSafe(word)
-}
-
-// accountEnvironmentEvaluationBudget bounds the work one command validation
-// may do before the walk fails closed. Recursive descents — nested env
-// commands, wrapper tails, strace suffixes — each charge their argv length, so
-// an attacker-sized input refuses inside a fixed budget instead of
-// overflowing the stack or fanning out exponentially.
-const accountEnvironmentEvaluationBudget = 32768
-
-// evaluationBudget is the shared work meter for one command walk. Every
-// recursive descent into the walker draws on the same counter, so the total
-// cost of validating one command stays bounded no matter how many wrapper
-// layers or suffix judgments the walk reaches.
-type evaluationBudget struct {
-	work int
-	// operandTails bounds the shadowed-wrapper operand walk. Every words slice
-	// inside one validation is a suffix of a call's Args — the parser allocates
-	// each Word once — so the first element's pointer names a distinct remaining
-	// suffix, and the answer to "does the operand-onward tail mutate" depends
-	// only on that suffix and on names, which is fixed for the whole walk.
-	// Without it the same suffix is walked once by the operand check and again
-	// by the enclosing unwrap loop's continuation, so nested value-taking
-	// wrappers recurred exponentially (Codex on #4465: ~3s at depth 20 of
-	// `nice -n nice ...`, unbounded at 25). The map holds its keys, so a Word
-	// from the other parser variant can never reuse an address it names.
-	operandTails map[*syntax.Word]bool
 }
 
 func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}, evaluation *evaluationBudget) bool {

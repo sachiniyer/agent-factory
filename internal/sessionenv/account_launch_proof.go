@@ -145,15 +145,28 @@ func ValidateAccountEnvironmentCommand(command string, account Account) error {
 	for name := range accountShellStartupNames {
 		overrideNames[name] = struct{}{}
 	}
-	if commandMutatesAccountEnvironment(command, overrideNames) {
-		if !commandWalkMutatesAccountEnvironment(command, overrideNames) {
+	// One meter for the whole validation. This function walks the same program
+	// up to three times — the verdict, the tilde-cause check, and the
+	// diagnostic blame — and a fresh budget per walk bounded each walk while
+	// bounding nothing the caller pays for: measured here, 32 calls of a
+	// 1000-word strace argv took 18.9s (#4466 review). A walk that finds the
+	// meter already spent fails closed, which costs only the more specific
+	// wording on inputs that were refused either way.
+	evaluation := &evaluationBudget{}
+	// walkNames is the set the VERDICT is computed against, so the diagnostic
+	// must blame against it too: with the un-extended set,
+	// `HOME=/usr; ~/bin/env "$X" codex` refuses on the tilde-bound HOME while
+	// the message names "$X", and pinning "$X" does not clear the refusal.
+	walkNames := withTildeBindingNames(command, overrideNames)
+	if commandWalkMutatesAccountEnvironment(command, walkNames, evaluation) {
+		if !commandWalkMutatesAccountEnvironment(command, overrideNames, evaluation) {
 			return accountCommandValidationErrorf(
 				"account %q cannot scope sibling environment for agent %q: its command changes HOME, PWD, or OLDPWD and "+
 					"also uses a ~ path, so af cannot tell what that path expands to — it could become an option or an "+
 					"identity assignment; write the path out in full instead of using ~",
 				account.Name, account.Agent)
 		}
-		if word := unprovableWordCausedRefusal(command, overrideNames); word != "" {
+		if word := unprovableWordCausedRefusal(command, walkNames, evaluation); word != "" {
 			return accountCommandValidationErrorf(
 				"account %q cannot scope sibling environment for agent %q: its command sets an identity or shell-startup variable itself, which can override the account directory — the command word %q is not provably a literal, so af cannot prove what it expands to: replace it with a literal value (a fixed path, name, or option) and retry",
 				account.Name, account.Agent, word)

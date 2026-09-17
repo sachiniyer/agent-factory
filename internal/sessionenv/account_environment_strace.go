@@ -6,13 +6,12 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// straceFlatArgvLimit bounds the suffix scan's flat fan-out. A command line
-// with more words than this is not an ordinary invocation, and scanning every
-// suffix would do quadratic real work below the shared meter: each suffix
-// judgment re-walks its tail, so the meter's one slot per suffix understates
-// the true cost. The cap is set where the quadratic stays sub-second — a
-// measured ~8000-word flat argv took ~13s, while this bound lands under half
-// a million pair-judgments per parse pass.
+// straceFlatArgvLimit is the suffix scan's flat early-out: a command line with
+// more words than this is not an ordinary invocation, so it refuses before the
+// hazard record even reads it. It is no longer what bounds the quadratic —
+// the shared meter charges each suffix judgment the length of the suffix it
+// walks (#4466 review), so the budget bites first on any argv long enough to
+// matter. This stays as the O(1) guard in front of that arithmetic.
 const straceFlatArgvLimit = 1024
 
 // unwrapStrace judges a strace invocation without a grammar for its options.
@@ -43,15 +42,24 @@ func unwrapStrace(
 	if len(words) > straceFlatArgvLimit {
 		return nil, true
 	}
+	// The hazard record reads every word once.
+	evaluation.work += len(words)
+	if evaluation.work >= accountEnvironmentEvaluationBudget {
+		return nil, true
+	}
 	if straceArgvHazardous(words, names) {
 		return nil, true
 	}
 	for i := range words {
-		// One metered slot per suffix judgment: the flat fan-out is bounded by
-		// straceFlatArgvLimit above, while each descent draws on the shared
-		// budget for its own argv — a plain long argv costs only its length in
-		// slots, but nested strace/env recursion stays bounded.
-		evaluation.work += 1
+		// Charge the suffix its own LENGTH, not one slot. Judging words[i:] as
+		// a command line re-walks that whole tail, so a slot-per-suffix meter
+		// understated the cost by a factor of n and the advertised bound held
+		// only for a single short call: measured through
+		// ValidateAccountEnvironmentCommand, 32 calls of a 1000-word argv took
+		// 18.9s while every call stayed inside its own slot count (#4466
+		// review). Charging the real walk puts flat argv, nested descent and
+		// multi-call programs on one honest meter.
+		evaluation.work += len(words) - i
 		if evaluation.work >= accountEnvironmentEvaluationBudget {
 			return nil, true
 		}

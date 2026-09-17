@@ -474,6 +474,9 @@ type braceExpansionState struct {
 // position (or right after a leading '!'/'^' negation) is itself a member, and
 // an unquoted '\' escapes the next member byte. A '[' that never closes is a
 // literal character, not a glob.
+//
+// The state only TRACKS; it consumes no byte from the word's other readers.
+// Letting it consume them is the bug #4579 measured — see appendUnexpandedLit.
 type bracketGlobState struct {
 	open     bool
 	negation bool
@@ -485,7 +488,11 @@ type bracketGlobState struct {
 // quoted byte can never close it, but a '!' or '^' in first position is still
 // the negation marker — quote removal happens before the pattern is read.
 func (b *bracketGlobState) feedMember(c byte) {
-	b.escape = false
+	if b.escape {
+		// A '\' at the end of the preceding unquoted part quotes this byte.
+		b.consumeEscape()
+		return
+	}
 	if b.members == 0 && !b.negation && (c == '!' || c == '^') {
 		b.negation = true
 		return
@@ -493,35 +500,25 @@ func (b *bracketGlobState) feedMember(c byte) {
 	b.members++
 }
 
-// feedUnquoted applies one byte of an unquoted literal part to the bracket
-// state, reporting whether the byte closed a live expression — which makes
-// the whole word a pathname expansion — and whether the byte was consumed as
-// bracket syntax. An opener '[' and every member byte are written to value;
-// the escape '\' resolves like the word-level one and is not written.
-func (b *bracketGlobState) feedUnquoted(value *strings.Builder, c byte) (closed, handled bool) {
-	if b.escape {
-		b.escape = false
-		b.members++
-		value.WriteByte(c)
-		return false, true
-	}
+// feed applies one unescaped, unquoted byte to the bracket state and reports
+// whether the byte CLOSED a live expression — which makes the whole word a
+// pathname expansion. It writes nothing and swallows nothing: every reader of
+// the word (the brace-expansion state, the glob-metacharacter check, the value
+// builder) still sees the byte, because a '[' that never closes leaves all of
+// them live for the rest of the word.
+func (b *bracketGlobState) feed(c byte) (closed bool) {
 	if !b.open {
 		if c == '[' {
 			b.open = true
 			b.negation = false
 			b.members = 0
-			value.WriteByte(c)
-			return false, true
 		}
-		return false, false
+		return false
 	}
 	switch c {
-	case '\\':
-		b.escape = true
-		return false, true
 	case ']':
 		if b.members > 0 {
-			return true, true
+			return true
 		}
 		// First position (also right after the negation marker): a member.
 		b.members++
@@ -535,16 +532,36 @@ func (b *bracketGlobState) feedUnquoted(value *strings.Builder, c byte) (closed,
 	default:
 		b.members++
 	}
-	value.WriteByte(c)
-	return false, true
+	return false
+}
+
+// beginEscape records an unquoted '\'. One escape rule serves the whole word:
+// the next byte is quoted, so it is neither brace syntax, nor a glob
+// metacharacter, nor bracket syntax — inside a live bracket expression it is an
+// ordinary member, and outside one it is ordinary literal text.
+func (b *bracketGlobState) beginEscape() {
+	b.escape = true
+}
+
+// escaped reports whether the previous byte was an unquoted '\'.
+func (b *bracketGlobState) escaped() bool {
+	return b.escape
+}
+
+// consumeEscape closes the escape beginEscape opened, counting the quoted byte
+// as a bracket member when an expression is open.
+func (b *bracketGlobState) consumeEscape() {
+	b.escape = false
+	if b.open {
+		b.members++
+	}
 }
 
 // finish flushes a dangling escape at the end of a word: a '\' with no byte
 // after it is literal, matching the word-level rule.
 func (b *bracketGlobState) finish(value *strings.Builder) {
 	if b.escape {
-		b.escape = false
-		b.members++
+		b.consumeEscape()
 		value.WriteByte('\\')
 	}
 }
@@ -573,6 +590,24 @@ func (b *braceExpansionState) feed(c byte, next byte, hasNext bool) (expanded bo
 	return false, false
 }
 
+// appendUnexpandedLit resolves one unquoted literal part of a word into value,
+// reporting whether the part still spells exactly the text it reads as.
+//
+// The order of the readers is the whole correctness argument, and #4579
+// measured what getting it wrong costs. Brace expansion is an EARLIER phase
+// than pathname expansion, so it runs whether or not a bracket expression is
+// open: bash splits `{unset,a[b}` into `unset` and `a[b` before anything reads
+// '[' as a pattern at all. The bracket state used to consume every byte after
+// an unclosed '[' — so the ',' and the '}' never reached the brace state, the
+// word read as one literal, and `{unset,a[b} CODEX_HOME` passed the account
+// guard while bash unset the identity variable.
+//
+// The glob metacharacters are unconditional for the mirror-image reason: an
+// unescaped '*' or '?' seen while a bracket is open refuses whichever way that
+// bracket goes. If it closes, the word is a bracket glob and refuses anyway; if
+// it never closes, the '[' is an ordinary character and the metacharacter is a
+// live wildcard. So the bracket state now only tracks, and every reader sees
+// every byte.
 func appendUnexpandedLit(
 	value *strings.Builder,
 	s string,
@@ -582,41 +617,46 @@ func appendUnexpandedLit(
 ) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if closed, handled := bracket.feedUnquoted(value, c); closed {
-			return false
-		} else if handled {
+		if bracket.escaped() {
+			// Quoted by the preceding '\': literal text and, inside a live
+			// bracket expression, an ordinary member. Nothing else reads it.
+			bracket.consumeEscape()
+			value.WriteByte(c)
 			continue
 		}
 		if c == '\\' {
-			if i+1 < len(s) {
-				i++
-				value.WriteByte(s[i])
-			} else {
-				value.WriteByte(c)
-			}
+			bracket.beginEscape()
 			continue
+		}
+		hasNext := i+1 < len(s)
+		var next byte
+		if hasNext {
+			next = s[i+1]
+		}
+		expanded, skip := braces.feed(c, next, hasNext)
+		if expanded {
+			return false
+		}
+		if skip {
+			// The '..' of a sequence expression: the second '.' carries no
+			// further meaning to any reader, but the bracket state still
+			// counts it as a member.
+			i++
+			if bracket.feed('.') {
+				return false
+			}
+			value.WriteByte('.')
 		}
 		switch c {
 		case '*', '?':
 			return false
-		case '{', '}', ',', '.':
-			hasNext := i+1 < len(s)
-			var next byte
-			if hasNext {
-				next = s[i+1]
-			}
-			expanded, skip := braces.feed(c, next, hasNext)
-			if expanded {
-				return false
-			}
-			if skip {
-				i++
-				value.WriteByte('.')
-			}
 		case '~':
 			if wordStart && i == 0 && !tildePrefixNamesAPath(s) {
 				return false
 			}
+		}
+		if bracket.feed(c) {
+			return false
 		}
 		value.WriteByte(c)
 	}
@@ -638,11 +678,14 @@ func appendUnexpandedLit(
 // all — is a literal cause. An assignment-shaped word keeps its provable name
 // when pinned (the denial lives in the name, not the dynamic value), so
 // `env CODEX_HOME=$X codex` is likewise a literal-cause refusal.
-func unprovableWordCausedRefusal(command string, names map[string]struct{}) string {
-	// The diagnostic walk draws on one meter like the verdict walk does —
-	// semicolon-separated calls share it rather than each spending a fresh
-	// budget.
-	evaluation := &evaluationBudget{}
+func unprovableWordCausedRefusal(
+	command string,
+	names map[string]struct{},
+	evaluation *evaluationBudget,
+) string {
+	// The diagnostic walk draws on the caller's meter, the same one the verdict
+	// walk spent: it re-walks the whole program, so giving it a fresh budget
+	// would let one validation pay for the advertised bound several times over.
 	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
 		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
 		if err != nil {

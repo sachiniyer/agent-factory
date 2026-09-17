@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -44,7 +45,7 @@ func TestCommandMutatesAccountEnvironment_TildePathHeadsKeepTheirWrapperVerdict(
 			head := strings.ReplaceAll(spelling, "%s", row.wrapper)
 			for _, context := range contexts {
 				command := context + head + " " + row.rest
-				require.True(t, commandMutatesAccountEnvironment(command, codex), "command %q", command)
+				assert.True(t, commandMutatesAccountEnvironment(command, codex), "command %q", command)
 			}
 		}
 	}
@@ -74,8 +75,10 @@ func TestValidateAccountEnvironmentCommand_RefusesTildeAfterRebinding(t *testing
 		"env HOME=/tmp/h ~/bin/tool",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
-		require.Error(t, err, "command %q", command)
-		require.Contains(t, err.Error(), "write the path out in full", "command %q", command)
+		if !assert.Error(t, err, "command %q", command) {
+			continue
+		}
+		assert.Contains(t, err.Error(), "write the path out in full", "command %q", command)
 	}
 	// An identity mutation keeps its own message even when a tilde is present.
 	err := ValidateAccountEnvironmentCommand("unset CODEX_HOME; ~/bin/tool", scopedProcessTabAccount())
@@ -94,7 +97,7 @@ func TestCommandMutatesAccountEnvironment_RefusesDirectoryStackTildeHeads(t *tes
 		"nohup ~2/bin/tool",
 		`~us\er/bin/tool`,
 	} {
-		require.True(t, commandMutatesAccountEnvironment(command, codex), "command %q", command)
+		assert.True(t, commandMutatesAccountEnvironment(command, codex), "command %q", command)
 	}
 }
 
@@ -130,6 +133,6 @@ func TestValidateAccountEnvironmentCommand_AdmitsTildePaths(t *testing.T) {
 		"export HOME=/tmp/h; make",
 		"PWD=/srv make",
 	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
+		assert.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
 	}
 }
