@@ -82,10 +82,18 @@ export interface ClipboardDeps {
   clearSelection(): void;
   /** Copy text to the system clipboard, with a graceful, never-silent fallback. */
   copy(text: string): void;
-  /** Send text to the PTY as OpInput — the same path onData uses for typed keys. */
-  sendInput(text: string): void;
-  /** Feed genuine typed input back through xterm so it runs onUserInput effects
-   *  (scroll-to-bottom and selection clearing) before onData sends the bytes. */
+  /**
+   * Send typed bytes as genuine user input: xterm's onUserInput effects run
+   * (scroll-to-bottom and selection clearing) before onData sends the bytes.
+   *
+   * Ordinary bytes wait behind a just-committed IME composition so they keep
+   * their typed order. A terminal signal byte — the interrupt included — is sent
+   * at once and is never queued. That rule is enforced by the terminal on the
+   * bytes themselves (TerminalKeybar's SIGNAL_BYTES), not chosen here per call:
+   * there used to be a second, look-alike `sendInput` for the interrupt, and
+   * rewiring it onto the ordered path is what let a focus change drop Ctrl+C
+   * (#4151).
+   */
   sendUserInput(text: string): void;
 }
 
@@ -235,9 +243,10 @@ export function handleClipboardKeydown(ev: ClipboardKeyEvent, deps: ClipboardDep
       return false;
     }
     // No selection: interrupt. Send \x03 ourselves and suppress xterm's own
-    // Ctrl+C handling so the interrupt is emitted exactly once.
+    // Ctrl+C handling so the interrupt is emitted exactly once. It goes out
+    // immediately even mid-composition; see sendUserInput.
     ev.preventDefault();
-    deps.sendInput(ETX);
+    deps.sendUserInput(ETX);
     return false;
   }
 
