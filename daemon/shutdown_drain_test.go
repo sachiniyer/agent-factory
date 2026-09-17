@@ -106,7 +106,6 @@ func TestBackgroundMutationShutdownAbandonsPermanentlyStalledGhostCleanup(t *tes
 	case <-time.After(time.Second):
 		t.Fatal("shutdown remained blocked on a permanently stalled ghost cleanup worker")
 	}
-	manager.lateGhostCleanupWG.Wait()
 
 	if _, admitted := manager.beginBackgroundMutation(); admitted {
 		manager.backgroundMutationWG.Done()
