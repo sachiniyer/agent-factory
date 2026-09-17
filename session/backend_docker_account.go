@@ -413,6 +413,10 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			if err := checkMount(strings.SplitN(arg, "=", 2)[1]); err != nil {
 				return err
 			}
+		case strings.HasPrefix(arg, "-v="):
+			if err := checkMount(strings.TrimPrefix(arg, "-v=")); err != nil {
+				return err
+			}
 		case strings.HasPrefix(arg, "-v") && len(arg) > 2:
 			if err := checkMount(strings.TrimPrefix(arg, "-v")); err != nil {
 				return err

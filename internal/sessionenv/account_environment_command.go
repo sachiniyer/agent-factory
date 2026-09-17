@@ -143,6 +143,17 @@ const accountEnvironmentEvaluationBudget = 32768
 // layers or suffix judgments the walk reaches.
 type evaluationBudget struct {
 	work int
+	// operandTails bounds the shadowed-wrapper operand walk. Every words slice
+	// inside one validation is a suffix of a call's Args — the parser allocates
+	// each Word once — so the first element's pointer names a distinct remaining
+	// suffix, and the answer to "does the operand-onward tail mutate" depends
+	// only on that suffix and on names, which is fixed for the whole walk.
+	// Without it the same suffix is walked once by the operand check and again
+	// by the enclosing unwrap loop's continuation, so nested value-taking
+	// wrappers recurred exponentially (Codex on #4465: ~3s at depth 20 of
+	// `nice -n nice ...`, unbounded at 25). The map holds its keys, so a Word
+	// from the other parser variant can never reuse an address it names.
+	operandTails map[*syntax.Word]bool
 }
 
 func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}, evaluation *evaluationBudget) bool {
@@ -284,13 +295,13 @@ func unwrapAccountCommand(
 			}
 		case isAccountCommandName(words[0], "nice"):
 			var unsafe bool
-			words, unsafe = unwrapNice(words[1:])
+			words, unsafe = unwrapNice(words[1:], names, evaluation)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "timeout"):
 			var unsafe bool
-			words, unsafe = unwrapTimeout(words[1:])
+			words, unsafe = unwrapTimeout(words[1:], names, evaluation)
 			if unsafe {
 				return nil, true
 			}
@@ -302,19 +313,19 @@ func unwrapAccountCommand(
 			}
 		case isAccountCommandName(words[0], "stdbuf"):
 			var unsafe bool
-			words, unsafe = unwrapStdbuf(words[1:])
+			words, unsafe = unwrapStdbuf(words[1:], names, evaluation)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "ionice"):
 			var unsafe bool
-			words, unsafe = unwrapIonice(words[1:])
+			words, unsafe = unwrapIonice(words[1:], names, evaluation)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "taskset"):
 			var unsafe bool
-			words, unsafe = unwrapTaskset(words[1:])
+			words, unsafe = unwrapTaskset(words[1:], names, evaluation)
 			if unsafe {
 				return nil, true
 			}
@@ -326,7 +337,7 @@ func unwrapAccountCommand(
 			}
 		case isAccountCommandName(words[0], "xargs"):
 			var unsafe bool
-			words, unsafe = unwrapXargs(words[1:], names)
+			words, unsafe = unwrapXargs(words[1:], names, evaluation)
 			if unsafe {
 				return nil, true
 			}
@@ -631,7 +642,10 @@ func accountShellCommandWordsProven(words []*syntax.Word) bool {
 	command, _ := literalShellWordExpandableSafe(words[0])
 	// A sibling shell may read profiles, stdin, a script, or a command string.
 	// The only statically proven form is the same absolute, startup-free command
-	// AccountShellCommand generates for a dedicated shell tab.
+	// AccountShellCommand generates for a dedicated shell tab. What stdin can
+	// carry is a property of the whole command, not of these words, so
+	// ValidateAccountEnvironmentCommand checks it separately
+	// (commandFeedsProvenShell).
 	args := make([]string, len(words))
 	for idx, word := range words {
 		arg, literal := literalShellWordExpandableSafe(word)
@@ -641,6 +655,15 @@ func accountShellCommandWordsProven(words []*syntax.Word) bool {
 		args[idx] = arg
 	}
 	if !filepath.IsAbs(command) {
+		return false
+	}
+	// zsh's startup-freedom is only half in its argv: the other half is the
+	// ZDOTDIR pin, which ApplyAccountEnvironment attaches to the exact
+	// generated command alone. Inside a longer command, zsh runs with whatever
+	// environment a wrapper or earlier statement hands it, so it is never
+	// proven here; ValidateAccountEnvironmentCommand admits the exact form
+	// before this walk runs (#4474 review).
+	if filepath.Base(command) == "zsh" {
 		return false
 	}
 	want := trustedAccountShellArgs(command)
