@@ -140,7 +140,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 	}
 	switch {
 	case isAccountCommandName(words[0], "env"):
-		return envCallMutatesAccountEnvironment(words[1:], names)
+		return envCallMutatesAccountEnvironment(words[1:], names, false)
 	case isBareName(words[0], "unset"):
 		return unsetMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "set"):
@@ -269,11 +269,124 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 			if unsafe {
 				return nil, true
 			}
+		case isAccountCommandName(words[0], "xargs"):
+			var unsafe bool
+			words, unsafe = unwrapXargs(words[1:], names)
+			if unsafe {
+				return nil, true
+			}
 		default:
+			if unrecognizedWrapperHidesAccountAssignment(words, names) {
+				return nil, true
+			}
 			return words, false
 		}
 	}
 	return nil, false
+}
+
+// unrecognizedWrapperHidesAccountAssignment reports whether the literal tail
+// words of an unrecognized argv-passthrough wrapper carry a NAME=... assignment
+// whose NAME is one af removes for the selected account, specifically by
+// nesting an env invocation inside the wrapper's argument list.
+//
+// unwrapAccountCommand peels a CLOSED list of wrappers (exec/command/builtin/
+// nohup/nice/timeout/setsid/stdbuf/ionice/taskset/xargs); every other binary
+// that runs a child command and passes argv through (strace/perf/valgrind/
+// gdb --args/...) falls to the default arm and was returned opaque. Wrapping the
+// modelled `env NAME=value <agent>` mutation — which the guard already refuses
+// bare and under every modelled wrapper — in an unmodeled wrapper hid the inner
+// assignment from the walk, so `strace env CODEX_HOME=/other codex` was accepted
+// while `nohup env CODEX_HOME=/other codex` was refused.
+//
+// This lifts envCallMutatesAccountEnvironment's NAME= rule one level: scan
+// the wrapper's literal argv tail for an `env` invocation and delegate to
+// envCallMutatesAccountEnvironment when one is found. Commands that do not
+// contain a nested env invocation are not refused even when an argument
+// resembles a NAME=value token, so noun-uses such as `echo CODEX_HOME=/tmp`,
+// `rg 'OPENAI_API_KEY='`, `man env`, `make env`, `git grep env`, `ls env/bin`,
+// `pip show env`, or `strace -p 1234 env` (none of which carries a nested env
+// invocation with a denied assignment) stay allowed.
+//
+// The same tail scan applies the modeled path's other two rules one level
+// down: a shell word with argv is judged by shellCommandIsUnproven exactly as
+// a bare `sh -c '...'` command is, and a literal option word whose VALUE is a
+// denied name or assignment (xargs --process-slot-var=NAME, strace -E var=val
+// and --env=var=val) is refused — a wrapper's own options can place the
+// mutation without any env word.
+func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}) bool {
+	strace := isAccountCommandName(words[0], "strace")
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		if isAccountCommandName(word, "env") {
+			// A nested env only mutates the child it execs; requireCommand
+			// keeps an `env CODEX_HOME=/tmp` whose argv ends there — env's
+			// print mode, which overrides nothing — allowed.
+			if envCallMutatesAccountEnvironment(words[i+1:], names, true) {
+				return true
+			}
+			continue
+		}
+		literal, ok := literalShellWord(word)
+		if !ok {
+			// An unprovable tail word can itself expand to `env` (or to a
+			// multiword `env NAME=value` after word splitting); judge the
+			// words after it as that invocation's argv.
+			if envCallMutatesAccountEnvironment(words[i+1:], names, true) {
+				return true
+			}
+			continue
+		}
+		if !strings.HasPrefix(literal, "-") {
+			// A shell in the wrapper's tail gets the same verdict a bare
+			// shell command gets: `strace sh -c 'unset CODEX_HOME; codex'`
+			// execs the literal script the modeled path already refuses
+			// under `nice sh -c ...`. Only the trusted account-shell form
+			// proves out. A trailing shell name with no argv (echo sh,
+			// strace -p 1 sh) has nothing to judge and stays allowed.
+			if i+1 < len(words) && knownShellName(filepath.Base(literal)) &&
+				shellCommandIsUnproven(words[i:]) {
+				return true
+			}
+			continue
+		}
+		if strace {
+			switch {
+			case literal == "-E" || literal == "--env":
+				// strace's env option takes var[=val] as a separate word and
+				// injects or REMOVES the variable in the traced child's
+				// environment — the same mutation the env arm refuses, in
+				// option spelling. It is strace-only because -E means
+				// extended-regexp to grep and friends.
+				i++
+				if i >= len(words) {
+					return true
+				}
+				value, ok := literalShellWord(words[i])
+				if !ok || accountEnvironmentOperandDenied(value, names) {
+					return true
+				}
+				continue
+			case strings.HasPrefix(literal, "-E"):
+				if accountEnvironmentOperandDenied(literal[2:], names) {
+					return true
+				}
+				continue
+			}
+		}
+		// An unrecognized wrapper may expose options that mutate its
+		// child's environment in option-value form — xargs's
+		// --process-slot-var=NAME sets NAME on every exec'd command, and
+		// strace's --env=var=val is analogous. A literal `--opt=DENIED` or
+		// `--opt=DENIED=value` is refused when its value names a denied
+		// variable or carries a denied assignment.
+		if _, value, ok := strings.Cut(literal, "="); ok {
+			if accountEnvironmentOperandDenied(value, names) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {
@@ -341,22 +454,39 @@ func unwrapCommandBuiltin(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return words, false
 }
 
-func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
+// envCallArgvParse literalizes env's operand words the way env itself parses
+// them: a non-literal word that still spells a NAME= assignment keeps its name
+// (the value is dynamic), and anything else is unprovable so the parse fails.
+func envCallArgvParse(words []*syntax.Word) (envcommand.Invocation, error) {
 	literals := make([]string, 0, len(words))
 	for _, word := range words {
 		value, literal := literalShellWord(word)
 		if !literal {
 			name, assignment := shellWordAssignmentName(word)
 			if !assignment {
-				return true
+				return envcommand.Invocation{}, envcommand.ErrUnsupported
 			}
 			value = name + "=AF_DYNAMIC_VALUE"
 		}
 		literals = append(literals, value)
 	}
-	invocation, err := envcommand.Parse(literals, envcommand.Policy{AllowAssignments: true})
+	return envcommand.Parse(literals, envcommand.Policy{AllowAssignments: true})
+}
+
+// envCallMutatesAccountEnvironment reports whether the env invocation formed by
+// words mutates a denied name or execs something unprovable. requireCommand
+// restricts that verdict to env invocations carrying a command word: print-mode
+// env mutates only its own process, which is the right reading when the words
+// sit in an unrecognized wrapper's tail rather than forming the command itself —
+// an `env CODEX_HOME=/tmp` with nothing after it runs env's print path, not an
+// override of a running agent.
+func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}, requireCommand bool) bool {
+	invocation, err := envCallArgvParse(words)
 	if err != nil || invocation.ClearEnvironment {
 		return true
+	}
+	if requireCommand && invocation.CommandIndex < 0 {
+		return false
 	}
 	for _, mutation := range invocation.Mutations {
 		if _, denied := names[mutation.Name]; denied {
@@ -394,9 +524,21 @@ func accountShellCommandWordsProven(words []*syntax.Word) bool {
 	command, _ := literalShellWord(words[0])
 	// A sibling shell may read profiles, stdin, a script, or a command string.
 	// The only statically proven form is the same absolute, startup-free command
-	// AccountShellCommand generates for a dedicated shell tab.
+	// AccountShellCommand generates for a dedicated shell tab. What stdin can
+	// carry is a property of the whole command, not of these words, so
+	// ValidateAccountEnvironmentCommand checks it separately
+	// (commandFeedsProvenShell).
 	args, literal := literalCommandArgs(words)
 	if !literal || !filepath.IsAbs(command) {
+		return false
+	}
+	// zsh's startup-freedom is only half in its argv: the other half is the
+	// ZDOTDIR pin, which ApplyAccountEnvironment attaches to the exact
+	// generated command alone. Inside a longer command, zsh runs with whatever
+	// environment a wrapper or earlier statement hands it, so it is never
+	// proven here; ValidateAccountEnvironmentCommand admits the exact form
+	// before this walk runs (#4474 review).
+	if filepath.Base(command) == "zsh" {
 		return false
 	}
 	want := trustedAccountShellArgs(command)
@@ -465,7 +607,24 @@ func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struc
 //
 // Deliberately narrow: a process tab runs an arbitrary user command, and an
 // ordinary `set -e` prologue must keep working. Only keyword mode is refused.
+//
+// Option arity modelled by this scanner:
+//
+//	-o / +o   conditional arity — consumes the next word as a mode name ONLY
+//	          when that word does not start with `-` or `+`. Real mode names
+//	          (pipefail, noclobber, keyword, …) never start with either; when
+//	          the next word does start with one it is another option that the
+//	          scan must keep examining. This applies to both the standalone
+//	          `-o` word and to `o` embedded in a minus-prefixed cluster.
+//	          These are the only conditional-arity options; all others have
+//	          fixed arity (zero).
+//
+// Keyword-mode tracking: bash processes options left to right; a later `-k`
+// overrides an earlier `+k` and vice versa. The scanner tracks the running
+// state rather than returning on the first `-k`, so a sequence like
+// `set -k +k` is correctly seen as leaving keyword mode off.
 func setMutatesAccountEnvironment(words []*syntax.Word) bool {
+	keywordMode := false
 	for idx := 0; idx < len(words); idx++ {
 		value, literal := literalShellWord(words[idx])
 		if !literal {
@@ -474,12 +633,25 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 		}
 		// `--` and the first non-option operand both end option parsing: every
 		// word after one is a positional parameter, so `set -- -k` assigns the
-		// string "-k" to $1 and enables nothing.
-		if value == "--" || !strings.HasPrefix(value, "-") {
-			return false
+		// string "-k" to $1 and enables nothing. A lone `-` is also a bash
+		// option terminator ("assign any remaining arguments to the positional
+		// parameters"); `set +e - -k` assigns "-k" to $1 and does NOT enable
+		// keyword mode. A `+` prefix is a turn-OFF flag in bash, not a
+		// non-option operand, so it does NOT end the scan: `set +e -k` still
+		// enables keyword mode and must be caught by the loop below.
+		if value == "--" || value == "-" || (!strings.HasPrefix(value, "-") && !strings.HasPrefix(value, "+")) {
+			return keywordMode
 		}
-		// A long-form switch names its mode in the next word. `+o keyword` turns
-		// the mode OFF, so only the minus form is a switch on.
+		// A long-form switch names its mode in the next word.
+		//
+		// `-o` has conditional arity: it consumes the following word as a mode
+		// name ONLY when that word does not start with `-` or `+`. A real mode
+		// name (pipefail, noclobber, keyword, …) never starts with either; a
+		// word that does start with one is another option that the scan must
+		// continue examining. When the next word is another option, `-o` behaves
+		// as bare `-o` (prints current settings) and the shell processes the
+		// following option normally — so `set +e -o -k` does enable keyword mode
+		// via the `-k` that the `-o` branch must NOT swallow.
 		if value == "-o" || value == "+o" {
 			if idx+1 >= len(words) {
 				// A bare `set -o` prints the current settings.
@@ -489,20 +661,61 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 			if !ok {
 				return true
 			}
-			if value == "-o" && mode == "keyword" {
-				return true
+			// Only treat the next word as the mode name when it cannot itself
+			// be an option token. Mode names (pipefail, noclobber, …) never
+			// start with `-` or `+`; a word that does start with one is an
+			// option that must be examined on the next iteration.
+			if strings.HasPrefix(mode, "-") || strings.HasPrefix(mode, "+") {
+				continue
+			}
+			if mode == "keyword" {
+				keywordMode = value == "-o"
 			}
 			idx++
 			continue
 		}
 		// Short options cluster, so a guard matching only a lone "-k" walks
-		// straight past "-ek" (the #3402 lesson). "+k" DISABLES keyword mode and
-		// is not a prefix match here.
-		if strings.ContainsRune(value[1:], 'k') {
-			return true
+		// straight past "-ek" (the #3402 lesson). Track the running state
+		// rather than returning immediately, so a later `+k` can cancel an
+		// earlier `-k` (bash processes options left to right and the last
+		// setting wins: `set -k +k` leaves keyword mode off).
+		//
+		// When a minus-prefixed cluster contains `o`, it has the same
+		// conditional arity as the standalone `-o`: if the following word does
+		// not start with `-` or `+`, that word is the mode name (and is consumed
+		// by advancing idx). A plus-prefixed cluster containing `o` (`+eo`)
+		// behaves as `+o` and turns the named mode OFF.
+		prefix := value[0]
+		tail := value[1:]
+		if strings.ContainsRune(tail, 'o') {
+			if idx+1 >= len(words) {
+				// No following word: bare cluster with `o`, prints settings.
+			} else {
+				mode, ok := literalShellWord(words[idx+1])
+				if !ok {
+					return true
+				}
+				if !strings.HasPrefix(mode, "-") && !strings.HasPrefix(mode, "+") {
+					// The following word is a mode name; consume it.
+					if mode == "keyword" {
+						keywordMode = prefix == '-'
+					}
+					idx++
+					// Fall through to the `k` check: the cluster may contain `k`
+					// in addition to `o` (e.g. `-ko pipefail`), and bash applies
+					// all cluster characters — those before `o` and those after `o`
+					// when the consumed name is valid. Skipping the check here
+					// would miss a `k` in the same cluster.
+				}
+				// The following word is another option (or we just consumed the
+				// mode name); fall through to the `k` check below.
+			}
+		}
+		if strings.ContainsRune(tail, 'k') {
+			keywordMode = prefix == '-'
 		}
 	}
-	return false
+	return keywordMode
 }
 
 // hashMutatesAccountEnvironment reports whether a `hash` call remaps a command

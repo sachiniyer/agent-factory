@@ -107,6 +107,11 @@ func TestListBackends_OffersEverySupportedBackend(t *testing.T) {
 // with no reason to show.
 func TestListBackends_ReflectsRepoConfig(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// A local engine so the docker locality precondition resolves without a docker
+	// call; the picker must agree with the runtime that a configured, local repo is
+	// usable (see TestBackendUnusableReason_DockerRefusesRemoteEngine).
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	stubLookPath(t)
 	repo := setupControlRepo(t)
 	addOrigin(t, repo)
@@ -139,6 +144,10 @@ func TestListBackends_DefaultMatchesTheCreatePath(t *testing.T) {
 	})
 
 	t.Run("repo backend config is the default", func(t *testing.T) {
+		// A local engine so the docker locality precondition resolves without a
+		// docker call; the default's status is computed from the docker option.
+		t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+		t.Setenv("DOCKER_CONTEXT", "")
 		stubLookPath(t)
 		repo := setupControlRepo(t)
 		addOrigin(t, repo)
@@ -389,6 +398,10 @@ func TestListBackends_RequiresARepo(t *testing.T) {
 // exists to keep honest.
 func TestListBackends_AnswersOverTheControlSocket(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// A local engine so the docker locality precondition resolves without a docker
+	// call; docker is configured here, so the socket must report it selectable.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
 	stubLookPath(t)
 	repo := setupControlRepo(t)
 	addOrigin(t, repo)

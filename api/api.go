@@ -489,6 +489,35 @@ func repoHasInstanceTitle(repoID, title string) (bool, error) {
 	return false, nil
 }
 
+// repoHasLiveInstanceTitle is like repoHasInstanceTitle but skips archived
+// rows. Used by the sessions-create pre-check: the daemon intentionally
+// reclaims an archived-only title by renaming the archived record to
+// "<title> (archived)" and proceeding (renameArchivedForReuseLocked), so
+// counting an archived row as "already exists" would abort a create the daemon
+// would allow, with the wrong error. RecordedLiveness resolves both the
+// explicit Liveness field and the legacy Status fallback so a row persisted
+// before the Liveness field existed is still detected as archived and skipped.
+// The authoritative race-safe check still happens inside the daemon under the
+// per-repo file lock, so letting archived rows through is safe.
+//
+// NOTE: do NOT use this for the send-prompt existence pre-check
+// (instanceTitleExistsInScope). Send-prompt to an archived session should fall
+// through to the daemon, which returns the actionable "session is Archived;
+// restore it first" error (promptTargetLivenessError). Using this filtered
+// predicate there would return "not found" instead.
+func repoHasLiveInstanceTitle(repoID, title string) (bool, error) {
+	instances, err := loadRepoInstanceData(repoID)
+	if err != nil {
+		return false, err
+	}
+	for i := range instances {
+		if instances[i].Title == title && session.RecordedLiveness(instances[i]) != session.LiveArchived {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
 	raw, err := config.LoadRepoInstances(repoID)
 	if err != nil {

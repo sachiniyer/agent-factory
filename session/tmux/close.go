@@ -29,7 +29,7 @@ var ErrSessionStillAlive = errors.New("tmux session is still alive")
 
 // ErrSessionVanishedBeforeCapture marks a pane-list read that failed because
 // tmux says the session does not exist. Whether that is a determinate EMPTY or a
-// lost ancestry depends on the caller: see captureSessionProcessTrees.
+// lost ancestry depends on the caller: see CaptureSessionProcessTrees.
 var ErrSessionVanishedBeforeCapture = errors.New("tmux session was gone before its panes could be listed")
 
 // PaneState is what a bounded teardown could ESTABLISH about a tmux session, and
@@ -141,7 +141,7 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
 	// (#1104).
-	leaked, captureErr := captureSessionProcessTrees(t.cmdExec, t.sanitizedName)
+	leaked, captureErr := CaptureSessionProcessTrees(t.cmdExec, t.sanitizedName)
 
 	// Bounded by tmuxCommandTimeout (#1917), through the run so the deadline counts
 	// itself: an unbounded kill-session against a wedged server blocks
@@ -299,6 +299,14 @@ func (t *TmuxSession) CloseAndWaitForPaneExitTrustingOwnGeneration() (PaneState,
 }
 
 func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneState, bool, error) {
+	// Invalidate any prior closed-conclusively proof before starting a fresh close
+	// attempt. A previously latched true persists through a blind refusal or a
+	// PaneStateUnknown return — neither of those re-routes through the flag
+	// clearing entry points (Start or RestoreWithResult's live-session branch) —
+	// so the stale flag could let stopForAccountSwap skip a session that still has
+	// a live pane (#703b4a70 follow-up). Clear here and re-latch below only on
+	// conclusive non-blind success.
+	t.setClosedConclusively(false)
 	pid, pidErr := t.panePID()
 	var (
 		paneProcess proctree.Process
@@ -410,6 +418,23 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 	// comes from Close, and the nothing-still-writing fact comes from the captured
 	// process set, which INCLUDES the pane leader. Neither depends on the PID
 	// query, so it has nothing left to tell the caller.
+	//
+	// A conclusive teardown that OBSERVED the pane (blind is false) latch the
+	// closed-conclusively flag so the redundant stopForAccountSwap can skip
+	// re-closing an already-dead session instead of re-classifying it blind and
+	// wrapping ErrAccountSwapAgentTeardownBlind onto an unrelated error — the
+	// respawnFresh path, whose inner finishRecoverTabFailure already closed the
+	// pane conclusively before its outer stopForAccountSwap runs (#703b4a70).
+	//
+	// Only the non-blind branch latches. A blind conclusive close (session gone
+	// with no pane observed, ancestry lost) keeps the flag false so a later
+	// stopForAccountSwap still re-checks (the ancestry scan is not safe to skip),
+	// and an inconclusive close (PaneStateUnknown) stays false so the backstop
+	// close in stopForAccountSwap still runs on the ts.Start-failure path where
+	// no inner close ever ran (#703b4a70).
+	if !blind {
+		t.setClosedConclusively(true)
+	}
 	return PaneStateKnown, blind, nil
 }
 
