@@ -707,8 +707,14 @@ function delay(milliseconds) {
 }
 
 async function evaluate({ github, context, core, prNumber, setOutputs = true }) {
+  // The resolved PR's node id is what reportDecision's NOT_FOUND
+  // classification reads, so evaluatePullRequest publishes it here the moment
+  // it is known — a mid-evaluation failure then still writes its scoped
+  // failure against the right subject instead of rethrowing unclassified
+  // (#4484, Codex on #4486).
+  const resolved = {};
   try {
-    return await evaluatePullRequest({ github, context, core, prNumber, setOutputs });
+    return await evaluatePullRequest({ github, context, core, prNumber, setOutputs, resolved });
   } catch (error) {
     // A PR that no longer exists is a conclusion, not an evaluation failure: it
     // cannot be evaluated and there is nothing to report on it. isOpen false
@@ -731,6 +737,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
       prNumber: prNumber ? String(prNumber) : "",
       shouldMerge: false,
       isOpen: false,
+      pullRequestId: resolved.pullRequestId,
       readFailure: isReadFailure(error),
       reasons: [`auto-gate evaluation error: ${message}`],
       notes: [],
@@ -738,7 +745,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
   }
 }
 
-async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true }) {
+async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true, resolved }) {
   const number = prNumber || (await findPullRequestNumber({ github, context, core }));
 
   if (!number) {
@@ -752,6 +759,12 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   }
 
   const pr = await getPullRequest({ github, context, number });
+  // From here on a failure is a failure OF a known PR: hand its node id back
+  // through the carrier so evaluate()'s failure result can still write the
+  // scoped decision against the right subject.
+  if (resolved) {
+    resolved.pullRequestId = pr.id;
+  }
   const baseRepository = `${context.repo.owner}/${context.repo.repo}`;
   const reasons = [];
   const notes = [];
@@ -916,10 +929,12 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     try {
       playTest = await evaluatePlayTest({ github, context, pr, comments: codex.comments, subject });
     } catch (error) {
-      // TUI evidence is advisory for authors the gate never auto-merges. Keep
-      // unreadable snapshots advisory too, without swallowing review/check
-      // failures or relaxing snapshot verification on the automatic path.
-      if (isAllowedAuthor(pr.author)) throw error;
+      // An attestation that cannot be verified fails closed as a BLOCKED
+      // reason for EVERY author class — never an unhandled error. Re-throwing
+      // on the automatic path used to surface this as "auto-gate evaluation
+      // error", which the aggregate run then aborted on: one unresolvable
+      // attested SHA took the whole repository's gate down (#4484). The
+      // reason still blocks the merge, so nothing relaxes verification.
       playTest = {
         ok: false,
         message: `play-tested attestation could not be verified: ${error.message || String(error)}`,
@@ -2002,7 +2017,64 @@ async function processAggregateHead({
         });
         return { state: "evaluation-error", pending, aggregate };
       }
-      throw new Error(`Auto Gate evaluation failed for PR #${prNumber}: ${result.summary}`);
+      // A deterministic evaluation failure is scoped to this PR — unrelated
+      // PRs sharing this run still evaluate and publish; throwing here used
+      // to kill the whole job and take the gate down repo-wide (#4484). But
+      // skipping the write is NOT neutral: an earlier run can have left a
+      // green (PR, head) decision on this unchanged head, and the aggregate
+      // accepts any completed success it rereads — republishing green for a
+      // PR this run never evaluated (#4486 review). Write the failure in
+      // place so the reread reads this run's truth.
+      core.warning(`Auto Gate evaluation failed for PR #${prNumber}; scoping the failure to that PR: ${result.summary}`);
+      try {
+        const failedWrite = await reportDecision({
+          github,
+          context,
+          core,
+          // A workflow_dispatch recovery with no prior decision must publish
+          // this failure as NEVER_RAN, the same state the normal decision
+          // write below produces — dropping `manual` here rendered it as an
+          // ordinary WAITING and erased the "recovery found nothing" signal
+          // (Codex on #4486).
+          manual,
+          result: {
+            prNumber,
+            headSha: pending.headSha,
+            pullRequestId: result.pullRequestId,
+            shouldMerge: false,
+            reasons: [`auto-gate evaluation error: ${result.summary}`],
+            summary: `Auto Gate could not evaluate this pull request: ${result.summary}`,
+            requiredCheckObservations: [],
+          },
+        });
+        if (failedWrite.state === "read-only") {
+          return { state: "read-only", pending };
+        }
+      } catch (error) {
+        // The same classification the normal decision write below uses: a PR
+        // that vanished mid-run is an association change, a read that gave up
+        // is an evaluation error, anything else stays fatal.
+        if (error?.autoGatePullRequestGone) {
+          core.notice(
+            `Keeping aggregate ${pending.headSha} non-green because PR #${prNumber} ` +
+              "no longer exists.",
+          );
+          return { state: "association-changed", pending };
+        }
+        if (!isReadFailure(error)) {
+          throw error;
+        }
+        const aggregate = await blockAggregateEvaluation({
+          github,
+          context,
+          core,
+          headSha: pending.headSha,
+          checkRunId: pending.checkRunId,
+          reason: formatError(error),
+        });
+        return { state: "evaluation-error", pending, aggregate };
+      }
+      continue;
     }
     if (result.headSha !== pending.headSha) {
       // The association changed after the snapshot. Keep the aggregate red;
@@ -2334,10 +2406,17 @@ async function evaluateAggregateFresh({ github, context, core, headSha }) {
       setOutputs: false,
     });
     if (evaluationFailed(result)) {
-      throw evaluationFailure(
-        `Auto Gate fresh aggregate evaluation failed for PR #${pull.number}: ${result.summary}`,
-        result,
-      );
+      if (result.readFailure) {
+        throw evaluationFailure(
+          `Auto Gate fresh aggregate evaluation failed for PR #${pull.number}: ${result.summary}`,
+          result,
+        );
+      }
+      // The same scoping as the pending loop: a deterministic failure on one
+      // PR is that PR's blocker, not an abort for every PR sharing the head
+      // (#4484). The aggregate stays red until that PR evaluates cleanly.
+      blockers.push(`PR #${pull.number} at this commit could not be evaluated: ${decisionWaitingReason(result)}`);
+      continue;
     }
     if (result.headSha !== sha) {
       blockers.push(`PR #${pull.number} no longer evaluates at this commit`);
@@ -2660,12 +2739,19 @@ async function listParkedRuns({ github, context, headSha, subject = null }) {
 // Named, so a test can assert the file it points at actually accepts a dispatch.
 const VALIDATION_WORKFLOW = "pr.yml";
 const GATE_WORKFLOW = "auto-gate.yml";
-// A schedule is the backstop for terminal workflow_run events GitHub does not
-// deliver. It never fans one workflow's matrix out into one gate run per check:
-// completed Build/Lint checks select only decisions that name them as blockers,
-// each PR/head appears once, and one sweep starts at most this many evaluations.
+// A reconciliation pass is the backstop for terminal workflow_run events GitHub
+// does not deliver. It never fans one workflow's matrix out into one gate run per
+// check: completed Build/Lint checks select only decisions that name them as
+// blockers, each PR/head appears once, and one pass starts at most this many
+// evaluations.
 const REQUIRED_CHECK_REEVALUATION_LIMIT = 10;
 const REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE = 100;
+// A pass runs on the schedule, or as the one repository_dispatch type
+// auto-gate.yml subscribes to. GitHub delivers the */5 schedule every two to
+// five hours (#4571), so ordinary runs request the dispatch, at most once per
+// this window.
+const REQUIRED_CHECK_RECONCILIATION_DISPATCH = "auto-gate-reconcile";
+const REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
 const PR_VALIDATION_REQUIRED_CHECK_NAMES = ["Build", "Lint"];
 
 // Reruns the successor of an accepted update, whichever lane failed to finish
@@ -4169,6 +4255,102 @@ async function listRequiredCheckReevaluationTargets({ github, context, core }) {
   return targets;
 }
 
+function isRequiredCheckReconciliationDispatch(context) {
+  return (
+    context.eventName === "repository_dispatch" &&
+    context.payload?.action === REQUIRED_CHECK_RECONCILIATION_DISPATCH
+  );
+}
+
+// Called by every Auto Gate run that is not itself a pass (#4571). The request
+// is one repository_dispatch; the run it starts is a full scheduled pass, with
+// the same ten-evaluation cap and the same PR Validation blocker filter, and it
+// serializes with scheduled passes in one concurrency group.
+//
+// Two guards keep this from fanning out:
+//
+// - A pass never requests a pass. Schedule and repository_dispatch runs return
+//   before any read. The runs a pass causes can request one, but only through
+//   the rate window below, so the total stays bounded however many there are.
+// - The rate window. The marker is the creation time of this workflow's newest
+//   repository_dispatch run. Every requested pass is such a run, so a pass that
+//   selected nothing is recorded too, and GitHub stores the marker: there is no
+//   variable, ref, or check run to write or leave stale. It costs one REST read
+//   of one result, and filtering on the event keeps the dozens of ordinary runs
+//   an hour out of that result. Two runs that read before either dispatch is
+//   visible can both request. The shared group then holds one running pass and
+//   one pending pass, and a newer pending pass replaces the older one, so the
+//   race costs at most one extra scan.
+//
+// Every failure falls back to not dispatching, which leaves the schedule as the
+// backstop. That is the safe direction. A missed request delays a green PR, but
+// an unbounded one could load the queue the reconciliation is meant to drain.
+async function requestRequiredCheckReconciliation({ github, context, core, now = Date.now() }) {
+  if (context.eventName === "schedule" || context.eventName === "repository_dispatch") {
+    core.info(`A ${context.eventName} run does not request required-check reconciliation.`);
+    return { requested: false, reason: "pass" };
+  }
+  const { owner, repo } = context.repo;
+  // Whole seconds: GitHub stores whole-second creation times, and rounding the
+  // cutoff down only widens the window.
+  const cutoff = Math.floor((now - REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS) / 1000) * 1000;
+  let runs;
+  try {
+    const listed = await retryRead("could not list recent required-check reconciliation runs", () =>
+      github.rest.actions.listWorkflowRuns({
+        owner,
+        repo,
+        workflow_id: GATE_WORKFLOW,
+        event: "repository_dispatch",
+        created: `>=${new Date(cutoff).toISOString().replace(/\.\d{3}Z$/, "Z")}`,
+        exclude_pull_requests: true,
+        per_page: 1,
+      }),
+    );
+    runs = listed?.data?.workflow_runs;
+    if (!Array.isArray(runs)) {
+      throw new Error("the workflow-run listing had no runs array");
+    }
+  } catch (error) {
+    core.warning(
+      `Skipped the required-check reconciliation request: ${formatError(error)}. ` +
+        "The scheduled pass remains the backstop.",
+    );
+    return { requested: false, reason: "unknown-marker" };
+  }
+  // The server applies the created filter, and the listing is newest first.
+  // Checking the time again here keeps the window correct if the filter is ever
+  // ignored. An unreadable time counts as recent, so it cannot cause a dispatch.
+  const recent = runs.find((run) => !(Date.parse(run?.created_at) < cutoff));
+  if (recent) {
+    core.info(
+      `Required-check reconciliation run ${recent.id} was created at ${recent.created_at}; ` +
+        `ordinary runs request at most one pass per ${REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS / 60000} minutes.`,
+    );
+    return { requested: false, reason: "rate-limited", runId: recent.id };
+  }
+  // A dispatch is not idempotent, so it gets one attempt.
+  try {
+    await github.rest.repos.createDispatchEvent({
+      owner,
+      repo,
+      event_type: REQUIRED_CHECK_RECONCILIATION_DISPATCH,
+      client_payload: {
+        source_run_id: String(context.runId || ""),
+        source_event: String(context.eventName || ""),
+      },
+    });
+  } catch (error) {
+    core.warning(
+      `Could not request required-check reconciliation: ${formatError(error)}. ` +
+        "The scheduled pass remains the backstop.",
+    );
+    return { requested: false, reason: "dispatch-failed" };
+  }
+  core.notice("Requested a required-check reconciliation pass for stale decisions.");
+  return { requested: true };
+}
+
 async function resolveTargets({
   github, context, core, prNumber,
   headPollAttempts = 6,
@@ -4176,6 +4358,16 @@ async function resolveTargets({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   if (context.eventName === "schedule") {
+    return listRequiredCheckReevaluationTargets({ github, context, core });
+  }
+  if (isRequiredCheckReconciliationDispatch(context)) {
+    const source = context.payload?.client_payload || {};
+    // Logged only when it is the shape requestRequiredCheckReconciliation
+    // sends: anyone with write access can send this event, and an arbitrary
+    // string on stdout can be read as a workflow command.
+    if (/^[1-9][0-9]*$/.test(String(source.source_run_id)) && /^[a-z_]+$/.test(String(source.source_event))) {
+      core.info(`Required-check reconciliation requested by ${source.source_event} run ${source.source_run_id}.`);
+    }
     return listRequiredCheckReevaluationTargets({ github, context, core });
   }
   const numbers = [];
@@ -4662,7 +4854,21 @@ async function evaluatePlayTest({ github, context, pr, comments, subject }) {
       }
       return JSON.stringify(entries.sort());
     };
-    const tested = await snapshot(testedSha);
+    let tested;
+    try {
+      tested = await snapshot(testedSha);
+    } catch (error) {
+      // A well-formed SHA naming no commit is a bad attestation — user input
+      // with its own blocking reason, not a gate-read failure (#4484).
+      const status = Number(error?.status ?? error?.cause?.status);
+      if (status === 404 || status === 422) {
+        return {
+          ok: false,
+          message: `play-tested attestation names ${testedSha}, which GitHub cannot resolve as a commit (HTTP ${status}); ${remedy}`,
+        };
+      }
+      throw error;
+    }
     const current = await snapshot(pr.headRefOid);
     if (tested !== current) {
       return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
@@ -6540,6 +6746,7 @@ module.exports = {
   reportDecision,
   resolveAggregateHeads,
   resolveMergeRefusal,
+  requestRequiredCheckReconciliation,
   resolveTargets,
   sweepMergedHeadRefs,
   __test: {
