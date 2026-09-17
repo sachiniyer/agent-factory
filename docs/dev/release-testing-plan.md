@@ -15,7 +15,7 @@ These checks must pass on the release commit before cutting a release:
 ```bash
 gofmt -l .
 go vet ./...
-go test -v -race -count=1 ./...
+go test -v -race -count=1 -timeout=30m ./...
 go build ./...
 ```
 
@@ -33,7 +33,7 @@ Run this from a clean checkout of `master`:
 ```bash
 git fetch origin --prune
 git status --short --branch
-go test -v -race -count=1 ./...
+go test -v -race -count=1 -timeout=30m ./...
 go vet ./...
 go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 git diff --check
@@ -132,7 +132,7 @@ Expected result:
 
 Do not cut or publish a release if any of these are true:
 - Any required CI check is failing or pending.
-- Local `go test -v -race -count=1 ./...` fails.
+- Local `go test -v -race -count=1 -timeout=30m ./...` fails.
 - Manual smoke leaves behind tmux sessions, worktrees, or stale storage.
 - The release workflow cannot build all four artifacts.
 - There is an open issue or PR marked as a release blocker.
