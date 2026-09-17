@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -109,7 +110,14 @@ func TestCloseAndWaitForPaneExit_HeldDeadPaneReapsItsDetachedSurvivor(t *testing
 // makes tmux mark the pane dead while the process keeps running, and tmux has
 // not reaped it, so no status, signal or death time is reported. The teardown
 // must still treat that root as a live pane process.
+//
+// Linux only: that state is how a Linux pty answers the root closing its last
+// terminal descriptor. On macOS (tmux 3.7c in CI) the pane is never marked dead
+// while the root runs, so there is no such pane to tear down there.
 func TestCloseAndWaitForPaneExit_DeadPaneWithARunningRootStopsTheRoot(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("a pane is held dead with its root running only on Linux ptys, not on %s", runtime.GOOS)
+	}
 	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
 	name := fmt.Sprintf("af_test_dead_pane_eof_%d", time.Now().UnixNano())
