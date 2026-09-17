@@ -397,10 +397,6 @@ type Manager struct {
 	// after restart; this map prevents a second worker in the same daemon process.
 	// Values are stable IDs so title reuse cannot inherit an old fence.
 	ghostCleanupStalls map[string]string
-	// lateGhostCleanupWG joins detached finalizers before tests restore their
-	// seams. Launchers must return before waiting so every Add precedes Wait;
-	// the production kill path never waits for these retrying workers.
-	lateGhostCleanupWG sync.WaitGroup
 	// backgroundMutationWG owns detached writers spawned by otherwise-synchronous
 	// control/poll paths: conversation capture, task on-complete teardown, and
 	// late ghost cleanup. backgroundMutationMu makes launch-vs-shutdown admission
