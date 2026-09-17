@@ -185,8 +185,8 @@ func TestEnsureRootAgentsLeavesADeadSiblingRootsCarryParked(t *testing.T) {
 // half. The owner's carry is parked on disk — its replacement never published
 // before a restart — and the sibling publishes the repository's root instead.
 // Neither that publish nor the healthy passes that adopt the sibling's root
-// may delete the owner's pin and pending swap: it is warned about once, and it
-// is superseded, by name, only when a later reap takes the one carry slot.
+// may delete the owner's pin and pending swap, and the kept carry is warned
+// about once rather than on every healthy tick.
 func TestEnsureRootAgentsKeepsAnotherWorktreesParkedCarry(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
@@ -226,15 +226,40 @@ func TestEnsureRootAgentsKeepsAnotherWorktreesParkedCarry(t *testing.T) {
 	assert.Equal(t, owner, parked.workspace, "adopting the sibling's root must not retire the owner's carry")
 	assert.Equal(t, 1, strings.Count(warning.String(), "leaving the root agent carry reaped in "+owner),
 		"the parked carry is reported once, not on every healthy tick")
+}
 
-	// The sibling's own root dies and the sibling reaps it: one carry slot per
-	// repository, so the owner's carry is superseded — and said so.
+// TestEnsureRootAgentsNamesTheSiblingCarryAReapSupersedes covers the one way a
+// kept carry still goes: the file holds one carry per repository, so when the
+// sibling's own root dies and the sibling reaps it, the owner's parked carry is
+// overwritten. That retirement has to be named before it happens.
+func TestEnsureRootAgentsNamesTheSiblingCarryAReapSupersedes(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	seen := installOptionsRecordingBackend(t)
+	owner, another := setupBareRepoTwoWorktrees(t)
+	repo, err := config.RepoFromPath(owner)
+	require.NoError(t, err)
+
+	cfg := config.DefaultConfig()
+	cfg.RootAgents = map[string]config.RootAgentConfig{owner: {}, another: {}}
+	manager, warning := newManagerCapturingWarnings(t, cfg)
+	holdRootEnsure(manager, owner, true)
+	manager.ensureRootAgentsAndWait()
+	require.Len(t, *seen, 1)
 	sibling := findRootInstance(t, manager, another)
 	require.NotNil(t, sibling)
-	holdRootEnsure(manager, owner, true)
+	require.Equal(t, another, (*seen)[0].Path)
+
+	// The owner's carry lands on disk after the sibling's root is up, so the
+	// reap below finds it however the healthy passes treat a kept carry.
+	require.NoError(t, manager.writeReapedRootCarry(repo.ID, reapedRootState{
+		workspace: owner, account: "work", agent: tmux.ProgramClaude,
+	}))
 	sibling.SetStatusForTest(session.Lost)
 	manager.ensureRootAgentsAndWait()
-	require.Len(t, *seen, 2)
+
+	require.Len(t, *seen, 2, "the sibling reaps and re-creates its own root")
 	assert.Contains(t, warning.String(), "supersedes the root agent carry parked for "+owner)
 	_, present, err := manager.loadReapedRootCarry(repo.ID)
 	require.NoError(t, err)
