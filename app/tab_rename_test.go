@@ -254,6 +254,7 @@ func TestRenameTabResolvedNameNotice(t *testing.T) {
 	h.store.SetActiveTab(1)
 	calls, _ := recordRenameTab(t, "web-2")
 
+	_, _ = h.showRenameTabPrompt()
 	typeIntoPrompt(h, "-2")
 	_, _ = h.handleStateRenameTab(tea.KeyMsg{Type: tea.KeyEnter})
 
