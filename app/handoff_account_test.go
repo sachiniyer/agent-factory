@@ -206,6 +206,33 @@ func TestHandoffScopedOpaqueCurrentAgentIsNotOffered(t *testing.T) {
 	require.Equal(t, []string{"", "", "", ""}, h.handoffAccounts)
 }
 
+// A scoped session's ambient scope-drop rows must not steal the preselection
+// from a scopable target's logged-in account row just because the drop row
+// comes first in SupportedPrograms order (#4430 review): with claude
+// redirected to a non-agent command, its ambient row precedes codex's account
+// section, and the codex account must still win the default.
+func TestHandoffScopedPreselectsAccountOverAmbientDrop(t *testing.T) {
+	h := newTestHome(t)
+	inst := handoffActionInstance(t, "worker", "gemini")
+	inst.Account = "work"
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+	restore := SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
+		return daemon.ListAccountsResponse{
+			Agents:         []string{"claude", "codex", "gemini"},
+			Entries:        []daemon.AccountEntry{{Agent: "codex", Name: "spare", LoggedIn: true}},
+			ResolvedAgents: map[string]string{"claude": ""},
+		}, nil
+	})
+	defer restore()
+	_, cmd := h.handleHandoff()
+	h.Update(cmd())
+	require.Equal(t, []string{"claude", "codex", "aider", "amp", "opencode", "devin"}, h.handoffChoices)
+	require.Equal(t, []string{"", "spare", "", "", "", ""}, h.handoffAccounts)
+	require.Equal(t, 1, h.selectionOverlay.GetSelectedIndex(),
+		"the logged-in codex account is the default; the leading claude ambient row is only a fallback")
+}
+
 func TestHandoffCredentialWarning(t *testing.T) {
 	h := newTestHome(t)
 	h.store.AddInstance(handoffActionInstance(t, "worker", "claude"))

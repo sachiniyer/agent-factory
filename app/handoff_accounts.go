@@ -38,6 +38,12 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 	current, _ := selected.AccountSelection()
 	agents, accounts, labels, warnings := []string{}, []string{}, []string{}, []string{}
 	preselected := -1
+	// ambientFallback records the first scope-drop row for a scoped session:
+	// it is a valid offer but never the right default while a scopable
+	// target's account row exists, so it is only consulted if no account row
+	// claims preselected (#4430 review). An unscoped session's ambient rows
+	// ARE the same-identity default and claim preselected directly.
+	ambientFallback := -1
 	// The daemon's account-capable roster decides whether a target can carry a
 	// scope at all; a registry entry is proof of the same fact for a response
 	// whose roster was empty.
@@ -93,8 +99,12 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 		// carries one: the daemon refuses a resolved-identity self-handoff, so
 		// the offer would only error.
 		if !isCurrent && (current == "" || !canCarry) {
-			if preselected < 0 {
-				preselected = len(labels)
+			if current == "" {
+				if preselected < 0 {
+					preselected = len(labels)
+				}
+			} else if ambientFallback < 0 {
+				ambientFallback = len(labels)
 			}
 			warning := ""
 			if current != "" {
@@ -148,6 +158,9 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 		m.selectionOverlay = nil
 		m.state = stateDefault
 		return m, m.handleNotice(fmt.Errorf("no registered target account is available to hand %q off to", selected.Title))
+	}
+	if preselected < 0 {
+		preselected = ambientFallback
 	}
 	if preselected < 0 {
 		agents = append([]string{""}, agents...)

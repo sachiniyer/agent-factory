@@ -83,22 +83,29 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	}
 
 	current := selected.CurrentAgentName()
-	// Resolve every enum's launch identity for this session's repo — the same
-	// inspection-scope read the daemon's picker answer makes — so the
-	// unscoped picker filters by the same resolved identities the daemon's
-	// same-target guard compares (#4430 review).
-	choices := handoffAgentChoices(current,
-		session.HandoffEffectiveAgentsForPathInspection(selected.GetRepoPath(), tmux.SupportedPrograms))
-	if len(choices) == 0 {
-		return m, m.handleNotice(fmt.Errorf("no other agent is available to hand '%s' off to", selected.Title))
-	}
-
-	m.handoffChoices = choices
+	m.handoffChoices = nil
 	m.handoffAccounts = nil
 	m.handoffWarnings = nil
+	var choices []string
 	if account, _ := selected.AccountSelection(); account != "" {
-		m.handoffChoices = nil
+		// A scoped session's rows are rebuilt wholesale from the daemon's
+		// account answer — a synchronous repo-config read here would block
+		// Update only to be discarded (#4430 review).
 		choices = []string{"Loading accounts…"}
+	} else {
+		// Unscoped sessions get an optimistic first frame from the local
+		// inspection-scope read — the same predicate the daemon's picker
+		// answer applies. Handoff is only offered for local-worktree
+		// sessions (guarded above), so this repo's config IS the config the
+		// daemon resolves against; the daemon's ResolvedAgents rebuild is
+		// still authoritative once the answer lands, and this frame is the
+		// fallback if that call fails (#4430 review).
+		choices = handoffAgentChoices(current,
+			session.HandoffEffectiveAgentsForPathInspection(selected.GetRepoPath(), tmux.SupportedPrograms))
+		if len(choices) == 0 {
+			return m, m.handleNotice(fmt.Errorf("no other agent is available to hand '%s' off to", selected.Title))
+		}
+		m.handoffChoices = choices
 	}
 	m.handoffTarget = captureSessionActionTarget(selected, m.repoID)
 	m.selectionOverlay = overlay.NewSelectionOverlay("Hand off to", choices)
