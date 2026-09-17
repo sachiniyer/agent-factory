@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -282,7 +283,15 @@ func TestWatcherSupervisor_DuplicateCleanupKeepsSelectedWatcherQueue(t *testing.
 	supervisor := newWatcherSupervisor()
 	supervisor.queueDir = func() (string, error) { return dir, nil }
 	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
-	supervisor.deliver = func(string, string, string) error { return nil }
+	// Deliveries FAIL here, which is the only state a backlog exists in at all.
+	// With a stub that succeeded, the selected row's own watcher drained the queue
+	// and removed its files — reconcile starts that watcher, and run() starts its
+	// drainer for a non-empty queue — so the assertion below raced a goroutine
+	// instead of measuring the cleanup decision, and lost on CI at 467862e9
+	// ("stat …dupe0003.<hash>.jsonl: no such file or directory").
+	supervisor.deliver = func(string, string, string) error {
+		return errors.New("target unreachable (outage)")
+	}
 	supervisor.setStatus = func(string, string, string) {}
 	t.Cleanup(supervisor.Stop)
 
@@ -300,6 +309,8 @@ func TestWatcherSupervisor_DuplicateCleanupKeepsSelectedWatcherQueue(t *testing.
 	_, err := os.Stat(queue.path)
 	require.NoError(t, err,
 		"orphan cleanup must retain the queue owned by the duplicate row selected as the live watcher")
+	assert.Equal(t, 1, newEventQueueForGeneration(dir, selected.ID, selected.GenerationID).pendingCount(),
+		"the backlog is still pending, so the file's presence is the cleanup's decision and not a won race")
 }
 
 // TestFirstOccurrencePerID_ResolvesMixedTriggerDuplicates is the case the
