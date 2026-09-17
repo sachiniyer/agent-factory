@@ -89,6 +89,8 @@ func TestMouseResizeGapDropsEventPastGrid(t *testing.T) {
 	// echoes, not the view box — here the echo lands the emulator at 30x6.
 	s.feedResize(6, 30)
 	require.Eventually(t, func() bool {
+		tp.gridMu.RLock()
+		defer tp.gridMu.RUnlock()
 		return tp.emu.Height() == 6 && tp.emu.Width() == 30
 	}, 2*time.Second, 5*time.Millisecond)
 
@@ -113,6 +115,8 @@ func TestMouseClickTranslatesAcrossTheCrop(t *testing.T) {
 	// Authoritative size taller than the view: the pane is 40x10, the box 40x6.
 	s.feedResize(10, 40)
 	require.Eventually(t, func() bool {
+		tp.gridMu.RLock()
+		defer tp.gridMu.RUnlock()
 		return tp.emu.Height() == 10 && tp.emu.Width() == 40
 	}, 2*time.Second, 5*time.Millisecond)
 

@@ -234,8 +234,10 @@ func TestSetSizeOwnerAssertsViewBox(t *testing.T) {
 		r, ok := s.lastResize()
 		return ok && r == [2]uint16{10, 60} // rows, cols
 	}, 2*time.Second, 10*time.Millisecond, "promotion must assert the current view box as the pane size")
+	tp.gridMu.RLock()
 	assert.Equal(t, 60, tp.emu.Width())
 	assert.Equal(t, 10, tp.emu.Height())
+	tp.gridMu.RUnlock()
 
 	// Demotion is local-only: no frame pushes the viewer's box back.
 	s.mu.Lock()
