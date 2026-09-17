@@ -83,7 +83,7 @@ func TestFailedConfigApplyOutcomeDistinguishesLostReply(t *testing.T) {
 		require.Contains(t, warning, "live apply could not be confirmed")
 		require.NotContains(t, warning, "live apply failed")
 		require.Equal(t,
-			"Saved — the daemon’s live config apply could not be confirmed. See warnings for details.",
+			"Saved — the daemon’s live config apply could not be confirmed (see the warnings for the reason).",
 			config.EffectNotice("network.require_token", outcome))
 	})
 }

@@ -223,7 +223,7 @@ func TestEffectNoticeRanksUnconfirmedAboveAFailedRebind(t *testing.T) {
 }
 
 func TestEffectNoticeDaemonApplyUnconfirmed(t *testing.T) {
-	const want = "Saved — the daemon’s live config apply could not be confirmed. See warnings for details."
+	const want = "Saved — the daemon’s live config apply could not be confirmed (see the warnings for the reason)."
 	outcome := ApplyOutcome{DaemonApplyFailed: true, DaemonApplyUnconfirmed: true}
 	if got := EffectNotice("network.require_token", outcome); got != want {
 		t.Errorf("got %q, want %q", got, want)

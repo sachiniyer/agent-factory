@@ -245,7 +245,7 @@ var saveRules = []saveRule{
 			return o.DaemonApplyUnconfirmed && !deferredEffectClass(key)
 		},
 		status: ApplyStatusUnconfirmed,
-		notice: staticNotice("Saved — the daemon’s live config apply could not be confirmed. See warnings for details."),
+		notice: staticNotice("Saved — the daemon’s live config apply could not be confirmed (see the warnings for the reason)."),
 	},
 	// A failed apply is evidence about the FILE: DaemonApplyFailed is set only for
 	// a "reload config" failure (Manager.ApplyConfig's one error return), so the
