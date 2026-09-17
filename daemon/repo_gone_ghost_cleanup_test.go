@@ -53,7 +53,38 @@ func newCleanupReadyGhost(t *testing.T, title string) (*Manager, string) {
 	failLoadFor(t, title)
 	manager, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
+	// Registered after the sandbox home and temp dirs, so it runs BEFORE they are
+	// restored and removed: no finalizer this manager launched can still write
+	// into them (#4125).
+	t.Cleanup(manager.stopAndWaitBackgroundMutationsForShutdown)
 	return manager, repo.ID
+}
+
+// lateGhostWait bounds every wait on the detached finalizer in this file. A
+// passing wait returns the moment its condition holds, so the bound costs
+// nothing; it only has to outlast a slow -race runner. The 500ms it replaced
+// did not: that is the failed wait that raced in #4125.
+const lateGhostWait = 10 * time.Second
+
+// stubLateGhostSeam swaps a package-level seam the late-ghost finalizer reads,
+// and restores it only once that finalizer can no longer run (#4125).
+//
+// The finalizer is detached — KillSession and reconcileLateGhostCleanup return
+// while it still retries — so a bare t.Cleanup restore races it whenever the
+// test ends first. A failed wait is exactly that case, and -race then fails the
+// NEXT test instead of this one. Stopping background mutations is the join, and
+// it is bounded: the retry loop observes the stop channel, where a bare
+// WaitGroup.Wait would block forever on a worker that is still retrying. A stub
+// that blocks must be released by a cleanup registered AFTER this call, so that
+// it runs first. scripts/daemon_finalizer_seam_test.go refuses the bare shape.
+func stubLateGhostSeam[T any](t *testing.T, manager *Manager, seam *T, stub T) {
+	t.Helper()
+	previous := *seam
+	*seam = stub
+	t.Cleanup(func() {
+		manager.stopAndWaitBackgroundMutationsForShutdown()
+		*seam = previous
+	})
 }
 
 func preparedCleanupRecovery(
@@ -159,22 +190,22 @@ func TestLateGhostCleanup_DeleteFailureIsRetriedFromDefinitiveSuccess(t *testing
 	stableID := "ghost-late-success-id"
 	manager.markGhostCleanupStalled(key, stableID)
 
-	previousDelete := lateGhostDeleteSessionRecord
-	previousInterval := lateGhostCleanupRetryInterval
 	var attempts atomic.Int32
-	retried := make(chan struct{})
-	lateGhostCleanupRetryInterval = 5 * time.Millisecond
-	lateGhostDeleteSessionRecord = func(_ *Manager, _, _, _ string, _ error) (bool, string, error) {
-		if attempts.Add(1) == 1 {
-			return false, "", errors.New("transient instances lock failure")
-		}
-		retried <- struct{}{}
-		return true, "", nil
-	}
-	t.Cleanup(func() {
-		lateGhostDeleteSessionRecord = previousDelete
-		lateGhostCleanupRetryInterval = previousInterval
-	})
+	// Buffered, so a worker whose test already gave up is not left blocked on the
+	// send — the cleanup join below would wait for it.
+	retried := make(chan struct{}, 1)
+	stubLateGhostSeam(t, manager, &lateGhostCleanupRetryInterval, 5*time.Millisecond)
+	stubLateGhostSeam(t, manager, &lateGhostDeleteSessionRecord,
+		func(_ *Manager, _, _, _ string, _ error) (bool, string, error) {
+			if attempts.Add(1) == 1 {
+				return false, "", errors.New("transient instances lock failure")
+			}
+			select {
+			case retried <- struct{}{}:
+			default:
+			}
+			return true, "", nil
+		})
 
 	lateResult := make(chan error, 1)
 	lateResult <- nil
@@ -182,12 +213,12 @@ func TestLateGhostCleanup_DeleteFailureIsRetriedFromDefinitiveSuccess(t *testing
 
 	select {
 	case <-retried:
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(lateGhostWait):
 		t.Fatalf("late cleanup completion was discarded after one delete failure; attempts=%d", attempts.Load())
 	}
 	require.Eventually(t, func() bool {
 		return !manager.ghostCleanupStallActive(key, stableID)
-	}, 250*time.Millisecond, time.Millisecond, "a successful retry must release the process-epoch fence")
+	}, lateGhostWait, time.Millisecond, "a successful retry must release the process-epoch fence")
 }
 
 func TestLateGhostCleanup_WorkerErrorReleasesProcessFence(t *testing.T) {
@@ -202,7 +233,7 @@ func TestLateGhostCleanup_WorkerErrorReleasesProcessFence(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return !manager.ghostCleanupStallActive(key, stableID)
-	}, 250*time.Millisecond, time.Millisecond, "a completed worker error must release the process-only fence")
+	}, lateGhostWait, time.Millisecond, "a completed worker error must release the process-only fence")
 	assert.NotNil(t, recordFor(t, repoID, "ghost-late-error"),
 		"releasing the process fence must retain the durable cleanup row for retry")
 }
@@ -239,12 +270,9 @@ func TestKillSession_GhostCleanupSettledTailFailureRetriesFinalization(t *testin
 		}
 	})
 
-	previousDeleteTimeout := session.InstanceDeleteLockTimeout
-	session.InstanceDeleteLockTimeout = 25 * time.Millisecond
-	t.Cleanup(func() { session.InstanceDeleteLockTimeout = previousDeleteTimeout })
-	previousRetryInterval := lateGhostCleanupRetryInterval
-	lateGhostCleanupRetryInterval = 5 * time.Millisecond
-	t.Cleanup(func() { lateGhostCleanupRetryInterval = previousRetryInterval })
+	// The finalizer's real record delete reads this session seam on every attempt.
+	stubLateGhostSeam(t, manager, &session.InstanceDeleteLockTimeout, 25*time.Millisecond)
+	stubLateGhostSeam(t, manager, &lateGhostCleanupRetryInterval, 5*time.Millisecond)
 
 	_, err := manager.KillSession(KillSessionRequest{Title: "ghost-sync-success", RepoID: repoID})
 	require.ErrorIs(t, err, config.ErrLockTimeout)
@@ -254,7 +282,7 @@ func TestKillSession_GhostCleanupSettledTailFailureRetriesFinalization(t *testin
 
 	require.Eventually(t, func() bool {
 		return recordFor(t, repoID, "ghost-sync-success") == nil
-	}, 500*time.Millisecond, 5*time.Millisecond,
+	}, lateGhostWait, 5*time.Millisecond,
 		"definitive synchronous cleanup must keep retrying its editor/record tail")
 }
 
@@ -292,22 +320,16 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 		}
 	})
 
-	previousLateDelete := lateGhostDeleteSessionRecord
 	releaseFinalizer := make(chan struct{})
-	lateGhostDeleteSessionRecord = func(*Manager, string, string, string, error) (bool, string, error) {
-		<-releaseFinalizer
-		return false, "", nil
-	}
-	previousDeleteTimeout := session.InstanceDeleteLockTimeout
-	session.InstanceDeleteLockTimeout = 25 * time.Millisecond
-	t.Cleanup(func() {
-		close(releaseFinalizer)
-		// KillSession has returned, so its finalizer is registered. Join the
-		// whole worker before restoring any seams it can still read (#4063).
-		manager.lateGhostCleanupWG.Wait()
-		lateGhostDeleteSessionRecord = previousLateDelete
-		session.InstanceDeleteLockTimeout = previousDeleteTimeout
-	})
+	stubLateGhostSeam(t, manager, &lateGhostDeleteSessionRecord,
+		func(*Manager, string, string, string, error) (bool, string, error) {
+			<-releaseFinalizer
+			return false, "", nil
+		})
+	stubLateGhostSeam(t, manager, &session.InstanceDeleteLockTimeout, 25*time.Millisecond)
+	// Registered after the seams, so it runs before their joins: the stub above
+	// ignores the stop channel, and the join would otherwise wait on it (#4063).
+	t.Cleanup(func() { close(releaseFinalizer) })
 
 	_, err := manager.KillSession(KillSessionRequest{Title: "ghost-crash-window", RepoID: repoID})
 	require.ErrorIs(t, err, config.ErrLockTimeout)
@@ -434,13 +456,12 @@ func TestLateGhostCleanup_SuccessCompletesRootKill(t *testing.T) {
 	key := daemonInstanceKey(repoID, session.RootSessionTitle)
 	const stableID = "root-id"
 
-	previousDelete := lateGhostDeleteSessionRecord
 	deleted := make(chan struct{})
-	lateGhostDeleteSessionRecord = func(*Manager, string, string, string, error) (bool, string, error) {
-		close(deleted)
-		return true, "", nil
-	}
-	t.Cleanup(func() { lateGhostDeleteSessionRecord = previousDelete })
+	stubLateGhostSeam(t, manager, &lateGhostDeleteSessionRecord,
+		func(*Manager, string, string, string, error) (bool, string, error) {
+			close(deleted)
+			return true, "", nil
+		})
 
 	subscriberID, events := manager.events.subscribe()
 	t.Cleanup(func() { manager.events.unsubscribe(subscriberID) })
@@ -450,7 +471,7 @@ func TestLateGhostCleanup_SuccessCompletesRootKill(t *testing.T) {
 
 	select {
 	case <-deleted:
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(lateGhostWait):
 		t.Fatal("late ghost finalizer did not consume its durable row")
 	}
 
@@ -461,7 +482,7 @@ func TestLateGhostCleanup_SuccessCompletesRootKill(t *testing.T) {
 		require.NoError(t, json.Unmarshal(event.Data, &data))
 		assert.Equal(t, stableID, data.ID)
 		assert.Equal(t, session.RootSessionTitle, data.Title)
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(lateGhostWait):
 		t.Error("late ghost cleanup removed the row without publishing session.killed")
 	}
 
