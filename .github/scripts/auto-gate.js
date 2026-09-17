@@ -712,8 +712,14 @@ function delay(milliseconds) {
 }
 
 async function evaluate({ github, context, core, prNumber, setOutputs = true }) {
+  // The resolved PR's node id is what reportDecision's NOT_FOUND
+  // classification reads, so evaluatePullRequest publishes it here the moment
+  // it is known — a mid-evaluation failure then still writes its scoped
+  // failure against the right subject instead of rethrowing unclassified
+  // (#4484, Codex on #4486).
+  const resolved = {};
   try {
-    return await evaluatePullRequest({ github, context, core, prNumber, setOutputs });
+    return await evaluatePullRequest({ github, context, core, prNumber, setOutputs, resolved });
   } catch (error) {
     // A PR that no longer exists is a conclusion, not an evaluation failure: it
     // cannot be evaluated and there is nothing to report on it. isOpen false
@@ -736,6 +742,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
       prNumber: prNumber ? String(prNumber) : "",
       shouldMerge: false,
       isOpen: false,
+      pullRequestId: resolved.pullRequestId,
       readFailure: isReadFailure(error),
       reasons: [`auto-gate evaluation error: ${message}`],
       notes: [],
@@ -743,7 +750,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
   }
 }
 
-async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true }) {
+async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true, resolved }) {
   const number = prNumber || (await findPullRequestNumber({ github, context, core }));
 
   if (!number) {
@@ -757,6 +764,12 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   }
 
   const pr = await getPullRequest({ github, context, number });
+  // From here on a failure is a failure OF a known PR: hand its node id back
+  // through the carrier so evaluate()'s failure result can still write the
+  // scoped decision against the right subject.
+  if (resolved) {
+    resolved.pullRequestId = pr.id;
+  }
   const baseRepository = `${context.repo.owner}/${context.repo.repo}`;
   const reasons = [];
   const notes = [];
@@ -934,10 +947,12 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     try {
       playTest = await evaluatePlayTest({ github, context, pr, comments: codex.comments, subject });
     } catch (error) {
-      // TUI evidence is advisory for authors the gate never auto-merges. Keep
-      // unreadable snapshots advisory too, without swallowing review/check
-      // failures or relaxing snapshot verification on the automatic path.
-      if (isAllowedAuthor(pr.author)) throw error;
+      // An attestation that cannot be verified fails closed as a BLOCKED
+      // reason for EVERY author class — never an unhandled error. Re-throwing
+      // on the automatic path used to surface this as "auto-gate evaluation
+      // error", which the aggregate run then aborted on: one unresolvable
+      // attested SHA took the whole repository's gate down (#4484). The
+      // reason still blocks the merge, so nothing relaxes verification.
       playTest = {
         ok: false,
         message: `play-tested attestation could not be verified: ${error.message || String(error)}`,
@@ -2020,7 +2035,64 @@ async function processAggregateHead({
         });
         return { state: "evaluation-error", pending, aggregate };
       }
-      throw new Error(`Auto Gate evaluation failed for PR #${prNumber}: ${result.summary}`);
+      // A deterministic evaluation failure is scoped to this PR — unrelated
+      // PRs sharing this run still evaluate and publish; throwing here used
+      // to kill the whole job and take the gate down repo-wide (#4484). But
+      // skipping the write is NOT neutral: an earlier run can have left a
+      // green (PR, head) decision on this unchanged head, and the aggregate
+      // accepts any completed success it rereads — republishing green for a
+      // PR this run never evaluated (#4486 review). Write the failure in
+      // place so the reread reads this run's truth.
+      core.warning(`Auto Gate evaluation failed for PR #${prNumber}; scoping the failure to that PR: ${result.summary}`);
+      try {
+        const failedWrite = await reportDecision({
+          github,
+          context,
+          core,
+          // A workflow_dispatch recovery with no prior decision must publish
+          // this failure as NEVER_RAN, the same state the normal decision
+          // write below produces — dropping `manual` here rendered it as an
+          // ordinary WAITING and erased the "recovery found nothing" signal
+          // (Codex on #4486).
+          manual,
+          result: {
+            prNumber,
+            headSha: pending.headSha,
+            pullRequestId: result.pullRequestId,
+            shouldMerge: false,
+            reasons: [`auto-gate evaluation error: ${result.summary}`],
+            summary: `Auto Gate could not evaluate this pull request: ${result.summary}`,
+            requiredCheckObservations: [],
+          },
+        });
+        if (failedWrite.state === "read-only") {
+          return { state: "read-only", pending };
+        }
+      } catch (error) {
+        // The same classification the normal decision write below uses: a PR
+        // that vanished mid-run is an association change, a read that gave up
+        // is an evaluation error, anything else stays fatal.
+        if (error?.autoGatePullRequestGone) {
+          core.notice(
+            `Keeping aggregate ${pending.headSha} non-green because PR #${prNumber} ` +
+              "no longer exists.",
+          );
+          return { state: "association-changed", pending };
+        }
+        if (!isReadFailure(error)) {
+          throw error;
+        }
+        const aggregate = await blockAggregateEvaluation({
+          github,
+          context,
+          core,
+          headSha: pending.headSha,
+          checkRunId: pending.checkRunId,
+          reason: formatError(error),
+        });
+        return { state: "evaluation-error", pending, aggregate };
+      }
+      continue;
     }
     if (result.headSha !== pending.headSha) {
       // The association changed after the snapshot. Keep the aggregate red;
@@ -2352,10 +2424,17 @@ async function evaluateAggregateFresh({ github, context, core, headSha }) {
       setOutputs: false,
     });
     if (evaluationFailed(result)) {
-      throw evaluationFailure(
-        `Auto Gate fresh aggregate evaluation failed for PR #${pull.number}: ${result.summary}`,
-        result,
-      );
+      if (result.readFailure) {
+        throw evaluationFailure(
+          `Auto Gate fresh aggregate evaluation failed for PR #${pull.number}: ${result.summary}`,
+          result,
+        );
+      }
+      // The same scoping as the pending loop: a deterministic failure on one
+      // PR is that PR's blocker, not an abort for every PR sharing the head
+      // (#4484). The aggregate stays red until that PR evaluates cleanly.
+      blockers.push(`PR #${pull.number} at this commit could not be evaluated: ${decisionWaitingReason(result)}`);
+      continue;
     }
     if (result.headSha !== sha) {
       blockers.push(`PR #${pull.number} no longer evaluates at this commit`);
@@ -4803,7 +4882,21 @@ async function evaluatePlayTest({ github, context, pr, comments, subject }) {
     // Compare snapshots, not GitHub's three-dot/merge-base diff. Rebases can
     // diverge and compare's file list can truncate. Tree equality covers adds,
     // deletes, renames, modes and merge conflict resolutions as well as edits.
-    const tested = await readGatedTuiTree({ github, context, sha: testedSha, role: "play-tested", subject });
+    let tested;
+    try {
+      tested = await readGatedTuiTree({ github, context, sha: testedSha, role: "play-tested", subject });
+    } catch (error) {
+      // A well-formed SHA naming no commit is a bad attestation — user input
+      // with its own blocking reason, not a gate-read failure (#4484).
+      const status = Number(error?.status ?? error?.cause?.status);
+      if (status === 404 || status === 422) {
+        return {
+          ok: false,
+          message: `play-tested attestation names ${testedSha}, which GitHub cannot resolve as a commit (HTTP ${status}); ${remedy}`,
+        };
+      }
+      throw error;
+    }
     const current = await readGatedTuiTree({ github, context, sha: pr.headRefOid, role: "play-tested", subject });
     const changed = [...new Set([...tested.keys(), ...current.keys()])]
       .filter((path) => !sameTreeEntry(tested.get(path), current.get(path)))
