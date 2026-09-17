@@ -614,6 +614,72 @@ func TestPendingAccountSwapHandoffAdmitsOnlySameTargetRetry(t *testing.T) {
 	require.ErrorContains(t, busy.ValidateHandoffRuntimeAction("", "work"), "busy")
 }
 
+// TestPendingCrossAgentSwapRetryAdmitsCommittedTargetBeforeRelaunch is the
+// pre-relaunch half of the committed-retry gate that #4401 never exercised. A
+// committed cross-agent manual swap rewrites i.Program to the incoming agent at
+// the identity checkpoint, but until setLaunchProgram relaunches the pane the
+// bound tmux session still reports the outgoing agent. The retry's --to
+// <target> must match the committed record (the agent committedAccountSwap's
+// manual branch re-derives from), not the stale live pane — otherwise the
+// refusal whose message advertises "retry that account swap" turns the
+// retry's own explicit form into the one request it refuses.
+func TestPendingCrossAgentSwapRetryAdmitsCommittedTargetBeforeRelaunch(t *testing.T) {
+	newPending := func() *Instance {
+		inst := accountSwapTestInstance("codex")
+		_, err := inst.SelectAccountForHandoff("ambient", "personal", "claude", HandoffReasonManual, "", "continue the mission")
+		require.NoError(t, err)
+		require.Equal(t, "claude", inst.AgentProgram(), "commit rewrites the durable record to the incoming agent")
+		require.Equal(t, "codex", inst.CurrentAgentName(), "the live pane still names the outgoing agent before relaunch")
+		inst.inFlightOp = OpNone
+		return inst
+	}
+
+	retry := newPending()
+	require.NoError(t, retry.ValidateHandoffRuntimeAction("claude", "personal"),
+		"retry of the committed swap's own target must pass the gate before the replacement pane launches")
+	require.NoError(t, retry.ValidateHandoffRuntimeAction("", "personal"),
+		"the documented no-to retry form remains admitted")
+
+	// A different agent, a different account, or no account is another
+	// transaction the committed swap still owns.
+	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("codex", "personal"), "account swap",
+		"the outgoing live-pane agent is not the committed target")
+	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("gemini", "personal"), "account swap")
+	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("claude", "work"), "account swap")
+	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("", ""), "account swap")
+
+	// The exemption clears only the pending-swap axis: a lost session still
+	// refuses on liveness, and an in-flight operation still refuses on the
+	// op fence — even when the agent names the committed target.
+	lost := newPending()
+	lost.liveness = LiveLost
+	require.ErrorContains(t, lost.ValidateHandoffRuntimeAction("claude", "personal"), "restore it first")
+
+	busy := newPending()
+	busy.inFlightOp = OpReplacing
+	require.ErrorContains(t, busy.ValidateHandoffRuntimeAction("claude", "personal"), "busy")
+}
+
+// TestPendingAutoAccountSwapRetryAdmitsExplicitLiveAgent pins the fallback the
+// cross-agent fix relies on: automatic swaps do not rewrite i.Program or append a
+// ledger entry, so the live pane remains the correct source for matching a
+// retry's agent. An explicit --to <live-agent> is still admitted, and a
+// different agent or account is still fenced.
+func TestPendingAutoAccountSwapRetryAdmitsExplicitLiveAgent(t *testing.T) {
+	auto := accountSwapTestInstance("claude")
+	_, err := auto.SelectAccountAutomatically("ambient", "work")
+	require.NoError(t, err)
+	require.Equal(t, "claude", auto.AgentProgram(), "automatic swaps do not rewrite the committed record")
+	auto.inFlightOp = OpNone
+
+	require.NoError(t, auto.ValidateHandoffRuntimeAction("claude", "work"),
+		"an automatic swap's explicit live-agent retry is still admitted")
+	require.NoError(t, auto.ValidateHandoffRuntimeAction("", "work"))
+	require.ErrorContains(t, auto.ValidateHandoffRuntimeAction("codex", "work"), "account swap",
+		"a different agent is still fenced even for an automatic swap")
+	require.ErrorContains(t, auto.ValidateHandoffRuntimeAction("", "personal"), "account swap")
+}
+
 type captureAccountSwapEnvironmentPty struct {
 	cmd *exec.Cmd
 }

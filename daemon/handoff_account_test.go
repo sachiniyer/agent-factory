@@ -270,3 +270,75 @@ func TestHandoffAccountKeepsLimitInOutgoingAgentNamespace(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, limited, "work")
 }
+
+// TestHandoffAccountRetryRoutesCrossAgentTargetBeforeRelaunch is the routing
+// half of the pre-relaunch retry that #4401 never exercised. A committed
+// cross-agent manual swap rewrites i.Program to the incoming agent, but until
+// the replacement pane relaunches the live tmux session still names the
+// outgoing agent. The shipped onRespawn hook forces the pane to update before
+// the retry, so the live-pane and committed-record sources coincide and mask
+// the race. This test commits the swap directly (the way respawnFresh failing
+// before setLaunchProgram leaves it: i.Program rewritten, ledger entry and
+// pending marker durable, ReplacementPanesStarted false, and the bound pane
+// still reporting the outgoing agent), then retries with an explicit
+// --to <target>: the gate must admit it AND the routing must send it to
+// committedAccountSwap (the recorded transaction), not a fresh admission that
+// overwrites the stored mission and headSHA.
+func TestHandoffAccountRetryRoutesCrossAgentTargetBeforeRelaunch(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "finish migration", time.Now().Add(time.Hour))
+	prepareHandoffTargetPreflight(t, inst)
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.Program = "codex"
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "codex"))
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	m.cfg.LimitAutoResume = false
+	// Commit the cross-agent manual swap directly, the way the real bug state
+	// persists it: the identity checkpoint landed (i.Program rewritten to the
+	// incoming agent, ledger entry recorded, pending marker durable) but the
+	// replacement pane never reached setLaunchProgram, so the bound tmux
+	// session still reports the outgoing agent and ReplacementPanesStarted is
+	// false. No respawn runs here, so SynchronizeAccountSwapRuntimeMetadata is
+	// never reached for the commit — exactly the pre-relaunch window.
+	require.NoError(t, inst.BeginManualAccountSwap())
+	require.NoError(t, inst.ValidateManualAccountSwap("personal", "claude"))
+	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", session.HandoffReasonManual, "tip", "finish migration")
+	require.NoError(t, err)
+	require.NoError(t, m.persistSettlement(repo, daemonInstanceKey(repo, inst.Title), inst))
+	require.True(t, inst.EndLimitResume())
+	require.Equal(t, "claude", inst.AgentProgram(), "commit rewrites the durable record to the incoming agent")
+	require.Equal(t, "codex", inst.CurrentAgentName(), "the live pane still reports the outgoing agent before relaunch")
+	_, _, pending := inst.PendingAccountSwap()
+	require.True(t, pending)
+	recorded, ok := inst.LastHandoff()
+	require.True(t, ok)
+	require.Equal(t, "codex", recorded.From.Agent)
+	require.Equal(t, "claude", recorded.To)
+	require.NotEmpty(t, recorded.HeadSHA, "the committed transaction must record its attribution boundary")
+
+	// The retry's recovery path relaunches the replacement pane; onRespawn
+	// stands in for setLaunchProgram landing during that retry, not before the
+	// routing decision below — at the gate and the routing branch the pane is
+	// still the outgoing "codex".
+	backend.onRespawn = func(i *session.Instance) { i.SetTmuxSession(tmux.NewTmuxSession(i.Title, i.AgentProgram())) }
+
+	// The retry names the committed target explicitly against a stale live
+	// pane. Without the gate fix it is refused as a "committed account swap";
+	// with only the gate fix it slips past routing into a fresh admission that
+	// appends a second ledger entry and overwrites the stored mission.
+	resp, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, To: "claude", Account: "personal"})
+	require.NoError(t, err, "retry of the committed swap's own target must pass the gate and route to committedAccountSwap")
+	require.True(t, resp.OK)
+	require.Equal(t, "codex", resp.From, "a committed retry reports the recorded outgoing agent, not the stale live pane")
+	require.Equal(t, "claude", resp.To)
+	require.Equal(t, "work", resp.FromAccount)
+	require.Equal(t, "personal", resp.ToAccount)
+	require.Equal(t, recorded.HeadSHA, resp.HeadSHA, "the committed retry preserves the recorded attribution boundary")
+	require.Len(t, inst.ToInstanceData().Tabs[0].Handoffs, 1,
+		"the retry must finish the recorded transaction, not append a fresh admission that overwrites the stored mission")
+	_, _, prompts := backend.snapshot()
+	require.Len(t, prompts, 1)
+	require.Contains(t, prompts[0], "finish migration")
+	_, _, pending = inst.PendingAccountSwap()
+	require.False(t, pending, "the retried transaction must retire its durable marker")
+}

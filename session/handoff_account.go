@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // ValidateHandoffRuntimeAction evaluates RuntimeActionHandoff for a request
@@ -32,9 +34,34 @@ func (i *Instance) pendingAccountSwapRetryTargetLocked(agent, account string) bo
 		return false
 	}
 	if agent = strings.TrimSpace(agent); agent != "" {
-		return agent == i.currentAgentNameLocked()
+		return agent == i.committedAgentNameLocked()
 	}
 	return true
+}
+
+// committedAgentNameLocked names the agent the committed manual account swap
+// recorded, the same way committedAccountSwap's manual branch does — through
+// sessionenv.AgentForCommand(i.Program). A committed cross-agent manual swap
+// rewrites i.Program to the incoming agent at the identity checkpoint, but the
+// bound tmux pane keeps reporting the outgoing agent until setLaunchProgram
+// relaunches it. The live pane is therefore the wrong source for matching a
+// retry's --to <target> in the pre-relaunch window: the committed record names
+// the target the recovery path will actually run, and committedAccountSwap
+// already re-derives its agent from that record rather than the live pane.
+//
+// Automatic swaps do not rewrite i.Program or append a ledger entry, so the
+// live pane remains the correct source for them; fall back to
+// currentAgentNameLocked() when the pending swap is not manual, or when the
+// committed record is a wrapper the literal classifier cannot resolve (a
+// same-agent swap whose configured command af cannot identify as a single
+// agent invocation). Callers hold i.mu.
+func (i *Instance) committedAgentNameLocked() string {
+	if i.pendingAccountSwap != nil && i.pendingAccountSwap.Manual {
+		if agent := sessionenv.AgentForCommand(i.Program); agent != "" {
+			return agent
+		}
+	}
+	return i.currentAgentNameLocked()
 }
 
 // BeginManualAccountSwap raises the existing account-replacement fence after
