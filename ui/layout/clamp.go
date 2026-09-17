@@ -110,5 +110,9 @@ func clipMarkingCut(s string, width int) string {
 	}
 	// clipToContract closes an open style with a reset, so the marker lands
 	// after it and renders as chrome rather than in the cut row's last style.
-	return clipToContract(s, width-1) + "…"
+	// The clipped prefix is padded to width-1 first: a wide rune straddling
+	// that boundary is dropped whole, leaving the prefix short, and without
+	// the pad the "…" would sit mid-row with the rectangle's padding after it
+	// rather than marking the cut edge.
+	return padToContract(clipToContract(s, width-1), width-1) + "…"
 }

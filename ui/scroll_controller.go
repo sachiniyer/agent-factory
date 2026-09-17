@@ -2,8 +2,11 @@ package ui
 
 import (
 	"math"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/viewport"
+
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 // ScrollOwner identifies the subsystem that can truthfully satisfy a scroll
@@ -95,6 +98,12 @@ type captureHistoryScrollController struct {
 	fillGen        uint64
 	dispatchedGen  uint64
 	fillInFlight   bool
+	// fillContent retains the last completed capture's raw rows. The viewport's
+	// own View() truncates each visible line at Width before any render-time
+	// marker can see that content was dropped, so cut rows are marked at fill
+	// time instead (#4175) — and a narrower resize re-marks them rather than
+	// hard-cutting a marker stamped for the old width.
+	fillContent string
 }
 
 var _ historyScrollController = (*captureHistoryScrollController)(nil)
@@ -230,7 +239,8 @@ func (c *captureHistoryScrollController) CompleteFill(
 	if !c.FillIsCurrent(token) {
 		return false
 	}
-	v.SetContent(content)
+	c.fillContent = content
+	v.SetContent(markScrollRows(content, v.Width))
 	// Seed from the ready content and current geometry, then replay in order so
 	// boundary clamping is identical to input received after the fill. In
 	// particular, down-at-bottom followed by up must still move up.
@@ -253,9 +263,16 @@ func (c *captureHistoryScrollController) Resize(v *viewport.Model, width, height
 	if c.phase == historyScrollReady {
 		distanceFromBottom = max(0, viewportBottomOffset(v)-v.YOffset)
 	}
+	oldWidth := v.Width
 	v.Width = width
 	v.Height = height
 	if c.phase == historyScrollReady {
+		if width != oldWidth {
+			// The cut markers were stamped for the old width; re-mark from the
+			// retained raw capture so a narrower box does not hard-cut them and
+			// a wider one does not leave a stale "…" mid-row.
+			v.SetContent(markScrollRows(c.fillContent, width))
+		}
 		v.SetYOffset(viewportBottomOffset(v) - distanceFromBottom)
 	}
 }
@@ -279,8 +296,24 @@ func (c *captureHistoryScrollController) Reset(v *viewport.Model) {
 	c.pendingIntents = nil
 	c.fillGen++
 	c.fillInFlight = false
+	c.fillContent = ""
 	v.SetContent("")
 	v.GotoTop()
+}
+
+// markScrollRows stamps the "…" cut marker into the last cell of every row
+// wider than width. It runs on the raw capture before the viewport sees it:
+// View() truncates each visible line at Width internally, so a marker applied
+// to View()'s output can no longer tell that content was dropped (#4175).
+func markScrollRows(content string, width int) string {
+	if width <= 0 {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	for i := range lines {
+		lines[i] = layout.MarkCutRow(lines[i], width)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func applyScrollIntent(v *viewport.Model, intent ScrollIntent) {

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -132,6 +133,51 @@ func TestResolveScrollLinesFloorsAtOne(t *testing.T) {
 	v := viewport.New(80, 1)
 	require.Equal(t, -1, resolveScrollLines(&v, scrollHalfPageUp))
 	require.Equal(t, 1, resolveScrollLines(&v, scrollHalfPageDown))
+}
+
+// TestHostHistoryScrollFillMarksCutRows pins the scroll-mode half of #4175:
+// the viewport's own View() truncates each visible line at Width before any
+// render-time clamp can see it, so a row wider than the box must be marked on
+// the raw fill — otherwise scroll mode shows a silent hard cut where the
+// preview would show "…".
+func TestHostHistoryScrollFillMarksCutRows(t *testing.T) {
+	v := viewport.New(10, 4)
+	controller := newHostHistoryScrollController()
+
+	controller.Scroll(&v, scrollOneLineUp)
+	token, claimed := controller.ClaimFill()
+	require.True(t, claimed)
+	require.True(t, controller.CompleteFill(token, &v,
+		"short\nabcdefghijklmnop\nfits-10col"))
+
+	lines := strings.Split(v.View(), "\n")
+	require.Equal(t, "abcdefghi…", lines[1],
+		"an over-wide history row is marked at fill, before View() can cut it")
+	require.Equal(t, "fits-10col", lines[2],
+		"a row exactly at the box width is not mistaken for a cut one")
+	require.NotContains(t, lines[0], "…")
+}
+
+// TestHostHistoryScrollResizeRemarksCutRows: a marker stamped for the fill-time
+// width would hard-cut away in a narrower box and sit stale mid-row in a wider
+// one, so resize re-marks the retained raw capture.
+func TestHostHistoryScrollResizeRemarksCutRows(t *testing.T) {
+	v := viewport.New(10, 4)
+	controller := newHostHistoryScrollController()
+
+	controller.Scroll(&v, scrollOneLineUp)
+	token, claimed := controller.ClaimFill()
+	require.True(t, claimed)
+	require.True(t, controller.CompleteFill(token, &v, "abcdefghijklmnop"))
+
+	controller.Resize(&v, 6, 4)
+	require.Equal(t, "abcde…", strings.Split(v.View(), "\n")[0],
+		"the cut row is re-marked at the narrower width, not hard-cut at six")
+
+	controller.Resize(&v, 14, 4)
+	require.Equal(t, "abcdefghijklm…",
+		strings.Split(v.View(), "\n")[0],
+		"growing re-marks the raw row rather than leaving the stale marker")
 }
 
 func TestPassiveScrollControllersNeverEnterHostHistory(t *testing.T) {

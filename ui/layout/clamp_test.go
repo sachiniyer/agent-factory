@@ -147,6 +147,17 @@ func TestClampToRectMarkingCutWideRunes(t *testing.T) {
 	assert.True(t, strings.HasPrefix(out, "日本"), "intact wide runes lead: %q", out)
 }
 
+// TestClampToRectMarkingCutWideRuneStraddlePadsPrefix: when the retained prefix
+// underfills width-1 — a wide rune straddling the boundary is dropped whole —
+// the marker must still occupy the row's LAST cell, not land before the
+// padding the rectangle adds.
+func TestClampToRectMarkingCutWideRuneStraddlePadsPrefix(t *testing.T) {
+	out := layout.ClampToRectMarkingCut("日本語", layout.Rect{W: 4, H: 1})
+	requireExactSize(t, out, 4, 1)
+	assert.Equal(t, "日 …", out,
+		"日 keeps 2 of the 3 content cells; the gap is padded BEFORE the marker")
+}
+
 func TestClampToRectMarkingCutEmptyRect(t *testing.T) {
 	assert.Equal(t, "", layout.ClampToRectMarkingCut("content", layout.Rect{}))
 	assert.Equal(t, "", layout.ClampToRectMarkingCut("content", layout.Rect{W: 5}))
