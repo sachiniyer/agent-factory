@@ -154,3 +154,52 @@ func TestValidateAccountEnvironmentCommand_IoniceDynamicClassStaysNarrow(t *test
 		})
 	}
 }
+
+// The swallow proof above was reviewed against ionice's original option set:
+// `--`, -t/--ignore, and the exact -c/-n/--class/--classdata spellings. #4465
+// then admitted terminal options, process selectors, long-option abbreviations
+// and pinned quoted tokens, each with its own proof. A command that combines
+// the #4460 admission with one of those is in neither proof, and #4465 pins
+// `ionice -c"$CLASS" --help` as refused, so the combination stays refused
+// whichever comes first.
+func TestValidateAccountEnvironmentCommand_IoniceDynamicClassStaysInItsReviewedOptionSet(t *testing.T) {
+	for _, command := range []string{
+		`ionice -c"$CLASS" --help`,
+		`ionice -n"$LEVEL" -V`,
+		`ionice -c"$CLASS" -th`,
+		`ionice -c"$CLASS" --vers`,
+		`ionice -c"$CLASS" -p 123`,
+		`ionice -c"$CLASS" -tp 123`,
+		`ionice -c"$CLASS" --pid 123`,
+		`ionice -n"$LEVEL" -u 1000`,
+		`ionice -c"$CLASS" -p"$PID"`,
+		`ionice -c"$CLASS" --pi="$PID"`,
+		`ionice -c"$CLASS" --clas 2 npm run dev`,
+		`ionice -c"$CLASS" --classd=4 npm run dev`,
+		`ionice --classd 4 -c"$CLASS" npm run dev`,
+		`ionice --cla=2 -n"$LEVEL" npm run dev`,
+		`ionice --class="$A" -n"$LEVEL" npm run dev`,
+		`ionice -c2"$X" -n"$LEVEL" npm run dev`,
+		`ionice -n"$LEVEL" --class="$A" npm run dev`,
+		`ionice -n"$LEVEL" -c2"$X" npm run dev`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"command %q combines the #4460 admission with an option outside its proof", command)
+		})
+	}
+	// The original option set still composes, before and after the token.
+	for _, command := range []string{
+		`ionice -c"$CLASS" --class 3 npm run dev`,
+		`ionice -c"$CLASS" --classdata=4 npm run dev`,
+		`ionice --classdata 4 -c"$CLASS" npm run dev`,
+		`ionice --ignore -c"$CLASS" npm run dev`,
+		`ionice -c3 -n"$LEVEL" npm run dev`,
+		`ionice -n4 -c"$CLASS" -- npm run dev`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"command %q stays inside the reviewed option set", command)
+		})
+	}
+}

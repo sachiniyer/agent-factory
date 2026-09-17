@@ -186,3 +186,45 @@ func asciiEqualFold(a, b string) bool {
 	}
 	return true
 }
+
+// ioniceProofScope keeps the #4460 admission inside the option set its proof
+// was reviewed against. #4465 admitted terminal options, process selectors,
+// long-option abbreviations and pinned quoted tokens under proofs of their
+// own. Neither proof covers a command that uses both, so such a command is
+// refused whichever part comes first. The combination is very likely inert:
+// an empty value swallows the option-shaped word and exits with `unknown
+// scheduling class: '--help'` on util-linux 2.39.3. Admitting it widens both
+// proofs, though, and #4465 pins `ionice -c"$CLASS" --help` as refused.
+type ioniceProofScope struct{ dynamicValue, extended bool }
+
+// admitDynamicValue records a `-c"$C"`/`-n"$N"` token and reports whether it
+// may stand in this command.
+func (s *ioniceProofScope) admitDynamicValue() bool {
+	s.dynamicValue = true
+	return !s.extended
+}
+
+// admitExtension records a word only #4465's proofs admit (a quoted selector
+// or pinned token, or a literal option outside ioniceOriginalOption) and
+// reports whether it may stand in this command.
+func (s *ioniceProofScope) admitExtension() bool {
+	s.extended = true
+	return !s.dynamicValue
+}
+
+func (s *ioniceProofScope) admitLiteralOption(option string) bool {
+	return ioniceOriginalOption(option) || s.admitExtension()
+}
+
+// ioniceOriginalOption reports whether a literal word belongs to the set the
+// swallow proof was reviewed against: the child (any word not starting with
+// '-'), `--`, -t/--ignore, and the exact -c/-n/--class/--classdata spellings,
+// separate or attached. It is an allowlist, so an option admitted later stays
+// out of the combination until the proof is extended to cover it.
+func ioniceOriginalOption(option string) bool {
+	name, _, _ := strings.Cut(option, "=")
+	return !strings.HasPrefix(option, "-") ||
+		option == "--" || option == "-t" || option == "--ignore" ||
+		name == "--class" || name == "--classdata" ||
+		strings.HasPrefix(option, "-c") || strings.HasPrefix(option, "-n")
+}
