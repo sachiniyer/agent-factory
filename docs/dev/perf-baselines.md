@@ -2,7 +2,8 @@
 
 Issue #3908, part of #3906. Run `make perf-container`. The performance job
 runs for PRs touching `web/` (including Playwright configs and goldens), `app/`,
-`ui/`, `scripts/perf/`, or `scripts/container/`, and is a dependency
+`ui/`, `config/` (the manifest supplies the Config pane's rows, #4362),
+`scripts/perf/`, or `scripts/container/`, and is a dependency
 of the required **Build** check. It uses the same 35-minute harness / 40-minute job
 limits as Web selftest. The shared scope job computes both decisions from the
 same rename-safe diff, with a tested path list; docs-only and gate-only PRs skip
