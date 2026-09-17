@@ -391,11 +391,11 @@ jq -s -e 'length > 0 and all(type == "array")' "$G/inline.json" >/dev/null \
 
 jq -s '
   add as $all
-  | ["sachiniyer"] as $allowed
+  | ["sachiniyer","detail-app"] as $allowed
   | ($all
      | map(select(
          .in_reply_to_id != null
-         and (.user.login | IN($allowed[]))
+         and ((.user.login | sub("^app/"; "") | sub("\\[bot\\]$"; "")) | IN($allowed[]))
          and ((((.body // "") | test("\\b(RESOLVED|ACCEPTED)\\b"))
                or ((.body // "") | contains("[gate-ack]"))))))
      | map(.in_reply_to_id)) as $resolved
@@ -422,11 +422,11 @@ HD=$(cat "$G/head-date.txt")
 
 jq -s -r --arg hd "$HD" '
   add as $all
-  | ["sachiniyer"] as $allowed
+  | ["sachiniyer","detail-app"] as $allowed
   | ($all
      | map(select(
          .in_reply_to_id != null
-         and (.user.login | IN($allowed[]))
+         and ((.user.login | sub("^app/"; "") | sub("\\[bot\\]$"; "")) | IN($allowed[]))
          and ((.body // "") | test("\\bRESOLVED\\b"))))
      | map(.in_reply_to_id)) as $claimed
   | $all
