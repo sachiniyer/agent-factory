@@ -76,7 +76,7 @@ func archivableTabExec(agentName string) (cmd_test.MockCmdExec, func(string) boo
 func registerArchivableWithTmux(t *testing.T, m *Manager, repoID, repoPath, title, agentName string) (*session.Instance, string, func(string) bool) {
 	t.Helper()
 	wtPath := filepath.Join(filepath.Dir(repoPath), "wt-"+sanitizeArchiveTitle(title))
-	branch := "af/" + sanitizeArchiveTitle(title)
+	branch := m.branchForTitle(title)
 	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput()
 	require.NoError(t, err, string(out))
 
