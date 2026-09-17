@@ -15293,6 +15293,12 @@ var TAB_PRESS_LIMITS = { holdMs: 500, slopPx: 10 };
 function pressDistance(fromX, fromY, toX, toY) {
   return Math.hypot(toX - fromX, toY - fromY);
 }
+function tabDragFeedbackRegion(overBar, overPane) {
+  if (overBar) {
+    return "bar";
+  }
+  return overPane ? "pane" : "none";
+}
 
 // src/keyed-rows.ts
 var KeyedRows = class {
@@ -16991,10 +16997,13 @@ var AppShell = class {
         return;
       }
       e.preventDefault();
-      if (!bar.contains(document.elementFromPoint(e.clientX, e.clientY)) && this.actions.paneDropHintAt(e.clientX, e.clientY)) {
-        this.hideTabInsert();
-      } else {
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      const overBar = bar.contains(hit);
+      const overPane = !overBar && this.actions.paneDropHintAt(e.clientX, e.clientY);
+      if (tabDragFeedbackRegion(overBar, overPane) === "bar") {
         this.showTabInsert(bar, e.clientX);
+      } else {
+        this.hideTabInsert();
       }
     });
     bar.addEventListener("pointerup", (e) => {
