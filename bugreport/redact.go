@@ -655,6 +655,12 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 		if d.PendingAccountSwap.To != "" {
 			d.PendingAccountSwap.To = redactedMarker
 		}
+		// The account a carried conversation was copied from (#4367) is the
+		// same user-picked label as From. Empty means the ambient identity and
+		// stays empty, so redaction never invents an account.
+		if d.PendingAccountSwap.CarrySourceAccount != "" {
+			d.PendingAccountSwap.CarrySourceAccount = redactedMarker
+		}
 		// The same provider conversation id AgentConversation.ID is cleared for,
 		// and cleared the same way rather than marked: it is a resumable handle,
 		// so its VALUE is the sensitive part and its presence is not worth
