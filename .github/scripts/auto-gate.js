@@ -2,17 +2,23 @@ const { randomUUID } = require("node:crypto");
 
 // GitHub renders one GitHub App actor under several logins depending on the
 // surface being read: the detail app has been observed as `app/detail-app` on a
-// pull request's author field, `detail-app[bot]` on its commits, and
-// `app-detail-app` / `app-detail-app[bot]` in the renderings this set was first
-// written for. Strip a leading `app/` and a trailing `[bot]` before the
-// membership test so a rename — or a rendering this gate has not seen before —
-// cannot silently fail closed into the manual-merge path again (#4425). The
-// predicate is applied at every ALLOWED_AUTHORS lookup; a site that skipped the
-// normalization would be an intermittent version of the same defect.
+// pull request's author field and `detail-app[bot]` on its review comments
+// (live comment data, #4117). Strip a leading `app/` and a trailing `[bot]`
+// before the membership test so a rename — or a rendering this gate has not
+// seen before — cannot silently fail closed into the manual-merge path again
+// (#4425). The predicate is applied at every ALLOWED_AUTHORS lookup; a site
+// that skipped the normalization would be an intermittent version of the same
+// defect.
 function normalizeAuthorLogin(login) {
   return String(login || "").replace(/^app\//, "").replace(/\[bot\]$/, "");
 }
-const ALLOWED_AUTHORS = new Set(["sachiniyer", "detail-app", "app-detail-app"]);
+// `app-detail-app` was dropped for #4117: it was a guessed spelling, never
+// observed on a real artifact — every rendering of the detail app normalizes
+// to `detail-app`. A dead entry is not harmless: it implies a capability
+// nothing has, and a squatter registering the username would gain the gate's
+// trust. If a real surface ever does emit it, the unauthorized-acker
+// diagnostics below now name it in the summary instead of failing invisibly.
+const ALLOWED_AUTHORS = new Set(["sachiniyer", "detail-app"]);
 function isAllowedAuthor(login) {
   return ALLOWED_AUTHORS.has(normalizeAuthorLogin(login));
 }
@@ -5868,31 +5874,72 @@ async function evaluateCodex({
     const named = unboundFindingArtifacts
       .map((artifact) => artifactReferences(artifact)[0])
       .filter(Boolean);
+    // #4117: the same silent drop lives on this surface — a reply that links
+    // the artifact and carries a marker still counts for nothing when its
+    // author is outside the allowlist, and it used to vanish without a word.
+    // Name the author so the blocker says why the visible reply is not an
+    // answer instead of reporting the artifact as simply unanswered.
+    const unauthorizedUnboundAckers = [
+      ...new Set(
+        [...comments, ...reviews]
+          .filter(
+            (artifact) =>
+              !isAllowedAuthor(artifact.user?.login) &&
+              hasResolutionMarker(artifact.body || "") &&
+              unboundFindingArtifacts.some((finding) =>
+                artifactReferences(finding).some((reference) =>
+                  bodyNamesReference(artifact.body || "", reference),
+                ),
+              ),
+          )
+          .map((artifact) => String(artifact.user?.login || "(unknown)")),
+      ),
+    ].sort();
+    const unauthorizedNote =
+      unauthorizedUnboundAckers.length > 0
+        ? `; marker replies by ${unauthorizedUnboundAckers.map((login) => `@${login}`).join(", ")} ` +
+          "are ignored — not on the gate's allowlist"
+        : "";
     const unboundReason =
       `${unboundFindingArtifacts.length} Codex artifact(s) carrying a P0-P3 finding name no ` +
       "commit, so the gate cannot tell which head they are about" +
-      (named.length > 0 ? `: ${named.join(", ")}` : "");
+      (named.length > 0 ? `: ${named.join(", ")}` : "") +
+      unauthorizedNote;
     reasons.push(unboundReason);
     findingBlockers.push({
       reason: unboundReason,
       remedy:
         "read the finding and answer it in a PR comment that LINKS it (its comment URL or " +
         "`#issuecomment-<id>`) and carries RESOLVED, ACCEPTED or [gate-ack] — no push can clear " +
-        "an artifact that names no commit, and a marker that names no artifact is not an answer",
+        "an artifact that names no commit, and a marker that names no artifact is not an answer" +
+        (unauthorizedUnboundAckers.length > 0
+          ? `; the linked replies by ${unauthorizedUnboundAckers.map((login) => `@${login}`).join(", ")} ` +
+            "do not count because those authors are not allowed to acknowledge a finding"
+          : ""),
     });
   }
 
+  const resolutionReplies = reviewComments.filter(
+    (comment) => comment.in_reply_to_id && hasResolutionMarker(comment.body || ""),
+  );
   const resolvedByAllowedReply = new Set(
-    reviewComments
-      .filter((comment) => {
-        return (
-          comment.in_reply_to_id &&
-          isAllowedAuthor(comment.user?.login) &&
-          hasResolutionMarker(comment.body || "")
-        );
-      })
+    resolutionReplies
+      .filter((comment) => isAllowedAuthor(comment.user?.login))
       .map((comment) => comment.in_reply_to_id),
   );
+  // #4117: a marker-carrying reply from an author outside the allowlist does
+  // not clear the thread — but it must not vanish either. The author believes
+  // it answered and the gate believes nothing was answered, and a summary that
+  // prescribes the reply already sitting there is how the drop survived. Name
+  // the author so the blocker can say who still has to answer.
+  const unauthorizedAckLogins = new Map();
+  for (const reply of resolutionReplies) {
+    if (!isAllowedAuthor(reply.user?.login)) {
+      const logins = unauthorizedAckLogins.get(reply.in_reply_to_id) || new Set();
+      logins.add(String(reply.user?.login || "(unknown)"));
+      unauthorizedAckLogins.set(reply.in_reply_to_id, logins);
+    }
+  }
   // A top-level Codex review comment is live until somebody ANSWERS it, and where
   // its thread currently points is deliberately no part of that test. GitHub
   // nulls `line` once a push moves the code a thread was anchored to, and a
@@ -5925,11 +5972,29 @@ async function evaluateCodex({
   // the summary renders what the gate knows rather than inferring it back out of
   // the message.
   if (unresolvedFindings.length > 0) {
-    const unresolvedReason = `${unresolvedFindings.length} unresolved live Codex inline finding(s)`;
+    const unauthorizedAckers = [
+      ...new Set(
+        unresolvedFindings.flatMap((comment) => [
+          ...(unauthorizedAckLogins.get(comment.id) || []),
+        ]),
+      ),
+    ].sort();
+    const unauthorizedNote =
+      unauthorizedAckers.length > 0
+        ? `; resolution replies by ${unauthorizedAckers.map((login) => `@${login}`).join(", ")} ` +
+          "are ignored — not on the gate's allowlist"
+        : "";
+    const unresolvedReason =
+      `${unresolvedFindings.length} unresolved live Codex inline finding(s)` + unauthorizedNote;
     reasons.push(unresolvedReason);
     findingBlockers.push({
       reason: unresolvedReason,
-      remedy: "reply RESOLVED, ACCEPTED or [gate-ack] on each thread",
+      remedy:
+        "reply RESOLVED, ACCEPTED or [gate-ack] on each thread" +
+        (unauthorizedAckers.length > 0
+          ? ` — the marker replies already posted by ${unauthorizedAckers.map((login) => `@${login}`).join(", ")} ` +
+            "do not count because those authors are not allowed to acknowledge a finding"
+          : ""),
     });
   } else {
     notes.push("No unresolved live Codex inline findings");

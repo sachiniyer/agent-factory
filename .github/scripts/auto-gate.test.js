@@ -1035,18 +1035,17 @@ test("a reviewed non-allowed author gets a passing manual decision without an au
   ]);
 });
 
-// #4425: the detail bot's real login is `app/detail-app`, which the unmodified
-// set never contained — every detail PR fell to the manual-merge path. The
-// predicate strips a leading `app/` and a trailing `[bot]` before the set
-// lookup, so these pins cover every spelling GitHub has been observed to
-// render for the same actor rather than the three the set once spelled out.
+// #4425: the detail bot's real logins are `app/detail-app` on a pull request's
+// author field and `detail-app[bot]` on its review comments (verified against
+// live comment data in #4117) — the spellings the set once spelled out were
+// guesses. The predicate strips a leading `app/` and a trailing `[bot]`
+// before the set lookup, so these pins cover every spelling GitHub has been
+// observed to render for the same actor.
 for (const login of [
   "sachiniyer",
   "app/detail-app",
   "detail-app",
   "detail-app[bot]",
-  "app-detail-app",
-  "app-detail-app[bot]",
 ]) {
   test(`author normalization admits ${login}`, () => {
     assert.equal(__test.isAllowedAuthor(login), true);
@@ -1055,12 +1054,19 @@ for (const login of [
 
 // …and the normalization must not become a new way in: an actor that merely
 // wears the `app/` or `[bot]` shape is still refused, and so is the reviewer —
-// a Codex approval would be the gate trusting the thing it gates.
+// a Codex approval would be the gate trusting the thing it gates. The
+// `app-detail-app` spellings are pinned REFUSED rather than dropped from the
+// fixture list: they were the guessed logins the set once named (#4117), never
+// observed on a real artifact, and re-admitting one is how the silent-ack hole
+// would come back — or a squatter's way in if the username were registered.
 for (const login of [
   "outside-contributor",
   "app/outside-contributor",
   "chatgpt-codex-connector[bot]",
   "app/trunk-io",
+  "app-detail-app",
+  "app-detail-app[bot]",
+  "detail-app-bot",
   "",
   undefined,
   null,
@@ -3889,7 +3895,7 @@ test("an answer in the same second as the finding still answers it", async () =>
         commentTime: "2026-07-09T01:20:06Z",
       }),
       prComment(
-        "app-detail-app[bot]",
+        "detail-app[bot]",
         `Read it — [gate-ack] #issuecomment-${stripped.id}.`,
         "2026-07-09T01:20:00Z",
       ),
@@ -4649,7 +4655,7 @@ test("an APPROVED review from an allowed author counts as the approval", async (
     issueComments: [codexRateLimit()],
     reviews: [
       {
-        user: { login: "app-detail-app" },
+        user: { login: "detail-app[bot]" },
         state: "APPROVED",
         submitted_at: "2026-07-09T01:30:00Z",
         body: "Looks right.",
@@ -11671,6 +11677,77 @@ test("a later ACCEPTED exempts a finding an earlier RESOLVED claimed to fix", as
 test("gate-ack remains an explicit finding resolution marker", () => {
   assert.equal(__test.hasResolutionMarker("Root accepts this [gate-ack]."), true);
   assert.equal(__test.hasResolutionMarker("accepted in discussion, not marked"), false);
+});
+
+// #4117: the detail bot's real review-comment login is `detail-app[bot]` —
+// verified against live comment data on #4106 and #4109, where its acks were
+// dropped because the allowlist named spellings no actor posts under. An ack
+// under the real login must clear the finding.
+test("a gate-ack from detail-app[bot] clears an inline finding", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    reviewComments: [
+      codexFinding({ id: 10, line: 32, createdAt: "2026-07-09T01:15:00Z" }),
+      {
+        ...findingReply({ id: 11, inReplyToId: 10, body: "Valid edge case — accepting [gate-ack]." }),
+        user: { login: "detail-app[bot]" },
+      },
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+// #4117's other half: a marker reply from an author OUTSIDE the allowlist does
+// not clear the thread — but it must not vanish silently either. The author
+// believes it answered and the gate believed nothing was answered, and the old
+// summary prescribed the reply already sitting there. The blocker now names
+// the author and says why its reply does not count.
+test("a gate-ack from an unrecognized author is named on the blocker, not dropped", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    reviewComments: [
+      codexFinding({ id: 10, line: 32, createdAt: "2026-07-09T01:15:00Z" }),
+      {
+        ...findingReply({ id: 11, inReplyToId: 10, body: "Looks fine to me [gate-ack]." }),
+        user: { login: "outside-contributor" },
+      },
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /unresolved live Codex inline finding/);
+  assert.match(result.reasons.join("\n"), /@outside-contributor/);
+  assert.match(result.reasons.join("\n"), /not (?:an allowed|on the allowlist)|allowlist/);
+});
+
+// Same contract on the unbound-artifact surface: a reply that LINKS the
+// artifact and carries a marker still counts for nothing when its author is
+// outside the allowlist — and now says so, naming the author.
+test("a linked marker reply from an unrecognized author is named on the unbound blocker", async () => {
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const result = await evaluateGate({
+    reviews: [automaticReview()],
+    issueComments: [
+      stripped,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+      prComment(
+        "outside-contributor",
+        `Read it — [gate-ack] #issuecomment-${stripped.id}.`,
+        "2026-07-09T01:20:00Z",
+      ),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /name no commit/);
+  assert.match(result.reasons.join("\n"), /@outside-contributor/);
 });
 
 async function evaluateGate(options = {}) {
