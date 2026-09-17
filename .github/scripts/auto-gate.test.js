@@ -405,13 +405,13 @@ test("the gate's own sources do not disqualify a review that quotes them", () =>
   }
 });
 
-test("scheduled reconciliation coalesces only fungible full-scan workflows", () => {
+test("reconciliation passes coalesce only fungible full-scan workflows", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
   const beforeJobs = workflow.slice(0, workflow.indexOf("\njobs:"));
   assert.match(
     beforeJobs,
-    /concurrency:\n  group: auto-gate-\$\{\{ github\.event_name == 'schedule' && 'required-check-reconciliation' \|\| github\.run_id \}\}\n  cancel-in-progress: false/,
-    "a second schedule must wait for the selected targets' whole transaction",
+    /concurrency:\n  group: auto-gate-\$\{\{ \(github\.event_name == 'schedule' \|\| github\.event_name == 'repository_dispatch'\) && 'required-check-reconciliation' \|\| github\.run_id \}\}\n  cancel-in-progress: false/,
+    "a second pass, scheduled or dispatched, must wait for the selected targets' whole transaction",
   );
   assert.doesNotMatch(
     beforeJobs,
@@ -424,8 +424,8 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
   assert.match(
     workflow,
-    /^concurrency:\n  group: auto-gate-\$\{\{ github\.event_name == 'schedule' && 'required-check-reconciliation' \|\| github\.run_id \}\}\n  cancel-in-progress: false$/m,
-    "only fungible scheduled scans may share a workflow-level group",
+    /^concurrency:\n  group: auto-gate-\$\{\{ \(github\.event_name == 'schedule' \|\| github\.event_name == 'repository_dispatch'\) && 'required-check-reconciliation' \|\| github\.run_id \}\}\n  cancel-in-progress: false$/m,
+    "only fungible reconciliation scans may share a workflow-level group",
   );
   const jobs = Object.fromEntries([...workflow.matchAll(
     /^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/gm,
@@ -461,6 +461,7 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
     "github.event.check_suite.head_sha",
     "github.event.sha",
     "github.event.schedule",
+    "github.event.action",
     "github.run_id",
   ]);
   // Evaluate the actual expression's property/OR subset, including Actions'
@@ -481,6 +482,11 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
     status: [{ sha: HEAD_SHA }, {}, HEAD_SHA],
     workflow_run: [{ workflow_run: { head_sha: HEAD_SHA } }, {}, HEAD_SHA],
     schedule: [{ schedule: "*/5 * * * *" }, {}, "*/5 * * * *"],
+    repository_dispatch: [
+      { action: "auto-gate-reconcile", client_payload: { source_run_id: "501" } },
+      {},
+      "auto-gate-reconcile",
+    ],
     workflow_dispatch: [{}, { pr_number: 4060 }, 4060],
   };
   const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
@@ -7697,6 +7703,316 @@ test("scheduled reconciliation caps one sweep at ten PRs", async () => {
   assert.equal(new Set(targets.map((target) => target.prNumber)).size, targets.length);
 });
 
+// The schedule is a backstop, not a clock: GitHub delivered the */5 trigger
+// every two to five hours (#4571). Ordinary Auto Gate runs arrive many times an
+// hour, so each one may request the same bounded pass. These fakes stand in for
+// the two calls a request makes, and a dispatch they accept becomes a run the
+// next request's listing can see.
+const RECONCILIATION_DISPATCH = "auto-gate-reconcile";
+const RECONCILIATION_WINDOW_MS = 5 * 60 * 1000;
+
+function reconciliationRequestApi({
+  clock,
+  runs = [],
+  listReads = [],
+  dispatches = [],
+  listError = null,
+  listResponse = null,
+  dispatchError = null,
+  honorCreatedFilter = true,
+}) {
+  return {
+    listWorkflowRuns: async (params) => {
+      listReads.push(params);
+      if (listError) {
+        throw listError;
+      }
+      if (listResponse) {
+        return listResponse;
+      }
+      const since = /^>=(.+)$/.exec(params.created || "")?.[1];
+      const matching = runs
+        .filter(
+          (run) =>
+            run.workflow_id === params.workflow_id &&
+            (!params.event || run.event === params.event) &&
+            (!honorCreatedFilter || since === undefined ||
+              Date.parse(run.created_at) >= Date.parse(since)),
+        )
+        // The API lists newest first.
+        .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
+      return {
+        data: {
+          total_count: matching.length,
+          workflow_runs: matching.slice(0, params.per_page ?? 30),
+        },
+      };
+    },
+    createDispatchEvent: async (params) => {
+      dispatches.push(params);
+      if (dispatchError) {
+        throw dispatchError;
+      }
+      // auto-gate.yml subscribes exactly one repository_dispatch type, which the
+      // first reconciliation test pins; any other type starts no run of it.
+      if (params.event_type !== RECONCILIATION_DISPATCH) {
+        return { status: 204 };
+      }
+      runs.push({
+        id: 9_000_000 + runs.length,
+        workflow_id: "auto-gate.yml",
+        event: "repository_dispatch",
+        created_at: new Date(clock()).toISOString().replace(/\.\d{3}Z$/, "Z"),
+        payload: { action: params.event_type, client_payload: params.client_payload },
+      });
+      return { status: 204 };
+    },
+  };
+}
+
+function withReconciliationRequests(github, api) {
+  return {
+    ...github,
+    rest: {
+      ...github.rest,
+      actions: { ...github.rest?.actions, listWorkflowRuns: api.listWorkflowRuns },
+      repos: { ...github.rest?.repos, createDispatchEvent: api.createDispatchEvent },
+    },
+  };
+}
+
+async function requestReconciliation({ github, context, core = fakeCore(), now }) {
+  assert.equal(
+    typeof autoGate.requestRequiredCheckReconciliation,
+    "function",
+    "an ordinary Auto Gate run has no way to request stale-decision reconciliation",
+  );
+  return autoGate.requestRequiredCheckReconciliation({ github, context, core, now });
+}
+
+function autoGateResolverJob() {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  return workflow.slice(workflow.indexOf("  auto-gate:"), workflow.indexOf("  invalidate-gate:"));
+}
+
+test("a decision frozen before PR Validation concluded is re-evaluated by the next non-schedule run", async () => {
+  // #4224's shape in #4571: the decision froze on "Build is missing" at 14:57,
+  // Build went green at 15:37:10, the workflow_run wakeup resolved another PR's
+  // head, and the next scheduled run was hours away.
+  const frozen = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-09-17T14:57:00Z",
+  });
+  const clock = () => Date.parse("2026-09-17T15:40:00Z");
+  const runs = [];
+  const dispatches = [];
+  const github = withReconciliationRequests(
+    scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA), reconciliationPull(4060, OTHER_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          frozen,
+          reconciliationRequiredCheck("Build", "2026-09-17T15:37:10Z"),
+          reconciliationRequiredCheck("Lint", "2026-09-17T15:02:00Z"),
+        ],
+      },
+    }),
+    reconciliationRequestApi({ clock, runs, dispatches }),
+  );
+
+  // The next run is an ordinary one: a comment on an unrelated PR.
+  const comment = {
+    ...fakeContext({ issue: { number: 4060, pull_request: {} } }),
+    eventName: "issue_comment",
+    runId: 501,
+  };
+  const request = await requestReconciliation({ github, context: comment, now: clock() });
+  assert.equal(request.requested, true);
+  assert.equal(dispatches.length, 1);
+  assert.equal(dispatches[0].event_type, RECONCILIATION_DISPATCH);
+  assert.equal(runs.length, 1, "the request must start an Auto Gate run");
+
+  // That run is the scheduled pass under another trigger: it selects the frozen
+  // decision, and only it.
+  const [started] = runs;
+  const targets = await autoGate.resolveTargets({
+    github,
+    context: { ...fakeContext(started.payload), eventName: started.event, runId: started.id },
+    core: fakeCore(),
+  });
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+
+  // The workflow wires both halves: the dispatch is a subscribed trigger, and
+  // the resolver of every run hands the request to the helper.
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
+  assert.match(
+    triggers,
+    new RegExp(`^  repository_dispatch:\\n    types: \\[${RECONCILIATION_DISPATCH}\\]$`, "m"),
+  );
+  assert.match(triggers, /^  schedule:\n    - cron: "\*\/5 \* \* \* \*"$/m, "the schedule stays as a backstop");
+  assert.match(
+    autoGateResolverJob(),
+    /await autoGate\.requestRequiredCheckReconciliation\(\{ github, context, core \}\)/,
+  );
+});
+
+test("a reconciliation-dispatched run does not request another reconciliation", async () => {
+  const clock = () => Date.parse("2026-09-17T15:40:00Z");
+  const listReads = [];
+  const dispatches = [];
+  const github = withReconciliationRequests(
+    { rest: {} },
+    reconciliationRequestApi({ clock, listReads, dispatches }),
+  );
+  // Nothing sits in the rate window, so only the recursion guard can refuse.
+  for (const context of [
+    {
+      ...fakeContext({ action: RECONCILIATION_DISPATCH, client_payload: { source_run_id: "501" } }),
+      eventName: "repository_dispatch",
+    },
+    { ...fakeContext({ action: "another-type" }), eventName: "repository_dispatch" },
+    { ...fakeContext({ schedule: "*/5 * * * *" }), eventName: "schedule" },
+  ]) {
+    const request = await requestReconciliation({ github, context, now: clock() });
+    assert.equal(request.requested, false, `${context.eventName} is itself a pass`);
+  }
+  assert.deepEqual(listReads, [], "a pass does not even read the rate marker");
+  assert.deepEqual(dispatches, [], "a pass cannot start another pass");
+
+  // Control: in the same state, a dispatched run that is not a pass — a manual
+  // or update-branch recovery — does request one.
+  for (const context of [
+    { ...fakeContext({ inputs: { pr_number: "4060" } }), eventName: "workflow_dispatch" },
+    { ...fakeContext({ workflow_run: { head_sha: HEAD_SHA } }), eventName: "workflow_run" },
+  ]) {
+    const control = withReconciliationRequests(
+      { rest: {} },
+      reconciliationRequestApi({ clock, dispatches: [] }),
+    );
+    const request = await requestReconciliation({ github: control, context, now: clock() });
+    assert.equal(request.requested, true, context.eventName);
+  }
+
+  // The workflow skips the step for both pass events before the helper loads,
+  // and a pass keeps the schedule's single running-plus-pending group.
+  const step = autoGateResolverJob().match(
+    /      - name: Request stale-decision reconciliation\n([\s\S]*?)(?=\n      - name: |$(?![\s\S]))/,
+  );
+  assert.ok(step, "the resolver needs a reconciliation request step");
+  assert.match(
+    step[1],
+    /^        if: \$\{\{ !cancelled\(\) && github\.event_name != 'schedule' && github\.event_name != 'repository_dispatch' \}\}$/m,
+  );
+});
+
+test("two ordinary runs inside the rate window request one reconciliation", async () => {
+  for (const honorCreatedFilter of [true, false]) {
+    const label = honorCreatedFilter ? "server-filtered listing" : "unfiltered listing";
+    let now = Date.parse("2026-09-17T16:00:00Z");
+    const runs = [
+      // A pass just outside the window, and runs that are not passes.
+      { id: 1, workflow_id: "auto-gate.yml", event: "repository_dispatch", created_at: "2026-09-17T15:54:59Z" },
+      { id: 2, workflow_id: "auto-gate.yml", event: "issue_comment", created_at: "2026-09-17T15:59:00Z" },
+      { id: 3, workflow_id: "pr.yml", event: "repository_dispatch", created_at: "2026-09-17T15:59:30Z" },
+    ];
+    const listReads = [];
+    const dispatches = [];
+    const github = withReconciliationRequests(
+      { rest: {} },
+      reconciliationRequestApi({ clock: () => now, runs, listReads, dispatches, honorCreatedFilter }),
+    );
+    const comment = { ...fakeContext({ issue: { number: 4060 } }), eventName: "issue_comment" };
+    const status = { ...fakeContext({ sha: HEAD_SHA }), eventName: "status" };
+
+    const first = await requestReconciliation({ github, context: comment, now });
+    assert.equal(first.requested, true, label);
+    now += 2 * 60 * 1000;
+    const second = await requestReconciliation({ github, context: status, now });
+    assert.equal(second.requested, false, label);
+    assert.equal(dispatches.length, 1, `${label}: two runs inside the window reconcile once`);
+
+    // The window is inclusive: a pass exactly five minutes old still holds it.
+    now = Date.parse("2026-09-17T16:05:00Z");
+    assert.equal((await requestReconciliation({ github, context: comment, now })).requested, false, label);
+    now = Date.parse("2026-09-17T16:05:01Z");
+    assert.equal((await requestReconciliation({ github, context: status, now })).requested, true, label);
+    assert.equal(dispatches.length, 2, label);
+
+    // The marker is one cheap read: this workflow's newest repository_dispatch
+    // run, filtered to the window, one result.
+    assert.equal(listReads.length, 4, label);
+    for (const read of listReads) {
+      assert.equal(read.workflow_id, "auto-gate.yml");
+      assert.equal(read.event, "repository_dispatch");
+      assert.equal(read.per_page, 1);
+    }
+    assert.equal(listReads[3].created, ">=2026-09-17T16:00:01Z");
+  }
+
+  // Two runs that both read before either dispatch is visible can both
+  // request. The group bounds that race to one running and one pending pass.
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const beforeJobs = workflow.slice(0, workflow.indexOf("\njobs:")).replace(/\s+/g, " ");
+  assert.match(
+    beforeJobs,
+    /\(github\.event_name == 'schedule' \|\| github\.event_name == 'repository_dispatch'\) && 'required-check-reconciliation'/,
+  );
+});
+
+test("a failed reconciliation request fails toward no dispatch and never reds the run", async () => {
+  const clock = () => Date.parse("2026-09-17T16:00:00Z");
+  const comment = { ...fakeContext({ issue: { number: 4060 } }), eventName: "issue_comment" };
+  const unreadable = [
+    { listError: Object.assign(new Error("Forbidden"), { status: 403 }) },
+    { listResponse: { data: {} } },
+    {
+      listResponse: {
+        data: { workflow_runs: [{ id: 9, event: "repository_dispatch", created_at: "not a time" }] },
+      },
+    },
+  ];
+  for (const failure of unreadable) {
+    const dispatches = [];
+    const core = fakeCore();
+    const github = withReconciliationRequests(
+      { rest: {} },
+      reconciliationRequestApi({ clock, dispatches, ...failure }),
+    );
+    const request = await requestReconciliation({ github, context: comment, core, now: clock() });
+    assert.equal(request.requested, false);
+    assert.deepEqual(dispatches, [], "an unknown marker must not fan out");
+  }
+
+  // A dispatch is not idempotent: one attempt, then a warning.
+  const dispatches = [];
+  const core = fakeCore();
+  const github = withReconciliationRequests(
+    { rest: {} },
+    reconciliationRequestApi({
+      clock,
+      dispatches,
+      dispatchError: Object.assign(new Error("Server Error"), { status: 502 }),
+    }),
+  );
+  const request = await requestReconciliation({ github, context: comment, core, now: clock() });
+  assert.equal(request.requested, false);
+  assert.equal(dispatches.length, 1);
+  assert.match(core.warnings.join("\n"), /reconciliation/);
+
+  const step = autoGateResolverJob().match(
+    /      - name: Request stale-decision reconciliation\n([\s\S]*?)(?=\n      - name: |$(?![\s\S]))/,
+  );
+  assert.ok(step);
+  assert.match(step[1], /catch \(error\) \{[\s\S]{0,300}core\.warning\(/);
+  assert.doesNotMatch(step[1], /setFailed|throw /);
+});
+
 test("the happy path squash-merges the exact evaluated head", async () => {
   const github = fakeGateGithub({
     checkRuns: [
@@ -11188,8 +11504,9 @@ test("the gate runs the sweep once per non-reconciliation run", () => {
 
   // The resolver job — NOT apply-gate, which is a per-aggregate-head matrix that
   // does not run at all when nothing was invalidated, and would sweep once per
-  // head when it does. The scheduled reconciliation is the one exception: its
-  // quota is reserved for repairing required-check decisions.
+  // head when it does. Reconciliation passes, scheduled or dispatched, are the
+  // one exception: their quota is reserved for repairing required-check
+  // decisions.
   const resolver = workflow.slice(
     workflow.indexOf("  auto-gate:"),
     workflow.indexOf("  invalidate-gate:"),
@@ -11205,7 +11522,7 @@ test("the gate runs the sweep once per non-reconciliation run", () => {
   // on its own, so the switch that turns that off has to reach it.
   assert.match(
     resolver,
-    /if: always\(\) && vars\.AUTO_GATE_ENABLED == 'true' && github\.event_name != 'schedule'\n\s+uses: actions\/github-script/,
+    /if: always\(\) && vars\.AUTO_GATE_ENABLED == 'true' && github\.event_name != 'schedule' && github\.event_name != 'repository_dispatch'\n\s+uses: actions\/github-script/,
   );
   assert.match(resolver, /catch \(error\) \{[\s\S]{0,300}core\.warning\(/);
 });
