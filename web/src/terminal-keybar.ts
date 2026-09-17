@@ -65,8 +65,35 @@ interface UserInputMarker {
 interface UserInputOptions {
   physical?: PhysicalKeyInput;
   keybar?: boolean;
+  /** Wait behind a just-committed IME composition xterm has not flushed yet.
+   *  Ignored for a terminal signal byte; see SIGNAL_BYTES. */
   afterComposition?: boolean;
 }
+
+/**
+ * The termios signal characters — VINTR (^C), VQUIT (^\) and VSUSP (^Z). Each
+ * acts on the running program rather than on the line being typed, so none is
+ * ever held back to keep its place behind a just-committed composition (#4151).
+ *
+ * The fail direction decides it. Sent ahead of the commit, a signal only means
+ * the committed word arrives afterwards, unsubmitted. Held back, it is an
+ * interrupt the user watches not happen — and a queued byte is one a focus
+ * change can drop, which is exactly how #4043's deferral lost Ctrl+C.
+ *
+ * Deliberately absent, although they feel just as urgent:
+ *   - ^D is EOF only on an empty line, and the committed word decides whether
+ *     the line is empty. Sent first, it can end the program instead of flushing
+ *     the word.
+ *   - ESC switches mode in modal programs. Sent first, the committed word is
+ *     read as commands — `dd` deletes a line.
+ *   - LF and CR are positional text.
+ * Those need order, not speed. Both ^D and ESC are also already immediate on
+ * their normal path: xterm's CompositionHelper.keydown flushes a pending commit
+ * synchronously before handling any key it is allowed to see, so they reach the
+ * wire at once AND in order. Only keys af intercepts ahead of xterm miss that
+ * flush and need the deferral at all.
+ */
+const SIGNAL_BYTES: ReadonlySet<string> = new Set(["\x03", "\x1c", "\x1a"]);
 
 function userSequence(text: string): UserSequence | undefined {
   if (text.length < 3 || text.charCodeAt(0) !== 27) return undefined;
@@ -402,11 +429,15 @@ export class TerminalKeybar {
     return true;
   }
   sendUserInput(data: string, options: UserInputOptions = {}): void {
-    if (options.afterComposition &&
+    // Decided here, by the bytes, rather than by each caller's options: #4043 lost
+    // the interrupt by rewiring one caller onto the ordered path, and this makes
+    // that rewiring harmless.
+    if (options.afterComposition && !SIGNAL_BYTES.has(data) &&
       this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
     this.emitUserInput(data, options);
   }
-  /** Send an xterm-suppressed physical key after any commit that it could not flush. */
+  /** Send an xterm-suppressed physical key after any commit that it could not
+   *  flush. A terminal signal byte is sent at once instead (SIGNAL_BYTES). */
   sendCustomUserInput(data: string, physical: PhysicalKeyInput): void {
     this.sendUserInput(data, { physical, afterComposition: true });
   }
