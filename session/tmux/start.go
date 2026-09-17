@@ -652,8 +652,14 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 	// has-session already spent a full tmuxCommandTimeout, and a second
 	// command here would pay the same deadline for the same non-answer —
 	// once per persisted tab on the local restore path (Codex on #4473).
+	// resolvedAt is stamped BEFORE the probe runs, not after: it is the
+	// ordering evidence setMonitor uses to decide whether a settled teardown
+	// mark may retire, and only a resolution that BEGAN after the close
+	// returned proves the teardown did not take (#4473 review).
 	var resolved *tmuxGeneration
+	var resolvedAt time.Time
 	if answered {
+		resolvedAt = time.Now()
 		resolved, _ = t.confirmedGeneration()
 	}
 	if err := t.refreshRestoredAccountEnvironment(); err != nil {
@@ -671,6 +677,10 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 	// the fresh monitor must not be bound to it. Either way the OLD monitor
 	// keeps its generation, so an in-flight poll still reads its own
 	// attribution.
-	t.setMonitor(monitor, resolved, answered || confirmedFresh)
+	t.setMonitor(monitor, generationResolution{
+		generation: resolved,
+		answered:   answered || confirmedFresh,
+		startedAt:  resolvedAt,
+	})
 	return RestoreReattached, nil
 }

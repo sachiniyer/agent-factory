@@ -241,14 +241,14 @@ func TestStartAlreadyExistsClearsAnUnboundMarkWithoutResolving(t *testing.T) {
 	session := NewTmuxSessionFromSanitizedNameWithDeps("af_4473_unbound_mark", "claude", NewMockPtyFactory(t), execu)
 	session.monitor = newStatusMonitor()
 	session.markTeardownInitiated()
-	if !session.TeardownInitiated() {
+	if !session.teardownInitiated() {
 		t.Fatal("the unbound mark must land before Start runs")
 	}
 
 	if err := session.Start(t.TempDir()); !errors.Is(err, ErrSessionNotStarted) {
 		t.Fatalf("expected the already-exists refusal, got: %v", err)
 	}
-	if session.TeardownInitiated() {
+	if session.teardownInitiated() {
 		t.Fatal("the live-name answer the caller already established discharges a name-scoped mark")
 	}
 }

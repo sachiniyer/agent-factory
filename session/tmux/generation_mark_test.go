@@ -26,6 +26,17 @@ func boundSession(t *testing.T, gen *tmuxGeneration) (*TmuxSession, *teardownMar
 	return session, m
 }
 
+// probeEveryPoll disables the identity probe's cadence gate for one test.
+// Tests that poll more than once and mean to exercise the PROBE must call it:
+// under the production interval the second poll takes the skip path, and an
+// assertion written for the probe would pass without ever running it.
+func probeEveryPoll(t *testing.T) {
+	t.Helper()
+	prev := generationProbeInterval
+	generationProbeInterval = 0
+	t.Cleanup(func() { generationProbeInterval = prev })
+}
+
 func monitorMark(t *testing.T, session *TmuxSession) bool {
 	t.Helper()
 	session.monitorMu.Lock()
@@ -47,7 +58,11 @@ func TestSameGenerationRebindSharesTeardownMark(t *testing.T) {
 	// The rebind resolves the same generation — display-message answered with
 	// the identical (id, pid, created) tuple.
 	incoming := newStatusMonitor()
-	session.setMonitor(incoming, &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}, true)
+	session.setMonitor(incoming, generationResolution{
+		generation: &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"},
+		answered:   true,
+		startedAt:  time.Now(),
+	})
 	require.Same(t, gen, incoming.generation,
 		"a rebind confirming the same live generation must share its attribution object")
 
@@ -117,7 +132,7 @@ func TestAnsweredResolutionDoesNotCarryStaleMark(t *testing.T) {
 	session, m := newMarkedTeardownSession(t)
 	_, err := session.Close()
 	require.NoError(t, err)
-	require.True(t, session.TeardownInitiated())
+	require.True(t, session.teardownInitiated())
 
 	// The name is live again, owned by a DIFFERENT generation — the
 	// existence probe answers and the bind probe resolves $9.
@@ -126,7 +141,7 @@ func TestAnsweredResolutionDoesNotCarryStaleMark(t *testing.T) {
 
 	_, err = session.RestoreWithResult(t.TempDir())
 	require.NoError(t, err)
-	require.False(t, session.TeardownInitiated(),
+	require.False(t, session.teardownInitiated(),
 		"a resolved generation is affirmative liveness: the confirmed-live session is not the one af closed")
 
 	// And the fresh monitor's poll of the confirmed generation's death stays
@@ -164,7 +179,7 @@ func TestSameGenerationResolutionRetiresSettledMark(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, gen, session.monitor.generation,
 		"the same confirmed generation shares its attribution object")
-	require.False(t, session.TeardownInitiated(),
+	require.False(t, session.teardownInitiated(),
 		"the settled mark retires: the generation answered live after the close returned")
 
 	// And the unsettled counterpart: an in-flight teardown keeps its mark.
@@ -176,6 +191,58 @@ func TestSameGenerationResolutionRetiresSettledMark(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, monitorMark(t, session2),
 		"an in-flight teardown's mark survives the same-generation rebind")
+}
+
+// TestStraddlingResolutionKeepsSettledMark is the settle-ordering finding
+// (#4473 review): setMonitor's same-generation branch must apply the SAME rule
+// HasUpdatedWithBaseline applies to a successful capture — liveness that was
+// observed BEFORE the asking close() returned is no evidence the teardown
+// failed, because the resolution saw the very session the kill was about to
+// take.
+//
+// The rebind here straddles the close: the name probe is already in flight
+// when close() settles the mark. Without the startedAt guard, setMonitor sees
+// only a non-zero teardownSettledAt and retires a mark whose kill is still
+// landing — and the generation's imminent, af-REQUESTED death then reports at
+// ERROR.
+func TestStraddlingResolutionKeepsSettledMark(t *testing.T) {
+	shortTmuxTimeout(t, markTestTimeout)
+	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+	session, m := boundSession(t, gen)
+	m.nameGen.Store("$5 111 222")
+	session.markTeardownInitiated()
+
+	// The close settles WHILE the rebind's resolution is in flight: the probe
+	// has already begun, so its answer predates the settle it is about to be
+	// compared against.
+	var settledOnce bool
+	m.duringNameProbe = func() {
+		if settledOnce {
+			return
+		}
+		settledOnce = true
+		session.monitorMu.Lock()
+		gen.teardownSettledAt = time.Now()
+		session.monitorMu.Unlock()
+	}
+
+	_, err := session.RestoreWithResult(t.TempDir())
+	require.NoError(t, err)
+	require.True(t, settledOnce, "the test must actually stage the straddle")
+	require.Same(t, gen, session.monitor.generation,
+		"the same confirmed generation still shares its attribution object")
+	require.True(t, session.teardownInitiated(),
+		"a resolution that began before the close returned cannot retire the mark: it saw the session the kill was about to take")
+
+	// And the consequence the guard exists for: the bound generation's death
+	// is af's own teardown completing, so it stays at INFO.
+	m.captureOK.Store(false)
+	m.idGen.Store("999 222") // the id now answers for a different server lifetime
+	infos := captureInfoLog(t)
+	errs := captureErrorLog(t)
+	session.HasUpdated()
+	require.Contains(t, infos.String(), "going silent")
+	require.NotContains(t, errs.String(), "going silent")
 }
 
 // TestStartKeepsBoundMarkWhenNameIsRebound is the fourth finding: Start's
@@ -192,7 +259,7 @@ func TestStartKeepsBoundMarkWhenNameIsRebound(t *testing.T) {
 	// generation than the one the monitor polls.
 	m.nameGen.Store("$9 999 888")
 	require.ErrorIs(t, session.Start(t.TempDir()), ErrSessionNotStarted)
-	require.True(t, session.TeardownInitiated(),
+	require.True(t, session.teardownInitiated(),
 		"a live name owned by another generation does not discharge af's teardown of the bound one")
 
 	// The bound generation then reports its death — af's own teardown, at
@@ -216,7 +283,7 @@ func TestStartClearsBoundMarkWhenGenerationSurvives(t *testing.T) {
 
 	m.nameGen.Store("$5 111 222") // the bound generation itself is live
 	require.ErrorIs(t, session.Start(t.TempDir()), ErrSessionNotStarted)
-	require.False(t, session.TeardownInitiated(),
+	require.False(t, session.teardownInitiated(),
 		"the bound generation answering live proves the teardown did not take")
 }
 
@@ -232,7 +299,7 @@ func TestCloseDoesNotMarkAGenerationThatLostTheName(t *testing.T) {
 
 	_, err := session.Close()
 	require.NoError(t, err)
-	require.False(t, session.TeardownInitiated(),
+	require.False(t, session.teardownInitiated(),
 		"the kill targets the name's owner, which is not the bound generation — its mark must not land")
 
 	// The bound generation's earlier, unrequested death then reports as the
@@ -256,7 +323,7 @@ func TestCloseMarksTheGenerationTheNameStillResolvesTo(t *testing.T) {
 
 	_, err := session.Close()
 	require.NoError(t, err)
-	require.True(t, session.TeardownInitiated())
+	require.True(t, session.teardownInitiated())
 }
 
 // TestWedgedIdentityProbeSpendsOneBudget is the double-timeout finding: a
@@ -279,12 +346,86 @@ func TestWedgedIdentityProbeSpendsOneBudget(t *testing.T) {
 	require.Contains(t, errs.String(), "error capturing pane content")
 }
 
+// TestIdentityProbeRunsOnACadenceNotEveryPoll pins the gate from the #4473
+// review's cost finding. The probe is a `tmux display-message` fork/exec per
+// bound session per poll; measured on an isolated tmux server it cost 5.4ms of
+// CPU each, which at the 1s default poll and ~40 live sessions is 21.5% of one
+// core permanently — roughly doubling the daemon's status-poll cost for a
+// log-severity fix. So it runs on generationProbeInterval, not on every poll.
+//
+// Both halves matter. Skipping is what makes the poll cheap; still probing
+// once the interval elapses is what keeps a reissued id detectable at all.
+func TestIdentityProbeRunsOnACadenceNotEveryPoll(t *testing.T) {
+	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+	session, m := boundSession(t, gen)
+	m.idGen.Store("111 222") // the bound generation keeps answering
+
+	// A freshly bound monitor has never probed, so its first poll does.
+	session.HasUpdated()
+	require.Equal(t, int32(1), m.idProbeCalls.Load(),
+		"the first poll after binding must resolve the generation")
+
+	// Further polls inside the interval ride the previous answer: the capture
+	// still runs every poll, the probe does not.
+	for i := 0; i < 5; i++ {
+		session.HasUpdated()
+	}
+	require.Equal(t, int32(1), m.idProbeCalls.Load(),
+		"polls inside generationProbeInterval must not each pay a second fork/exec")
+	require.Equal(t, int32(6), m.captureCalls.Load(),
+		"the capture itself is NOT gated — only the identity probe is")
+
+	// Once the interval has elapsed the probe runs again, so a reissued id is
+	// still noticed; the gate bounds the detection latency, it does not
+	// remove the detection.
+	session.monitorMu.Lock()
+	session.monitor.lastGenerationProbe = time.Now().Add(-2 * generationProbeInterval)
+	session.monitorMu.Unlock()
+	session.HasUpdated()
+	require.Equal(t, int32(2), m.idProbeCalls.Load(),
+		"a bound monitor must still re-resolve its generation once the interval elapses")
+}
+
+// TestGatedPollStillReportsGenerationDeathOnACaptureFailure is the gate's
+// safety boundary: skipping the pre-capture probe must not cost #4472 its
+// mechanism. A capture that FAILS resolves the identity immediately through
+// captureTargetAliveOrUnknown, so af's own teardown is still attributed on the
+// very poll that observes the disappearance — no interval wait.
+func TestGatedPollStillReportsGenerationDeathOnACaptureFailure(t *testing.T) {
+	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
+	session, m := boundSession(t, gen)
+	m.nameGen.Store("$5 111 222")
+	m.idGen.Store("111 222")
+	session.markTeardownInitiated()
+
+	// Burn the first poll's probe budget so the NEXT poll is inside the
+	// interval and takes the skip path.
+	session.HasUpdated()
+	require.Equal(t, int32(1), m.idProbeCalls.Load())
+
+	// The session now dies. The pre-capture probe is gated off, but the
+	// capture fails and its own gone-probe resolves the id.
+	m.captureOK.Store(false)
+	m.idGen.Store("999 222") // the id answers for a different server lifetime
+	infos := captureInfoLog(t)
+	errs := captureErrorLog(t)
+	session.HasUpdated()
+	require.True(t, session.monitor.dead,
+		"a gated poll must still latch the death its capture just proved")
+	require.Contains(t, infos.String(), "going silent",
+		"af asked for this teardown, and the gate must not cost it that attribution")
+	require.NotContains(t, errs.String(), "going silent")
+}
+
 // TestTransientIdentityProbeFailureStaysRetryable is the misclassification
 // finding: a probe error tmux never answered — an exec-level failure here —
 // is not evidence the generation is gone. The poll must surface it as an
 // ordinary transient and keep the monitor retryable, which is what the
 // recovery half of this test observes.
 func TestTransientIdentityProbeFailureStaysRetryable(t *testing.T) {
+	// The recovery half polls a SECOND time and asserts on what the probe
+	// answers, so the cadence gate must not skip it.
+	probeEveryPoll(t)
 	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
 	session, m := boundSession(t, gen)
 	m.idErr.Store(errors.New("fork/exec tmux: resource temporarily unavailable"))
@@ -391,7 +532,7 @@ func TestStartWedgedRebindDoesNotBindRetiredGeneration(t *testing.T) {
 	session.monitorMu.Unlock()
 	require.NotSame(t, gen, newGen,
 		"the replacement's monitor must not carry the retired generation — a wedged rebind is no evidence the old session owns the name")
-	require.False(t, session.TeardownInitiated(),
+	require.False(t, session.teardownInitiated(),
 		"the fresh monitor answers for a session af did not tear down")
 
 	// Once tmux answers again the monitor must be polling a live session —

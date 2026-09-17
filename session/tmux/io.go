@@ -39,7 +39,32 @@ type statusMonitor struct {
 	// than before.
 	// Written before the monitor is installed; read under monitorMu.
 	generation *tmuxGeneration
+	// lastGenerationProbe is when this monitor last spent a command budget on
+	// the id-identity probe, which runs on a slower cadence than the capture
+	// (generationProbeInterval). Zero means never, so a freshly bound monitor
+	// always probes on its first poll. Guarded by monitorMu.
+	lastGenerationProbe time.Time
 }
+
+// generationProbeInterval is the floor between two identity probes for one
+// bound monitor. The probe is a `tmux display-message` fork/exec per bound
+// session per poll, and at the 1s default poll with ~40 live sessions that
+// measured 5.4ms of CPU each — 21.5% of one core, permanently, roughly
+// DOUBLING the daemon's status-poll cost (#4473 review; measured on an
+// isolated tmux server, 40 sessions x 30 polls x 3 reps, tmux 3.4).
+//
+// Slowing the cadence is the gate that keeps the mechanism intact. The other
+// candidate — probe only after a capture error — would remove the very case
+// the probe exists for: a reissued $id answers capture-pane SUCCESSFULLY from
+// a foreign session, so there is no error to trigger it and the dead
+// generation is never noticed. A capture that DOES fail still resolves the
+// identity immediately, through captureTargetAliveOrUnknown, so this interval
+// costs the teardown attribution in #4472 nothing at all; it bounds only how
+// long a successful capture can read a reissued id before the reuse is seen.
+//
+// Overridable so tests that poll repeatedly can keep exercising the probe
+// rather than silently running the skip path.
+var generationProbeInterval = 10 * time.Second
 
 // tmuxGeneration is one concrete tmux session as tmux can prove it: the
 // session id ($N) plus the SERVER's process id and the session's creation
@@ -267,11 +292,21 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 	mon := t.monitor
 	alive := mon != nil && !mon.dead
 	var gen *tmuxGeneration
+	var probeDue bool
 	target := exactTarget(t.sanitizedName)
 	if alive {
 		gen = mon.generation
 		if gen != nil && gen.sessionID != "" {
 			target = gen.sessionID
+			// Rate-limit the identity probe to generationProbeInterval: it is
+			// a second fork/exec per bound session per poll, and it measured
+			// as much CPU as the capture it precedes (#4473 review). The
+			// stamp is taken here, before the probe runs, so a probe that
+			// spends its whole deadline cannot shorten the next interval.
+			probeDue = time.Since(mon.lastGenerationProbe) >= generationProbeInterval
+			if probeDue {
+				mon.lastGenerationProbe = time.Now()
+			}
 		}
 	}
 	t.monitorMu.Unlock()
@@ -291,7 +326,13 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 	// death. An unanswered probe means a wedged server — unknown, so the
 	// poll ends on the probe's own error rather than doubling the budget on
 	// a capture the server is just as unlikely to answer.
-	if gen != nil && gen.sessionID != "" {
+	//
+	// It runs on generationProbeInterval rather than on every poll: a second
+	// fork/exec per bound session per second measured as much CPU as the
+	// capture it precedes (#4473 review). Skipping it costs only detection
+	// LATENCY for a reissued id — a capture that fails still resolves the
+	// identity on the spot, inside capturePaneContentTarget.
+	if probeDue {
 		switch same, known, probeErr := t.generationMatches(gen); {
 		case known && !same:
 			// Route through the canonical constructor: a hand-built

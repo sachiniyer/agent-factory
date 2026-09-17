@@ -70,9 +70,20 @@ type teardownMarkTmux struct {
 	captureCalls   atomic.Int32
 	idProbeCalls   atomic.Int32
 	nameProbeCalls atomic.Int32
+	// killCalls and listPanesCalls count the two commands close() issues AFTER
+	// its identity probe, so a test can prove the unanswered-probe early return
+	// actually skipped them rather than merely reporting the same state
+	// (#4473 review).
+	killCalls      atomic.Int32
+	listPanesCalls atomic.Int32
 	// duringSetup, if set, runs inside Start's post-confirmation set-option call,
 	// between the existence poll and the inner Restore.
 	duringSetup func()
+	// duringNameProbe, if set, runs INSIDE the name-targeted bind probe — the
+	// window in which a rebind's resolution is in flight. It is how a test
+	// stages a resolution that STRADDLES a close: the probe has already begun
+	// when close() settles its mark (#4473 review).
+	duringNameProbe func()
 }
 
 func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
@@ -88,6 +99,7 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 		}
 		return nil, errors.New("can't find session")
 	case strings.Contains(args, "kill-session"):
+		m.killCalls.Add(1)
 		if m.killFails.Load() {
 			return nil, errors.New("cannot kill session")
 		}
@@ -99,6 +111,9 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 			return []byte("pane content"), nil
 		}
 		return nil, errors.New("exit status 1")
+	case strings.Contains(args, "list-panes"):
+		m.listPanesCalls.Add(1)
+		return nil, nil
 	case strings.Contains(args, " ls "):
 		if v := m.idList.Load(); v != nil {
 			return []byte(v.(string)), nil
@@ -107,6 +122,9 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 	case strings.Contains(args, "display-message") && strings.Contains(args, "session_id"):
 		// confirmedGeneration's name-targeted bind probe.
 		m.nameProbeCalls.Add(1)
+		if m.duringNameProbe != nil {
+			m.duringNameProbe()
+		}
 		if m.nameWedged.Load() {
 			time.Sleep(markTestWedge)
 			return nil, errors.New("wedged tmux server never answered the name probe")
@@ -259,7 +277,7 @@ func TestCloseTeardownMarkFollowsTmuxAnswer(t *testing.T) {
 			} else {
 				require.ErrorIs(t, err, tc.wantErr)
 			}
-			require.Equal(t, tc.wantMark, session.TeardownInitiated(), tc.rationale)
+			require.Equal(t, tc.wantMark, session.teardownInitiated(), tc.rationale)
 		})
 	}
 }
@@ -315,7 +333,7 @@ func TestFailedRestartKeepsTeardownAtInfo(t *testing.T) {
 
 			tc.stage(t, m)
 			require.ErrorIs(t, session.Start(t.TempDir()), tc.want)
-			require.True(t, session.TeardownInitiated(),
+			require.True(t, session.teardownInitiated(),
 				"no live replacement was confirmed, so the mark still describes the session af closed")
 
 			atInfo, atError := pollVanish(t, session, m)
@@ -337,7 +355,7 @@ func TestStartNameTakenClearsTeardownMark(t *testing.T) {
 
 	m.alive.Store(true) // recreated behind af's back
 	require.ErrorIs(t, session.Start(t.TempDir()), ErrSessionNotStarted)
-	require.False(t, session.TeardownInitiated(), "a live session af did not just close holds the name")
+	require.False(t, session.teardownInitiated(), "a live session af did not just close holds the name")
 
 	_, atError := pollVanish(t, session, m)
 	require.True(t, atError)
@@ -359,14 +377,14 @@ func TestStartConfirmedReplacementKeepsOldMonitorMark(t *testing.T) {
 	var setupRan, markDuringSetup atomic.Bool
 	m.duringSetup = func() {
 		setupRan.Store(true)
-		markDuringSetup.Store(session.TeardownInitiated())
+		markDuringSetup.Store(session.teardownInitiated())
 	}
 
 	require.NoError(t, session.Start(t.TempDir()))
 	require.True(t, setupRan.Load(), "the observation point must actually run")
 	require.True(t, markDuringSetup.Load(),
 		"the old monitor must keep its mark until the swap — clearing it here is the in-flight-poll race Codex found")
-	require.False(t, session.TeardownInitiated(), "the fresh monitor for the confirmed replacement starts unmarked")
+	require.False(t, session.teardownInitiated(), "the fresh monitor for the confirmed replacement starts unmarked")
 }
 
 // TestRestoreKeepsTeardownMarkOnUnansweredProbe pins the third site with the
@@ -383,7 +401,7 @@ func TestRestoreKeepsTeardownMarkOnUnansweredProbe(t *testing.T) {
 	result, err := session.RestoreWithResult("/some/work/dir")
 	require.NoError(t, err)
 	require.Equal(t, RestoreReattached, result, "a wedged probe still rebinds rather than respawning (#1962)")
-	require.True(t, session.TeardownInitiated(), "a timed-out probe is not evidence of a live session")
+	require.True(t, session.teardownInitiated(), "a timed-out probe is not evidence of a live session")
 
 	atInfo, atError := pollVanish(t, session, m)
 	require.True(t, atInfo)
@@ -405,14 +423,14 @@ func TestSurvivedTeardownRetiresMarkOnProvenLiveness(t *testing.T) {
 	// session kept running.
 	_, err := session.Close()
 	require.NoError(t, err)
-	require.True(t, session.TeardownInitiated())
+	require.True(t, session.teardownInitiated())
 
 	// A poll that began after the request settled captures successfully —
 	// proof the session outlived af's request — so the mark retires.
 	m.alive.Store(true)
 	m.captureOK.Store(true)
 	session.HasUpdated()
-	require.False(t, session.TeardownInitiated(),
+	require.False(t, session.teardownInitiated(),
 		"post-settle liveness proves the teardown did not take; the mark must retire")
 
 	// The session then dies on its own — unrelated to the request that
@@ -431,5 +449,5 @@ func TestClosedConclusivelyLiveAgainClearsTeardownMark(t *testing.T) {
 
 	require.False(t, session.ClosedConclusivelyAndStillAbsent())
 	require.False(t, session.ClosedConclusively())
-	require.False(t, session.TeardownInitiated(), "the name is live again and af has not asked for it")
+	require.False(t, session.teardownInitiated(), "the name is live again and af has not asked for it")
 }

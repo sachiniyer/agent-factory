@@ -534,10 +534,15 @@ func (t *TmuxSession) setClosedConclusively(closed bool) {
 	t.provenMu.Unlock()
 }
 
-// TeardownInitiated reports whether af itself asked for the teardown of the
+// teardownInitiated reports whether af itself asked for the teardown of the
 // session the CURRENT monitor is polling — the predicate the status monitor
 // uses to keep expected disappearances out of ERROR (#4472).
-func (t *TmuxSession) TeardownInitiated() bool {
+//
+// Unexported: the production reader is HasUpdatedWithBaseline, which reads the
+// mark off its own snapshotted monitor rather than through this accessor, so
+// nothing outside the package needs it (#4473 review). It survives as the
+// package's read-side assertion helper.
+func (t *TmuxSession) teardownInitiated() bool {
 	t.monitorMu.Lock()
 	defer t.monitorMu.Unlock()
 	return t.monitor != nil && t.monitor.generation != nil && t.monitor.generation.teardownInitiated

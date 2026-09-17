@@ -520,7 +520,7 @@ func TestHasUpdatedExpectedTeardownLogsInfo(t *testing.T) {
 	// close() records the request before it runs.
 	_, err := session.Close()
 	require.NoError(t, err)
-	require.True(t, session.TeardownInitiated(), "close() must mark af-initiated teardown")
+	require.True(t, session.teardownInitiated(), "close() must mark af-initiated teardown")
 
 	updated, hasPrompt, _ := session.HasUpdated()
 	require.False(t, updated)
@@ -535,7 +535,7 @@ func TestHasUpdatedExpectedTeardownLogsInfo(t *testing.T) {
 	sessionAlive.Store(true)
 	captureOK.Store(true)
 	require.NoError(t, session.Restore("/some/work/dir"))
-	require.False(t, session.TeardownInitiated(), "re-binding a live session must clear the mark")
+	require.False(t, session.teardownInitiated(), "re-binding a live session must clear the mark")
 
 	captureOK.Store(false)
 	sessionAlive.Store(false)
