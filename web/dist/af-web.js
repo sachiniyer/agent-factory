@@ -18594,8 +18594,14 @@ function applyConfigValueNow(key, value, tok) {
 var TASK_HEALTH_POLL_MS = 6e4;
 window.setInterval(() => {
   const state = store.get();
-  if (state.phase === "app" && state.view === "tasks") {
+  if (state.phase !== "app") {
+    return;
+  }
+  if (state.view === "tasks") {
     refreshTasks();
+  }
+  if (state.view === "config") {
+    refreshUsage();
   }
 }, TASK_HEALTH_POLL_MS);
 var tasksRefetcher = createFencedRefetcher({
