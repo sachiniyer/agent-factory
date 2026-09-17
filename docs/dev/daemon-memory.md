@@ -503,8 +503,8 @@ worth checking before concluding otherwise: a hook run by a **TUI or CLI**
 outside the daemon unit that creates the worktree itself was never scoped (it
 satisfies neither half of the gate and is not in the daemon's cgroup); a
 **non-Linux** host has no systemd and no cgroup accounting at all; and a
-**Linux daemon not managed by systemd** — when the unit cannot start and
-`ensureDaemonThroughUnit` falls back to `ensureDaemonAdHoc`
+**Linux daemon not managed by systemd** — when no service manager is present
+to start the unit and `ensureDaemonThroughUnit` falls back to `ensureDaemonAdHoc`
 (`daemon/control_client.go`), or an operator runs `af --daemon` directly — has
 neither the PID marker nor unit-cgroup membership, so `RunningDaemonProcess()` is
 false and its hooks run unscoped with plain `exec`. Read
