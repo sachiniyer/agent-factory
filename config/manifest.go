@@ -706,23 +706,6 @@ func manifestGlobalOnlyKeySet() map[string]bool {
 	return keys
 }
 
-func manifestTOMLOnlyGlobalKeySet() map[string]bool {
-	keys := make(map[string]bool)
-	for _, entry := range configManifest {
-		if entry.Sources.Has(SourceGlobal) && !entry.Formats.Has(FormatJSON) {
-			keys[entry.Key] = true
-		}
-		if entry.Sources.Has(SourceGlobal) {
-			if _, ok := configAliasForCanonical(entry.Key); ok {
-				// The setting remains available to JSON under its flat alias, but
-				// its canonical dotted spelling is a TOML table leaf.
-				keys[entry.Key] = true
-			}
-		}
-	}
-	return keys
-}
-
 // ManifestTiers is the tier order a briefing (and any future `af config`
 // surface) walks.
 var ManifestTiers = []ConfigTier{TierCore, TierCommon, TierAdvanced}
