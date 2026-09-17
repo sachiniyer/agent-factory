@@ -487,7 +487,11 @@ func taskRunMayFollow(candidate session.InstanceData, run session.TaskRunIdentit
 }
 
 func taskRunIdentityMayFollow(candidate, run session.TaskRunIdentity) bool {
-	if candidate.TaskID != run.TaskID || candidate.TaskGenerationID != run.TaskGenerationID ||
+	// A run admitted before its row's generation was backfilled carries the
+	// empty generation, and runs admitted after carry the backfilled one, so
+	// those later runs are its successors too.
+	if candidate.TaskID != run.TaskID ||
+		!task.GenerationStillNames(candidate.TaskGenerationID, run.TaskGenerationID) ||
 		candidate.SessionID == run.SessionID {
 		return false
 	}

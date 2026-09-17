@@ -113,8 +113,7 @@ func taskRunReservationKey(repoID, taskID, taskGenerationID string) string {
 // daemons made. A row minted by an add is never charged for an empty-generation
 // run.
 func taskRunChargesGeneration(runGenerationID, taskGenerationID string) bool {
-	return runGenerationID == taskGenerationID ||
-		(runGenerationID == "" && task.IsBackfilledGeneration(taskGenerationID))
+	return task.GenerationStillNames(taskGenerationID, runGenerationID)
 }
 
 // holdsTaskRunSlot reports whether one of a task's sessions still occupies a

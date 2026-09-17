@@ -105,3 +105,67 @@ func TestAddNeverMintsABackfilledGeneration(t *testing.T) {
 	assert.NotEqual(t, loaded[0].GenerationID, added.GenerationID)
 	assert.False(t, strings.HasPrefix(added.GenerationID, backfilledGenerationPrefix))
 }
+
+// An operation that read a pre-field row just before a load backfilled it
+// still names that row: the backfill is not a replacement. The CI witness was a
+// hand-written tasks.json whose first `af tasks trigger` was refused with "was
+// replaced before its run was admitted".
+//
+// At 28a6f0fa1 the first write below is refused (applied=false).
+func TestReadFromBeforeBackfillStillNamesTheRow(t *testing.T) {
+	path := setupTestTasks(t, nil)
+	require.NoError(t, os.WriteFile(path, []byte(`[{"id": "inflight", "name": "n", "prompt": "p",
+  "cron_expr": "0 3 * * *", "project_path": "", "program": "claude", "enabled": true,
+  "created_at": "2025-01-01T00:00:00Z"}]`), 0o644))
+	before, err := GetTask("inflight")
+	require.NoError(t, err)
+	require.Empty(t, before.GenerationID, "precondition: the caller read the pre-field row")
+	loaded, _, err := LoadTasksWithStableRepoBindingUpdates()
+	require.NoError(t, err)
+	require.True(t, IsBackfilledGeneration(loaded[0].GenerationID), "precondition: the row was backfilled meanwhile")
+
+	sentAt := time.Date(2026, 9, 17, 9, 0, 0, 0, time.UTC)
+	written, applied, err := UpdateTaskStatusForGeneration("inflight", before.GenerationID, &sentAt, "sent")
+	require.NoError(t, err)
+	require.True(t, applied, "a task-wide status from a pre-backfill read must land")
+	assert.Equal(t, loaded[0].GenerationID, written.GenerationID, "the write keeps the backfilled generation")
+
+	runAt := sentAt.Add(time.Minute)
+	_, applied, err = BeginTaskRun("inflight", "", "session-a", 1, written.LastRunRevision, runAt, RunStatusStarted)
+	require.NoError(t, err)
+	require.True(t, applied, "a run admitted against the pre-field row still publishes")
+	_, applied, err = UpdateTaskRunOutcome("inflight", "", "session-a", "interrupted: agent runtime lost")
+	require.NoError(t, err)
+	assert.True(t, applied)
+
+	// The legacy claim stays exact: there, an empty generation may be a removed
+	// pre-field row's session.
+	current, err := GetTask("inflight")
+	require.NoError(t, err)
+	_, applied, err = ClaimUnidentifiedTaskRunOutcome("inflight", "session-b", current.LastRunAt,
+		current.LastRunStatus, current.LastRunSessionID, current.LastRunSequence,
+		current.LastRunRevision, "", runAt, 2, "interrupted: agent runtime lost")
+	require.NoError(t, err)
+	assert.False(t, applied)
+}
+
+// A row an add minted is a new incarnation. An empty generation never names it.
+func TestEmptyGenerationDoesNotNameAMintedRow(t *testing.T) {
+	setupTestTasks(t, nil)
+	added, err := AddTaskChecked(Task{
+		ID: "minted02", Name: "n", Prompt: "p", CronExpr: "0 3 * * *",
+		Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}, ActorAPI, nil)
+	require.NoError(t, err)
+	_, applied, err := UpdateTaskStatusForGeneration(added.ID, "", nil, "stopped")
+	require.NoError(t, err)
+	assert.False(t, applied)
+
+	assert.True(t, GenerationStillNames("abc", "abc"))
+	assert.True(t, GenerationStillNames("", ""))
+	assert.True(t, GenerationStillNames(backfilledGenerationPrefix+"abc", ""))
+	assert.False(t, GenerationStillNames("abc", ""))
+	assert.False(t, GenerationStillNames("", backfilledGenerationPrefix+"abc"),
+		"a backfilled read never names a row that has lost its generation")
+	assert.False(t, GenerationStillNames(backfilledGenerationPrefix+"abc", backfilledGenerationPrefix+"def"))
+}

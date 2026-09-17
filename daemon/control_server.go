@@ -806,7 +806,7 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 		if err != nil {
 			return fmt.Errorf("load task %s at target delivery boundary: %w", req.TaskID, err)
 		}
-		if current.GenerationID != req.TaskGenerationID {
+		if !task.GenerationStillNames(current.GenerationID, req.TaskGenerationID) {
 			return fmt.Errorf("task %s was replaced before its target prompt could be delivered", req.TaskID)
 		}
 		if !current.Enabled {

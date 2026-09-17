@@ -77,6 +77,12 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	if err != nil {
 		return session.InstanceData{}, err
 	}
+	if req.TaskID != "" {
+		// Admission may accept a caller that read the row before its generation
+		// was backfilled. From here on the create, its cap slot, and its session
+		// all use the generation the row actually stores.
+		req.TaskGenerationID = taskRunAdmission.generationID
+	}
 	reservationBoundaryDelegated = true
 	repo, title, release, renamedArchived, err := m.reserveCreateForSession(req)
 	if err != nil {

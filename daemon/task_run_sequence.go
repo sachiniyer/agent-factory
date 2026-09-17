@@ -32,7 +32,7 @@ func (m *Manager) nextTaskRunAdmission(taskID, expectedGenerationID string) (tas
 	if err != nil {
 		return taskRunAdmission{}, fmt.Errorf("read task %s for run admission: %w", taskID, err)
 	}
-	if storedTask.GenerationID != expectedGenerationID {
+	if !task.GenerationStillNames(storedTask.GenerationID, expectedGenerationID) {
 		return taskRunAdmission{}, fmt.Errorf("task %s was replaced before its run was admitted", taskID)
 	}
 	// Disabling does not mint a new generation, so the incarnation check above

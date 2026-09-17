@@ -288,3 +288,33 @@ func TestAdoptLegacyEventQueueResumesAndRefusesConflicts(t *testing.T) {
 		assert.NoError(t, err)
 	})
 }
+
+// A delivery that read a hand-edited, pre-field row just before a load
+// backfilled it must still be admitted, and it must run under the generation
+// the row now stores. This is the integration failure on 28a6f0fa1:
+// `af tasks trigger` on a freshly hand-written tasks.json was refused with
+// "task task-one was replaced before its run was admitted", because the create
+// path's target-relationship load backfilled the row between RunTask's read
+// and admission. At 28a6f0fa1 the first require below fails with that error.
+func TestAdmissionAcceptsReadFromBeforeBackfill(t *testing.T) {
+	manager, _, repoPath := newStatusTestManager(t)
+	writePreFieldTasks(t, enabledCronTask("inflight", repoPath))
+	read, err := task.GetTask("inflight")
+	require.NoError(t, err)
+	require.Empty(t, read.GenerationID, "precondition: the caller read the pre-field row")
+	_, _, err = task.LoadTasksWithStableRepoBindingUpdates()
+	require.NoError(t, err)
+	stored, err := task.GetTask("inflight")
+	require.NoError(t, err)
+	require.True(t, task.IsBackfilledGeneration(stored.GenerationID), "precondition: backfilled meanwhile")
+
+	admission, err := manager.nextTaskRunAdmission("inflight", read.GenerationID)
+	require.NoError(t, err, "the backfill is not a replacement")
+	assert.Equal(t, stored.GenerationID, admission.generationID,
+		"the admitted run carries the generation the row stores, so on_complete applies to it")
+
+	minted := addStatusTestTask(t, enabledCronTask("minted03", repoPath))
+	_, err = manager.nextTaskRunAdmission(minted.ID, "")
+	require.Error(t, err, "an empty generation never names a row an add minted")
+	assert.Contains(t, err.Error(), "was replaced before its run was admitted")
+}

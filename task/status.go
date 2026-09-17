@@ -43,7 +43,7 @@ func UpdateTaskStatusForGeneration(
 ) (Task, bool, error) {
 	var revisionErr error
 	updated, applied, err := mutateTaskStatus(taskID, func(t *Task) bool {
-		if t.GenerationID != expectedGenerationID {
+		if !GenerationStillNames(t.GenerationID, expectedGenerationID) {
 			return false
 		}
 		if t.LastRunRevision == ^uint64(0) {
@@ -82,8 +82,8 @@ func BeginTaskRun(
 		return Task{}, false, fmt.Errorf("task run id and sequence are required")
 	}
 	return mutateTaskStatus(taskID, func(t *Task) bool {
-		if t.GenerationID != taskGenerationID || t.LastRunRevision != expectedRevision ||
-			runSequence <= t.LastRunSequence {
+		if !GenerationStillNames(t.GenerationID, taskGenerationID) ||
+			t.LastRunRevision != expectedRevision || runSequence <= t.LastRunSequence {
 			return false
 		}
 		t.LastRunAt = &runAt
@@ -133,8 +133,8 @@ func UpdateTaskRunOutcome(taskID, taskGenerationID, runID, lastRunStatus string)
 // caller can decide whether to do extra work first. It is advisory only: the
 // write evaluates it again, so a row that changes in between is still refused.
 func RunOutcomeApplies(t Task, taskGenerationID, runID string) bool {
-	return runID != "" && t.GenerationID == taskGenerationID && t.LastRunSessionID == runID &&
-		sessionRunStatusActive(t.LastRunStatus)
+	return runID != "" && GenerationStillNames(t.GenerationID, taskGenerationID) &&
+		t.LastRunSessionID == runID && sessionRunStatusActive(t.LastRunStatus)
 }
 
 // AdvanceTaskRunStatus changes the status of the identified active run without
@@ -146,7 +146,7 @@ func AdvanceTaskRunStatus(taskID, taskGenerationID, runID, fromStatus, toStatus 
 		return Task{}, false, fmt.Errorf("task run id is required")
 	}
 	return mutateTaskStatus(taskID, func(t *Task) bool {
-		if t.GenerationID != taskGenerationID || t.LastRunSessionID != runID ||
+		if !GenerationStillNames(t.GenerationID, taskGenerationID) || t.LastRunSessionID != runID ||
 			t.LastRunStatus != fromStatus {
 			return false
 		}
@@ -186,6 +186,9 @@ func ClaimUnidentifiedTaskRunOutcome(
 		return Task{}, false, fmt.Errorf("task run id is required")
 	}
 	return mutateTaskStatus(taskID, func(t *Task) bool {
+		// Exact, unlike the other writers: this is the legacy claim, where an
+		// empty generation can be a removed pre-field row's session rather than
+		// an in-flight read (see GenerationStillNames).
 		if t.GenerationID != expectedGenerationID ||
 			t.LastRunSessionID != expectedSessionID || t.LastRunSequence != expectedSequence ||
 			t.LastRunRevision != expectedRevision ||

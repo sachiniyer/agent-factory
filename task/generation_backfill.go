@@ -31,3 +31,23 @@ func generateBackfilledTaskGenerationID() (string, error) {
 func IsBackfilledGeneration(generationID string) bool {
 	return strings.HasPrefix(generationID, backfilledGenerationPrefix)
 }
+
+// GenerationStillNames reports whether expected, a generation an in-flight
+// operation read from a task row, still names the row that now stores stored.
+// It is exact equality with one addition. An operation that read a pre-field
+// row before the backfill holds the empty generation, and the backfill gave
+// that same row its generation without replacing it, so the operation still
+// names the row (#4224). Without this, a delivery that read a hand-edited row
+// just before a load backfilled it was refused as though the task had been
+// replaced. A replacement added under the same ID mints an unmarked
+// generation, which the empty generation never names.
+//
+// The session-run writers use it too, and stay safe for sessions stamped
+// before the upgrade: BeginTaskRun is called only for a run this daemon just
+// admitted, and the outcome writers also require the row to name the run's
+// stable session ID, which no binary from before the field ever recorded. The
+// lifecycle and the legacy outcome claim compare exactly, because there an
+// empty generation can be a removed pre-field row's session.
+func GenerationStillNames(stored, expected string) bool {
+	return stored == expected || (expected == "" && IsBackfilledGeneration(stored))
+}
