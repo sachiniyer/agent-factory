@@ -74,6 +74,8 @@ jobs:
         # lane runs the identical -race suite every three hours, and #4463 left it
         # on Go's 10m per-package default: daemon measured 500.0s here on
         # 2026-09-16, 83% of that default, on the curve that failed v1.0.288 (#4464).
+        # The five successful runs before v1.0.290 took 494s, 500s, 481s, 504s and
+        # 594.5s, the last 5.5s from failing a preview release on a budget (#4556).
         go test -v -race -count=1 -timeout=30m ./...
         go build ./...
 
