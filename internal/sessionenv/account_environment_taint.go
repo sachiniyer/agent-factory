@@ -377,17 +377,17 @@ func isWrappedLetCall(call *syntax.CallExpr) bool {
 		switch name {
 		case "command", "builtin":
 			words = words[1:]
-		// Skip any options (e.g. `command -p let`), consuming `--` when present.
-		for len(words) > 0 {
-			opt, ok := literalShellWord(words[0])
-			if !ok || !strings.HasPrefix(opt, "-") {
-				break
+			// Skip any options (e.g. `command -p let`), consuming `--` when present.
+			for len(words) > 0 {
+				opt, ok := literalShellWord(words[0])
+				if !ok || !strings.HasPrefix(opt, "-") {
+					break
+				}
+				words = words[1:]
+				if opt == "--" {
+					break
+				}
 			}
-			words = words[1:]
-			if opt == "--" {
-				break
-			}
-		}
 		case "let":
 			return true
 		default:
