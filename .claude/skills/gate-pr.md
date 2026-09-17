@@ -391,7 +391,7 @@ jq -s -e 'length > 0 and all(type == "array")' "$G/inline.json" >/dev/null \
 
 jq -s '
   add as $all
-  | ["sachiniyer","app-detail-app","app-detail-app[bot]"] as $allowed
+  | ["sachiniyer"] as $allowed
   | ($all
      | map(select(
          .in_reply_to_id != null
@@ -422,7 +422,7 @@ HD=$(cat "$G/head-date.txt")
 
 jq -s -r --arg hd "$HD" '
   add as $all
-  | ["sachiniyer","app-detail-app","app-detail-app[bot]"] as $allowed
+  | ["sachiniyer"] as $allowed
   | ($all
      | map(select(
          .in_reply_to_id != null
