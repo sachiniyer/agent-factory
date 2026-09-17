@@ -139,7 +139,7 @@ type ConfigEntry struct {
 	// It no longer answers WHEN the change takes effect: #2480 made that per-key and
 	// honest (config.EffectClass / EffectNotice in effect.go), because the answer is
 	// not uniform — a running daemon applies most keys in place,
-	// root_agents and branch_prefix wait for the next daemon start, and client-only
+	// root_agents and root_agent wait for the next daemon start, and client-only
 	// keys such as update_channel are picked up by af's own next launch. The old
 	// per-key boolean could not express those outcomes; the notice does.
 	RequiresRestart bool `json:"requires_restart"`
@@ -180,7 +180,7 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 // constant: #2480 made it PER-KEY (config.EffectNotice / KeyEffectClass in
 // effect.go), because the honest answer differs by key — a running daemon applies
 // some in place (the network listener keys among them since #2480 PR2), root_agents
-// and branch_prefix wait for the next daemon start, and client-only keys such as
+// and root_agent wait for the next daemon start, and client-only keys such as
 // update_channel and appearance are picked up by af's own next launch. It
 // deliberately never tells the user to run a command (#2479).
 

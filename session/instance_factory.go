@@ -80,10 +80,12 @@ type InstanceOptions struct {
 	// never removes the user's tree or branch. Local backend only.
 	InPlace bool
 	// BranchPrefix is the resolved snapshot used to name a fresh local
-	// worktree's branch. The daemon supplies its frozen startup value because
-	// branch_prefix is EffectNextDaemonStart; nil preserves the direct-constructor
-	// behavior of resolving the current on-disk value when provisioning begins.
-	// A pointer distinguishes an explicitly configured empty prefix from nil.
+	// worktree's branch. The daemon supplies the value its create admission
+	// checked the title against (the project's override over the live global,
+	// #4539), so the worktree cannot name a branch those checks never saw. nil
+	// preserves the direct-constructor behavior of resolving the current on-disk
+	// value when provisioning begins. A pointer distinguishes an explicitly
+	// configured empty prefix from nil.
 	BranchPrefix *string
 	// ResumeConversation asks the first launch to come up on a provider
 	// conversation a previous record held, rather than starting a new one

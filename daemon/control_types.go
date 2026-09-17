@@ -818,7 +818,7 @@ type SetConfigValueResponse struct {
 	// Applied and Pending report the ApplyConfig outcome (#2480): the daemon
 	// applies the write to itself in place, so a save surface can say what took
 	// effect rather than telling the user to restart. Applied keys are live now;
-	// Pending keys (root_agents/root_agent until #2216, branch_prefix) take effect
+	// Pending keys (root_agents/root_agent until #2216, among others) take effect
 	// on the next daemon start.
 	Applied []string `json:"applied"`
 	Pending []string `json:"pending"`

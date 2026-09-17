@@ -40,19 +40,33 @@ func (m *Manager) worktreeHeldBranchesLocked(repoPath string, remote bool) map[s
 	return held
 }
 
-func (m *Manager) branchForTitle(title string) string {
-	return git.BranchForTitle(m.cfg.BranchPrefix, title)
+// createReservation is what a successful admission hands the create.
+type createReservation struct {
+	repo  *config.RepoContext
+	title string
+	// release drops the title, runtime-name, and task-run reservations, and the
+	// worktree admission lock when one is held.
+	release func()
+	// renamedArchived is the archived session renamed to free the title, or nil.
+	renamedArchived *session.InstanceData
+	// naming is the branch_prefix admission checked the title against. The
+	// create passes this same value to NewInstance and never reads it again.
+	naming branchNaming
 }
 
 // reserveCreate keeps the established unit-test seam free of a long-lived
 // reservation. Production uses reserveCreateForSession and holds admission from
-// its final observation through live-row publication.
+// its final observation through live-row publication. It reads the live config
+// the way CreateSession's op-entry snapshot does.
 func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, string, func(), *session.InstanceData, error) {
-	return m.reserveCreateWithWorktreeAdmission(req, false)
+	r, err := m.reserveCreateWithWorktreeAdmission(req, m.Config(), false)
+	return r.repo, r.title, r.release, r.renamedArchived, err
 }
 
-func (m *Manager) reserveCreateForSession(req CreateSessionRequest) (*config.RepoContext, string, func(), *session.InstanceData, error) {
-	return m.reserveCreateWithWorktreeAdmission(req, true)
+// reserveCreateForSession admits a create against cfg, the create's op-entry
+// config snapshot.
+func (m *Manager) reserveCreateForSession(req CreateSessionRequest, cfg *config.Config) (createReservation, error) {
+	return m.reserveCreateWithWorktreeAdmission(req, cfg, true)
 }
 
 // refuseHeldBranchReuseLocked refuses an explicit-title create BEFORE the
@@ -93,18 +107,18 @@ func (m *Manager) reserveCreateForSession(req CreateSessionRequest) (*config.Rep
 //     failed probe the create proceeds and, if the branch really is held, fails
 //     loudly at `git worktree add`: precisely the pre-guard behavior, which
 //     destroyed nothing. Only a branch git POSITIVELY reports as held refuses.
-func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, namespace runtimeNameNamespace, inPlace bool, diskData []session.InstanceData) error {
+func (m *Manager) refuseHeldBranchReuseLocked(naming branchNaming, repoID, repoPath, title string, namespace runtimeNameNamespace, inPlace bool, diskData []session.InstanceData) error {
 	if namespace != runtimeNamespaceLocalTmux || inPlace {
 		return nil
 	}
-	archived, _, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, diskData)
+	archived, _, err := m.findArchivedOnlyCollisionLocked(naming, repoID, repoPath, title, namespace, diskData)
 	if err != nil {
 		return err
 	}
 	if archived == nil {
 		return nil
 	}
-	branch := m.branchForTitle(title)
+	branch := naming.branchFor(title)
 	// Indexing a nil map is the nil-probe path: not held, so no refusal.
 	holders := m.worktreeHeldBranchesLocked(repoPath, false)[branch]
 	if len(holders) == 0 {
@@ -134,8 +148,8 @@ func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, na
 	// would either refuse a reuse that would have worked, or wave through one that
 	// then failed at `git worktree add` with the archived session already renamed —
 	// the exact state this function exists to prevent.
-	newTitle, terr := m.uniqueArchivedTitleLocked(repoID, repoPath, archived.Title, archived.Program, namespace, diskData)
-	if terr == nil && m.reclaimArchivedBranchLocked(repoPath, archived, newTitle) != "" {
+	newTitle, terr := m.uniqueArchivedTitleLocked(naming, repoID, repoPath, archived.Title, archived.Program, namespace, diskData)
+	if terr == nil && m.reclaimArchivedBranchLocked(naming, repoPath, archived, newTitle) != "" {
 		return nil
 	}
 	return fmt.Errorf("cannot create session %q: the archived session %q still has branch %q checked out at %s, and the new session would derive that same branch. Its branch cannot be moved aside automatically (it is published, externally owned, or its state could not be determined), so freeing the name would not free the branch and the create would fail at `git worktree add` — permanently delete the archived session to release both (%s), or create this session under a different name",
@@ -152,12 +166,12 @@ func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, na
 // The archived-only case is deliberately excluded: reserveCreate renames that
 // record to free the requested title. Every other record conflict is final and
 // can be reported before inspecting Git without changing any state.
-func (m *Manager) refuseNonReusableTitleConflictLocked(repoID, repoPath, title string, namespace runtimeNameNamespace, diskData []session.InstanceData) error {
-	archived, _, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, diskData)
+func (m *Manager) refuseNonReusableTitleConflictLocked(naming branchNaming, repoID, repoPath, title string, namespace runtimeNameNamespace, diskData []session.InstanceData) error {
+	archived, _, err := m.findArchivedOnlyCollisionLocked(naming, repoID, repoPath, title, namespace, diskData)
 	if err != nil || archived != nil {
 		return err
 	}
-	return m.findTitleRecordConflictLocked(repoID, repoPath, title, namespace, diskData)
+	return m.findTitleRecordConflictLocked(naming, repoID, repoPath, title, namespace, diskData)
 }
 
 // refuseLiveHeldBranchLocked is the narrow #4092 create admission guard. A
@@ -165,7 +179,7 @@ func (m *Manager) refuseNonReusableTitleConflictLocked(repoID, repoPath, title s
 // the target worktree's observed branch and path. Only a positively identified
 // live lane refuses, and AF never renames, detaches, resets, or moves either
 // worktree on this path.
-func (m *Manager) refuseLiveHeldBranchLocked(repoPath, workspace, title string, namespace runtimeNameNamespace, inPlace bool, diskData []session.InstanceData) error {
+func (m *Manager) refuseLiveHeldBranchLocked(naming branchNaming, repoPath, workspace, title string, namespace runtimeNameNamespace, inPlace bool, diskData []session.InstanceData) error {
 	if namespace != runtimeNamespaceLocalTmux {
 		return nil
 	}
@@ -178,7 +192,7 @@ func (m *Manager) refuseLiveHeldBranchLocked(repoPath, workspace, title string, 
 			return fmt.Errorf("cannot create session %q in place: af could not verify the target worktree's actual branch; nothing was started: %w", title, err)
 		}
 	} else {
-		branch = m.branchForTitle(title)
+		branch = naming.branchFor(title)
 		holders = m.worktreeHeldBranchesLocked(repoPath, false)[branch]
 	}
 	for _, holder := range holders {
@@ -333,12 +347,12 @@ func (m *Manager) worktreeAdmissionLockForRepo(repoID string) *sync.Mutex {
 // keeps the archived row internally coherent: after the move its title, worktree
 // directory, and branch all say the same thing, which is what a later restore
 // presents to the user.
-func (m *Manager) reclaimArchivedBranchLocked(repoPath string, archived *session.Instance, newTitle string) string {
+func (m *Manager) reclaimArchivedBranchLocked(naming branchNaming, repoPath string, archived *session.Instance, newTitle string) string {
 	current, ok := archived.ArchivedBranchForReclaim()
 	if !ok {
 		return ""
 	}
-	candidate := m.branchForTitle(newTitle)
+	candidate := naming.branchFor(newTitle)
 	if candidate == "" || candidate == current {
 		return ""
 	}
@@ -449,8 +463,8 @@ func archivedWorktreeHoldsBranch(archived *session.Instance, holder string) bool
 //     It is the claim the rename is about to release, so counting it would refuse
 //     a reuse that would have succeeded — turning a data-integrity fix into a
 //     feature regression.
-func (m *Manager) refuseUnclaimableTitleReuseLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool, remedyPath ...string) error {
-	archived, _, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, diskData)
+func (m *Manager) refuseUnclaimableTitleReuseLocked(naming branchNaming, repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool, remedyPath ...string) error {
+	archived, _, err := m.findArchivedOnlyCollisionLocked(naming, repoID, repoPath, title, namespace, diskData)
 	if err != nil || archived == nil {
 		return err
 	}
@@ -472,8 +486,8 @@ var reuseArchivedRenamePersist = renameInstanceDataTitle
 // rename happened — no archived collision, or a LIVE/reserved session also holds
 // the name, in which case the create is left to fail in validateTitleAvailableLocked
 // exactly as before. Runs under m.mu.
-func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, diskData *[]session.InstanceData) (*session.InstanceData, error) {
-	archived, oldKey, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, *diskData)
+func (m *Manager) renameArchivedForReuseLocked(naming branchNaming, repoID, repoPath, title, program string, namespace runtimeNameNamespace, diskData *[]session.InstanceData) (*session.InstanceData, error) {
+	archived, oldKey, err := m.findArchivedOnlyCollisionLocked(naming, repoID, repoPath, title, namespace, *diskData)
 	if err != nil {
 		return nil, err
 	}
@@ -492,7 +506,7 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	} else if archived.ToInstanceData().IsRemoteHook() {
 		archivedNamespace = runtimeNamespaceRemoteHook
 	}
-	newTitle, err := m.uniqueArchivedTitleLocked(repoID, repoPath, oldTitle, program, archivedNamespace, *diskData)
+	newTitle, err := m.uniqueArchivedTitleLocked(naming, repoID, repoPath, oldTitle, program, archivedNamespace, *diskData)
 	if err != nil {
 		return nil, err
 	}
@@ -518,7 +532,7 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	// owns that judgement; RenameArchived treats empty as "leave the branch alone",
 	// which is also the right answer for a workspace that has no local branch.
 	origBranch := archived.GetBranch()
-	newBranch := m.reclaimArchivedBranchLocked(repoPath, archived, newTitle)
+	newBranch := m.reclaimArchivedBranchLocked(naming, repoPath, archived, newTitle)
 
 	// Relocate the archived worktree + move its branch + update the title
 	// atomically on the instance. The wrapper names neither the worktree nor the
@@ -630,10 +644,10 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 // loaded winner would mutate user state and still leave the requested runtime
 // name unavailable.
 // Runs under m.mu.
-func (m *Manager) findArchivedOnlyCollisionLocked(repoID, repoPath, title string, namespace runtimeNameNamespace, diskData []session.InstanceData) (*session.Instance, string, error) {
+func (m *Manager) findArchivedOnlyCollisionLocked(naming branchNaming, repoID, repoPath, title string, namespace runtimeNameNamespace, diskData []session.InstanceData) (*session.Instance, string, error) {
 	for key := range m.reservedTitles {
 		rid, existing := splitDaemonInstanceKey(key)
-		if rid == repoID && m.titlesCollide(existing, title) {
+		if rid == repoID && naming.collide(existing, title) {
 			// A concurrent create is reserving a colliding name; let the
 			// availability check reject with errConcurrentCreate.
 			return nil, "", nil
@@ -653,7 +667,7 @@ func (m *Manager) findArchivedOnlyCollisionLocked(repoID, repoPath, title string
 			continue
 		}
 		bothUseLocalTmux := namespace == runtimeNamespaceLocalTmux && inst.Capabilities().Workspace == session.WorkspaceLocalWorktree
-		if m.titleCollisionNamespace(repoPath, inst.Title, title, bothUseLocalTmux) == titleNamespaceNone {
+		if m.titleCollisionNamespace(naming, repoPath, inst.Title, title, bothUseLocalTmux) == titleNamespaceNone {
 			continue
 		}
 		if inst.GetLiveness() != session.LiveArchived {
@@ -726,7 +740,7 @@ func (m *Manager) findArchivedOnlyCollisionLocked(repoID, repoPath, title string
 	matchedPersistedCopy := false
 	for _, data := range diskData {
 		bothUseLocalTmux := namespace == runtimeNamespaceLocalTmux && data.UsesLocalTmux()
-		if m.titleCollisionNamespace(repoPath, data.Title, title, bothUseLocalTmux) == titleNamespaceNone || data.Status == session.Loading {
+		if m.titleCollisionNamespace(naming, repoPath, data.Title, title, bothUseLocalTmux) == titleNamespaceNone || data.Status == session.Loading {
 			continue
 		}
 		if !matchedPersistedCopy && data.Title == archived.Title && data.ID == archived.ID {
@@ -748,7 +762,7 @@ func (m *Manager) findArchivedOnlyCollisionLocked(repoID, repoPath, title string
 // session, which keeps the branch it already has checked out. The new title is a
 // label, not a branch to be created, so "is this branch checked out somewhere" is
 // not a question about it.
-func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program string, namespace runtimeNameNamespace, diskData []session.InstanceData) (string, error) {
+func (m *Manager) uniqueArchivedTitleLocked(naming branchNaming, repoID, repoPath, base, program string, namespace runtimeNameNamespace, diskData []session.InstanceData) (string, error) {
 	// Bound the base so the " (archived N)" suffix survives branch truncation and
 	// each rung derives a DISTINCT branch; a long base otherwise collapses every
 	// rung to the same branch and the walk spins to 10,000 (#2528). Availability
@@ -768,7 +782,7 @@ func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program stri
 		if i > 1 {
 			candidate = fmt.Sprintf("%s (archived %d)", base, i)
 		}
-		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, namespace, false, diskData, false)
+		err := m.validateTitleAvailableLocked(naming, repoID, repoPath, candidate, program, namespace, false, diskData, false)
 		if err == nil && namespace == runtimeNamespaceLocalTmux {
 			err = archiveNames.validateArchiveRelocationDestination(candidate)
 		}
@@ -782,7 +796,7 @@ func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program stri
 	return "", fmt.Errorf("could not find an available archived name for %q", base)
 }
 
-func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program string, namespace runtimeNameNamespace, diskData []session.InstanceData, inPlace bool) (string, error) {
+func (m *Manager) nextAvailableTitleLocked(naming branchNaming, repoID, repoPath, baseTitle, program string, namespace runtimeNameNamespace, diskData []session.InstanceData, inPlace bool) (string, error) {
 	// Shape errors belong to the base, not to any candidate's availability.
 	// Validate once before the suffix walk so controls do not burn all 10,000
 	// rungs and whitespace cannot turn into a punctuation-only "   -2" title.
@@ -813,14 +827,14 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 		if i > 1 {
 			candidate = fmt.Sprintf("%s-%d", boundedBase, i)
 		}
-		branch := m.branchForTitle(candidate)
+		branch := naming.branchFor(candidate)
 		if holders := heldBranches[branch]; len(holders) > 0 {
 			// Accumulated rather than logged per rung (#3838): the walk is the whole
 			// event, and every rung of it says the same thing.
 			skipped = append(skipped, heldRung{title: candidate, holder: strings.Join(holders, ", ")})
 			continue
 		}
-		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, namespace, false, diskData, inPlace)
+		err := m.validateTitleAvailableLocked(naming, repoID, repoPath, candidate, program, namespace, false, diskData, inPlace)
 		if err == nil {
 			m.logHeldSuffixWalkLocked(baseTitle, candidate, skipped)
 			return candidate, nil

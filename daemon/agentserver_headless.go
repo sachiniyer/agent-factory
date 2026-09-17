@@ -236,8 +236,11 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		Program:               program,
 		ProgramResolved:       opts.ProgramResolved && opts.Program != "",
 		SessionEnvPassthrough: opts.SessionEnvPassthrough,
-		// This process's startup config is its frozen branch-naming snapshot, just
-		// like the host daemon's. NewGitWorktree must not reload a later save.
+		// This process builds exactly one worktree, so its startup config is its one
+		// branch_prefix read. NewGitWorktree must not reload a later save. The value is
+		// this sandbox's own: a host project's personal override (#4539) is resolved by
+		// the host daemon and does not reach an off-box session, which is also why
+		// sandbox_preserve.go reads the branch name back instead of deriving it.
 		BranchPrefix: &branchPrefix,
 		// The in-sandbox agent-server ALWAYS runs the local runtime (tmux + git
 		// worktree against RepoPath) — it IS the sandbox (§1.2). Force it explicitly

@@ -27,10 +27,9 @@ const (
 	EffectAppliedLive
 	// EffectNextDaemonStart: the daemon reads the key, but only at startup, so a
 	// change waits for the next daemon start. root_agents / root_agent (their
-	// next-daemon-start contract, #2216) and branch_prefix (read from the FROZEN
-	// startup config in the title-reservation helpers — deliberately not threaded
-	// live, so it is reported here rather than falsely claimed applied) are these.
-	// (The network listener keys used to be here; #2480 PR2 made them applied-live.)
+	// next-daemon-start contract, #2216) are these. (The network listener keys used
+	// to be here until #2480 PR2 made them applied-live, and branch_prefix until
+	// #4539 made each create resolve it.)
 	EffectNextDaemonStart
 	// EffectNextAfLaunch: nothing a running daemon does with the key changes what
 	// the user just asked to change — af's own CLI or TUI does, on its next launch
@@ -64,7 +63,12 @@ var keyEffectClasses = map[string]EffectClass{
 	// default_accounts is read per create, from the daemon's live config snapshot
 	// and the per-repo resolution beside it, so a change reaches the next session
 	// with no restart (#3386).
-	"default_accounts":               EffectAppliedLive,
+	"default_accounts": EffectAppliedLive,
+	// branch_prefix is resolved once per create, from the live snapshot and the
+	// project's personal override, and that one value names both the collision
+	// check and the worktree (#4539). A change reaches the next session with no
+	// restart.
+	"branch_prefix":                  EffectAppliedLive,
 	"session_env_passthrough":        EffectAppliedLive,
 	"on_archive_command":             EffectAppliedLive,
 	"worktree_root":                  EffectAppliedLive,
@@ -92,9 +96,8 @@ var keyEffectClasses = map[string]EffectClass{
 	"network.require_loopback_token": EffectAppliedLive,
 	"network.cors_allowed_origins":   EffectAppliedLive,
 	// Next daemon start — the daemon reads these once, at startup.
-	"root_agents":   EffectNextDaemonStart,
-	"root_agent":    EffectNextDaemonStart,
-	"branch_prefix": EffectNextDaemonStart,
+	"root_agents": EffectNextDaemonStart,
+	"root_agent":  EffectNextDaemonStart,
 	// The watcher supervisor snapshots this cap when the daemon constructs it;
 	// existing supervisors are not rebuilt by ApplyConfig.
 	"watcher_events_per_minute": EffectNextDaemonStart,

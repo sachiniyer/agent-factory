@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
@@ -172,6 +173,32 @@ func TestProjectBranchPrefixWorktreeUsesTheSnapshotAdmissionChecked(t *testing.T
 	require.Positive(t, rewrites, "anti-vacuous: the override must be rewritten while admission is running")
 	assert.Equal(t, "proj/", rec.prefix(t, "snapshot"),
 		"the worktree must be named with the prefix admission checked, not one read after it")
+}
+
+// TestProjectBranchPrefixUnloadableOverrideFallsBackAndSaysSo pins the failure
+// direction. A personal config that does not load (a hand-edit left it invalid)
+// cannot say which prefix the project wants. The create still goes ahead on the
+// global prefix, as every other create-time project read does, and the daemon log
+// says why, so a branch under the global prefix can be explained.
+func TestProjectBranchPrefixUnloadableOverrideFallsBackAndSaysSo(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	project, err := config.RegisterProject(repoPath)
+	require.NoError(t, err)
+	path, err := config.ProjectConfigTomlPath(project.ID)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("branch_prefix = \"unterminated\n"), 0o644))
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = "global/"
+	m, logs := newManagerCapturingLogs(t, cfg)
+	rec := installBranchPrefixRecorder(t)
+
+	require.NoError(t, createWithTitle(m, repoPath, "fallback"),
+		"an unloadable override must not block session creation")
+	assert.Equal(t, "global/", rec.prefix(t, "fallback"))
+	assert.Contains(t, logs.warnings.String(), "could not resolve branch_prefix",
+		"the fallback must be logged, or a branch under the global prefix is unexplained")
 }
 
 // TestProjectBranchPrefixDerivedTitleSkipsTheProjectsHeldBranch covers the

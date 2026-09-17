@@ -128,15 +128,15 @@ func TestCreateAdmissionWaitIsBoundedBeforeReservation(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		_, _, release, renamed, err := manager.reserveCreateForSession(CreateSessionRequest{
+		reservation, err := manager.reserveCreateForSession(CreateSessionRequest{
 			RepoPath: repoPath,
 			Title:    "bounded-create-admission",
 			Program:  "claude",
-		})
-		if release != nil {
-			release()
+		}, manager.Config())
+		if reservation.release != nil {
+			reservation.release()
 		}
-		done <- result{renamed: renamed, err: err}
+		done <- result{renamed: reservation.renamedArchived, err: err}
 	}()
 
 	select {

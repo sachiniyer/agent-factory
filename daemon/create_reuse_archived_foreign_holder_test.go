@@ -138,7 +138,7 @@ func TestReclaimArchivedBranch_ArchivedHolderStillQualifies(t *testing.T) {
 		"the archived session's own worktree must be recognized as the holder, or reuse-archived-name can never complete")
 
 	manager.mu.Lock()
-	candidate := manager.reclaimArchivedBranchLocked(repoPath, archived, "foo (archived)")
+	candidate := manager.reclaimArchivedBranchLocked(manager.globalBranchNaming(), repoPath, archived, "foo (archived)")
 	manager.mu.Unlock()
 	assert.Equal(t, manager.branchForTitle("foo (archived)"), candidate,
 		"the reclaim must still offer the archived session's own branch a new name")

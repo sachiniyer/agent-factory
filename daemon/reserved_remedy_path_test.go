@@ -16,7 +16,7 @@ func TestReservedTitleRemedyUsesRepoPath(t *testing.T) {
 	m := newTitleAdmissionManager()
 	repo := t.TempDir()
 	for _, err := range []error{
-		m.validateTitleAvailableLocked("repo", repo, "root", "claude", runtimeNamespaceLocalTmux, false, nil, false),
+		m.validateTitleAvailableLocked(m.globalBranchNaming(), "repo", repo, "root", "claude", runtimeNamespaceLocalTmux, false, nil, false),
 		m.validateTitleClaimableLocked("repo", repo, "root", "claude", runtimeNamespaceLocalTmux, false, nil, nil, false),
 	} {
 		require.Error(t, err)
@@ -62,7 +62,7 @@ func TestTitleAdmissionUsesIdentityRootForLinkedWorktreeNamespace(t *testing.T) 
 	workspace := filepath.Join(t.TempDir(), "worktree")
 	m.reservedTmuxNames[daemonInstanceKey("repo", tmux.SanitizedNameForRepo("a b", identityRoot))] = "a b"
 
-	err := m.validateTitleAvailableLocked("repo", identityRoot, "ab", "claude", runtimeNamespaceLocalTmux, false, nil, false, workspace)
+	err := m.validateTitleAvailableLocked(m.globalBranchNaming(), "repo", identityRoot, "ab", "claude", runtimeNamespaceLocalTmux, false, nil, false, workspace)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "a b")
 }

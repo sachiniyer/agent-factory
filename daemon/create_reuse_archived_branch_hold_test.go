@@ -272,7 +272,7 @@ func TestReserveCreate_ArchivedBranchMovesWithTheRename(t *testing.T) {
 	manager.mu.Lock()
 	diskData, lerr := loadRepoInstanceData(repoID)
 	require.NoError(t, lerr)
-	renamed, err := manager.renameArchivedForReuseLocked(repoID, repoPath, "foo", "claude", runtimeNamespaceLocalTmux, &diskData)
+	renamed, err := manager.renameArchivedForReuseLocked(manager.globalBranchNaming(), repoID, repoPath, "foo", "claude", runtimeNamespaceLocalTmux, &diskData)
 	manager.mu.Unlock()
 	require.NoError(t, err)
 	require.NotNil(t, renamed, "the rename must have run for this test to say anything")

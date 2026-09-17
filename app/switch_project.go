@@ -652,9 +652,11 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	m.repoRoot = repo.Root
 	m.sidebar.SetProjectName(filepath.Base(repo.Root))
 
-	// Re-resolve the new project's default program for future sessions.
-	// BranchPrefix and other machine preferences are global-only, so they do not
-	// change on switch.
+	// Re-resolve the new project's default program and branch_prefix for future
+	// sessions. Both are PROJECT-scoped: branch_prefix admits a personal
+	// per-project override (#4539), and the naming pre-check derives branches with
+	// it. A failed resolve drops the outgoing project's value like the program
+	// below, so the pre-check falls back to the global prefix.
 	//
 	// m.program is PROJECT-scoped state, so every path out of this block must
 	// land on a value derived from the INCOMING project: its own default_program
@@ -680,6 +682,7 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 		}
 		m.store.SetHookCount(len(resolved.PostWorktreeCommands))
 		m.hooksPane.SetCommands(resolved.PostWorktreeCommands)
+		m.projectBranchPrefix = &resolved.BranchPrefix
 	} else {
 		log.WarningLog.Printf("switch project: failed to resolve config for %s: %v", repo.Root, err)
 		// Clear the hooks pane so the OUTGOING project's hooks cannot leak into
@@ -689,6 +692,7 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 		// this only matters on an in-place switch.
 		m.store.SetHookCount(0)
 		m.hooksPane.SetCommands(nil)
+		m.projectBranchPrefix = nil
 		// Same reasoning for the program (#2138): a config we cannot parse tells
 		// us nothing about this project's preference, so fall back to the global
 		// default — the value a project that expresses no preference gets. This
