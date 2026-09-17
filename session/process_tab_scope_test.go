@@ -15,6 +15,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -35,10 +36,13 @@ type tmuxModel struct {
 	// failOnStart makes new-session produce a finished pane at once, as a
 	// command that exits immediately does under remain-on-exit.
 	failOnStart map[string]finishedPane
-	output      map[string]string
-	started     []string
-	killed      []string
-	missing     *exec.ExitError
+	// launching names a pane whose root is the given process while it runs, and
+	// which reads as its failOnStart pane once that process is gone.
+	launching map[string]launchingPane
+	output    map[string]string
+	started   []string
+	killed    []string
+	missing   *exec.ExitError
 }
 
 func newTmuxModel(t *testing.T, alive ...string) *tmuxModel {
@@ -47,7 +51,8 @@ func newTmuxModel(t *testing.T, alive ...string) *tmuxModel {
 	require.ErrorAs(t, exec.Command("sh", "-c", "exit 1").Run(), &missing)
 	m := &tmuxModel{
 		t: t, alive: map[string]bool{}, finished: map[string]finishedPane{},
-		failOnStart: map[string]finishedPane{}, output: map[string]string{}, missing: missing,
+		failOnStart: map[string]finishedPane{}, launching: map[string]launchingPane{}, output: map[string]string{},
+		missing: missing,
 	}
 	for _, name := range alive {
 		m.alive[name] = true
@@ -123,7 +128,7 @@ func (m *tmuxModel) answer(c *exec.Cmd) ([]byte, error) {
 	case strings.Contains(joined, "new-session"):
 		m.started = append(m.started, name)
 		m.alive[name] = true
-		if pane, ok := m.failOnStart[name]; ok {
+		if pane, ok := m.failOnStart[name]; ok && m.launching[name].done == nil {
 			m.finished[name] = pane
 		}
 		return nil, nil
@@ -150,6 +155,19 @@ func (m *tmuxModel) answer(c *exec.Cmd) ([]byte, error) {
 		delete(m.finished, name)
 		return nil, nil
 	}
+	if launcher := m.launching[name]; launcher.done != nil {
+		select {
+		case <-launcher.done:
+			delete(m.launching, name)
+			m.finished[name] = m.failOnStart[name]
+		default:
+			if strings.Contains(joined, "display-message") || strings.Contains(joined, "list-panes") {
+				return []byte(paneFieldsRunning.Replace(strings.NewReplacer("#{pane_pid}", strconv.Itoa(launcher.pid)).Replace(
+					c.Args[len(c.Args)-1])) + "\n"), nil
+			}
+			return nil, nil
+		}
+	}
 	if pane, ok := m.finished[name]; ok {
 		if answer, ok := pane.answer(c); ok {
 			return []byte(answer), nil
@@ -164,6 +182,13 @@ func (m *tmuxModel) answer(c *exec.Cmd) ([]byte, error) {
 		return []byte(paneFieldsRunning.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
 	}
 	return nil, nil
+}
+
+// launchingPane is a pane whose root, pid, is still af's launch shim; done
+// closes once that process has exited and been collected.
+type launchingPane struct {
+	pid  int
+	done <-chan struct{}
 }
 
 // paneFieldsBlank expands every pane field to nothing, as tmux does for a
@@ -443,6 +468,40 @@ func TestAddProcessTabReportsACommandThatFailsAtOnce(t *testing.T) {
 	assert.NotContains(t, err.Error(), "Pane is dead")
 	assert.Equal(t, 1, inst.TabCount(), "no tab is added for a command that never ran")
 	assert.Equal(t, 1, m.killCount(name), "the held pane is removed")
+}
+
+// On a loaded host af's launch shim can take longer than the watch before the
+// command even starts, and a refusal by the shim is an immediate failure too.
+// The watch therefore starts once the pane leaves the shim.
+func TestAddProcessTabWaitsForTheLaunchShimBeforeWatching(t *testing.T) {
+	m := newTmuxModel(t, scopeAgent)
+	inst := scopedInstance(t, m, "")
+	name := scopeAgent + "__slow"
+	// A stand-in for the shim's first stage: a shell whose command line starts
+	// af's launch shim, alive for well over the 150ms watch.
+	launcher := exec.Command("/bin/sh", "-c",
+		"sleep 0.5; : "+sessionenv.AccountEnvironmentExecMarker+" claude 0 work '' 0 ./slow.sh")
+	launcher.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, launcher.Start())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = launcher.Wait()
+	}()
+	t.Cleanup(func() {
+		_ = launcher.Process.Kill()
+		<-done
+	})
+	m.mu.Lock()
+	m.launching[name] = launchingPane{pid: launcher.Process.Pid, done: done}
+	m.failOnStart[name] = finishedPane{status: "127", at: "1726000000"}
+	m.output[name] = "af: could not start the filtered session process"
+	m.mu.Unlock()
+
+	_, err := inst.AddProcessTab("./slow.sh", "slow")
+	require.Error(t, err, "a shim that refuses after the watch window is still an immediate failure")
+	assert.ErrorContains(t, err, "exited immediately with status 127")
+	assert.Equal(t, 1, inst.TabCount())
 }
 
 func TestAddProcessTabRecordsACommandThatFinishedCleanly(t *testing.T) {

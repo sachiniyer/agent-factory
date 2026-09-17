@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -221,11 +222,19 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 		if perr != nil || pid <= 0 {
 			return false, 0, false, time.Time{}, false
 		}
-		if !pidGone(pid) {
+		if !pidGone(pid) && !exitedUncollected(pid) {
 			return false, 0, false, time.Time{}, true
 		}
 	}
 	return true, status, statusKnown, at, true
+}
+
+// exitedUncollected reports whether pid is a process that has exited and waits
+// for its parent to collect it. A pane root in that state has finished, even
+// though tmux has not reported how yet.
+func exitedUncollected(pid int) bool {
+	_, err := proctree.Lookup(pid)
+	return errors.Is(err, proctree.ErrProcessExited)
 }
 
 // paneExitFormat keeps the probe's fields positional: tmux leaves
@@ -234,6 +243,39 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 // time as the exit status (#4506 review).
 const paneExitFormat = "#{pane_dead}" + paneFieldSeparator + "#{pane_dead_status}" + paneFieldSeparator +
 	"#{pane_dead_time}" + paneFieldSeparator + "#{pane_dead_signal}" + paneFieldSeparator + "#{pane_pid}"
+
+// LaunchPending reports whether the pane's root is still af's launch shim, the
+// environment filter that execs the pane command, so the command itself has
+// not started yet. It covers both stages: the default shell running the shim's
+// command line, and the shim. Any doubt answers false.
+func (t *TmuxSession) LaunchPending() bool {
+	row, err := t.panePID()
+	if err != nil || row.dead {
+		return false
+	}
+	return argvIsLaunchShim(proctree.Argv(row.pid))
+}
+
+func argvIsLaunchShim(argv []string) bool {
+	isMarker := func(word string) bool {
+		switch word {
+		case sessionenv.ExecMarker, sessionenv.AccountExecMarker, sessionenv.AccountEnvironmentExecMarker:
+			return true
+		}
+		return false
+	}
+	switch {
+	case len(argv) >= 2 && isMarker(argv[1]):
+		return true
+	case len(argv) >= 3 && argv[1] == "-c":
+		for _, word := range strings.Fields(argv[2]) {
+			if isMarker(word) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // FinishedAndQuiet reports whether the session holds only a finished command
 // with nothing of it still running: the pane's root has exited, and its kernel

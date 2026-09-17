@@ -1,14 +1,17 @@
 package tmux
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
 // #4506 review: tmux leaves pane_dead_status EMPTY for a command killed by a
@@ -16,6 +19,7 @@ import (
 // empty field and read the timestamp as the exit status.
 func TestProbePaneExitKeepsAnEmptyStatusUnknown(t *testing.T) {
 	gone := exitedProcess(t).PID
+	uncollected := uncollectedProcess(t)
 	for _, tc := range []struct {
 		name                      string
 		status, signal, deadTime  string
@@ -35,6 +39,8 @@ func TestProbePaneExitKeepsAnEmptyStatusUnknown(t *testing.T) {
 		// tmux reports nothing about the root: the pane pid decides.
 		{name: "unreported, root gone", pid: gone, wantDead: true},
 		{name: "unreported, root running", pid: os.Getpid()},
+		// tmux has not collected the root yet: it has still finished.
+		{name: "unreported, root exited but uncollected", pid: uncollected, wantDead: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := NewTmuxSessionWithDeps("pane-exit", "true", nil,
@@ -61,4 +67,41 @@ func TestProbePaneExitLivePane(t *testing.T) {
 	assert.True(t, known)
 	assert.False(t, dead)
 	assert.False(t, statusKnown)
+}
+
+// uncollectedProcess returns the pid of a child that has exited and that
+// nothing has collected yet, which is what a pane root is between its exit and
+// tmux reaping it.
+func uncollectedProcess(t *testing.T) int {
+	t.Helper()
+	c := exec.Command("sleep", "300")
+	require.NoError(t, c.Start())
+	t.Cleanup(func() { _, _ = c.Process.Wait() })
+	require.NoError(t, c.Process.Kill())
+	require.Eventually(t, func() bool {
+		_, err := proctree.Lookup(c.Process.Pid)
+		return errors.Is(err, proctree.ErrProcessExited)
+	}, 3*time.Second, 10*time.Millisecond, "the child never became an uncollected exit")
+	return c.Process.Pid
+}
+
+// tmux runs a pane command as `<default-shell> -c <command line>`, and af's
+// command line starts its launch shim, which then execs /bin/sh -c <command>.
+// Only the first two stages mean the command has not started.
+func TestArgvIsLaunchShim(t *testing.T) {
+	for _, tc := range []struct {
+		argv []string
+		want bool
+	}{
+		{[]string{"zsh", "-c", "/opt/af __af-session-env-exec-account-environment claude 0 work '' 0 ./deploy.sh"}, true},
+		{[]string{"/opt/af", "__af-session-env-exec-account-environment", "claude", "0", "work", "", "0", "./deploy.sh"}, true},
+		{[]string{"/opt/af", "__af-session-env-exec", "claude", "0", "claude"}, true},
+		{[]string{"/opt/af", "__af-session-env-exec-account", "claude", "0", "work", "", "0", "claude"}, true},
+		{[]string{"/bin/sh", "-c", "./deploy.sh"}, false},
+		{[]string{"/bin/sh", "./deploy.sh"}, false},
+		{[]string{"sleep", "300"}, false},
+		{nil, false},
+	} {
+		assert.Equal(t, tc.want, argvIsLaunchShim(tc.argv), "%q", tc.argv)
+	}
 }

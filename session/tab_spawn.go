@@ -359,25 +359,39 @@ func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
 	return tab, nil
 }
 
-// processTabExitWatch is how long tab-create watches a new process tab for a
-// command that fails at once, such as a mistyped name (exit 127). A command
-// still running at the end of it is reported as started.
-var processTabExitWatch = 150 * time.Millisecond
+// processTabExitWatch is how long tab-create watches a new process tab's
+// command, once it has started, for a failure at once such as a mistyped name
+// (exit 127). A command still running at the end of it is reported as started.
+//
+// The watch starts when the pane leaves af's launch shim, not when tmux
+// created the pane: on a loaded host the shim alone can take longer than the
+// watch, and a refusal by the shim is an immediate failure too.
+// processTabLaunchWait bounds that wait, matching the 2s Start allowed a pane
+// to appear before remain-on-exit.
+var (
+	processTabExitWatch  = 150 * time.Millisecond
+	processTabLaunchWait = 2 * time.Second
+)
 
 // awaitImmediateProcessExit returns the exit of a process tab's command if it
-// finishes within processTabExitWatch, or nil.
+// finishes within processTabExitWatch of starting, or nil.
 func awaitImmediateProcessExit(ts *tmux.TmuxSession) *TabExit {
-	deadline := time.Now().Add(processTabExitWatch)
+	start := time.Now()
+	launchDeadline := start.Add(processTabLaunchWait)
+	var deadline time.Time
 	pause := 10 * time.Millisecond
 	for {
 		if dead, status, statusKnown, at, known := ts.ProbePaneExit(); known && dead {
 			return &TabExit{Status: status, StatusKnown: statusKnown, At: at}
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
+		now := time.Now()
+		if deadline.IsZero() && (!ts.LaunchPending() || !now.Before(launchDeadline)) {
+			deadline = now.Add(processTabExitWatch)
+		}
+		if !deadline.IsZero() && !now.Before(deadline) {
 			return nil
 		}
-		time.Sleep(min(pause, remaining))
+		time.Sleep(pause)
 		pause = min(2*pause, 50*time.Millisecond)
 	}
 }
