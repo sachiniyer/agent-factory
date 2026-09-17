@@ -836,7 +836,7 @@ func resolveAccountForProvision(repoRoot, program, accountName string) (sessione
 			"account %q is a %s account, but this session resolves %s to a %s command; account namespaces are separate, so the Docker session would not use the identity you selected",
 			accountName, requestedAgent, requestedAgent, resolvedAgent)
 	}
-	account, err := agentaccount.Selected(home, requestedAgent, accountName, "")
+	account, err := agentaccount.Selected(home, requestedAgent, accountName)
 	if err != nil {
 		return sessionenv.Account{}, err
 	}

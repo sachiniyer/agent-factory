@@ -15,6 +15,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// A fresh attempt supersedes any earlier proof: whatever an aborted Start
 	// established about this name, it is about to be re-established or replaced.
 	t.setProvenNoPane(false)
+	t.setClosedConclusively(false)
 	// Check if the session already exists. This is a POSITIVE existence gate, so
 	// it must not read the lossy bool: a wedged/timed-out has-session is NOT proof
 	// the name is taken, and ExistsOrUnknown would launder it into "already
@@ -25,7 +26,7 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("%w: has-session probe for session %q did not answer", ErrTmuxTimeout, t.sanitizedName)
 	}
 	if exists {
-		return fmt.Errorf("%w: tmux session already exists: %s", ErrSessionNotStarted, t.sanitizedName)
+		return fmt.Errorf("%w: %w: %s", ErrSessionNotStarted, ErrSessionNameTaken, t.sanitizedName)
 	}
 	// The name is positively absent, so any Start from here creates a new pane
 	// process. Drop diagnostics owned by the prior process at that proven runtime
@@ -116,10 +117,19 @@ func (t *TmuxSession) Start(workDir string) error {
 	// success for a session tmux never confirmed (#1962). A !known probe means keep
 	// waiting until the 2s deadline, then take the timeout path below — which
 	// threads pane-state / ErrTmuxTimeout correctly.
+	//
+	// Each probe is bounded by what is LEFT of the 2s budget, NOT the flat
+	// tmuxCommandTimeout. The select's `case <-timeout` (the give-up path) only
+	// runs AFTER this synchronous probe returns, so bounding the probe at the
+	// flat 10s would let one wedged has-session hold the goroutine for the whole
+	// 10s and leave that give-up case unreachable past the poll's own 2s deadline
+	// (#2099 poll-loop class). probeSessionWithin/tmuxTimeoutContextWithin are what
+	// make the deadline actually fire on time. Mirrors the paste-delivery poll.
 	timeout := time.After(2 * time.Second)
+	pollDeadline := time.Now().Add(2 * time.Second)
 	sleepDuration := 5 * time.Millisecond
 	for {
-		if exists, known := t.ProbeSession(); known && exists {
+		if exists, known := t.probeSessionWithin(time.Until(pollDeadline)); known && exists {
 			break
 		}
 		select {
@@ -285,6 +295,24 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			// selected — the same look-then-act contract the codex branch below
 			// already keeps.
 			return t.answerClaudeTrustPrompt(content)
+		}
+		// The MCP trust modal is NOT atomic: Claude Code paints the question and
+		// options before it paints the "Enter to confirm" footer, so a capture
+		// taken mid-paint shows the question without the footer.
+		// claudeTrustPromptPresent requires the complete modal structure, so it
+		// returns false for a partially rendered frame. Without this guard, that
+		// false falls through to the return false below, and
+		// task.DismissTrustPrompt treats it as "pane is clear" — the prompt is
+		// delivered directly into the live but partially painted MCP picker.
+		//
+		// Requiring the confirmed structure to send a key is correct. Requiring
+		// the confirmed structure to PROCEED is not: "I could not confirm a trust
+		// prompt" and "there is definitely no trust prompt" are different answers
+		// and must not map to the same return value. The MCP question appearing
+		// on screen is enough to hold; the folder-trust handler already has
+		// settling logic for the same reason.
+		if claudeMCPDialogPartiallyRendered(content) {
+			return true
 		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
@@ -473,14 +501,21 @@ func reverseVideoURLSubject(line string) bool {
 // trust this folder" or the "Enter to confirm" affordance), so a stray mention
 // of the phrase in scrollback or agent output never triggers a dismissal. The
 // old wording is a self-contained, dialog-specific string and stays matched
-// as-is. The MCP prompt ("New MCP server found. Do you trust this new MCP
-// server? ❯ 1. Yes ... Enter to confirm") is anchored on its UNIQUE question
-// "do you trust this new mcp server" — a phrase Claude only ever renders inside
-// the real MCP trust modal, never in ordinary output. We deliberately do NOT
-// anchor on a generic marker like "Enter to confirm": that affordance appears
-// in many dialogs, so pairing it with a bare "new mcp server" mention would
-// still false-match on normal agent output. Each anchor here is a string that
-// only its own dialog emits, closing the whole false-positive class.
+// as-is.
+//
+// The MCP prompt ("New MCP server found. Do you trust this new MCP server? ❯
+// 1. Yes ... Enter to confirm") is anchored on its unique question "do you
+// trust this new mcp server" AND the modal's "Enter to confirm" footer being
+// the last non-blank content in the pane. The phrase alone cannot tell a live
+// modal from output that merely quotes it — af's own source contains the
+// phrase verbatim — so the footer-is-last rule (the same discipline
+// claudeTrustPickerStructure applies to the folder-trust branch,
+// claude_trust.go:307-310, and CodexTrustPromptPresent applies as its
+// `affordance == last` rule) refuses a quoted phrase whose agent composer or
+// further output is painted below it. Requiring the footer at the END is
+// strictly stronger than requiring it anywhere in the content: a working
+// agent paints its composer beneath its output, so a quoted dialog has
+// something after it and a live one does not.
 func claudeTrustPromptPresent(content string) bool {
 	lower := strings.ToLower(content)
 
@@ -489,8 +524,11 @@ func claudeTrustPromptPresent(content string) bool {
 	reworded := strings.Contains(content, "Is this a project you created or one you trust") &&
 		strings.Contains(content, "Yes, I trust this folder")
 
-	// MCP trust dialog — anchored on its unique question (case-insensitive).
-	mcpDialog := strings.Contains(lower, "do you trust this new mcp server")
+	// MCP trust dialog — anchored on its unique question (case-insensitive)
+	// AND the modal's footer being the last content on screen, so a quoted
+	// mention of the phrase with the composer painted below it does not fire.
+	mcpDialog := strings.Contains(lower, "do you trust this new mcp server") &&
+		claudeMCPTrustFooterIsLast(content)
 
 	return reworded ||
 		mcpDialog ||
@@ -558,6 +596,14 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	// with a workDir is reattaching persisted state, so its first capture only
 	// establishes the monitor baseline; Start's inner Restore("") keeps the fresh
 	// process behavior where first output is an update.
+	//
+	// Clear the ProvenNoPane and ClosedConclusively flags: reattaching to a LIVE
+	// session means this object is now in front of a pane that genuinely exists,
+	// so any earlier absence proof is invalidated. Without this clear, a reattach
+	// through this branch inherits a stale flag and stopForAccountSwap skips its
+	// liveness check for a pane that is still running.
+	t.setProvenNoPane(false)
+	t.setClosedConclusively(false)
 	monitor := newStatusMonitor()
 	if workDir != "" {
 		monitor = newReattachStatusMonitor()

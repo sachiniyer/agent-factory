@@ -14,7 +14,6 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/spf13/cobra"
@@ -96,6 +95,7 @@ var globalConfigReadOrder = []string{
 	"network.preview_listen_addr",
 	"network.cors_allowed_origins",
 	"daemon_poll_interval",
+	"watcher_events_per_minute",
 	"debug_pprof",
 	"log_max_size_mb",
 	"log_max_backups",
@@ -478,8 +478,8 @@ Settable keys:
   keys                       compact JSON object of TUI action-to-key rebinds
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
-                             DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and network.require_token defaults to FALSE —
+                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
+                             full control plane on the network, and network.require_token defaults to false —
                              set network.require_token = true in the same breath, or anyone who can reach the
                              address controls this machine. af serves plain HTTP, so front a routable
                              listener with a TLS-terminating proxy or a private network.
@@ -490,6 +490,7 @@ Settable keys:
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
+  watcher_events_per_minute  positive integer (per-task watch delivery cap; default 10; next daemon start)
   debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
                              unix control socket only, never on the web address. A profile dumps live daemon
                              memory — session titles, worktree paths, prompt text — so turn it off again.
@@ -580,7 +581,15 @@ owns.`, tmux.SupportedProgramsString()),
 			fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s for project %s in %s\n",
 				res.Key, echoValue(res.Value), configSetProjectFlag, prettyPath(res.Path))
 			if res.RequiresRestart {
-				fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
+				if config.KeyEffectClass(res.Key) == config.EffectNextDaemonStart {
+					fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
+				} else if res.Key == "on_archive_command" {
+					fmt.Fprintln(cmd.OutOrStdout(),
+						"saved. It applies to archive operations in this project from now on.")
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(),
+						"saved. It applies to sessions created in this project from now on.")
+				}
 			}
 			return nil
 		}
@@ -640,25 +649,8 @@ func printListenerAddr(cmd *cobra.Command, addr string) {
 // checked. The value is deliberately not returned — the point is the verdict,
 // and a config that fails to load has no value to report.
 type configValidateResult struct {
-	OK        bool   `json:"ok"`
-	Path      string `json:"path"`
-	Warning   string `json:"warning,omitempty"`
-	Uncertain bool   `json:"-"`
-}
-
-// MarshalJSON preserves the established ok/path/warning member order and
-// appends uncertainty only when the read-only directory probe could not answer.
-// Re-encoding through a map would alphabetize the existing public payload.
-func (r configValidateResult) MarshalJSON() ([]byte, error) {
-	type alias configValidateResult
-	object, err := json.Marshal(alias(r))
-	if err != nil {
-		return nil, err
-	}
-	if !r.Uncertain {
-		return object, nil
-	}
-	return session.AppendJSONMember(object, "uncertain", []byte("true"))
+	OK   bool   `json:"ok"`
+	Path string `json:"path"`
 }
 
 var configValidateCmd = &cobra.Command{
@@ -671,9 +663,7 @@ materializes nothing — a read-only check.
 This is the companion to a raw hand-edit. "af config set" validates every scalar
 and structured key before it writes and so cannot leave a broken file. A manual
 edit bypasses that protection: exit 0 means no config defect was found, while a
-non-zero exit names what must be fixed before the next launch. An inconclusive
-read-only directory-access probe does not prove that a later startup can
-regenerate an empty stub; text output warns, and JSON appends uncertain=true.
+non-zero exit names what must be fixed before the next launch.
 
 Local-only: it checks the config on the machine it runs on, so
 --daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
@@ -691,10 +681,10 @@ host to check that host.`,
 		// can never itself change the thing it is checking. A missing file is not
 		// a failure: first run has no config yet, and af materializes defaults
 		// then. A contentless config.toml with no shadowing config.json is the
-		// same verdict from startup's side: af removes the stub and materializes
-		// defaults, so an empty stub is OK — the very state this command claims
-		// to mirror (the "same parse+validate af runs at startup") must not
-		// reject it.
+		// same verdict from startup's side: af runs on in-memory defaults and
+		// leaves the file untouched (#4483), so an empty stub is OK — the very
+		// state this command claims to mirror (the "same parse+validate af runs
+		// at startup") must not reject it.
 		loaded, err := configValidateLoadReadOnly()
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
@@ -702,18 +692,12 @@ host to check that host.`,
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(),
 				apiproto.Success(configValidateResult{
-					OK:        true,
-					Path:      loaded.Path,
-					Warning:   loaded.DirectoryAccessWarning,
-					Uncertain: loaded.DirectoryAccessWarning != "",
+					OK:   true,
+					Path: loaded.Path,
 				}))
 		}
-		if loaded.DirectoryAccessWarning != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "config warning: %s\n", loaded.DirectoryAccessWarning)
-			return nil
-		}
 		if loaded.EmptyStub {
-			fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s is an empty stub — af will attempt to regenerate defaults on the next start\n", prettyPath(loaded.Path))
+			fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s is an empty stub — af runs on built-in defaults and leaves it untouched; write your settings or delete it to regenerate\n", prettyPath(loaded.Path))
 			return nil
 		}
 		if loaded.Missing {

@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -19,7 +20,7 @@ import (
 // #3234.
 func newUnsafeTeardownKillFixture(t *testing.T, title string) (*Manager, string, session.InstanceData) {
 	t.Helper()
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	restore := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
 		fake := session.NewFakeBackend()
 		fake.CompleteStart()

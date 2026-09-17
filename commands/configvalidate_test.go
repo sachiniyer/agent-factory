@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/spf13/cobra"
 )
 
@@ -117,9 +116,10 @@ func TestConfigValidateDoesNotMutateTheConfig(t *testing.T) {
 
 // TestConfigValidateAcceptsAnEmptyStub is the fix's headline guarantee for this
 // command: a contentless config.toml (here zero bytes) with no shadowing
-// config.json is a state af boots on — startup removes the stub and materializes
-// defaults — so validate, whose doc-comment claims to run "the same parse+validate
-// af runs at startup", must report OK and exit 0 rather than "is not valid".
+// config.json is a state af boots on — startup runs on in-memory defaults and
+// leaves the file untouched (#4483) — so validate, whose doc-comment claims to
+// run "the same parse+validate af runs at startup", must report OK and exit 0
+// rather than "is not valid".
 func TestConfigValidateAcceptsAnEmptyStub(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
@@ -139,6 +139,62 @@ func TestConfigValidateAcceptsAnEmptyStub(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "empty stub") {
 		t.Errorf("validate must name the empty-stub state distinctly from Missing, got: %q", out.String())
+	}
+}
+
+// TestConfigValidateAcceptsAnEmptyStubDefaultHomeReadOnly covers the
+// default-home case for this command: a contentless config.toml in an
+// owner-owned default ~/.agent-factory tightened to a write-less mode (0500).
+// Since #4483 a stub is never removed or written by a load, so the mode is
+// irrelevant to the verdict — validate must report OK and exit 0.
+//
+// Unlike TestConfigValidateAcceptsAnEmptyStub, this stages the home as the
+// CONCRETE default via $HOME (AGENT_FACTORY_HOME empty) at a write-less mode.
+func TestConfigValidateAcceptsAnEmptyStubDefaultHomeReadOnly(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses mode bits, so a 0500 home cannot be staged as non-writable")
+	}
+	t.Setenv("SHELL", "/bin/sh")
+	userHome := t.TempDir()
+	afHome := filepath.Join(userHome, ".agent-factory")
+	if err := os.Mkdir(afHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := filepath.Join(afHome, "config.toml")
+	if err := os.WriteFile(tomlPath, []byte("# placeholder\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(afHome, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(afHome, 0o755) })
+	t.Setenv("HOME", userHome)
+	t.Setenv("AGENT_FACTORY_HOME", "")
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := configValidateCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("a chmod-repairable default home self-heals at startup; validate must report OK, got: %v", err)
+	}
+	if !strings.Contains(out.String(), "config OK") {
+		t.Errorf("validate must report OK for a repairable default home, got: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "empty stub") {
+		t.Errorf("validate must name the empty-stub state, got: %q", out.String())
+	}
+
+	// No-write: the stub is untouched and the home stays read-only.
+	after, _ := os.ReadFile(tomlPath)
+	if string(after) != "# placeholder\n" {
+		t.Errorf("validate changed the empty stub it checked.\n got: %q\nwant: %q", after, "# placeholder\n")
+	}
+	info, err := os.Stat(afHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o500 {
+		t.Errorf("validate must not chmod-repair the home it reports on, got mode %o", info.Mode().Perm())
 	}
 }
 
@@ -166,8 +222,9 @@ func TestConfigValidateAcceptsACommentOnlyStub(t *testing.T) {
 }
 
 // TestConfigValidateDoesNotMutateAnEmptyStub extends the read-only promise to the
-// empty-stub state: the command must neither remove the stub (startup does, but
-// validate is a check, not a heal) nor materialize any config file beside it.
+// empty-stub state: the command must neither remove the stub nor materialize
+// any config file beside it — the same no-mutation rule startup itself now
+// follows for stubs (#4483).
 //
 // Like TestConfigValidateDoesNotMutateTheConfig above, the assertion is scoped to
 // CONFIG files rather than the whole home: every command runs log.Initialize,
@@ -248,55 +305,11 @@ func TestConfigValidateJSONAcceptsAnEmptyStub(t *testing.T) {
 	}
 }
 
-func TestConfigValidateJSONReportsAdvisoryUncertainty(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	previousLoad := configValidateLoadReadOnly
-	configValidateLoadReadOnly = func() (config.ReadOnlyConfigLoad, error) {
-		return config.ReadOnlyConfigLoad{
-			Path:                   "/tmp/config.toml",
-			EmptyStub:              true,
-			DirectoryAccessWarning: "directory access probe unavailable: function not implemented",
-		}, nil
-	}
-	t.Cleanup(func() { configValidateLoadReadOnly = previousLoad })
-	previousJSON := configJSONFlag
-	configJSONFlag = true
-	t.Cleanup(func() { configJSONFlag = previousJSON })
-
-	cmd := &cobra.Command{}
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	if err := configValidateCmd.RunE(cmd, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	var envelope struct {
-		Data struct {
-			OK        bool `json:"ok"`
-			Uncertain bool `json:"uncertain"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
-		t.Fatalf("stdout is not a JSON envelope: %v\n%s", err, out.String())
-	}
-	if !envelope.Data.OK || !envelope.Data.Uncertain {
-		t.Fatalf("advisory result = ok:%t uncertain:%t; want true/true\n%s",
-			envelope.Data.OK, envelope.Data.Uncertain, out.String())
-	}
-	var compact bytes.Buffer
-	if err := json.Compact(&compact, out.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(compact.String(), `"warning":"directory access probe unavailable: function not implemented","uncertain":true`) {
-		t.Fatalf("uncertain must be appended after the established result members:\n%s", compact.String())
-	}
-}
-
 func TestConfigValidateHelpDescribesAdvisorySuccess(t *testing.T) {
 	help := strings.Join(strings.Fields(configValidateCmd.Long), " ")
 	for _, want := range []string{
 		"exit 0 means no config defect was found",
-		"does not prove that a later startup can regenerate an empty stub",
+		"writes nothing and materializes nothing",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("validate help does not contain %q:\n%s", want, configValidateCmd.Long)

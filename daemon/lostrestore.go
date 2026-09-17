@@ -416,6 +416,17 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		return
 	}
 	defer opLock.Unlock()
+	// Local recovery can register a vanished worktree through either rebuild
+	// fallback. It must share create's path admission, but this is the daemon's
+	// operational poll: contention skips the attempt instead of blocking every
+	// later recovery and status pass behind another repository operation.
+	worktreeAdmission, acquired := m.tryLocalWorktreeAdmission(repoID, inst)
+	if !acquired {
+		return
+	}
+	if worktreeAdmission != nil {
+		defer worktreeAdmission.Unlock()
+	}
 
 	// Re-verify under the lock: everything checked above was point-in-time,
 	// and a KillSession that beat us to the lock may have torn the session

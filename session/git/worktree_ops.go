@@ -48,7 +48,6 @@ func (g *GitWorktree) Setup() error {
 	if setupErr != nil {
 		return setupErr
 	}
-
 	// Fire-and-forget post-worktree hooks (cancellable via hooksCtx)
 	g.hooksDone = g.runHooks()
 	return nil
@@ -86,7 +85,6 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 		return err
 	}
 	g.branchCreatedByUs = branchCreatedByUs
-
 	g.startHooks()
 	return nil
 }

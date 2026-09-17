@@ -1,8 +1,10 @@
 package session
 
 import (
+	"context"
 	"encoding/csv"
 	"fmt"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -411,6 +413,10 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			if err := checkMount(strings.SplitN(arg, "=", 2)[1]); err != nil {
 				return err
 			}
+		case strings.HasPrefix(arg, "-v="):
+			if err := checkMount(strings.TrimPrefix(arg, "-v=")); err != nil {
+				return err
+			}
 		case strings.HasPrefix(arg, "-v") && len(arg) > 2:
 			if err := checkMount(strings.TrimPrefix(arg, "-v")); err != nil {
 				return err
@@ -439,25 +445,113 @@ func environmentValue(environ []string, name string) string {
 }
 
 func localDockerEndpoint(endpoint string) bool {
-	endpoint = strings.ToLower(strings.TrimSpace(endpoint))
-	return strings.HasPrefix(endpoint, "unix://") ||
-		strings.HasPrefix(endpoint, "npipe://") ||
-		strings.HasPrefix(endpoint, "fd://")
+	endpoint = strings.TrimSpace(endpoint)
+	lower := strings.ToLower(endpoint)
+	if strings.HasPrefix(lower, "unix://") ||
+		strings.HasPrefix(lower, "npipe://") ||
+		strings.HasPrefix(lower, "fd://") {
+		return true
+	}
+	// A TCP or SSH endpoint whose host is a loopback address or the reserved
+	// loopback name is local by definition — the daemon can reach it regardless
+	// of transport scheme. tcp://127.0.0.1:2375, tcp://127.x.x.x:*,
+	// tcp://[::1]:*, tcp://localhost:2375, tcp://localhost.:2375, and
+	// ssh://user@localhost are all local; any other host (including a
+	// resolvable remote hostname over TCP or an SSH target elsewhere) is
+	// remote. isLoopbackHost (session/weburl.go) covers RFC 6761
+	// "localhost"/"*.localhost" without DNS and ip.IsLoopback() for the full
+	// 127.0.0.0/8 and ::1 ranges.
+	if strings.HasPrefix(lower, "tcp://") || strings.HasPrefix(lower, "ssh://") {
+		return loopbackHostedEndpoint(endpoint)
+	}
+	return false
 }
 
-// dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will
-// talk to and reports whether it is local. Two callers need that answer for the
-// same underlying reason — Docker resolves AND labels a bind source on the daemon
-// host, not the CLI host: ensureAccountDockerEngineLocal refuses a remote engine
-// outright, and bindMountRelabel keeps the SELinux relabel when locality cannot
-// be proven (#3589).
-func (p *dockerProvisioner) dockerEngineEndpoint() (endpoint string, local bool, err error) {
-	environ := p.dockerEnvironment()
+// loopbackHostedEndpoint reports whether endpoint parses as a URL whose host is
+// loopback. u.Hostname() strips the port, userinfo, and IPv6 brackets, so
+// ssh://user@127.0.0.1 answers on 127.0.0.1, not on "user@127.0.0.1".
+func loopbackHostedEndpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	return isLoopbackHost(u.Hostname())
+}
+
+// dockerEndpointOnThisHost is the stricter locality proof that bind-mount
+// identity and SELinux labelling need. It answers "is the Docker DAEMON on this
+// host", not "can this host reach the endpoint" — a different question, because
+// Docker resolves and labels a bind source on the daemon host.
+//
+// A socket scheme (unix://, npipe://, fd://) is the engine's own transport on
+// this machine, and an ssh:// endpoint aimed at loopback terminates on this
+// host's sshd, so the daemon it reaches is local too. A tcp:// endpoint does
+// NOT get this proof even on loopback: `ssh -L 2375:host:2375` — Docker's
+// documented remote-access transport — makes a remote daemon answer on
+// 127.0.0.1 while resolving bind sources on the remote host, where an
+// unrelated same-named path would mount under the wrong identity. Reachability
+// is enough for a non-account session's dial-back; it is not evidence of which
+// host a bind mount lands on.
+func dockerEndpointOnThisHost(endpoint string) bool {
+	endpoint = strings.TrimSpace(endpoint)
+	lower := strings.ToLower(endpoint)
+	if strings.HasPrefix(lower, "unix://") ||
+		strings.HasPrefix(lower, "npipe://") ||
+		strings.HasPrefix(lower, "fd://") {
+		return true
+	}
+	if strings.HasPrefix(lower, "ssh://") {
+		return loopbackHostedEndpoint(endpoint)
+	}
+	return false
+}
+
+// remoteDockerEngineError is the one wording for "the Docker engine is not on this
+// host", shared by Provision (create time) and BackendUnusableReason (choose time)
+// — mirroring dockerCLIMissingError / missingOriginError, so the reason the web
+// gives at choose time is the reason the CLI prints at create time. The published
+// agent-server port is on the engine host's loopback; the daemon dials its own, so
+// a remote engine is unreachable and the failure would otherwise surface later as
+// an opaque `dial tcp 127.0.0.1:<port>: connect: connection refused`.
+func remoteDockerEngineError(endpoint string) error {
+	return fmt.Errorf("backend=docker: the docker backend requires a local Docker engine, but the Docker endpoint %q is remote; the in-container agent-server port is published on the engine host's loopback, which this daemon cannot reach", endpoint)
+}
+
+// dockerLocalityProbeError is the fail-closed wording for "I could not establish
+// whether the Docker engine is local", shared by Provision and
+// BackendUnusableReason. The account path names the account inline; this is the
+// account-agnostic half, matching that path's posture (refuse, do not proceed)
+// when locality cannot be proven.
+func dockerLocalityProbeError(err error) error {
+	return fmt.Errorf("backend=docker: cannot establish that the Docker daemon is local: %w", err)
+}
+
+// resolveDockerEngineEndpoint resolves the Docker endpoint this daemon's docker
+// CLI will talk to and reports whether it is REACHABLE-local: localDockerEndpoint
+// is the dial-back classification, shared by the provision-time
+// dockerEngineEndpoint method and the choose-time picker locality check so
+// create-time and choose-time cannot disagree on what "local" means for
+// reachability. Host-identity consumers (ensureAccountDockerEngineLocal and
+// bindMountRelabel) resolve the endpoint through this same call but apply the
+// stricter dockerEndpointOnThisHost to it instead — see its comment for why a
+// loopback TCP endpoint is not host-identity proof.
+//
+// It reads DOCKER_HOST / DOCKER_CONTEXT from environ exactly as the docker CLI
+// receives them, and runs `docker context inspect` only when DOCKER_HOST is unset
+// or a DOCKER_CONTEXT is named — the same call ensureAccountDockerEngineLocal and
+// bindMountRelabel make. Two concerns turn on the engine being local: Docker
+// resolves AND labels a bind source on the daemon host (not the CLI host), and the
+// agent-server port publishes on the engine host's loopback while the daemon dials
+// its own. A remote engine breaks the latter for every docker session, not only
+// account-scoped ones.
+func resolveDockerEngineEndpoint(environ []string) (endpoint string, local bool, err error) {
 	dockerHost := environmentValue(environ, "DOCKER_HOST")
 	dockerContext := environmentValue(environ, "DOCKER_CONTEXT")
 	endpoint = dockerHost
 	if dockerContext != "" || endpoint == "" {
-		out, derr := p.docker(dockerShortStepTimeout, "context", "inspect", "--format", dockerEndpointFormat)
+		ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
+		defer cancel()
+		out, derr := dockerExec(ctx, environ, "context", "inspect", "--format", dockerEndpointFormat)
 		if derr != nil {
 			return "", false, fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), derr)
 		}
@@ -466,20 +560,55 @@ func (p *dockerProvisioner) dockerEngineEndpoint() (endpoint string, local bool,
 	return endpoint, localDockerEndpoint(endpoint), nil
 }
 
+// dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will
+// talk to and reports whether it is reachable-local. It delegates to
+// resolveDockerEngineEndpoint so the provision-time answer and the choose-time
+// picker answer cannot disagree. Three callers turn on the engine being local:
+// ensureDockerEngineLocal refuses a remote engine for non-account sessions
+// (dial-back reachability, this `local`), while ensureAccountDockerEngineLocal
+// (bind-mount identity) and bindMountRelabel (which host's SELinux mode the
+// daemon labels under, #3589) need the stricter dockerEndpointOnThisHost proof
+// on the same resolved endpoint.
+func (p *dockerProvisioner) dockerEngineEndpoint() (endpoint string, local bool, err error) {
+	return resolveDockerEngineEndpoint(p.dockerEnvironment())
+}
+
 // ensureAccountDockerEngineLocal proves bind mounts are interpreted on this
 // host. Docker resolves a bind source on the daemon host, not the CLI host, so a
 // remote endpoint would mount an unrelated path while reporting the local
-// account name.
+// account name. It uses dockerEndpointOnThisHost rather than the shared
+// loopback-connectivity classification: a tcp:// loopback endpoint can be an
+// SSH local-forward or proxy to a remote daemon, so reachability is not the
+// host-identity proof this gate needs (Codex P1 on this PR).
 func (p *dockerProvisioner) ensureAccountDockerEngineLocal() error {
-	endpoint, local, err := p.dockerEngineEndpoint()
+	endpoint, _, err := p.dockerEngineEndpoint()
 	if err != nil {
 		return fmt.Errorf("backend=docker: cannot establish that the Docker daemon is local before mounting account %q: %w",
 			p.spec.Account.Name, err)
 	}
-	if !local {
+	if !dockerEndpointOnThisHost(endpoint) {
 		return fmt.Errorf(
 			"backend=docker: account %q cannot be used with remote Docker endpoint %q: bind mounts resolve on the daemon host, so this host's account path would not be the selected identity",
 			p.spec.Account.Name, endpoint)
+	}
+	return nil
+}
+
+// ensureDockerEngineLocal refuses a remote Docker engine before the container is
+// created, for every docker session that is not account-scoped. runContainer
+// publishes the agent-server port on the engine host's loopback (`-p
+// 127.0.0.1::<agentPort>`) and provision dials the daemon's own 127.0.0.1, so a
+// remote engine yields an endpoint the daemon can never reach — the failure
+// surfaces later as an opaque `dial tcp 127.0.0.1:<port>: connect: connection
+// refused` rather than at create time. Mirrors ensureAccountDockerEngineLocal's
+// posture (refuse, do not proceed) and fails closed on a probe error the same way.
+func (p *dockerProvisioner) ensureDockerEngineLocal() error {
+	endpoint, local, err := p.dockerEngineEndpoint()
+	if err != nil {
+		return dockerLocalityProbeError(err)
+	}
+	if !local {
+		return remoteDockerEngineError(endpoint)
 	}
 	return nil
 }

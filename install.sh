@@ -235,7 +235,7 @@ case ":$PATH:" in
 		;;
 	*)
 		echo ""
-		echo "NOTE: $INSTALL_DIR is not on your PATH."
+		echo "warning: $INSTALL_DIR is not on your PATH."
 		echo "Add it to your shell profile, e.g.:"
 		echo "    export PATH=\"$INSTALL_DIR:\$PATH\""
 		echo "Then restart your shell and run: af doctor --setup"

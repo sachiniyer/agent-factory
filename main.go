@@ -17,7 +17,7 @@ var (
 	// stable releases also commit the new number here so dev builds report
 	// the latest stable base. Preview releases (vX.Y.Z-preview-N, #1041)
 	// never rewrite this value.
-	version     = "1.0.286"
+	version     = "1.0.289"
 	rootCommand = commands.NewRootCommand
 )
 
@@ -31,14 +31,7 @@ func main() {
 		if err != nil {
 			return sessionenv.Account{}, err
 		}
-		executable, err := os.Executable()
-		if err != nil {
-			// Not fatal: TrustedWrapper only widens what the command guard accepts,
-			// so an unknown path means a bare `af` is still recognised and anything
-			// else is refused. Failing closed is the correct direction.
-			executable = ""
-		}
-		return agentaccount.Selected(home, agent, name, executable)
+		return agentaccount.Selected(home, agent, name)
 	}
 	sessionenv.HandleInternalExec()
 	sessiontmux.HandleDedicatedServerExec()

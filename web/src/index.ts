@@ -76,6 +76,7 @@ import {
 import { confirmDeleteTabModal } from "./delete_tab_modal.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
+import { restoreShortcutFocus } from "./shortcut-focus.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, projectDeletionBreakdown, reconcileProject, scopeToProject } from "./project.js";
 import {
@@ -356,8 +357,7 @@ function rerender(): void {
       shell = null; // dropped from the tree by renderLogin below
     }
     disposeSplit();
-    closeModal();
-    closeConfigAssistant();
+    closeOverlays();
     renderLogin(root, state, actions);
     return;
   }
@@ -490,8 +490,7 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
   pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
-  closeModal();
-  closeConfigAssistant();
+  closeOverlays();
   token = null;
   clearToken();
   store.set({
@@ -749,6 +748,28 @@ function closeConfigAssistant(): void {
   }
 }
 
+/** Closes any open account-login overlay and its terminal stream. */
+function closeAccountLogin(): void {
+  accountLogin?.close();
+  accountLogin = null;
+}
+
+/** Reaps every imperative overlay owned by modalHost. Keep the complete owner list
+ *  here so host teardown and replacement cannot orphan a controller by omission. */
+function closeOverlays(): void {
+  closeModal();
+  closeConfigAssistant();
+  closeAccountLogin();
+}
+
+/** The only opener-facing path to modalHost: reap every current owner before giving
+ *  a constructor access to the shared mount point. A new overlay gets replacement
+ *  semantics by using this seam instead of reproducing the owner list. */
+function mountOverlay<T>(open: (mountHost: HTMLElement) => T): T {
+  closeOverlays();
+  return open(modalHost);
+}
+
 interface ModalInvoker {
   sessionId?: string;
   actionLabel: string | null;
@@ -766,58 +787,57 @@ function captureModalInvoker(): ModalInvoker {
   };
 }
 
-/** Mounts a fresh modal, replacing any currently open overlay (a form modal OR the
- *  config-assistant chat) — one overlay at a time, and the assistant is torn down
- *  (terminal disposed, session reaped) rather than left streaming behind the modal. */
+/** Mounts a fresh modal, replacing any currently open overlay. Controllers are
+ *  reaped before their DOM is replaced so no hidden terminal keeps streaming. */
 function openModal(m: ModalHandle, focusCard = false, explicitInvoker?: ModalInvoker): void {
-  closeModal();
-  closeConfigAssistant();
-  const focused = document.activeElement as HTMLElement | null;
-  const invoker = explicitInvoker ?? captureModalInvoker();
-  const { sessionId, actionLabel } = invoker;
-  const row = explicitInvoker ? !invoker.header && sessionId : focused?.closest(".af-row");
-  const header = invoker.header ? root?.querySelector<HTMLElement>(".af-term-head") : null;
-  if (focusCard || row) {
-    restoreModalFocus = () => {
-      const canFocus = (el: HTMLElement | null | undefined): el is HTMLElement =>
-        !!el && el.isConnected && el !== document.body && !el.matches(":disabled") &&
-        el.getClientRects().length > 0 && getComputedStyle(el).visibility === "visible";
-      // Header actions do not live in the rail; return to their invoking control.
-      if (!row && !explicitInvoker && canFocus(focused)) {
-        focused.focus({ preventScroll: true });
-        return;
-      }
-      if (!row && header?.isConnected) {
-        // Pending-state reconciliation can replace the original header button.
-        const action = actionLabel ? header.querySelector<HTMLButtonElement>(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
-        const target = canFocus(action) ? action : header.querySelector<HTMLButtonElement>(".af-term-more");
-        if (canFocus(target)) {
-          target.focus({ preventScroll: true });
+  mountOverlay((mountHost) => {
+    const focused = document.activeElement as HTMLElement | null;
+    const invoker = explicitInvoker ?? captureModalInvoker();
+    const { sessionId, actionLabel } = invoker;
+    const row = explicitInvoker ? !invoker.header && sessionId : focused?.closest(".af-row");
+    const header = invoker.header ? root?.querySelector<HTMLElement>(".af-term-head") : null;
+    if (focusCard || row) {
+      restoreModalFocus = () => {
+        const canFocus = (el: HTMLElement | null | undefined): el is HTMLElement =>
+          !!el && el.isConnected && el !== document.body && !el.matches(":disabled") &&
+          el.getClientRects().length > 0 && getComputedStyle(el).visibility === "visible";
+        // Header actions do not live in the rail; return to their invoking control.
+        if (!row && !explicitInvoker && canFocus(focused)) {
+          focused.focus({ preventScroll: true });
           return;
         }
-      }
-      // A phone row action closes the drawer before mounting its dialog. Hidden
-      // rail controls still have rectangles, but cannot receive keyboard focus.
-      const toggle = root?.querySelector<HTMLButtonElement>(".af-nav-toggle");
-      if (!root?.querySelector(".af-app.af-nav-open") && canFocus(toggle)) {
+        if (!row && header?.isConnected) {
+          // Pending-state reconciliation can replace the original header button.
+          const action = actionLabel ? header.querySelector<HTMLButtonElement>(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+          const target = canFocus(action) ? action : header.querySelector<HTMLButtonElement>(".af-term-more");
+          if (canFocus(target)) {
+            target.focus({ preventScroll: true });
+            return;
+          }
+        }
+        // A phone row action closes the drawer before mounting its dialog. Hidden
+        // rail controls still have rectangles, but cannot receive keyboard focus.
+        const toggle = root?.querySelector<HTMLButtonElement>(".af-nav-toggle");
+        if (!root?.querySelector(".af-app.af-nav-open") && canFocus(toggle)) {
+          focusRail();
+          toggle.focus({ preventScroll: true });
+          return;
+        }
         focusRail();
-        toggle.focus({ preventScroll: true });
-        return;
-      }
-      focusRail();
-      const menu = sessionId ? root?.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
-      const action = actionLabel ? menu?.querySelector<HTMLButtonElement>(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
-      const target = canFocus(action) ? action : menu?.querySelector<HTMLButtonElement>("button");
-      if (canFocus(target)) target.focus({ preventScroll: true });
-      else {
-        const rail = root?.querySelector<HTMLElement>(".af-rail");
-        if (canFocus(rail)) { rail.tabIndex = -1; rail.focus({ preventScroll: true }); }
-      }
-    };
-  }
-  modal = m;
-  modalHost.replaceChildren(m.el);
-  if (focusCard) m.el.querySelector<HTMLElement>(".af-modal-card")?.focus({ preventScroll: true });
+        const menu = sessionId ? root?.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
+        const action = actionLabel ? menu?.querySelector<HTMLButtonElement>(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+        const target = canFocus(action) ? action : menu?.querySelector<HTMLButtonElement>("button");
+        if (canFocus(target)) target.focus({ preventScroll: true });
+        else {
+          const rail = root?.querySelector<HTMLElement>(".af-rail");
+          if (canFocus(rail)) { rail.tabIndex = -1; rail.focus({ preventScroll: true }); }
+        }
+      };
+    }
+    modal = m;
+    mountHost.replaceChildren(m.el);
+    if (focusCard) m.el.querySelector<HTMLElement>(".af-modal-card")?.focus({ preventScroll: true });
+  });
 }
 
 /** Opens the conversational config assistant (#2467): spawn-or-reuse, stream into a
@@ -828,15 +848,13 @@ function doOpenConfigAssistant(): void {
   if (tok === null) {
     return;
   }
-  closeModal();
-  closeConfigAssistant();
-  configAssistant = openConfigAssistant({
+  configAssistant = mountOverlay((mountHost) => openConfigAssistant({
     token: tok,
-    mountHost: modalHost,
+    mountHost,
     onClosed: () => {
       configAssistant = null;
     },
-  });
+  }));
 }
 
 /** Opens the new-session modal, its picker seeded from the live projects. Submit
@@ -1725,27 +1743,19 @@ function doOpenAccountLogin(agent: string, name: string): void {
       }
       const notices = login.notices?.length ? ` · ${login.notices.join(" · ")}` : "";
       setAccountStatus(agent, name, `Running ${login.program}${notices}`, false);
-      closeModal();
-      closeAccountLogin();
-      accountLogin = openAccountLogin({
+      accountLogin = mountOverlay((mountHost) => openAccountLogin({
         token: tok,
-        mountHost: modalHost,
+        mountHost,
         login,
         onClosed: () => {
           accountLogin = null;
           refreshAccounts();
         },
-      });
+      }));
     })
     .catch((err: unknown) => {
       setAccountStatus(agent, name, errorText(err), true);
     });
-}
-
-/** Closes any open login overlay. One at a time, like the assistant. */
-function closeAccountLogin(): void {
-  accountLogin?.close();
-  accountLogin = null;
 }
 
 /** Writes one config key and reports the outcome.
@@ -2428,13 +2438,14 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
       selectedId = null;
     }
   }
-  // An unchanged selection keeps its active tab; one the snapshot MOVED (the selected
-  // session was archived/killed, so pickSelection landed elsewhere) takes the tab its
-  // retained layout will settle on rather than asserting 0 (#1855, as moveSelection).
-  const settled =
-    selectedId === prevSel
-      ? store.get().activeTab
-      : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
+  // The split layout owns which TAB is focused; resolve its retained identity against
+  // this roster before store.set synchronously rerenders AppShell. Keeping the old
+  // ordinal for an unchanged selection is wrong when another client reordered tabs:
+  // until syncSplit remaps the layout, that ordinal names a neighbour. A changed
+  // selection uses the same retained-layout rule (#1855, as moveSelection).
+  const settled = selectedId
+    ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId))
+    : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
   // Evidence distinguishes causal completion from delayed updates/cache repaints.
@@ -2675,36 +2686,28 @@ function onKeydown(e: KeyboardEvent): void {
       focusRail();
       break;
     case "switchTab":
-      switchTab(action.index);
+      if (shell) shell.switchTab(action.index);
+      else switchTab(action.index);
       break;
     case "newTab": {
       const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       shell?.openNewTabPicker(() => {
         focusRail();
-        if (navigationTarget?.isConnected && navigationTarget !== document.body) {
-          navigationTarget.focus({ preventScroll: true });
-        }
         // Control+] commonly leaves document.body as the nominal focus target.
         // Focusing body is a no-op, which can leave the picker item focused after
         // its hidden ancestors close; the next shortcut is then swallowed as a
         // native-button key. Give rail navigation a stable DOM focus target.
-        if (document.activeElement !== navigationTarget || navigationTarget === document.body) {
-          const rail = root?.querySelector<HTMLElement>(".af-rail");
-          if (rail) {
-            rail.tabIndex = -1;
-            rail.focus({ preventScroll: true });
-          } else {
-            (document.activeElement as HTMLElement | null)?.blur();
-          }
-        }
+        restoreShortcutFocus(navigationTarget, root?.querySelector<HTMLElement>(".af-rail") ?? null);
       });
       break;
     }
     case "closeTab":
-      closeSessionTab(store.get().activeTab);
+      if (shell) shell.closeTab(store.get().activeTab);
+      else closeSessionTab(store.get().activeTab);
       break;
     case "switchView":
-      switchView(action.view);
+      if (shell) shell.switchView(action.view);
+      else switchView(action.view);
       break;
     case "cyclePane":
       splitView.cyclePane(action.delta);

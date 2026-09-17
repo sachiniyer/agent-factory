@@ -373,6 +373,16 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 		if err := p.ensureAccountDockerEngineLocal(); err != nil {
 			return ProvisionResult{}, err
 		}
+	} else {
+		// A remote Docker engine publishes the agent-server port on the engine
+		// host's loopback while the daemon dials its own, so the dial-back is
+		// unreachable and the failure surfaces only later as `connection refused`
+		// to 127.0.0.1. The account path refuses the same engine for its own
+		// reason (bind-mount identity); refuse here too, before `docker run`, so a
+		// non-account session fails fast with the remote-engine cause instead.
+		if err := p.ensureDockerEngineLocal(); err != nil {
+			return ProvisionResult{}, err
+		}
 	}
 	engineID, err := p.currentEngineID(dockerShortStepTimeout)
 	if err != nil {
@@ -608,16 +618,18 @@ func (p *dockerProvisioner) startAgentServer() error {
 }
 
 func (p *dockerProvisioner) agentServerCommand() (string, error) {
-	inner := fmt.Sprintf("%s agent-server --listen :%s --repo %s --title %s",
-		shellQuote(dockerAfBinaryPath), dockerAgentPort, shellQuote(dockerWorkspaceDir), shellQuote(p.spec.Title))
+	args := []string{"agent-server", "--listen", ":" + dockerAgentPort,
+		"--repo", dockerWorkspaceDir, "--title", p.spec.Title}
 	if strings.TrimSpace(p.program) != "" {
-		inner += " --program " + shellQuote(p.program)
-		inner += " --program-resolved"
+		args = append(args, "--program", p.program, "--program-resolved")
 	}
 	for _, name := range p.spec.SessionEnvPassthrough {
-		inner += " --session-env " + shellQuote(name)
+		args = append(args, "--session-env", name)
 	}
-	filteredInner, err := sessionenv.WrapCommand(dockerAfBinaryPath, p.agentName(), p.spec.SessionEnvPassthrough, inner)
+	// This is an execution binding, not a path proof. The copied af enters a
+	// dedicated mode that derives the allowlist from these exact args and execs
+	// its current binary into agent-server; no argv spelling authorizes recursion.
+	filteredInner, err := sessionenv.WrapAgentServerCommand(dockerAfBinaryPath, p.spec.SessionEnvPassthrough, args)
 	if err != nil {
 		return "", fmt.Errorf("backend=docker: preparing filtered agent-server environment failed: %w", err)
 	}
