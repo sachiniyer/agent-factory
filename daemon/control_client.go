@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -183,30 +184,60 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 }
 
 func ensureDaemonThroughUnitUntil(launch func() error, deadline time.Time) error {
-	unitDeadline := admissionBoundedDeadline(deadline, ensureUnitStartTimeout)
-
-	unitErr := runEnsureUnitStartCommand(unitDeadline)
-	if unitErr == nil {
-		unitErr = waitForDaemonReady(unitDeadline)
-		if unitErr == nil {
-			return nil
+	// The ONLY condition under which an ad-hoc launch remains legitimate on a
+	// unit-claimed home: the service manager the installed unit belongs to
+	// provably cannot exist in this environment — no systemd/launchd as init,
+	// or a platform with no autostart support. There is no supervision to
+	// escape, and the fallback keeps af usable on systemd-less boxes and
+	// containers (#2373). Every other outcome below — a refused, hung,
+	// bus-unreachable, or UNINVOKABLE start — instead returns an error: a
+	// manager that COULD run the unit makes an ad-hoc spawn an unsupervised
+	// escapee that outlives the transient failure, greets the unit's next
+	// start with an already-served socket (whose ExecStart exits 0 by
+	// design), and leaves the daemon permanently outside Restart=on-failure
+	// protection (#4470).
+	presence, probeErr := probeUnitSupervisor(autostartGOOS)
+	switch presence {
+	case supervisorAbsent:
+		if admissionDeadlineExpired(deadline) {
+			return daemonAdmissionDeadlineError()
 		}
+		log.WarningLog.Printf("installed daemon service cannot run in this environment; falling back to an ad-hoc daemon: %v", probeErr)
+		if err := ensureDaemonAdHocUntil(launch, deadline); err != nil {
+			return fmt.Errorf("installed daemon service unavailable: %v; ad-hoc fallback failed: %w", probeErr, err)
+		}
+		// The ad-hoc fallback brought up a reachable daemon. EnsureDaemon's
+		// contract is "daemon reachable when I return nil", and every caller
+		// (callDaemon, withDaemonHTTP, attach) hard-returns on a non-nil
+		// result and skips the RPC — so a non-nil supervision-degradation
+		// return after a working fallback broke the first client action on
+		// hosts without a systemd user bus, self-healing only on the second
+		// call (#2373). The degradation is still surfaced where the user
+		// looks: the warning above, and af doctor / af daemon status carry a
+		// supervision-owner row. Report success.
+		return nil
+	case supervisorUnreachable:
+		// The manager provably runs this system — only this process's ability
+		// to invoke it failed (e.g. a PATH that omits the binary). `af daemon
+		// adopt` would hit the same wall, so the remedy is an environment
+		// that can reach the manager.
+		return unreachableSupervisorRefusal(autostartGOOS, probeErr)
 	}
-	if admissionDeadlineExpired(deadline) {
-		return daemonAdmissionDeadlineError()
+
+	unitDeadline := admissionBoundedDeadline(deadline, ensureUnitStartTimeout)
+	if startErr := runEnsureUnitStartCommand(unitDeadline); startErr != nil {
+		return unitStartRefusal(autostartGOOS, startErr)
 	}
-	log.WarningLog.Printf("failed to start daemon through its installed service; falling back to an ad-hoc daemon: %v", unitErr)
-	if err := ensureDaemonAdHocUntil(launch, deadline); err != nil {
-		return fmt.Errorf("installed daemon service failed: %v; ad-hoc fallback failed: %w", unitErr, err)
+	// The manager accepted the start — but "accepted" is not "serving":
+	// after an on-failure kill the unit holds ExecStart for RestartSec, so a
+	// serving socket can legitimately be several seconds out. Wait on the
+	// whole readiness budget, not the bounded start share: an ad-hoc spawn
+	// in this window races the pending ExecStart to the socket, wins it as
+	// an unsupervised process, and is exactly the escape that left the unit
+	// inactive while an impostor served the home for hours (#4470).
+	if err := waitForUnitDaemonReady(deadline); err != nil {
+		return unitReadinessRefusal(autostartGOOS, err)
 	}
-	// The ad-hoc fallback brought up a reachable daemon. EnsureDaemon's contract is
-	// "daemon reachable when I return nil", and every caller (callDaemon,
-	// withDaemonHTTP, attach) hard-returns on a non-nil result and skips the RPC —
-	// so returning a supervision-degradation error here failed the first client
-	// action on any host without a systemd user bus even though the daemon was
-	// serving, self-healing only on the second call (#2373). The degradation is
-	// still surfaced where the user looks: the warning above, and af doctor /
-	// af daemon status carry a supervision-owner row. Report success.
 	return nil
 }
 
@@ -253,7 +284,14 @@ func ensureDaemonAdHocUntil(launch func() error, deadline time.Time) error {
 		return daemonAdmissionDeadlineError()
 	}
 
-	return waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout))
+	err := waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout))
+	if err != nil && admissionDeadlineExpired(deadline) {
+		// Same deadline-identity rule as the unit path: a readiness wait that
+		// consumed the whole admission window must still read as a deadline to
+		// callDaemon's lifecycle-fallback guard (Codex on #4475).
+		return fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
+	}
+	return err
 }
 
 func waitForDaemonReady(deadline time.Time) error {
