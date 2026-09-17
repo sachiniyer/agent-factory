@@ -830,30 +830,6 @@ func DeliverPromptWithStatus(req DeliverPromptRequest) (string, session.PromptDe
 	return result.status, result.deliveryStatus, err
 }
 
-type taskPromptDeliveryResult struct {
-	status         string
-	deliveryStatus session.PromptDeliveryStatus
-	promptRetained bool
-}
-
-// deliverPromptForTaskRPC preserves the daemon's structural distinction between
-// an existing limited target and a newly created parked target that already
-// retained this prompt. Public send-prompt callers need only status + evidence;
-// the watch path needs the retained bit to avoid queueing a duplicate.
-func deliverPromptForTaskRPC(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
-	var resp DeliverPromptResponse
-	if err := callDaemon("DeliverPrompt", req, &resp); err != nil {
-		return taskPromptDeliveryResult{}, err
-	}
-	if !resp.DeliveryStatus.Valid() {
-		resp.DeliveryStatus = session.PromptCouldNotConfirm
-	}
-	return taskPromptDeliveryResult{
-		status: resp.Status, deliveryStatus: resp.DeliveryStatus,
-		promptRetained: resp.PromptRetained,
-	}, nil
-}
-
 // ListTasksNoSpawn returns the daemon's authoritative task list WITHOUT
 // starting a daemon (#1029 PR 3). It dials the existing control socket only if
 // it is already serving and returns ErrDaemonUnavailable otherwise, so a
