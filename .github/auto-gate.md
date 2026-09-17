@@ -507,8 +507,12 @@ problem is worth reporting it as a failure:
   squash-merges, so the merged head is never an ancestor of `master` and
   reachability would read every merged branch as carrying work. A side of the
   comparison that cannot be read is not a difference; the branch is kept.
-  Neither the REST ref API nor GraphQL's `deleteRef` accepts an expected OID,
-  so ordering is the only lever there is.
+  Because the comparison costs round trips the tip was read before, the tip is
+  read once more after it and the delete fires only if the ref still points at
+  the measured commit — a push landing inside the comparison is work the sweep
+  never measured, so the branch is kept. Neither the REST ref API nor
+  GraphQL's `deleteRef` accepts an expected OID, so ordering is the only lever
+  there is.
 
 Those conditions are correct when the merge asks them and nothing revisits the
 answer, so a branch kept for a reason that later disappears leaks forever

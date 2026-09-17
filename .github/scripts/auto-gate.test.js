@@ -10832,6 +10832,50 @@ test("#4462: the sweep deletes a moved branch whose tip tree is the default bran
   assert.deepEqual(result.deleted, ["siyer/fix-3603"]);
 });
 
+test("#4462: a branch that moves again under the tree comparison is kept unmeasured", async () => {
+  // The comparison's tree reads sit between the tip read and the delete, so
+  // the tip must be re-verified after them: a push landing in that window is
+  // work the sweep never measured. First getRef answers OTHER_SHA (the moved
+  // tip the comparison proves identical), the second answers MASTER_TIP_SHA —
+  // the branch moved again mid-decision.
+  let tipReads = 0;
+  const github = fakeGateGithub({
+    branchRefs: [
+      sweepBranch({
+        name: "siyer/fix-3603",
+        sha: OTHER_SHA,
+        treeOid: MERGED_TREE_OID,
+        pulls: [
+          {
+            number: 1465,
+            headRefOid: HEAD_SHA,
+            mergeCommit: { oid: SQUASH_MERGE_SHA, tree: { oid: MERGED_TREE_OID } },
+          },
+        ],
+      }),
+    ],
+    remoteRefShaByBranch: {
+      get "siyer/fix-3603"() {
+        return tipReads++ === 0 ? OTHER_SHA : MASTER_TIP_SHA;
+      },
+    },
+    commitTreesByOid: { [OTHER_SHA]: MERGED_TREE_OID },
+  });
+
+  const result = await autoGate.sweepMergedHeadRefs({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(github.deletedRefs, [], "the unmeasured tip may be the only copy of that work");
+  assert.equal(result.deleted.length, 0);
+  assert.equal(result.moved, 0, "the enumeration-side count is for pre-delete keeps only");
+  assert.equal(result.kept.length, 1);
+  assert.match(result.kept[0].reason, /moved again.*never measured/);
+  assert.equal(tipReads, 2, "the delete is gated on a post-comparison tip read");
+});
+
 test("#4462: a moved branch the enumeration cannot measure is kept, and says so", async () => {
   // A merged PR row without a mergeCommit is the "could not measure" shape —
   // the enumeration did not carry the tree the comparison needs. It is not a

@@ -3563,6 +3563,18 @@ async function deleteMergedHeadRef({
         core.notice(`Keeping ${branch}: ${reason}.`);
         return { branch, prNumber, outcome: "kept", reason };
       }
+      // The tip was read before the tree comparison's round trips, so prove it
+      // is still the commit those trees were read for — a push landing in that
+      // window lands on the ref this delete would otherwise take with it.
+      const rechecked = await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
+      const stillTip = String(rechecked?.data?.object?.sha || "").toLowerCase();
+      if (stillTip !== tip) {
+        const reason =
+          `it moved again to ${stillTip || "an unreadable commit"} under the tree ` +
+          "comparison, and the new tip was never measured";
+        core.notice(`Keeping ${branch}: ${reason}.`);
+        return { branch, prNumber, outcome: "kept", reason };
+      }
       core.notice(`${branch} moved past the merged head, but ${comparison.detail}. Deleting it.`);
     }
 
