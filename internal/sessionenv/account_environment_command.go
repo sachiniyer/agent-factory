@@ -52,6 +52,19 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		if fileHasLiteralDeniedArithAssignment(file, names) && fileHasArithmeticContext(file) {
 			return true
 		}
+		// Coarse rule 3: if the command contains a same-shell runtime-input
+		// builtin (`read`, `mapfile`, or `readarray`) AND an arithmetic context,
+		// refuse. These builtins write an unprovable runtime value into a shell
+		// variable; if the same command later evaluates that variable in an
+		// arithmetic context, bash re-evaluates the stored string as fresh
+		// arithmetic — the same re-evaluation hazard as rule 1, but without any
+		// command substitution in the AST. `read x </tmp/payload; : $((x));
+		// codex` is the canonical form: neither a CmdSubst nor a hazardous
+		// literal appears in the file, yet x can carry `CODEX_HOME=1` at
+		// runtime.
+		if fileHasRuntimeInputToVariable(file) && fileHasArithmeticContext(file) {
+			return true
+		}
 		mutates := false
 		syntax.Walk(file, func(node syntax.Node) bool {
 			if nodeMutatesAccountEnvironment(node, names, nil) {

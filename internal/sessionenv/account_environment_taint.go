@@ -81,8 +81,12 @@ func literalContainsDeniedArithAssignment(value string, names map[string]struct{
 				syntax.QuoAssgn, syntax.RemAssgn, syntax.AndAssgn, syntax.OrAssgn,
 				syntax.XorAssgn, syntax.ShlAssgn, syntax.ShrAssgn, syntax.AndBoolAssgn,
 				syntax.OrBoolAssgn, syntax.XorBoolAssgn, syntax.PowAssgn:
+				// Fail closed when the assignment target cannot be read
+				// literally: e.g. `CODEX_HOME[0]` is an indexed word that
+				// arithmeticAccountEnvironmentName cannot literalize, so
+				// `ok=false` must be treated as hazardous rather than safe.
 				name, ok := arithmeticAccountEnvironmentName(n.X)
-				if ok && accountEnvironmentNameDenied(name, names) {
+				if !ok || accountEnvironmentNameDenied(name, names) {
 					found = true
 					return false
 				}
@@ -90,7 +94,7 @@ func literalContainsDeniedArithAssignment(value string, names map[string]struct{
 		case *syntax.UnaryArithm:
 			if n.Op == syntax.Inc || n.Op == syntax.Dec {
 				name, ok := arithmeticAccountEnvironmentName(n.X)
-				if ok && accountEnvironmentNameDenied(name, names) {
+				if !ok || accountEnvironmentNameDenied(name, names) {
 					found = true
 					return false
 				}
@@ -249,6 +253,40 @@ func isShellNameByte(value byte) bool {
 	return value == '_' || value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
 }
 
+// fileHasRuntimeInputToVariable reports whether a parsed shell file contains a
+// same-shell builtin (`read`, `mapfile`, or `readarray`) that writes runtime
+// input directly into a shell variable without a command substitution. When
+// such a builtin is present AND the command also contains an arithmetic context,
+// the value written by the builtin may be evaluated as arithmetic: e.g.
+// `read x </tmp/payload; : $((x)); codex` lets an attacker store
+// `CODEX_HOME=1` in x via the file, and bash re-evaluates it as arithmetic
+// inside `$(( ))`. Neither coarse rule 1 (CmdSubst + arith) nor coarse rule 2
+// (literal arith assignment + arith) fires, so this third coarse rule closes
+// the gap.
+func fileHasRuntimeInputToVariable(file syntax.Node) bool {
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		name, literal := literalShellWord(call.Args[0])
+		if !literal {
+			return true
+		}
+		switch name {
+		case "read", "mapfile", "readarray":
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 // fileHasCmdSubst reports whether a parsed shell file contains any command
 // substitution ($(…) or backtick form) anywhere in its AST, including inside
 // subshells and nested constructs.
@@ -339,17 +377,17 @@ func isWrappedLetCall(call *syntax.CallExpr) bool {
 		switch name {
 		case "command", "builtin":
 			words = words[1:]
-			// Skip any options (e.g. `command -p let`).
-			for len(words) > 0 {
-				opt, ok := literalShellWord(words[0])
-				if !ok || !strings.HasPrefix(opt, "-") || opt == "--" {
-					break
-				}
-				words = words[1:]
-				if opt == "--" {
-					break
-				}
+		// Skip any options (e.g. `command -p let`), consuming `--` when present.
+		for len(words) > 0 {
+			opt, ok := literalShellWord(words[0])
+			if !ok || !strings.HasPrefix(opt, "-") {
+				break
 			}
+			words = words[1:]
+			if opt == "--" {
+				break
+			}
+		}
 		case "let":
 			return true
 		default:
@@ -375,6 +413,11 @@ func isWrappedLetCall(call *syntax.CallExpr) bool {
 //
 // Both *syntax.Lit (unquoted or double-quoted text) and *syntax.SglQuoted
 // (single-quoted strings) can hold the hazardous literal, so both are checked.
+// Additionally, complete *syntax.Word nodes are checked: the shell concatenates
+// adjacent literal word parts at parse time (e.g. CODEX_HOME"=1" becomes the
+// single string "CODEX_HOME=1"), so the per-fragment checks on Lit and
+// SglQuoted alone are insufficient — only the fully-assembled word catches
+// split literals.
 func fileHasLiteralDeniedArithAssignment(file syntax.Node, names map[string]struct{}) bool {
 	if len(names) == 0 {
 		return false
@@ -384,18 +427,30 @@ func fileHasLiteralDeniedArithAssignment(file syntax.Node, names map[string]stru
 		if found {
 			return false
 		}
-		var value string
 		switch n := node.(type) {
+		case *syntax.Word:
+			// Check the fully concatenated word value: CODEX_HOME"=1" has two
+			// AST fragments ("CODEX_HOME" and "=1") that are individually
+			// harmless but spell "CODEX_HOME=1" when joined. literalShellWord
+			// performs the same concatenation the shell does; if it returns
+			// false the word has a non-literal part and the individual-fragment
+			// arms below still run during the walk's descent.
+			if value, ok := literalShellWord(n); ok {
+				if literalContainsDeniedArithAssignment(value, names) {
+					found = true
+					return false
+				}
+			}
 		case *syntax.Lit:
-			value = n.Value
+			if literalContainsDeniedArithAssignment(n.Value, names) {
+				found = true
+				return false
+			}
 		case *syntax.SglQuoted:
-			value = n.Value
-		default:
-			return true
-		}
-		if literalContainsDeniedArithAssignment(value, names) {
-			found = true
-			return false
+			if literalContainsDeniedArithAssignment(n.Value, names) {
+				found = true
+				return false
+			}
 		}
 		return true
 	})
