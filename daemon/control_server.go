@@ -643,8 +643,9 @@ func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptRespon
 
 // DeleteProject deletes a project (a repo grouping of sessions, #1735):
 // archive-then-remove, reversible. The manager archives every live session
-// (restorable), tears down in-place sessions (repo untouched), and drops the
-// repo's root_agents opt-in. It publishes one archived/killed event per affected
+// (restorable, except rows claiming the reserved root identity, which are
+// preserved but reported as unrestorable), tears down in-place sessions (repo
+// untouched), and drops the repo's root_agents opt-in. It publishes one archived/killed event per affected
 // session — so every client's rail moves the sessions exactly as a per-session
 // archive/kill would — plus a projects-changed signal for clients keying a
 // projects view. On a partial failure it still publishes what DID happen before
@@ -667,7 +668,10 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 		return err
 	}
 	resp.OK = true
-	resp.ArchivedCount = len(result.Archived)
+	// Only rows restore will accept are reported as archived: ArchivedCount is
+	// the restorable promise every client prints.
+	resp.ArchivedCount = len(result.Archived) - len(result.Unrestorable)
+	resp.UnrestorableCount = len(result.Unrestorable)
 	resp.KilledCount = len(result.Killed)
 	resp.Deregistered = result.Deregistered
 	resp.Warning = strings.Join(result.Warnings, "\n")

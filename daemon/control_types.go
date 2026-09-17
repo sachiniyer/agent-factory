@@ -258,8 +258,9 @@ type RestoreSessionResponse struct {
 
 // DeleteProjectRequest asks the daemon to delete a project — a repo grouping of
 // sessions (#1735). Every regular live session is archived (worktree relocated,
-// branch/state preserved, restorable via RestoreArchived); in-place/external
-// sessions are torn down. The repo's root_agents opt-in is removed, as is any
+// branch/state preserved, restorable via RestoreArchived, except a row whose
+// title claims the reserved root identity — see UnrestorableCount);
+// in-place/external sessions are torn down. The repo's root_agents opt-in is removed, as is any
 // durable registration whose root matches RepoPath, and the always-on root agent
 // (if any) is stopped. The user's real git repo is never touched. Restoring an
 // archived session makes the repo active again, but does not restore its
@@ -278,8 +279,14 @@ type DeleteProjectRequest struct {
 
 type DeleteProjectResponse struct {
 	OK bool `json:"ok"`
-	// ArchivedCount is how many live sessions were archived (restorable).
+	// ArchivedCount is how many live sessions were archived and can be restored.
+	// It excludes UnrestorableCount.
 	ArchivedCount int `json:"archived_count"`
+	// UnrestorableCount is how many live sessions were archived — worktree and
+	// branch preserved — but cannot be restored, because their title claims the
+	// reserved root session name (a record from before that reservation, such as
+	// a local "ro ot"). Restore refuses them. Omitted when zero.
+	UnrestorableCount int `json:"unrestorable_count,omitempty"`
 	// KilledCount is how many live sessions could not be archived and were torn
 	// down instead — only in-place/external worktrees (the root agent, `--here`
 	// sessions), whose kill never touches the user's tree or branch.

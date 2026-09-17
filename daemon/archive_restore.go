@@ -90,9 +90,11 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// root's af_root tmux name, colliding with any live root or wedging the
 	// row on a startup that cannot resolve the collision. Preserved is not
 	// restorable here: the archived row and worktree survive untouched, and
-	// the restore refuses (#4407 review).
+	// the restore refuses (#4407 review). The refusal says where the work is,
+	// because project deletion reported the row as preserved: a bare "reserved"
+	// would leave the operator with no path back to it.
 	if session.IsReservedRecordTitle(req.Title, instance.BackendType()) {
-		return "", fmt.Errorf("cannot restore the reserved %q session", req.Title)
+		return "", reservedRestoreRefusal(req.Title, instance.ToInstanceData().Worktree)
 	}
 
 	key := daemonInstanceKey(repoID, req.Title)
@@ -357,4 +359,22 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	}
 	m.info().Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
 	return restoredArchiveResult(instance, worktreePath)
+}
+
+// reservedRestoreRefusal is the error for an archived row restore will not
+// start: its title claims the reserved root session name. Project deletion
+// archives such a row to preserve its work, so the refusal names what was
+// preserved rather than only what is refused.
+func reservedRestoreRefusal(title string, worktree session.GitWorktreeData) error {
+	preserved := ""
+	switch {
+	case worktree.WorktreePath != "" && worktree.BranchName != "":
+		preserved = fmt.Sprintf("; its work is preserved in the archived worktree %s on branch %q", worktree.WorktreePath, worktree.BranchName)
+	case worktree.WorktreePath != "":
+		preserved = fmt.Sprintf("; its work is preserved in the archived worktree %s", worktree.WorktreePath)
+	case worktree.BranchName != "":
+		preserved = fmt.Sprintf("; its work is preserved on branch %q", worktree.BranchName)
+	}
+	return fmt.Errorf("cannot restore session %q: its title claims the reserved %q session name (reservation ignores case and whitespace), so af will not start it again%s",
+		title, session.RootSessionTitle, preserved)
 }

@@ -106,6 +106,13 @@ type DeleteProjectResult struct {
 	// relocate an external worktree; its kill never touches the user's tree/branch).
 	Archived []session.InstanceData
 	Killed   []session.InstanceData
+	// Unrestorable is the subset of Archived that restore refuses: rows whose
+	// persisted title and backend claim the reserved root identity
+	// (session.IsReservedRecordTitle) — a pre-#3732 local "ro ot", or a legacy
+	// linked-worktree "Root". Their worktree and branch are preserved like any
+	// archive, but restoreArchivedInstance will not start them again, so
+	// callers must not count them among the restorable sessions.
+	Unrestorable []session.InstanceData
 	// Warnings carries failed on-archive hooks for sessions whose archive still
 	// committed. They do not block the remaining sessions or project
 	// deregistration, but every caller must surface them as a committed outcome.
@@ -131,7 +138,9 @@ func deleteProjectFailure(result DeleteProjectResult, err error) error {
 //   - Every LIVE session of the repo is ARCHIVED (tmux torn down, worktree moved
 //     to the archive dir, branch + state preserved) so it stays restorable via
 //     RestoreArchived. Already-archived rows are left untouched — they are the
-//     restorable state this delete preserves.
+//     restorable state this delete preserves. The one exception is a row whose
+//     title claims the reserved root identity: it is archived (preserved) but
+//     restore refuses it, and it is reported in Unrestorable, not as restorable.
 //   - An in-place/external worktree session (the always-on root agent, or an
 //     `af sessions create --here` session) cannot be archived — archive relocates
 //     the worktree, unsupported for the user's own checkout — so it is torn down
@@ -398,6 +407,10 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		id       string
 		title    string
 		external bool
+		// reserved is the restore refusal's own predicate, read at the same
+		// point as external, so the result reports a reserved row as
+		// preserved-not-restorable rather than as an ordinary archive.
+		reserved bool
 	}
 	var targets []target
 	m.mu.Lock()
@@ -406,7 +419,10 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		if rid != repoID || inst == nil || inst.GetLiveness() == session.LiveArchived {
 			continue
 		}
-		targets = append(targets, target{id: inst.ID, title: title, external: inst.IsExternalWorktree()})
+		targets = append(targets, target{
+			id: inst.ID, title: title, external: inst.IsExternalWorktree(),
+			reserved: session.IsReservedRecordTitle(title, inst.BackendType()),
+		})
 	}
 	m.mu.Unlock()
 
@@ -466,6 +482,8 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		// record's linked worktree still deserves archive's preserve-not-
 		// destroy teardown. Without it the refusal wedged the whole delete
 		// after the root_agents opt-in was already durably removed.
+		// Preserved is not restorable: restoreArchivedInstance still refuses
+		// the row, so it is reported in result.Unrestorable below.
 		_, archived, err := m.archiveSession(ArchiveSessionRequest{ID: t.id, Title: t.title, RepoID: repoID, allowReserved: true}, taskTargets, nil)
 		if errors.Is(err, errSessionNotFound) {
 			// Snapshot-gated idempotency, exactly like the kill path: this target
@@ -499,6 +517,9 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 			continue
 		}
 		result.Archived = append(result.Archived, archived)
+		if t.reserved {
+			result.Unrestorable = append(result.Unrestorable, archived)
+		}
 	}
 
 	if len(errs) > 0 {
