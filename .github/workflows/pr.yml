@@ -30,10 +30,11 @@ on:
   # probe must never report under a name a PR run uses. That is why the
   # always-running jobs carry a probe-aware `name:`. GitHub does not evaluate the
   # name of a skipped job (github.com/orgs/community/discussions/13261), so a
-  # probe's skipped rows show the raw `${{ … }}` text and match no check; were
-  # that ever fixed, they would read "… (skipped by probe)", which matches none
-  # either. test-systemd's name is already an unexpanded matrix expression when
-  # skipped. web-selftest and perf keep plain names: they skip on ordinary PRs
+  # probe's skipped rows are named by the bare expression, such as
+  # `inputs.probe && 'Lint (skipped by probe)' || 'Lint'` (measured on #4565),
+  # and match no check. Were that ever fixed, they would read
+  # "… (skipped by probe)", which matches none either. test-systemd skips as one
+  # row, still named `Test (systemd, ${{ matrix.os }})`. web-selftest and perf keep plain names: they skip on ordinary PRs
   # too, where an expression name would show raw, and no gate reads them.
   workflow_dispatch:
     inputs:

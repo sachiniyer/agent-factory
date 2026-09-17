@@ -32,7 +32,8 @@ apply produces a green run that looks like "the test does not catch this":
 
 ```bash
 git diff --stat HEAD                    # every file you meant to mutate is listed
-go build ./...                          # a mutation that does not compile proves nothing
+go build ./... && go vet ./...          # a mutation that does not compile proves nothing;
+                                        # vet compiles the tests without running them
 git commit -am "probe: revert the fix for #$N"
 git push -u origin "probe/$N-failfirst" # no PR
 ```
@@ -64,7 +65,8 @@ git switch - && git branch -D "probe/$N-failfirst"
 ```
 
 The job that ran is named `Test (probe)`. Every other job shows as skipped, and
-a skipped job's name appears as raw `${{ … }}` text. That is expected: see
+most are named by a bare expression such as
+`inputs.probe && 'Lint (skipped by probe)' || 'Lint'`. That is expected: see
 [how a probe stays out of the gates](#how-a-probe-stays-out-of-the-gates).
 
 ## The inputs
@@ -144,8 +146,8 @@ or block one whose real run passed. `pr.yml` prevents that three ways:
 - Every job that runs on every PR has a name like
   `${{ inputs.probe && 'Build (skipped by probe)' || 'Build' }}`. On a PR it
   evaluates to `Build`. In a probe the job is skipped, and GitHub does not
-  evaluate a skipped job's name, so the row carries the raw expression, which
-  matches no check. `Test` runs in a probe and reads `Test (probe)`.
+  evaluate a skipped job's name, so the row is named by the expression itself,
+  which matches no check. `Test` runs in a probe and reads `Test (probe)`.
 - A probe has its own concurrency group, `probe-<ref>`. It cannot cancel a PR
   run or Auto Gate's recovery dispatch on the same branch.
 - Auto Gate's recovery dispatch passes no inputs, so it still gets the full run.
