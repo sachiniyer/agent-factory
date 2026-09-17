@@ -701,6 +701,57 @@ func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readiness
 	ticker, stopTicker := clock.newTicker(waitForReadyPollInterval)
 	defer stopTicker()
 
+	// probe is one look at the pane, and done reports whether that look settled
+	// the wait. It is the SAME function at both sites that look before the
+	// deadline — once before the first tick and then on every tick — so the
+	// ErrSessionGone and usage-limit handling cannot diverge between them the way
+	// the ticker and timeout branches once did (#989).
+	probe := func() (done bool, err error) {
+		content, err := target.PreviewContent(ctx)
+		if err != nil {
+			// A cancelled/timed-out create surfaces here as context.Canceled /
+			// DeadlineExceeded: return at once (the top-of-loop check would
+			// catch it next hop, but returning here frees the lock a poll
+			// sooner).
+			if ctx.Err() != nil {
+				return true, ctx.Err()
+			}
+			// ErrSessionGone is a definitive, non-retryable failure: the
+			// tmux session no longer exists, so it can never become ready.
+			// Fail fast with a clear cause instead of polling the full
+			// timeout and returning a misleading "timed out" error (#976).
+			// Other errors (incl. a capture that hit waitForReadyCaptureTimeout)
+			// are transient — keep polling.
+			if errors.Is(err, tmux.ErrSessionGone) {
+				return true, fmt.Errorf("session died while waiting for agent to start: %w", err)
+			}
+			return false, nil
+		}
+		// Check the usage-limit banner BEFORE readiness: a limit-blocked pane
+		// never shows the ready glyph, but checking limit first keeps the
+		// intent explicit and future-proofs against a banner that also carried
+		// one. On a hit, stop waiting and return the park sentinel (#1146).
+		if perr := limitParkError(detector, content, agent); perr != nil {
+			return true, perr
+		}
+		return isReadyContent(content, agent), nil
+	}
+
+	// Look once before waiting for the first tick (#4464). The ticker's first
+	// fire is a full poll interval away, and the loop used to look ONLY when it
+	// fired — so a pane that was already ready (a reattached live agent, the
+	// composer back after a trust dialog was dismissed, any ready test fake) still
+	// waited out the interval. A freshly launched pane is blank here, which reads
+	// as not ready, so a normal agent start polls exactly as before. The
+	// cancellation check comes first, as at the top of every iteration below, so
+	// an abandoned wait starts no capture at all.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if done, err := probe(); done {
+		return err
+	}
+
 	for {
 		// Observe cancellation at the top of every iteration, before starting
 		// another capture: if the create was abandoned/cancelled while the
@@ -763,35 +814,8 @@ func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readiness
 			log.ErrorLog.Printf("waitForReady timed out. Last pane content: %s", content)
 			return formatWaitForReadyTimeoutError(waitForReadyTimeout, content)
 		case <-ticker:
-			content, err := target.PreviewContent(ctx)
-			if err != nil {
-				// A cancelled/timed-out create surfaces here as context.Canceled /
-				// DeadlineExceeded: return at once (the top-of-loop check would
-				// catch it next hop, but returning here frees the lock a poll
-				// sooner).
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				// ErrSessionGone is a definitive, non-retryable failure: the
-				// tmux session no longer exists, so it can never become ready.
-				// Fail fast with a clear cause instead of polling the full
-				// timeout and returning a misleading "timed out" error (#976).
-				// Other errors (incl. a capture that hit waitForReadyCaptureTimeout)
-				// are transient — keep polling.
-				if errors.Is(err, tmux.ErrSessionGone) {
-					return fmt.Errorf("session died while waiting for agent to start: %w", err)
-				}
-				continue
-			}
-			// Check the usage-limit banner BEFORE readiness: a limit-blocked pane
-			// never shows the ready glyph, but checking limit first keeps the
-			// intent explicit and future-proofs against a banner that also carried
-			// one. On a hit, stop waiting and return the park sentinel (#1146).
-			if perr := limitParkError(detector, content, agent); perr != nil {
-				return perr
-			}
-			if isReadyContent(content, agent) {
-				return nil
+			if done, err := probe(); done {
+				return err
 			}
 		}
 	}
