@@ -559,12 +559,12 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		m.mu.Unlock()
 		if inst != nil {
 			if status := inst.GetStatus(); status != session.Dead && status != session.Lost && status != session.Archived {
-				m.rootEnsureSucceeded(repo.ID, st)
+				m.rootEnsureSucceeded(repo.ID, inst.Path, st)
 				return
 			}
 		}
 		if !m.repoHasEnabledRootCandidate(repo.ID, stateKey) {
-			m.retireReapedRootCarry(repo.ID)
+			m.discardReapedRootCarry(repo.ID, "no enabled root_agents entry for its repository remains to restore it")
 		}
 		m.rootEnsureBackoffReset(st)
 		return
@@ -588,7 +588,13 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	deleted := m.rootDeletionTombstoneApplies(sweepLayers, repo.ID)
 	m.mu.Unlock()
 	if deleted {
-		m.rootEnsureSucceeded(repo.ID, st)
+		// The deleted project's root is suppressed for good, so its parked
+		// carry has no consumer left — unless a create that started before the
+		// delete still owns it and retires it itself.
+		m.rootEnsureBackoffReset(st)
+		if !m.rootCreateInFlight(repo.ID) {
+			m.discardReapedRootCarry(repo.ID, "its project was deleted")
+		}
 		return
 	}
 
@@ -631,7 +637,10 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			// evidence, so a later outage does not carry a rotated-away id (#3306).
 			m.checkAdoptedRootProgramDrift(repo, key, workspace, st, resolution.RootAgent, inst, identity)
 			m.refreshRootClaudeConversation(repo.ID, key, workspace, inst, st)
-			m.rootEnsureSucceeded(repo.ID, st)
+			// The ADOPTED root's checkout, not this candidate's: a sibling
+			// spelling of the repository adopting it must not retire a carry
+			// parked for its own checkout, which only a root there can consume.
+			m.rootEnsureSucceeded(repo.ID, inst.Path, st)
 			return
 		}
 	}

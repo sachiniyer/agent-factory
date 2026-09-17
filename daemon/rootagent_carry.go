@@ -75,12 +75,9 @@ func (s reapedRootState) forWorkspace(workspace string) bool {
 // reapedRootCarryPath places the carry beside the repo's instances.json: one
 // per-repo directory holds everything the heal needs to restore, and the repo
 // ID validation that file's path resolution already performs covers this one.
+// The name lives in config because `af reset` clears it with the records.
 func reapedRootCarryPath(repoID string) (string, error) {
-	instancesPath, err := config.RepoInstancesPath(repoID)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(filepath.Dir(instancesPath), "reaped-root-carry.json"), nil
+	return config.RepoReapedRootCarryPath(repoID)
 }
 
 // writeReapedRootCarry durably publishes the carry the reap just snapshot.
@@ -198,30 +195,160 @@ func reconcilePendingSwapConversation(req *CreateSessionRequest) {
 	req.pendingAccountSwap = &reconciled
 }
 
-// retireReapedRootCarry drops both halves of the parked carry. The create
-// goroutine calls it after a successful publish: rootEnsureSucceeded leaves
-// the carry alone while this repo's in-flight mark is held — the mark only
-// clears in the deferred finishRootCreate AFTER runRootCreate returns — so
-// the create that owns the mark retires the carry itself once its outcome is
-// known (#4400 review round 4).
-func (m *Manager) retireReapedRootCarry(repoID string) {
+// retireReapedRootCarry drops the parked carry once a pass has made it moot —
+// but only a carry that pass can speak for (#4400 review round 7). The carry is
+// keyed by repository and bound to the checkout that parked it, so one retire
+// keyed by repository alone let a create in linked worktree B delete worktree
+// A's account pin, pending swap, and takeover brief without a log line.
+//
+// consumed says the caller's own create restored this carry: the create goroutine
+// calls with true after a successful publish, because rootEnsureSucceeded leaves
+// the carry alone while this repo's in-flight mark is held (#4400 review round
+// 4). Otherwise workspace names the checkout whose healthy root the pass just
+// established, and only a carry bound to it — or one written before binding
+// existed — is moot:
+//
+//	parked carry           | action
+//	-----------------------+-------------------------------------------------
+//	none                   | nothing
+//	bound to workspace     | retire the map entry and the file
+//	bound to another       | keep it parked for that checkout's entry; warn once
+//	present but unreadable | keep it; warn once (its binding is unknown)
+//
+// Keeping an unreadable carry is the read policy the no-record create already
+// applies (#4400 review round 6): the file may be the only copy of an account
+// pin, and a pass that cannot read it cannot tell whose it is. The warning names
+// the file, so removing it stays the operator's call.
+func (m *Manager) retireReapedRootCarry(repoID, workspace string, consumed bool) {
+	if !consumed {
+		parked, present, err := m.parkedReapedRootCarry(repoID)
+		switch {
+		case err != nil:
+			m.warnReapedRootCarryOnce(repoID, reapedRootCarryUnreadableNotice(repoID, err))
+			return
+		case !present:
+			m.clearReapedRootCarryNotice(repoID)
+			return
+		case !parked.forWorkspace(workspace):
+			m.warnReapedRootCarryOnce(repoID, fmt.Sprintf(
+				"leaving the root agent carry reaped in %s parked for that checkout's own root_agents entry while the root runs in %s (account %q, pending account swap: %t)",
+				parked.workspace, workspace, parked.account, parked.pendingSwap != nil))
+			return
+		}
+	}
 	m.mu.Lock()
 	delete(m.reapedRootCarries, repoID)
 	m.mu.Unlock()
-	m.removeReapedRootCarry(repoID)
+	if _, clear := m.removeReapedRootCarry(repoID); clear {
+		m.clearReapedRootCarryNotice(repoID)
+	}
 }
 
-// removeReapedRootCarry drops the parked carry once a pass makes it moot.
-// A missing file is the common case (nothing was ever reaped); a remove
-// failure only leaves a stale file the next reap overwrites — a warning, not
-// a heal blocker, so callers log rather than propagate it.
-func (m *Manager) removeReapedRootCarry(repoID string) {
-	path, err := reapedRootCarryPath(repoID)
-	if err != nil {
-		m.warn().Printf("could not resolve the reaped root carry path for repo %s: %v", repoID, err)
+// discardReapedRootCarry retires the parked carry whatever it is bound to, for
+// the two outcomes that leave it no consumer at all: the project was deleted,
+// or no enabled root_agents spelling of the repository remains. It says what it
+// discarded, because the carry can hold an account pin and a pending swap.
+func (m *Manager) discardReapedRootCarry(repoID, reason string) {
+	parked, present, loadErr := m.parkedReapedRootCarry(repoID)
+	m.mu.Lock()
+	delete(m.reapedRootCarries, repoID)
+	m.mu.Unlock()
+	existed, clear := m.removeReapedRootCarry(repoID)
+	if !clear {
 		return
 	}
-	if err := config.RemoveFileRefusingLink(path); err != nil && !os.IsNotExist(err) {
-		m.warn().Printf("could not remove the parked reaped root carry for repo %s: %v", repoID, err)
+	m.clearReapedRootCarryNotice(repoID)
+	switch {
+	case present:
+		m.warn().Printf("discarded the root agent carry reaped in %s (account %q, pending account swap: %t): %s",
+			parked.workspace, parked.account, parked.pendingSwap != nil, reason)
+	case existed || loadErr != nil:
+		m.warn().Printf("discarded the unreadable parked root agent carry for repo %s: %s", repoID, reason)
 	}
+}
+
+// parkedReapedRootCarry returns the carry parked for repoID: the in-memory park
+// when there is one, otherwise the durable file, hydrated into the map so a
+// carry left for another checkout costs one read rather than one per tick.
+// After a restart the file outlives the map, which is why a healthy pass has to
+// read it at all before deciding it is moot.
+func (m *Manager) parkedReapedRootCarry(repoID string) (reapedRootState, bool, error) {
+	m.mu.Lock()
+	parked, ok := m.reapedRootCarries[repoID]
+	m.mu.Unlock()
+	if ok {
+		return parked, true, nil
+	}
+	parked, ok, err := m.loadReapedRootCarry(repoID)
+	if err != nil || !ok {
+		return reapedRootState{}, false, err
+	}
+	m.mu.Lock()
+	if current, raced := m.reapedRootCarries[repoID]; raced {
+		parked = current
+	} else {
+		m.reapedRootCarries[repoID] = parked
+	}
+	m.mu.Unlock()
+	return parked, true, nil
+}
+
+// reapedRootCarryUnreadableNotice words a carry a healthy pass could not read.
+func reapedRootCarryUnreadableNotice(repoID string, err error) string {
+	path, pathErr := reapedRootCarryPath(repoID)
+	if pathErr != nil {
+		path = "reaped-root-carry.json for repo " + repoID
+	}
+	return fmt.Sprintf("leaving the parked root agent carry at %s in place: it could not be read, so which checkout it belongs to is unknown — remove it once the root it was reaped from no longer needs its account pin or pending account swap: %v",
+		path, err)
+}
+
+// removeReapedRootCarry unlinks the durable carry. existed reports that a file
+// was removed; clear reports that the path holds no carry now. A missing file is
+// the common case (nothing was ever reaped). A failure leaves a stale file the
+// next reap overwrites — a warning, not a heal blocker — and it is logged once
+// per distinct cause: a symlink or directory at the path fails the same way on
+// every healthy tick (#4400 review round 7).
+func (m *Manager) removeReapedRootCarry(repoID string) (existed, clear bool) {
+	path, err := reapedRootCarryPath(repoID)
+	if err != nil {
+		m.warnReapedRootCarryOnce(repoID, fmt.Sprintf("could not resolve the reaped root carry path for repo %s: %v", repoID, err))
+		return false, false
+	}
+	err = config.RemoveFileRefusingLink(path)
+	switch {
+	case err == nil:
+		return true, true
+	case os.IsNotExist(err):
+		return false, true
+	default:
+		m.warnReapedRootCarryOnce(repoID, fmt.Sprintf("could not remove the parked reaped root carry for repo %s: %v", repoID, err))
+		return false, false
+	}
+}
+
+// warnReapedRootCarryOnce logs a carry warning unless it is the one already
+// logged for this repo. Every carry decision a healthy root re-runs on the
+// one-second ensure cadence goes through here, so a condition that persists is
+// reported when it starts and again only when it changes.
+func (m *Manager) warnReapedRootCarryOnce(repoID, message string) {
+	m.mu.Lock()
+	if m.reapedRootCarryNotices[repoID] == message {
+		m.mu.Unlock()
+		return
+	}
+	if m.reapedRootCarryNotices == nil {
+		m.reapedRootCarryNotices = make(map[string]string)
+	}
+	m.reapedRootCarryNotices[repoID] = message
+	m.mu.Unlock()
+	m.warn().Print(message)
+}
+
+// clearReapedRootCarryNotice re-arms warnReapedRootCarryOnce once the condition
+// it reported has cleared.
+func (m *Manager) clearReapedRootCarryNotice(repoID string) {
+	m.mu.Lock()
+	delete(m.reapedRootCarryNotices, repoID)
+	m.mu.Unlock()
 }

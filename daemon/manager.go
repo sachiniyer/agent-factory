@@ -282,11 +282,15 @@ type Manager struct {
 	// restart inside the reap→publish window cannot drop the pin either
 	// (#4400 review round 3). Set under mu by the reaping create, consumed by
 	// the next create for that repo that finds no record — hydrated from disk
-	// when the map is empty — and cleared by rootEnsureSucceeded once a pass
-	// leaves a healthy root (or a disable/delete outcome makes it moot).
-	// rootEnsureFailed deliberately leaves it: the pin must survive transient
-	// create failure.
+	// when the map is empty — and cleared by retireReapedRootCarry once a pass
+	// leaves a healthy root in the checkout the carry is bound to (or a
+	// disable/delete outcome makes it moot). rootEnsureFailed deliberately
+	// leaves it: the pin must survive transient create failure.
 	reapedRootCarries map[string]reapedRootState
+	// reapedRootCarryNotices is the last carry warning logged per repo ID, so a
+	// condition a healthy root re-checks every tick is logged once. Guarded by
+	// mu; allocated on first use.
+	reapedRootCarryNotices map[string]string
 	// rootCreateWG counts those goroutines, so shutdown can JOIN them instead of
 	// abandoning a half-provisioned session (waitRootAgentCreates). A WaitGroup is
 	// internally synchronized and needs no lock of its own; the Add nonetheless

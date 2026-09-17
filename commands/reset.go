@@ -745,6 +745,16 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 		}
 	} else {
 		for _, rid := range plan.processedRepoIDs {
+			// The reaped root carry (#4400) goes with the record set it belongs
+			// to, on both branches below: a root is in-place, so it is never one
+			// of the incomplete records retainIncompleteInstances keeps, and a
+			// carry that outlived the reset would hand the first root the daemon
+			// creates afterwards a stale account pin, conversation, and pending
+			// swap. A corrupt repo is not processed, so it keeps its carry along
+			// with the records this reset could not read.
+			if err := config.DeleteRepoReapedRootCarry(rid); err != nil {
+				errs = append(errs, fmt.Errorf("delete root agent carry for repo %s: %w", rid, err))
+			}
 			paths, worktreeBlocked := blockedWorktrees[rid]
 			branchNames, branchUnverified := unverifiedBranches[rid]
 			if worktreeBlocked || branchUnverified {
