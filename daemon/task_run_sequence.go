@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -31,6 +32,29 @@ func (m *Manager) nextTaskRunAdmission(taskID, expectedGenerationID string) (tas
 	storedTask, err := task.GetTask(taskID)
 	if err != nil {
 		return taskRunAdmission{}, fmt.Errorf("read task %s for run admission: %w", taskID, err)
+	}
+	if storedTask.GenerationID == "" {
+		// No stable load has given this row a generation yet; typically it was
+		// added to tasks.json by hand since the last reload. Give it one now so
+		// this run carries it and the row's on_complete applies (#4224 review).
+		// If the write fails, the run is still admitted with the empty
+		// generation, as before the field existed, and its session is kept.
+		backfilled, applied, err := task.EnsureTaskGeneration(taskID)
+		switch {
+		case task.IsTaskNotFound(err):
+			return taskRunAdmission{}, fmt.Errorf("read task %s for run admission: %w", taskID, err)
+		case err != nil:
+			m.warn().Printf("task %s has no generation and one could not be recorded, so this run's session will be kept whatever on_complete declares: %v",
+				taskID, err)
+		case applied:
+			m.publishEvent(agentproto.EventTaskUpdated, backfilled)
+			storedTask = &backfilled
+		default:
+			// Another writer gave it a generation first.
+			if storedTask, err = task.GetTask(taskID); err != nil {
+				return taskRunAdmission{}, fmt.Errorf("read task %s for run admission: %w", taskID, err)
+			}
+		}
 	}
 	if !task.GenerationStillNames(storedTask.GenerationID, expectedGenerationID) {
 		return taskRunAdmission{}, fmt.Errorf("task %s was replaced before its run was admitted", taskID)

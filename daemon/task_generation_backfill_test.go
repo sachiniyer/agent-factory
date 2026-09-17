@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -37,51 +38,101 @@ func writePreFieldTasks(t *testing.T, rows ...task.Task) {
 
 // TestPreFieldTaskAppliesOnCompleteAfterUpgrade is the upgrade regression the
 // #4224 review blocked on. A task row written before generation_id existed
-// declares on_complete = archive. After this daemon arms it, and the scheduler's
-// real RunTask fires it, the session that run creates must be archived when the
-// run ends, as it was before generations existed.
+// declares on_complete = archive. When the scheduler's real RunTask fires it,
+// the session that run creates must be archived when the run ends, as it was
+// before generations existed. Two ways a row reaches its first run:
 //
-// Without the backfill, the arming load returns the row with an empty
-// generation (the first require below). The run's session is then stamped with
-// the empty generation, taskSessionLifecycle answers keep, and the final
-// Eventually times out with the session still live.
+//   - armed at startup: daemon start's arming load backfills it first. Without
+//     that backfill the first require.NotEmpty fails.
+//   - hand-added after startup: no stable load has read the row, so run
+//     admission backfills it. At cf7618b1a the session was stamped with the
+//     empty generation (the require.NotEmpty after RunTask), and the play-test
+//     showed that run's session kept.
+//
+// In both cases, a session stamped with the empty generation makes
+// taskSessionLifecycle answer keep, and the final Eventually times out.
 func TestPreFieldTaskAppliesOnCompleteAfterUpgrade(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
-	legacy := enabledCronTask("legacy42", repoPath)
-	legacy.OnComplete = task.OnCompleteArchive
-	writePreFieldTasks(t, legacy)
+	for _, tc := range []struct {
+		name string
+		arm  bool
+	}{
+		{name: "armed at startup", arm: true},
+		{name: "hand-added after startup", arm: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			legacy := enabledCronTask("legacy42", repoPath)
+			legacy.OnComplete = task.OnCompleteArchive
+			writePreFieldTasks(t, legacy)
 
-	// Daemon start arms task automation before any cron entry can fire.
-	require.NoError(t, armTaskAutomation(manager, newTaskScheduler(), nil))
-	armed, err := task.GetTask(legacy.ID)
-	require.NoError(t, err)
-	require.NotEmpty(t, armed.GenerationID,
-		"arming must durably give a pre-field row a generation; RunTask reads it from disk")
-	assert.True(t, task.IsBackfilledGeneration(armed.GenerationID))
-	assert.Equal(t, task.OnCompleteArchive, armed.SessionLifecycle())
+			if tc.arm {
+				require.NoError(t, armTaskAutomation(manager, newTaskScheduler(), nil))
+				armed, err := task.GetTask(legacy.ID)
+				require.NoError(t, err)
+				require.NotEmpty(t, armed.GenerationID,
+					"arming must durably give a pre-field row a generation; RunTask reads it from disk")
+			}
 
-	var run *session.Instance
-	previous := createSessionForTask
-	createSessionForTask = func(req CreateSessionRequest) (*session.InstanceData, error) {
-		run = registerTaskSpawnedSessionForGeneration(
-			t, manager, repoID, repoPath, "nightly-after-upgrade", req.TaskID, req.TaskGenerationID,
-		)
-		data := run.ToInstanceData()
-		return &data, nil
+			var run *session.Instance
+			previous := createSessionForTask
+			createSessionForTask = func(req CreateSessionRequest) (*session.InstanceData, error) {
+				data, err := manager.nextTaskRunAdmission(req.TaskID, req.TaskGenerationID)
+				if err != nil {
+					return nil, err
+				}
+				run = registerTaskSpawnedSessionForGeneration(
+					t, manager, repoID, repoPath, "nightly-after-upgrade", req.TaskID, data.generationID,
+				)
+				out := run.ToInstanceData()
+				return &out, nil
+			}
+			t.Cleanup(func() { createSessionForTask = previous })
+
+			require.NoError(t, RunTask(legacy.ID, task.ProjectExpectation{}))
+			require.NotNil(t, run, "precondition: the run created its session")
+			stored, err := task.GetTask(legacy.ID)
+			require.NoError(t, err)
+			require.NotEmpty(t, run.TaskRun().TaskGenerationID, "the run must carry a generation")
+			assert.True(t, task.IsBackfilledGeneration(stored.GenerationID))
+			assert.Equal(t, stored.GenerationID, run.TaskRun().TaskGenerationID,
+				"the run's session carries the row's backfilled generation")
+			assert.Equal(t, task.OnCompleteArchive, stored.SessionLifecycle())
+
+			was := endRunOnIdleEdge(t, run)
+			manager.applyTaskSessionLifecycleOnRunEnd(repoID, run, was)
+			require.Eventually(t, func() bool {
+				return run.GetLiveness() == session.LiveArchived
+			}, 20*time.Second, 25*time.Millisecond,
+				"a pre-field task's declared on_complete must apply to runs started after the upgrade")
+		})
 	}
-	t.Cleanup(func() { createSessionForTask = previous })
+}
 
-	require.NoError(t, RunTask(legacy.ID, task.ProjectExpectation{}))
-	require.NotNil(t, run, "precondition: the run created its session")
-	assert.Equal(t, armed.GenerationID, run.TaskRun().TaskGenerationID,
-		"the run's session carries the backfilled generation")
+// Run admission gives a row no stable load has read its generation, durably and
+// visibly, before the run is admitted. At cf7618b1a the admitted generation is
+// empty (the first assertion below).
+func TestAdmissionGivesAHandAddedRowItsGeneration(t *testing.T) {
+	manager, _, repoPath := newStatusTestManager(t)
+	writePreFieldTasks(t, enabledCronTask("handadd2", repoPath))
+	_, events := manager.events.subscribe()
 
-	was := endRunOnIdleEdge(t, run)
-	manager.applyTaskSessionLifecycleOnRunEnd(repoID, run, was)
-	require.Eventually(t, func() bool {
-		return run.GetLiveness() == session.LiveArchived
-	}, 20*time.Second, 25*time.Millisecond,
-		"a pre-field task's declared on_complete must apply to runs started after the upgrade")
+	admission, err := manager.nextTaskRunAdmission("handadd2", "")
+	require.NoError(t, err)
+	require.True(t, task.IsBackfilledGeneration(admission.generationID),
+		"a run is never admitted under the empty generation of a row this daemon can write")
+	stored, err := task.GetTask("handadd2")
+	require.NoError(t, err)
+	assert.Equal(t, admission.generationID, stored.GenerationID, "the backfill is durable")
+
+	select {
+	case event := <-events:
+		require.Equal(t, agentproto.EventTaskUpdated, event.Type)
+		var published task.Task
+		require.NoError(t, json.Unmarshal(event.Data, &published))
+		assert.Equal(t, stored.GenerationID, published.GenerationID, "push-only clients see the new generation")
+	default:
+		t.Fatal("the admission backfill must publish the updated task")
+	}
 }
 
 // A session stamped with the empty generation before the backfill stays kept:

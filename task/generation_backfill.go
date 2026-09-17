@@ -51,3 +51,30 @@ func IsBackfilledGeneration(generationID string) bool {
 func GenerationStillNames(stored, expected string) bool {
 	return stored == expected || (expected == "" && IsBackfilledGeneration(stored))
 }
+
+// EnsureTaskGeneration gives one row the backfilled generation the stable load
+// would give it, and reports whether it wrote. Run admission calls it for a row
+// no stable load has read yet, typically one added to tasks.json by hand since
+// the last reload. A run admitted under the empty generation is kept whatever
+// the row declares for on_complete (#4224 review). A row that already has a
+// generation is left alone and applied is false.
+func EnsureTaskGeneration(taskID string) (Task, bool, error) {
+	var mintErr error
+	updated, applied, err := mutateTaskStatus(taskID, func(t *Task) bool {
+		if t.GenerationID != "" {
+			return false
+		}
+		generationID, err := generateBackfilledTaskGenerationID()
+		if err != nil {
+			mintErr = err
+			return false
+		}
+		t.GenerationID = generationID
+		appendAudit(t, ActorDaemonUpgrade, AuditUpdated, []string{"generation_id"}, nowFn())
+		return true
+	})
+	if err == nil && mintErr != nil {
+		return Task{}, false, mintErr
+	}
+	return updated, applied, err
+}

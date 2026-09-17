@@ -169,3 +169,33 @@ func TestEmptyGenerationDoesNotNameAMintedRow(t *testing.T) {
 		"a backfilled read never names a row that has lost its generation")
 	assert.False(t, GenerationStillNames(backfilledGenerationPrefix+"abc", backfilledGenerationPrefix+"def"))
 }
+
+// Run admission backfills one row at a time for a row no stable load has read.
+func TestEnsureTaskGenerationBackfillsOnlyAPreFieldRow(t *testing.T) {
+	path := setupTestTasks(t, nil)
+	require.NoError(t, os.WriteFile(path, []byte(`[{"id": "handadd1", "name": "n", "prompt": "p",
+  "cron_expr": "0 3 * * *", "project_path": "", "program": "claude", "enabled": true,
+  "created_at": "2025-01-01T00:00:00Z"}]`), 0o644))
+
+	backfilled, applied, err := EnsureTaskGeneration("handadd1")
+	require.NoError(t, err)
+	require.True(t, applied)
+	assert.True(t, IsBackfilledGeneration(backfilled.GenerationID))
+	stored, err := GetTask("handadd1")
+	require.NoError(t, err)
+	assert.Equal(t, backfilled.GenerationID, stored.GenerationID, "the backfill is durable")
+	require.Len(t, stored.Audit, 1)
+	assert.Equal(t, ActorDaemonUpgrade, stored.Audit[0].Actor)
+	assert.Equal(t, []string{"generation_id"}, stored.Audit[0].Fields)
+
+	_, applied, err = EnsureTaskGeneration("handadd1")
+	require.NoError(t, err)
+	assert.False(t, applied, "a row that has a generation keeps it")
+	again, err := GetTask("handadd1")
+	require.NoError(t, err)
+	assert.Equal(t, backfilled.GenerationID, again.GenerationID)
+	assert.Len(t, again.Audit, 1)
+
+	_, _, err = EnsureTaskGeneration("missing1")
+	assert.True(t, IsTaskNotFound(err))
+}
