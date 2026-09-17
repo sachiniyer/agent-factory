@@ -295,6 +295,13 @@ var ErrSessionGone = errors.New("tmux session no longer exists")
 // by hasStableTmuxSpelling can turn a confirmed absence into this marker.
 var ErrSessionNotStarted = errors.New("tmux session definitely did not start")
 
+// ErrSessionNameTaken marks the one ErrSessionNotStarted whose cause is the
+// positive existence gate: a same-named pane was positively present when Start
+// probed. Callers that re-diagnose after the fact must not lose that verdict —
+// a blocker that exits before the second probe leaves the name free while the
+// launch still never ran, which is a launch failure, not a finished flow.
+var ErrSessionNameTaken = errors.New("tmux session already exists")
+
 // ErrAccountEnvironmentRefresh marks a live restored tmux session whose scoped
 // session environment or default command could not be upgraded in place.
 var ErrAccountEnvironmentRefresh = errors.New("account-scoped tmux environment refresh failed")
