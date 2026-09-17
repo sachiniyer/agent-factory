@@ -54,14 +54,16 @@ var (
 )
 
 // SessionProcessTrees enumerates every live process belonging to the named
-// tmux session's panes: each pane root (verified to be a live child of a
-// tmux server), its ppid-descendants, and its kernel-session members. The
+// tmux session's panes: each pane root (verified to be a live child of a tmux
+// server), its ppid-descendants, and its kernel-session members. The
 // teardown paths call it BEFORE kill-session; `af doctor` uses it to map a
 // live session's legitimate processes. This public diagnostic form is strictly
 // best-effort: a command/snapshot failure returns nil, while malformed individual
 // pane rows are omitted and any independently verified panes are still returned.
-// Destructive teardown uses captureSessionProcessTrees below so it also receives
-// the completeness error and can refuse workspace cleanup.
+// Report-bearing callers that must not render a failed read as an empty result
+// (or as a concrete finding) use CaptureSessionProcessTrees below so they also
+// receive the completeness error and can refuse to classify on a nil that only
+// means "could not be read".
 //
 // The list-panes probe is bounded by tmuxCommandTimeout (#1917): it runs first
 // on the kill teardown, so an unbounded stall here wedges the kill before
@@ -69,17 +71,27 @@ var (
 // nil (best-effort) result — nothing is reaped, which is the safe direction: a
 // wedged server has told us nothing about which processes are actually leaked.
 func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.Process {
-	procs, _ := captureSessionProcessTrees(cmdExec, sanitizedName)
+	procs, _ := CaptureSessionProcessTrees(cmdExec, sanitizedName)
 	return procs
 }
 
-// captureSessionProcessTrees is the evidence-bearing half of
+// CaptureSessionProcessTrees is the evidence-bearing half of
 // SessionProcessTrees. Ordinary user-driven teardown remains best-effort and uses
-// any partial result, but a caller about to delete or move the worktree also needs
-// to know whether the capture itself was complete. Returning that answer separately
+// any partial result via SessionProcessTrees above, but a caller about to delete
+// or move the worktree — or to report on pane membership — also needs to know
+// whether the capture itself was complete. Returning that answer separately
 // prevents "no descendants" from being confused with "the process table/list-panes
 // could not be read" (#2260 review).
-func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]proctree.Process, error) {
+//
+// The consumers are report-bearing as well as destructive: `af doctor`'s
+// escaped-process check decides a marked process escaped a LIVE session's pane
+// tree by its ABSENCE from this result, so a per-session list-panes failure that
+// returned nil would read as a proven-empty tree and manufacture a false
+// escaped-process finding for every ordinary in-pane child of that session.
+// Taking the error lets it report blindness instead of either an empty result
+// or a concrete finding, the way the package already treats an unreadable
+// process table or session list.
+func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]proctree.Process, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := outputTmuxBoundedWith(ctx, cmdExec,
