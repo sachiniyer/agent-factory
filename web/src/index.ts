@@ -1126,10 +1126,10 @@ function openDeleteProject(root: string, label: string): void {
         const m = modal;
         m.setBusy(true);
         void deleteProject(root, tok)
-          .then(closeModal)
+          .then(() => { if (modal === m) closeModal(); })
           .catch((e) => {
             if (isMutationCommittedError(e)) {
-              closeModal();
+              if (modal === m) closeModal();
               requestResync();
               refreshRegisteredProjects();
               surfaceTabError(e);
@@ -1182,7 +1182,7 @@ function openAddProject(): void {
         const m = modal;
         m.setBusy(true);
         void registerProject(path, tok)
-          .then(closeModal)
+          .then(() => { if (modal === m) closeModal(); })
           .catch((e) => {
             m.setBusy(false);
             m.setError(errorText(e));
