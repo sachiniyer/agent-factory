@@ -79,7 +79,10 @@ names it above the advisory list, with the recovery that actually clears **that*
 blocker: an unanswered finding takes a threaded `RESOLVED`, `ACCEPTED` or
 `[gate-ack]` reply, while one already marked `RESOLVED` needs a commit pushed
 after it (or `ACCEPTED` / `[gate-ack]` to withdraw the claim) — a second
-`RESOLVED` cannot clear that one.
+`RESOLVED` cannot clear that one. Marker replies count only from an author in
+`ALLOWED_AUTHORS`; one from any other author does not clear the thread, and the
+blocker names that author instead of reporting the finding as simply unanswered
+(#4117).
 
 **An absent or stale verdict blocks that pass too** (#4091). The test is not "is
 it a finding" but "can a maintainer answer it per item, without the author
