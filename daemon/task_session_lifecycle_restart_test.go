@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
+	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -35,6 +38,7 @@ import (
 func TestTaskSessionLifecycle_TeardownSurvivesRestartWithHooksInFlight(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
+	testguard.IsolateTmux(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	require.NoError(t, err)
@@ -43,6 +47,12 @@ func TestTaskSessionLifecycle_TeardownSurvivesRestartWithHooksInFlight(t *testin
 
 	inst := registerTaskSpawnedSession(t, manager, repo.ID, repoPath, "nightly", "task-kill")
 	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
+	// A persisted agent-tab name: the row carries it across the restart, and
+	// the staged session below lands under it. The contract under test is the
+	// durable marker, not the tmux respawn — which on a runner without the
+	// agent binary spawns a pane that dies under the probe.
+	const tmuxName = "af_4162_restart_teardown"
+	inst.SetTmuxSession(sessiontmux.NewTmuxSessionFromSanitizedName(tmuxName, "claude"))
 
 	// A post-worktree hook still running when the run finishes. The channel
 	// stands in for a live scope the way the lifecycle worker sees it — the
@@ -72,6 +82,13 @@ func TestTaskSessionLifecycle_TeardownSurvivesRestartWithHooksInFlight(t *testin
 	// either way, the in-memory waiter is gone after this.
 	manager.stopAndWaitBackgroundMutationsForShutdown()
 
+	// The session's tmux outliving the daemon is the ordinary shape of a
+	// restart (a bounce, not a machine outage): stage it on the isolated
+	// server under the row's persisted name so the load takes tmux's plain
+	// reattach branch rather than respawning an agent the runner lacks.
+	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", tmuxName).Run(),
+		"staging the surviving tmux session")
+
 	// Restart: a fresh manager over the same AF_HOME restores the row. The
 	// restored worktree gets a still-running adopted hook — the surrogate for
 	// the scope AdoptRunningHookRuns would rebuild from a surviving systemd
@@ -84,7 +101,17 @@ func TestTaskSessionLifecycle_TeardownSurvivesRestartWithHooksInFlight(t *testin
 	restarted.mu.Lock()
 	restored := restarted.instances[key]
 	restarted.mu.Unlock()
-	require.NotNil(t, restored, "the marked session must survive the restart")
+	if restored == nil {
+		// The row is still on disk; re-materialize it directly so the failure
+		// names the actual load error instead of a bare nil.
+		rawRows, rerr := config.LoadRepoInstances(repo.ID)
+		require.NoError(t, rerr)
+		var items []session.InstanceData
+		require.NoError(t, json.Unmarshal(rawRows, &items))
+		require.Len(t, items, 1)
+		_, merr := fromInstanceDataForRefresh(items[0])
+		t.Fatalf("the marked session must survive the restart (materialization error: %v)", merr)
+	}
 
 	adoptedHooks := make(chan struct{})
 	if gw := restored.GitWorktreeForTest(); gw != nil {
@@ -127,6 +154,7 @@ func TestTaskSessionLifecycle_TeardownSurvivesRestartWithHooksInFlight(t *testin
 func TestTaskSessionLifecycle_RestartAdoptionStillStandsDown(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
+	testguard.IsolateTmux(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	require.NoError(t, err)
@@ -135,11 +163,18 @@ func TestTaskSessionLifecycle_RestartAdoptionStillStandsDown(t *testing.T) {
 
 	inst := registerTaskSpawnedSession(t, manager, repo.ID, repoPath, "nightly", "task-kill")
 	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
+	// Same staging as the hooks-in-flight test: a persisted agent-tab name the
+	// restarted load can reattach to, so restore never respawns the agent.
+	const tmuxName = "af_4162_restart_adopt"
+	inst.SetTmuxSession(sessiontmux.NewTmuxSessionFromSanitizedName(tmuxName, "claude"))
 	inst.GitWorktreeForTest().SetHooksDoneForTest(make(chan struct{}))
 
 	was := endRunOnIdleEdge(t, inst)
 	manager.applyTaskSessionLifecycleOnRunEnd(repo.ID, inst, was)
 	manager.stopAndWaitBackgroundMutationsForShutdown()
+
+	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", tmuxName).Run(),
+		"staging the surviving tmux session")
 
 	restarted, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
@@ -149,7 +184,15 @@ func TestTaskSessionLifecycle_RestartAdoptionStillStandsDown(t *testing.T) {
 	restarted.mu.Lock()
 	restored := restarted.instances[key]
 	restarted.mu.Unlock()
-	require.NotNil(t, restored)
+	if restored == nil {
+		rawRows, rerr := config.LoadRepoInstances(repo.ID)
+		require.NoError(t, rerr)
+		var items []session.InstanceData
+		require.NoError(t, json.Unmarshal(rawRows, &items))
+		require.Len(t, items, 1)
+		_, merr := fromInstanceDataForRefresh(items[0])
+		t.Fatalf("the marked session must survive the restart (materialization error: %v)", merr)
+	}
 
 	// The user adopts the restored session before the drain runs: an
 	// agent-server delivery is the adoption the fence already knows how to see.
