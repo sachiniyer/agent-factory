@@ -400,6 +400,22 @@ const (
 	probeUnknown
 )
 
+// notAliveReason says in an operator's words why a probe result is not proof
+// of a live runtime. The refusals that print it are read at a terminal, where
+// the enum's integer means nothing.
+func (p livenessProbe) notAliveReason() string {
+	switch p {
+	case probeAbsent:
+		return "its pane is gone"
+	case probeAnsweredDead:
+		return "its agent has exited"
+	case probeUnknown:
+		return "the liveness probe got no answer"
+	default:
+		return "the liveness probe did not report it alive"
+	}
+}
+
 // probeLiveness runs one liveness probe for an instance, bounding the wait for
 // REMOTE instances only. A local probe is in-process (no network to hang on) and
 // its Alive never errors, so it answers directly; wrapping it would spend a

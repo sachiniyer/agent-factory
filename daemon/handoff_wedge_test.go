@@ -123,6 +123,7 @@ func TestResumeFromLimit_ExplicitRetryRefusesStartupUnknownWithoutLivePane(t *te
 		ID: inst.ID, Title: inst.Title, RepoID: repoID,
 	})
 	require.ErrorContains(t, err, "could not be confirmed live")
+	require.ErrorContains(t, err, "its pane is gone", "the refusal names the probe result in words")
 	require.Equal(t, resumeNotPerformed, outcome)
 
 	_, previews, _ := base.eventSnapshot()

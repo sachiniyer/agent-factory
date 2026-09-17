@@ -116,9 +116,9 @@ func (m *Manager) confirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (boo
 	case probeAlive:
 	default:
 		return false, fmt.Errorf(
-			"session %q's runtime could not be confirmed live (probe %v); "+
+			"session %q's runtime could not be confirmed live (%s); "+
 				"if the pane is gone, restore or kill owns this row — confirmation retires the mission, it does not resurrect the runtime",
-			title, probe)
+			title, probe.notAliveReason())
 	}
 
 	switch {

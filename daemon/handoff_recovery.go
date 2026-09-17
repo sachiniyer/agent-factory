@@ -177,9 +177,9 @@ func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string,
 	if wasUnknown {
 		if probe := probeLiveness(entry.instance, entry.instance.AgentServer()); probe != probeAlive {
 			return false, fmt.Errorf(
-				"session %q's runtime could not be confirmed live (probe %v), so its pending mission was not resent; "+
+				"session %q's runtime could not be confirmed live (%s), so its pending mission was not resent; "+
 					"if the pane is gone, restore or kill owns this row",
-				entry.instance.Title, probe)
+				entry.instance.Title, probe.notAliveReason())
 		}
 		entry.instance.ResolveStartupState()
 	}
