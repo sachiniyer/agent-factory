@@ -1152,9 +1152,9 @@ func TestAccountSwapOpportunity_UsesThePollsFrozenGlobalConfig(t *testing.T) {
 // resolved to codex by program_overrides records its wall in the CODEX
 // namespace. Deriving candidates from i.Program would scan the claude namespace
 // — where that observation does not exist — find every claude account
-// "unlimited", and hand each one to a preflight that resolveAccountForProvision
-// refuses as agent drift (#3082/#3108). No wrong identity is ever selected, but
-// the scan is wasted and its refusal names the wrong thing.
+// "unlimited", and hand each one to a picker that refuses the drifted
+// session's candidates as agent drift (#3082/#3108). No wrong identity is ever
+// selected, but the scan is wasted and its refusal names the wrong thing.
 //
 // The second half is the anti-vacuity witness, and it is not optional: with the
 // same fixture, same accounts and same candidate list, only the agent

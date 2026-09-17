@@ -200,10 +200,10 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 // it, find every claude account "unlimited", and hand each one to a preflight
 // that refuses it as agent drift (#3174 review).
 //
-// A disagreement between the two yields NO swap rather than a choice, because no
-// candidate in either namespace could be admitted anyway:
-// resolveAccountForProvision refuses to scope a session whose resolved agent
-// differs from its requested one (#3082/#3108). Not an error, for the same
+// A disagreement between the two yields NO swap rather than a choice: the wall
+// was filed under the running agent while the record claims the configured
+// enum, and rotating either registry silently spends an account the limit was
+// never attributed to (#3082/#3108). Not an error, for the same
 // reason the unsupported-agent case below is not one — this runs on every poll
 // of a limit-blocked row, and the caller logs a warning per call with no
 // backoff, so an error here is a line every daemon_poll_interval for as long as

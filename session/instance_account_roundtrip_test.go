@@ -2,8 +2,10 @@ package session
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
@@ -314,6 +316,29 @@ func TestAccountScoping_RefusesACrossAgentOverride(t *testing.T) {
 		InstanceOptions{Title: "t", Path: path, Program: "claude", Account: "work"}, path)
 
 	require.Error(t, err, "a cross-agent override must refuse: the validated namespace is not the one that would be used")
+	require.Contains(t, err.Error(), "namespaces are separate")
+	require.Contains(t, err.Error(), "work")
+}
+
+// The provision-side twin of the refusal above (#4430 review, D2). The local
+// create boundary refuses a cross-agent override through
+// refuseUnsupportedAccountAgent, but resolveAccountForProvision — the helper
+// docker provisioning, off-box re-provision, and the committed-swap retry all
+// reach — resolved the account under the RESOLVED namespace instead, silently
+// spending codex's "work" for `--program claude --account work`. Both backends
+// must give the same answer to the same command, and the codex registration
+// below is what makes the test prove the refusal rather than a lookup miss.
+func TestResolveAccountForProvision_RefusesACrossAgentOverride(t *testing.T) {
+	saveOverrideConfig(t, "codex")
+	home := os.Getenv("AGENT_FACTORY_HOME")
+	_, err := agentaccount.Register(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
+	_, err = agentaccount.Register(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err, "the colliding name exists in the resolved namespace — only the refusal prevents silently spending it")
+
+	_, err = resolveAccountForProvision(initTempGitRepo(t), tmux.ProgramClaude, "work")
+
+	require.Error(t, err, "the provision helper must refuse the same drift the local boundary refuses")
 	require.Contains(t, err.Error(), "namespaces are separate")
 	require.Contains(t, err.Error(), "work")
 }

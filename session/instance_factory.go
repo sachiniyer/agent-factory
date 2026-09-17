@@ -813,29 +813,41 @@ func accountRefusalWithSource(opts InstanceOptions, err error) error {
 	return fmt.Errorf("%w · %s", err, source)
 }
 
-// resolveAccountForProvision resolves opts.Account to the registered account's
-// directory on this host.
+// resolveAccountForProvision resolves a create's --account to the registered
+// account's directory on this host, in the REQUESTED program's namespace.
 //
-// The agent is derived from the session's program, matching how every other
-// account surface names one: an account belongs to an agent, and "codex" and
-// "claude" keep separate registries.
+// A create names the account in the enum's registry — the API validated it
+// there — so a program_overrides redirect that moves the enum to another
+// agent's command must refuse rather than silently spend the resolved agent's
+// same-named account (#4430 review, D2). The swap path deliberately differs:
+// it selects under the command the session is RUNNING (the resolved one),
+// because the session's live identity, not its recorded enum, is what the
+// account will pin.
 func resolveAccountForProvision(repoRoot, program, accountName string) (sessionenv.Account, error) {
 	resolved, err := resolveRepoConfig(repoRoot)
 	if err != nil {
 		return sessionenv.Account{}, fmt.Errorf("cannot resolve account %q against the session program: %w", accountName, err)
 	}
 	resolvedProgram := config.ResolveProgram(&resolved.Config, program)
-	// The account lives under the agent the resolved command actually runs,
-	// not the requested program name: program_overrides can point an enum at a
-	// different agent's command, and the identity the session spends is the
-	// resolved one. Selecting under the requested name would either find no
-	// account or pin an identity the session never uses (#4430 review).
-	return selectAccountInNamespace(sessionenv.AgentForCommand(resolvedProgram), accountName)
+	// A create requests an account in the requested enum's namespace; when
+	// program_overrides resolves the enum to another agent's command, silently
+	// spending the RESOLVED agent's same-named account is the name-collision
+	// hazard the local path refuses via refuseAccountAgentDrift — both backends
+	// must give the same answer to the same command (#4430 review).
+	requestedAgent := sessionenv.AgentForCommand(program)
+	resolvedAgent := sessionenv.AgentForCommand(resolvedProgram)
+	if resolvedAgent != requestedAgent {
+		return sessionenv.Account{}, fmt.Errorf(
+			"account %q is a %s account, but this session resolves %s to a %s command; account namespaces are separate, so the session would not use the identity you selected",
+			accountName, requestedAgent, requestedAgent, resolvedAgent)
+	}
+	return selectAccountInNamespace(requestedAgent, accountName)
 }
 
 // selectAccountInNamespace resolves accountName inside agent's account
-// registry. It is the shared tail of account resolution: fresh provisions reach
-// it through resolveAccountForProvision's current-config answer, while a
+// registry. It is the shared tail of account selection: fresh provisions reach
+// it through resolveAccountForProvision's refused-or-matched requested
+// namespace, a swap reaches it with the resolved launch command's agent, and a
 // committed manual swap's retry reaches it with the namespace the transaction
 // recorded at commit — the one answer a later config flip cannot move (#4430
 // review).

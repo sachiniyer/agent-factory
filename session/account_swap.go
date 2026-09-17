@@ -148,7 +148,6 @@ func (i *Instance) validateAccountSwap(name, agent string, crossAgent, manual, r
 	backend := i.currentBackend()
 	i.mu.RLock()
 	program := i.Program
-	path := i.Path
 	current := i.Account
 	auto := i.accountAutoSelected
 	pending := cloneAccountSwapData(i.pendingAccountSwap)
@@ -217,19 +216,23 @@ func (i *Instance) validateAccountSwap(name, agent string, crossAgent, manual, r
 	if err := tmux.ValidateAccountLaunchSupport(name); err != nil {
 		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
 	}
+	// A swap selects the account in the namespace of the command it will
+	// actually launch, not the enum the session was created under: a session
+	// recorded as claude whose override resolves to codex is RUNNING codex,
+	// and the account must come from the registry the launch's agent reads
+	// (#4430 review). resolvedProgram is that frozen command — resolved above
+	// from the same config — so no second resolution can disagree with it.
 	// The committed manual transaction is the one caller whose account
-	// namespace is a matter of record rather than configuration: the swap
+	// namespace is a matter of record rather than resolution: the swap
 	// already moved this session to name inside pending.AccountAgent's
 	// registry, so its retry must resolve there even when program_overrides
-	// have since moved the enum's resolution — resolveAccountForProvision
-	// answers the namespace the CURRENT config would pick, which is the
-	// wrong registry for finishing an already-committed move (#4430 review).
+	// have since moved the enum's resolution.
 	var accountScope sessionenv.Account
 	var err error
 	if pending != nil && pending.Manual && pending.To == name && pending.AccountAgent != "" {
 		accountScope, err = selectAccountInNamespace(pending.AccountAgent, name)
 	} else {
-		accountScope, err = resolveAccountForProvision(path, program, name)
+		accountScope, err = selectAccountInNamespace(sessionenv.AgentForCommand(resolvedProgram), name)
 	}
 	if err != nil {
 		return fmt.Errorf("cannot select account %q for session %q: %w", name, i.Title, err)

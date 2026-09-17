@@ -11356,7 +11356,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   const syncAccountSelection = () => {
     const target = agentSelect.value;
     const resolved = resolvedAgent(target);
-    accountHint.textContent = callbacks.currentAccount && !scopableTarget(target) ? resolved === "" ? `${target} resolves to a command that cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : resolved !== target ? `${target} launches ${resolved}, which cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : `${target} cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : (resolved !== "" && resolved !== target ? `${target} launches ${resolved} \u2014 the account must be a ${resolved} account. ` : "") + (accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "");
+    accountHint.textContent = callbacks.currentAccount && !scopableTarget(target) ? resolved !== target ? `${target} launches ${resolved}, which cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : `${target} cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : (resolved !== "" && resolved !== target ? `${target} launches ${resolved} \u2014 the account must be a ${resolved} account. ` : "") + (accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "");
     confirmBtn.disabled = !accountsLoaded || !agentSelect.value || requiresAccount(agentSelect.value) && !accountSelect.value;
   };
   const refreshAccounts2 = () => {
@@ -11396,7 +11396,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
       isCurrentAgent(agent) ? callbacks.currentAccount : ""
     ).length > 0;
     const currentTarget = catalogChoices.find((choice) => isCurrentAgent(choice.value))?.value ?? currentAgent;
-    const choices = catalogChoices.filter((choice) => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || !scopableTarget(choice.value)));
+    const choices = catalogChoices.filter((choice) => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || resolvedAgent(choice.value) !== "" && !scopableTarget(choice.value)));
     if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentTarget)) {
       choices.unshift({ value: currentTarget, label: currentTarget + " (another account)" });
     }

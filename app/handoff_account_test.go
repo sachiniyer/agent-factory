@@ -184,7 +184,10 @@ func TestHandoffScopedClassifiesTargetsByResolvedAgent(t *testing.T) {
 // The account picker applies the same fallback (#4430 review): a scoped claude
 // session behind an opaque claude override is still claude, so its own enum is
 // neither offered as a self-handoff nor as an ambient "scope dropped" row —
-// the daemon refuses both.
+// the daemon refuses both. The same opacity on a TARGET enum now hides the
+// row outright (#4430 review, D1): aider resolving to an unclassifiable
+// command is a row that can only error — the daemon refuses to drop a durable
+// pin on an answer it cannot prove — so nothing opaque is offered at all.
 func TestHandoffScopedOpaqueCurrentAgentIsNotOffered(t *testing.T) {
 	h := newTestHome(t)
 	inst := handoffActionInstance(t, "worker", "claude")
@@ -201,16 +204,17 @@ func TestHandoffScopedOpaqueCurrentAgentIsNotOffered(t *testing.T) {
 	defer restore()
 	_, cmd := h.handleHandoff()
 	h.Update(cmd())
-	require.Equal(t, []string{"aider", "amp", "opencode", "devin"}, h.handoffChoices,
-		"only targets that drop the scope remain; claude is the running agent")
-	require.Equal(t, []string{"", "", "", ""}, h.handoffAccounts)
+	require.Equal(t, []string{"amp", "opencode", "devin"}, h.handoffChoices,
+		"only KNOWN scope-dropping targets remain: opaque aider can only error, and claude is the running agent")
+	require.Equal(t, []string{"", "", ""}, h.handoffAccounts)
 }
 
 // A scoped session's ambient scope-drop rows must not steal the preselection
 // from a scopable target's logged-in account row just because the drop row
 // comes first in SupportedPrograms order (#4430 review): with claude
-// redirected to a non-agent command, its ambient row precedes codex's account
-// section, and the codex account must still win the default.
+// redirected to aider — a KNOWN non-scopable command — its ambient row
+// precedes codex's account section, and the codex account must still win the
+// default.
 func TestHandoffScopedPreselectsAccountOverAmbientDrop(t *testing.T) {
 	h := newTestHome(t)
 	inst := handoffActionInstance(t, "worker", "gemini")
@@ -221,7 +225,7 @@ func TestHandoffScopedPreselectsAccountOverAmbientDrop(t *testing.T) {
 		return daemon.ListAccountsResponse{
 			Agents:         []string{"claude", "codex", "gemini"},
 			Entries:        []daemon.AccountEntry{{Agent: "codex", Name: "spare", LoggedIn: true}},
-			ResolvedAgents: map[string]string{"claude": ""},
+			ResolvedAgents: map[string]string{"claude": "aider"},
 		}, nil
 	})
 	defer restore()

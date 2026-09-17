@@ -93,12 +93,15 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 		isCurrent := sameAgent[agent]
 		canCarry := scopable[resolved]
 		// The ambient row is also the honest offer for a scoped session aimed at
-		// a target that cannot carry a scope: the swap drops it and reports the
-		// drop on from_account (#4428), so the target is offered with its
-		// warning rather than hidden. The current agent's own section never
+		// a KNOWN agent that cannot carry a scope: the swap drops it and reports
+		// the drop on from_account (#4428), so the target is offered with its
+		// warning rather than hidden. An UNCLASSIFIABLE resolution ("") is not
+		// offered to a scoped session at all — the daemon refuses the drop on an
+		// answer it cannot prove, and a row that can only error is a lie
+		// (#4430 review, D1). The current agent's own section never
 		// carries one: the daemon refuses a resolved-identity self-handoff, so
 		// the offer would only error.
-		if !isCurrent && (current == "" || !canCarry) {
+		if !isCurrent && (current == "" || (!canCarry && resolved != "")) {
 			if current == "" {
 				if preselected < 0 {
 					preselected = len(labels)
@@ -108,12 +111,9 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 			}
 			warning := ""
 			if current != "" {
-				switch {
-				case resolved == "":
-					warning = fmt.Sprintf("%s resolves to a command that cannot carry an account — the %q scope is dropped on handoff. ", agent, current)
-				case resolved != agent:
+				if resolved != agent {
 					warning = fmt.Sprintf("%s launches %s, which cannot carry an account — the %q scope is dropped on handoff. ", agent, resolved, current)
-				default:
+				} else {
 					warning = fmt.Sprintf("%s cannot carry an account — the %q scope is dropped on handoff. ", agent, current)
 				}
 			}

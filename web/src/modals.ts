@@ -492,9 +492,7 @@ export function handoffModal(
     const target = agentSelect.value;
     const resolved = resolvedAgent(target);
     accountHint.textContent = callbacks.currentAccount && !scopableTarget(target)
-      ? (resolved === ""
-        ? `${target} resolves to a command that cannot carry an account — the "${callbacks.currentAccount}" scope is dropped on handoff.`
-        : resolved !== target
+      ? (resolved !== target
           ? `${target} launches ${resolved}, which cannot carry an account — the "${callbacks.currentAccount}" scope is dropped on handoff.`
           : `${target} cannot carry an account — the "${callbacks.currentAccount}" scope is dropped on handoff.`)
       : (resolved !== "" && resolved !== target
@@ -553,9 +551,12 @@ export function handoffModal(
     // pre-resolved-agents behavior against older daemons.
     const currentTarget = catalogChoices.find(choice => isCurrentAgent(choice.value))?.value ?? currentAgent;
     // A scoped session keeps every target it can honestly reach: an agent with
-    // a registered account to name, or one with no account support at all,
-    // which drops the scope rather than needing it (#4428).
-    const choices = catalogChoices.filter(choice => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || !scopableTarget(choice.value)));
+    // a registered account to name, or one KNOWN to have no account support,
+    // which drops the scope rather than needing it (#4428). A target whose
+    // resolved command af cannot classify ("") is not offered — the daemon
+    // refuses the drop on an unproven answer, so the row could only error
+    // (#4430 review, D1).
+    const choices = catalogChoices.filter(choice => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || (resolvedAgent(choice.value) !== "" && !scopableTarget(choice.value))));
     if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentTarget)) {
       choices.unshift({ value: currentTarget, label: currentTarget + " (another account)" });
     }

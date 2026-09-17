@@ -405,6 +405,18 @@ func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent string, crossA
 	if len(i.Tabs) == 0 {
 		return HandoffSwap{}, fmt.Errorf("session %q has no agent tab to hand off", i.Title)
 	}
+	// A cross-agent swap may drop the session's account pin only for a KNOWN
+	// agent with no account namespace. An empty effectiveAgent means af could
+	// not classify the resolved command at all — a wrapper such as
+	// `npx codex` may launch a scopable agent underneath — and a durable,
+	// operator-set pin is never destroyed on an unproven answer: the
+	// --account path refuses the same command for the mirror-image reason
+	// (#4430 review, D1).
+	if crossAgent && i.Account != "" && effectiveAgent == "" {
+		return HandoffSwap{}, fmt.Errorf(
+			"session %q is scoped to account %q and %s resolves to a command af cannot classify as an agent; refusing to drop the pin on an unproven target",
+			i.Title, i.Account, target)
+	}
 
 	// Record the outgoing agent through the shared identity resolver, so the
 	// ledger names the same agent the guard compared and the confirmation

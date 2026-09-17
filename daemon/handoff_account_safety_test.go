@@ -305,12 +305,42 @@ func TestHandoffScopedSessionDescopesCrossAgentProgramOverride(t *testing.T) {
 	require.Len(t, prompts, 1)
 }
 
+// D1 (#4430 review): an UNCLASSIFIABLE resolved command is not a provable
+// non-scopable agent — `npx codex` may launch a scopable agent underneath —
+// so a scoped session refuses the swap rather than dropping its durable pin.
+// The pickers hide the row for the same reason; the daemon refuses even when
+// the row was still reachable (a CLI caller, an older UI, a direct RPC).
+func TestHandoffScopedSessionRefusesUnclassifiableTarget(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	inst.SetBackend(&handoffRealPlanBackend{backend})
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	bin := t.TempDir()
+	wrapper := filepath.Join(bin, "wrapped-codex")
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	writeLimitAccountCandidates(t, "[program_overrides]\naider = \""+wrapper+"\"\n")
+
+	_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, To: "aider"})
+	require.Error(t, err, "an unclassifiable resolved command must refuse rather than drop a durable pin")
+	require.Contains(t, err.Error(), "cannot classify")
+	account, _ := inst.AccountSelection()
+	require.Equal(t, "work", account, "a refused handoff never touches the scope")
+	require.Empty(t, inst.Handoffs(), "a refused handoff records nothing")
+	_, _, prompts := backend.snapshot()
+	require.Empty(t, prompts, "a refused handoff delivers no mission")
+}
+
 // Error precedence on the plan-failure path (#4430 review): PrepareAgentSwap
 // resolves the command BEFORE preflight checks it, so a target that is BOTH
 // unlaunchable AND scopable-resolved must still get the scope refusal —
 // --account is the remedy the user can act on, while the preflight detail
-// would send them to install an agent they were never going to reach. A
-// non-scopable resolution leaves the preflight error to name the real blocker.
+// would send them to install an agent they were never going to reach. An
+// unclassifiable resolution earns the same refusal for the mirror-image
+// reason (it can never be proven safe for the scope), while a KNOWN
+// non-scopable one leaves the preflight error to name the real blocker.
 func TestHandoffScopedSessionScopeRefusalBeatsPreflightFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -324,6 +354,11 @@ func TestHandoffScopedSessionScopeRefusalBeatsPreflightFailure(t *testing.T) {
 			wantErr:    "--account",
 			absentErr:  "preflight",
 			wantDetail: "resolves to codex"},
+		{name: "unclassifiable resolution wins over preflight",
+			override:   "aider = \"/nonexistent/mystery\"",
+			wantErr:    "cannot classify",
+			absentErr:  "preflight",
+			wantDetail: "cannot classify"},
 		{name: "non-scopable resolution leaves preflight",
 			override:  "aider = \"/nonexistent/aider\"",
 			wantErr:   "preflight",

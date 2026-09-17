@@ -199,13 +199,24 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		// the preflight detail would send them to install an agent they were
 		// never going to reach. The plan failed, so this resolution is the best
 		// available answer — the same one the failed plan computed — and a
-		// retry re-resolves anyway. Only a scopable resolution earns the
-		// refusal; anything else leaves preflight to name the real blocker.
+		// retry re-resolves anyway. Only a scopable resolution — or an
+		// unclassifiable one, which can never be proven safe for the scope
+		// either — earns the refusal; anything else leaves preflight to name
+		// the real blocker.
 		if fromAccount != "" {
 			effective := session.HandoffEffectiveAgentForPath(instance.Path, target)
 			if _, scopable := sessionenv.SupportsAccounts(effective); scopable {
 				return HandoffSessionResponse{}, scopedAccountHandoffRefusal(
 					req.Title, instance.CurrentAgentName(), fromAccount, target, effective)
+			}
+			// Unclassifiable earns the scope refusal for the same reason a
+			// scopable resolution does: the command can never carry this
+			// session's identity, so its classification — not the launch
+			// detail — is the blocker worth naming (#4430 review, D1).
+			if effective == "" {
+				return HandoffSessionResponse{}, fmt.Errorf(
+					"session %q is scoped to %s account %q, and %s resolves to a command af cannot classify as an agent — it cannot be proven to either carry or safely drop that scope; point program_overrides.%s at a literal agent command or choose another target",
+					req.Title, instance.CurrentAgentName(), fromAccount, target, target)
 			}
 		}
 		return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", req.Title, target, err)
@@ -219,6 +230,17 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		if _, scopable := sessionenv.SupportsAccounts(plan.EffectiveAgent()); scopable {
 			return HandoffSessionResponse{}, scopedAccountHandoffRefusal(
 				req.Title, instance.CurrentAgentName(), fromAccount, target, plan.EffectiveAgent())
+		}
+		// "" means the resolved command is not a provable agent invocation — a
+		// wrapper like `npx codex` may launch a scopable agent underneath. The
+		// --account path refuses the same command because it cannot prove the
+		// target carries a scope; here the refusal is because af cannot prove
+		// the target does NOT carry one, and a durable pin is never dropped on
+		// an unproven answer (#4430 review, D1).
+		if plan.EffectiveAgent() == "" {
+			return HandoffSessionResponse{}, fmt.Errorf(
+				"session %q is scoped to %s account %q, and %s resolves to a command af cannot classify as an agent — it cannot be proven to either carry or safely drop that scope; point program_overrides.%s at a literal agent command or choose another target",
+				req.Title, instance.CurrentAgentName(), fromAccount, target, target)
 		}
 		// The descope path clears the account inside the record transaction,
 		// but SwapAgent restarts only the agent pane: a sibling shell or

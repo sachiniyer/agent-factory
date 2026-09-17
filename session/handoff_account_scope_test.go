@@ -104,29 +104,33 @@ func TestSwapAgentProgram_KeepsScopeForScopableTarget(t *testing.T) {
 // exercised because a fix that only consulted the enum would pass one and
 // silently break the other.
 //
-// The unprovable shapes are the third class (#4430 review round 3): a command
-// the credential-boundary parser cannot prove — `bash`, or `./collect codex`
-// whose agent-looking word is an argument, not the executable — must answer
-// non-scopable. A loose token scan claims the namespace the argument names
+// The unprovable shapes are the third class (#4430 review round 3), and they
+// split differently after D1: a command the credential-boundary parser cannot
+// prove — `bash`, or `./collect codex` whose agent-looking word is an
+// argument, not the executable — is UNCLASSIFIABLE, and an unclassifiable
+// resolution refuses rather than drops: a durable pin is never destroyed on
+// an answer af cannot prove (`npx codex` may launch a scopable agent
+// underneath). A loose token scan claims the namespace the argument names
 // ("codex"), and the enum fallback claims the target's — both let "work" ride
-// a launch that can never apply it.
+// a launch that can never apply it; the refusal denies both.
 func TestSwapAgentProgram_ScopeDecisionFollowsResolvedCommand(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		target      string
 		override    string
 		wantAccount string
+		wantErr     string
 	}{
 		{name: "non-scopable enum resolving to scopable command",
 			target: tmux.ProgramAider, override: tmux.ProgramCodex, wantAccount: "work"},
 		{name: "scopable enum resolving to non-scopable command",
 			target: tmux.ProgramCodex, override: tmux.ProgramAider, wantAccount: ""},
 		{name: "scopable enum resolving to a non-agent command",
-			target: tmux.ProgramCodex, override: "bash", wantAccount: ""},
+			target: tmux.ProgramCodex, override: "bash", wantErr: "cannot classify"},
 		{name: "scopable enum resolving to an agent-looking argument",
-			target: tmux.ProgramCodex, override: "./collect codex", wantAccount: ""},
+			target: tmux.ProgramCodex, override: "./collect codex", wantErr: "cannot classify"},
 		{name: "non-scopable enum resolving to an agent-looking argument",
-			target: tmux.ProgramAider, override: "./collect codex", wantAccount: ""},
+			target: tmux.ProgramAider, override: "./collect codex", wantErr: "cannot classify"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -136,6 +140,15 @@ func TestSwapAgentProgram_ScopeDecisionFollowsResolvedCommand(t *testing.T) {
 			inst.Account = "work"
 
 			_, err = inst.SwapAgentProgram(tc.target, HandoffReasonManual, "abc123", false)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tc.wantErr)
+				if account, _ := inst.AccountSelection(); account != "work" {
+					t.Fatalf("Account = %q after the refusal, want %q — a refused swap "+
+						"leaves the pin it found", account, "work")
+				}
+				return
+			}
 			require.NoError(t, err)
 			if account, _ := inst.AccountSelection(); account != tc.wantAccount {
 				t.Fatalf("Account = %q, want %q — the scope decision belongs to the resolved %q "+
