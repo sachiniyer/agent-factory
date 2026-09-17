@@ -143,7 +143,7 @@ func TestValidateAccountEnvironmentCommand_IoniceDynamicClassStaysNarrow(t *test
 		`ionice -c"${arr[@]}" npm run dev`,
 		`ionice "-c$CLASS" npm run dev`,
 		`ionice -tc"$CLASS" npm run dev`,
-		`ionice -p"$PID" npm run dev`,
+		`ionice -t"$X" npm run dev`,
 		`ionice "$OPT" npm run dev`,
 		`ionice -\c"$CLASS" npm run dev`,
 		`ionice -c$'x'"$CLASS" npm run dev`,
