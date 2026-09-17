@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestResolveConfigForRepoInspectionWithGlobalContextBoundsFileLoads(t *testing.T) {
+func TestBoundedRepoInspectionResolveBoundsFileLoads(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := filepath.Join(t.TempDir(), "repo")
 	require.NoError(t, exec.Command("git", "init", repoPath).Run())
@@ -48,7 +48,7 @@ func TestResolveConfigForRepoInspectionWithGlobalContextBoundsFileLoads(t *testi
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	_, err = ResolveConfigForRepoInspectionWithGlobalContext(ctx, repo, DefaultConfig())
+	_, err = resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx, repo, DefaultConfig(), nil)
 	elapsed := time.Since(started)
 	close(release)
 	require.NoError(t, <-writerDone)
