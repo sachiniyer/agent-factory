@@ -156,7 +156,9 @@ assert_size_is "200x60" "embedded viewer must not resize a 200x60 spawn"
 # program produces the content the viewer must render at 200x60. The marker
 # strings are built by %s%s so the echoed command line itself never contains
 # them — only a real cursor-positioned write can put them on screen.
-tmux send-keys -t "$SESS" 'printf "\033[45;1H%s%s" RO W45_4480; printf "\033[50;1H%s%s" RO W50_4480; printf "G%.0s" $(seq 1 150); echo GAMMA_WIDE_4480' Enter
+# The bare echo before the marker forces a newline — the G-run ends at ~col
+# 160 of row 50, so a marker printed there would land outside the ~62-col crop.
+tmux send-keys -t "$SESS" 'printf "\033[45;1H%s%s" RO W45_4480; printf "\033[50;1H%s%s" RO W50_4480; printf "G%.0s" $(seq 1 150); echo; echo GAMMA_WIDE_4480' Enter
 af_wait_for 'GAMMA_WIDE_4480'
 # A 24-row emulator would clamp both CSI moves onto its last row, so the second
 # write would overwrite the first — BOTH markers surviving inside the ~19-row
