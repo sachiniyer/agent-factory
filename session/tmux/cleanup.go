@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -95,6 +96,23 @@ func (t *TmuxSession) ProbeSession() (exists bool, known bool) {
 	return probeSession(t.cmdExec, t.sanitizedName)
 }
 
+// probeSessionWithin is ProbeSession bounded by a caller's own REMAINING budget
+// rather than the flat tmuxCommandTimeout (#2099 poll-loop class).
+//
+// Start's readiness poll carries its own 2s deadline, and the only code that
+// decides to give up on it — the loop's `select { case <-timeout: ... }` — runs
+// AFTER the synchronous probe returns. Bounding the probe at the flat
+// tmuxCommandTimeout (10s) would let one wedged has-session hold the goroutine
+// for the whole 10s: the give-up case stays unreachable past the poll's own 2s
+// deadline, so the poll overshoots its budget 5x. Bounding each probe by what is
+// LEFT of the budget is what makes that deadline actually fire on time. Mirrors
+// capturePaneForDeliveryWithin, which exists for the same reason.
+func (t *TmuxSession) probeSessionWithin(budget time.Duration) (exists bool, known bool) {
+	ctx, cancel := tmuxTimeoutContextWithin(budget)
+	defer cancel()
+	return probeSessionContext(ctx, t.cmdExec, t.sanitizedName)
+}
+
 // ProbeSessionStrict reports whether this session exists with the same
 // three-valued contract as SessionHomeMarker: (true, true, nil) when the session
 // exists, (false, true, nil) when tmux positively reported it absent, and
@@ -120,6 +138,16 @@ func (t *TmuxSession) ProbeSessionStrict() (exists bool, known bool, err error) 
 func probeSession(cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
+	return probeSessionContext(ctx, cmdExec, name)
+}
+
+// probeSessionContext is the shared body of probeSession and the budget-bounded
+// probeSessionWithin: one bounded has-session reported as the (exists, known)
+// tri-state. A nil err means tmux answered "exists"; a non-nil err with a tripped
+// ctx means the probe did not answer (timeout); any other non-nil err is tmux
+// answering with a non-"exists" result, which this probe has always conflated
+// with absence.
+func probeSessionContext(ctx context.Context, cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	// Using "-t name" does a prefix match, which is wrong. `-t=` does an exact match.
 	err := runTmuxBoundedWith(ctx, cmdExec, "has-session", fmt.Sprintf("-t=%s", name))
 	if err == nil {
