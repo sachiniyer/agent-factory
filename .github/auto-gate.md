@@ -107,6 +107,12 @@ satisfied by the maintainer rather than skipped, so what is left is the mechanic
 part the gate already performs for every other passing PR. The approval is an
 APPROVED review from an allowed author, or a comment from one whose first line is
 exactly `## Review — approve` — the maintainer account cannot approve its own PR.
+The comment carries none of GitHub's authorship checks, so it counts as an
+approval of the commenter's OWN pull request only for a self-approving maintainer
+(`SELF_APPROVING_AUTHORS`, today `sachiniyer`); any other allowed author — the
+Detail app included — needs a second party, and an unreadable PR author counts as
+possibly its own (#4554). APPROVED reviews need no such check: GitHub refuses a
+self-approving review server-side.
 That is the ENTIRE first line, exactly, not a prefix: a qualifier on the heading
 (`## Review — approve, one fix owed before landing`) withholds the approval on
 purpose, so a review that owes a fix cannot land on its own heading.

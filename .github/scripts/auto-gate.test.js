@@ -4587,6 +4587,134 @@ test("an approval marker from an unrelated author is not an approval", async () 
   assert.match(result.reasons.join("\n"), /post `## Review — approve` on this head/);
 });
 
+// #4554. The comment marker exists because GitHub will not let the maintainer
+// approve the maintainer's own PR — and a comment carries none of GitHub's
+// authorship checks, so the workaround opened self-approval to every allowed
+// author. detail-app writes a large share of this repo's PRs and posted the
+// marker on its own #4281. The decision these pin: a self-approval counts only
+// for an account named as a self-approving maintainer (sachiniyer); every other
+// allowed author needs a second party. Blanket exclusion was rejected because
+// the maintainer opens most PRs here and would have no merge route at all during
+// the Codex outage the degraded path exists for.
+for (const [prAuthor, approver] of [
+  ["app/detail-app", "detail-app[bot]"],
+  ["detail-app", "detail-app"],
+  ["app/detail-app", "detail-app"],
+  ["detail-app", "app/detail-app"],
+]) {
+  test(`#4554: a bot author's own approval marker is not an approval (${prAuthor} / ${approver})`, async () => {
+    const result = await evaluateGate({
+      author: prAuthor,
+      issueComments: [
+        codexRateLimit(),
+        prComment(approver, "## Review — approve\n\nAll findings answered.", "2026-07-09T01:30:00Z"),
+      ],
+    });
+
+    assert.equal(result.shouldMerge, false, "a bot's self-approval must not authorize its own merge");
+    assert.match(result.reasons.join("\n"), /post `## Review — approve` on this head/);
+    assert.doesNotMatch(result.notes.join("\n"), /Maintainer approval from/);
+  });
+}
+
+test("#4554: the maintainer's approval on a bot-authored PR still satisfies the degraded path", async () => {
+  const result = await evaluateGate({
+    author: "app/detail-app",
+    issueComments: [
+      codexRateLimit(),
+      prComment("detail-app[bot]", "## Review — approve\n\nSelf-approval, ignored.", "2026-07-09T01:29:00Z"),
+      prComment("sachiniyer", "## Review — approve\n\nRead the diff.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, `a second party's approval must land it: ${result.reasons.join("; ")}`);
+  assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
+});
+
+// The deliberate half of the decision: the maintainer may approve the
+// maintainer's own PR through the marker. That is the marker's documented
+// purpose, and without it maintainer PRs have no route to merge while Codex is
+// rate-limited. Changing this is a policy change, not a bug fix.
+test("#4554: the maintainer's approval on the maintainer's own PR still satisfies the degraded path", async () => {
+  const result = await evaluateGate({
+    author: "sachiniyer",
+    issueComments: [
+      codexRateLimit(),
+      prComment("sachiniyer", "## Review — approve\n\nRead the diff.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, `the maintainer's own route must stay open: ${result.reasons.join("; ")}`);
+  assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
+});
+
+// Only SELF-approval is excluded: an allowed bot approving someone else's PR is
+// unchanged by #4554.
+test("#4554: an allowed bot's approval on another author's PR is unchanged", async () => {
+  const result = await evaluateGate({
+    author: "sachiniyer",
+    issueComments: [
+      codexRateLimit(),
+      prComment("detail-app[bot]", "## Review — approve\n\nRead the diff.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("; "));
+  assert.match(result.notes.join("\n"), /Maintainer approval from detail-app\[bot\]/);
+});
+
+// An unreadable PR author cannot prove an approval is NOT a self-approval, so
+// only an account allowed to self-approve still counts there. An unknown author
+// is also not an allowed one, so this is the manual path, where the approval is
+// what turns "awaiting maintainer review" into the manual PASS — the summary,
+// not shouldMerge, is where the decision shows.
+test("#4554: with the PR author unknown, only a self-approving maintainer's marker counts", async () => {
+  const bot = await evaluateGate({
+    author: "",
+    issueComments: [
+      codexRateLimit(),
+      prComment("detail-app[bot]", "## Review — approve", "2026-07-09T01:30:00Z"),
+    ],
+  });
+  assert.equal(bot.shouldMerge, false);
+  assert.match(
+    bot.summary,
+    /post `## Review — approve` on this head/,
+    "an unknown author must not let a bot approval answer the review requirement",
+  );
+
+  const maintainer = await evaluateGate({
+    author: "",
+    issueComments: [
+      codexRateLimit(),
+      prComment("sachiniyer", "## Review — approve", "2026-07-09T01:30:00Z"),
+    ],
+  });
+  assert.match(maintainer.summary, /^PASS: Auto Gate does not auto-merge PRs from this author/);
+  assert.doesNotMatch(
+    maintainer.summary,
+    /post `## Review — approve` on this head/,
+    "the maintainer's marker still answers the review requirement",
+  );
+});
+
+test("#4554: markerApprovalCounts names who may approve their own PR", () => {
+  const { markerApprovalCounts } = __test;
+  // Self-approval: only the named maintainer.
+  assert.equal(markerApprovalCounts("sachiniyer", "sachiniyer"), true);
+  assert.equal(markerApprovalCounts("detail-app[bot]", "app/detail-app"), false);
+  assert.equal(markerApprovalCounts("detail-app", "detail-app"), false);
+  // Case is not identity on GitHub; a case-only difference is still the same account.
+  assert.equal(markerApprovalCounts("detail-app[bot]", "Detail-App"), false);
+  // A second party.
+  assert.equal(markerApprovalCounts("sachiniyer", "app/detail-app"), true);
+  assert.equal(markerApprovalCounts("detail-app[bot]", "sachiniyer"), true);
+  // Unknown author: fail closed except for the self-approving maintainer.
+  assert.equal(markerApprovalCounts("detail-app[bot]", ""), false);
+  assert.equal(markerApprovalCounts("detail-app[bot]", null), false);
+  assert.equal(markerApprovalCounts("sachiniyer", undefined), true);
+});
+
 test("reviewer silence with no usage-limit evidence keeps blocking exactly as before", async () => {
   const result = await evaluateGate({ issueComments: [] });
 
