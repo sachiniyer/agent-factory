@@ -76,9 +76,14 @@ func (m *Manager) loadEnabledTaskTargets(repoID string) (map[string][]task.Task,
 // taskTargetMu but before entering the tasks-file lock; validators must not
 // shell out there. The verdict keeps the refusal's CAUSE (#3264), so the
 // validator's message can name the thing to fix instead of guessing.
+//
+// persistedBinding marks the arming pass (persistedTasksForArming): it decides
+// whether to SCHEDULE a binding that is already durable, not whether to COMMIT
+// one. Only the collision clause reads it — see validateEnabledTaskTarget.
 type taskTargetValidationContext struct {
-	rootRepoID  string
-	rootVerdict rootAgentMaterializeVerdict
+	rootRepoID       string
+	rootVerdict      rootAgentMaterializeVerdict
+	persistedBinding bool
 }
 
 func (m *Manager) prepareTaskTargetValidation(repoID, target string, enabled bool) taskTargetValidationContext {
@@ -142,18 +147,27 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 	// at all — the arms below report it, and do so without consulting ctx,
 	// which prepareTaskTargetValidation only fills for the exact spelling.
 	//
-	// An existing ordinary record under such a title does not lift the refusal
-	// (#4407 review). A case variant like "Ro ot" owns the distinct af_Root and
-	// keeps receiving prompts — the delivery path sends to an existing target
-	// without asking admission — but this write commits a DURABLE binding, and
-	// the record's lifetime is not fenced by it: KillSession does not consult
-	// target tasks, so once the record is gone (or a concurrent kill wins this
-	// validation) every later run lands on the auto-create refusal. Existence
-	// only chooses the message, so the operator is not told to use "root" for a
-	// session that is not the root. Tasks already enabled before the widened
-	// admission keep delivering to the record while it exists.
-	if session.ReservedTitleCollision(target) != "" {
-		if recordExists && !session.IsReservedRecordTitle(state.Title, state.BackendType) {
+	// An existing ORDINARY record under such a title — a case variant like
+	// "Ro ot", which owns the distinct af_Root, or a provisioned-backend "ro ot"
+	// with no local tmux name — splits on who is asking (#4407 review):
+	//
+	//   - A task write commits a NEW durable binding, and the record's lifetime
+	//     is not the binding's: once the record is gone, every later run lands
+	//     on the auto-create refusal. Existence does not lift the refusal; it
+	//     only chooses the message, so the operator is not told to use "root"
+	//     for a session that is not the root.
+	//   - The arming pass (ctx.persistedBinding) re-checks a binding that is
+	//     ALREADY durable — one enabled before admission widened, since the
+	//     write above refuses new ones. Delivery sends to an existing target
+	//     without asking admission, so while the record exists the task works;
+	//     refusing it here would disarm working automation at the first daemon
+	//     start after upgrade. It falls through to the ordinary record checks
+	//     below instead, and KillSession refuses to delete such a record while
+	//     an enabled task targets it, so the record cannot disappear from under
+	//     an armed binding. Once the record is gone the clause applies again.
+	ordinaryRecord := recordExists && !session.IsReservedRecordTitle(state.Title, state.BackendType)
+	if session.ReservedTitleCollision(target) != "" && !(ctx.persistedBinding && ordinaryRecord) {
+		if ordinaryRecord {
 			return fmt.Errorf("cannot enable task %q: target session %q exists, but its title claims the reserved %q session name (reservation ignores case and whitespace), so af cannot re-create it and the task would fail on every run once that session is gone; choose a target whose title does not claim the reserved name; nothing was changed", t.ID, target, session.RootSessionTitle)
 		}
 		if target != session.RootSessionTitle {

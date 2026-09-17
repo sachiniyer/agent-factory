@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"errors"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 
@@ -166,5 +168,71 @@ func TestTaskMutations_ReservedLookalikeTargetKeepsItsWayOut(t *testing.T) {
 		require.NoError(t, server.AddTask(AddTaskRequest{Task: archiveTargetTask(
 			"fresh-"+title, "Fresh "+title, repoPath, title, true,
 		)}, &AddTaskResponse{}), "an existing ordinary target must still accept a new enabled task")
+	}
+}
+
+// TestTaskArming_PersistedLookalikeBindingArmsWhileItsRecordExists pins option
+// (a) of the #4407 change request. The write-side refusal above cannot reach a
+// binding enabled before admission widened, so the arming pass is where such a
+// binding meets the widened fold — at the first daemon start after upgrade.
+// Delivery sends to an existing target without asking admission, so while the
+// ordinary record exists the task works, and arming must schedule it (cron)
+// and run it (watch), and so must an explicit watch restart. Once the record
+// is gone the binding can only fail, and the next arming pass refuses it.
+func TestTaskArming_PersistedLookalikeBindingArmsWhileItsRecordExists(t *testing.T) {
+	records := []struct {
+		name    string
+		title   string
+		backend func() session.Backend
+	}{
+		{"local case variant", "Ro ot", func() session.Backend { return session.NewFakeBackend() }},
+		{"remote derived name", "ro ot", func() session.Backend { return fakeRemoteBackend{session.NewFakeBackend()} }},
+	}
+	for _, rec := range records {
+		t.Run(rec.name, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			registerReadyLookalike(t, manager, repoID, repoPath, rec.title, rec.backend())
+
+			// Seeded without the fence: the bindings an older daemon accepted.
+			const cronID, watchID = "arm00001", "arm00002"
+			require.NoError(t, task.AddTask(archiveTargetTask(cronID, "Nightly Sweep", repoPath, rec.title, true)))
+			watch := watchTask(watchID, "sleep 60", repoPath)
+			watch.TargetSession = rec.title
+			require.NoError(t, task.AddTask(watch))
+
+			scheduler := newTaskScheduler()
+			watchers, _ := newTestSupervisor(t, task.LoadTasks)
+			require.NoError(t, armTaskAutomation(manager, scheduler, watchers),
+				"startup arming must not refuse a binding whose ordinary target record still exists")
+			assert.Contains(t, scheduler.scheduledTaskIDs(), cronID, "the cron binding must be scheduled")
+			assert.Contains(t, watchers.watchingTaskIDs(), watchID, "the watch binding must be running")
+			for _, id := range []string{cronID, watchID} {
+				assert.NotContains(t, reloadArmingTask(t, id).LastRunStatus, "not armed",
+					"an armed task must not carry a not-armed status")
+			}
+
+			server := &controlServer{manager: manager, scheduler: scheduler, watchers: watchers}
+			require.NoError(t, server.RestartTask(RestartTaskRequest{ID: watchID}, &RestartTaskResponse{}),
+				"restarting an armed watch binding commits nothing and must not be refused")
+			assert.Contains(t, watchers.watchingTaskIDs(), watchID)
+
+			// The record goes away: the binding can no longer be delivered, and
+			// the next arming pass must refuse it rather than keep it scheduled.
+			manager.mu.Lock()
+			delete(manager.instances, daemonInstanceKey(repoID, rec.title))
+			manager.mu.Unlock()
+			require.NoError(t, config.LoadState().SaveInstances(repoID, []byte("[]")))
+
+			scheduler.controlMu.Lock()
+			refused, err := reloadTaskAutomation(manager, scheduler, watchers, everyWatchTask())
+			scheduler.controlMu.Unlock()
+			require.NoError(t, err)
+			joined := errors.Join(refused...)
+			require.Error(t, joined, "a binding whose record is gone must be refused at arming")
+			assert.Contains(t, joined.Error(), cronID)
+			assert.Contains(t, joined.Error(), watchID)
+			assert.NotContains(t, scheduler.scheduledTaskIDs(), cronID)
+			assert.NotContains(t, watchers.watchingTaskIDs(), watchID)
+		})
 	}
 }

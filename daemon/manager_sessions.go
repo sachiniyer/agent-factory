@@ -80,11 +80,13 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	// because ReservedTitleCollision refuses it on every later run (#4407
 	// review). The task-enable gate refuses NEW bindings to these titles now,
 	// so the only bindings this fence can meet were enabled before the widened
-	// admission — and they are still armed and delivering to the live record
-	// until the next arming pass re-validates them. Killing the record inside
-	// that window turns a working automation into a permanent per-run failure;
-	// mirror the archive fence instead: refuse the kill while enabled tasks
-	// target the title, naming each one to disable or retarget first. Ordinary
+	// admission — and they stay armed and delivering to the live record: every
+	// arming pass accepts a persisted binding whose ordinary record exists
+	// (validateEnabledTaskTarget's persistedBinding). This fence is what keeps
+	// that acceptance true. Killing the record turns a working automation into
+	// a permanent per-run failure; mirror the archive fence instead: refuse the
+	// kill while enabled tasks target the title, naming each one to disable or
+	// retarget first. Ordinary
 	// titles need no fence — the next delivery auto-creates the record afresh —
 	// and the canonical reserved record is excluded by its own symmetry: the
 	// task-enable gate only accepts a "root" binding it has proven the ensure
