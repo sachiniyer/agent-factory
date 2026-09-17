@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -507,7 +508,7 @@ func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
 
 	// Stub the session restore so we don't need a live tmux/PTY backend.
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -527,7 +528,7 @@ func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
 		t.Fatalf("save corrupted repo: %v", err)
 	}
 
-	got, _, err := refreshDaemonInstances(nil)
+	got, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatalf("refreshDaemonInstances(nil) returned error on corrupted-repo input — daemon startup would fail and orphan every live session: %v", err)
 	}
@@ -569,12 +570,12 @@ func TestRefreshDaemonInstances_BackfillsLegacyIDBeforeMaterialize(t *testing.T)
 	}
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		return &session.Instance{ID: d.ID, Title: d.Title}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
 
-	got, _, err := refreshDaemonInstances(nil)
+	got, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatalf("refresh legacy row: %v", err)
 	}
@@ -626,13 +627,13 @@ func TestRefreshDaemonInstances_DoesNotMaterializeUnpersistedLegacyID(t *testing
 	t.Cleanup(func() { persistLegacyInstanceID = prevPersist })
 	materialized := false
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		materialized = true
 		return &session.Instance{ID: d.ID, Title: d.Title}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
 
-	got, _, err := refreshDaemonInstances(nil)
+	got, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatalf("refresh should isolate one legacy backfill failure: %v", err)
 	}
@@ -653,7 +654,7 @@ func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testi
 	silenceWarnings(t)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -667,7 +668,7 @@ func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testi
 	prior := &session.Instance{}
 	existing := map[string]*session.Instance{priorKey: prior}
 
-	got, _, err := refreshDaemonInstances(existing)
+	got, _, _, err := refreshDaemonInstances(existing)
 	if err != nil {
 		t.Fatalf("refreshDaemonInstances on poll path errored on corrupted-repo input: %v", err)
 	}
@@ -688,7 +689,7 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *tes
 	warnBuf := teeWarnings(t)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(_ string, d session.InstanceData) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -734,7 +735,7 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *tes
 		t.Fatalf("remove missing repo dir: %v", err)
 	}
 
-	got, _, err := refreshDaemonInstances(existing)
+	got, _, _, err := refreshDaemonInstances(existing)
 	if err != nil {
 		t.Fatalf("refreshDaemonInstances returned error: %v", err)
 	}
@@ -757,12 +758,45 @@ func TestRefreshDaemonInstances_StartupDoesNotInventMissingRepos(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	silenceWarnings(t)
 
-	got, _, err := refreshDaemonInstances(nil)
+	got, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatalf("startup refresh errored: %v", err)
 	}
 	if len(got) != 0 {
 		t.Fatalf("expected empty map at startup with no repos, got %d entries", len(got))
+	}
+}
+
+func TestRefreshDaemonInstancesRetainsTaskRunSequenceFromUnloadedRow(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	silenceWarnings(t)
+	previousRestore := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(string, session.InstanceData) (*session.Instance, error) {
+		return nil, errors.New("fixture cannot materialize")
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = previousRestore })
+	const repoID = "sequence-ghost"
+	raw, err := json.Marshal([]session.InstanceData{{
+		ID: "ghost-run", Title: "ghost-run", TaskID: "feed0001",
+		Path: "/path/that/cannot/materialize", Program: "claude",
+		TaskRunActive: true, TaskRunSequence: 41, CreatedAt: time.Now(),
+	}})
+	if err != nil {
+		t.Fatalf("marshal ghost: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoID, raw); err != nil {
+		t.Fatalf("save ghost: %v", err)
+	}
+
+	loaded, _, sequence, err := refreshDaemonInstances(nil)
+	if err != nil {
+		t.Fatalf("refreshDaemonInstances: %v", err)
+	}
+	if sequence != 41 {
+		t.Fatalf("task run sequence = %d, want 41 from the persisted row even when it cannot load", sequence)
+	}
+	if len(loaded) != 0 {
+		t.Fatalf("fixture row unexpectedly materialized: %+v", loaded)
 	}
 }
 

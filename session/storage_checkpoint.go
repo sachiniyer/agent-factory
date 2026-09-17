@@ -38,6 +38,7 @@ func snapshotInstancesForCheckpoint(instances []*Instance) checkpointSnapshot {
 		data := inst.ToInstanceData()
 		status := data.Status
 		pendingHandoff := data.PendingHandoffMission != ""
+		pendingTaskOutcome := data.TaskRunInterruptionPending
 		unknownRuntimeCleanup := data.RuntimeCleanupStateUnknown
 		unresolvedRelocation := data.Worktree.RelocationRecovery != nil
 		archiveReportPending := data.archiveReportPending
@@ -61,7 +62,7 @@ func snapshotInstancesForCheckpoint(instances []*Instance) checkpointSnapshot {
 		}
 
 		pendingTabs := len(data.PendingTabs) > 0
-		durableRetention := pendingHandoff || unknownRuntimeCleanup ||
+		durableRetention := pendingHandoff || pendingTaskOutcome || unknownRuntimeCleanup ||
 			unresolvedRelocation || archiveReportPending || pendingArchiveSandbox
 		lostSandbox := lostSandboxRecord(data)
 		if (status == Loading || status == Deleting) && !durableRetention {

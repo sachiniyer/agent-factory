@@ -22,12 +22,11 @@ func TestWatcherRateDropIsVisibleOnTaskAndListAPI(t *testing.T) {
 	tsk := watchTask("d4357001", `printf 'one\ntwo\nthree\n'; sleep 60`, dir)
 	require.NoError(t, task.AddTask(tsk))
 	when := time.Now()
-	_, err := task.UpdateTaskStatus(tsk.ID, &when, "sent")
-	require.NoError(t, err)
+	setTaskStatusForTest(t, tsk.ID, &when, "sent")
 
 	s := newWatcherSupervisor()
 	s.eventsPerMinute = 1
-	s.deliver = func(_, _ string) error { return nil }
+	s.deliver = func(_, _, _ string) error { return nil }
 	logDir := t.TempDir()
 	s.logPath = func(taskID string) (string, error) {
 		return filepath.Join(logDir, "task-"+taskID+".log"), nil
@@ -82,6 +81,23 @@ func TestLiveDropOverlayPreservesANewerSuccessfulDelivery(t *testing.T) {
 	require.Equal(t, "sent", record.LastRunStatus)
 }
 
+func TestLiveDropOverlayDoesNotCrossTaskGenerations(t *testing.T) {
+	droppedAt := time.Date(2026, time.September, 11, 12, 0, 0, 0, time.UTC)
+	w := &taskWatcher{
+		taskID: "d4357009", generationID: "removed-generation",
+		dropped: 4, lastDroppedAt: droppedAt, terminalStatus: "stopped",
+	}
+	s := &watcherSupervisor{watchers: map[string]*taskWatcher{w.taskID: w}}
+	record := task.Task{ID: "d4357009", GenerationID: "rebound-generation"}
+
+	s.applyLiveDropState(&record)
+
+	require.Zero(t, record.DroppedEvents,
+		"a predecessor watcher's drops must not overlay the rebound ID's listing")
+	require.Empty(t, record.LastRunStatus,
+		"its drop or terminal status must not overlay either")
+}
+
 func TestLiveDropOverlayPreservesTerminalWatcherStatus(t *testing.T) {
 	droppedAt := time.Date(2026, time.September, 11, 12, 0, 0, 0, time.UTC)
 	for _, terminal := range []string{"stopped", "errored: exit status 1"} {
@@ -90,7 +106,7 @@ func TestLiveDropOverlayPreservesTerminalWatcherStatus(t *testing.T) {
 			w := &taskWatcher{taskID: "d4357004", dropped: 4, lastDroppedAt: droppedAt}
 			s := &watcherSupervisor{
 				watchers:  map[string]*taskWatcher{w.taskID: w},
-				setStatus: func(_, status string) { persisted = status },
+				setStatus: func(_, _, status string) { persisted = status },
 			}
 			w.sup = s
 			w.persistTerminalStatus(terminal)

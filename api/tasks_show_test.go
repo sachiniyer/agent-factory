@@ -140,8 +140,11 @@ func TestTasksShowCmd_ReadsTheStoreAndScopes(t *testing.T) {
 	// client-supplied one (task.resetStoreOwnedFields) — so this exercises the
 	// 18-day gap it means to and not a 60-day one measured from creation.
 	last := time.Now().Add(-18 * 24 * time.Hour)
-	_, err := task.UpdateTaskStatus("4ab7ba4f", &last, "started")
+	stored, err := task.GetTask("4ab7ba4f")
 	require.NoError(t, err)
+	_, applied, err := task.UpdateTaskStatusForGeneration("4ab7ba4f", stored.GenerationID, &last, "started")
+	require.NoError(t, err)
+	require.True(t, applied)
 
 	var out bytes.Buffer
 	tasksShowCmd.SetOut(&out)

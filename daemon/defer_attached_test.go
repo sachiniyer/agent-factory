@@ -185,10 +185,10 @@ func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
 	tsk := &task.Task{ID: "aa158601", TargetSession: "captain", ProjectPath: t.TempDir(), Prompt: "cron-event"}
 
 	done := make(chan struct{})
-	var status string
+	var delivery taskDelivery
 	var err error
 	go func() {
-		status, err = deliverCronTaskPrompt(tsk, tsk.Prompt)
+		delivery, err = deliverCronTaskPrompt(tsk, tsk.Prompt)
 		close(done)
 	}()
 
@@ -201,7 +201,7 @@ func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
 	}
 	select {
 	case <-done:
-		t.Fatalf("cron delivery resolved (%q) while the target was still attached; it must wait, not skip", status)
+		t.Fatalf("cron delivery resolved (%q) while the target was still attached; it must wait, not skip", delivery.status)
 	case <-time.After(30 * time.Millisecond):
 	}
 
@@ -215,8 +215,8 @@ func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cron catch-up: %v", err)
 	}
-	if status != "sent" {
-		t.Fatalf("post-detach cron status = %q, want \"sent\"", status)
+	if delivery.status != "sent" {
+		t.Fatalf("post-detach cron status = %q, want \"sent\"", delivery.status)
 	}
 	if attempts.Load() < 2 {
 		t.Fatalf("expected at least one held attempt then a catch-up, got %d attempts", attempts.Load())
@@ -344,10 +344,10 @@ func TestDeliverCronTaskPrompt_NeverPastesWhileAttached(t *testing.T) {
 	tsk := &task.Task{ID: "aa158602", TargetSession: "captain", ProjectPath: t.TempDir(), Prompt: "cron-event"}
 
 	done := make(chan struct{})
-	var status string
+	var delivery taskDelivery
 	var err error
 	go func() {
-		status, err = deliverCronTaskPrompt(tsk, tsk.Prompt)
+		delivery, err = deliverCronTaskPrompt(tsk, tsk.Prompt)
 		close(done)
 	}()
 
@@ -365,7 +365,7 @@ func TestDeliverCronTaskPrompt_NeverPastesWhileAttached(t *testing.T) {
 	}
 	select {
 	case <-done:
-		t.Fatalf("delivery resolved (%q) while still attached — it must keep deferring until detach", status)
+		t.Fatalf("delivery resolved (%q) while still attached — it must keep deferring until detach", delivery.status)
 	default:
 	}
 
@@ -379,8 +379,8 @@ func TestDeliverCronTaskPrompt_NeverPastesWhileAttached(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post-detach delivery: %v", err)
 	}
-	if status != "sent" {
-		t.Fatalf("post-detach status = %q, want \"sent\"", status)
+	if delivery.status != "sent" {
+		t.Fatalf("post-detach status = %q, want \"sent\"", delivery.status)
 	}
 	if got := pasted.Load(); got != 1 {
 		t.Fatalf("exactly one delivery on detach, got %d", got)
@@ -396,7 +396,7 @@ type busyDeliver struct {
 	success  []string
 }
 
-func (d *busyDeliver) deliver(_, line string) error {
+func (d *busyDeliver) deliver(_, _ string, line string) error {
 	if d.attached.Load() {
 		return errTargetBusy
 	}

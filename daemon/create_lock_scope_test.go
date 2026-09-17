@@ -164,7 +164,7 @@ func TestReserveCreate_RefusesACappedTaskRunBeforeResolvingTheBackend(t *testing
 	// Fill the single slot with a reservation — an admitted create that has not
 	// registered its instance yet, which is what the cap counts.
 	manager.mu.Lock()
-	manager.reserveTaskRunLocked(repoID, "task-1", 1)
+	manager.reserveTaskRunLocked(repoID, "task-1", "", 1)
 	manager.mu.Unlock()
 
 	var resolverRuns atomic.Int64

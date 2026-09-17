@@ -28,9 +28,12 @@ type InstanceData struct {
 	// omitempty + additive: records written before #1892 simply have no task_id
 	// and count against no limit (rollforward, mirroring the ID precedent above).
 	TaskID string `json:"task_id,omitempty"`
-	Title  string `json:"title"`
-	Path   string `json:"path"`
-	Branch string `json:"branch"`
+	// TaskGenerationID binds TaskID to the exact task incarnation that spawned
+	// this session. Empty denotes sessions written before the field existed.
+	TaskGenerationID string `json:"task_generation_id,omitempty"`
+	Title            string `json:"title"`
+	Path             string `json:"path"`
+	Branch           string `json:"branch"`
 	// Status is the legacy single-axis status int (#1195). Still written for one
 	// release for rollback safety and read as the fallback source for records
 	// that predate the `liveness` field. New code should read Liveness.
@@ -107,8 +110,9 @@ type InstanceData struct {
 	// It proves bytes changed, not who produced them or what they meant.
 	LastPaneChurnAt time.Time `json:"last_pane_churn_at,omitzero"`
 	// TaskRunActive records whether this session's task run is still in flight
-	// (#1892) — true from creation, false once the agent goes idle or startup
-	// settles terminal-unknown. It is the one fact the watch-task concurrency cap
+	// (#1892) — true from creation, false once the prompted agent goes idle,
+	// startup settles terminal-unknown, or a Lost runtime is replaced without
+	// replaying its prompt. It is the one fact the watch-task concurrency cap
 	// counts, and it is stored rather than
 	// re-derived because every neighbouring signal answers a different question:
 	// Lost cannot tell a finished run from an interrupted one, and an in-flight op
@@ -125,6 +129,24 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// TaskRunInterruptionPending is the durable outbox marker for a replacement
+	// runtime whose predecessor received this task run's prompt. It is cleared only
+	// after the exact task-row interruption is recorded or superseded, so a daemon
+	// restart between the session and task writes reconstructs the owed outcome.
+	TaskRunInterruptionPending bool `json:"task_run_interruption_pending,omitempty"`
+	// TaskRunAt is the immutable display timestamp of this session-backed task
+	// delivery; the stable session ID is its identity. It is written before the
+	// session becomes visible and matches the owning task's LastRunAt. Additive +
+	// omitzero: older rows decode to zero and take the daemon's conservative legacy
+	// attribution path.
+	TaskRunAt time.Time `json:"task_run_at,omitzero"`
+	// TaskRunSequence is the clock-independent manager admission order for this
+	// session-backed task delivery. It lets a delayed task-row writer prove it is
+	// newer without comparing timestamps. Zero denotes a pre-field record.
+	TaskRunSequence uint64 `json:"task_run_sequence,omitempty"`
+	// TaskRunRevision is the owning task row's last-run revision observed before
+	// provisioning. It makes delayed publication conditional on an unchanged row.
+	TaskRunRevision uint64 `json:"task_run_revision,omitempty"`
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a
 	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and

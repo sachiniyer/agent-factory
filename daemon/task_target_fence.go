@@ -71,21 +71,38 @@ func (m *Manager) loadEnabledTaskTargets(repoID string) (map[string][]task.Task,
 	return targets, nil
 }
 
-// taskTargetValidationContext carries the root-agent reachability verdict that
-// can require git resolution. Control callers prepare it while holding
-// taskTargetMu but before entering the tasks-file lock; validators must not
-// shell out there. The verdict keeps the refusal's CAUSE (#3264), so the
-// validator's message can name the thing to fix instead of guessing.
+// taskTargetValidationContext carries every manager-owned fact the task-store
+// validator needs. Control callers prepare it while holding taskTargetMu but
+// before entering the tasks-file lock; validators must neither shell out nor
+// acquire Manager.mu there. The root verdict keeps the refusal's CAUSE (#3264),
+// while the target snapshot breaks the tasks-file/Manager lock cycle.
 type taskTargetValidationContext struct {
-	rootRepoID  string
-	rootVerdict rootAgentMaterializeVerdict
+	rootRepoID     string
+	rootVerdict    rootAgentMaterializeVerdict
+	targetRepoID   string
+	targetTitle    string
+	targetEnabled  bool
+	targetLoaded   bool
+	targetSnapshot session.InstanceData
 }
 
 func (m *Manager) prepareTaskTargetValidation(repoID, target string, enabled bool) taskTargetValidationContext {
-	ctx := taskTargetValidationContext{}
+	target = task.CanonicalTargetSession(target)
+	ctx := taskTargetValidationContext{
+		targetRepoID: repoID, targetTitle: target, targetEnabled: enabled,
+	}
 	if enabled && repoID != "" && session.IsReservedTitle(target) {
 		ctx.rootRepoID = repoID
 		ctx.rootVerdict = m.rootAgentMaterializeVerdictFor(repoID)
+	}
+	if enabled && repoID != "" && target != "" {
+		m.mu.Lock()
+		instance := m.instances[daemonInstanceKey(repoID, target)]
+		m.mu.Unlock()
+		if instance != nil {
+			ctx.targetLoaded = true
+			ctx.targetSnapshot = instance.ToInstanceData()
+		}
 	}
 	return ctx
 }
@@ -111,6 +128,15 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 	}
 	if t.RepoID == "" {
 		return fmt.Errorf("cannot determine project identity for enabled task %q target %q; nothing was changed", t.ID, target)
+	}
+	// The callback runs under the tasks-file lock, so consulting m.instances here
+	// would invert session creation's Manager.mu -> tasks-file order. The caller
+	// prepared this snapshot under taskTargetMu, which also prevents the only
+	// relevant transition (live -> archiving/archived) until the task commit.
+	// Refuse if an unsupported out-of-band task edit changed the relationship
+	// between preparation and the authoritative store read.
+	if !ctx.targetEnabled || ctx.targetRepoID != t.RepoID || ctx.targetTitle != target {
+		return fmt.Errorf("cannot enable task %q: target session %q relationship changed during validation; retry; nothing was changed", t.ID, target)
 	}
 	// Reserved root delivery is safe only while the daemon owns its future, not
 	// merely because a process happens to exist now. A disabled root-agent policy
@@ -138,14 +164,9 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 			return fmt.Errorf("cannot enable task %q: target session %q is reserved for the daemon-managed root agent, and %s; or choose a different target; nothing was changed", t.ID, target, rootAgentUnavailableDetail(ctx.rootVerdict))
 		}
 	}
-	m.mu.Lock()
-	instance := m.instances[daemonInstanceKey(t.RepoID, target)]
-	m.mu.Unlock()
-	loaded := instance != nil
-	var state session.InstanceData
-	if loaded {
-		state = instance.ToInstanceData()
-	} else {
+	loaded := ctx.targetLoaded
+	state := ctx.targetSnapshot
+	if !loaded {
 		persisted, _, err := findInstanceDataByTitle(target, t.RepoID)
 		if errors.Is(err, errSessionNotFound) {
 			return nil

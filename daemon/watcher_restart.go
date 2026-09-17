@@ -30,8 +30,22 @@ func (s *watcherSupervisor) restart(t task.Task) error {
 	}
 	if current := s.watchers[t.ID]; current != nil {
 		delete(s.watchers, t.ID)
-		if dropped := current.stop(); dropped > t.DroppedEvents {
-			t.DroppedEvents = dropped
+		// The flush total crosses only between incarnations: a watcher stopped
+		// for a replaced task must not seed its drops onto the row the reused
+		// ID now names (#4224 review).
+		dropped := current.stop()
+		if current.generationID == t.GenerationID {
+			if dropped > t.DroppedEvents {
+				t.DroppedEvents = dropped
+			}
+		} else {
+			// The generation rebound under the reused ID: the persisted total
+			// on the row is the predecessor incarnation's evidence just as
+			// the flush is, so the replacement starts clean (#4224). The
+			// durable row needs the same reset or the stale count keeps
+			// reporting and reseeding across restarts.
+			t.DroppedEvents = 0
+			s.clearReboundDropSeed(t)
 		}
 	}
 
@@ -52,10 +66,20 @@ func (s *watcherSupervisor) restart(t task.Task) error {
 }
 
 func watcherSignature(t task.Task) string {
-	return t.WatchCmd + "\x00" + t.ProjectPath + "\x00" + t.Name
+	return t.GenerationID + "\x00" + t.WatchCmd + "\x00" + t.ProjectPath + "\x00" + t.Name
 }
 
-func stopWatchers(ws []*taskWatcher) map[string]int {
+// flushedDrop is one stopped watcher's final drop total tagged with the task
+// incarnation that produced it. The tag is what makes the transfer between a
+// stopped watcher and the replacement row safe: a reused task ID must not
+// inherit drops — or the "dropped" last-run status — its predecessor earned
+// (#4224 review).
+type flushedDrop struct {
+	generationID string
+	drops        int
+}
+
+func stopWatchers(ws []*taskWatcher) map[string]flushedDrop {
 	var wg sync.WaitGroup
 	totals := make([]int, len(ws))
 	for i, w := range ws {
@@ -66,10 +90,10 @@ func stopWatchers(ws []*taskWatcher) map[string]int {
 		}(i, w)
 	}
 	wg.Wait()
-	dropped := make(map[string]int, len(ws))
+	dropped := make(map[string]flushedDrop, len(ws))
 	for i, w := range ws {
-		if totals[i] > dropped[w.taskID] {
-			dropped[w.taskID] = totals[i]
+		if totals[i] > dropped[w.taskID].drops {
+			dropped[w.taskID] = flushedDrop{generationID: w.generationID, drops: totals[i]}
 		}
 	}
 	return dropped

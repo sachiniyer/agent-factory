@@ -83,8 +83,9 @@ const guardMinContainer = 2 * guardUnitLen
 const guardContainerLen = 9 * guardUnitLen
 
 var verbatimInstanceFields = map[string]string{
-	"ID":     "minted instance id, never derived from user text",
-	"TaskID": "minted task id (#1892), never derived from user text",
+	"ID":               "minted instance id, never derived from user text",
+	"TaskID":           "minted task id (#1892), never derived from user text",
+	"TaskGenerationID": "128-bit random task-incarnation id minted by AddTaskChecked, never derived from user text (#4222)",
 
 	"BackendType":  "bounded backend discriminator (\"local\", \"remote\", \"\")",
 	"CurrentAgent": "agent enum name (tmux.SupportedPrograms), not user text",

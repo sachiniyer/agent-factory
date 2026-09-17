@@ -61,8 +61,7 @@ func TestLoadTasksTagsEveryReadWithTheStoreGeneration(t *testing.T) {
 		"two reads of an unchanged store must agree, or nothing would ever pair")
 
 	ran := time.Now()
-	_, err = UpdateTaskStatus("bbb00002", &ran, "started")
-	require.NoError(t, err)
+	setRunStatus(t, "bbb00002", &ran, "started")
 
 	after, err := LoadTasks()
 	require.NoError(t, err)
@@ -116,7 +115,7 @@ func TestOrdinalNeverReachesDisk(t *testing.T) {
 	// Derived, never persisted — the rule the health fields already follow, and
 	// one the row number needs even more than they do: a stored ordinal goes stale
 	// the moment a row is inserted above it, leaving a record asserting an
-	// identity that is no longer its own. UpdateTaskStatus is a real
+	// identity that is no longer its own. The status writer is a real
 	// load-modify-save, which is the path that would otherwise write one back.
 	path := setupTestTasks(t, []Task{
 		ordinalRow("aaa00001", "first", "0 9 * * *", "/repo"),
@@ -124,8 +123,7 @@ func TestOrdinalNeverReachesDisk(t *testing.T) {
 	})
 
 	ran := time.Now()
-	_, statusErr := UpdateTaskStatus("bbb00002", &ran, "started")
-	require.NoError(t, statusErr)
+	setRunStatus(t, "bbb00002", &ran, "started")
 
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -299,8 +297,7 @@ func TestUpdateTaskStatusReturnsTheIdentityTheNextReadWillReport(t *testing.T) {
 	before, err := LoadTasks()
 	require.NoError(t, err)
 
-	updated, err := UpdateTaskStatus("bbb00002", nil, "errored: not armed — target is gone")
-	require.NoError(t, err)
+	updated := setRunStatus(t, "bbb00002", nil, "errored: not armed — target is gone")
 	assert.Equal(t, "errored: not armed — target is gone", updated.LastRunStatus,
 		"precondition: the status write landed")
 
