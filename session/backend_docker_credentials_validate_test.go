@@ -237,8 +237,13 @@ func TestDockerCredentialRunArgs_AllowsEveryMountInstallingOption(t *testing.T) 
 // TestDockerCredentialRunArgs_AllowsHarmlessEnvNames is the over-refusal boundary
 // for environment entries: a name that is not in the agent's identity set does
 // nothing to the credential mount, so the guard must leave it through.
+// Note: XDG_CONFIG_HOME and XDG_DATA_HOME are not in the codex denied set (codex
+// does not use XDG paths for auth), so the validator passes them for codex. The
+// XDG redirect risk for amp and opencode is closed by runContainer re-asserting
+// XDG_CONFIG_HOME and XDG_DATA_HOME after run_args when credential mounts are
+// installed — not by the validator refusing them.
 func TestDockerCredentialRunArgs_AllowsHarmlessEnvNames(t *testing.T) {
-	for _, name := range []string{"TZ", "LANG", "FOO", "XDG_CONFIG_HOME", "CODEX_SQLITE_HOME"} {
+	for _, name := range []string{"TZ", "LANG", "FOO", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "CODEX_SQLITE_HOME"} {
 		require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-e", name + "=value"}, tmux.ProgramCodex),
 			"harmless env name %q was refused (over-refusal)", name)
 	}
@@ -312,8 +317,12 @@ func provisionDockerCredentialGrant(t *testing.T, program string, runArgs []stri
 	t.Setenv("DOCKER_CONTEXT", "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	if program == tmux.ProgramCodex {
-		writeCredFile(t, filepath.Join(home, ".codex/auth.json"))
+	// Write the first credential file for the given agent so that
+	// resolveAgentCredentialMounts finds it and installs a mount. Tests that
+	// check XDG re-assertion need an actual mount to be present (the re-assertion
+	// is gated on len(credentialMounts) > 0).
+	if files, ok := agentCredentialFiles[program]; ok && len(files) > 0 {
+		writeCredFile(t, filepath.Join(home, files[0]))
 	}
 	// Force the SELinux probe to a fixture so the argv is deterministic on any
 	// host; the validator runs before the mount is resolved, so the mode does
@@ -432,6 +441,58 @@ func TestDockerMountAgentCredentials_HarmlessRunArgsStayAfterTheMount(t *testing
 	require.Greaterf(t, mountIdx, 0, "the credential mount was not in the run argv: %v", runArgv)
 	require.Greaterf(t, envIdx, 0, "the harmless env was not in the run argv: %v", runArgv)
 	require.Greaterf(t, envIdx, mountIdx, "harmless run_args must remain appended after the credential mount: %v", runArgv)
+}
+
+// TestDockerMountAgentCredentials_XDGReassertedAfterRunArgs pins that when
+// credential mounts are installed, runContainer emits XDG_DATA_HOME and
+// XDG_CONFIG_HOME AFTER run_args so that repo-supplied values cannot redirect
+// agents that use those XDG paths for credential lookup:
+//   - opencode reads $XDG_DATA_HOME/opencode/auth.json when XDG_DATA_HOME is set.
+//   - amp reads $XDG_CONFIG_HOME/amp/settings.json when XDG_CONFIG_HOME is set.
+//
+// Docker gives the LAST -e for a name precedence, so the re-assertion after
+// run_args dominates any repo-supplied redirect, closing the same gap that the
+// HOME re-assertion closed for HOME-relative credential lookup.
+func TestDockerMountAgentCredentials_XDGReassertedAfterRunArgs(t *testing.T) {
+	for _, tt := range []struct {
+		agent   string
+		xdgVar  string
+		xdgPath string // suffix that should appear in the re-asserted value
+	}{
+		{tmux.ProgramOpencode, "XDG_DATA_HOME", dockerContainerHome + "/.local/share"},
+		{tmux.ProgramAmp, "XDG_CONFIG_HOME", dockerContainerHome + "/.config"},
+	} {
+		t.Run(tt.agent, func(t *testing.T) {
+			// Pass a run_arg that tries to redirect the XDG path. The guard lets
+			// it through (XDG vars are not in the denied set for these agents),
+			// but runContainer must re-assert the correct value after run_args.
+			runCalled, _, runArgv := provisionDockerCredentialGrant(t, tt.agent,
+				[]string{"-e", tt.xdgVar + "=/tmp/attacker"})
+			require.True(t, runCalled, "harmless (to validator) run_args must still reach docker run: agent=%s", tt.agent)
+			// Find the last occurrence of the XDG variable in the argv: Docker
+			// gives the LAST -e precedence, so the re-assertion must come after
+			// the repo-supplied value.
+			lastReassertIdx := -1
+			repoIdx := -1
+			for i, a := range runArgv {
+				if strings.Contains(a, tt.xdgVar+"="+tt.xdgPath) {
+					lastReassertIdx = i
+				}
+				if strings.Contains(a, tt.xdgVar+"=/tmp/attacker") {
+					repoIdx = i
+				}
+			}
+			require.Greaterf(t, lastReassertIdx, 0,
+				"agent %s: XDG re-assertion %s=%s was not in the run argv: %v",
+				tt.agent, tt.xdgVar, tt.xdgPath, runArgv)
+			require.Greaterf(t, repoIdx, 0,
+				"agent %s: the repo-supplied %s redirect was not in the run argv: %v",
+				tt.agent, tt.xdgVar, runArgv)
+			require.Greaterf(t, lastReassertIdx, repoIdx,
+				"agent %s: the af XDG re-assertion must come AFTER the repo-supplied redirect so Docker's last-wins rule makes it dominate: %v",
+				tt.agent, runArgv)
+		})
+	}
 }
 
 // indexIn returns the index of the first arg containing sub, or -1.

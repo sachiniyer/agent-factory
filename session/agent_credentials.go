@@ -262,9 +262,12 @@ func resolveAgentCredentialMounts(agent string, relabel bool) []string {
 // (AgentAuthSelectors). It is empty for the agents on the credential-mount
 // feature whose config-root variable does NOT relocate credential lookup —
 // amp, opencode and devin (internal/sessionenv/account.go records the measured
-// reason each is out) — and this guard is a no-op for them because no
-// environment entry can defeat their mount. Refusing --env-file for an empty
-// denied set would be over-refusal, so the empty set returns early.
+// reason each is out) — and this guard is a no-op for them. For those agents,
+// the redirect risk via generic XDG variables (XDG_DATA_HOME for opencode,
+// XDG_CONFIG_HOME for amp) is closed instead by runContainer re-asserting those
+// variables after run_args when credential mounts are installed. Refusing
+// --env-file for an empty denied set would be over-refusal, so the empty set
+// returns early.
 func validateCredentialDockerRunArgs(args []string, agent string) error {
 	denied := accountDockerDeniedNames(agent)
 	if len(denied) == 0 {

@@ -513,11 +513,25 @@ func (p *dockerProvisioner) runContainer() error {
 		// For credential-mount sessions, credential files are mounted at paths
 		// relative to dockerContainerHome (/root). docker.run_args is repo-controlled
 		// and is appended above with no later af env to dominate it, so a repo entry
-		// setting HOME=/tmp/x would redirect agents whose credential lookup is
-		// HOME-relative (e.g. opencode reads $HOME/.local/share/opencode/auth.json)
-		// away from the mounted file. Re-asserting HOME last closes the same gap
-		// the account path closes with its own re-assertion.
-		args = append(args, "-e", "HOME="+p.sessionHome())
+		// setting HOME, XDG_DATA_HOME, or XDG_CONFIG_HOME would redirect agents
+		// whose credential lookup is HOME- or XDG-relative away from the mounted
+		// file. Re-asserting all three last closes the same gap the account path
+		// closes with its own HOME re-assertion:
+		//   - opencode reads $XDG_DATA_HOME/opencode/auth.json when XDG_DATA_HOME is
+		//     set, falling back to $HOME/.local/share/opencode/auth.json.
+		//   - amp reads $XDG_CONFIG_HOME/amp/settings.json when XDG_CONFIG_HOME is
+		//     set, falling back to $HOME/.config/amp/settings.json.
+		//   - codex and claude fall back to os.UserHomeDir() ($HOME) when their
+		//     specific config-root variable is absent, so HOME is the load-bearing
+		//     anchor for all four agents.
+		// Docker gives the LAST -e for a name precedence, so appending these after
+		// run_args makes them dominate any repo-supplied redirect.
+		home := p.sessionHome()
+		args = append(args,
+			"-e", "HOME="+home,
+			"-e", "XDG_DATA_HOME="+home+"/.local/share",
+			"-e", "XDG_CONFIG_HOME="+home+"/.config",
+		)
 	}
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
 
