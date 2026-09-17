@@ -29,7 +29,7 @@ var ErrSessionStillAlive = errors.New("tmux session is still alive")
 
 // ErrSessionVanishedBeforeCapture marks a pane-list read that failed because
 // tmux says the session does not exist. Whether that is a determinate EMPTY or a
-// lost ancestry depends on the caller: see captureSessionProcessTrees.
+// lost ancestry depends on the caller: see CaptureSessionProcessTrees.
 var ErrSessionVanishedBeforeCapture = errors.New("tmux session was gone before its panes could be listed")
 
 // PaneState is what a bounded teardown could ESTABLISH about a tmux session, and
@@ -164,7 +164,7 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
 	// (#1104).
-	leaked, captureErr := captureSessionProcessTrees(t.cmdExec, t.sanitizedName)
+	leaked, captureErr := CaptureSessionProcessTrees(t.cmdExec, t.sanitizedName)
 
 	// Bounded by tmuxCommandTimeout (#1917), through the run so the deadline counts
 	// itself: an unbounded kill-session against a wedged server blocks
