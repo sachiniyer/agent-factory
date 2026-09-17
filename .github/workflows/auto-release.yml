@@ -70,11 +70,12 @@ jobs:
           exit 1
         fi
         go vet ./...
-        # The same command and budget as stable-release.yml's preflight (#4463):
-        # this lane was left on Go's 10m-per-package default. Measured here, the
-        # -race daemon package took 494s, 500s, 481s, 504s and 594.5s in the five
-        # successful runs before v1.0.290 — the last 5.5s from failing a preview
-        # release on a budget. 30m is 3x the slowest.
+        # The same explicit budget as stable-release.yml's preflight (#4463). This
+        # lane runs the identical -race suite every three hours, and #4463 left it
+        # on Go's 10m per-package default: daemon measured 500.0s here on
+        # 2026-09-16, 83% of that default, on the curve that failed v1.0.288 (#4464).
+        # The five successful runs before v1.0.290 took 494s, 500s, 481s, 504s and
+        # 594.5s, the last 5.5s from failing a preview release on a budget (#4556).
         go test -v -race -count=1 -timeout=30m ./...
         go build ./...
 
