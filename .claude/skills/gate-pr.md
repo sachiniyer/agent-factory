@@ -756,6 +756,13 @@ ordinary path (#3790). Write it as a PR comment whose FIRST line is exactly:
 or leave an APPROVED review — but the maintainer account cannot approve its own
 PR, which is why the comment marker exists.
 
+**The marker is not a self-approval for anyone but the maintainer (#4554).** A
+comment carries none of GitHub's authorship checks, so the gate counts a marker
+on the commenter's own PR only from `SELF_APPROVING_AUTHORS` (today
+`sachiniyer`). `## Review — approve` from `detail-app` on a PR `detail-app`
+opened is not an approval, and neither is any non-maintainer marker when the PR
+author cannot be read. Read who posted the marker before relying on it.
+
 Two things the gate insists on, and both matter:
 
 - **The entire first line, exactly.** Not a prefix. `## Review — approve, one fix
