@@ -77,9 +77,10 @@ func (m *Manager) loadEnabledTaskTargets(repoID string) (map[string][]task.Task,
 // shell out there. The verdict keeps the refusal's CAUSE (#3264), so the
 // validator's message can name the thing to fix instead of guessing.
 //
-// persistedBinding marks the arming pass (persistedTasksForArming): it decides
-// whether to SCHEDULE a binding that is already durable, not whether to COMMIT
-// one. Only the collision clause reads it — see validateEnabledTaskTarget.
+// persistedBinding marks a re-check of a binding that is already durable — the
+// arming pass (persistedTasksForArming) and RestartTask. Both decide whether to
+// RUN that binding, not whether to COMMIT one. Only the collision clause reads
+// it — see validateEnabledTaskTarget.
 type taskTargetValidationContext struct {
 	rootRepoID       string
 	rootVerdict      rootAgentMaterializeVerdict
@@ -156,12 +157,12 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 	//     on the auto-create refusal. Existence does not lift the refusal; it
 	//     only chooses the message, so the operator is not told to use "root"
 	//     for a session that is not the root.
-	//   - The arming pass (ctx.persistedBinding) re-checks a binding that is
-	//     ALREADY durable — one enabled before admission widened, since the
-	//     write above refuses new ones. Delivery sends to an existing target
-	//     without asking admission, so while the record exists the task works;
-	//     refusing it here would disarm working automation at the first daemon
-	//     start after upgrade. It falls through to the ordinary record checks
+	//   - The arming pass and RestartTask (ctx.persistedBinding) re-check a
+	//     binding that is ALREADY durable — one enabled before admission
+	//     widened, since the write above refuses new ones. Delivery sends to an
+	//     existing target without asking admission, so while the record exists
+	//     the task works; refusing it here would disarm working automation at
+	//     the first daemon start after upgrade. It falls through to the ordinary record checks
 	//     below instead, and KillSession refuses to delete such a record while
 	//     an enabled task targets it, so the record cannot disappear from under
 	//     an armed binding. Once the record is gone the clause applies again.
