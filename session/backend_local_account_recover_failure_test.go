@@ -239,7 +239,7 @@ func TestLoad_AccountShellPreparationFailureStopsPreScopeSibling(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	t.Setenv("SHELL", "/bin/zsh")
+	t.Setenv("SHELL", "/bin/fish")
 	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
 
 	const agentName = "af_account_shell_prepare_failure"

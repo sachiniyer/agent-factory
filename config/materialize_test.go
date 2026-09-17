@@ -124,8 +124,11 @@ func TestWriteConfigIfMissing_RemovesStubOnWriteFailure(t *testing.T) {
 
 func TestLoadConfig_RecoversAfterFailedFirstRunWrite(t *testing.T) {
 	// End-to-end #864: a failed first-run write leaves an empty config.toml;
-	// the NEXT startup must recover (re-materialize defaults), not wedge on the
-	// contentless-TOML hard error.
+	// the NEXT startup must recover, not wedge on the contentless-TOML hard
+	// error. Since #4483 the recovery is in memory: a load can never tell a
+	// crashed write apart from one still in flight, so the stub is left
+	// untouched and defaults are returned — af starts, and the file heals on
+	// the next config write.
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	fastShell(t)
@@ -145,7 +148,7 @@ func TestLoadConfig_RecoversAfterFailedFirstRunWrite(t *testing.T) {
 
 	data, err := os.ReadFile(tomlPath)
 	require.NoError(t, err)
-	assert.NotEmpty(t, data, "defaults must be re-materialized to a non-empty file")
+	assert.Empty(t, data, "the load must not delete or rewrite the stub (#4483)")
 }
 
 func TestWriteConfigIfMissing_RefusesExistingFile(t *testing.T) {
@@ -161,4 +164,96 @@ func TestWriteConfigIfMissing_RefusesExistingFile(t *testing.T) {
 	data, err := os.ReadFile(tomlPath)
 	require.NoError(t, err)
 	assert.Equal(t, original, data)
+}
+
+// TestLoadConfig_DoesNotUnlinkAnInFlightRewrite is the #4483 reproduction: a
+// writer that rewrites config.toml IN PLACE (shell `>`, an in-place editor)
+// truncates first, so a LoadConfig inside that window sees a contentless
+// regular unshadowed file — a shape identical to a failed first-run stub.
+// The load must not touch the file: removing it detaches the writer's
+// descriptor, the writer's content lands in an unlinked inode, and the
+// re-materialized defaults win — the user's entire config silently replaced.
+// A read must never delete user data.
+func TestLoadConfig_DoesNotUnlinkAnInFlightRewrite(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	fastShell(t)
+	tomlPath := filepath.Join(home, TomlConfigFileName)
+
+	require.NoError(t, os.WriteFile(tomlPath,
+		[]byte("schema_version = 1\ndefault_program = 'aider'\nauto_update = true\n"), 0o644))
+
+	// The in-place writer: open + truncate, new content not yet written.
+	writer, err := os.OpenFile(tomlPath, os.O_WRONLY|os.O_TRUNC, 0o644)
+	require.NoError(t, err)
+
+	// The load lands in the window. It may see the file empty, but it must
+	// not delete, rewrite, or otherwise mutate it.
+	cfg, err := LoadConfig()
+	require.NoError(t, err, "a load during an in-place rewrite must not fail")
+	require.NotNil(t, cfg)
+
+	// The writer finishes through ITS descriptor.
+	_, werr := writer.WriteString("schema_version = 1\ndefault_program = 'codex'\nauto_update = true\n")
+	require.NoError(t, werr)
+	require.NoError(t, writer.Close())
+
+	// The path must hold the WRITER's content — not the defaults af would
+	// have installed in place of the file it unlinked.
+	data, err := os.ReadFile(tomlPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "codex",
+		"the writer's content must land at config.toml — losing it is the #4483 data loss")
+	assert.NotContains(t, string(data), "'claude'",
+		"af's defaults must not replace the user's in-flight rewrite")
+}
+
+// The same in-place-rewrite window exists for a legacy config.json on a host
+// that never materialized config.toml: a zero-byte config.json is the same
+// failed-write fingerprint, and unlinking it detaches the writer's descriptor
+// exactly the same way.
+func TestLoadConfig_DoesNotUnlinkAnInFlightJSONRewrite(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	fastShell(t)
+	jsonPath := filepath.Join(home, ConfigFileName)
+
+	require.NoError(t, os.WriteFile(jsonPath,
+		[]byte(`{"schema_version":1,"default_program":"aider"}`), 0o644))
+
+	writer, err := os.OpenFile(jsonPath, os.O_WRONLY|os.O_TRUNC, 0o644)
+	require.NoError(t, err)
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err, "a load during an in-place rewrite must not fail")
+	require.NotNil(t, cfg)
+
+	_, werr := writer.WriteString(`{"schema_version":1,"default_program":"codex"}`)
+	require.NoError(t, werr)
+	require.NoError(t, writer.Close())
+
+	data, err := os.ReadFile(jsonPath)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"schema_version":1,"default_program":"codex"}`, string(data),
+		"the writer's content must land at config.json — losing it is the #4483 data loss")
+}
+
+// A zero-byte config.json satisfies UnsetGlobalConfigValue's pre-lock
+// LoadConfig with in-memory defaults while config.toml stays absent (#4483
+// review). The locked body must answer "not set" from that empty document —
+// not ENOENT, and not a defaults file materialized just to say so.
+func TestUnsetGlobalConfigValue_EmptyJSONStubAnswersNotSet(t *testing.T) {
+	fastShell(t)
+	home := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home, ConfigFileName), nil, 0o644))
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	result, err := UnsetGlobalConfigValue("ssh.host_key_verification")
+	require.NoError(t, err, "unset on an accepted stub must not fail")
+	require.NotNil(t, result)
+	assert.False(t, result.Removed, "an empty document holds no key to remove")
+	assert.Equal(t, filepath.Join(home, TomlConfigFileName), result.Path)
+	_, statErr := os.Stat(filepath.Join(home, TomlConfigFileName))
+	assert.True(t, os.IsNotExist(statErr),
+		"a no-op unset must not materialize config.toml — a mid-flight rewrite may be holding the name open")
 }
