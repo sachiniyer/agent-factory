@@ -6391,7 +6391,7 @@ function handleClipboardKeydown(ev, deps) {
       return false;
     }
     ev.preventDefault();
-    deps.sendInput(ETX);
+    deps.sendUserInput(ETX);
     return false;
   }
   return true;
@@ -8304,7 +8304,7 @@ var TerminalSoftInput = class {
   };
   /** Queue custom input after xterm's already-scheduled composition finalizer. */
   deferAfterPendingComposition(action) {
-    if (!this.pending.length) return false;
+    if (!this.pending.length && !this.postCompositionTimers.size) return false;
     const release = setTimeout(() => {
       this.postCompositionTimers.delete(release);
       action();
@@ -8453,6 +8453,22 @@ var TerminalSoftInput = class {
       this.forwardingComposition = void 0;
     }
   }
+  /**
+   * Drop composition state on focus loss — including custom input queued behind
+   * the composition, because the blur discards the commit it was waiting for.
+   *
+   * In the pinned xterm 5.5.0, Terminal._handleTextAreaBlur empties the textarea
+   * synchronously (Terminal.ts:289-292) and nothing flushes the composition
+   * first, while CompositionHelper's finalizer only reads the textarea later, in
+   * its setTimeout(0) (CompositionHelper.ts:152-171), and sends nothing when the
+   * read is empty. A blur in the window therefore loses the committed text. A key
+   * queued behind that text must go with it: sent alone, a Shift+Enter would land
+   * as an orphaned LF, detached from the word it was ordered after.
+   *
+   * Cancelling here is safe because nothing that must arrive is ever queued: a
+   * terminal signal byte, the Ctrl+C interrupt included, bypasses the queue
+   * (TerminalKeybar's SIGNAL_BYTES), which is what #4151 needed.
+   */
   reset() {
     for (const range of this.pending) if (range.release !== void 0) clearTimeout(range.release);
     for (const flush of this.trailingFlushes) if (flush.release !== void 0) clearTimeout(flush.release);
@@ -8492,6 +8508,7 @@ function keyBytes(key, ctrl = false, alt = false, applicationCursor = false) {
   return (alt ? "\x1B" : "") + text;
 }
 var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
+var SIGNAL_BYTES = /* @__PURE__ */ new Set(["", "", ""]);
 function userSequence(text) {
   if (text.length < 3 || text.charCodeAt(0) !== 27) return void 0;
   const csi = /^\x1b\[([0-9;]*)([A-Za-z~])$/.exec(text);
@@ -8791,10 +8808,11 @@ var TerminalKeybar = class {
     return true;
   }
   sendUserInput(data, options = {}) {
-    if (options.afterComposition && this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
+    if (options.afterComposition && !SIGNAL_BYTES.has(data) && this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
     this.emitUserInput(data, options);
   }
-  /** Send an xterm-suppressed physical key after any commit that it could not flush. */
+  /** Send an xterm-suppressed physical key after any commit that it could not
+   *  flush. A terminal signal byte is sent at once instead (SIGNAL_BYTES). */
   sendCustomUserInput(data, physical) {
     this.sendUserInput(data, { physical, afterComposition: true });
   }
@@ -9373,9 +9391,10 @@ var AttachTerminal = class {
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
-        sendInput: (text) => this.keybar.sendCustomUserInput(text, ev),
         // Public Terminal.input(..., true) is xterm's genuine-user-input path:
         // it scrolls to bottom and clears selection, then fires onData above.
+        // The keybar holds ordinary bytes behind a pending IME commit and sends
+        // signal bytes such as the interrupt at once (#4151).
         sendUserInput: (text) => this.keybar.sendCustomUserInput(text, ev)
       });
       if (!accepted) this.keybar.markKeydownSuppressed(ev);
