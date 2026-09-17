@@ -13,7 +13,9 @@ import (
 const afSkillDirName = "agent-factory"
 
 // ambientAgentStoreFiles resolves the files af writes into an agent's own config
-// root, using the ambient (pre-sandbox) environment. That is the SKILL.md that
+// root, using the ambient (pre-sandbox) environment. The paths are a hand-kept
+// copy of session's skill bases, and FencedAgentStoreFiles' drift test is what
+// holds them to production. That is the SKILL.md that
 // ensureAfSkillDir writes under global_agent_skills and removes when that
 // setting is off (session/agentskill.go, session/ampskill.go). A sandboxed
 // package runs with global_agent_skills off, so a test that reaches a real root
@@ -53,6 +55,18 @@ func ambientAgentStoreFiles() []string {
 		}
 	}
 	return files
+}
+
+// FencedAgentStoreFiles is the list the agent-store tripwire guards, resolved
+// from the current environment. It is exported for one consumer: the session
+// package's drift test (TestAgentStoreFenceMatchesWhereLaunchesWriteSkills). That
+// test launches every supported agent through the real create path and fails if
+// af writes a skill file this list does not name, or if the list names a file af
+// no longer writes. This package cannot import session, so that test is what
+// keeps the hand-kept paths above in step with session/agentskill.go and
+// session/ampskill.go.
+func FencedAgentStoreFiles() []string {
+	return ambientAgentStoreFiles()
 }
 
 // agentStoreTripwire snapshots ambientAgentStoreFiles and returns a verify

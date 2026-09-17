@@ -135,6 +135,13 @@ func sandboxUserHome() (func(), error) {
 	// Git and Docker treat these differently when empty. An empty
 	// GIT_CONFIG_GLOBAL makes git read no global file at all, whatever HOME is.
 	// An empty DOCKER_CONFIG falls back to HOME, like Go's.
+	//
+	// A NON-EMPTY GIT_CONFIG_GLOBAL is a known gap, considered and deliberately
+	// left alone (#4508 review). It names the developer's global file
+	// explicitly, so git ignores the sandbox .gitconfig. A test that runs
+	// `git config --global` then writes to that real file. Overriding a variable
+	// the developer set on purpose would be its own bug, and the exposure needs
+	// both that setting and a test that writes global git config.
 	_, hadGitGlobal := os.LookupEnv("GIT_CONFIG_GLOBAL")
 	hadDockerConfig := os.Getenv("DOCKER_CONFIG") != ""
 
