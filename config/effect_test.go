@@ -29,7 +29,15 @@ func TestEffectNoticeIsPerKeyAndHonest(t *testing.T) {
 		t.Errorf("applied-live notice should say it is live now, got %q", applied)
 	}
 
-	pending := EffectNotice("branch_prefix", ApplyOutcome{DaemonApplied: true})
+	// branch_prefix was this row's key until #4539 made each create resolve it
+	// from the live snapshot plus the project's override. It is live now, like
+	// the other keys the next session create reads.
+	prefix := EffectNotice("branch_prefix", ApplyOutcome{DaemonApplied: true})
+	if !strings.Contains(prefix, "using the new value now") {
+		t.Errorf("branch_prefix is read per create, so its notice should say it is live now, got %q", prefix)
+	}
+
+	pending := EffectNotice("debug_pprof", ApplyOutcome{DaemonApplied: true})
 	if !strings.Contains(pending, "next daemon start") {
 		t.Errorf("next-daemon-start notice should defer to the next daemon start, got %q", pending)
 	}

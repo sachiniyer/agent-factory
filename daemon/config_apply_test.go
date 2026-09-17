@@ -115,24 +115,30 @@ func TestApplyConfigReportsCanonicalBackendSettingsApplied(t *testing.T) {
 	}
 }
 
-// TestApplyConfigReportsBranchPrefixPending is the regression for the lie the
-// per-key notice rework caught: branch_prefix is read from the FROZEN startup
-// config in the title-reservation helpers (manager_create.go, deliberately not
-// threaded live), so a change does NOT hot-reload — yet it was reported Applied,
-// telling the user "the daemon is using it now" while the daemon kept deriving
-// branches from the old prefix. It must be Pending.
-func TestApplyConfigReportsBranchPrefixPending(t *testing.T) {
+// TestApplyConfigAppliesBranchPrefixToTheNextCreate: branch_prefix is resolved
+// once per create from the live snapshot plus the project's override (#4539), so
+// a saved change is reported Applied AND the very next create names its branch
+// with it. The report and the behaviour are asserted together on purpose. This
+// test's predecessor pinned a Pending report, which was the honest answer while
+// the create read the frozen startup config; reporting Applied is honest only
+// because the create now reads the value that report describes.
+func TestApplyConfigAppliesBranchPrefixToTheNextCreate(t *testing.T) {
 	m := applyConfigTestManager(t)
+	rec := installBranchPrefixRecorder(t)
+	repoPath := setupControlRepo(t)
 
 	_, err := config.SetGlobalConfigValue("branch_prefix", "test-branch/")
 	require.NoError(t, err)
 
 	result, err := m.ApplyConfig()
 	require.NoError(t, err)
-	require.Contains(t, result.Pending, "branch_prefix",
-		"branch_prefix is read from the frozen startup config, so a change waits for the next daemon start")
-	require.NotContains(t, result.Applied, "branch_prefix",
-		"reporting branch_prefix applied claims a change is live while the daemon still uses the old prefix")
+	require.Contains(t, result.Applied, "branch_prefix",
+		"the next create reads the live snapshot, so a saved branch_prefix is in force without a restart")
+	require.NotContains(t, result.Pending, "branch_prefix")
+
+	require.NoError(t, createWithTitle(m, repoPath, "after-apply"))
+	assert.Equal(t, "test-branch/", rec.prefix(t, "after-apply"),
+		"the create after the apply must name its branch with the applied prefix")
 }
 
 // TestApplyBucketsAgreeWithEffectClasses pins the invariant that keeps the daemon
