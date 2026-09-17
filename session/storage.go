@@ -633,9 +633,12 @@ type TabData struct {
 // TabExitData is the wire form of Tab.Exit: only the fields a reader needs to
 // render or reason about a finished command.
 type TabExitData struct {
-	Status      int       `json:"status,omitempty"`
-	StatusKnown bool      `json:"status_known,omitempty"`
-	At          time.Time `json:"at,omitempty"`
+	Status      int  `json:"status,omitempty"`
+	StatusKnown bool `json:"status_known,omitempty"`
+	// At is omitted, not zero-valued, when tmux reported no death time:
+	// omitempty never omits a struct, and "0001-01-01T00:00:00Z" would present
+	// an invented completion time to every reader (#4506 review).
+	At time.Time `json:"at,omitzero"`
 }
 
 // TabCleanupData is one durable cleanup handle for a closed tab whose tmux

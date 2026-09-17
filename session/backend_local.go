@@ -580,6 +580,12 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 					return &accountTabScopeUnknownError{title: i.Title, tab: tab.Name}
 				}
 				if exists {
+					if tab.Kind == TabKindProcess && tab.Exit == nil {
+						// The stop destroys a held dead pane's status and death
+						// time, which are the only evidence of how the command
+						// ended, so read them first (#4506 review).
+						stampProcessTabExit(i, tab)
+					}
 					if _, err := tab.tmux.CloseAndWaitForPaneExit(); err != nil {
 						return fmt.Errorf("restore account-scoped tab %q for %q: stop the pre-scope process: %w", tab.Name, i.Title, err)
 					}
@@ -797,24 +803,42 @@ func restoreProcessTab(i *Instance, tab *Tab, worktreePath string) {
 	// tmux holds the pane when the command exits and pane_dead records it.
 	tab.tmux.ApplyRemainOnExit()
 	if tab.Exit == nil {
-		if dead, status, statusKnown, at, known := tab.tmux.ProbePaneExit(); known && dead {
-			exit := &TabExit{Status: status, StatusKnown: statusKnown, At: at}
-			i.mu.Lock()
-			for idx, current := range i.Tabs {
-				if current.ID == tab.ID {
-					i.replaceTabFieldLocked(idx, func(copy *Tab) { copy.Exit = exit })
-					// replaceTabFieldLocked touches only on ID/Name/tmux
-					// changes; the exit stamp is itself a mutation to persist.
-					i.touchLocked()
-					break
-				}
-			}
-			i.mu.Unlock()
-		}
+		stampProcessTabExit(i, tab)
 	}
 	if err := tab.tmux.ReattachOnly(worktreePath); err != nil {
 		log.WarningLog.Printf("reattach process tab %q for %q failed: %v", tab.Name, i.Title, err)
 	}
+}
+
+// stampProcessTabExit records a process tab's exit when its pane is observed
+// held dead, and reports whether it did. A stamp is durable evidence discovered
+// while restoring, so it also enrolls the row for the daemon's load checkpoint:
+// nothing else writes a row whose runtime was not replaced, and a reboot before
+// any later mutation would lose the pane and the only record of how its command
+// ended (#4506 review).
+func stampProcessTabExit(i *Instance, tab *Tab) bool {
+	dead, status, statusKnown, at, known := tab.tmux.ProbePaneExit()
+	if !known || !dead {
+		return false
+	}
+	exit := &TabExit{Status: status, StatusKnown: statusKnown, At: at}
+	i.mu.Lock()
+	stamped := false
+	for idx, current := range i.Tabs {
+		if current.ID == tab.ID {
+			i.replaceTabFieldLocked(idx, func(copy *Tab) { copy.Exit = exit })
+			// replaceTabFieldLocked touches only on ID/Name/tmux changes; the
+			// exit stamp is itself a mutation to persist.
+			i.touchLocked()
+			stamped = true
+			break
+		}
+	}
+	i.mu.Unlock()
+	if stamped {
+		i.markLoadRuntimeReplaced()
+	}
+	return stamped
 }
 
 // CloseAttachOnly releases this instance's hold on its tmux sessions — the

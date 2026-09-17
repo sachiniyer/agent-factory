@@ -206,6 +206,13 @@ func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch 
 		if tab.tmux == nil {
 			return fmt.Errorf("cannot switch session %q to account %q because tab %q has no tmux binding to replace", i.Title, name, tab.Name)
 		}
+		if tab.Kind == TabKindProcess {
+			// The swap stops a process tab and never relaunches it (#4479), so its
+			// command is not a replacement command: preflighting it, or refusing
+			// its arguments, would block a swap over something that will not run
+			// (#4506 review). The binding check above is what the stop needs.
+			continue
+		}
 		replacementProgram := tab.tmux.Program()
 		if tab.Kind == TabKindShell {
 			var err error

@@ -146,7 +146,7 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 		if td.ID == "" || td.Exit == nil {
 			continue
 		}
-		exit := &TabExit{Status: td.Exit.Status, StatusKnown: td.Exit.StatusKnown, At: td.Exit.At}
+		exit := tabExitFromData(td.Exit)
 		for idx, t := range i.Tabs {
 			if t.ID == td.ID && !tabExitEqual(t.Exit, exit) {
 				i.replaceTabFieldLocked(idx, func(c *Tab) { c.Exit = exit })
@@ -263,11 +263,7 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 		}
 		// URL rides along for a web tab (a vscode tab has none by design — its target
 		// is resolved at proxy time), or the pane would have nothing to iframe.
-		var exit *TabExit
-		if td.Exit != nil {
-			exit = &TabExit{Status: td.Exit.Status, StatusKnown: td.Exit.StatusKnown, At: td.Exit.At}
-		}
-		tab := &Tab{ID: id, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL, Exit: exit, tmux: ts}
+		tab := &Tab{ID: id, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL, Exit: tabExitFromData(td.Exit), tmux: ts}
 		// Adopt under the write lock, re-checking BOTH the already-present dedupe (a
 		// concurrent reconcile/AddTab may have added this tab while we reconnected
 		// outside the lock) and the teardown fence a Kill/archive can have raised in

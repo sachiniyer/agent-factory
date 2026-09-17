@@ -90,7 +90,7 @@ func TestProcessTabRestoreDeadPaneStampsExit(t *testing.T) {
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			if strings.Contains(strings.Join(c.Args, " "), "pane_dead") {
-				return []byte("1 42 1726000000"), nil
+				return []byte(paneExitAnswer(c, "1", "42", "1726000000")), nil
 			}
 			return nil, nil
 		},

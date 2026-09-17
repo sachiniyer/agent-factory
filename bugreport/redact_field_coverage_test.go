@@ -208,6 +208,10 @@ var unplantableInstanceFields = map[string]string{
 	"PendingTabs[].Kind":                 "same bounded TabKind enum under the staging roster",
 	"Tabs[].Handoffs[].Automatic":        "bool — whether the handoff was automatic rather than user-initiated",
 	"PendingTabs[].Handoffs[].Automatic": "same handoff bool under the staging roster",
+	"Tabs[].Exit.Status":                 "exit code tmux reported for a finished process tab (#4479); machine-minted int",
+	"PendingTabs[].Exit.Status":          "same machine-minted exit code under the staging roster",
+	"Tabs[].Exit.StatusKnown":            "bool — whether tmux reported an exit code at all",
+	"PendingTabs[].Exit.StatusKnown":     "same exit-code bool under the staging roster",
 	"TabKinds[].Allowed":                 "bool — whether this backend admits the kind (#3060)",
 }
 

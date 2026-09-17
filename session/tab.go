@@ -198,6 +198,23 @@ type TabExit struct {
 	At          time.Time
 }
 
+// tabExitFromData and data convert between Tab.Exit and its wire form; nil
+// maps to nil both ways. Every roster rebuild — load, reconcile, the root
+// heal's carry — goes through them, so none can drop the field (#4506 review).
+func tabExitFromData(d *TabExitData) *TabExit {
+	if d == nil {
+		return nil
+	}
+	return &TabExit{Status: d.Status, StatusKnown: d.StatusKnown, At: d.At}
+}
+
+func (e *TabExit) data() *TabExitData {
+	if e == nil {
+		return nil
+	}
+	return &TabExitData{Status: e.Status, StatusKnown: e.StatusKnown, At: e.At}
+}
+
 // Tab is one slot in an instance's tab roster (#930): the Agent tab at Tabs[0]
 // and any shell/process tabs each run a process backed by their own tmux
 // session, while web and VS Code tabs carry no tmux PTY (TabKind.HasTmux). The
