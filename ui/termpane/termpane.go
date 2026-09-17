@@ -67,14 +67,6 @@ const (
 	// pane when its binding disappears, so this loop never needs its own give-up.
 	reconnectMinBackoff = 50 * time.Millisecond
 	reconnectMaxBackoff = 3 * time.Second
-
-	// paneSpawnCols/paneSpawnRows are the size an af tmux window comes up at:
-	// new-session carries no -x/-y, so the server's default-size (80x24) applies
-	// until a size owner asserts otherwise. A viewer's emulator starts here; the
-	// broker's authoritative echo corrects it the moment a driving surface has
-	// established a different size (#4480).
-	paneSpawnCols = 80
-	paneSpawnRows = 24
 )
 
 // EventKind discriminates a stream Event between output bytes, a resize echo, a
@@ -220,14 +212,17 @@ type TermPane struct {
 // happens on the run goroutine, so a not-yet-ready session self-heals via
 // reconnect rather than failing construction.
 //
-// The pane starts a VIEWER (#4480): the emulator begins at the pane's spawn
-// size and tracks the authoritative echoes rather than the box, and no RESIZE
-// frame is ever written until SetSizeOwner promotes the pane to driving.
+// The pane starts a VIEWER (#4480): the emulator begins at the view box — the
+// only geometry the client knows until the first authoritative echo lands. The
+// broker measures the pane's real size on the capture path, so even a pane
+// nobody ever drove (a custom tmux default-size) sizes its viewers correctly.
+// No RESIZE frame is ever written until SetSizeOwner promotes the pane to
+// driving.
 func New(dial Dialer, width, height int) *TermPane {
 	width, height = clampSize(width, height)
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &TermPane{
-		emu:           vt.NewEmulator(paneSpawnCols, paneSpawnRows),
+		emu:           vt.NewEmulator(width, height),
 		cursorVisible: true,
 		mouseModes:    make(map[ansi.Mode]bool),
 		width:         width,
@@ -394,9 +389,11 @@ func (t *TermPane) readStream(stream Stream) {
 			t.cursor = ev.Seq
 			t.connMu.Unlock()
 		case EventResize:
-			// Authoritative echo: reflow the emulator to the server's size. We drive
-			// the size, so this normally matches wantCols/wantRows; applying it
-			// anyway honors a size the server clamped (e.g. an old tmux).
+			// Authoritative echo: reflow the emulator to the pane's real size.
+			// An owner's echo normally matches wantCols/wantRows (applying it
+			// anyway honors a size the server clamped); a viewer's carries
+			// whatever the driving surface — or the capture path's pane
+			// measurement — established.
 			t.gridMu.Lock()
 			t.emu.Resize(int(ev.Cols), int(ev.Rows))
 			t.gridMu.Unlock()

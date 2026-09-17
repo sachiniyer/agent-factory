@@ -298,11 +298,19 @@ func (b *ptyBroker) armRecoveryRepaintLocked() []*ptySub {
 // the subscribers — the restarted capture's next live byte still reaches them — rather
 // than failing the recovery. Caller holds captureMu.
 func (b *ptyBroker) recoveryRepaint() *repaintSnapshot {
+	b.mu.Lock()
+	genBefore := b.resizeGen
+	b.mu.Unlock()
 	snap, err := b.ch.Snapshot()
 	if err != nil {
 		log.WarningLog.Printf("pty broker: snapshot for recovery re-seed: %v", err)
 		return nil
 	}
+	// A pane-replacing recovery just cleared hasSize — the re-spawned pane's
+	// measured size is what the snapshot reports, so subscribers learn the fresh
+	// pane's real geometry (custom default-size included) with the repaint
+	// (#4480). A remote re-dial keeps its size and reports no dims — a no-op.
+	b.adoptSnapshotSize(snap, genBefore)
 	if !snapshotHasRepaintState(snap) {
 		return nil
 	}

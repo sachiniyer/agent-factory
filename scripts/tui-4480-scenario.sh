@@ -137,5 +137,36 @@ af_send_to_pane 'echo FINAL_4480'
 af_wait_for 'FINAL_4480'
 af_exit_interactive
 
+# --- custom spawn size: a never-driven viewer must render the pane's REAL ---
+# --- size, learned on the capture path — not an assumed 80x24            ---
+# tmux's default-size is user-configurable; with `default-size 200x60` the next
+# session's window spawns at 200x60 and NO af surface ever writes a RESIZE for
+# it. The viewer must learn that geometry from the capture path — a guessed
+# emulator size would reflow the screen wrong for as long as it is watched
+# (#4480 review).
+tmux set-option -g default-size 200x60
+af_new_instance gamma
+SESS="$(tmux list-sessions -F '#{session_name}' | grep -E '_gamma$' | head -1)"
+[ -n "$SESS" ] || { _af_fail "no af_gamma tmux session"; exit 1; }
+af_select gamma
+af_open_pane
+assert_size_is "200x60" "embedded viewer must not resize a 200x60 spawn"
+
+# Input at the tmux layer (send-keys is not a size writer): the pane's own
+# program produces the content the viewer must render at 200x60. The marker
+# strings are built by %s%s so the echoed command line itself never contains
+# them — only a real cursor-positioned write can put them on screen.
+tmux send-keys -t "$SESS" 'printf "\033[45;1H%s%s" RO W45_4480; printf "\033[50;1H%s%s" RO W50_4480; printf "G%.0s" $(seq 1 150); echo GAMMA_WIDE_4480' Enter
+af_wait_for 'GAMMA_WIDE_4480'
+# A 24-row emulator would clamp both CSI moves onto its last row, so the second
+# write would overwrite the first — BOTH markers surviving inside the ~19-row
+# crop (which ends at the cursor, ~row 52) proves the emulator is 60 rows tall.
+# The 150-char run clipped with `…` at the ~62-col box edge proves it is 200
+# cols wide — an 80-wide emulator would wrap it into rows that fit unmarked.
+af_wait_for 'ROW45_4480'
+af_wait_for 'ROW50_4480'
+af_wait_for 'G{10,}…'
+assert_size_is "200x60" "viewer-only session must keep its 200x60 spawn size"
+
 af_assert_no_orphan_clients
-printf 'PASS #4480 single-owner pane size: viewers never resize, owners assert, crops mark clips\n'
+printf 'PASS #4480 single-owner pane size: viewers never resize, owners assert, crops mark clips, spawn size measured\n'

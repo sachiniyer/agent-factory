@@ -198,6 +198,7 @@ func TestResizeSendsResizeFrame(t *testing.T) {
 // follow the viewer's box change.
 func TestViewerResizeNeverSendsFrame(t *testing.T) {
 	tp, s := newSingleStreamPane(t, 80, 24)
+	s.feedResize(24, 80) // rows, cols — the pane's authoritative size arrives as an echo
 	s.feed("viewer-marker")
 	waitForRender(t, tp, 80, 24, "viewer-marker")
 
@@ -210,13 +211,40 @@ func TestViewerResizeNeverSendsFrame(t *testing.T) {
 	}, 500*time.Millisecond, 10*time.Millisecond,
 		"a viewer's Resize must never write a RESIZE frame — watching a session must not reflow it (#4480)")
 
-	// The emulator keeps the pane's authoritative size (spawn 80x24 here), so a
+	// The emulator keeps the pane's authoritative 80x24 (the echo above), so a
 	// 40-wide box shows a CROP: the long row is clipped, not re-wrapped.
 	s.feed("\r\n" + strings.Repeat("q", 60))
 	require.Eventually(t, func() bool {
 		return strings.Contains(plainRender(tp, 40, 8), strings.Repeat("q", 39)+"…")
 	}, 2*time.Second, 10*time.Millisecond,
 		"a wider authoritative row must clip with the … marker at the view's edge")
+}
+
+// A viewer that never drives still ends up at the pane's REAL size: the
+// emulator starts at the view box — the only geometry known at construction,
+// NOT an assumed spawn size — and the authoritative echo re-windows it to
+// whatever the capture measured, so a custom-default-size pane (e.g. 200x60)
+// sizes its viewers correctly (#4480 review).
+func TestViewerFollowsTheMeasuredPaneSize(t *testing.T) {
+	tp, s := newSingleStreamPane(t, 40, 10)
+	tp.gridMu.RLock()
+	w, h := tp.emu.Width(), tp.emu.Height()
+	tp.gridMu.RUnlock()
+	require.Equal(t, [2]int{40, 10}, [2]int{w, h},
+		"the emulator starts at the view box — the only geometry known until the echo lands")
+
+	s.feedResize(60, 200) // rows, cols — the pane's measured size
+	require.Eventually(t, func() bool {
+		tp.gridMu.RLock()
+		defer tp.gridMu.RUnlock()
+		return tp.emu.Width() == 200 && tp.emu.Height() == 60
+	}, 2*time.Second, 10*time.Millisecond,
+		"the emulator must re-window to the pane's measured 200x60 on the echo")
+	require.Never(t, func() bool {
+		_, ok := s.lastResize()
+		return ok
+	}, 300*time.Millisecond, 10*time.Millisecond,
+		"learning the pane's size is an echo, not a frame — the viewer stays silent")
 }
 
 // TestSetSizeOwnerAssertsViewBox pins the promotion contract: an interactive

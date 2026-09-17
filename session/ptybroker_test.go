@@ -61,6 +61,13 @@ type fakeClientlessChannel struct {
 	// no repaint when the snapshot cannot be taken, so the ring replay is the only
 	// thing left to render the pane.
 	snapshotErr error
+	// snapshotRows/snapshotCols/snapshotHasSize are the canned pane dimensions
+	// Snapshot reports — the test stand-in for tmux's #{pane_height}/#{pane_width}
+	// on a pane nobody ever resized (#4480). hasSize false means the channel
+	// cannot report dimensions (the remote preview shape).
+	snapshotRows    uint16
+	snapshotCols    uint16
+	snapshotHasSize bool
 	// snapshotHook, when non-nil, runs at the START of each Snapshot with f.mu NOT
 	// held. The real Snapshot is a `tmux capture-pane` exec taking milliseconds, and
 	// the pane keeps producing the whole time; the hook is how a test drives output
@@ -191,6 +198,9 @@ func (f *fakeClientlessChannel) Snapshot() (PaneSnapshot, error) {
 		HasCursor: f.hasCursor,
 		Modes:     f.modes,
 		HasModes:  f.hasModes,
+		Rows:      f.snapshotRows,
+		Cols:      f.snapshotCols,
+		HasSize:   f.snapshotHasSize,
 	}, nil
 }
 
@@ -302,6 +312,77 @@ func TestPTYBrokerInitialRepaint(t *testing.T) {
 	}
 	ch.emit(t, []byte("live"))
 	mustData(t, re, "live")
+}
+
+// A pane nobody ever drove still has a real size: tmux spawns it at the
+// server's default-size, which is user-configurable (e.g. `default-size
+// 200x60`). The capture path measures #{pane_width}/#{pane_height}, so a fresh
+// subscriber's FIRST event must be the authoritative echo of the pane's actual
+// dimensions — ahead of the repaint. Without it a viewer's emulator stays at
+// whatever geometry it happened to start with for as long as the session lives
+// (#4480 review).
+func TestPTYBrokerFreshSubscriberLearnsThePaneSize(t *testing.T) {
+	ch := &fakeClientlessChannel{
+		snapshot:        []byte("prompt$ "),
+		snapshotRows:    60,
+		snapshotCols:    200,
+		snapshotHasSize: true,
+	}
+	br := newPTYBroker(ch)
+
+	sub, err := br.subscribe(0) // fresh live-tail subscriber
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("initial NextEvent: %v", err)
+	}
+	if ev.Kind != PTYResize || ev.Rows != 60 || ev.Cols != 200 {
+		t.Fatalf("initial event = %+v, want the pane's measured 60x200 size echo before any content", ev)
+	}
+	ev, err = nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("second NextEvent: %v", err)
+	}
+	if ev.Kind != PTYRepaint {
+		t.Fatalf("second event = %+v, want the repaint after the size echo", ev)
+	}
+	// The pane was OBSERVED, not resized: learning the spawn size must not write
+	// a resize-window — adoption is the broker's belief catching up to tmux, not
+	// another driving surface.
+	if len(ch.resizes) != 0 {
+		t.Fatalf("adopting the measured pane size wrote %v to the pane, want no resize-window", ch.resizes)
+	}
+}
+
+// The snapshot exec runs without b.mu held, so a RESIZE frame can land while
+// tmux is being queried. That frame is NEWER authority than dims captured
+// before it — the stale observation must be dropped, not recorded over the
+// winning size (the stale-dimensions family this issue is about).
+func TestPTYBrokerResizeDuringSnapshotBeatsTheMeasuredSize(t *testing.T) {
+	ch := &fakeClientlessChannel{
+		snapshot:        []byte("prompt$ "),
+		snapshotRows:    60,
+		snapshotCols:    200,
+		snapshotHasSize: true,
+	}
+	br := newPTYBroker(ch)
+	// A driving surface asserts its size WHILE the subscribe snapshot is in
+	// flight — the tmux read already returned the pre-resize 60x200.
+	ch.snapshotHook = func() { _ = br.resize(40, 100) }
+
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("initial NextEvent: %v", err)
+	}
+	if ev.Kind != PTYResize || ev.Rows != 40 || ev.Cols != 100 {
+		t.Fatalf("initial event = %+v, want the mid-capture resize frame's 40x100 — not the stale 60x200 it superseded", ev)
+	}
 }
 
 // TestPTYBrokerFreshSubscriberGetsSizeBeforeRepaint pins the #4480 ordering: a

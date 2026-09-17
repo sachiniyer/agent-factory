@@ -94,6 +94,16 @@ type PaneSnapshot struct {
 	// primary-screen snapshot from a source that cannot report modes.
 	Modes    terminal.Modes
 	HasModes bool
+	// Rows/Cols are the pane's REAL dimensions measured by the capture — the one
+	// place a pane nobody ever drove exposes its geometry: tmux spawns it at the
+	// server's default-size (80x24 stock, but user-configurable — e.g. 200x60),
+	// and with no driving surface no RESIZE frame ever reports the truth
+	// (#4480). HasSize distinguishes a measured pane from a source that cannot
+	// report dimensions (the remote REST preview), which leaves them zero; when
+	// set, both fit a uint16.
+	Rows    uint16
+	Cols    uint16
+	HasSize bool
 }
 
 // repaintSnapshot is one atomic broker event: the grid repaint plus the terminal
@@ -387,16 +397,57 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// flight, skipped for a repaint that never arrived, so the new terminal renders
 	// blank or truncated until unrelated output happens along.
 	if needRepaint {
-		if snap, err := b.ch.Snapshot(); err == nil && snapshotHasRepaintState(snap) {
-			rp := buildRepaintSnapshot(snap)
-			b.mu.Lock()
-			sub.cursor = repaintTail
-			sub.pendingRepaint = &rp
-			b.mu.Unlock()
-			sub.wake()
+		// resizeGen sampled BEFORE the capture so adoptSnapshotSize can tell a
+		// resize frame that landed while tmux was being queried from dims the
+		// capture measured first — the frame is the newer authority.
+		b.mu.Lock()
+		genBefore := b.resizeGen
+		b.mu.Unlock()
+		if snap, err := b.ch.Snapshot(); err == nil {
+			// The measured pane size is authoritative even when nobody has ever
+			// driven a resize: a pane spawned under a custom default-size (e.g.
+			// 200x60) otherwise keeps every viewer at a guessed size for as long
+			// as it is only watched (#4480).
+			b.adoptSnapshotSize(snap, genBefore)
+			if snapshotHasRepaintState(snap) {
+				rp := buildRepaintSnapshot(snap)
+				b.mu.Lock()
+				sub.cursor = repaintTail
+				sub.pendingRepaint = &rp
+				b.mu.Unlock()
+				sub.wake()
+			}
 		}
 	}
 	return sub, nil
+}
+
+// adoptSnapshotSize records the pane's measured dimensions as the broker's
+// authoritative size. The capture path is the ONLY way a pane nobody ever drove
+// gets its geometry known: tmux spawns it at the server's default-size (80x24
+// stock, but user-configurable), and with no driving surface no RESIZE frame
+// ever teaches subscribers the truth — the snapshot's measurement is the only
+// place it exists (#4480). genBefore is resizeGen sampled before the Snapshot
+// exec began; a resize frame that landed while tmux was being queried is newer
+// authority than dims captured before it, so that stale observation is dropped.
+// Adopting never resizes the pane — the broker's belief is catching up to tmux,
+// not another surface driving it.
+func (b *ptyBroker) adoptSnapshotSize(snap PaneSnapshot, genBefore uint64) {
+	if !snap.HasSize {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.resizeGen != genBefore {
+		return
+	}
+	if b.hasSize && b.rows == snap.Rows && b.cols == snap.Cols {
+		return
+	}
+	b.rows, b.cols = snap.Rows, snap.Cols
+	b.hasSize = true
+	b.resizeGen++
+	b.wakeAllLocked()
 }
 
 // buildRepaint turns a GRID-form pane snapshot (see PaneSnapshot) into bytes that
