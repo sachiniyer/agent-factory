@@ -7779,6 +7779,162 @@ test("#1815 review: a retained layout follows its tab when the roster changes wh
   await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
 });
 
+// The focus-desync regression that #1815 made reachable: an out-of-band roster close
+// of the identity bound to the FOCUSED pane rebuilds that pane's AttachTerminal while
+// the keyboard is attached to it. reconcile() disposes the DOM-focused terminal and
+// constructs a new one, but the disposed terminal's blur is suppressed (terminal.ts
+// sets stopped before xterm tears the textarea down), so no onFocusChange(false)
+// corrects store.focus — it stays "terminal" while DOM focus falls back to
+// document.body, and rail-mode keys (j/k, digits, t, w, Enter, Escape-as-interrupt)
+// are silently swallowed by decideKey's `ctx.focus === "terminal"` → kind:"none"
+// branch. The three #1815 review tests above cover the UNAFFECTED paths (the focused
+// leaf's identity survives); this one stages the affected one — the closed identity
+// IS the focused pane's — and asserts the keyboard model stays in sync with the DOM.
+test("#1815 focus: an out-of-band close of the focused pane's bound identity keeps the keyboard attached (no desync)", REAL_FIXTURE, async () => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, "sessions", ...args], { stdio: "pipe" });
+  };
+
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  const active = page.locator(".af-tab.af-tab-active .af-tab-label");
+
+  // Reset SESSION_A to its single unclosable Agent tab first. The suite is serial and
+  // earlier flows leave their own tabs on this session, so the pane clamps onto an
+  // UNPREDICTABLE surviving tab when f1 closes — and with it the focus outcome
+  // (terminal if the survivor is a PTY tab, rail if it is a web tab). Starting from
+  // just Agent makes arithmetic deterministic: create f1 → [Agent, f1]; close f1 and
+  // the leaf clamps onto Agent (a terminal), which is the case this test pins.
+  await resetToAgentTab(page);
+  const baseline = 1;
+
+  // A PROCESS tab so the focused pane can bind a closable terminal identity. (A web
+  // tab's pane is an iframe that swallows the mousedown the pane focus handler listens
+  // for, so it cannot be the attach target that establishes the terminal-mode precondition.)
+  af("tab-create", SESSION_A, "--command", "sleep 300", "--name", "f1");
+  await expect(tabbar.locator(".af-tab", { hasText: "f1" })).toHaveCount(1, { timeout: 30_000 });
+
+  // Rebind the FOCUSED pane to f1 by selecting its tab, then attach the keyboard to
+  // f1's terminal by clicking into the pane. Clicking the tab blurs the prior terminal
+  // (→ rail); the pane click re-focuses f1's textarea (→ terminal), which is exactly
+  // the keyboard-attached state the bug bites in.
+  await tabbar.locator(".af-tab", { hasText: "f1" }).locator(".af-tab-label").click();
+  await expect(active).toHaveText("f1");
+  const pane = page.locator(".af-term-host .af-pane");
+  await pane.locator(".af-pane-host").click();
+  await expect(page.locator(".af-app.af-kb-terminal"), "the keyboard must be attached to f1's terminal").toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.className ?? ""), {
+      message: "f1's xterm textarea must hold DOM focus going into the out-of-band close",
+      timeout: 10_000,
+    })
+    .toContain("xterm-helper-textarea");
+
+  // Another client closes f1 out-of-band. #1815 delivers the roster change LIVE, so
+  // reconcile rebuilds the focused pane (f1 → Agent, the only remaining tab) while the
+  // keyboard is attached — the exact silent window the bug report describes.
+  af("tab-delete", SESSION_A, "--name", "f1");
+  await expect(tabbar.locator(".af-tab", { hasText: "f1" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(active, "the focused pane follows the roster onto Agent").toHaveText("Agent");
+
+  // THE FIX: the rebuilt terminal re-takes DOM focus, so store.focus="terminal" is
+  // TRUE against the new textarea rather than pinned against document.body. Pre-fix
+  // this was the desync — af-kb-terminal visible while document.activeElement was BODY
+  // — and every rail key was swallowed. The active element must be the focused pane's
+  // xterm textarea (the keyboard model matches reality).
+  await expect(page.locator(".af-app.af-kb-terminal"), "terminal mode is real, not stale").toBeVisible();
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const el = document.activeElement;
+          // The focused pane's textarea, not body: the rebuilt terminal holds the keyboard.
+          return el && el.classList.contains("xterm-helper-textarea")
+            ? "xterm"
+            : el?.tagName ?? "";
+        }),
+      {
+        message:
+          "the rebuilt terminal's textarea must hold DOM focus — pre-fix this was BODY (store.focus=\"terminal\" with no focused terminal)",
+        timeout: 15_000,
+      },
+    )
+    .toBe("xterm");
+
+  // The bar is back to its baseline (f1 was the only tab this test created).
+  await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
+});
+
+// The symmetric web-pane outcome: when the focused pane rebuilds onto a WEB tab (no
+// terminal to hand the keyboard to), the fix reports the focus loss itself so
+// store.focus lands on "rail" — the right mode when the focused pane ceases to be a
+// terminal — rather than staying pinned on a dead "terminal" that swallows rail keys.
+test("#1815 focus: an out-of-band close that turns the focused pane into a web tab corrects to rail mode", REAL_FIXTURE, async () => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, "sessions", ...args], { stdio: "pipe" });
+  };
+
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  const active = page.locator(".af-tab.af-tab-active .af-tab-label");
+
+  // Reset SESSION_A to just Agent so the ordinal arithmetic is deterministic (serial
+  // suite; earlier flows leave their own tabs). [Agent, w1, p1]: focus lands on p1
+  // (a process terminal the keyboard can attach to). Closing p1 out-of-band leaves
+  // [Agent, w1]; the focused leaf's ordinal 2 clamps to 1, which is w1 — a WEB tab —
+  // so reconcile rebuilds the focused pane from a terminal into an iframe.
+  await resetToAgentTab(page);
+  const baseline = 1;
+  af("tab-create", SESSION_A, "--kind", "web", "--url", WEBTAB_EXTERNAL_URL, "--name", "w1");
+  await expect(tabbar.locator(".af-tab", { hasText: "w1" })).toHaveCount(1, { timeout: 15_000 });
+  af("tab-create", SESSION_A, "--command", "sleep 300", "--name", "p1");
+  await expect(tabbar.locator(".af-tab", { hasText: "p1" })).toHaveCount(1, { timeout: 30_000 });
+
+  await tabbar.locator(".af-tab", { hasText: "p1" }).locator(".af-tab-label").click();
+  await expect(active).toHaveText("p1");
+  const pane = page.locator(".af-term-host .af-pane");
+  await pane.locator(".af-pane-host").click();
+  await expect(page.locator(".af-app.af-kb-terminal"), "the keyboard must be attached to p1's terminal").toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.className ?? ""), {
+      message: "p1's xterm textarea must hold DOM focus going into the out-of-band close",
+      timeout: 10_000,
+    })
+    .toContain("xterm-helper-textarea");
+
+  // Close p1 out-of-band; the focused pane's ordinal clamps onto w1 (a web tab).
+  af("tab-delete", SESSION_A, "--name", "p1");
+  await expect(tabbar.locator(".af-tab", { hasText: "p1" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(active, "the focused pane follows the roster onto w1").toHaveText("w1");
+
+  // THE FIX: the focused pane is now a web pane (no terminal), so the fix reports the
+  // focus loss and store.focus lands on "rail". DOM focus fell back to document.body
+  // (the disposed terminal's blur was suppressed), and rail mode is the correct match —
+  // rail keys now work, instead of being swallowed by a stale "terminal" claim.
+  await expect(page.locator(".af-app.af-kb-rail"), "a focused web pane must land in rail mode, not a stale terminal").toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.tagName ?? ""), {
+      message: "DOM focus fell back to body, and rail mode is the honest match for it",
+      timeout: 15_000,
+    })
+    .toBe("BODY");
+
+  // Restore the bar to its baseline.
+  af("tab-delete", SESSION_A, "--name", "w1");
+  await expect(tabbar.locator(".af-tab", { hasText: "w1" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
+});
+
 // --- PWA: favicon, theme-color, manifest, service worker, install (feat) --------
 //
 // These run in their OWN context rather than on the shared serial `page`, because a
