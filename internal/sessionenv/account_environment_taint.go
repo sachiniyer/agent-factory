@@ -53,9 +53,9 @@ func wordHasCommandSubstitution(word syntax.Node) bool {
 // and compound assignments like `CODEX_HOME+=1` are also detected.
 //
 // The check parses the string as a bash arithmetic expression and walks the
-// resulting AST for assignment nodes whose target is a denied name. Any
-// expression that cannot be parsed is treated as potentially hazardous and
-// causes the check to return true.
+// resulting AST for assignment nodes whose target is a denied name. A string
+// that is not valid arithmetic cannot perform an arithmetic assignment, so
+// parse failure is treated as not hazardous.
 func literalContainsDeniedArithAssignment(value string, names map[string]struct{}) bool {
 	if len(names) == 0 {
 		return false
