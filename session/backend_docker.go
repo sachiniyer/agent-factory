@@ -509,6 +509,15 @@ func (p *dockerProvisioner) runContainer() error {
 		// agent's config root is explicit, but the non-root agent-server still needs
 		// its writable runtime home, so make this execution invariant win last.
 		args = append(args, "-e", "HOME="+p.sessionHome())
+	} else if len(p.credentialMounts) > 0 {
+		// For credential-mount sessions, credential files are mounted at paths
+		// relative to dockerContainerHome (/root). docker.run_args is repo-controlled
+		// and is appended above with no later af env to dominate it, so a repo entry
+		// setting HOME=/tmp/x would redirect agents whose credential lookup is
+		// HOME-relative (e.g. opencode reads $HOME/.local/share/opencode/auth.json)
+		// away from the mounted file. Re-asserting HOME last closes the same gap
+		// the account path closes with its own re-assertion.
+		args = append(args, "-e", "HOME="+p.sessionHome())
 	}
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
 
