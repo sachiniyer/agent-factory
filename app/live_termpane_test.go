@@ -25,7 +25,10 @@ type fakeLiveTerm struct {
 	keys []string
 	// mice records every event forwarded through SendMouse with its grid-local
 	// coordinates (#1024 R4 interactive forwarding).
-	mice       []forwardedMouse
+	mice []forwardedMouse
+	// sizeOwner records the ownership flag SetSizeOwner last drove — the #4480
+	// invariant is that exactly the focused interactive attachment is true.
+	sizeOwner  bool
 	modes      terminal.Modes
 	modesKnown bool
 }
@@ -62,6 +65,8 @@ func (f *fakeLiveTerm) SendMouse(msg tea.MouseMsg, x, y int) bool {
 func (f *fakeLiveTerm) TerminalModes() (terminal.Modes, bool) {
 	return f.modes, f.modesKnown
 }
+
+func (f *fakeLiveTerm) SetSizeOwner(on bool) { f.sizeOwner = on }
 
 // stubLiveTermFactory points the attachment seam at fake attachments and returns
 // the created fakes + the session titles they were created for.
@@ -326,4 +331,70 @@ func TestLiveBindKeyChangesWhenTabIdentitySwapsAtSameOrdinal(t *testing.T) {
 
 	assert.NotEqual(t, keyA, keyB,
 		"a different tab identity at the same ordinal must force a rebind")
+}
+
+// TestInteractiveOwnsFocusedPaneSize pins the #4480 ownership invariant:
+// exactly the focused INTERACTIVE attachment may write RESIZE frames — every
+// other attachment is a pure viewer whose layout changes are render-only. Enter
+// promotes the focused pane's attachment; exit demotes without pushing the
+// viewer box back onto the session.
+func TestInteractiveOwnsFocusedPaneSize(t *testing.T) {
+	h, inst := liveTestHome(t)
+	p0 := h.focusedOpenPane()
+	require.NotNil(t, p0)
+	p1 := openTestPane(t, h, inst, 1) // second pane; becomes focused
+
+	fakes, _ := stubLiveTermFactory(t)
+	h.syncLiveTermPane()
+	require.Len(t, *fakes, 2, "both visible panes must bind")
+	for _, f := range *fakes {
+		assert.False(t, f.sizeOwner, "no attachment owns the size before interactive")
+	}
+
+	// Enter interactive on the focused pane (p1): it owns, the other viewer does not.
+	h.setInteractive(true)
+	focused := h.focusedOpenPane()
+	require.NotNil(t, focused)
+	require.Equal(t, p1.ID(), focused.ID())
+	focusedAttachment := h.liveTerms[focused.ID()].(*fakeLiveTerm)
+	var other *fakeLiveTerm
+	for _, f := range *fakes {
+		if f != focusedAttachment {
+			other = f
+		}
+	}
+	require.NotNil(t, other)
+	assert.True(t, focusedAttachment.sizeOwner, "the focused interactive attachment owns the size")
+	assert.False(t, other.sizeOwner, "a non-focused attachment stays a viewer")
+
+	// Leaving interactive demotes without a size write — local-only.
+	h.setInteractive(false)
+	assert.False(t, focusedAttachment.sizeOwner, "leaving interactive must drop ownership")
+	assert.False(t, other.sizeOwner)
+}
+
+// TestInteractiveRebindKeepsOwnership covers the drift path reconcileSizeOwners
+// exists for: a pane rebound mid-interaction (bind-key change swaps the
+// attachment object) must have its NEW attachment promoted on the next sync —
+// a fresh subscription starts as a viewer.
+func TestInteractiveRebindKeepsOwnership(t *testing.T) {
+	h, inst := liveTestHome(t)
+	fakes, _ := stubLiveTermFactory(t)
+	h.syncLiveTermPane()
+	require.Len(t, *fakes, 1)
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+
+	h.setInteractive(true)
+	assert.True(t, (*fakes)[0].sizeOwner)
+
+	// Force a rebind while interactive: the tab adopts its stable id (#1779),
+	// which changes the bind key and swaps the attachment object.
+	inst.Tabs[0].ID = "adopted-id"
+	h.syncLiveTermPane()
+
+	require.Len(t, *fakes, 2, "the rebind must swap in a fresh attachment")
+	assert.True(t, (*fakes)[0].closed)
+	assert.True(t, (*fakes)[1].sizeOwner,
+		"the replacement attachment must be promoted — interactive mode outlives the rebind")
 }

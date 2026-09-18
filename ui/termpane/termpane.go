@@ -8,8 +8,17 @@
 // and the authoritative resize echo reflows that grid. Render turns the grid into
 // an ANSI-styled block the TUI places inside a pane rect — no full-screen takeover.
 // Interactive keystrokes and mouse events are encoded by the same emulator and
-// sent back as INPUT frames; Resize sends a RESIZE frame (last-resize-wins,
-// server-side). Close ends the subscription only; the session keeps running.
+// sent back as INPUT frames. Close ends the subscription only; the session keeps
+// running.
+//
+// RESIZE frames are reserved for the pane's size OWNER — the surface the user
+// is driving through (#4480). A TermPane starts a VIEWER: it never writes a
+// RESIZE, its emulator tracks the pane's authoritative size via the broker's
+// echoes, and Render shows a crop of that grid when the view box is smaller.
+// SetSizeOwner promotes the pane to driving — only the focused interactive
+// pane does this — after which Resize re-windows the emulator AND asserts the
+// box to the server (last-resize-wins). The split is what keeps merely
+// watching a session from reflowing its scrollback on every layout change.
 //
 // The structural reliability win over the old tmux attach client (§6): the stream
 // is fanned from the daemon's clientless capture through a bounded ring buffer, so
@@ -30,6 +39,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -175,7 +185,13 @@ type TermPane struct {
 	connMu             sync.Mutex
 	stream             Stream // current live stream; nil while (re)connecting
 	wantRows, wantCols uint16 // desired size, (re)asserted on each connect
-	cursor             uint64 // absolute output cursor for ?since replay
+	// ownsSize marks this subscription the pane's size driver (#4480): only an
+	// owner writes RESIZE frames (Resize/connect-time assert), and only an owner
+	// re-windows the emulator to the view box. A viewer's emulator tracks the
+	// authoritative echoes instead, so watching a session never reflows it. Set
+	// via SetSizeOwner on the event loop; read here by the run/read goroutines.
+	ownsSize bool
+	cursor   uint64 // absolute output cursor for ?since replay
 
 	// resizeMu serializes the two RESIZE senders — Resize() and the run loop's
 	// per-connect re-assert — so that reading the desired size and writing it is
@@ -191,10 +207,17 @@ type TermPane struct {
 	closeOnce sync.Once
 }
 
-// New starts a live pane at the given grid size, dialing the stream through dial.
-// It returns immediately — the first dial (and any reconnect) happens on the run
-// goroutine, so a not-yet-ready session self-heals via reconnect rather than
-// failing construction.
+// New starts a live pane whose VIEW box is the given size, dialing the stream
+// through dial. It returns immediately — the first dial (and any reconnect)
+// happens on the run goroutine, so a not-yet-ready session self-heals via
+// reconnect rather than failing construction.
+//
+// The pane starts a VIEWER (#4480): the emulator begins at the view box — the
+// only geometry the client knows until the first authoritative echo lands. The
+// broker measures the pane's real size on the capture path, so even a pane
+// nobody ever drove (a custom tmux default-size) sizes its viewers correctly.
+// No RESIZE frame is ever written until SetSizeOwner promotes the pane to
+// driving.
 func New(dial Dialer, width, height int) *TermPane {
 	width, height = clampSize(width, height)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -283,7 +306,12 @@ func (t *TermPane) run() {
 
 		// (Re)assert our desired size so the server sizes this tab's window to us —
 		// the pane may have resized while we were disconnected (last-resize-wins).
-		t.assertSize(stream)
+		// Only the size OWNER writes: a viewer's RESIZE on every (re)connect is a
+		// reflow the user can see in scrollback for a surface they are not driving
+		// through (#4480).
+		if t.sizeOwner() {
+			t.assertSize(stream)
+		}
 
 		t.readStream(stream)
 
@@ -342,6 +370,13 @@ func (t *TermPane) readStream(stream Stream) {
 				t.invalidateTerminalModesLocked()
 			}
 			t.gridMu.Unlock()
+			// A mid-stream repaint means the pane was re-spawned behind us — back
+			// at its spawn size while the broker's recorded size died with the old
+			// window. The owner re-asserts the box so the fresh pane is driven back
+			// to what the user is looking at (#4480); a viewer stays silent.
+			if t.sizeOwner() {
+				t.assertSize(stream)
+			}
 		case EventCursor:
 			t.gridMu.Lock()
 			t.observeTerminalCursorLocked(openingCursor)
@@ -354,9 +389,11 @@ func (t *TermPane) readStream(stream Stream) {
 			t.cursor = ev.Seq
 			t.connMu.Unlock()
 		case EventResize:
-			// Authoritative echo: reflow the emulator to the server's size. We drive
-			// the size, so this normally matches wantCols/wantRows; applying it
-			// anyway honors a size the server clamped (e.g. an old tmux).
+			// Authoritative echo: reflow the emulator to the pane's real size.
+			// An owner's echo normally matches wantCols/wantRows (applying it
+			// anyway honors a size the server clamped); a viewer's carries
+			// whatever the driving surface — or the capture path's pane
+			// measurement — established.
 			t.gridMu.Lock()
 			t.emu.Resize(int(ev.Cols), int(ev.Rows))
 			t.gridMu.Unlock()
@@ -439,9 +476,12 @@ func forwardKey(emu *vt.Emulator, msg tea.KeyMsg) bool {
 	return true
 }
 
-// Resize propagates a new pane geometry: the emulator grid immediately (for
-// responsiveness) and a RESIZE frame to the server (last-resize-wins). Event-loop
-// only.
+// Resize records a new view-box geometry — the size this pane asserts while it
+// owns the pane's size — and, ONLY while it is the owner, re-windows the
+// emulator grid and sends a RESIZE frame (last-resize-wins). A viewer's box
+// change is view-only: the emulator keeps tracking the pane's authoritative
+// size and Render crops it, so merely watching a session through a changing
+// layout never reflows the pane (#4480). Event-loop only.
 func (t *TermPane) Resize(width, height int) {
 	width, height = clampSize(width, height)
 	t.gridMu.Lock()
@@ -450,23 +490,65 @@ func (t *TermPane) Resize(width, height int) {
 		return
 	}
 	t.width, t.height = width, height
-	// Re-window the emulator grid to the new size. The pinned x/vt emulator
-	// truncates rather than reflows (#1556), so the grid may transiently show a
-	// stale continuation row — but the daemon injects a clean capture-pane repaint
-	// on every resize (the broker's Snapshot-on-resize), which clears and redraws
-	// the reflowed screen a round-trip later. So the client does NOT blank here:
-	// blanking would leave the pane empty until the repaint arrives, whereas
-	// keeping the re-windowed grid shows content continuously.
-	t.emu.Resize(width, height)
 	t.gridMu.Unlock()
 
 	t.connMu.Lock()
 	t.wantRows, t.wantCols = uint16(height), uint16(width) //nolint:gosec // clampSize bounds to [1, 4096]
 	stream := t.stream
+	owns := t.ownsSize
 	t.connMu.Unlock()
+	if !owns {
+		return
+	}
+	t.gridMu.Lock()
+	// Re-window the emulator grid to the new size. The pinned x/vt emulator
+	// truncates rather than reflows (#1556), so the grid may transiently show a
+	// stale continuation row — but the resize makes the pane's program redraw
+	// itself at the new size through the live stream (SIGWINCH), which clears the
+	// artifact a round-trip later. So the client does NOT blank here: blanking
+	// would leave the pane empty until that redraw, whereas keeping the
+	// re-windowed grid shows content continuously.
+	t.emu.Resize(width, height)
+	t.gridMu.Unlock()
 	if stream != nil {
 		t.assertSize(stream)
 	}
+}
+
+// SetSizeOwner promotes (or demotes) this subscription as the pane's size
+// driver. Only the surface the user is driving through may write RESIZE frames
+// — for an embedded pane that is the FOCUSED interactive pane, and nothing
+// else (#4480). Promotion re-windows the emulator to the view box and asserts
+// that size to the server; if no stream is up, the latched flag makes the next
+// connect's assert carry it. Demotion is local-only: the pane keeps the last
+// asserted size and the emulator keeps tracking authoritative echoes, so
+// leaving interactive mode never reflows the pane back. Idempotent;
+// event-loop only.
+func (t *TermPane) SetSizeOwner(on bool) {
+	t.connMu.Lock()
+	if on == t.ownsSize {
+		t.connMu.Unlock()
+		return
+	}
+	t.ownsSize = on
+	stream := t.stream
+	t.connMu.Unlock()
+	if !on {
+		return
+	}
+	t.gridMu.Lock()
+	t.emu.Resize(t.width, t.height)
+	t.gridMu.Unlock()
+	if stream != nil {
+		t.assertSize(stream)
+	}
+}
+
+// sizeOwner reports whether this subscription currently drives the pane's size.
+func (t *TermPane) sizeOwner() bool {
+	t.connMu.Lock()
+	defer t.connMu.Unlock()
+	return t.ownsSize
 }
 
 // assertSize writes the pane's CURRENT desired size to stream as a RESIZE frame.
@@ -505,17 +587,57 @@ func (t *TermPane) assertSize(stream Stream) {
 // tick drives it. showCursor overlays the terminal cursor (reverse-video) when the
 // inner app has it visible — the interactive-mode typing cue. There is no status
 // offset: the streamed bytes are the pane itself (§ package doc).
+//
+// The emulator tracks the pane's REAL size, which a viewer's box need not match
+// (#4480): a taller emulator is cropped to the window ending at the pane's
+// working edge (the cursor row, or the last row holding content if lower — a
+// status bar below the input cursor), so the view shows what the pane is doing
+// rather than stale scrollback or a blank tail; a wider one is clipped with a
+// `…` marker at the cut (renderGridWindow).
 func (t *TermPane) Render(width, height int, showCursor bool) string {
 	t.gridMu.RLock()
 	defer t.gridMu.RUnlock()
+	pos := t.emu.CursorPosition()
 	cursor := cursorNone
 	if showCursor && t.cursorVisible {
-		pos := t.emu.CursorPosition()
 		cursor = cursorAt{x: pos.X, y: pos.Y, show: true}
 	}
 	visibleHeight := min(height, t.height)
-	grid := renderGridWindow(t.emu, width, visibleHeight, 0, cursor)
+	grid := renderGridWindow(t.emu, width, visibleHeight, t.viewSourceYLocked(pos.Y, visibleHeight), cursor)
 	return padRenderedRows(grid, width, height-visibleHeight)
+}
+
+// viewSourceYLocked picks the emulator row the rendered window starts at when
+// the emulator is taller than the view: the lowest window that still shows the
+// pane's working edge. cursorY is the emulator cursor row (already read by the
+// caller for the overlay). Caller holds gridMu.
+func (t *TermPane) viewSourceYLocked(cursorY, viewH int) int {
+	emuH := t.emu.Height()
+	if emuH <= viewH || viewH <= 0 {
+		return 0
+	}
+	bottom := cursorY
+	// Content below the cursor — a status bar, a menu — is part of the pane's
+	// working edge, so the window reaches the last row holding content. Rows
+	// above the cursor can never be the anchor, so the scan stops there.
+	for y := emuH - 1; y > bottom; y-- {
+		if rowHasContent(t.emu, y, 0) {
+			bottom = y
+			break
+		}
+	}
+	return max(0, min(bottom-viewH+1, emuH-viewH))
+}
+
+// rowHasContent reports whether row y holds any visible (non-blank) cell at or
+// right of x0. Caller holds the emulator's lock.
+func rowHasContent(emu *vt.Emulator, y, x0 int) bool {
+	for x := x0; x < emu.Width(); x++ {
+		if c := emu.CellAt(x, y); c != nil && c.Width > 0 && strings.TrimSpace(c.Content) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // Close ends the subscription only — cancel the run loop, drop and close the

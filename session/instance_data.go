@@ -100,6 +100,14 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
 
+	// An archived row cannot owe its own teardown — reaching Archived IS the
+	// discharge. Any other state may legitimately carry the obligation across a
+	// restart, and must (#4162): the completion edge that armed it cannot
+	// re-fire, so dropping the marker here would lose it permanently.
+	if i.liveness != LiveArchived {
+		data.PendingOnComplete = i.owedOnComplete
+	}
+
 	// Persist each tab so the full local agent+shell tab list survives a restart
 	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
 	// each local tab's tmux session by its exact persisted name. An off-box
@@ -354,6 +362,13 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		rootRecreateContext: data.RootRecreateContext,
 	}
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
+	// The pending on_complete obligation rides the restart so the daemon can
+	// re-drive the teardown it could not finish (#4162). An archived row cannot
+	// owe its own teardown — mirroring the serialize gate — so a marker that
+	// somehow reached one is dropped rather than armed.
+	if liveness != LiveArchived {
+		instance.owedOnComplete = data.PendingOnComplete
+	}
 	worktreeReaped := false
 	restoredRelocationRecovery := false
 
