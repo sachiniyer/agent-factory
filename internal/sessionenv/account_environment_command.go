@@ -624,13 +624,13 @@ func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struc
 // overrides an earlier `+k` and vice versa. The scanner tracks the running
 // state rather than returning on the first `-k`, so a sequence like
 // `set -k +k` is correctly seen as leaving keyword mode off.
-func setMutatesAccountEnvironment(words []*syntax.Word) bool {
+func setOptionTaint(words []*syntax.Word) setOptionTaintReason {
 	keywordMode := false
 	for idx := 0; idx < len(words); idx++ {
 		value, literal := literalShellWord(words[idx])
 		if !literal {
 			// An operand this parser cannot evaluate could expand to -k.
-			return true
+			return setOptionTaintReason{kind: setTaintUnprovable}
 		}
 		// `--` and the first non-option operand both end option parsing: every
 		// word after one is a positional parameter, so `set -- -k` assigns the
@@ -641,7 +641,10 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 		// non-option operand, so it does NOT end the scan: `set +e -k` still
 		// enables keyword mode and must be caught by the loop below.
 		if value == "--" || value == "-" || (!strings.HasPrefix(value, "-") && !strings.HasPrefix(value, "+")) {
-			return keywordMode
+			if keywordMode {
+				return setOptionTaintReason{kind: setTaintKeywordMode}
+			}
+			return setOptionTaintReason{}
 		}
 		// A long-form switch names its mode in the next word.
 		//
@@ -660,7 +663,7 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 			}
 			mode, ok := literalShellWord(words[idx+1])
 			if !ok {
-				return true
+				return setOptionTaintReason{kind: setTaintUnprovable}
 			}
 			// Only treat the next word as the mode name when it cannot itself
 			// be an option token. Mode names (pipefail, noclobber, …) never
@@ -680,8 +683,9 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 				// final state, so fail closed instead of consuming the invalid
 				// name and continuing — `set -k -o nonsense +k` cannot use an
 				// invalid name to flip keywordMode back off across a +k that
-				// bash never applies.
-				return true
+				// bash never applies. Carry the offending name so the refusal
+				// can name it instead of the false generic message.
+				return setOptionTaintReason{kind: setTaintUnrecognized, option: mode}
 			}
 			idx++
 			continue
@@ -705,7 +709,7 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 			} else {
 				mode, ok := literalShellWord(words[idx+1])
 				if !ok {
-					return true
+					return setOptionTaintReason{kind: setTaintUnprovable}
 				}
 				if !strings.HasPrefix(mode, "-") && !strings.HasPrefix(mode, "+") {
 					// The following word is a mode name; consume it.
@@ -719,8 +723,10 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 						// prior word) persists and a later +k is never applied,
 						// so the running keywordMode state is not bash's final
 						// state. Fail closed rather than consume the invalid
-						// name and keep scanning.
-						return true
+						// name and keep scanning. Carry the offending name so
+						// the refusal can name it instead of the false generic
+						// message.
+						return setOptionTaintReason{kind: setTaintUnrecognized, option: mode}
 					}
 					idx++
 					// Fall through to the `k` check: the cluster may contain `k`
@@ -737,7 +743,33 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 			keywordMode = prefix == '-'
 		}
 	}
-	return keywordMode
+	if keywordMode {
+		return setOptionTaintReason{kind: setTaintKeywordMode}
+	}
+	return setOptionTaintReason{}
+}
+
+// setOptionTaintKind classifies why a `set` scan could not prove the shell's
+// final keyword-mode state.
+type setOptionTaintKind int
+
+const (
+	setTaintNone setOptionTaintKind = iota
+	setTaintUnprovable
+	setTaintKeywordMode
+	setTaintUnrecognized
+)
+
+type setOptionTaintReason struct {
+	kind   setOptionTaintKind
+	option string
+}
+
+// setMutatesAccountEnvironment is the bool view of setOptionTaint for the walk's
+// own refusal decision; the reason (and, for an unrecognized long option name,
+// the offending name) is read separately to render a refusal that names it.
+func setMutatesAccountEnvironment(words []*syntax.Word) bool {
+	return setOptionTaint(words).kind != setTaintNone
 }
 
 // knownBashSetOptionName reports whether name is one of the long-form option

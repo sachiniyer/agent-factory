@@ -166,3 +166,42 @@ func TestValidateAccountEnvironmentCommand_AllowsOrdinaryShellOptions(t *testing
 			"command %q is ordinary shell and must stay allowed", command)
 	}
 }
+
+// An unrecognized `set -o`/`set +o` long option name fails closed, but the
+// refusal must name that option and say af cannot prove what the shell did with
+// the rest of the `set` line: the generic "sets an identity or shell-startup
+// variable itself" refusal is false for this class, which sets no variable at
+// all (e.g. `set -o extendedglob; npm run dev`). A real keyword-mode switch
+// (`set -k`) keeps the generic refusal, accurate for it by contract.
+func TestValidateAccountEnvironmentCommand_UnrecognizedSetOptionNameRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		option  string
+	}{
+		{"set -o extendedglob; npm run dev", "extendedglob"},
+		{"set -o nonsense; npm run dev", "nonsense"},
+		{"set -eo nonsense; npm run dev", "nonsense"},
+		{"set -k -o nonsense +k 2>/dev/null || true; codex CODEX_HOME=/other", "nonsense"},
+		{"set -k +o nonsense +k 2>/dev/null || true; codex CODEX_HOME=/other", "nonsense"},
+		{"set -ko nonsense +k 2>/dev/null || true; codex CODEX_HOME=/other", "nonsense"},
+		{"set -ok nonsense +k 2>/dev/null || true; codex CODEX_HOME=/other", "nonsense"},
+		{"set -k -o nopipefail +k 2>/dev/null || true; codex CODEX_HOME=/other", "nopipefail"},
+		{"set -k -o interactive_comments +k 2>/dev/null || true; codex CODEX_HOME=/other", "interactive_comments"},
+		{"set -k -o Nonsense +k 2>/dev/null || true; codex CODEX_HOME=/other", "Nonsense"},
+	} {
+		err := ValidateAccountEnvironmentCommand(tc.command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q must be refused", tc.command)
+		require.Contains(t, err.Error(), tc.option,
+			"command %q: refusal must name the unrecognized option", tc.command)
+		require.Contains(t, err.Error(), "cannot prove what the shell did",
+			"command %q: refusal must say af cannot prove what the shell did with the rest of the set line", tc.command)
+		require.NotContains(t, err.Error(), "sets an identity or shell-startup variable itself",
+			"command %q: refusal must not reuse the generic identity-variable message", tc.command)
+	}
+	// A real keyword-mode switch keeps the generic refusal, accurate for it.
+	keywordErr := ValidateAccountEnvironmentCommand("set -k; codex CODEX_HOME=/other", scopedProcessTabAccount())
+	require.Error(t, keywordErr)
+	require.Contains(t, keywordErr.Error(), "sets an identity or shell-startup variable itself")
+	// A recognized long name stays allowed (no refusal at all).
+	require.NoError(t, ValidateAccountEnvironmentCommand("set -o pipefail; npm run dev", scopedProcessTabAccount()))
+}
