@@ -107,7 +107,11 @@ var (
 	// unmarshalling cannot change runtime behavior without a diagnostic
 	// (inrepo.go:93-96: "typos fail loudly"). Each set is derived from the
 	// same struct the typed decode targets, so adding a field to
-	// DockerConfig/SSHConfig automatically admits it here.
+	// DockerConfig/SSHConfig automatically admits it here. The comparison
+	// folds case against the shape key (see LoadInRepoConfig): the typed
+	// decoders match field names case-insensitively, so a spelling the
+	// decode accepts (e.g. [docker] Image) is admitted here too, and the
+	// rejection lands on spellings the decode does not accept — typos.
 	inRepoAllowedTableLeaves = map[string]map[string]bool{
 		"docker": inRepoTableLeavesFor(reflect.TypeOf(DockerConfig{})),
 		"ssh":    inRepoTableLeavesFor(reflect.TypeOf(SSHConfig{})),
@@ -116,9 +120,12 @@ var (
 
 // inRepoTableLeavesFor derives the set of leaf key names the typed decoder
 // accepts under a table-typed in-repo field, from the struct's toml and json
-// tags. metadataForSource decodes sub-tables as map[string]any for both TOML
-// (go-toml/v2) and JSON (encoding/json), so the shape keys match these tag
-// names regardless of the file format.
+// tags (struct tags in this package are lowercase, so the set is lowercase).
+// metadataForSource decodes sub-tables as map[string]any for both TOML
+// (go-toml/v2) and JSON (encoding/json), preserving the file's original key
+// casing in the shape; the leaf check in LoadInRepoConfig therefore lowercases
+// each shape key before lookup, matching the case-insensitive field matching
+// of both decoders.
 func inRepoTableLeavesFor(typ reflect.Type) map[string]bool {
 	leaves := map[string]bool{}
 	for i := 0; i < typ.NumField(); i++ {
@@ -395,7 +402,15 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 			continue
 		}
 		for leaf := range sub {
-			if !allowed[leaf] {
+			// Fold case to match the typed decoders: encoding/json and
+			// go-toml/v2 both match field names case-insensitively, so a
+			// spelling like [docker] Image would be accepted by the typed
+			// decode into DockerConfig. The leaf check lowercases the shape
+			// key (whose casing is preserved from the file by
+			// metadataForSource) before the allowlist lookup so such
+			// spellings load cleanly and the rejection lands on genuine
+			// typos (e.g. "runargs", "iamge") instead.
+			if !allowed[strings.ToLower(leaf)] {
 				return nil, nil, fmt.Errorf("in-repo config %s: unknown key %q under %q (allowed %s keys: %s)",
 					prettyPath, leaf, table, table, strings.Join(sortedKeysFrom(allowed), ", "))
 			}

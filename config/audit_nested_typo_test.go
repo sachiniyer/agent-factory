@@ -154,6 +154,38 @@ func TestAuditNestedTypoCorrectValuesKept(t *testing.T) {
 		assert.True(t, cfg.IsSet("ssh"))
 	})
 
+	// Case-insensitive leaf spellings must load cleanly: encoding/json and
+	// go-toml/v2 both match field names case-insensitively, so the typed
+	// decode accepts [docker] Image into DockerConfig.Image. The leaf check
+	// folds case to match, so this previously-working spelling continues to
+	// load instead of being rejected as an "unknown key". A typo'd leaf
+	// (e.g. "runargs") still fails — that is the bug being fixed, not this.
+	// The case fold only changes casing, not spelling: "RunArgs" (no
+	// underscore) is still rejected, since neither the typed decode nor the
+	// allowlist treats it as "run_args".
+	t.Run("docker case-insensitive leaf loads", func(t *testing.T) {
+		repoRoot := t.TempDir()
+		writeInRepoTomlConfig(t, repoRoot, "[docker]\nImage = \"af-runtime:latest\"\nRUN_ARGS = [\"--read-only\"]\n")
+		cfg, _, err := LoadInRepoConfig(repoRoot)
+		require.NoError(t, err)
+		require.NotNil(t, cfg.Docker)
+		assert.Equal(t, "af-runtime:latest", cfg.Docker.Image)
+		assert.Equal(t, []string{"--read-only"}, cfg.Docker.RunArgs)
+		assert.True(t, cfg.IsSet("docker"))
+	})
+
+	t.Run("ssh case-insensitive leaf loads", func(t *testing.T) {
+		repoRoot := t.TempDir()
+		writeInRepoConfig(t, repoRoot, `{"ssh":{"Host":"build-box","USER":"ci","Port":2222}}`)
+		cfg, _, err := LoadInRepoConfig(repoRoot)
+		require.NoError(t, err)
+		require.NotNil(t, cfg.SSH)
+		assert.Equal(t, "build-box", cfg.SSH.Host)
+		assert.Equal(t, "ci", cfg.SSH.User)
+		assert.Equal(t, 2222, cfg.SSH.Port)
+		assert.True(t, cfg.IsSet("ssh"))
+	})
+
 	// An empty docker table is valid — it means "docker backend with all
 	// defaults" — and must not be rejected by the leaf check.
 	t.Run("empty docker table", func(t *testing.T) {
