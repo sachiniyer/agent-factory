@@ -119,6 +119,48 @@ func TestValidateAccountSwapRefusesUnprovableSiblingIdentityOverride(t *testing.
 		"an interpreter wrapper must not hide an identity assignment from the swap boundary")
 }
 
+// A committed manual swap's retry must resolve the replacement account inside
+// the namespace the transaction recorded at commit — not the namespace CURRENT
+// configuration derives (#4430 review). Commit under aider→codex records
+// AccountAgent=codex; a restart after the override flips to aider→gemini must
+// still consult the codex registry, where the drift check then names the real
+// mismatch instead of silently binding a gemini-launched pane to a codex
+// credential. The un-pinned path would find the decoy "work" in gemini's
+// registry and pass the drift check — the exact wrong-namespace recovery the
+// durable field exists to prevent.
+func TestValidateAccountSwapCommittedRetryUsesRecordedNamespace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramAider: tmux.ProgramCodex}
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err := agentaccount.Register(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err)
+
+	inst := accountSwapTestInstance(tmux.ProgramAider)
+	inst.Path = initTempGitRepo(t)
+	_, err = inst.SelectAccountForHandoff("", "work", tmux.ProgramAider, tmux.ProgramCodex, true,
+		HandoffReasonManual, "head", "")
+	require.NoError(t, err)
+	require.Equal(t, tmux.ProgramCodex, inst.PendingAccountSwapAgent(),
+		"the committed transaction must carry the namespace the account was selected in")
+	require.Equal(t, tmux.ProgramCodex, inst.ToInstanceData().PendingAccountSwap.AccountAgent,
+		"the namespace must survive a daemon restart — it is the only answer a config flip cannot move")
+
+	// The restart's view: the override moved, and a decoy registration now
+	// exists in the namespace current config would resolve.
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramAider: tmux.ProgramGemini}
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err = agentaccount.Register(home, tmux.ProgramGemini, "work")
+	require.NoError(t, err)
+
+	err = inst.ValidateAccountSwap("work")
+	require.ErrorContains(t, err, "is a codex account",
+		"the retry must consult the recorded codex registry, not the flipped resolution's gemini")
+	require.ErrorContains(t, err, "runs gemini",
+		"the drift refusal names the launch the current override now produces")
+}
+
 func TestValidateAccountSwapPreflightsStartupFreeShellReplacement(t *testing.T) {
 	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
 	inst.Tabs = append(inst.Tabs, &Tab{
@@ -178,7 +220,7 @@ func TestValidateManualAccountSwapPreflightsMissingUnchangedBinary(t *testing.T)
 	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
-	err = inst.ValidateManualAccountSwap("work", tmux.ProgramClaude)
+	err = inst.ValidateManualAccountSwap("work", tmux.ProgramClaude, false)
 	require.ErrorContains(t, err, "launch preflight")
 	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(), "admission must leave the outgoing runtime untouched")
 	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
@@ -199,7 +241,7 @@ func TestValidateManualAccountSwapPreflightsMissingSiblingBinary(t *testing.T) {
 		tmux: tmux.NewTmuxSession("worker", missing),
 	})
 
-	err = inst.ValidateManualAccountSwap("work", tmux.ProgramClaude)
+	err = inst.ValidateManualAccountSwap("work", tmux.ProgramClaude, false)
 	require.ErrorContains(t, err, `tab "worker"`)
 	require.ErrorContains(t, err, "launch preflight")
 	require.ErrorContains(t, err, "not installed or not on PATH")
@@ -221,7 +263,7 @@ func TestValidateManualAccountSwapAcceptsHealthySiblingBinary(t *testing.T) {
 		tmux: tmux.NewTmuxSession("worker", "/usr/bin/true"),
 	})
 
-	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramClaude))
+	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramClaude, false))
 	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram())
 	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 }
@@ -253,7 +295,7 @@ func TestValidateManualCrossAgentAccountSwapWritesSkillToIncomingAccount(t *test
 			require.NoError(t, err)
 			inst.SetGitWorktreeForTest(gw)
 
-			require.NoError(t, inst.ValidateManualAccountSwap("work", tc.agent))
+			require.NoError(t, inst.ValidateManualAccountSwap("work", tc.agent, true))
 			require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(),
 				"validation must not rewrite the outgoing runtime identity")
 			require.FileExists(t, tc.skillPath(accountDir),
@@ -272,9 +314,9 @@ func TestCheckManualAccountSwapDoesNotRecordLaunchPlan(t *testing.T) {
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
 
-	require.NoError(t, inst.CheckManualAccountSwap("work", tmux.ProgramClaude))
+	require.NoError(t, inst.CheckManualAccountSwap("work", tmux.ProgramClaude, false))
 	require.Nil(t, inst.accountSwapLaunch, "the unlocked check must not leave mutation authority behind")
-	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramClaude))
+	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramClaude, false))
 	require.NotNil(t, inst.accountSwapLaunch, "locked admission still records the launch plan")
 }
 
@@ -567,7 +609,7 @@ func TestPendingAccountSwapFencesArchiveAndHandoffButAllowsDelivery(t *testing.T
 func TestPendingAccountSwapHandoffAdmitsOnlySameTargetRetry(t *testing.T) {
 	newPending := func() *Instance {
 		inst := accountSwapTestInstance("claude")
-		_, err := inst.SelectAccountForHandoff("ambient", "work", "claude", HandoffReasonManual, "", "continue the mission")
+		_, err := inst.SelectAccountForHandoff("ambient", "work", "claude", "claude", false, HandoffReasonManual, "", "continue the mission")
 		require.NoError(t, err)
 		inst.inFlightOp = OpNone
 		return inst
@@ -586,6 +628,23 @@ func TestPendingAccountSwapHandoffAdmitsOnlySameTargetRetry(t *testing.T) {
 	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("", "personal"), "account swap")
 	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("codex", "work"), "account swap")
 	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("", ""), "account swap")
+
+	// A redirected swap (`--to aider` resolving to codex) commits a codex
+	// pane while Program records the requested aider enum. The retry the
+	// refusal advertises may spell the committed target EITHER way — the
+	// requested enum or the resolved agent — because both name the same
+	// committed transaction (#4430 review round 3).
+	redirected := accountSwapTestInstance(tmux.ProgramAider)
+	redirected.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSession("swap", tmux.ProgramCodex))}
+	_, selectErr := redirected.SelectAccountForHandoff("ambient", "work", tmux.ProgramAider, tmux.ProgramCodex, false, HandoffReasonManual, "", "continue the mission")
+	require.NoError(t, selectErr)
+	redirected.inFlightOp = OpNone
+	require.NoError(t, redirected.ValidateHandoffRuntimeAction(tmux.ProgramAider, "work"),
+		"the retry may name the requested enum even though the committed pane runs codex")
+	require.NoError(t, redirected.ValidateHandoffRuntimeAction(tmux.ProgramCodex, "work"),
+		"or the resolved agent the pane actually runs")
+	require.ErrorContains(t, redirected.ValidateHandoffRuntimeAction(tmux.ProgramGemini, "work"), "account swap",
+		"a third agent names another transaction and stays fenced")
 
 	// The same goes for an automatic swap: its committed target is retryable,
 	// and only that target.

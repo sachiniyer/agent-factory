@@ -31,9 +31,37 @@ type autoAccountSwap struct {
 	candidates               []string
 	fromAgent                string
 	agent                    string
-	alreadySet               bool
-	fallbackDue              bool
-	fellBack                 bool
+	// accountAgent is the registry namespace the swap's account name resolves
+	// in — the agent the launch command resolves to, which a program_overrides
+	// redirect can set apart from the requested target enum held in agent
+	// (#4430 review round 2). Empty on the auto and committed paths, where
+	// agent already IS the resolved/live agent; the manual handoff sets it
+	// explicitly so `program_overrides.aider = "codex"` resolves the account in
+	// codex's registry while program resolution still reads aider's override.
+	accountAgent string
+	// accountOnly records that the manual request named no --to: its agent is
+	// the running identity, not an enum whose override produced the pane, so it
+	// must never be re-resolved into a cross-agent launch (#4430 review).
+	accountOnly bool
+	// crossAgent is manual admission's one decision about whether the swap
+	// launches agent's command or keeps the recorded program. The launch
+	// preflight and the identity commit both read it.
+	crossAgent  bool
+	alreadySet  bool
+	fallbackDue bool
+	fellBack    bool
+}
+
+// accountNamespace is the agent whose account registry answers the swap's
+// name — accountAgent when an override redirect set it, otherwise agent
+// itself. Keeping it a method rather than another write site is what stops
+// the three namespace consumers (Selected, the limit ledger, the messages)
+// from drifting back to the requested enum.
+func (s *autoAccountSwap) accountNamespace() string {
+	if s.accountAgent != "" {
+		return s.accountAgent
+	}
+	return s.agent
 }
 
 var loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationData, error) {
@@ -112,8 +140,26 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 	current, currentAuto := instance.AccountSelection()
 	manual, mission := instance.PendingManualAccountSwap()
 	agent := instance.CurrentAgentName()
+	var accountAgent string
 	if manual {
 		agent = sessionenv.AgentForCommand(instance.AgentProgram())
+		// A manual swap can redirect through program_overrides: agent is the
+		// recorded requested enum while the committed account was selected in
+		// the resolved command's namespace — the one Selected, the limit
+		// ledger, and the conversation-id repair must all answer in (#4430
+		// review round 3). The durable transaction now carries that namespace:
+		// after a restart under changed overrides, ResolvedPaneProgram answers
+		// the NEW config (attach rewrites the metadata before any retry reads
+		// it) and HandoffEffectiveAgentForPath is current-config by
+		// construction — neither can still name the registry the commit used
+		// (#4430 review round 4).
+		accountAgent = instance.PendingAccountSwapAgent()
+		if accountAgent == "" {
+			accountAgent = sessionenv.AgentForCommand(instance.ResolvedPaneProgram())
+		}
+		if accountAgent == "" {
+			accountAgent = session.HandoffEffectiveAgentForPath(instance.Path, agent)
+		}
 	}
 	if !pending || (!currentAuto && !manual) || strings.TrimSpace(to) == "" || current != to {
 		return nil
@@ -134,11 +180,12 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 	}
 	return &autoAccountSwap{
 		manual: manual, mission: mission, headSHA: headSHA,
-		from:       from,
-		to:         to,
-		fromAgent:  fromAgent,
-		agent:      agent,
-		alreadySet: true,
+		from:         from,
+		to:           to,
+		fromAgent:    fromAgent,
+		agent:        agent,
+		accountAgent: accountAgent,
+		alreadySet:   true,
 	}
 }
 
@@ -153,10 +200,10 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 // it, find every claude account "unlimited", and hand each one to a preflight
 // that refuses it as agent drift (#3174 review).
 //
-// A disagreement between the two yields NO swap rather than a choice, because no
-// candidate in either namespace could be admitted anyway:
-// resolveAccountForProvision refuses to scope a session whose resolved agent
-// differs from its requested one (#3082/#3108). Not an error, for the same
+// A disagreement between the two yields NO swap rather than a choice: the wall
+// was filed under the running agent while the record claims the configured
+// enum, and rotating either registry silently spends an account the limit was
+// never attributed to (#3082/#3108). Not an error, for the same
 // reason the unsupported-agent case below is not one — this runs on every poll
 // of a limit-blocked row, and the caller logs a warning per call with no
 // backoff, so an error here is a line every daemon_poll_interval for as long as
@@ -362,7 +409,7 @@ func (m *Manager) commitNewAccountSwapIdentity(
 		brief := instance.BuildMissionBrief(scheduled.agent, scheduled.promptOverride, scheduled.reason)
 		scheduled.headSHA = brief.Work.HeadSHA
 		scheduled.mission = brief.Render()
-		handoff, err = instance.SelectAccountForHandoff(scheduled.from, scheduled.to, scheduled.agent, scheduled.reason, scheduled.headSHA, scheduled.mission)
+		handoff, err = instance.SelectAccountForHandoff(scheduled.from, scheduled.to, scheduled.agent, scheduled.accountNamespace(), scheduled.crossAgent, scheduled.reason, scheduled.headSHA, scheduled.mission)
 		previousConversation = handoff.From
 	} else {
 		previousConversation, err = instance.SelectAccountAutomatically(scheduled.from, scheduled.to)
@@ -410,13 +457,13 @@ func accountSwapPrompt(swap *autoAccountSwap, prompt string) string {
 			fromAgent = swap.agent
 		}
 		return fmt.Sprintf("[Agent Factory] Handed off from %s to %s. Continue the same task.\n\n%s",
-			accountSwapIdentity(fromAgent, swap.from), accountSwapIdentity(swap.agent, swap.to), swap.mission)
+			accountSwapIdentity(fromAgent, swap.from), accountSwapIdentity(swap.accountNamespace(), swap.to), swap.mission)
 	}
 	notice := fmt.Sprintf(
 		"[Agent Factory] This session switched from %s to %s after the previous identity reached its usage limit. "+
 			"The replacement was explicitly allowed by limit_account_candidates and had no current limit observation. "+
 			"Continue the same task under the new identity.",
-		accountSwapIdentity(swap.agent, swap.from), accountSwapIdentity(swap.agent, swap.to))
+		accountSwapIdentity(swap.agent, swap.from), accountSwapIdentity(swap.accountNamespace(), swap.to))
 	if strings.TrimSpace(prompt) == "" {
 		return notice + "\n\ncontinue"
 	}

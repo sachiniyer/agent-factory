@@ -2,8 +2,10 @@ package session
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
@@ -263,22 +265,37 @@ func TestAccountScoping_RefusesUnsupportedCombinations(t *testing.T) {
 	require.NoError(t, refuseUnsupportedAccountAgent(plain, plain.Path))
 }
 
-// An account-scoped session must REFUSE a handoff (#3083 review, P1).
+// A handoff that reaches the runtime boundary with an account still on the
+// record must refuse (#3083 review, #4428).
 //
 // Clearing the generated-args declaration was not enough: refreshSessionEnvironment
 // reapplies the unchanged Account, so handing a claude session scoped to "work" to
 // codex would launch codex under a codex account also named "work" — a different
 // identity, selected by a name collision rather than by the user. Bare codex needs
 // no declaration, so nothing downstream refuses it.
+//
+// Since #4428 the honest answers differ by target: a scopable one takes an
+// explicit --account, a non-scopable one has the record transaction drop the
+// scope. A direct backend call bypasses that transaction, so the account still
+// being recorded is itself the violation both cases refuse on.
 func TestSwapAgent_RefusesAnAccountScopedSession(t *testing.T) {
 	backend := &LocalBackend{}
-	inst := &Instance{Title: "scoped", Path: t.TempDir(), Program: "claude", Account: "work"}
 
-	err := backend.SwapAgent(inst, AgentSwapPlan{target: "codex", program: "codex"})
+	scopable := &Instance{Title: "scoped", Path: t.TempDir(), Program: "claude", Account: "work"}
+	err := backend.SwapAgent(scopable, AgentSwapPlan{target: "codex", program: "codex"})
 
 	require.Error(t, err, "an account-scoped handoff must refuse rather than reuse the account name")
 	require.Contains(t, err.Error(), "belongs to one agent")
 	require.Contains(t, err.Error(), "work", "the refusal must name the account it is protecting")
+	require.Contains(t, err.Error(), "--account", "the refusal must name the explicit remedy")
+	require.NotContains(t, err.Error(), "new session", "creating a session is no longer the remedy")
+
+	unscopable := &Instance{Title: "scoped", Path: t.TempDir(), Program: "claude", Account: "work"}
+	err = backend.SwapAgent(unscopable, AgentSwapPlan{target: "aider", program: "aider"})
+
+	require.Error(t, err, "a still-scoped record must not reach the runtime swap, "+
+		"even for a target that cannot carry the scope")
+	require.Contains(t, err.Error(), "work")
 }
 
 // A cross-agent program_overrides must refuse BEFORE launch (#3083 review, P1).
@@ -299,6 +316,29 @@ func TestAccountScoping_RefusesACrossAgentOverride(t *testing.T) {
 		InstanceOptions{Title: "t", Path: path, Program: "claude", Account: "work"}, path)
 
 	require.Error(t, err, "a cross-agent override must refuse: the validated namespace is not the one that would be used")
+	require.Contains(t, err.Error(), "namespaces are separate")
+	require.Contains(t, err.Error(), "work")
+}
+
+// The provision-side twin of the refusal above (#4430 review, D2). The local
+// create boundary refuses a cross-agent override through
+// refuseUnsupportedAccountAgent, but resolveAccountForProvision — the helper
+// docker provisioning, off-box re-provision, and the committed-swap retry all
+// reach — resolved the account under the RESOLVED namespace instead, silently
+// spending codex's "work" for `--program claude --account work`. Both backends
+// must give the same answer to the same command, and the codex registration
+// below is what makes the test prove the refusal rather than a lookup miss.
+func TestResolveAccountForProvision_RefusesACrossAgentOverride(t *testing.T) {
+	saveOverrideConfig(t, "codex")
+	home := os.Getenv("AGENT_FACTORY_HOME")
+	_, err := agentaccount.Register(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
+	_, err = agentaccount.Register(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err, "the colliding name exists in the resolved namespace — only the refusal prevents silently spending it")
+
+	_, err = resolveAccountForProvision(initTempGitRepo(t), tmux.ProgramClaude, "work")
+
+	require.Error(t, err, "the provision helper must refuse the same drift the local boundary refuses")
 	require.Contains(t, err.Error(), "namespaces are separate")
 	require.Contains(t, err.Error(), "work")
 }

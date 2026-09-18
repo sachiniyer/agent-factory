@@ -29,7 +29,14 @@ func sessionEnvPassthroughForInstance(i *Instance) []string {
 	return normalized
 }
 
-func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error {
+// refreshSessionEnvironment reapplies a session's environment declarations to
+// its agent pane. launchProgram is the command the pane will run — the
+// account's namespace is derived from it, never from i.Program's enum: a
+// program_overrides redirect means the recorded Program names what was
+// requested while the pane runs what it resolved to, and the tmux declaration
+// must match the namespace prepareLaunchEnvironment proves at launch or the
+// launch refuses after teardown (#4430 review round 3).
+func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession, launchProgram string) error {
 	if err := tmuxSession.SetEnvPassthrough(sessionEnvPassthroughForInstance(i)); err != nil {
 		return fmt.Errorf("invalid session environment pass-through: %w", err)
 	}
@@ -39,11 +46,15 @@ func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error
 	i.mu.RLock()
 	account := i.Account
 	i.mu.RUnlock()
-	tmuxSession.SetAccountForAgent(sessionenv.AgentForCommand(i.AgentProgram()), account)
+	tmuxSession.SetAccountForAgent(sessionenv.AgentForCommand(launchProgram), account)
 	return nil
 }
 
-func refreshTabSessionEnvironment(i *Instance, tab *Tab) error {
+// refreshTabSessionEnvironment is the sibling-tab half: a shell or process tab
+// carries the SESSION's account scope, so sessionProgram is the agent pane's
+// resolved command — the sibling's own program (a shell, a dev server) is not
+// the namespace the account belongs to.
+func refreshTabSessionEnvironment(i *Instance, tab *Tab, sessionProgram string) error {
 	if tab == nil || tab.tmux == nil {
 		return nil
 	}
@@ -53,7 +64,7 @@ func refreshTabSessionEnvironment(i *Instance, tab *Tab) error {
 	i.mu.RLock()
 	account := i.Account
 	i.mu.RUnlock()
-	agent := sessionenv.AgentForCommand(i.AgentProgram())
+	agent := sessionenv.AgentForCommand(sessionProgram)
 	if tab.Kind == TabKindShell {
 		if err := tab.tmux.SetAccountShellEnvironmentForAgent(agent, account); err != nil {
 			return fmt.Errorf("prepare account-scoped shell: %w", err)

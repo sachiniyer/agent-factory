@@ -98,27 +98,56 @@ func (i *Instance) SupportsAutomaticAccountSwap() bool {
 // account creation remains supported, but a crash-safe automatic reprovision
 // needs a durable container identity and immutable provision plan of its own.
 func (i *Instance) ValidateAccountSwap(name string) error {
-	return i.validateAccountSwap(name, "", false, true)
+	return i.validateAccountSwap(name, "", false, false, true)
 }
 
-// ValidateManualAccountSwap uses the same launch proof with an operator-selected identity.
-func (i *Instance) ValidateManualAccountSwap(name, agent string) error {
-	return i.validateAccountSwap(name, agent, true, true)
+// ManualAccountSwapProgram decides which program a manual account swap
+// launches: agent's own command for a cross-agent handoff, the recorded
+// program otherwise. The daemon asks it once, at admission, and hands the same
+// crossAgent to ValidateManualAccountSwap and SelectAccountForHandoff so the
+// frozen launch and the record cannot disagree.
+//
+// "Same agent" is HandoffTargetIsCurrent, the same-target guard's predicate:
+// with program_overrides.aider = "codex" running a codex pane, `--to codex`
+// whose own override resolves to aider is CROSS-agent, while `--to aider` is
+// the same-agent account change despite the enum differing from Program.
+//
+// accountOnly (no --to) is same-agent by construction and skips the predicate.
+// Its agent is the running IDENTITY, not an enum whose override produced the
+// pane, so resolving it through its own override answers a question nobody
+// asked: with program_overrides.claude = "codex" and program_overrides.codex =
+// "gemini", a claude-configured codex pane would read "codex" as a gemini
+// launch and turn `--account work` into a cross-agent handoff (#4430 review).
+// Resolution does config I/O, so this must not run under i.mu.
+func (i *Instance) ManualAccountSwapProgram(agent string, accountOnly bool) (program string, crossAgent bool) {
+	program = i.AgentProgram()
+	agent = strings.TrimSpace(agent)
+	if accountOnly || agent == "" ||
+		HandoffTargetIsCurrent(i.CurrentAgentName(), agent, handoffEffectiveAgent(i, agent)) {
+		return program, false
+	}
+	return agent, true
+}
+
+// ValidateManualAccountSwap uses the same launch proof with an operator-selected
+// identity. agent names the handoff target; crossAgent is
+// ManualAccountSwapProgram's decision for it.
+func (i *Instance) ValidateManualAccountSwap(name, agent string, crossAgent bool) error {
+	return i.validateAccountSwap(name, agent, crossAgent, true, true)
 }
 
 // CheckManualAccountSwap performs the manual launch proof without recording a
 // launch plan. The daemon uses it before a project-lock identity probe so an
 // independent domain refusal can remain visible; a successful check grants no
 // authority to mutate and is repeated under the proven policy lock.
-func (i *Instance) CheckManualAccountSwap(name, agent string) error {
-	return i.validateAccountSwap(name, agent, true, false)
+func (i *Instance) CheckManualAccountSwap(name, agent string, crossAgent bool) error {
+	return i.validateAccountSwap(name, agent, crossAgent, true, false)
 }
 
-func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch bool) error {
+func (i *Instance) validateAccountSwap(name, agent string, crossAgent, manual, recordLaunch bool) error {
 	backend := i.currentBackend()
 	i.mu.RLock()
 	program := i.Program
-	path := i.Path
 	current := i.Account
 	auto := i.accountAutoSelected
 	pending := cloneAccountSwapData(i.pendingAccountSwap)
@@ -143,7 +172,12 @@ func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch 
 		return fmt.Errorf("cannot switch accounts for session %q while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the account swap", i.Title, pendingCleanup)
 	}
 	resolution := resolveLaunchProgramForInstance(i)
-	crossAgent := agent != "" && agent != i.CurrentAgentName()
+	// A cross-agent swap resolves the target enum's own command and namespace;
+	// a same-agent one keeps the recorded program. With program_overrides.aider
+	// = "codex" running a codex pane, `--to codex` whose override resolves to
+	// aider IS cross-agent, while `--to aider` — and an account-only request,
+	// whose agent is the running identity rather than an enum — is not (#4430
+	// review).
 	if crossAgent {
 		program = agent
 		resolved := resolveResolvedConfigForInstance(i)
@@ -182,7 +216,24 @@ func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch 
 	if err := tmux.ValidateAccountLaunchSupport(name); err != nil {
 		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
 	}
-	accountScope, err := resolveAccountForProvision(path, program, name)
+	// A swap selects the account in the namespace of the command it will
+	// actually launch, not the enum the session was created under: a session
+	// recorded as claude whose override resolves to codex is RUNNING codex,
+	// and the account must come from the registry the launch's agent reads
+	// (#4430 review). resolvedProgram is that frozen command — resolved above
+	// from the same config — so no second resolution can disagree with it.
+	// The committed manual transaction is the one caller whose account
+	// namespace is a matter of record rather than resolution: the swap
+	// already moved this session to name inside pending.AccountAgent's
+	// registry, so its retry must resolve there even when program_overrides
+	// have since moved the enum's resolution.
+	var accountScope sessionenv.Account
+	var err error
+	if pending != nil && pending.Manual && pending.To == name && pending.AccountAgent != "" {
+		accountScope, err = selectAccountInNamespace(pending.AccountAgent, name)
+	} else {
+		accountScope, err = selectAccountInNamespace(sessionenv.AgentForCommand(resolvedProgram), name)
+	}
 	if err != nil {
 		return fmt.Errorf("cannot select account %q for session %q: %w", name, i.Title, err)
 	}
@@ -496,14 +547,28 @@ func (i *Instance) ValidateAccountSwapReplacementPanes() error {
 // this restores tmux's launch metadata and promotes a durable injected Claude
 // id before the pending marker can be cleared.
 func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
+	// The incoming agent is the resolved command's, not i.Program's enum: a
+	// program_overrides redirect records the requested target while launching
+	// the overridden command, and the live-pane answer a stopped swap lacks
+	// falls back to that enum (#4430 review round 3). Resolved before the
+	// instance lock — program resolution does config I/O. Inside the lock the
+	// pane's frozen launch program wins when it exists: it is the command the
+	// committed transaction actually froze, which re-resolution can only
+	// approximate once the configuration has moved.
+	resolvedAgent := HandoffEffectiveAgentForPath(i.Path, i.AgentProgram())
 	i.mu.Lock()
+	agent := resolvedAgent
+	if ts := i.tmuxLocked(); ts != nil {
+		if frozen := sessionenv.AgentForCommand(ts.Program()); frozen != "" {
+			agent = frozen
+		}
+	}
 	account := i.Account
 	pending := cloneAccountSwapData(i.pendingAccountSwap)
 	if pending == nil || account != pending.To {
 		i.mu.Unlock()
 		return fmt.Errorf("account swap for %q has no committed replacement to synchronize", i.Title)
 	}
-	agent := i.currentAgentNameLocked()
 	if pending.ConversationID != "" {
 		if agent != tmux.ProgramClaude {
 			i.mu.Unlock()

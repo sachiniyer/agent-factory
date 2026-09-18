@@ -19,16 +19,28 @@ type handoffPickerTarget = sessionActionTarget
 // handoffAgentChoices returns the agents the selected session may be handed to:
 // every supported agent except the one already running.
 //
+// "Already running" is a resolved-identity question, not an enum one (#4430
+// review): program_overrides.aider = "codex" makes the aider enum a
+// self-handoff the daemon's guard refuses, while the codex enum — resolving
+// to aider — is a legitimate cross-agent target the enum compare would hide.
+// resolvedAgents maps each enum to the agent its configured command launches
+// ("" when the command is not a provable agent invocation — never the current
+// agent); a nil map falls back to the enum answer for callers without one.
+//
 // It returns the display list and a parallel slice of agent names rather than
 // indexing SupportedPrograms directly the way the create-time picker does. That
 // picker can index the canonical slice because it offers all of it; this one
 // filters, so positions no longer line up — and SupportedPrograms is explicitly
 // documented as positionally load-bearing. Carrying the names alongside removes
 // the chance of an off-by-one silently handing off to the wrong agent.
-func handoffAgentChoices(current string) []string {
+func handoffAgentChoices(current string, resolvedAgents map[string]string) []string {
 	choices := make([]string, 0, len(tmux.SupportedPrograms))
 	for _, agent := range tmux.SupportedPrograms {
-		if agent == current {
+		resolved, known := resolvedAgents[agent]
+		if !known {
+			resolved = agent
+		}
+		if session.HandoffTargetIsCurrent(current, agent, resolved) {
 			continue
 		}
 		choices = append(choices, agent)
@@ -71,17 +83,29 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	}
 
 	current := selected.CurrentAgentName()
-	choices := handoffAgentChoices(current)
-	if len(choices) == 0 {
-		return m, m.handleNotice(fmt.Errorf("no other agent is available to hand '%s' off to", selected.Title))
-	}
-
-	m.handoffChoices = choices
+	m.handoffChoices = nil
 	m.handoffAccounts = nil
 	m.handoffWarnings = nil
+	var choices []string
 	if account, _ := selected.AccountSelection(); account != "" {
-		m.handoffChoices = nil
+		// A scoped session's rows are rebuilt wholesale from the daemon's
+		// account answer — a synchronous repo-config read here would block
+		// Update only to be discarded (#4430 review).
 		choices = []string{"Loading accounts…"}
+	} else {
+		// Unscoped sessions get an optimistic first frame from the local
+		// inspection-scope read — the same predicate the daemon's picker
+		// answer applies. Handoff is only offered for local-worktree
+		// sessions (guarded above), so this repo's config IS the config the
+		// daemon resolves against; the daemon's ResolvedAgents rebuild is
+		// still authoritative once the answer lands, and this frame is the
+		// fallback if that call fails (#4430 review).
+		choices = handoffAgentChoices(current,
+			session.HandoffEffectiveAgentsForPathInspection(selected.GetRepoPath(), tmux.SupportedPrograms))
+		if len(choices) == 0 {
+			return m, m.handleNotice(fmt.Errorf("no other agent is available to hand '%s' off to", selected.Title))
+		}
+		m.handoffChoices = choices
 	}
 	m.handoffTarget = captureSessionActionTarget(selected, m.repoID)
 	m.selectionOverlay = overlay.NewSelectionOverlay("Hand off to", choices)

@@ -233,6 +233,33 @@ func (i *Instance) reprovisionRemote() error {
 	if err != nil {
 		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
 	}
+	// Refuse a drifted agent BEFORE anything is reaped or provisioned (#3082) —
+	// and before the account resolution below, which would answer a different
+	// question first (#4430): the resolver looks the persisted account up under
+	// the CURRENTLY resolved agent's registry, so a drifted config either finds
+	// no account there or reports the resolved agent "does not support multiple
+	// accounts" — roster answers, when the defect is that the session's
+	// persisted identity no longer matches what its program will launch.
+	//
+	// The create path checks this; reprovision did not, so a restore or recovery
+	// after program_overrides changed would rebuild the container against the same
+	// account while running a different agent — the identity the account names
+	// would be reported, and another one spent. Same question, same helper: two
+	// places deciding "has the program changed?" separately is how they drift.
+	//
+	// A refusal must cost nothing: the old runtime is still live and still
+	// recoverable, and reaping first would destroy it for a create that is
+	// about to be refused anyway.
+	if strings.TrimSpace(accountName) != "" {
+		resolved, cfgErr := resolveRepoConfig(i.Path)
+		if cfgErr != nil {
+			return fmt.Errorf("cannot re-provision session %q: its account cannot be checked against the resolved program: %w", i.Title, cfgErr)
+		}
+		scopedAgent := sessionenv.AgentForCommand(i.Program)
+		if err := refuseAccountAgentDrift(accountName, scopedAgent, config.ResolveProgram(&resolved.Config, i.Program)); err != nil {
+			return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
+		}
+	}
 	// Resolve the persisted account before reaping the old sandbox. A missing or
 	// cross-agent account makes the replacement unusable, and that is not a reason
 	// to destroy the only runtime the session still has. The initial create uses
@@ -251,27 +278,6 @@ func (i *Instance) reprovisionRemote() error {
 	i.mu.RLock()
 	creds := i.sandboxCreds
 	i.mu.RUnlock()
-	// Refuse a drifted agent BEFORE anything is reaped or provisioned (#3082).
-	//
-	// The create path checks this; reprovision did not, so a restore or recovery
-	// after program_overrides changed would rebuild the container against the same
-	// account while running a different agent — the identity the account names
-	// would be reported, and another one spent. Same question, same helper: two
-	// places deciding "has the program changed?" separately is how they drift.
-	//
-	// Placed above the reap because a refusal must cost nothing: the old runtime is
-	// still live and still recoverable, and reaping first would destroy it for a
-	// create that is about to be refused anyway.
-	if strings.TrimSpace(i.Account) != "" {
-		resolved, cfgErr := resolveRepoConfig(i.Path)
-		if cfgErr != nil {
-			return fmt.Errorf("cannot re-provision session %q: its account cannot be checked against the resolved program: %w", i.Title, cfgErr)
-		}
-		scopedAgent := sessionenv.AgentForCommand(i.Program)
-		if err := refuseAccountAgentDrift(i.Account, scopedAgent, config.ResolveProgram(&resolved.Config, i.Program)); err != nil {
-			return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
-		}
-	}
 
 	// A failed archive/recovery can leave the old sandbox wiring live. Reap it
 	// before provisioning a replacement so bindProvisionResult never discards its

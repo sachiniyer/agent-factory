@@ -1838,6 +1838,21 @@ agent and stored prompt, or combine both flags to change agent and account.
 A manual handoff moves an explicit account pin; automatic rotation still
 respects it. Targets with current usage-limit evidence are refused.
 
+An account belongs to one agent, so a scoped session that changes agents
+must name the incoming agent's account with --account — unless the target
+has no account support at all, which drops the scope instead and reports
+it on from_account. What decides capability is the command the target
+resolves to, not the enum: program_overrides can make aider launch codex
+(a codex account is then required) or codex launch something unscopable
+(the scope is dropped). A resolved command af cannot classify as an agent
+at all — a wrapper like "npx codex" may launch an account-capable agent
+underneath — refuses rather than drop the pin on an unproven answer. The
+drop is one-way: handing back to an account-capable agent later does not
+restore it, so name the account again with --account. Dropping the scope
+restarts only the agent pane, so a session with shell, process, or VS Code
+sibling tabs is refused until those tabs are closed — they would keep
+running under the dropped account's environment.
+
 The session keeps its identity, its git worktree, and its branch — only the
 agent process changes. The incoming agent starts a fresh conversation and is
 given a mission brief: the session's goal, and what is already on the branch.

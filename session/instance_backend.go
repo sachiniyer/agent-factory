@@ -426,6 +426,11 @@ func (i *Instance) SwapAgent(plan AgentSwapPlan) (InstanceData, error) {
 	if target := i.AgentProgram(); target != plan.target || strings.TrimSpace(plan.program) == "" {
 		return InstanceData{}, fmt.Errorf("session %q handoff plan no longer matches its recorded target", i.Title)
 	}
+	// A record still carrying an account at this boundary skipped the handoff
+	// transaction's scope decision (#4428); refuse before any pane is touched.
+	if err := i.handoffUnsettledAccountError(plan); err != nil {
+		return InstanceData{}, err
+	}
 	if plan.conversation.HasID() {
 		i.SetAgentConversation(plan.conversation)
 	}

@@ -85,21 +85,24 @@ func (s vscodeAccountScope) environment() ([]string, error) {
 // vscodeAccountScopeForInstance gives the daemon-owned editor the same selected
 // credential boundary as the tmux panes whose integrated terminals it hosts.
 //
-// The agent NAMESPACE is derived from the session's configured program, matching
-// refreshSessionEnvironment and every other surface that resolves this session's
-// account. It deliberately does not use CurrentAgentName, which prefers the
-// RUNNING tmux command: an account belongs to an agent's registry, this
-// session's account was validated against its configured program when it was
-// created (resolveAccountForProvision), and a session resolved by
-// program_overrides into a different agent would send the lookup into a registry
-// that never held this account — turning a working editor into a refusal.
+// The agent NAMESPACE is the agent the session's account was selected under —
+// the RESOLVED command's, not the configured program's enum: a
+// program_overrides redirect commits Program=aider while the pane launches
+// codex and the account lives in codex's registry (#4430 review round 3). The
+// pane's frozen launch program is the authority for what was committed;
+// re-resolving the enum covers a pane that can no longer report it. It
+// deliberately does not use CurrentAgentName, whose enum fallback would answer
+// the requested program — the enum is exactly what a redirect makes wrong.
 func vscodeAccountScopeForInstance(instance *session.Instance) vscodeAccountScope {
 	account, _ := instance.AccountSelection()
 	account = strings.TrimSpace(account)
 	if account == "" {
 		return ambientVSCodeScope()
 	}
-	agent := sessionenv.AgentForCommand(instance.AgentProgram())
+	agent := sessionenv.AgentForCommand(instance.ResolvedPaneProgram())
+	if agent == "" {
+		agent = session.HandoffEffectiveAgentForPath(instance.Path, instance.AgentProgram())
+	}
 	return vscodeAccountScope{
 		account: account,
 		environ: func() ([]string, error) {
