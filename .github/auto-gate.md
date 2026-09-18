@@ -384,22 +384,37 @@ bypass because that non-session path updates the release commit directly.
 
 ## Queued-only deduplication
 
-Concurrency belongs to evaluation jobs, never the workflow. Every run follows
-this dependency graph:
+Every run follows this dependency graph:
 
 ```text
-auto-gate (resolve event heads, ungrouped)
+auto-gate (resolve event heads)
   -> invalidate-gate (ungrouped, including retries)
     -> apply-gate (one reusable-workflow call per invalidated head)
       -> aggregate transaction (head-serialized evaluation/report/merge)
 ```
 
-Neither the resolver nor invalidation has a concurrency group or waits on a
-grouped job. Every event can therefore invalidate while an older transaction
-is running; dedupe cannot discard an event before its invalidation attempt.
-Only successfully invalidated heads enter evaluation. This preserves generation
-ownership checks immediately before PASS and merge, including write retries.
-Runner availability and API failures still apply; concurrency adds no wait here.
+A concurrency group keeps at most one running and one pending run; a newer
+pending run replaces the older one. Replacement is safe only when the
+survivor's invalidation covers every head the cancelled pending run would have
+covered — a run discarded while pending never reaches invalidation, and an
+uncovered head keeps its stale verdict. The workflow-level group is keyed so
+that guarantee holds: scheduled and dispatched reconciliation passes share one
+fungible group; comment and
+review events coalesce per PR; check-suite, status, and workflow-run events
+coalesce per named commit; the remaining pull_request_target actions coalesce
+per (PR, payload head); synchronize stays keyed to its exact (before, after)
+transition and workflow_dispatch to its (PR, previous head), because those two
+carry coverage no later run reproduces. `cancel-in-progress` is `false`
+everywhere, so an active resolve, invalidation, or transaction always finishes
+uninterrupted.
+
+Inside each surviving run nothing changed: neither the resolver nor
+invalidation waits on a grouped job, every event still invalidates before any
+serialized lane, and a newer event can still invalidate while an older
+transaction is running. Only successfully invalidated heads enter evaluation.
+This preserves generation ownership checks immediately before PASS and merge,
+including write retries. Runner availability and API failures still apply;
+concurrency adds no wait here.
 
 The calling evaluation job holds `auto-gate-target-<target>-head-<head SHA>`
 for the entire reusable aggregate transaction. The target is the issue or PR
@@ -489,6 +504,47 @@ does no per-head REST reads. Each other run pays one REST read for the marker,
 plus at most one dispatch per window. Passes skip unrelated branch-sweep
 housekeeping. This avoids both the frozen-decision failure and one gate
 evaluation per completed matrix job (#4242).
+
+**A head with no PR Validation run at all gets one dispatched (#4581).**
+Reconciliation wakes a decision when Build or Lint completes, so it cannot help
+a head whose run GitHub never created. #4430's `b63f9752` was an ordinary lane
+push that got an Auto Gate run and no PR Validation run, and its decision said
+"required check Build is missing" until someone dispatched `pr.yml` by hand.
+When an evaluation finds Build or Lint absent and no run parked, it first asks
+whether any PR Validation run exists for the head sha, under any event:
+
+- **A run exists** (queued, running, finished, or dispatched earlier): nothing
+  changes, and the decision reads as before.
+- **No run exists:** the gate dispatches `pr.yml` on the PR's branch, the same
+  mechanism the update-branch recovery uses, and the missing-check reasons say
+  so.
+
+Guards:
+
+- **Once per head.** The existence read is the marker. A dispatched run carries
+  the sha it ran at, so every later evaluation of that head finds it and stops.
+  The gate writes no state of its own. Two evaluations that read before either
+  dispatch is visible can both send one. The dispatch passes no inputs, so it
+  is a full run rather than a #4563 probe. `pr.yml` groups it by its branch ref
+  (`pr-<ref>`, apart from probes' `probe-<ref>`) and cancels in progress, so
+  that race costs one cancelled run, and a probe on the branch cancels neither.
+- **Toward waiting.** A failed or malformed read dispatches nothing, and the
+  decision reads as before. A missed dispatch costs a delay, but a dispatch loop
+  would cost the runner pool.
+- **Not mid-push.** GitHub creates a push's runs a few seconds after the head
+  moves, so absence is confirmed over the same bounded wait (three reads, five
+  seconds apart) that update-branch recovery uses.
+- **At this head only.** A dispatch takes a ref, so the branch tip is read last,
+  and a tip that is no longer the evaluated head skips the dispatch. The newer
+  head gets its own evaluation.
+- **Only where GitHub would have run it.** Fork heads, conflicting or
+  still-computing merges, PRs that are not open master PRs, and merge-queue
+  batches get no dispatch. GitHub creates no `pull_request` run for those either.
+
+The cost is one REST read per evaluation that finds a PR Validation check
+absent. It finds a run on the first read in the ordinary case. A dispatch also
+runs PR Validation for a head whose commit message skipped CI, because the gate
+cannot merge a head whose required checks never report.
 
 GitHub also suppresses `push` workflows when Auto Gate merges with its
 `GITHUB_TOKEN`. After a merge, the gate therefore dispatches the five
@@ -582,8 +638,10 @@ structurally removes top-level pull-review comments from that feed before body
 classification; those artifacts are finding surfaces, while replies retain the
 finding-shaped body guard. It reconstructs degraded merges using #3932's method:
 a reviewer-unavailable response whose artifact timestamp falls inside the
-episode and before merge, plus no real verdict covering the actual merged head
-before merge. Each degraded merge is attributed once, to the episode holding
+episode and before merge, plus no real verdict covering the merged head before
+merge — where coverage admits the same head set the gate accepts: the merged
+head and each first parent the update-branch proof verifies content-preserving
+(#4238, #4241). Each degraded merge is attributed once, to the episode holding
 the latest qualifying notice at or before that merge, even when the merge lands
 after recovery. Scanned merged PRs have their attribution refreshed across both
 rebuilt and frozen episodes, so merges after the 24-hour boundary are counted
@@ -593,7 +651,9 @@ implementation of the merge gate; the count is labelled with its method in the
 record. An unrecognised artifact before the episode is not evidence. Late
 reviews cannot undo a degraded merge. The shared `codexEvidence` export from
 `auto-gate.js` supplies structural classification, quotation/finding exclusions,
-and verdict parsing. Finding predicates and the hand gate's jq are unchanged.
+verdict parsing, and the update-branch content-head proof, so the record and the
+gate cannot drift apart on what a covering verdict may name. Finding predicates
+and the hand gate's jq are unchanged.
 
 On a degraded evaluation, Auto Gate reads this record once and writes the
 outage duration to the job summary. It labels the watch's observation time;

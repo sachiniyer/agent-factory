@@ -206,6 +206,14 @@ func recoverSandbox(i *Instance) error {
 // branch, so the new sandbox clones the pushed state back; on success the new
 // backend + remote agent-server endpoint + teardown replace the old (dead) ones.
 func (i *Instance) reprovisionRemote() error {
+	// Bound the hook's lifetime to this attempt: clear it on every exit so a
+	// hook registered for this call cannot survive to fire on a later call.
+	// After a successful reap (below) the hook is already taken and fired, so
+	// this defer gets nil — a no-op. After a reap failure the explicit clear
+	// below is reached first; this defer is then also a no-op. For all
+	// pre-reap returns (missing backend, bad kind, unresolvable account,
+	// runtime resolution failure, config/drift check) only this defer runs.
+	defer i.takeOnSandboxRetired()
 	i.mu.RLock()
 	backend := i.backend
 	accountName := i.Account
@@ -270,7 +278,18 @@ func (i *Instance) reprovisionRemote() error {
 	// only cleanup handle. An unknown outcome keeps the old wiring installed for a
 	// real retry instead of provisioning a second sandbox on a guess.
 	if err := i.reapRemoteRuntimeForReplacement(); err != nil {
+		// Retirement failed: clear any registered hook so it is not inherited by a
+		// later call or fired at the wrong point.
+		i.takeOnSandboxRetired()
 		return fmt.Errorf("cannot re-provision session %q: previous sandbox cleanup state is unknown: %w", i.Title, err)
+	}
+	// The old sandbox is now provably gone: fire the one-shot hook before
+	// continuing. This is the earliest point from which a new Recover episode
+	// can legitimately begin. Pre-reap failures are excluded because the old
+	// sandbox may still be live, and firing there would let repeated pre-reap
+	// failures reset the budget indefinitely.
+	if fn := i.takeOnSandboxRetired(); fn != nil {
+		fn()
 	}
 	// Mint AFTER the reap, through the same helper the create path uses (#3068).
 	//
