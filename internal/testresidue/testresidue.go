@@ -24,6 +24,15 @@ const (
 	PackageTmuxPrefix = "af-tmux-pkg-"
 	// TestTmuxPrefix is testguard.IsolateTmux's TMUX_TMPDIR, one per test.
 	TestTmuxPrefix = "af-tmux-"
+
+	// OwnerStampFile is the file testguard writes inside every one of these
+	// directories, of either kind, naming the test binary that created it, so
+	// a later test binary can reap the directory once that owner is provably
+	// dead (#4468).
+	OwnerStampFile = "owner"
+	// OwnerStampTempFile is the stamp before its rename into place. A binary
+	// killed between the write and the rename leaves it behind.
+	OwnerStampTempFile = OwnerStampFile + ".tmp"
 )
 
 // Kind is which harness directory a name belongs to.
@@ -36,7 +45,7 @@ const (
 	SandboxHome
 	// TmuxSocketDir is a private tmux server's TMUX_TMPDIR, per package or per
 	// test. Both hold the same thing — tmux-<uid>/ and its sockets — so they are
-	// one kind.
+	// one kind, and it is the one that can hold a tmux server worth stopping.
 	TmuxSocketDir
 )
 

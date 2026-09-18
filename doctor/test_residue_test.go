@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testresidue"
@@ -284,6 +285,146 @@ func TestAHarnessDirHoldingMoreThanTheHarnessLeavesIsKept(t *testing.T) {
 		require.NotContains(t, rf.Detail, realHome, "a two-marker home is checkStaleTempHomes' to judge")
 	}
 	require.FileExists(t, filepath.Join(realHome, "config.toml"))
+}
+
+// stampResidue writes testguard's owner stamp files into a harness dir, as
+// every one of them carries since #4468, and re-ages the dir so writing them
+// does not make it read as a live run.
+func stampResidue(t *testing.T, dir string, names ...string) {
+	t.Helper()
+	paths := []string{dir}
+	for _, name := range names {
+		p := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(p, []byte("4242\t99\tboot\tns\n"), 0o644))
+		paths = append(paths, p)
+	}
+	ageTree(t, paths...)
+}
+
+// #4468 stamps every harness dir with an owner file (and, for a binary killed
+// mid-write, its rename temp). That stamp is harness content in both kinds: a
+// recogniser that reads it as foreign would report every dir the harness now
+// leaves behind instead of clearing it.
+func TestAHarnessDirHoldingTheOwnerStampIsStillRemoved(t *testing.T) {
+	root := socketTempHome(t)
+	stubOpenFiles(t, true, nil)
+	homeWithLog := sandboxHomeResidue(t, root, testresidue.SandboxHomePrefix+"9901", "agent-factory.log")
+	stampResidue(t, homeWithLog, testresidue.OwnerStampFile)
+	homeMidStamp := sandboxHomeResidue(t, root, testresidue.SandboxHomePrefix+"9902")
+	stampResidue(t, homeMidStamp, testresidue.OwnerStampTempFile)
+	pkgDead, socket := tmuxResidue(t, root, testresidue.PackageTmuxPrefix+"9903", "dead")
+	stampResidue(t, pkgDead, testresidue.OwnerStampFile)
+	testEmpty, _ := tmuxResidue(t, root, testresidue.TestTmuxPrefix+"9904", "empty")
+	stampResidue(t, testEmpty, testresidue.OwnerStampFile, testresidue.OwnerStampTempFile)
+	dirs := []string{homeWithLog, homeMidStamp, pkgDead, testEmpty}
+
+	report, err := Run(residueOptions(t, root, false))
+	require.NoError(t, err)
+	for _, dir := range dirs {
+		f := residueFinding(t, report, dir)
+		require.True(t, f.Actionable, f.Detail)
+		require.NotContains(t, f.Detail, "does not leave behind")
+	}
+	require.Contains(t, residueFinding(t, report, homeWithLog).Detail, "that run's log and its owner stamp")
+	require.Contains(t, residueFinding(t, report, homeMidStamp).Detail, "holding only its owner stamp")
+
+	report, err = Run(residueOptions(t, root, true))
+	require.NoError(t, err)
+	for _, dir := range dirs {
+		f := residueFinding(t, report, dir)
+		require.True(t, f.Fixed, "fix error for %s: %v", dir, f.FixErr)
+		require.NoDirExists(t, dir)
+	}
+	require.NoFileExists(t, socket)
+}
+
+// Only those two names, and only as regular files. Anything else wearing the
+// name, or near it, is content the harness did not leave, and --fix refuses it.
+func TestSomethingMerelyNamedLikeTheOwnerStampIsKept(t *testing.T) {
+	root := socketTempHome(t)
+	stubOpenFiles(t, true, nil)
+
+	stampDir := sandboxHomeResidue(t, root, testresidue.SandboxHomePrefix+"9911", "agent-factory.log")
+	inner := filepath.Join(stampDir, testresidue.OwnerStampFile, "work")
+	require.NoError(t, os.MkdirAll(filepath.Dir(inner), 0o700))
+	require.NoError(t, os.WriteFile(inner, []byte("do not delete me"), 0o600))
+	ageTree(t, stampDir, filepath.Dir(inner), inner)
+
+	stampLink, _ := tmuxResidue(t, root, testresidue.PackageTmuxPrefix+"9912", "empty")
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	require.NoError(t, os.WriteFile(target, []byte("do not delete me"), 0o600))
+	link := filepath.Join(stampLink, testresidue.OwnerStampTempFile)
+	require.NoError(t, os.Symlink(target, link))
+	// Chtimes follows the link; the link's own mtime is what doctor reads, and
+	// left at now it would spare the dir as young rather than judge the link.
+	old := unix.NsecToTimeval(time.Now().Add(-48 * time.Hour).UnixNano())
+	require.NoError(t, unix.Lutimes(link, []unix.Timeval{old, old}))
+	ageTree(t, stampLink)
+
+	nearName, _ := tmuxResidue(t, root, testresidue.TestTmuxPrefix+"9913", "empty")
+	stampResidue(t, nearName, testresidue.OwnerStampFile+".bak")
+
+	report, err := Run(residueOptions(t, root, true))
+	require.NoError(t, err)
+	for dir, name := range map[string]string{
+		stampDir:  testresidue.OwnerStampFile,
+		stampLink: testresidue.OwnerStampTempFile,
+		nearName:  testresidue.OwnerStampFile + ".bak",
+	} {
+		f := residueFinding(t, report, dir)
+		require.False(t, f.Actionable, f.Detail)
+		require.Empty(t, f.FixAction)
+		require.Contains(t, f.Detail, name+", which the test harness does not leave behind")
+		require.DirExists(t, dir)
+	}
+	require.FileExists(t, inner)
+	require.FileExists(t, target)
+}
+
+// The fix re-reads the shape of a stamped dir too: a stranger's file added after
+// the scan, or the stamp swapped for a directory, refuses the removal before a
+// single entry — the stamp included — is taken.
+func TestTheResidueFixReReadsAStampedDirectory(t *testing.T) {
+	for name, tamper := range map[string]func(t *testing.T, dir string) string{
+		"gained a file": func(t *testing.T, dir string) string {
+			p := filepath.Join(dir, "someone-elses-work")
+			require.NoError(t, os.WriteFile(p, []byte("do not delete me"), 0o600))
+			ageTree(t, dir, p)
+			return p
+		},
+		"stamp became a directory": func(t *testing.T, dir string) string {
+			stamp := filepath.Join(dir, testresidue.OwnerStampFile)
+			require.NoError(t, os.Remove(stamp))
+			p := filepath.Join(stamp, "work")
+			require.NoError(t, os.MkdirAll(stamp, 0o700))
+			require.NoError(t, os.WriteFile(p, []byte("do not delete me"), 0o600))
+			ageTree(t, dir, stamp, p)
+			return p
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := socketTempHome(t)
+			stubOpenFiles(t, true, nil)
+			dir, socket := tmuxResidue(t, root, testresidue.TestTmuxPrefix+"9921", "dead")
+			stampResidue(t, dir, testresidue.OwnerStampFile, testresidue.OwnerStampTempFile)
+			ctx, err := newScanContext(residueOptions(t, root, true))
+			require.NoError(t, err)
+			require.True(t, readResidueShape(normalizeHome(dir), testresidue.TmuxSocketDir).ok,
+				"precondition: the stamped dir is removable as scanned")
+			fix := testResidueRemoveFix(ctx, normalizeHome(dir), normalizeHome(root), normalizeHome(ctx.opts.ConfigDir),
+				testresidue.TmuxSocketDir)
+
+			kept := tamper(t, dir)
+
+			err = fix()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "no longer holds only what the test harness leaves behind",
+				"refused for the content, not for some other reason")
+			require.FileExists(t, kept)
+			require.FileExists(t, filepath.Join(dir, testresidue.OwnerStampTempFile), "nothing is removed before the refusal")
+			require.FileExists(t, socket)
+		})
+	}
 }
 
 func TestAYoungHarnessDirIsLeftAlone(t *testing.T) {
