@@ -134,7 +134,7 @@ for **that session's own agent** — and only that agent. The mapping is:
 | claude | `~/.claude/.credentials.json` |
 | codex | `~/.codex/auth.json` |
 | gemini | `~/.gemini/{oauth_creds,gemini-credentials,google_accounts}.json` (whichever exist) |
-| amp | `~/.config/amp/settings.json` |
+| amp | `~/.local/share/amp/secrets.json` *(amp's stored API key; if you enabled amp's native keyring storage there is no file, so name `AMP_API_KEY` in `session_env_passthrough` instead)* |
 | opencode | `~/.local/share/opencode/auth.json` |
 | aider | *(none — authenticates via API-key env vars; name it in `session_env_passthrough`)* |
 | devin | `~/.config/devin/config.json` *(no effect unless your image also carries the devin CLI)* |
