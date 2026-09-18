@@ -1,0 +1,464 @@
+package testguard
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// fakeHome points HOME at a temp dir for the test, and sets the Go toolchain
+// variables so SandboxHome finds them set and does not run `go env` there. A
+// `go env` under a fake home writes Go telemetry into the fake config dir from
+// a process that can outlive it, and that write raced t.TempDir's cleanup
+// ("directory not empty").
+func fakeHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range goToolchainVars {
+		t.Setenv(name, filepath.Join(home, "pinned-"+name))
+	}
+	// The shell proof runs on every SandboxHome. /bin/sh keeps it fast and
+	// independent of the developer's shell; the proof has its own tests.
+	t.Setenv("SHELL", "/bin/sh")
+	return home
+}
+
+// fakeAmbientHome stands in for the developer's real environment: a HOME and
+// every root override pointed somewhere this test owns. Restoration is
+// registered with t.Setenv, so a failing test cannot leak it.
+// mustClear is the contract, written out rather than read from
+// userRootOverrides, so a name dropped from that list fails a test. It holds the
+// root-naming variables internal/sessionenv passes into agent panes, the XDG
+// roots, and the shell startup indirections, which can re-export any of them.
+var mustClear = []string{
+	"CODEX_HOME", "CODEX_SQLITE_HOME", "GEMINI_CLI_HOME", "CLAUDE_CONFIG_DIR",
+	"AMP_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "GH_CONFIG_DIR",
+	"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+	"ZDOTDIR", "BASH_ENV", "ENV", "HISTFILE",
+}
+
+func fakeAmbientHome(t *testing.T) (home string, overrides map[string]string) {
+	t.Helper()
+	home = fakeHome(t)
+	overrides = make(map[string]string, len(mustClear))
+	for _, name := range mustClear {
+		value := filepath.Join(home, "override-"+name)
+		t.Setenv(name, value)
+		overrides[name] = value
+	}
+	return home, overrides
+}
+
+// unsetForTest makes name genuinely absent for the rest of the test and restores
+// its original state afterwards. t.Setenv alone cannot express "absent".
+func unsetForTest(t *testing.T, name string) {
+	t.Helper()
+	t.Setenv(name, "placeholder")
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatalf("unset %s: %v", name, err)
+	}
+}
+
+// TestSandboxHome_RelocatesEveryUserRoot is #4469's red at the harness level.
+// A test that never sets CODEX_HOME must not resolve the developer's Codex
+// store, and the same holds one variable over: every root an agent or af derives
+// from the ambient environment has to land in the sandbox. An override is
+// CLEARED rather than repointed, so each root derives from the sandbox HOME the
+// same way it does on a default install. That keeps a command-local HOME=
+// meaningful: an inherited CODEX_HOME would outrank it (#4501).
+func TestSandboxHome_RelocatesEveryUserRoot(t *testing.T) {
+	realHome, overrides := fakeAmbientHome(t)
+
+	restore := SandboxHome()
+	home := os.Getenv("HOME")
+	if home == "" || home == realHome {
+		restore()
+		t.Fatalf("SandboxHome left HOME at %q; a test that never sets CODEX_HOME resolves %s", home, filepath.Join(realHome, ".codex"))
+	}
+	if info, err := os.Stat(home); err != nil || !info.IsDir() {
+		restore()
+		t.Fatalf("sandbox HOME %q is not a usable directory: %v", home, err)
+	}
+	if got, err := os.UserHomeDir(); err != nil || got != home {
+		restore()
+		t.Fatalf("os.UserHomeDir() = %q, %v; want the sandbox %q", got, err, home)
+	}
+	for _, name := range mustClear {
+		if value, ok := os.LookupEnv(name); ok {
+			restore()
+			t.Fatalf("SandboxHome must clear %s so its root derives from the sandbox HOME; still %q", name, value)
+		}
+	}
+	afHome := os.Getenv("AGENT_FACTORY_HOME")
+	if rel, err := filepath.Rel(afHome, home); err == nil && filepath.IsLocal(rel) {
+		restore()
+		t.Fatalf("sandbox HOME %q is inside AGENT_FACTORY_HOME %q; tests that list the af home would see it", home, afHome)
+	}
+
+	restore()
+	if got := os.Getenv("HOME"); got != realHome {
+		t.Fatalf("restore did not put HOME back; got %q, want %q", got, realHome)
+	}
+	for name, want := range overrides {
+		if got := os.Getenv(name); got != want {
+			t.Fatalf("restore did not put %s back; got %q, want %q", name, got, want)
+		}
+	}
+	if _, err := os.Stat(home); !os.IsNotExist(err) {
+		t.Fatalf("restore did not remove the sandbox HOME %q; stat err=%v", home, err)
+	}
+}
+
+// TestSandboxHome_RestoresAbsentOverridesAsAbsent pins the other half of the
+// restore contract: a variable that was unset before the sandbox must be unset
+// after it, not set to an empty string. CODEX_HOME="" and an unset CODEX_HOME
+// are different inputs to every resolver that uses LookupEnv.
+func TestSandboxHome_RestoresAbsentOverridesAsAbsent(t *testing.T) {
+	fakeHome(t)
+	for _, name := range userRootOverrides {
+		unsetForTest(t, name)
+	}
+
+	restore := SandboxHome()
+	for _, name := range userRootOverrides {
+		if err := os.Setenv(name, "set-during-run"); err != nil {
+			restore()
+			t.Fatalf("set %s: %v", name, err)
+		}
+	}
+	restore()
+
+	for _, name := range userRootOverrides {
+		if value, ok := os.LookupEnv(name); ok {
+			t.Fatalf("restore must leave %s unset, as it was before the sandbox; got %q", name, value)
+		}
+	}
+}
+
+// TestSandboxHome_PinsGoToolchainState: `go test` exports none of these to the
+// test binary, so without a pin a package that runs `go build` would start from
+// an empty build cache and module cache once HOME moves. The pins are the
+// values `go env` reported before the sandbox, and restore unsets them again.
+func TestSandboxHome_PinsGoToolchainState(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skipf("no go toolchain on PATH: %v", err)
+	}
+	for _, name := range goToolchainVars {
+		unsetForTest(t, name)
+	}
+	out, err := exec.Command("go", append([]string{"env", "-json"}, goToolchainVars...)...).Output()
+	if err != nil {
+		t.Fatalf("go env: %v", err)
+	}
+	var want map[string]string
+	if err := json.Unmarshal(out, &want); err != nil {
+		t.Fatalf("decode go env: %v", err)
+	}
+
+	restore := SandboxHome()
+	got := make(map[string]string, len(goToolchainVars))
+	for _, name := range goToolchainVars {
+		got[name] = os.Getenv(name)
+	}
+	home := os.Getenv("HOME")
+	restore()
+
+	for _, name := range goToolchainVars {
+		if want[name] == "" {
+			continue
+		}
+		if got[name] != want[name] {
+			t.Errorf("%s inside the sandbox = %q, want the pre-sandbox %q", name, got[name], want[name])
+		}
+		if strings.HasPrefix(got[name], home+string(filepath.Separator)) {
+			t.Errorf("%s = %q follows the sandbox HOME %q", name, got[name], home)
+		}
+		if value, ok := os.LookupEnv(name); ok {
+			t.Errorf("restore must leave %s unset, as it was before the sandbox; got %q", name, value)
+		}
+	}
+}
+
+// TestSandboxHome_LeavesExplicitToolchainSettingsAlone: a value the developer
+// already set outranks anything the sandbox could compute, so it is kept as is.
+func TestSandboxHome_LeavesExplicitToolchainSettingsAlone(t *testing.T) {
+	explicit := map[string]string{
+		"GOCACHE":       filepath.Join(t.TempDir(), "gocache"),
+		"DOCKER_CONFIG": filepath.Join(t.TempDir(), "docker"),
+	}
+	for name, value := range explicit {
+		t.Setenv(name, value)
+	}
+	restore := SandboxHome()
+	defer restore()
+	for name, want := range explicit {
+		if got := os.Getenv(name); got != want {
+			t.Errorf("%s = %q inside the sandbox, want the explicit %q", name, got, want)
+		}
+	}
+}
+
+func TestSandboxHome_PinsDockerConfig(t *testing.T) {
+	realHome := fakeHome(t)
+	unsetForTest(t, "DOCKER_CONFIG")
+
+	restore := SandboxHome()
+	got, set := os.LookupEnv("DOCKER_CONFIG")
+	restore()
+
+	if want := filepath.Join(realHome, ".docker"); !set || got != want {
+		t.Fatalf("DOCKER_CONFIG = %q (set=%v) inside the sandbox, want the real %q", got, set, want)
+	}
+	if value, ok := os.LookupEnv("DOCKER_CONFIG"); ok {
+		t.Fatalf("restore must leave DOCKER_CONFIG unset; got %q", value)
+	}
+}
+
+// TestSandboxHome_KeepsGitGlobalConfigReadOnly: git reads its global config from
+// HOME. The sandbox keeps the developer's identity and safe.directory visible,
+// which the container suite needs, and a test's `git config --global` lands in
+// the sandbox instead of the developer's file. Both of git's global files are
+// covered, and ~/.gitconfig still wins over the XDG file.
+func TestSandboxHome_KeepsGitGlobalConfigReadOnly(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	realHome := fakeHome(t)
+	unsetForTest(t, "XDG_CONFIG_HOME")
+	unsetForTest(t, "GIT_CONFIG_GLOBAL")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	gitconfig := filepath.Join(realHome, ".gitconfig")
+	xdgConfig := filepath.Join(realHome, ".config", "git", "config")
+	writeFileAll(t, gitconfig, "[user]\n\tname = Real Person\n[test]\n\twinner = home\n[commit]\n\tgpgsign = true\n[tag]\n\tgpgsign = true\n")
+	writeFileAll(t, xdgConfig, "[user]\n\temail = real@example.com\n[test]\n\twinner = xdg\n")
+	before, err := os.ReadFile(gitconfig)
+	if err != nil {
+		t.Fatalf("read %s: %v", gitconfig, err)
+	}
+
+	restore := SandboxHome()
+	defer restore()
+	// Outside any repository, so the answers come from the global scope alone.
+	// A plain lookup, not `--global --get`: git follows include.path only when
+	// no single file is named, and a plain lookup is how `git commit` reads
+	// user.name.
+	notARepo := t.TempDir()
+	gitConfig := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"config"}, args...)...)
+		cmd.Dir = notARepo
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git config %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	for key, want := range map[string]string{
+		"user.name":   "Real Person",
+		"user.email":  "real@example.com",
+		"test.winner": "home",
+		// The keyring is out of reach from the sandbox, so signing is off even
+		// though the developer's own config turns it on.
+		"commit.gpgsign": "false",
+		"tag.gpgsign":    "false",
+	} {
+		if got := gitConfig("--get", key); got != want {
+			t.Errorf("git config %s = %q inside the sandbox, want %q", key, got, want)
+		}
+	}
+	gitConfig("--global", "test.written", "by-a-test")
+	if got := gitConfig("--get", "test.written"); got != "by-a-test" {
+		t.Fatalf("a test's git config --global write is not visible to it; got %q", got)
+	}
+	after, err := os.ReadFile(gitconfig)
+	if err != nil {
+		t.Fatalf("read %s: %v", gitconfig, err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("a test's git config --global rewrote the real %s:\n%s", gitconfig, after)
+	}
+}
+
+// TestSandboxHome_SeedsZshrc: with no startup file in HOME, zsh starts its
+// interactive new-user setup, which waits for input and would stall a zsh pane
+// or the claude probe's `source ~/.zshrc`.
+func TestSandboxHome_SeedsZshrc(t *testing.T) {
+	fakeHome(t)
+	restore := SandboxHome()
+	defer restore()
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".zshrc")); err != nil {
+		t.Fatalf("sandbox HOME has no .zshrc: %v", err)
+	}
+}
+
+const sandboxChildEnv = "AF_TESTGUARD_SANDBOX_CHILD"
+
+// TestSandboxHomeChildProcess is re-exec'd by TestSandboxHome_ChildInheritsTheParentsSandbox.
+// It stands in for a test binary a test launches as a fixture: the daemon's
+// fake Codex is the test binary behind a "codex" symlink. Its TestMain calls
+// SandboxHome again before the fixture reads CODEX_HOME.
+func TestSandboxHomeChildProcess(t *testing.T) {
+	if os.Getenv(sandboxChildEnv) != "1" {
+		t.Skip("re-exec'd by TestSandboxHome_ChildInheritsTheParentsSandbox")
+	}
+	restore := SandboxHome()
+	defer restore()
+	fmt.Printf("HOME=%s\nCODEX_HOME=%s\n", os.Getenv("HOME"), os.Getenv("CODEX_HOME"))
+}
+
+// TestSandboxHome_ChildInheritsTheParentsSandbox is the regression CI caught on
+// the first head of #4469. A parent test points CODEX_HOME at its fixture store
+// and launches the test binary as the fake Codex. That child must keep writing
+// where the parent reads, so a child of a live sandbox inherits the sandbox
+// instead of applying a fresh one that clears CODEX_HOME.
+//
+// The child gets a stripped environment, not os.Environ(). af launches the
+// fake Codex in a session pane whose environment passes only an allowlist
+// (internal/sessionenv), which keeps HOME and CODEX_HOME and drops anything
+// testguard-specific. The first version of this test passed the full
+// environment, so it passed while CI's pane-launched fixture still failed.
+func TestSandboxHome_ChildInheritsTheParentsSandbox(t *testing.T) {
+	fakeHome(t)
+	restore := SandboxHome()
+	defer restore()
+	parentHome := os.Getenv("HOME")
+	fixtureStore := t.TempDir()
+	t.Setenv("CODEX_HOME", fixtureStore)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSandboxHomeChildProcess$", "-test.count=1")
+	// What sessionenv passes for a codex pane, plus the fixture's own flag, which
+	// the daemon test adds through SessionEnvPassthrough.
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + parentHome,
+		"CODEX_HOME=" + fixtureStore,
+		sandboxChildEnv + "=1",
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child test binary: %v\n%s", err, out)
+	}
+	for _, want := range []string{"HOME=" + parentHome + "\n", "CODEX_HOME=" + fixtureStore + "\n"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("child did not inherit %q from its parent's sandbox:\n%s", strings.TrimSpace(want), out)
+		}
+	}
+}
+
+// TestSandboxHome_IgnoresAnUnmarkedHome: only the marker file makes a HOME
+// count as an inherited sandbox. A home that merely looks like one (a temp dir
+// with the same name prefix) is sandboxed as usual.
+func TestSandboxHome_IgnoresAnUnmarkedHome(t *testing.T) {
+	fakeHome(t)
+	lookalike, err := os.MkdirTemp("", "af-test-user-home-")
+	if err != nil {
+		t.Fatalf("create lookalike home: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(lookalike) })
+	t.Setenv("HOME", lookalike)
+
+	restore := SandboxHome()
+	home := os.Getenv("HOME")
+	restore()
+	if home == lookalike {
+		t.Fatalf("an unmarked HOME %q was treated as an inherited sandbox", lookalike)
+	}
+}
+
+// TestUseAmbientHome_RestoresThePreSandboxHomeForOneTest covers the opt-out for
+// tests whose subject is the real user environment: inside the test, HOME and
+// every override match what they were before the sandbox, including an override
+// that was absent. Afterwards the sandbox is back.
+func TestUseAmbientHome_RestoresThePreSandboxHomeForOneTest(t *testing.T) {
+	realHome, overrides := fakeAmbientHome(t)
+	unsetForTest(t, "XDG_STATE_HOME")
+	delete(overrides, "XDG_STATE_HOME")
+	restore := SandboxHome()
+	defer restore()
+	sandboxHome := os.Getenv("HOME")
+
+	t.Run("opted out", func(t *testing.T) {
+		UseAmbientHome(t)
+		if got := os.Getenv("HOME"); got != realHome {
+			t.Fatalf("HOME = %q, want the pre-sandbox %q", got, realHome)
+		}
+		for name, want := range overrides {
+			if got := os.Getenv(name); got != want {
+				t.Fatalf("%s = %q, want the pre-sandbox %q", name, got, want)
+			}
+		}
+		if value, ok := os.LookupEnv("XDG_STATE_HOME"); ok {
+			t.Fatalf("XDG_STATE_HOME was unset before the sandbox; UseAmbientHome set it to %q", value)
+		}
+	})
+
+	if got := os.Getenv("HOME"); got != sandboxHome {
+		t.Fatalf("after the opted-out test HOME = %q, want the sandbox %q back", got, sandboxHome)
+	}
+	for name := range overrides {
+		if value, ok := os.LookupEnv(name); ok {
+			t.Fatalf("after the opted-out test %s = %q, want it cleared again", name, value)
+		}
+	}
+}
+
+func TestUseAmbientHome_NoSandboxIsANoOp(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	UseAmbientHome(t)
+	if got := os.Getenv("HOME"); got != home {
+		t.Fatalf("UseAmbientHome without a sandbox changed HOME to %q", got)
+	}
+}
+
+// TestSandboxHome_PinsToolchainVariablesExportedEmpty: an exported empty GOCACHE
+// or DOCKER_CONFIG means "derive it from HOME" to Go and Docker, so it needs a
+// pin just like an unset one. The empty value is what gets restored.
+func TestSandboxHome_PinsToolchainVariablesExportedEmpty(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skipf("no go toolchain on PATH: %v", err)
+	}
+	realHome := t.TempDir()
+	t.Setenv("HOME", realHome)
+	t.Setenv("SHELL", "/bin/sh")
+	for _, name := range goToolchainVars {
+		t.Setenv(name, filepath.Join(realHome, "pinned-"+name))
+	}
+	// This test has to run `go env` under a fake home. Go telemetry writes into
+	// the config dir from a process that can outlive the command, so that dir
+	// is one whose cleanup tolerates a late write, unlike t.TempDir's.
+	configDir, err := os.MkdirTemp("", "af-testguard-goconfig-")
+	if err != nil {
+		t.Fatalf("create go config dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(configDir) })
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("GOCACHE", "")
+	t.Setenv("DOCKER_CONFIG", "")
+	out, err := exec.Command("go", "env", "GOCACHE").Output()
+	if err != nil {
+		t.Fatalf("go env GOCACHE: %v", err)
+	}
+	wantCache := strings.TrimSpace(string(out))
+
+	restore := SandboxHome()
+	gotCache, gotDocker := os.Getenv("GOCACHE"), os.Getenv("DOCKER_CONFIG")
+	restore()
+
+	if gotCache != wantCache {
+		t.Errorf("an exported-empty GOCACHE was not pinned: %q inside the sandbox, want the pre-sandbox %q", gotCache, wantCache)
+	}
+	if want := filepath.Join(realHome, ".docker"); gotDocker != want {
+		t.Errorf("an exported-empty DOCKER_CONFIG was not pinned: %q inside the sandbox, want %q", gotDocker, want)
+	}
+	for _, name := range []string{"GOCACHE", "DOCKER_CONFIG"} {
+		if value, set := os.LookupEnv(name); !set || value != "" {
+			t.Errorf("restore must put back the exported-empty %s; got %q (set=%v)", name, value, set)
+		}
+	}
+}
