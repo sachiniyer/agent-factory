@@ -299,8 +299,9 @@ func TestServeSPA_PWAAssetsAreEmbedded(t *testing.T) {
 // TestServeSPA_ServiceWorkerIsStamped guards the cache-busting stamp end to end. A
 // worker shipped with its literal __AF_SHELL_VERSION__ placeholder would name one
 // permanent cache across every future build, so an auto-updated af could keep serving
-// the pre-update shell from it. build.mjs throws if the placeholder goes missing; this
-// is the other half — that the committed dist/ was actually built by it.
+// the pre-update shell from it. The committed dist/sw.js carries that placeholder on
+// purpose (#4116); web.Dist replaces it with a hash of the embedded shell, and this is
+// the check that the daemon serves the replaced file rather than the committed one.
 func TestServeSPA_ServiceWorkerIsStamped(t *testing.T) {
 	srv := httptest.NewServer(webShellHandler(&apiSpy{}))
 	defer srv.Close()
@@ -313,7 +314,7 @@ func TestServeSPA_ServiceWorkerIsStamped(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.NotContains(t, string(body), "__AF_SHELL_VERSION__",
-		"dist/sw.js still carries the placeholder — run `make web-build`")
+		"the served worker still carries the placeholder — web.Dist must stamp sw.js")
 	require.Regexp(t, `af-shell-\$\{VERSION\}`, string(body), "sw.js must name a versioned cache")
 	require.Regexp(t, `const VERSION = "[0-9a-f]{12}"`, string(body), "sw.js must carry a stamped content hash")
 }

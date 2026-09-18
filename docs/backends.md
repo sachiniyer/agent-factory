@@ -146,7 +146,7 @@ for **that session's own agent** — and only that agent. The mapping is:
 | claude | `~/.claude/.credentials.json` |
 | codex | `~/.codex/auth.json` |
 | gemini | `~/.gemini/{oauth_creds,gemini-credentials,google_accounts}.json` (whichever exist) |
-| amp | `~/.config/amp/settings.json` |
+| amp | `~/.local/share/amp/secrets.json` *(amp's stored API key; if you enabled amp's native keyring storage there is no file, so name `AMP_API_KEY` in `session_env_passthrough` instead)* |
 | opencode | `~/.local/share/opencode/auth.json` |
 | aider | *(none — authenticates via API-key env vars; name it in `session_env_passthrough`)* |
 | devin | `~/.config/devin/config.json` *(no effect unless your image also carries the devin CLI)* |
@@ -317,6 +317,16 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex
   af refuses a remote engine at create time (and reports it unavailable at choose
   time) rather than provisioning a session that fails later with an opaque
   `connection refused` to `127.0.0.1`.
+- **At most one of `DOCKER_HOST` and `DOCKER_CONTEXT`**, unless both point at the
+  same endpoint. When both are set, the docker CLI dials `DOCKER_HOST`, but its
+  reference documents `DOCKER_CONTEXT` as the override. af cannot tell which one
+  you meant, so it refuses the combination and names both variables in the
+  error — including in the daemon-startup orphan sweep, which skips its
+  destructive pass rather than guess an engine. Endpoint spellings that provably
+  name one engine still pass: letter case, a scheme's default port, and trailing
+  dots or slashes are normalized before af compares them. With only one of them
+  set, af follows the CLI: `DOCKER_HOST` wins over the context selected with
+  `docker context use`, and `DOCKER_CONTEXT` wins over it too.
 - The repo must have an `origin` remote the container can clone from (GitHub for
   a real repo; a `file://` path + a `run_args` bind-mount for a self-contained
   test).

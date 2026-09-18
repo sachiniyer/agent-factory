@@ -237,10 +237,11 @@ test("Build runs even when a need fails, so the required check goes red not skip
   // GitHub skips a job whose `needs` failed, and a SKIPPED required check does not
   // fail — the merge button stays live. `if: always()` plus the gate step is what
   // converts a failed need into a red "Build". Without it, every `needs` entry
-  // above is decorative.
+  // above is decorative. The `&& !inputs.probe` clause is true on every event
+  // but a probe dispatch (#4563), which gates nothing; pr-probe.test.js pins it.
   const yaml = readWorkflow("pr.yml");
   const build = yaml.slice(yaml.indexOf("\n  build:\n"));
-  assert.match(build, /^ {4}if: always\(\)$/m, "pr.yml's build job must keep `if: always()`");
+  assert.match(build, /^ {4}if: always\(\) && !inputs\.probe$/m, "pr.yml's build job must keep `if: always()`");
   assert.match(
     build,
     /^ {8}if: contains\(needs\.\*\.result, 'failure'\) \|\| contains\(needs\.\*\.result, 'cancelled'\)$/m,
@@ -417,6 +418,9 @@ test("the visual gate diffs stills against committed goldens and cannot regenera
     "CI must always diff against the committed goldens (updateSnapshots: none)");
   assert.equal(loadVisualConfig({ AF_PERF_MODE: "1" }).updateSnapshots, "none",
     "a plain human run diffs; it does not rewrite baselines");
-  assert.equal(loadVisualConfig({ AF_PERF_MODE: "1", AF_UPDATE_GOLDENS: "1" }).updateSnapshots, "all",
-    "update mode belongs to AF_UPDATE_GOLDENS runs a human reviews");
+  // "changed", not "all": "all" rewrites every golden whose bytes differ, and
+  // the capture is byte-nondeterministic below the gate threshold (#4557), so
+  // each update run would hand a human noise to review as if it were a change.
+  assert.equal(loadVisualConfig({ AF_PERF_MODE: "1", AF_UPDATE_GOLDENS: "1" }).updateSnapshots, "changed",
+    "update mode belongs to AF_UPDATE_GOLDENS runs a human reviews, and rewrites only goldens the gate rejects");
 });

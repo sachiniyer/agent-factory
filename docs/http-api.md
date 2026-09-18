@@ -228,7 +228,7 @@ not list. They fall into three groups:
 
 **Response shapes.** These are not part of the generated request-field catalog,
 so they are documented here. `CreateSession` returns `{ "instance": <session> }`;
-`Snapshot` and `ImportRemoteHookSessions` return `{ "instances": [<session>…] }`;
+`Snapshot` returns `{ "instances": [<session>…] }`;
 `ArchiveSession` returns `{ "ok": true, "archived_path": "…" }`;
 `RestoreArchived` returns `{ "ok": true, "worktree_path": "…" }`;
 `SendPrompt` returns `{ "ok": true, "status": "delivered" | "not-delivered" | "sent-unverified" | "could-not-confirm" }`;
