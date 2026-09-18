@@ -26,7 +26,7 @@ func AccountLimitEvidenceFromData(data InstanceData) (string, []AccountLimitObse
 		return account, observations
 	}
 	return account, []AccountLimitObservationData{{
-		Agent: agent, Account: account, ResetAt: data.LimitResetAt,
+		Agent: agent, Account: account, ResetAt: data.LimitResetAt, ObservedAt: data.LimitObservedAt,
 	}}
 }
 

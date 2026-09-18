@@ -326,6 +326,15 @@ type home struct {
 	configPane *ui.ConfigPane
 	// Identifies the current opening and its latest remote accounts operation.
 	accountGeneration uint64
+	// Identifies the current opening's remote usage read (#4361). Separate from
+	// accountGeneration: an account register bumping the generation must not
+	// discard a usage report still in flight, or the section would sit on
+	// "Loading usage…" until the next open.
+	usageGeneration uint64
+	// When the Usage section's report was last read or landed (#4361 review) —
+	// paces the bounded refresh, which rides previewTickMsg rather than owning a
+	// timer command the opener would have to return.
+	lastUsageRead time.Time
 	// A remote mutation outlives the overlay and is released only on completion.
 	accountRegisterInFlight *daemon.RegisterAccountRequest
 	// menu displays the key hints inside the status bar (shared handle for

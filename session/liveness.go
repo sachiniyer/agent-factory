@@ -550,6 +550,15 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	// This call site is a real sighting — the detector or a create-time limit
+	// error just observed the wall — so the observation's clock is now (#4361).
+	// Only the FIRST sighting of an episode stamps: a poll re-observing the same
+	// banner every tick must not keep re-dating the evidence, or a session
+	// parked for days would always read "observed just now" — the staleness the
+	// field exists to show (#4361 review).
+	if i.limitObservedAt.IsZero() {
+		i.limitObservedAt = instanceNow()
+	}
 	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
 		i.limitAgent = agent
 		i.touchLocked()
@@ -563,6 +572,16 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	return true
 }
 
+// accountObservationRefreshQuantum bounds how often a REPEAT sighting re-dates
+// durable account evidence (#4361 review): the poll ticks over a parked session
+// every few seconds, and every stamp it advances is a row the daemon's persist
+// gate durably writes — unquantized, "last seen" costs one write per tick per
+// parked session for as long as it sits at its wall. The quantum keeps the
+// last-seen fact honest at the granularity the quota report displays while
+// bounding the write cadence; a stamp older than the quantum refreshes, so the
+// record still cannot read days fresh while it is actually days stale.
+const accountObservationRefreshQuantum = 5 * time.Minute
+
 func (i *Instance) recordAccountLimitObservationLocked(agent, account string, resetAt time.Time) {
 	if agent == "" || account == "" {
 		return
@@ -570,16 +589,30 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 	for idx := range i.accountLimitObservations {
 		observation := &i.accountLimitObservations[idx]
 		if observation.Agent == agent && observation.Account == account {
-			retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
-			if !observation.ResetAt.Equal(retained) {
-				observation.ResetAt = retained
+			// A repeat sighting refreshes WHEN af last saw this wall (#4361);
+			// the conservative reset merge keeps the safer boundary. The refresh
+			// is quantized so each re-dating is one the persist gate durably
+			// checkpoints rather than a per-tick memory-only advance (#4361
+			// review). The mutation stamp follows the retained evidence, not
+			// the sighting: a repeat that changes nothing the record keeps is
+			// no mutation — advancing UpdatedAt for it would let an unrelated
+			// later checkpoint persist a synthetic timestamp the storage and
+			// archive reconcilers read as real state change (#4409 review).
+			priorReset := observation.ResetAt
+			observation.ResetAt = RetainedAccountLimitReset(observation.ResetAt, resetAt)
+			changed := !observation.ResetAt.Equal(priorReset)
+			if instanceNow().Sub(observation.ObservedAt) >= accountObservationRefreshQuantum {
+				observation.ObservedAt = instanceNow()
+				changed = true
+			}
+			if changed {
 				i.touchLocked()
 			}
 			return
 		}
 	}
 	i.accountLimitObservations = append(i.accountLimitObservations, AccountLimitObservationData{
-		Agent: agent, Account: account, ResetAt: resetAt,
+		Agent: agent, Account: account, ResetAt: resetAt, ObservedAt: instanceNow(),
 	})
 	i.touchLocked()
 }
@@ -656,6 +689,7 @@ func (i *Instance) ClearLimitReached() {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveRunning
 	i.limitResetAt = time.Time{}
+	i.limitObservedAt = time.Time{}
 	i.limitAgent = ""
 	i.limitAccount = ""
 	// The epoch bump here is what a racing poll checks: it is the resume's
@@ -684,6 +718,19 @@ func (i *Instance) LimitResetAt() (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return i.limitResetAt, true
+}
+
+// LimitObservedAt returns when af recorded the current wall (#4361), for the
+// daemon's persist gate: it reports (zero, false) off the limit wall or on a
+// record written before the field existed, so the gate can see the exact edge
+// where a first sighting stamps the field.
+func (i *Instance) LimitObservedAt() (time.Time, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.liveness != LiveLimitReached || i.limitObservedAt.IsZero() {
+		return time.Time{}, false
+	}
+	return i.limitObservedAt, true
 }
 
 // LimitAccount returns the account whose runtime produced the current limit

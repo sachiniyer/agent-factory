@@ -37,14 +37,14 @@ func TestAccountRegisterPendingSurvivesReopen(t *testing.T) {
 			return registeredAccountResponse(req.Name), nil
 		}, nil,
 	))
-	h.Update(openAccountPane(t, h)())
+	updateAll(h, sectionsMsgs(t, openAccountPane(t, h)))
 	pending := h.handleAccountRegister("codex", "fresh")
 	require.NotNil(t, pending)
 	h.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	reopened := openAccountPane(t, h)
 	require.True(t, h.configPane.AccountsBusy(), "the pending mutation survives closing the overlay")
 	require.Contains(t, h.configPane.String(), `Registering codex account "fresh"…`)
-	h.Update(reopened())
+	updateAll(h, sectionsMsgs(t, reopened))
 	require.True(t, h.configPane.AccountsBusy(), "the initial read must not release a pending mutation")
 	require.Contains(t, h.configPane.String(), `Registering codex account "fresh"…`)
 	accountPaneLastRow(h)
@@ -72,7 +72,7 @@ func TestAccountRegisterReopenCompletionReconcilesFreshList(t *testing.T) {
 			return registeredAccountResponse(req.Name), nil
 		}, nil,
 	))
-	h.Update(openAccountPane(t, h)())
+	updateAll(h, sectionsMsgs(t, openAccountPane(t, h)))
 	pending := h.handleAccountRegister("codex", "fresh")
 	require.NotNil(t, pending)
 	listed = "stale-register-snapshot"
@@ -80,8 +80,8 @@ func TestAccountRegisterReopenCompletionReconcilesFreshList(t *testing.T) {
 	h.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	reopened := openAccountPane(t, h)
 	listed = "stale-reopen-snapshot"
-	oldLoad := reopened()
-	h.Update(oldLoad)
+	staleLoad := sectionsMsgs(t, reopened)
+	updateAll(h, staleLoad)
 	h.configPane.SetAccountStatus("Current operator feedback", false)
 	_, refresh := h.Update(completion)
 	require.NotNil(t, refresh, "a mutation from a previous opening needs a fresh read")
@@ -90,16 +90,16 @@ func TestAccountRegisterReopenCompletionReconcilesFreshList(t *testing.T) {
 	require.NotContains(t, h.configPane.String(), "stale-register-snapshot")
 	before := h.configPane.String()
 	listed = "fresh"
-	loaded := refresh()
+	loaded := sectionsMsgs(t, refresh)
 	require.Equal(t, before, h.configPane.String(), "the reconciliation worker must not mutate the pane")
-	h.Update(loaded)
+	updateAll(h, loaded)
 	require.Equal(t, 4, listCalls, "reconciliation must fetch again after the registration completion")
 	require.Contains(t, h.configPane.String(), "fresh")
 	require.NotContains(t, h.configPane.String(), "stale-register-snapshot")
 	require.NotContains(t, h.configPane.String(), "stale-reopen-snapshot")
 	require.Contains(t, h.configPane.String(), "Current operator feedback")
 	current := h.configPane.String()
-	h.Update(oldLoad)
+	updateAll(h, staleLoad)
 	require.Equal(t, current, h.configPane.String(), "a late initial read must not replace reconciliation's newer list")
 	require.NotNil(t, h.handleAccountRegister("codex", "next"), "completion releases the home-level registration gate")
 }
@@ -114,7 +114,7 @@ func TestAccountRegisterClosedCompletionReleasesPendingMutation(t *testing.T) {
 			return registeredAccountResponse(req.Name), nil
 		}, nil,
 	))
-	h.Update(openAccountPane(t, h)())
+	updateAll(h, sectionsMsgs(t, openAccountPane(t, h)))
 	pending := h.handleAccountRegister("codex", "fresh")
 	require.NotNil(t, pending)
 	h.Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -124,7 +124,7 @@ func TestAccountRegisterClosedCompletionReleasesPendingMutation(t *testing.T) {
 	require.Nil(t, cmd, "closed panes do not need reconciliation")
 	require.Equal(t, closed, h.configPane.String())
 	require.False(t, h.configPane.HasFocus())
-	h.Update(openAccountPane(t, h)())
+	updateAll(h, sectionsMsgs(t, openAccountPane(t, h)))
 	require.False(t, h.configPane.AccountsBusy(), "the closed-pane completion releases the pending flag")
 	require.NotContains(t, h.configPane.String(), `Registering codex account "fresh"…`)
 	require.NotNil(t, h.handleAccountRegister("codex", "next"))
@@ -142,11 +142,11 @@ func TestAccountRegisterReopenFailurePreservesNewerStatus(t *testing.T) {
 					return daemon.RegisterAccountResponse{}, errors.New("registration of fresh failed")
 				}, nil,
 			))
-			h.Update(openAccountPane(t, h)())
+			updateAll(h, sectionsMsgs(t, openAccountPane(t, h)))
 			pending := h.handleAccountRegister("codex", "fresh")
 			require.NotNil(t, pending)
 			h.Update(tea.KeyMsg{Type: tea.KeyEsc})
-			h.Update(openAccountPane(t, h)())
+			updateAll(h, sectionsMsgs(t, openAccountPane(t, h)))
 			require.True(t, h.configPane.AccountsBusy(), "the reopened pane remains busy until failure arrives")
 			switch status {
 			case "empty":

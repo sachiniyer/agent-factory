@@ -218,9 +218,37 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual {
 		return fmt.Errorf("manual account limit requires the pending replacement fence")
 	}
+	i.parkReplacementAtLimitLocked(resetAt)
+	return nil
+}
+
+// ParkAutoAccountSwapAtLimit is the automatic transaction's twin of
+// ParkManualAccountSwapAtLimit: the scheduler-driven replacement also spawns
+// under OpRespawning, so a wall its readiness finds belongs to the INCOMING
+// identity — a fresh sighting — not to the parked episode's preserved metadata
+// (#4361 review). ReparkLimitUnderResumeFence must NOT serve this call: it is
+// the same-identity restore, and under an automatic swap it would persist the
+// outgoing account's observation time and attribution onto the new wall.
+func (i *Instance) ParkAutoAccountSwapAtLimit(resetAt time.Time) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || i.pendingAccountSwap.Manual {
+		return fmt.Errorf("automatic account limit requires the pending replacement fence")
+	}
+	i.parkReplacementAtLimitLocked(resetAt)
+	return nil
+}
+
+// parkReplacementAtLimitLocked parks the pending replacement at the wall its
+// readiness probe just found, attributing the sighting to the incoming
+// identity. Caller holds i.mu and has validated the replacement fence.
+func (i *Instance) parkReplacementAtLimitLocked(resetAt time.Time) {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	// Readiness found the incoming identity's wall just now — a real sighting,
+	// so the observation clock is now (#4361).
+	i.limitObservedAt = instanceNow()
 	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
 		i.limitAgent = agent
 		i.touchLocked()
@@ -238,5 +266,4 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	}
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
 	i.noteStateChangeLocked(lv, op, prevReset)
-	return nil
 }

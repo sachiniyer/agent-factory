@@ -19,6 +19,12 @@
 // usage-limit wall, and the reset time it recorded when they did. That is real
 // signal even where the provider offers no endpoint, and it is reported on a
 // separate axis so it is never confused with entitlement.
+//
+// An observation also carries WHEN af recorded it (#4361): a wall seen six days
+// ago is weaker evidence than one seen a minute ago, and a reset time carried
+// over from another identity can outlive the truth entirely. Every rendering of
+// an observation therefore names its time so a stale claim shows its age rather
+// than reading as fresh.
 package quota
 
 import (
@@ -103,6 +109,20 @@ type AgentQuota struct {
 	// a limit with no reset time is common (not every provider states one), and
 	// showing a zero time would invent a deadline in 1970.
 	ResetAt *time.Time
+	// ObservedAt is when af recorded the wall whose reset this row reports, or
+	// nil when that session carries none. It is what makes a stale claim
+	// visibly stale (#4361): the reader can see that af last saw the wall days
+	// ago rather than just now. It pairs with ResetAt rather than taking the
+	// latest sighting outright — a fresh observation borrowed from a different
+	// session would make old reset evidence read as new. A wall recorded
+	// before this field existed is nil and must render as unknown, not as
+	// fresh.
+	ObservedAt *time.Time
+	// latestObserved is the newest sighting among all of this agent's parked
+	// sessions, kept unpaired so a row with no reset time at all can still say
+	// when af last saw a wall. When a reset is reported, only the observation
+	// that came with it is honest to show.
+	latestObserved *time.Time
 }
 
 // Report is the full answer, one row per configured agent.
@@ -120,6 +140,11 @@ type SessionState struct {
 	// ResetAt is the recorded reset time for that limit; zero when none was
 	// parsed. Only read when LimitReached.
 	ResetAt time.Time
+	// ObservedAt is when af recorded that wall; zero for evidence written
+	// before the field existed. Only read when LimitReached — a running
+	// session's own timestamp is not a wall observation and must not freshen
+	// the row's evidence.
+	ObservedAt time.Time
 }
 
 // Build assembles the report for the given configured agents from af's own
@@ -160,18 +185,39 @@ func Build(programs []string, sessions []SessionState) Report {
 			continue
 		}
 		row.LimitedSessions++
+		if !state.ObservedAt.IsZero() && (row.latestObserved == nil || state.ObservedAt.After(*row.latestObserved)) {
+			at := state.ObservedAt
+			row.latestObserved = &at
+		}
 		if state.ResetAt.IsZero() {
 			continue
 		}
-		// Earliest reset wins: it is the soonest the user could resume anything.
+		// Earliest reset wins: it is the soonest the user could resume
+		// anything. The observation shown must be one af recorded of THAT
+		// session's wall — a fresher sighting borrowed from a session with a
+		// later reset would make the reported reset look newly observed
+		// (#4361 review). Among sessions sharing the earliest reset, the
+		// latest sighting is the freshest evidence of it.
 		if row.ResetAt == nil || state.ResetAt.Before(*row.ResetAt) {
 			at := state.ResetAt
 			row.ResetAt = &at
+			row.ObservedAt = nil
+		}
+		if row.ResetAt != nil && state.ResetAt.Equal(*row.ResetAt) &&
+			!state.ObservedAt.IsZero() && (row.ObservedAt == nil || state.ObservedAt.After(*row.ObservedAt)) {
+			at := state.ObservedAt
+			row.ObservedAt = &at
 		}
 	}
 	report := Report{Agents: make([]AgentQuota, 0, len(order))}
 	for _, name := range order {
 		row := rows[name]
+		if row.ResetAt == nil {
+			// No reset is rendered, so no observation can misdate one: the
+			// latest sighting is safe to show on its own.
+			row.ObservedAt = row.latestObserved
+		}
+		row.latestObserved = nil
 		switch {
 		case row.LimitedSessions > 0:
 			row.Observation = ObservationLimitReached
@@ -188,38 +234,89 @@ func Build(programs []string, sessions []SessionState) Report {
 	return report
 }
 
+// Row is one rendered row of the report — the four cells the CLI prints, as
+// strings. It is the wire shape the daemon's QuotaReport response carries, so
+// the TUI, the web, and a remote `af quota` all render the SAME wording of the
+// same evidence instead of each growing a private reading of the policy
+// (#4361).
+type Row struct {
+	// Agent is the canonical agent name.
+	Agent string `json:"agent"`
+	// Quota is the rendered provider entitlement ("not reported" today).
+	Quota string `json:"quota"`
+	// Observed is the rendered af observation ("limit reached", "no limit
+	// seen", "no sessions").
+	Observed string `json:"observed"`
+	// Detail is the per-row sentence: counts, reset times, and when the
+	// observation was made.
+	Detail string `json:"detail"`
+}
+
+// Rows renders the report into wire cells. `now` is what the age and
+// countdown wording in Detail is measured against.
+func (r Report) Rows(now time.Time) []Row {
+	rows := make([]Row, 0, len(r.Agents))
+	for _, agent := range r.Agents {
+		rows = append(rows, Row{
+			Agent:    agent.Program,
+			Quota:    agent.Entitlement.String(),
+			Observed: agent.Observation.String(),
+			Detail:   detail(agent, now),
+		})
+	}
+	return rows
+}
+
 // Render writes the human-readable table.
 //
 // Every cell is filled. There is no branch that can emit an empty column, which
 // is the rendering half of the rule the types enforce: a blank in a quota table
 // is read as zero remaining, and af does not know that about any provider.
 func Render(w io.Writer, report Report, now time.Time) error {
-	if len(report.Agents) == 0 {
+	return RenderRows(w, report.Rows(now), ReportNote)
+}
+
+// RenderRows writes the table for rows that are already rendered cells — what a
+// remote daemon's QuotaReport answer hands the CLI, so a remote readout is
+// word-for-word a local one. The note travels with the table and is the
+// report's own framing — the caller passes the daemon's wording verbatim, so a
+// remote readout never silently substitutes this binary's note for the note
+// the answering daemon sent.
+func RenderRows(w io.Writer, rows []Row, note string) error {
+	if len(rows) == 0 {
 		_, err := fmt.Fprintln(w, "No agent CLIs are configured, so there is nothing to report.")
 		return err
 	}
 	width := len("AGENT")
-	for _, agent := range report.Agents {
-		if len(agent.Program) > width {
-			width = len(agent.Program)
+	for _, row := range rows {
+		if len(row.Agent) > width {
+			width = len(row.Agent)
 		}
 	}
 	if _, err := fmt.Fprintf(w, "%-*s  %-13s  %-13s  %s\n", width, "AGENT", "QUOTA", "OBSERVED", "DETAIL"); err != nil {
 		return err
 	}
-	for _, agent := range report.Agents {
+	for _, row := range rows {
 		if _, err := fmt.Fprintf(w, "%-*s  %-13s  %-13s  %s\n",
-			width, agent.Program, agent.Entitlement, agent.Observation, detail(agent, now),
+			width, row.Agent, row.Quota, row.Observed, row.Detail,
 		); err != nil {
 			return err
 		}
 	}
-	_, err := fmt.Fprint(w, "\nQUOTA is what the provider reports. af has no quota API for any supported\n"+
-		"agent today, so every row reads \"not reported\" — that is af declining to\n"+
-		"guess a ceiling, not a ceiling of zero. OBSERVED is what af has seen in its\n"+
-		"own sessions, which is real signal even where the provider offers nothing.\n")
+	_, err := fmt.Fprint(w, "\n"+note+"\n")
 	return err
 }
+
+// ReportNote is the report's standing framing, shared by the wire response and
+// every UI section that renders the rows: the two axes must never be conflated,
+// and an observation carries its age so a stale one shows (#4361).
+const ReportNote = "QUOTA is what the provider reports. af has no quota API for any supported\n" +
+	"agent today, so every row reads \"not reported\" — that is af declining to\n" +
+	"guess a ceiling, not a ceiling of zero. OBSERVED is what af has seen in its\n" +
+	"own sessions, which is real signal even where the provider offers nothing —\n" +
+	"and \"no limit seen\" is never a claim that the account is healthy. Each\n" +
+	"observation names when af recorded it, so an old one reads as old: a reset\n" +
+	"time can outlive the identity it was observed under."
 
 // detail is the per-row sentence. It states what was observed and, when a
 // session is parked, when it resets — saying so explicitly when that is unknown
@@ -229,16 +326,44 @@ func detail(agent AgentQuota, now time.Time) string {
 	case ObservationLimitReached:
 		base := fmt.Sprintf("%d of %d session(s) parked at a usage limit", agent.LimitedSessions, agent.Sessions)
 		if agent.ResetAt == nil {
-			return base + "; no reset time was reported with it"
+			base += "; no reset time was reported with it"
+		} else {
+			remaining := agent.ResetAt.Sub(now)
+			if remaining <= 0 {
+				base += fmt.Sprintf("; earliest reset %s has passed, so a retry is due", agent.ResetAt.UTC().Format(time.RFC3339))
+			} else {
+				base += fmt.Sprintf("; earliest reset %s (in %s)", agent.ResetAt.UTC().Format(time.RFC3339), remaining.Round(time.Minute))
+			}
 		}
-		remaining := agent.ResetAt.Sub(now)
-		if remaining <= 0 {
-			return base + fmt.Sprintf("; earliest reset %s has passed, so a retry is due", agent.ResetAt.UTC().Format(time.RFC3339))
+		// When the wall was recorded is what lets a reader distrust an old
+		// claim (#4361) — a reset can outlive the identity it was observed
+		// under, so the age is part of the evidence, not a footnote.
+		if agent.ObservedAt == nil {
+			return base + "; af has no record of when this was observed"
 		}
-		return base + fmt.Sprintf("; earliest reset %s (in %s)", agent.ResetAt.UTC().Format(time.RFC3339), remaining.Round(time.Minute))
+		return base + fmt.Sprintf("; observed %s (%s)", agent.ObservedAt.UTC().Format(time.RFC3339), observationAge(*agent.ObservedAt, now))
 	case ObservationNoLimitSeen:
 		return fmt.Sprintf("%d session(s) running, none parked at a limit", agent.Sessions)
 	default:
 		return "configured, but af has no sessions running it"
 	}
+}
+
+// observationAge renders how long ago the wall was recorded, compactly, the
+// same scale the tree's pane-churn ages use.
+func observationAge(observedAt, now time.Time) string {
+	age := now.Sub(observedAt)
+	if age <= 0 {
+		return "just now"
+	}
+	if age < time.Minute {
+		return "just now"
+	}
+	if age < time.Hour {
+		return fmt.Sprintf("%dm ago", int(age/time.Minute))
+	}
+	if age < 24*time.Hour {
+		return fmt.Sprintf("%dh ago", int(age/time.Hour))
+	}
+	return fmt.Sprintf("%dd ago", int(age/(24*time.Hour)))
 }

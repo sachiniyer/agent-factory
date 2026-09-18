@@ -327,6 +327,7 @@ func TestPersistPollChange_ResumeDuringWriteWindowIsNotOverwritten(t *testing.T)
 	// the session at the wall. This is what it is about to write.
 	before := inst.GetLiveness()
 	beforeReset, _ := inst.LimitResetAt()
+	beforeObserved, _ := inst.LimitObservedAt()
 	inst.SetLimitReached(time.Date(2026, 7, 20, 18, 0, 0, 0, time.UTC))
 
 	// The resume lands in the write window: after the poll read its payload, before
@@ -344,7 +345,7 @@ func TestPersistPollChange_ResumeDuringWriteWindowIsNotOverwritten(t *testing.T)
 		}
 	}
 
-	manager.persistPollChange(repoID, inst, before, beforeReset, false)
+	manager.persistPollChange(repoID, inst, before, beforeReset, beforeObserved, inst.AccountLimitObservations(), false)
 
 	if got := persistedLiveness(t, repoID, "limited"); got != session.LiveRunning {
 		t.Errorf("persisted liveness = %v, want LiveRunning: the poll must not overwrite a resume that landed while it waited for the write lock (#2135)", got)
@@ -411,6 +412,7 @@ func TestPersistPollChange_HandoffSwapFailureDuringWriteWindowIsNotPersistedAsSe
 	// was seeded".
 	before := inst.GetLiveness()
 	beforeReset, _ := inst.LimitResetAt()
+	beforeObserved, _ := inst.LimitObservedAt()
 	inst.SetLimitReached(time.Date(2026, 7, 20, 18, 0, 0, 0, time.UTC))
 	manager.persistInstance(repoID, inst)
 	if seed := recordFor(t, repoID, "handoff-poll-race"); seed == nil || seed.Program != tmux.ProgramClaude {
@@ -440,7 +442,7 @@ func TestPersistPollChange_HandoffSwapFailureDuringWriteWindowIsNotPersistedAsSe
 		<-backend.entered
 	}
 
-	manager.persistPollChange(repoID, inst, before, beforeReset, false)
+	manager.persistPollChange(repoID, inst, before, beforeReset, beforeObserved, inst.AccountLimitObservations(), false)
 
 	// The handoff is still parked inside SwapAgent: the poll has just re-read the
 	// mid-OpReplacing snapshot. Prove the race window was actually reached, so the

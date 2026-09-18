@@ -342,6 +342,19 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(GetConfigRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetConfig) },
 	},
+	// The usage-limit read model (#4361): what af has observed about each agent
+	// CLI on this host — sessions parked at a provider wall with when that wall
+	// was recorded — and what it cannot observe, the provider's own entitlement
+	// answer. It is the same quotahost.Report `af quota` runs locally, so the
+	// TUI's Usage section, the web's, and a remote `af quota` all print the same
+	// evidence worded identically.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/QuotaReport",
+		Description: "Report usage-limit status for each agent CLI on this host: af's own observations (parked sessions, when the wall was recorded) kept apart from the provider's entitlement answer, which af has no API to read.",
+		requestType: reflect.TypeOf(QuotaReportRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.QuotaReport) },
+	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/SetConfigValue",

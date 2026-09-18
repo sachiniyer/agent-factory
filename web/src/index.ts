@@ -44,6 +44,7 @@ import {
   listTasks,
   setConfigValue,
   listAccounts,
+  quotaReport,
   registerAccount as registerAccountRPC,
   startAccountLogin,
   loadToken,
@@ -60,6 +61,7 @@ import {
 } from "./api.js";
 import { createKeyedQueue, saveNotice } from "./config.js";
 import { emptyAccountsState } from "./accounts.js";
+import { emptyUsageState } from "./usage.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
@@ -148,6 +150,7 @@ const store = new Store<AppState>({
   configPath: "",
   configStatus: null,
   accounts: emptyAccountsState(),
+  usage: emptyUsageState(),
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -647,9 +650,11 @@ function switchView(view: View): void {
   }
   if (view === "config") {
     refreshConfig();
-    // The accounts read rides with the config read for the same reason: the
-    // section shows them as they are NOW, including an account registered from
-    // the CLI or logged in from the TUI since this tab was opened.
+    // The usage and accounts reads ride with the config read for the same
+    // reason: the sections show them as they are NOW — a session parked at a
+    // wall, or an account registered or logged in on another surface, since
+    // this tab was opened.
+    refreshUsage();
     refreshAccounts();
   }
 }
@@ -1683,6 +1688,31 @@ function refreshAccounts(): void {
   accountsRefetcher.refresh();
 }
 
+/** The usage read (#4361), fenced like the config and accounts reads beside it:
+ *  entering the config view fetches the daemon's report, and a slower earlier
+ *  response must never land after a newer one and repaint stale evidence.
+ *
+ *  A failure becomes the SECTION's own message rather than a tab error, for the
+ *  same reason the accounts failure does: an empty section would read as "no
+ *  limits anywhere" — a different thing, needing a different action, from "af
+ *  could not look". */
+const usageRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: quotaReport,
+  commit: (resp) => {
+    store.set({
+      usage: { loaded: true, rows: resp.rows ?? [], note: resp.note ?? "", caveats: resp.caveats ?? [], error: "" },
+    });
+  },
+  onError: (err: unknown) => {
+    store.set({ usage: { ...store.get().usage, error: errorText(err) } });
+  },
+});
+
+function refreshUsage(): void {
+  usageRefetcher.refresh();
+}
+
 /** Records the outcome of an account action on the row that produced it. */
 function setAccountStatus(agent: string, name: string, message: string, error: boolean): void {
   store.set({ accounts: { ...store.get().accounts, status: { agent, name, message, error } } });
@@ -1823,8 +1853,20 @@ const TASK_HEALTH_POLL_MS = 60_000;
 // tick cannot get out of step with it.
 window.setInterval(() => {
   const state = store.get();
-  if (state.phase === "app" && state.view === "tasks") {
+  if (state.phase !== "app") {
+    return;
+  }
+  if (state.view === "tasks") {
     refreshTasks();
+  }
+  if (state.view === "config") {
+    // The usage report is a snapshot of account-limit state that changes behind
+    // the page: a session can reach or clear a wall, be killed, or be created
+    // while the config view stays open, and session events update the session
+    // store without touching this one — so the rows and their relative times
+    // ("just now", "in 5m") went stale until the next view switch (#4361
+    // review). Same cadence and the same fenced refetcher as the task poll.
+    refreshUsage();
   }
 }, TASK_HEALTH_POLL_MS);
 
@@ -2352,6 +2394,9 @@ function stopStream(): void {
   tasksRefetcher.invalidate();
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
+  // The usage read is the same shape: issued for the config view beside config
+  // itself, and its answer describes the daemon the PREVIOUS stream talked to.
+  usageRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

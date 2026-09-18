@@ -1544,10 +1544,12 @@ Two different things, kept apart on purpose:
             "not reported". That is af declining to guess, not a ceiling of zero.
 
   OBSERVED  what af has seen in its OWN sessions — a session parked at a usage
-            wall, and the reset time recorded with it. Real signal even where the
-            provider exposes nothing.
+            wall, the reset time recorded with it, and when af recorded it, so
+            an old observation reads as old. Real signal even where the
+            provider exposes nothing — and never proof the account is healthy.
 
-Read-only: it reads local session records and starts nothing.
+Read-only: it reads session records and starts nothing. With --daemon-url it
+reports the targeted daemon's host instead of this machine's.
 
 ```
 af quota

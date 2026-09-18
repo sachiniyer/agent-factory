@@ -21,14 +21,22 @@ func remoteAccountLoadHome(t *testing.T) *home {
 	t.Helper()
 	h := newTestHome(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/GetConfig" {
+		switch r.URL.Path {
+		case "/v1/GetConfig":
+			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.GetConfigResponse{
+				Path: "/remote/config.toml", Entries: []config.ConfigEntry{{Key: "default_program", Value: "codex", Tier: 1}},
+			}))
+		case "/v1/QuotaReport":
+			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.QuotaReportResponse{}))
+		case "/v1/ListAccounts":
+			// remoteSectionsLoadCmd reads Accounts and Usage in one batched
+			// command, so a remote Usage test still owes this route a stub even
+			// when the accounts seam is the one under test (#4361).
+			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.ListAccountsResponse{}))
+		default:
 			t.Errorf("unexpected remote request: %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
-			return
 		}
-		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.GetConfigResponse{
-			Path: "/remote/config.toml", Entries: []config.ConfigEntry{{Key: "default_program", Value: "codex", Tier: 1}},
-		}))
 	}))
 	t.Cleanup(server.Close)
 	previousURL := apiclient.FlagDaemonURL
@@ -36,6 +44,29 @@ func remoteAccountLoadHome(t *testing.T) *home {
 	t.Cleanup(func() { apiclient.FlagDaemonURL = previousURL })
 	h.configPane.SetAccounts([]ui.AccountRow{{Agent: "codex", Name: "previous-opening"}}, []string{"codex"}, nil)
 	return h
+}
+
+// sectionsMsgs runs a remoteSectionsLoadCmd the way the runtime does: the two
+// section reads are batched, so the command's message is a tea.BatchMsg whose
+// inner commands each produce their own section's message. Running the inner
+// commands is what performs the reads.
+func sectionsMsgs(t *testing.T, cmd tea.Cmd) []tea.Msg {
+	t.Helper()
+	require.NotNil(t, cmd)
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	require.True(t, ok, "remoteSectionsLoadCmd must batch the per-section reads, got %T", msg)
+	msgs := make([]tea.Msg, 0, len(batch))
+	for _, inner := range batch {
+		msgs = append(msgs, inner())
+	}
+	return msgs
+}
+
+func updateAll(h *home, msgs []tea.Msg) {
+	for _, msg := range msgs {
+		h.Update(msg)
+	}
 }
 
 func TestAccountLoadRemoteDefersCompletionToUILoop(t *testing.T) {
@@ -54,10 +85,10 @@ func TestAccountLoadRemoteDefersCompletionToUILoop(t *testing.T) {
 	before := h.configPane.String()
 	require.Contains(t, before, "Loading accounts…")
 	require.NotContains(t, before, "previous-opening", "pending loads must clear the old opening's rows")
-	msg := cmd()
+	msgs := sectionsMsgs(t, cmd)
 	require.Equal(t, 1, calls)
 	require.Equal(t, before, h.configPane.String(), "the command must not mutate the pane")
-	h.Update(msg)
+	updateAll(h, msgs)
 	require.Contains(t, h.configPane.String(), "fresh-account")
 	require.NotContains(t, h.configPane.String(), "Loading accounts…")
 	require.True(t, h.configPane.HasFocus())
@@ -91,8 +122,23 @@ func TestAccountLoadRemoteStallLeavesUIResponsive(t *testing.T) {
 		t.Fatal("opening the pane blocked on remote ListAccounts")
 	}
 	require.NotNil(t, cmd)
-	completed := make(chan tea.Msg, 1)
-	go func() { completed <- cmd() }()
+	batched := make(chan tea.Msg, 1)
+	go func() { batched <- cmd() }()
+	var batch tea.BatchMsg
+	select {
+	case msg := <-batched:
+		var ok bool
+		batch, ok = msg.(tea.BatchMsg)
+		require.True(t, ok, "remote sections load must batch its per-section reads, got %T", msg)
+	case <-time.After(5 * time.Second):
+		t.Fatal("remote command did not return its batch")
+	}
+	// Drive the per-section reads the way the runtime does — concurrently —
+	// and collect each section's own completion.
+	sectionMsgs := make(chan tea.Msg, len(batch))
+	for _, inner := range batch {
+		go func(c tea.Cmd) { sectionMsgs <- c() }(inner)
+	}
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
@@ -105,11 +151,13 @@ func TestAccountLoadRemoteStallLeavesUIResponsive(t *testing.T) {
 	require.Equal(t, stateDefault, h.state)
 	closed := h.configPane.String()
 	unblock()
-	select {
-	case msg := <-completed:
-		h.Update(msg)
-	case <-time.After(5 * time.Second):
-		t.Fatal("ListAccounts did not complete after release")
+	for range batch {
+		select {
+		case msg := <-sectionMsgs:
+			h.Update(msg)
+		case <-time.After(5 * time.Second):
+			t.Fatal("the section reads did not complete after release")
+		}
 	}
 	require.Equal(t, closed, h.configPane.String(), "late completion must not mutate a closed pane")
 	require.False(t, h.configPane.HasFocus())
@@ -126,9 +174,9 @@ func TestAccountLoadRemoteErrorStaysInSection(t *testing.T) {
 	require.NotContains(t, h.configPane.String(), "remote account listing unavailable", "listing is deferred until the command runs")
 	require.NotNil(t, cmd)
 	before := h.configPane.String()
-	msg := cmd()
+	msgs := sectionsMsgs(t, cmd)
 	require.Equal(t, before, h.configPane.String(), "the command must not display the error itself")
-	h.Update(msg)
+	updateAll(h, msgs)
 	require.Contains(t, h.configPane.String(), "Accounts could not be read: remote account listing unavailable")
 	require.NotContains(t, h.configPane.String(), "Loading accounts…")
 	require.True(t, h.configPane.HasFocus())
@@ -150,18 +198,18 @@ func TestAccountLoadRemoteIgnoresCompletionAfterReopen(t *testing.T) {
 	}, nil, nil))
 	_, first := h.showConfigEditor()
 	require.NotNil(t, first, "remote opening must return its load command")
-	old := first()
+	stale := sectionsMsgs(t, first)
 	h.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	_, second := h.showConfigEditor()
 	require.NotNil(t, second)
 	sizeConfigPane(h)
 	pending := h.configPane.String()
-	h.Update(old)
+	updateAll(h, stale)
 	require.Equal(t, pending, h.configPane.String(), "an earlier opening's completion must not replace the pending load")
-	h.Update(second())
+	updateAll(h, sectionsMsgs(t, second))
 	current := h.configPane.String()
 	require.Contains(t, current, "current-opening")
-	h.Update(old)
+	updateAll(h, stale)
 	require.Equal(t, current, h.configPane.String(), "an earlier opening's completion must not replace current accounts")
 	require.True(t, h.configPane.HasFocus())
 	require.Equal(t, stateConfigEditor, h.state)
