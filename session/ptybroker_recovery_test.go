@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -731,4 +732,225 @@ func TestPTYBrokerReconnectAtBaseAfterEvictionStaysSeamless(t *testing.T) {
 		t.Fatalf("B first event = %+v, want PTYData %q (seamless replay of the "+
 			"retained window [base, head))", ev, "efgh")
 	}
+}
+
+// caughtUpReconnectAfterDiscard stages the #4615 shape: a reconnect whose cursor lands
+// EXACTLY at a base the recovery discard set, so subscribe takes the watermark repaint
+// path — with the recovered pane's output still RETAINED in the ring above that base
+// whenever recovered is non-empty.
+//
+// TestPTYBrokerReconnectRepaintsWhenCaughtUpAfterDiscard builds the same watermark with
+// nobody attached, which leaves the capture stopped and the ring empty, so [base, head)
+// can never hold anything and the reconnect has nothing to lose. Here A stays attached
+// across the respawn — a second browser tab, or the TUI next to one — so the recovery
+// restarts the capture (resume) and the recovered pane's bytes land in the ring before
+// the caught-up client reconnects. That is the case where starting the reconnect at
+// the tail skips bytes that are still there.
+//
+// Returns the reconnect cursor: the caught-up position a client left on before the
+// respawn, which the discard turned into the new base.
+func caughtUpReconnectAfterDiscard(t *testing.T, recovered string) (*fakeClientlessChannel, *ptyBroker, Seq) {
+	t.Helper()
+	ch := &fakeClientlessChannel{snapshot: []byte("SCREEN-BEFORE-DEATH")}
+	br := newPTYBroker(ch)
+
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	mustRepaintContains(t, a, "SCREEN-BEFORE-DEATH")
+	// A real (non-zero) cursor, so the reconnect is not the since == 0 fresh sentinel.
+	ch.emit(t, []byte("pre-death"))
+	mustData(t, a, "pre-death")
+	since := a.Seq() // caught up: the cursor a client at the live tail leaves on
+
+	// tmux dies and is re-spawned while A is attached: the discard sets base = head,
+	// marks it as a recovery discard, restarts the capture and re-seeds A.
+	ch.mu.Lock()
+	ch.snapshot = []byte("SCREEN-AFTER-RECOVERY")
+	ch.mu.Unlock()
+	br.resetCapture()
+	mustRepaintContains(t, a, "SCREEN-AFTER-RECOVERY")
+
+	if recovered != "" {
+		ch.emit(t, []byte(recovered))
+		// A's consumption proves feed() landed the bytes in the ring, not merely that
+		// the pipe write was read.
+		mustData(t, a, recovered)
+	}
+
+	// Pin the fixture to the watermark case, so it cannot drift into since < base (the
+	// behind reconnect) or an unmarked base (the eviction clamp) without failing here.
+	br.mu.Lock()
+	base, mark, head := br.base, br.recoveryDiscardAt, br.headLocked()
+	br.mu.Unlock()
+	if base != since || mark != base {
+		t.Fatalf("fixture: base=%d recoveryDiscardAt=%d since=%d, want since == base == "+
+			"recoveryDiscardAt (the caught-up reconnect after a recovery discard)", base, mark, since)
+	}
+	if want := since + Seq(len(recovered)); head != want {
+		t.Fatalf("fixture: head=%d, want %d (the recovered bytes retained above base)", head, want)
+	}
+	return ch, br, since
+}
+
+// TestPTYBrokerCaughtUpReconnectReplaysRingWhenRepaintUnavailable is #4615, the state
+// that has to CHANGE: the caught-up reconnect after a recovery discard, with the
+// recovered pane's output retained in [base, head), and no repaint to show for it.
+//
+// cc0ff9a5 (#4384) routed this reconnect onto the repaint path, and that path started
+// every subscriber at the live tail at CREATION — before Snapshot() runs. For the two
+// older triggers that costs nothing (since == 0 has no history; since < base asked for
+// bytes that are gone), but here since == base, so [base, head) is exactly the
+// recovered pane's buffered output and every byte of it is still in the ring. A
+// snapshot that fails or carries no repaint state then delivers neither the repaint
+// nor those bytes: the client stays on the dead pane's frozen frame and the recovered
+// output never arrives. Before cc0ff9a5 the same reconnect replayed [base, head)
+// whatever the snapshot did.
+//
+// Both halves of subscribe's best-effort gate are covered — `err == nil` and
+// snapshotHasRepaintState — because either one leaves the ring as the only thing that
+// can render the pane.
+//
+// The client side is modelled with clientCursor, seeded from Seq() read AFTER subscribe
+// returns: that is when the daemon reads it for X-Af-Stream-Seq and the opening
+// OpHello (daemon/ws_pty.go), so it is the value the client is actually told.
+//
+// Fail-before/pass-after: on master Seq() is head, B gets no event at all, and the
+// first assertion below fails.
+func TestPTYBrokerCaughtUpReconnectReplaysRingWhenRepaintUnavailable(t *testing.T) {
+	const recovered = "RECOVERED-PANE-OUTPUT"
+	for _, tc := range []struct {
+		name string
+		fail func(ch *fakeClientlessChannel)
+	}{
+		{"snapshot error", func(ch *fakeClientlessChannel) {
+			ch.snapshotErr = errors.New("capture-pane: no such pane")
+		}},
+		{"snapshot without repaint state", func(ch *fakeClientlessChannel) {
+			// Blank grid, no cursor, no modes: snapshotHasRepaintState is false, so no
+			// repaint is queued even though Snapshot() itself succeeded.
+			ch.snapshot = nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch, br, since := caughtUpReconnectAfterDiscard(t, recovered)
+			ch.mu.Lock()
+			tc.fail(ch)
+			ch.mu.Unlock()
+
+			b, err := br.subscribe(since)
+			if err != nil {
+				t.Fatalf("reconnect subscribe: %v", err)
+			}
+			t.Cleanup(func() { _ = b.Close() })
+			// The published cursor is the replay start, not the tail: nothing was repainted,
+			// so nothing above base may be skipped.
+			if got := b.Seq(); got != since {
+				t.Fatalf("published cursor = %d, want %d (base): no repaint was built, so "+
+					"starting at the tail drops the recovered pane's retained output", got, since)
+			}
+			client := &clientCursor{seq: b.Seq()}
+			if got := client.applyAll(t, b, 250*time.Millisecond); string(got) != recovered {
+				t.Fatalf("client rendered %q, want %q replayed from the ring", got, recovered)
+			}
+			// What the client counted is what the server holds, so its next ?since is exact.
+			if client.seq != b.Seq() {
+				t.Fatalf("client cursor = %d, server cursor = %d", client.seq, b.Seq())
+			}
+
+			// The recovered pane keeps streaming after the replay.
+			ch.emit(t, []byte("later"))
+			mustData(t, b, "later")
+		})
+	}
+}
+
+// TestPTYBrokerCaughtUpReconnectRepaintDoesNotReplayRing is the snapshot-SUCCESS state of
+// the same reconnect, and the #1872 guard for it. The repaint reconstructs the whole
+// recovered screen, so [base, head) is already on it; replaying those bytes on top
+// would render the recovered output twice.
+//
+// It passes on master too. Its job is to hold the fix to its premise: the reconnect's
+// creation cursor now sits at base, so the only thing standing between it and a
+// duplicate is the success-path commit that moves the cursor to repaintTail together
+// with the queued repaint. Deleting that commit fails this test (the PTYData check), and
+// the published cursor check catches the same mutation before it.
+func TestPTYBrokerCaughtUpReconnectRepaintDoesNotReplayRing(t *testing.T) {
+	const recovered = "RECOVERED-PANE-OUTPUT"
+	ch, br, since := caughtUpReconnectAfterDiscard(t, recovered)
+	ch.mu.Lock()
+	ch.snapshot = []byte("SCREEN-WITH-RECOVERED-OUTPUT")
+	ch.mu.Unlock()
+
+	b, err := br.subscribe(since)
+	if err != nil {
+		t.Fatalf("reconnect subscribe: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	head := since + Seq(len(recovered))
+	if got := b.Seq(); got != head {
+		t.Fatalf("published cursor = %d, want %d (the tail): the repaint already shows "+
+			"[base, head), so the replay must start past it", got, head)
+	}
+	mustRepaintContains(t, b, "SCREEN-WITH-RECOVERED-OUTPUT")
+	client := &clientCursor{seq: b.Seq()}
+	if got := client.applyAll(t, b, 250*time.Millisecond); len(got) != 0 {
+		t.Fatalf("after the repaint the client rendered %q, want nothing: the repaint "+
+			"already shows those bytes (#1872)", got)
+	}
+	if client.seq != b.Seq() {
+		t.Fatalf("client cursor = %d, server cursor = %d", client.seq, b.Seq())
+	}
+
+	ch.emit(t, []byte("later"))
+	mustData(t, b, "later")
+}
+
+// TestPTYBrokerCaughtUpReconnectIdleRingWithoutRepaint is the third state: the snapshot
+// fails and the recovered pane has not emitted, so [base, head) is empty. There is
+// nothing to replay and nothing to paint. The reconnect must still return promptly,
+// deliver no blank or partial repaint and no spurious bytes, sit at the tail, and pick
+// up the recovered pane's first output when it arrives. The screen stays on the dead
+// pane's last frame until then; no reconnect can do better without a snapshot.
+//
+// Unchanged by the fix (the replay start and the tail coincide here). It pins that
+// keying the creation cursor on replayability did not turn "nothing to replay" into a
+// hang or a stray event.
+func TestPTYBrokerCaughtUpReconnectIdleRingWithoutRepaint(t *testing.T) {
+	ch, br, since := caughtUpReconnectAfterDiscard(t, "")
+	ch.mu.Lock()
+	ch.snapshotErr = errors.New("capture-pane: no such pane")
+	ch.mu.Unlock()
+
+	type subResult struct {
+		sub *ptySub
+		err error
+	}
+	res := make(chan subResult, 1)
+	go func() {
+		s, e := br.subscribe(since)
+		res <- subResult{s, e}
+	}()
+	var b subResult
+	select {
+	case b = <-res:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconnect subscribe never returned with the snapshot failing")
+	}
+	if b.err != nil {
+		t.Fatalf("reconnect subscribe: %v", b.err)
+	}
+	t.Cleanup(func() { _ = b.sub.Close() })
+	if got := b.sub.Seq(); got != since {
+		t.Fatalf("published cursor = %d, want %d (base == head)", got, since)
+	}
+	if ev, err := nextWithin(t, b.sub, 250*time.Millisecond); err == nil {
+		t.Fatalf("reconnect got Kind=%d Data=%q, want no event: the snapshot failed and "+
+			"the ring is empty", ev.Kind, ev.Data)
+	}
+
+	ch.emit(t, []byte("first-recovered-output"))
+	mustData(t, b.sub, "first-recovered-output")
 }

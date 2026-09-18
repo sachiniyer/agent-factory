@@ -276,24 +276,31 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// exists to avoid.
 	needRepaint := since == 0 || since < b.base ||
 		(since == b.base && b.recoveryDiscardAt == b.base)
+	// Where the replay STARTS is a separate decision from whether a repaint is owed
+	// (#4615). The repaint below is best-effort, so this is the cursor the subscriber
+	// keeps when none arrives; only a repaint actually built moves it to the tail, in the
+	// same section that queues it (repaintTail) — which is what keeps the retained ring
+	// from being replayed on top of a screen that already shows it (#1872). So it is keyed
+	// on whether `since` can be replayed, not on needRepaint.
+	//
+	// since == 0 has no history and since < base asked for bytes that are gone; replaying
+	// the retained ring onto a screen missing everything below it rebuilds nothing, so
+	// both start at the live tail. Every other since is inside [base, head] — including
+	// the caught-up reconnect after a recovery discard, which needRepaint repaints but
+	// whose [base, head) is the recovered pane's output, all of it still retained.
+	// Starting that one at the tail (cc0ff9a5 shared the tail with the two triggers
+	// above) meant a failed snapshot delivered neither the repaint nor those bytes.
+	//
+	// Nothing tells the client this cursor until subscribe returns: the daemon reads Seq()
+	// for X-Af-Stream-Seq and the opening OpHello afterwards, when the repaint has either
+	// been built or failed, so the client always learns the settled value.
 	var cursor Seq
-	if needRepaint {
-		// Start at the live tail, NOT at base. The repaint below reconstructs the WHOLE
-		// current screen, so every retained ring byte [base, head) is ALREADY baked into
-		// it. Starting the replay at base would make NextEvent send the repaint and THEN
-		// replay those same bytes on top of it — duplicating output: a command/prompt
-		// appended twice, up to the entire retained ring on an eviction or post-recovery
-		// reconnect (#1872 P1). The tail cursor is exactly what a since == 0 fresh
-		// subscriber already gets; the two paths now share it. Bytes fed between this head
-		// read and the snapshot below land in both the snapshot and the replayed tail —
-		// the same tiny, bounded double-render a fresh subscribe already accepts — never
-		// dropped. The client learns this cursor from the handshake seq / OpHello, so its
-		// ?since stays consistent.
+	if since == 0 || since < b.base {
 		cursor = head
 	} else {
-		// A seamless reconnect: since is inside the retained window, so the client's
-		// screen is current up to `since` and replaying [since, head) brings it forward
-		// with no repaint flicker. A since past head clamps down to the live tail.
+		// since is inside the retained window, so replaying [since, head) brings the
+		// client's screen forward from where it left off. A since past head clamps down
+		// to the live tail.
 		cursor = since
 		if cursor > head {
 			cursor = head
