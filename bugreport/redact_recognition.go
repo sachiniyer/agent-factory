@@ -1,5 +1,7 @@
 package bugreport
 
+import "github.com/sachiniyer/agent-factory/internal/redactx"
+
 // redactionTextKind is provenance, not a guess made from interesting-looking
 // bytes. It is the recognition half of the redaction invariant: span union can
 // cover every candidate only after the grammar that owns the surrounding text
@@ -83,4 +85,19 @@ func (r *redactor) scrubRecognizedText(s string, kind redactionTextKind) string 
 		// Calling this flat-text entry without that owner is unknown provenance.
 		return redactedMarker
 	}
+}
+
+// scrubKnownLogValues runs the shared stage over a daemon log blob — the
+// richest provenance: %q fields, ANSI controls, URIs, and emitter-proven
+// shell commands all decode here.
+func (r *redactor) scrubKnownLogValues(s string) string {
+	return r.stage().Scrub(s, redactx.ProvLogRecord)
+}
+
+func (r *redactor) scrubKnownDiagnosticValues(s string) string {
+	return r.stage().Scrub(s, redactx.ProvDiagnostic)
+}
+
+func (r *redactor) scrubGenericText(s string) string {
+	return r.stage().Scrub(s, redactx.ProvGeneric)
 }
