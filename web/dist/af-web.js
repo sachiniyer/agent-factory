@@ -7638,9 +7638,11 @@ function canCommit(shown, current) {
 }
 function saveNotice(resp) {
   const parts = [];
-  if (resp.result.requires_restart && resp.restart_notice !== "") {
+  const warnings = resp.warnings ?? [];
+  if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }
+  parts.push(...warnings);
   const addr = resp.listener_addr ?? "";
   if (addr !== "") {
     parts.push(`Daemon now listening at ${addr}`);
@@ -12956,6 +12958,16 @@ var SplitView = class {
   // Debounces the "focus left every pane" report so a click that moves focus A→B
   // (blur A, then focus B) doesn't flap the nav mode through rail and back.
   blurTimer = null;
+  // Whether one of this view's panes currently holds the keyboard in its xterm
+  // textarea — the DOM-focus half of the #1693 nav/terminal model, mirrored here so
+  // reconcile() can tell whether a focused-pane rebuild happened while the operator
+  // was keyboard-attached (store.focus="terminal"). Maintained alongside the
+  // onFocusChange echoes in onPaneFocus: set true when any pane's textarea gains
+  // focus, false when the debounced-blur corrector finds focus left every pane.
+  // Teardown resets it: a disposed terminal suppresses its own blur (terminal.ts
+  // sets stopped before xterm tears the textarea down), so the callback alone would
+  // leave it stale-true across a session switch and arm a spurious refocus.
+  termHoldsFocus = false;
   // Last values reported via onLayout, so a no-op reconcile never re-fires it (which
   // would re-enter the store→rerender→setSession loop).
   lastFocusedTab = -1;
@@ -13227,6 +13239,7 @@ var SplitView = class {
     this.host.replaceChildren();
     this.host.classList.remove("af-split-multi");
     this.focusedId = null;
+    this.termHoldsFocus = false;
     this.builtTree = null;
   }
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
@@ -13262,6 +13275,7 @@ var SplitView = class {
     }
     const multi = desired.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
+    let focusedRebuilt = false;
     for (const leaf of desired) {
       const pane = this.panes.get(leaf.id);
       if (!pane) {
@@ -13274,6 +13288,9 @@ var SplitView = class {
       const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(spec ? spec.target : null, realId);
       if (spec !== null) {
         if (pane.term || pane.webUrl !== iframeIdentity(spec) || pane.iframeProxied !== ((this.tabRealIds[leaf.tab] ?? "") !== "" && iframeIsProxied(spec)) || staleAddress || pane.webArchived !== this.archived) {
+          if (this.focusedId === leaf.id) {
+            focusedRebuilt = true;
+          }
           pane.term?.dispose();
           pane.term = null;
           pane.webDispose?.();
@@ -13287,6 +13304,9 @@ var SplitView = class {
           pane.tab = leaf.tab;
         }
       } else if (!pane.term || staleAddress) {
+        if (this.focusedId === leaf.id) {
+          focusedRebuilt = true;
+        }
         pane.term?.dispose();
         pane.webDispose?.();
         pane.webUrl = null;
@@ -13319,6 +13339,45 @@ var SplitView = class {
       pane.label.textContent = tabLabel(named);
     }
     this.applyFocusClass();
+    this.reEngageFocusAfterRebuild(focusedRebuilt);
+  }
+  /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, correcting
+   *  the desync where `store.focus` stays "terminal" while DOM focus fell back to
+   *  `document.body` (the disposed terminal's blur is suppressed, so nothing else
+   *  reports the loss).
+   *
+   *  Gated on BOTH a focused-pane rebuild AND `termHoldsFocus` so it only fires when
+   *  the operator was keyboard-attached at the moment of the rebuild: a passive
+   *  repaint (rename, archive flip on a sibling, proxy change) that reaches a user
+   *  who DELIBERATELY detached to rail via Ctrl+] does not rebuild the focused pane
+   *  (so `focusedRebuilt` is false anyway), and a same-session rebuild that happens
+   *  to reach a rail-mode user is skipped by `termHoldsFocus` — neither yanks a
+   *  detached operator back into "terminal" without intent.
+   *
+   *  Two rebuild outcomes land differently, and both are the correct one:
+   *
+   *    - Rebuilt as a TERMINAL: refocus() → focus() focuses the new textarea, whose
+   *      focus listener echoes onPaneFocus(_, true), re-confirming store.focus=
+   *      "terminal" against the new DOM-focal textarea. The desync is undone.
+   *    - Rebuilt as a WEB/VS Code pane (no terminal to hand the keyboard to): DOM
+   *      focus is on document.body and no textarea blur can arm onPaneFocus's
+   *      corrector, so report the loss ourselves — store.focus lands on "rail",
+   *      which is the right mode when the focused pane ceases to be a terminal.
+   *
+   *  Split out from reconcile() so the boolean contract is unit-testable without a
+   *  DOM/xterm/WS (split_focus.test.ts stages the pane map directly); the end-to-end
+   *  behavior is pinned by the Playwright selftest. */
+  reEngageFocusAfterRebuild(focusedRebuilt) {
+    if (!focusedRebuilt || !this.termHoldsFocus) {
+      return;
+    }
+    const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
+    if (focused?.term) {
+      this.refocus();
+    } else {
+      this.cb.onFocusChange(false);
+      this.termHoldsFocus = false;
+    }
   }
   createPane(leaf) {
     const container = el("div", "af-pane");
@@ -13830,6 +13889,7 @@ var SplitView = class {
       if (this.focusedId !== leafId) {
         this.focusPane(leafId);
       }
+      this.termHoldsFocus = true;
       this.cb.onFocusChange(true);
       return;
     }
@@ -13841,6 +13901,7 @@ var SplitView = class {
       const active = document.activeElement;
       const stillInPane = active ? [...this.panes.values()].some((p) => p.host.contains(active)) : false;
       if (!stillInPane) {
+        this.termHoldsFocus = false;
         this.cb.onFocusChange(false);
       }
     }, 0);

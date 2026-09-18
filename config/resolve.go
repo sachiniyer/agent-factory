@@ -146,15 +146,12 @@ func resolveConfigForRepoInspectionWithGlobalAndPersonal(repo *RepoContext, glob
 	return resolved, nil
 }
 
-// ResolveConfigForRepoInspectionWithGlobalContext bounds the complete read-only
-// resolution, including filesystem-backed legacy, checked-in, and personal
-// config loads. Repository subprocesses already receive their own deadlines,
-// but an unavailable mount can stall an ordinary file read too; inspection
-// callers must be able to return an unknown result when that happens.
-func ResolveConfigForRepoInspectionWithGlobalContext(ctx context.Context, repo *RepoContext, global *Config) (*ResolvedConfig, error) {
-	return resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx, repo, global, nil)
-}
-
+// resolveConfigForRepoInspectionWithGlobalAndPersonalContext bounds the
+// complete read-only resolution, including filesystem-backed legacy,
+// checked-in, and personal config loads. Repository subprocesses already
+// receive their own deadlines, but an unavailable mount can stall an ordinary
+// file read too; inspection callers must be able to return an unknown result
+// when that happens.
 func resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx context.Context, repo *RepoContext, global *Config, personal *sourceDocument) (*ResolvedConfig, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required for bounded repo inspection")

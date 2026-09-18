@@ -150,6 +150,14 @@ func ValidateAccountEnvironmentCommand(command string, account Account) error {
 			"account %q cannot scope sibling environment for agent %q: its command sets an identity or shell-startup variable itself, which can override the account directory",
 			account.Name, account.Agent)
 	}
+	if commandFeedsProvenShell(command) {
+		return accountCommandValidationErrorf(
+			"account %q cannot scope sibling environment for agent %q: its command gives an interactive shell input "+
+				"other than the terminal (a pipe, input redirection, here-document, or coprocess), and that shell would "+
+				"run the supplied text as commands, which can override the account directory; start the shell without "+
+				"redirecting its input",
+			account.Name, account.Agent)
+	}
 	return nil
 }
 
