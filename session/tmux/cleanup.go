@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -62,13 +63,23 @@ func (t *TmuxSession) ExistsOrUnknown() bool {
 // or any other tmux error — still reports false, preserving the pre-#1917
 // conflation callers already relied on.
 func sessionExists(cmdExec cmd.Executor, name string) bool {
+	existsOrUnknown, _ := sessionExistsReportingAnswer(cmdExec, name)
+	return existsOrUnknown
+}
+
+// sessionExistsReportingAnswer is sessionExists for a caller that branches on
+// the lossy bool but must not treat its true as proof of life: answered is false
+// when that true is the timeout's conservative lie. RestoreWithResult needs both
+// — it rebinds on either true, but only an answered one is evidence that a live
+// session stands behind the name (#4473).
+func sessionExistsReportingAnswer(cmdExec cmd.Executor, name string) (existsOrUnknown, answered bool) {
 	exists, known := probeSession(cmdExec, name)
 	if !known {
 		log.WarningLog.Printf("tmux has-session for %s timed out after %s; the server is wedged, so "+
 			"reporting the session as still present rather than risk a false teardown", name, tmuxCommandTimeout)
-		return true
+		return true, false
 	}
-	return exists
+	return exists, true
 }
 
 // ProbeSession reports whether this session exists AND whether tmux actually
@@ -83,6 +94,23 @@ func sessionExists(cmdExec cmd.Executor, name string) bool {
 // must take this form; callers that merely need a bool keep the lie, knowingly.
 func (t *TmuxSession) ProbeSession() (exists bool, known bool) {
 	return probeSession(t.cmdExec, t.sanitizedName)
+}
+
+// probeSessionWithin is ProbeSession bounded by a caller's own REMAINING budget
+// rather than the flat tmuxCommandTimeout (#2099 poll-loop class).
+//
+// Start's readiness poll carries its own 2s deadline, and the only code that
+// decides to give up on it — the loop's `select { case <-timeout: ... }` — runs
+// AFTER the synchronous probe returns. Bounding the probe at the flat
+// tmuxCommandTimeout (10s) would let one wedged has-session hold the goroutine
+// for the whole 10s: the give-up case stays unreachable past the poll's own 2s
+// deadline, so the poll overshoots its budget 5x. Bounding each probe by what is
+// LEFT of the budget is what makes that deadline actually fire on time. Mirrors
+// capturePaneForDeliveryWithin, which exists for the same reason.
+func (t *TmuxSession) probeSessionWithin(budget time.Duration) (exists bool, known bool) {
+	ctx, cancel := tmuxTimeoutContextWithin(budget)
+	defer cancel()
+	return probeSessionContext(ctx, t.cmdExec, t.sanitizedName)
 }
 
 // ProbeSessionStrict reports whether this session exists with the same
@@ -110,6 +138,16 @@ func (t *TmuxSession) ProbeSessionStrict() (exists bool, known bool, err error) 
 func probeSession(cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
+	return probeSessionContext(ctx, cmdExec, name)
+}
+
+// probeSessionContext is the shared body of probeSession and the budget-bounded
+// probeSessionWithin: one bounded has-session reported as the (exists, known)
+// tri-state. A nil err means tmux answered "exists"; a non-nil err with a tripped
+// ctx means the probe did not answer (timeout); any other non-nil err is tmux
+// answering with a non-"exists" result, which this probe has always conflated
+// with absence.
+func probeSessionContext(ctx context.Context, cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	// Using "-t name" does a prefix match, which is wrong. `-t=` does an exact match.
 	err := runTmuxBoundedWith(ctx, cmdExec, "has-session", fmt.Sprintf("-t=%s", name))
 	if err == nil {
@@ -323,7 +361,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	preMarkerCaptureErrs := make(map[string]error, len(prefixed))
 	preMarkerGenerations := make(map[string]orphanGenerationSet, len(prefixed))
 	for _, match := range prefixed {
-		preMarkerProcesses[match], preMarkerCaptureErrs[match] = captureSessionProcessTrees(cmdExec, match)
+		preMarkerProcesses[match], preMarkerCaptureErrs[match] = CaptureSessionProcessTrees(cmdExec, match)
 		// Retain the generation while the captured pane tree is still alive.
 		// Waiting until a vanished-session recovery begins may be too late to
 		// read its immutable environment, especially when a helper starts after
@@ -400,7 +438,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	var incompleteCaptures error
 	var killErr error
 	for _, match := range matches {
-		leaked, captureErr := captureSessionProcessTrees(cmdExec, match)
+		leaked, captureErr := CaptureSessionProcessTrees(cmdExec, match)
 		if captureErr != nil {
 			vanished := errors.Is(captureErr, ErrSessionVanishedBeforeCapture)
 			var probeErr error

@@ -342,15 +342,6 @@ func runDedicatedServer() error {
 	return nil
 }
 
-// newTmuxServerCommand keeps the historical per-session scope as a fail-open
-// fallback only. Once the daemon observes or creates the shared server, this
-// new-session is a plain no-autostart client. -N closes the final probe/connect
-// race: if that server exits first, the daemon client fails instead of creating
-// its replacement inside agent-factory-daemon.service.
-func newTmuxServerCommand(args ...string) (*exec.Cmd, bool) {
-	return newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), args...)
-}
-
 func newTmuxServerCommandAfterEnsure(serverErr error, args ...string) (*exec.Cmd, bool) {
 	if !systemdunit.RunningDaemonProcess() {
 		return exec.Command("tmux", args...), false
