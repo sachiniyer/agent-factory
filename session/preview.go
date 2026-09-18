@@ -84,17 +84,9 @@ func previewSnapshotWithModes(content string, ts *tmux.TmuxSession) PreviewSnaps
 	return snapshot
 }
 
-// PreviewTab captures the detached content of the tab currently at idx. The
-// ordinal form exists for legacy callers that never supplied a stable tab id.
-// An out-of-range ordinal is an explicit error: returning ("", nil) would claim
-// that a nonexistent pane was merely blank (#2200).
-func (i *Instance) PreviewTab(idx int) (string, error) {
-	snapshot, err := i.PreviewTabSnapshot(idx, false)
-	return snapshot.Content, err
-}
-
-// PreviewTabSnapshot is PreviewTab with an authoritative terminal-mode
-// observation when the selected runtime exposes a tmux pane.
+// PreviewTabSnapshot captures the detached content of the tab currently at idx
+// along with an authoritative terminal-mode observation when the selected runtime
+// exposes a tmux pane.
 func (i *Instance) PreviewTabSnapshot(idx int, full bool) (PreviewSnapshot, error) {
 	i.mu.RLock()
 	if idx < 0 || idx >= len(i.Tabs) {
@@ -122,13 +114,6 @@ func (i *Instance) PreviewTabSnapshot(idx int, full bool) (PreviewSnapshot, erro
 		return PreviewSnapshot{}, err
 	}
 	return previewSnapshotWithModes(content, ts), nil
-}
-
-// PreviewTabFullHistory is PreviewTab's full-scrollback counterpart. It keeps
-// the same explicit out-of-range refusal.
-func (i *Instance) PreviewTabFullHistory(idx int) (string, error) {
-	snapshot, err := i.PreviewTabSnapshot(idx, true)
-	return snapshot.Content, err
 }
 
 // PreviewTabSnapshotByID binds content and terminal modes to one stable tab
