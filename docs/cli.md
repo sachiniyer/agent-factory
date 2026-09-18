@@ -302,12 +302,15 @@ health, and remote-hook setup for the current repo when configured.
 by dead sessions, processes pegging a CPU core inside live sessions, `af_` tmux
 sessions with no backing record, abandoned temp agent-factory homes, af daemons
 running a binary no install owns, temp directories holding nothing but a daemon
-socket nobody answers on, pinned remote host-key directories no session owns,
-and daemon problems (stale socket, stale pid file, a daemon still running a
-replaced binary). With `--fix` it kills orphans whose ancestry markers prove they
-came from a dead Agent Factory session, removes stale temp homes, stops daemons
-proven to be running a temp-dir binary, removes dead-socket directories, and
-removes orphaned host-key pins, logging each action; individual observations it
+socket nobody answers on, directories af's own test harness left under the temp
+dir when a test run ended before its cleanup, pinned remote host-key directories
+no session owns, and daemon problems (stale socket, stale pid file, a daemon still
+running a replaced binary). With `--fix` it kills orphans whose ancestry markers
+prove they came from a dead Agent Factory session, removes stale temp homes, stops
+daemons proven to be running a temp-dir binary, removes dead-socket directories,
+removes test-residue dirs af's own test harness left under the temp dir when a
+test run ended before its cleanup, and removes orphaned host-key pins, logging
+each action; individual observations it
 cannot verify are reported, never touched, and stay advisory rather than failing
 the run, but a check that stops before finishing counts as incomplete rather than
 advisory. Exits 1 when an actionable condition remains or a check stopped before
