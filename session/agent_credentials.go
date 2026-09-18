@@ -50,7 +50,12 @@ var agentCredentialFiles = map[string][]string{
 		".gemini/gemini-credentials.json",
 		".gemini/google_accounts.json",
 	},
-	tmux.ProgramAmp:      {".config/amp/settings.json"},
+	// amp stores its API key in a file secret store, $XDG_DATA_HOME/amp/secrets.json
+	// (#4305). ~/.config/amp/settings.json is its settings file and carries no
+	// credential: amp reports "No API key found" with only settings.json present.
+	// With amp's native keyring storage enabled there is no key file at all, and
+	// AMP_API_KEY (via session_env_passthrough) is the only way in.
+	tmux.ProgramAmp:      {".local/share/amp/secrets.json"},
 	tmux.ProgramOpencode: {".local/share/opencode/auth.json"},
 	// devin is a cloud agent; config.json holds its settings but the session
 	// image ships no devin CLI, so this is a no-op until an image adds devin.
