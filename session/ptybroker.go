@@ -276,8 +276,15 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// exists to avoid.
 	needRepaint := since == 0 || since < b.base ||
 		(since == b.base && b.recoveryDiscardAt == b.base)
+	// The watermark is the ONLY needRepaint trigger whose `since` is INSIDE [base, head)
+	// — recoveryDiscardAt == b.base carries no eviction debt above it, so [base, head) is
+	// data-complete. The other triggers (since == 0 fresh, since < base behind) have no
+	// seamless alternative, so the tail stays right for them. since != 0 guards the
+	// zero-value startup state (recoveryDiscardAt == base == 0 by default), so subscribe(0)
+	// still starts at the tail (TestPTYBrokerSubscribeKeepsReplayableBytesWhenRepaintUnavailable).
+	watermarkRepaint := since != 0 && since == b.base && b.recoveryDiscardAt == b.base
 	var cursor Seq
-	if needRepaint {
+	if needRepaint && !watermarkRepaint {
 		// Start at the live tail, NOT at base. The repaint below reconstructs the WHOLE
 		// current screen, so every retained ring byte [base, head) is ALREADY baked into
 		// it. Starting the replay at base would make NextEvent send the repaint and THEN
@@ -290,6 +297,16 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 		// dropped. The client learns this cursor from the handshake seq / OpHello, so its
 		// ?since stays consistent.
 		cursor = head
+	} else if needRepaint {
+		// Watermark caught-up reconnect: keep the cursor at base (the seamless replay
+		// position), NOT the tail. The snapshot is best-effort; on failure there is no
+		// repaint, so [base, head) must stay replayable as the only thing that can render
+		// the recovered pane. cursor = head (pre-fix) advanced past [base, head) before
+		// Snapshot ran, so on a snapshot failure NextEvent's `cursor < head` was false and
+		// those bytes were silently dropped — the regression cc0ff9a5 introduced. On
+		// success the block below overwrites sub.cursor = repaintTail, so no double-replay
+		// (#1872).
+		cursor = b.base
 	} else {
 		// A seamless reconnect: since is inside the retained window, so the client's
 		// screen is current up to `since` and replaying [since, head) brings it forward

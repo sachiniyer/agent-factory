@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -669,6 +670,151 @@ func TestPTYBrokerReconnectRepaintsWhenCaughtUpAfterDiscard(t *testing.T) {
 	// The recovered pane still streams: repainting must not wedge the ring.
 	ch.emit(t, []byte("post-recovery-output"))
 	mustData(t, b, "post-recovery-output")
+}
+
+// TestPTYBrokerWatermarkReconnectReplaysRingWhenSnapshotFails is the snapshot-FAILURE
+// companion to TestPTYBrokerReconnectRepaintsWhenCaughtUpAfterDiscard above. That test
+// constructs the idle-pane, empty-ring caught-up reconnect (head == base, so [base,
+// head) is empty and there is nothing to lose); this one constructs a NON-empty ring at
+// the reconnect. A second subscriber A stays attached across the recovery so resume=true
+// restarts the capture, and the recovered pane then emits, advancing head past base. A
+// caught-up client B reconnects at since == base with recoveryDiscardAt == base — the
+// cc0ff9a5 watermark case — but the capture-pane Snapshot FAILS (a pane that vanished
+// under the exec).
+//
+// The repaint is best-effort, so on a snapshot failure there is NO repaint and the ring
+// is the only thing that can render the recovered pane. subscribe must keep B's cursor
+// at base (the seamless replay position) so NextEvent replays [base, head); setting
+// cursor = head at creation (the pre-fix behavior) advanced the cursor past those bytes
+// BEFORE Snapshot ran, so on the failure NextEvent's `cursor < head` test was false and
+// the recovered pane's already-buffered bytes were silently dropped — the regression
+// this test pins.
+func TestPTYBrokerWatermarkReconnectReplaysRingWhenSnapshotFails(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("SCREEN-BEFORE-DEATH")}
+	br := newPTYBroker(ch)
+
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	mustRepaintContains(t, a, "SCREEN-BEFORE-DEATH")
+	ch.emit(t, []byte("pre-death"))
+	mustData(t, a, "pre-death")
+	cursor := a.Seq() // caught up: cursor == head
+
+	// A stays attached across the respawn, so resume=true restarts the capture and
+	// re-seeds A with a repaint of the recovered screen.
+	ch.mu.Lock()
+	ch.snapshot = []byte("SCREEN-AFTER-RECOVERY")
+	ch.mu.Unlock()
+	br.resetCapture()
+	mustRepaintContains(t, a, "SCREEN-AFTER-RECOVERY")
+
+	// The recovered pane emits, so head advances past base: [base, head) is now non-empty.
+	const postRecovery = "post-recovery-bytes"
+	ch.emit(t, []byte(postRecovery))
+	mustData(t, a, postRecovery)
+
+	// Gate B's subscribe on captureMu so the snapshot failure can be injected BEFORE
+	// Snapshot() runs — the same harness as
+	// TestPTYBrokerSubscribeKeepsReplayableBytesWhenRepaintUnavailable.
+	br.captureMu.Lock()
+	type subResult struct {
+		sub *ptySub
+		err error
+	}
+	bres := make(chan subResult, 1)
+	go func() {
+		s, e := br.subscribe(cursor) // since == base, recoveryDiscardAt == base
+		bres <- subResult{s, e}
+	}()
+	waitSubscriberCount(t, br, 2)
+
+	// The pane vanishes under the capture-pane exec: no repaint can be built.
+	ch.mu.Lock()
+	ch.snapshotErr = errors.New("capture-pane: no such pane")
+	ch.mu.Unlock()
+
+	br.captureMu.Unlock()
+
+	var b subResult
+	select {
+	case b = <-bres:
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscribe B never returned")
+	}
+	if b.err != nil {
+		t.Fatalf("subscribe B: %v", b.err)
+	}
+
+	// No repaint was delivered, so the ring is all B has — and it must hold the recovered
+	// pane's buffered bytes. cursor = base (the fix) lets NextEvent replay [base, head);
+	// cursor = head (pre-fix) skips them and this nextWithin times out.
+	ev, err := nextWithin(t, b.sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("B NextEvent (want %q replayed from ring): %v", postRecovery, err)
+	}
+	if ev.Kind != PTYData || string(ev.Data) != postRecovery {
+		t.Fatalf("B first event = %+v, want PTYData %q (the ring fallback)", ev, postRecovery)
+	}
+
+	// The ring is not wedged: the recovered pane's later bytes still stream.
+	ch.emit(t, []byte("future"))
+	mustData(t, b.sub, "future")
+}
+
+// TestPTYBrokerWatermarkReconnectNoDuplicationOnSnapshotSuccess is the snapshot-SUCCESS
+// companion and #1872 no-regression guard. Same watermark topology as the failure test
+// above — caught-up B reconnects at since == base with recoveryDiscardAt == base and a
+// non-empty [base, head) — but the capture-pane Snapshot SUCCEEDS. The repaint already
+// reflects every retained byte, so replaying [base, head) on top of it would duplicate
+// output. The fix keeps B's creation cursor at base ONLY as a snapshot-failure safety
+// net: on success the repaint block overwrites sub.cursor = repaintTail, so [base, head)
+// is never replayed on top of the repaint. This test passes both before and after the
+// fix, expressing the #1872 invariant the cursor-overwrite on success preserves.
+func TestPTYBrokerWatermarkReconnectNoDuplicationOnSnapshotSuccess(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("SCREEN-BEFORE-DEATH")}
+	br := newPTYBroker(ch)
+
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	mustRepaintContains(t, a, "SCREEN-BEFORE-DEATH")
+	ch.emit(t, []byte("pre-death"))
+	mustData(t, a, "pre-death")
+	cursor := a.Seq()
+
+	ch.mu.Lock()
+	ch.snapshot = []byte("SCREEN-AFTER-RECOVERY")
+	ch.mu.Unlock()
+	br.resetCapture()
+	mustRepaintContains(t, a, "SCREEN-AFTER-RECOVERY")
+
+	const postRecovery = "post-recovery-bytes"
+	ch.emit(t, []byte(postRecovery))
+	mustData(t, a, postRecovery)
+
+	// B reconnects at the watermark (since == base, recoveryDiscardAt == base) with the
+	// snapshot succeeding and reflecting the recovered screen AND the post-recovery
+	// bytes already in the ring.
+	ch.mu.Lock()
+	ch.snapshot = []byte("SCREEN-AFTER-RECOVERY-WITH-POSTRECOVERY-BYTES")
+	ch.mu.Unlock()
+	b, err := br.subscribe(cursor)
+	if err != nil {
+		t.Fatalf("subscribe B: %v", err)
+	}
+	mustRepaintContains(t, b, "SCREEN-AFTER-RECOVERY-WITH-POSTRECOVERY-BYTES")
+
+	// The repaint already shows the [base, head) bytes, so nothing follows it: a PTYData
+	// here would be the #1872 duplicate the cursor-overwrite on success exists to prevent.
+	if ev, err := nextWithin(t, b, 250*time.Millisecond); err == nil && ev.Kind == PTYData {
+		t.Fatalf("B got PTYData %q after a successful repaint — #1872 duplicate", ev.Data)
+	}
+
+	ch.emit(t, []byte("future"))
+	mustData(t, b, "future")
 }
 
 // TestPTYBrokerReconnectAtBaseAfterEvictionStaysSeamless is the no-regression guard for
