@@ -758,12 +758,13 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 		return err
 	}
 	managerDelegated = true
-	status, deliveryStatus, err := s.manager.DeliverPromptWithStatus(req)
+	status, deliveryStatus, promptRetained, err := s.manager.deliverPromptWithOutcome(req)
 	if err != nil {
 		return err
 	}
 	resp.Status = status
 	resp.DeliveryStatus = deliveryStatus
+	resp.PromptRetained = promptRetained
 	return nil
 }
 
