@@ -1241,16 +1241,18 @@ func TestUnitRefusalRemediesOrderByClass(t *testing.T) {
 
 			// A manager that exists but cannot be invoked: PATH first when the
 			// binary is missing, never adopt (same binary, same PATH). The
-			// prefix is asserted through the directory literal so the
-			// (usually …) hint cannot silently regress to the wrong path
-			// (#4484: launchctl ships in /usr/bin, not /bin).
+			// prefix is asserted through the per-platform directory literal so
+			// the (usually …) hint cannot silently regress to the wrong path
+			// (#4594: the directory literal was unasserted; launchctl ships in
+			// /bin on darwin and systemctl in /usr/bin on linux).
 			bin := map[string]string{"linux": "systemctl", "darwin": "launchctl"}[goos]
+			dir := map[string]string{"linux": "/usr/bin", "darwin": "/bin"}[goos]
 			pathMiss := fmt.Errorf("no binary: %w", &exec.Error{Name: bin, Err: exec.ErrNotFound})
-			pathLead := remedyPathLead + bin + "` (usually /usr/bin)"
+			pathLead := remedyPathLead + bin + "` (usually " + dir + ")"
 			assertRemedyOrder(t, unreachableSupervisorRemedies(goos, pathMiss),
 				pathLead, remedySessionLead, uninstallRemedy)
-			if got := unreachableSupervisorRemedies(goos, pathMiss)[0]; !strings.Contains(got, "(usually /usr/bin)") {
-				t.Fatalf("PATH remedy %q must name /usr/bin, not /bin (launchctl and systemctl both ship there)", got)
+			if got := unreachableSupervisorRemedies(goos, pathMiss)[0]; !strings.Contains(got, "(usually "+dir+")") {
+				t.Fatalf("PATH remedy %q must name (usually %s)", got, dir)
 			}
 			unreadable := fmt.Errorf("boot marker unreadable: %w", os.ErrPermission)
 			assertRemedyOrder(t, unreachableSupervisorRemedies(goos, unreadable),
