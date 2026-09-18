@@ -500,6 +500,49 @@ func TestHasUpdatedSilentWhenSessionGone(t *testing.T) {
 	require.Equal(t, int32(1), hasSessionCalls.Load(), "no further has-session calls while dead")
 }
 
+// TestHasUpdatedExpectedTeardownLogsInfo covers #4472: when af itself asked
+// for the teardown — every kill/archive/task-completion/swap routes through
+// close(), which marks the session — the monitor's "session is gone" line is
+// normal lifecycle and must stay out of ERROR, where routine teardowns were
+// burying real failures. A vanish with no af request behind it keeps ERROR,
+// including after a restore clears a stale mark.
+func TestHasUpdatedExpectedTeardownLogsInfo(t *testing.T) {
+	var captureOK, sessionAlive atomic.Bool
+	session, _, _ := makeAttachedSession(t, &captureOK, &sessionAlive)
+
+	var infos logtest.Buffer
+	prevInfo := aflog.InfoLog.Writer()
+	aflog.InfoLog.SetOutput(&infos)
+	t.Cleanup(func() { aflog.InfoLog.SetOutput(prevInfo) })
+	errs := captureErrorLog(t)
+
+	// af asks for the teardown: the mock's kill-session answers success and
+	// close() records the request before it runs.
+	_, err := session.Close()
+	require.NoError(t, err)
+	require.True(t, session.teardownInitiated(), "close() must mark af-initiated teardown")
+
+	updated, hasPrompt, _ := session.HasUpdated()
+	require.False(t, updated)
+	require.False(t, hasPrompt)
+	require.True(t, session.monitor.dead)
+	require.Contains(t, infos.String(), "going silent")
+	require.NotContains(t, errs.String(), "going silent",
+		"an af-requested teardown must not land at ERROR")
+
+	// Re-bind the object to a live session: the mark must clear so a later
+	// vanish af did NOT ask for is still the anomaly ERROR exists for.
+	sessionAlive.Store(true)
+	captureOK.Store(true)
+	require.NoError(t, session.Restore("/some/work/dir"))
+	require.False(t, session.teardownInitiated(), "re-binding a live session must clear the mark")
+
+	captureOK.Store(false)
+	sessionAlive.Store(false)
+	session.HasUpdated()
+	require.Contains(t, errs.String(), "going silent")
+}
+
 // TestHasUpdatedRespawnResetsDead documents that a reattach via Restore
 // produces a fresh statusMonitor with dead cleared, so polling resumes after
 // the session comes back without reporting its baseline capture as pane churn.

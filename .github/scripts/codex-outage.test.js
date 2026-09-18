@@ -604,3 +604,84 @@ test('#4078: a merge after the freeze boundary is attributed once to its retaine
       comment(4, limits[0], { created_at: tomorrow(4) })] }, now });
   assert.deepEqual(newer.episodes.map(e => [e.start, e.merged]), [[t(2), []], [tomorrow(4), [1]]]);
 });
+
+// #4241: the count must accept the same head names the gate accepted at merge
+// time. #4233's shape — Codex reviewed the only content commit hours before the
+// outage, and the merged head was a clean update-branch merge of it with
+// master. Recorded as degraded before this fix; a real review, not an escape.
+test('a verdict bound to a proven content head covers the merged head', () => {
+  const CONTENT = '8d6fa799576f23afdc5ca227c91834000a2729c0';
+  const LAP = '9e27c60100000000000000000000000000000000';
+  const MERGE = '506829439dcdd89713b7544f7a7bb453f7c78ac9';
+  const contentHead = { oid: CONTENT, committedDate: t(1), evidenceHeadOids: [LAP, CONTENT] };
+  const pull = (extra = {}, artifacts = [comment(3, limits[0]), verdict(1, CONTENT)]) =>
+    ({ number: 4233, head: { sha: MERGE }, merged_at: t(5), artifacts, ...extra });
+
+  // Without the proof nothing changed: the head-only rule still counts it.
+  assert.deepEqual(aggregate([pull()], t(6))[0].merged, [4233]);
+  // With it, the verdict on the terminal content head covers the merge.
+  assert.deepEqual(aggregate([pull({ contentHead })], t(6))[0].merged, []);
+  // A verdict on a tree-proven intermediate head covers it too (#4239's set).
+  assert.deepEqual(aggregate([pull({ contentHead }, [comment(3, limits[0]), verdict(1, LAP)])], t(6))[0].merged, []);
+  // A verdict naming an unrelated commit still leaves the merge degraded.
+  assert.deepEqual(aggregate([pull({ contentHead }, [comment(3, limits[0]), verdict(1, 'b'.repeat(40))])], t(6))[0].merged, [4233]);
+});
+
+// The same pin through the live sweep: the api fake serves the commit, compare
+// and tree reads updateBranchContentHead makes, so the counted set is the one
+// the gate's proof produced — not a restated copy.
+test('the sweep proves the content head before counting a merge degraded', async () => {
+  const CONTENT = '8d6fa799576f23afdc5ca227c91834000a2729c0';
+  const MERGE = '506829439dcdd89713b7544f7a7bb453f7c78ac9';
+  const BASE = '9ac0ffee00000000000000000000000000000000';
+  const MERGE_BASE = 'ba5eba5e00000000000000000000000000000000';
+  const PARENT = 'aaaa000000000000000000000000000000000000';
+  const commits = {
+    [MERGE]: { date: t(5), parents: [CONTENT, BASE] },
+    [CONTENT]: { date: t(1), parents: [PARENT] },
+    [BASE]: { date: t(4), parents: [MERGE_BASE] },
+    [MERGE_BASE]: { date: t(0), parents: [] },
+    [PARENT]: { date: t(0), parents: [] },
+  };
+  const byRef = (ref) => {
+    const sha = Object.keys(commits).find(candidate => candidate.startsWith(ref));
+    const entry = sha && commits[sha];
+    return entry && { sha, commit: { committer: { date: entry.date }, tree: { sha } },
+      parents: entry.parents.map(parent => ({ sha: parent })) };
+  };
+  for (const contained of [true, false]) {
+    const writes = [];
+    const calls = [];
+    const api = async (route, options = {}) => {
+      calls.push(route);
+      if (options.method) { writes.push(options.body); return { body: options.body }; }
+      if (route.includes('/issues/3932/comments')) return [];
+      if (route.includes('/pulls?')) return [{ number: 4233, created_at: t(0), updated_at: t(5),
+        merged_at: t(5), head: { sha: MERGE }, base: { ref: 'master' } }];
+      if (route.includes('/issues/4233/comments')) return [verdict(2, CONTENT), comment(3, limits[0])];
+      if (route.includes('/pulls/4233/comments') || route.includes('/pulls/4233/reviews')) return [];
+      if (route.includes('/compare/')) return {
+        status: contained ? 'behind' : 'diverged', merge_base_commit: { sha: MERGE_BASE } };
+      if (route.includes('/git/trees/')) return {
+        sha: route.split('/git/trees/')[1].split('?')[0], truncated: false, tree: [] };
+      if (route.includes('/commits/')) {
+        const commit = byRef(route.split('/commits/')[1].split('?')[0]);
+        if (!commit) throw new Error(`unknown commit ${route}`);
+        return commit;
+      }
+      throw new Error(route);
+    };
+    await sweep(api, 'owner/repo', t(6));
+    const record = readRecord({ body: writes[0], user: { login: 'sachiniyer' } });
+    if (contained) {
+      assert.deepEqual(record.episodes[0].merged, [],
+        'a verdict bound to the proven content head covers the merged head');
+      assert.match(writes[0], /Degraded merges: 0/);
+      assert.ok(calls.some(route => route.includes('/compare/master...')),
+        'the update-branch proof ran rather than being bypassed');
+    } else {
+      assert.deepEqual(record.episodes[0].merged, [4233],
+        'a merge the proof does not accept keeps the head-only count');
+    }
+  }
+});
