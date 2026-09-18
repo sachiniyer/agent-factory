@@ -142,6 +142,11 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		{class: afAuthored, note: "bash probe: -i so aliases are defined, then `type claude`"},
 		{class: afAuthored, note: "fallback probe: `which claude`"},
 	},
+	"internal/testguard/shellproof.go:proveShellSandbox": {{
+		class: afAuthored,
+		note: "`$SHELL -l -i -c env`: the script is the fixed word `env`, and the shell is the environment's own " +
+			"SHELL (else /bin/sh). Only test binaries run it, to prove a pane shell still sees the HOME sandbox (#4469)",
+	}},
 	"daemon/vscode_start_gate.go:newGatedVSCodeCommand": {{
 		class: afAuthored,
 		note: "vscodeStartGateScript, a const in the same file; the binary and its args arrive as \"$@\" " +
