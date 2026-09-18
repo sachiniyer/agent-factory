@@ -346,6 +346,30 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			return "", err
 		}
 		m.warn().Printf("restore of %q: --force-reap given past an indeterminate probe; af could not reach the sandbox to push it, so anything it holds unpushed is discarded", title)
+		// The episode resets — the push-failure budget and the Recover-flap budget
+		// alike — are registered as a one-shot hook that reprovisionRemote fires
+		// only after reapRemoteRuntimeForReplacement returns without error — the
+		// point where the old sandbox is provably gone and the new episode genuinely
+		// begins.
+		//
+		// A Recover failure BEFORE that point belongs to the surviving sandbox's
+		// episode, so it is deliberately NOT shielded from recordLostRestoreFailure's
+		// restart seed: with no in-memory entry the failure continues the persisted
+		// count (terminal stays terminal), exactly the verdict an existing entry
+		// produces. Pre-seeding an empty entry here would make the same failure log
+		// "retrying in" after a daemon restart — a promise the durable
+		// LostRestoreGaveUp gate refuses to keep — so the same input would take a
+		// different verdict depending on whether the daemon had restarted.
+		//
+		// If reprovisionRemote fails before the reap (e.g. unresolvable account,
+		// invalid runtime config, agent-account drift), the hook is cleared without
+		// firing and the budgets stay charged, so the surviving sandbox's preserve
+		// episode continues instead of restarting, and repeated pre-reap failures
+		// cannot reset either budget indefinitely.
+		instance.SetOnSandboxRetired(func() {
+			m.resetPreserveBudget(repoID, instance)
+			m.resetRecoverBudget(repoID, instance)
+		})
 	case probeAbsent:
 		// af's own not-provisioned sentinel: nothing to preserve, so replacement is
 		// unconditional. The only arm that licenses that.
@@ -372,21 +396,22 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 				return "", err
 			}
 			m.warn().Printf("restore of %q: --force-reap given, replacing its reachable sandbox without pushing; anything it has not pushed is discarded", title)
-			// The sandbox is being replaced: end the push-failure episode so that a
-			// later failure against the new sandbox earns a fresh budget rather than
-			// inheriting the old one's escalation — the same reset the non-forced arm
-			// applies after a successful preserve push.
-			m.resetPreserveBudget(repoID, instance)
-			// A force-replace also ends any in-progress Recover episode: the old
-			// sandbox is gone, so prior Recover failures are stale. Without this
-			// reset, d8e4e08f's give-up assignment (consecutiveFailures =
-			// lostRestoreMaxAttempts) survives the replacement, and the first
-			// Recover failure against the brand-new sandbox counts as attempt
-			// maxAttempts+1 and triggers immediate give-up. The successful-push
-			// arm at line 365 deliberately does NOT clear this — a push-success
-			// is not a replacement, and zeroing consecutiveFailures there would
-			// erase a legitimate Recover-flap count mid-episode.
-			m.resetRecoverBudget(repoID, instance)
+			// Gate the push-failure and Recover-budget resets on sandbox retirement,
+			// using the same hook pattern as the probeUnknown arm above. A direct
+			// reset here would zero the budget even if reprovisionRemote then fails
+			// before reapRemoteRuntimeForReplacement retires the old sandbox —
+			// letting repeated pre-reap failures restart the budgets indefinitely,
+			// and for the preserve budget restarting a surviving sandbox's push
+			// episode as if it were fresh. A pre-reap failure belongs to the
+			// surviving sandbox's episode and keeps charging its existing count —
+			// seeded from the persisted terminal failure after a restart, so the
+			// verdict is identical whether or not the daemon restarted. The hook
+			// fires only after the sandbox is provably gone, ending its preserve
+			// episode and starting the replacement's Recover budget fresh.
+			instance.SetOnSandboxRetired(func() {
+				m.resetPreserveBudget(repoID, instance)
+				m.resetRecoverBudget(repoID, instance)
+			})
 			break
 		}
 		// The shared selector keeps the refusal's off-ramp executable even when
@@ -420,6 +445,14 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// that ordering — persistInstanceData scrubs the in-flight op before it
 		// writes, and recordLostRestoreFailure touches only the retry state.
 		//
+		// A retirement hook registered by a force-reap arm above must not outlive
+		// this attempt: if Recover returned before reprovisionRemote reached the
+		// reap (e.g. the recover-fence validation refused a superseded op), the
+		// hook is still armed and would fire at the NEXT call's retirement,
+		// resetting a budget that belongs to a different episode. A hook that did
+		// fire, or that reprovisionRemote's defer already cleared, reads nil here
+		// — so clearing unconditionally costs nothing.
+		instance.SetOnSandboxRetired(nil)
 		// Error-returning, not the logging wrapper: the committed arm below must
 		// not claim "recorded" for a write that failed (#3353 review), so the
 		// outcome of this persist is part of the message. The plain arm keeps the

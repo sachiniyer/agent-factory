@@ -724,10 +724,12 @@ func (m *home) relayout() {
 
 	m.layoutModalOverlays()
 
-	// Live panes size their sessions over the WS stream (last-resize-wins
-	// resize-window, #1592 Phase 2 PR6): each attachment's Resize rides the pane
-	// geometry through SetRect → w.live.Resize, so the TUI no longer resizes local
-	// tmux sessions from the relayout.
+	// Live panes report their view geometry through SetRect → w.live.Resize —
+	// which is render-only unless the attachment currently OWNS the pane's size
+	// (the focused interactive pane, #4480): only an owner's Resize reaches the
+	// WS stream's last-resize-wins resize-window. The TUI no longer resizes
+	// local tmux sessions from the relayout, and a passive viewer's layout churn
+	// never does either.
 }
 
 func newlyAutoHiddenPane(previousVisible, nextVisible, openPanes []*store.OpenPane) *store.OpenPane {
