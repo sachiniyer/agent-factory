@@ -174,9 +174,11 @@ func testPreviewFetcher(h *home) func(daemon.PreviewRequest) (daemon.PreviewResp
 			snapshot, snapshotErr := inst.AgentServer().Preview(req.Tab, req.Full)
 			content, err = snapshot.Content, snapshotErr
 		case req.Full:
-			content, err = inst.PreviewTabFullHistory(req.Tab)
+			snap, snapErr := inst.PreviewTabSnapshot(req.Tab, true)
+			content, err = snap.Content, snapErr
 		default:
-			content, err = inst.PreviewTab(req.Tab)
+			snap, snapErr := inst.PreviewTabSnapshot(req.Tab, false)
+			content, err = snap.Content, snapErr
 		}
 		if errors.Is(err, tmux.ErrSessionGone) {
 			return daemon.PreviewResponse{Gone: true}, nil
