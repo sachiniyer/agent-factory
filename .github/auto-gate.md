@@ -490,6 +490,47 @@ plus at most one dispatch per window. Passes skip unrelated branch-sweep
 housekeeping. This avoids both the frozen-decision failure and one gate
 evaluation per completed matrix job (#4242).
 
+**A head with no PR Validation run at all gets one dispatched (#4581).**
+Reconciliation wakes a decision when Build or Lint completes, so it cannot help
+a head whose run GitHub never created. #4430's `b63f9752` was an ordinary lane
+push that got an Auto Gate run and no PR Validation run, and its decision said
+"required check Build is missing" until someone dispatched `pr.yml` by hand.
+When an evaluation finds Build or Lint absent and no run parked, it first asks
+whether any PR Validation run exists for the head sha, under any event:
+
+- **A run exists** (queued, running, finished, or dispatched earlier): nothing
+  changes, and the decision reads as before.
+- **No run exists:** the gate dispatches `pr.yml` on the PR's branch, the same
+  mechanism the update-branch recovery uses, and the missing-check reasons say
+  so.
+
+Guards:
+
+- **Once per head.** The existence read is the marker. A dispatched run carries
+  the sha it ran at, so every later evaluation of that head finds it and stops.
+  The gate writes no state of its own. Two evaluations that read before either
+  dispatch is visible can both send one. The dispatch passes no inputs, so it
+  is a full run rather than a #4563 probe. `pr.yml` groups it by its branch ref
+  (`pr-<ref>`, apart from probes' `probe-<ref>`) and cancels in progress, so
+  that race costs one cancelled run, and a probe on the branch cancels neither.
+- **Toward waiting.** A failed or malformed read dispatches nothing, and the
+  decision reads as before. A missed dispatch costs a delay, but a dispatch loop
+  would cost the runner pool.
+- **Not mid-push.** GitHub creates a push's runs a few seconds after the head
+  moves, so absence is confirmed over the same bounded wait (three reads, five
+  seconds apart) that update-branch recovery uses.
+- **At this head only.** A dispatch takes a ref, so the branch tip is read last,
+  and a tip that is no longer the evaluated head skips the dispatch. The newer
+  head gets its own evaluation.
+- **Only where GitHub would have run it.** Fork heads, conflicting or
+  still-computing merges, PRs that are not open master PRs, and merge-queue
+  batches get no dispatch. GitHub creates no `pull_request` run for those either.
+
+The cost is one REST read per evaluation that finds a PR Validation check
+absent. It finds a run on the first read in the ordinary case. A dispatch also
+runs PR Validation for a head whose commit message skipped CI, because the gate
+cannot merge a head whose required checks never report.
+
 GitHub also suppresses `push` workflows when Auto Gate merges with its
 `GITHUB_TOKEN`. After a merge, the gate therefore dispatches the five
 master-verification workflows named by `MASTER_PUSH_WORKFLOWS`: Build, Docs,
