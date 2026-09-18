@@ -20,18 +20,12 @@ import (
 // config_unset.go; the outcome rules both halves share are in
 // config_save_outcome.go.
 
-// RequestApplyConfig asks a RUNNING daemon to apply the on-disk global config to
-// itself in place (#2480). It deliberately never STARTS a daemon: a config write
-// with no daemon running has nothing to apply live and takes effect on the next
-// start, so this uses the no-ensure path and returns the dial error when none is
-// reachable (the caller treats that as "saved, nothing running to apply").
-func RequestApplyConfig() (ApplyConfigResponse, error) {
-	resp, attempt := requestApplyConfigAttempt()
-	return resp, attempt.err
-}
-
-// requestApplyConfigAttempt preserves whether the RPC started so save callers
-// can distinguish an unreachable daemon from a failed apply.
+// requestApplyConfigAttempt asks a RUNNING daemon to apply the on-disk global
+// config to itself in place (#2480). It deliberately never STARTS a daemon: a
+// config write with no daemon running has nothing to apply live and takes
+// effect on the next start, so this uses the no-ensure path and reports the
+// dial failure when none is reachable. Preserving whether the RPC started lets
+// save callers distinguish an unreachable daemon from a failed apply.
 func requestApplyConfigAttempt() (ApplyConfigResponse, daemonCallAttempt) {
 	var resp ApplyConfigResponse
 	attempt := callDaemonNoEnsureAttemptBefore("ApplyConfig", ApplyConfigRequest{}, &resp, time.Time{}, false)
@@ -51,8 +45,8 @@ func requestApplyConfigAttempt() (ApplyConfigResponse, daemonCallAttempt) {
 // working with the daemon stopped. The fallback is decided by the DIAL, never
 // by the daemon's answer: once a daemon has answered, an error (validation or
 // admission refusal) is final, because writing locally after a refusal would
-// reopen exactly the split #3231 closes. It never STARTS a daemon, like
-// RequestApplyConfig.
+// reopen exactly the split #3231 closes. It never STARTS a daemon, like the
+// apply poke.
 func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 	if err := config.RetiredThemeKeyError(key); err != nil {
 		return SetConfigValueResponse{}, err
@@ -107,14 +101,15 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 	}
 	resp = SetConfigValueResponse{Result: result}
 	// Keep dial failure distinct from an RPC error: only the former means
-	// no daemon was reached. A started RPC may have failed or lost its reply.
+	// no daemon was reached (recorded explicitly — unset reports unknown, #4482).
+	// A started RPC may have failed or lost its reply.
 	applyResp, applyAttempt := requestApplyConfigAttempt()
-	var outcome config.ApplyOutcome
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyNotReached}
 	if applyAttempt.err == nil {
 		resp.Applied = applyResp.Applied
 		resp.Pending = applyResp.Pending
 		resp.Warnings = applyResp.Warnings
-		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
+		outcome = config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: applyResp.FailedListenerKeys}
 		// The named skew rule (#4247). This fallback only runs against a daemon
 		// too old to serve SetConfigValue, and ApplyConfigResponse carries no
 		// digest, so nothing here can be matched against the local write above —
@@ -175,14 +170,15 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 	// network.listen_addr / network.preview_listen_addr rebind that failed left the
 	// OLD listener serving, and this surface used to report that as "Applied".
 	// Keep dial failure distinct from an RPC error: only the former means
-	// no daemon was reached. A started RPC may have failed or lost its reply.
+	// no daemon was reached (recorded explicitly — unset reports unknown, #4482).
+	// A started RPC may have failed or lost its reply.
 	applyResp, applyAttempt := requestApplyConfigAttempt()
-	var outcome config.ApplyOutcome
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyNotReached}
 	if applyAttempt.err == nil {
 		resp.Applied = applyResp.Applied
 		resp.Pending = applyResp.Pending
 		resp.Warnings = applyResp.Warnings
-		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
+		outcome = config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: applyResp.FailedListenerKeys}
 		// The same named skew rule as the set fallback (#4247).
 		applyDigestSkewUnconfirmed(&outcome, &resp.Warnings)
 	} else if applyAttempt.requestStarted {
