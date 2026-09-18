@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -114,6 +115,23 @@ var keyEffectClasses = map[string]EffectClass{
 	"upgrade_clear_unverifiable_artifacts": EffectAppliedLive,
 	"keys":                                 EffectNextAfLaunch,
 	"detach_keys":                          EffectNextAfLaunch,
+}
+
+// AllEffectClassifiedKeys returns the canonical name of every key in
+// keyEffectClasses, sorted, so a caller can mirror the classifier's key set
+// without reaching into the unexported map. The daemon's keyDiff mirrors this
+// set (daemon/config_apply.go): every daemon-applied key — EffectAppliedLive or
+// EffectNextDaemonStart — MUST have a keyDiff entry, or ApplyConfig silently
+// drops changes to it from ApplyConfigResult.Applied/Pending. Client-only
+// (EffectNextAfLaunch) keys are returned too; callers that only care about
+// daemon-applied keys should filter by KeyEffectClass.
+func AllEffectClassifiedKeys() []string {
+	keys := make([]string, 0, len(keyEffectClasses))
+	for k := range keyEffectClasses {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // KeyEffectClass returns when a change to key takes effect. A dotted family leaf

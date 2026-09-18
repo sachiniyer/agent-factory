@@ -97,10 +97,20 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"network.require_token":          func(a, b *config.Config) bool { return a.RequireToken != b.RequireToken },
 	"network.require_loopback_token": func(a, b *config.Config) bool { return a.RequireLoopbackToken != b.RequireLoopbackToken },
 	"network.cors_allowed_origins":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.CORSAllowedOrigins, b.CORSAllowedOrigins) },
+	// Read at the moment an upgrade activates (update_driver.go), from the live
+	// config ApplyConfig swaps, so a save is in force for the next upgrade attempt
+	// with nothing to restart (config/effect.go classifies it EffectAppliedLive).
+	"upgrade_clear_unverifiable_artifacts": func(a, b *config.Config) bool {
+		return a.UpgradeClearUnverifiableArtifacts != b.UpgradeClearUnverifiableArtifacts
+	},
 	// EffectNextDaemonStart keys — read once at startup.
 	"root_agents":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgents, b.RootAgents) },
 	"root_agent":    func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgent, b.RootAgent) },
 	"branch_prefix": func(a, b *config.Config) bool { return a.BranchPrefix != b.BranchPrefix },
+	// The watcher supervisor snapshots this cap when the daemon constructs it
+	// (daemon.go) and is not rebuilt by ApplyConfig, so a change waits for the next
+	// daemon start (config/effect.go classifies it EffectNextDaemonStart).
+	"watcher_events_per_minute": func(a, b *config.Config) bool { return a.WatcherEventsPerMinute != b.WatcherEventsPerMinute },
 	// debug_pprof: the pprof mount is decided when startHTTPServer builds the unix
 	// listener's handler, so a change is reported pending rather than applied.
 	"debug_pprof": func(a, b *config.Config) bool { return a.DebugPprof != b.DebugPprof },
