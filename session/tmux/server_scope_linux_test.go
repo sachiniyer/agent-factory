@@ -26,7 +26,7 @@ func TestNewTmuxServerCommandScopesDaemonUnitSpawn(t *testing.T) {
 	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
 	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
 
-	cmd, scoped := newTmuxServerCommand("new-session", "-d", "-s", "af_worker")
+	cmd, scoped := newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), "new-session", "-d", "-s", "af_worker")
 	if !scoped {
 		t.Fatal("daemon-owned tmux server command was not marked systemd-scoped")
 	}
@@ -54,7 +54,7 @@ func TestNewTmuxServerCommandDoesNotScopeClientWhenServerAlreadyExists(t *testin
 	restore := ConfigureDaemonServer(t.TempDir())
 	t.Cleanup(restore)
 
-	cmd, scoped := newTmuxServerCommand("new-session", "-d", "-s", "af_worker")
+	cmd, scoped := newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), "new-session", "-d", "-s", "af_worker")
 	if scoped {
 		t.Fatal("session client was put in a transient scope even though the shared server already exists")
 	}
@@ -296,7 +296,7 @@ func TestNewTmuxServerCommandDoesNotTrustInheritedSystemdMarker(t *testing.T) {
 	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
 	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()+1))
 
-	cmd, scoped := newTmuxServerCommand("new-session")
+	cmd, scoped := newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), "new-session")
 	if scoped {
 		t.Fatal("descendant with inherited marker was marked systemd-scoped")
 	}
@@ -383,7 +383,7 @@ func TestDedicatedServerFailureFallsBackToSessionScope(t *testing.T) {
 	restore := ConfigureDaemonServer(t.TempDir())
 	t.Cleanup(restore)
 
-	cmd, scoped := newTmuxServerCommand("new-session", "-d", "-s", "af_worker")
+	cmd, scoped := newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), "new-session", "-d", "-s", "af_worker")
 	if !scoped {
 		t.Fatal("dedicated-scope failure refused the historical per-session fallback")
 	}
@@ -651,7 +651,7 @@ exec "$@"
 		t.Fatalf("private server exit-empty = %q, want off", got)
 	}
 
-	cmd, scoped := newTmuxServerCommand("new-session", "-d", "-s", "af_worker", "sleep", "60")
+	cmd, scoped := newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), "new-session", "-d", "-s", "af_worker", "sleep", "60")
 	if scoped {
 		t.Fatal("session spawn still owned a scope after the dedicated server became ready")
 	}
