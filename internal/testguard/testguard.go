@@ -4,9 +4,10 @@
 // child process it spawned) escapes its AGENT_FACTORY_HOME sandbox and
 // touches the real config.json, the package run fails loudly instead of the
 // user discovering days later that their settings were silently replaced
-// (#837). TmuxTripwire does the same for real tmux sessions leaked onto the
-// developer's tmux server, SandboxHome defaults a whole package into a
-// throwaway AGENT_FACTORY_HOME, SandboxTmux defaults a whole package onto a
+// (#837). The same check covers the af skill files in the developer's agent
+// config roots (#4469). TmuxTripwire does the same for real tmux sessions leaked
+// onto the developer's tmux server, SandboxHome defaults a whole package into a
+// throwaway AGENT_FACTORY_HOME and HOME, SandboxTmux defaults a whole package onto a
 // private tmux server so no test can even see the developer's real one
 // (#1122), and IsolateTmux gives a single test a private server of its own so
 // nothing it creates can outlive it (#1056).
@@ -21,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -92,14 +94,28 @@ func hashFile(path string) ([]byte, bool, error) {
 }
 
 // ConfigTripwire snapshots the real config files (config.json and
-// config.toml, #1030) and returns a verify func for TestMain to call after
-// m.Run(). Verify returns a non-nil error when:
+// config.toml, #1030), plus the af skill files in the real agent config roots
+// (#4469, see agentStoreTripwire), and returns a verify func for TestMain to
+// call after m.Run(). Verify returns a non-nil error when:
 //   - a file existed at snapshot time and was modified or deleted, or
 //   - a file did not exist and a test materialized one.
 //
-// On boxes without a resolvable home (or with AF_DISABLE_CONFIG_TRIPWIRE=1)
-// both snapshot and verify are no-ops, so CI runs are unaffected.
+// The agent-store check is part of this function rather than a new export. That
+// way every TestMain that already calls ConfigTripwire gets it, and nobody has
+// to remember to add a second call.
+//
+// On boxes without a resolvable home both snapshot and verify are no-ops, so CI
+// runs are unaffected. AF_DISABLE_CONFIG_TRIPWIRE=1 turns off the config half
+// and AF_DISABLE_AGENT_STORE_TRIPWIRE=1 turns off the agent-store half.
 func ConfigTripwire() func() error {
+	verifyAgentStores := agentStoreTripwire()
+	verifyConfig := configFileTripwire()
+	return func() error {
+		return errors.Join(verifyConfig(), verifyAgentStores())
+	}
+}
+
+func configFileTripwire() func() error {
 	if os.Getenv("AF_DISABLE_CONFIG_TRIPWIRE") == "1" {
 		return func() error { return nil }
 	}
@@ -285,6 +301,16 @@ func TmuxTripwire() func() error {
 // on marker absence (e.g. doctor's home-match gate) and misattributes test
 // children to the real install. AF_TESTGUARD_RUN is replaced with this run's
 // stable identity so per-test AGENT_FACTORY_HOME overrides remain attributable.
+//
+// Despite the name, it also sandboxes $HOME (#4469). Every agent store af reads
+// or writes — Codex conversations and receipts, Claude transcripts, and the
+// codex/gemini/amp/devin skill bases — derives from HOME or from an override
+// that falls back to it, and a package run that sandboxed only
+// AGENT_FACTORY_HOME polled the developer's real ~/.codex. HOME moves to a
+// sibling temp dir, userRootOverrides are cleared so each root derives from it,
+// and the Go caches, global git config and Docker config keep pointing at the
+// real ones (see sandboxUserHome). A test that t.Setenv's its own CODEX_HOME or
+// HOME still wins for its duration, as with AGENT_FACTORY_HOME.
 func SandboxHome() func() {
 	if stats, ran := sweepOrphanTempDirsOnce(); ran && stats.noteworthy() {
 		fmt.Fprintf(os.Stderr, "testguard: %s\n", stats)
@@ -296,9 +322,18 @@ func SandboxHome() func() {
 	if err := writeOwnerStamp(dir); err != nil {
 		fmt.Fprintf(os.Stderr, "testguard: cannot stamp sandbox home owner, dir will not be reaped if this binary dies: %v\n", err)
 	}
+	// Before AGENT_FACTORY_HOME moves, so it reads the ambient HOME, XDG and Go
+	// settings it has to preserve.
+	restoreUserHome, err := sandboxUserHome()
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		panic("testguard: cannot sandbox HOME: " + err.Error())
+	}
 	prev, had := os.LookupEnv("AGENT_FACTORY_HOME")
 	prevTestRun, hadTestRun := os.LookupEnv(envMarkerTestRun)
 	if err := os.Setenv("AGENT_FACTORY_HOME", dir); err != nil {
+		restoreUserHome()
+		_ = os.RemoveAll(dir)
 		panic("testguard: cannot set sandbox AGENT_FACTORY_HOME: " + err.Error())
 	}
 	if err := os.Setenv(envMarkerTestRun, dir); err != nil {
@@ -307,6 +342,7 @@ func SandboxHome() func() {
 		} else {
 			_ = os.Unsetenv("AGENT_FACTORY_HOME")
 		}
+		restoreUserHome()
 		_ = os.RemoveAll(dir)
 		panic("testguard: cannot set sandbox run marker: " + err.Error())
 	}
@@ -343,6 +379,7 @@ func SandboxHome() func() {
 		} else {
 			_ = os.Unsetenv(envMarkerTestRun)
 		}
+		restoreUserHome()
 		_ = os.RemoveAll(dir)
 	}
 }
