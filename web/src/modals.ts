@@ -1,4 +1,4 @@
-import { handoffAccountChoices } from "./handoff_accounts.js";
+import { handoffAccountChoices, handoffAccountPinned } from "./handoff_accounts.js";
 // The web client's modal overlays (#1592 Phase 5 PR5): the new-session form, the
 // send-prompt box, and the kill/archive confirms — the write surface that
 // completes the v1 loop (list → attach → type → create/kill). They mirror the
@@ -20,6 +20,8 @@ import { handoffAccountChoices } from "./handoff_accounts.js";
 import { AccountSelection } from "./account_selection.js";
 import type { CreateSessionInput, DirectoryListing } from "./api.js";
 import {
+  AMBIENT_ACCOUNT,
+  AMBIENT_PIN_ACCOUNT,
   type AccountChoice,
   accountAgentFor,
   accountChoices,
@@ -27,7 +29,7 @@ import {
   accountNotice,
   accountSelectable,
 } from "./account_scope.js";
-import { type BackendCatalog, type BackendChoice, REPO_DEFAULT, backendChoices, backendNotice, backendSelectable } from "./backends.js";
+import { type BackendCatalog, type BackendChoice, REPO_DEFAULT, backendAccountScoped, backendChoices, backendNotice, backendSelectable } from "./backends.js";
 import { type DirectoryPickerHandle, directoryPicker } from "./dirpicker.js";
 import { h } from "./dom.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, handoffAgentChoices, programChoices } from "./programs.js";
@@ -143,6 +145,9 @@ export function newSessionModal(
   backendHint.setAttribute("role", "status");
 
   let choices: BackendChoice[] = backendChoices(null);
+  // The catalog itself, kept for one fact the choices do not carry: whether the
+  // selected backend can run an account (#4404 review). null until it lands.
+  let backendCatalog: BackendCatalog | null = null;
 
   // The account field (#3844): which of the agent's registered credential accounts
   // the session runs as. Its options come from the daemon's ListAccounts registry,
@@ -190,8 +195,12 @@ export function newSessionModal(
       .replace(/^Repo default \((.*)\)$/, "$1 (default)")
       .replace(/^Use configured default \((.*)\)$/, "$1 (default)");
     // Ambiguity, unavailable choices and explicit overrides must remain in view.
+    // A real choice exists when at least one NAMED account is offered and no
+    // configured default answers for the field — the routable and ambient rows
+    // are present for every supported agent, so they cannot count (#4404).
     const accountNeedsChoice = !!accountHint.textContent || accountSelection.picked
-      || (accountRows.length > 2 && !accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog)));
+      || (accountRows.some((row) => row.value !== AMBIENT_ACCOUNT && row.value !== AMBIENT_PIN_ACCOUNT)
+        && !accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog)));
     defaults.setSummary([`Program: ${choiceLabel(programSelect)}`, `Backend: ${choiceLabel(backendSelect)}`,
       ...(accountNeedsChoice ? [] : [`Account: ${choiceLabel(accountSelect)}`])]);
     const accountParent = accountNeedsChoice ? accountSlot : defaults.body;
@@ -246,8 +255,9 @@ export function newSessionModal(
     const agent = accountAgentFor(programSelect.value, programCatalog);
     // Wait for both per-project facts before judging whether a choice exists.
     const knownAccounts = programsPending ? null : accounts;
-    accountRows = accountChoices(knownAccounts, agent, accountsFailed);
-    const selected = accountSelection.render(knownAccounts, agent, accountsFailed);
+    const backendScoped = backendAccountScoped(backendCatalog, backendSelect.value);
+    accountRows = accountChoices(knownAccounts, agent, accountsFailed, backendScoped);
+    const selected = accountSelection.render(knownAccounts, agent, accountsFailed, backendScoped);
     accountSelect.replaceChildren();
     for (const choice of accountRows) {
       accountSelect.append(h("option", { value: choice.value }, choice.label));
@@ -261,6 +271,8 @@ export function newSessionModal(
     syncSubmitState();
   });
   programSelect.addEventListener("change", renderAccounts);
+  // The backend decides whether the routable row may promise a pool pick.
+  backendSelect.addEventListener("change", renderAccounts);
 
   const renderPrograms = (): void => {
     const previous = programSelect.value;
@@ -286,6 +298,7 @@ export function newSessionModal(
   const loadCatalogsFor = (repoPath: string): void => {
     const seq = ++loadSeq;
     accounts = null;
+    backendCatalog = null;
     programsPending = true;
     accountsFailed = false;
     renderAccounts();
@@ -342,6 +355,7 @@ export function newSessionModal(
     if (repoPath === "") {
       choices = backendChoices(null);
       renderChoices();
+      renderAccounts();
       return;
     }
     void callbacks
@@ -350,17 +364,22 @@ export function newSessionModal(
         if (seq !== loadSeq) {
           return;
         }
+        backendCatalog = catalog;
         choices = backendChoices(catalog);
         renderChoices();
+        renderAccounts();
       })
       .catch(() => {
         if (seq !== loadSeq) {
           return;
         }
         // Degrade to "repo default" only. The create path is unchanged by an
-        // unknown catalog, so this costs the user the choice, not the session.
+        // unknown catalog, so this costs the user the choice, not the session —
+        // though the account row no longer promises a pool pick it cannot back.
+        backendCatalog = null;
         choices = backendChoices(null);
         renderChoices();
+        renderAccounts();
       });
   };
 
@@ -418,9 +437,12 @@ export function newSessionModal(
       // REPO_DEFAULT ("") when the user did not choose — createSession then omits
       // `backend` entirely and the repo's config decides (#1933).
       backend: backendSelect.value,
-      // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
-      // `account` entirely and the daemon applies its default, if any (#3844).
-      account: accountSelect.value,
+      // The select may be SHOWING a configured default it preselected — a
+      // presentation convenience, not a decision — or a failure row whose
+      // value is "" while an ambient pin is still logically picked. Either
+      // way the DOM value is not the pick; wireAccount serializes the
+      // RETAINED one (#4404 review).
+      ...accountSelection.wireAccount(),
     });
   });
 
@@ -445,6 +467,8 @@ export function handoffModal(
     onSubmit: (target: string, account?: string) => void;
     loadAccounts?: () => Promise<AccountsResponse>;
     currentAccount?: string;
+    /** The current account is af's own pick (account_auto_selected), not a pin. */
+    currentAccountAuto?: boolean;
     onCancel: () => void;
     loadPrograms: () => Promise<ProgramCatalog>;
   },
@@ -459,7 +483,13 @@ export function handoffModal(
   let accounts: AccountsResponse = { entries: [], agents: [] };
   let accountsLoaded = !callbacks.loadAccounts;
   let accountsFailed = false;
-  const requiresAccount = (agent: string): boolean => agent === currentAgent || !!callbacks.currentAccount;
+  // Only a PINNED account demands a target account. One af chose — the
+  // create-time router's pick — is released by an agent-only handoff (the
+  // daemon clears it in the swap), so a routed session keeps every target
+  // agent's ambient identity on offer (#4404 review). The current account is
+  // still excluded from the same-agent rows either way.
+  const pinned = handoffAccountPinned(callbacks.currentAccount, callbacks.currentAccountAuto);
+  const requiresAccount = (agent: string): boolean => agent === currentAgent || pinned;
   let accountRows: ReturnType<typeof handoffAccountChoices> = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
@@ -503,7 +533,7 @@ export function handoffModal(
     if (catalogChoices === null || !accountsLoaded) return;
     const hasAccount = (agent: string): boolean => handoffAccountChoices(accounts, agent,
       agent === currentAgent ? callbacks.currentAccount : "").length > 0;
-    const choices = catalogChoices.filter(choice => !callbacks.currentAccount || hasAccount(choice.value));
+    const choices = catalogChoices.filter(choice => !pinned || hasAccount(choice.value));
     if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
       choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
     }
@@ -512,7 +542,7 @@ export function handoffModal(
     if (choices.some(choice => choice.value === previous)) agentSelect.value = previous;
     refreshAccounts();
     if (accountsLoaded) handle.setError(choices.length === 0
-      ? (callbacks.currentAccount ? "No registered target account is available to hand off to." : "No other agent is available to hand off to.")
+      ? (pinned ? "No registered target account is available to hand off to." : "No other agent is available to hand off to.")
       : null);
   };
 
@@ -550,7 +580,7 @@ export function handoffModal(
       accountsLoaded = true;
       accountsFailed = true;
       refreshAgentChoices();
-      handle.setError(callbacks.currentAccount
+      handle.setError(pinned
         ? "Could not load accounts. Try again to choose a registered target account."
         : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
     });

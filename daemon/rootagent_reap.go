@@ -162,9 +162,13 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 	// Through the one choke point (#1917): it refuses while the teardown's outcome
 	// is unknown. This site was still log-and-delete after two audits I called
 	// exhaustive — which is the argument for there being exactly one place to call.
-	// The SAME projection carried above, not a second read: the row's account-limit
-	// evidence is retained from the exact record being deleted.
-	deleted, err := m.deleteSessionRecord(repoID, session.RootSessionTitle, inst.ID, teardownErr, snapshot)
+	// The row's account-limit evidence is read from the same instance being
+	// deleted, but by the choke point inside the refute fence rather than from the
+	// snapshot carried above: that snapshot predates the teardown, and a refute
+	// can retract an observation in between — retaining the stale copy would
+	// re-publish evidence already disproven (#4404 review). The carry itself still
+	// comes from the one projection, for the reason given where it is taken.
+	deleted, err := m.deleteSessionRecord(repoID, session.RootSessionTitle, inst.ID, teardownErr, inst.ToInstanceData)
 	if err != nil {
 		// Return the ERROR, not (false, nil) (#1917 round 8). "No, but fine" is
 		// absence-of-error wearing a different hat: the caller reads it as "nothing to

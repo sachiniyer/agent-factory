@@ -9,16 +9,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // #3386: the project's default account, applied on the create so TUI, web, CLI
 // and task deliveries all honour it without re-implementing the precedence.
 //
-// These drive applyDefaultAccount directly — the function CreateSession calls
-// before it reserves anything — because the ORDER and the REFUSAL are the whole
-// contract, and both are decided before a worktree, a branch or a tmux session
-// exists.
+// These drive applyDefaultAccount directly — the fallback routeCreateAccount
+// delegates to for a create the pool cannot route (#4404) — because the ORDER
+// and the REFUSAL are the whole contract, and both are decided before a
+// worktree, a branch or a tmux session exists.
 
 // defaultAccountFixture gives a temp AF home, a registered project, and a
 // registered account directory when name is non-empty.
@@ -30,7 +31,15 @@ func defaultAccountFixture(t *testing.T, agent, account string) (home, repoPath 
 	p, err := config.RegisterProject(repoPath)
 	require.NoError(t, err)
 	if account != "" {
-		require.NoError(t, os.MkdirAll(filepath.Join(home, "accounts", agent, account), 0o700))
+		dir := filepath.Join(home, "accounts", agent, account)
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+		// Registered WITH a credential: the pool router skips accounts with no
+		// login evidence, and most fixtures mean "an account af could launch
+		// under", which is the logged-in state. Tests for the unlogged-in path
+		// build the bare directory themselves.
+		artifacts := agentaccount.AccountCredentialArtifacts(agent)
+		require.NotEmpty(t, artifacts, "test agent %q has no known credential artifact", agent)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, artifacts[0]), []byte("{}"), 0o600))
 	}
 	return home, repoPath, p
 }
@@ -130,8 +139,11 @@ func TestAnEmptyProjectEntryKeepsTheAmbientIdentity(t *testing.T) {
 	req := CreateSessionRequest{Title: "opted-out", RepoPath: repoPath, Program: "codex"}
 	require.NoError(t, applyDefaultAccount(&config.Config{}, &req))
 	assert.Empty(t, req.Account, "this project opted out, so the global default must not reach it")
-	assert.Empty(t, defaultAccountsFor(&config.Config{}, repoPath, []string{"codex"})["codex"],
+	catalogDefaults, catalogOptOuts := defaultAccountsFor(&config.Config{}, repoPath, []string{"codex"})
+	assert.Empty(t, catalogDefaults["codex"],
 		"and the picker must agree, or it would preselect an identity the create does not use")
+	assert.True(t, catalogOptOuts["codex"],
+		"and the catalog must expose the opt-out, or the routable row is labelled \"af picks a healthy account\" while the create launches ambient")
 }
 
 // An account belongs to ONE agent, and this is the property the map-shaped key
@@ -196,15 +208,43 @@ func TestListAccountsReportsTheProjectDefaults(t *testing.T) {
 	home, repoPath, project := defaultAccountFixture(t, "codex", "work")
 	writeProjectAccounts(t, project, "[default_accounts]\ncodex = \"work\"\n")
 
-	defaults := defaultAccountsFor(&config.Config{}, repoPath, []string{"claude", "codex"})
+	defaults, optOuts := defaultAccountsFor(&config.Config{}, repoPath, []string{"claude", "codex"})
 	assert.Equal(t, map[string]string{"codex": "work"}, defaults,
 		"only the agents the project actually scoped are reported")
+	assert.Empty(t, optOuts,
+		"a configured default is not an opt-out — the two answers must not be conflated")
 
 	// The unregistered case is reported too, deliberately: dropping it would hide a
 	// misconfiguration behind an "ambient identity" the picker would then be lying
 	// about, and the create is about to refuse it by name.
 	writeProjectAccounts(t, project, "[default_accounts]\ncodex = \"gone\"\n")
-	assert.Equal(t, map[string]string{"codex": "gone"},
-		defaultAccountsFor(&config.Config{}, repoPath, []string{"codex"}))
+	goneDefaults, _ := defaultAccountsFor(&config.Config{}, repoPath, []string{"codex"})
+	assert.Equal(t, map[string]string{"codex": "gone"}, goneDefaults)
 	assert.NoDirExists(t, filepath.Join(home, "accounts", "codex", "gone"))
+}
+
+// #4404 review: whether an untouched backend field can carry a routed account is
+// the DAEMON's resolution of the repo's `backend` key — a TUI attached to a
+// remote daemon cannot read that repo's config — so the account catalog the
+// picker already fetches carries the answer.
+func TestListAccountsReportsWhetherTheRepoBackendTakesAnAccount(t *testing.T) {
+	_, repoPath, _ := defaultAccountFixture(t, "codex", "work")
+	var m *Manager
+
+	resp, err := m.ListAccounts(ListAccountsRequest{Agent: "codex", RepoPath: repoPath})
+	require.NoError(t, err)
+	assert.True(t, resp.PoolRouting)
+	assert.True(t, resp.RepoBackendAccountScoped, "an unconfigured repo defaults to local, which takes an account")
+
+	writeRepoBackendConfig(t, repoPath, map[string]any{
+		"backend": "ssh",
+		"ssh":     map[string]any{"host": "example.invalid"},
+	})
+	resp, err = m.ListAccounts(ListAccountsRequest{Agent: "codex", RepoPath: repoPath})
+	require.NoError(t, err)
+	assert.False(t, resp.RepoBackendAccountScoped, "the router leaves an ssh-default repo on the legacy contract")
+
+	resp, err = m.ListAccounts(ListAccountsRequest{Agent: "codex"})
+	require.NoError(t, err)
+	assert.False(t, resp.RepoBackendAccountScoped, "no repo, no backend to answer for")
 }

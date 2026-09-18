@@ -74,11 +74,23 @@ func setCreateFlags(t *testing.T, name, repo, backend string) {
 	t.Helper()
 	prevName, prevPrompt, prevProgram, prevBackend := createNameFlag, createPromptFlag, createProgramFlag, createBackendFlag
 	prevHere, prevInPlace, prevRepo := createHereFlag, createInPlaceFlag, repoFlag
+	prevPing, prevListAccounts := pingDaemonCapabilities, listAccountsViaDaemon
 	createNameFlag, createPromptFlag, createProgramFlag, createBackendFlag = name, "", "", backend
 	createHereFlag, createInPlaceFlag, repoFlag = false, false, repo
+	// A current daemon: an omitted --account runs the routing-capability probe
+	// before the create, and with no stub it dials the temp home's control
+	// socket, waits out the ensure, and — failing closed on an unknown
+	// capability — refuses the create (#4404 review).
+	pingDaemonCapabilities = func() (daemon.PingResponse, error) {
+		return daemon.PingResponse{OK: true, PoolRouting: true}, nil
+	}
+	listAccountsViaDaemon = func(daemon.ListAccountsRequest) (daemon.ListAccountsResponse, error) {
+		return daemon.ListAccountsResponse{PoolRouting: true}, nil
+	}
 	t.Cleanup(func() {
 		createNameFlag, createPromptFlag, createProgramFlag, createBackendFlag = prevName, prevPrompt, prevProgram, prevBackend
 		createHereFlag, createInPlaceFlag, repoFlag = prevHere, prevInPlace, prevRepo
+		pingDaemonCapabilities, listAccountsViaDaemon = prevPing, prevListAccounts
 	})
 }
 

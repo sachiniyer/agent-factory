@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/accountlogin"
 )
 
@@ -123,10 +125,22 @@ func (m *Manager) ListAccounts(req ListAccountsRequest) (ListAccountsResponse, e
 	// without another round trip (#3386). A nil manager (a test control server) has
 	// no config to resolve, so it reports no defaults rather than guessing one.
 	var defaults map[string]string
+	var ambientOptOuts map[string]bool
 	if m != nil {
-		defaults = defaultAccountsFor(m.Config(), req.RepoPath, roster)
+		defaults, ambientOptOuts = defaultAccountsFor(m.Config(), req.RepoPath, roster)
 	}
-	return ListAccountsResponse{Entries: entries, Agents: roster, Defaults: defaults}, nil
+	repoBackendScoped := false
+	if strings.TrimSpace(req.RepoPath) != "" {
+		kind, kindErr := session.BackendKindFor(session.InstanceOptions{}, req.RepoPath)
+		repoBackendScoped = kindErr == nil && kind.LaunchesWithAccount()
+	}
+	return ListAccountsResponse{
+		Entries: entries, Agents: roster, Defaults: defaults, AmbientOptOuts: ambientOptOuts,
+		// This build has the create-time router — the capability bit a picker
+		// checks before it may call a routable row "af picks a healthy account".
+		PoolRouting:              true,
+		RepoBackendAccountScoped: repoBackendScoped,
+	}, nil
 }
 
 // RegisterAccount creates an account's credential directory without logging in.

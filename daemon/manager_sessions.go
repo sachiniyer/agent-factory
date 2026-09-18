@@ -371,12 +371,14 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 
 	stage.set("deleting record from storage")
 	// Through the one choke point (#1917): it refuses while the teardown's outcome
-	// is unknown, so this call site cannot be the one that forgets.
-	var evidence session.InstanceData
+	// is unknown, so this call site cannot be the one that forgets. The evidence
+	// is read by the choke point, inside the refute fence — a live instance's
+	// observations can be retracted until that moment (#4404 review).
+	evidence := recordedEvidence(session.InstanceData{})
 	if instance != nil {
-		evidence = instance.ToInstanceData()
+		evidence = instance.ToInstanceData
 	} else if data != nil {
-		evidence = *data
+		evidence = recordedEvidence(*data)
 	}
 	deleted, err := m.deleteSessionRecord(repoID, req.Title, targetID, teardownErr, evidence)
 	if err != nil {

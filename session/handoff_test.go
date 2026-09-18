@@ -189,6 +189,55 @@ func TestRevertHandoff_RestoresOpaqueOutgoingProgram(t *testing.T) {
 	}
 }
 
+// A daemon-routed account pick belongs to the OUTGOING agent's registry —
+// claude's "work" and gemini's "work" are different identities — so a
+// cross-agent handoff cannot carry it. It is also not the user's choice, so
+// dropping it is the honest answer: the incoming agent launches ambient, and
+// the swap token holds the pick for a synchronous restore if the runtime swap
+// fails (#4404 review).
+func TestSwapAgentProgram_ClearsAnAutoSelectedAccountAcrossAgents(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.Account = "work"
+	inst.accountAutoSelected = true
+
+	entry, err := inst.SwapAgentProgram(tmux.ProgramGemini, HandoffReasonManual, "sha", false)
+	if err != nil {
+		t.Fatalf("SwapAgentProgram: %v", err)
+	}
+	if inst.Account != "" || inst.accountAutoSelected {
+		t.Fatalf("Account = %q, auto = %v after a cross-agent swap; the pick cannot follow the agent", inst.Account, inst.accountAutoSelected)
+	}
+	if entry.FromAccount != "work" {
+		t.Fatalf("entry.FromAccount = %q, want the released pool pick recorded for attribution", entry.FromAccount)
+	}
+	ledger := inst.Handoffs()
+	if len(ledger) != 1 || ledger[0].FromAccount != "work" {
+		t.Fatalf("ledger = %+v, want the durable entry to carry from_account=work", ledger)
+	}
+
+	if err := inst.RevertHandoff(entry); err != nil {
+		t.Fatalf("RevertHandoff: %v", err)
+	}
+	if inst.Account != "work" || !inst.accountAutoSelected {
+		t.Fatalf("after a failed swap Account = %q, auto = %v — the pool pick must come back with the agent", inst.Account, inst.accountAutoSelected)
+	}
+}
+
+// A PINNED account is the user's choice, so the record never clears it: it
+// survives to SwapAgent, whose refusal is what stops the handoff. The daemon
+// refuses earlier still, but this is the boundary that cannot be skipped.
+func TestSwapAgentProgram_KeepsAPinnedAccountForSwapAgentToRefuse(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.Account = "work"
+
+	if _, err := inst.SwapAgentProgram(tmux.ProgramGemini, HandoffReasonManual, "sha", false); err != nil {
+		t.Fatalf("SwapAgentProgram: %v", err)
+	}
+	if inst.Account != "work" {
+		t.Fatalf("Account = %q after the record — a pinned choice is never silently dropped", inst.Account)
+	}
+}
+
 func TestRevertHandoff_RefusesWhenNotTheLastEntry(t *testing.T) {
 	inst := handoffTestInstance(t, tmux.ProgramClaude)
 

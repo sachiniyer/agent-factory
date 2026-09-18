@@ -38,6 +38,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingBackend = ""
 		m.backendPickerPending = false
 		m.pendingAccount = ""
+		m.pendingAccountAmbient = false
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -183,8 +184,40 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingBackend = ""
 		m.backendPickerPending = false
 		// And for the ctrl+o account field (#3844), on the loop for the same reason.
+		// pendingAccountAmbient rides with it: "the ambient identity" is a pick
+		// the wire cannot tell from an untouched field without the flag (#4404
+		// review). pendingAccountChosen needs no clearing — the next
+		// startNewInstance's clearPendingAccount resets the whole field.
+		//
+		// pendingAccount may be showing a CONFIGURED DEFAULT the picker
+		// preselected (handleAccountDefault) — a presentation convenience, not
+		// a decision. Serializing it would read on the wire as an explicit
+		// --account pin and bypass the create-time router's pool routing
+		// entirely (#4404 review), so only a deliberate pick carries a name;
+		// an untouched field submits "" and stays routable. AccountAmbient is
+		// already false when nothing was picked — it is only ever set under
+		// pendingAccountChosen — but reset it explicitly anyway so the wire
+		// contract never depends on that invariant.
 		account := m.pendingAccount
+		accountAmbient := m.pendingAccountAmbient
+		if !m.pendingAccountChosen {
+			account = ""
+			accountAmbient = false
+		}
+		// An empty account that is not an ambient pin is this client's routable
+		// ask — whether the routable first row was picked or the field was left
+		// untouched. account_auto is what makes that ask legible to the daemon:
+		// a bare empty account is the shape a PRE-router client sends for the
+		// ambient identity, and the daemon reads it that way (#4404 review).
+		// It is sent only when the form SAW the daemon report pool routing and
+		// the backend is one the router routes — the same two facts the
+		// picker's label is built from, so the wire never asks for what the
+		// row did not describe. A daemon that never answered is not one this
+		// client may opt in on (#4404 review).
+		accountAuto := account == "" && !accountAmbient && m.pendingAccountRouting && m.accountBackendScoped(backend)
 		m.pendingAccount = ""
+		m.pendingAccountAmbient = false
+		m.pendingAccountRouting, m.pendingRepoBackendScoped = false, false
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.state = stateDefault
@@ -216,8 +249,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// (#3844), forwarded verbatim as CreateSessionRequest.Account — the
 				// field `af sessions create --account` fills. Empty means "the ambient
 				// identity", so an untouched field is byte-identical to every create
-				// before this field existed.
-				Account: account,
+				// before this field existed. AccountAmbient adds the one bit Account
+				// cannot carry: whether that empty was the user's own pick (#4404).
+				Account:        account,
+				AccountAmbient: accountAmbient,
+				AccountAuto:    accountAuto,
 			}
 			started, err := start(instance, req)
 			return instanceStartedMsg{
@@ -229,7 +265,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// the daemon reports on the session it created (#3844 constraint 5).
 				// Read off the request rather than the model: by the time this lands
 				// the form has been reset, and a later create may hold a different one.
-				account: account,
+				account:        account,
+				accountAmbient: accountAmbient,
 			}
 		}
 
@@ -315,6 +352,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingBackend = ""
 		m.backendPickerPending = false
 		m.pendingAccount = ""
+		m.pendingAccountAmbient = false
 		m.state = stateDefault
 		cmd := m.selectionChanged()
 
@@ -355,6 +393,7 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.pendingPrompt = ""
 	m.pendingBackend = ""
 	m.clearPendingAccount()
+	m.pendingAccountRouting, m.pendingRepoBackendScoped = false, false
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram
 	}

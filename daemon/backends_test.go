@@ -63,6 +63,23 @@ func optionByName(t *testing.T, resp ListBackendsResponse, name string) BackendO
 	return BackendOption{}
 }
 
+// #4404 review: a picker labels its routable account row from the catalog, so
+// the catalog — not a client-side list — says which backends the create-time
+// router can land an account on. It must agree with the launch boundary, which
+// refuses an account on every other backend.
+func TestListBackends_ReportsWhichBackendsTakeAnAccount(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	resp := listBackends(t, setupControlRepo(t))
+	for _, opt := range resp.Backends {
+		assert.Equalf(t, session.BackendKind(opt.Name).LaunchesWithAccount(), opt.AccountScoped,
+			"%s: account_scoped must be the router's own predicate", opt.Name)
+	}
+	assert.True(t, optionByName(t, resp, config.BackendLocal).AccountScoped)
+	assert.True(t, optionByName(t, resp, config.BackendDocker).AccountScoped)
+	assert.False(t, optionByName(t, resp, config.BackendSSH).AccountScoped)
+	assert.False(t, optionByName(t, resp, config.BackendHook).AccountScoped)
+}
+
 // TestListBackends_OffersEverySupportedBackend is the core of #1933: the daemon —
 // not a hand-typed list in a client — decides what a create may select. A repo
 // with no in-repo config gets the whole enum in canonical order, with local usable

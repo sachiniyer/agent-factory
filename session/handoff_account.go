@@ -210,6 +210,29 @@ func accountSwapDataEqual(a, b *AccountSwapData) bool {
 	return *aOriginal == *bOriginal
 }
 
+// ReparkReplacementLimitUnderResumeFence parks an AUTOMATIC account
+// replacement at the wall its readiness wait just met, attributed to the
+// identity the replacement launched under (#4404 review).
+//
+// ReparkLimitUnderResumeFence restores only liveness and the reset time — right
+// for the resume's own re-park of the wall it started from, wrong here: the
+// swap has already moved Account to the incoming identity, so limit_account
+// kept naming the outgoing one and no observation was recorded for the
+// incoming. Every evidence reader — the swap scheduler, the create-time
+// router, the deletion retain — then treated the credential readiness had
+// just proven walled as healthy. The pending swap is left exactly as it is:
+// committedAccountSwap owns its retry and reads no limit identity.
+func (i *Instance) ReparkReplacementLimitUnderResumeFence(resetAt time.Time) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning {
+		return fmt.Errorf("re-parking the replacement limit for %q requires the resume fence (in-flight op is %s)",
+			i.Title, opLabel(i.inFlightOp))
+	}
+	i.parkReplacementAtLimitLocked(resetAt)
+	return nil
+}
+
 // ParkManualAccountSwapAtLimit attributes a readiness wall to the replacement
 // identity without releasing the account transaction's fence or its mission.
 func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
@@ -218,17 +241,6 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual {
 		return fmt.Errorf("manual account limit requires the pending replacement fence")
 	}
-	lv, op, prevReset := i.lifecycleStateLocked()
-	i.liveness = LiveLimitReached
-	i.limitResetAt = resetAt
-	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
-		i.limitAgent = agent
-		i.touchLocked()
-	}
-	if i.limitAccount != i.Account {
-		i.limitAccount = i.Account
-		i.touchLocked()
-	}
 	// Readiness found the incoming identity's wall before mission submission,
 	// which is positive non-delivery evidence for this transaction. Replace any
 	// earlier ambiguity so the scheduler may resume it after the recorded reset.
@@ -236,7 +248,28 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 		i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered
 		i.touchLocked()
 	}
-	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
-	i.noteStateChangeLocked(lv, op, prevReset)
+	i.parkReplacementAtLimitLocked(resetAt)
 	return nil
+}
+
+// parkReplacementAtLimitLocked is the identity-attributing park both
+// replacement arms share: the wall, its reset, the {agent, account} that
+// produced it, and the durable observation, in one critical section so no
+// evidence reader sees the limit without its attribution. Caller holds i.mu
+// and has checked the resume fence.
+func (i *Instance) parkReplacementAtLimitLocked(resetAt time.Time) {
+	lv, op, prevReset := i.lifecycleStateLocked()
+	i.liveness = LiveLimitReached
+	i.limitResetAt = resetAt
+	agent := i.currentAgentNameLocked()
+	if i.limitAgent != agent {
+		i.limitAgent = agent
+		i.touchLocked()
+	}
+	if i.limitAccount != i.Account {
+		i.limitAccount = i.Account
+		i.touchLocked()
+	}
+	i.recordAccountLimitObservationLocked(agent, i.Account, resetAt)
+	i.noteStateChangeLocked(lv, op, prevReset)
 }

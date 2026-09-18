@@ -5458,7 +5458,8 @@ test.describe("create → kill (one session, two flows)", () => {
     // Only web-signed-in holds the artifact claude's login would leave.
     await expect(accountSelect.locator("option")).toHaveText(
       [
-        "Use agent login (no default)",
+        "Automatic — af picks a healthy account",
+        "Use the ambient identity (no account)",
         "design-review-account — not logged in",
         "web-registered — not logged in",
         "web-signed-in",
@@ -5475,10 +5476,14 @@ test.describe("create → kill (one session, two flows)", () => {
 
     // An account belongs to ONE agent, so changing the program drops the pick rather
     // than carrying a claude account name into another agent's registry, where the
-    // same spelling is a different identity. codex has no registered accounts here,
-    // so the honest list is the ambient row alone.
+    // same spelling is a different identity. codex is in the daemon's roster but
+    // has no registered accounts here, so the routable row admits it lands on the
+    // agent's own login — and the explicit ambient pin still renders beside it.
     await programSelect.selectOption("codex");
-    await expect(accountSelect.locator("option")).toHaveText(["Use agent login (no default)"]);
+    await expect(accountSelect.locator("option")).toHaveText([
+      "Use agent login (nothing to route)",
+      "Use the ambient identity (no account)",
+    ]);
     await expect(accountSelect).toHaveValue("");
     await expect(accountHint).toHaveText("");
 
@@ -5488,7 +5493,7 @@ test.describe("create → kill (one session, two flows)", () => {
     // the field on the ambient identity, so `account` is omitted entirely and this
     // create runs on the fake agent's own environment.
     await programSelect.selectOption("");
-    await expect(accountSelect.locator("option")).toHaveCount(4, { timeout: 30_000 });
+    await expect(accountSelect.locator("option")).toHaveCount(5, { timeout: 30_000 });
     await expect(accountSelect).toHaveValue("");
     await expect(modal.locator("button.af-primary")).toBeEnabled();
 

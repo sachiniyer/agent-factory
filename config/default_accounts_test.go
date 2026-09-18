@@ -165,8 +165,11 @@ func TestAnEmptyProjectEntryOptsOutOfTheGlobalDefault(t *testing.T) {
 	codex, codexGlobal := DefaultAccountLayersFor(global, repoRoot, "codex")
 	assert.Empty(t, codex.Name, "the project turned the default off for this agent")
 	assert.Empty(t, codexGlobal.Name, "and the global entry must not come back as a fallback")
-	assert.Empty(t, ResolvedDefaultAccountsFor(global, repoRoot)["codex"],
+	effective, optOuts := ResolvedDefaultAccountsFor(global, repoRoot)
+	assert.Empty(t, effective["codex"],
 		"the catalog must agree, or a picker would preselect an identity the create does not use")
+	assert.True(t, optOuts["codex"],
+		"and the opt-out itself must be visible, or a picker labels the ambient row \"af picks a healthy account\"")
 
 	claude, _ := DefaultAccountLayersFor(global, repoRoot, "claude")
 	assert.Equal(t, "shared", claude.Name, "and the opt-out is per agent, like every other entry")
@@ -276,7 +279,7 @@ func TestResolvedDefaultAccountsAgreesWithThePerAgentResolution(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, repoPath := range []string{repoRoot, "", filepath.Join(t.TempDir(), "not-a-repo")} {
-		effective := ResolvedDefaultAccountsFor(global, repoPath)
+		effective, _ := ResolvedDefaultAccountsFor(global, repoPath)
 		for _, agent := range []string{"claude", "codex", "gemini"} {
 			project, globalLayer := DefaultAccountLayersFor(global, repoPath, agent)
 			want := project.Name
@@ -288,6 +291,46 @@ func TestResolvedDefaultAccountsAgreesWithThePerAgentResolution(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, "side", ResolvedDefaultAccountsFor(global, repoRoot)["codex"],
+	effective, _ := ResolvedDefaultAccountsFor(global, repoRoot)
+	assert.Equal(t, "side", effective["codex"],
 		"and the answer is the project's, not the global one")
+}
+
+// #4404: the create-time account router must honor the same opt-out the default
+// resolution does. A present-but-empty entry is a deliberate "this project runs
+// on the ambient identity", and routing the session onto a registered account
+// anyway would scope it to exactly the identity the project turned off.
+func TestDefaultAccountAmbientOptOutSeesThePresentEmptyEntry(t *testing.T) {
+	home, repoRoot, project := registeredTestProject(t)
+	writeGlobalTOML(t, home, "[default_accounts]\ncodex = \"work\"\nclaude = \"shared\"\n")
+	writePersonalConfig(t, project.ID, "[default_accounts]\ncodex = \"\"\n")
+	global, err := LoadConfig()
+	require.NoError(t, err)
+
+	assert.True(t, DefaultAccountAmbientOptOut(global, repoRoot, "codex"),
+		"a project entry set to \"\" is the ambient opt-out and the router must respect it")
+	assert.False(t, DefaultAccountAmbientOptOut(global, repoRoot, "claude"),
+		"a sibling that resolves to a named default is not an opt-out")
+}
+
+func TestDefaultAccountAmbientOptOutReadsTheGlobalEntry(t *testing.T) {
+	home, repoRoot, _ := registeredTestProject(t)
+	writeGlobalTOML(t, home, "[default_accounts]\ncodex = \"\"\n")
+	global, err := LoadConfig()
+	require.NoError(t, err)
+
+	assert.True(t, DefaultAccountAmbientOptOut(global, repoRoot, "codex"),
+		"a present-but-empty global entry is the same ambient signal")
+	assert.False(t, DefaultAccountAmbientOptOut(global, repoRoot, "gemini"),
+		"an agent with no entry at all is not an opt-out")
+}
+
+func TestDefaultAccountAmbientOptOutIgnoresAnUnresolvableRepoWithoutAGlobalEntry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	global, err := LoadConfig()
+	require.NoError(t, err)
+
+	assert.False(t, DefaultAccountAmbientOptOut(global, filepath.Join(t.TempDir(), "not-a-repo"), "codex"))
+	assert.False(t, DefaultAccountAmbientOptOut(global, "", "codex"))
 }

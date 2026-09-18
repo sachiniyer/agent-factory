@@ -41,6 +41,14 @@ import type { AccountsResponse, SessionData } from "./types.js";
  *  account name. */
 export const AMBIENT_ACCOUNT = "";
 
+/** The sentinel value of the EXPLICIT ambient-identity row — "keep this session
+ *  off the pool". It cannot reuse AMBIENT_ACCOUNT: the routable first row carries
+ *  "" too, and an <option>'s value is all the submit can read, so the two would
+ *  be indistinguishable. The string only ever needs to not collide with a real
+ *  account name — it is translated back to account "" + account_ambient at
+ *  submit and never reaches the wire itself (#4404 review). */
+export const AMBIENT_PIN_ACCOUNT = "af://ambient";
+
 /** An account choice, ready to render as an <option>. */
 export interface AccountChoice {
   /** The <option> value: AMBIENT_ACCOUNT, or an account name to send verbatim. */
@@ -122,20 +130,53 @@ export function accountAgentSupported(accounts: AccountsResponse | null, agent: 
  * account offered to a claude session is a create that fails, or worse, one that
  * quietly does not.
  */
-export function accountChoices(accounts: AccountsResponse | null, agent: string, failed = false): AccountChoice[] {
+export function accountChoices(
+  accounts: AccountsResponse | null, agent: string, failed = false, backendScoped: boolean | null = true,
+): AccountChoice[] {
   if (accounts === null) {
+    // A failed load leaves the router's capability unknown too, so the create
+    // does not opt into routing (AccountSelection.wireAccount): the configured
+    // default applies if there is one, else the agent's own login (#4404 review).
     return [{ value: AMBIENT_ACCOUNT, agent, projectDefault: false,
       label: failed ? "Accounts unavailable" : "Loading accounts…",
       blocked: failed ? "" : "Wait for the account policy to load.",
-      note: failed ? "Accounts could not be loaded. The daemon default, if any, applies." : "",
+      note: failed ? "Accounts could not be loaded, so af will not pick one. The daemon default, if any, applies — otherwise the agent's own login." : "",
     }];
   }
+  const fallback = accountDefaultFor(accounts, agent);
+  const optedOut = accounts.ambient_opt_outs?.[agent] === true;
+  const anyLoggedIn = accounts.entries.some((entry) => entry.agent === agent && entry.logged_in);
+  // The capability bit decides what the routable row may promise: a daemon
+  // without pool_routing has no router at all, so its empty account IS the
+  // ambient identity — labelling it "Automatic" would promise a pick the
+  // daemon cannot make (#4404 review).
+  const routing = accounts.pool_routing === true;
+  // And the backend decides whether it may promise a PICK: the router leaves
+  // ssh/sandbox/hook on the ambient/default contract however many accounts are
+  // logged in, and an unknown backend is not one to promise anything on
+  // (#4404 review). It does not gate the pin row below — a pin made before the
+  // backend field moved must survive the move back.
+  const routes = routing && backendScoped === true;
+  // The first row is the ROUTABLE choice — a create that names no account.
+  // What af does with it changed with the pool router (#4404): it is no longer
+  // a synonym for the ambient identity. With a configured default it prefers
+  // that account; with logged-in accounts and no default it picks the
+  // least-loaded healthy one; only with nothing to route does it land on the
+  // agent's own login, and the label says which applies.
+  // The ambient opt-out — a present-but-empty `default_accounts` entry — must
+  // be named rather than inferred: logged-in accounts exist beside it, and
+  // calling the row "Automatic" would promise a pool pick the daemon refuses
+  // to make (#4404 review).
   const choices: AccountChoice[] = [
     {
       value: AMBIENT_ACCOUNT,
-      label: agent === "" ? "Use daemon default" : accountDefaultFor(accounts, agent)
-        ? `Use configured default (${accountDefaultFor(accounts, agent)})`
-        : "Use agent login (no default)",
+      label: agent === "" ? "Use daemon default" : fallback !== ""
+        ? `Use configured default (${fallback})`
+        : optedOut ? "Use the ambient identity (routing is off)"
+        : anyLoggedIn && routes ? "Automatic — af picks a healthy account"
+        : anyLoggedIn && routing && backendScoped === false ? "Use the agent's own login (this backend runs no account)"
+        : anyLoggedIn && routing ? "Use the agent's own login (backend not confirmed)"
+        : routing ? "Use agent login (nothing to route)" : "Use the agent's own login",
       agent,
       blocked: "",
       note: agent === "" ? "The daemon default, if any, applies." : "",
@@ -145,7 +186,23 @@ export function accountChoices(accounts: AccountsResponse | null, agent: string,
   if (agent === "" || !accountAgentSupported(accounts, agent)) {
     return choices;
   }
-  const fallback = accountDefaultFor(accounts, agent);
+  // The ambient identity is a deliberate pick in its own right — "keep this
+  // session off the pool" — not merely the label an untouched field wears. It
+  // needs a row of its own so it can still be asked for once a default is
+  // configured, which is exactly when the first row stops meaning it (#4404
+  // review). The sentinel maps back to account "" + account_ambient at submit.
+  // A daemon without the router has no pool to be kept off — the first row is
+  // already the ambient identity there, so the pin row would be a duplicate.
+  if (routing) {
+    choices.push({
+      value: AMBIENT_PIN_ACCOUNT,
+      label: "Use the ambient identity (no account)",
+      agent,
+      blocked: "",
+      note: "Pins this session to the agent's own login instead of routing the account pool.",
+      projectDefault: false,
+    });
+  }
   let listed = false;
   for (const entry of accounts.entries) {
     if (entry.agent !== agent) {
@@ -269,10 +326,22 @@ export function accountSelectable(choices: AccountChoice[], selected: string): b
  * It reads what came back rather than what was sent, because the daemon is the
  * authority on what it stored, and it names BOTH identities plus the session —
  * which now exists, and has to be removed rather than used.
+ *
+ * `ambient` is the explicit-ambient pick (#4404 review): an ambient-pinned
+ * session that comes back scoped to an account is the same wrong-identity
+ * outcome as a named pick landing on ambient — a daemon that predates the
+ * account_ambient field drops it and lets the pool router re-identify the
+ * create. Routable creates ("" with no ambient bit) still skip the check:
+ * there, an account is a legitimate routing answer.
  */
-export function accountSkewMessage(requested: string, created: SessionData): string {
+export function accountSkewMessage(requested: string, created: SessionData, ambient = false): string {
   const want = requested.trim();
   if (want === AMBIENT_ACCOUNT) {
+    if (ambient && (created.account ?? "").trim() !== "") {
+      return `Session "${created.title}" was created but the daemon did not keep it on the ambient identity — `
+        + `it is running as account "${(created.account ?? "").trim()}". The running daemon predates the ambient `
+        + `pin; upgrade it, then choose Delete session and create it again.`;
+    }
     return "";
   }
   const got = (created.account ?? "").trim();

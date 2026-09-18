@@ -374,6 +374,8 @@ func (m *Manager) createMissingPromptTarget(req DeliverPromptRequest) (_ session
 		Prompt:     req.Prompt,
 		TaskRepoID: req.TaskRepoID,
 		TaskOrigin: req.TaskOrigin,
+		// Same-binary sends always opt in to pool routing (#4404).
+		AccountAuto: true,
 	})
 }
 

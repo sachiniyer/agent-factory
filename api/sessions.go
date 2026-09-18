@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	xansi "github.com/charmbracelet/x/ansi"
@@ -33,6 +34,8 @@ var (
 	killSessionViaDaemon    = daemon.KillSession
 	archiveSessionViaDaemon = daemon.ArchiveSession
 	restoreSessionViaDaemon = daemon.RestoreSession
+	listAccountsViaDaemon   = daemon.ListAccounts
+	pingDaemonCapabilities  = daemon.PingCapabilities
 	sessionsArchiveSelf     bool
 	sendPromptViaDaemon     = daemon.SendPromptWithStatus
 	deliverPromptViaDaemon  = daemon.DeliverPromptWithStatus
@@ -462,14 +465,37 @@ pointing at one).`,
 			}
 		}
 
+		// An explicitly empty --account is the user's own ambient choice — the
+		// CLI's spelling of the picker's ambient row — and the daemon's pool
+		// router cannot tell it from an unset flag without the AccountAmbient
+		// bit: Changed distinguishes "--account \"\"" from "flag absent" (#4404
+		// review). Absent keeps the router's default — pool or configured
+		// default — which is exactly the ask account_auto carries: the flag's
+		// absence IS this client opting in, since this build knows the router
+		// exists and prints the pool contract in --account's help.
+		accountAmbient := cmd.Flags().Changed("account") && strings.TrimSpace(createAccountFlag) == ""
+		accountAuto := !cmd.Flags().Changed("account")
+
+		// A PRE-ROUTER daemon's gob decoder silently drops account_auto, so an
+		// omitted --account would run that daemon's legacy contract instead of
+		// the pool pick --account's help promises. accountAutoSkewRefusal checks
+		// the capability BEFORE the create (#4404 review).
+		if accountAuto {
+			if err := accountAutoSkewRefusal(program, workspace, createBackendFlag, inPlace); err != nil {
+				return jsonError(err)
+			}
+		}
+
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
-			Title:    createTitle,
-			RepoPath: workspace,
-			Program:  program,
-			Account:  createAccountFlag,
-			Prompt:   createPromptFlag,
-			InPlace:  inPlace,
-			Backend:  createBackendFlag,
+			Title:          createTitle,
+			RepoPath:       workspace,
+			Program:        program,
+			Account:        createAccountFlag,
+			AccountAmbient: accountAmbient,
+			AccountAuto:    accountAuto,
+			Prompt:         createPromptFlag,
+			InPlace:        inPlace,
+			Backend:        createBackendFlag,
 		})
 		if err != nil {
 			return jsonError(err)
@@ -504,6 +530,19 @@ pointing at one).`,
 				// parsing: `--name=-worker` is a valid title, and `af sessions kill
 				// '-worker'` still exits "unknown shorthand flag". The terminator lives in
 				// that helper so no call site has to remember it (#3432).
+				shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, data.Title)))
+		}
+		if accountAmbient && data.Account != "" {
+			// The mirror arm of the named-account check above: an explicitly
+			// empty --account asked for the ambient identity, and a session that
+			// came back on an account is the same wrong-identity outcome in the
+			// other direction — the daemon dropped account_ambient, a field only
+			// this build and newer know (#4404 review).
+			return jsonError(fmt.Errorf(
+				"session %q was created for the ambient identity but the daemon put it on account %q — it is running "+
+					"as an identity you did not choose. The running daemon predates ambient requests; upgrade it "+
+					"(af daemon restart after an upgrade) and recreate. Remove the session with `%s`",
+				data.Title, data.Account,
 				shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, data.Title)))
 		}
 

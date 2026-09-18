@@ -42,7 +42,10 @@ func stubAccounts(t *testing.T, resp daemon.ListAccountsResponse, err error) (*i
 // twoAgentsWithAccounts is the ordinary answer from a host that has been used:
 // two claude accounts (one of them never logged into) and one codex account,
 // which is the shape constraint 1 is about — claude's "work" and codex's "work"
-// are different identities in different registries.
+// are different identities in different registries. PoolRouting is what the
+// daemon always sends on this build; omitting it tells the picker the daemon
+// predates the router, which drops the ambient pin and the routed labels —
+// a different contract than the one these fixtures exist to exercise.
 func twoAgentsWithAccounts() daemon.ListAccountsResponse {
 	return daemon.ListAccountsResponse{
 		Entries: []daemon.AccountEntry{
@@ -50,7 +53,11 @@ func twoAgentsWithAccounts() daemon.ListAccountsResponse {
 			{Agent: "claude", Name: "work", Dir: "/h/accounts/claude/work", LoggedIn: true},
 			{Agent: "codex", Name: "work", Dir: "/h/accounts/codex/work", LoggedIn: true},
 		},
-		Agents: []string{"claude", "codex", "gemini"},
+		Agents:      []string{"claude", "codex", "gemini"},
+		PoolRouting: true,
+		// And the repo the form targets defaults to a backend that takes an
+		// account — a local repo on a current daemon (#4404 review).
+		RepoBackendAccountScoped: true,
 	}
 }
 
@@ -159,8 +166,8 @@ func TestAccountPickerListsOnlyTheProgramsAgent(t *testing.T) {
 		assert.Equal(t, "claude", choice.agent,
 			"every offered row must belong to the agent the form's program runs as")
 	}
-	require.Len(t, labels, 3, "the ambient row plus claude's two accounts: %v", labels)
-	assert.Equal(t, []string{"personal", "work"}, labels[1:],
+	require.Len(t, labels, 4, "the routable and ambient rows plus claude's two accounts: %v", labels)
+	assert.Equal(t, []string{"personal", "work"}, labels[2:],
 		"the picker must offer claude's accounts, in the daemon's order")
 
 	// The codex account is the control: it is in the response, and it must not be
@@ -197,7 +204,7 @@ func TestAccountPickerFollowsAProgramChange(t *testing.T) {
 		labels = append(labels, choice.label)
 		assert.Equal(t, "codex", choice.agent, "the reopened list must follow the NEW program")
 	}
-	require.Len(t, labels, 2, "the ambient row plus codex's one account: %v", labels)
+	require.Len(t, labels, 3, "the routable and ambient rows plus codex's one account: %v", labels)
 
 	// Leave the reopened field without choosing: the create must then go out on the
 	// ambient identity, not on the claude account the program change dropped.
@@ -250,10 +257,13 @@ func TestNamingFormWithoutAccountSendsNothing(t *testing.T) {
 	assert.Equal(t, "ambient-create", got.Title)
 }
 
-// TestAccountPickerAmbientRowSendsNoAccount covers the sentinel: choosing the
-// ambient row explicitly must be identical to never opening the field. A
-// non-empty sentinel would eventually be transmitted as a literal account name —
-// and an account name that does not exist is a refused create at best.
+// TestAccountPickerAmbientRowSendsNoAccount covers the ambient row: choosing it
+// must clear a previously picked account and ask for the ambient identity
+// outright — Account "" on the wire PLUS the ambient bit, so the daemon's pool
+// router can tell "keep this session off the pool" from an untouched field
+// (#4404 review). A non-empty sentinel would eventually be transmitted as a
+// literal account name — and an account name that does not exist is a refused
+// create at best.
 func TestAccountPickerAmbientRowSendsNoAccount(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(200, 1)
@@ -266,11 +276,23 @@ func TestAccountPickerAmbientRowSendsNoAccount(t *testing.T) {
 	require.Equal(t, "work", h.pendingAccount)
 
 	openAccountField(t, h)
-	pickAccount(t, h, h.accountPickerChoices[0].label)
+	// The ambient row is the one pinsAmbient marks — the routable first row
+	// shares its "" value but is NOT it.
+	ambientRow := -1
+	for i, choice := range h.accountPickerChoices {
+		if choice.pinsAmbient {
+			ambientRow = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, ambientRow, "the picker must offer an explicit ambient row")
+	pickAccount(t, h, h.accountPickerChoices[ambientRow].label)
 	assert.Empty(t, h.pendingAccount, "the ambient row must clear a previously picked account")
+	assert.True(t, h.pendingAccountAmbient, "the ambient row must record the ambient pick")
 
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Empty(t, got.Account, "the ambient row must send NO account")
+	assert.True(t, got.AccountAmbient, "the ambient row must set account_ambient on the wire")
 }
 
 // TestAccountPickerRefusesARegistrationOnlyAccount is constraint 2. An agent can
@@ -299,7 +321,7 @@ func TestAccountPickerRefusesARegistrationOnlyAccount(t *testing.T) {
 	startNaming(t, h, "cannot-scope-this")
 
 	openAccountField(t, h)
-	require.Contains(t, accountItems(h)[1], "registration only",
+	require.Contains(t, strings.Join(accountItems(h), "\n"), "unproven — registration only",
 		"a registration-only row must be marked in the list, before any keypress")
 	pickAccount(t, h, "unproven")
 
@@ -339,7 +361,7 @@ func TestAccountPickerKeepsANotLoggedInAccountSelectable(t *testing.T) {
 	startNaming(t, h, "about-to-log-in")
 
 	openAccountField(t, h)
-	require.Contains(t, accountItems(h)[1], "not logged in",
+	require.Contains(t, strings.Join(accountItems(h), "\n"), "just-registered — not logged in",
 		"a not-logged-in row must say so in the list, before any keypress")
 	pickAccount(t, h, "just-registered")
 
@@ -539,24 +561,41 @@ func TestAccountFieldSurvivesARegistryFailure(t *testing.T) {
 func TestAccountSkewRefusalReadsWhatCameBack(t *testing.T) {
 	applied := &session.Instance{Title: "s", Account: "work"}
 
-	assert.NoError(t, accountSkewRefusal(ambientAccount, &session.Instance{Title: "s"}),
+	assert.NoError(t, accountSkewRefusal(ambientAccount, false, &session.Instance{Title: "s"}),
 		"a create that asked for no account has nothing to compare")
-	assert.NoError(t, accountSkewRefusal(ambientAccount, applied),
+	assert.NoError(t, accountSkewRefusal(ambientAccount, false, applied),
 		"a daemon that volunteered an account nobody asked for is not this check's business")
-	assert.NoError(t, accountSkewRefusal("work", applied), "an applied account is the silent case")
+	assert.NoError(t, accountSkewRefusal("work", false, applied), "an applied account is the silent case")
 
-	dropped := accountSkewRefusal("work", &session.Instance{Title: "s"})
+	dropped := accountSkewRefusal("work", false, &session.Instance{Title: "s"})
 	require.Error(t, dropped, "a daemon that dropped the field must be reported")
 	assert.Contains(t, dropped.Error(), "ambient identity")
 
-	other := accountSkewRefusal("work", &session.Instance{Title: "s", Account: "personal"})
+	other := accountSkewRefusal("work", false, &session.Instance{Title: "s", Account: "personal"})
 	require.Error(t, other, "a daemon that applied a DIFFERENT account must be reported too")
 	assert.Contains(t, other.Error(), `account "personal"`,
 		"the message names what the session is actually running as, not just what was asked for")
 
-	missing := accountSkewRefusal("work", nil)
+	missing := accountSkewRefusal("work", false, nil)
 	require.Error(t, missing, "no session to check against is not a pass")
 	assert.Contains(t, missing.Error(), "af sessions list --json")
+}
+
+// TestAccountSkewRefusalCoversTheAmbientPickToo pins the mirror arm (#4404
+// review): an explicit ambient choice landing on an account is the same
+// wrong-identity outcome as a named account landing on ambient — the daemon
+// dropped account_ambient, a field only this build and newer know.
+func TestAccountSkewRefusalCoversTheAmbientPickToo(t *testing.T) {
+	assert.NoError(t, accountSkewRefusal(ambientAccount, true, &session.Instance{Title: "s"}),
+		"ambient asked and ambient came back — the silent case")
+
+	routed := accountSkewRefusal(ambientAccount, true, &session.Instance{Title: "s", Account: "work"})
+	require.Error(t, routed, "an ambient pick landing on an account must be reported")
+	assert.Contains(t, routed.Error(), `account "work"`,
+		"the message names the identity the session is actually running as")
+
+	missing := accountSkewRefusal(ambientAccount, true, nil)
+	require.Error(t, missing, "no session to check against is not a pass here either")
 }
 
 // TestAccountChoiceItemMarksBothStates pins the row text itself, which is the
@@ -575,8 +614,8 @@ func TestAccountChoiceItemMarksBothStates(t *testing.T) {
 			"work — registration only"},
 		{"both", accountChoice{value: "work", label: "work", registrationOnly: true},
 			"work — registration only · not logged in"},
-		{"ambient", accountChoice{value: ambientAccount, label: "Use the agent's own login (no default configured)"},
-			"Use the agent's own login (no default configured)"},
+		{"ambient", accountChoice{value: ambientAccount, label: "Use the ambient identity (no account)", pinsAmbient: true},
+			"Use the ambient identity (no account)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, tc.choice.item())

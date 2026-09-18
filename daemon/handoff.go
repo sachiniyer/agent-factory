@@ -174,9 +174,15 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := instance.ValidateHandoffTarget(target); err != nil {
 		return HandoffSessionResponse{}, err
 	}
-	if account, automatic := instance.AccountSelection(); account != "" && !automatic {
+	account, automatic := instance.AccountSelection()
+	if account != "" && !automatic {
 		return HandoffSessionResponse{}, fmt.Errorf("session %q is pinned to %s account %q; specify a target account with --account before handing it off to %s", req.Title, instance.CurrentAgentName(), account, target)
 	}
+	// An automatic (routed) pick is admitted, but it cannot cross agents: the
+	// name means a different identity in the target's registry. RecordHandoffSwap
+	// clears it inside the transaction — clearedAccount remembers the pick the
+	// swap released so the response can say the account stayed behind (#4404).
+	clearedAccount := account
 	plan, err := instance.PrepareAgentSwap(target)
 	if err != nil {
 		return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", req.Title, target, err)
@@ -285,6 +291,12 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	}
 
 	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA}
+	// The cleared account is disclosed as from_account — the pick was real, it
+	// just stayed with the outgoing agent's registry. Same-agent handoffs keep
+	// their account, so this only applies when the swap actually crossed.
+	if clearedAccount != "" && outgoing != target {
+		response.FromAccount = clearedAccount
+	}
 	if err := m.deliverHandoffMission(delivery); err != nil {
 		// SwapAgent already installed the incoming runtime. Preserve the resolved
 		// identity and classify every later delivery/settlement failure as

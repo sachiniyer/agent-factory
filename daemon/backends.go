@@ -70,6 +70,13 @@ type BackendOption struct {
 	// from the session package's precondition checks. It names what to fix ("set
 	// docker.image in …"), never merely "unavailable". Empty when available.
 	Reason string `json:"reason,omitempty"`
+	// AccountScoped reports whether a session on this backend can run under a
+	// registered account at all — session.BackendKind.LaunchesWithAccount, the
+	// predicate the create-time router (#4404) routes on. A picker needs it to
+	// label its routable account row honestly: the router leaves every other
+	// backend on the ambient/default contract. Absent from daemons that predate
+	// the router, which report no pool_routing either.
+	AccountScoped bool `json:"account_scoped,omitempty"`
 }
 
 // ListBackendsResponse is the catalog for one repo.
@@ -144,7 +151,7 @@ func backendCatalog(names []string, cfg *config.ResolvedConfig, cfgErr error, re
 // fabricated finding: docker.image might be set perfectly well in a file with a
 // stray comma elsewhere. The user needs to hear about the comma.
 func backendOptionFor(kind session.BackendKind, cfg *config.ResolvedConfig, cfgErr error, repoRoot string) BackendOption {
-	opt := BackendOption{Name: string(kind), Label: backendLabel(kind, cfg)}
+	opt := BackendOption{Name: string(kind), Label: backendLabel(kind, cfg), AccountScoped: kind.LaunchesWithAccount()}
 
 	if cfgErr != nil {
 		// local is the one backend that reads nothing from the repo config, so an

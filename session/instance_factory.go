@@ -59,6 +59,20 @@ type InstanceOptions struct {
 	// refusal is the same refusal; only the remedy differs, so only the remedy is
 	// carried.
 	AccountSource string
+	// AccountAutoSelected records that af — not the caller — chose Account:
+	// the create-time pool router (#4404) or the limit-swap scheduler. The flag
+	// is what keeps a pinned identity a pin: the swap path only ever re-chooses
+	// an account af selected. Persisted via the instance record's
+	// account_auto_selected field.
+	AccountAutoSelected bool
+	// AccountRoute is what the daemon's create-time account router (#4404)
+	// resolved when it decided this create's account; nil when it made no such
+	// decision. The launch boundary resolves both facts again and refuses a
+	// create whose answer moved (#4404 review): a program_overrides or `backend`
+	// edit landing while the create waited behind its repo's start lock means
+	// the decision — a pooled pick, or none — was made for a launch this one no
+	// longer is.
+	AccountRoute *AccountRouteDecision
 	// ProgramResolved marks Program as the final command selected by an outer
 	// runtime. It is internal to the sandbox agent-server handoff; ordinary
 	// callers pass an agent enum and leave this false.
@@ -498,6 +512,12 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	}
 	opts.ProvisionSessionEnvPassthrough = normalizedProvisionEnv
 
+	// A routing decision made for a different launch is the root cause of any
+	// account refusal below, so it is named first.
+	if err := refuseAccountRouteDrift(opts, absPath, kind, resolveBackendErr); err != nil {
+		return nil, err
+	}
+
 	// Judge account support on the RESOLVED backend. An empty opts.Backend means
 	// "read the repo config", not local; checking the request field let the most
 	// common ssh/sandbox/hook path provision on ambient credentials while the
@@ -590,6 +610,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		Path:                  absPath,
 		Program:               opts.Program,
 		Account:               opts.Account,
+		accountAutoSelected:   opts.AccountAutoSelected,
 		Height:                0,
 		Width:                 0,
 		CreatedAt:             t,
@@ -712,6 +733,89 @@ func offBoxAccountRefusal(kind BackendKind) string {
 // This remains an ALLOWLIST, not a denylist: an agent added later is unsupported
 // until someone proves the boundary accepts its launch, which fails in the safe
 // direction (#3051, #3083).
+// AccountRouteDecision is the pair of launch facts an account routing decision
+// rests on: the agent the program resolves to ("" for a command no agent owns)
+// and whether the resolved backend can run an account
+// (BackendKind.LaunchesWithAccount).
+type AccountRouteDecision struct {
+	Agent         string
+	BackendScoped bool
+}
+
+// ResolveLaunchProgram answers the command a program label launches as, read
+// from the sources the launch itself reads: the repository's resolved config
+// (repo over global, the global layer from disk), else the global config when
+// the path does not resolve to a repository. An unreadable config leaves the
+// label unchanged — the pre-override answer, so a failed read can never admit
+// a cross-agent override.
+//
+// It is the one resolver both halves of an account decision use: the launch
+// boundary below, and the daemon's create-time router (#4404), which used to
+// resolve against its op-entry config snapshot instead. That snapshot is only
+// refreshed by ApplyConfig or a restart, so a hand-edited program_overrides
+// made the router and the launch disagree on EVERY create until the daemon
+// reloaded (#4404 review). Read-only: it records no in-repo load observation,
+// which is the launch's to record when it actually runs.
+func ResolveLaunchProgram(program, absPath string) string {
+	var cfg *config.Config
+	if repo, err := config.RepoFromPath(absPath); err == nil {
+		if resolved, rerr := config.ResolveConfigForRepoInspection(repo); rerr == nil {
+			cfg = &resolved.Config
+		}
+	}
+	if cfg == nil {
+		if loaded, lerr := config.LoadConfig(); lerr == nil {
+			cfg = loaded
+		}
+	}
+	return config.ResolveProgram(cfg, program)
+}
+
+// refuseAccountRouteDrift is the launch-time half of the router's decision
+// (#4404 review): the router chose this create's account — or chose none —
+// for the launch it resolved then, and the create has since waited behind
+// reserveCreate and the repo's start lock. An edit in that window leaves the
+// decision describing a launch this one is not: routed nothing because codex
+// pointed at a shim or the repo defaulted to ssh, then real codex starts
+// locally on the ambient identity; or routed a codex account that a moved
+// override or backend now cannot carry. Resolving again with the same
+// functions and refusing on disagreement makes each outcome a retryable error
+// instead of a silent identity. Nothing has been provisioned yet.
+func refuseAccountRouteDrift(opts InstanceOptions, absPath string, kind BackendKind, kindErr error) error {
+	decision := opts.AccountRoute
+	if decision == nil {
+		return nil
+	}
+	launched := AccountRouteDecision{
+		Agent:         sessionenv.AgentForCommand(ResolveLaunchProgram(opts.Program, absPath)),
+		BackendScoped: kindErr == nil && kind.LaunchesWithAccount(),
+	}
+	if launched == *decision {
+		return nil
+	}
+	setting, was, now := "program_overrides", routeAgentPhrase(decision.Agent), routeAgentPhrase(launched.Agent)
+	if launched.BackendScoped != decision.BackendScoped {
+		setting, was, now = "the `backend` setting", routeBackendPhrase(decision.BackendScoped), routeBackendPhrase(launched.BackendScoped)
+	}
+	return fmt.Errorf("%s for %q changed while session %q was being created: its account was decided for %s, "+
+		"but the launch now resolves to %s. Nothing was started — create the session again",
+		setting, opts.Program, opts.Title, was, now)
+}
+
+func routeAgentPhrase(agent string) string {
+	if agent == "" {
+		return "a command af does not recognize as an agent"
+	}
+	return "a " + agent + " command"
+}
+
+func routeBackendPhrase(scoped bool) string {
+	if scoped {
+		return "a backend that runs registered accounts"
+	}
+	return "a backend that runs no account"
+}
+
 func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 	if strings.TrimSpace(opts.Account) == "" {
 		return nil
@@ -729,24 +833,14 @@ func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 	//
 	// config.ResolveProgram is the resolver the launch itself uses
 	// (resolveProgramForAgent), so this gate and the launch cannot disagree about
-	// what the command is.
-	// The config is resolved HERE rather than threaded in, because the gate must read
-	// the same overrides the launch will: resolveRepoConfig is what the launch path
-	// uses too. A failure to resolve leaves cfg nil, and config.ResolveProgram on a
-	// nil config returns the label unchanged — which is the pre-override answer, so an
-	// unreadable config cannot silently admit a cross-agent override.
-	// Repo config, then GLOBAL — mirroring resolveConfigForInstance exactly, because
-	// that is what the launch uses. Trying only the repo would miss a global
-	// program_overrides entry that the launch then applies, which is the very
-	// gate-disagrees-with-launch divergence this check exists to close.
-	var cfg *config.Config
-	if resolved, rerr := resolveRepoConfig(absPath); rerr == nil {
-		cfg = &resolved.Config
-	} else if loaded, lerr := config.LoadConfig(); lerr == nil {
-		cfg = loaded
-	}
+	// what the command is. The config comes from ResolveLaunchProgram rather than
+	// being threaded in, because the gate must read the same overrides the launch
+	// will: repo config, then GLOBAL — mirroring resolveConfigForInstance, since
+	// trying only the repo would miss a global program_overrides entry the launch
+	// then applies. An unreadable config returns the label unchanged, the
+	// pre-override answer, so it cannot silently admit a cross-agent override.
 	requested := sessionenv.AgentForCommand(opts.Program)
-	agent := sessionenv.AgentForCommand(config.ResolveProgram(cfg, opts.Program))
+	agent := sessionenv.AgentForCommand(ResolveLaunchProgram(opts.Program, absPath))
 	if agent != requested {
 		return accountRefusalWithSource(opts, fmt.Errorf(
 			"account %q was validated as a %s account, but this session's program_overrides resolves %s to "+

@@ -16,10 +16,13 @@ import (
 //
 // The distinction is the whole issue. The session is identical either way — the
 // daemon applies the same default — so what these pin is the difference between a
-// form that says "Ambient identity" while the create runs as `work`, and one that
-// says `work` before the user presses Enter. The second is also what makes the
-// version-skew check mean anything: a client that sent no account has nothing to
-// compare the created session against.
+// form that says "Ambient identity" while the create prefers `work`, and one that
+// says `work` before the user presses Enter. Since the pool router (#4404) the
+// preselection is display-only, not a wire value: an untouched field submits ""
+// and stays routable, which is also why the skew check does not compare it —
+// routing may legitimately land on another account when the preferred one is
+// walled, and an "asked for X, got Y" alarm on a correct reroute is exactly the
+// noise a skew check must never raise (#4404 review).
 
 // requireNamingFormOpened asserts that pressing `n`/`N` OPENED the naming form
 // rather than refusing the keypress.
@@ -61,7 +64,8 @@ func deliverAccountDefault(t *testing.T, h *home, naming *session.Instance, agen
 }
 
 // TestNamingFormPreselectsTheProjectDefaultAccount is the issue's headline: the
-// default is visible on the form and is what the create actually sends.
+// default is visible on the form — and stays ROUTABLE, because a preselection
+// is a preview, not a pick (#4404 review).
 func TestNamingFormPreselectsTheProjectDefaultAccount(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(200, 1)
@@ -69,8 +73,7 @@ func TestNamingFormPreselectsTheProjectDefaultAccount(t *testing.T) {
 	t.Cleanup(SetSessionStarterForTest(func(inst *session.Instance, req sessionStartRequest) (*session.Instance, error) {
 		got = req
 		// A daemon that knows the field echoes it back on the created session; the
-		// skew check compares the two, which is only possible because the account
-		// was SENT rather than left for the daemon to fill in.
+		// skew check compares the two only when an account was actually sent.
 		return startedWithAccount(t, inst.Title, req.Account), nil
 	}))
 	calls, asked := stubAccounts(t, withDefaults(map[string]string{"claude": "work"}), nil)
@@ -81,10 +84,12 @@ func TestNamingFormPreselectsTheProjectDefaultAccount(t *testing.T) {
 	assert.Equal(t, []string{""}, *asked, "the whole registry is fetched and narrowed here, as the picker does")
 	require.Equal(t, "work", h.pendingAccount,
 		"the project's configured account must be preselected, not applied invisibly by the daemon")
+	assert.False(t, h.pendingAccountChosen, "a preselection is a preview, not a decision the user made")
 
 	require.True(t, submitNaming(t, h))
-	assert.Equal(t, "work", got.Account,
-		"the preselected account must be SENT, so the daemon's answer can be checked against what the user saw")
+	assert.Empty(t, got.Account,
+		"an unchosen preselection must send NO account — serializing it would pin what was only displayed")
+	assert.False(t, got.AccountAmbient, "and it is not an ambient pick either — it is routable")
 }
 
 // TestProjectDefaultNeverOverridesADeliberatePick is the race this feature is one
@@ -115,8 +120,9 @@ func TestProjectDefaultNeverOverridesADeliberateAmbientPick(t *testing.T) {
 	inst := startNaming(t, h, "ambient-on-purpose")
 
 	openAccountField(t, h)
-	pickAccount(t, h, "Use configured default (work)")
+	pickAccount(t, h, "Use the ambient identity (no account)")
 	require.Equal(t, ambientAccount, h.pendingAccount)
+	require.True(t, h.pendingAccountAmbient, "the ambient row must record the ambient pick")
 
 	deliverAccountDefault(t, h, inst, "claude")
 	assert.Equal(t, ambientAccount, h.pendingAccount,
@@ -169,9 +175,9 @@ func TestAccountPickerMarksTheProjectDefault(t *testing.T) {
 
 	openAccountField(t, h)
 	items := accountItems(h)
-	require.Len(t, items, 3, "the ambient row plus claude's two accounts: %v", items)
-	assert.Equal(t, "personal", items[1], "an account this project did not choose is unmarked")
-	assert.Equal(t, "work — project default", items[2],
+	require.Len(t, items, 4, "the routable and ambient rows plus claude's two accounts: %v", items)
+	assert.Equal(t, "personal", items[2], "an account this project did not choose is unmarked")
+	assert.Equal(t, "work — project default", items[3],
 		"the configured account must SAY it is the project default; a silent preselection is the complaint")
 }
 
@@ -186,8 +192,8 @@ func TestAccountPickerOffersAnUnregisteredProjectDefault(t *testing.T) {
 
 	openAccountField(t, h)
 	items := accountItems(h)
-	require.Len(t, items, 4, "the ambient row, claude's two accounts, and the configured-but-absent one: %v", items)
-	assert.Equal(t, "retired — project default · not registered", items[3],
+	require.Len(t, items, 5, "the routable and ambient rows, claude's two accounts, and the configured-but-absent one: %v", items)
+	assert.Equal(t, "retired — project default · not registered", items[4],
 		"appended last, and labelled — hiding it would show the ambient identity while the config says otherwise")
 
 	pickAccount(t, h, "retired")

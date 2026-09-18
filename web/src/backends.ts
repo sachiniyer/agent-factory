@@ -30,6 +30,10 @@ export interface BackendOption {
   /** Actionable reason whenever `status` is not "available" — the same text the
    *  CLI prints at create time. Absent when available. */
   reason?: string;
+  /** Whether a session on this backend can run under a registered account — the
+   *  daemon's create-time router routes only these (#4404). Absent from daemons
+   *  that predate the router. */
+  account_scoped?: boolean;
 }
 
 /** The daemon's per-repo backend catalog (daemon.ListBackendsResponse). */
@@ -115,6 +119,23 @@ export function backendChoices(catalog: BackendCatalog | null): BackendChoice[] 
     });
   }
   return choices;
+}
+
+/**
+ * Whether a create with this backend selection can land on a registered
+ * account, as the DAEMON's catalog says (#4404 review) — resolved through the
+ * catalog's `default` for the repo-default choice, never a list kept here.
+ * `null` when it cannot be said: no catalog yet, a failed one, or a repo
+ * default the daemon could not name. The account picker treats that as "does
+ * not route", for its label and its request alike, so the two cannot disagree.
+ */
+export function backendAccountScoped(catalog: BackendCatalog | null, selected: string): boolean | null {
+  if (catalog === null) {
+    return null;
+  }
+  const name = selected === REPO_DEFAULT ? catalog.default : selected;
+  const option = catalog.backends.find((opt) => opt.name === name);
+  return option === undefined ? null : option.account_scoped === true;
 }
 
 /**

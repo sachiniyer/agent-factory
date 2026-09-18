@@ -378,6 +378,17 @@ export interface CreateSessionInput {
    *  did not choose, and createSession then sends NO account so the session runs
    *  on the ambient identity. It is a directory name, never credential material. */
   account?: string;
+  /** True only when the user picked the ambient row itself (#4404 review): the
+   *  wire cannot tell "no choice; the daemon decides" from "I chose ambient"
+   *  without this bit, and the daemon's pool router reads unspecified-empty as
+   *  routable — silently re-identifying a session the user chose to keep off
+   *  the account pool. */
+  accountAmbient?: boolean;
+  /** True when the empty account is this client's routable ask — the opt-in
+   *  bit a daemon with the pool router requires before an unspecified account
+   *  may land on a pooled identity (#4404 review). Without it the daemon
+   *  serves the pre-router contract: configured default, else ambient. */
+  accountAuto?: boolean;
 }
 
 /** Lists the runtimes a session in this repo can be created on, whether the repo's
@@ -434,6 +445,17 @@ export async function createSession(input: CreateSessionInput, token: string): P
   const account = (input.account ?? "").trim();
   if (account !== "") {
     body.account = account;
+  }
+  // The ambient counterpart: sent only when the user picked the ambient row —
+  // an untouched field sends neither and lets the daemon's router decide.
+  if (input.accountAmbient === true) {
+    body.account_ambient = true;
+  }
+  // And the routable ask: sent when the empty account means "pick for me"
+  // rather than "ambient" — the bit that lets the daemon tell this client's
+  // unspecified create from a pre-router client's identical wire shape.
+  if (input.accountAuto === true) {
+    body.account_auto = true;
   }
   const resp = await af<{ instance: SessionData; warning?: string }>("CreateSession", body, token);
   if (resp.warning) {
@@ -1206,7 +1228,18 @@ export async function reapConfigAssistant(token: string): Promise<void> {
 export async function listAccounts(token: string, repoPath = ""): Promise<AccountsResponse> {
   const body = repoPath === "" ? {} : { repo_path: repoPath };
   const resp = await af<AccountsResponse>("ListAccounts", body, token);
-  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {} };
+  // Pass the router fields through verbatim: pool_routing is the capability bit
+  // the picker needs before it may offer the ambient pin or call a routable row
+  // "af picks a healthy account", and ambient_opt_outs is what keeps an opted-out
+  // project from being labelled that way. Rebuilding the object without them
+  // makes a routing-capable daemon look pre-router to every web consumer (#4404).
+  return {
+    entries: resp?.entries ?? [],
+    agents: resp?.agents ?? [],
+    defaults: resp?.defaults ?? {},
+    ambient_opt_outs: resp?.ambient_opt_outs,
+    pool_routing: resp?.pool_routing,
+  };
 }
 
 /** Creates an account's credential directory without logging in. Idempotent.

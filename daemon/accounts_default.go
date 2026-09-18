@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
@@ -34,7 +33,9 @@ import (
 // through the environment.
 //
 // It runs BEFORE reserveCreate, so a refusal costs no worktree, no branch and no
-// tmux session.
+// tmux session. Since #4404 it is only the fallback path: for a backend that
+// carries accounts, routeCreateAccount resolves the same default first and
+// treats it as the pool's preference rather than the answer.
 func applyDefaultAccount(cfg *config.Config, req *CreateSessionRequest) error {
 	if strings.TrimSpace(req.Account) != "" {
 		// An explicit account wins and is already validated by the surface that
@@ -58,33 +59,44 @@ func applyDefaultAccount(cfg *config.Config, req *CreateSessionRequest) error {
 		// it already names, where it would be a choice rather than a consequence.
 		return nil
 	}
-	// The LABEL's agent, which is what an account name is validated against
-	// everywhere else (api/sessions.go, app/account_picker.go). A program_overrides
-	// entry that points the label at another agent is refused by
-	// session.refuseUnsupportedAccountAgent with a message naming both — and, since
-	// #3386, naming this config key too when the account came from here.
 	agent := sessionenv.AgentForCommand(req.Program)
 	if agent == "" {
 		return nil
 	}
-	project, global := config.DefaultAccountLayersFor(cfg, req.RepoPath, agent)
-	name := agentaccount.Resolve(req.Account, project.Name, global.Name)
-	if name == "" {
+	return applyResolvedDefaultAccount(req, defaultAccountSelectionFor(cfg, req.RepoPath, agent))
+}
+
+// defaultAccountSelectionFor resolves the layered `default_accounts` entry for
+// agent the way applyDefaultAccount always has, returning the winning selection
+// with its provenance — the zero value when neither layer names an account.
+//
+// The LABEL's agent is what an account name is validated against everywhere
+// else (api/sessions.go, app/account_picker.go). A program_overrides entry that
+// points the label at another agent is refused by
+// session.refuseUnsupportedAccountAgent with a message naming both — and, since
+// #3386, naming this config key too when the account came from here.
+func defaultAccountSelectionFor(cfg *config.Config, repoPath, agent string) config.DefaultAccountSelection {
+	selection, _ := config.DefaultAccountPolicyFor(cfg, repoPath, agent)
+	return selection
+}
+
+// applyResolvedDefaultAccount validates and applies an already-resolved
+// default selection. The refusal is unchanged from when this lived inside
+// applyDefaultAccount: a configured default that cannot be honoured fails the
+// create by name rather than silently falling back to ambient.
+func applyResolvedDefaultAccount(req *CreateSessionRequest, selection config.DefaultAccountSelection) error {
+	if selection.Name == "" {
 		return nil
-	}
-	selection := project
-	if selection.Name != name {
-		selection = global
 	}
 	home, err := config.GetConfigDir()
 	if err != nil {
 		return fmt.Errorf("%s selects account %q, but af cannot resolve its agent-factory home to check it: %w",
-			selection.Source(), name, err)
+			selection.Source(), selection.Name, err)
 	}
 	if err := config.CheckDefaultAccount(home, req.RepoPath, selection); err != nil {
 		return err
 	}
-	req.Account = name
+	req.Account = selection.Name
 	req.AccountSource = defaultAccountProvenance(selection, req.RepoPath)
 	return nil
 }
@@ -101,20 +113,29 @@ func defaultAccountProvenance(selection config.DefaultAccountSelection, repoPath
 // catalog half of applyDefaultAccount and calls the same resolver, so a picker
 // cannot preselect an account the create would not have applied.
 //
+// The second result carries the agents whose resolved entry is present but
+// empty — the ambient opt-out a routable create honors by launching the
+// agent's own login. A picker that cannot see it labels that row "af picks a
+// healthy account" while the daemon does the opposite (#4404 review).
+//
 // Unvalidated on purpose: this answers "what is configured", and a listing that
 // silently dropped an unregistered default would hide exactly the misconfiguration
 // the create is about to refuse. The entry that comes back is what the create
 // will use, right or wrong.
-func defaultAccountsFor(cfg *config.Config, repoPath string, agents []string) map[string]string {
+func defaultAccountsFor(cfg *config.Config, repoPath string, agents []string) (map[string]string, map[string]bool) {
 	// ONE resolution for every agent, not one per agent: this runs on every open of
 	// a form nobody has submitted yet, and resolving a repository's config costs git
 	// probes.
-	effective := config.ResolvedDefaultAccountsFor(cfg, repoPath)
+	effective, optOuts := config.ResolvedDefaultAccountsFor(cfg, repoPath)
 	defaults := map[string]string{}
+	ambientOptOuts := map[string]bool{}
 	for _, agent := range agents {
 		if name := effective[agent]; name != "" {
 			defaults[agent] = name
 		}
+		if optOuts[agent] {
+			ambientOptOuts[agent] = true
+		}
 	}
-	return defaults
+	return defaults, ambientOptOuts
 }

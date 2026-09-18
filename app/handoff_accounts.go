@@ -33,11 +33,16 @@ func (m *home) handleHandoffAccountsLoaded(msg handoffAccountsLoadedMsg) (tea.Mo
 	if msg.err != nil {
 		return m, m.handleNotice(fmt.Errorf("load handoff accounts: %w", msg.err))
 	}
-	current, _ := selected.AccountSelection()
+	current, automatic := selected.AccountSelection()
+	// An automatic account is not a pin: the daemon releases it on an
+	// agent-only handoff, so the target agents keep their ambient rows
+	// (#4404 review). The current account is still excluded from the
+	// same-agent rows below — switching to it would be no switch at all.
+	pinned := current != "" && !automatic
 	agents, accounts, labels, warnings := []string{}, []string{}, []string{}, []string{}
 	preselected := -1
 	for _, agent := range append([]string{msg.agent}, handoffAgentChoices(msg.agent)...) {
-		if agent != msg.agent && current == "" {
+		if agent != msg.agent && !pinned {
 			if preselected < 0 {
 				preselected = len(labels)
 			}

@@ -920,7 +920,7 @@ function newSession(): void {
             // It runs AFTER the upsert, not before, because the store.set above
             // carries `tabError: null` — raising the notice first would have it
             // cleared by the very update that puts the wrongly-scoped row on screen.
-            const skew = accountSkewMessage(requestedAccount, created);
+            const skew = accountSkewMessage(requestedAccount, created, values.accountAmbient === true);
             if (skew !== "") {
               surfaceTabError(new Error(skew));
             }
@@ -2120,6 +2120,7 @@ function doHandoff(): void {
       loadPrograms: () => loadPrograms(""),
       loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
       currentAccount: sel.account,
+      currentAccountAuto: sel.account_auto_selected === true,
       onSubmit: (to: string, account?: string) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).

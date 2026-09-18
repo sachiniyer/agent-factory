@@ -127,3 +127,79 @@ func TestLoadAccountLimitLedgerReportsNoEvidenceForAnAbsentFile(t *testing.T) {
 	require.NoError(t, err, "a home with no ledger yet is not an error; it is a first run")
 	require.Empty(t, observations)
 }
+
+// TestDeleteSessionRecordReadsEvidenceInsideTheRefuteFence is the #4404 review
+// race one step earlier than the one below: a kill that captured its row
+// snapshot BEFORE taking accountLimitMu could carry a sibling observation a
+// refute retracted in between, and the retain would re-publish it into the
+// ledger right before the row — the only place the deferred settlement could
+// have repaired — was deleted. The reader must therefore run with the fence
+// held, and what it returns at that moment is what gets retained.
+func TestDeleteSessionRecordReadsEvidenceInsideTheRefuteFence(t *testing.T) {
+	manager, repoID, _ := installRaceBackend(t, &raceBackend{}, "fenced-snapshot")
+
+	inFence := session.InstanceData{AccountLimitObservations: []session.AccountLimitObservationData{
+		{Agent: "claude", Account: "personal", ResetAt: time.Now().Add(time.Hour)},
+	}}
+	read := false
+	deleted, err := manager.deleteSessionRecord(repoID, "fenced-snapshot", "", nil, func() session.InstanceData {
+		read = true
+		require.False(t, manager.accountLimitMu.TryLock(),
+			"the evidence snapshot must be read under accountLimitMu — refuteAccountLimitEvidence retracts under it")
+		return inFence
+	})
+	require.NoError(t, err)
+	require.True(t, deleted)
+	require.True(t, read, "the choke point must read the evidence itself")
+
+	observations, err := loadAccountLimitLedger()
+	require.NoError(t, err)
+	require.Len(t, observations, 1)
+	require.Equal(t, "personal", observations[0].Account,
+		"what the row held inside the fence is what gets retained")
+}
+
+// TestDeleteSessionRecordUnmarksRetainedEvidenceUnderTheFence is the #4404
+// review race: a refute whose ledger check lands between a delete's retain and
+// its cache un-mark leaves fresh evidence standing next to an "already
+// checked" mark, and every later affirmative session skips the retraction the
+// evidence still needs — the account stays excluded until restart. The hook
+// runs at the exact interleave point — after the retain, before the un-mark —
+// and must find accountLimitMu already held, because the refute serializes on
+// it. A TryLock that succeeds proves the window is unfenced.
+func TestDeleteSessionRecordUnmarksRetainedEvidenceUnderTheFence(t *testing.T) {
+	manager, repoID, _ := installRaceBackend(t, &raceBackend{}, "fenced-retain")
+
+	previousHook := testHookRetainedAccountLimitFence
+	testHookRetainedAccountLimitFence = func() {
+		require.False(t, manager.accountLimitMu.TryLock(),
+			"the retain/un-mark window must hold accountLimitMu — refuteAccountLimitEvidence serializes on it")
+	}
+	t.Cleanup(func() { testHookRetainedAccountLimitFence = previousHook })
+
+	// The interleave's second half: a stale "ledger already checked" mark for
+	// the identity this delete is about to re-retain.
+	manager.mu.Lock()
+	manager.refutedLedgerAccounts = map[string]struct{}{"claude\x00work": {}}
+	manager.mu.Unlock()
+
+	evidence := session.InstanceData{AccountLimitObservations: []session.AccountLimitObservationData{
+		{Agent: "claude", Account: "work", ResetAt: time.Now().Add(time.Hour)},
+	}}
+	deleted, err := manager.deleteSessionRecord(repoID, "fenced-retain", "", nil, recordedEvidence(evidence))
+	require.NoError(t, err)
+	require.True(t, deleted)
+
+	// The end-state invariant the interleave broke: the fresh row is durable
+	// AND no surviving mark says it was already checked, so the next
+	// successful session under the identity retracts it.
+	observations, err := loadAccountLimitLedger()
+	require.NoError(t, err)
+	require.NotEmpty(t, observations,
+		"the delete must retain the session's limit evidence in the durable ledger")
+	manager.mu.Lock()
+	_, marked := manager.refutedLedgerAccounts["claude\x00work"]
+	manager.mu.Unlock()
+	require.False(t, marked,
+		"re-retained evidence must clear the already-checked mark inside the same fence the refute takes")
+}

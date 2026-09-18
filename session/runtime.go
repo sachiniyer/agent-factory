@@ -250,6 +250,17 @@ func (k BackendKind) CarriesAccount() bool {
 	return k == BackendDocker
 }
 
+// LaunchesWithAccount reports whether a session on this kind can run under a
+// registered account at all: local through the exec shim, plus every kind that
+// CarriesAccount. It is the ONE predicate for "can the create-time account
+// router (#4404) land a pooled account here" — the daemon's router, the CLI's
+// version-skew check and the TUI's picker label all ask it, because a surface
+// that decided for itself would promise a pool pick on a backend the daemon
+// deliberately leaves ambient.
+func (k BackendKind) LaunchesWithAccount() bool {
+	return k == BackendLocal || k.CarriesAccount()
+}
+
 // InjectsSandboxCallback reports whether this kind's provisioner actually
 // delivers the #2999 callback credential into the workspace.
 //

@@ -148,6 +148,10 @@ export interface SessionData {
    *  silently, and a UI reporting an identity the session does not have is the
    *  exact failure the feature exists to prevent. */
   account?: string;
+  /** True when af — the create-time account router or the limit scheduler —
+   *  chose `account`, rather than the user pinning it (#4404). A handoff
+   *  releases such an account instead of demanding a target one. */
+  account_auto_selected?: boolean;
   /** Daemon-owned reserved-root decision (#2513): true for the always-on root
    *  agent. The web pins root to the top of the rail and draws the demarcation rule
    *  by CONSUMING this decision (session.IsReservedTitle, projected) rather than
@@ -537,6 +541,20 @@ export interface AccountsResponse {
    *  than this client does not send it at all — in which case the picker simply
    *  offers no preselection, which is what it did before this field existed. */
   defaults?: Record<string, string>;
+  /** Per agent, whether the resolved `default_accounts` entry is present but
+   *  EMPTY — the only spelling of "this project runs on the ambient identity"
+   *  (#4404). A routable create against one launches the agent's own login
+   *  rather than picking a pooled account, so a picker that cannot see the
+   *  opt-out labels that row "af picks a healthy account" while the daemon
+   *  does the opposite. Optional because the daemon omits it when empty and
+   *  older daemons do not send it at all. */
+  ambient_opt_outs?: Record<string, boolean>;
+  /** The daemon's capability bit: present and true means this build has the
+   *  create-time account router, so a routable create (account_auto) can land
+   *  on a pooled account. Absent means a daemon older than the router, whose
+   *  empty account is the ambient identity — a picker must not label that row
+   *  "af picks a healthy account" for it (#4404 review). */
+  pool_routing?: boolean;
 }
 
 /** RegisterAccountResponse (daemon/control_types_accounts.go). */

@@ -352,6 +352,79 @@ func TestHandoffSession_RollsBackTheRecordWhenTheSwapFails(t *testing.T) {
 	}
 }
 
+// A routed pick is af's own choice, not the user's — and it belongs to the
+// OUTGOING agent's registry, where the same name under another agent is a
+// different identity. A bare handoff drops it rather than carry it, the
+// incoming agent launches ambient, and the response says which account stayed
+// behind so the caller can name the released pick (#4404 review).
+func TestHandoffSession_ClearsAnAutoSelectedAccountAcrossAgents(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "routed-pick", backend)
+	inst.ReconcileAccountHandoffSnapshot("work", true, nil)
+
+	resp, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "routed-pick", RepoID: repoID, To: tmux.ProgramGemini,
+	})
+	if err != nil {
+		t.Fatalf("HandoffSession: %v — an af-chosen account must not block an agent handoff", err)
+	}
+	if resp.FromAccount != "work" {
+		t.Fatalf("FromAccount = %q, want the released pool pick disclosed", resp.FromAccount)
+	}
+	if account, automatic := inst.AccountSelection(); account != "" || automatic {
+		t.Fatalf("AccountSelection = (%q, %v) after the swap, want the ambient identity", account, automatic)
+	}
+	ledger := inst.Handoffs()
+	if len(ledger) != 1 || ledger[0].FromAccount != "work" {
+		t.Fatalf("ledger = %+v, want the durable entry to carry from_account=work", ledger)
+	}
+}
+
+// The same clear rolls back with the swap: a failed runtime replacement leaves
+// the outgoing agent running, so its pool pick must be running with it.
+func TestHandoffSession_RestoresTheAutoAccountWhenTheSwapFails(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{
+		FakeBackend: session.NewFakeBackend(),
+		swapErr:     errors.New("could not confirm the current agent stopped"),
+	}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "swap-fails-routed", backend)
+	inst.ReconcileAccountHandoffSnapshot("work", true, nil)
+
+	if _, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "swap-fails-routed", RepoID: repoID, To: tmux.ProgramGemini,
+	}); err == nil {
+		t.Fatal("HandoffSession succeeded despite a failed runtime swap")
+	}
+	if account, automatic := inst.AccountSelection(); account != "work" || !automatic {
+		t.Fatalf("AccountSelection = (%q, %v) after a failed swap — the pool pick must be restored with the outgoing agent", account, automatic)
+	}
+}
+
+// A PINNED account is the user's choice, not af's to release: a bare cross-agent
+// handoff refuses rather than silently drop it, and names --account as the way
+// through.
+func TestHandoffSession_RefusesAPinnedAccountAcrossAgents(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "pinned-pick", backend)
+	inst.ReconcileAccountHandoffSnapshot("work", false, nil)
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "pinned-pick", RepoID: repoID, To: tmux.ProgramGemini,
+	})
+	if err == nil {
+		t.Fatal("handoff accepted a pinned account; silently clearing a user's choice is the wrong-identity outcome")
+	}
+	if !strings.Contains(err.Error(), "--account") {
+		t.Fatalf("refusal = %v, want it to name --account as the way through", err)
+	}
+	if swaps, _ := backend.snapshot(); swaps != 0 {
+		t.Fatalf("a refused handoff still swapped (swaps=%d); the pin check must run before anything is stopped", swaps)
+	}
+}
+
 func TestHandoffSession_RefusesSameAgentAndUnknownAgent(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}

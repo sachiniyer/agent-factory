@@ -209,8 +209,9 @@ type InstanceData struct {
 	// ambient account would spend the wrong quota while still displaying the
 	// account it was created with.
 	Account string `json:"account,omitempty"`
-	// AccountAutoSelected is true only when af's opt-in limit scheduler chose the
-	// account. Missing/false preserves every pre-#3127 account as an explicit pin.
+	// AccountAutoSelected is true only when af chose the account — the opt-in
+	// limit scheduler's swap or the create-time pool router (#4404).
+	// Missing/false preserves every pre-#3127 account as an explicit pin.
 	AccountAutoSelected bool `json:"account_auto_selected,omitempty"`
 	// UserKilled is the kill-intent tombstone (#1108): persisted by
 	// Manager.KillSession before teardown begins. Present only in the crash

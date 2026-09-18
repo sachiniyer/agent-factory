@@ -56,3 +56,36 @@ test("a committed account handoff closes the stale modal and surfaces a confirme
 
   assert.deepEqual(events, ["busy:true", "close", "resync", "surface:confirmed"]);
 });
+
+// #4404 review: the modal can only tell af's pick from a pin if the session's
+// account_auto_selected reaches it.
+test("the handoff modal learns whether the session's account is af's own pick", () => {
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const handler = topLevelFunction(source, "doHandoff");
+  for (const auto of [true, false, undefined]) {
+    let seen: { currentAccount?: string; currentAccountAuto?: boolean } | undefined;
+    const context = {
+      selectedSessionData: () => ({
+        id: "session-id", title: "worker", current_agent: "codex", account: "work",
+        account_auto_selected: auto, worktree: { repo_path: "/work/repo" },
+      }),
+      canHandoff: () => true,
+      handoffModal: (_title: string, _agent: string, callbacks: { currentAccount?: string; currentAccountAuto?: boolean }) => {
+        seen = callbacks;
+        return { close() {}, setBusy() {}, setError() {} };
+      },
+      loadPrograms: () => Promise.resolve({}),
+      loadCreateAccounts: () => Promise.resolve({}),
+    };
+    const code = ts.transpileModule(`
+      let token = "token", modal = null;
+      function openModal(next) { modal = next; }
+      function closeModal() { modal = null; }
+      ${handler}
+    `, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
+    runInNewContext(code, context);
+    (context as typeof context & { doHandoff(): void }).doHandoff();
+    assert.equal(seen?.currentAccount, "work");
+    assert.equal(seen?.currentAccountAuto, auto === true, `account_auto_selected=${auto}`);
+  }
+});

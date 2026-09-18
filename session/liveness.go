@@ -719,6 +719,80 @@ func (i *Instance) AccountLimitObservations() []AccountLimitObservationData {
 	return append([]AccountLimitObservationData(nil), i.accountLimitObservations...)
 }
 
+// RefuteAccountLimitObservationAtEpoch removes this session's stored limit
+// observation for the identity it is running as RIGHT NOW, after the pane
+// produced affirmative work evidence under it (#4404). A wall recorded against
+// an account that is demonstrably answering is stale — the live repro had a
+// reset carried over from the ambient identity's wall still excluding an
+// account that was serving prompts for days. Only the entry keyed by the
+// session's own current {agent, account} is removed; a sibling account's
+// evidence is unrelated and stays.
+//
+// The epoch fence is the same one every poll-applied decision carries (#2135):
+// the refutation was decided from a pane captured at observedEpoch, so a newer
+// authoritative transition — above all a resume or a handoff that changed which
+// identity the session runs as — invalidates it, and the next tick re-decides.
+//
+// The identity is returned even when nothing changed so the caller can also
+// retract the retained-ledger copy a deleted session may have left behind.
+func (i *Instance) RefuteAccountLimitObservationAtEpoch(observedEpoch uint64) (agent, account string, changed bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.stateEpoch != observedEpoch {
+		return "", "", false
+	}
+	agent = i.currentAgentNameLocked()
+	account = i.Account
+	if agent == "" || account == "" {
+		return "", "", false
+	}
+	for idx := range i.accountLimitObservations {
+		observation := i.accountLimitObservations[idx]
+		if observation.Agent == agent && observation.Account == account {
+			i.accountLimitObservations = append(
+				i.accountLimitObservations[:idx], i.accountLimitObservations[idx+1:]...)
+			i.touchLocked()
+			return agent, account, true
+		}
+	}
+	return agent, account, false
+}
+
+// RetractAccountLimitObservation removes EVERY stored observation this session
+// carries for the NAMED identity, regardless of which account the session is
+// running as now — the sibling half of refuteAccountLimitEvidence (#4404).
+// A session answering under {agent, account} refutes that identity's wall
+// evidence wherever it is stored, not only on the session that answered: a row
+// left on another session would keep excluding the account through
+// accountLimitEvidenceForSwap exactly as if the refute never happened.
+//
+// No epoch fence: the caller is not deciding from THIS session's pane, it is
+// applying a fact proven on another session — a fence scoped to this session's
+// epoch would only drop the retraction when this session's own state moved.
+// What is deliberately NOT cleared is live state: a sibling currently parked
+// LiveLimitReached under the identity still claims its wall through the merge's
+// live branch, and that claim is the conservative direction — it clears on the
+// sibling's own affirmative work, never on another session's say-so.
+func (i *Instance) RetractAccountLimitObservation(agent, account string) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	kept := i.accountLimitObservations[:0]
+	removed := false
+	for _, observation := range i.accountLimitObservations {
+		if observation.Agent == agent && observation.Account == account {
+			removed = true
+			continue
+		}
+		kept = append(kept, observation)
+	}
+	if !removed {
+		return false
+	}
+	i.accountLimitObservations = kept
+	i.touchLocked()
+	return true
+}
+
 // livenessFromData resolves the liveness a persisted or snapshot record should
 // take, applying the same rollforward FromInstanceData uses: prefer the
 // `liveness` field, fall back to the legacy `status` int for pre-#1195 records,

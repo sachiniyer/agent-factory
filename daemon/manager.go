@@ -136,7 +136,14 @@ type Manager struct {
 	// a concrete Instance exists. Snapshot and the events plane expose these rows;
 	// mutation lookups do not, so a half-built runtime cannot be acted on.
 	pendingCreates map[string]session.InstanceData
-	reservedTitles map[string]struct{}
+	// createAccountClaims reserves each router-picked account between the
+	// routing decision and the pending-create row that publishes it — the gap in
+	// which two concurrent creates could otherwise read the same least-loaded
+	// snapshot and both take it (#4404 review). Keyed agent+"\x00"+account; the
+	// count hands off to the pending row inside the m.mu section that publishes
+	// it, so a load snapshot can never observe the assignment uncounted.
+	createAccountClaims map[string]int
+	reservedTitles      map[string]struct{}
 	// projectDeletes is a short-lived admission fence keyed by repo ID. A delete
 	// installs it under m.mu in the same decision that proves no create is already
 	// reserved or pending; reserveCreate checks it under that lock before any title
@@ -168,6 +175,12 @@ type Manager struct {
 	// daemon's lifetime.
 	projectDeleteSeq     uint64
 	projectDeleteLastSeq map[string]uint64
+	// refutedLedgerAccounts bounds the retained-ledger retraction the poll
+	// performs when a session answers under an account that carries stale limit
+	// evidence (#4404). Keyed agent+"\x00"+account; once an identity has been
+	// proven healthy this daemon lifetime, the locked file check does not repeat
+	// for every affirmative tick of every session on it.
+	refutedLedgerAccounts map[string]struct{}
 	// reservedTmuxNames closes the second namespace a local create claims. Titles
 	// such as "a/b" and "a_b" can derive distinct git branches but the same
 	// positive-policy tmux name; reserving only the raw title leaves that collision
@@ -722,6 +735,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		storage:                   storage,
 		instances:                 make(map[string]*session.Instance),
 		pendingCreates:            make(map[string]session.InstanceData),
+		createAccountClaims:       make(map[string]int),
 		reservedTitles:            make(map[string]struct{}),
 		projectDeletes:            make(map[string]struct{}),
 		projectDeleteLastSeq:      make(map[string]uint64),
@@ -939,45 +953,4 @@ func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 		data = append(data, projected)
 	}
 	return data
-}
-
-// startLockForRepo returns the per-repo lock serializing session/tab creation
-// against other mutations of that repo, lazily creating it.
-//
-// LOCK CONTRACT (#2106): it takes m.mu, so it must NEVER be called with m.mu
-// already held — sync.Mutex is not reentrant and the goroutine would deadlock on
-// the manager lock, stalling every other operation behind it. That rules out
-// calling it, m.persistInstance, or m.persistInstanceErr from any `...Locked`
-// helper or other code running under m.mu; persist from there with the lock-free
-// persistInstanceData instead, which takes only the instances.json file lock.
-//
-// Acquiring the returned lock while holding m.mu is likewise forbidden: the
-// established order is repoStartLock BEFORE m.mu (CreateSession holds the start
-// lock across its body and takes m.mu under it), so the reverse closes an ABBA
-// cycle — the #2006 lock-inversion class.
-func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	lock := m.repoStartLocks[repoID]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.repoStartLocks[repoID] = lock
-	}
-	return lock
-}
-
-// opLockFor returns the per-session operation lock serializing kill teardown
-// against Lost-recovery and prompt writes for one daemon instance key (#1108 PR
-// 2, #1473).
-func (m *Manager) opLockFor(key string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	lock := m.instanceOpLocks[key]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.instanceOpLocks[key] = lock
-	}
-	return lock
 }

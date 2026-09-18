@@ -429,6 +429,14 @@ type home struct {
 	// would silently replace it — putting the session on an identity the user had
 	// just chosen against, which is the whole failure this field exists to prevent.
 	pendingAccountChosen bool
+	// pendingAccountAmbient records that the chosen account value "" means the
+	// user asked for the ambient identity OUTRIGHT — the picker's ambient row —
+	// rather than the routable row or an untouched field (#4404 review): Account
+	// alone sends "" for all three. Reset with pendingAccount.
+	pendingAccountAmbient bool
+	// ListAccountsResponse's PoolRouting and RepoBackendAccountScoped as the form
+	// last OBSERVED them; account_auto needs both for the submitted backend (#4404).
+	pendingAccountRouting, pendingRepoBackendScoped bool
 	// backendPickerChoices is the option list the open backend picker is showing,
 	// held alongside the overlay for the same reason handoffChoices is: the list is
 	// built from the daemon's response (plus a leading "repo default" row), so the

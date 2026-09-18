@@ -518,14 +518,18 @@ func (m *Manager) settleReplacementRuntime(
 	case errors.As(err, &limitErr):
 		// The incoming identity is itself at a wall — the same classification
 		// deliverManualAccountMission applies when its send-path wait sees one.
+		// Both arms charge the wall to the INCOMING identity: the plain re-park
+		// kept limit_account on the outgoing one, so the router and the swap
+		// scheduler read the credential readiness had just proven walled as
+		// healthy (#4404 review).
 		var parkErr error
+		m.accountLimitMu.Lock()
 		if swap.manual {
-			m.accountLimitMu.Lock()
 			parkErr = instance.ParkManualAccountSwapAtLimit(limitErr.ResetAt)
-			m.accountLimitMu.Unlock()
 		} else {
-			parkErr = m.reparkLimitUnderResumeFence(instance, limitErr.ResetAt)
+			parkErr = instance.ReparkReplacementLimitUnderResumeFence(limitErr.ResetAt)
 		}
+		m.accountLimitMu.Unlock()
 		return errors.Join(
 			fmt.Errorf("account replacement for %q reached a usage limit on the incoming identity before its runtime became usable: %w", requestedTitle, err),
 			parkErr, m.persistSettlement(repoID, key, instance))
@@ -624,15 +628,40 @@ func (m *Manager) stopVSCodeForAccountSwap(key string, instance *session.Instanc
 	return nil
 }
 
-func (m *Manager) limitedAccountsForSwap(agent string, loadEvidence accountLimitEvidenceLoader) ([]string, error) {
+// accountLimitEvidenceForSwap is the ONE predicate for "which of agent's
+// accounts currently carry unexpired usage-limit evidence". It merges the three
+// evidence sources — durable session-row observations, the retained ledger, and
+// live instance state — and returns, per walled account, the merged reset
+// boundary that evidence claims (zero when unknown, which dominates by the same
+// rule the ledger's own merge uses).
+//
+// It exists because the answer must be identical everywhere the question is
+// asked. The swap scheduler uses it to exclude candidates; the create-time
+// router (#4404) uses the same map both to exclude accounts and to name the
+// earliest reset when every candidate is walled. Two implementations would
+// eventually disagree about which identity a session is about to launch under.
+func (m *Manager) accountLimitEvidenceForSwap(agent string, loadEvidence accountLimitEvidenceLoader) (map[string]time.Time, error) {
 	m.mu.Lock()
 	instances := make([]*session.Instance, 0, len(m.instances))
 	for _, other := range m.instances {
 		instances = append(instances, other)
 	}
 	m.mu.Unlock()
-	limitedSet := make(map[string]struct{})
+	evidence := make(map[string]time.Time)
 	now := nowFunc()
+	merge := func(account string, resetAt time.Time) {
+		// A zero reset means "no known expiry" — the most conservative evidence
+		// an account can carry, and the merge must not let a later known reset
+		// weaken it.
+		if prior, ok := evidence[account]; ok {
+			evidence[account] = session.RetainedAccountLimitReset(prior, resetAt)
+			return
+		}
+		evidence[account] = resetAt
+	}
+	unexpired := func(resetAt time.Time) bool {
+		return resetAt.IsZero() || now.Before(resetAt.Add(limitResumeGrace))
+	}
 	retained, err := loadEvidence()
 	if err != nil {
 		return nil, fmt.Errorf("load durable account-limit evidence: %w", err)
@@ -641,10 +670,10 @@ func (m *Manager) limitedAccountsForSwap(agent string, loadEvidence accountLimit
 		if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
 			continue
 		}
-		if !observation.ResetAt.IsZero() && !now.Before(observation.ResetAt.Add(limitResumeGrace)) {
+		if !unexpired(observation.ResetAt) {
 			continue
 		}
-		limitedSet[observation.Account] = struct{}{}
+		merge(observation.Account, observation.ResetAt)
 	}
 	for _, other := range instances {
 		if other == nil {
@@ -657,8 +686,11 @@ func (m *Manager) limitedAccountsForSwap(agent string, loadEvidence accountLimit
 		if !manual && sessionenv.AgentForCommand(other.AgentProgram()) == agent {
 			if account, limitedNow := other.LimitAccount(); limitedNow && strings.TrimSpace(account) != "" {
 				resetAt, hasReset := other.LimitResetAt()
-				if !hasReset || now.Before(resetAt.Add(limitResumeGrace)) {
-					limitedSet[account] = struct{}{}
+				if !hasReset {
+					resetAt = time.Time{}
+				}
+				if unexpired(resetAt) {
+					merge(account, resetAt)
 				}
 			}
 		}
@@ -666,14 +698,22 @@ func (m *Manager) limitedAccountsForSwap(agent string, loadEvidence accountLimit
 			if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
 				continue
 			}
-			if !observation.ResetAt.IsZero() && !now.Before(observation.ResetAt.Add(limitResumeGrace)) {
+			if !unexpired(observation.ResetAt) {
 				continue
 			}
-			limitedSet[observation.Account] = struct{}{}
+			merge(observation.Account, observation.ResetAt)
 		}
 	}
-	limited := make([]string, 0, len(limitedSet))
-	for account := range limitedSet {
+	return evidence, nil
+}
+
+func (m *Manager) limitedAccountsForSwap(agent string, loadEvidence accountLimitEvidenceLoader) ([]string, error) {
+	evidence, err := m.accountLimitEvidenceForSwap(agent, loadEvidence)
+	if err != nil {
+		return nil, err
+	}
+	limited := make([]string, 0, len(evidence))
+	for account := range evidence {
 		limited = append(limited, account)
 	}
 	return limited, nil

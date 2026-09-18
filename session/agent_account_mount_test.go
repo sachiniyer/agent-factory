@@ -100,6 +100,19 @@ func TestCarriesAccount_OnlyDockerIsProven(t *testing.T) {
 	}
 }
 
+// LaunchesWithAccount is the router's backend gate (#4404): local and docker
+// can run a pooled account, and every kind the off-box refusal turns away
+// cannot — so a surface asking it can never promise a pick NewInstance refuses.
+func TestLaunchesWithAccount_MatchesTheOffBoxRefusal(t *testing.T) {
+	for _, kind := range []BackendKind{BackendLocal, BackendDocker, BackendSSH, BackendSandbox, BackendHook} {
+		refused := refuseOffBoxAccountForKind(InstanceOptions{Account: "work"}, kind) != nil
+		if kind.LaunchesWithAccount() == refused {
+			t.Errorf("%s: LaunchesWithAccount = %v, but the launch boundary refused = %v",
+				kind, kind.LaunchesWithAccount(), refused)
+		}
+	}
+}
+
 func TestRefuseOffBoxAccount_AllowsDockerRefusesTheRest(t *testing.T) {
 	if err := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: BackendDocker}); err != nil {
 		t.Errorf("docker carries the account now, so it must not be refused: %v", err)

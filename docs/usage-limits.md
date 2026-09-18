@@ -124,6 +124,14 @@ explicit candidate list — see [Opt-in auto-resume](#opt-in-auto-resume). A
 session created with `--account` is pinned and automatic switching never rotates it. The full
 command surface is in [`af accounts`](reference/cli.md#af-accounts).
 
+Naming no account at all does not mean ambient: on a backend that carries
+accounts, the create-time router picks the least-loaded logged-in account with
+no current usage-limit evidence — preferring the configured `default_accounts`
+entry while it is healthy — and refuses with the earliest known reset when the
+whole pool is walled. A routed session is not pinned: it is eligible for the
+same opt-in account switching above. To keep the ambient identity instead,
+pick the picker's ambient row or pass `--account ""` explicitly.
+
 ### Scoping an account to a project
 
 Typing `--account` on every create is the wrong unit of work when the answer is
@@ -140,7 +148,11 @@ Now a session created in that project — from the CLI, the TUI, the web client 
 a scheduled task — runs as `work` with nothing typed. The resolution order is
 **explicit `--account` (or a picker choice) → the project's default → the global
 default → the agent's ambient login**, and it is applied by the background
-service on the create, so every surface gets the same answer.
+service on the create, so every surface gets the same answer. On a backend that
+carries accounts the default is the pool router's *preference* rather than an
+unconditional answer: while the configured account is healthy the create lands
+on it, and if it carries current usage-limit evidence the router moves to the
+least-loaded healthy account rather than launching into a known wall.
 
 The default has these properties:
 
@@ -483,6 +495,11 @@ blocked on:
 - **Local-worktree sessions only.** A docker/ssh/hook session runs its agent
   inside a provisioned sandbox, where swapping the agent is a different
   lifecycle; those sessions refuse the handoff rather than half-perform it.
+- **Account names belong to one agent.** A session pinned to an account needs a
+  target account (`--account`) to change agents. An account af picked for the
+  session is not a pin: a handoff to another agent releases it, and the incoming
+  agent starts on its own login unless you pick one of its accounts. The TUI and
+  web pickers offer the ambient target for those sessions for the same reason.
 
 Handing off is **reversible**. Each agent's conversation history is stored per
 directory, so the outgoing agent's thread is still in the worktree — hand back
