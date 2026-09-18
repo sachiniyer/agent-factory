@@ -101,14 +101,15 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 	}
 	resp = SetConfigValueResponse{Result: result}
 	// Keep dial failure distinct from an RPC error: only the former means
-	// no daemon was reached. A started RPC may have failed or lost its reply.
+	// no daemon was reached (recorded explicitly — unset reports unknown, #4482).
+	// A started RPC may have failed or lost its reply.
 	applyResp, applyAttempt := requestApplyConfigAttempt()
-	var outcome config.ApplyOutcome
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyNotReached}
 	if applyAttempt.err == nil {
 		resp.Applied = applyResp.Applied
 		resp.Pending = applyResp.Pending
 		resp.Warnings = applyResp.Warnings
-		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
+		outcome = config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: applyResp.FailedListenerKeys}
 		// The named skew rule (#4247). This fallback only runs against a daemon
 		// too old to serve SetConfigValue, and ApplyConfigResponse carries no
 		// digest, so nothing here can be matched against the local write above —
@@ -169,14 +170,15 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 	// network.listen_addr / network.preview_listen_addr rebind that failed left the
 	// OLD listener serving, and this surface used to report that as "Applied".
 	// Keep dial failure distinct from an RPC error: only the former means
-	// no daemon was reached. A started RPC may have failed or lost its reply.
+	// no daemon was reached (recorded explicitly — unset reports unknown, #4482).
+	// A started RPC may have failed or lost its reply.
 	applyResp, applyAttempt := requestApplyConfigAttempt()
-	var outcome config.ApplyOutcome
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyNotReached}
 	if applyAttempt.err == nil {
 		resp.Applied = applyResp.Applied
 		resp.Pending = applyResp.Pending
 		resp.Warnings = applyResp.Warnings
-		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
+		outcome = config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: applyResp.FailedListenerKeys}
 		// The same named skew rule as the set fallback (#4247).
 		applyDigestSkewUnconfirmed(&outcome, &resp.Warnings)
 	} else if applyAttempt.requestStarted {
