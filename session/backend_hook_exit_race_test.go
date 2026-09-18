@@ -159,11 +159,14 @@ func TestHookScript_ExitZeroAtDeadlineReportsSuccess(t *testing.T) {
 
 // The other half of the rule: a nonzero exit the script reached on its own is
 // still a failure, never a clean exit the guard could drop. The splice cannot
-// apply — os/exec replaces only a NIL result — so the *ExitError surfaces and
-// the fired deadline still wraps it in DeadlineExceeded: the conservative
-// classification for a teardown caller that cannot prove the workspace
-// absorbed the answer.
-func TestHookScript_NonzeroExitAtDeadlineStillFails(t *testing.T) {
+// apply — os/exec replaces only a NIL result — so the *ExitError surfaces. And
+// because the script ANSWERED, the fired deadline must NOT wrap it in
+// DeadlineExceeded: the wrap is gated on !Exited(), since a caller that treats
+// the wrapped sentinel as "workspace state unproven" (reap →
+// ErrWorkspaceStateUnknown → retain + re-run delete_cmd) would misread an
+// answered failure as silence (#4411 review — this test asserted the wrap
+// before the gate landed).
+func TestHookScript_NonzeroExitAtDeadlineSurfacesItsExitError(t *testing.T) {
 	script := writeHookScript(t, filepath.Join(t.TempDir(), "hook.sh"), "exit 23")
 
 	exitR, exitW, err := os.Pipe()
@@ -223,10 +226,12 @@ func TestHookScript_NonzeroExitAtDeadlineStillFails(t *testing.T) {
 	require.True(t, windowOpened,
 		"seam did not observe script-exit followed by Cancel — the test exercised nothing")
 	require.Error(t, err, "a script that exited 23 failed, whatever the clock did")
-	assert.True(t, errors.Is(err, context.DeadlineExceeded),
-		"the conservative classification for an answer the workspace may not have absorbed")
-	assert.Contains(t, err.Error(), "exit status 23",
-		"the script's real exit status must still surface inside the report")
+	assert.False(t, errors.Is(err, context.DeadlineExceeded),
+		"an exit-23 the deadline did not cause must not be reported as a timeout: %v", err)
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 23, exitErr.ExitCode(),
+		"the script's real exit status is the report")
 }
 
 // The failure direction the guard must never take: a script still running when
