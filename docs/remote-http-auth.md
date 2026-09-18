@@ -322,10 +322,12 @@ connects. The web client reads the daemon's answer from `/v1/auth-info` and skip
 its login screen whenever no token is required.
 
 The trade-off is deliberate: `af` ships open rather than closed, and the
-loopback-only `network.listen_addr` is what bounds the blast radius — the tokenless
-posture is only ever allowed to front a listener nothing off-box can reach.
-Exposing the daemon to a network is an explicit act, and it carries the token
-with it: af will not start a network listener without one.
+loopback-only `network.listen_addr` is what bounds the blast radius — out of the
+box, the tokenless posture fronts a listener nothing off-box can reach.
+Exposing the daemon to a network is an explicit act: af serves the bind and
+warns once at daemon start rather than refusing it (see
+[the tokenless network warning](#the-tokenless-network-warning)); carrying the
+token is your decision.
 
 ### Loopback is exempt even with the token on
 
