@@ -198,7 +198,7 @@ func loadConfig(readDigest *ConfigDigest) (*Config, error) {
 	}
 
 	// 3. A real config.json with no config.toml → one-time conversion.
-	return convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, prettyTomlPath)
+	return convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath)
 }
 
 // ReadOnlyConfigLoad is a no-write config snapshot for diagnostics.
@@ -441,7 +441,7 @@ var convertRaceHookForTest func()
 // run); a crash after it leaves both files, and LoadConfig's canonical-toml
 // rule resolves that to config.toml with a warning. The rename is therefore
 // best-effort — a failure is logged, not fatal.
-func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, prettyTomlPath string) (*Config, error) {
+func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath string) (*Config, error) {
 	var result *Config
 	lockErr := withFollowedFileLock(tomlPath, func(locked lockedTarget) error {
 		if convertRaceHookForTest != nil {
@@ -479,22 +479,28 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			return fmt.Errorf("failed to read config file %s: %w", prettyConfigPath, err)
 		}
 		if os.IsNotExist(err) || len(data) == 0 {
-			// The racer renamed config.json to .bak (and its config.toml is
-			// gone/incomplete), or the file is an empty first-run stub — either
-			// way there is nothing to convert, so materialize fresh defaults.
+			// config.json vanished/was truncated under the lock. A concurrent
+			// af converter that won already wrote config.toml and was adopted by
+			// locked.read() above — and even if that read missed,
+			// materializeDefaultConfig's O_CREATE|O_EXCL create fails EEXIST on
+			// the winner's config.toml — so this branch is only reached when an
+			// external process (in-place editor, rm, mv) made config.json
+			// empty/gone in the inter-read window. The conversion lock
+			// serializes af converters, not external editors, so this window is
+			// not closed by acquiring the lock.
 			//
-			// This one keeps the LINK path deliberately. It creates with
-			// O_CREATE|O_EXCL, which fails on a symlink rather than following
-			// it, so it can never write through the link; and the questions it
-			// asks — is something already at config.toml, is that something a
-			// link — are questions about the link itself, which the pinned
-			// target cannot answer.
-			//
-			// It does not confirm-and-refuse either, for the same reason as the
-			// winner branch above: what it returns is the config af STARTS on,
-			// not a report about what af changed. Every command outcome under
-			// this lock confirms; these two loads deliberately do not.
-			cfg, mErr := materializeDefaultConfig(configDir, tomlPath, prettyTomlPath)
+			// An in-place rewrite may be mid-flight (#4483): the writer
+			// truncated config.json first and has not written its content yet.
+			// Installing a canonical config.toml of built-in defaults here
+			// shadows the user's config.json on the next load — the same
+			// in-place-rewrite threat loadConfig's pre-lock zero-byte path
+			// declines to write for. A read never deletes user data, and a read
+			// never installs a canonical file that shadows an in-flight one
+			// either: answer defaults in memory and write nothing, leaving
+			// config.json for whoever holds it. If a writer completes it, the
+			// next load parses and converts it as usual. (Mirrors loadConfig's
+			// pre-lock path.)
+			cfg, mErr := emptyConfigStubLoad(prettyConfigPath)
 			if mErr != nil {
 				return mErr
 			}
