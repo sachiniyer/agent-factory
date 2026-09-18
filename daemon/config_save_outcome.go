@@ -45,9 +45,9 @@ const skewedApplyDigestWarning = "saved config, but this daemon is too old to re
 func failedConfigApplyOutcome(err error) (config.ApplyOutcome, string) {
 	var serverErr rpc.ServerError
 	if errors.As(err, &serverErr) && strings.HasPrefix(string(serverErr), "reload config:") {
-		return config.ApplyOutcome{DaemonApplyFailed: true}, "saved config, but live apply failed: " + err.Error()
+		return config.ApplyOutcome{DaemonApply: config.DaemonApplyFailed}, "saved config, but live apply failed: " + err.Error()
 	}
-	return config.ApplyOutcome{DaemonApplyUnconfirmed: true}, "saved config, but live apply could not be confirmed: " + err.Error()
+	return config.ApplyOutcome{DaemonApply: config.DaemonApplyUnconfirmed}, "saved config, but live apply could not be confirmed: " + err.Error()
 }
 
 // confirmSavedConfigDigest is the ONE comparison that decides whether a
@@ -66,9 +66,10 @@ func failedConfigApplyOutcome(err error) (config.ApplyOutcome, string) {
 // a genuine mismatch, and an apply whose load never reached the canonical
 // config.toml read (it materialized defaults or converted a legacy config.json,
 // so it parsed no file this save could have written). Both mean "cannot
-// confirm", which is what config.ApplyOutcome.DaemonApplyUnconfirmed says — and
-// which leaves a DEFERRED key's next-start promise standing, because the file
-// was written either way.
+// confirm", which is what config.DaemonApplyUnconfirmed says — and which leaves
+// a DEFERRED key's next-start promise standing, because the file was written
+// either way. It replaces the applied answer outright: the apply ran, but which
+// file it loaded is unproven, so no applied claim may survive beside it.
 //
 // The comparison is against a digest rather than a value on purpose: this
 // function plus config.ConfigDigest is the entire mechanism, where the readback
@@ -78,7 +79,7 @@ func confirmSavedConfigDigest(outcome *config.ApplyOutcome, warnings *[]string, 
 	if loaded.Matches(wrote) {
 		return
 	}
-	outcome.DaemonApplyUnconfirmed = true
+	outcome.DaemonApply = config.DaemonApplyUnconfirmed
 	*warnings = append(*warnings, digestMismatchWarning)
 }
 
@@ -94,9 +95,9 @@ func confirmSavedConfigDigest(outcome *config.ApplyOutcome, warnings *[]string, 
 // the only answer this path can support.
 //
 // A DEFERRED key is unaffected, by the same rule as every other cause of this
-// bit: the file was written, so the next daemon start or af launch still reads
-// this save's value (see config.ApplyOutcome.DaemonApplyUnconfirmed).
+// state: the file was written, so the next daemon start or af launch still reads
+// this save's value (see config.DaemonApplyUnconfirmed).
 func applyDigestSkewUnconfirmed(outcome *config.ApplyOutcome, warnings *[]string) {
-	outcome.DaemonApplyUnconfirmed = true
+	outcome.DaemonApply = config.DaemonApplyUnconfirmed
 	*warnings = append(*warnings, skewedApplyDigestWarning)
 }
