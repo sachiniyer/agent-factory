@@ -50,16 +50,46 @@ import (
 // This mirrors the error-propagation contract already adopted by
 // LoadRepoConfig, where only os.IsNotExist yields defaults.
 func LoadConfig() (*Config, error) {
-	cfg, err := loadConfig()
+	cfg, _, err := LoadConfigWithDigest()
+	return cfg, err
+}
+
+// LoadConfigWithDigest is LoadConfig plus the digest of the config.toml bytes it
+// parsed, for the one caller that has to prove WHICH file it loaded: a live
+// config apply, whose save then compares the digest against the bytes it wrote
+// to decide whether it may claim the daemon is serving this save's value (#4247).
+//
+// The digest is Known only on the canonical path — the single os.ReadFile of
+// config.toml in loadConfig below. Every other path (first-run materialization,
+// a legacy config.json conversion, an empty stub answered from memory) leaves it
+// unknown, because none of them parsed a config.toml a save could have written.
+// Unknown never matches, so those loads confirm nothing rather than confirming
+// wrongly.
+//
+// The digest describes what was READ, which is the question a save is asking.
+// persistAppearanceMigration below may rewrite the file afterwards; that does not
+// change which bytes this load parsed, and so does not change what the running
+// daemon is serving.
+func LoadConfigWithDigest() (*Config, ConfigDigest, error) {
+	var digest ConfigDigest
+	cfg, err := loadConfig(&digest)
 	if err != nil {
-		return nil, err
+		return nil, ConfigDigest{}, err
 	}
 	// All successful normal paths converge here after releasing conversion locks,
 	// including a concurrent winner adopted by conversion or materialization.
-	return persistAppearanceMigration(cfg)
+	cfg, err = persistAppearanceMigration(cfg)
+	if err != nil {
+		return nil, ConfigDigest{}, err
+	}
+	return cfg, digest, nil
 }
 
-func loadConfig() (*Config, error) {
+// loadConfig reports into readDigest, when non-nil, the digest of the canonical
+// config.toml read — and only there. Every other return leaves it untouched at
+// its unknown zero value, which is the honest answer: no config.toml a save
+// wrote was parsed on those paths.
+func loadConfig(readDigest *ConfigDigest) (*Config, error) {
 	configDir, err := GetConfigDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config directory: %w", err)
@@ -126,6 +156,13 @@ func loadConfig() (*Config, error) {
 		if jsonExists {
 			log.WarningLog.Printf("both %s and %s exist; %s is canonical and %s is ignored — delete or rename %s to silence this warning",
 				prettyTomlPath, prettyConfigPath, prettyTomlPath, prettyConfigPath, prettyConfigPath)
+		}
+		// The canonical read, and the only one a save can be compared against:
+		// tomlData is the whole file, and parseLoadedConfigTOML parses this
+		// buffer rather than reading again. A shadowing config.json changes
+		// nothing here — it is ignored, loudly, and config.toml still decides.
+		if readDigest != nil {
+			*readDigest = digestConfigBytes(tomlData)
 		}
 		return parseLoadedConfigTOML(tomlData, prettyTomlPath, tomlPath)
 	}

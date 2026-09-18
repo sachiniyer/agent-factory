@@ -382,6 +382,23 @@ func TestTaskDeliveryWaitsForHealthySnapshotToClearLimit(t *testing.T) {
 	}
 }
 
+// heldTransportSafetyTimeout bounds each wait in
+// TestSlowTaskPromptDoesNotBlockAnUnrelatedTarget. It is not a latency budget,
+// and missing it asserts nothing about ordering: its only job is to stop a
+// regression from hanging CI until the package timeout.
+const heldTransportSafetyTimeout = 10 * time.Second
+
+// receiveWithin receives from ch, reporting false if d elapses first.
+func receiveWithin[T any](ch <-chan T, d time.Duration) (T, bool) {
+	select {
+	case v := <-ch:
+		return v, true
+	case <-time.After(d):
+		var zero T
+		return zero, false
+	}
+}
+
 func TestSlowTaskPromptDoesNotBlockAnUnrelatedTarget(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	firstRecorder := &promptRecorder{}
@@ -418,8 +435,8 @@ func TestSlowTaskPromptDoesNotBlockAnUnrelatedTarget(t *testing.T) {
 	}()
 	select {
 	case <-firstBackend.started:
-	case <-time.After(time.Second):
-		t.Fatal("first prompt did not reach its blocking transport")
+	case <-time.After(heldTransportSafetyTimeout):
+		t.Fatalf("timed out after %v waiting for the first prompt to reach its blocking transport", heldTransportSafetyTimeout)
 	}
 	limitDone := make(chan struct{})
 	go func() {
@@ -434,38 +451,40 @@ func TestSlowTaskPromptDoesNotBlockAnUnrelatedTarget(t *testing.T) {
 		})
 		secondDone <- err
 	}()
-	limitBlocked := false
-	select {
-	case <-limitDone:
-	case <-time.After(100 * time.Millisecond):
-		limitBlocked = true
-	}
-	secondBlocked := false
-	select {
-	case err := <-secondDone:
-		if err != nil {
-			close(firstBackend.release)
-			<-firstDone
-			t.Fatalf("unrelated prompt failed: %v", err)
-		}
-	case <-time.After(100 * time.Millisecond):
-		secondBlocked = true
-	}
+	// firstBackend.release is still open, so the first target's transport I/O is
+	// demonstrably in progress until the close below. A limit publication or
+	// prompt serialized behind that I/O cannot finish before then, however long it
+	// is given; an independent one finishes. Finishing inside this window is the
+	// proof of independence, so neither wait carries a latency budget, and missing
+	// the safety timeout is reported as a timeout, not as serialization (#4608: a
+	// 100ms budget read a slow arm64 runner as serialized).
+	_, limitWhileHeld := receiveWithin(limitDone, heldTransportSafetyTimeout)
+	secondErr, secondWhileHeld := receiveWithin(secondDone, heldTransportSafetyTimeout)
 	close(firstBackend.release)
-	if err := <-firstDone; err != nil {
-		t.Fatalf("first prompt failed after release: %v", err)
+	// Unwind every outstanding call before reporting, so none outlives the test.
+	firstErr, firstReturned := receiveWithin(firstDone, heldTransportSafetyTimeout)
+	if !limitWhileHeld {
+		receiveWithin(limitDone, heldTransportSafetyTimeout)
 	}
-	if limitBlocked {
-		<-limitDone
+	if !secondWhileHeld {
+		receiveWithin(secondDone, heldTransportSafetyTimeout)
 	}
-	if secondBlocked {
-		if err := <-secondDone; err != nil {
-			t.Fatalf("unrelated prompt failed after slow transport released: %v", err)
-		}
-		t.Fatal("unrelated task prompt was serialized behind another target's transport I/O")
+	if !firstReturned {
+		t.Fatalf("timed out after %v waiting for the first prompt once its transport was released", heldTransportSafetyTimeout)
 	}
-	if limitBlocked {
-		t.Fatal("unrelated limit publication was serialized behind another target's transport I/O")
+	if firstErr != nil {
+		t.Fatalf("first prompt failed after release: %v", firstErr)
+	}
+	if !limitWhileHeld {
+		t.Errorf("timed out after %v waiting for the unrelated limit publication while slow-target's transport was held open", heldTransportSafetyTimeout)
+	}
+	if !secondWhileHeld {
+		t.Errorf("timed out after %v waiting for the unrelated task prompt while slow-target's transport was held open", heldTransportSafetyTimeout)
+	} else if secondErr != nil {
+		t.Errorf("unrelated prompt failed: %v", secondErr)
+	}
+	if t.Failed() {
+		return
 	}
 	if got := limitTarget.GetLiveness(); got != session.LiveLimitReached {
 		t.Fatalf("unrelated limit publication left liveness %v, want LimitReached", got)

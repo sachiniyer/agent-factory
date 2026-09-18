@@ -831,9 +831,10 @@ type SetConfigValueResponse struct {
 	// on the next daemon start.
 	Applied []string `json:"applied"`
 	Pending []string `json:"pending"`
-	// Warnings surfaces the tokenless-network exposure notice and any listener
-	// rebind failure at save time (#2480 PR2). The web form shows them after the
-	// echo so a user learns when a socket key did not apply or a posture is exposed.
+	// Warnings carries apply-time notices: tokenless-network exposure, listener
+	// rebind failures, and failed/unconfirmed live-apply details. On a failed or
+	// unconfirmed apply it also retains Result.Warnings, since ApplyConfig did not
+	// return its normal warning set. The web form renders this complete set.
 	Warnings []string `json:"warnings,omitempty"`
 	// ListenerAddr is where the daemon is ACCEPTING right now for a listener key
 	// (network.listen_addr / network.preview_listen_addr) — "" for every other key,
@@ -844,6 +845,10 @@ type SetConfigValueResponse struct {
 	// FAILED, it names the address still serving rather than the one config now
 	// asks for, which is what the deferred notice beside it is about.
 	ListenerAddr string `json:"listener_addr,omitempty"`
+	// ApplyOutcome is appended to preserve every established response member's
+	// wire order. It lets automation distinguish applied, deferred, no-daemon,
+	// failed, and unconfirmed saves without parsing RestartNotice or Warnings.
+	ApplyOutcome config.ApplyStatus `json:"apply_outcome,omitempty"`
 }
 
 // UnsetConfigValueRequest clears one globally unsettable migrated setting.
@@ -864,6 +869,8 @@ type UnsetConfigValueResponse struct {
 	// two verbs report it identically or one of them is the surface that quietly
 	// does not (#3397 is that lesson, on this same pair of handlers).
 	ListenerAddr string `json:"listener_addr,omitempty"`
+	// Keep this additive field last for the same wire-order contract as set.
+	ApplyOutcome config.ApplyStatus `json:"apply_outcome,omitempty"`
 }
 
 // ApplyConfigRequest asks the running daemon to apply the on-disk global config
@@ -878,7 +885,7 @@ type ApplyConfigResponse struct {
 	Applied []string `json:"applied"`
 	Pending []string `json:"pending"`
 	// Warnings carries the tokenless-network exposure notice and any listener rebind
-	// failure so a pre-#3231 `af config set` (which applies via RequestApplyConfig)
+	// failure so a pre-#3231 `af config set` (which applies via the ApplyConfig poke)
 	// can print them.
 	Warnings []string `json:"warnings,omitempty"`
 	// FailedListenerKeys names the socket keys (listen_addr / preview_listen_addr)
