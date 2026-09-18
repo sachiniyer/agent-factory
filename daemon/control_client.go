@@ -851,8 +851,8 @@ func SendPromptWithStatus(req SendPromptRequest) (session.PromptDeliveryStatus, 
 }
 
 // DeliverPrompt asks the daemon to deliver a prompt to a target session,
-// auto-creating it when missing. It returns the recorded status ("started" or
-// "sent"). Unlike a bare CreateSession-then-SendPrompt from the caller, the
+// auto-creating it when missing. It returns the recorded status ("started",
+// "sent", or a task-only park). Unlike a bare CreateSession-then-SendPrompt, the
 // whole create-or-send decision runs under the daemon's per-target lock, so
 // concurrent deliveries to the same shared target never drop a prompt (#865).
 func DeliverPrompt(req DeliverPromptRequest) (string, error) {
@@ -864,14 +864,8 @@ func DeliverPrompt(req DeliverPromptRequest) (string, error) {
 // delivery observation. Older daemons omit DeliveryStatus, which is honest
 // could-not-confirm rather than an inferred success.
 func DeliverPromptWithStatus(req DeliverPromptRequest) (string, session.PromptDeliveryStatus, error) {
-	var resp DeliverPromptResponse
-	if err := callDaemon("DeliverPrompt", req, &resp); err != nil {
-		return "", session.PromptCouldNotConfirm, err
-	}
-	if !resp.DeliveryStatus.Valid() {
-		resp.DeliveryStatus = session.PromptCouldNotConfirm
-	}
-	return resp.Status, resp.DeliveryStatus, nil
+	result, err := deliverPromptForTaskRPC(req)
+	return result.status, result.deliveryStatus, err
 }
 
 // ListTasksNoSpawn returns the daemon's authoritative task list WITHOUT

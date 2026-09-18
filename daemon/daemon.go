@@ -189,6 +189,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 
 	scheduler := newTaskScheduler()
 	watchers := newWatcherSupervisorWithEventsPerMinute(cfg.WatcherEventsPerMinute)
+	watchers.observeTargetLimit = manager.observeTaskTargetLimit
 
 	shutdownCh := make(chan struct{})
 	closeControl, alreadyRunning, err := bindControlServerExclusive(manager, scheduler, watchers, shutdownCh)
