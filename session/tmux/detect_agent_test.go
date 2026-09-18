@@ -1,6 +1,10 @@
 package tmux
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+)
 
 // DetectAgentFromCommand is the seam every agent-conditional spawn/restore
 // behavior keys off (#1116, #1131): it must identify the agent a resolved
@@ -70,5 +74,41 @@ func TestDetectAgentFromCommand(t *testing.T) {
 				t.Errorf("DetectAgentFromCommand(%q) = %q, want %q", tt.command, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestDetectAgentExecutableAgreesWithAgentNamespaceForCommand is the shared
+// invariant the #4356 narrowing broke. Before #4356, AgentForCommand matched env
+// by basename, the same rule DetectAgentExecutable uses at the create gate, so a
+// program the gate accepted was always classifiable on restore. #4356 tightened
+// AgentForCommand to the strict isTrustedEnvExecutable set while the gate kept the
+// basename rule, and the two surfaces drifted: a path-qualified env wrapper such
+// as /usr/local/bin/env ... codex was accepted onto a session but could no longer
+// be classified by the VS Code editor scope, so a restored session's editor
+// refused with ErrUnsupportedAgent. AgentNamespaceForCommand restores the basename
+// rule for the namespace-only callers; this test pins the agreement the gate and
+// the editor scope must keep so the same drift cannot return silently.
+func TestDetectAgentExecutableAgreesWithAgentNamespaceForCommand(t *testing.T) {
+	for _, command := range []string{
+		"env codex",
+		"/bin/env codex",
+		"/usr/bin/env codex",
+		"/usr/local/bin/env CODEX_HOME=/x codex",
+		"/run/current-system/sw/bin/env codex",
+		"./env codex",
+		"/tmp/env CLAUDE_CONFIG_DIR=/y claude",
+		"env -i HOME=/h gemini --resume latest",
+		"codex",
+		"/opt/bin/claude --permission-mode plan",
+		"bash",
+		"/usr/bin/some-other-tool --foo",
+		"",
+	} {
+		gate := DetectAgentExecutable(command)
+		scope := sessionenv.AgentNamespaceForCommand(command)
+		if gate != scope {
+			t.Errorf("create gate and editor scope disagree on %q: DetectAgentExecutable=%q AgentNamespaceForCommand=%q",
+				command, gate, scope)
+		}
 	}
 }
