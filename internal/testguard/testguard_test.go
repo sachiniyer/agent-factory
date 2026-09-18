@@ -10,11 +10,16 @@ import (
 )
 
 // sandbox points the tripwire's ambient resolution at a temp dir and returns
-// the config.json path inside it.
+// the config.json path inside it. HOME and the agent root overrides move too,
+// because ConfigTripwire also snapshots the agent config roots (#4469). A unit
+// test must not hash the developer's real skill files.
 func sandbox(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", dir)
+	t.Setenv("HOME", dir)
+	unsetForTest(t, "CODEX_HOME")
+	unsetForTest(t, "GEMINI_CLI_HOME")
 	return filepath.Join(dir, "config.json")
 }
 

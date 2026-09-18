@@ -107,6 +107,12 @@ satisfied by the maintainer rather than skipped, so what is left is the mechanic
 part the gate already performs for every other passing PR. The approval is an
 APPROVED review from an allowed author, or a comment from one whose first line is
 exactly `## Review — approve` — the maintainer account cannot approve its own PR.
+The comment carries none of GitHub's authorship checks, so it counts as an
+approval of the commenter's OWN pull request only for a self-approving maintainer
+(`SELF_APPROVING_AUTHORS`, today `sachiniyer`); any other allowed author — the
+Detail app included — needs a second party, and an unreadable PR author counts as
+possibly its own (#4554). APPROVED reviews need no such check: GitHub refuses a
+self-approving review server-side.
 That is the ENTIRE first line, exactly, not a prefix: a qualifier on the heading
 (`## Review — approve, one fix owed before landing`) withholds the approval on
 purpose, so a review that owes a fix cannot land on its own heading.
@@ -433,8 +439,8 @@ writes.
 GitHub suppresses `check_suite` recursion for suites created by Actions. The
 required `Lint` and `Build` jobs both belong to **PR Validation**, so Auto Gate
 also subscribes to that workflow's terminal `workflow_run` event. GitHub has
-intermittently omitted that event, so a five-minute reconciliation pass backs it
-up: it wakes only an absent exact decision, or a failed decision that names
+intermittently omitted that event, so a reconciliation pass backs it up: it
+wakes only an absent exact decision, or a failed decision that names
 `Build` or `Lint` as a blocker and recorded a different state for the now-complete
 check. Runs are coalesced per PR/head. The decision records the check-run ID,
 status and conclusion that its
@@ -442,21 +448,47 @@ required-check read actually observed; the reconciler compares that tuple with
 the current completed run rather than ordering check and publication clocks.
 Missing or malformed legacy evidence is reconciled conservatively once.
 
+**A pass does not depend on the schedule (#4571).** The `*/5` schedule still
+starts passes, but GitHub has delivered it every two to five hours. Every other
+Auto Gate run therefore ends by requesting a pass: it sends one
+`repository_dispatch` of type `auto-gate-reconcile`, and the run that starts is
+the same pass the schedule runs. Two guards bound this:
+
+- **No recursion.** A pass never requests a pass. The request step skips
+  `schedule` and `repository_dispatch` runs, and the helper refuses them before
+  any read. Runs that a pass causes, such as update-branch recovery dispatches,
+  can request one, but only through the rate window.
+- **At most one request per five minutes.** The marker is the creation time of
+  Auto Gate's newest `repository_dispatch` run, read with one REST request
+  (`event=repository_dispatch`, `created>=` the window start, `per_page=1`).
+  Every requested pass is such a run, so a pass that selected nothing still
+  counts. GitHub stores the marker, so the gate writes no variable, ref, or
+  check run. A failed or unreadable read sends nothing, and the schedule
+  remains the backstop. Two runs that read before either dispatch is visible
+  can both send one. Dispatched and scheduled passes share one concurrency
+  group, which holds one running pass and one pending pass, so that race costs
+  at most one extra scan.
+
 Each pass paginates every open PR in creation order and carries its current check
 rollup in the same GraphQL snapshot, 100 PRs per request. Eligibility therefore
 depends on neither `updated_at` ordering nor a wall-clock page assignment: every
-PR, including the least recently updated one, is inspected in the next delivered
-sweep. The nominal scheduling bound is five minutes; a scheduler outage or delay
-adds directly to that bound instead of permanently skipping a page. At most ten
-stale decisions are reevaluated per sweep, so S simultaneously stale decisions
-drain in at most `ceil(S / 10)` delivered sweeps. A truncated per-head rollup is
+PR, including the least recently updated one, is inspected in the next pass. On
+an active repository, the first Auto Gate run after the window opens requests
+that pass. A frozen decision then waits about five minutes plus runner queue
+time, not hours. A quiet repository falls back to the schedule. A delay adds to
+that wait but cannot make a pass skip a page. At most ten stale decisions are
+reevaluated per pass, so S simultaneously stale decisions
+drain in at most `ceil(S / 10)` passes. A truncated per-head rollup is
 skipped fail-closed rather than treated as complete.
 
-The scan costs `ceil(N / 100)` GraphQL requests per pass: one request (12/hour)
-through the 83-head REST-quota threshold, or two (24/hour) for 120 PRs, before
-bounded retries. It performs no per-head REST reads. Scheduled passes also skip
-unrelated branch-sweep housekeeping. This avoids both the frozen-decision
-failure and one gate evaluation per completed matrix job (#4242).
+The scan costs `ceil(N / 100)` GraphQL requests per pass. The rate window holds
+dispatched passes to about 12 an hour, and scheduled passes add a few more.
+That is one request per pass (about 12/hour) through the 83-head REST-quota
+threshold, or two (about 24/hour) for 120 PRs, before bounded retries. The scan
+does no per-head REST reads. Each other run pays one REST read for the marker,
+plus at most one dispatch per window. Passes skip unrelated branch-sweep
+housekeeping. This avoids both the frozen-decision failure and one gate
+evaluation per completed matrix job (#4242).
 
 GitHub also suppresses `push` workflows when Auto Gate merges with its
 `GITHUB_TOKEN`. After a merge, the gate therefore dispatches the five
@@ -550,8 +582,10 @@ structurally removes top-level pull-review comments from that feed before body
 classification; those artifacts are finding surfaces, while replies retain the
 finding-shaped body guard. It reconstructs degraded merges using #3932's method:
 a reviewer-unavailable response whose artifact timestamp falls inside the
-episode and before merge, plus no real verdict covering the actual merged head
-before merge. Each degraded merge is attributed once, to the episode holding
+episode and before merge, plus no real verdict covering the merged head before
+merge — where coverage admits the same head set the gate accepts: the merged
+head and each first parent the update-branch proof verifies content-preserving
+(#4238, #4241). Each degraded merge is attributed once, to the episode holding
 the latest qualifying notice at or before that merge, even when the merge lands
 after recovery. Scanned merged PRs have their attribution refreshed across both
 rebuilt and frozen episodes, so merges after the 24-hour boundary are counted
@@ -561,7 +595,9 @@ implementation of the merge gate; the count is labelled with its method in the
 record. An unrecognised artifact before the episode is not evidence. Late
 reviews cannot undo a degraded merge. The shared `codexEvidence` export from
 `auto-gate.js` supplies structural classification, quotation/finding exclusions,
-and verdict parsing. Finding predicates and the hand gate's jq are unchanged.
+verdict parsing, and the update-branch content-head proof, so the record and the
+gate cannot drift apart on what a covering verdict may name. Finding predicates
+and the hand gate's jq are unchanged.
 
 On a degraded evaluation, Auto Gate reads this record once and writes the
 outage duration to the job summary. It labels the watch's observation time;
