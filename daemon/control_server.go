@@ -242,15 +242,15 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	result, err := config.SetGlobalConfigValue(req.Key, req.Value)
+	result, wroteDigest, err := config.SetGlobalConfigValueWithDigest(req.Key, req.Value)
 	if err != nil {
 		return err
 	}
 	resp.Result = result
 	// Apply the write to the running daemon in place (#2480) so the web form need
 	// not tell the user to restart for a hot-reloadable key. Best-effort: the write
-	// already succeeded on disk, so an apply failure just means the change waits for
-	// the next daemon start.
+	// already succeeded on disk; report a live apply failure separately so the
+	// operator knows the running daemon has not adopted the saved config.
 	var outcome config.ApplyOutcome
 	if s.manager != nil {
 		if applied, aerr := s.manager.ApplyConfig(); aerr == nil {
@@ -258,8 +258,19 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 			resp.Pending = applied.Pending
 			resp.Warnings = applied.Warnings
 			outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applied.FailedListenerKeys}
+			// A successful apply claims "applied" only if the daemon loaded THIS
+			// save's file: a competing write can land between the writer's
+			// file-lock release and the apply's load (#4247). Both digests are
+			// taken in this process — one by the write, one by the apply's own
+			// load — so the comparison needs nothing read back.
+			confirmSavedConfigDigest(&outcome, &resp.Warnings, wroteDigest, applied.Digest)
+		} else {
+			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+aerr.Error())
+			outcome.DaemonApplyFailed = true
 		}
 	}
+	resp.Warnings = completeConfigSaveWarnings(outcome, result.Warnings, resp.Warnings)
+	resp.ApplyOutcome = outcome.StatusForKey(result.Key)
 	// The per-key effect notice (#2480). A socket key (network.listen_addr /
 	// network.preview_listen_addr, #2480 PR2) whose live rebind FAILED did not apply —
 	// the daemon kept the old listener — so it must not be reported as applied; the
@@ -765,12 +776,13 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 		return err
 	}
 	managerDelegated = true
-	status, deliveryStatus, err := s.manager.DeliverPromptWithStatus(req)
+	status, deliveryStatus, promptRetained, err := s.manager.deliverPromptWithOutcome(req)
 	if err != nil {
 		return err
 	}
 	resp.Status = status
 	resp.DeliveryStatus = deliveryStatus
+	resp.PromptRetained = promptRetained
 	return nil
 }
 
