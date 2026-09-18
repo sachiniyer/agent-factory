@@ -125,7 +125,7 @@ func TestLifecycleStopFlushPreservesTerminalStatus(t *testing.T) {
 
 	s := newWatcherSupervisorWithEventsPerMinute(2)
 	s.loadTasks = task.LoadTasks
-	s.deliver = func(taskID, line string) error {
+	s.deliver = func(taskID, line string, _ watchDeliveryOptions) error {
 		now := time.Now()
 		_, err := task.UpdateTaskStatus(taskID, &now, "sent")
 		return err
@@ -172,7 +172,7 @@ func TestLifecycleErroredFlushPreservesTerminalStatus(t *testing.T) {
 
 	s := newWatcherSupervisorWithEventsPerMinute(2)
 	s.loadTasks = task.LoadTasks
-	s.deliver = func(taskID, line string) error {
+	s.deliver = func(taskID, line string, _ watchDeliveryOptions) error {
 		now := time.Now()
 		_, err := task.UpdateTaskStatus(taskID, &now, "sent")
 		return err
