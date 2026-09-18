@@ -6,6 +6,8 @@ the commands that use it.
 
 Read the [contributor overview](index.md) and the repository operating contract
 first. Then choose the focused harness below; CI owns routine full-suite runs.
+To show that a new `daemon/`, `app/` or `integration/` test fails without its
+fix, use a [fail-first probe run](probe-runs.md) in CI rather than a container.
 
 `af`'s test suite and play-tests drive **real tmux servers and real `af`
 daemons**. The tests themselves are hermetic (every tmux-touching package
@@ -29,7 +31,9 @@ make test-container
 make test-container GOTESTARGS="-race ./daemon/..."
 ```
 
-Runs `go test -count=1 ./...` inside the container. This is the **one
+Runs `go test -count=1 -timeout=30m ./...` inside the container — an explicit
+budget rather than Go's 10m-per-package default, which the `daemon` package has
+crossed on a slow CI runner; a `-timeout` in `GOTESTARGS` overrides it. This is the **one
 sanctioned way to run the bare full suite on a shared box** — on the host,
 skip the `daemon` and `app` packages (`go test $(go list ./... | grep -vE '/(daemon|app)')`),
 which spawn real `af` daemons and drive real tmux next to live sessions, or
