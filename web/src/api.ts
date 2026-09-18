@@ -33,6 +33,7 @@ import type {
   AccountsResponse,
   ConfigResponse,
   ConfigSetResponse,
+  ProjectConfigResponse,
   RegisterAccountResponse,
   ProjectExpectation,
   SessionData,
@@ -660,9 +661,10 @@ export async function registerProject(path: string, token: string): Promise<Regi
 /** Lists the daemon's registered projects (the #2355 registry) — the read half of
  *  the #2456 union. The client ∪s these roots with the projects it derives from live
  *  sessions and tasks, so a registered-but-sessionless project still shows in the
- *  switcher and is creatable-into (projectSummaries / pickerProjects). The web is the
- *  only client that reads the registry over HTTP; the TUI and CLI read
- *  config.ListProjects() in-process, so this has no Go apiclient twin. */
+ *  switcher and is creatable-into (projectSummaries / pickerProjects). The Go
+ *  apiclient twin exists for the remote-targeted TUI's config scope (its roots must
+ *  resolve on the DAEMON's filesystem); the local TUI and CLI read
+ *  config.ListProjects() in-process. */
 export async function listProjects(token: string): Promise<RegisteredProject[]> {
   const resp = await af<{ projects: RegisteredProject[] | null }>("ListProjects", {}, token);
   return resp.projects ?? [];
@@ -1111,6 +1113,27 @@ export async function removeTask(task: TaskMutationRef, token: string): Promise<
 export async function getConfig(token: string): Promise<ConfigResponse> {
   const resp = await af<ConfigResponse>("GetConfig", {}, token);
   return { entries: resp?.entries ?? [], path: resp?.path ?? "" };
+}
+
+/** Fetches one repository's project-effective config view — the web analogue of
+ *  `af config list --repo` (config.read-project), and the remote half of what the
+ *  TUI config editor's project scope reads locally through
+ *  config.ResolveProjectConfigView. The daemon resolves the same manifest rows on
+ *  its own filesystem, so the repo-scoped keys the global view does not carry
+ *  (backend, docker, ssh, remote_hooks) arrive here.
+ *
+ *  `projectPath` is a read-only selector on the --repo contract: an existing
+ *  repository path ON THE DAEMON HOST (a listProjects root), sent verbatim. It
+ *  resolves a read and neither registers a project nor writes identity state. The
+ *  view is READ-ONLY — per-project writes are `af config set --project`, a
+ *  separate capability (config.write-project), so this route has no write twin.
+ *
+ *  Throws ApiError on transport/auth/resolution failure — an unresolvable root is
+ *  the daemon's own repository error, surfaced verbatim like the TUI's scope-row
+ *  refusal. */
+export async function getProjectConfig(projectPath: string, token: string): Promise<ProjectConfigResponse> {
+  const resp = await af<ProjectConfigResponse>("GetProjectConfig", { project_path: projectPath }, token);
+  return { entries: resp?.entries ?? [], project_root: resp?.project_root ?? "", path: resp?.path ?? "" };
 }
 
 /** Sets one global config key, exactly as `af config set key value` does: the

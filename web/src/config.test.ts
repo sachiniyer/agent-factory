@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { getConfig, setConfigValue } from "./api.js";
+import { getConfig, getProjectConfig, setConfigValue } from "./api.js";
 import { canCommit, controlKind, createKeyedQueue, saveNotice } from "./config.js";
 import type { ConfigEntry, ConfigSetResponse } from "./types.js";
 
@@ -310,4 +310,42 @@ test("different keys are not queued behind each other", async () => {
   await Promise.all([slow, fast]);
 
   assert.deepEqual(finished, ["auto_update", "listen_addr"], "keys have no ordering relationship; they must not block each other");
+});
+
+// --- getProjectConfig: the project scope's read (config.read-project) --------
+
+test("getProjectConfig posts the path selector and returns the resolved root", async () => {
+  const cap = stubFetch({
+    entries: [entry({ key: "backend", value: "tmux" })],
+    project_root: "/home/u/repo",
+    path: "/home/u/.agent-factory/config.toml",
+  });
+  const resp = await getProjectConfig("/home/u/repo", "tok");
+
+  assert.equal(cap.url, "/v1/GetProjectConfig");
+  // The path is a read-only selector on the --repo contract, sent verbatim —
+  // the daemon resolves it on ITS filesystem and writes nothing.
+  assert.deepEqual(cap.body, { project_path: "/home/u/repo" });
+  assert.equal(cap.auth, "Bearer tok");
+  assert.equal(resp.entries[0].key, "backend");
+  // The resolved root, not the selector: the view names what it is scoped to.
+  assert.equal(resp.project_root, "/home/u/repo");
+  assert.equal(resp.path, "/home/u/.agent-factory/config.toml");
+});
+
+test("getProjectConfig normalizes a sparse answer to empty fields, never null", async () => {
+  stubFetch({ entries: null });
+  const resp = await getProjectConfig("/repo", "tok");
+  assert.deepEqual(resp.entries, [], "callers iterate this; null would throw at render");
+  assert.equal(resp.project_root, "");
+  assert.equal(resp.path, "");
+});
+
+test("getProjectConfig carries the daemon's repository error verbatim", async () => {
+  stubFetch(null, { error: "failed to resolve project path \"/gone\": no longer a git repository" });
+  await assert.rejects(
+    () => getProjectConfig("/gone", "tok"),
+    /no longer a git repository/,
+    "an unresolvable scope is the daemon's answer, shown rather than silently dropped to global",
+  );
 });

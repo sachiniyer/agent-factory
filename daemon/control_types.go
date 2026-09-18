@@ -805,6 +805,28 @@ type GetConfigResponse struct {
 	Path string `json:"path"`
 }
 
+// GetProjectConfigRequest asks for the project-effective config view for one
+// repository path — the UI analogue of `af config list --repo`. The path is a
+// read-only selector on the same contract as --repo: it resolves an existing
+// repository and neither registers a project nor writes identity state.
+type GetProjectConfigRequest struct {
+	ProjectPath string `json:"project_path"`
+}
+
+type GetProjectConfigResponse struct {
+	// Entries are every AllManifest key with the repository's effective value —
+	// the repo-scoped keys (backend, docker, ssh, remote_hooks,
+	// post_worktree_commands) included, which the global GetConfig view does
+	// not carry.
+	Entries []config.ConfigEntry `json:"entries"`
+	// ProjectRoot is the resolved repository root the entries describe — the
+	// header a UI shows so the view names what it is scoped to.
+	ProjectRoot string `json:"project_root"`
+	// Path is the config.toml the global layer was read from — see
+	// GetConfigResponse.Path.
+	Path string `json:"path"`
+}
+
 // SetConfigValueRequest sets one key, exactly as `af config set key value` does.
 // Value is the raw string form; the daemon hands it to the same validator, so an
 // invalid value is rejected here with the identical message rather than being

@@ -102,6 +102,66 @@ func localConfigForEditor() ([]config.ConfigEntry, string, error) {
 	return config.ManifestWithValues(cfg), filepath.Join(configDir, config.TomlConfigFileName), nil
 }
 
+// ReadProjectScopesForEditor lists the projects the `,` editor's scope row
+// offers, from whichever daemon this session is attached to. Locally that is
+// the on-disk registry — the same read the project switcher makes — and under
+// a remote target it is the daemon's own ListProjects, because the roots the
+// scope row sends back must resolve on THAT host: offering the local machine's
+// projects to a remote daemon would ask it to resolve paths it cannot see.
+//
+// A failure is returned rather than swallowed, but the caller treats it as
+// auxiliary — the editor still opens for global config, just without a scope
+// row — so an unreadable registry cannot lock the user out of the pane.
+func ReadProjectScopesForEditor() ([]config.Project, error) {
+	if !apiclient.IsRemoteTarget() {
+		return config.ListProjects()
+	}
+	client, err := apiclient.NewTargeted()
+	if err != nil {
+		return nil, err
+	}
+	defer client.CloseIdleConnections()
+	resp, err := client.ListProjects(daemon.ListProjectsRequest{})
+	if err != nil {
+		return nil, remoteConfigRefusal(client, "read the project registry from", "ListProjects", "No scope was read", err)
+	}
+	return resp.Projects, nil
+}
+
+// ReadProjectConfigForEditor reads the project-effective view for one
+// repository root — the pane's project scope — from whichever daemon this
+// session is attached to. Locally it resolves in-process through
+// config.ResolveProjectConfigView, the same chain `af config list --repo`
+// walks; remotely it posts /v1/GetProjectConfig, whose handler calls the same
+// helper, so both halves answer through one resolver.
+//
+// The location returned is the repository root itself: the pane's header names
+// what the view is scoped to, and under a remote target the daemon's own path
+// leads for the reason remoteConfigLocation documents.
+func ReadProjectConfigForEditor(projectPath string) ([]config.ConfigEntry, string, error) {
+	if !apiclient.IsRemoteTarget() {
+		entries, projectRoot, err := config.ResolveProjectConfigView(projectPath)
+		if err != nil {
+			return nil, "", err
+		}
+		return entries, projectRoot, nil
+	}
+	client, err := apiclient.NewTargeted()
+	if err != nil {
+		return nil, "", err
+	}
+	defer client.CloseIdleConnections()
+	resp, err := client.GetProjectConfig(daemon.GetProjectConfigRequest{ProjectPath: projectPath})
+	if err != nil {
+		return nil, "", remoteConfigRefusal(client, "read project config from", "GetProjectConfig", "Nothing was read", err)
+	}
+	if len(resp.Entries) == 0 {
+		return nil, "", fmt.Errorf("the config editor read no config keys from the daemon at %s; "+
+			"check that the URL names an af daemon", apiclient.RemoteTargetURL())
+	}
+	return resp.Entries, remoteConfigLocation(resp.ProjectRoot), nil
+}
+
 // applyingConfigSet writes one global config key on whichever daemon this
 // session is attached to, and returns the per-key effect notice so the pane
 // shows the honest outcome — live now, deferred rebind, next daemon start, or

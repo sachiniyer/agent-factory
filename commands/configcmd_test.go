@@ -105,8 +105,8 @@ func TestFormatConfigValue(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := formatConfigValue(c.in); got != c.want {
-				t.Fatalf("formatConfigValue(%v) = %q, want %q", c.in, got, c.want)
+			if got := config.FormatConfigValue(c.in); got != c.want {
+				t.Fatalf("config.FormatConfigValue(%v) = %q, want %q", c.in, got, c.want)
 			}
 		})
 	}

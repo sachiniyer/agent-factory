@@ -3323,6 +3323,85 @@ test("config: the editor renders from the manifest and writes through the real p
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 
+test("config: the scope selector reads a project's effective config, read-only (config.read-project)", REAL_FIXTURE, async ({ browser }) => {
+  // The config view's project scope is the web half of the TUI pane's scope row:
+  // the selector offers the daemon's own registry, the rows come back through
+  // /v1/GetProjectConfig — the same resolver `af config list --repo` walks — and
+  // they render with NO writer, because per-project writes are
+  // `af config set --project`, a separate capability (config.write-project).
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    const projectEntries = [
+      { key: "default_program", type: "string", default: "claude", purpose: "The agent a new session runs.", tier: 1, tier_name: "core", settable: true, value: "codex", requires_restart: true },
+      // The repo-scoped key the global manifest never carries — the point of
+      // the project view.
+      { key: "backend", type: "string", default: "tmux", purpose: "The backend sessions in this repository run on.", tier: 3, tier_name: "advanced", settable: false, value: "ssh", requires_restart: true },
+    ];
+    let projectPathSent = "";
+    await p.route("**/v1/ListProjects", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: { projects: [{ id: "p1", checkout_id: "", root: "/srv/repo-a", relative_root: "", path_exists: true }] },
+          error: null,
+        }),
+      });
+    });
+    await p.route("**/v1/GetProjectConfig", async (route) => {
+      projectPathSent = (route.request().postDataJSON() as { project_path: string }).project_path;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: { entries: projectEntries, project_root: "/srv/repo-a", path: "/home/u/.agent-factory/config.toml" },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+
+    // The selector offers the daemon's registry beside the global file.
+    const scope = p.getByLabel("Config scope", { exact: true });
+    await expect(scope).toHaveCount(1);
+    await expect(scope.locator("option")).toHaveCount(2);
+
+    // The global scope is the writable editor it always was.
+    await expect(pane.locator('.af-config-row[data-key="default_program"] input')).toBeVisible();
+
+    // Scoping to the project sends its root as the read-only selector — the
+    // --repo contract — and re-renders the effective rows with no writer.
+    await scope.selectOption("/srv/repo-a");
+    await expect.poll(() => projectPathSent).toBe("/srv/repo-a");
+    const scoped = pane.locator('.af-config-row[data-key="default_program"]');
+    await expect(scoped.locator(".af-config-value")).toHaveText("codex");
+    await expect(scoped.locator("input")).toHaveCount(0);
+    await expect(scoped.locator("button.af-config-save")).toHaveCount(0);
+    await expect(pane.locator(".af-config-scope-note")).toContainText("read-only");
+    // The Accounts section and the assistant are GLOBAL affordances: an account
+    // is a credential on the daemon host, not a property of the repository
+    // being read, and the assistant edits the global file.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(0);
+    await expect(pane.locator(".af-config-assistant-btn")).toHaveCount(0);
+
+    // The repo-scoped key arrives under its own (folded) tier.
+    await pane.locator(".af-config-toggle").click();
+    await expect(pane.locator('.af-config-row[data-key="backend"] .af-config-value')).toHaveText("ssh");
+
+    // Back to global: the editable form returns, and the read-only note leaves.
+    await scope.selectOption("");
+    await expect(pane.locator('.af-config-row[data-key="default_program"] input')).toBeVisible();
+    await expect(pane.locator(".af-config-scope-note")).toHaveCount(0);
+  } finally {
+    await ctx.close();
+  }
+});
+
 test("config: a refresh landing mid-edit preserves focus, caret, and later typing (#4244)", REAL_FIXTURE, async ({ browser }) => {
   const ctx = await browser.newContext();
   let releaseSave: (() => void) | undefined;

@@ -3022,6 +3022,51 @@ button:disabled,
   max-width: 50%;
 }
 
+/* The scope selector (config.read-project): which repository's effective config
+ * the list reads — the web counterpart of the TUI config pane's scope row. Sits
+ * under the head so the rows it scopes follow it directly. */
+.af-config-scopebar {
+  display: flex;
+  align-items: center;
+  gap: var(--af-space-2);
+  padding: var(--af-space-2) var(--af-space-3);
+  background: var(--af-surface);
+}
+
+.af-config-scope-label {
+  font-size: var(--af-type-caption);
+  color: var(--af-ink);
+  font-weight: 600;
+}
+
+.af-config-scope {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-caption);
+  min-width: 0;
+}
+
+/* The read-only explanation a project scope carries: it says what the view is
+ * and where the write verb lives, so a scope that shows no controls is not
+ * mistaken for a broken form. Wraps under the select on narrow widths. */
+.af-config-scope-note {
+  margin-left: auto;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  line-height: 1.4;
+}
+
+/* A project-scoped row's value: the repository's effective value, rendered as
+ * text because the project view is read-only — the control column keeps its
+ * grid place so scoped and unscoped rows align. */
+.af-config-value {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-body);
+  color: var(--af-ink);
+  overflow-wrap: anywhere;
+}
+
 .af-config-list {
   display: flex;
   flex-direction: column;
@@ -3433,6 +3478,10 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   .af-config-head { flex-wrap: wrap; }
   .af-config-path { order: 3; flex-basis: 100%; max-width: 100%; margin-left: 0; }
   .af-config-assistant-btn { margin-left: auto; }
+  /* The scope bar's read-only note wraps under the selector rather than
+   * squeezing the project roots it chooses between. */
+  .af-config-scopebar { flex-wrap: wrap; }
+  .af-config-scope-note { order: 3; flex-basis: 100%; margin-left: 0; }
 }
 
 /* C review: compact rows, atomic summary fragments and one focus treatment. */

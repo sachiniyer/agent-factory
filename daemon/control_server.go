@@ -203,6 +203,35 @@ func (s *controlServer) GetConfig(_ GetConfigRequest, resp *GetConfigResponse) e
 	return nil
 }
 
+// GetProjectConfig resolves one repository's effective config — the same read
+// `af config get/list --repo` performs — and returns it as the ConfigEntry
+// rows the web and TUI config surfaces already render, including the
+// repo-scoped keys (backend, docker, ssh, remote_hooks,
+// post_worktree_commands) the global view does not carry. The projection is
+// config.ResolveProjectConfigView, the single implementation the TUI's local
+// read also calls, so the three surfaces cannot describe the same project
+// differently.
+//
+// The route exists for the surfaces that cannot reach the daemon's disk: the
+// web always, and the TUI when --daemon-url points at another host. The CLI
+// and the local TUI resolve in-process through the same helper, so all three
+// answers come from one resolver. Like the CLI flag, the path is a read-only
+// selector: it never registers a project and never writes identity state.
+func (s *controlServer) GetProjectConfig(req GetProjectConfigRequest, resp *GetProjectConfigResponse) error {
+	entries, projectRoot, err := config.ResolveProjectConfigView(req.ProjectPath)
+	if err != nil {
+		return err
+	}
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		return err
+	}
+	resp.Entries = entries
+	resp.ProjectRoot = projectRoot
+	resp.Path = filepath.Join(configDir, config.TomlConfigFileName)
+	return nil
+}
+
 // SetConfigValue writes one config key on the caller's behalf, through
 // config.SetGlobalConfigValue — the identical validated, file-locked, atomic
 // path a daemonless `af config set` uses. The daemon adds nothing: no second
