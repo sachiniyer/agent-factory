@@ -157,6 +157,12 @@ satisfied by the maintainer rather than skipped, so what is left is the mechanic
 part the gate already performs for every other passing PR. The approval is an
 APPROVED review from an allowed author, or a comment from one whose first line is
 exactly `## Review — approve` — the maintainer account cannot approve its own PR.
+The comment carries none of GitHub's authorship checks, so it counts as an
+approval of the commenter's OWN pull request only for a self-approving maintainer
+(`SELF_APPROVING_AUTHORS`, today `sachiniyer`); any other allowed author — the
+Detail app included — needs a second party, and an unreadable PR author counts as
+possibly its own (#4554). APPROVED reviews need no such check: GitHub refuses a
+self-approving review server-side.
 That is the ENTIRE first line, exactly, not a prefix: a qualifier on the heading
 (`## Review — approve, one fix owed before landing`) withholds the approval on
 purpose, so a review that owes a fix cannot land on its own heading.
@@ -626,8 +632,10 @@ structurally removes top-level pull-review comments from that feed before body
 classification; those artifacts are finding surfaces, while replies retain the
 finding-shaped body guard. It reconstructs degraded merges using #3932's method:
 a reviewer-unavailable response whose artifact timestamp falls inside the
-episode and before merge, plus no real verdict covering the actual merged head
-before merge. Each degraded merge is attributed once, to the episode holding
+episode and before merge, plus no real verdict covering the merged head before
+merge — where coverage admits the same head set the gate accepts: the merged
+head and each first parent the update-branch proof verifies content-preserving
+(#4238, #4241). Each degraded merge is attributed once, to the episode holding
 the latest qualifying notice at or before that merge, even when the merge lands
 after recovery. Scanned merged PRs have their attribution refreshed across both
 rebuilt and frozen episodes, so merges after the 24-hour boundary are counted
@@ -637,7 +645,9 @@ implementation of the merge gate; the count is labelled with its method in the
 record. An unrecognised artifact before the episode is not evidence. Late
 reviews cannot undo a degraded merge. The shared `codexEvidence` export from
 `auto-gate.js` supplies structural classification, quotation/finding exclusions,
-and verdict parsing. Finding predicates and the hand gate's jq are unchanged.
+verdict parsing, and the update-branch content-head proof, so the record and the
+gate cannot drift apart on what a covering verdict may name. Finding predicates
+and the hand gate's jq are unchanged.
 
 On a degraded evaluation, Auto Gate reads this record once and writes the
 outage duration to the job summary. It labels the watch's observation time;

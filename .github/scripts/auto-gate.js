@@ -22,6 +22,16 @@ const ALLOWED_AUTHORS = new Set(["sachiniyer", "detail-app"]);
 function isAllowedAuthor(login) {
   return ALLOWED_AUTHORS.has(normalizeAuthorLogin(login));
 }
+// The allowed authors whose `## Review — approve` marker counts on a pull
+// request they opened themselves (#4554). Named, not detected: the marker's
+// whole purpose is that the maintainer opens most PRs here and GitHub will not
+// let that account approve them, so a maintainer's self-approval is the
+// documented intent. An automated author's is not, and "is this author a bot"
+// has no reliable answer across surfaces — normalizeAuthorLogin strips the very
+// `app/` and `[bot]` spellings that would say so, and GraphQL reports bots bare.
+// Listing the humans instead means a future allowlisted app is refused
+// self-approval by default rather than by someone remembering to add it.
+const SELF_APPROVING_AUTHORS = new Set(["sachiniyer"]);
 // The merge queue's own app authors its synthetic test PRs. Its login gets the
 // same normalization: `app/trunk-io` is what the author field reports. A batch
 // PR is recognized by this author AND the branch prefix together — either alone
@@ -1011,6 +1021,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     headForcePushes: pr.headForcePushes,
     contentHead,
     subject,
+    prAuthor: pr.author,
   });
   if (!codex.ok) {
     reasons.push(...codex.reasons);
@@ -5757,6 +5768,13 @@ function headCurrentSinceTime({
 // and on this repository the maintainer opens most of them — so a hand review of
 // record is a comment, and it already uses this exact heading.
 //
+// Only the marker is checked for self-approval (markerApprovalCounts), and that
+// asymmetry is deliberate. GitHub refuses an APPROVED review from a pull
+// request's own author server-side, for every account, so the review form cannot
+// be a self-approval. A comment carries none of those checks: working around the
+// restriction for the maintainer removed it for every allowed author, including
+// one that opens PRs at volume and posted the marker on its own #4281 (#4554).
+//
 // Bound to the head the same way a Codex artifact is (#3702): an approval is
 // about the code it was written against, so `headCurrentSince` decides. A push
 // after the sign-off returns the PR to the manual pass rather than carrying a
@@ -5764,7 +5782,7 @@ function headCurrentSinceTime({
 // head.
 //
 // Fails closed on an unknown order, like every other timestamp comparison here.
-function maintainerApproval({ comments, reviews, headCurrentSince }) {
+function maintainerApproval({ comments, reviews, headCurrentSince, prAuthor }) {
   if (headCurrentSince == null) {
     return null;
   }
@@ -5774,7 +5792,8 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
       (comment) =>
         // The first line, whole and exact — see the marker's own comment for why
         // a prefix test is the wrong shape here.
-        String(comment.body || "").split("\n", 1)[0].trim() === MAINTAINER_APPROVAL_MARKER,
+        String(comment.body || "").split("\n", 1)[0].trim() === MAINTAINER_APPROVAL_MARKER &&
+        markerApprovalCounts(comment.user?.login, prAuthor),
     ),
   ].filter(
     (artifact) =>
@@ -5782,6 +5801,24 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
       reviewArtifactTime(artifact) > headCurrentSince,
   );
   return approvals.sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a))[0] || null;
+}
+
+// Whether a marker comment from `approverLogin` may stand as the approval on a
+// pull request opened by `prAuthor` (#4554): always for a self-approving
+// maintainer, otherwise only when the PR's author is KNOWN to be someone else.
+//
+// Fails closed on an unknown author — an empty or unreadable login cannot prove
+// the marker is not a self-approval — but only for accounts that could not
+// self-approve anyway, so the maintainer's route stays open in exactly the
+// outage the degraded path exists for. Identity is compared without case, as
+// GitHub compares logins; a case-only difference must not read as a second party.
+function markerApprovalCounts(approverLogin, prAuthor) {
+  const approver = normalizeAuthorLogin(approverLogin);
+  if (SELF_APPROVING_AUTHORS.has(approver)) {
+    return true;
+  }
+  const author = normalizeAuthorLogin(prAuthor);
+  return author !== "" && author.toLowerCase() !== approver.toLowerCase();
 }
 
 // The commit whose CONTENT this head carries, when the head is a merge that only
@@ -6033,6 +6070,26 @@ async function updateBranchContentHead({
   };
 }
 
+// Every sha a Codex artifact may name and still count as evidence about this
+// head. A recognised chain of update-branch merges has one valid evidence name
+// per tree-proven link: the current merge and every first parent walked on the
+// way to the terminal content head (#4238, #4239). A review or unavailability
+// reply may have landed on any of them between gate updates. No other ancestor
+// is admitted; updateBranchContentHead's fail-closed proof authorizes every
+// added name.
+//
+// codex-outage.js reconstructs degraded merges against this same set (#4241),
+// so the outage record and the gate cannot disagree about which heads a
+// covering verdict may name.
+function evidenceHeadShasFor(headSha, contentHead) {
+  const evidenceHeadOids = Array.isArray(contentHead?.evidenceHeadOids)
+    ? contentHead.evidenceHeadOids
+    : [contentHead?.oid];
+  return [...new Set(
+    [headSha, ...evidenceHeadOids].map(normalizeHeadSha).filter(Boolean),
+  )];
+}
+
 // The Codex finding artifacts a gate must not merge past: those carrying a
 // P0-P3 that bind to NO head, and that no acknowledgement has answered.
 //
@@ -6129,6 +6186,8 @@ async function evaluateCodex({
   headForcePushes = [],
   contentHead = null,
   subject = null,
+  // The PR's author, so a marker cannot be its author's own approval (#4554).
+  prAuthor = "",
 }) {
   const notes = [];
   const reasons = [];
@@ -6168,12 +6227,7 @@ async function evaluateCodex({
   // to the terminal content head. A review or unavailability reply may have
   // landed on any of them between gate updates. No other ancestor is admitted;
   // updateBranchContentHead's fail-closed proof authorizes every added name.
-  const evidenceHeadOids = Array.isArray(contentHead?.evidenceHeadOids)
-    ? contentHead.evidenceHeadOids
-    : [contentHead?.oid];
-  const evidenceHeadShas = [...new Set(
-    [sha, ...evidenceHeadOids].map(normalizeHeadSha).filter(Boolean),
-  )];
+  const evidenceHeadShas = evidenceHeadShasFor(sha, contentHead);
   // Body links are location prose, not a claim about what Codex reviewed. Keep
   // their pre-#4239 scope — current and terminal content head — while accepting
   // every verified intermediate only where GitHub's commit_id authenticates the
@@ -6677,7 +6731,7 @@ async function evaluateCodex({
     // Read here because this is where the comments and reviews already are; the
     // caller decides what it means.
     comments,
-    maintainerApproval: maintainerApproval({ comments, reviews, headCurrentSince }),
+    maintainerApproval: maintainerApproval({ comments, reviews, headCurrentSince, prAuthor }),
   };
 }
 
@@ -7134,7 +7188,8 @@ function formatError(error) {
 
 module.exports = {
   codexEvidence: { CODEX_REVIEWER, codexReportsReviewUsageLimit, isCodexUsageLimitArtifact, classifyCodexUnavailableArtifact,
-    parseReviewedCommit, parseVerdictArtifact, completedCodexSummaryRows, corroboratedCodexSummaryRows },
+    parseReviewedCommit, parseVerdictArtifact, completedCodexSummaryRows, corroboratedCodexSummaryRows,
+    updateBranchContentHead, evidenceHeadShasFor },
   beginAggregateDecision,
   evaluate,
   evaluateAggregateDecision,
@@ -7189,6 +7244,7 @@ module.exports = {
     decisionSummaryBody,
     DECISION_STAMP_PREFIX,
     maintainerApproval,
+    markerApprovalCounts,
     MAINTAINER_APPROVAL_MARKER,
     isAllowedAuthor,
     normalizeAuthorLogin,
