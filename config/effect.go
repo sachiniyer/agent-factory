@@ -133,8 +133,8 @@ func KeyEffectClass(key string) EffectClass {
 
 // DaemonApply is the one mutually exclusive answer to "what did a running
 // daemon do with this save" — the fact #4482 pulled out of three bools, whose
-// two-bits-set combinations were unrepresentable-in-practice but
-// representable-in-code.
+// two-bits-set combinations were representable in code and settled, where they
+// were settled at all, only by which rule happened to sit first.
 type DaemonApply int
 
 const (
@@ -155,9 +155,33 @@ const (
 	// applying the saved config — ApplyConfig's one error return, the "reload
 	// config:" wrap of a file that did not load.
 	DaemonApplyFailed
-	// DaemonApplyUnconfirmed distinguishes a lost RPC response or an admission
-	// refusal from a daemon error: the daemon may have applied the config
-	// before the connection failed, and the client cannot tell.
+	// DaemonApplyUnconfirmed means this save cannot establish what the running
+	// daemon ended up serving. It has three causes, and they share one
+	// implication — the file was written, but the live value is unproven:
+	//
+	//   - a lost RPC response: the daemon may have applied the config before the
+	//     connection failed, so neither success nor failure may be claimed;
+	//   - an admission refusal (upgrade probation, quiescing), which says nothing
+	//     about whether the apply ran;
+	//   - a config DIGEST that does not match: the bytes the apply loaded are not
+	//     the bytes this save wrote, so a competing write — another client, or a
+	//     hand-edit — landed between the writer's file-lock release and the
+	//     apply's load, and the daemon may be serving that value instead. The
+	//     apply returned success here, and this state REPLACES DaemonApplyApplied
+	//     rather than sitting beside it.
+	//
+	// The digest cause DELIBERATELY over-reports, and that is not a defect to be
+	// fixed. It compares whole files, so it cannot tell "my key lost a race" from
+	// "an unrelated key changed in the same window", and it reports the second as
+	// unconfirmed too. That direction is the point: the error is always to
+	// WITHHOLD a claim, never to make a false one. Narrowing it to "my key moved"
+	// means reading the key's value back out of some store after the fact, which
+	// is exactly the mechanism this replaced (#4247) — it needed store selection,
+	// value normalisation, generation identity and file-readability handling, and
+	// produced nine review findings doing it. An unrelated concurrent write is
+	// rare; a save that falsely claims `applied` is not recoverable by the caller.
+	//
+	// So: do not "fix" an unrelated-key window into DaemonApplyApplied.
 	DaemonApplyUnconfirmed
 )
 
@@ -177,9 +201,14 @@ const (
 // address. Carrying the outcome makes EffectNotice the one owner of the decision.
 //
 // The daemon's apply result is ONE mutually exclusive fact, so it is one
-// DaemonApply field rather than three bools (#4482): the bool form admitted
-// eight combinations, of which the four with two bits set were unreachable —
-// code and tests nonetheless existed to settle states nothing could produce.
+// DaemonApply field rather than three bools (#4482). The bool form admitted
+// eight combinations for four answers. Of the ones with two bits set, only
+// applied+unconfirmed was reachable — the digest check set the unconfirmed bit
+// and left the applied one standing — and it read as unconfirmed only because
+// that row outranked the applied row; the rest were unreachable, yet code and
+// tests existed to settle them. The digest check now records
+// DaemonApplyUnconfirmed in place of DaemonApplyApplied, so the answer no
+// longer depends on row order.
 //
 // The zero value is DaemonApplyUnset: no producer recorded an apply result.
 // That is deliberately NOT an outcome — it is distinguishable from every real
@@ -198,21 +227,6 @@ type ApplyOutcome struct {
 	// daemon.ApplyConfigResponse carry this; config owns no daemon types and must not
 	// import daemon (daemon imports config), so it travels as the plain slice.
 	FailedListenerKeys []string
-	// SavedValueSuperseded is set when the apply completed but the key's live
-	// value is not the one this save wrote: a competing write landed between the
-	// save's file-lock release and the apply's load, so the apply carried the
-	// other value (#4247). It is set only by a readback that RESOLVED the key:
-	// after a successful apply, or — for a file-authoritative key on the
-	// version-skewed fallback — after an unconfirmed one, since the file decides
-	// there whether or not the apply's reply arrived.
-	SavedValueSuperseded bool
-	// SavedFileUnreadable is set when a post-apply readback of the config FILE
-	// could not load it, for a key FileAuthoritative says is served from that
-	// file. The next daemon start or af launch reads the same file, so the save
-	// cannot promise a deferred effect (#4247). It is its own fact rather than a
-	// cause of DaemonApplyUnconfirmed because its implication is the opposite:
-	// every cause of that bit leaves the file written and loadable.
-	SavedFileUnreadable bool
 }
 
 // ApplyStatus is the machine-readable result for the key a save wrote. A
@@ -230,10 +244,6 @@ const (
 	ApplyStatusFailed      ApplyStatus = "failed"
 	ApplyStatusUnconfirmed ApplyStatus = "unconfirmed"
 	ApplyStatusDeferred    ApplyStatus = "deferred"
-	// ApplyStatusSuperseded reports a save whose write reached disk but lost the
-	// race to the apply: a newer write landed in between, so the daemon is not
-	// serving the value this save reported.
-	ApplyStatusSuperseded ApplyStatus = "superseded"
 )
 
 // saveRule is one row of the ordering that turns a save's facts into what the
@@ -269,35 +279,22 @@ var saveRules = []saveRule{
 		status:  ApplyStatusUnknown,
 		notice:  staticNotice("Saved — the daemon's apply result was never recorded, which is an af bug; the file holds the new value."),
 	},
-	// A lost race outranks everything: it is the one answer about WHICH value is
-	// stored, and it contradicts every "takes effect" promise below. Only a
-	// readback that resolved the key sets it.
-	{
-		applies: func(_ string, o ApplyOutcome) bool { return o.SavedValueSuperseded },
-		status:  ApplyStatusSuperseded,
-		notice:  supersededNotice,
-	},
-	// A config file that no longer loads, for a key served FROM that file. The
-	// next daemon start or af launch reads the same file, so every deferred
-	// promise below would be made about a value nothing can load.
-	{
-		applies: func(key string, o ApplyOutcome) bool {
-			return o.SavedFileUnreadable && o.FileAuthoritative(key)
-		},
-		status: ApplyStatusUnconfirmed,
-		notice: fileUnreadableNotice,
-	},
-	// Uncertainty about a LIVE key: once the reply is lost the client cannot claim
-	// the daemon kept its previous config. It deliberately does not reach a
-	// deferred key, because every cause of this state — a lost reply, an admission
-	// refusal, a live key's unconfirmable readback — leaves the file written, so
-	// the next start still reads this save's value and the class rows stay true.
+	// Uncertainty about a LIVE key outranks every recorded answer below: once the
+	// apply's answer is lost, refused, or contradicted by the digest, nothing
+	// below may promise what the running daemon is serving.
+	//
+	// It deliberately does not reach a DEFERRED key. Every cause of this state
+	// leaves the file written — a lost reply and a refusal both do, and a digest
+	// mismatch says some file is there, just possibly not this one — so the next
+	// daemon start or af launch still reads a config.toml, and the class rows
+	// below stay true. A race at save time is also indistinguishable from a
+	// hand-edit a minute later, which no save could have reported either.
 	{
 		applies: func(key string, o ApplyOutcome) bool {
 			return o.DaemonApply == DaemonApplyUnconfirmed && !deferredEffectClass(key)
 		},
 		status: ApplyStatusUnconfirmed,
-		notice: staticNotice("Saved — the daemon’s live config apply could not be confirmed. See warnings for details."),
+		notice: staticNotice("Saved — the daemon’s live config apply could not be confirmed (see the warnings for the reason)."),
 	},
 	// A failed apply is evidence about the FILE: DaemonApplyFailed is recorded
 	// only for a "reload config" failure (Manager.ApplyConfig's one error
@@ -401,7 +398,7 @@ func deferredEffectClass(key string) bool {
 // ListenerRebindFailed reports whether key is one of the socket keys whose live
 // rebind failed in this apply. A failed rebind defers the key dynamically: the
 // running daemon keeps the old listener and the value only reaches one at the
-// next start, which reads the file — so save readbacks must verify it there.
+// next start, which reads the file.
 //
 // Both sides are canonicalized, which today is belt and braces: every producer of
 // FailedListenerKeys is a hardcoded canonical literal in webListeners.reconcile,
@@ -422,20 +419,6 @@ func (o ApplyOutcome) ListenerRebindFailed(key string) bool {
 	return false
 }
 
-// FileAuthoritative reports whether this save's value for key is served from the
-// config FILE rather than the running daemon's snapshot: a key consumed at the
-// next daemon start or af launch, or a live listener whose rebind failed and so
-// reaches a daemon only at its next start. A post-apply readback must check the
-// file for these keys, and a file that no longer loads breaks the promise the
-// save would otherwise make about them.
-//
-// It is the one definition of that condition. The daemon's readback and its
-// version-skewed fallback each spelled it out, over a second copy of the class
-// test that lived in another package.
-func (o ApplyOutcome) FileAuthoritative(key string) bool {
-	return deferredEffectClass(key) || o.ListenerRebindFailed(key)
-}
-
 // EffectNotice is the one sentence a save surface shows after writing key, stating
 // WHEN the change takes effect. outcome is what the running daemon did with it (see
 // ApplyOutcome); it only changes the applied-live answer, because an applied-live
@@ -449,33 +432,6 @@ func (o ApplyOutcome) FileAuthoritative(key string) bool {
 func EffectNotice(key string, outcome ApplyOutcome) string {
 	key, rule := matchSaveRule(key, outcome)
 	return rule.notice(key)
-}
-
-// supersededNotice is the one sentence for a save that lost a race, worded for
-// what the key's class makes the stored value mean. A live key's loser is about
-// what the daemon is serving now; a deferred key's loser is about what the next
-// daemon start or af launch will read. Both must avoid the "takes effect"
-// promise, which would be made about the winner's value rather than this save's.
-func supersededNotice(key string) string {
-	switch KeyEffectClass(key) {
-	case EffectNextDaemonStart:
-		return "Saved — a newer write raced this save, so the value waiting for the next daemon start is not the one this save wrote."
-	case EffectNextAfLaunch:
-		return "Saved — a newer write raced this save, so the value waiting for the next af launch is not the one this save wrote."
-	default:
-		return "Saved — a newer write raced this save, so the running daemon may be using a different value."
-	}
-}
-
-// fileUnreadableNotice is the sentence for a save whose value is served from a
-// config file that no longer loads. It names the start that will fail to read the
-// setting and withholds the "takes effect" promise, which that file cannot keep.
-func fileUnreadableNotice(key string) string {
-	when := "the next daemon start"
-	if KeyEffectClass(key) == EffectNextAfLaunch {
-		when = "the next af launch"
-	}
-	return "Saved — the config file no longer loads, so " + when + " cannot read this setting until the file is fixed. See warnings for details."
 }
 
 // WithRootAgentAdoptionNotice appends the half of restart guidance unique to

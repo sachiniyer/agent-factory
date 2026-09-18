@@ -33,8 +33,16 @@ import (
 // Which tests are RED first, on unmodified master — every one of them an UNSET, the
 // half that was missed:
 //   - TestServerUnsetReportsDeferredWhenListenerRebindFails
-//   - TestClientFallbackUnsetReportsDeferredWhenListenerRebindFails
-//   - TestClientFallbackUnsetAliasSpellingReportsDeferred
+//   - TestClientFallbackUnsetCannotConfirmWhenListenerRebindFails
+//   - TestClientFallbackUnsetAliasSpellingCanonicalizesTheResultKey
+//
+// The last two were renamed by #4247, which changed what the CLIENT FALLBACK may
+// claim: that path only runs against a daemon too old to report a config digest,
+// so it cannot establish which bytes the apply loaded and answers `unconfirmed`
+// rather than `deferred`. The defect above is still caught on all four surfaces —
+// none of them may say "using the new value now" — and the two SERVER surfaces
+// still carry the deferred sentence, since their digest match proves the apply
+// loaded this save. See requireFallbackCannotConfirm.
 //
 // Every other test in this file is GREEN on master and is a regression guard, not
 // evidence of the bug: the two `set` surfaces already compensated correctly and
@@ -87,6 +95,31 @@ func requireDeferredNotice(t *testing.T, notice, key string) {
 		"the notice must name the failure the warning describes")
 	require.Contains(t, notice, key, "the deferred notice must name the key that did not apply")
 	require.Contains(t, notice, "next daemon start", "the value is on disk, so it takes effect on the next start")
+}
+
+// requireFallbackCannotConfirm is the CLIENT FALLBACK's answer for a live key
+// since #4247, and it replaces requireDeferredNotice on that path alone.
+//
+// The fallback runs only against a daemon too old to serve SetConfigValue
+// (pre-#1960), whose ApplyConfigResponse carries no config digest — so nothing
+// there can establish WHICH bytes that daemon's apply loaded, and a save on that
+// path withholds the live claim instead of making one it cannot support.
+//
+// That reaches a failed rebind too, and the reason is worth stating because the
+// deferred CLASS rows are deliberately left alone by the same rule. A class row
+// says WHEN a key takes effect, which is true whichever value ended up in the
+// file. The rebind-deferred sentence says what happened to THIS SAVE — it names
+// this save's key as the thing that could not be applied — and the fallback
+// cannot know the daemon was rebinding this save's address rather than a
+// competing writer's. So the class rows stand and this one does not.
+//
+// The exact sentence is named here rather than pattern-matched: the whole point
+// of these four surfaces is that they say the same thing.
+func requireFallbackCannotConfirm(t *testing.T, notice string) {
+	t.Helper()
+	require.Equal(t,
+		"Saved — the daemon’s live config apply could not be confirmed (see the warnings for the reason).",
+		notice)
 }
 
 // rebindFailureControl models a running daemon OLD enough not to serve
@@ -175,12 +208,21 @@ func TestServerUnsetPreviewListenAddrReportsAppliedBecauseTeardownCannotFail(t *
 
 // --- Surface 2: client fallback unset. RED on unmodified master. ---
 
-// TestClientFallbackUnsetReportsDeferredWhenListenerRebindFails covers the daemonless
+// TestClientFallbackUnsetCannotConfirmWhenListenerRebindFails covers the daemonless
 // half of the same defect: a daemon too old to serve UnsetConfigValue sends the client
 // down its local-write path, which pokes ApplyConfig and then worded the notice from
 // the poke's error alone — so a rebind failure reported in FailedListenerKeys was
 // dropped and the change claimed live.
-func TestClientFallbackUnsetReportsDeferredWhenListenerRebindFails(t *testing.T) {
+//
+// Since #4247 this surface answers `unconfirmed` rather than `deferred`: that old
+// daemon reports no config digest, so the fallback cannot tell which bytes its
+// apply loaded and withholds the claim instead of naming this save's key as the
+// one that failed to rebind. The defect this test was written for is still
+// caught — the notice must never be the live one — and the rebind reason still
+// reaches the user, in the warnings the notice points at. The server surfaces
+// above keep the deferred sentence, because their digest match proves the apply
+// loaded this save.
+func TestClientFallbackUnsetCannotConfirmWhenListenerRebindFails(t *testing.T) {
 	home := configClientHome(t)
 	seedNetworkConfig(t, home)
 	serveControlStub(t, &rebindFailureControl{failedListenerKeys: []string{"network.listen_addr"}})
@@ -191,8 +233,10 @@ func TestClientFallbackUnsetReportsDeferredWhenListenerRebindFails(t *testing.T)
 	require.True(t, resp.Result.Removed)
 
 	require.NotEmpty(t, resp.Warnings, "the client must surface the daemon's rebind warning")
-	requireDeferredNotice(t, resp.RestartNotice, "network.listen_addr")
-	require.Equal(t, config.ApplyStatusDeferred, resp.ApplyOutcome)
+	require.NotContains(t, resp.RestartNotice, "using the new value now",
+		"a listener key whose rebind FAILED must never be reported as live, on any surface")
+	requireFallbackCannotConfirm(t, resp.RestartNotice)
+	require.Equal(t, config.ApplyStatusUnconfirmed, resp.ApplyOutcome)
 }
 
 // --- Surface 3: server-side set. GREEN on master — regression guard. ---
@@ -218,10 +262,16 @@ func TestServerSetReportsDeferredWhenListenerRebindFails(t *testing.T) {
 
 // --- Surface 4: client fallback set. GREEN on master — regression guard. ---
 
-// TestClientFallbackSetReportsDeferredWhenListenerRebindFails is the second surface
+// TestClientFallbackSetCannotConfirmWhenListenerRebindFails is the second surface
 // that already compensated correctly. Same role as surface 3: it pins that the two
-// working sites came out of the refactor identical.
-func TestClientFallbackSetReportsDeferredWhenListenerRebindFails(t *testing.T) {
+// working sites came out of the refactor identical — and, since #4247, that the
+// two CLIENT surfaces answer identically too.
+//
+// It reports `unconfirmed` for the same reason as its unset twin: this path only
+// runs against a daemon too old to report a digest, so which bytes its apply
+// loaded is unknowable, and the rebind-deferred sentence would claim that THIS
+// save's address is the one that failed to bind.
+func TestClientFallbackSetCannotConfirmWhenListenerRebindFails(t *testing.T) {
 	home := configClientHome(t)
 	seedNetworkConfig(t, home)
 	serveControlStub(t, &rebindFailureControl{failedListenerKeys: []string{"network.listen_addr"}})
@@ -229,16 +279,18 @@ func TestClientFallbackSetReportsDeferredWhenListenerRebindFails(t *testing.T) {
 	resp, err := SetGlobalConfigValue("network.listen_addr", "127.0.0.1:9")
 	require.NoError(t, err)
 	require.NotNil(t, resp.Result)
-	requireDeferredNotice(t, resp.RestartNotice, "network.listen_addr")
-	require.Equal(t, config.ApplyStatusDeferred, resp.ApplyOutcome)
+	require.NotContains(t, resp.RestartNotice, "using the new value now",
+		"a listener key whose rebind FAILED must never be reported as live, on any surface")
+	requireFallbackCannotConfirm(t, resp.RestartNotice)
+	require.Equal(t, config.ApplyStatusUnconfirmed, resp.ApplyOutcome)
 }
 
 // --- The alias-spelling case. GREEN on master — it pins an invariant, not a fix. ---
 
-// TestClientFallbackSetAliasSpellingReportsDeferred settles the latent question this
-// PR was asked to answer rather than assume: the rebind-failure check compares
-// result.Key against FailedListenerKeys, and `af config set` accepts BOTH spellings
-// of a migrated key while unset removes both.
+// TestClientFallbackSetAliasSpellingCanonicalizesTheResultKey settles the latent
+// question this PR was asked to answer rather than assume: the rebind-failure check
+// compares result.Key against FailedListenerKeys, and `af config set` accepts BOTH
+// spellings of a migrated key while unset removes both.
 //
 // The two sides cannot in fact disagree today, and this pins the reason. Every entry
 // in FailedListenerKeys is a hardcoded canonical literal (webListeners.reconcile), and
@@ -246,9 +298,16 @@ func TestClientFallbackSetReportsDeferredWhenListenerRebindFails(t *testing.T) {
 // building the result — so a set spelled `listen_addr` arrives at the notice as
 // "network.listen_addr" and matches. That is an invariant spread across three files
 // with nothing previously holding it in place; a future result.Key that kept the
-// user's spelling would silently reopen the exact bug. Hence a test, and hence the
-// comparison canonicalizes both sides inside config.EffectNotice.
-func TestClientFallbackSetAliasSpellingReportsDeferred(t *testing.T) {
+// user's spelling would silently reopen the exact bug.
+//
+// Since #4247 this surface's NOTICE no longer witnesses that match: the fallback
+// cannot confirm which bytes the old daemon loaded, so it answers `unconfirmed`
+// without consulting FailedListenerKeys at all. The name says what is left, and
+// what is left is the load-bearing half — the end-to-end proof that the writer
+// canonicalizes result.Key. The notice side of the same invariant is pinned
+// directly, from both directions, by
+// config.TestEffectNoticeMatchesFailedListenerKeysAcrossAliasSpellings.
+func TestClientFallbackSetAliasSpellingCanonicalizesTheResultKey(t *testing.T) {
 	home := configClientHome(t)
 	seedNetworkConfig(t, home)
 	serveControlStub(t, &rebindFailureControl{failedListenerKeys: []string{"network.listen_addr"}})
@@ -257,14 +316,19 @@ func TestClientFallbackSetAliasSpellingReportsDeferred(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "network.listen_addr", resp.Result.Key,
 		"the result must carry the canonical spelling, which is what makes the raw comparison safe")
-	requireDeferredNotice(t, resp.RestartNotice, "network.listen_addr")
+	requireFallbackCannotConfirm(t, resp.RestartNotice)
+	require.Equal(t, config.ApplyStatusUnconfirmed, resp.ApplyOutcome)
 }
 
-// TestClientFallbackUnsetAliasSpellingReportsDeferred is the unset half of the same
-// question — the surface that removes BOTH alias spellings. RED on master, since it
-// runs through the unset path that dropped FailedListenerKeys entirely; the alias
-// spelling is an additional axis on top of that, not the cause of the failure.
-func TestClientFallbackUnsetAliasSpellingReportsDeferred(t *testing.T) {
+// TestClientFallbackUnsetAliasSpellingCanonicalizesTheResultKey is the unset half of
+// the same question — the surface that removes BOTH alias spellings. RED on master,
+// since it runs through the unset path that dropped FailedListenerKeys entirely; the
+// alias spelling is an additional axis on top of that, not the cause of the failure.
+//
+// Renamed and re-aimed with its set twin above, for the same reason: on the
+// fallback the notice is `unconfirmed` whatever the key spelling, so result.Key is
+// what this test still witnesses.
+func TestClientFallbackUnsetAliasSpellingCanonicalizesTheResultKey(t *testing.T) {
 	home := configClientHome(t)
 	seedNetworkConfig(t, home)
 	serveControlStub(t, &rebindFailureControl{failedListenerKeys: []string{"network.listen_addr"}})
@@ -272,7 +336,8 @@ func TestClientFallbackUnsetAliasSpellingReportsDeferred(t *testing.T) {
 	resp, err := UnsetGlobalConfigValue("listen_addr")
 	require.NoError(t, err)
 	require.Equal(t, "network.listen_addr", resp.Result.Key)
-	requireDeferredNotice(t, resp.RestartNotice, "network.listen_addr")
+	requireFallbackCannotConfirm(t, resp.RestartNotice)
+	require.Equal(t, config.ApplyStatusUnconfirmed, resp.ApplyOutcome)
 }
 
 // --- The other direction: a SUCCESSFUL apply must still say "Applied". ---
@@ -314,20 +379,42 @@ func TestServerUnsetReportsAppliedWhenNothingRebinds(t *testing.T) {
 		"an applied-live key the daemon applied with no rebind involved is live now")
 }
 
-// TestClientFallbackReportsAppliedWhenNoListenerFailed is the same guard on the
-// client surfaces: an apply that reports no failed listener keys still says applied.
-func TestClientFallbackReportsAppliedWhenNoListenerFailed(t *testing.T) {
+// TestClientFallbackCannotConfirmEvenWhenNoListenerFailed was the over-correction
+// guard on the client surfaces — "an apply reporting no failed listener keys still
+// says applied" — and #4247 inverted its answer, so it is renamed to what it now
+// asserts rather than left describing behaviour it no longer pins.
+//
+// The new claim is the sharper one, and it is why the rename is not a demotion:
+// the fallback's uncertainty comes from the MISSING DIGEST, not from the rebind.
+// A clean apply — no failed listener keys, the daemon reporting the key applied —
+// is still `unconfirmed` here, because a pre-#1960 daemon cannot say which bytes
+// it loaded and a competing writer may have won between the local write and the
+// poke. So this and the two rebind-failure tests above agree, on purpose, and a
+// change that made the fallback's answer depend on FailedListenerKeys again would
+// split them.
+//
+// The over-correction guard itself is not lost. It lives where the digest still
+// discriminates: TestServerSetReportsAppliedWhenListenerRebindSucceeds and
+// TestServerUnsetReportsAppliedWhenNothingRebinds above still require the live
+// sentence, and TestClientFallbackAppliesTheDigestSkewRule requires a DEFERRED
+// key to keep its class sentence on this very path — so "every save now reports
+// unconfirmed" would fail three tests.
+func TestClientFallbackCannotConfirmEvenWhenNoListenerFailed(t *testing.T) {
 	home := configClientHome(t)
 	seedNetworkConfig(t, home)
 	serveControlStub(t, &rebindFailureControl{})
 
 	setResp, err := SetGlobalConfigValue("network.listen_addr", "127.0.0.1:9")
 	require.NoError(t, err)
-	require.Contains(t, setResp.RestartNotice, "using the new value now")
+	require.Equal(t, []string{"network.listen_addr"}, setResp.Applied,
+		"premise: the daemon itself reported the key APPLIED, so nothing but the missing digest withholds the claim")
+	requireFallbackCannotConfirm(t, setResp.RestartNotice)
+	require.Equal(t, config.ApplyStatusUnconfirmed, setResp.ApplyOutcome)
 
 	unsetResp, err := UnsetGlobalConfigValue("network.listen_addr")
 	require.NoError(t, err)
-	require.Contains(t, unsetResp.RestartNotice, "using the new value now")
+	requireFallbackCannotConfirm(t, unsetResp.RestartNotice)
+	require.Equal(t, config.ApplyStatusUnconfirmed, unsetResp.ApplyOutcome)
 }
 
 // --- And with nothing answering the socket, the daemonless sentence is unchanged. ---

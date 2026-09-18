@@ -65,7 +65,13 @@ jobs:
           exit 1
         fi
         go vet ./...
-        go test -v -race -count=1 ./...
+        # The daemon package took 468s of Go's default 600s per-package budget at
+        # v1.0.287 and crossed it four days later, failing a release with a
+        # timeout rather than a real defect. PR CI runs this same -race suite but
+        # with -timeout 20m (pr.yml), so it could not see a 10m wall. The default
+        # is Go's, not a considered budget for this suite. What the time is spent
+        # on, measured from these logs, is in #4464.
+        go test -v -race -count=1 -timeout=30m ./...
         go build ./...
 
   build:

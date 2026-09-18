@@ -9,16 +9,28 @@ import (
 )
 
 // How a save surface turns one apply attempt into the outcome it reports. The
-// distinctions here are the whole point: a refusal, a lost reply, and a readback
-// that cannot resolve its key are three different states, and collapsing any two
-// of them makes a save surface claim something it does not know (#4247).
+// distinctions here are the whole point: a refusal, a lost reply, and an apply
+// that loaded a file this save did not write are different states, and
+// collapsing any two of them makes a save surface claim something it does not
+// know (#4247).
 
-// unconfirmedReadbackWarning explains the one apply a version-skewed client can
-// neither confirm nor call failed: the daemon accepted the apply, but predates
-// the live-config readback, and the post-apply file no longer matches this
-// save. The file may have moved after the daemon loaded this save's value, so
-// this states what is known rather than asserting a lost race.
-const unconfirmedReadbackWarning = "saved config, but this daemon is too old to report its live config back and the file no longer holds this save's value, so the value the daemon is serving could not be confirmed"
+// digestMismatchWarning is what a save says when the apply returned success but
+// did not load the bytes this save committed. It states what is known — the
+// daemon's reload and this write are not the same file — and stops there.
+//
+// It deliberately does NOT say the save lost a race for its own key. The digest
+// covers the whole file, so an unrelated key changing in the same window reads
+// identically, and asserting the stronger claim is exactly what the readback
+// this replaced spent nine review rounds failing to earn.
+const digestMismatchWarning = "saved config, but the daemon's live reload did not load the config this save wrote, " +
+	"so the value the daemon is now serving could not be confirmed"
+
+// skewedApplyDigestWarning is the version-skew rule's sentence. A daemon too old
+// to serve SetConfigValue (pre-#1960) is served by the client fallback below,
+// and reports nothing about which bytes its apply loaded, so no save on that
+// path can ever be confirmed.
+const skewedApplyDigestWarning = "saved config, but this daemon is too old to report which config its live apply loaded, " +
+	"so the value the daemon is now serving could not be confirmed"
 
 // failedConfigApplyOutcome keeps a genuine reload failure distinct from both a
 // lost RPC reply and a refusal that never reached the reload. net/rpc flattens
@@ -38,69 +50,54 @@ func failedConfigApplyOutcome(err error) (config.ApplyOutcome, string) {
 	return config.ApplyOutcome{DaemonApply: config.DaemonApplyUnconfirmed}, "saved config, but live apply could not be confirmed: " + err.Error()
 }
 
-// readbackStore is which store a post-apply readback could consult. It is what
-// decides what a divergence on a LIVE key proves.
-type readbackStore int
-
-const (
-	// readbackSnapshot: the in-daemon handler reads the snapshot its apply just
-	// swapped in, so a live key's divergence is a definite lost race.
-	readbackSnapshot readbackStore = iota
-	// readbackFileAfterApply: a version-skewed client can read only the file, and
-	// only after the apply returned, which cannot establish which generation the
-	// daemon loaded for a live key.
-	readbackFileAfterApply
-)
-
-// recordSavedValueReadback is the ONE place a post-apply readback verdict
-// becomes an outcome fact. Each save path used to compare the verdict against
-// savedValueSuperseded at its own call site, so a verdict a path did not name —
-// an unloadable file — was silently dropped on all four of them (#4247). Every
-// verdict is decided here, once, for every path.
-func recordSavedValueReadback(outcome *config.ApplyOutcome, warnings *[]string, key string, store readbackStore, verdict savedValueVerdict, loadErr error) {
-	switch verdict {
-	case savedValueConfirmed, savedValueUnresolved:
-		// Either this save is confirmed, or the readback could not look. Neither
-		// contradicts the apply, so its own answer stands.
-	case savedValueFileUnreadable:
-		// Only a key served FROM the file is harmed: its next daemon start or af
-		// launch reads this same file. A live key's value is whatever the running
-		// daemon already loaded, which a file breaking afterwards does not change,
-		// and the apply's own answer already states what is known about it.
-		if outcome.FileAuthoritative(key) {
-			outcome.SavedFileUnreadable = true
-			*warnings = append(*warnings, fileUnreadableWarning(key, loadErr))
-		}
-	case savedValueSuperseded:
-		// The file decides for a file-authoritative key, and the snapshot decides
-		// for a live key read inside the daemon. Either way the divergence is
-		// definitive.
-		if outcome.FileAuthoritative(key) || store == readbackSnapshot {
-			outcome.SavedValueSuperseded = true
-			return
-		}
-		// A live key read from the file after the apply returned: the file may
-		// have moved after the daemon loaded this save, so this proves only that
-		// the client cannot confirm what the daemon is serving.
-		outcome.DaemonApply = config.DaemonApplyUnconfirmed
-		*warnings = append(*warnings, unconfirmedReadbackWarning)
+// confirmSavedConfigDigest is the ONE comparison that decides whether a
+// successful apply may be reported as this save's value reaching the daemon.
+//
+// A save cannot claim `applied` merely because ApplyConfig returned nil: the
+// writer's file lock is released before the apply loads config.toml, so a
+// competing write — another client, or a hand-edit, which takes no lock at all —
+// can land in that gap and be the value the apply carried. wrote is the digest
+// of the bytes this save committed; loaded is the digest of the bytes that apply
+// parsed. Equal means the daemon adopted exactly this file, and only then may
+// the outcome's own answer stand.
+//
+// Anything else withholds the claim rather than making a different one, which is
+// the failure direction this whole mechanism is chosen for. Two states reach it:
+// a genuine mismatch, and an apply whose load never reached the canonical
+// config.toml read (it materialized defaults or converted a legacy config.json,
+// so it parsed no file this save could have written). Both mean "cannot
+// confirm", which is what config.DaemonApplyUnconfirmed says — and which leaves
+// a DEFERRED key's next-start promise standing, because the file was written
+// either way. It replaces the applied answer outright: the apply ran, but which
+// file it loaded is unproven, so no applied claim may survive beside it.
+//
+// The comparison is against a digest rather than a value on purpose: this
+// function plus config.ConfigDigest is the entire mechanism, where the readback
+// it replaced needed a store to re-read, a value normalisation, a generation
+// identity, and a file-readability verdict.
+func confirmSavedConfigDigest(outcome *config.ApplyOutcome, warnings *[]string, wrote, loaded config.ConfigDigest) {
+	if loaded.Matches(wrote) {
+		return
 	}
+	outcome.DaemonApply = config.DaemonApplyUnconfirmed
+	*warnings = append(*warnings, digestMismatchWarning)
 }
 
-// fileUnreadableWarning names the key whose next-start effect is lost and the
-// reason the file will not load, so the operator knows what to fix.
-func fileUnreadableWarning(key string, loadErr error) string {
-	reason := "the file could not be read"
-	if loadErr != nil {
-		reason = loadErr.Error()
-	}
-	return "saved config, but the config file no longer loads, so " + key +
-		" cannot take effect at its next start until the file is fixed: " + reason
-}
-
-// applyFallbackDiskVerdict is the version-skewed fallback's readback: the file is
-// the only store such a daemon lets a client consult.
-func applyFallbackDiskVerdict(outcome *config.ApplyOutcome, warnings *[]string, key, expected string) {
-	verdict, loadErr := diskSavedValue(key, expected)
-	recordSavedValueReadback(outcome, warnings, key, readbackFileAfterApply, verdict, loadErr)
+// applyDigestSkewUnconfirmed is the named skew rule for the version-skewed
+// client fallback: a pre-#1960 daemon's ApplyConfig reports no digest, so a save
+// on that path reports `unconfirmed` for a live key.
+//
+// It is a rule rather than an absent default, and the alternative was considered
+// and rejected: keeping the pre-digest `applied` there would preserve a known
+// misreport — the daemon may be serving a competing write — on the grounds that
+// it only affects daemons older than #1960. Knowingly preserving a misreport
+// because of who it reaches is how skew bugs become permanent. `unconfirmed` is
+// the only answer this path can support.
+//
+// A DEFERRED key is unaffected, by the same rule as every other cause of this
+// state: the file was written, so the next daemon start or af launch still reads
+// this save's value (see config.DaemonApplyUnconfirmed).
+func applyDigestSkewUnconfirmed(outcome *config.ApplyOutcome, warnings *[]string) {
+	outcome.DaemonApply = config.DaemonApplyUnconfirmed
+	*warnings = append(*warnings, skewedApplyDigestWarning)
 }

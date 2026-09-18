@@ -201,6 +201,18 @@ func (s *legacyConfigControl) ApplyConfig(_ ApplyConfigRequest, _ *ApplyConfigRe
 // daemon that does not register SetConfigValue answers "can't find method",
 // which is absence, not refusal — the client falls back to the legacy sequence
 // (local write, then the ApplyConfig poke) instead of failing the set.
+//
+// The notice it gets for a live key is `unconfirmed`, not `applied` (#4247). The
+// poke succeeded, but a daemon old enough to take this path reports no config
+// digest, so nothing here can establish which bytes its apply actually loaded —
+// a competing write, or a hand-edit, could have landed between the local write
+// above and the poke. The save therefore withholds the live claim rather than
+// making one it cannot support, and the file write is unaffected, which is what
+// the rest of this test checks.
+//
+// The sentence is named in full rather than recomputed from config.EffectNotice:
+// deriving the expectation from the code under test would keep passing if that
+// sentence changed underneath it.
 func TestSetGlobalConfigValueLegacyDaemonFallsBack(t *testing.T) {
 	home := configClientHome(t)
 	stub := &legacyConfigControl{applied: make(chan struct{})}
@@ -208,7 +220,10 @@ func TestSetGlobalConfigValueLegacyDaemonFallsBack(t *testing.T) {
 
 	resp, err := SetGlobalConfigValue("default_program", "codex")
 	require.NoError(t, err)
-	require.Equal(t, config.EffectNotice("default_program", config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}), resp.RestartNotice)
+	require.Equal(t,
+		"Saved — the daemon’s live config apply could not be confirmed (see the warnings for the reason).",
+		resp.RestartNotice)
+	require.Equal(t, config.ApplyStatusUnconfirmed, resp.ApplyOutcome)
 	select {
 	case <-stub.applied:
 	default:
