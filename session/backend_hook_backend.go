@@ -332,22 +332,27 @@ func runHookScriptWithResolvedEnvironment(timeout time.Duration, name, agent str
 	// unrelated non-nil error beside a clean exit still surfaces; and
 	// Exited()+ExitCode()==0 is the kernel's proof the script terminated on its
 	// own terms — a SIGKILL'd script reports "signal: killed" with Exited()
-	// false and still takes the timeout wrap below, and a real exit-23
-	// *ExitError keeps the wrap too, since the retry-on-deadline
-	// classification is the safer direction for an answer af cannot prove the
-	// workspace absorbed.
+	// false and still takes the timeout wrap below. A real nonzero *ExitError
+	// does NOT take it: the script answered, so the wrap is gated on
+	// !Exited() below and the failure surfaces as itself (#4411 review).
 	if runErr != nil && cmd.ProcessState != nil && cmd.ProcessState.Exited() &&
 		cmd.ProcessState.ExitCode() == 0 &&
 		(errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, context.Canceled)) {
 		runErr = nil
 	}
-	if runErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		// The context deadline killed the script mid-run, so whatever it was doing
-		// to the remote workspace is UNKNOWN. exec surfaces this as a bare
-		// "signal: killed" that does NOT wrap context.DeadlineExceeded, so wrap it
-		// here — that is the only place the ctx is in scope — letting callers (reap
-		// in particular) tell a timeout from a script that answered, and retain the
-		// record instead of trusting a success that never happened (#2529).
+	// The context deadline killing a STILL-RUNNING script is a timeout:
+	// whatever it was doing to the remote workspace is UNKNOWN. exec surfaces
+	// this as a bare "signal: killed" that does NOT wrap context.DeadlineExceeded,
+	// so wrap it here — that is the only place the ctx is in scope — letting
+	// callers (reap in particular) tell a timeout from a script that answered,
+	// and retain the record instead of trusting a success that never happened
+	// (#2529). ProcessState gates the wrap: a script that reached its own exit
+	// ANSWERED, deadline or no — a clean exit was cleared above, and a nonzero
+	// one is a real failure to report, not an unproven timeout (#4411: an
+	// exit-23 wrapped here would route a clean answered reap into
+	// ErrWorkspaceStateUnknown, retaining the record and re-running delete_cmd).
+	if runErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) &&
+		(cmd.ProcessState == nil || !cmd.ProcessState.Exited()) {
 		runErr = fmt.Errorf("%w: %w", context.DeadlineExceeded, runErr)
 	}
 
