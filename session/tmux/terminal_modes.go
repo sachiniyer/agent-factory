@@ -25,9 +25,17 @@ type TerminalState struct {
 	// invocation and no second capture. Verified against real tmux: a 10-row pane
 	// holding 61 lines reported history_size 51 while a full capture returned 61.
 	HistorySize int
+	// PaneWidth/PaneHeight are the pane's real dimensions — tmux's own
+	// #{pane_width}/#{pane_height}. They ride the same request because the WS
+	// stream's repaint path needs the pane's actual geometry: a pane nobody ever
+	// resized still has a size (the server's default-size, which is
+	// user-configurable — e.g. 200x60), and only measuring it here lets a
+	// never-driven viewer learn it (#4480).
+	PaneWidth  int
+	PaneHeight int
 }
 
-const terminalStateFormat = "#{cursor_y} #{cursor_x} #{alternate_on} #{mouse_any_flag} #{mouse_standard_flag} #{mouse_button_flag} #{mouse_all_flag} #{mouse_utf8_flag} #{mouse_sgr_flag} #{history_size}"
+const terminalStateFormat = "#{cursor_y} #{cursor_x} #{alternate_on} #{mouse_any_flag} #{mouse_standard_flag} #{mouse_button_flag} #{mouse_all_flag} #{mouse_utf8_flag} #{mouse_sgr_flag} #{history_size} #{pane_width} #{pane_height}"
 
 // ReadTerminalState reads cursor, alternate-screen, mouse tracking, and mouse
 // encoding in one bounded tmux request. One display-message keeps those fields
@@ -46,8 +54,8 @@ func (t *TmuxSession) ReadTerminalState() (TerminalState, error) {
 	// A SHORT answer is a parse failure, never a zero history_size. Defaulting the
 	// missing field to 0 would report "nothing above the visible screen" for a pane
 	// nobody measured — the fabricated negative #3169 is about, one layer down.
-	if len(fields) != 10 {
-		return TerminalState{}, fmt.Errorf("failed to parse tmux terminal state %q: want 10 fields, got %d", string(output), len(fields))
+	if len(fields) != 12 {
+		return TerminalState{}, fmt.Errorf("failed to parse tmux terminal state %q: want 12 fields, got %d", string(output), len(fields))
 	}
 	values := make([]int, len(fields))
 	for i, field := range fields {
@@ -69,5 +77,7 @@ func (t *TmuxSession) ReadTerminalState() (TerminalState, error) {
 			MouseSGR:        values[8] != 0,
 		},
 		HistorySize: values[9],
+		PaneWidth:   values[10],
+		PaneHeight:  values[11],
 	}, nil
 }
