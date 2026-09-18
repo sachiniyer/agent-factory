@@ -107,6 +107,12 @@ satisfied by the maintainer rather than skipped, so what is left is the mechanic
 part the gate already performs for every other passing PR. The approval is an
 APPROVED review from an allowed author, or a comment from one whose first line is
 exactly `## Review — approve` — the maintainer account cannot approve its own PR.
+The comment carries none of GitHub's authorship checks, so it counts as an
+approval of the commenter's OWN pull request only for a self-approving maintainer
+(`SELF_APPROVING_AUTHORS`, today `sachiniyer`); any other allowed author — the
+Detail app included — needs a second party, and an unreadable PR author counts as
+possibly its own (#4554). APPROVED reviews need no such check: GitHub refuses a
+self-approving review server-side.
 That is the ENTIRE first line, exactly, not a prefix: a qualifier on the heading
 (`## Review — approve, one fix owed before landing`) withholds the approval on
 purpose, so a review that owes a fix cannot land on its own heading.
@@ -484,6 +490,47 @@ plus at most one dispatch per window. Passes skip unrelated branch-sweep
 housekeeping. This avoids both the frozen-decision failure and one gate
 evaluation per completed matrix job (#4242).
 
+**A head with no PR Validation run at all gets one dispatched (#4581).**
+Reconciliation wakes a decision when Build or Lint completes, so it cannot help
+a head whose run GitHub never created. #4430's `b63f9752` was an ordinary lane
+push that got an Auto Gate run and no PR Validation run, and its decision said
+"required check Build is missing" until someone dispatched `pr.yml` by hand.
+When an evaluation finds Build or Lint absent and no run parked, it first asks
+whether any PR Validation run exists for the head sha, under any event:
+
+- **A run exists** (queued, running, finished, or dispatched earlier): nothing
+  changes, and the decision reads as before.
+- **No run exists:** the gate dispatches `pr.yml` on the PR's branch, the same
+  mechanism the update-branch recovery uses, and the missing-check reasons say
+  so.
+
+Guards:
+
+- **Once per head.** The existence read is the marker. A dispatched run carries
+  the sha it ran at, so every later evaluation of that head finds it and stops.
+  The gate writes no state of its own. Two evaluations that read before either
+  dispatch is visible can both send one. The dispatch passes no inputs, so it
+  is a full run rather than a #4563 probe. `pr.yml` groups it by its branch ref
+  (`pr-<ref>`, apart from probes' `probe-<ref>`) and cancels in progress, so
+  that race costs one cancelled run, and a probe on the branch cancels neither.
+- **Toward waiting.** A failed or malformed read dispatches nothing, and the
+  decision reads as before. A missed dispatch costs a delay, but a dispatch loop
+  would cost the runner pool.
+- **Not mid-push.** GitHub creates a push's runs a few seconds after the head
+  moves, so absence is confirmed over the same bounded wait (three reads, five
+  seconds apart) that update-branch recovery uses.
+- **At this head only.** A dispatch takes a ref, so the branch tip is read last,
+  and a tip that is no longer the evaluated head skips the dispatch. The newer
+  head gets its own evaluation.
+- **Only where GitHub would have run it.** Fork heads, conflicting or
+  still-computing merges, PRs that are not open master PRs, and merge-queue
+  batches get no dispatch. GitHub creates no `pull_request` run for those either.
+
+The cost is one REST read per evaluation that finds a PR Validation check
+absent. It finds a run on the first read in the ordinary case. A dispatch also
+runs PR Validation for a head whose commit message skipped CI, because the gate
+cannot merge a head whose required checks never report.
+
 GitHub also suppresses `push` workflows when Auto Gate merges with its
 `GITHUB_TOKEN`. After a merge, the gate therefore dispatches the five
 master-verification workflows named by `MASTER_PUSH_WORKFLOWS`: Build, Docs,
@@ -576,8 +623,10 @@ structurally removes top-level pull-review comments from that feed before body
 classification; those artifacts are finding surfaces, while replies retain the
 finding-shaped body guard. It reconstructs degraded merges using #3932's method:
 a reviewer-unavailable response whose artifact timestamp falls inside the
-episode and before merge, plus no real verdict covering the actual merged head
-before merge. Each degraded merge is attributed once, to the episode holding
+episode and before merge, plus no real verdict covering the merged head before
+merge — where coverage admits the same head set the gate accepts: the merged
+head and each first parent the update-branch proof verifies content-preserving
+(#4238, #4241). Each degraded merge is attributed once, to the episode holding
 the latest qualifying notice at or before that merge, even when the merge lands
 after recovery. Scanned merged PRs have their attribution refreshed across both
 rebuilt and frozen episodes, so merges after the 24-hour boundary are counted
@@ -587,7 +636,9 @@ implementation of the merge gate; the count is labelled with its method in the
 record. An unrecognised artifact before the episode is not evidence. Late
 reviews cannot undo a degraded merge. The shared `codexEvidence` export from
 `auto-gate.js` supplies structural classification, quotation/finding exclusions,
-and verdict parsing. Finding predicates and the hand gate's jq are unchanged.
+verdict parsing, and the update-branch content-head proof, so the record and the
+gate cannot drift apart on what a covering verdict may name. Finding predicates
+and the hand gate's jq are unchanged.
 
 On a degraded evaluation, Auto Gate reads this record once and writes the
 outage duration to the job summary. It labels the watch's observation time;
