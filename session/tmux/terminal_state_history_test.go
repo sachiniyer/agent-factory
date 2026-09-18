@@ -30,7 +30,7 @@ import (
 // tmux while designing this: a 10-row pane holding 61 lines of output reported
 // history_size 51, and a full capture returned 61 lines.
 func TestReadTerminalState_ReportsScrollbackSize(t *testing.T) {
-	ts := fakeTerminalStateTmux(t, "7 11 1 1 0 1 0 0 1 51")
+	ts := fakeTerminalStateTmux(t, "7 11 1 1 0 1 0 0 1 51 200 60")
 
 	state, err := ts.ReadTerminalState()
 	require.NoError(t, err)
@@ -49,7 +49,7 @@ func TestReadTerminalState_ReportsScrollbackSize(t *testing.T) {
 // answer must stay distinguishable from "we did not measure", which is the failure
 // this issue is about — see PreviewSnapshot.LinesAboveKnown.
 func TestReadTerminalState_ReportsZeroScrollback(t *testing.T) {
-	ts := fakeTerminalStateTmux(t, "0 0 0 0 0 0 0 0 0 0")
+	ts := fakeTerminalStateTmux(t, "0 0 0 0 0 0 0 0 0 0 80 24")
 
 	state, err := ts.ReadTerminalState()
 	require.NoError(t, err)
@@ -65,7 +65,19 @@ func TestReadTerminalState_RefusesAShortAnswerRatherThanAssumingNoScrollback(t *
 	_, err := ts.ReadTerminalState()
 	require.Error(t, err,
 		"nine fields must not silently mean history_size=0; an unmeasured pane is not an unscrolled one")
-	require.Contains(t, err.Error(), "want 10 fields")
+	require.Contains(t, err.Error(), "want 12 fields")
+}
+
+// The ten-field shape an OLDER answer produced (before pane dimensions rode the
+// format) is likewise a parse failure, not a "pane size unknown, read on" — a
+// short answer means the producer and the parser disagree, which is always the
+// bug to surface.
+func TestReadTerminalState_RefusesThePreSizeFieldShape(t *testing.T) {
+	ts := fakeTerminalStateTmux(t, "7 11 1 1 0 1 0 0 1 51")
+
+	_, err := ts.ReadTerminalState()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "want 12 fields")
 }
 
 func fakeTerminalStateTmux(t *testing.T, fields string) *TmuxSession {

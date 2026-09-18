@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/redactx"
 )
 
 // Auth material rides the transport, never the payload (§4.4). Sachin locked the
@@ -73,7 +75,7 @@ func redactAccessTokenComponents(u *url.URL) {
 	// af:a%2Fb%20c became af:a/b c, which is no longer a valid URL (#4161).
 	// Leaving the original encoded bytes in place when nothing matched keeps
 	// this a redactor rather than a normalizer.
-	if _, malformed := fullyPercentDecodedView(u.Opaque, false); malformed {
+	if _, malformed := redactx.PercentDecode(u.Opaque, false); malformed {
 		u.Opaque = accessTokenRedaction
 	} else if redacted, found := redactPercentEncodedAccessTokenText(u.Opaque, false); found {
 		// Source mapping keeps every non-sensitive escape in its original form.

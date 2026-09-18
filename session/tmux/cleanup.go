@@ -63,13 +63,23 @@ func (t *TmuxSession) ExistsOrUnknown() bool {
 // or any other tmux error — still reports false, preserving the pre-#1917
 // conflation callers already relied on.
 func sessionExists(cmdExec cmd.Executor, name string) bool {
+	existsOrUnknown, _ := sessionExistsReportingAnswer(cmdExec, name)
+	return existsOrUnknown
+}
+
+// sessionExistsReportingAnswer is sessionExists for a caller that branches on
+// the lossy bool but must not treat its true as proof of life: answered is false
+// when that true is the timeout's conservative lie. RestoreWithResult needs both
+// — it rebinds on either true, but only an answered one is evidence that a live
+// session stands behind the name (#4473).
+func sessionExistsReportingAnswer(cmdExec cmd.Executor, name string) (existsOrUnknown, answered bool) {
 	exists, known := probeSession(cmdExec, name)
 	if !known {
 		log.WarningLog.Printf("tmux has-session for %s timed out after %s; the server is wedged, so "+
 			"reporting the session as still present rather than risk a false teardown", name, tmuxCommandTimeout)
-		return true
+		return true, false
 	}
-	return exists
+	return exists, true
 }
 
 // ProbeSession reports whether this session exists AND whether tmux actually
@@ -351,7 +361,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	preMarkerCaptureErrs := make(map[string]error, len(prefixed))
 	preMarkerGenerations := make(map[string]orphanGenerationSet, len(prefixed))
 	for _, match := range prefixed {
-		preMarkerProcesses[match], preMarkerCaptureErrs[match] = captureSessionProcessTrees(cmdExec, match)
+		preMarkerProcesses[match], preMarkerCaptureErrs[match] = CaptureSessionProcessTrees(cmdExec, match)
 		// Retain the generation while the captured pane tree is still alive.
 		// Waiting until a vanished-session recovery begins may be too late to
 		// read its immutable environment, especially when a helper starts after
@@ -428,7 +438,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	var incompleteCaptures error
 	var killErr error
 	for _, match := range matches {
-		leaked, captureErr := captureSessionProcessTrees(cmdExec, match)
+		leaked, captureErr := CaptureSessionProcessTrees(cmdExec, match)
 		if captureErr != nil {
 			vanished := errors.Is(captureErr, ErrSessionVanishedBeforeCapture)
 			var probeErr error

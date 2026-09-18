@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"path"
 	"strconv"
@@ -137,6 +138,80 @@ func dockerShorthandValue(arg string, pos int, args []string, index int) (string
 		return args[index+1], true
 	}
 	return "", false
+}
+
+// dockerCheckShorthandCluster walks a COMBINED short option such as `-tv`,
+// whose trailing guarded option Docker honors exactly as if it had been
+// written on its own. Ambiguity fails CLOSED here: when af cannot prove that a
+// guarded character is an option rather than part of an earlier option's
+// value, it refuses and names the argument. A refusal is an annoyance with an
+// obvious remedy — write the options separately — while an accept would hand a
+// repository a credential boundary (#3401).
+//
+// guarded is the set of short options this walk has to act on: "ve" for the
+// account path (a -v installs a mount, a -e names another identity) and "e"
+// for the credential-mount path (only -e can redirect credential lookup; a -v
+// cannot shadow af's single-file credential mount, so the credential path does
+// not guard it). check dispatches per guarded character — 'v' to a mount
+// check, 'e' to an env check — and returns the per-option refusal. whichGuarded
+// is the "-v or -e" / "-e" phrase the fail-closed refusal names, and scope is
+// the "account-scoped session" / "credential-mount session" clause, so the
+// account and credential guards share the WORDING the account tests pin
+// without two copies of the pflag-walk drifting apart.
+//
+// pflag resolves the `-f=value` form BEFORE it consults the option's kind, so
+// an explicit `=` makes the WHOLE suffix that option's value — a boolean's
+// included. `-t=false` therefore ends the cluster; walking on into `false`
+// refused a valid docker.run_args entry over the `e` in it, which would have
+// kept the session from starting at all.
+//
+// Docker demonstrates the precedence rather than just documenting it:
+// `-t=v/tmp:/x` fails with "invalid argument ... for -t, --tty flag:
+// strconv.ParseBool", so the suffix was -t's value and never a `v` option
+// nested inside it. The `pos+2 < len(arg)` bound is pflag's own
+// `len(shorthands) > 2` — with nothing after the `=` there is no value, and
+// Docker reads the `=` as a further option ("unknown shorthand flag: '=' in
+// -=").
+func dockerCheckShorthandCluster(arg string, args []string, index int, guarded string,
+	check func(character byte, value string) error, scope, whichGuarded string) error {
+	for pos := 1; pos < len(arg); pos++ {
+		character := arg[pos]
+		guardedChar := strings.IndexByte(guarded, character) >= 0
+		if pos+2 < len(arg) && arg[pos+1] == '=' {
+			if guardedChar {
+				return check(character, arg[pos+2:])
+			}
+			return nil
+		}
+		if guardedChar {
+			value, present := dockerShorthandValue(arg, pos, args, index)
+			if !present {
+				// Docker refuses an option whose value never arrives, so this
+				// argument installs nothing to check.
+				return nil
+			}
+			return check(character, value)
+		}
+		if _, boolean := dockerRunBooleanShorthands[character]; boolean {
+			continue
+		}
+		if _, takesValue := dockerRunValueShorthands[character]; takesValue {
+			// Proven to consume the remainder, so no later character in this
+			// cluster is an option Docker will act on.
+			return nil
+		}
+		// An option af has not been taught. It either takes a value —
+		// swallowing the rest of the cluster, any guarded option inside it
+		// included — or is a boolean, and the two are indistinguishable here.
+		// Refuse while anything guarded could still be hiding.
+		if strings.ContainsAny(arg[pos+1:], guarded) {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot use the combined short option %s for %s because af cannot tell whether %s in it is an option or part of -%c's value; write the options separately, such as -t -v /host:/container",
+				arg, scope, whichGuarded, character)
+		}
+		return nil
+	}
+	return nil
 }
 
 // dockerDeviceMode reports whether a --device field is a permission mask rather
@@ -274,71 +349,13 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 	}
 	// checkShorthandCluster examines a COMBINED short option such as `-tv`,
 	// whose trailing -v or -e Docker honors exactly as if it had been written
-	// on its own. Ambiguity fails CLOSED here: when af cannot prove that a `v`
-	// or `e` is an option rather than part of an earlier option's value, it
-	// refuses and names the argument. A refusal is an annoyance with an obvious
-	// remedy — write the options separately — while an accept would hand a
-	// repository the credential boundary (#3401).
-	checkGuardedShorthand := func(character byte, value string) error {
-		if character == 'v' {
-			return checkMount(value)
-		}
-		return checkEnv(value)
-	}
-	checkShorthandCluster := func(arg string, args []string, index int) error {
-		for pos := 1; pos < len(arg); pos++ {
-			character := arg[pos]
-			guarded := strings.IndexByte(dockerGuardedShorthands, character) >= 0
-			// pflag resolves the `-f=value` form BEFORE it consults the
-			// option's kind, so an explicit `=` makes the WHOLE suffix that
-			// option's value — a boolean's included. `-t=false` therefore ends
-			// the cluster; walking on into `false` refused a valid
-			// docker.run_args entry over the `e` in it, which would have kept
-			// the session from starting at all.
-			//
-			// Docker demonstrates the precedence rather than just documenting
-			// it: `-t=v/tmp:/x` fails with "invalid argument ... for -t, --tty
-			// flag: strconv.ParseBool", so the suffix was -t's value and never
-			// a `v` option nested inside it. The `pos+2 < len(arg)` bound is
-			// pflag's own `len(shorthands) > 2` — with nothing after the `=`
-			// there is no value, and Docker reads the `=` as a further option
-			// ("unknown shorthand flag: '=' in -=").
-			if pos+2 < len(arg) && arg[pos+1] == '=' {
-				if guarded {
-					return checkGuardedShorthand(character, arg[pos+2:])
-				}
-				return nil
-			}
-			if guarded {
-				value, present := dockerShorthandValue(arg, pos, args, index)
-				if !present {
-					// Docker refuses an option whose value never arrives, so
-					// this argument installs nothing to check.
-					return nil
-				}
-				return checkGuardedShorthand(character, value)
-			}
-			if _, boolean := dockerRunBooleanShorthands[character]; boolean {
-				continue
-			}
-			if _, takesValue := dockerRunValueShorthands[character]; takesValue {
-				// Proven to consume the remainder, so no later character in
-				// this cluster is an option Docker will act on.
-				return nil
-			}
-			// An option af has not been taught. It either takes a value —
-			// swallowing the rest of the cluster, any -v or -e inside it
-			// included — or is a boolean, and the two are indistinguishable
-			// here. Refuse while anything guarded could still be hiding.
-			if strings.ContainsAny(arg[pos+1:], dockerGuardedShorthands) {
-				return fmt.Errorf(
-					"backend=docker: docker.run_args cannot use the combined short option %s for an account-scoped session because af cannot tell whether the -v or -e in it is an option or part of -%c's value; write the options separately, such as -t -v /host:/container",
-					arg, character)
-			}
-			return nil
-		}
-		return nil
-	}
+	// on its own. Ambiguity fails CLOSED, via dockerCheckShorthandCluster: when
+	// af cannot prove that a `v` or `e` is an option rather than part of an
+	// earlier option's value, it refuses and names the argument. A refusal is an
+	// annoyance with an obvious remedy — write the options separately — while
+	// an accept would hand a repository the credential boundary (#3401). The
+	// shared helper is the same walk the credential-mount guard uses with
+	// guarded="e", so the two run_args guards cannot drift on the pflag rules.
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		switch {
@@ -426,7 +443,14 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			// see. The index deliberately does NOT advance past the value:
 			// that value may belong to an earlier option in the cluster, and
 			// consuming it here would skip a real --mount written next to it.
-			if err := checkShorthandCluster(arg, args, index); err != nil {
+			if err := dockerCheckShorthandCluster(arg, args, index, dockerGuardedShorthands,
+				func(character byte, value string) error {
+					if character == 'v' {
+						return checkMount(value)
+					}
+					return checkEnv(value)
+				},
+				"an account-scoped session", "the -v or -e"); err != nil {
 				return err
 			}
 		}
@@ -434,14 +458,18 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 	return nil
 }
 
-func environmentValue(environ []string, name string) string {
+// rawEnvironmentValue returns the untrimmed value environ gives name, or "" when
+// it is absent. The last entry wins because exec.Cmd.Env passes the last
+// duplicate to the child, and the value af judges must be the one docker reads.
+func rawEnvironmentValue(environ []string, name string) string {
 	prefix := name + "="
+	value := ""
 	for _, entry := range environ {
 		if strings.HasPrefix(entry, prefix) {
-			return strings.TrimSpace(strings.TrimPrefix(entry, prefix))
+			value = strings.TrimPrefix(entry, prefix)
 		}
 	}
-	return ""
+	return value
 }
 
 func localDockerEndpoint(endpoint string) bool {
@@ -536,21 +564,42 @@ func dockerLocalityProbeError(err error) error {
 // stricter dockerEndpointOnThisHost to it instead — see its comment for why a
 // loopback TCP endpoint is not host-identity proof.
 //
-// It reads DOCKER_HOST / DOCKER_CONTEXT from environ exactly as the docker CLI
-// receives them, and runs `docker context inspect` only when DOCKER_HOST is unset
-// or a DOCKER_CONTEXT is named — the same call ensureAccountDockerEngineLocal and
-// bindMountRelabel make. Two concerns turn on the engine being local: Docker
-// resolves AND labels a bind source on the daemon host (not the CLI host), and the
-// agent-server port publishes on the engine host's loopback while the daemon dials
-// its own. A remote engine breaks the latter for every docker session, not only
+// It reads DOCKER_HOST and DOCKER_CONTEXT from environ exactly as the docker CLI
+// receives them. The CLI picks its engine in this order (resolveContextName in
+// docker/cli; the order is the same in 19.03 through 29.x, and since 23.0 an
+// empty value counts as unset): a non-empty DOCKER_HOST, then a non-empty
+// DOCKER_CONTEXT, then the context chosen with `docker context use`, then the
+// default socket. With DOCKER_HOST alone, af uses that value directly.
+// With neither set, `docker context inspect` reports the CLI's own choice. When
+// both are set, the CLI's code and its reference disagree about which one wins,
+// so resolveConflictingDockerSelectors refuses unless both name the same
+// endpoint.
+//
+// ensureAccountDockerEngineLocal and bindMountRelabel make this same call. Two
+// concerns turn on the engine being local: Docker resolves AND labels a bind
+// source on the daemon host (not the CLI host), and the agent-server port
+// publishes on the engine host's loopback while the daemon dials its own. A
+// remote engine breaks the latter for every docker session, not only
 // account-scoped ones.
 func resolveDockerEngineEndpoint(environ []string) (endpoint string, local bool, err error) {
-	dockerHost := environmentValue(environ, "DOCKER_HOST")
-	dockerContext := environmentValue(environ, "DOCKER_CONTEXT")
-	endpoint = dockerHost
-	if dockerContext != "" || endpoint == "" {
-		ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
-		defer cancel()
+	// The CLI tests both variables with os.Getenv(...) != "", so a
+	// whitespace-only value still counts as set. Presence is decided on the raw
+	// value for that reason.
+	rawHost := rawEnvironmentValue(environ, "DOCKER_HOST")
+	rawContext := rawEnvironmentValue(environ, "DOCKER_CONTEXT")
+	ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
+	defer cancel()
+	switch {
+	case rawHost != "" && rawContext != "":
+		endpoint, err = resolveConflictingDockerSelectors(ctx, environ, rawContext)
+		if err != nil {
+			return "", false, err
+		}
+	case strings.TrimSpace(rawHost) != "":
+		endpoint = strings.TrimSpace(rawHost)
+	default:
+		// A whitespace-only DOCKER_HOST lands here too. The CLI still selects the
+		// default context for it, and the inspect below reports that choice.
 		out, derr := dockerExec(ctx, environ, "context", "inspect", "--format", dockerEndpointFormat)
 		if derr != nil {
 			return "", false, fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), derr)
@@ -558,6 +607,141 @@ func resolveDockerEngineEndpoint(environ []string) (endpoint string, local bool,
 		endpoint = strings.TrimSpace(string(out))
 	}
 	return endpoint, localDockerEndpoint(endpoint), nil
+}
+
+// resolveConflictingDockerSelectors handles DOCKER_HOST and DOCKER_CONTEXT set
+// together, the one pair Docker's own sources disagree on (#4413). Every CLI
+// release dials DOCKER_HOST and ignores DOCKER_CONTEXT. The CLI reference
+// documents DOCKER_CONTEXT as overriding DOCKER_HOST. A user who set both may
+// have meant either one, and a wrong guess puts the session on an engine they
+// did not choose. af therefore has the CLI resolve both, and proceeds only when
+// they name the same endpoint.
+//
+// "default" is the context a set DOCKER_HOST selects. Resolving it through the
+// CLI keeps Docker's own normalization of the value: a whitespace-only
+// DOCKER_HOST becomes the default socket, not an empty endpoint. The `--` stops
+// a context name that starts with a dash from being read as a flag.
+func resolveConflictingDockerSelectors(ctx context.Context, environ []string, rawContext string) (string, error) {
+	out, err := dockerExec(ctx, environ, "context", "inspect", "--format", dockerEndpointFormat, "--", "default", rawContext)
+	if err != nil {
+		return "", fmt.Errorf("DOCKER_HOST and DOCKER_CONTEXT are both set, and DOCKER_CONTEXT=%q could not be resolved to compare them (%s: %w) — unset the one you did not mean",
+			rawContext, strings.TrimSpace(string(out)), err)
+	}
+	endpoints := strings.Split(strings.TrimRight(string(out), "\r\n"), "\n")
+	if len(endpoints) != 2 {
+		return "", fmt.Errorf("DOCKER_HOST and DOCKER_CONTEXT are both set, and `docker context inspect` reported %d endpoints instead of 2 when comparing them — unset the one you did not mean",
+			len(endpoints))
+	}
+	hostEndpoint := strings.TrimSpace(endpoints[0])
+	contextEndpoint := strings.TrimSpace(endpoints[1])
+	if !sameDockerEndpoint(hostEndpoint, contextEndpoint) {
+		return "", fmt.Errorf("DOCKER_HOST and DOCKER_CONTEXT are both set and select different Docker engines (DOCKER_HOST resolves to %q, DOCKER_CONTEXT=%q to %q); the docker CLI dials DOCKER_HOST but its reference documents DOCKER_CONTEXT as the override, so af will not guess — unset the one you did not mean",
+			hostEndpoint, rawContext, contextEndpoint)
+	}
+	return hostEndpoint, nil
+}
+
+// sameDockerEndpoint reports whether two endpoint strings provably name the
+// same engine. Byte-equal strings always do — a context storing the literal
+// DOCKER_HOST value needs no further proof. Otherwise both are canonicalized
+// and compared, so differently SERIALIZED spellings of one endpoint (case,
+// default port, trailing dot or slash) still agree: refusing those would be a
+// fail-closed guard rejecting a legitimate configuration (#4413 review).
+//
+// When an endpoint cannot be canonicalized at all the comparison reports
+// false rather than leaning either way: af could not prove the selectors
+// agree, and unprovable agreement is exactly the ambiguity this guard exists
+// to refuse. The same conclusion follows when both are unparseable but
+// byte-different.
+func sameDockerEndpoint(a, b string) bool {
+	if a == b {
+		return true
+	}
+	canonicalA, okA := canonicalDockerEndpoint(a)
+	canonicalB, okB := canonicalDockerEndpoint(b)
+	return okA && okB && canonicalA == canonicalB
+}
+
+// canonicalDockerEndpoint normalizes an endpoint string for the same-engine
+// comparison and reports whether the normalization applied. It covers only
+// spelling, never identity:
+//
+//   - scheme and host letter case (`TCP://LOCALHOST:2375`),
+//   - tcp's default port (`tcp://x` is `tcp://x:2375`) — but NOT ssh's: Docker's
+//     ssh connhelper passes `-p` only for an explicit URL port and otherwise
+//     lets OpenSSH config supply one, so `ssh://h` and `ssh://h:22` can reach
+//     different daemons when ~/.ssh/config sets Port on an alias (#4413 review).
+//   - one trailing dot on a hostname (`localhost.` is `localhost`),
+//   - IPv6 in any spelling netip accepts (`[0:0:0:0:0:0:0:1]` is `::1`),
+//   - a trailing path slash, and the unix:// split url.Parse makes between
+//     host and path (`unix://var/run/docker.sock` joins to the same socket as
+//     `unix:///var/run/docker.sock`).
+//
+// It deliberately does NOT resolve names or equate addresses: tcp://localhost
+// and tcp://127.0.0.1 likely reach one daemon, but proving that needs DNS —
+// and DNS answers in a refusal guard are a fail-open hazard. They still
+// compare different. url.Parse has already rejected non-numeric ports, so a
+// port that survives here is a number Docker will dial.
+func canonicalDockerEndpoint(endpoint string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Scheme == "" {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	switch scheme {
+	case "unix", "npipe", "fd":
+		// The socket is host+path rejoined: url.Parse puts the first segment
+		// into Host for unix://sock/..., leaving Path to carry the rest. No
+		// case folding or dot-segment cleaning — the path is what docker opens.
+		socket := u.Host + u.Path
+		if scheme == "unix" && !strings.HasPrefix(socket, "/") {
+			socket = "/" + socket
+		}
+		return scheme + "://" + socket, true
+	case "tcp", "ssh":
+		host := u.Hostname()
+		if host == "" {
+			return "", false
+		}
+		if addr, aerr := netip.ParseAddr(host); aerr == nil {
+			host = addr.String()
+		} else {
+			host = strings.TrimSuffix(strings.ToLower(host), ".")
+		}
+		port := u.Port()
+		if port == "" && scheme == "tcp" {
+			// tcp's default is fixed in docker/cli; ssh has no safe default —
+			// an omitted port there defers to OpenSSH config, which this
+			// function cannot see, so the canonical form keeps it absent.
+			port = "2375"
+		}
+		var b strings.Builder
+		b.WriteString(scheme)
+		b.WriteString("://")
+		if u.User != nil {
+			b.WriteString(u.User.String())
+			b.WriteString("@")
+		}
+		b.WriteString(host)
+		if port != "" {
+			b.WriteString(":")
+			b.WriteString(port)
+		}
+		if p := strings.TrimSuffix(u.Path, "/"); p != "" {
+			b.WriteString(p)
+		}
+		if u.ForceQuery || u.RawQuery != "" {
+			b.WriteString("?")
+			b.WriteString(u.RawQuery)
+		}
+		if u.Fragment != "" {
+			b.WriteString("#")
+			b.WriteString(u.Fragment)
+		}
+		return b.String(), true
+	default:
+		return "", false
+	}
 }
 
 // dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will

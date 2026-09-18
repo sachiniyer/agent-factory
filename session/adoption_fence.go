@@ -1,6 +1,9 @@
 package session
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // Adoption fencing (#3865).
 //
@@ -85,9 +88,11 @@ import "errors"
 // leaving a session in place, which is the recoverable outcome and the same one
 // the hook-wait timeout already produces.
 //
-// In-memory only, and deliberately: it describes a window between one
-// completion edge and one teardown goroutine, and no such window survives a
-// daemon restart.
+// The count itself stays in-memory: a restart resets it to zero, so adoption
+// evidence after a restart instead comes from the durable obligation —
+// owedOnComplete, cleared by a delivery in this same critical section — and
+// from the durable pane-churn watermark for input that reaches no agent-server
+// entry point (#4162).
 
 // ErrAdoptionFenced refuses a PTY write to a session whose teardown has already
 // claimed it. It is returned to the writer — a browser terminal frame, a TUI
@@ -113,14 +118,30 @@ type adoptionFence struct {
 // point that writes to the PTY calls it FIRST — see the file comment for why
 // before rather than after, and TestAgentServerWritePathsAreAllAdoption for the
 // property that keeps the set complete.
+//
+// A delivery also discharges a pending on_complete obligation: prompting a
+// finished task session IS the adoption the marker exists to defer to. The
+// clear happens in the same critical section as the count bump, so the
+// teardown's under-fence read of either sees this delivery; the notify then
+// runs AFTER the lock is released — it performs storage I/O and must not hold
+// i.mu, let alone re-enter it.
 func (i *Instance) NoteAdoptionDelivery() error {
 	i.mu.Lock()
-	defer i.mu.Unlock()
 	if i.adoption.closed {
+		i.mu.Unlock()
 		return ErrAdoptionFenced
 	}
 	i.adoption.deliveries++
+	var notify func(*Instance)
+	if i.owedOnComplete != nil {
+		i.owedOnComplete = nil
+		notify = i.owedOnCompleteNotify
+	}
 	i.touchLocked()
+	i.mu.Unlock()
+	if notify != nil {
+		notify(i)
+	}
 	return nil
 }
 
@@ -176,4 +197,67 @@ func (i *Instance) ReopenAdoptionFence() {
 // TestAdoptionBaselineIsCapturedAtTheCompletionTransition.
 func (i *Instance) captureAdoptionBaselineLocked() {
 	i.adoption.atRunEnd = i.adoption.deliveries
+}
+
+// OwedOnComplete returns the pending on_complete obligation filed for this
+// session's finished run (#4162), or nil when none is owed. The in-memory form
+// of InstanceData.PendingOnComplete.
+func (i *Instance) OwedOnComplete() *PendingOnCompleteData {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.owedOnComplete
+}
+
+// SetOwedOnComplete files or clears the obligation in memory. The daemon owns
+// making that change durable: filing persists the marked row BEFORE the
+// teardown wait begins, and clearing persists the discharge once a decision is
+// reached. This call only moves memory.
+func (i *Instance) SetOwedOnComplete(marker *PendingOnCompleteData) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.owedOnComplete = marker
+}
+
+// SetOwedOnCompleteNotify installs the callback invoked (outside i.mu) when a
+// delivery discharges the obligation — the daemon's hook for making an
+// adoption durable before the process can lose it. Not persisted itself: the
+// daemon re-installs it wherever a marked row materializes.
+func (i *Instance) SetOwedOnCompleteNotify(notify func(*Instance)) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.owedOnCompleteNotify = notify
+}
+
+// LastPaneChurnAt returns the most recent observed pane-output timestamp,
+// which is durable (InstanceData.LastPaneChurnAt) — the adoption evidence that
+// survives a restart where the in-memory delivery counter cannot.
+func (i *Instance) LastPaneChurnAt() time.Time {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.lastPaneChurnAt
+}
+
+// ClaimOwedDrain marks the obligation's lifecycle worker in flight and reports
+// whether this call won it. The marker can be re-armed while a worker is still
+// waiting on adopted hooks — a refresh re-parks the intent and the next tick
+// would otherwise launch a second teardown beside it. One worker per
+// obligation, per generation: the claim is in-memory because a restarted
+// daemon starts with none.
+func (i *Instance) ClaimOwedDrain() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.owedDrainActive {
+		return false
+	}
+	i.owedDrainActive = true
+	return true
+}
+
+// ReleaseOwedDrain frees the worker claim. The worker's deferred release covers
+// every exit — committed teardown, stand-down, timeout, and the shutdown stop —
+// so a re-arm can only ever find a claim no worker still holds.
+func (i *Instance) ReleaseOwedDrain() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.owedDrainActive = false
 }
