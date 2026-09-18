@@ -77,18 +77,27 @@ func TestDetectAgentFromCommand(t *testing.T) {
 	}
 }
 
-// TestDetectAgentExecutableAgreesWithAgentNamespaceForCommand is the shared
-// invariant the #4356 narrowing broke. Before #4356, AgentForCommand matched env
-// by basename, the same rule DetectAgentExecutable uses at the create gate, so a
-// program the gate accepted was always classifiable on restore. #4356 tightened
+// TestDetectAgentExecutableAgreesWithAgentNamespaceForCommandOnCoveredSpellings
+// guards the #4356 narrowing's fix. Before #4356, AgentForCommand matched env by
+// basename, the same rule DetectAgentExecutable uses at the create gate, so a
+// program the gate accepted was classifiable on restore. #4356 tightened
 // AgentForCommand to the strict isTrustedEnvExecutable set while the gate kept the
 // basename rule, and the two surfaces drifted: a path-qualified env wrapper such
 // as /usr/local/bin/env ... codex was accepted onto a session but could no longer
 // be classified by the VS Code editor scope, so a restored session's editor
 // refused with ErrUnsupportedAgent. AgentNamespaceForCommand restores the basename
-// rule for the namespace-only callers; this test pins the agreement the gate and
-// the editor scope must keep so the same drift cannot return silently.
-func TestDetectAgentExecutableAgreesWithAgentNamespaceForCommand(t *testing.T) {
+// rule for the namespace-only callers.
+//
+// Scope: this is NOT a universal invariant. DetectAgentExecutable and
+// AgentNamespaceForCommand are independent implementations — the gate parses with
+// its own splitShellTokens and resolves the executable via baseCommand, the
+// namespace surface parses with mvdan.cc/sh and filepath.Base — and they diverge
+// on spellings outside this corpus (e.g. "codex >output", "codex 2>/dev/null",
+// "codex --model $MODEL", and "env env codex" all classify as codex at the gate
+// but "" on the namespace side). This test asserts agreement only for the
+// spellings enumerated below — the env-wrapper forms the #4356 bug turns on plus
+// a few bare-agent and reject cases — so that drift does not return there.
+func TestDetectAgentExecutableAgreesWithAgentNamespaceForCommandOnCoveredSpellings(t *testing.T) {
 	for _, command := range []string{
 		"env codex",
 		"/bin/env codex",

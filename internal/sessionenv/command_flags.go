@@ -24,12 +24,17 @@ func AgentForCommand(command string) string {
 }
 
 // AgentNamespaceForCommand derives the agent NAMESPACE from a command for the
-// non-credential callers that resolve an already-validated account's directory
-// (vscodeAccountScopeForInstance) and the create-time detection surface
-// (tmux.DetectAgentExecutable). Unlike AgentForCommand it recognizes any env
+// non-credential caller that resolves an already-validated account's directory
+// (vscodeAccountScopeForInstance). Unlike AgentForCommand it recognizes any env
 // wrapper whose basename is env — including operator-supplied path-qualified
-// spellings such as /usr/local/bin/env — so the two surfaces agree on what a
-// persisted session's stored Program can be classified as on restore.
+// spellings such as /usr/local/bin/env — using the same env-basename rule the
+// create-time gate tmux.DetectAgentExecutable keeps, so a path-qualified env
+// wrapper the gate accepted onto a pre-#4356 session stays classifiable on
+// restore. This shares only the env-basename rule, not a parser:
+// DetectAgentExecutable and AgentNamespaceForCommand are otherwise independent
+// (the gate uses splitShellTokens + baseCommand, this surface uses mvdan.cc/sh +
+// filepath.Base) and agree on the env-wrapper spellings the #4356 fix targets,
+// not on every command.
 //
 // It grants no credentials. The agent namespace it returns names a directory
 // under the af home the operator already selected an account in; nothing about
@@ -55,8 +60,8 @@ type agentCommand struct {
 // literalAgentCommand parses one literal agent invocation, optionally through an
 // env wrapper. envMatch decides which spellings count as the env wrapper: the
 // strict isTrustedEnvExecutable for credential-bearing callers, and the lenient
-// isEnvExecutableByBase for namespace-only callers that must agree with
-// tmux.DetectAgentExecutable over operator-controlled input.
+// isEnvExecutableByBase for namespace-only callers that share the env-basename
+// rule tmux.DetectAgentExecutable keeps for env-wrapper spellings.
 func literalAgentCommand(command string, envMatch func(string) bool) (agentCommand, bool) {
 	if strings.TrimSpace(command) == "" {
 		return agentCommand{}, false
