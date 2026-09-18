@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/testresidue"
 )
 
 // stampSelf writes a stamp for the current test process through the real
@@ -231,9 +232,9 @@ func sweepBase(t *testing.T) string {
 
 func TestSweep_ReapsDeadOwnerAndItsSockets(t *testing.T) {
 	base := sweepBase(t)
-	dead := filepath.Join(base, "af-tmux-dead123")
-	live := filepath.Join(base, "af-tmux-live456")
-	unstamped := filepath.Join(base, "af-tmux-legacy789")
+	dead := filepath.Join(base, testresidue.TestTmuxPrefix+"123")
+	live := filepath.Join(base, testresidue.TestTmuxPrefix+"456")
+	unstamped := filepath.Join(base, testresidue.TestTmuxPrefix+"789")
 	for _, d := range []string{dead, live, unstamped} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
@@ -275,7 +276,7 @@ func TestSweep_ReapsDeadOwnerAndItsSockets(t *testing.T) {
 
 func TestSweep_KillFailureStillRemovesDeadOwnerDir(t *testing.T) {
 	base := sweepBase(t)
-	dir := filepath.Join(base, "af-tmux-wedged")
+	dir := filepath.Join(base, testresidue.PackageTmuxPrefix+"4246")
 	sockDir := filepath.Join(dir, "tmux-1000")
 	if err := os.MkdirAll(sockDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -295,7 +296,7 @@ func TestSweep_KillFailureStillRemovesDeadOwnerDir(t *testing.T) {
 
 func TestSweep_UnprovenDirIsLeftAndCounted(t *testing.T) {
 	base := sweepBase(t)
-	dir := filepath.Join(base, "af-tmux-mystery")
+	dir := filepath.Join(base, testresidue.TestTmuxPrefix+"4247")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +316,8 @@ func TestSweep_UnprovenDirIsLeftAndCounted(t *testing.T) {
 
 func TestSweep_BudgetStopsAndCountsRemainder(t *testing.T) {
 	base := sweepBase(t)
-	for _, name := range []string{"af-tmux-a", "af-tmux-b", "af-tmux-c"} {
+	names := []string{testresidue.TestTmuxPrefix + "1", testresidue.PackageTmuxPrefix + "2", testresidue.SandboxHomePrefix + "3"}
+	for _, name := range names {
 		if err := os.MkdirAll(filepath.Join(base, name), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -335,7 +337,7 @@ func TestSweep_BudgetStopsAndCountsRemainder(t *testing.T) {
 	if stats.unproven != 3 {
 		t.Fatalf("stats %+v, want all 3 counted unproven after budget expiry", stats)
 	}
-	for _, name := range []string{"af-tmux-a", "af-tmux-b", "af-tmux-c"} {
+	for _, name := range names {
 		if _, err := os.Stat(filepath.Join(base, name)); err != nil {
 			t.Fatalf("%s removed after budget expiry", name)
 		}
@@ -345,8 +347,8 @@ func TestSweep_BudgetStopsAndCountsRemainder(t *testing.T) {
 func TestSweep_IgnoresUnrelatedPrefixesAndFiles(t *testing.T) {
 	base := sweepBase(t)
 	// af-* dirs (SocketTempDir) and unrelated names are not this package's
-	// to judge; a plain FILE matching the prefix is skipped too.
-	for _, name := range []string{"af-other1", "unrelated", "af-tmux-file"} {
+	// to judge; a plain FILE wearing a harness name is skipped too.
+	for _, name := range []string{"af-other1", "unrelated", testresidue.TestTmuxPrefix + "4248"} {
 		if err := os.WriteFile(filepath.Join(base, name), []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -355,6 +357,63 @@ func TestSweep_IgnoresUnrelatedPrefixesAndFiles(t *testing.T) {
 	stats := env.sweep(base)
 	if stats.reaped != 0 || stats.live != 0 || stats.unattributed != 0 || stats.unproven != 0 {
 		t.Fatalf("stats %+v on foreign entries, want all zero", stats)
+	}
+}
+
+// The sweep judges exactly the names testresidue says this package creates.
+// A dir that merely starts with one of the prefixes is not the harness's, so
+// even a stamp naming a dead owner does not make it this sweep's to delete.
+func TestSweep_OnlyHarnessShapedNamesAreJudged(t *testing.T) {
+	base := sweepBase(t)
+	names := []string{"af-tmux-abc", "af-tmux-pkg-", "af-tmux-pkg-12a", "af-test-home-12x", "af-tmux-"}
+	for _, name := range names {
+		dir := filepath.Join(base, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeStamp(t, dir, ownerStamp{pid: 424249, startID: 1, bootID: "b", nsID: "n"})
+	}
+	env := fakeEnv("b", "n", nil, nil)
+	stats := env.sweep(base)
+	if stats.reaped != 0 || stats.live != 0 || stats.unattributed != 0 || stats.unproven != 0 {
+		t.Fatalf("stats %+v on names the harness does not make, want all zero", stats)
+	}
+	for _, name := range names {
+		if _, err := os.Stat(filepath.Join(base, name)); err != nil {
+			t.Fatalf("%s was removed although the harness never makes that name", name)
+		}
+	}
+}
+
+// kill-server runs only in a tmux socket dir — the kind that is a TMUX_TMPDIR.
+// A SandboxHome with a socket in it is removed without one.
+func TestSweep_KillsServersOnlyInTmuxSocketDirs(t *testing.T) {
+	base := sweepBase(t)
+	socketIn := map[string]string{}
+	for i, prefix := range []string{testresidue.TestTmuxPrefix, testresidue.PackageTmuxPrefix, testresidue.SandboxHomePrefix} {
+		dir := filepath.Join(base, fmt.Sprintf("%s%d", prefix, 500+i))
+		sub := filepath.Join(dir, "tmux-1000")
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		socketIn[prefix] = unixSocket(t, sub, "default")
+		writeStamp(t, dir, ownerStamp{pid: 424250 + i, startID: 1, bootID: "b", nsID: "n"})
+	}
+	var killed []string
+	env := fakeEnv("b", "n", nil, nil)
+	env.killSocket = func(s string) error { killed = append(killed, s); return nil }
+	stats := env.sweep(base)
+	if stats.reaped != 3 {
+		t.Fatalf("stats %+v, want all three dead-owner dirs reaped", stats)
+	}
+	want := map[string]bool{socketIn[testresidue.TestTmuxPrefix]: true, socketIn[testresidue.PackageTmuxPrefix]: true}
+	if len(killed) != len(want) {
+		t.Fatalf("kill-server ran on %v, want exactly the two tmux socket dirs' sockets", killed)
+	}
+	for _, sock := range killed {
+		if !want[sock] {
+			t.Fatalf("kill-server ran on %s, which is not in a tmux socket dir", sock)
+		}
 	}
 }
 

@@ -50,27 +50,14 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/testresidue"
 )
 
 // ownerStampFile is the marker naming the creating test binary's process
 // instance. It lives inside the dir so it is created and destroyed with it.
-const ownerStampFile = "owner"
-
-// orphanDirPrefixes are the temp-dir prefixes this package creates, with
-// whether a match holds a tmux server worth killing. af-tmux- covers both
-// IsolateTmux (af-tmux-*) and SandboxTmux (af-tmux-pkg-*); af-test-home-
-// covers SandboxHome. SocketTempDir's af-* dirs are per-test
-// t.TempDir-cleaned and deliberately not matched.
-// Prefix matching rather than filepath.Glob on purpose: a TMPDIR
-// containing a glob metacharacter would make Glob misread or fail the
-// pattern and silently sweep nothing.
-var orphanDirPrefixes = []struct {
-	prefix string
-	tmux   bool
-}{
-	{"af-tmux-", true},
-	{"af-test-home-", false},
-}
+// The name is testresidue's so `af doctor` recognises the stamp as harness
+// content rather than as something a test run does not leave behind.
+const ownerStampFile = testresidue.OwnerStampFile
 
 // orphanSweepBudget bounds the whole once-per-process sweep so a /tmp full
 // of wedged servers cannot stall a test binary at startup.
@@ -110,7 +97,7 @@ func writeOwnerStamp(dir string) error {
 		return fmt.Errorf("reading pid namespace id: %w", err)
 	}
 	line := fmt.Sprintf("%d\t%d\t%s\t%s\n", self.PID, self.StartID, boot, ns)
-	tmp := filepath.Join(dir, ownerStampFile+".tmp")
+	tmp := filepath.Join(dir, testresidue.OwnerStampTempFile)
 	if err := os.WriteFile(tmp, []byte(line), 0o644); err != nil {
 		return err
 	}
@@ -251,16 +238,22 @@ func (e *sweepEnv) sweep(baseDir string) sweepStats {
 		return stats // cannot list the temp base — sweep nothing, prove nothing
 	}
 	for _, entry := range entries {
-		isTmux, matched := false, false
-		for _, p := range orphanDirPrefixes {
-			if strings.HasPrefix(entry.Name(), p.prefix) {
-				isTmux, matched = p.tmux, true
-				break
-			}
-		}
-		if !matched {
+		// testresidue owns which names this package creates: the exact
+		// MkdirTemp shape of IsolateTmux, SandboxTmux and SandboxHome, and
+		// nothing merely starting with one of their prefixes. SocketTempDir's
+		// af-* dirs are per-test t.TempDir-cleaned and deliberately not
+		// matched. An exact name test over the listing rather than
+		// filepath.Glob on purpose: a TMPDIR containing a glob metacharacter
+		// would make Glob misread or fail the pattern and silently sweep
+		// nothing.
+		kind := testresidue.Classify(entry.Name())
+		if kind == testresidue.None {
 			continue
 		}
+		// Only a tmux socket dir is a TMUX_TMPDIR, so only it can hold a
+		// tmux server to stop. A SandboxHome is an AGENT_FACTORY_HOME and is
+		// removed without kill-server.
+		isTmux := kind == testresidue.TmuxSocketDir
 		dir := filepath.Join(baseDir, entry.Name())
 		info, err := os.Stat(dir)
 		if err != nil || !info.IsDir() {
