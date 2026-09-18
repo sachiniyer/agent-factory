@@ -321,10 +321,11 @@ func unitStartRemedies(goos string, class startFailureClass) []string {
 func unreachableSupervisorRemedies(goos string, probeErr error) []string {
 	var remedies []string
 	if errors.Is(probeErr, exec.ErrNotFound) {
-		bin, dir := "systemctl", "/usr/bin"
+		bin := "systemctl"
 		if goos == "darwin" {
-			bin, dir = "launchctl", "/bin"
+			bin = "launchctl"
 		}
+		dir := "/usr/bin" // systemctl and launchctl both ship here on their platforms
 		remedies = append(remedies, fmt.Sprintf("add the directory holding `%s` (usually %s) to this environment's PATH (`af daemon adopt` runs the same binary and fails the same way)", bin, dir))
 	}
 	return append(remedies, busSessionRemedy(goos), uninstallRemedy)
