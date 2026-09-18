@@ -239,11 +239,11 @@ func (e *sweepEnv) sweep(baseDir string) sweepStats {
 	}
 	for _, entry := range entries {
 		// testresidue owns which names this package creates: the exact
-		// MkdirTemp shape of IsolateTmux, SandboxTmux and SandboxHome, and
-		// nothing merely starting with one of their prefixes. SocketTempDir's
-		// af-* dirs are per-test t.TempDir-cleaned and deliberately not
-		// matched. An exact name test over the listing rather than
-		// filepath.Glob on purpose: a TMPDIR containing a glob metacharacter
+		// MkdirTemp shape of IsolateTmux, SandboxTmux, SandboxHome and the
+		// sandboxed HOME, and nothing merely starting with one of their prefixes.
+		// SocketTempDir's af-* dirs are per-test t.TempDir-cleaned and
+		// deliberately not matched. An exact name test over the listing rather
+		// than filepath.Glob on purpose: a TMPDIR containing a glob metacharacter
 		// would make Glob misread or fail the pattern and silently sweep
 		// nothing.
 		kind := testresidue.Classify(entry.Name())
@@ -252,7 +252,11 @@ func (e *sweepEnv) sweep(baseDir string) sweepStats {
 		}
 		// Only a tmux socket dir is a TMUX_TMPDIR, so only it can hold a
 		// tmux server to stop. A SandboxHome is an AGENT_FACTORY_HOME and is
-		// removed without kill-server.
+		// removed without kill-server. A sandboxed HOME holds neither a server
+		// nor a socket, and carries no owner stamp (sandboxUserHome never writes
+		// one), so it reads as unstamped below — counted as unattributed and
+		// left in place, which keeps the leak visible until `af doctor` clears
+		// it on content (#4170 sandbox-HOME regression).
 		isTmux := kind == testresidue.TmuxSocketDir
 		dir := filepath.Join(baseDir, entry.Name())
 		info, err := os.Stat(dir)
