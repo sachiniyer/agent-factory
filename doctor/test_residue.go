@@ -43,7 +43,9 @@ import (
 //     dir, and the directory is ours;
 //   - its content is precisely what the harness leaves behind and nothing else —
 //     the package log (plus its rotations), or tmux-<uid>/ dirs holding only
-//     sockets — so the most a removal can take is a dead run's test log;
+//     sockets, and in either kind the owner stamp testguard writes so a later
+//     test binary can reap the directory itself (#4468) — so the most a removal
+//     can take is a dead run's test log;
 //   - every socket in it refused a dial, nothing has changed in it for
 //     MinTempHomeAge, and no live process names it, has a file open inside it,
 //     or is working inside it;
@@ -243,9 +245,11 @@ type residueShape struct {
 	ok bool
 	// why describes the content when ok is false.
 	why string
-	// The removable entries, deepest first when removed: leaf files and sockets,
-	// then tmux-<uid> dirs.
+	// The removable entries, deepest first when removed: leaf files, stamps and
+	// sockets, then tmux-<uid> dirs. leaves are a SandboxHome's logs; stamps are
+	// testresidue's owner stamp files, which either kind can hold.
 	leaves  []string
+	stamps  []string
 	sockets []string
 	subdirs []string
 	// newest is the latest mtime over the directory and everything read.
@@ -283,6 +287,8 @@ func readResidueShape(dir string, kind testresidue.Kind) residueShape {
 		}
 		shape.newest = later(shape.newest, entry.ModTime())
 		switch {
+		case isOwnerStamp(e.Name()) && entry.Mode().IsRegular():
+			shape.stamps = append(shape.stamps, path)
 		case kind == testresidue.SandboxHome && sandboxLogName.MatchString(e.Name()) && entry.Mode().IsRegular():
 			shape.leaves = append(shape.leaves, path)
 		case kind == testresidue.TmuxSocketDir && tmuxUserDirName.MatchString(e.Name()) && entry.IsDir():
@@ -296,6 +302,15 @@ func readResidueShape(dir string, kind testresidue.Kind) residueShape {
 		}
 	}
 	return shape
+}
+
+// isOwnerStamp reports whether name is the owner stamp testguard writes into
+// every harness directory, or that stamp before its rename into place. What
+// testguard writes there is one line identifying the test binary that made the
+// directory — nothing a user could want back once the directory itself is
+// judged removable.
+func isOwnerStamp(name string) bool {
+	return name == testresidue.OwnerStampFile || name == testresidue.OwnerStampTempFile
 }
 
 // addTmuxUserDir records one tmux-<uid> dir, which must hold sockets and
@@ -508,9 +523,9 @@ func assessTestResidueDir(ctx *scanContext, report *Report, dir string, kind tes
 	if kind == testresidue.SandboxHome && (ctx.snap == nil || !refs.openFilesKnown) {
 		report.addAdvisoryFinding(Finding{
 			Check: checkTestResidueDir,
-			Detail: fmt.Sprintf("%s is a test run's sandbox home holding only its log, untouched for %s, but "+
-				"this run cannot see which files processes hold open, so a test binary still writing that log "+
-				"cannot be ruled out — reported, not removed", dir, formatAge(age.Seconds())),
+			Detail: fmt.Sprintf("%s is a test run's sandbox home holding only what the test harness leaves "+
+				"behind, untouched for %s, but this run cannot see which files processes hold open, so a test "+
+				"binary still writing its log cannot be ruled out — reported, not removed", dir, formatAge(age.Seconds())),
 			Severity:    StatusWarn,
 			Remediation: "verify no test run is using it, then `" + shellsuggest.Command("rm", "-r", dir) + "`",
 		})
@@ -519,8 +534,14 @@ func assessTestResidueDir(ctx *scanContext, report *Report, dir string, kind tes
 
 	what := "a test's private tmux socket dir with no server answering in it"
 	if kind == testresidue.SandboxHome {
-		what = "a test run's sandbox home holding only that run's log, which nothing has open"
-		if len(shape.leaves) == 0 {
+		switch {
+		case len(shape.leaves) > 0 && len(shape.stamps) > 0:
+			what = "a test run's sandbox home holding only that run's log and its owner stamp, which nothing has open"
+		case len(shape.leaves) > 0:
+			what = "a test run's sandbox home holding only that run's log, which nothing has open"
+		case len(shape.stamps) > 0:
+			what = "a test run's sandbox home holding only its owner stamp"
+		default:
 			what = "an empty sandbox home from a test run"
 		}
 	}
@@ -579,7 +600,8 @@ func testResidueRemoveFix(ctx *scanContext, dir, tempDir, activeHome string, kin
 		if why, held := refs.inUse(dir, tmuxHomes, ctx.fixTimeWorkingDirs()); held {
 			return fmt.Errorf("refusing to remove %s: it is now in use (%s)", dir, why)
 		}
-		for _, path := range append(append([]string(nil), shape.leaves...), shape.sockets...) {
+		files := append(append(append([]string(nil), shape.leaves...), shape.stamps...), shape.sockets...)
+		for _, path := range files {
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("remove %s: %w", path, err)
 			}
