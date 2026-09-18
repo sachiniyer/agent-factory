@@ -1280,7 +1280,7 @@ func TestDeliverPrompt_TmuxOrphanReturnsImmediatelyWithError(t *testing.T) {
 	if !tmux.NewTmuxSessionForRepo(orphanTitle, repo.Root, program).ExistsOrUnknown() {
 		t.Fatal("orphan tmux session should exist after creation")
 	}
-	if exists, _, _, err := manager.targetSessionState(repo.ID, orphanTitle); err != nil {
+	if exists, _, err := manager.targetSessionState(repo.ID, orphanTitle); err != nil {
 		t.Fatalf("targetSessionState: %v", err)
 	} else if exists {
 		t.Fatal("orphan title should NOT exist in daemon state")
