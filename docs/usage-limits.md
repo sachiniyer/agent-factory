@@ -121,7 +121,7 @@ See the [TUI guide](tui.md#accounts) and [web guide](web.md#config-view).
 runs as the account you named or does not start — and by default never rotates
 accounts on its own. Rotating after a usage limit is opt-in and needs an
 explicit candidate list — see [Opt-in auto-resume](#opt-in-auto-resume). A
-session created with `--account` is pinned and is never rotated at all. The full
+session created with `--account` is pinned and automatic switching never rotates it. The full
 command surface is in [`af accounts`](reference/cli.md#af-accounts).
 
 ### Scoping an account to a project
