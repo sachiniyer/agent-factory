@@ -375,6 +375,12 @@ it comes from an **allowed author** and carries a whole-word `RESOLVED` or
 `ACCEPTED` — note `UNRESOLVED` contains `RESOLVED` as a substring, so match on
 word boundaries.
 
+**The `$allowed` list in both jq snippets below must match `ALLOWED_AUTHORS` in
+`.github/scripts/auto-gate.js` exactly.** There is no mechanical derivation —
+the two copies are maintained by hand. Whenever `ALLOWED_AUTHORS` changes in the
+script, update both occurrences here in lockstep; a copy that disagrees with the
+real predicate produces confident wrong answers and is worse than no copy.
+
 **A thread's location is not part of the test (#3689).** GitHub nulls `line`
 once a push moves the code a thread points at, and a rebase, a re-indent, or a
 fix to the *neighbouring* line does that exactly as readily as the fix itself —
@@ -391,11 +397,11 @@ jq -s -e 'length > 0 and all(type == "array")' "$G/inline.json" >/dev/null \
 
 jq -s '
   add as $all
-  | ["sachiniyer","app-detail-app","app-detail-app[bot]"] as $allowed
+  | ["sachiniyer","detail-app"] as $allowed
   | ($all
      | map(select(
          .in_reply_to_id != null
-         and (.user.login | IN($allowed[]))
+         and (((.user.login // "") | sub("^app/";"") | sub("\\[bot\\]$";"")) | IN($allowed[]))
          and ((((.body // "") | test("\\b(RESOLVED|ACCEPTED)\\b"))
                or ((.body // "") | contains("[gate-ack]"))))))
      | map(.in_reply_to_id)) as $resolved
@@ -422,11 +428,11 @@ HD=$(cat "$G/head-date.txt")
 
 jq -s -r --arg hd "$HD" '
   add as $all
-  | ["sachiniyer","app-detail-app","app-detail-app[bot]"] as $allowed
+  | ["sachiniyer","detail-app"] as $allowed
   | ($all
      | map(select(
          .in_reply_to_id != null
-         and (.user.login | IN($allowed[]))
+         and (((.user.login // "") | sub("^app/";"") | sub("\\[bot\\]$";"")) | IN($allowed[]))
          and ((.body // "") | test("\\bRESOLVED\\b"))))
      | map(.in_reply_to_id)) as $claimed
   | $all
