@@ -268,9 +268,12 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			want: ApplyStatusApplied,
 		},
 		{
+			// debug_pprof, not branch_prefix: #4539 made each create resolve
+			// branch_prefix, so it is EffectAppliedLive and no longer an exemplar
+			// of a key a successful apply still defers.
 			name:    "next daemon start",
 			outcome: ApplyOutcome{DaemonApplied: true},
-			key:     "branch_prefix",
+			key:     "debug_pprof",
 			want:    ApplyStatusDeferred,
 		},
 		{
@@ -332,7 +335,7 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			outcome: ApplyOutcome{
 				DaemonApplyUnconfirmed: true,
 			},
-			key:  "branch_prefix",
+			key:  "debug_pprof",
 			want: ApplyStatusDeferred,
 		},
 		{

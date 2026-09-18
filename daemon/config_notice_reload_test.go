@@ -57,7 +57,7 @@ func TestFailedConfigApplyOutcomeDistinguishesLostReply(t *testing.T) {
 		require.Equal(t,
 			"Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value.",
 			config.EffectNotice("network.require_token", outcome))
-		require.Equal(t, config.ApplyStatusFailed, outcome.StatusForKey("branch_prefix"))
+		require.Equal(t, config.ApplyStatusFailed, outcome.StatusForKey("debug_pprof"))
 	})
 
 	t.Run("daemon refusal", func(t *testing.T) {
@@ -73,7 +73,7 @@ func TestFailedConfigApplyOutcomeDistinguishesLostReply(t *testing.T) {
 		require.Contains(t, warning, "live apply could not be confirmed")
 		require.Contains(t, warning, "apply refused during upgrade")
 		require.Equal(t, config.ApplyStatusUnconfirmed, outcome.StatusForKey("network.require_token"))
-		require.Equal(t, config.ApplyStatusDeferred, outcome.StatusForKey("branch_prefix"))
+		require.Equal(t, config.ApplyStatusDeferred, outcome.StatusForKey("debug_pprof"))
 	})
 
 	t.Run("lost reply", func(t *testing.T) {
