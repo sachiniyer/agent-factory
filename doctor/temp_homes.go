@@ -361,6 +361,12 @@ const defaultMaxTempHomeCandidates = 50000
 // as the healthier machine (#3466).
 type tempHomeSweep struct {
 	candidates []string
+	// roots is every first-level directory NAME the root listing yielded, which
+	// the candidate budget never trims: it is complete unless rootPartial or
+	// unreadable says otherwise. checkTestResidue reads it, because the dirs it
+	// looks for are first-level by construction and must not vanish behind a
+	// budget spent on somebody else's nested directories (#4170).
+	roots []string
 	// offered and visited count FIRST-LEVEL entries of the temp dir, because
 	// that is both the number an operator can act on ("/tmp holds 48,000
 	// directories") and a number known EXACTLY: one ReadDir yields it before
@@ -813,6 +819,7 @@ func candidateTempHomes(tempDir string, limit int) tempHomeSweep {
 	if !ok {
 		return sweep
 	}
+	sweep.roots = level1
 	for _, name := range level1 {
 		if limit > 0 && len(sweep.candidates) >= limit {
 			sweep.hitCandidateLimit = true
