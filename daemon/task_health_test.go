@@ -261,7 +261,7 @@ func TestWatcherSupervisor_DuplicateIDsWatchTheFirst(t *testing.T) {
 	supervisor := newWatcherSupervisor()
 	supervisor.queueDir = func() (string, error) { return dir, nil }
 	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
-	supervisor.deliver = func(string, string) error { return nil }
+	supervisor.deliver = adaptWatchDelivery(func(string, string) error { return nil })
 	supervisor.setStatus = func(string, string) {}
 	t.Cleanup(supervisor.Stop)
 
@@ -474,7 +474,7 @@ func TestWatchArming_StaleWatcherAfterAFailedReloadIsNotArmed(t *testing.T) {
 	supervisor := newWatcherSupervisor()
 	supervisor.queueDir = func() (string, error) { return dir, nil }
 	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
-	supervisor.deliver = func(string, string) error { return nil }
+	supervisor.deliver = adaptWatchDelivery(func(string, string) error { return nil })
 	supervisor.setStatus = func(string, string) {}
 	t.Cleanup(supervisor.Stop)
 
@@ -510,7 +510,7 @@ func TestWatchArming_DuringShutdownIsUnknown(t *testing.T) {
 	supervisor := newWatcherSupervisor()
 	supervisor.queueDir = func() (string, error) { return dir, nil }
 	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
-	supervisor.deliver = func(string, string) error { return nil }
+	supervisor.deliver = adaptWatchDelivery(func(string, string) error { return nil })
 	supervisor.setStatus = func(string, string) {}
 
 	watch := watchTask("shutdown", "printf 'a\\n'; sleep 30", dir)
