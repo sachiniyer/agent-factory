@@ -8942,11 +8942,16 @@ test("a head with no PR Validation run is dispatched once and the decision names
   assert.deepEqual(requiredCheckReasons(second), TODAYS_MISSING_REASONS);
 
   // Two evaluations that both read before either dispatch is visible can both
-  // send one. pr.yml groups a dispatched run by its ref and cancels in progress,
-  // so that race costs one cancelled run rather than two builds.
+  // send one. The dispatch passes no inputs, so pr.yml's probe input (#4563)
+  // stays false: a full run, grouped by its ref under pr-, cancel in progress.
+  // That race costs one cancelled run rather than two builds.
+  assert.equal(validationDispatches(github)[0].inputs, undefined, "a dispatch with inputs could be a probe");
   const validation = fs.readFileSync(path.join(__dirname, "..", "workflows", "pr.yml"), "utf8");
   assert.match(validation, /^ {2}workflow_dispatch:$/m);
-  assert.match(validation, /^ {2}group: pr-\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}$/m);
+  assert.match(
+    validation,
+    /^ {2}group: \$\{\{ inputs\.probe && 'probe-' \|\| 'pr-' \}\}\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}$/m,
+  );
   assert.match(validation, /^ {2}cancel-in-progress: true$/m);
 });
 

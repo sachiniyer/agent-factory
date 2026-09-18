@@ -2987,7 +2987,9 @@ async function dispatchMissingValidationRun({
     return { dispatched: false, reason: "moved", tip };
   }
 
-  // A dispatch is not idempotent, so it gets one attempt.
+  // A dispatch is not idempotent, so it gets one attempt. It passes no inputs,
+  // so pr.yml's probe input stays false: a full run in the pr-<ref> group, never
+  // a #4563 probe.
   try {
     await github.rest.actions.createWorkflowDispatch({
       owner,
@@ -5832,6 +5834,26 @@ async function updateBranchContentHead({
   };
 }
 
+// Every sha a Codex artifact may name and still count as evidence about this
+// head. A recognised chain of update-branch merges has one valid evidence name
+// per tree-proven link: the current merge and every first parent walked on the
+// way to the terminal content head (#4238, #4239). A review or unavailability
+// reply may have landed on any of them between gate updates. No other ancestor
+// is admitted; updateBranchContentHead's fail-closed proof authorizes every
+// added name.
+//
+// codex-outage.js reconstructs degraded merges against this same set (#4241),
+// so the outage record and the gate cannot disagree about which heads a
+// covering verdict may name.
+function evidenceHeadShasFor(headSha, contentHead) {
+  const evidenceHeadOids = Array.isArray(contentHead?.evidenceHeadOids)
+    ? contentHead.evidenceHeadOids
+    : [contentHead?.oid];
+  return [...new Set(
+    [headSha, ...evidenceHeadOids].map(normalizeHeadSha).filter(Boolean),
+  )];
+}
+
 // The Codex finding artifacts a gate must not merge past: those carrying a
 // P0-P3 that bind to NO head, and that no acknowledgement has answered.
 //
@@ -5969,12 +5991,7 @@ async function evaluateCodex({
   // to the terminal content head. A review or unavailability reply may have
   // landed on any of them between gate updates. No other ancestor is admitted;
   // updateBranchContentHead's fail-closed proof authorizes every added name.
-  const evidenceHeadOids = Array.isArray(contentHead?.evidenceHeadOids)
-    ? contentHead.evidenceHeadOids
-    : [contentHead?.oid];
-  const evidenceHeadShas = [...new Set(
-    [sha, ...evidenceHeadOids].map(normalizeHeadSha).filter(Boolean),
-  )];
+  const evidenceHeadShas = evidenceHeadShasFor(sha, contentHead);
   // Body links are location prose, not a claim about what Codex reviewed. Keep
   // their pre-#4239 scope — current and terminal content head — while accepting
   // every verified intermediate only where GitHub's commit_id authenticates the
@@ -6935,7 +6952,8 @@ function formatError(error) {
 
 module.exports = {
   codexEvidence: { CODEX_REVIEWER, codexReportsReviewUsageLimit, isCodexUsageLimitArtifact, classifyCodexUnavailableArtifact,
-    parseReviewedCommit, parseVerdictArtifact, completedCodexSummaryRows, corroboratedCodexSummaryRows },
+    parseReviewedCommit, parseVerdictArtifact, completedCodexSummaryRows, corroboratedCodexSummaryRows,
+    updateBranchContentHead, evidenceHeadShasFor },
   beginAggregateDecision,
   evaluate,
   evaluateAggregateDecision,
