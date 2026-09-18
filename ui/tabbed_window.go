@@ -327,9 +327,10 @@ func tabLabelFor(inst *session.Instance, idx int) string {
 
 // SetRect implements layout.Pane: the pane renders exactly r. The inner
 // TabPane gets the area inside the frame minus the header line; that inner
-// size is also what the instances' tmux sessions are resized to (see
-// GetPreviewSize), so the capture matches the visible area exactly — the full
-// workspace width, with no AdjustPreviewWidth-style right buffer (#1024 PR 4).
+// size is the live attachment's VIEW box — asserted as the pane's tmux size
+// only while the attachment owns the pane's dimensions (the focused
+// interactive pane; #4480) — so a viewer's layout change re-crops the render
+// without reflowing the session (see GetPreviewSize).
 func (w *TabbedWindow) SetRect(r layout.Rect) {
 	w.rect = r
 	iw, ih := w.innerSize()
