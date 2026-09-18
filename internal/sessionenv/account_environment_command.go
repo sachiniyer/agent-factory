@@ -24,45 +24,32 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		if err != nil {
 			return true
 		}
-		// Coarse rule 1: if the command contains both a command substitution
-		// anywhere and an arithmetic context anywhere, refuse without modelling
-		// scope. bash re-evaluates the stdout of a command substitution as fresh
-		// arithmetic when the variable holding it appears in an arithmetic
-		// context, so any combination of the two is unprovable without
-		// tracking taint across all compound-statement boundaries. Rather than
-		// enumerating compound forms (if/elif, while/until, for, case, FuncDecl,
-		// etc.) and maintaining a per-scope accumulator that accrues a new gap
-		// each time a missing form is discovered, the guard rejects the
-		// combination structurally. Commands that combine command substitutions
-		// with arithmetic are uncommon in agent invocation strings; the class
-		// that IS common — arithmetic alone, command substitutions alone, or the
-		// two in separate statements without a re-evaluation path — stays allowed.
-		if fileHasCmdSubst(file) && fileHasArithmeticContext(file) {
-			return true
-		}
-		// Coarse rule 2: if the command contains a literal string that is itself
-		// a denied arithmetic assignment AND the command contains any arithmetic
-		// context, refuse. bash re-evaluates a variable's stored value as fresh
-		// arithmetic when that variable appears inside $(( )), (( )), let, etc.,
-		// so `x='CODEX_HOME=1'; : $((x)); codex` carries the same bypass as the
-		// command-substitution form — no CmdSubst is involved, but the literal
-		// value is the hazard. Combined with fileHasArithmeticContext this is
-		// symmetric with coarse rule 1: both are structural, scope-free, and
-		// cannot gain a new gap from an unhandled compound form.
-		if fileHasLiteralDeniedArithAssignment(file, names) && fileHasArithmeticContext(file) {
-			return true
-		}
-		// Coarse rule 3: if the command contains a same-shell runtime-input
-		// builtin (`read`, `mapfile`, or `readarray`) AND an arithmetic context,
-		// refuse. These builtins write an unprovable runtime value into a shell
-		// variable; if the same command later evaluates that variable in an
-		// arithmetic context, bash re-evaluates the stored string as fresh
-		// arithmetic — the same re-evaluation hazard as rule 1, but without any
-		// command substitution in the AST. `read x </tmp/payload; : $((x));
-		// codex` is the canonical form: neither a CmdSubst nor a hazardous
-		// literal appears in the file, yet x can carry `CODEX_HOME=1` at
-		// runtime.
-		if fileHasRuntimeInputToVariable(file) && fileHasArithmeticContext(file) {
+		// Inverted arithmetic guard: refuse any command whose arithmetic context
+		// has an operand that is not provably a numeric constant. Rather than
+		// enumerating the ways a variable's stored value can become hazardous
+		// (command substitution, hazardous literal, runtime-input builtin,
+		// dynamically composed strings, …), the guard inverts the burden: an
+		// arithmetic context is refused UNLESS its operand provably consists of
+		// only integer literals, arithmetic operators, and parentheses. Any
+		// variable reference inside arithmetic — $((x)), (( x )), let x,
+		// arr[x], etc. — is unprovable regardless of how x was assigned.
+		//
+		// This single check subsumes the three coarse rules that preceded it:
+		//   - CmdSubst+arith: a CmdSubst inside arithmetic is never a constant.
+		//   - Literal-assignment+arith: a variable holding a hazardous literal
+		//     appears in arithmetic as a variable reference — not a constant.
+		//   - Runtime-input+arith: same as the literal case above.
+		//   - Dynamic-composition bypass (n=CODEX_HOME; x="${n}=1"; : $((x))):
+		//     x is a variable reference in arithmetic — not a constant.
+		//
+		// Safe-side false positives: commands that combine arithmetic with any
+		// non-constant expression are refused, including provably safe ones like
+		// n=5; : $((n+1)). That cost is documented and priced as acceptable:
+		// arithmetic over non-constant operands is uncommon in agent invocation
+		// strings, and the precision gain from tracking whether the variable was
+		// actually hazardous is outweighed by the unbounded enumeration gap it
+		// creates.
+		if fileHasArithmeticContextWithVariableOperand(file) {
 			return true
 		}
 		mutates := false

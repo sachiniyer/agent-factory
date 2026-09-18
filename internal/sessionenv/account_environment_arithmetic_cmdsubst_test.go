@@ -371,18 +371,10 @@ func TestValidateAccountEnvironmentCommand_AllowsProvableArithmeticAndExternalCm
 		"echo $(echo CODEX_HOME=1); codex",
 		"echo \"$(echo CODEX_HOME=1)\"; codex",
 		"codex $(echo hi)",
-		// Pure arithmetic with no command substitution is provable and stays
-		// allowed, including `$(( ))` whose re-evaluation cannot assign anything.
+		// Pure arithmetic with no command substitution and no variable operands
+		// stays allowed: the inverted guard only fires when an arithmetic
+		// context has a non-constant operand.
 		"echo $(( 1 + 2 )); codex",
-		"echo $(( arr[i] )); codex",
-		"(( x = 1 )); codex",
-		"let 'x = 1'; codex",
-		"let 'x = $((1+1))'; codex",
-		// The existing narrow arithmetic forms remain allowed.
-		"let 'total += 1'",
-		"let 'arr[i=42]'; npm run dev",
-		"(( counter[index] ))",
-		"(( arr[i=42] )); npm run dev",
 		// Non-arithmetic commands are unaffected.
 		"cd /tmp && codex",
 		"npm run dev",
@@ -390,27 +382,15 @@ func TestValidateAccountEnvironmentCommand_AllowsProvableArithmeticAndExternalCm
 		// arithmetic, so a command substitution in them is plain data.
 		"[[ $(echo CODEX_HOME=1) == \"CODEX_HOME=1\" ]]; codex",
 		"[[ $(echo hi) != \"bye\" ]]; codex",
-		// [[ ]] numeric operators with no command substitution are fine.
+		// [[ ]] numeric operators with numeric-literal operands stay allowed.
 		"[[ 0 -eq 0 ]]; codex",
 		"[[ 1 -lt 2 ]]; codex",
 		// A variable assigned from a command substitution but used OUTSIDE
 		// arithmetic is still just data — the stdout is a string, not re-evaluated.
 		"x=$(echo CODEX_HOME=1); echo $x; codex",
 		"x=$(echo hi); echo $x; codex",
-		// A variable assigned from a literal value (not a command substitution)
-		// and used in arithmetic is provable.
-		"x=42; : $((x)); codex",
-		"x=1; (( x )); codex",
-		// Non-tainted variables in subscripts and bare [[ ]] forms are fine.
-		"x=42; : $((arr[x])); codex",
-		"x=42; [[ x -eq 0 ]]; codex",
-		// A variable copy from a non-tainted source is not tainted.
-		"x=42; y=$x; : $((y)); codex",
-		// A ParamExp assignment from a literal (not a command substitution)
-		// does not taint the variable.
-		`x=; : "${x:=42}"; : $((x)); codex`,
-		// $[ ] (deprecated arithmetic) is handled as ArithmExp — pure
-		// arithmetic with no substitution is provable.
+		// $[ ] (deprecated arithmetic) is handled as ArithmExp — pure numeric
+		// arithmetic with no variable operands stays allowed.
 		"echo $[1+2]; codex",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
@@ -457,7 +437,7 @@ func TestValidateAccountEnvironmentCommand_AllowsCompoundSafeTaintOrder(t *testi
 }
 
 // TestValidateAccountEnvironmentCommand_RefusesLiteralDeniedArithAssignment
-// verifies that the second coarse rule closes the literal-arithmetic-assignment
+// verifies that the inverted arithmetic guard closes the literal-arithmetic-assignment
 // bypass: a command that assigns a literal string containing a denied arithmetic
 // assignment AND contains an arithmetic context is refused, even when no command
 // substitution is present.
@@ -465,10 +445,8 @@ func TestValidateAccountEnvironmentCommand_AllowsCompoundSafeTaintOrder(t *testi
 // Example: `x='CODEX_HOME=1'; : $((x)); codex`
 //   - x is assigned the literal string "CODEX_HOME=1" (no CmdSubst involved).
 //   - bash re-evaluates x as arithmetic in $((x)), performing CODEX_HOME=1.
-//   - Coarse rule 1 (CmdSubst+arithmetic) does not fire: no CmdSubst present.
-//   - Coarse rule 2 (literalDeniedArithAssignment+arithmetic) fires: the literal
-//     "CODEX_HOME=1" is a denied arithmetic assignment, and $((x)) is an
-//     arithmetic context.
+//   - The inverted guard fires: $((x)) has a variable operand (not a numeric
+//     constant), so the command is refused regardless of what x holds.
 func TestValidateAccountEnvironmentCommand_RefusesLiteralDeniedArithAssignment(t *testing.T) {
 	for _, command := range []string{
 		"x='CODEX_HOME=1'; : $((x)); codex",
@@ -482,45 +460,110 @@ func TestValidateAccountEnvironmentCommand_RefusesLiteralDeniedArithAssignment(t
 }
 
 // TestValidateAccountEnvironmentCommand_AllowsLiteralArithNonDenied verifies
-// that the literal-arithmetic-assignment check is narrow: a variable whose
-// literal value assigns a non-denied name, or is a plain number, must stay
-// allowed.
+// that the inverted arithmetic guard does not fire when no arithmetic context
+// is present. The cases below previously tested that a variable holding a
+// non-hazardous literal was allowed in arithmetic — under the inverted predicate,
+// ANY variable reference inside arithmetic is refused (the operand is not a
+// numeric constant). These commands are documented as accepted false positives in
+// TestValidateAccountEnvironmentCommand_InvertedArithGuardFalsePositives.
+//
+// Commands with no arithmetic context at all stay allowed regardless of what
+// any variable holds.
 func TestValidateAccountEnvironmentCommand_AllowsLiteralArithNonDenied(t *testing.T) {
 	for _, command := range []string{
-		// Literal is a plain number — does not assign any name.
-		"x='42'; : $((x)); codex",
-		"x='0'; (( x )); codex",
-		// Literal assigns a non-denied name.
-		"x='a=1'; : $((x)); codex",
+		// No arithmetic context: the variable's value is never re-evaluated.
+		"x='42'; echo $x; codex",
+		"x='0'; echo $x; codex",
+		"x='a=1'; echo $x; codex",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
-			"command %q stores a non-hazardous literal and must stay allowed", command)
+			"command %q stores a non-hazardous literal with no arithmetic context and must stay allowed", command)
 	}
 }
 
 // TestValidateAccountEnvironmentCommand_DefiniteReassignmentIsCoarseRuleFalsePositive
-// documents that the coarse rule refuses commands that combine a command
-// substitution with arithmetic even when a subsequent literal reassignment
+// documents that the inverted arithmetic guard refuses commands that combine a
+// command substitution with arithmetic even when a subsequent literal reassignment
 // provably overwrites the tainted value. These were previously allowed by the
 // taint accumulator's reaching-assignment semantics.
 //
-// The coarse rule explicitly prices this as an acceptable false positive:
-// combining command-substitution assignments with arithmetic is uncommon in
-// agent invocation strings, and the precision gain from per-statement tracking
-// is outweighed by the compound-form enumeration gap it creates (every new
-// shell compound form — case, FuncDecl, TimeClause, CoprocClause — is a new
-// potential gap in the accumulator that yields a new round of P1 findings).
+// The inverted guard explicitly prices this as an acceptable false positive:
+// any arithmetic context with a non-constant operand is refused regardless of
+// how the variable was assigned.
 func TestValidateAccountEnvironmentCommand_DefiniteReassignmentIsCoarseRuleFalsePositive(t *testing.T) {
 	for _, command := range []string{
 		// These would be safe under per-statement taint tracking (the literal
 		// reassignment x=0 overwrites the tainted value before arithmetic), but
-		// the coarse rule refuses them because CmdSubst and arithmetic coexist.
+		// the inverted guard refuses them because $((x)) has a variable operand.
 		"x=$(printf CODEX_HOME=1); x=0; : $((x)); codex",
 		"x=$(printf CODEX_HOME=1); x=42; (( x )); codex",
 		"x=$(printf CODEX_HOME=1); x=42; let x; codex",
 		"x=$(printf CODEX_HOME=1); y=0; x=$y; : $((x)); codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
-		require.Error(t, err, "command %q is refused by the coarse rule (CmdSubst+arithmetic), priced as acceptable false positive", command)
+		require.Error(t, err, "command %q is refused by the inverted arithmetic guard, priced as acceptable false positive", command)
 	}
+}
+
+// TestValidateAccountEnvironmentCommand_InvertedArithGuardFalsePositives
+// documents commands that are refused by the inverted arithmetic guard but are
+// not actually hazardous. The guard refuses any arithmetic context whose operand
+// is not a provably numeric constant — that is, any variable reference inside
+// arithmetic — regardless of what the variable was assigned. This means that
+// legitimate uses of arithmetic over provably non-hazardous variables are
+// refused as accepted false positives.
+//
+// The cost is priced as acceptable (maintainer decision):
+//   - Arithmetic over non-constant operands is uncommon in agent invocation strings.
+//   - Every attempt to track whether a variable is "safe" accumulated per-scope
+//     enumeration gaps (new compound form → new gap → new P1 finding, 39 rounds).
+//   - The failure directions are not symmetric: a wrong refusal produces an error
+//     a user can read and work around; a wrong accept silently redirects CODEX_HOME.
+func TestValidateAccountEnvironmentCommand_InvertedArithGuardFalsePositives(t *testing.T) {
+	for _, command := range []string{
+		// Variable assigned from a literal and used in arithmetic — the guard
+		// sees a variable operand and refuses regardless of the assignment value.
+		"x=42; : $((x)); codex",
+		"x=1; (( x )); codex",
+		"x=42; : $((arr[x])); codex",
+		"x=42; y=$x; : $((y)); codex",
+		`x=; : "${x:=42}"; : $((x)); codex`,
+		// Variable-literal assignment with non-denied arith name in arithmetic.
+		"x='42'; : $((x)); codex",
+		"x='0'; (( x )); codex",
+		"x='a=1'; : $((x)); codex",
+		// Arithmetic over variable subscripts and targets.
+		"echo $(( arr[i] )); codex",
+		"(( x = 1 )); codex",
+		"(( counter[index] ))",
+		"(( arr[i=42] )); npm run dev",
+		// let with non-literal variable operands.
+		"let 'x = 1'; codex",
+		"let 'x = $((1+1))'; codex",
+		"let 'total += 1'",
+		"let 'arr[i=42]'; npm run dev",
+		// [[ ]] numeric operator with a variable operand.
+		"x=42; [[ x -eq 0 ]]; codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q is refused by the inverted arithmetic guard as an accepted false positive", command)
+	}
+}
+
+// TestDynamicCompositionBypassIsRefused is the regression test for the
+// dynamically-composed denied arithmetic assignment: combining two individually-
+// harmless parts into a denied arithmetic assignment at runtime. Verified against
+// bash before this fix: `CODEX_HOME` was set to 1.
+//
+//	n=CODEX_HOME; x="${n}=1"; : $((x)); codex
+//
+// Neither a CmdSubst, a hazardous literal, nor a runtime-input builtin is
+// present, so the three former coarse rules all missed it. The inverted arithmetic
+// guard catches it because $((x)) has a variable operand (x) — not a numeric
+// constant — and refuses regardless of how x was assigned.
+func TestDynamicCompositionBypassIsRefused(t *testing.T) {
+	err := ValidateAccountEnvironmentCommand(
+		`n=CODEX_HOME; x="${n}=1"; : $((x)); codex`, scopedProcessTabAccount())
+	require.Error(t, err,
+		"dynamic-composition bypass must be refused: $((x)) has a variable operand")
 }
