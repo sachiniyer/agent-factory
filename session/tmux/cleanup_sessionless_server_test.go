@@ -72,7 +72,7 @@ func TestProbeSessionStrictConfirmsAbsenceOnSessionlessServer(t *testing.T) {
 func TestCaptureSessionProcessTreesReportsVanishedOnSessionlessServer(t *testing.T) {
 	name := sessionlessTmuxServer(t)
 
-	procs, err := captureSessionProcessTrees(cmd.MakeExecutor(), name)
+	procs, err := CaptureSessionProcessTrees(cmd.MakeExecutor(), name)
 	require.Empty(t, procs)
 	require.ErrorIs(t, err, ErrSessionVanishedBeforeCapture,
 		"a session absent from a server that answered must classify as vanished, not as an unreadable capture")
