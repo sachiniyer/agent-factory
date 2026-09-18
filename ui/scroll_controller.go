@@ -1,6 +1,13 @@
 package ui
 
-import "github.com/charmbracelet/bubbles/viewport"
+import (
+	"math"
+	"strings"
+
+	"github.com/charmbracelet/bubbles/viewport"
+
+	"github.com/sachiniyer/agent-factory/ui/layout"
+)
 
 // ScrollOwner identifies the subsystem that can truthfully satisfy a scroll
 // request for a pane. HostHistory is the captured-preview implementation; the
@@ -14,16 +21,23 @@ const (
 	ScrollOwnerChildApplication
 )
 
-// ScrollIntent is a semantic vertical displacement. Negative lines move toward
-// older content; positive lines move toward newer content. Mouse and keyboard
-// input are normalized to this type before the controller sees them.
+// ScrollIntent is a semantic vertical displacement. Negative values move
+// toward older content; positive values move toward newer content. Lines is an
+// absolute row count. Pages is a viewport-height-relative displacement —
+// ctrl+u/ctrl+d are the conventional half-page keys (#4173) — resolved against
+// the viewport where the intent applies, so a gesture queued across the
+// asynchronous fill or a resize keeps its intended magnitude. Mouse and
+// keyboard input are normalized to this type before the controller sees them.
 type ScrollIntent struct {
 	Lines int
+	Pages float64
 }
 
 var (
-	scrollOneLineUp   = ScrollIntent{Lines: -1}
-	scrollOneLineDown = ScrollIntent{Lines: 1}
+	scrollOneLineUp    = ScrollIntent{Lines: -1}
+	scrollOneLineDown  = ScrollIntent{Lines: 1}
+	scrollHalfPageUp   = ScrollIntent{Pages: -0.5}
+	scrollHalfPageDown = ScrollIntent{Pages: 0.5}
 )
 
 // ScrollController is the pane-level ownership and transition contract. It is
@@ -84,6 +98,12 @@ type captureHistoryScrollController struct {
 	fillGen        uint64
 	dispatchedGen  uint64
 	fillInFlight   bool
+	// fillContent retains the last completed capture's raw rows. The viewport's
+	// own View() truncates each visible line at Width before any render-time
+	// marker can see that content was dropped, so cut rows are marked at fill
+	// time instead (#4175) — and a narrower resize re-marks them rather than
+	// hard-cutting a marker stamped for the old width.
+	fillContent string
 }
 
 var _ historyScrollController = (*captureHistoryScrollController)(nil)
@@ -189,7 +209,7 @@ func (c *captureHistoryScrollController) FillIsCurrent(token scrollFillToken) bo
 // request is recorded before the viewport is emptied: entering the mode is not
 // a substitute for performing the requested scroll.
 func (c *captureHistoryScrollController) Scroll(v *viewport.Model, intent ScrollIntent) {
-	if intent.Lines == 0 {
+	if intent.Lines == 0 && intent.Pages == 0 {
 		return
 	}
 	switch c.phase {
@@ -219,7 +239,8 @@ func (c *captureHistoryScrollController) CompleteFill(
 	if !c.FillIsCurrent(token) {
 		return false
 	}
-	v.SetContent(content)
+	c.fillContent = content
+	v.SetContent(markScrollRows(content, v.Width))
 	// Seed from the ready content and current geometry, then replay in order so
 	// boundary clamping is identical to input received after the fill. In
 	// particular, down-at-bottom followed by up must still move up.
@@ -242,9 +263,16 @@ func (c *captureHistoryScrollController) Resize(v *viewport.Model, width, height
 	if c.phase == historyScrollReady {
 		distanceFromBottom = max(0, viewportBottomOffset(v)-v.YOffset)
 	}
+	oldWidth := v.Width
 	v.Width = width
 	v.Height = height
 	if c.phase == historyScrollReady {
+		if width != oldWidth {
+			// The cut markers were stamped for the old width; re-mark from the
+			// retained raw capture so a narrower box does not hard-cut them and
+			// a wider one does not leave a stale "…" mid-row.
+			v.SetContent(markScrollRows(c.fillContent, width))
+		}
 		v.SetYOffset(viewportBottomOffset(v) - distanceFromBottom)
 	}
 }
@@ -268,17 +296,50 @@ func (c *captureHistoryScrollController) Reset(v *viewport.Model) {
 	c.pendingIntents = nil
 	c.fillGen++
 	c.fillInFlight = false
+	c.fillContent = ""
 	v.SetContent("")
 	v.GotoTop()
 }
 
-func applyScrollIntent(v *viewport.Model, intent ScrollIntent) {
-	switch {
-	case intent.Lines < 0:
-		v.LineUp(-intent.Lines)
-	case intent.Lines > 0:
-		v.LineDown(intent.Lines)
+// markScrollRows stamps the "…" cut marker into the last cell of every row
+// wider than width. It runs on the raw capture before the viewport sees it:
+// View() truncates each visible line at Width internally, so a marker applied
+// to View()'s output can no longer tell that content was dropped (#4175).
+func markScrollRows(content string, width int) string {
+	if width <= 0 {
+		return content
 	}
+	lines := strings.Split(content, "\n")
+	for i := range lines {
+		lines[i] = layout.MarkCutRow(lines[i], width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func applyScrollIntent(v *viewport.Model, intent ScrollIntent) {
+	switch lines := resolveScrollLines(v, intent); {
+	case lines < 0:
+		v.LineUp(-lines)
+	case lines > 0:
+		v.LineDown(lines)
+	}
+}
+
+// resolveScrollLines converts an intent to a signed row count against the
+// viewport's current geometry. A Pages displacement rounds to the nearest row
+// and floors at one — half of a one-row viewport still moves.
+func resolveScrollLines(v *viewport.Model, intent ScrollIntent) int {
+	if intent.Pages == 0 {
+		return intent.Lines
+	}
+	lines := int(math.Round(math.Abs(intent.Pages) * float64(v.Height)))
+	if lines < 1 {
+		lines = 1
+	}
+	if intent.Pages < 0 {
+		return -lines
+	}
+	return lines
 }
 
 func viewportBottomOffset(v *viewport.Model) int {

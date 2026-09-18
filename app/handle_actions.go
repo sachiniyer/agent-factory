@@ -96,13 +96,13 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyShiftUp:
 		m.syncPaneScrollOwners()
 		if pane, _ := m.focusedContentPane(); pane != nil {
-			pane.ScrollUp()
+			pane.ScrollHalfPageUp()
 		}
 		return m, m.selectionChanged()
 	case keys.KeyShiftDown:
 		m.syncPaneScrollOwners()
 		if pane, _ := m.focusedContentPane(); pane != nil {
-			pane.ScrollDown()
+			pane.ScrollHalfPageDown()
 		}
 		return m, m.selectionChanged()
 

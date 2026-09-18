@@ -41,6 +41,34 @@ func TestTabPaneWideProcessOutputTruncatesToPaneWidth(t *testing.T) {
 	}
 }
 
+// TestTabPaneWideCaptureMarksTheCut is the #4175 half of #1082's contract: a
+// preview-only session's tmux pane stays 80 columns while the preview box is
+// narrower, so a row the pane had to shorten must carry "…" in its last cell —
+// the same convention truncated tab and task names use — rather than amputate
+// the tail silently.
+func TestTabPaneWideCaptureMarksTheCut(t *testing.T) {
+	const w, h = 56, 4
+	p := NewTabPane(previewFromInstance)
+	p.SetSize(w, h)
+
+	p.mu.Lock()
+	p.content = tabContentState{text: "AAAAAAAAAA-10 BBBBBBBBBB-20 CCCCCCCCCC-30 DDDDDDDDDD-40 EEEEEEEEEE-50 FFFFFFFFFF-60\nshort"}
+	p.mu.Unlock()
+
+	got := strings.Split(p.String(), "\n")
+	require.Len(t, got, h)
+	row := stripANSI(got[0])
+	assert.Equal(t, w, lipgloss.Width(got[0]), "a cut row still measures exactly the pane width")
+	assert.True(t, strings.HasPrefix(row, "AAAAAAAAAA-10"),
+		"the leading columns of the capture survive: %q", row)
+	assert.True(t, strings.HasSuffix(row, "…"),
+		"the cut reads as truncation, not amputation: %q", row)
+
+	short := stripANSI(got[1])
+	assert.NotContains(t, short, "…",
+		"a row that fits carries no marker — it must mean cut, not full: %q", short)
+}
+
 // TestTabbedWindowWideProcessOutputStaysInsideRect covers #1082 end to end at
 // the pane level: with wide capture content loaded, the framed workspace pane
 // still renders exactly its rect, so the wide tab cannot push the automations

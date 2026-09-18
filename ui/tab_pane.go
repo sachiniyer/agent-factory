@@ -717,7 +717,7 @@ func (p *TabPane) String() string {
 
 	// In scroll/copy mode always use the viewport.
 	if p.scroll.Active() {
-		return layout.ClampToRect(p.viewport.View(), rect)
+		return layout.ClampToRectMarkingCut(p.viewport.View(), rect)
 	}
 
 	if p.content.fallback {
@@ -759,17 +759,40 @@ func (p *TabPane) String() string {
 		lines = lines[len(lines)-p.height:]
 	}
 
+	// Captured rows can be wider than the pane — a preview-only session's tmux
+	// pane stays 80 columns while the preview box is narrower (#4175). Mark each
+	// raw row before Render: the style pass pads every row of the block to its
+	// widest line, and a marker applied after it would read that padding as
+	// content and stamp "…" on rows that fit. The marking cut leaves "…" in the
+	// last cell of a shortened row so the amputation reads as truncation.
+	for i := range lines {
+		lines[i] = layout.MarkCutRow(lines[i], p.width)
+	}
 	return layout.ClampToRect(tabPaneStyle.Render(strings.Join(lines, "\n")), rect)
 }
 
-// ScrollUp enters scroll mode (if not already) and scrolls up.
+// ScrollUp enters scroll mode (if not already) and scrolls up one line — the
+// wheel's step. The keyboard's ctrl+u is ScrollHalfPageUp.
 func (p *TabPane) ScrollUp(instance *session.Instance, activeTab int) error {
 	return p.scrollBy(instance, activeTab, scrollOneLineUp)
 }
 
-// ScrollDown enters scroll mode (if not already) and scrolls down.
+// ScrollDown enters scroll mode (if not already) and scrolls down one line.
 func (p *TabPane) ScrollDown(instance *session.Instance, activeTab int) error {
 	return p.scrollBy(instance, activeTab, scrollOneLineDown)
+}
+
+// ScrollHalfPageUp enters scroll mode (if not already) and scrolls up half a
+// viewport — the conventional ctrl+u step (vim, less, tmux copy-mode). The
+// magnitude stays semantic until the intent applies, so a gesture queued
+// across the off-loop history fill measures the geometry it lands on (#4173).
+func (p *TabPane) ScrollHalfPageUp(instance *session.Instance, activeTab int) error {
+	return p.scrollBy(instance, activeTab, scrollHalfPageUp)
+}
+
+// ScrollHalfPageDown is ScrollHalfPageUp toward newer content — ctrl+d.
+func (p *TabPane) ScrollHalfPageDown(instance *session.Instance, activeTab int) error {
+	return p.scrollBy(instance, activeTab, scrollHalfPageDown)
 }
 
 // scrollBy is the single keyboard/wheel-independent input path. It validates a

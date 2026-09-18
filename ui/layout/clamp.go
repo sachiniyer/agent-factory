@@ -56,3 +56,63 @@ func ClampToRect(s string, r Rect) string {
 	}
 	return strings.Join(out, "\n")
 }
+
+// ClampToRectMarkingCut is ClampToRect with the repo's truncation marker: any
+// row that had to be shortened gets "…" in its last cell instead of a silent
+// hard cut (#4175). Use it where the clipped content is user data — captured
+// pane rows from a wider source, like a preview-only session's 80-column pane
+// rendered into a narrower preview box — rather than af's own chrome, which
+// elides its own text before the clamp sees it.
+//
+// The marker is a re-cut, not an affix: the content keeps r.W-1 cells and the
+// last cell carries the "…", so the row still measures exactly r.W and a style
+// the content cut left open is closed before the marker, never around it.
+func ClampToRectMarkingCut(s string, r Rect) string {
+	if r.Empty() {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > r.H {
+		lines = lines[:r.H]
+	}
+	out := make([]string, r.H)
+	for i := range out {
+		var line string
+		if i < len(lines) {
+			line = lines[i]
+		}
+		out[i] = MarkCutRow(line, r.W)
+	}
+	return strings.Join(out, "\n")
+}
+
+// MarkCutRow enforces the width contract on ONE row the way
+// ClampToRectMarkingCut does: a row wider than width is re-cut so its last
+// cell carries "…" (#4175); a row that fits is padded out to width unchanged.
+//
+// The single-row form is for callers marking raw capture rows BEFORE styling:
+// a lipgloss Render pads every row of a block to its widest line, so a marker
+// applied afterwards would read that padding as content and stamp "…" on rows
+// that fit. Mark first, then render.
+func MarkCutRow(s string, width int) string {
+	return padToContract(clipMarkingCut(s, width), width)
+}
+
+// clipMarkingCut is clipToContract that spends the row's last cell on "…" when
+// the row had to be shortened. Rows that already fit are returned unchanged, so
+// a row exactly at width is never mistaken for a cut one.
+func clipMarkingCut(s string, width int) string {
+	if contractCells(s) <= width {
+		return s
+	}
+	if width <= 0 {
+		return ""
+	}
+	// clipToContract closes an open style with a reset, so the marker lands
+	// after it and renders as chrome rather than in the cut row's last style.
+	// The clipped prefix is padded to width-1 first: a wide rune straddling
+	// that boundary is dropped whole, leaving the prefix short, and without
+	// the pad the "…" would sit mid-row with the rectangle's padding after it
+	// rather than marking the cut edge.
+	return padToContract(clipToContract(s, width-1), width-1) + "…"
+}

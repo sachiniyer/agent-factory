@@ -100,6 +100,69 @@ func TestClampToRectEmptyRect(t *testing.T) {
 	assert.Equal(t, "", layout.ClampToRect("content", layout.Rect{W: -2, H: 3}))
 }
 
+// TestClampToRectMarkingCutMarksShortenedRows pins #4175: a row that had to be
+// shortened carries the repo's "…" truncation marker in its last cell instead
+// of a silent hard cut.
+func TestClampToRectMarkingCutMarksShortenedRows(t *testing.T) {
+	r := layout.Rect{W: 6, H: 3}
+	out := layout.ClampToRectMarkingCut("abcdefghij\nshort\nexactly", r)
+	requireExactSize(t, out, 6, 3)
+	lines := strings.Split(out, "\n")
+	assert.Equal(t, "abcde…", lines[0],
+		"a cut row keeps width-1 of content and spends the last cell on the marker")
+	assert.Equal(t, "short ", lines[1],
+		"a short row is padded, unmarked — the marker must mean cut, not full")
+	assert.Equal(t, "exact…", lines[2],
+		"a second cut row is marked the same way")
+}
+
+// TestClampToRectMarkingCutExactWidthUnmarked: a row that already measures
+// exactly the width fits, so it must not gain a marker it does not deserve.
+func TestClampToRectMarkingCutExactWidthUnmarked(t *testing.T) {
+	out := layout.ClampToRectMarkingCut("123456", layout.Rect{W: 6, H: 1})
+	requireExactSize(t, out, 6, 1)
+	assert.Equal(t, "123456", out)
+}
+
+// TestClampToRectMarkingCutStyledRow: the marker lands after the style reset
+// clipToContract closes, so it renders as chrome rather than in the cut row's
+// last style — and the row still measures exactly the width.
+func TestClampToRectMarkingCutStyledRow(t *testing.T) {
+	styled := "\x1b[31mred text here\x1b[0m" // 13 visible cells
+	out := layout.ClampToRectMarkingCut(styled, layout.Rect{W: 5, H: 1})
+	requireExactSize(t, out, 5, 1)
+	assert.True(t, strings.HasSuffix(out, "…"), "marker occupies the last cell: %q", out)
+	assert.Contains(t, out, "\x1b[0m", "the cut style is closed before the marker")
+	assert.Less(t, strings.Index(out, "\x1b[0m"), strings.Index(out, "…"),
+		"reset precedes the marker so it does not inherit the cut style")
+}
+
+// TestClampToRectMarkingCutWideRunes: a cut at a wide-rune boundary drops the
+// straddling grapheme and still marks the row — the marker replaces the lost
+// cells, it does not add to them.
+func TestClampToRectMarkingCutWideRunes(t *testing.T) {
+	out := layout.ClampToRectMarkingCut("日本語のテスト", layout.Rect{W: 5, H: 1})
+	requireExactSize(t, out, 5, 1)
+	assert.True(t, strings.HasSuffix(out, "…"), "cut row is marked: %q", out)
+	assert.True(t, strings.HasPrefix(out, "日本"), "intact wide runes lead: %q", out)
+}
+
+// TestClampToRectMarkingCutWideRuneStraddlePadsPrefix: when the retained prefix
+// underfills width-1 — a wide rune straddling the boundary is dropped whole —
+// the marker must still occupy the row's LAST cell, not land before the
+// padding the rectangle adds.
+func TestClampToRectMarkingCutWideRuneStraddlePadsPrefix(t *testing.T) {
+	out := layout.ClampToRectMarkingCut("日本語", layout.Rect{W: 4, H: 1})
+	requireExactSize(t, out, 4, 1)
+	assert.Equal(t, "日 …", out,
+		"日 keeps 2 of the 3 content cells; the gap is padded BEFORE the marker")
+}
+
+func TestClampToRectMarkingCutEmptyRect(t *testing.T) {
+	assert.Equal(t, "", layout.ClampToRectMarkingCut("content", layout.Rect{}))
+	assert.Equal(t, "", layout.ClampToRectMarkingCut("content", layout.Rect{W: 5}))
+}
+
 // TestClampToRectMatchesGridRegions ties the two halves of the §2.6
 // contract together: content clamped to a solved region renders exactly
 // that region's size.

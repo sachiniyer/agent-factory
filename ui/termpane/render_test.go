@@ -64,15 +64,15 @@ func TestRenderGridWideCharacters(t *testing.T) {
 
 func TestRenderGridClipsAndPadsAroundResize(t *testing.T) {
 	// A grid larger than the requested rect (the transient state right
-	// before Resize catches up) clips; a smaller one pads. Both must hold
-	// the exact width x height contract.
+	// before Resize catches up) clips and marks the cut; a smaller one
+	// pads. Both must hold the exact width x height contract.
 	emu := vt.NewEmulator(12, 4)
 	_, err := emu.Write([]byte("abcdefghijkl\r\nsecond"))
 	require.NoError(t, err)
 
 	lines := gridLines(t, renderGridWindow(emu, 6, 2, 0, cursorNone), 6, 2)
-	assert.Equal(t, "abcdef", ansi.Strip(lines[0]))
-	assert.Equal(t, "second", ansi.Strip(lines[1]))
+	assert.Equal(t, "abcde…", ansi.Strip(lines[0]), "clipped row must carry the cut marker")
+	assert.Equal(t, "second", ansi.Strip(lines[1]), "a row with nothing past the edge is not marked")
 
 	gridLines(t, renderGridWindow(emu, 20, 6, 0, cursorNone), 20, 6)
 }
@@ -83,9 +83,27 @@ func TestRenderGridBlanksWideGlyphStraddlingClipBoundary(t *testing.T) {
 	require.NoError(t, err)
 
 	// Clipping at width 5 lands mid-glyph: the straddling glyph must blank,
-	// never overflow the row.
+	// never overflow the row, and the lost tail marks the row as cut.
 	lines := gridLines(t, renderGridWindow(emu, 5, 1, 0, cursorNone), 5, 1)
-	assert.Equal(t, "日本 ", ansi.Strip(lines[0]))
+	assert.Equal(t, "日本…", ansi.Strip(lines[0]))
+}
+
+func TestRenderGridMarksOnlyRowsThatLoseInk(t *testing.T) {
+	// The cut marker must fire exactly where rendering would drop cells:
+	// ink beyond the edge, including a wide glyph's clipped tail — never a
+	// row that merely extends with blanks.
+	emu := vt.NewEmulator(10, 4)
+	_, err := emu.Write([]byte("short\r\n" +
+		"exactlysix\r\n" +
+		"wide   end\r\n" +
+		"abcde日"))
+	require.NoError(t, err)
+
+	lines := gridLines(t, renderGridWindow(emu, 6, 4, 0, cursorNone), 6, 4)
+	assert.Equal(t, "short ", ansi.Strip(lines[0]), "nothing past the edge — no mark")
+	assert.Equal(t, "exact…", ansi.Strip(lines[1]))
+	assert.Equal(t, "wide …", ansi.Strip(lines[2]), "ink at cells 7-9 marks the cut")
+	assert.Equal(t, "abcde…", ansi.Strip(lines[3]), "wide-glyph tail past the edge marks the row")
 }
 
 func TestRenderGridDegenerateSizes(t *testing.T) {
