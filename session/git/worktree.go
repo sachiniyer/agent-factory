@@ -216,6 +216,14 @@ func (g *GitWorktree) HooksDone() <-chan struct{} {
 	return g.hooksDone
 }
 
+// SetHooksDoneForTest installs an in-flight hook-completion channel without
+// launching a real hook run — the test-side analogue of adoptRunningHooks,
+// which is how a restored worktree reports a survivor from a previous daemon
+// (#4162's restart tests need exactly that shape without systemd).
+func (g *GitWorktree) SetHooksDoneForTest(done chan struct{}) {
+	g.hooksDone = done
+}
+
 // IsExternalWorktree returns true if this worktree was not created by agent-factory
 func (g *GitWorktree) IsExternalWorktree() bool {
 	return g.externalWorktree
