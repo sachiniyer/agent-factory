@@ -46,65 +46,6 @@ func wordHasCommandSubstitution(word syntax.Node) bool {
 	return found
 }
 
-// literalContainsDeniedArithAssignment reports whether a literal string, when
-// evaluated by bash as an arithmetic expression, would perform an assignment to
-// a denied account-environment variable. bash evaluates the entire string as
-// arithmetic, so compound expressions like `0,CODEX_HOME=1` (comma operator)
-// and compound assignments like `CODEX_HOME+=1` are also detected.
-//
-// The check parses the string as a bash arithmetic expression and walks the
-// resulting AST for assignment nodes whose target is a denied name. A string
-// that is not valid arithmetic cannot perform an arithmetic assignment, so
-// parse failure is treated as not hazardous.
-func literalContainsDeniedArithAssignment(value string, names map[string]struct{}) bool {
-	if len(names) == 0 {
-		return false
-	}
-	// Parse the literal as an arithmetic expression to catch compound forms
-	// like `0,CODEX_HOME=1`, `CODEX_HOME+=1`, etc. If parsing fails the
-	// expression is unprovable; treat it as hazardous.
-	parsed, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Arithmetic(strings.NewReader(value))
-	if err != nil || parsed == nil {
-		// Not valid arithmetic (or empty expression) — not hazardous as an
-		// arithmetic assignment.
-		return false
-	}
-	found := false
-	syntax.Walk(parsed, func(node syntax.Node) bool {
-		if found {
-			return false
-		}
-		switch n := node.(type) {
-		case *syntax.BinaryArithm:
-			switch n.Op {
-			case syntax.Assgn, syntax.AddAssgn, syntax.SubAssgn, syntax.MulAssgn,
-				syntax.QuoAssgn, syntax.RemAssgn, syntax.AndAssgn, syntax.OrAssgn,
-				syntax.XorAssgn, syntax.ShlAssgn, syntax.ShrAssgn, syntax.AndBoolAssgn,
-				syntax.OrBoolAssgn, syntax.XorBoolAssgn, syntax.PowAssgn:
-				// Fail closed when the assignment target cannot be read
-				// literally: e.g. `CODEX_HOME[0]` is an indexed word that
-				// arithmeticAccountEnvironmentName cannot literalize, so
-				// `ok=false` must be treated as hazardous rather than safe.
-				name, ok := arithmeticAccountEnvironmentName(n.X)
-				if !ok || accountEnvironmentNameDenied(name, names) {
-					found = true
-					return false
-				}
-			}
-		case *syntax.UnaryArithm:
-			if n.Op == syntax.Inc || n.Op == syntax.Dec {
-				name, ok := arithmeticAccountEnvironmentName(n.X)
-				if !ok || accountEnvironmentNameDenied(name, names) {
-					found = true
-					return false
-				}
-			}
-		}
-		return true
-	})
-	return found
-}
-
 // arithmeticExprReferencesTaintedVar reports whether an arithmetic expression
 // tree contains a variable reference (bare word or `$name` expansion) of a
 // tainted name. When a tainted variable appears inside arithmetic, bash
@@ -253,107 +194,202 @@ func isShellNameByte(value byte) bool {
 	return value == '_' || value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
 }
 
-// fileHasRuntimeInputToVariable reports whether a parsed shell file contains a
-// same-shell builtin (`read`, `mapfile`, or `readarray`) that writes runtime
-// input directly into a shell variable without a command substitution. When
-// such a builtin is present AND the command also contains an arithmetic context,
-// the value written by the builtin may be evaluated as arithmetic: e.g.
-// `read x </tmp/payload; : $((x)); codex` lets an attacker store
-// `CODEX_HOME=1` in x via the file, and bash re-evaluates it as arithmetic
-// inside `$(( ))`. Neither coarse rule 1 (CmdSubst + arith) nor coarse rule 2
-// (literal arith assignment + arith) fires, so this third coarse rule closes
-// the gap.
-func fileHasRuntimeInputToVariable(file syntax.Node) bool {
-	found := false
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if found {
+// arithmExprIsNumericConstant reports whether an arithmetic expression is a
+// provably numeric constant — that is, it contains only literal integer digits,
+// arithmetic operators, and parentheses. No variable references, no parameter
+// expansions, and no command substitutions are present. An expression that
+// satisfies this predicate cannot perform a re-evaluation of a stored string as
+// arithmetic, because it never reads a variable whose value could have been set
+// to a hazardous string.
+//
+// Examples of numeric constants: `0`, `42`, `1+2`, `(3*4)`, `-1`.
+// Examples of non-constants: `x` (variable reference), `$x`, `${x}`, `$(cmd)`.
+func arithmExprIsNumericConstant(expr syntax.ArithmExpr) bool {
+	constant := true
+	syntax.Walk(expr, func(node syntax.Node) bool {
+		if !constant {
 			return false
 		}
-		call, ok := node.(*syntax.CallExpr)
-		if !ok || len(call.Args) == 0 {
+		if node == nil {
+			// End-of-children sentinel; nothing to check.
 			return true
 		}
-		name, literal := literalShellWord(call.Args[0])
-		if !literal {
-			return true
-		}
-		switch name {
-		case "read", "mapfile", "readarray":
-			found = true
+		switch n := node.(type) {
+		case *syntax.BinaryArithm, *syntax.UnaryArithm, *syntax.ParenArithm,
+			*syntax.FlagsArithm:
+			// Structural nodes: continue walking into children.
+		case *syntax.Word:
+			// A word in arithmetic context is a variable reference unless it
+			// consists entirely of digit characters. Check every part: if any
+			// part is not a Lit, or the Lit contains non-digit characters, the
+			// word is not a constant. Return false to stop descending into the
+			// word's Lit parts (they are already checked above).
+			for _, part := range n.Parts {
+				lit, ok := part.(*syntax.Lit)
+				if !ok {
+					constant = false
+					return false
+				}
+				for _, ch := range lit.Value {
+					if ch < '0' || ch > '9' {
+						constant = false
+						return false
+					}
+				}
+			}
+			// All parts are numeric Lit nodes; do not descend further.
+			return false
+		default:
+			_ = n
+			// Any other node (ParamExp, CmdSubst, etc.) inside an arithmetic
+			// expression is not a numeric constant.
+			constant = false
 			return false
 		}
 		return true
 	})
-	return found
+	return constant
 }
 
-// fileHasCmdSubst reports whether a parsed shell file contains any command
-// substitution ($(…) or backtick form) anywhere in its AST, including inside
-// subshells and nested constructs.
-func fileHasCmdSubst(file syntax.Node) bool {
-	found := false
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if found {
+// wordIsNumericLiteralForArith reports whether a shell word, when used as an
+// arithmetic operand (e.g. in `[[ X -eq Y ]]`), is a provably numeric literal.
+// A provably numeric literal is a word whose only part is a Lit consisting
+// entirely of decimal digit characters, optionally preceded by a minus sign.
+func wordIsNumericLiteralForArith(word *syntax.Word) bool {
+	if len(word.Parts) == 0 {
+		return false
+	}
+	// Allow a leading '-' part if it's a Lit.
+	parts := word.Parts
+	if lit, ok := parts[0].(*syntax.Lit); ok && lit.Value == "-" && len(parts) > 1 {
+		parts = parts[1:]
+	}
+	if len(parts) != 1 {
+		return false
+	}
+	lit, ok := parts[0].(*syntax.Lit)
+	if !ok || len(lit.Value) == 0 {
+		return false
+	}
+	for _, ch := range lit.Value {
+		if ch < '0' || ch > '9' {
 			return false
 		}
-		if _, ok := node.(*syntax.CmdSubst); ok {
-			found = true
-			return false
-		}
-		return true
-	})
-	return found
+	}
+	return true
 }
 
-// fileHasArithmeticContext reports whether a parsed shell file contains any
-// arithmetic-evaluation context: $(( )), (( )), let, or a C-style for loop.
-// These are the shell constructs that re-evaluate a variable's string value as
-// fresh arithmetic, making a prior command substitution stored in a variable
-// into a deferred arithmetic mutation.
+// fileHasArithmeticContextWithVariableOperand reports whether a parsed shell
+// file contains any arithmetic-evaluation context whose operand is not provably
+// a numeric constant. Rather than listing which constructs ARE arithmetic
+// contexts and pairing with separate predicates that enumerate the ways a
+// variable's value can become hazardous, it directly asks whether any arithmetic
+// context can re-evaluate a runtime string.
 //
-// The check also covers numeric [[ ]] operators (-eq/-ne/-lt/-gt/-le/-ge) and
-// arithmetic subscripts and slice offsets in parameter expansions and indexed
-// assignments, all of which trigger the same re-evaluation.
+// An arithmetic context's operand is "provably numeric" only when it consists
+// entirely of integer literals, arithmetic operators, and parentheses — with no
+// variable references, parameter expansions, or command substitutions. This
+// predicate returns true whenever any arithmetic context has an operand that
+// does not satisfy that condition.
 //
-// Additionally, a CallExpr whose effective command name (after stripping the
-// `command` and `builtin` wrappers) is `let` is treated as an arithmetic
-// context. bash's `command` and `builtin` builtins execute `let` in the
-// current shell, so `command let x` carries the same re-evaluation hazard as
-// bare `let x`; the wrapped form is not represented by a LetClause AST node
-// and would otherwise escape this check.
-func fileHasArithmeticContext(file syntax.Node) bool {
+// This single predicate subsumes all three coarse rules:
+//   - Rule 1 (CmdSubst+arith): a CmdSubst inside arithmetic is never a numeric
+//     constant, so it is caught here.
+//   - Rule 2 (literal-arith-assignment+arith): a variable holding a literal
+//     denied-assignment string appears in arithmetic as a variable reference
+//     (not a constant), so it is caught here.
+//   - Rule 3 (runtime-input+arith): a variable assigned by read/mapfile appears
+//     in arithmetic as a variable reference, so it is caught here.
+//   - The dynamic-composition bypass (n=CODEX_HOME; x="${n}=1"; : $((x))): x is
+//     a variable reference in arithmetic, not a numeric constant — caught here.
+//
+// The predicate is enumeration-free in the sense that matters: it does not
+// enumerate the ways a value can become hazardous (CmdSubst, literal, read, …),
+// only the ways an arithmetic operand can be provably constant (integer digits,
+// operators). The "safe" list is controlled by this code and does not silently
+// grow when bash or mvdan.cc/sh adds a new form of string-building.
+func fileHasArithmeticContextWithVariableOperand(file syntax.Node) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if found {
 			return false
 		}
 		switch n := node.(type) {
-		case *syntax.ArithmExp, *syntax.ArithmCmd, *syntax.LetClause, *syntax.CStyleLoop:
-			found = true
-			return false
+		case *syntax.ArithmExp:
+			// $(( expr )) — the expression must be a numeric constant.
+			if !arithmExprIsNumericConstant(n.X) {
+				found = true
+				return false
+			}
+		case *syntax.ArithmCmd:
+			// (( expr )) — same.
+			if !arithmExprIsNumericConstant(n.X) {
+				found = true
+				return false
+			}
+		case *syntax.LetClause:
+			// let expr … — each expression must be a numeric constant.
+			for _, expr := range n.Exprs {
+				if !arithmExprIsNumericConstant(expr) {
+					found = true
+					return false
+				}
+			}
+		case *syntax.CStyleLoop:
+			// for (( init; cond; post )) — any non-constant expression is unsafe.
+			if n.Init != nil && !arithmExprIsNumericConstant(n.Init) {
+				found = true
+				return false
+			}
+			if n.Cond != nil && !arithmExprIsNumericConstant(n.Cond) {
+				found = true
+				return false
+			}
+			if n.Post != nil && !arithmExprIsNumericConstant(n.Post) {
+				found = true
+				return false
+			}
 		case *syntax.BinaryTest:
+			// Numeric [[ ]] operators evaluate operands as arithmetic.
 			switch n.Op {
 			case syntax.TsEql, syntax.TsNeq, syntax.TsLeq, syntax.TsGeq, syntax.TsLss, syntax.TsGtr:
-				found = true
-				return false
+				// Operands are TestExpr (can be *Word or another test node).
+				// A numeric literal must be a plain *Word with digit-only Lit parts.
+				xWord, xOk := n.X.(*syntax.Word)
+				yWord, yOk := n.Y.(*syntax.Word)
+				if !xOk || !yOk || !wordIsNumericLiteralForArith(xWord) || !wordIsNumericLiteralForArith(yWord) {
+					found = true
+					return false
+				}
 			}
 		case *syntax.ParamExp:
-			if n.Index != nil || n.Slice != nil {
+			// ${arr[i]} and ${x:offset:length} evaluate subscripts/slices as arithmetic.
+			if n.Index != nil && !arithmExprIsNumericConstant(n.Index) {
 				found = true
 				return false
 			}
+			if n.Slice != nil {
+				if n.Slice.Offset != nil && !arithmExprIsNumericConstant(n.Slice.Offset) {
+					found = true
+					return false
+				}
+				if n.Slice.Length != nil && !arithmExprIsNumericConstant(n.Slice.Length) {
+					found = true
+					return false
+				}
+			}
 		case *syntax.Assign:
-			if n.Index != nil {
+			// arr[i]=val evaluates the subscript as arithmetic.
+			if n.Index != nil && !arithmExprIsNumericConstant(n.Index) {
 				found = true
 				return false
 			}
 		case *syntax.CallExpr:
-			// Recognize `command let …` and `builtin let …` as arithmetic
-			// contexts: bash's command/builtin wrappers execute let in the
-			// current shell, so the wrapped form carries the same re-evaluation
-			// hazard as a bare let, but is represented as a CallExpr rather
-			// than a LetClause.
+			// `command let …` and `builtin let …` execute let in the current shell.
 			if isWrappedLetCall(n) {
+				// Treat the args after stripping wrappers as let expressions.
+				// If any wrapped-let invocation exists, it is non-constant by
+				// definition (the args are shell words, not arithmetic ASTs).
 				found = true
 				return false
 			}
@@ -397,62 +433,4 @@ func isWrappedLetCall(call *syntax.CallExpr) bool {
 	return false
 }
 
-// fileHasLiteralDeniedArithAssignment reports whether a parsed shell file
-// contains any literal string value that, when evaluated by bash as arithmetic,
-// would perform an assignment to a denied account-environment variable.
-//
-// This is the counterpart to fileHasCmdSubst for the literal-assignment bypass:
-// `x='CODEX_HOME=1'; : $((x)); codex` stores a literal arithmetic-assignment
-// string in x, and bash re-evaluates it as fresh arithmetic when x appears
-// inside an arithmetic context. No command substitution is involved, so
-// fileHasCmdSubst does not fire; this predicate detects the hazardous literal.
-//
-// Combined with fileHasArithmeticContext, this forms the second coarse rule:
-// if any literal in the command is a denied arithmetic assignment AND the
-// command contains any arithmetic context, refuse.
-//
-// Both *syntax.Lit (unquoted or double-quoted text) and *syntax.SglQuoted
-// (single-quoted strings) can hold the hazardous literal, so both are checked.
-// Additionally, complete *syntax.Word nodes are checked: the shell concatenates
-// adjacent literal word parts at parse time (e.g. CODEX_HOME"=1" becomes the
-// single string "CODEX_HOME=1"), so the per-fragment checks on Lit and
-// SglQuoted alone are insufficient — only the fully-assembled word catches
-// split literals.
-func fileHasLiteralDeniedArithAssignment(file syntax.Node, names map[string]struct{}) bool {
-	if len(names) == 0 {
-		return false
-	}
-	found := false
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if found {
-			return false
-		}
-		switch n := node.(type) {
-		case *syntax.Word:
-			// Check the fully concatenated word value: CODEX_HOME"=1" has two
-			// AST fragments ("CODEX_HOME" and "=1") that are individually
-			// harmless but spell "CODEX_HOME=1" when joined. literalShellWord
-			// performs the same concatenation the shell does; if it returns
-			// false the word has a non-literal part and the individual-fragment
-			// arms below still run during the walk's descent.
-			if value, ok := literalShellWord(n); ok {
-				if literalContainsDeniedArithAssignment(value, names) {
-					found = true
-					return false
-				}
-			}
-		case *syntax.Lit:
-			if literalContainsDeniedArithAssignment(n.Value, names) {
-				found = true
-				return false
-			}
-		case *syntax.SglQuoted:
-			if literalContainsDeniedArithAssignment(n.Value, names) {
-				found = true
-				return false
-			}
-		}
-		return true
-	})
-	return found
-}
+
