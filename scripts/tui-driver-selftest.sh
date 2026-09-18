@@ -998,7 +998,7 @@ _expect_scrolled_rail_relaunch() {
 # even when scripts/testbox.sh reuses a pinned AF_SELFTEST_NAME. The sandbox
 # reset intentionally preserves config.toml, so a previous run otherwise leaves
 # codex active before the editor writes codex again. This command runs after the
-# reset killed the sandbox daemon and RequestApplyConfig is non-spawning; the
+# reset killed the sandbox daemon and the apply poke is non-spawning; the
 # daemon therefore boots from claude, then the editor must transition it to
 # codex for the live ListPrograms readback below to pass.
 # shellcheck disable=SC2317  # dispatched indirectly via step().
