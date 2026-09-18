@@ -344,42 +344,12 @@ func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *Resume
 	return nil
 }
 
-// resumeFromLimit clears a session's usage-limit block and nudges its agent back
-// to work (#1146). It is the reusable resume action shared by the TUI manual-
-// retry key (`c`) and PR3's auto-resume scheduler — factored as a Manager method
-// rather than inlined so the scheduler can call it directly. If the agent's tmux
-// session exited while blocked it is re-spawned (Recover → resumeProgram) before
-// the prompt is sent; a live stall needs no respawn. The pending prompt is then
-// re-delivered — the session's stored initial/task prompt when it carries one (a
-// task-driven session resumes its work), else a bare "continue" that un-stalls an
-// interactive session (which loses context per anthropics/claude-code#5977;
-// documented). The LimitReached liveness is cleared so the poll re-resolves the
-// real state on the next tick, and the transition is persisted.
-//
-// Delivering that prompt is the ONLY thing that lifts the block: a resume that
-// fails anywhere before the send lands leaves the session parked at the wall,
-// both in memory and on disk, so the manual retry and the auto-resume scheduler
-// (which both gate on the limit still being set) can pick it up again. The
-// respawn arm re-applies the block for that reason — Respawn ends in ConfirmLive,
-// which would otherwise report a session as resumed before its prompt existed.
-//
-// Takes the per-(repo, title) target lock and then the per-session op lock — the
-// same target-before-op order DeliverPrompt uses (#2006) — and re-verifies the
-// limit state under them, so it never races a self-recovery, a kill, a concurrent
-// resume, or an overlapping send-prompt. Rejects a tombstoned / reserved-root
-// session, mirroring the lostrestore guards.
-//
-// testHookResumeAfterFirstLock fires in resumeFromLimit immediately after the
-// FIRST of its two locks is acquired, before the second. No-op in production; the
-// #2006 ABBA regression test substitutes a barrier so it can pin one resume
+// testHookResumeAfterFirstLock fires in resumeFromLimitOutcome immediately after
+// the FIRST of its two locks is acquired, before the second. No-op in production;
+// the #2006 ABBA regression test substitutes a barrier so it can pin one resume
 // goroutine holding its first lock and force the cross-lock interleaving that the
 // inverted order deadlocked on.
 var testHookResumeAfterFirstLock = func() {}
-
-func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
-	_, err := m.resumeFromLimitOutcome(req)
-	return err
-}
 
 func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFromLimitOutcome, error) {
 	// resolveActionSession, not findSession: id-first with a {title, repoID}
