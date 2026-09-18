@@ -195,9 +195,15 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	// (#2628). reapedRoot distinguishes "the reaped root had none of these" from
 	// "there was no prior root at all" — only the first is worth reporting, and
 	// they are different answers to the question an operator asks after an outage.
+	//
+	// consumedCarry is narrower than reapedRoot: it says the carry is THIS
+	// checkout's and this create restores it. A heal that reaped another
+	// checkout's record replaces a reaped record without consuming what that
+	// record carried, and only a consumed carry is this create's to retire.
 	var (
-		carried    reapedRootState
-		reapedRoot bool
+		carried       reapedRootState
+		reapedRoot    bool
+		consumedCarry bool
 	)
 
 	if inst != nil {
@@ -262,6 +268,21 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		m.mu.Lock()
 		m.reapedRootCarries[repo.ID] = carried
 		m.mu.Unlock()
+		// The same workspace gate the parked branch below applies (#4400
+		// review round 7). Two root_agents entries on linked worktrees of one
+		// bare repository share the root's title slot, so this candidate can
+		// reach a dead record another checkout ran in. Its conversation is
+		// scoped to that checkout's project path and its tabs ran in that
+		// tree, and its account pin and pending swap are that entry's: the
+		// record is still reaped here, so the repository gets its root back,
+		// but what it carried stays parked for the checkout that owns it.
+		if carried.forWorkspace(workspace) {
+			consumedCarry = true
+		} else {
+			m.warn().Printf("root agent for %s reaped the dead root recorded in %s; that checkout's conversation, tabs, account pin, and pending account swap stay parked for its own root_agents entry, and this root starts fresh",
+				workspace, carried.workspace)
+			carried = reapedRootState{}
+		}
 	} else {
 		// No record to reap — but an earlier heal may have reaped one and
 		// parked its carry when the replacement then failed to publish.
@@ -277,13 +298,25 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		m.mu.Unlock()
 		if !parkedOk {
 			// The map is empty after a daemon restart; the carry the reap
-			// wrote beside instances.json is not (#4400 review round 3). A
-			// read error keeps the carry as the fallback it always was —
-			// ambient rebuild — rather than failing the heal on a file the
-			// record's deletion already made advisory.
+			// wrote beside instances.json is not (#4400 review round 3).
+			//
+			// A carry that EXISTS but cannot be read fails the ensure rather
+			// than degrading to an ambient rebuild (#4400 review round 6):
+			// the record is already deleted, so this file is the only copy of
+			// the account pin, conversation, tab roster, and pending swap, and
+			// a successful ambient create retires it — a transient read error
+			// would become a permanent credential demotion. This is the read
+			// half of the policy reapDeadRoot already applies to the write,
+			// which retains the record rather than heal over a carry it could
+			// not persist. Only "no file" (present=false, nil) is the ordinary
+			// first-create case. A fault that never clears — a corrupt or
+			// linked file — stays on rootEnsureFailed's retry-forever cadence
+			// and its escalation ERROR, and the message names the file and
+			// the remedy, so dropping the carry stays the operator's choice.
 			var loadErr error
 			if parked, parkedOk, loadErr = m.loadReapedRootCarry(repo.ID); loadErr != nil {
-				m.warn().Printf("root agent for %s could not read the parked reaped carry: %v", workspace, loadErr)
+				m.rootEnsureFailed(stateKey, st, reapedRootCarryUnreadableError(repo.ID, loadErr))
+				return
 			}
 			if parkedOk {
 				m.mu.Lock()
@@ -293,15 +326,16 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		}
 		if parkedOk && !parked.forWorkspace(workspace) {
 			// The carry belongs to another spelling of this repository: leave
-			// it parked for that spelling's own pass — or for the ambient
-			// publish below to retire — rather than restore a different
-			// worktree's state under this one. A carry with no workspace is a
-			// pre-binding record; it consumes as it always did.
+			// it parked for that spelling's own pass rather than restore a
+			// different worktree's state under this one; the publish below
+			// leaves it parked too (retireReapedRootCarry). A carry with no
+			// workspace is a pre-binding record; it consumes as it always did.
 			parkedOk = false
 		}
 		if parkedOk {
 			carried = parked
 			reapedRoot = true
+			consumedCarry = true
 		}
 	}
 
@@ -382,6 +416,18 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 			carried.tabs = ambientSafeCarriedTabs(carried.tabs)
 		}
 	}
+	// A committed account swap owns the carried conversation until its
+	// mission settles — the premise refreshRootClaudeConversation applies to a
+	// live root, applied here to the reaped one (#4400 review round 7). The
+	// swap's injected conversation has no transcript until the takeover brief
+	// is delivered, so "the recorded transcript is gone" is not evidence of a
+	// rotation, and the newest on-disk project conversation cannot be this
+	// root's: the commit cleared the recorded conversation and the only id
+	// recorded since is the swap's own. Substituting it would resume some
+	// other conversation under the new account and deliver the brief into it.
+	// Read before the release below — a released swap's conversation was never
+	// written either.
+	pendingSwapOwnsConversation := carried.pendingSwap != nil
 	// A committed swap the replacement cannot honor must not ride the new
 	// record: pendingSwap.To names the identity the transaction committed to,
 	// so a launch under a different account leaves committedAccountSwap
@@ -415,6 +461,15 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		case inspectErr != nil:
 			m.warn().Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
 				workspace, carried.conversation.ID, inspectErr)
+		case !state.RecordedExists && pendingSwapOwnsConversation:
+			// Start clean rather than launch the swap's id: the transcript is
+			// empty either way, and a fresh id cannot collide with a claude
+			// process from the reaped pane that still holds the swap's. The
+			// reconcile below clears the swap's recorded id to match, which
+			// the settlement sync accepts.
+			m.warn().Printf("root agent for %s recorded claude conversation %s belongs to a committed account swap and has no transcript yet; starting fresh rather than resuming an older project conversation",
+				workspace, carried.conversation.ID)
+			skipRecordedResume = true
 		case !state.RecordedExists && state.Resume.HasID():
 			m.warn().Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
 				workspace, carried.conversation.ID, state.Resume.ID)
@@ -488,7 +543,9 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// what keeps an unresumable id from costing the root a backoff interval of
 		// downtime. Losing the history is the bug this carry fixes; losing the ROOT
 		// would be worse than the bug.
-		if req.resumeConversation.Agent == tmux.ProgramClaude {
+		// A pending swap's conversation falls straight through to the fresh
+		// retry below, for the reason the first inspection starts it clean.
+		if req.resumeConversation.Agent == tmux.ProgramClaude && !pendingSwapOwnsConversation {
 			transcriptProgram, resolveErr := resolveLaunchProgram()
 			if resolveErr == nil {
 				transcriptProgram, resolveErr = claudeAccountTranscriptProgram(transcriptProgram, account)
@@ -529,14 +586,16 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		return
 	}
 	m.info().Printf("ensured root agent for %s (in-place, program %q)", workspace, program)
-	if reapedRoot {
+	if consumedCarry {
 		reportRootConversationCarry(workspace, carried.conversation, data.AgentConversation, data.CurrentAgent)
 		reportRootTabCarry(workspace, carried.tabs, data.Tabs)
 	}
-	m.rootEnsureSucceeded(repo.ID, st)
+	m.rootEnsureSucceeded(repo.ID, workspace, st)
 	// The in-flight mark is still held here — the deferred finishRootCreate
 	// clears it only after this function returns — so rootEnsureSucceeded left
 	// the carry in place. This create's own success is the proof that retires
-	// it (#4400 review round 4).
-	m.retireReapedRootCarry(repo.ID)
+	// what it consumed (#4400 review round 4) — and only that: a carry parked
+	// for another checkout of the repository stays for that checkout's entry
+	// (#4400 review round 7).
+	m.retireReapedRootCarry(repo.ID, workspace, consumedCarry)
 }

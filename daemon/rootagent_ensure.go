@@ -24,32 +24,39 @@ func (m *Manager) rootEnsureBackoffReset(st *rootEnsureState) {
 }
 
 // rootEnsureSucceeded resets a repo's retry state after a pass that left a
-// healthy root in place (freshly created or adopted). The repoID keys the
-// pending reaped carry the same pass makes moot — by repository, not by this
-// candidate's state key, because two spellings of one repo share one carry.
-func (m *Manager) rootEnsureSucceeded(repoID string, st *rootEnsureState) {
+// healthy root in place (freshly created or adopted). liveWorkspace is the
+// checkout that root runs in: the pending reaped carry the pass makes moot is
+// keyed by repository — two spellings of one repo share one carry — but only a
+// carry bound to the healthy root's own checkout is moot (#4400 review round 7).
+func (m *Manager) rootEnsureSucceeded(repoID, liveWorkspace string, st *rootEnsureState) {
 	m.rootEnsureBackoffReset(st)
-	m.mu.Lock()
 	// A create still in flight owns the carry: the row this pass adopted can
 	// be that create's provisional publication — CreateSession registers it
 	// before startup and readiness finish — and retiring the carry now would
 	// delete the state the running create still needs if it fails and removes
 	// its provisional row. The create retires it after recording its own
 	// outcome; the next pass covers every other exit (#4400 review round 4).
+	// Only the poll goroutine launches a create, and every caller that can
+	// reach the retire below runs on it, so the mark cannot appear between
+	// this check and the retire.
+	if m.rootCreateInFlight(repoID) {
+		return
+	}
+	// Consulted on every healthy tick, not only when the map holds an entry:
+	// after a restart the file can outlive the map — this pass adopted a
+	// healthy root and never hydrated the carry — and a stale durable carry
+	// would be consumed by the NEXT no-record create long after this root was
+	// healthy. One absent-file probe per healthy tick is the cost of never
+	// resurrecting an obsolete pin.
+	m.retireReapedRootCarry(repoID, liveWorkspace, false)
+}
+
+// rootCreateInFlight reports whether a root create for repoID is running.
+func (m *Manager) rootCreateInFlight(repoID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	_, inFlight := m.rootCreatesInFlight[repoID]
-	if !inFlight {
-		delete(m.reapedRootCarries, repoID)
-	}
-	m.mu.Unlock()
-	if !inFlight {
-		// Unconditional, not gated on the map: after a restart the file can
-		// outlive the map — this pass adopted a healthy root and never
-		// hydrated the carry — and a stale durable carry would be consumed by
-		// the NEXT no-record create long after this root was healthy. One
-		// ENOENT unlink per healthy tick is the cost of never resurrecting an
-		// obsolete pin.
-		m.removeReapedRootCarry(repoID)
-	}
+	return inFlight
 }
 
 // rootEnsureFailed records a failed ensure attempt: exponential backoff up to

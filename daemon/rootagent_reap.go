@@ -171,9 +171,35 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 	// A failure retains the record for the next tick rather than healing over
 	// a carry a restart could still drop — and a store that cannot take this
 	// file would fail deleteSessionRecord's write moments later anyway. The
-	// retain paths below remove the file again for the same staleness reason.
+	// retain paths below put back whatever the write replaced, for the same
+	// staleness reason.
+	//
+	// The file holds one carry per repository, so a carry still parked here —
+	// one a create in another checkout left for its own root_agents entry
+	// (retireReapedRootCarry) — is superseded by this write. That is a
+	// retirement of another checkout's account pin and pending swap, so it is
+	// named before it happens (#4400 review round 7).
+	prior, hadPrior, priorErr := m.parkedReapedRootCarry(repoID)
+	if hadPrior && !prior.forWorkspace(carried.workspace) {
+		m.warn().Printf("reaping the dead root in %s supersedes the root agent carry parked for %s (account %q, pending account swap: %t); that checkout's state is lost",
+			carried.workspace, prior.workspace, prior.account, prior.pendingSwap != nil)
+	}
 	if err := m.writeReapedRootCarry(repoID, carried); err != nil {
 		return reapedRootState{}, false, fmt.Errorf("reaping dead root for repo %s: could not persist the carry its replacement needs: %w", repoID, err)
+	}
+	if priorErr != nil {
+		// Only once the write has landed: a link or directory at the path
+		// refuses the write, and then nothing was superseded.
+		m.warn().Printf("reaping dead root for repo %s superseded a parked root agent carry that could not be read: %v", repoID, priorErr)
+	}
+	restorePrior := func() {
+		if !hadPrior {
+			m.removeReapedRootCarry(repoID)
+			return
+		}
+		if err := m.writeReapedRootCarry(repoID, prior); err != nil {
+			m.warn().Printf("reaping dead root for repo %s was retained, but the carry parked for %s could not be restored: %v", repoID, prior.workspace, err)
+		}
 	}
 
 	// Through the one choke point (#1917): it refuses while the teardown's outcome
@@ -183,7 +209,7 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 	// evidence is retained from the exact record being deleted.
 	deleted, err := m.deleteSessionRecord(repoID, session.RootSessionTitle, inst.ID, teardownErr, snapshot)
 	if err != nil {
-		m.removeReapedRootCarry(repoID)
+		restorePrior()
 		// Return the ERROR, not (false, nil) (#1917 round 8). "No, but fine" is
 		// absence-of-error wearing a different hat: the caller reads it as "nothing to
 		// reap" and skips rootEnsureFailed, so a persistent tmux/file-lock timeout
@@ -193,7 +219,7 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 		return reapedRootState{}, false, fmt.Errorf("reaping dead root for repo %s: %w", repoID, err)
 	}
 	if !deleted {
-		m.removeReapedRootCarry(repoID)
+		restorePrior()
 		m.info().Printf("dead root reap for repo %s skipped storage delete: current root record has a different instance identity", repoID)
 		return reapedRootState{}, false, nil
 	}
