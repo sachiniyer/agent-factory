@@ -21,7 +21,8 @@ import (
 // 2 PR3 (apiclient.Client.SnapshotWithAlarms), so the net/rpc SnapshotWithAlarms
 // client wrapper that used to live here is gone — the TUI was its only caller.
 // The sessions SnapshotNoSpawn read moved to apiclient in Phase 2 PR2; task
-// reads (ListTasksNoSpawn) stay on net/rpc.
+// reads from the local CLI (ListTasksNoSpawn) stay on net/rpc, while TUI and
+// remote-target task reads use apiclient.
 
 // SnapshotRequest asks the daemon for the authoritative session list of a repo
 // (#960 PR 3). RepoID scopes the read like the other sessions verbs (empty =

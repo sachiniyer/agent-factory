@@ -149,9 +149,13 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 				}
 				program = programFlag
 			}
-			// The daemon hosts the task scheduler (#782), so make sure
-			// it is up whenever an enabled task exists. In the background:
-			// daemon launch can take a few seconds and must not delay the TUI.
+			// On a bare root launch, check the LOCAL task store and make sure its
+			// daemon is up whenever an enabled task exists (#782). This check runs
+			// whatever the TUI targets: a --daemon-url TUI never starts the remote
+			// daemon, but local scheduled work still needs this home's. Run it in the
+			// background because daemon launch must not delay the TUI — which also
+			// makes it best-effort: an early exit can outrun the goroutine, so no
+			// user-facing text may promise this start.
 			go launchEnsureDaemonForTasks()
 
 			app.Version = version

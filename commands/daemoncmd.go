@@ -16,12 +16,27 @@ import (
 )
 
 // The daemon is the single always-on host for task schedules (cron and watch
-// scripts), session monitoring, and the web UI. Launching the TUI starts it:
-// the cold start reads session state through the daemon
-// (coldStartFromSnapshot -> withDaemonHTTP -> daemon.EnsureDaemon), and
-// ensureDaemonForTasks covers the scheduled-work case. `af daemon install`
-// registers a user-level autostart unit so schedules and the web UI survive
-// logouts and reboots without ever opening af.
+// scripts), session monitoring, and the web UI. af starts only the daemon for
+// this process's AF home (daemon.DaemonSocketPath); nothing here can start one
+// at a --daemon-url address. On its own, af starts it only through
+// daemon.EnsureDaemon, and all but one caller run that just before a request
+// to this home's daemon:
+//
+//   - callDaemon — every gob control verb in daemon/control_client.go. It
+//     always dials this home's socket and never consults --daemon-url, so a
+//     CLI verb that does not route the flag elsewhere first (for example
+//     `af sessions kill`) ensures this home's daemon with the flag set.
+//   - withDaemonHTTP (app/session_control.go) — TUI calls, local target only.
+//   - `af sessions attach` (api/sessions.go) — local target only.
+//
+// The exception, an ensure that precedes no request, is ensureDaemonForTasks:
+// the bare root launch's enabled-task check, which reads this home's task
+// store whatever the TUI targets. EnsureDaemon asks the service manager first
+// when the installed unit serves this home, and defers to a live upgrade.
+// Every other start is an explicit lifecycle command: install (the autostart
+// unit), adopt, reset's unit resume, and the restart/upgrade respawn, which
+// runs only after stopping a live daemon (restartDaemonFromPathDetailed).
+// docs/daemon.md#lifecycle is the user-facing copy of this inventory.
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
@@ -30,13 +45,31 @@ var daemonCmd = &cobra.Command{
 watch-task scripts, monitors sessions, and serves the bundled web UI.
 
 The web UI is part of the daemon — there is no separate web command — so it is
-served whenever the daemon is running. Running af starts one: the TUI reads
-session state through the daemon and spawns it if none is up, so simply opening
-af serves the web UI. Any enabled task starts one too. Only
-standalone commands that never talk to the daemon (such as 'af config list')
-leave it down.
+served whenever the daemon is running.
 
-With af running, open:
+af only ever starts the daemon for this machine's AF home; it never starts one
+at a --daemon-url/AF_DAEMON_URL address. It starts that daemon on its own in
+exactly two cases:
+
+  - A request needs it. Before af sends a request that only the daemon can
+    answer, it makes sure the daemon is running: opening the TUI without
+    --daemon-url, and every command whose work only this machine's daemon can
+    do ('af sessions create' and 'af sessions kill' always; 'af tasks add' and
+    'af sessions attach' when no --daemon-url is set). Commands that can answer
+    without a daemon, such as 'af daemon status' and 'af sessions list', never
+    start it.
+  - A bare 'af' launch finds an enabled task in this machine's task store. The
+    check runs in the background and is best-effort.
+
+--daemon-url changes only where a command that supports it sends its requests;
+it switches neither case off. When the installed autostart unit serves this
+home, an on-demand start asks the service manager to start it first. Otherwise
+the daemon starts only through the commands that manage it:
+'af daemon install', 'af daemon adopt', 'af reset' (which restarts the unit it
+paused), and 'af daemon restart' or an upgrade, which replace a running daemon
+and start nothing when none is running.
+
+With the daemon running, open:
 
     http://localhost:8443
 
@@ -47,7 +80,7 @@ peers; on the default loopback listener same-host callers stay exempt, so the
 UI keeps opening with no login on this machine. Add network.require_loopback_token =
 true to require the token from localhost as well.
 Note that 'af agent-server' does not serve the web UI: it is the headless
-per-workspace backend a daemon drives on a remote machine.
+per-workspace server a daemon drives inside a separately provisioned workspace.
 
 Clients reach the daemon over a local Unix socket by default. To drive one from
 another machine, either ssh to that host and run 'af' there, or give network.listen_addr
@@ -99,7 +132,7 @@ var daemonUninstallCmd = &cobra.Command{
 			return nil
 		}
 		fmt.Printf("daemon autostart removed: %s\n", unitPath)
-		fmt.Println("the daemon still starts on demand whenever you run af with enabled tasks")
+		fmt.Println("local calls that need a running daemon still start it on demand; bare af also checks local enabled tasks")
 		return nil
 	},
 }
@@ -235,10 +268,11 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 	if info.Running {
 		fmt.Fprintln(w, "daemon: running")
 	} else {
-		// The on-demand promise is unconditional again: since #2168 Phase 0 there
-		// is no config the daemon refuses to start under, so there is no posture
-		// that makes this line a lie.
-		fmt.Fprintln(w, "daemon: not running (starts on demand when you run af with an enabled task)")
+		// Both production callers — `af daemon status` and the daemon section in
+		// `af bug-report` — are read-only and never spawn. State that first, then the
+		// one rule: calls that need the local daemon start it on demand.
+		fmt.Fprintln(w, "daemon: not running (this check never starts it; "+
+			"local calls that need a daemon start it on demand)")
 	}
 	if info.Phase != "" {
 		fmt.Fprintf(w, "  phase:          %s\n", info.Phase)
@@ -765,13 +799,16 @@ func respawnDaemonAfterUpgrade(execPath string) (respawnResult, error) {
 	return respawnResult{UnitErr: unitErr, UnitGateErr: gateErr}, nil
 }
 
-// ensureDaemonForTasks starts the daemon when any enabled task exists, so
-// cron schedules are evaluated even if the user never opens the TUI.
-// Failures are logged rather than surfaced: the TUI is fully usable without
-// the daemon, and the next af invocation retries.
+// ensureDaemonForTasks is the LOCAL enabled-task background check used by the
+// bare root command's TUI RunE. It always reads this AF home's task store and
+// ensures its local daemon; selecting a remote TUI target does not retarget this
+// lifecycle work, and never starts the remote daemon. Cobra subcommands do not
+// invoke it. Failures are logged rather than surfaced because it runs alongside
+// TUI launch, and the next bare af invocation retries. The TUI's HTTP path
+// separately ensures only its default local target and surfaces startup failure.
 //
 // The enabled-task gate is correct here and only here: this is the cold-start
-// path (af launch), where no daemon was previously running. The post-upgrade
+// path (bare af launch), where no daemon was previously running. The post-upgrade
 // respawn path must not use it — see respawnDaemonAfterUpgrade (#813).
 func ensureDaemonForTasks() {
 	tasks, err := task.LoadTasks()

@@ -49,7 +49,7 @@ writability, config materialization and parsing, git and this repo, git
 identity, tmux, your configured agent commands, state and log storage, daemon
 health, and remote-hook setup when the repo configures one. Anything it reports
 needs attention if it fails — see [Troubleshooting](troubleshooting.md).
-On a fresh install, `daemon: not running; starts on demand` is expected. The
+On a fresh install, `daemon: not running; local calls that need it start it on demand` is expected. The
 `autostart: not installed` warning does not block your first session; the
 optional autostart step appears below.
 
@@ -159,9 +159,13 @@ Schedule an agent to run on its own:
 af tasks add --name "Daily triage" --prompt "Triage open issues" --cron "0 9 * * *"
 ```
 
-Scheduled and event-driven tasks are run by the background **daemon**, which
-starts on demand whenever there is work to host. To keep it — and your tasks —
-running across logouts and reboots, install its autostart unit once:
+Scheduled and event-driven tasks are run by the background **daemon**. Opening
+the TUI with `af` and no `--daemon-url` starts this machine's daemon if it is not
+already running, and a bare `af` launch also checks for enabled tasks; af never
+starts a daemon at a `--daemon-url` address.
+[The daemon's lifecycle](daemon.md#lifecycle) has the exact rules. To keep the
+daemon — and your tasks — running across logouts and reboots, install its
+autostart unit once:
 
 ```bash
 af daemon install

@@ -318,7 +318,11 @@ func TestCollectDaemonStatusReportsExposureWithoutClaimingItCannotStart(t *testi
 	cmd.SetOut(&out)
 	printDaemonStatusHuman(cmd, info)
 	got := out.String()
-	require.Contains(t, got, "starts on demand",
+	require.Contains(t, got, "this check never starts it",
+		"status must not imply that rerunning this no-spawn command starts the daemon")
+	require.Contains(t, got, "calls that need a daemon",
+		"the on-demand promise must name the narrow condition — a call that needs one")
+	require.Contains(t, got, "start it on demand",
 		"the on-demand promise is true again — this config starts fine")
 	require.NotContains(t, got, "cannot start",
 		"there is no config the daemon refuses to start under any more")
@@ -341,7 +345,9 @@ func TestCollectDaemonStatusSafeConfigIsUnwarned(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	printDaemonStatusHuman(cmd, info)
-	require.Contains(t, out.String(), "starts on demand")
+	require.Contains(t, out.String(), "this check never starts it")
+	require.Contains(t, out.String(), "calls that need a daemon")
+	require.Contains(t, out.String(), "start it on demand")
 	require.NotContains(t, out.String(), "warning:")
 }
 

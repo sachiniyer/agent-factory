@@ -43,8 +43,8 @@ const binaryProbeTimeout = 5 * time.Second
 func checkDaemonVersionSkew(ctx *scanContext, report *Report, h daemon.HealthStatus) {
 	if h.PingErr != nil {
 		// Nothing answered, so there is no version to compare — whether that
-		// is fine (starts on demand) or broken (stale socket) is
-		// checkDaemonHealth's call, not ours.
+		// is fine (a call that needs it starts it on demand) or broken (stale
+		// socket) is checkDaemonHealth's call, not ours.
 		return
 	}
 	client := strings.TrimSpace(ctx.opts.Version)
@@ -128,8 +128,9 @@ func checkDuplicateDaemons(ctx *scanContext, report *Report) {
 	}
 	procs := activeHomeDaemons(ctx)
 	if len(procs) <= 1 {
-		// 0 daemons is not this check's problem (the daemon starts on demand);
-		// 1 is the invariant holding. Neither is worth a row of its own.
+		// 0 daemons is not this check's problem (a call that needs the daemon
+		// starts it on demand); 1 is the invariant holding. Neither is worth a
+		// row of its own.
 		return
 	}
 	descs := make([]string, 0, len(procs))

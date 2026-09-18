@@ -62,7 +62,8 @@ var (
 	// decodes the same {data,error} envelope back into the same
 	// session.InstanceData structs the RPC returned — so list/get/whoami output,
 	// scoping, and disk-fallback behavior are unchanged; only the transport
-	// moved. Every write/control path stays on net/rpc for now.
+	// moved. Other reads and controls use HTTP or gob according to their caller
+	// and target; this helper makes no transport claim about them.
 	snapshotViaDaemon = apiclient.SnapshotNoSpawn
 )
 

@@ -59,9 +59,42 @@ paragraph because it's why `af` doesn't corrupt itself:
 
 ## Lifecycle
 
-The daemon starts **on demand**: whenever you run `af` and there is work to host
-(an enabled task or a root agent), `af` makes sure a daemon is running.
-That means for interactive use you usually don't have to think about it at all.
+af only ever starts the daemon for **this machine's** af home
+(`$AGENT_FACTORY_HOME`, default `~/.agent-factory`). It has no way to start a
+daemon anywhere else, so it never starts one at a
+`--daemon-url`/`AF_DAEMON_URL` address.
+
+af starts this machine's daemon on its own in exactly two cases:
+
+- **A request needs it.** Before af sends a request that only the daemon can
+  answer, it makes sure the daemon is running. Opening the TUI without
+  `--daemon-url` is such a request. So is every command whose work only this
+  machine's daemon can do — for example `af sessions create` and
+  `af sessions kill` always, and `af tasks add`, `af accounts login`, and
+  `af sessions attach` when no `--daemon-url` is set. Commands that can answer
+  without a daemon, such as `af daemon status`, `af sessions list`, and
+  `af tasks list`, never start it.
+- **A bare `af` launch finds an enabled task** in this home's task store. The
+  check runs in the background and is best-effort: if `af` exits first,
+  nothing starts.
+
+`--daemon-url` changes only where a command that supports it sends its
+requests. It switches neither case off: a command that still sends its work to
+this machine's daemon with the flag set — the local session commands listed
+under [`af sessions`](cli.md#af-sessions) — starts that daemon like any other
+request, and a bare `af --daemon-url …` still runs the task check.
+
+When an installed autostart unit serves this home, an on-demand start asks the
+service manager to start that unit, and launches the daemon directly only if
+the manager fails. While an upgrade is handing over to a new daemon, an
+on-demand start defers to the upgrade instead of starting a second daemon.
+
+Otherwise the daemon starts only when you run a command that manages it:
+`af daemon install` starts it and has the service manager start it at every
+login, `af daemon adopt` starts it under the installed unit, `af reset`
+restarts the installed unit it paused for the wipe, and `af daemon restart` and
+upgrades replace a running daemon and start nothing when none is running. For
+interactive local use you usually don't have to think about any of this.
 
 To keep tasks and sessions running across logouts and reboots, install the
 daemon's autostart unit once:
@@ -84,7 +117,14 @@ unavailable manager or older daemon is reported as unknown rather than guessed.
 ## Sockets
 
 The daemon listens on two local Unix sockets under `$AGENT_FACTORY_HOME`
-(default `~/.agent-factory`): an internal control socket the TUI and CLI use, and
-the HTTP/JSON socket (`daemon-http.sock`) for the public API. Both are
-owner-only (`0600`) and local — never a TCP port, never the network. See the
+(default `~/.agent-factory`): the gob control socket (`daemon.sock`) and the
+HTTP/JSON socket (`daemon-http.sock`). The TUI uses HTTP for session/task reads
+and many controls. Callers choose the transport by operation and target: the
+config pane's local account verbs, config-agent spawn/reap, and local
+config-editor saves still use gob. The local config editor reads config in-process and writes through
+`daemon.SetGlobalConfigValue`, which may fall back to a local-file write if no
+daemon is reachable; a remote-target editor reads and writes through HTTP. CLI
+callers also use both transports. The HTTP socket serves public and internal
+routes. Both Unix sockets are owner-only (`0600`) and local — never a TCP port,
+never the network. See the
 [HTTP API guide](http-api.md) for the transport and auth details.

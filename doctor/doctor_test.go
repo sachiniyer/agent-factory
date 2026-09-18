@@ -798,7 +798,7 @@ func TestCleanRunHasNoFindings(t *testing.T) {
 // TestRenderShapes covers the three finding render states.
 func TestRenderShapes(t *testing.T) {
 	r := &Report{
-		OK: []string{"daemon: not running (starts on demand)"},
+		OK: []string{"daemon: not running (local calls that need it start it on demand)"},
 		Findings: []Finding{
 			{Check: "orphaned-process", Detail: "pid 1234 (yes)", Actionable: true, FixAction: "kill pid 1234"},
 			{Check: "leaked-tmux-session", Detail: "tmux session af_x has no backing record", Actionable: true},

@@ -325,24 +325,26 @@ func runUpgrade(out, errOut io.Writer, downloadURL string, noRestart bool) error
 // also kill daemons serving other AF homes.
 func stopDaemonHint(h daemon.HealthStatus) string {
 	if h.PIDVerified && h.PIDFilePID > 0 {
-		return fmt.Sprintf("Stop it with `kill %d`, then run af — the next run starts a fresh daemon from the new binary.", h.PIDFilePID)
+		return fmt.Sprintf("Stop it with `kill %d`, then open af without --daemon-url — that starts a fresh daemon from the new binary.", h.PIDFilePID)
 	}
 	// No verified pid to name: point at the command that finds it rather than
 	// guessing one.
-	return "Find its pid with `af daemon status` and stop it, then run af — the next run starts a fresh daemon from the new binary."
+	return "Find its pid with `af daemon status` and stop it, then open af without --daemon-url — that starts a fresh daemon from the new binary."
 }
 
 // startDaemonHint names what brings a daemon back when none is running.
 //
 // Also NOT `af daemon restart`: with no daemon up there is no socket, so it
 // reports "no running daemon to restart" and starts nothing — it restarts, it
-// does not start. Running af does start one (the TUI cold start calls
-// daemon.EnsureDaemon, as does ensureDaemonForTasks), and `af daemon install`
-// both starts one and re-registers it for this home (systemctl --user enable
-// --now / a RunAtLoad launchd agent), which is the only option here that ends
-// with the daemon supervised.
+// does not start. Opening the TUI without --daemon-url does start one: newHome
+// reads the all-projects snapshot through withDaemonHTTP, which runs
+// daemon.EnsureDaemon for the local target (the full inventory of starters is
+// in daemoncmd.go and docs/daemon.md#lifecycle).
+// `af daemon install` both starts one and re-registers it for this home
+// (systemctl --user enable --now / a RunAtLoad launchd agent), which is the only
+// option here that ends with the daemon supervised.
 func startDaemonHint() string {
-	return "Running af starts one from the new binary; `af daemon install` starts it and keeps it supervised across logins."
+	return "Opening af without --daemon-url starts one from the new binary; `af daemon install` starts it and keeps it supervised across logins."
 }
 
 // reportUpgradeRestart tells the user what the restart actually did.

@@ -24,9 +24,9 @@ import (
 // What this RPC deliberately does NOT do is claim availability, which is where it
 // diverges from ListBackends. A backend's preconditions are properties of the
 // repo's config, which the daemon can read and check. Whether `aider` is
-// installed is a property of the machine the AGENT will run on — and for a docker
-// or ssh backend that is not the daemon's machine at all. Probing the daemon's
-// own PATH would answer a question nobody asked and, worse, answer it with a
+// installed is a property of the agent's execution environment — Docker uses
+// the container's filesystem and PATH, while SSH uses the configured host's.
+// Probing the daemon's own PATH would answer a different question, with a
 // NEGATIVE: an agent present in the container would be reported missing, hiding a
 // working choice behind a confident lie. A probe that cannot know must not answer
 // (#1933), so this one reports the enum and stops.

@@ -157,7 +157,7 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 				"upgrade this af client before diagnosing daemon readiness", false)
 		}
 	case !h.SocketExists:
-		report.Pass(sectionDaemon, "daemon", "not running; starts on demand")
+		report.Pass(sectionDaemon, "daemon", "not running; local calls that need it start it on demand")
 	default:
 		// The socket exists but the ping failed — classify WHY. A dial timeout
 		// is not proof the daemon is dead: a live daemon with a saturated

@@ -22,10 +22,14 @@ func TestAgentServerHelpDoesNotClaimToServeTheFrontend(t *testing.T) {
 	// stay silent — silence is what let the misconception form.
 	assert.Contains(t, lower, "does not start the web ui",
 		"agent-server help must explicitly disclaim serving the web UI")
-	assert.Contains(t, lower, "af daemon",
-		"agent-server help must name the daemon as what does serve the UI")
+	assert.Contains(t, lower, "bare 'af'",
+		"agent-server help must name the default-local on-demand start path")
+	assert.Contains(t, lower, "af daemon install",
+		"agent-server help must name the explicit supervised start path")
 	assert.Contains(t, help, "8443",
 		"agent-server help must point at the daemon's web address")
+	assert.NotContains(t, lower, "run the daemon with 'af daemon'",
+		"bare af daemon only renders help because the command is not runnable")
 
 	// And it must never assert the opposite.
 	for _, claim := range []string{

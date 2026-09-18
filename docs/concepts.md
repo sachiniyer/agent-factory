@@ -56,9 +56,11 @@ and ask it to change things, so they cannot disagree about what exists, and
 closing any of them does not stop the work.
 
 It also keeps sessions alive across process death and reboots, runs the
-scheduler, handles usage-limit parking and resume, and serves the web client. It
-starts on demand when there is work to host; install its autostart unit once to
-keep tasks firing across logouts:
+scheduler, handles usage-limit parking and resume, and serves the web client.
+af starts it on your machine when a request needs it — opening the TUI without
+`--daemon-url` is one — or when a bare `af` launch finds an enabled task;
+[the daemon's lifecycle](daemon.md#lifecycle) has the exact rules. Install its
+autostart unit once to keep tasks firing across logouts:
 
 ```bash
 af daemon install   # systemd user service on Linux, launchd agent on macOS
