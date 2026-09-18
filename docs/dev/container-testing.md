@@ -6,6 +6,8 @@ the commands that use it.
 
 Read the [contributor overview](index.md) and the repository operating contract
 first. Then choose the focused harness below; CI owns routine full-suite runs.
+To show that a new `daemon/`, `app/` or `integration/` test fails without its
+fix, use a [fail-first probe run](probe-runs.md) in CI rather than a container.
 
 `af`'s test suite and play-tests drive **real tmux servers and real `af`
 daemons**. The tests themselves are hermetic (every tmux-touching package

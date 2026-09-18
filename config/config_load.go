@@ -50,16 +50,46 @@ import (
 // This mirrors the error-propagation contract already adopted by
 // LoadRepoConfig, where only os.IsNotExist yields defaults.
 func LoadConfig() (*Config, error) {
-	cfg, err := loadConfig()
+	cfg, _, err := LoadConfigWithDigest()
+	return cfg, err
+}
+
+// LoadConfigWithDigest is LoadConfig plus the digest of the config.toml bytes it
+// parsed, for the one caller that has to prove WHICH file it loaded: a live
+// config apply, whose save then compares the digest against the bytes it wrote
+// to decide whether it may claim the daemon is serving this save's value (#4247).
+//
+// The digest is Known only on the canonical path — the single os.ReadFile of
+// config.toml in loadConfig below. Every other path (first-run materialization,
+// a legacy config.json conversion, an empty stub answered from memory) leaves it
+// unknown, because none of them parsed a config.toml a save could have written.
+// Unknown never matches, so those loads confirm nothing rather than confirming
+// wrongly.
+//
+// The digest describes what was READ, which is the question a save is asking.
+// persistAppearanceMigration below may rewrite the file afterwards; that does not
+// change which bytes this load parsed, and so does not change what the running
+// daemon is serving.
+func LoadConfigWithDigest() (*Config, ConfigDigest, error) {
+	var digest ConfigDigest
+	cfg, err := loadConfig(&digest)
 	if err != nil {
-		return nil, err
+		return nil, ConfigDigest{}, err
 	}
 	// All successful normal paths converge here after releasing conversion locks,
 	// including a concurrent winner adopted by conversion or materialization.
-	return persistAppearanceMigration(cfg)
+	cfg, err = persistAppearanceMigration(cfg)
+	if err != nil {
+		return nil, ConfigDigest{}, err
+	}
+	return cfg, digest, nil
 }
 
-func loadConfig() (*Config, error) {
+// loadConfig reports into readDigest, when non-nil, the digest of the canonical
+// config.toml read — and only there. Every other return leaves it untouched at
+// its unknown zero value, which is the honest answer: no config.toml a save
+// wrote was parsed on those paths.
+func loadConfig(readDigest *ConfigDigest) (*Config, error) {
 	configDir, err := GetConfigDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config directory: %w", err)
@@ -127,6 +157,13 @@ func loadConfig() (*Config, error) {
 			log.WarningLog.Printf("both %s and %s exist; %s is canonical and %s is ignored — delete or rename %s to silence this warning",
 				prettyTomlPath, prettyConfigPath, prettyTomlPath, prettyConfigPath, prettyConfigPath)
 		}
+		// The canonical read, and the only one a save can be compared against:
+		// tomlData is the whole file, and parseLoadedConfigTOML parses this
+		// buffer rather than reading again. A shadowing config.json changes
+		// nothing here — it is ignored, loudly, and config.toml still decides.
+		if readDigest != nil {
+			*readDigest = digestConfigBytes(tomlData)
+		}
 		return parseLoadedConfigTOML(tomlData, prettyTomlPath, tomlPath)
 	}
 	if !os.IsNotExist(tomlErr) {
@@ -161,7 +198,7 @@ func loadConfig() (*Config, error) {
 	}
 
 	// 3. A real config.json with no config.toml → one-time conversion.
-	return convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, prettyTomlPath)
+	return convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath)
 }
 
 // ReadOnlyConfigLoad is a no-write config snapshot for diagnostics.
@@ -404,7 +441,7 @@ var convertRaceHookForTest func()
 // run); a crash after it leaves both files, and LoadConfig's canonical-toml
 // rule resolves that to config.toml with a warning. The rename is therefore
 // best-effort — a failure is logged, not fatal.
-func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, prettyTomlPath string) (*Config, error) {
+func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath string) (*Config, error) {
 	var result *Config
 	lockErr := withFollowedFileLock(tomlPath, func(locked lockedTarget) error {
 		if convertRaceHookForTest != nil {
@@ -442,22 +479,28 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			return fmt.Errorf("failed to read config file %s: %w", prettyConfigPath, err)
 		}
 		if os.IsNotExist(err) || len(data) == 0 {
-			// The racer renamed config.json to .bak (and its config.toml is
-			// gone/incomplete), or the file is an empty first-run stub — either
-			// way there is nothing to convert, so materialize fresh defaults.
+			// config.json vanished/was truncated under the lock. A concurrent
+			// af converter that won already wrote config.toml and was adopted by
+			// locked.read() above — and even if that read missed,
+			// materializeDefaultConfig's O_CREATE|O_EXCL create fails EEXIST on
+			// the winner's config.toml — so this branch is only reached when an
+			// external process (in-place editor, rm, mv) made config.json
+			// empty/gone in the inter-read window. The conversion lock
+			// serializes af converters, not external editors, so this window is
+			// not closed by acquiring the lock.
 			//
-			// This one keeps the LINK path deliberately. It creates with
-			// O_CREATE|O_EXCL, which fails on a symlink rather than following
-			// it, so it can never write through the link; and the questions it
-			// asks — is something already at config.toml, is that something a
-			// link — are questions about the link itself, which the pinned
-			// target cannot answer.
-			//
-			// It does not confirm-and-refuse either, for the same reason as the
-			// winner branch above: what it returns is the config af STARTS on,
-			// not a report about what af changed. Every command outcome under
-			// this lock confirms; these two loads deliberately do not.
-			cfg, mErr := materializeDefaultConfig(configDir, tomlPath, prettyTomlPath)
+			// An in-place rewrite may be mid-flight (#4483): the writer
+			// truncated config.json first and has not written its content yet.
+			// Installing a canonical config.toml of built-in defaults here
+			// shadows the user's config.json on the next load — the same
+			// in-place-rewrite threat loadConfig's pre-lock zero-byte path
+			// declines to write for. A read never deletes user data, and a read
+			// never installs a canonical file that shadows an in-flight one
+			// either: answer defaults in memory and write nothing, leaving
+			// config.json for whoever holds it. If a writer completes it, the
+			// next load parses and converts it as usual. (Mirrors loadConfig's
+			// pre-lock path.)
+			cfg, mErr := emptyConfigStubLoad(prettyConfigPath)
 			if mErr != nil {
 				return mErr
 			}

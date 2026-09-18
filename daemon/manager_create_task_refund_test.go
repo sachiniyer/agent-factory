@@ -151,12 +151,12 @@ func flattenControlCreateSession(t *testing.T, manager *Manager) {
 func flattenDeliverPrompt(t *testing.T, manager *Manager) {
 	t.Helper()
 	orig := deliverPromptForTask
-	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
-		status, err := manager.DeliverPrompt(req)
+	deliverPromptForTask = func(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
+		status, deliveryStatus, promptRetained, err := manager.deliverPromptWithOutcome(req)
 		if err == nil {
-			return status, nil
+			return taskPromptDeliveryResult{status: status, deliveryStatus: deliveryStatus, promptRetained: promptRetained}, nil
 		}
-		return "", fmt.Errorf("%s", err.Error())
+		return taskPromptDeliveryResult{}, fmt.Errorf("%s", err.Error())
 	}
 	t.Cleanup(func() { deliverPromptForTask = orig })
 }
