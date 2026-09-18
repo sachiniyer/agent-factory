@@ -8820,6 +8820,101 @@ test("#4209: a failed follow-up dispatch names the manual recovery instead of cl
   assert.deepEqual(github.dispatchedWorkflows, []);
 });
 
+// ---------------------------------------------------------------------------
+// The update-branch merge race (#4462). evaluate() resolves a PR open and
+// behind; a hand or queue merge then closes it in the seconds before the
+// gate's own `PUT update-branch` executes — two writers on one PR with no
+// ordering between them. The loser's update is either rejected by a PR that no
+// longer exists to update, or accepted onto a dead branch whose tip it just
+// moved out from under delete-on-merge. Both are the race's losing outcome —
+// the merge the run wanted already happened — and neither is an update failure.
+// ---------------------------------------------------------------------------
+
+test("#4462: an update-branch refused because the PR already merged is a lost race, not an update failure", async () => {
+  // #4398's first shape: the PUT is rejected (422, the documented
+  // "unprocessable" for a merged or head-less PR) and the confirming read
+  // proves the merge landed. The update is a no-op — not a red gate.
+  const gone = new Error("Unprocessable Entity");
+  gone.status = 422;
+  const github = fakeGateGithub({
+    behindBy: 1,
+    updateBranchError: gone,
+    pullGetSnapshots: [
+      { merged: false },
+      { merged: true, state: "closed", merge_commit_sha: OTHER_SHA },
+    ],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was in flight/,
+  );
+  assert.equal(github.mergedWith, null, "the loser does not merge what already merged");
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.deepEqual(github.dispatchedWorkflows, [], "there is no successor work to schedule");
+});
+
+test("#4462: a PR already merged before the update is never written to", async () => {
+  // The merge landed in the wider window — between the evaluation and this
+  // lane reaching the update. The live read sees it and the PUT never fires:
+  // no write lands on a dead PR's branch at all.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    pullGetSnapshots: [{ merged: true, state: "closed", merge_commit_sha: OTHER_SHA }],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was pending/,
+  );
+  assert.equal(github.updateBranchCalls.length, 0, "the write is skipped entirely");
+  assert.equal(github.mergedWith, null);
+});
+
+test("#4462: an update-branch accepted onto a just-merged PR refuses and schedules nothing", async () => {
+  // #4398's observed shape, exactly: the PUT was ACCEPTED and its merge commit
+  // (688928a) landed on the head branch inside the merge's own second —
+  // delete-on-merge saw a tip it did not recognize and left the branch. The
+  // post-update read sees the PR merged, and the lane refuses as the lost race
+  // it is rather than scheduling successor work onto a dead PR. Reclaiming the
+  // orphaned branch is the sweep's concern, not this transaction's.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    headAfterUpdate: OTHER_SHA,
+    remoteRefSha: OTHER_SHA,
+    pullGetSnapshots: [
+      { merged: false },
+      { merged: true, state: "closed", merge_commit_sha: "f".repeat(40) },
+    ],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was in flight/,
+  );
+  assert.equal(github.mergedWith, null);
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.deepEqual(github.dispatchedWorkflows, [], "no successor: the merge already produced the outcome");
+  assert.deepEqual(github.approvedRuns, [], "no runs are approved for a head the merge made moot");
+});
+
+test("#4462: an update failure whose PR state cannot be re-read stays an update failure", async () => {
+  // The concession needs PROOF the race was lost — a read whose failure means
+  // "no evidence", never "a new error" (#3551's rule). An unreachable PR is
+  // not a merged PR.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    updateBranchError: new Error("update rejected"),
+    pullGetErrors: [null, new Error("PR read unavailable")],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /the update failed: error update rejected/,
+  );
+  assert.equal(github.mergedWith, null);
+});
+
 // #3807. The merge commit `PUT update-branch` writes is authored by the workflow
 // token, so every `pull_request` run it triggers is attributed to
 // `github-actions[bot]` and GitHub parks it in `action_required` behind "Approve
