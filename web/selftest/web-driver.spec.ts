@@ -4209,6 +4209,7 @@ test("per-tab preview origin (#1856): ↻ recovers from a STICKY reachability su
   const originRe = new RegExp(`^http://af[a-z2-7]{32}\\.localhost:${previewPort}`);
 
   setPreview(`127.0.0.1:${previewPort}`);
+  let previewOrigin = "";
   try {
     // Now that preview_listen_addr is bound, the live config has changed; reload so
     // the SPA re-reads /v1/preview-auth and the per-tab origin path is eligible.
@@ -4226,7 +4227,7 @@ test("per-tab preview origin (#1856): ↻ recovers from a STICKY reachability su
     // the real preview listener (NOT intercepted yet), the daemon answers, and the
     // pane moves onto the per-tab origin. This is the cached-true state.
     await expect(frame).toHaveAttribute("src", originRe, { timeout: 15_000 });
-    const previewOrigin = new URL((await frame.getAttribute("src")) ?? "").origin;
+    previewOrigin = new URL((await frame.getAttribute("src")) ?? "").origin;
     expect(previewOrigin, "the pane landed on the per-tab preview origin").toMatch(originRe);
     // Wait until the frame has actually loaded against the live listener, so the
     // later fallback assertion is a real transition rather than the initial load.
@@ -4260,6 +4261,7 @@ test("per-tab preview origin (#1856): ↻ recovers from a STICKY reachability su
     expect(afterSrc, "↻ must not re-navigate to the dead per-tab origin").not.toMatch(originRe);
   } finally {
     await page.unroute(`http://${PREVIEW_PROBE_HOST}:${previewPort}/**`).catch(() => {});
+    await page.unroute(`${previewOrigin}/**`).catch(() => {});
     setPreview("");
     await page.reload();
   }
