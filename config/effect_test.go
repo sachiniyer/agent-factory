@@ -185,11 +185,171 @@ func TestEffectNoticeAppliedLiveSurvivesASuccessfulRebind(t *testing.T) {
 }
 
 // TestEffectNoticeZeroOutcomeIsTheDaemonlessSentence: a caller with no apply result
-// at all — no daemon ran, or its apply errored — stays expressible, and gets the
+// at all — no daemon was reached — stays expressible, and gets the
 // pre-#3397 sentence verbatim.
 func TestEffectNoticeZeroOutcomeIsTheDaemonlessSentence(t *testing.T) {
 	const want = "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
 	if got := EffectNotice("network.listen_addr", ApplyOutcome{}); got != want {
 		t.Errorf("daemonless notice changed\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// A confirmed reload failure keeps the previous live configuration; a lost
+// response cannot establish that fact. Neither outcome means no daemon ran.
+func TestEffectNoticeDaemonApplyFailed(t *testing.T) {
+	const want = "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
+	for _, key := range []string{"network.require_token", "require_token", "default_program"} {
+		if got := EffectNotice(key, ApplyOutcome{DaemonApplyFailed: true}); got != want {
+			t.Errorf("%s: got %q, want %q", key, got, want)
+		}
+	}
+}
+
+// A listener key can carry BOTH a failed rebind and an unconfirmed apply: the
+// rebind failure rides on an apply that SUCCEEDED, so nothing stops the file
+// from having moved under the load that apply made. The rebind-deferred sentence
+// promises the save takes effect at the next daemon start, which would be a
+// promise about whatever bytes the winner left there. EffectNotice must
+// therefore rank these the way StatusForKey does, or the sentence and the wire
+// status describe different worlds for one save (#4247).
+func TestEffectNoticeRanksUnconfirmedAboveAFailedRebind(t *testing.T) {
+	const key = "network.listen_addr"
+	rebindPromise := listenerRebindDeferredNotice(key)
+
+	unconfirmed := ApplyOutcome{
+		DaemonApplied:          true,
+		FailedListenerKeys:     []string{key},
+		DaemonApplyUnconfirmed: true,
+	}
+	got := EffectNotice(key, unconfirmed)
+	if got == rebindPromise {
+		t.Errorf("EffectNotice(%q) promised a next-start effect for an unconfirmed apply: %q", key, got)
+	}
+	if status := unconfirmed.StatusForKey(key); status != ApplyStatusUnconfirmed {
+		t.Errorf("StatusForKey(%q) = %q, want %q — the notice and the status must agree", key, status, ApplyStatusUnconfirmed)
+	}
+}
+
+func TestEffectNoticeDaemonApplyUnconfirmed(t *testing.T) {
+	const want = "Saved — the daemon’s live config apply could not be confirmed (see the warnings for the reason)."
+	outcome := ApplyOutcome{DaemonApplyFailed: true, DaemonApplyUnconfirmed: true}
+	if got := EffectNotice("network.require_token", outcome); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestApplyOutcomeStatusForKey(t *testing.T) {
+	tests := []struct {
+		name    string
+		outcome ApplyOutcome
+		key     string
+		want    ApplyStatus
+	}{
+		{name: "no daemon", key: "default_program", want: ApplyStatusNoDaemon},
+		{name: "applied", outcome: ApplyOutcome{DaemonApplied: true}, key: "default_program", want: ApplyStatusApplied},
+		{name: "failed", outcome: ApplyOutcome{DaemonApplyFailed: true}, key: "default_program", want: ApplyStatusFailed},
+		{name: "unconfirmed", outcome: ApplyOutcome{DaemonApplyUnconfirmed: true}, key: "default_program", want: ApplyStatusUnconfirmed},
+		{
+			name: "failed listener key is deferred",
+			outcome: ApplyOutcome{
+				DaemonApplied:      true,
+				FailedListenerKeys: []string{"network.listen_addr"},
+			},
+			key:  "network.listen_addr",
+			want: ApplyStatusDeferred,
+		},
+		{
+			name: "unrelated key still applied",
+			outcome: ApplyOutcome{
+				DaemonApplied:      true,
+				FailedListenerKeys: []string{"network.listen_addr"},
+			},
+			key:  "network.require_token",
+			want: ApplyStatusApplied,
+		},
+		{
+			name:    "next daemon start",
+			outcome: ApplyOutcome{DaemonApplied: true},
+			key:     "branch_prefix",
+			want:    ApplyStatusDeferred,
+		},
+		{
+			name:    "next client start",
+			outcome: ApplyOutcome{DaemonApplied: true},
+			key:     "update_channel",
+			want:    ApplyStatusDeferred,
+		},
+		{
+			name: "startup-only key remains deferred without daemon",
+			key:  "debug_pprof",
+			want: ApplyStatusDeferred,
+		},
+		{
+			// This case used to expect "deferred", on the premise that an apply
+			// failure was UNRELATED to a key the apply cannot make live. There is
+			// no such failure: Manager.ApplyConfig has exactly one error return,
+			// wrapping config.LoadConfig, so a failure means the whole file did not
+			// load — and the next daemon start reads that same file. "Deferred"
+			// promised an effect the invalid file cannot deliver (#4247).
+			name:    "startup-only key reports the failed reload that will also break its next start",
+			outcome: ApplyOutcome{DaemonApplyFailed: true},
+			key:     "root_agents",
+			want:    ApplyStatusFailed,
+		},
+		{
+			// The complement, and the reason failure and uncertainty rank
+			// differently against the class: an unconfirmed apply still WROTE the
+			// file, so the next start reads this save's value.
+			name:    "startup-only key stays deferred when the apply is merely unconfirmed",
+			outcome: ApplyOutcome{DaemonApplyUnconfirmed: true},
+			key:     "root_agents",
+			want:    ApplyStatusDeferred,
+		},
+		{
+			name:    "unclassified key is unknown",
+			outcome: ApplyOutcome{DaemonApplied: true},
+			key:     "future_unclassified_key",
+			want:    ApplyStatusUnknown,
+		},
+		{
+			// A successful apply whose digest did not match: the daemon loaded
+			// some other writer's file, so its live value is unproven and the
+			// applied claim is withheld rather than replaced by a stronger one
+			// (#4247).
+			name: "applied but not confirmed by the digest withholds the live claim",
+			outcome: ApplyOutcome{
+				DaemonApplied:          true,
+				DaemonApplyUnconfirmed: true,
+			},
+			key:  "default_program",
+			want: ApplyStatusUnconfirmed,
+		},
+		{
+			// The complement: an apply result that says nothing about WHICH value
+			// is stored still loses to the class, because no apply can make a
+			// startup-only key live.
+			name: "an unconfirmed apply still defers a startup-only key",
+			outcome: ApplyOutcome{
+				DaemonApplyUnconfirmed: true,
+			},
+			key:  "branch_prefix",
+			want: ApplyStatusDeferred,
+		},
+		{
+			name: "uncertainty outranks a conflicting failure bit",
+			outcome: ApplyOutcome{
+				DaemonApplyFailed:      true,
+				DaemonApplyUnconfirmed: true,
+			},
+			key:  "default_program",
+			want: ApplyStatusUnconfirmed,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.outcome.StatusForKey(tc.key); got != tc.want {
+				t.Errorf("StatusForKey(%q) = %q, want %q", tc.key, got, tc.want)
+			}
+		})
 	}
 }

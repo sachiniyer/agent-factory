@@ -9961,34 +9961,47 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
   const ctx = await browser.newContext();
   const win = await ctx.newPage();
   try {
-    // A handle on the SPA's event socket, so the test can drop it. Recording only — the
-    // constructor is not otherwise altered, so the app connects exactly as it always
-    // does. Needed because closing the LIVE socket is the one thing network emulation
-    // will not do for us: going offline blocks new traffic but leaves an established
-    // WebSocket open, so the client never notices, never reconnects, and never
-    // re-Snapshots (measured — the first cut of this test timed out waiting for it).
+    // The SPA's event socket, held by its CONSTRUCTOR: a handle on each one so the test
+    // can drop it, and a switch that refuses every new one for as long as the gap is
+    // held. Together they reproduce a real outage: the socket drops, retries fail, and
+    // the events published meanwhile are dropped by the daemon's hub rather than queued
+    // (events.ts) — which is exactly why the reconnect must re-Snapshot, and why that
+    // one Snapshot carries a close and a recreate FUSED into a single roster change.
+    //
+    // The constructor is the only layer that does both. Going offline leaves an
+    // established WebSocket open, so the client never notices, never reconnects, and
+    // never re-Snapshots (measured — the first cut of this test timed out waiting for
+    // it). And CDP's Network.setBlockedURLs, which held the retries off before #4584,
+    // refuses matching HTTP requests but NOT WebSocket handshakes (measured: 20 of 20
+    // handshakes opened under the block). That made the "outage" one 500 ms reconnect
+    // backoff long (events.ts), and the spec raced it — whenever the two CLI mutations
+    // below outran the backoff, the recreate arrived as a LIVE event and rebound the
+    // pane before the offline assertion read it.
+    //
+    // A refused attempt is closed while still CONNECTING, which fails it without ever
+    // firing `open`. The close is a microtask so the app has attached its handlers, and
+    // it lands before any task could deliver an open. To the client that is a refused
+    // connection — error, close, schedule the next retry — so it keeps reporting
+    // "reconnecting". An allowed attempt is not altered, so the app connects exactly as
+    // it always does.
     await win.addInitScript(() => {
-      const w = window as unknown as { __afEventSockets: WebSocket[] };
+      const w = window as unknown as { __afEventSockets: WebSocket[]; __afRefuseEvents: boolean };
       w.__afEventSockets = [];
+      w.__afRefuseEvents = false;
       const Native = WebSocket;
       window.WebSocket = new Proxy(Native, {
         construct(target, args: [string, (string | string[])?]) {
           const ws = new target(...args);
           if (String(args[0]).includes("/v1/events")) {
             w.__afEventSockets.push(ws);
+            if (w.__afRefuseEvents) {
+              queueMicrotask(() => ws.close());
+            }
           }
           return ws;
         },
       });
     });
-    // Block the events endpoint at the NETWORK layer, so every reconnect ATTEMPT fails
-    // for as long as the flag is set. Together with the close below this reproduces a
-    // real outage: the socket drops, retries fail, and the events published meanwhile
-    // are dropped by the daemon's hub rather than queued (events.ts) — which is exactly
-    // why the reconnect must re-Snapshot, and why that one Snapshot carries a close and
-    // a recreate FUSED into a single roster change.
-    const cdp = await ctx.newCDPSession(win);
-    await cdp.send("Network.enable");
 
     // Wait for the startup resync CHAIN to be accepted before manufacturing the
     // outage. openTokenless proves the seed Snapshot rendered the rail, but the event
@@ -10030,10 +10043,11 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     // The gap: retries are refused, then the live socket is dropped. Neither the close
     // nor the recreate below is delivered as an event — delivered live they would each
     // repaint the bar and settle the edit early, which is the (already-covered) path
-    // above, not this one.
-    await cdp.send("Network.setBlockedURLs", { urls: ["*/v1/events*"] });
+    // above, not this one. Refused BEFORE the drop, in the same evaluate: the drop's
+    // reconnect is scheduled by its close handler, which cannot run first.
     const eventSocketClose = await win.evaluate(async () => {
-      const w = window as unknown as { __afEventSockets: WebSocket[] };
+      const w = window as unknown as { __afEventSockets: WebSocket[]; __afRefuseEvents: boolean };
+      w.__afRefuseEvents = true;
       await Promise.all(
         w.__afEventSockets.map(
           (ws) =>
@@ -10065,6 +10079,15 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     ).toHaveAttribute("data-live", "reconnecting");
     af("sessions", "tab-delete", SESSION_ORDER, "--name", VICTIM);
     af("sessions", "tab-create", SESSION_ORDER, "--command", "sleep 300", "--name", VICTIM);
+    // Still in the gap once both mutations have landed — asserted, because a reconnect
+    // that got through is exactly how this spec used to flake (#4584): the client read
+    // "open" here and had the recreate as a live event before the binding below was
+    // read. Checked first so a leak in the staging fails under its own name, not as a
+    // lost binding.
+    await expect(
+      win.locator(".af-app"),
+      "no events socket may open while the gap is held — it would deliver the mutations live",
+    ).toHaveAttribute("data-live", "reconnecting");
     await expect(editedPane, "the offline fixture must retain the old binding until reconnect")
       .toHaveAttribute("data-tab-id", editedPaneID!);
 
@@ -10076,7 +10099,9 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     const resync = win.waitForResponse((r) => r.url().includes("/v1/Snapshot") && r.status() === 200, {
       timeout: 30_000,
     });
-    await cdp.send("Network.setBlockedURLs", { urls: [] });
+    await win.evaluate(() => {
+      (window as unknown as { __afRefuseEvents: boolean }).__afRefuseEvents = false;
+    });
     const resyncResponse = await resync;
     const resyncEnvelope = (await resyncResponse.json()) as {
       data?: {

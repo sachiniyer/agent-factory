@@ -384,22 +384,37 @@ bypass because that non-session path updates the release commit directly.
 
 ## Queued-only deduplication
 
-Concurrency belongs to evaluation jobs, never the workflow. Every run follows
-this dependency graph:
+Every run follows this dependency graph:
 
 ```text
-auto-gate (resolve event heads, ungrouped)
+auto-gate (resolve event heads)
   -> invalidate-gate (ungrouped, including retries)
     -> apply-gate (one reusable-workflow call per invalidated head)
       -> aggregate transaction (head-serialized evaluation/report/merge)
 ```
 
-Neither the resolver nor invalidation has a concurrency group or waits on a
-grouped job. Every event can therefore invalidate while an older transaction
-is running; dedupe cannot discard an event before its invalidation attempt.
-Only successfully invalidated heads enter evaluation. This preserves generation
-ownership checks immediately before PASS and merge, including write retries.
-Runner availability and API failures still apply; concurrency adds no wait here.
+A concurrency group keeps at most one running and one pending run; a newer
+pending run replaces the older one. Replacement is safe only when the
+survivor's invalidation covers every head the cancelled pending run would have
+covered — a run discarded while pending never reaches invalidation, and an
+uncovered head keeps its stale verdict. The workflow-level group is keyed so
+that guarantee holds: scheduled and dispatched reconciliation passes share one
+fungible group; comment and
+review events coalesce per PR; check-suite, status, and workflow-run events
+coalesce per named commit; the remaining pull_request_target actions coalesce
+per (PR, payload head); synchronize stays keyed to its exact (before, after)
+transition and workflow_dispatch to its (PR, previous head), because those two
+carry coverage no later run reproduces. `cancel-in-progress` is `false`
+everywhere, so an active resolve, invalidation, or transaction always finishes
+uninterrupted.
+
+Inside each surviving run nothing changed: neither the resolver nor
+invalidation waits on a grouped job, every event still invalidates before any
+serialized lane, and a newer event can still invalidate while an older
+transaction is running. Only successfully invalidated heads enter evaluation.
+This preserves generation ownership checks immediately before PASS and merge,
+including write retries. Runner availability and API failures still apply;
+concurrency adds no wait here.
 
 The calling evaluation job holds `auto-gate-target-<target>-head-<head SHA>`
 for the entire reusable aggregate transaction. The target is the issue or PR
@@ -485,7 +500,9 @@ The scan costs `ceil(N / 100)` GraphQL requests per pass. The rate window holds
 dispatched passes to about 12 an hour, and scheduled passes add a few more.
 That is one request per pass (about 12/hour) through the 83-head REST-quota
 threshold, or two (about 24/hour) for 120 PRs, before bounded retries. The scan
-does no per-head REST reads. Each other run pays one REST read for the marker,
+does no per-head REST reads except when a queued check run faces a dated
+rival; it then re-reads just that head via `listForRef` to order the run
+(#4427). Each other run pays one REST read for the marker,
 plus at most one dispatch per window. Passes skip unrelated branch-sweep
 housekeeping. This avoids both the frozen-decision failure and one gate
 evaluation per completed matrix job (#4242).

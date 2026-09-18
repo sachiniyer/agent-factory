@@ -15,13 +15,11 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
-// TaskStatusLimitParked is the run status recorded when a task-driven session
-// hits a usage-limit wall during startup and is PARKED instead of failed (#1146
-// PR4). It is deliberately NOT an "errored:"-prefixed value, so the TUI and task
-// history show the run waiting for the limit window to reset — not failed — and
-// no failure side-effects fire. The daemon auto-resume scheduler (opt-in) or the
-// manual `c` retry re-delivers the stored prompt once the window resets, after
-// which the run records its normal completion status.
+// TaskStatusLimitParked is recorded when a task-driven create hits a usage-limit
+// wall at startup (#1146 PR4), or when a targeted task finds its existing
+// session already limit-parked (#4223). It is deliberately NOT an
+// "errored:"-prefixed value: create-per-run prompts resume with their session;
+// targeted cron occurrences skip, while targeted watch events queue for replay.
 const TaskStatusLimitParked = "parked: usage limit"
 
 // Indirected so delivery tests can observe the daemon RPCs without dialing —
@@ -29,7 +27,7 @@ const TaskStatusLimitParked = "parked: usage limit"
 // own control socket when called from inside the daemon process.
 var (
 	createSessionForTask = CreateSession
-	deliverPromptForTask = DeliverPrompt
+	deliverPromptForTask = deliverPromptForTaskRPC
 )
 
 // cronDeferPollInterval is how often a held cron fire re-checks whether the
@@ -39,7 +37,8 @@ var cronDeferPollInterval = 1 * time.Second
 // deliverTaskPrompt delivers one rendered prompt for a task and returns the
 // status string to record on it. With TargetSession empty it creates a fresh
 // session per run (the historical task behavior, status "started"). With
-// TargetSession set it sends the prompt into that session (status "sent"),
+// TargetSession set it sends the prompt into that session (status "sent"), or
+// returns "parked: usage limit" without typing when the target is limit-reached,
 // auto-creating the session with the task's ProjectPath/Program when it does
 // not exist yet (Sachin-approved in #782, mirroring `af sessions send-prompt
 // --create`). The target session is looked up in the task's own repo so a
@@ -51,11 +50,19 @@ var cronDeferPollInterval = 1 * time.Second
 // (#1586). Callers that can catch up a held delivery pass true; a forced final
 // attempt passes false.
 func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (string, error) {
+	status, _, err := deliverTaskPromptOutcome(t, prompt, deferWhileAttached)
+	return status, err
+}
+
+// deliverTaskPromptOutcome adds the one fact a watch task needs beyond the
+// public run status: whether a newly parked session already retained this exact
+// prompt for resume. Such a prompt must not also enter the watch replay queue.
+func deliverTaskPromptOutcome(t *task.Task, prompt string, deferWhileAttached bool) (string, bool, error) {
 	_, err := config.LoadConfig()
 	if err != nil {
 		// Pre-flight: this returns before any create or send, so the watch paths
 		// refund the rate slot (#2102). Inert for cron, which only checks err != nil.
-		return "", notAttempted(fmt.Errorf("failed to load config: %w", err))
+		return "", false, notAttempted(fmt.Errorf("failed to load config: %w", err))
 	}
 
 	// Ask the SAME question the cap was validated against (#1892). Reading the raw
@@ -92,13 +99,13 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 			// reaches the manager over net/rpc, which flattens the sentinel to a
 			// string (see atConcurrencyLimitErrText).
 			if isAtConcurrencyLimitErr(err) {
-				return "", errAtConcurrencyLimit
+				return "", false, errAtConcurrencyLimit
 			}
 			wrapped := fmt.Errorf("failed to start task session: %w", err)
 			if isNotAttemptedErr(err) {
-				return "", notAttempted(wrapped)
+				return "", false, notAttempted(wrapped)
 			}
-			return "", wrapped
+			return "", false, wrapped
 		}
 		// The freshly created session hit a usage-limit wall during startup and
 		// was parked, not failed (#1146 PR4). Record the parked status so the run
@@ -106,17 +113,17 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 		// prompt once the limit window resets.
 		if data.Liveness == session.LiveLimitReached {
 			log.InfoLog.Print(taskParkedLogMessage(t.ID, data.Title))
-			return TaskStatusLimitParked, nil
+			return TaskStatusLimitParked, true, nil
 		}
 		log.InfoLog.Print(taskStartedLogMessage(t.ID, data.Title))
-		return "started", nil
+		return "started", false, nil
 	}
 
 	// Route through the daemon's serialized create-or-send path. When several
 	// tasks fire at the same missing target_session, the daemon creates it once
 	// and delivers every prompt in order instead of dropping the losers of the
 	// creation race (#865). A Deleting target is surfaced, not silently dropped.
-	status, err := deliverPromptForTask(DeliverPromptRequest{
+	result, err := deliverPromptForTask(DeliverPromptRequest{
 		// The canonical target, which for a nonempty value IS the raw field
 		// byte-for-byte. Titles are not canonicalized globally and the daemon keys
 		// instances on exact bytes, so this lookup must never be trimmed: a task
@@ -141,12 +148,17 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 		// refusal already does above. Without this the tag never survives the hop
 		// and the budget drains over an outage, which is the bug #2501 reports.
 		if isNotAttemptedErr(err) {
-			return "", notAttempted(wrapped)
+			return "", false, notAttempted(wrapped)
 		}
-		return "", wrapped
+		return "", false, wrapped
+	}
+	status := result.status
+	if status == TaskStatusLimitParked {
+		log.InfoLog.Printf("task %s parked delivery to target session %q at a usage limit; prompt not sent", t.ID, target)
+		return status, result.promptRetained, nil
 	}
 	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, target, status)
-	return status, nil
+	return status, false, nil
 }
 
 // Keep task-created title logging on the same %q encoding as target-session

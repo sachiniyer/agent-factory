@@ -55,6 +55,18 @@ type ApplyConfigResult struct {
 	// deferred rather than falsely "applied". The auth/CORS keys never appear here —
 	// they are live-read and cannot fail to apply.
 	FailedListenerKeys []string
+	// Digest identifies the config.toml bytes THIS apply loaded (#4247). A save
+	// that then compares it against the digest of what it wrote learns whether
+	// the daemon adopted its file or one a competing writer — another client, or
+	// a hand-edit — left there in between. The file lock inside the writer is
+	// released before this load runs, so that gap is real.
+	//
+	// It is deliberately NOT on ApplyConfigResponse: this comparison happens
+	// inside one daemon process, in the SetConfigValue handler, so it needs no
+	// wire field — and config.ConfigDigest could not be one anyway, by
+	// construction. A load that did not reach the canonical config.toml read
+	// leaves this unknown, which confirms nothing.
+	Digest config.ConfigDigest
 }
 
 // keyDiff maps every config key the daemon reads to a predicate reporting whether
@@ -141,7 +153,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	m.configApplyMu.Lock()
 	defer m.configApplyMu.Unlock()
 
-	newCfg, err := config.LoadConfig()
+	newCfg, loadedDigest, err := config.LoadConfigWithDigest()
 	if err != nil {
 		return ApplyConfigResult{}, fmt.Errorf("reload config: %w", err)
 	}
@@ -150,7 +162,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// Bucket every changed key by its effect class (config.KeyEffectClass, the same
 	// source the save-surface notice reads). Sorted so the reported order is stable
 	// across map iterations.
-	var result ApplyConfigResult
+	result := ApplyConfigResult{Digest: loadedDigest}
 	for key, changed := range keyDiff {
 		if !changed(old, newCfg) {
 			continue
