@@ -28,7 +28,7 @@ func TestCompleteConfigSaveWarnings(t *testing.T) {
 	const applyWarning = "saved config, but live apply failed: reload config: forced"
 
 	failed := completeConfigSaveWarnings(
-		config.ApplyOutcome{DaemonApplyFailed: true},
+		config.ApplyOutcome{DaemonApply: config.DaemonApplyFailed},
 		[]string{writeWarning},
 		[]string{writeWarning, applyWarning},
 	)
@@ -36,7 +36,7 @@ func TestCompleteConfigSaveWarnings(t *testing.T) {
 		"a failed apply must retain both warning sources without duplicates")
 
 	applied := completeConfigSaveWarnings(
-		config.ApplyOutcome{DaemonApplied: true},
+		config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied},
 		[]string{writeWarning},
 		[]string{"the running daemon's authoritative exposure warning"},
 	)
@@ -50,8 +50,7 @@ func TestFailedConfigApplyOutcomeDistinguishesLostReply(t *testing.T) {
 		// "reload config: …" — the one ServerError that proves the saved FILE
 		// did not load, so it outranks even a deferred key's next-start class.
 		outcome, warning := failedConfigApplyOutcome(rpc.ServerError("reload config: forced reload failure"))
-		require.True(t, outcome.DaemonApplyFailed)
-		require.False(t, outcome.DaemonApplyUnconfirmed)
+		require.Equal(t, config.DaemonApplyFailed, outcome.DaemonApply)
 		require.Contains(t, warning, "live apply failed")
 		require.Contains(t, warning, "reload config: forced reload failure")
 		require.Equal(t,
@@ -68,8 +67,7 @@ func TestFailedConfigApplyOutcomeDistinguishesLostReply(t *testing.T) {
 		// save broken although the next af/daemon launch reads the file normally
 		// (#4247).
 		outcome, warning := failedConfigApplyOutcome(rpc.ServerError("apply refused during upgrade"))
-		require.False(t, outcome.DaemonApplyFailed)
-		require.True(t, outcome.DaemonApplyUnconfirmed)
+		require.Equal(t, config.DaemonApplyUnconfirmed, outcome.DaemonApply)
 		require.Contains(t, warning, "live apply could not be confirmed")
 		require.Contains(t, warning, "apply refused during upgrade")
 		require.Equal(t, config.ApplyStatusUnconfirmed, outcome.StatusForKey("network.require_token"))
@@ -78,8 +76,7 @@ func TestFailedConfigApplyOutcomeDistinguishesLostReply(t *testing.T) {
 
 	t.Run("lost reply", func(t *testing.T) {
 		outcome, warning := failedConfigApplyOutcome(errors.New("unexpected EOF"))
-		require.False(t, outcome.DaemonApplyFailed)
-		require.True(t, outcome.DaemonApplyUnconfirmed)
+		require.Equal(t, config.DaemonApplyUnconfirmed, outcome.DaemonApply)
 		require.Contains(t, warning, "live apply could not be confirmed")
 		require.NotContains(t, warning, "live apply failed")
 		require.Equal(t,

@@ -24,7 +24,7 @@ func TestEveryManifestKeyHasAnEffectClass(t *testing.T) {
 //   - a client-side key points at the next af launch and NEVER mentions a daemon,
 //     because none read it.
 func TestEffectNoticeIsPerKeyAndHonest(t *testing.T) {
-	applied := EffectNotice("default_program", ApplyOutcome{DaemonApplied: true})
+	applied := EffectNotice("default_program", ApplyOutcome{DaemonApply: DaemonApplyApplied})
 	if !strings.Contains(applied, "using the new value now") {
 		t.Errorf("applied-live notice should say it is live now, got %q", applied)
 	}
@@ -32,12 +32,12 @@ func TestEffectNoticeIsPerKeyAndHonest(t *testing.T) {
 	// branch_prefix was this row's key until #4539 made each create resolve it
 	// from the live snapshot plus the project's override. It is live now, like
 	// the other keys the next session create reads.
-	prefix := EffectNotice("branch_prefix", ApplyOutcome{DaemonApplied: true})
+	prefix := EffectNotice("branch_prefix", ApplyOutcome{DaemonApply: DaemonApplyApplied})
 	if !strings.Contains(prefix, "using the new value now") {
 		t.Errorf("branch_prefix is read per create, so its notice should say it is live now, got %q", prefix)
 	}
 
-	pending := EffectNotice("debug_pprof", ApplyOutcome{DaemonApplied: true})
+	pending := EffectNotice("debug_pprof", ApplyOutcome{DaemonApply: DaemonApplyApplied})
 	if !strings.Contains(pending, "next daemon start") {
 		t.Errorf("next-daemon-start notice should defer to the next daemon start, got %q", pending)
 	}
@@ -45,7 +45,7 @@ func TestEffectNoticeIsPerKeyAndHonest(t *testing.T) {
 		t.Errorf("next-daemon-start notice must not claim it is live now, got %q", pending)
 	}
 
-	client := EffectNotice("update_channel", ApplyOutcome{DaemonApplied: true})
+	client := EffectNotice("update_channel", ApplyOutcome{DaemonApply: DaemonApplyApplied})
 	if !strings.Contains(client, "launch af") {
 		t.Errorf("client-side notice should point at the next af launch, got %q", client)
 	}
@@ -58,7 +58,7 @@ func TestEffectNoticeIsPerKeyAndHonest(t *testing.T) {
 // waits for the next daemon start when no daemon was running to apply it, so the
 // CLI on a box with no daemon does not claim a change is live.
 func TestEffectNoticeDowngradesAppliedLiveWithoutADaemon(t *testing.T) {
-	n := EffectNotice("default_program", ApplyOutcome{})
+	n := EffectNotice("default_program", ApplyOutcome{DaemonApply: DaemonApplyNotReached})
 	if strings.Contains(n, "using the new value now") {
 		t.Errorf("with no daemon, applied-live must not claim it is live now, got %q", n)
 	}
@@ -81,7 +81,7 @@ func TestKeyEffectClassClassifiesDottedLeavesByBase(t *testing.T) {
 // root unchanged, so the save notice must name both actions a program edit needs.
 func TestRootAgentEffectNoticeNamesLiveSessionAdoption(t *testing.T) {
 	for _, key := range []string{"root_agent", "root_agent.enabled", "root_agent.program", "root_agents"} {
-		notice := EffectNotice(key, ApplyOutcome{DaemonApplied: true})
+		notice := EffectNotice(key, ApplyOutcome{DaemonApply: DaemonApplyApplied})
 		if !strings.HasPrefix(notice, "Saved — this setting takes effect on the next daemon start.") {
 			t.Errorf("%s lost the existing next-start sentence: %q", key, notice)
 		}
@@ -101,7 +101,7 @@ func TestRootAgentEffectNoticeNamesLiveSessionAdoption(t *testing.T) {
 // contradict the warning the same save surface prints beside it.
 func TestEffectNoticeReportsAFailedListenerRebindAsDeferred(t *testing.T) {
 	for _, key := range []string{"network.listen_addr", "network.preview_listen_addr"} {
-		n := EffectNotice(key, ApplyOutcome{DaemonApplied: true, FailedListenerKeys: []string{key}})
+		n := EffectNotice(key, ApplyOutcome{DaemonApply: DaemonApplyApplied, FailedListenerKeys: []string{key}})
 		if strings.Contains(n, "using the new value now") {
 			t.Errorf("%s: a failed rebind must never be reported as live, got %q", key, n)
 		}
@@ -121,7 +121,7 @@ func TestEffectNoticeKeepsTheDeferredSentenceVerbatim(t *testing.T) {
 	const want = "Saved — network.listen_addr could not be applied to the running daemon; " +
 		"it takes effect on the next daemon start (see the warning for the reason)."
 	got := EffectNotice("network.listen_addr", ApplyOutcome{
-		DaemonApplied: true, FailedListenerKeys: []string{"network.listen_addr"},
+		DaemonApply: DaemonApplyApplied, FailedListenerKeys: []string{"network.listen_addr"},
 	})
 	if got != want {
 		t.Errorf("deferred notice changed\n got: %q\nwant: %q", got, want)
@@ -147,7 +147,7 @@ func TestEffectNoticeMatchesFailedListenerKeysAcrossAliasSpellings(t *testing.T)
 		{"preview, written as the alias", "preview_listen_addr", "network.preview_listen_addr"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			n := EffectNotice(tc.key, ApplyOutcome{DaemonApplied: true, FailedListenerKeys: []string{tc.failed}})
+			n := EffectNotice(tc.key, ApplyOutcome{DaemonApply: DaemonApplyApplied, FailedListenerKeys: []string{tc.failed}})
 			if strings.Contains(n, "using the new value now") {
 				t.Errorf("alias spelling must not defeat the rebind-failure check, got %q", n)
 			}
@@ -165,7 +165,7 @@ func TestEffectNoticeMatchesFailedListenerKeysAcrossAliasSpellings(t *testing.T)
 // guard: a rebind failure on one socket key must not make every other key in the
 // same apply report deferred. Only the key that failed did not take effect.
 func TestEffectNoticeIgnoresAnUnrelatedFailedListenerKey(t *testing.T) {
-	outcome := ApplyOutcome{DaemonApplied: true, FailedListenerKeys: []string{"network.listen_addr"}}
+	outcome := ApplyOutcome{DaemonApply: DaemonApplyApplied, FailedListenerKeys: []string{"network.listen_addr"}}
 	for _, key := range []string{"network.preview_listen_addr", "network.require_token", "default_program"} {
 		n := EffectNotice(key, outcome)
 		if !strings.Contains(n, "using the new value now") {
@@ -178,19 +178,34 @@ func TestEffectNoticeIgnoresAnUnrelatedFailedListenerKey(t *testing.T) {
 // applied-live answer is unchanged, so the fix cannot have turned every save into a
 // deferred report.
 func TestEffectNoticeAppliedLiveSurvivesASuccessfulRebind(t *testing.T) {
-	n := EffectNotice("network.listen_addr", ApplyOutcome{DaemonApplied: true})
+	n := EffectNotice("network.listen_addr", ApplyOutcome{DaemonApply: DaemonApplyApplied})
 	if !strings.Contains(n, "using the new value now") {
 		t.Errorf("a successful rebind must still report the change as live, got %q", n)
 	}
 }
 
-// TestEffectNoticeZeroOutcomeIsTheDaemonlessSentence: a caller with no apply result
-// at all — no daemon was reached — stays expressible, and gets the
-// pre-#3397 sentence verbatim.
-func TestEffectNoticeZeroOutcomeIsTheDaemonlessSentence(t *testing.T) {
+// TestEffectNoticeNotReachedIsTheDaemonlessSentence: a save that recorded "no
+// daemon was reached" gets the pre-#3397 sentence verbatim. The outcome must
+// SAY not-reached — since #4482 the zero ApplyOutcome is an unrecorded result
+// (unknown), not this answer.
+func TestEffectNoticeNotReachedIsTheDaemonlessSentence(t *testing.T) {
 	const want = "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
-	if got := EffectNotice("network.listen_addr", ApplyOutcome{}); got != want {
+	if got := EffectNotice("network.listen_addr", ApplyOutcome{DaemonApply: DaemonApplyNotReached}); got != want {
 		t.Errorf("daemonless notice changed\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestEffectNoticeUnsetOutcomeClaimsNothing is the #4482 zero-value contract:
+// an ApplyOutcome no producer filled in reports unknown and claims nothing
+// about the daemon — not the no-daemon sentence above, which a forgotten
+// assignment would otherwise print as fact.
+func TestEffectNoticeUnsetOutcomeClaimsNothing(t *testing.T) {
+	got := EffectNotice("network.listen_addr", ApplyOutcome{})
+	if strings.Contains(got, "no daemon is running") || strings.Contains(got, "takes effect") {
+		t.Errorf("an unrecorded apply result must not report a daemon state or promise an effect, got %q", got)
+	}
+	if !strings.Contains(got, "was never recorded") {
+		t.Errorf("an unrecorded apply result should admit it, got %q", got)
 	}
 }
 
@@ -199,7 +214,7 @@ func TestEffectNoticeZeroOutcomeIsTheDaemonlessSentence(t *testing.T) {
 func TestEffectNoticeDaemonApplyFailed(t *testing.T) {
 	const want = "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."
 	for _, key := range []string{"network.require_token", "require_token", "default_program"} {
-		if got := EffectNotice(key, ApplyOutcome{DaemonApplyFailed: true}); got != want {
+		if got := EffectNotice(key, ApplyOutcome{DaemonApply: DaemonApplyFailed}); got != want {
 			t.Errorf("%s: got %q, want %q", key, got, want)
 		}
 	}
@@ -217,9 +232,8 @@ func TestEffectNoticeRanksUnconfirmedAboveAFailedRebind(t *testing.T) {
 	rebindPromise := listenerRebindDeferredNotice(key)
 
 	unconfirmed := ApplyOutcome{
-		DaemonApplied:          true,
-		FailedListenerKeys:     []string{key},
-		DaemonApplyUnconfirmed: true,
+		DaemonApply:        DaemonApplyUnconfirmed,
+		FailedListenerKeys: []string{key},
 	}
 	got := EffectNotice(key, unconfirmed)
 	if got == rebindPromise {
@@ -232,7 +246,7 @@ func TestEffectNoticeRanksUnconfirmedAboveAFailedRebind(t *testing.T) {
 
 func TestEffectNoticeDaemonApplyUnconfirmed(t *testing.T) {
 	const want = "Saved — the daemon’s live config apply could not be confirmed (see the warnings for the reason)."
-	outcome := ApplyOutcome{DaemonApplyFailed: true, DaemonApplyUnconfirmed: true}
+	outcome := ApplyOutcome{DaemonApply: DaemonApplyUnconfirmed}
 	if got := EffectNotice("network.require_token", outcome); got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -245,14 +259,14 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 		key     string
 		want    ApplyStatus
 	}{
-		{name: "no daemon", key: "default_program", want: ApplyStatusNoDaemon},
-		{name: "applied", outcome: ApplyOutcome{DaemonApplied: true}, key: "default_program", want: ApplyStatusApplied},
-		{name: "failed", outcome: ApplyOutcome{DaemonApplyFailed: true}, key: "default_program", want: ApplyStatusFailed},
-		{name: "unconfirmed", outcome: ApplyOutcome{DaemonApplyUnconfirmed: true}, key: "default_program", want: ApplyStatusUnconfirmed},
+		{name: "no daemon", outcome: ApplyOutcome{DaemonApply: DaemonApplyNotReached}, key: "default_program", want: ApplyStatusNoDaemon},
+		{name: "applied", outcome: ApplyOutcome{DaemonApply: DaemonApplyApplied}, key: "default_program", want: ApplyStatusApplied},
+		{name: "failed", outcome: ApplyOutcome{DaemonApply: DaemonApplyFailed}, key: "default_program", want: ApplyStatusFailed},
+		{name: "unconfirmed", outcome: ApplyOutcome{DaemonApply: DaemonApplyUnconfirmed}, key: "default_program", want: ApplyStatusUnconfirmed},
 		{
 			name: "failed listener key is deferred",
 			outcome: ApplyOutcome{
-				DaemonApplied:      true,
+				DaemonApply:        DaemonApplyApplied,
 				FailedListenerKeys: []string{"network.listen_addr"},
 			},
 			key:  "network.listen_addr",
@@ -261,7 +275,7 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 		{
 			name: "unrelated key still applied",
 			outcome: ApplyOutcome{
-				DaemonApplied:      true,
+				DaemonApply:        DaemonApplyApplied,
 				FailedListenerKeys: []string{"network.listen_addr"},
 			},
 			key:  "network.require_token",
@@ -272,20 +286,21 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			// branch_prefix, so it is EffectAppliedLive and no longer an exemplar
 			// of a key a successful apply still defers.
 			name:    "next daemon start",
-			outcome: ApplyOutcome{DaemonApplied: true},
+			outcome: ApplyOutcome{DaemonApply: DaemonApplyApplied},
 			key:     "debug_pprof",
 			want:    ApplyStatusDeferred,
 		},
 		{
 			name:    "next client start",
-			outcome: ApplyOutcome{DaemonApplied: true},
+			outcome: ApplyOutcome{DaemonApply: DaemonApplyApplied},
 			key:     "update_channel",
 			want:    ApplyStatusDeferred,
 		},
 		{
-			name: "startup-only key remains deferred without daemon",
-			key:  "debug_pprof",
-			want: ApplyStatusDeferred,
+			name:    "startup-only key remains deferred without daemon",
+			outcome: ApplyOutcome{DaemonApply: DaemonApplyNotReached},
+			key:     "debug_pprof",
+			want:    ApplyStatusDeferred,
 		},
 		{
 			// This case used to expect "deferred", on the premise that an apply
@@ -295,7 +310,7 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			// load — and the next daemon start reads that same file. "Deferred"
 			// promised an effect the invalid file cannot deliver (#4247).
 			name:    "startup-only key reports the failed reload that will also break its next start",
-			outcome: ApplyOutcome{DaemonApplyFailed: true},
+			outcome: ApplyOutcome{DaemonApply: DaemonApplyFailed},
 			key:     "root_agents",
 			want:    ApplyStatusFailed,
 		},
@@ -304,13 +319,13 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			// differently against the class: an unconfirmed apply still WROTE the
 			// file, so the next start reads this save's value.
 			name:    "startup-only key stays deferred when the apply is merely unconfirmed",
-			outcome: ApplyOutcome{DaemonApplyUnconfirmed: true},
+			outcome: ApplyOutcome{DaemonApply: DaemonApplyUnconfirmed},
 			key:     "root_agents",
 			want:    ApplyStatusDeferred,
 		},
 		{
 			name:    "unclassified key is unknown",
-			outcome: ApplyOutcome{DaemonApplied: true},
+			outcome: ApplyOutcome{DaemonApply: DaemonApplyApplied},
 			key:     "future_unclassified_key",
 			want:    ApplyStatusUnknown,
 		},
@@ -321,8 +336,7 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			// (#4247).
 			name: "applied but not confirmed by the digest withholds the live claim",
 			outcome: ApplyOutcome{
-				DaemonApplied:          true,
-				DaemonApplyUnconfirmed: true,
+				DaemonApply: DaemonApplyUnconfirmed,
 			},
 			key:  "default_program",
 			want: ApplyStatusUnconfirmed,
@@ -333,19 +347,20 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			// startup-only key live.
 			name: "an unconfirmed apply still defers a startup-only key",
 			outcome: ApplyOutcome{
-				DaemonApplyUnconfirmed: true,
+				DaemonApply: DaemonApplyUnconfirmed,
 			},
 			key:  "debug_pprof",
 			want: ApplyStatusDeferred,
 		},
 		{
-			name: "uncertainty outranks a conflicting failure bit",
-			outcome: ApplyOutcome{
-				DaemonApplyFailed:      true,
-				DaemonApplyUnconfirmed: true,
-			},
-			key:  "default_program",
-			want: ApplyStatusUnconfirmed,
+			// The zero ApplyOutcome is not an outcome at all: no producer
+			// recorded an apply result. It reports unknown rather than the
+			// no-daemon status a forgotten assignment would otherwise
+			// masquerade as (#4482).
+			name:    "an unset apply result is unknown, not no-daemon",
+			outcome: ApplyOutcome{},
+			key:     "default_program",
+			want:    ApplyStatusUnknown,
 		},
 	}
 	for _, tc := range tests {

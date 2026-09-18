@@ -233,13 +233,16 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 	// not tell the user to restart for a hot-reloadable key. Best-effort: the write
 	// already succeeded on disk; report a live apply failure separately so the
 	// operator knows the running daemon has not adopted the saved config.
-	var outcome config.ApplyOutcome
+	// A nil manager is the in-daemon "no daemon was reached" answer; it is stated
+	// explicitly because an unset DaemonApply reports unknown, not no-daemon
+	// (#4482).
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyNotReached}
 	if s.manager != nil {
 		if applied, aerr := s.manager.ApplyConfig(); aerr == nil {
 			resp.Applied = applied.Applied
 			resp.Pending = applied.Pending
 			resp.Warnings = applied.Warnings
-			outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applied.FailedListenerKeys}
+			outcome = config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: applied.FailedListenerKeys}
 			// A successful apply claims "applied" only if the daemon loaded THIS
 			// save's file: a competing write can land between the writer's
 			// file-lock release and the apply's load (#4247). Both digests are
@@ -248,7 +251,7 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 			confirmSavedConfigDigest(&outcome, &resp.Warnings, wroteDigest, applied.Digest)
 		} else {
 			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+aerr.Error())
-			outcome.DaemonApplyFailed = true
+			outcome.DaemonApply = config.DaemonApplyFailed
 		}
 	}
 	resp.Warnings = completeConfigSaveWarnings(outcome, result.Warnings, resp.Warnings)

@@ -134,6 +134,60 @@ func KeyEffectClass(key string) EffectClass {
 	return keyEffectClasses[base]
 }
 
+// DaemonApply is the one mutually exclusive answer to "what did a running
+// daemon do with this save" — the fact #4482 pulled out of three bools, whose
+// two-bits-set combinations were representable in code and settled, where they
+// were settled at all, only by which rule happened to sit first.
+type DaemonApply int
+
+const (
+	// DaemonApplyUnset is the zero value: NO producer recorded an apply result.
+	// It is not an outcome and never means "no daemon" — a producer that
+	// genuinely reached no daemon records DaemonApplyNotReached instead. A save
+	// surface handed an unset outcome reports unknown rather than guessing, so
+	// a forgotten assignment cannot masquerade as a real answer.
+	DaemonApplyUnset DaemonApply = iota
+	// DaemonApplyNotReached means no daemon was reached to apply the save: the
+	// dial failed, or the in-daemon handler had no manager. The write is on
+	// disk and the next daemon start reads it.
+	DaemonApplyNotReached
+	// DaemonApplyApplied means a running daemon applied the on-disk config
+	// (daemon.Manager.ApplyConfig returned without error).
+	DaemonApplyApplied
+	// DaemonApplyFailed means the daemon returned a failure response instead of
+	// applying the saved config — ApplyConfig's one error return, the "reload
+	// config:" wrap of a file that did not load.
+	DaemonApplyFailed
+	// DaemonApplyUnconfirmed means this save cannot establish what the running
+	// daemon ended up serving. It has three causes, and they share one
+	// implication — the file was written, but the live value is unproven:
+	//
+	//   - a lost RPC response: the daemon may have applied the config before the
+	//     connection failed, so neither success nor failure may be claimed;
+	//   - an admission refusal (upgrade probation, quiescing), which says nothing
+	//     about whether the apply ran;
+	//   - a config DIGEST that does not match: the bytes the apply loaded are not
+	//     the bytes this save wrote, so a competing write — another client, or a
+	//     hand-edit — landed between the writer's file-lock release and the
+	//     apply's load, and the daemon may be serving that value instead. The
+	//     apply returned success here, and this state REPLACES DaemonApplyApplied
+	//     rather than sitting beside it.
+	//
+	// The digest cause DELIBERATELY over-reports, and that is not a defect to be
+	// fixed. It compares whole files, so it cannot tell "my key lost a race" from
+	// "an unrelated key changed in the same window", and it reports the second as
+	// unconfirmed too. That direction is the point: the error is always to
+	// WITHHOLD a claim, never to make a false one. Narrowing it to "my key moved"
+	// means reading the key's value back out of some store after the fact, which
+	// is exactly the mechanism this replaced (#4247) — it needed store selection,
+	// value normalisation, generation identity and file-readability handling, and
+	// produced nine review findings doing it. An unrelated concurrent write is
+	// rare; a save that falsely claims `applied` is not recoverable by the caller.
+	//
+	// So: do not "fix" an unrelated-key window into DaemonApplyApplied.
+	DaemonApplyUnconfirmed
+)
+
 // ApplyOutcome is what a running daemon actually DID with the write a save surface
 // is about to report — the WHOLE outcome, not the single "did the apply call
 // return nil" bit EffectNotice used to take.
@@ -149,42 +203,27 @@ func KeyEffectClass(key string) EffectClass {
 // new value now." over a warning saying the daemon was still serving the old
 // address. Carrying the outcome makes EffectNotice the one owner of the decision.
 //
-// The zero value means no daemon was reached to apply the save. An apply
-// failure must set DaemonApplyFailed instead of claiming that no daemon ran.
+// The daemon's apply result is ONE mutually exclusive fact, so it is one
+// DaemonApply field rather than three bools (#4482). The bool form admitted
+// eight combinations for four answers. Of the ones with two bits set, only
+// applied+unconfirmed was reachable — the digest check set the unconfirmed bit
+// and left the applied one standing — and it read as unconfirmed only because
+// that row outranked the applied row; the rest were unreachable, yet code and
+// tests existed to settle them. The digest check now records
+// DaemonApplyUnconfirmed in place of DaemonApplyApplied, so the answer no
+// longer depends on row order.
+//
+// The zero value is DaemonApplyUnset: no producer recorded an apply result.
+// That is deliberately NOT an outcome — it is distinguishable from every real
+// answer, including DaemonApplyNotReached, and StatusForKey reports it as
+// unknown rather than letting "never set" pass for "no daemon". A zero value
+// standing for both an outcome and an absence is the shape that wrongly granted
+// #4224 and wrongly refused #4356.
 type ApplyOutcome struct {
-	// DaemonApplied reports that a running daemon applied the on-disk config
-	// (daemon.Manager.ApplyConfig returned without error). It does NOT report that
-	// every changed key took effect — FailedListenerKeys is the rest of the answer.
-	DaemonApplied bool
-	// DaemonApplyFailed means the daemon returned a failure response instead of
-	// applying the saved config.
-	DaemonApplyFailed bool
-	// DaemonApplyUnconfirmed means this save cannot establish what the running
-	// daemon ended up serving. It has three causes, and they share one
-	// implication — the file was written, but the live value is unproven:
-	//
-	//   - a lost RPC response: the daemon may have applied the config before the
-	//     connection failed, so neither success nor failure may be claimed;
-	//   - an admission refusal (upgrade probation, quiescing), which says nothing
-	//     about whether the apply ran;
-	//   - a config DIGEST that does not match: the bytes the apply loaded are not
-	//     the bytes this save wrote, so a competing write — another client, or a
-	//     hand-edit — landed between the writer's file-lock release and the
-	//     apply's load, and the daemon may be serving that value instead.
-	//
-	// The digest cause DELIBERATELY over-reports, and that is not a defect to be
-	// fixed. It compares whole files, so it cannot tell "my key lost a race" from
-	// "an unrelated key changed in the same window", and it reports the second as
-	// unconfirmed too. That direction is the point: the error is always to
-	// WITHHOLD a claim, never to make a false one. Narrowing it to "my key moved"
-	// means reading the key's value back out of some store after the fact, which
-	// is exactly the mechanism this replaced (#4247) — it needed store selection,
-	// value normalisation, generation identity and file-readability handling, and
-	// produced nine review findings doing it. An unrelated concurrent write is
-	// rare; a save that falsely claims `applied` is not recoverable by the caller.
-	//
-	// So: do not "fix" an unrelated-key window into `applied`.
-	DaemonApplyUnconfirmed bool
+	// DaemonApply is what the running daemon did with the saved config. It does
+	// NOT report that every changed key took effect — FailedListenerKeys is the
+	// rest of that answer.
+	DaemonApply DaemonApply
 	// FailedListenerKeys names the socket keys (network.listen_addr /
 	// network.preview_listen_addr) whose live rebind failed, so bind-new-before-close
 	// left the OLD listener serving. Both daemon.ApplyConfigResult and
@@ -233,11 +272,21 @@ type saveRule struct {
 // status and differ only in their sentence; that is a difference of projection,
 // not of ordering, and it is why the rows are per meaning rather than per status.
 var saveRules = []saveRule{
-	// Uncertainty about a LIVE key outranks the rest: once the apply's answer is
-	// lost, refused, or contradicted by the digest, nothing below may promise
-	// what the running daemon is serving.
+	// An unset apply result outranks everything else in the struct: it means the
+	// producer never recorded what the daemon did, so no other field is
+	// trustworthy enough to report on. The honest status is unknown — never the
+	// no-daemon row, which would let a forgotten assignment pass for a real
+	// "no daemon reached" (#4482).
+	{
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyUnset },
+		status:  ApplyStatusUnknown,
+		notice:  staticNotice("Saved — the daemon's apply result was never recorded, which is an af bug; the file holds the new value."),
+	},
+	// Uncertainty about a LIVE key outranks every recorded answer below: once the
+	// apply's answer is lost, refused, or contradicted by the digest, nothing
+	// below may promise what the running daemon is serving.
 	//
-	// It deliberately does not reach a DEFERRED key. Every cause of this bit
+	// It deliberately does not reach a DEFERRED key. Every cause of this state
 	// leaves the file written — a lost reply and a refusal both do, and a digest
 	// mismatch says some file is there, just possibly not this one — so the next
 	// daemon start or af launch still reads a config.toml, and the class rows
@@ -245,17 +294,18 @@ var saveRules = []saveRule{
 	// hand-edit a minute later, which no save could have reported either.
 	{
 		applies: func(key string, o ApplyOutcome) bool {
-			return o.DaemonApplyUnconfirmed && !deferredEffectClass(key)
+			return o.DaemonApply == DaemonApplyUnconfirmed && !deferredEffectClass(key)
 		},
 		status: ApplyStatusUnconfirmed,
 		notice: staticNotice("Saved — the daemon’s live config apply could not be confirmed (see the warnings for the reason)."),
 	},
-	// A failed apply is evidence about the FILE: DaemonApplyFailed is set only for
-	// a "reload config" failure (Manager.ApplyConfig's one error return), so the
-	// file did not load — and the next start reads it. It therefore outranks the
-	// class rows, which would promise an effect that file cannot deliver.
+	// A failed apply is evidence about the FILE: DaemonApplyFailed is recorded
+	// only for a "reload config" failure (Manager.ApplyConfig's one error
+	// return), so the file did not load — and the next start reads it. It
+	// therefore outranks the class rows, which would promise an effect that file
+	// cannot deliver.
 	{
-		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApplyFailed },
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyFailed },
 		status:  ApplyStatusFailed,
 		notice:  staticNotice("Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."),
 	},
@@ -286,16 +336,24 @@ var saveRules = []saveRule{
 		notice:  listenerRebindDeferredNotice,
 	},
 	{
-		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApplied },
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyApplied },
 		status:  ApplyStatusApplied,
 		notice:  staticNotice("Applied — the running daemon is using the new value now."),
 	},
-	// The zero outcome: no daemon was reached. It always applies, so the table is
-	// total and every save gets exactly one row.
+	// No daemon was reached — a recorded answer, distinct from the unset state
+	// the first row and the catch-all below report.
 	{
-		applies: func(string, ApplyOutcome) bool { return true },
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyNotReached },
 		status:  ApplyStatusNoDaemon,
 		notice:  staticNotice("Saved — no daemon is running to apply it, so it takes effect on the next daemon start."),
+	},
+	// The total row: a DaemonApply value this table does not enumerate is no
+	// recorded outcome either, so it reports unknown exactly as unset does. It
+	// always applies, so the table is total and every save gets exactly one row.
+	{
+		applies: func(string, ApplyOutcome) bool { return true },
+		status:  ApplyStatusUnknown,
+		notice:  staticNotice("Saved — the daemon's apply result was never recorded, which is an af bug; the file holds the new value."),
 	},
 }
 

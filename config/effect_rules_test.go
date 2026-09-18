@@ -42,10 +42,11 @@ func TestSaveRulesAreCompleteAndTotal(t *testing.T) {
 			t.Errorf("no row produces %q: a wire value nothing can emit", status)
 		}
 	}
-	// The last row must match anything, or some save would get no answer.
+	// The last row must match anything, or some save would get no answer —
+	// including an outcome carrying facts but no recorded apply result.
 	last := saveRules[len(saveRules)-1]
 	for _, key := range saveRuleKeys {
-		if !last.applies(key, ApplyOutcome{DaemonApplied: true, DaemonApplyFailed: true, DaemonApplyUnconfirmed: true}) {
+		if !last.applies(key, ApplyOutcome{DaemonApply: DaemonApplyUnset, FailedListenerKeys: []string{"network.listen_addr"}}) {
 			t.Errorf("the final row does not apply to %q, so the table is not total", key)
 		}
 	}
@@ -80,7 +81,7 @@ func TestDeferredKeyDistinguishesAFailedReloadFromAnUnconfirmedOne(t *testing.T)
 	// it is applied-live and an unconfirmed apply leaves it unconfirmed, not
 	// deferred. debug_pprof is the scalar startup-only key in its place.
 	for _, key := range []string{"root_agents", "appearance", "debug_pprof"} {
-		failed := ApplyOutcome{DaemonApplyFailed: true}
+		failed := ApplyOutcome{DaemonApply: DaemonApplyFailed}
 		if got := failed.StatusForKey(key); got != ApplyStatusFailed {
 			t.Errorf("StatusForKey(%q) with a failed reload = %q, want %q", key, got, ApplyStatusFailed)
 		}
@@ -88,7 +89,7 @@ func TestDeferredKeyDistinguishesAFailedReloadFromAnUnconfirmedOne(t *testing.T)
 			t.Errorf("EffectNotice(%q) promised an effect from a file that did not load: %q", key, notice)
 		}
 
-		unconfirmed := ApplyOutcome{DaemonApplyUnconfirmed: true}
+		unconfirmed := ApplyOutcome{DaemonApply: DaemonApplyUnconfirmed}
 		if got := unconfirmed.StatusForKey(key); got != ApplyStatusDeferred {
 			t.Errorf("StatusForKey(%q) with an unconfirmed apply = %q, want %q", key, got, ApplyStatusDeferred)
 		}
@@ -105,7 +106,7 @@ func TestDeferredKeyDistinguishesAFailedReloadFromAnUnconfirmedOne(t *testing.T)
 // file was written either way and a race at save time is indistinguishable from
 // a hand-edit a minute later, which no save could have reported either (#4247).
 func TestAnUnconfirmedApplyWithholdsOnlyTheLiveClaim(t *testing.T) {
-	unconfirmed := ApplyOutcome{DaemonApplied: true, DaemonApplyUnconfirmed: true}
+	unconfirmed := ApplyOutcome{DaemonApply: DaemonApplyUnconfirmed}
 	for _, key := range []string{"default_program", "network.listen_addr", "network.require_token"} {
 		if got := unconfirmed.StatusForKey(key); got != ApplyStatusUnconfirmed {
 			t.Errorf("live key %q with an unconfirmed apply = %q, want %q", key, got, ApplyStatusUnconfirmed)
