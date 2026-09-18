@@ -54,3 +54,32 @@ func (c *Client) UnsetConfigValue(req daemon.UnsetConfigValueRequest) (daemon.Un
 	}
 	return resp, nil
 }
+
+// GetProjectConfig reads the project-effective config view for one repository
+// path on the targeted daemon — the remote half of the TUI config editor's
+// project scope, for which the local half is the in-process
+// config.ResolveProjectConfigView. The path resolves on the DAEMON's
+// filesystem; a caller on another machine must send a path meaningful to the
+// daemon, which is exactly what its ListProjects answers with.
+func (c *Client) GetProjectConfig(req daemon.GetProjectConfigRequest) (daemon.GetProjectConfigResponse, error) {
+	var resp daemon.GetProjectConfigResponse
+	if err := c.call("GetProjectConfig", req, &resp); err != nil {
+		return daemon.GetProjectConfigResponse{}, err
+	}
+	return resp, nil
+}
+
+// ListProjects reads the targeted daemon's durable project registry. There
+// was deliberately no wrapper while its only consumers read the registry
+// in-process (see the retired note at the former site): the TUI config
+// editor's project scope is now a Go consumer that CANNOT read in-process,
+// because under --daemon-url the registry that matters is the remote one — a
+// local read would offer the local machine's projects and send their paths to
+// a daemon that cannot resolve them.
+func (c *Client) ListProjects(req daemon.ListProjectsRequest) (daemon.ListProjectsResponse, error) {
+	var resp daemon.ListProjectsResponse
+	if err := c.call("ListProjects", req, &resp); err != nil {
+		return daemon.ListProjectsResponse{}, err
+	}
+	return resp, nil
+}

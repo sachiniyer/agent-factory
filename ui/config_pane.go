@@ -90,6 +90,29 @@ type ConfigPane struct {
 	// not a mode: the pane never enters an assistant state, it just asks the host
 	// to open one and closes.
 	assistantRequested bool
+
+	// scopes is the scope row's option list: index 0 is always the global
+	// scope, one entry per registered project after it. It is empty when the
+	// host supplied no projects — an unreadable registry must not lock the
+	// editor out of global config, it just removes the row.
+	scopes []configScope
+	// scopeIndex is the scope the rows were loaded for; 0 is global. A scope
+	// above 0 is the project view — READ-ONLY, because per-project writes are
+	// their own capability (config.write-project) and an editable project row
+	// here would write the global file, which is exactly the wrong file.
+	scopeIndex int
+	// scopeRequestIndex is the scope row's pending request, or -1. Like
+	// assistantRequested it is a request, not a mode: the app owns the re-read
+	// (ui.ReadProjectConfigForEditor), the pane only records where the user
+	// asked to go.
+	scopeRequestIndex int
+}
+
+// configScope is one option on the scope row: the global scope (path "") or a
+// registered project's repository root.
+type configScope struct {
+	label string
+	path  string
 }
 
 // configRow is one line of the flattened view: either a tier heading or an
@@ -99,9 +122,11 @@ type configRow struct {
 	heading string
 	entry   *config.ConfigEntry
 	// account is set for a row of the Accounts section (#3385) — an agent
-	// identity, not a config key. Exactly one of heading, entry and account is
-	// meaningful on any row.
+	// identity, not a config key. Exactly one of heading, entry, account and
+	// scope is meaningful on any row.
 	account *AccountRow
+	// scope is set for the one scope-selector row, which sits before the tiers.
+	scope bool
 }
 
 // isSelectable reports whether the cursor may land on this row. Every manifest
@@ -111,7 +136,7 @@ type configRow struct {
 // restore the class #3345 explicitly removed, while a local-write fallback
 // would bypass the running daemon's lifecycle admission gate.
 func (r configRow) isSelectable() bool {
-	return r.entry != nil || r.account != nil
+	return r.entry != nil || r.account != nil || r.scope
 }
 
 var (
@@ -143,8 +168,9 @@ func NewConfigPane() *ConfigPane {
 	// with displayValue, which never feeds the writer.
 	in.Blur()
 	return &ConfigPane{
-		input: in,
-		save:  applyingConfigSet,
+		input:             in,
+		save:              applyingConfigSet,
+		scopeRequestIndex: -1,
 	}
 }
 
@@ -157,6 +183,74 @@ func (c *ConfigPane) SetEntries(entries []config.ConfigEntry, location string) {
 	c.entries = visibleAppearanceEntries(entries)
 	c.location = location
 	c.rebuildRows()
+}
+
+// SetScopes supplies the registered projects the scope row offers, called by
+// the app at open alongside the global read. The scope always resets to
+// global: reopening `,` must show the predictable view, not whichever project
+// a previous visit was scoped to. An empty or failed list is legal — the row
+// simply does not render and the pane is the global editor it always was.
+func (c *ConfigPane) SetScopes(projects []config.Project) {
+	c.scopes = []configScope{{label: "global defaults"}}
+	for _, p := range projects {
+		label := p.Root
+		if !p.PathExists {
+			// A registered project whose checkout is gone is still offerable —
+			// the daemon answers its read with the repository error — but the
+			// label says so up front rather than letting the failure surprise.
+			label += " (missing)"
+		}
+		c.scopes = append(c.scopes, configScope{label: label, path: p.Root})
+	}
+	c.scopeIndex = 0
+	c.scopeRequestIndex = -1
+	c.rebuildRows()
+}
+
+// IsProjectScope reports whether the pane is showing a project's effective
+// config rather than the global file — the read-only view.
+func (c *ConfigPane) IsProjectScope() bool { return c.scopeIndex > 0 }
+
+// requestScope records that the user asked to move the scope row to index.
+// Out-of-range and no-op moves are dropped here rather than reaching the app
+// as fetches for a scope that cannot exist or is already shown.
+func (c *ConfigPane) requestScope(index int) {
+	if index < 0 || index >= len(c.scopes) || index == c.scopeIndex {
+		return
+	}
+	c.scopeRequestIndex = index
+}
+
+// TakeScopeRequest reports whether the user asked to change scope since the
+// last call, returning the target index and the project path to read ("" for
+// the global scope). Read-and-clear like TakeAssistantRequest, so a request
+// fires exactly once.
+func (c *ConfigPane) TakeScopeRequest() (index int, projectPath string, ok bool) {
+	if c.scopeRequestIndex < 0 {
+		return 0, "", false
+	}
+	index = c.scopeRequestIndex
+	c.scopeRequestIndex = -1
+	return index, c.scopes[index].path, true
+}
+
+// ApplyScope commits a scope the app successfully read: the target index, the
+// rows, and the location the header names (the repository root for a project).
+// Called only after the read answered — a failed one goes to
+// ScopeRequestFailed so the pane keeps showing the scope it still has.
+func (c *ConfigPane) ApplyScope(index int, entries []config.ConfigEntry, location string) {
+	c.scopeIndex = index
+	c.SetEntries(entries, location)
+}
+
+// ScopeRequestFailed surfaces a scope the app could not read — a repository
+// that no longer resolves, a daemon that refused. The pane keeps the scope it
+// had; the reason lands in the status line rather than silently refusing the
+// row the user just asked for.
+func (c *ConfigPane) ScopeRequestFailed(err error) {
+	c.status = err.Error()
+	c.statusIsError = true
+	c.restartNotice = ""
 }
 
 func (c *ConfigPane) SetSize(width, height int) {
@@ -193,6 +287,7 @@ func (c *ConfigPane) SetFocus(focus bool) {
 		// one that survives to a close was never taken (the pane was dismissed
 		// another way). Drop it so the next open cannot inherit a stale intent.
 		c.assistantRequested = false
+		c.scopeRequestIndex = -1
 	}
 }
 
@@ -211,6 +306,14 @@ func (c *ConfigPane) TakeAssistantRequest() bool {
 func (c *ConfigPane) rebuildRows() {
 	selectedAccount := c.selectedAccount()
 	c.rows = nil
+	// The scope row leads the list: it is the one control that changes what
+	// every row below it means, so it is pinned where the pane opens rather
+	// than scrolling away under the tiers. It renders only when a project
+	// exists to scope to — a global-only list would be a control that does
+	// nothing.
+	if len(c.scopes) > 1 {
+		c.rows = append(c.rows, configRow{scope: true})
+	}
 	for _, tier := range config.ManifestTiers {
 		if tier == config.TierAdvanced && !c.showAdvanced {
 			continue
@@ -232,8 +335,12 @@ func (c *ConfigPane) rebuildRows() {
 		}
 	}
 	// Accounts last: the config keys are what this overlay is for, and a
-	// credential section above them would push them off the first screen.
-	c.appendAccountRows()
+	// credential section above them would push them off the first screen. In
+	// the project scope they stay home entirely — an account is a daemon-host
+	// credential, not a property of the repository being read.
+	if c.scopeIndex == 0 {
+		c.appendAccountRows()
+	}
 	if selectedAccount != nil {
 		found := false
 		for i, row := range c.rows {
@@ -339,6 +446,16 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 		c.showAdvanced = !c.showAdvanced
 		c.rebuildRows()
 		return true
+	case "left", "h":
+		if c.onScopeRow() {
+			c.requestScope(c.scopeIndex - 1)
+		}
+		return true
+	case "right", "l":
+		if c.onScopeRow() {
+			c.requestScope(c.scopeIndex + 1)
+		}
+		return true
 	case "C":
 		// Ask the host to open the config assistant. Uppercase C matches the global
 		// hotkey the assistant already has (keys.KeyConfigAgent), and it is free
@@ -355,10 +472,19 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 		c.assistantRequested = true
 		return true
 	case "enter":
+		if c.onScopeRow() {
+			c.requestScope(c.scopeIndex + 1)
+			return true
+		}
 		c.beginEdit()
 		return true
 	}
 	return true
+}
+
+// onScopeRow reports whether the cursor is on the scope selector row.
+func (c *ConfigPane) onScopeRow() bool {
+	return c.selectedIdx >= 0 && c.selectedIdx < len(c.rows) && c.rows[c.selectedIdx].scope
 }
 
 // beginEdit opens the value field for the selected key, pre-filled with the
@@ -368,6 +494,17 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 func (c *ConfigPane) beginEdit() {
 	entry := c.selectedEntry()
 	if entry == nil {
+		return
+	}
+	if c.scopeIndex > 0 {
+		// The project view is a READ, matching `af config list --repo` — a
+		// per-project write is its own capability (config.write-project) and an
+		// edit committed here would land in the GLOBAL file, which is exactly
+		// the file the user is not looking at. Say so rather than silently
+		// ignoring the key, and name the verb that does write one.
+		c.status = "read-only view — write a personal override for this project with `af config set " + entry.Key + " <value> --project`"
+		c.statusIsError = false
+		c.restartNotice = ""
 		return
 	}
 	c.editing = true
@@ -535,6 +672,9 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 	for i, row := range c.rows {
 		start := len(lines)
 		switch {
+		case row.scope:
+			rendered := c.renderScopeRow(i)
+			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
 		case row.account != nil:
 			rendered := c.renderAccountRow(i, *row.account)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
@@ -670,6 +810,50 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 	return b.String()
 }
 
+// renderScopeRow renders the one scope-selector row: the current scope between
+// the ‹ › affordances that say it moves, plus — when selected — the same
+// purpose line an entry gets, so what the row controls is read off the screen
+// rather than guessed from its name.
+func (c *ConfigPane) renderScopeRow(i int) string {
+	var b strings.Builder
+	selected := i == c.selectedIdx
+
+	cursor := "  "
+	if selected {
+		cursor = SelectionMarker("› ")
+	}
+	b.WriteString(cursor)
+
+	left, right := "  ", "  "
+	if c.scopeIndex > 0 {
+		left = "‹ "
+	}
+	if c.scopeIndex < len(c.scopes)-1 {
+		right = " ›"
+	}
+	label := c.scopes[c.scopeIndex].label
+	key := configKeyStyle.Render("Scope")
+	if selected {
+		key = configSelectedStyle.Render("Scope")
+	}
+	b.WriteString(key)
+	valueStyle := configValueStyle
+	if selected {
+		valueStyle = configSelectedStyle
+	}
+	b.WriteString(valueStyle.Render("  " + left + label + right))
+
+	line := c.fitPaneLine(b.String())
+	b.Reset()
+	b.WriteString(line)
+	b.WriteString("\n")
+
+	if selected {
+		b.WriteString(c.wrapIndented("The repository this pane reads: global defaults, or one project's effective config (read-only).", configPurposeStyle))
+	}
+	return b.String()
+}
+
 func (c *ConfigPane) wrapIndented(text string, style lipgloss.Style) string {
 	const indent = "    "
 	width := c.width - len(indent) - 2
@@ -767,6 +951,20 @@ func (c *ConfigPane) renderHints() string {
 	if c.showAdvanced {
 		advanced = "a hide advanced"
 	}
+	if c.onScopeRow() {
+		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
+			{text: "↑/↓ move", drop: 2},
+			{text: "←/→ scope", drop: 1},
+			{text: "C assistant", drop: 4},
+			{text: "esc close"},
+		})) + "\n"
+	}
+	edit := "↵ edit"
+	if c.scopeIndex > 0 {
+		// The project view is a read: no edit verb is offered, and the hint says
+		// so rather than letting ↵ look broken.
+		edit = "view only"
+	}
 	// Display order left to right; `drop` is the shed order (see fitHints).
 	//
 	// "C assistant" is the button #2453 adds: the discoverable way to open the
@@ -774,7 +972,7 @@ func (c *ConfigPane) renderHints() string {
 	// exit stays last, where a reader looks for it.
 	return "\n" + configHintStyle.Render(c.fitHints([]configHint{
 		{text: "↑/↓ move", drop: 2},
-		{text: "↵ edit", drop: 3},
+		{text: edit, drop: 3},
 		{text: advanced, drop: 1},
 		{text: "C assistant", drop: 4},
 		{text: "esc close"},

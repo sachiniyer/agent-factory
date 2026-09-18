@@ -2337,6 +2337,37 @@ button:disabled,
   white-space: nowrap;
   max-width: 50%;
 }
+.af-config-scopebar {
+  display: flex;
+  align-items: center;
+  gap: var(--af-space-2);
+  padding: var(--af-space-2) var(--af-space-3);
+  background: var(--af-surface);
+}
+.af-config-scope-label {
+  font-size: var(--af-type-caption);
+  color: var(--af-ink);
+  font-weight: 600;
+}
+.af-config-scope {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-caption);
+  min-width: 0;
+}
+.af-config-scope-note {
+  margin-left: auto;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  line-height: 1.4;
+}
+.af-config-value {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-body);
+  color: var(--af-ink);
+  overflow-wrap: anywhere;
+}
 .af-config-list {
   display: flex;
   flex-direction: column;
@@ -2895,6 +2926,14 @@ textarea[class] {
   }
   .af-config-assistant-btn {
     margin-left: auto;
+  }
+  .af-config-scopebar {
+    flex-wrap: wrap;
+  }
+  .af-config-scope-note {
+    order: 3;
+    flex-basis: 100%;
+    margin-left: 0;
   }
 }
 .af-defaults-fragment {

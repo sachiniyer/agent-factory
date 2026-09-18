@@ -475,6 +475,20 @@ export interface ConfigResponse {
   path: string;
 }
 
+/** GetProjectConfigResponse (daemon/control_types.go): one repository's
+ *  project-effective config view — `af config list --repo` over RPC
+ *  (config.read-project). The entries are every AllManifest key with the value
+ *  the daemon would use for a session rooted there, so the repo-scoped keys the
+ *  global view never carries (backend, docker, ssh, remote_hooks) appear here. */
+export interface ProjectConfigResponse {
+  entries: ConfigEntry[];
+  /** The resolved repository root the entries describe — what the view's scope
+   *  label names. */
+  project_root: string;
+  /** The config.toml the global layer was read from — see ConfigResponse.path. */
+  path: string;
+}
+
 /** config.SetResult (config/configset.go), as returned by SetConfigValue. */
 export interface ConfigSetResult {
   key: string;

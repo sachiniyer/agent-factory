@@ -6,9 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -169,26 +167,6 @@ func loadGlobalConfigEntries() ([]configEntry, error) {
 	return entries, nil
 }
 
-// formatConfigValue renders a value for human output: scalars bare (so
-// `af config get default_program` prints exactly `claude`, script-friendly),
-// composites as compact JSON.
-func formatConfigValue(v any) string {
-	switch x := v.(type) {
-	case string:
-		return x
-	case bool:
-		return strconv.FormatBool(x)
-	case int:
-		return strconv.Itoa(x)
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return fmt.Sprintf("%v", v)
-		}
-		return string(b)
-	}
-}
-
 // formatConfigListValue makes absence visible without hiding an explicit
 // empty value. Empty built-in values are not configured anywhere, so the human
 // list labels them consistently. An explicit empty string/list/table/null is
@@ -196,8 +174,8 @@ func formatConfigValue(v any) string {
 // and "I configured the empty/off value". `config get` and JSON output keep
 // their existing script-facing representations.
 func formatConfigListValue(entry configEntry) string {
-	if !isEmptyConfigValue(entry.Value) {
-		return formatConfigValue(entry.Value)
+	if !config.IsEmptyConfigValue(entry.Value) {
+		return config.FormatConfigValue(entry.Value)
 	}
 	if !entry.configured {
 		return "(unset)"
@@ -205,42 +183,8 @@ func formatConfigListValue(entry configEntry) string {
 	return formatConfigExplanationValue(entry.Value)
 }
 
-func isEmptyConfigValue(value any) bool {
-	if value == nil {
-		return true
-	}
-	if text, ok := value.(string); ok {
-		return text == ""
-	}
-	reflected := reflect.ValueOf(value)
-	switch reflected.Kind() {
-	case reflect.Map, reflect.Slice:
-		return reflected.Len() == 0
-	case reflect.Pointer:
-		return reflected.IsNil()
-	default:
-		return false
-	}
-}
-
 func configEntryFromResolvedValue(value config.ResolvedValue) configEntry {
-	entry := configEntry{Key: value.Key, Value: value.Value}
-	if value.Winner != nil && value.Winner.Layer != config.SourceBuiltIn.String() {
-		entry.configured = true
-		return entry
-	}
-
-	// Empty composites have no leaf origin or winner. Their candidate result
-	// still distinguishes an intentionally empty/replacing value from a
-	// nonempty value that validation discarded as "ignored".
-	for _, candidate := range value.Candidates {
-		if candidate.Layer != config.SourceBuiltIn.String() && candidate.Allowed && candidate.Present &&
-			(candidate.Result == "empty" || candidate.Result == "replaced") {
-			entry.configured = true
-			break
-		}
-	}
-	return entry
+	return configEntry{Key: value.Key, Value: value.Value, configured: config.ResolvedValueConfigured(value)}
 }
 
 var configCmd = &cobra.Command{
@@ -367,7 +311,7 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 			if configJSONFlag {
 				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(entry))
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), formatConfigValue(entry.Value))
+			fmt.Fprintln(cmd.OutOrStdout(), config.FormatConfigValue(entry.Value))
 			return nil
 		}
 
@@ -381,7 +325,7 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 				if configJSONFlag {
 					return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(e))
 				}
-				fmt.Fprintln(cmd.OutOrStdout(), formatConfigValue(e.Value))
+				fmt.Fprintln(cmd.OutOrStdout(), config.FormatConfigValue(e.Value))
 				return nil
 			}
 		}

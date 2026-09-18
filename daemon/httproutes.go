@@ -342,6 +342,18 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(GetConfigRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetConfig) },
 	},
+	// The project-scope read behind the web config view's project selector and
+	// the remote-targeted TUI editor — the UI analogue of `af config list
+	// --repo`. Not sandboxAllowed, like ListProjects/ListDirectory: the path is
+	// resolved on the daemon's filesystem and the answer names that host's
+	// roots, which is reconnaissance the sandbox credential withholds.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/GetProjectConfig",
+		Description: "List one repository's effective config (every key `af config list --repo` shows, repo-scoped keys included) as the same manifest rows GetConfig returns — the project-scope read behind the web and TUI config surfaces. The path is a read-only selector: it never registers a project or writes identity state.",
+		requestType: reflect.TypeOf(GetProjectConfigRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetProjectConfig) },
+	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/SetConfigValue",

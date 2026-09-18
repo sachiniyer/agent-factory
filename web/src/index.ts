@@ -32,6 +32,7 @@ import {
   fetchSessionSnapshot,
   killSession,
   getConfig,
+  getProjectConfig,
   isMutationCommittedError,
   isMutationOutcomeUncertain,
   handoffSession,
@@ -146,6 +147,7 @@ const store = new Store<AppState>({
   view: "sessions",
   config: [],
   configPath: "",
+  configScope: null,
   configStatus: null,
   accounts: emptyAccountsState(),
   selectedProject: null,
@@ -646,6 +648,10 @@ function switchView(view: View): void {
     refreshTasks();
   }
   if (view === "config") {
+    // Entering the view opens on the global scope — the predictable view, same
+    // as the TUI's `,` editor resetting its scope row on every open. A project
+    // scope is an explicit read the user asks for from inside the view.
+    configScopeRequest = null;
     refreshConfig();
     // The accounts read rides with the config read for the same reason: the
     // section shows them as they are NOW, including an account registered from
@@ -1623,6 +1629,15 @@ function clearTabError(): void {
 
 // --- task actions (#1592 Phase 5 PR8) --------------------------------------
 
+/** The scope the config view's NEXT read is for (config.read-project): null is
+ *  the global file the view edits, a project root is that repository's effective
+ *  config — read-only, since per-project writes are config.write-project, a
+ *  separate capability. Distinct from state.configScope, which is the scope of
+ *  the last COMMITTED read: a request the daemon refuses (a checkout that no
+ *  longer resolves) must not move the view off the scope it still has, so only a
+ *  response that lands under the fence commits the scope it was read for. */
+let configScopeRequest: string | null = null;
+
 /** Re-reads the config manifest and the user's live values.
  *
  *  Always from the daemon, never from a cached copy: config.toml is hand-editable
@@ -1640,21 +1655,51 @@ function clearTabError(): void {
  *  though it had not taken. */
 const configRefetcher = createFencedRefetcher({
   readToken: () => token,
-  fetch: getConfig,
+  // The scope rides with the read: the global manifest answers GetConfig, a
+  // project root answers GetProjectConfig — the same resolver the TUI's project
+  // scope and `af config list --repo` share, so all three surfaces report one
+  // effective value for a repo rather than three renderings of the layers.
+  fetch: (tok) =>
+    configScopeRequest === null
+      ? getConfig(tok).then((resp) => ({ entries: resp.entries, path: resp.path, scope: null as string | null }))
+      : getProjectConfig(configScopeRequest, tok).then((resp) => ({
+          entries: resp.entries,
+          path: resp.path,
+          // The daemon's resolved root, not the requested string: it names what
+          // the view is scoped to, and it is what a failed selector should have
+          // asked for verbatim (a symlinked selector still commits its target).
+          scope: resp.project_root as string | null,
+        })),
   commit: (resp) => {
-    store.set({ config: resp.entries, configPath: resp.path });
+    store.set({ config: resp.entries, configPath: resp.path, configScope: resp.scope });
   },
   // Surfaced, not swallowed: an empty config screen would read as "you have no
   // settings" rather than "the read failed". Under the fence like the commit — an
   // older request's transport blip must not paint an error over the fresher answer
   // already on screen, which is the same "the older one commits nothing" rule.
   onError: (err: unknown) => {
+    // A scope read the daemon could not answer — a checkout that no longer
+    // resolves — leaves the view on the scope it still has (the TUI's scope row
+    // does the same). Revert the request pointer to the committed scope so a
+    // later refreshConfig() re-reads what is on screen rather than silently
+    // retrying the scope that just failed.
+    configScopeRequest = store.get().configScope;
     surfaceTabError(err);
   },
 });
 
 function refreshConfig(): void {
   configRefetcher.refresh();
+}
+
+/** Re-reads the config view for a different scope (config.read-project): null is
+ *  the global file; a registered project's root is that repository's effective
+ *  config, rendered read-only. The committed scope moves only when the read
+ *  answers, so a dead checkout's refusal leaves the view where it was with the
+ *  daemon's reason in the tab-error line — never a silent jump back to global. */
+function selectConfigScope(projectRoot: string | null): void {
+  configScopeRequest = projectRoot;
+  refreshConfig();
 }
 
 /** The accounts read (#3385), fenced like the config read and for the same
@@ -2239,6 +2284,7 @@ const actions = {
   dropTabOnPaneAt: (x: number, y: number, drag: DragPayload) => splitView.dropTabAt(x, y, drag),
   switchView,
   setConfigValue: applyConfigValue,
+  selectConfigScope,
   openConfigAssistant: doOpenConfigAssistant,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,

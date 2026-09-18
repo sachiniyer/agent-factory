@@ -213,6 +213,11 @@ export interface AppState {
   /** the config.toml the values were read from, named in the config view so an
    *  AF_HOME user knows which file they are editing. */
   configPath: string;
+  /** the scope `config` was read for (config.read-project): null is the global
+   *  file the view edits; a project root is that repository's effective config,
+   *  which the view renders read-only — per-project writes are
+   *  config.write-project, a separate capability. */
+  configScope: string | null;
   /** the outcome of the last config write — the daemon's echo and restart notice,
    *  or the validator's message when it refused — or null when there is none. */
   configStatus: ConfigStatus | null;
@@ -315,6 +320,13 @@ export interface Actions {
    *  in the browser: a second copy of the rules is how a UI accepts a value the
    *  loader later rejects at startup. */
   setConfigValue(key: string, value: string): void;
+  /** Re-reads the config view for a different scope (config.read-project): null is
+   *  the global file the view edits; a registered project's root is that
+   *  repository's effective config — read-only, since per-project writes are
+   *  config.write-project, a separate capability. index.ts fetches through the same
+   *  fenced refetcher as the global read, so the committed scope only moves when the
+   *  read answers. */
+  selectConfigScope(projectRoot: string | null): void;
   /** Opens the conversational config assistant (#2467): index.ts spawns-or-reuses
    *  the daemon-owned assistant, streams it into a chat overlay, and reaps it on
    *  close. The config pane only reports the intent; the shell owns the token and the
@@ -1211,6 +1223,7 @@ export class AppShell {
     });
     this.configPane = new ConfigPane({
       save: (key: string, value: string) => this.actions.setConfigValue(key, value),
+      selectScope: (projectRoot: string | null) => this.actions.selectConfigScope(projectRoot),
       openAssistant: () => this.actions.openConfigAssistant(),
       accounts: {
         register: (agent: string, name: string) => this.actions.registerAccount(agent, name),
@@ -1391,10 +1404,14 @@ export class AppShell {
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
 
-    // The config pane mirrors the manifest. Global config is NOT project-scoped —
-    // config.toml applies to every repo — so unlike the tasks pane it re-renders on
-    // the data alone, with no project in the change check.
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
+    // The config pane mirrors the manifest. It is NOT scoped to the rail's
+    // selected project — config.toml applies to every repo, and the pane's own
+    // scope selector (config.read-project) is a separate, explicit read — so
+    // unlike the tasks pane it re-renders on the data alone, with no rail project
+    // in the change check. The scope state IS data: a committed scope switches
+    // the rows to that repository's effective view.
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts,
+      state.configScope, state.registeredProjects);
 
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;

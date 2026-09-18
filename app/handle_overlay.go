@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -403,6 +404,16 @@ func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
 		return m, m.handleError(err)
 	}
 	m.configPane.SetEntries(entries, location)
+	// The scope row's project list (config.read-project): the registered
+	// projects of whichever daemon the pane's read just answered. A registry
+	// failure is auxiliary — the editor still opens for global config without
+	// the row — but the reason is shown so the row's absence is not a mystery.
+	if projects, err := ui.ReadProjectScopesForEditor(); err == nil {
+		m.configPane.SetScopes(projects)
+	} else {
+		m.configPane.SetScopes(nil)
+		m.configPane.ScopeRequestFailed(fmt.Errorf("project scopes unavailable: %w", err))
+	}
 	// The Accounts section (#3385), read on every open for the same reason the
 	// config is: an account registered from the CLI, or logged in from the web,
 	// since this TUI started must show as it is now rather than as af remembers.
@@ -436,6 +447,28 @@ func (m *home) handleStateConfigEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.configPane.HandleKeyPress(msg)
+	// A scope-row move (config.read-project): the pane asks for the scope it
+	// wants, the app re-reads through whichever daemon answers — the SAME
+	// reads the open used — and only a successful read changes the scope. A
+	// refusal stays on the current scope with the daemon's reason in the
+	// status line, so asking about a dead checkout fails visibly rather than
+	// silently.
+	if idx, projectPath, ok := m.configPane.TakeScopeRequest(); ok {
+		var entries []config.ConfigEntry
+		var location string
+		var err error
+		if projectPath == "" {
+			entries, location, err = ui.ReadConfigForEditor()
+		} else {
+			entries, location, err = ui.ReadProjectConfigForEditor(projectPath)
+		}
+		if err != nil {
+			m.configPane.ScopeRequestFailed(err)
+		} else {
+			m.configPane.ApplyScope(idx, entries, location)
+		}
+		return m, nil
+	}
 	// The Accounts section's verbs (#3385), taken BEFORE the focus check: a login
 	// drops focus as it asks — the overlay is closing so the takeover has a clean
 	// terminal — while a register keeps it, and reading the request first is what

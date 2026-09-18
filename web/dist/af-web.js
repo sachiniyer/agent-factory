@@ -6826,6 +6826,10 @@ async function getConfig(token2) {
   const resp = await af("GetConfig", {}, token2);
   return { entries: resp?.entries ?? [], path: resp?.path ?? "" };
 }
+async function getProjectConfig(projectPath, token2) {
+  const resp = await af("GetProjectConfig", { project_path: projectPath }, token2);
+  return { entries: resp?.entries ?? [], project_root: resp?.project_root ?? "", path: resp?.path ?? "" };
+}
 async function setConfigValue(key, value, token2) {
   return af("SetConfigValue", { key, value }, token2);
 }
@@ -7666,6 +7670,17 @@ var ConfigPane = class {
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
   accounts = emptyAccountsState();
+  /** The scope the rows were loaded for (config.read-project): null is the global
+   *  file the editor writes; a project root is that repository's effective
+   *  config — READ-ONLY, because per-project writes are `af config set
+   *  --project`, a separate capability (config.write-project). An editable row
+   *  here would write the global file, which is exactly the wrong file. */
+  scope = null;
+  /** The registered-project roots the scope selector offers — the daemon's own
+   *  registry (listProjects), so a root sent back resolves on the daemon's
+   *  filesystem. Empty means the selector does not render at all: a scope
+   *  control that goes nowhere is worse than none. */
+  projects = [];
   showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
    *  write is per-key (like `af config set`), so a multi-row "save all" would
@@ -7676,13 +7691,23 @@ var ConfigPane = class {
   // them had it (#2933). Null whenever that control is not currently rendered.
   editingInput = null;
   advancedToggle = null;
+  scopeSelect = null;
   lastEntries = null;
   lastStatus = null;
   lastAccounts = null;
+  lastScope = void 0;
+  lastProjects = null;
+  lastListToken = null;
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
-   *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries, path, status, accounts) {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
+   *  changed, matching the rest of the shell's patch-in-place model.
+   *
+   *  `scope` is the scope the rows were read for — null is the global file, a
+   *  project root is that repository's effective view. `projects` is the
+   *  registry the scope selector offers. Both are committed by the shell's read,
+   *  never optimistically: a scope the daemon could not resolve keeps the view
+   *  on the scope it still has, with the daemon's reason in the tab-error line. */
+  update(entries, path, status, accounts, scope, projects) {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastScope === scope && this.lastProjects === projects) {
       return;
     }
     const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status && accounts.status.name === "" && !accounts.status.error;
@@ -7693,10 +7718,18 @@ var ConfigPane = class {
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
+    this.lastScope = scope;
+    this.lastProjects = projects;
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
     this.accounts = accounts;
+    if (scope !== this.scope) {
+      this.editing = null;
+      this.draft = "";
+    }
+    this.scope = scope;
+    this.projects = projects;
     if (status && !status.error && status.key === this.editing) {
       this.editing = null;
       this.draft = "";
@@ -7730,7 +7763,10 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
-    rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
+    const wasScope = this.scopeSelect !== null && active === this.scopeSelect;
+    const listTok = listToken([CONFIG_LIST_TOKEN, this.scope]);
+    rebuildKeepingScroll(this.el, this.lastListToken, listTok, () => this.render());
+    this.lastListToken = listTok;
     this.restoreAccountDrafts(accountDrafts);
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
@@ -7739,6 +7775,8 @@ var ConfigPane = class {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (wasScope && this.scopeSelect) {
+      this.scopeSelect.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -7781,6 +7819,7 @@ var ConfigPane = class {
   render() {
     this.editingInput = null;
     this.advancedToggle = null;
+    this.scopeSelect = null;
     const head = h(
       "div",
       { class: "af-config-head" },
@@ -7790,13 +7829,15 @@ var ConfigPane = class {
     if (this.path !== "") {
       head.append(h("span", { class: "af-config-path" }, `Daemon ${location.host} \xB7 ${this.path}`));
     }
-    const assistantBtn = h(
-      "button",
-      { type: "button", class: "af-ghost af-config-assistant-btn" },
-      "Configure with assistant"
-    );
-    assistantBtn.addEventListener("click", () => this.actions.openAssistant());
-    head.append(assistantBtn);
+    if (this.scope === null) {
+      const assistantBtn = h(
+        "button",
+        { type: "button", class: "af-ghost af-config-assistant-btn" },
+        "Configure with assistant"
+      );
+      assistantBtn.addEventListener("click", () => this.actions.openAssistant());
+      head.append(assistantBtn);
+    }
     const sections = [];
     for (const { tier, name } of tiersInOrder(this.entries)) {
       const inTier = this.entries.filter((e) => e.tier === tier);
@@ -7833,11 +7874,68 @@ var ConfigPane = class {
         "No settings available. Try Configure with assistant."
       )
     ];
-    this.el.replaceChildren(
-      head,
-      h("div", { class: "af-config-list" }, ...content),
-      renderAccountsSection(this.accounts, this.actions.accounts, this.registration)
+    const children = [head];
+    const scopeBar = this.renderScopeBar();
+    if (scopeBar !== null) {
+      children.push(scopeBar);
+    }
+    children.push(h("div", { class: "af-config-list" }, ...content));
+    if (this.scope === null) {
+      children.push(renderAccountsSection(this.accounts, this.actions.accounts, this.registration));
+    }
+    this.el.replaceChildren(...children);
+  }
+  /** The scope selector (config.read-project): the web counterpart of the TUI
+   *  config pane's scope row. One option per registered project — the daemon's
+   *  own registry, so a root sent back resolves on the daemon's filesystem —
+   *  plus the global file the editor writes.
+   *
+   *  It only reports the intent: the shell owns the read, and a scope the daemon
+   *  cannot resolve is refused there with the view staying where it was. Returns
+   *  null when there is nothing to scope to — a selector whose only option is
+   *  the current view is a control that goes nowhere. */
+  renderScopeBar() {
+    const options = [...this.projects];
+    if (this.scope !== null && !options.includes(this.scope)) {
+      options.push(this.scope);
+    }
+    if (options.length === 0) {
+      return null;
+    }
+    const select = h("select", { class: "af-input af-config-scope" });
+    select.setAttribute("aria-label", "Config scope");
+    const globalOption = h("option", { value: "" }, "Global defaults");
+    if (this.scope === null) {
+      globalOption.selected = true;
+    }
+    select.append(globalOption);
+    for (const root2 of options) {
+      const opt = h("option", { value: root2 }, root2);
+      if (root2 === this.scope) {
+        opt.selected = true;
+      }
+      select.append(opt);
+    }
+    select.addEventListener("change", () => {
+      this.actions.selectScope(select.value === "" ? null : select.value);
+    });
+    this.scopeSelect = select;
+    const bar = h(
+      "div",
+      { class: "af-config-scopebar" },
+      h("label", { class: "af-config-scope-label" }, "Scope"),
+      select
     );
+    if (this.scope !== null) {
+      bar.append(
+        h(
+          "span",
+          { class: "af-config-scope-note" },
+          "Effective config for this repository \u2014 read-only \xB7 write a personal override with af config set <key> <value> --project"
+        )
+      );
+    }
+    return bar;
   }
   /** One key: its name, purpose, control, and — when it is the row just written
    *  or just refused — the echo or the error. */
@@ -7851,6 +7949,16 @@ var ConfigPane = class {
       h("span", { class: "af-config-purpose" }, e.purpose)
     );
     row.append(label);
+    if (this.scope !== null) {
+      row.append(
+        h(
+          "div",
+          { class: "af-config-control" },
+          h("span", { class: "af-config-value" }, e.value === "" ? "(unset)" : e.value)
+        )
+      );
+      return row;
+    }
     row.append(this.renderControl(e));
     const status = this.status;
     if (status && status.key === e.key) {
@@ -15776,6 +15884,7 @@ var AppShell = class {
     });
     this.configPane = new ConfigPane({
       save: (key, value) => this.actions.setConfigValue(key, value),
+      selectScope: (projectRoot) => this.actions.selectConfigScope(projectRoot),
       openAssistant: () => this.actions.openConfigAssistant(),
       accounts: {
         register: (agent, name) => this.actions.registerAccount(agent, name),
@@ -16105,7 +16214,14 @@ var AppShell = class {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
+    this.configPane.update(
+      state.config,
+      state.configPath,
+      state.configStatus,
+      state.accounts,
+      state.configScope,
+      state.registeredProjects
+    );
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
@@ -17539,6 +17655,7 @@ var store = new Store({
   view: "sessions",
   config: [],
   configPath: "",
+  configScope: null,
   configStatus: null,
   accounts: emptyAccountsState(),
   selectedProject: null,
@@ -17861,6 +17978,7 @@ function switchView(view) {
     refreshTasks();
   }
   if (view === "config") {
+    configScopeRequest = null;
     refreshConfig();
     refreshAccounts();
   }
@@ -18464,22 +18582,39 @@ function clearTabError() {
     store.set({ tabError: null });
   }
 }
+var configScopeRequest = null;
 var configRefetcher = createFencedRefetcher({
   readToken: () => token,
-  fetch: getConfig,
+  // The scope rides with the read: the global manifest answers GetConfig, a
+  // project root answers GetProjectConfig — the same resolver the TUI's project
+  // scope and `af config list --repo` share, so all three surfaces report one
+  // effective value for a repo rather than three renderings of the layers.
+  fetch: (tok) => configScopeRequest === null ? getConfig(tok).then((resp) => ({ entries: resp.entries, path: resp.path, scope: null })) : getProjectConfig(configScopeRequest, tok).then((resp) => ({
+    entries: resp.entries,
+    path: resp.path,
+    // The daemon's resolved root, not the requested string: it names what
+    // the view is scoped to, and it is what a failed selector should have
+    // asked for verbatim (a symlinked selector still commits its target).
+    scope: resp.project_root
+  })),
   commit: (resp) => {
-    store.set({ config: resp.entries, configPath: resp.path });
+    store.set({ config: resp.entries, configPath: resp.path, configScope: resp.scope });
   },
   // Surfaced, not swallowed: an empty config screen would read as "you have no
   // settings" rather than "the read failed". Under the fence like the commit — an
   // older request's transport blip must not paint an error over the fresher answer
   // already on screen, which is the same "the older one commits nothing" rule.
   onError: (err) => {
+    configScopeRequest = store.get().configScope;
     surfaceTabError(err);
   }
 });
 function refreshConfig() {
   configRefetcher.refresh();
+}
+function selectConfigScope(projectRoot) {
+  configScopeRequest = projectRoot;
+  refreshConfig();
 }
 var accountsRefetcher = createFencedRefetcher({
   readToken: () => token,
@@ -18854,6 +18989,7 @@ var actions = {
   dropTabOnPaneAt: (x, y, drag) => splitView.dropTabAt(x, y, drag),
   switchView,
   setConfigValue: applyConfigValue,
+  selectConfigScope,
   openConfigAssistant: doOpenConfigAssistant,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,

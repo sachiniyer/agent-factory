@@ -235,5 +235,5 @@ func formatConfigExplanationValue(value any) string {
 	if text, ok := value.(string); ok && text == "" {
 		return `""`
 	}
-	return formatConfigValue(value)
+	return config.FormatConfigValue(value)
 }

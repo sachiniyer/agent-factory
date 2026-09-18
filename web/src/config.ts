@@ -35,11 +35,11 @@ import {
 } from "./accounts.js";
 import { h } from "./dom.js";
 import type { ConfigEntry, ConfigSetResponse } from "./types.js";
-import { rebuildKeepingScroll } from "./scrollkeep.js";
+import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 
-/** The config list is ONE global manifest, so every rebuild shows the same list and
- *  the reader's place is always worth keeping — there is no project or filter here to
- *  change what the list contains. */
+/** The config list's scroll identity is per scope: the global manifest is one
+ *  list, each project's effective view is another — same list, keep the reader's
+ *  place; different list, start at the top (#2933 semantics). */
 const CONFIG_LIST_TOKEN = "config";
 
 /** What the config view can ask the shell to do. Saving is the shell's job (it
@@ -47,6 +47,13 @@ const CONFIG_LIST_TOKEN = "config";
  *  outcome it is handed back. */
 export interface ConfigActions {
   save: (key: string, value: string) => void;
+  /** Asks the shell to re-read the rows for a different scope (config.read-project):
+   *  null is the global file the editor writes, a registered project's root is that
+   *  repository's effective config — READ-ONLY, because per-project writes are
+   *  `af config set --project`, a separate capability (config.write-project). The
+   *  pane only reports the intent; the shell owns the read and hands the outcome
+   *  back through update(). */
+  selectScope: (projectRoot: string | null) => void;
   /** Opens the conversational config assistant (#2467) — the web analogue of the
    *  TUI's config-agent takeover. The shell owns the token and the modal host, so
    *  the pane only reports the intent. */
@@ -226,6 +233,17 @@ export class ConfigPane {
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
   private accounts: AccountsState = emptyAccountsState();
+  /** The scope the rows were loaded for (config.read-project): null is the global
+   *  file the editor writes; a project root is that repository's effective
+   *  config — READ-ONLY, because per-project writes are `af config set
+   *  --project`, a separate capability (config.write-project). An editable row
+   *  here would write the global file, which is exactly the wrong file. */
+  private scope: string | null = null;
+  /** The registered-project roots the scope selector offers — the daemon's own
+   *  registry (listProjects), so a root sent back resolves on the daemon's
+   *  filesystem. Empty means the selector does not render at all: a scope
+   *  control that goes nowhere is worse than none. */
+  private projects: string[] = [];
   private showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
    *  write is per-key (like `af config set`), so a multi-row "save all" would
@@ -236,10 +254,14 @@ export class ConfigPane {
   // them had it (#2933). Null whenever that control is not currently rendered.
   private editingInput: HTMLInputElement | null = null;
   private advancedToggle: HTMLElement | null = null;
+  private scopeSelect: HTMLElement | null = null;
 
   private lastEntries: ConfigEntry[] | null = null;
   private lastStatus: ConfigStatus | null = null;
   private lastAccounts: AccountsState | null = null;
+  private lastScope: string | null | undefined = undefined;
+  private lastProjects: string[] | null = null;
+  private lastListToken: string | null = null;
 
   constructor(private readonly actions: ConfigActions) {
     this.el = h("section", { class: "af-config" });
@@ -247,9 +269,17 @@ export class ConfigPane {
   }
 
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
-   *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries: ConfigEntry[], path: string, status: ConfigStatus | null, accounts: AccountsState): void {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
+   *  changed, matching the rest of the shell's patch-in-place model.
+   *
+   *  `scope` is the scope the rows were read for — null is the global file, a
+   *  project root is that repository's effective view. `projects` is the
+   *  registry the scope selector offers. Both are committed by the shell's read,
+   *  never optimistically: a scope the daemon could not resolve keeps the view
+   *  on the scope it still has, with the daemon's reason in the tab-error line. */
+  update(entries: ConfigEntry[], path: string, status: ConfigStatus | null, accounts: AccountsState,
+    scope: string | null, projects: string[]): void {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts
+      && this.lastScope === scope && this.lastProjects === projects) {
       return;
     }
     const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status
@@ -261,11 +291,23 @@ export class ConfigPane {
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
+    this.lastScope = scope;
+    this.lastProjects = projects;
     // Retired web appearance keys from older daemons are never editable here.
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
     this.accounts = accounts;
+    if (scope !== this.scope) {
+      // The list under an open field is gone with the scope: a draft typed
+      // against global's `default_program` must not land on a project row that
+      // only looks the same. And it cannot be saved anyway — the project view
+      // renders no writer.
+      this.editing = null;
+      this.draft = "";
+    }
+    this.scope = scope;
+    this.projects = projects;
     // A save closes the field it came from: the value is committed, and leaving
     // it open would invite a second write of the same thing.
     if (status && !status.error && status.key === this.editing) {
@@ -312,10 +354,14 @@ export class ConfigPane {
     const caretStart = wasEditing ? (this.editingInput?.selectionStart ?? null) : null;
     const caretEnd = wasEditing ? (this.editingInput?.selectionEnd ?? null) : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
-    // The config list is always the same list — one global manifest — so a rebuild
-    // never legitimately starts at the top. Keeping the place matters most right after
-    // a save, which is exactly when this fires.
-    rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
+    const wasScope = this.scopeSelect !== null && active === this.scopeSelect;
+    // The list token names the scope: a same-scope refresh keeps the reader's
+    // place (a save lands exactly here), a scope switch starts at the top —
+    // resuming an offset into a different repository's rows would be keeping a
+    // place in a list the reader is not looking at.
+    const listTok = listToken([CONFIG_LIST_TOKEN, this.scope]);
+    rebuildKeepingScroll(this.el, this.lastListToken, listTok, () => this.render());
+    this.lastListToken = listTok;
     // preventScroll on BOTH: focus() scrolls its target into view by default, which
     // would undo the offset rebuildKeepingScroll just restored. That is not a corner
     // case — a user who wheels the pane while a field still holds focus is exactly the
@@ -329,6 +375,8 @@ export class ConfigPane {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (wasScope && this.scopeSelect) {
+      this.scopeSelect.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector<HTMLElement>('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -379,6 +427,7 @@ export class ConfigPane {
     // one would name a detached node for the rest of this render.
     this.editingInput = null;
     this.advancedToggle = null;
+    this.scopeSelect = null;
     const head = h(
       "div",
       { class: "af-config-head" },
@@ -393,13 +442,17 @@ export class ConfigPane {
     // The conversational assistant (#2467): a chat that helps configure the service,
     // the web counterpart of the TUI's config-agent takeover. Opening it is the
     // shell's job (it owns the token + modal host), so the button only reports intent.
-    const assistantBtn = h(
-      "button",
-      { type: "button", class: "af-ghost af-config-assistant-btn" },
-      "Configure with assistant",
-    );
-    assistantBtn.addEventListener("click", () => this.actions.openAssistant());
-    head.append(assistantBtn);
+    // GLOBAL SCOPE ONLY: the assistant edits the global file, so offering it under
+    // a project read would pair a view of one thing with a writer for another.
+    if (this.scope === null) {
+      const assistantBtn = h(
+        "button",
+        { type: "button", class: "af-ghost af-config-assistant-btn" },
+        "Configure with assistant",
+      );
+      assistantBtn.addEventListener("click", () => this.actions.openAssistant());
+      head.append(assistantBtn);
+    }
 
     const sections: HTMLElement[] = [];
     for (const { tier, name } of tiersInOrder(this.entries)) {
@@ -442,13 +495,77 @@ export class ConfigPane {
               "No settings available. Try Configure with assistant.",
             ),
           ];
-    // Accounts LAST: the config keys are what this view is for, and a credential
-    // section above them would push them below the fold.
-    this.el.replaceChildren(
-      head,
-      h("div", { class: "af-config-list" }, ...content),
-      renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
+    const children: HTMLElement[] = [head];
+    const scopeBar = this.renderScopeBar();
+    if (scopeBar !== null) {
+      children.push(scopeBar);
+    }
+    children.push(h("div", { class: "af-config-list" }, ...content));
+    // Accounts LAST — and GLOBAL SCOPE ONLY: an account is a credential directory
+    // on the daemon host, not a property of the repository being read, so the
+    // section does not belong under the project view (the TUI's scope row hides
+    // it the same way). In global scope it follows the config keys, which are
+    // what this view is for.
+    if (this.scope === null) {
+      children.push(renderAccountsSection(this.accounts, this.actions.accounts, this.registration));
+    }
+    this.el.replaceChildren(...children);
+  }
+
+  /** The scope selector (config.read-project): the web counterpart of the TUI
+   *  config pane's scope row. One option per registered project — the daemon's
+   *  own registry, so a root sent back resolves on the daemon's filesystem —
+   *  plus the global file the editor writes.
+   *
+   *  It only reports the intent: the shell owns the read, and a scope the daemon
+   *  cannot resolve is refused there with the view staying where it was. Returns
+   *  null when there is nothing to scope to — a selector whose only option is
+   *  the current view is a control that goes nowhere. */
+  private renderScopeBar(): HTMLElement | null {
+    const options = [...this.projects];
+    if (this.scope !== null && !options.includes(this.scope)) {
+      // The scope the rows were read for is no longer registered — a project
+      // deleted since the read. Keep it selectable so the control still names
+      // what is on screen rather than silently presenting the global option.
+      options.push(this.scope);
+    }
+    if (options.length === 0) {
+      return null;
+    }
+    const select = h("select", { class: "af-input af-config-scope" });
+    select.setAttribute("aria-label", "Config scope");
+    const globalOption = h("option", { value: "" }, "Global defaults");
+    if (this.scope === null) {
+      globalOption.selected = true;
+    }
+    select.append(globalOption);
+    for (const root of options) {
+      const opt = h("option", { value: root }, root);
+      if (root === this.scope) {
+        opt.selected = true;
+      }
+      select.append(opt);
+    }
+    select.addEventListener("change", () => {
+      this.actions.selectScope(select.value === "" ? null : select.value);
+    });
+    this.scopeSelect = select;
+    const bar = h(
+      "div",
+      { class: "af-config-scopebar" },
+      h("label", { class: "af-config-scope-label" }, "Scope"),
+      select,
     );
+    if (this.scope !== null) {
+      bar.append(
+        h(
+          "span",
+          { class: "af-config-scope-note" },
+          "Effective config for this repository — read-only · write a personal override with af config set <key> <value> --project",
+        ),
+      );
+    }
+    return bar;
   }
 
   /** One key: its name, purpose, control, and — when it is the row just written
@@ -464,6 +581,22 @@ export class ConfigPane {
       h("span", { class: "af-config-purpose" }, e.purpose),
     );
     row.append(label);
+    if (this.scope !== null) {
+      // PROJECT SCOPE IS READ-ONLY (config.read-project): the row names the
+      // repository's effective value but offers no writer — a control here
+      // would write the GLOBAL file, which is exactly the wrong file for what
+      // the user is reading. Per-project writes are `af config set --project`
+      // (config.write-project). "(unset)" is the pane's own convention for a
+      // value no source configured, kept distinct from a configured "".
+      row.append(
+        h(
+          "div",
+          { class: "af-config-control" },
+          h("span", { class: "af-config-value" }, e.value === "" ? "(unset)" : e.value),
+        ),
+      );
+      return row;
+    }
     row.append(this.renderControl(e));
 
     const status = this.status;
