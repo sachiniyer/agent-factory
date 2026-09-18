@@ -133,8 +133,31 @@ func (t *TmuxSession) Close() (PaneState, error) {
 // false for interactive teardown (the captured-tree reaper remains asynchronous)
 // and true only when a caller will mutate the worktree immediately afterward.
 func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProcessOutcome) {
+	// Every af-initiated teardown of a tracked session routes here, so marking
+	// before kill-session runs is what lets the status monitor tell "af asked"
+	// from "vanished on its own" (#4472). A capture already in flight during
+	// teardown then reads the mark on its error path. The mark lands on the
+	// CURRENT monitor — scoped to this session generation, so a same-object
+	// restart can neither inherit it nor wipe an old poll's attribution — and
+	// settles on return, which is what lets a later post-settle successful
+	// poll retire a mark whose teardown demonstrably did not take (Codex on
+	// #4473).
+	markedMon, probeAnswered := t.markTeardownInitiated()
+	defer t.settleTeardown(markedMon)
 	var errs []error
 	r := &closeRun{t: t}
+	if !probeAnswered {
+		// The mark's identity probe already spent a full tmuxCommandTimeout
+		// without an answer — the server is wedged, so list-panes and
+		// kill-session would each pay the same deadline for the same
+		// non-answer. Report the run unknown from the probe's own failure
+		// instead of stacking two more budgets onto a wedged Close (Codex on
+		// #4473). No mark was set: no kill-session was ever sent, so no af
+		// request exists to attribute a later vanish to.
+		r.unknown = true
+		errs = append(errs, fmt.Errorf("%w: session identity probe after %s", ErrTmuxTimeout, tmuxCommandTimeout))
+		return r.state(), errors.Join(errs...), closeProcessOutcome{}
+	}
 
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
@@ -169,6 +192,15 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 				leaked = nil
 			case exists:
 				errs = append(errs, errors.Join(fmt.Errorf("error killing tmux session: %w", err), ErrSessionStillAlive))
+				// tmux refused the teardown and answered that the session is live, so
+				// no af request describes it any more — provided the live session is
+				// the generation the monitor polls; a replacement behind the name
+				// does not discharge af's teardown of the bound one (Codex on
+				// #4473). Callers such as the account swap keep monitoring it, and
+				// a later vanish af never asked for must reach ERROR. The timed-out
+				// branches above leave the mark: af asked, and nothing answered
+				// that the request failed.
+				t.clearTeardownMarkForConfirmedGeneration()
 				// Idempotent teardown (#967): a kill-session that fails because the
 				// session is already gone has achieved Close's goal — a dead session is
 				// the desired end state. Only a session that survives the kill is a

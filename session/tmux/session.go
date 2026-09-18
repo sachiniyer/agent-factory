@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/cmd"
@@ -254,7 +255,14 @@ type TmuxSession struct {
 	// time so a stale latch cannot pass a recreated session.
 	// Guarded by provenMu.
 	closedConclusively bool
-	provenMu           sync.RWMutex
+	// The teardown mark lives on statusMonitor (io.go), not here: the fact a
+	// status poll needs is the teardown attribution of the session generation
+	// IT is polling, and a shared session-level flag lets a same-object
+	// restart rewrite that attribution out from under an in-flight poll of
+	// the old generation (Codex on #4473). Accessors below proxy the current
+	// monitor's mark for callers — and for the clear sites that fire on
+	// tmux's answered-live evidence.
+	provenMu sync.RWMutex
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.
@@ -486,8 +494,12 @@ func (t *TmuxSession) ClosedConclusivelyAndStillAbsent() bool {
 	switch {
 	case known && exists:
 		// The name is live again: the stored proof is superseded, not stale-
-		// but-still-usable. Drop it so no later consumer re-checks it.
+		// but-still-usable. Drop it so no later consumer re-checks it. The
+		// teardown mark retires only if the live session is the generation the
+		// monitor polls — a replacement behind the name is not the session af
+		// closed, and its mark still describes af's own teardown.
 		t.setClosedConclusively(false)
+		t.clearTeardownMarkForConfirmedGeneration()
 		return false
 	default:
 		return known && !exists
@@ -527,6 +539,66 @@ func (t *TmuxSession) setClosedConclusively(closed bool) {
 	t.provenMu.Lock()
 	t.closedConclusively = closed
 	t.provenMu.Unlock()
+}
+
+// teardownInitiated reports whether af itself asked for the teardown of the
+// session the CURRENT monitor is polling — the predicate the status monitor
+// uses to keep expected disappearances out of ERROR (#4472).
+//
+// Unexported: the production reader is HasUpdatedWithBaseline, which reads the
+// mark off its own snapshotted monitor rather than through this accessor, so
+// nothing outside the package needs it (#4473 review). It survives as the
+// package's read-side assertion helper.
+func (t *TmuxSession) teardownInitiated() bool {
+	t.monitorMu.Lock()
+	defer t.monitorMu.Unlock()
+	return t.monitor != nil && t.monitor.generation != nil && t.monitor.generation.teardownInitiated
+}
+
+// clearTeardownMarkForConfirmedGeneration retires the current monitor's
+// teardown mark at a call site that has already established the NAME is live
+// — close()'s survived-kill answer, Start's exists gate,
+// ClosedConclusivelyAndStillAbsent's re-probe. A live name is only proof that
+// the POLLED generation survived when the monitor is unbound (the pre-binding
+// name semantics) or when the session answering resolves to that same
+// generation: a bound monitor watching a replaced name must keep its mark, or
+// af's own teardown of the old generation reads as an unrequested vanish
+// (Codex on #4473). An unresolvable live session is not proof either way —
+// the mark stays.
+func (t *TmuxSession) clearTeardownMarkForConfirmedGeneration() {
+	// Establish whether anything needs clearing BEFORE asking tmux anything:
+	// a monitor with no marked generation owes no resolution, and running the
+	// display-message query unconditionally spends a bounded tmux call on
+	// every exists-gated Start while reaching test doubles that stub only
+	// RunFunc — which is how an already-exists Start panicked on a nil
+	// OutputFunc instead of returning ErrSessionNotStarted (Codex on #4473).
+	t.monitorMu.Lock()
+	mon := t.monitor
+	if mon == nil || mon.generation == nil || !mon.generation.teardownInitiated {
+		t.monitorMu.Unlock()
+		return
+	}
+	g := mon.generation
+	if g.sessionID == "" {
+		// An unbound monitor's mark is name-scoped, so the live-name answer
+		// the caller already established is the whole proof — there is no id
+		// to resolve and nothing to query.
+		g.teardownInitiated = false
+		g.teardownSettledAt = time.Time{}
+		t.monitorMu.Unlock()
+		return
+	}
+	t.monitorMu.Unlock()
+
+	live, _ := t.confirmedGeneration()
+
+	t.monitorMu.Lock()
+	defer t.monitorMu.Unlock()
+	if live == nil || !g.sameAs(live) {
+		return
+	}
+	g.teardownInitiated = false
+	g.teardownSettledAt = time.Time{}
 }
 
 // SanitizedName returns the sanitized tmux session name.

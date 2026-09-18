@@ -1,16 +1,14 @@
 package agentproto
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/redactx"
+)
 
 type accessTokenTextSpan struct {
 	start int
 	end   int
-}
-
-type percentDecodedByte struct {
-	value       byte
-	sourceStart int
-	sourceEnd   int
 }
 
 // redactAccessTokenRawQuery treats separators and escaping as query grammar,
@@ -45,8 +43,8 @@ func redactAccessTokenQueryPair(pair string) (string, bool) {
 	if keyEnd < 0 {
 		keyEnd = len(pair)
 	}
-	keyView, _ := fullyPercentDecodedView(pair[:keyEnd], true)
-	if strings.EqualFold(percentDecodedText(keyView), AccessTokenQueryParam) {
+	keyView, _ := redactx.PercentDecode(pair[:keyEnd], true)
+	if strings.EqualFold(keyView.Text, AccessTokenQueryParam) {
 		if equals < 0 {
 			return pair + "=" + accessTokenRedaction, true
 		}
@@ -60,12 +58,13 @@ func redactAccessTokenQueryPair(pair string) (string, bool) {
 }
 
 // redactPercentEncodedAccessTokenText fully decodes a parser-proven URI
-// component while retaining a byte map to the original representation. The
-// stable view covers nested percent encoding, while the decoder's reducing
-// stack keeps work bounded by the input length.
+// component while retaining a byte map to the original representation — the
+// shared nested decoder in redactx. Its stable view covers nested percent
+// encoding, while the decoder's reducing stack keeps work bounded by the
+// input length.
 func redactPercentEncodedAccessTokenText(raw string, plusAsSpace bool) (string, bool) {
-	view, _ := fullyPercentDecodedView(raw, plusAsSpace)
-	spans := accessTokenURIValueSpans(percentDecodedText(view))
+	view, _ := redactx.PercentDecode(raw, plusAsSpace)
+	spans := accessTokenURIValueSpans(view.Text)
 	if len(spans) == 0 {
 		return raw, false
 	}
@@ -79,84 +78,15 @@ func redactPercentEncodedAccessTokenText(raw string, plusAsSpace bool) (string, 
 	return replaceAccessTokenTextSpans(raw, sourceSpans), true
 }
 
-// fullyPercentDecodedView returns the stable decoded text and whether the raw
-// representation itself contained a malformed escape. A suffix-reducing stack
-// resolves escapes exposed by earlier decoding without rescanning the input, so
-// arbitrarily nested encoding still takes linear work. Malformed percent bytes
-// in the stable view are ordinary data at the proven outer URI layer.
-func fullyPercentDecodedView(raw string, plusAsSpace bool) ([]percentDecodedByte, bool) {
-	view := make([]percentDecodedByte, 0, len(raw))
-	malformedRaw := false
-	for i := 0; i < len(raw); i++ {
-		if raw[i] == '%' &&
-			(i+2 >= len(raw) || !isHex(raw[i+1]) || !isHex(raw[i+2])) {
-			malformedRaw = true
-		}
-		current := percentDecodedByte{
-			value:       raw[i],
-			sourceStart: i,
-			sourceEnd:   i + 1,
-		}
-		// '+' belongs only to the outer application/x-www-form-urlencoded
-		// grammar. A plus produced from %2B is decoded data, not syntax to
-		// reinterpret at the next nesting depth.
-		if plusAsSpace && current.value == '+' {
-			current.value = ' '
-		}
-		view = append(view, current)
-
-		for len(view) >= 3 {
-			start := len(view) - 3
-			if view[start].value != '%' {
-				break
-			}
-			high, highOK := hexValue(view[start+1].value)
-			low, lowOK := hexValue(view[start+2].value)
-			if !highOK || !lowOK {
-				break
-			}
-			decoded := percentDecodedByte{
-				value:       high<<4 | low,
-				sourceStart: view[start].sourceStart,
-				sourceEnd:   view[start+2].sourceEnd,
-			}
-			view = append(view[:start], decoded)
-		}
-	}
-	return view, malformedRaw
-}
-
-func isHex(char byte) bool {
-	_, ok := hexValue(char)
-	return ok
-}
-
-func hexValue(char byte) (byte, bool) {
-	switch {
-	case char >= '0' && char <= '9':
-		return char - '0', true
-	case char >= 'a' && char <= 'f':
-		return char - 'a' + 10, true
-	case char >= 'A' && char <= 'F':
-		return char - 'A' + 10, true
-	default:
-		return 0, false
-	}
-}
-
-func percentDecodedText(view []percentDecodedByte) string {
-	text := make([]byte, len(view))
-	for i := range view {
-		text[i] = view[i].value
-	}
-	return string(text)
-}
-
-func percentDecodedBoundary(view []percentDecodedByte, offset, rawLength int) int {
-	if offset >= len(view) {
+// percentDecodedBoundary projects a decoded-view offset to the raw coordinate
+// where that offset begins: the source start of the byte at offset, or the
+// raw length when the offset lands past the view's end — which is what lets a
+// value spanning to the decoded end claim the whole raw tail.
+func percentDecodedBoundary(view redactx.View, offset, rawLength int) int {
+	if offset >= len(view.Source) {
 		return rawLength
 	}
-	return view[offset].sourceStart
+	return view.Source[offset].Start
 }
 
 // accessTokenURIValueSpans consumes the rest of the parser-proven URI field.

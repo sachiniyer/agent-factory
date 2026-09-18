@@ -16,8 +16,8 @@ import (
 // restoreProcessTab reconnects a persisted process tab WITHOUT re-executing its
 // command (#4479): a process command runs once, at tab-create, so the
 // definitive-absence respawn every other tmux-backed kind relies on would
-// re-fire deploys and migrations on every af restart. Its three observable
-// states map to:
+// re-fire deploys and migrations on every af restart. Its observable states map
+// to:
 //
 //   - session live, command finished (a held dead pane): stamp Tab.Exit with
 //     the status/time the pane reported, then rebind so its retained output
@@ -27,14 +27,30 @@ import (
 //   - session definitively absent: the pane is gone entirely (tmux-server
 //     loss, or a stop). The tab is left inert — nothing respawns, and nothing
 //     is stamped, because absence is not evidence of how the command ended.
+//   - probe unanswered (a wedged has-session): neither of the above, and
+//     treated as neither. Absence is not proven, so the tab is not made inert
+//     and its scope flag stands. Liveness is not proven either, so the rebind
+//     claims no answer (the monitor keeps its outgoing generation, #4473), and
+//     the remain-on-exit heal and exit stamp wait for a restore that gets an
+//     answer — each is another tmux command that would pay the same deadline
+//     for the same non-answer.
 //
-// An unknown (wedged) probe reports "exists" and takes the live arm on
-// purpose: reattaching against a wedged server can fail but can never
-// re-execute the command, which is the only outcome this path must exclude.
-// All failures here are warnings — a process tab's failure mode is inert, and
-// aborting setupTabs over one would strand the tabs behind it for nothing.
+// This is a positive gate in ExistsOrUnknown's sense, so it takes the
+// tri-state probe (probeRestoredTabSession, ProbeSession in production) and
+// handles !known itself (#1917/#1962). No state re-executes the command,
+// which is the only outcome this path must exclude. All failures here are
+// warnings — a process tab's failure mode is inert, and aborting setupTabs over
+// one would strand the tabs behind it for nothing.
 func restoreProcessTab(i *Instance, tab *Tab, worktreePath string) {
-	if !tab.tmux.ExistsOrUnknown() {
+	exists, known := probeRestoredTabSession(tab.tmux)
+	if !known {
+		log.WarningLog.Printf("tmux did not answer for process tab %q of %q; rebinding without healing or stamping it", tab.Name, i.Title)
+		if err := tab.tmux.ReattachOnly(worktreePath, false); err != nil {
+			log.WarningLog.Printf("reattach process tab %q for %q failed: %v", tab.Name, i.Title, err)
+		}
+		return
+	}
+	if !exists {
 		// Definitive absence also resolves an unknown-scope flag: whatever the
 		// pane was running as, it is gone — whether the scope stop killed it or
 		// the tmux server lost it. Clearing keeps the next restore from
@@ -51,7 +67,7 @@ func restoreProcessTab(i *Instance, tab *Tab, worktreePath string) {
 	if tab.Exit == nil {
 		stampProcessTabExit(i, tab)
 	}
-	if err := tab.tmux.ReattachOnly(worktreePath); err != nil {
+	if err := tab.tmux.ReattachOnly(worktreePath, true); err != nil {
 		log.WarningLog.Printf("reattach process tab %q for %q failed: %v", tab.Name, i.Title, err)
 	}
 }

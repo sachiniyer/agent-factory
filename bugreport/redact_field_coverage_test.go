@@ -85,6 +85,10 @@ const guardContainerLen = 9 * guardUnitLen
 var verbatimInstanceFields = map[string]string{
 	"ID":     "minted instance id, never derived from user text",
 	"TaskID": "minted task id (#1892), never derived from user text",
+	// The durable on_complete obligation (#4162) records WHOSE teardown is
+	// owed — the same minted task id the TaskID row above already carries
+	// verbatim — and WHEN the obligation was filed; no user text reaches it.
+	"PendingOnComplete.TaskID": "minted task id (#1892), the same value TaskID above already carries verbatim",
 
 	"BackendType":  "bounded backend discriminator (\"local\", \"remote\", \"\")",
 	"CurrentAgent": "agent enum name (tmux.SupportedPrograms), not user text",
