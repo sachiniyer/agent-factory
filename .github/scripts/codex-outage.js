@@ -95,10 +95,15 @@ function aggregate(pulls, now = new Date().toISOString(), since = SCAN_SINCE, fr
     }
     // #3932's reconstruction: an observed limit before merge and no verdict
     // covering the merged head at that time. Late reviews cannot erase a merge.
-    if (attributed && !artifacts.some(a => {
-      const verdict = evidence.parseVerdictArtifact(a, pull.head.sha, artifacts, summaryCommitSince(pull, pull.head.sha, merged));
+    // "Covering" admits the same head names the gate accepted at merge time
+    // (#4238): the sweep stores updateBranchContentHead's proof on
+    // pull.contentHead, and evidenceHeadShasFor keeps this check and the gate's
+    // on one equivalence (#4241) — a second copy would drift again.
+    const covering = evidence.evidenceHeadShasFor(pull.head.sha, pull.contentHead);
+    if (attributed && !artifacts.some(a => covering.some(sha => {
+      const verdict = evidence.parseVerdictArtifact(a, sha, artifacts, summaryCommitSince(pull, sha, merged));
       return verdict && verdict.time <= merged;
-    })) attributed.merged.push(pull.number);
+    }))) attributed.merged.push(pull.number);
   }
   for (const episode of episodes) {
     episode.merged = [...new Set(episode.merged)].sort((a, b) => a - b);
@@ -142,6 +147,42 @@ async function readForcePushes(api, repo, number) {
   return pushes;
 }
 
+// The content-head proof the gate runs at merge time (#3803, #4238), resolved
+// for the head a merged PR carried. The sweep's `api` is a `gh api` route
+// helper, so an octokit-shaped adapter answers the three reads the proof makes
+// — commit, compare, recursive tree. A read that cannot be answered throws out
+// of retryRead and aborts the sweep rather than silently narrowing the
+// covering-head set to the merged head alone (#4241).
+async function readUpdateBranchContentHead(api, root, pull) {
+  const headSha = pull.head?.sha;
+  const baseRefName = pull.base?.ref;
+  if (!headSha || !baseRefName) return null;
+  const head = await api(`${root}/commits/${headSha}`, { singlePage: true });
+  if (!Array.isArray(head?.parents)) throw new Error(`Unreadable head commit: ${headSha}`);
+  const single = async (route) => ({ data: await api(`${root}/${route}`, { singlePage: true }) });
+  const github = {
+    rest: {
+      repos: {
+        getCommit: ({ ref }) => single(`commits/${ref}`),
+        compareCommitsWithBasehead: ({ basehead, per_page }) =>
+          single(`compare/${basehead}?per_page=${per_page || 100}`),
+      },
+      git: {
+        getTree: ({ tree_sha, recursive }) =>
+          single(`git/trees/${tree_sha}${recursive ? '?recursive=1' : ''}`),
+      },
+    },
+  };
+  const [owner, name] = root.split('/');
+  return require('./auto-gate.js').codexEvidence.updateBranchContentHead({
+    github,
+    context: { repo: { owner, repo: name } },
+    baseRefName,
+    headSha,
+    headParents: head.parents.map(parent => ({ oid: parent.sha })),
+  });
+}
+
 function render(episodes, now) {
   const active = episodes.at(-1);
   const heading = active && !active.end
@@ -149,7 +190,7 @@ function render(episodes, now) {
     : 'Codex reviewer availability — recovered';
   const lines = [`## ${heading}`, '', 'Owned by Master Health Watch. Policy and evidence: #3932.',
     `Last sweep: ${now}. History scanned since ${SCAN_SINCE}.`,
-    'Degraded merges are reconstructed from pre-merge reviewer-unavailable notices and absence of a verdict covering the merged head (the #3932 method).', ''];
+    'Degraded merges are reconstructed from pre-merge reviewer-unavailable notices and absence of a verdict covering the merged head — where coverage admits the content head the gate\'s update-branch proof verifies, the same head set the gate accepts (the #3932 method, #4238\'s equivalence).', ''];
   for (const episode of [...episodes].reverse()) {
     lines.push(`### Unavailable since ${episode.start}`, `${hours(episode.start, episode.end || now)}h elapsed.`,
       `Observed causes: ${(episode.causes || []).map(causeLabel).join(', ') || 'not recorded'}.`,
@@ -247,7 +288,13 @@ async function sweep(api, repo, now = new Date().toISOString()) {
         if (!Number.isFinite(time(commitDates[commit.sha || sha]))) throw new Error(`Unreadable commit date: ${sha}`);
       }
       const headForcePushes = commits.size ? await readForcePushes(api, repo, pull.number) : [];
-      pulls.push({ ...pull, artifacts, commitDates, headForcePushes });
+      // Only a merged head can be counted, and only a proven update-branch
+      // merge has a content head — the same proof the gate ran (#4238), so a
+      // verdict bound to it covers the merge here exactly as it did there.
+      const contentHead = Number.isFinite(time(pull.merged_at))
+        ? await readUpdateBranchContentHead(api, root, pull)
+        : null;
+      pulls.push({ ...pull, artifacts, commitDates, headForcePushes, contentHead });
     }
     if (batch.length < 100 || time(batch.at(-1).updated_at) < time(since)) break;
   }
