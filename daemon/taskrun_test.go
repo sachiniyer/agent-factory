@@ -140,20 +140,20 @@ func stubTaskDelivery(t *testing.T) (*[]CreateSessionRequest, *[]DeliverPromptRe
 		}
 		return &session.InstanceData{Title: title}, nil
 	}
-	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
+	deliverPromptForTask = func(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
 		delivers = append(delivers, req)
 		repo, err := config.RepoFromPath(req.RepoPath)
 		if err != nil {
-			return "", err
+			return taskPromptDeliveryResult{}, err
 		}
 		exists, err := repoHasSessionTitle(repo.ID, req.Title)
 		if err != nil {
-			return "", err
+			return taskPromptDeliveryResult{}, err
 		}
 		if exists {
-			return "sent", nil
+			return taskPromptDeliveryResult{status: "sent"}, nil
 		}
-		return "started", nil
+		return taskPromptDeliveryResult{status: "started"}, nil
 	}
 	t.Cleanup(func() {
 		createSessionForTask = origCreate
