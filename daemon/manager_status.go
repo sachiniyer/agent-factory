@@ -336,6 +336,8 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 		m.clearRemoteLoss(key)
 		return
 	}
+	releaseObservationSettlement := instance.HoldAgentObservationSettlement()
+	defer releaseObservationSettlement()
 	obs, _, _, observedOp, epoch, err := instance.SnapshotAgent()
 	// Whatever happened, no loss episode survives an attach (see above).
 	m.clearRemoteLoss(key)
@@ -560,6 +562,8 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// observation lock. It retries transport I/O retired before return; the
 	// generation below fences daemon-owned side effects if replacement lands after
 	// that final transport check, while the epoch fences Instance mutations.
+	releaseObservationSettlement := instance.HoldAgentObservationSettlement()
+	defer releaseObservationSettlement()
 	obs, as, observationGeneration, observedOp, epoch, err := instance.SnapshotAgent()
 	if observedOp != session.OpNone {
 		m.clearRemoteLoss(key)
