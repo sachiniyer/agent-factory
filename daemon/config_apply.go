@@ -16,10 +16,10 @@ import (
 // swap and observe two config generations, producing an inconsistent result (a
 // branch derived from one generation, a worktree path from the next). The frozen
 // startup config m.cfg is deliberately separate — it backs only the keys that do
-// NOT hot-reload: root_agents/root_agent and branch_prefix (title-reservation
-// helpers). The network listener keys used to read m.cfg too; #2480 PR2 made them
-// applied-live (livePosture per request; network.listen_addr/network.preview_listen_addr rebind in
-// place), so they no longer do.
+// NOT hot-reload: root_agents/root_agent. The network listener keys used to read
+// m.cfg too, until #2480 PR2 made them applied-live (livePosture per request;
+// network.listen_addr/network.preview_listen_addr rebind in place), and so did
+// branch_prefix until #4539 resolved it once per create from this snapshot.
 func (m *Manager) Config() *config.Config {
 	if c := m.live.Load(); c != nil {
 		return c
@@ -39,11 +39,10 @@ type ApplyConfigResult struct {
 	Applied []string
 	// Pending names changed keys this daemon build reads only at startup, so they
 	// take effect on the next daemon start: root_agents / root_agent (their
-	// next-daemon-start contract, carved out pending #2216) and branch_prefix (read
-	// from the FROZEN startup config in the title-reservation helpers). Save
-	// surfaces append the root-only half of that contract: an already-running root
-	// is adopted as-is, so changing its program, disabling it, or removing its
-	// enabling entry also requires killing it.
+	// next-daemon-start contract, carved out pending #2216), the watcher cap, and
+	// debug_pprof. Save surfaces append the root-only half of that contract: an
+	// already-running root is adopted as-is, so changing its program, disabling
+	// it, or removing its enabling entry also requires killing it.
 	Pending []string
 	// Warnings are operator/user-facing notices produced while applying (#2480 PR2):
 	// the tokenless-network exposure notice (#2168 — warn, never refuse) and a
@@ -101,6 +100,9 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"docker.mount_agent_credentials": func(a, b *config.Config) bool { return a.DockerMountAgentCredentials != b.DockerMountAgentCredentials },
 	"ssh.host_key_verification":      func(a, b *config.Config) bool { return a.SSHHostKeyVerification != b.SSHHostKeyVerification },
 	"sandbox.ssh":                    func(a, b *config.Config) bool { return a.SandboxSSH != b.SandboxSSH },
+	// branch_prefix: each create resolves it from Config() plus the project's
+	// override (branchNamingForCreate), so the swap below reaches the next create.
+	"branch_prefix": func(a, b *config.Config) bool { return a.BranchPrefix != b.BranchPrefix },
 	// Network listener keys — applied-live since #2480 PR2: the auth/CORS keys are
 	// read per request (livePosture); network.listen_addr / network.preview_listen_addr rebind the
 	// socket in place (webListeners.reconcile, below in ApplyConfig).
@@ -110,9 +112,8 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"network.require_loopback_token": func(a, b *config.Config) bool { return a.RequireLoopbackToken != b.RequireLoopbackToken },
 	"network.cors_allowed_origins":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.CORSAllowedOrigins, b.CORSAllowedOrigins) },
 	// EffectNextDaemonStart keys — read once at startup.
-	"root_agents":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgents, b.RootAgents) },
-	"root_agent":    func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgent, b.RootAgent) },
-	"branch_prefix": func(a, b *config.Config) bool { return a.BranchPrefix != b.BranchPrefix },
+	"root_agents": func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgents, b.RootAgents) },
+	"root_agent":  func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgent, b.RootAgent) },
 	// debug_pprof: the pprof mount is decided when startHTTPServer builds the unix
 	// listener's handler, so a change is reported pending rather than applied.
 	"debug_pprof": func(a, b *config.Config) bool { return a.DebugPprof != b.DebugPprof },
@@ -177,10 +178,8 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	sort.Strings(result.Pending)
 
 	// Swap the live config: per-op keys (default_program, session_env_passthrough,
-	// limit_auto_resume, limit_retry_interval, …) read it at their next op entry.
-	// branch_prefix rides along in the swapped config, but its runtime consumers
-	// read frozen m.cfg so an unrelated apply cannot advance that generation behind
-	// the next-start notice.
+	// branch_prefix, limit_auto_resume, limit_retry_interval, …) read it at their
+	// next op entry.
 	m.applyLiveConfigAndInvalidateRootProgramDrift(newCfg)
 
 	// limit_patterns snapshots at construction, so the swap alone would be a silent

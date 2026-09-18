@@ -14,11 +14,11 @@ import (
 // `af config set --project <key>` prints for a project-overridable key whose
 // project override is re-read per relevant operation. Such a key is
 // EffectAppliedLive: the daemon resolves it from disk on each session create
-// (default_program / program_overrides / default_accounts via
-// config.ResolveConfigForRepo) or on each archive (on_archive_command), so the
-// change reaches the very next operation with NO restart. The honest notice
-// therefore names the key's actual effect surface instead of telling the
-// operator to restart af and the daemon.
+// (default_program / program_overrides / default_accounts / branch_prefix, the
+// last since #4539) or on each archive (on_archive_command), so the change
+// reaches the very next operation with NO restart. The honest notice therefore
+// names the key's actual effect surface instead of telling the operator to
+// restart af and the daemon.
 //
 // Each applied-live row asserts two clauses:
 //  1. stdout does NOT contain the restart sentence ("restart them to apply") —
@@ -29,10 +29,9 @@ import (
 //     fix that silently drops the notice AND a fix that uses session-scoped
 //     wording for the per-archive key.
 //
-// The keep_restart subtable pins the opposite partition — root_agent.program and
-// branch_prefix are EffectNextDaemonStart, so they MUST still print the restart
-// notice — so a fix that over-corrects by dropping the notice for a restart-needed
-// key fails.
+// The keep_restart subtable pins the opposite partition — root_agent.program is
+// EffectNextDaemonStart, so it MUST still print the restart notice — so a fix
+// that over-corrects by dropping the notice for a restart-needed key fails.
 func TestProjectSetAppliedLiveKeyNoticeIsNotRestart(t *testing.T) {
 	appliedLive := []struct {
 		name       string
@@ -43,6 +42,7 @@ func TestProjectSetAppliedLiveKeyNoticeIsNotRestart(t *testing.T) {
 		{"default_program", "default_program", "codex", "session"},
 		{"program_overrides.claude", "program_overrides.claude", "claude", "session"},
 		{"default_accounts.codex", "default_accounts.codex", "work", "session"},
+		{"branch_prefix", "branch_prefix", "af-", "sessions created in this project"},
 		{"on_archive_command", "on_archive_command", "echo done", "archive"},
 	}
 	for _, c := range appliedLive {
@@ -67,7 +67,6 @@ func TestProjectSetAppliedLiveKeyNoticeIsNotRestart(t *testing.T) {
 			name, key, value string
 		}{
 			{"root_agent.program", "root_agent.program", "claude"},
-			{"branch_prefix", "branch_prefix", "af-"},
 		}
 		for _, c := range restartNeeded {
 			t.Run(c.name, func(t *testing.T) {

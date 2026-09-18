@@ -204,11 +204,11 @@ func TestServerConfigSaveKeepsADeferredKeysPromiseThroughAMismatch(t *testing.T)
 		}
 	}()
 	go func() {
-		done <- server.SetConfigValue(SetConfigValueRequest{Key: "branch_prefix", Value: "mine/"}, &resp)
+		done <- server.SetConfigValue(SetConfigValueRequest{Key: "debug_pprof", Value: "true"}, &resp)
 	}()
 	require.Eventually(t, func() bool {
 		data, readErr := os.ReadFile(path)
-		return readErr == nil && strings.Contains(string(data), "mine/")
+		return readErr == nil && strings.Contains(string(data), "debug_pprof")
 	}, 5*time.Second, time.Millisecond, "the save must reach disk before the competing write")
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -262,7 +262,7 @@ func TestClientFallbackAppliesTheDigestSkewRule(t *testing.T) {
 		configClientHome(t)
 		serveControlStub(t, &applyOnlyControl{})
 
-		resp, err := SetGlobalConfigValue("branch_prefix", "mine/")
+		resp, err := SetGlobalConfigValue("debug_pprof", "true")
 		require.NoError(t, err)
 		require.Equal(t, config.ApplyStatusDeferred, resp.ApplyOutcome)
 		require.Contains(t, resp.RestartNotice, "takes effect on the next daemon start")

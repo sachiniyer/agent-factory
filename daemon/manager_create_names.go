@@ -58,12 +58,57 @@ const (
 	titleNamespaceTmux
 )
 
+// branchNaming is the branch_prefix ONE create resolved for its project (#4539).
+// Every title rule that derives a branch takes it as a value instead of reading
+// config itself, and the create hands the same value to NewInstance. That
+// keeps the collision check and `git worktree add` on one read, so they cannot
+// name different branches.
+type branchNaming struct {
+	prefix string
+}
+
+// branchFor derives the branch a session titled title gets under this prefix.
+func (n branchNaming) branchFor(title string) string {
+	return git.BranchForTitle(n.prefix, title)
+}
+
+// collide reports whether two titles cannot coexist in one repo because they
+// derive the same branch. It delegates to git.TitlesCollide so the daemon's
+// authoritative validation and the TUI's naming pre-check stay in lockstep (#936).
+func (n branchNaming) collide(a, b string) bool {
+	return git.TitlesCollide(a, b, n.prefix)
+}
+
+// branchNamingForCreate resolves the branch_prefix a create in repo uses: the
+// project's personal override when it sets one, otherwise the global value in cfg,
+// the create's op-entry snapshot (#2480). The override file is read on every call.
+// A saved change, global or per project, therefore names the next session's
+// branch without a daemon restart.
+//
+// Call it once per create, before the manager lock (#2931): it reads the project
+// registry and the override file.
+//
+// If resolution fails, the create falls back to cfg's global prefix and logs a
+// warning, like every other create-time per-project read (defaultProgramFor, the
+// backend kind, the post-worktree hooks). The resolver also fails on an invalid
+// checked-in config, which cannot even set this key, and refusing the create
+// there would block a project that creates sessions today.
+func (m *Manager) branchNamingForCreate(cfg *config.Config, repo *config.RepoContext) branchNaming {
+	resolved, err := config.ResolveConfigForRepoInspectionWithGlobal(repo, cfg)
+	if err != nil {
+		m.warn().Printf("could not resolve branch_prefix for %s, so this session's branch uses the global prefix %q: %v",
+			repo.WorkspacePath(), cfg.BranchPrefix, err)
+		return branchNaming{prefix: cfg.BranchPrefix}
+	}
+	return branchNaming{prefix: resolved.BranchPrefix}
+}
+
 // titleCollisionNamespace asks every name encoder a pair of local sessions will
 // actually claim. Git and tmux intentionally have different grammars, so either
 // one may collide while the other does not. The tmux half is enabled only when
 // both records use the host-local runtime.
-func (m *Manager) titleCollisionNamespace(repoPath, a, b string, bothUseLocalTmux bool) titleNamespace {
-	if m.titlesCollide(a, b) {
+func (m *Manager) titleCollisionNamespace(naming branchNaming, repoPath, a, b string, bothUseLocalTmux bool) titleNamespace {
+	if naming.collide(a, b) {
 		return titleNamespaceBranch
 	}
 	if bothUseLocalTmux && tmux.SanitizedNameForRepo(a, repoPath) == tmux.SanitizedNameForRepo(b, repoPath) {
@@ -77,10 +122,10 @@ func (m *Manager) titleCollisionNamespace(repoPath, a, b string, bothUseLocalTmu
 // result means the title is available. Local sessions claim both a git branch and
 // a tmux session name; admission rejects either collision before creating a
 // worktree or launching a runtime.
-func (m *Manager) findTitleConflictLocked(repoID, repoPath, title string, localTmux bool, diskData []session.InstanceData) (string, titleConflictKind, titleNamespace) {
+func (m *Manager) findTitleConflictLocked(naming branchNaming, repoID, repoPath, title string, localTmux bool, diskData []session.InstanceData) (string, titleConflictKind, titleNamespace) {
 	for key := range m.reservedTitles {
 		rid, existing := splitDaemonInstanceKey(key)
-		if rid == repoID && m.titlesCollide(existing, title) {
+		if rid == repoID && naming.collide(existing, title) {
 			return existing, titleConflictReserved, titleNamespaceBranch
 		}
 	}
@@ -96,13 +141,13 @@ func (m *Manager) findTitleConflictLocked(repoID, repoPath, title string, localT
 			continue
 		}
 		bothUseLocalTmux := localTmux && inst.Capabilities().Workspace == session.WorkspaceLocalWorktree
-		if namespace := m.titleCollisionNamespace(repoPath, inst.Title, title, bothUseLocalTmux); namespace != titleNamespaceNone {
+		if namespace := m.titleCollisionNamespace(naming, repoPath, inst.Title, title, bothUseLocalTmux); namespace != titleNamespaceNone {
 			return inst.Title, titleConflictLive, namespace
 		}
 	}
 	for _, data := range diskData {
 		bothUseLocalTmux := localTmux && data.UsesLocalTmux()
-		namespace := m.titleCollisionNamespace(repoPath, data.Title, title, bothUseLocalTmux)
+		namespace := m.titleCollisionNamespace(naming, repoPath, data.Title, title, bothUseLocalTmux)
 		if namespace == titleNamespaceNone {
 			continue
 		}
@@ -119,14 +164,6 @@ func (m *Manager) findTitleConflictLocked(repoID, repoPath, title string, localT
 	return "", titleConflictNone, titleNamespaceNone
 }
 
-// titlesCollide reports whether two session titles cannot coexist in the same
-// repo because they would derive the same git branch. It delegates to the shared
-// git.TitlesCollide helper so the daemon's authoritative validation and the
-// TUI's naming pre-check stay in lockstep (#936).
-func (m *Manager) titlesCollide(a, b string) bool {
-	return git.TitlesCollide(a, b, m.cfg.BranchPrefix)
-}
-
 // validateTitleAvailableLocked refuses a title the create cannot have. It is
 // composed of three groups, kept in this order because their error precedence is
 // observable: the title's own SHAPE, then a collision with an af record, then the
@@ -138,7 +175,7 @@ func (m *Manager) titlesCollide(a, b string) bool {
 // anything (#2415). Any new check belongs in one of the two halves rather than
 // inline here, so the pre-rename path picks it up automatically — a check added
 // only to this function is exactly how #2415 happened.
-func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool, remedyPath ...string) error {
+func (m *Manager) validateTitleAvailableLocked(naming branchNaming, repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, inPlace bool, remedyPath ...string) error {
 	refusalPath := repoPath
 	if len(remedyPath) > 0 {
 		refusalPath = remedyPath[0]
@@ -146,7 +183,7 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 	if err := m.validateTitleShapeLocked(refusalPath, title, namespace, allowReserved); err != nil {
 		return err
 	}
-	if err := m.findTitleRecordConflictLocked(repoID, repoPath, title, namespace, diskData); err != nil {
+	if err := m.findTitleRecordConflictLocked(naming, repoID, repoPath, title, namespace, diskData); err != nil {
 		return err
 	}
 	return m.validateTitleNamespacesLocked(repoID, repoPath, title, program, namespace, diskData, nil, inPlace)
@@ -225,14 +262,14 @@ func (m *Manager) validateTitleShapeLocked(repoPath, title string, namespace run
 // a reservation, a loaded instance, or a durable row. This is the ONE group the
 // archived-name-reuse rename clears, which is why it is not part of
 // validateTitleClaimableLocked.
-func (m *Manager) findTitleRecordConflictLocked(repoID, repoPath, title string, namespace runtimeNameNamespace, diskData []session.InstanceData) error {
+func (m *Manager) findTitleRecordConflictLocked(naming branchNaming, repoID, repoPath, title string, namespace runtimeNameNamespace, diskData []session.InstanceData) error {
 	// Titles are sanitized into git branch names (git.SanitizeBranchName
 	// lowercases, turns spaces into dashes, strips unsafe chars, and collapses
 	// dashes), so distinct titles can map to the same branch: "MyApp"/"myapp"
 	// (#605) or "A B"/"a-b" (#741) both collide. The second worktree create
 	// would otherwise fail with a cryptic git error, so reject the conflict
 	// here, before any worktree or tmux setup runs.
-	if existing, kind, collisionNamespace := m.findTitleConflictLocked(repoID, repoPath, title, namespace == runtimeNamespaceLocalTmux, diskData); existing != "" {
+	if existing, kind, collisionNamespace := m.findTitleConflictLocked(naming, repoID, repoPath, title, namespace == runtimeNamespaceLocalTmux, diskData); existing != "" {
 		switch {
 		case existing == title:
 			if kind == titleConflictReserved {
@@ -242,7 +279,7 @@ func (m *Manager) findTitleRecordConflictLocked(repoID, repoPath, title string, 
 		case collisionNamespace == titleNamespaceTmux:
 			return fmt.Errorf("session titled %q conflicts with existing session %q: both map to tmux session %q", title, existing, tmux.SanitizedNameForRepo(title, repoPath))
 		default:
-			return fmt.Errorf("session titled %q conflicts with existing session %q: both sanitize to the same git branch %q", title, existing, m.branchForTitle(title))
+			return fmt.Errorf("session titled %q conflicts with existing session %q: both sanitize to the same git branch %q", title, existing, naming.branchFor(title))
 		}
 	}
 	return nil

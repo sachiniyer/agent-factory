@@ -29,7 +29,15 @@ func TestEffectNoticeIsPerKeyAndHonest(t *testing.T) {
 		t.Errorf("applied-live notice should say it is live now, got %q", applied)
 	}
 
-	pending := EffectNotice("branch_prefix", ApplyOutcome{DaemonApply: DaemonApplyApplied})
+	// branch_prefix was this row's key until #4539 made each create resolve it
+	// from the live snapshot plus the project's override. It is live now, like
+	// the other keys the next session create reads.
+	prefix := EffectNotice("branch_prefix", ApplyOutcome{DaemonApply: DaemonApplyApplied})
+	if !strings.Contains(prefix, "using the new value now") {
+		t.Errorf("branch_prefix is read per create, so its notice should say it is live now, got %q", prefix)
+	}
+
+	pending := EffectNotice("debug_pprof", ApplyOutcome{DaemonApply: DaemonApplyApplied})
 	if !strings.Contains(pending, "next daemon start") {
 		t.Errorf("next-daemon-start notice should defer to the next daemon start, got %q", pending)
 	}
@@ -274,9 +282,12 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			want: ApplyStatusApplied,
 		},
 		{
+			// debug_pprof, not branch_prefix: #4539 made each create resolve
+			// branch_prefix, so it is EffectAppliedLive and no longer an exemplar
+			// of a key a successful apply still defers.
 			name:    "next daemon start",
 			outcome: ApplyOutcome{DaemonApply: DaemonApplyApplied},
-			key:     "branch_prefix",
+			key:     "debug_pprof",
 			want:    ApplyStatusDeferred,
 		},
 		{
@@ -338,7 +349,7 @@ func TestApplyOutcomeStatusForKey(t *testing.T) {
 			outcome: ApplyOutcome{
 				DaemonApply: DaemonApplyUnconfirmed,
 			},
-			key:  "branch_prefix",
+			key:  "debug_pprof",
 			want: ApplyStatusDeferred,
 		},
 		{

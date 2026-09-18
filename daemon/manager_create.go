@@ -51,9 +51,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// session_env_passthrough, and every other per-op key read THIS generation, so
 	// a config save that races the create can never pair one key's old value with
 	// another key's new value. A per-use m.Config() inside the create is exactly the
-	// torn read the op-entry rule prevents. (branch_prefix is a NAMED EXCEPTION — it
-	// still reads the frozen m.cfg across the title-reservation helpers; making it
-	// hot-reloadable is a fast-follow, so ApplyConfig reports it pending.)
+	// torn read the op-entry rule prevents. branch_prefix is resolved from this
+	// snapshot plus the project's override, once, inside admission (#4539).
 	cfg := m.Config()
 
 	if req.Program == "" {
@@ -76,11 +75,12 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return session.InstanceData{}, err
 	}
 	reservationBoundaryDelegated = true
-	repo, title, release, renamedArchived, err := m.reserveCreateForSession(req)
+	reservation, err := m.reserveCreateForSession(req, cfg)
 	if err != nil {
 		return session.InstanceData{}, err
 	}
-	defer release()
+	defer reservation.release()
+	repo, title, renamedArchived := reservation.repo, reservation.title, reservation.renamedArchived
 	workspace := repo.WorkspacePath()
 
 	// reserveCreate may have renamed a colliding archived session to free this
@@ -146,10 +146,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	repoStartLock := m.startLockForRepo(repo.ID)
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
-	// branch_prefix is EffectNextDaemonStart. Pass the same frozen snapshot
-	// used by the collision check; letting worktree creation reload the saved
-	// value here makes the guard and mutation name different branches.
-	frozenBranchPrefix := m.cfg.BranchPrefix
+	// The worktree takes the branch_prefix admission checked the title against.
+	// Letting worktree creation read the saved value again here would let the
+	// guard and the mutation name different branches (#4539).
+	branchPrefix := reservation.naming.prefix
 
 	// Session environment grants are security-sensitive. They come from the single
 	// op-entry config snapshot (cfg) taken at the top of this create (#2480), so a
@@ -173,7 +173,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		ResumeConversation:             req.resumeConversation,
 		RestoreTabs:                    req.restoreTabs,
 		PendingRecreateNotice:          req.pendingRecreateNotice,
-		BranchPrefix:                   &frozenBranchPrefix,
+		BranchPrefix:                   &branchPrefix,
 		ProvisionSessionEnvPassthrough: append([]string(nil), cfg.SessionEnvPassthrough...),
 		// Mints and revokes this session's credential, driven by the RUNTIME's
 		// lifetime rather than by this call site (#3068): the session runtime mints
@@ -579,7 +579,7 @@ func describeLegacyTasks(tasks []task.Task) string {
 // without a task file on disk. Production never reassigns it.
 var loadTasksForLegacyScan = task.LoadTasks
 
-func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, holdWorktreeAdmission bool) (_ *config.RepoContext, _ string, _ func(), _ *session.InstanceData, retErr error) {
+func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, cfg *config.Config, holdWorktreeAdmission bool) (_ createReservation, retErr error) {
 	reservationCommitted := false
 	defer func() {
 		if !reservationCommitted {
@@ -588,7 +588,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	}()
 
 	if req.RepoPath == "" {
-		return nil, "", nil, nil, fmt.Errorf("repo path is required")
+		return createReservation{}, fmt.Errorf("repo path is required")
 	}
 
 	// Sample the fence-transition counter BEFORE resolving the repo, because
@@ -607,14 +607,14 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 
 	repo, err := repoFromPathForCreate(req.RepoPath)
 	if err != nil {
-		return nil, "", nil, nil, err
+		return createReservation{}, err
 	}
 	warnLegacyBareCloneSessions(repo)
 	warnLegacyBareCloneTasks(repo)
 	workspace := repo.WorkspacePath()
 	identityRoot := repo.IdentityPath()
 	if req.TaskRepoID != "" && req.TaskRepoID != repo.ID {
-		return nil, "", nil, nil, fmt.Errorf("task is bound to repo %s, but project path %q now resolves to repo %s; session was not created and prompt not delivered — rebind the task to use this project", req.TaskRepoID, req.RepoPath, repo.ID)
+		return createReservation{}, fmt.Errorf("task is bound to repo %s, but project path %q now resolves to repo %s; session was not created and prompt not delivered — rebind the task to use this project", req.TaskRepoID, req.RepoPath, repo.ID)
 	}
 
 	// Resolve the runtime BEFORE taking the manager lock (#2931).
@@ -661,7 +661,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	// an ordinary create after a completed delete, not a race.
 	deleteActive, deleteMoved := m.projectDeleteStateFor(repo.ID, deleteSeq)
 	if deleteActive || deleteMoved {
-		return nil, "", nil, nil, projectDeleteRefusal(repo.ID, deleteActive)
+		return createReservation{}, projectDeleteRefusal(repo.ID, deleteActive)
 	}
 
 	// Same reasoning for the task-run cap, which the hoist also moved behind the
@@ -678,7 +678,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	// retry — the same tradeoff releaseTaskRunLocked already documents for its
 	// momentary over-count, and the opposite of admitting one too many.
 	if err := m.admitTaskRunFast(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
-		return nil, "", nil, nil, err
+		return createReservation{}, err
 	}
 
 	runtimeKind := session.BackendLocal
@@ -703,6 +703,10 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	// rename and behind the project-delete fence, exactly where it was.
 	inPlaceConflict := session.InPlaceBackendConflict(backendOpts, workspace)
 	nameNamespace := runtimeNamespaceForKind(runtimeKind)
+	// The ONE branch_prefix read for this create (#4539), resolved outside the
+	// manager lock like the backend above. Every title rule below and the worktree
+	// CreateSession builds use this value.
+	naming := m.branchNamingForCreate(cfg, repo)
 
 	// Keep the create's final branch/path observation reserved until its live row
 	// is published. Without this lock, two --here creates can both observe no
@@ -716,7 +720,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 		// create in the repository and a timeout leaves no mutation to undo.
 		lock, waited, acquired := m.lockWorktreeAdmissionWithin(repo.ID)
 		if !acquired {
-			return nil, "", nil, nil, fmt.Errorf(
+			return createReservation{}, fmt.Errorf(
 				"cannot create session: timed out after %s waiting for another worktree operation in this repository; retry after that operation finishes",
 				waited,
 			)
@@ -737,15 +741,15 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	// pre-resolver check could not see.
 	_, deleting := m.projectDeletes[repo.ID]
 	if deleting || m.projectDeleteMovedLocked(repo.ID, deleteSeq) {
-		return nil, "", nil, nil, projectDeleteRefusal(repo.ID, deleting)
+		return createReservation{}, projectDeleteRefusal(repo.ID, deleting)
 	}
 	if err := m.refreshLocked(); err != nil {
-		return nil, "", nil, nil, err
+		return createReservation{}, err
 	}
 
 	diskData, err := loadRepoInstanceData(repo.ID)
 	if err != nil {
-		return nil, "", nil, nil, err
+		return createReservation{}, err
 	}
 
 	// Admission control for a task's session-per-event deliveries (#1892), read-
@@ -759,7 +763,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	// the gap. On refusal the watch-task delivery path parks the event on the
 	// durable queue and retries when a slot frees, so nothing is dropped by the cap.
 	if err := m.admitTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
-		return nil, "", nil, nil, err
+		return createReservation{}, err
 	}
 
 	// An in-place session and an off-box runtime are contradictory, and
@@ -780,7 +784,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	// — including on the deliberate non-firing for a backend value that will not
 	// resolve, which belongs to the factory's canonical error.
 	if inPlaceConflict != nil {
-		return nil, "", nil, nil, inPlaceConflict
+		return createReservation{}, inPlaceConflict
 	}
 
 	var renamedArchived *session.InstanceData
@@ -788,18 +792,18 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	if title == "" {
 		base := req.TitleBase
 		if base == "" {
-			return nil, "", nil, nil, fmt.Errorf("session title is required")
+			return createReservation{}, fmt.Errorf("session title is required")
 		}
 		// A derived title_base keeps auto-suffixing around every existing session,
 		// archived rows included — the archived-name-reuse rename is reserved for an
 		// EXPLICIT title the caller asked for by name (below).
-		title, err = m.nextAvailableTitleLocked(repo.ID, identityRoot, base, req.Program, nameNamespace, diskData, req.InPlace)
+		title, err = m.nextAvailableTitleLocked(naming, repo.ID, identityRoot, base, req.Program, nameNamespace, diskData, req.InPlace)
 		if err != nil {
-			return nil, "", nil, nil, err
+			return createReservation{}, err
 		}
 		if req.InPlace {
-			if err := m.refuseLiveHeldBranchLocked(identityRoot, workspace, title, nameNamespace, true, diskData); err != nil {
-				return nil, "", nil, nil, err
+			if err := m.refuseLiveHeldBranchLocked(naming, identityRoot, workspace, title, nameNamespace, true, diskData); err != nil {
+				return createReservation{}, err
 			}
 		}
 	} else {
@@ -812,8 +816,8 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 		// race is both a title conflict and the live holder of the branch it just
 		// created. The title conflict is the useful, established diagnosis; the
 		// worktree refusal is reserved for a genuinely different live lane.
-		if err := m.refuseNonReusableTitleConflictLocked(repo.ID, identityRoot, title, nameNamespace, diskData); err != nil {
-			return nil, "", nil, nil, err
+		if err := m.refuseNonReusableTitleConflictLocked(naming, repo.ID, identityRoot, title, nameNamespace, diskData); err != nil {
+			return createReservation{}, err
 		}
 		//
 		// Ahead of that rename, refuse when the branch this create would derive is
@@ -822,11 +826,11 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 		// discovering it at `git worktree add` leaves the archived session renamed
 		// for a create that then did not happen, which is exactly the state the
 		// admission comment above promises this function never produces.
-		if err := m.refuseLiveHeldBranchLocked(identityRoot, workspace, title, nameNamespace, req.InPlace, diskData); err != nil {
-			return nil, "", nil, nil, err
+		if err := m.refuseLiveHeldBranchLocked(naming, identityRoot, workspace, title, nameNamespace, req.InPlace, diskData); err != nil {
+			return createReservation{}, err
 		}
-		if err := m.refuseHeldBranchReuseLocked(repo.ID, identityRoot, title, nameNamespace, req.InPlace, diskData); err != nil {
-			return nil, "", nil, nil, err
+		if err := m.refuseHeldBranchReuseLocked(naming, repo.ID, identityRoot, title, nameNamespace, req.InPlace, diskData); err != nil {
+			return createReservation{}, err
 		}
 		// And refuse for every other reason the rename cannot clear, still ahead
 		// of it (#2415). Freeing the title does not free an orphan tmux session of
@@ -836,15 +840,15 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 		// durable record, leaving exactly the state this function promises never to
 		// produce. Asking the record-independent half first turns those into
 		// side-effect-free refusals.
-		if err := m.refuseUnclaimableTitleReuseLocked(repo.ID, identityRoot, title, req.Program, nameNamespace, req.allowReserved, diskData, req.InPlace, workspace); err != nil {
-			return nil, "", nil, nil, err
+		if err := m.refuseUnclaimableTitleReuseLocked(naming, repo.ID, identityRoot, title, req.Program, nameNamespace, req.allowReserved, diskData, req.InPlace, workspace); err != nil {
+			return createReservation{}, err
 		}
-		renamedArchived, err = m.renameArchivedForReuseLocked(repo.ID, identityRoot, title, req.Program, nameNamespace, &diskData)
+		renamedArchived, err = m.renameArchivedForReuseLocked(naming, repo.ID, identityRoot, title, req.Program, nameNamespace, &diskData)
 		if err != nil {
-			return nil, "", nil, nil, err
+			return createReservation{}, err
 		}
-		if err := m.validateTitleAvailableLocked(repo.ID, identityRoot, title, req.Program, nameNamespace, req.allowReserved, diskData, req.InPlace, workspace); err != nil {
-			return nil, "", nil, nil, err
+		if err := m.validateTitleAvailableLocked(naming, repo.ID, identityRoot, title, req.Program, nameNamespace, req.allowReserved, diskData, req.InPlace, workspace); err != nil {
+			return createReservation{}, err
 		}
 	}
 
@@ -860,7 +864,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 		// reservedRemoteNames).
 		remoteName = session.Slugify(title)
 		if _, ok := m.reservedRemoteNames[remoteName]; ok {
-			return nil, "", nil, nil, fmt.Errorf("remote hook name %q is already reserved", remoteName)
+			return createReservation{}, fmt.Errorf("remote hook name %q is already reserved", remoteName)
 		}
 	}
 
@@ -907,7 +911,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	}
 
 	worktreeAdmissionHeld = false
-	return repo, title, release, renamedArchived, nil
+	return createReservation{repo: repo, title: title, release: release, renamedArchived: renamedArchived, naming: naming}, nil
 }
 
 // errTitleCheckFatal marks a title-availability failure that is NOT "this

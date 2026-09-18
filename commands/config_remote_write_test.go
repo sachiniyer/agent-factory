@@ -500,11 +500,11 @@ func TestConfigWriteJSONRendersFailedApplyOutcome(t *testing.T) {
 		{
 			name:    "startup-only key deferred",
 			outcome: "deferred",
-			args:    []string{"set", "branch_prefix", "feature/", "--json"},
+			args:    []string{"set", "debug_pprof", "true", "--json"},
 			want: "{\n" +
 				"  \"data\": {\n" +
-				"    \"key\": \"branch_prefix\",\n" +
-				"    \"value\": \"feature/\",\n" +
+				"    \"key\": \"debug_pprof\",\n" +
+				"    \"value\": \"true\",\n" +
 				"    \"path\": \"" + stubDaemonConfigPath + "\",\n" +
 				"    \"requires_restart\": false,\n" +
 				"    \"apply_outcome\": \"deferred\"\n" +

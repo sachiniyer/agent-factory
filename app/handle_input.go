@@ -106,7 +106,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// flow rejects what the daemon would reject after submit, instead of
 			// only catching exact duplicates and deferring case/branch variants
 			// to a post-Start error (#936).
-			if git.TitlesCollide(other.Title, title, m.appConfig.BranchPrefix) {
+			if git.TitlesCollide(other.Title, title, m.namingBranchPrefix()) {
 				return m, m.handleNotice(fmt.Errorf("a session titled %q conflicts with existing session %q", title, other.Title))
 			}
 		}
@@ -488,10 +488,7 @@ func switchProjectKeyPhrase() string {
 // created during naming) is still caught at submit and, authoritatively, by the
 // daemon.
 func (m *home) suggestSessionName(naming *session.Instance) string {
-	prefix := ""
-	if m.appConfig != nil {
-		prefix = m.appConfig.BranchPrefix
-	}
+	prefix := m.namingBranchPrefix()
 	return namegen.Suggest(func(name string) bool {
 		// The same admission question the submit gate asks, for the same reason:
 		// a suggestion the create would refuse is not a suggestion. namegen emits
@@ -511,6 +508,22 @@ func (m *home) suggestSessionName(naming *session.Instance) string {
 		}
 		return false
 	})
+}
+
+// namingBranchPrefix is the branch_prefix the naming pre-check and the name
+// suggestion derive branches with: the active project's resolved value (#4539),
+// or the global one when no project resolved. It is read when af starts and on a
+// project switch, like the default program. A change saved while the TUI is open
+// reaches the daemon's next create right away but this pre-check only after a
+// relaunch or switch. The daemon re-checks every create anyway.
+func (m *home) namingBranchPrefix() string {
+	if m.projectBranchPrefix != nil {
+		return *m.projectBranchPrefix
+	}
+	if m.appConfig != nil {
+		return m.appConfig.BranchPrefix
+	}
+	return ""
 }
 
 // clearNamingPlaceholder drops the autocreate-name shadow text (#2470) from both

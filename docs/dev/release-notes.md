@@ -32,6 +32,24 @@ consult the relevant notes below when preparing the announcement.
   from your automation or manage PR information outside Agent Factory. Expect
   the missing `pr_info` field and HTTP 404s, rather than a migration to new names.
 
+## A project's `branch_prefix` override now names its branches
+
+- **`af config set --project <p> branch_prefix <value>` now takes effect.**
+  The override was accepted, written, and reported as the winning value by
+  `af config get branch_prefix --repo <p> --explain`, but every session was
+  still named with the global prefix. Now the next session created in that
+  project gets the project's prefix, and projects without an override keep the
+  global one.
+- **`branch_prefix` no longer needs a daemon restart.** A saved change, global
+  or per project, applies to the next session created, and `af config set`
+  and the config panes now say so. Before, the daemon read the global value
+  once at startup.
+- **The naming form checks titles against the same prefix.** The TUI's
+  duplicate-title check reads the active project's prefix when `af` starts or
+  switches projects. The daemon still re-checks every create.
+- Docker and ssh sessions are unchanged: their branch is created inside the
+  sandbox, which uses its own config.
+
 ## `af sessions list` now tells you what its numbers mean
 
 - **Three new string fields, and nothing removed.** Every session carries

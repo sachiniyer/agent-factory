@@ -39,6 +39,9 @@ type home struct {
 	// repoRoot is the main-worktree root of the repo this TUI run is scoped
 	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
 	repoRoot string
+	// projectBranchPrefix is the active project's resolved branch_prefix, or nil
+	// to fall back to appConfig's (#4539). Read through namingBranchPrefix.
+	projectBranchPrefix *string
 	// projectPathResolutions retains successful Git identity lookups across the
 	// 750ms Projects poll. It is event-loop-owned like the rest of home state.
 	projectPathResolutions map[string]projectPathResolution
@@ -609,6 +612,7 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 		} else {
 			h.store.SetHookCount(len(repoCfg.PostWorktreeCommands))
 			h.hooksPane.SetCommands(repoCfg.PostWorktreeCommands)
+			h.projectBranchPrefix = &repoCfg.BranchPrefix
 		}
 	}
 

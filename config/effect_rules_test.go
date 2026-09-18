@@ -16,7 +16,7 @@ import (
 var saveRuleKeys = []string{
 	"default_program",     // EffectAppliedLive
 	"network.listen_addr", // EffectAppliedLive, and a socket key
-	"branch_prefix",       // EffectNextDaemonStart
+	"debug_pprof",         // EffectNextDaemonStart
 	"root_agents",         // EffectNextDaemonStart, with the adoption suffix
 	"appearance",          // EffectNextAfLaunch
 	"not_a_real_config_key",
@@ -77,7 +77,10 @@ func TestNoWithholdingRowPromisesAnEffect(t *testing.T) {
 // not load — and a deferred key's next start reads that same file. Every cause
 // of DaemonApplyUnconfirmed leaves the file written and loadable (#4247).
 func TestDeferredKeyDistinguishesAFailedReloadFromAnUnconfirmedOne(t *testing.T) {
-	for _, key := range []string{"branch_prefix", "root_agents", "appearance", "debug_pprof"} {
+	// branch_prefix used to lead this list; #4539 made each create resolve it, so
+	// it is applied-live and an unconfirmed apply leaves it unconfirmed, not
+	// deferred. debug_pprof is the scalar startup-only key in its place.
+	for _, key := range []string{"root_agents", "appearance", "debug_pprof"} {
 		failed := ApplyOutcome{DaemonApply: DaemonApplyFailed}
 		if got := failed.StatusForKey(key); got != ApplyStatusFailed {
 			t.Errorf("StatusForKey(%q) with a failed reload = %q, want %q", key, got, ApplyStatusFailed)
@@ -112,7 +115,9 @@ func TestAnUnconfirmedApplyWithholdsOnlyTheLiveClaim(t *testing.T) {
 			t.Errorf("EffectNotice(%q) claimed the daemon is serving an unconfirmed save: %q", key, notice)
 		}
 	}
-	for _, key := range []string{"branch_prefix", "appearance"} {
+	// Startup-only and client-only: the two classes no apply can make live.
+	// debug_pprof replaced branch_prefix here when #4539 made that key live.
+	for _, key := range []string{"debug_pprof", "appearance"} {
 		if got := unconfirmed.StatusForKey(key); got != ApplyStatusDeferred {
 			t.Errorf("deferred key %q with an unconfirmed apply = %q, want %q", key, got, ApplyStatusDeferred)
 		}
