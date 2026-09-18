@@ -126,6 +126,49 @@ func TestProcessTabRestoreLivePaneReattachesOnly(t *testing.T) {
 	assert.Zero(t, newSessionCount(pty))
 }
 
+// An unanswered existence probe is its own state, neither "exists" nor "gone"
+// (#1917/#1962). The process tab is rebound without re-running its command and
+// is not made inert, and it gets no remain-on-exit heal and no pane_dead probe:
+// both are further tmux commands against a server that just failed to answer
+// (#4473). The pane_dead answer here is "dead", so an unknown folded into the
+// live arm would stamp an exit and fail this test; one folded into the absent
+// arm would make the tab inert and fail it too.
+func TestProcessTabRestoreUnansweredProbeRebindsOnly(t *testing.T) {
+	var healed, paneProbed bool
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(strings.Join(c.Args, " "), "remain-on-exit") {
+				healed = true
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "pane_dead") {
+				paneProbed = true
+				return []byte(paneExitAnswer(c, "1", "42", "1726000000")), nil
+			}
+			return nil, nil
+		},
+	}
+	inst, procTab, pty := processTabRestoreInstance(t, cmdExec)
+	previousProbe := probeRestoredTabSession
+	probeRestoredTabSession = func(session *tmux.TmuxSession) (bool, bool) {
+		if session == procTab.tmux {
+			return false, false
+		}
+		return session.ProbeSession()
+	}
+	t.Cleanup(func() { probeRestoredTabSession = previousProbe })
+
+	require.NoError(t, (&LocalBackend{}).setupTabs(inst))
+	assert.Zero(t, newSessionCount(pty), "an unanswered probe must never re-spawn the command")
+	assert.False(t, inst.Tabs[1].inert, "unproven absence must not make the tab inert")
+	assert.Nil(t, inst.Tabs[1].Exit, "nothing was observed, so nothing is stamped")
+	assert.False(t, healed, "no remain-on-exit heal against a server that did not answer")
+	assert.False(t, paneProbed, "no pane_dead probe against a server that did not answer")
+	assert.Same(t, procTab.tmux, inst.Tabs[1].tmux, "the tab keeps its persisted tmux binding")
+}
+
 // The contrast that pins the bug: under the identical missing-session answer a
 // SHELL tab still gets a fresh sibling spawned, because an absent interactive
 // session is an interruption to repair — while the process tab above stays
