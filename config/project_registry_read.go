@@ -11,10 +11,10 @@ import (
 	"strings"
 )
 
-// The registry READ side (#1145 split): listings in their three strictness
-// forms — strict all-or-nothing, presence-explicit, and the #3297 partial
-// read — plus the record loaders and per-record validation they share. The
-// mutation and identity halves stay in project_registry.go.
+// The registry READ side (#1145 split): listings in their two strictness
+// forms — strict all-or-nothing and the #3297 partial read — plus the
+// record loaders and per-record validation they share. The mutation and
+// identity halves stay in project_registry.go.
 
 // ListProjects reads every durable binding without creating the AF home, the
 // projects directory, or a lock file. Initial registration uses an atomic
@@ -34,44 +34,6 @@ func ListProjects() ([]Project, error) {
 		projects = append(projects, projectFromRecord(record))
 	}
 	return projects, nil
-}
-
-// ListProjectsIfPresent is ListProjects with absence made explicit: present
-// is false — with a nil error — when the registry directory does not exist.
-// The daemon's fail-closed recovery needs the distinction (#3315 review): a
-// registry that is ABSENT mid-repair or mid-mount-outage must read as a
-// transition to wait out, never as an empty registry to freeze, and
-// ListProjects deliberately hides that difference for ordinary callers. An
-// empty result is bound to a present registry by a post-read check, so a
-// directory that vanishes during the read cannot masquerade as empty; a
-// registry recreated empty within that window reports present-and-empty,
-// which by then is simply the truth.
-func ListProjectsIfPresent() ([]Project, bool, error) {
-	dir, err := projectRegistryDir()
-	if err != nil {
-		return nil, false, err
-	}
-	present, err := projectRegistryDirPresent(dir)
-	if err != nil {
-		return nil, present, err
-	}
-	if !present {
-		return nil, false, nil
-	}
-	projects, err := ListProjects()
-	if err != nil {
-		return nil, true, err
-	}
-	if len(projects) == 0 {
-		present, err = projectRegistryDirPresent(dir)
-		if err != nil {
-			return nil, present, err
-		}
-		if !present {
-			return nil, false, nil
-		}
-	}
-	return projects, true, nil
 }
 
 // projectRegistryDirPresent follows the registry path so a dangling symlink is
