@@ -2,8 +2,9 @@
 // without ever touching a live connection.
 //
 // This file is PLAIN JS and is NOT an esbuild input — build.mjs copies it to
-// dist/sw.js verbatim (bar the version stamp below), because a service worker must
-// be served from the scope root to control "/" and cannot ride inside the bundle.
+// dist/sw.js verbatim, because a service worker must be served from the scope root to
+// control "/" and cannot ride inside the bundle. The one byte-level difference the
+// browser sees is the version stamp below, which the daemon applies when it serves it.
 //
 // It exists for one reason: Chrome will not offer to install a site whose service
 // worker has no fetch handler. Everything past that bar is deliberately as close to
@@ -64,11 +65,12 @@
 // that does not exist, which costs the installability this file is here to buy. A
 // one-load-late fallback is a much better trade than a fragile one.
 
-// Stamped by build.mjs with a hash of the built shell. It is a CONTENT hash rather
+// Stamped when served, by web/embed.go, with a hash of the shell the binary embeds;
+// the committed dist/sw.js keeps the placeholder (#4116). It is a CONTENT hash rather
 // than the af version on purpose: CI bumps main.go's version without rebuilding
-// web/dist, so a version stamp would desync the committed bundle from its own cache
-// name. The hash changes when — and only when — the shell bytes change.
-const VERSION = "498f8a071ce0";
+// web/dist, so a version stamp would name a cache for a build it was never part of.
+// The hash changes when — and only when — the shell bytes change.
+const VERSION = "__AF_SHELL_VERSION__";
 const CACHE = `af-shell-${VERSION}`;
 
 /** The exact same-origin SUB-RESOURCE paths this worker will handle. Anything absent
