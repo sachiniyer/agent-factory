@@ -175,6 +175,11 @@ var shellSiteRegistry = map[string][]classifiedSite{
 	"internal/sessionenv/account_environment_builtins.go:unwrapIonice": {{
 		class: notAShell, note: "strings.HasPrefix(option, \"-c\") — ionice's scheduling-class flag, matched as text",
 	}},
+	"internal/sessionenv/account_environment_ionice.go:ioniceOriginalOption": {{
+		class: notAShell,
+		note: "strings.HasPrefix(option, \"-c\") — ionice's scheduling-class flag, matched as text to allowlist " +
+			"the options the #4460 proof covers",
+	}},
 	"session/tmux/resume.go:codexGlobalOptionHasAttachedValue": {{
 		class: notAShell, note: "strings.HasPrefix(arg, \"-c\") — codex's --config short flag, matched as text",
 	}},

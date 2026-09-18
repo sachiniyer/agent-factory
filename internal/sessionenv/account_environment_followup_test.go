@@ -524,7 +524,9 @@ func TestValidateAccountEnvironmentCommand_ChildlessTailIsBounded(t *testing.T) 
 // file needs no argv to unset the root, so refusing these would only add false
 // positives. The first command is the review's exact shape, admitted on
 // purpose. A token whose empty expansion would leave a SEPARATE-value option
-// (`-c"$CLASS"`) can swallow the child and stays refused.
+// (`-c"$CLASS"`) can swallow the next word. It is admitted only when that
+// swallow reading runs nothing, as it does before `npm` (#4460); the
+// IoniceDynamicClass tests pin the live-swallow refusals.
 func TestValidateAccountEnvironmentCommand_AttachedIoniceValuesAreSelfContained(t *testing.T) {
 	for _, command := range []string{
 		`CMD=env; ./ionice --classd="$CMD" -u CODEX_HOME codex`,
@@ -533,12 +535,12 @@ func TestValidateAccountEnvironmentCommand_AttachedIoniceValuesAreSelfContained(
 		`ionice --class="$CLASS" npm run dev`,
 		`ionice --classd="$N" -p 123`,
 		`ionice -c3 npm run dev`,
+		`ionice -c"$CLASS" npm run dev`,
+		`ionice -n"$N" npm run dev`,
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
 	}
 	for _, command := range []string{
-		`ionice -c"$CLASS" npm run dev`,
-		`ionice -n"$N" npm run dev`,
 		`ionice --classdata "$N" npm run dev`,
 	} {
 		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
