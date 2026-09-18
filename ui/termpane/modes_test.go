@@ -119,6 +119,9 @@ func TestClampedReconnectRequiresFreshTerminalModes(t *testing.T) {
 		return known && got == child
 	}, 2*time.Second, 5*time.Millisecond)
 
+	// The owner's per-connect assert is the "reconnect established" probe: a
+	// viewer writes nothing on connect (#4480), so promote first.
+	tp.SetSizeOwner(true)
 	require.NoError(t, first.Close())
 	require.Eventually(t, func() bool {
 		_, connected := second.lastResize()
@@ -163,6 +166,8 @@ func TestClampToTailReconnectPreservesTerminalModes(t *testing.T) {
 	first.feed("abc")
 	waitForRender(t, tp, 40, 8, "abc")
 
+	// Same owner-only probe as the clamped-reconnect test (#4480).
+	tp.SetSizeOwner(true)
 	require.NoError(t, first.Close())
 	require.Eventually(t, func() bool {
 		_, connected := second.lastResize()
