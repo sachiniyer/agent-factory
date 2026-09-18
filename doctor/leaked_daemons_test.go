@@ -111,8 +111,17 @@ func leakedDaemonOptions(t *testing.T, fix bool, p proctree.Process, home string
 
 // tempBinaryDaemon is the #3842 shape: an af daemon whose own binary lives under
 // a `go test` temp directory.
+//
+// The path is resolved the way the kernel resolves it: /proc/<pid>/exe returns a
+// CANONICAL spelling (every directory-component symlink evaluated), so the stub
+// must do the same. When the test host's temp dir is itself reached through a
+// symlink — every macOS runner, where t.TempDir() lives under /var and /var is
+// a symlink to /private/var — a lexical spelling diverges from the canonicalised
+// tempDir guard and the daemon silently falls out of the temp bucket. Building
+// the path from normalizeHome(tempDir) keeps the stub and the guard on one
+// spelling on every host, matching what production actually compares.
 func tempBinaryDaemon(tempDir string) daemonBinary {
-	return daemonBinary{path: filepath.Join(tempDir, "TestSomething123", "001", "af"), known: true}
+	return daemonBinary{path: filepath.Join(normalizeHome(tempDir), "TestSomething123", "001", "af"), known: true}
 }
 
 func TestADaemonRunningFromATempBinaryIsReportedAndOfferedForAKill(t *testing.T) {
@@ -130,7 +139,8 @@ func TestADaemonRunningFromATempBinaryIsReportedAndOfferedForAKill(t *testing.T)
 		"a daemon running af from the temp dir is not an install; it is debris")
 	require.NotEmpty(t, findings[0].FixAction, "it must be offered for a kill")
 	require.Contains(t, findings[0].Detail, "which is not an install")
-	require.Contains(t, findings[0].Detail, otherHome, "the row must name the home it serves")
+	require.Contains(t, findings[0].Detail, normalizeHome(otherHome),
+		"the row must name the home it serves (canonicalised: d.home is read in the daemon's frame)")
 }
 
 // Paired with a leaked daemon in the SAME run, deliberately. "No finding" is
@@ -193,6 +203,65 @@ func TestADeletedTempBinaryIsStillRecognisedAsATempBinary(t *testing.T) {
 	require.True(t, findings[0].Actionable,
 		"the deleted suffix must be stripped before the temp-dir test, or a deleted test binary escapes")
 	require.Contains(t, findings[0].Detail, "since deleted")
+}
+
+// checkLeakedDaemonBinaries guards on a temp-dir comparison, and that comparison
+// must be against the CANONICAL spelling the kernel reports. /proc/<pid>/exe
+// symlink-resolves the exec path, while the guard used to compare it against a
+// LEXICAL tempDir (filepath.Clean only). When a directory component of the temp
+// path is itself a symlink — a real configuration (TMPDIR=/scratch where
+// /scratch -> /mnt/fasttmp), and the everyday state of a macOS runner whose
+// t.TempDir() lives under /var -> /private/var — the two spellings diverged and
+// a leaked temp daemon was either silently dropped (on-disk binary) or
+// mislabelled as upgrade residue (deleted binary), losing the --fix kill.
+//
+// Both branches are staged under a SYMLINKED TempDir spelling that resolves to a
+// different canonical path, with the daemon's bin.path canonicalised the way
+// /proc/<pid>/exe canonicalises it. The fix (tempDir := normalizeHome, matching
+// the sibling checkDeadSocketHomes / checkStaleTempHomes guards) reports both as
+// "not an install" with the kill path intact.
+func TestLeakedDaemonUnderSymlinkedTempDirIsReportedOnDiskAndDeleted(t *testing.T) {
+	proc := spawnWithEnv(t, "leaky-daemon", nil, nil)
+	otherHome := t.TempDir()
+	opts := leakedDaemonOptions(t, false, proc, otherHome)
+	realDir := opts.TempDir
+	// A symlink spelling of the temp dir, alongside its real target. bin.path is
+	// built from the canonical target (what /proc/<pid>/exe returns); opts.TempDir
+	// is the symlink spelling (what a symlinked TMPDIR hands the tool). The guard
+	// must bridge the two via EvalSymlinks.
+	symDir := filepath.Join(filepath.Dir(realDir), filepath.Base(realDir)+"-sym")
+	require.NoError(t, os.Symlink(realDir, symDir))
+	canonDir := normalizeHome(realDir)
+
+	opts.TempDir = symDir
+
+	// Branch A: an on-disk leaked temp binary. Pre-fix this was the SILENT drop
+	// (line-196 `continue` fired, double-gated on the symlinked TMPDIR).
+	onDisk := daemonBinary{path: filepath.Join(canonDir, "TestSomething123", "001", "af"), known: true}
+	stubDaemonExe(t, map[int]daemonBinary{proc.PID: onDisk})
+	rep, err := Run(opts)
+	require.NoError(t, err)
+	rows := findByCheck(rep, checkLeakedDaemon)
+	require.Len(t, rows, 1, "on-disk leaked daemon under a symlinked TempDir must be reported")
+	require.True(t, rows[0].Actionable, "it must carry the --fix kill, not be silently dropped")
+	require.NotEmpty(t, rows[0].FixAction)
+	require.Contains(t, rows[0].Detail, "which is not an install")
+
+	// Branch B: a deleted leaked temp binary (the common `go test` shape — the
+	// suite unlinks its work tree on exit). Pre-fix this was the MISLABEL:
+	// routed to the upgrade-residue advisory with "run `af daemon restart`"
+	// (which never reaches a temp-home daemon) and no kill path.
+	stubDaemonExe(t, map[int]daemonBinary{proc.PID: {path: onDisk.path, deleted: true, known: true}})
+	rep2, err := Run(opts)
+	require.NoError(t, err)
+	rows2 := findByCheck(rep2, checkLeakedDaemon)
+	require.Len(t, rows2, 1, "deleted leaked daemon under a symlinked TempDir must also be reported")
+	require.True(t, rows2[0].Actionable, "it must carry the --fix kill, not be mislabelled upgrade residue")
+	require.NotEmpty(t, rows2[0].FixAction)
+	require.Contains(t, rows2[0].Detail, "which is not an install")
+	require.Contains(t, rows2[0].Detail, "since deleted")
+	require.NotContains(t, rows2[0].Detail, "af upgrade",
+		"the upgrade-residue advisory must not fire for a temp-dir binary")
 }
 
 // The daemon serving THIS home is the one answering this very run. However odd

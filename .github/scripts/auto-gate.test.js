@@ -405,27 +405,183 @@ test("the gate's own sources do not disqualify a review that quotes them", () =>
   }
 });
 
-test("scheduled reconciliation coalesces only fungible full-scan workflows", () => {
+// Mirrors the workflow-level `concurrency.group` ternary chain pinned below.
+// The fixtures exist to prove the coverage rule the comment above the stanza
+// states: a pending run may only be replaced by a run whose invalidation
+// covers every head the cancelled run would have covered.
+const workflowGroup = (eventName, event = {}, inputs = {}, runId = 100) => {
+  const format = (template, ...values) =>
+    template.replace(/\{(\d+)\}/g, (match, index) => String(values[Number(index)] ?? ""));
+  const first = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
+  return "auto-gate-" + (
+    ((eventName === "schedule" || eventName === "repository_dispatch") && "required-check-reconciliation") ||
+    (eventName === "workflow_dispatch" &&
+      format("recovery-{0}-{1}", inputs.pr_number, inputs.previous_head_sha)) ||
+    (eventName === "pull_request_target" && event.action === "synchronize" &&
+      format("synchronize-{0}-{1}", event.before, event.after)) ||
+    (eventName === "pull_request_target" &&
+      format("pr-{0}-{1}", event.pull_request?.number, event.pull_request?.head?.sha)) ||
+    (first(event.issue?.number, event.pull_request?.number) &&
+      format("pr-{0}", first(event.issue?.number, event.pull_request?.number))) ||
+    (first(event.check_suite?.head_sha, event.workflow_run?.head_sha, event.sha) &&
+      format("head-{0}", first(event.check_suite?.head_sha, event.workflow_run?.head_sha, event.sha))) ||
+    runId
+  );
+};
+
+test("workflow concurrency coalesces only runs with covered invalidation", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
   const beforeJobs = workflow.slice(0, workflow.indexOf("\njobs:"));
-  assert.match(
-    beforeJobs,
-    /concurrency:\n  group: auto-gate-\$\{\{ github\.event_name == 'schedule' && 'required-check-reconciliation' \|\| github\.run_id \}\}\n  cancel-in-progress: false/,
-    "a second schedule must wait for the selected targets' whole transaction",
+  const stanza = beforeJobs.match(
+    /concurrency:\n  group: >-\n    auto-gate-\$\{\{\n([\s\S]*?)\n    \}\}\n  cancel-in-progress: false/,
   );
-  assert.doesNotMatch(
-    beforeJobs,
-    /github\.event_name != 'schedule'/,
-    "webhook and comment invalidations need unique run-id groups and must never coalesce",
+  assert.ok(
+    stanza,
+    "the workflow-level group must never cancel a run mid-transaction",
   );
+  const expression = stanza[1].replace(/\s+/g, " ").trim();
+  assert.equal(
+    expression,
+    "(github.event_name == 'schedule' || github.event_name == 'repository_dispatch') " +
+      "&& 'required-check-reconciliation' " +
+      "|| github.event_name == 'workflow_dispatch' && format('recovery-{0}-{1}', " +
+      "inputs.pr_number, inputs.previous_head_sha) " +
+      "|| github.event_name == 'pull_request_target' && github.event.action == 'synchronize' " +
+      "&& format('synchronize-{0}-{1}', github.event.before, github.event.after) " +
+      "|| github.event_name == 'pull_request_target' " +
+      "&& format('pr-{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) " +
+      "|| (github.event.issue.number || github.event.pull_request.number) " +
+      "&& format('pr-{0}', github.event.issue.number || github.event.pull_request.number) " +
+      "|| (github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) " +
+      "&& format('head-{0}', github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) " +
+      "|| github.run_id",
+  );
+  // The synchronize guard must precede both the generic pull_request_target
+  // clause and the issue/pull_request clause: its payload carries a number
+  // too, and matching it later would drop `before` from the key.
+  const syncGuard = expression.indexOf("github.event.action == 'synchronize'");
+  assert.ok(syncGuard > -1);
+  assert.ok(syncGuard < expression.indexOf("github.event.issue.number"));
+  assert.ok(
+    expression.indexOf("github.event.before") > syncGuard &&
+      expression.indexOf("github.event.before") < expression.indexOf("pull_request_target' && format"),
+    "before/after may key only the synchronize clause",
+  );
+  // run_id is the fallback and the only term that may still contain it.
+  assert.ok(expression.endsWith("|| github.run_id"));
+  assert.equal(expression.split("github.run_id").length - 1, 1);
+
+  const pr = (number, head = HEAD_SHA) => ({ number, head: { sha: head } });
+  // Every subscribed trigger resolves to a documented group.
+  assert.equal(workflowGroup("schedule"), "auto-gate-required-check-reconciliation");
+  // A dispatched reconciliation pass is the same full scan as a scheduled one —
+  // pending copies are fungible, so they share the group (#4571).
+  assert.equal(
+    workflowGroup("repository_dispatch", { action: "auto-gate-reconcile" }),
+    "auto-gate-required-check-reconciliation",
+  );
+  assert.equal(
+    workflowGroup("workflow_dispatch", {}, { pr_number: 4060, previous_head_sha: OTHER_SHA }),
+    `auto-gate-recovery-4060-${OTHER_SHA}`,
+  );
+  assert.equal(
+    workflowGroup("workflow_dispatch", {}, { pr_number: "4060" }),
+    "auto-gate-recovery-4060-",
+  );
+  // A comment burst on one PR collapses across all three comment event types,
+  // and a stale payload head does not change that: the transition away from it
+  // is carried by a synchronize run that never coalesces.
+  assert.equal(workflowGroup("issue_comment", { issue: { number: 4060 } }), "auto-gate-pr-4060");
+  assert.equal(
+    workflowGroup("pull_request_review", { pull_request: pr(4060, OTHER_SHA) }),
+    "auto-gate-pr-4060",
+  );
+  assert.equal(
+    workflowGroup("pull_request_review_comment", { pull_request: pr(4060) }),
+    "auto-gate-pr-4060",
+  );
+  assert.notEqual(
+    workflowGroup("issue_comment", { issue: { number: 4060 } }),
+    workflowGroup("issue_comment", { issue: { number: 4061 } }),
+  );
+  // Commit events coalesce across all three types on the same commit, and only
+  // on the same commit: coverage is exactly the named head.
+  assert.equal(
+    workflowGroup("check_suite", { check_suite: { head_sha: HEAD_SHA } }),
+    `auto-gate-head-${HEAD_SHA}`,
+  );
+  assert.equal(
+    workflowGroup("workflow_run", { workflow_run: { head_sha: HEAD_SHA } }),
+    `auto-gate-head-${HEAD_SHA}`,
+  );
+  assert.equal(workflowGroup("status", { sha: HEAD_SHA }), `auto-gate-head-${HEAD_SHA}`);
+  assert.notEqual(
+    workflowGroup("status", { sha: OTHER_SHA }),
+    workflowGroup("status", { sha: HEAD_SHA }),
+  );
+  // pull_request_target actions other than synchronize coalesce per (PR,
+  // payload head): a label burst on one head collapses, but closed on the old
+  // head is never replaced by reopened on the new one.
+  assert.equal(
+    workflowGroup("pull_request_target", { action: "labeled", pull_request: pr(4060) }),
+    `auto-gate-pr-4060-${HEAD_SHA}`,
+  );
+  assert.equal(
+    workflowGroup("pull_request_target", { action: "unlabeled", pull_request: pr(4060) }),
+    `auto-gate-pr-4060-${HEAD_SHA}`,
+  );
+  assert.notEqual(
+    workflowGroup("pull_request_target", { action: "closed", pull_request: pr(4060, OTHER_SHA) }),
+    workflowGroup("pull_request_target", { action: "reopened", pull_request: pr(4060) }),
+  );
+  // A synchronize run is replaceable only by the identical transition — never
+  // by a different push and never by a same-PR comment.
+  const syncEvent = {
+    action: "synchronize",
+    before: OTHER_SHA,
+    after: HEAD_SHA,
+    pull_request: pr(4060),
+  };
+  assert.equal(
+    workflowGroup("pull_request_target", syncEvent),
+    `auto-gate-synchronize-${OTHER_SHA}-${HEAD_SHA}`,
+  );
+  assert.notEqual(
+    workflowGroup("pull_request_target", syncEvent),
+    workflowGroup("pull_request_target", { ...syncEvent, before: HEAD_SHA, after: OTHER_SHA }),
+  );
+  assert.notEqual(
+    workflowGroup("pull_request_target", syncEvent),
+    workflowGroup("issue_comment", { issue: { number: 4060 } }),
+  );
+  // No event's group may contain the run id except the last-resort fallback:
+  // coalescing is decided by coverage, never by arrival order.
+  for (const [name, event] of Object.entries({
+    check_suite: { check_suite: { head_sha: HEAD_SHA } },
+    issue_comment: { issue: { number: 4060 } },
+    pull_request_review: { pull_request: pr(4060) },
+    pull_request_review_comment: { pull_request: pr(4060) },
+    pull_request_target: { action: "labeled", pull_request: pr(4060) },
+    status: { sha: HEAD_SHA },
+    workflow_run: { workflow_run: { head_sha: HEAD_SHA } },
+    schedule: { schedule: "*/5 * * * *" },
+    repository_dispatch: { action: "auto-gate-reconcile" },
+  })) {
+    assert.equal(
+      workflowGroup(name, event, {}, 200),
+      workflowGroup(name, event, {}, 100),
+      `${name} must ignore the run id`,
+    );
+  }
+  assert.equal(workflowGroup("unrecognized_event", {}, {}, 777), "auto-gate-777");
 });
 
 test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidation", async () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
   assert.match(
     workflow,
-    /^concurrency:\n  group: auto-gate-\$\{\{ github\.event_name == 'schedule' && 'required-check-reconciliation' \|\| github\.run_id \}\}\n  cancel-in-progress: false$/m,
-    "only fungible scheduled scans may share a workflow-level group",
+    /^concurrency:\n  group: >-\n    auto-gate-\$\{\{[\s\S]*?\}\}\n  cancel-in-progress: false$/m,
+    "the workflow-level group must never cancel a run mid-transaction",
   );
   const jobs = Object.fromEntries([...workflow.matchAll(
     /^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/gm,
@@ -461,6 +617,7 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
     "github.event.check_suite.head_sha",
     "github.event.sha",
     "github.event.schedule",
+    "github.event.action",
     "github.run_id",
   ]);
   // Evaluate the actual expression's property/OR subset, including Actions'
@@ -481,6 +638,11 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
     status: [{ sha: HEAD_SHA }, {}, HEAD_SHA],
     workflow_run: [{ workflow_run: { head_sha: HEAD_SHA } }, {}, HEAD_SHA],
     schedule: [{ schedule: "*/5 * * * *" }, {}, "*/5 * * * *"],
+    repository_dispatch: [
+      { action: "auto-gate-reconcile", client_payload: { source_run_id: "501" } },
+      {},
+      "auto-gate-reconcile",
+    ],
     workflow_dispatch: [{}, { pr_number: 4060 }, 4060],
   };
   const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
@@ -887,18 +1049,17 @@ test("a reviewed non-allowed author gets a passing manual decision without an au
   ]);
 });
 
-// #4425: the detail bot's real login is `app/detail-app`, which the unmodified
-// set never contained — every detail PR fell to the manual-merge path. The
-// predicate strips a leading `app/` and a trailing `[bot]` before the set
-// lookup, so these pins cover every spelling GitHub has been observed to
-// render for the same actor rather than the three the set once spelled out.
+// #4425: the detail bot's real logins are `app/detail-app` on a pull request's
+// author field and `detail-app[bot]` on its review comments (verified against
+// live comment data in #4117) — the spellings the set once spelled out were
+// guesses. The predicate strips a leading `app/` and a trailing `[bot]`
+// before the set lookup, so these pins cover every spelling GitHub has been
+// observed to render for the same actor.
 for (const login of [
   "sachiniyer",
   "app/detail-app",
   "detail-app",
   "detail-app[bot]",
-  "app-detail-app",
-  "app-detail-app[bot]",
 ]) {
   test(`author normalization admits ${login}`, () => {
     assert.equal(__test.isAllowedAuthor(login), true);
@@ -907,12 +1068,19 @@ for (const login of [
 
 // …and the normalization must not become a new way in: an actor that merely
 // wears the `app/` or `[bot]` shape is still refused, and so is the reviewer —
-// a Codex approval would be the gate trusting the thing it gates.
+// a Codex approval would be the gate trusting the thing it gates. The
+// `app-detail-app` spellings are pinned REFUSED rather than dropped from the
+// fixture list: they were the guessed logins the set once named (#4117), never
+// observed on a real artifact, and re-admitting one is how the silent-ack hole
+// would come back — or a squatter's way in if the username were registered.
 for (const login of [
   "outside-contributor",
   "app/outside-contributor",
   "chatgpt-codex-connector[bot]",
   "app/trunk-io",
+  "app-detail-app",
+  "app-detail-app[bot]",
+  "detail-app-bot",
   "",
   undefined,
   null,
@@ -2838,6 +3006,10 @@ test("a cancelled required check blocks the gate", async () => {
 test("an absent required check blocks the gate", async () => {
   const result = await evaluateGate({
     checkRuns: [checkRun({ name: "Build", conclusion: "success" })],
+    // Build reported, so PR Validation has a run for this head (#4581).
+    runsByHeadSha: {
+      [HEAD_SHA]: [{ id: 7, name: "PR Validation", event: "pull_request", status: "completed" }],
+    },
   });
 
   assert.equal(result.shouldMerge, false);
@@ -3741,7 +3913,7 @@ test("an answer in the same second as the finding still answers it", async () =>
         commentTime: "2026-07-09T01:20:06Z",
       }),
       prComment(
-        "app-detail-app[bot]",
+        "detail-app[bot]",
         `Read it — [gate-ack] #issuecomment-${stripped.id}.`,
         "2026-07-09T01:20:00Z",
       ),
@@ -4501,7 +4673,7 @@ test("an APPROVED review from an allowed author counts as the approval", async (
     issueComments: [codexRateLimit()],
     reviews: [
       {
-        user: { login: "app-detail-app" },
+        user: { login: "detail-app[bot]" },
         state: "APPROVED",
         submitted_at: "2026-07-09T01:30:00Z",
         body: "Looks right.",
@@ -4579,6 +4751,134 @@ test("an approval marker from an unrelated author is not an approval", async () 
 
   assert.equal(result.shouldMerge, false, "an unrelated author's marker is not an approval");
   assert.match(result.reasons.join("\n"), /post `## Review — approve` on this head/);
+});
+
+// #4554. The comment marker exists because GitHub will not let the maintainer
+// approve the maintainer's own PR — and a comment carries none of GitHub's
+// authorship checks, so the workaround opened self-approval to every allowed
+// author. detail-app writes a large share of this repo's PRs and posted the
+// marker on its own #4281. The decision these pin: a self-approval counts only
+// for an account named as a self-approving maintainer (sachiniyer); every other
+// allowed author needs a second party. Blanket exclusion was rejected because
+// the maintainer opens most PRs here and would have no merge route at all during
+// the Codex outage the degraded path exists for.
+for (const [prAuthor, approver] of [
+  ["app/detail-app", "detail-app[bot]"],
+  ["detail-app", "detail-app"],
+  ["app/detail-app", "detail-app"],
+  ["detail-app", "app/detail-app"],
+]) {
+  test(`#4554: a bot author's own approval marker is not an approval (${prAuthor} / ${approver})`, async () => {
+    const result = await evaluateGate({
+      author: prAuthor,
+      issueComments: [
+        codexRateLimit(),
+        prComment(approver, "## Review — approve\n\nAll findings answered.", "2026-07-09T01:30:00Z"),
+      ],
+    });
+
+    assert.equal(result.shouldMerge, false, "a bot's self-approval must not authorize its own merge");
+    assert.match(result.reasons.join("\n"), /post `## Review — approve` on this head/);
+    assert.doesNotMatch(result.notes.join("\n"), /Maintainer approval from/);
+  });
+}
+
+test("#4554: the maintainer's approval on a bot-authored PR still satisfies the degraded path", async () => {
+  const result = await evaluateGate({
+    author: "app/detail-app",
+    issueComments: [
+      codexRateLimit(),
+      prComment("detail-app[bot]", "## Review — approve\n\nSelf-approval, ignored.", "2026-07-09T01:29:00Z"),
+      prComment("sachiniyer", "## Review — approve\n\nRead the diff.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, `a second party's approval must land it: ${result.reasons.join("; ")}`);
+  assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
+});
+
+// The deliberate half of the decision: the maintainer may approve the
+// maintainer's own PR through the marker. That is the marker's documented
+// purpose, and without it maintainer PRs have no route to merge while Codex is
+// rate-limited. Changing this is a policy change, not a bug fix.
+test("#4554: the maintainer's approval on the maintainer's own PR still satisfies the degraded path", async () => {
+  const result = await evaluateGate({
+    author: "sachiniyer",
+    issueComments: [
+      codexRateLimit(),
+      prComment("sachiniyer", "## Review — approve\n\nRead the diff.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, `the maintainer's own route must stay open: ${result.reasons.join("; ")}`);
+  assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
+});
+
+// Only SELF-approval is excluded: an allowed bot approving someone else's PR is
+// unchanged by #4554.
+test("#4554: an allowed bot's approval on another author's PR is unchanged", async () => {
+  const result = await evaluateGate({
+    author: "sachiniyer",
+    issueComments: [
+      codexRateLimit(),
+      prComment("detail-app[bot]", "## Review — approve\n\nRead the diff.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("; "));
+  assert.match(result.notes.join("\n"), /Maintainer approval from detail-app\[bot\]/);
+});
+
+// An unreadable PR author cannot prove an approval is NOT a self-approval, so
+// only an account allowed to self-approve still counts there. An unknown author
+// is also not an allowed one, so this is the manual path, where the approval is
+// what turns "awaiting maintainer review" into the manual PASS — the summary,
+// not shouldMerge, is where the decision shows.
+test("#4554: with the PR author unknown, only a self-approving maintainer's marker counts", async () => {
+  const bot = await evaluateGate({
+    author: "",
+    issueComments: [
+      codexRateLimit(),
+      prComment("detail-app[bot]", "## Review — approve", "2026-07-09T01:30:00Z"),
+    ],
+  });
+  assert.equal(bot.shouldMerge, false);
+  assert.match(
+    bot.summary,
+    /post `## Review — approve` on this head/,
+    "an unknown author must not let a bot approval answer the review requirement",
+  );
+
+  const maintainer = await evaluateGate({
+    author: "",
+    issueComments: [
+      codexRateLimit(),
+      prComment("sachiniyer", "## Review — approve", "2026-07-09T01:30:00Z"),
+    ],
+  });
+  assert.match(maintainer.summary, /^PASS: Auto Gate does not auto-merge PRs from this author/);
+  assert.doesNotMatch(
+    maintainer.summary,
+    /post `## Review — approve` on this head/,
+    "the maintainer's marker still answers the review requirement",
+  );
+});
+
+test("#4554: markerApprovalCounts names who may approve their own PR", () => {
+  const { markerApprovalCounts } = __test;
+  // Self-approval: only the named maintainer.
+  assert.equal(markerApprovalCounts("sachiniyer", "sachiniyer"), true);
+  assert.equal(markerApprovalCounts("detail-app[bot]", "app/detail-app"), false);
+  assert.equal(markerApprovalCounts("detail-app", "detail-app"), false);
+  // Case is not identity on GitHub; a case-only difference is still the same account.
+  assert.equal(markerApprovalCounts("detail-app[bot]", "Detail-App"), false);
+  // A second party.
+  assert.equal(markerApprovalCounts("sachiniyer", "app/detail-app"), true);
+  assert.equal(markerApprovalCounts("detail-app[bot]", "sachiniyer"), true);
+  // Unknown author: fail closed except for the self-approving maintainer.
+  assert.equal(markerApprovalCounts("detail-app[bot]", ""), false);
+  assert.equal(markerApprovalCounts("detail-app[bot]", null), false);
+  assert.equal(markerApprovalCounts("sachiniyer", undefined), true);
 });
 
 test("reviewer silence with no usage-limit evidence keeps blocking exactly as before", async () => {
@@ -5659,7 +5959,10 @@ for (const tree of [undefined, { truncated: true, tree: [] }, { truncated: false
       [OTHER_SHA]: tuiTree(PLAY_TEST_TREE), [HEAD_SHA]: tree,
     } }));
     assert.equal(result.shouldMerge, false);
-    assert.match(result.reasons.join("\n"), /auto-gate evaluation error:/);
+    // Fails closed as a decision reason, never an evaluation error that an
+    // aggregate run would abort on (#4484).
+    assert.match(result.reasons.join("\n"), /play-tested attestation could not be verified:/);
+    assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
   });
 }
 
@@ -5734,11 +6037,198 @@ for (const failure of ["commit unavailable", "tree unavailable", "tree incomplet
         assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
       } else {
         assert.match(result.summary, /^BLOCKED:/);
-        assert.match(result.reasons.join("\n"), /auto-gate evaluation error:.*(?:unavailable|incomplete)/);
+        // An unverifiable attestation fails closed as a decision reason on the
+        // automatic path too — it used to escape as "auto-gate evaluation
+        // error" and take the whole repository's gate down (#4484).
+        assert.match(result.reasons.join("\n"), /play-tested attestation could not be verified:.*(?:unavailable|incomplete)/);
+        assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
       }
     });
   }
 }
+
+// #4484: the incident shape, verbatim — a 40-hex attestation naming a SHA
+// GitHub cannot resolve (a padded short SHA) answered HTTP 422. For an
+// allowed-author PR that escaped the degradation catch, surfaced as
+// "auto-gate evaluation error", and the aggregate loop aborted the whole run.
+// The decision must instead be BLOCKED with the attestation named as the
+// reason — the same shape missing checks and unresolved findings already use.
+test("#4484: an unresolvable attested SHA blocks the PR instead of erroring evaluation", async () => {
+  const BAD_SHA = "2e7c8865e0de9e22f0fd624b01c3bcc49ef3caf9";
+  const github = fakeGateGithub(playTestFixture({
+    issueComments: [codexVerdict(HEAD_SHA), playTestComment(BAD_SHA)],
+  }));
+  const realGetCommit = github.rest.repos.getCommit;
+  github.rest.repos.getCommit = async ({ ref }) => {
+    if (ref === BAD_SHA) {
+      const error = new Error(`No commit found for SHA: ${ref}`);
+      error.status = 422;
+      throw error;
+    }
+    return realGetCommit({ ref });
+  };
+  const result = await autoGate.evaluate({
+    github, context: fakeContext(), core: fakeCore(), prNumber: 1465, setOutputs: false,
+  });
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.reasons.join("\n"), new RegExp(
+    `play-tested attestation names ${BAD_SHA}, which GitHub cannot resolve as a commit \\(HTTP 422\\)`));
+  assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
+});
+
+// #4484: the same unresolvable SHA inside an aggregate run must scope to its
+// own PR — the unrelated PR sharing the head still evaluates and publishes.
+// Before the fix the loop threw on the first failure: the job died, the
+// second PR's decision was never written, and every master-scoped run failed
+// until the comment was edited.
+test("#4484: a per-PR evaluation failure does not abort the aggregate run", async () => {
+  const BAD_SHA = "2e7c8865e0de9e22f0fd624b01c3bcc49ef3caf9";
+  const github = fakeGateGithub({
+    labels: ["play-tested"],
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2400, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+    ],
+    pullRequestsByNumber: {
+      1465: {
+        files: ["session/tmux/envmarker.go"],
+        issueComments: [codexVerdict(HEAD_SHA), playTestComment(BAD_SHA)],
+      },
+      // The unrelated PR: no TUI files, so its evaluation needs no play-test
+      // and nothing else to fail on.
+      2400: { files: [], issueComments: [codexVerdict(HEAD_SHA)] },
+    },
+  });
+  const realGetCommit = github.rest.repos.getCommit;
+  github.rest.repos.getCommit = async ({ ref }) => {
+    if (ref === BAD_SHA) {
+      const error = new Error(`No commit found for SHA: ${ref}`);
+      error.status = 422;
+      throw error;
+    }
+    return realGetCommit({ ref });
+  };
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [
+      { prNumber: 1465, headSha: HEAD_SHA },
+      { prNumber: 2400, headSha: HEAD_SHA },
+    ],
+  });
+
+  // The run completed instead of dying on PR #1465's error…
+  assert.notEqual(transaction.state, "merged");
+  // …the healthy PR still got its evaluated decision published…
+  const goodDecision = github.createdChecks.find(
+    (check) => check.name === decisionName(2400, HEAD_SHA),
+  );
+  assert.ok(goodDecision, "the unrelated PR's decision was never published");
+  assert.equal(goodDecision.conclusion, "success");
+  // …and the aggregate stayed non-green with the failed PR named as waiting.
+  const aggregate = github.createdChecks.find((check) => check.name === "Auto Gate decision");
+  assert.ok(aggregate, "the aggregate decision was never published");
+  assert.notEqual(aggregate.conclusion, "success");
+});
+
+// A mid-evaluation failure used to drop the resolved PR's node id, so the
+// scoped failure write built no resolved-PR subject — and a self-contradictory
+// NOT_FOUND during that write's check-run read could not classify as a
+// vanished PR, rethrew unclassified, and aborted the serialized run over
+// unrelated PRs: the repo-wide outage the scoping exists to prevent (Codex on
+// #4486).
+test("#4486: an evaluation failure keeps the resolved PR identity", async () => {
+  const github = fakeGateGithub({
+    pullRequestsByNumber: {
+      1465: { issueComments: [codexVerdict(HEAD_SHA)] },
+    },
+  });
+  // A 422 on the files read is definitive, not transient: it escapes retryRead
+  // unmarked — a deterministic evaluation failure, the class the scoped write
+  // exists for — and it lands AFTER the PR resolved, which is the whole point:
+  // the node id existed to carry and was still dropped.
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options = {}) => {
+    if (fn === github.rest.pulls.listFiles && options.pull_number === 1465) {
+      const error = new Error("files lookup refused");
+      error.status = 422;
+      throw error;
+    }
+    return realPaginate(fn, options);
+  };
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.ok(
+    result.reasons.some((reason) => reason.startsWith("auto-gate evaluation error:")),
+    `expected a deterministic evaluation failure, got: ${result.reasons.join("; ")}`,
+  );
+  assert.equal(
+    result.pullRequestId,
+    "PR_node_1465",
+    "reportDecision needs the resolved node id to build its vanished-PR subject",
+  );
+});
+
+// The scoped failure write is still a decision write: on a workflow_dispatch
+// recovery with no prior decision it must publish NEVER_RAN like the normal
+// path does, not an ordinary WAITING that erases the "recovery found nothing"
+// signal (Codex on #4486).
+test("#4486: a manual recovery's scoped failure write stays NEVER_RAN", async () => {
+  const github = fakeGateGithub({
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2400, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+    ],
+    pullRequestsByNumber: {
+      1465: { issueComments: [codexVerdict(HEAD_SHA)] },
+      2400: { files: [], issueComments: [codexVerdict(HEAD_SHA)] },
+    },
+  });
+  // Same deterministic, post-resolution failure class as the identity test:
+  // a definitive 422 on the files read, scoped to the failing PR only.
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options = {}) => {
+    if (fn === github.rest.pulls.listFiles && options.pull_number === 1465) {
+      const error = new Error("files lookup refused");
+      error.status = 422;
+      throw error;
+    }
+    return realPaginate(fn, options);
+  };
+
+  await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [
+      { prNumber: 1465, headSha: HEAD_SHA },
+      { prNumber: 2400, headSha: HEAD_SHA },
+    ],
+    manual: true,
+  });
+
+  const failedDecision = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+  assert.ok(failedDecision, "the failing PR's scoped decision was never published");
+  assert.match(
+    failedDecision.output.title,
+    /^NEVER_RAN:/,
+    `a manual recovery's failure write must keep the never-ran distinction, got: ${failedDecision.output.title}`,
+  );
+});
 
 test("#4205: advisory play-test read failures do not waive a manual verdict blocker", async () => {
   const result = await evaluateGate(playTestFixture({
@@ -7501,6 +7991,316 @@ test("scheduled reconciliation caps one sweep at ten PRs", async () => {
   assert.equal(new Set(targets.map((target) => target.prNumber)).size, targets.length);
 });
 
+// The schedule is a backstop, not a clock: GitHub delivered the */5 trigger
+// every two to five hours (#4571). Ordinary Auto Gate runs arrive many times an
+// hour, so each one may request the same bounded pass. These fakes stand in for
+// the two calls a request makes, and a dispatch they accept becomes a run the
+// next request's listing can see.
+const RECONCILIATION_DISPATCH = "auto-gate-reconcile";
+const RECONCILIATION_WINDOW_MS = 5 * 60 * 1000;
+
+function reconciliationRequestApi({
+  clock,
+  runs = [],
+  listReads = [],
+  dispatches = [],
+  listError = null,
+  listResponse = null,
+  dispatchError = null,
+  honorCreatedFilter = true,
+}) {
+  return {
+    listWorkflowRuns: async (params) => {
+      listReads.push(params);
+      if (listError) {
+        throw listError;
+      }
+      if (listResponse) {
+        return listResponse;
+      }
+      const since = /^>=(.+)$/.exec(params.created || "")?.[1];
+      const matching = runs
+        .filter(
+          (run) =>
+            run.workflow_id === params.workflow_id &&
+            (!params.event || run.event === params.event) &&
+            (!honorCreatedFilter || since === undefined ||
+              Date.parse(run.created_at) >= Date.parse(since)),
+        )
+        // The API lists newest first.
+        .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
+      return {
+        data: {
+          total_count: matching.length,
+          workflow_runs: matching.slice(0, params.per_page ?? 30),
+        },
+      };
+    },
+    createDispatchEvent: async (params) => {
+      dispatches.push(params);
+      if (dispatchError) {
+        throw dispatchError;
+      }
+      // auto-gate.yml subscribes exactly one repository_dispatch type, which the
+      // first reconciliation test pins; any other type starts no run of it.
+      if (params.event_type !== RECONCILIATION_DISPATCH) {
+        return { status: 204 };
+      }
+      runs.push({
+        id: 9_000_000 + runs.length,
+        workflow_id: "auto-gate.yml",
+        event: "repository_dispatch",
+        created_at: new Date(clock()).toISOString().replace(/\.\d{3}Z$/, "Z"),
+        payload: { action: params.event_type, client_payload: params.client_payload },
+      });
+      return { status: 204 };
+    },
+  };
+}
+
+function withReconciliationRequests(github, api) {
+  return {
+    ...github,
+    rest: {
+      ...github.rest,
+      actions: { ...github.rest?.actions, listWorkflowRuns: api.listWorkflowRuns },
+      repos: { ...github.rest?.repos, createDispatchEvent: api.createDispatchEvent },
+    },
+  };
+}
+
+async function requestReconciliation({ github, context, core = fakeCore(), now }) {
+  assert.equal(
+    typeof autoGate.requestRequiredCheckReconciliation,
+    "function",
+    "an ordinary Auto Gate run has no way to request stale-decision reconciliation",
+  );
+  return autoGate.requestRequiredCheckReconciliation({ github, context, core, now });
+}
+
+function autoGateResolverJob() {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  return workflow.slice(workflow.indexOf("  auto-gate:"), workflow.indexOf("  invalidate-gate:"));
+}
+
+test("a decision frozen before PR Validation concluded is re-evaluated by the next non-schedule run", async () => {
+  // #4224's shape in #4571: the decision froze on "Build is missing" at 14:57,
+  // Build went green at 15:37:10, the workflow_run wakeup resolved another PR's
+  // head, and the next scheduled run was hours away.
+  const frozen = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-09-17T14:57:00Z",
+  });
+  const clock = () => Date.parse("2026-09-17T15:40:00Z");
+  const runs = [];
+  const dispatches = [];
+  const github = withReconciliationRequests(
+    scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA), reconciliationPull(4060, OTHER_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          frozen,
+          reconciliationRequiredCheck("Build", "2026-09-17T15:37:10Z"),
+          reconciliationRequiredCheck("Lint", "2026-09-17T15:02:00Z"),
+        ],
+      },
+    }),
+    reconciliationRequestApi({ clock, runs, dispatches }),
+  );
+
+  // The next run is an ordinary one: a comment on an unrelated PR.
+  const comment = {
+    ...fakeContext({ issue: { number: 4060, pull_request: {} } }),
+    eventName: "issue_comment",
+    runId: 501,
+  };
+  const request = await requestReconciliation({ github, context: comment, now: clock() });
+  assert.equal(request.requested, true);
+  assert.equal(dispatches.length, 1);
+  assert.equal(dispatches[0].event_type, RECONCILIATION_DISPATCH);
+  assert.equal(runs.length, 1, "the request must start an Auto Gate run");
+
+  // That run is the scheduled pass under another trigger: it selects the frozen
+  // decision, and only it.
+  const [started] = runs;
+  const targets = await autoGate.resolveTargets({
+    github,
+    context: { ...fakeContext(started.payload), eventName: started.event, runId: started.id },
+    core: fakeCore(),
+  });
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+
+  // The workflow wires both halves: the dispatch is a subscribed trigger, and
+  // the resolver of every run hands the request to the helper.
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
+  assert.match(
+    triggers,
+    new RegExp(`^  repository_dispatch:\\n    types: \\[${RECONCILIATION_DISPATCH}\\]$`, "m"),
+  );
+  assert.match(triggers, /^  schedule:\n    - cron: "\*\/5 \* \* \* \*"$/m, "the schedule stays as a backstop");
+  assert.match(
+    autoGateResolverJob(),
+    /await autoGate\.requestRequiredCheckReconciliation\(\{ github, context, core \}\)/,
+  );
+});
+
+test("a reconciliation-dispatched run does not request another reconciliation", async () => {
+  const clock = () => Date.parse("2026-09-17T15:40:00Z");
+  const listReads = [];
+  const dispatches = [];
+  const github = withReconciliationRequests(
+    { rest: {} },
+    reconciliationRequestApi({ clock, listReads, dispatches }),
+  );
+  // Nothing sits in the rate window, so only the recursion guard can refuse.
+  for (const context of [
+    {
+      ...fakeContext({ action: RECONCILIATION_DISPATCH, client_payload: { source_run_id: "501" } }),
+      eventName: "repository_dispatch",
+    },
+    { ...fakeContext({ action: "another-type" }), eventName: "repository_dispatch" },
+    { ...fakeContext({ schedule: "*/5 * * * *" }), eventName: "schedule" },
+  ]) {
+    const request = await requestReconciliation({ github, context, now: clock() });
+    assert.equal(request.requested, false, `${context.eventName} is itself a pass`);
+  }
+  assert.deepEqual(listReads, [], "a pass does not even read the rate marker");
+  assert.deepEqual(dispatches, [], "a pass cannot start another pass");
+
+  // Control: in the same state, a dispatched run that is not a pass — a manual
+  // or update-branch recovery — does request one.
+  for (const context of [
+    { ...fakeContext({ inputs: { pr_number: "4060" } }), eventName: "workflow_dispatch" },
+    { ...fakeContext({ workflow_run: { head_sha: HEAD_SHA } }), eventName: "workflow_run" },
+  ]) {
+    const control = withReconciliationRequests(
+      { rest: {} },
+      reconciliationRequestApi({ clock, dispatches: [] }),
+    );
+    const request = await requestReconciliation({ github: control, context, now: clock() });
+    assert.equal(request.requested, true, context.eventName);
+  }
+
+  // The workflow skips the step for both pass events before the helper loads,
+  // and a pass keeps the schedule's single running-plus-pending group.
+  const step = autoGateResolverJob().match(
+    /      - name: Request stale-decision reconciliation\n([\s\S]*?)(?=\n      - name: |$(?![\s\S]))/,
+  );
+  assert.ok(step, "the resolver needs a reconciliation request step");
+  assert.match(
+    step[1],
+    /^        if: \$\{\{ !cancelled\(\) && github\.event_name != 'schedule' && github\.event_name != 'repository_dispatch' \}\}$/m,
+  );
+});
+
+test("two ordinary runs inside the rate window request one reconciliation", async () => {
+  for (const honorCreatedFilter of [true, false]) {
+    const label = honorCreatedFilter ? "server-filtered listing" : "unfiltered listing";
+    let now = Date.parse("2026-09-17T16:00:00Z");
+    const runs = [
+      // A pass just outside the window, and runs that are not passes.
+      { id: 1, workflow_id: "auto-gate.yml", event: "repository_dispatch", created_at: "2026-09-17T15:54:59Z" },
+      { id: 2, workflow_id: "auto-gate.yml", event: "issue_comment", created_at: "2026-09-17T15:59:00Z" },
+      { id: 3, workflow_id: "pr.yml", event: "repository_dispatch", created_at: "2026-09-17T15:59:30Z" },
+    ];
+    const listReads = [];
+    const dispatches = [];
+    const github = withReconciliationRequests(
+      { rest: {} },
+      reconciliationRequestApi({ clock: () => now, runs, listReads, dispatches, honorCreatedFilter }),
+    );
+    const comment = { ...fakeContext({ issue: { number: 4060 } }), eventName: "issue_comment" };
+    const status = { ...fakeContext({ sha: HEAD_SHA }), eventName: "status" };
+
+    const first = await requestReconciliation({ github, context: comment, now });
+    assert.equal(first.requested, true, label);
+    now += 2 * 60 * 1000;
+    const second = await requestReconciliation({ github, context: status, now });
+    assert.equal(second.requested, false, label);
+    assert.equal(dispatches.length, 1, `${label}: two runs inside the window reconcile once`);
+
+    // The window is inclusive: a pass exactly five minutes old still holds it.
+    now = Date.parse("2026-09-17T16:05:00Z");
+    assert.equal((await requestReconciliation({ github, context: comment, now })).requested, false, label);
+    now = Date.parse("2026-09-17T16:05:01Z");
+    assert.equal((await requestReconciliation({ github, context: status, now })).requested, true, label);
+    assert.equal(dispatches.length, 2, label);
+
+    // The marker is one cheap read: this workflow's newest repository_dispatch
+    // run, filtered to the window, one result.
+    assert.equal(listReads.length, 4, label);
+    for (const read of listReads) {
+      assert.equal(read.workflow_id, "auto-gate.yml");
+      assert.equal(read.event, "repository_dispatch");
+      assert.equal(read.per_page, 1);
+    }
+    assert.equal(listReads[3].created, ">=2026-09-17T16:00:01Z");
+  }
+
+  // Two runs that both read before either dispatch is visible can both
+  // request. The group bounds that race to one running and one pending pass.
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const beforeJobs = workflow.slice(0, workflow.indexOf("\njobs:")).replace(/\s+/g, " ");
+  assert.match(
+    beforeJobs,
+    /\(github\.event_name == 'schedule' \|\| github\.event_name == 'repository_dispatch'\) && 'required-check-reconciliation'/,
+  );
+});
+
+test("a failed reconciliation request fails toward no dispatch and never reds the run", async () => {
+  const clock = () => Date.parse("2026-09-17T16:00:00Z");
+  const comment = { ...fakeContext({ issue: { number: 4060 } }), eventName: "issue_comment" };
+  const unreadable = [
+    { listError: Object.assign(new Error("Forbidden"), { status: 403 }) },
+    { listResponse: { data: {} } },
+    {
+      listResponse: {
+        data: { workflow_runs: [{ id: 9, event: "repository_dispatch", created_at: "not a time" }] },
+      },
+    },
+  ];
+  for (const failure of unreadable) {
+    const dispatches = [];
+    const core = fakeCore();
+    const github = withReconciliationRequests(
+      { rest: {} },
+      reconciliationRequestApi({ clock, dispatches, ...failure }),
+    );
+    const request = await requestReconciliation({ github, context: comment, core, now: clock() });
+    assert.equal(request.requested, false);
+    assert.deepEqual(dispatches, [], "an unknown marker must not fan out");
+  }
+
+  // A dispatch is not idempotent: one attempt, then a warning.
+  const dispatches = [];
+  const core = fakeCore();
+  const github = withReconciliationRequests(
+    { rest: {} },
+    reconciliationRequestApi({
+      clock,
+      dispatches,
+      dispatchError: Object.assign(new Error("Server Error"), { status: 502 }),
+    }),
+  );
+  const request = await requestReconciliation({ github, context: comment, core, now: clock() });
+  assert.equal(request.requested, false);
+  assert.equal(dispatches.length, 1);
+  assert.match(core.warnings.join("\n"), /reconciliation/);
+
+  const step = autoGateResolverJob().match(
+    /      - name: Request stale-decision reconciliation\n([\s\S]*?)(?=\n      - name: |$(?![\s\S]))/,
+  );
+  assert.ok(step);
+  assert.match(step[1], /catch \(error\) \{[\s\S]{0,300}core\.warning\(/);
+  assert.doesNotMatch(step[1], /setFailed|throw /);
+});
+
 test("the happy path squash-merges the exact evaluated head", async () => {
   const github = fakeGateGithub({
     checkRuns: [
@@ -8174,6 +8974,245 @@ test("a required check whose run is parked says so instead of reporting it missi
     /required check Lint \(app 15368\) is missing/,
     "the misleading wording must be gone for this case",
   );
+});
+
+// #4581. #4430's head b63f9752 was an ordinary lane push. GitHub created an Auto
+// Gate run for it and no PR Validation run at all, so Build could never report
+// and the decision said "missing" until someone ran `gh workflow run pr.yml` by
+// hand (run 35291417069). "Missing" meant "not reported yet" and "never coming",
+// and only the second earns a dispatch.
+const RUNLESS_BRANCH = "siyer/fix-3603";
+const TODAYS_MISSING_REASONS = [
+  `required check Build (app 15368) is missing on ${HEAD_SHA}`,
+  `required check Lint (app 15368) is missing on ${HEAD_SHA}`,
+];
+
+// Build and Lint absent, which is how a head with no PR Validation run reads.
+// A dispatch the fake accepts starts a run at the branch tip, carrying the tip's
+// sha, which is what the real API does and what makes the next read see it.
+function runlessValidationGithub(options = {}) {
+  const runsByHeadSha = options.runsByHeadSha || {};
+  const github = fakeGateGithub({
+    headRefName: RUNLESS_BRANCH,
+    checkRuns: happyCheckRuns().filter((run) => run.name !== "Build" && run.name !== "Lint"),
+    ...options,
+    runsByHeadSha,
+  });
+  const accept = github.rest.actions.createWorkflowDispatch;
+  github.rest.actions.createWorkflowDispatch = async (params) => {
+    await accept(params);
+    const tip = options.remoteRefSha || HEAD_SHA;
+    (runsByHeadSha[tip] ||= []).push({
+      id: 35291417069,
+      name: "PR Validation",
+      event: "workflow_dispatch",
+      status: "queued",
+      conclusion: null,
+    });
+  };
+  return github;
+}
+
+// Production waits five seconds between existence reads. Here that would be ten
+// idle seconds per evaluation that finds nothing.
+async function evaluateRunless(github, core = fakeCore()) {
+  const previousPoll = process.env.AUTO_GATE_VALIDATION_POLL_MS;
+  process.env.AUTO_GATE_VALIDATION_POLL_MS = "0";
+  try {
+    return await autoGate.evaluate({
+      github,
+      context: fakeContext(),
+      core,
+      prNumber: 1465,
+      setOutputs: false,
+    });
+  } finally {
+    if (previousPoll === undefined) {
+      delete process.env.AUTO_GATE_VALIDATION_POLL_MS;
+    } else {
+      process.env.AUTO_GATE_VALIDATION_POLL_MS = previousPoll;
+    }
+  }
+}
+
+const validationDispatches = (github) =>
+  github.dispatchedWorkflows.filter((dispatch) => dispatch.workflow_id === "pr.yml");
+const validationExistenceReads = (github) =>
+  github.runListReads.filter((read) => read.workflow_id === "pr.yml");
+const requiredCheckReasons = (result) =>
+  result.reasons.filter((reason) => reason.startsWith("required check "));
+
+test("a head with no PR Validation run is dispatched once and the decision names it", async () => {
+  const github = runlessValidationGithub();
+  const first = await evaluateRunless(github);
+
+  assert.equal(validationDispatches(github).length, 1, "one dispatch for Build and Lint together");
+  assert.equal(validationDispatches(github)[0].ref, RUNLESS_BRANCH, "a dispatch takes a ref, never a sha");
+  assert.deepEqual(github.refReads, [`heads/${RUNLESS_BRANCH}`], "the tip is read before the dispatch");
+  assert.equal(first.shouldMerge, false, "a dispatched run is not a reported check");
+  for (const reason of TODAYS_MISSING_REASONS) {
+    assert.ok(
+      first.summary.includes(
+        `${reason} — PR Validation had no run for this head, so Auto Gate dispatched it on ${RUNLESS_BRANCH}`,
+      ),
+      `the summary names the dispatch: ${first.summary}`,
+    );
+  }
+  // Absence is confirmed over the bounded wait, not read once: an evaluation
+  // that races the push would otherwise dispatch a duplicate of a run GitHub was
+  // about to create.
+  const reads = validationExistenceReads(github);
+  assert.equal(reads.length, 3);
+  for (const read of reads) {
+    assert.equal(read.head_sha, HEAD_SHA);
+    assert.equal(read.event, undefined, "every event counts, including this function's own dispatch");
+    assert.equal(read.per_page, 1);
+  }
+  // The dispatched reason keeps the prefix the reconciliation pass matches, so
+  // when the dispatched run's Build completes, a frozen decision still wakes.
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          reconciliationDecision({
+            prNumber: 1465,
+            headSha: HEAD_SHA,
+            evaluatedAt: "2026-09-17T23:10:00Z",
+            reason: first.reasons.join("; "),
+          }),
+          reconciliationRequiredCheck("Build", "2026-09-17T23:30:00Z"),
+          reconciliationRequiredCheck("Lint", "2026-09-17T23:20:00Z"),
+        ],
+      },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+  assert.deepEqual(targets.map((target) => target.prNumber), [1465]);
+
+  // The next evaluation of the same head finds the run the dispatch started. The
+  // marker is that run, so the head is dispatched once, not once per evaluation.
+  const second = await evaluateRunless(github);
+  assert.equal(validationDispatches(github).length, 1, "a second evaluation must not dispatch again");
+  assert.deepEqual(requiredCheckReasons(second), TODAYS_MISSING_REASONS);
+
+  // Two evaluations that both read before either dispatch is visible can both
+  // send one. The dispatch passes no inputs, so pr.yml's probe input (#4563)
+  // stays false: a full run, grouped by its ref under pr-, cancel in progress.
+  // That race costs one cancelled run rather than two builds.
+  assert.equal(validationDispatches(github)[0].inputs, undefined, "a dispatch with inputs could be a probe");
+  const validation = fs.readFileSync(path.join(__dirname, "..", "workflows", "pr.yml"), "utf8");
+  assert.match(validation, /^ {2}workflow_dispatch:$/m);
+  assert.match(
+    validation,
+    /^ {2}group: \$\{\{ inputs\.probe && 'probe-' \|\| 'pr-' \}\}\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}$/m,
+  );
+  assert.match(validation, /^ {2}cancel-in-progress: true$/m);
+});
+
+test("a head whose PR Validation run is queued or running is left alone", async () => {
+  for (const run of [
+    { id: 1, name: "PR Validation", event: "pull_request", status: "queued", conclusion: null },
+    { id: 2, name: "PR Validation", event: "pull_request", status: "in_progress", conclusion: null },
+    // A hand dispatch is a run too; #4430 was unstuck with one.
+    { id: 35291417069, name: "PR Validation", event: "workflow_dispatch", status: "queued", conclusion: null },
+  ]) {
+    const label = `${run.event} ${run.status}`;
+    const github = runlessValidationGithub({ runsByHeadSha: { [HEAD_SHA]: [run] } });
+    const core = fakeCore();
+    const result = await evaluateRunless(github, core);
+
+    assert.equal(validationExistenceReads(github).length, 1, `${label}: the gate asked, and one answer sufficed`);
+    assert.deepEqual(validationDispatches(github), [], `${label}: a run exists, so nothing is dispatched`);
+    assert.deepEqual(github.refReads, [], `${label}: a head with a run never reaches the tip read`);
+    assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS, `${label}: the decision reads as before`);
+    assert.deepEqual(core.warnings, [], label);
+  }
+
+  // GitHub creates a push's runs a few seconds after the head moves (#3814). A
+  // run that becomes visible during the wait is a run that exists. Reads per
+  // head: the parked-run listing, then the first existence read, see nothing.
+  const late = runlessValidationGithub({
+    runsAppearAfterReads: 2,
+    runsByHeadSha: {
+      [HEAD_SHA]: [{ id: 3, name: "PR Validation", event: "pull_request", status: "queued", conclusion: null }],
+    },
+  });
+  const result = await evaluateRunless(late);
+  assert.equal(validationExistenceReads(late).length, 2);
+  assert.deepEqual(validationDispatches(late), [], "a run that appears during the wait is not duplicated");
+  assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS);
+});
+
+test("an unreadable PR Validation listing dispatches nothing and reports as before", async () => {
+  for (const [label, answer] of [
+    ["403", async () => {
+      throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
+    }],
+    ["no runs array", async () => ({ data: {} })],
+  ]) {
+    const github = runlessValidationGithub();
+    const reads = [];
+    github.rest.actions.listWorkflowRuns = async (params) => {
+      reads.push(params);
+      return answer(params);
+    };
+    const core = fakeCore();
+    const result = await evaluateRunless(github, core);
+
+    assert.equal(reads.length, 1, `${label}: an unknown answer ends the check, it does not retry into a dispatch`);
+    assert.deepEqual(validationDispatches(github), [], `${label}: an unknown answer is not "no run"`);
+    assert.deepEqual(github.refReads, [], label);
+    assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS, `${label}: the decision reads as before`);
+    assert.equal(result.readFailure, undefined, `${label}: the evaluation itself did not fail`);
+    assert.match(
+      core.warnings.join("\n"),
+      new RegExp(`Could not tell whether PR Validation has a run for ${HEAD_SHA}`),
+      label,
+    );
+  }
+});
+
+test("a branch that has moved off the head, or cannot be read, is not dispatched", async () => {
+  for (const [label, options, trace] of [
+    ["moved", { remoteRefSha: OTHER_SHA }, (core) => core.infos.join("\n").includes(`now points at ${OTHER_SHA}`)],
+    ["deleted", { remoteRefSha: null }, (core) => /could not be read/.test(core.warnings.join("\n"))],
+    [
+      "unreadable",
+      { refReadError: Object.assign(new Error("Forbidden"), { status: 403 }) },
+      (core) => /could not be read/.test(core.warnings.join("\n")),
+    ],
+  ]) {
+    const github = runlessValidationGithub(options);
+    const core = fakeCore();
+    const result = await evaluateRunless(github, core);
+
+    assert.deepEqual(github.refReads, [`heads/${RUNLESS_BRANCH}`], `${label}: the tip was read before any dispatch`);
+    assert.deepEqual(validationDispatches(github), [], `${label}: a ref dispatch would not validate this head`);
+    assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS, `${label}: the decision reads as before`);
+    assert.ok(trace(core), `${label}: the log says why nothing was dispatched`);
+  }
+});
+
+// Not a red-first test: master never dispatches, so these pass there by
+// construction. They pin the heads where GitHub would not have created a
+// pull_request run either, where absence is expected and a dispatch would spend
+// a runner on a head that cannot merge.
+test("a head GitHub would not validate is not dispatched or even checked", async () => {
+  for (const [label, options] of [
+    ["conflicting", { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }],
+    ["mergeability unknown", { mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }],
+    ["fork head", { pullRequestsByNumber: { 1465: { headRepository: "outside/fork" } } }],
+    ["closed", { state: "CLOSED" }],
+  ]) {
+    const github = runlessValidationGithub(options);
+    const result = await evaluateRunless(github);
+
+    assert.deepEqual(validationExistenceReads(github), [], label);
+    assert.deepEqual(validationDispatches(github), [], label);
+    assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS, label);
+  }
 });
 
 // #3814. #3812 approved parked runs immediately after its own update-branch and
@@ -9201,25 +10240,30 @@ test("a self-contradictory NOT_FOUND that never clears blocks instead of throwin
 test("a NOT_FOUND for an id the gate did not resolve stays loud", async () => {
   // The property #3346 established on purpose. NOT_FOUND is only tolerated for
   // the node id THIS run resolved; anything else is real breakage and is not
-  // retried even once.
+  // retried even once. #4484 then scopes that breakage to its PR: the run
+  // completes with the aggregate red for the failed PR rather than the job
+  // dying and taking unrelated PRs' evaluations with it.
   const github = fakeGateGithub({
     readErrorsByFn: { listReviews: [selfContradictoryNotFound("PR_some_other_node")] },
   });
 
-  await assert.rejects(
-    autoGate.processAggregateHead({
-      github,
-      context: fakeContext(),
-      core: fakeCore(),
-      headSha: HEAD_SHA,
-      targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
-      mergeEnabled: false,
-    }),
-    /Could not resolve to a node with the global id of 'PR_some_other_node'/,
-  );
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: false,
+  });
 
   assert.equal(github.readAttemptsByFn.listReviews, 1, "an unrelated NOT_FOUND must not retry");
   assert.equal(github.pullGetReads, 0, "an unrelated NOT_FOUND must not be cross-checked");
+  assert.notEqual(transaction.state, "merged");
+  assert.equal(transaction.aggregate.ok, false);
+  assert.ok(
+    transaction.aggregate.blockers.some((blocker) => blocker.includes("1465")),
+    `aggregate must name the failed PR as a blocker: ${transaction.aggregate.blockers}`,
+  );
 });
 
 test("a PR that genuinely vanished mid-run concludes cleanly", async () => {
@@ -10987,8 +12031,9 @@ test("the gate runs the sweep once per non-reconciliation run", () => {
 
   // The resolver job — NOT apply-gate, which is a per-aggregate-head matrix that
   // does not run at all when nothing was invalidated, and would sweep once per
-  // head when it does. The scheduled reconciliation is the one exception: its
-  // quota is reserved for repairing required-check decisions.
+  // head when it does. Reconciliation passes, scheduled or dispatched, are the
+  // one exception: their quota is reserved for repairing required-check
+  // decisions.
   const resolver = workflow.slice(
     workflow.indexOf("  auto-gate:"),
     workflow.indexOf("  invalidate-gate:"),
@@ -11004,7 +12049,7 @@ test("the gate runs the sweep once per non-reconciliation run", () => {
   // on its own, so the switch that turns that off has to reach it.
   assert.match(
     resolver,
-    /if: always\(\) && vars\.AUTO_GATE_ENABLED == 'true' && github\.event_name != 'schedule'\n\s+uses: actions\/github-script/,
+    /if: always\(\) && vars\.AUTO_GATE_ENABLED == 'true' && github\.event_name != 'schedule' && github\.event_name != 'repository_dispatch'\n\s+uses: actions\/github-script/,
   );
   assert.match(resolver, /catch \(error\) \{[\s\S]{0,300}core\.warning\(/);
 });
@@ -11523,6 +12568,77 @@ test("a later ACCEPTED exempts a finding an earlier RESOLVED claimed to fix", as
 test("gate-ack remains an explicit finding resolution marker", () => {
   assert.equal(__test.hasResolutionMarker("Root accepts this [gate-ack]."), true);
   assert.equal(__test.hasResolutionMarker("accepted in discussion, not marked"), false);
+});
+
+// #4117: the detail bot's real review-comment login is `detail-app[bot]` —
+// verified against live comment data on #4106 and #4109, where its acks were
+// dropped because the allowlist named spellings no actor posts under. An ack
+// under the real login must clear the finding.
+test("a gate-ack from detail-app[bot] clears an inline finding", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    reviewComments: [
+      codexFinding({ id: 10, line: 32, createdAt: "2026-07-09T01:15:00Z" }),
+      {
+        ...findingReply({ id: 11, inReplyToId: 10, body: "Valid edge case — accepting [gate-ack]." }),
+        user: { login: "detail-app[bot]" },
+      },
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+// #4117's other half: a marker reply from an author OUTSIDE the allowlist does
+// not clear the thread — but it must not vanish silently either. The author
+// believes it answered and the gate believed nothing was answered, and the old
+// summary prescribed the reply already sitting there. The blocker now names
+// the author and says why its reply does not count.
+test("a gate-ack from an unrecognized author is named on the blocker, not dropped", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    reviewComments: [
+      codexFinding({ id: 10, line: 32, createdAt: "2026-07-09T01:15:00Z" }),
+      {
+        ...findingReply({ id: 11, inReplyToId: 10, body: "Looks fine to me [gate-ack]." }),
+        user: { login: "outside-contributor" },
+      },
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /unresolved live Codex inline finding/);
+  assert.match(result.reasons.join("\n"), /@outside-contributor/);
+  assert.match(result.reasons.join("\n"), /not (?:an allowed|on the allowlist)|allowlist/);
+});
+
+// Same contract on the unbound-artifact surface: a reply that LINKS the
+// artifact and carries a marker still counts for nothing when its author is
+// outside the allowlist — and now says so, naming the author.
+test("a linked marker reply from an unrecognized author is named on the unbound blocker", async () => {
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const result = await evaluateGate({
+    reviews: [automaticReview()],
+    issueComments: [
+      stripped,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+      prComment(
+        "outside-contributor",
+        `Read it — [gate-ack] #issuecomment-${stripped.id}.`,
+        "2026-07-09T01:20:00Z",
+      ),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /name no commit/);
+  assert.match(result.reasons.join("\n"), /@outside-contributor/);
 });
 
 async function evaluateGate(options = {}) {

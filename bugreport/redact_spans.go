@@ -7,6 +7,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/credscrub"
 	"github.com/sachiniyer/agent-factory/internal/redactspan"
+	"github.com/sachiniyer/agent-factory/internal/redactx"
 )
 
 // redactionSpan is one replacement located in the unmodified input. Credentials,
@@ -32,95 +33,97 @@ const (
 	spanQuotedValue
 )
 
-// textTransformContext is the provenance of an already-decoded logical value.
-// It decides which transformations may be applied next; byte shape alone never
-// upgrades a value into a stronger grammar.
-type textTransformContext uint8
-
-const (
-	transformLogRecord textTransformContext = iota
-	transformLogValue
-	transformLogShellValue
-	transformDiagnosticValue
-	transformGenericValue
-)
-
-// scrubKnownLogValues includes the historical task-log shapes whose title is
-// known from fixed syntax rather than the current record set.
-func (r *redactor) scrubKnownLogValues(s string) string {
-	return applyRedactionSpans(s, r.transformedTextSpans(s, transformLogRecord, 0))
-}
-
-func (r *redactor) scrubKnownDiagnosticValues(s string) string {
-	return applyRedactionSpans(s, r.transformedTextSpans(s, transformDiagnosticValue, 0))
-}
-
-func (r *redactor) scrubGenericText(s string) string {
-	return applyRedactionSpans(s, r.transformedTextSpans(s, transformGenericValue, 0))
-}
-
-func (r *redactor) transformedTextSpans(
-	s string,
-	context textTransformContext,
-	quoteDepth int,
-) []redactionSpan {
-	spans := r.directTextSpans(s, context)
-	if context.admitsANSI() {
-		spans = r.appendANSITransformedSpans(spans, s, func(logical string) []redactionSpan {
-			return r.transformedTextSpans(logical, context, quoteDepth)
-		})
-	}
-	return r.appendTransformedGoQuotedSpans(spans, s, context, quoteDepth)
-}
-
-func (r *redactor) directTextSpans(s string, context textTransformContext) []redactionSpan {
-	switch context {
-	case transformLogRecord:
-		spans := r.sensitiveTextSpans(s)
-		spans = appendLegacyTaskTitleSpans(spans, s)
-		return r.appendLogShellCommandPathSpans(spans, s)
-	case transformLogValue:
-		return appendLegacyTaskTitleSpans(r.sensitiveTextSpans(s), s)
-	case transformLogShellValue:
-		spans := appendLegacyTaskTitleSpans(r.sensitiveTextSpans(s), s)
-		return append(spans, r.shellCommandSpans(s, r.sensitiveTextSpans)...)
-	case transformDiagnosticValue:
-		return r.sensitiveTextSpans(s)
-	case transformGenericValue:
-		return r.genericTextSpans(s)
+// produceSpans is this redactor's match policy on one logical view — what
+// counts as secret in text carrying a given provenance. The shared engine
+// (internal/redactx) decides which decodings a provenance admits; this switch
+// decides which matchers see the decoded result. It mirrors the per-context
+// matcher sets the old dispatcher hardcoded: the log family gets the
+// sensitive (known-value) matchers plus legacy emitter titles, shell commands
+// get their path boundaries beside the family matchers, and decoded URI
+// components get their dedicated boundary rules.
+func (r *redactor) produceSpans(text string, prov redactx.Provenance) []redactionSpan {
+	switch prov {
+	case redactx.ProvLogRecord, redactx.ProvLogValue:
+		return appendLegacyTaskTitleSpans(r.sensitiveBaseTextSpans(text), text)
+	case redactx.ProvLogShell:
+		spans := appendLegacyTaskTitleSpans(r.sensitiveBaseTextSpans(text), text)
+		return append(spans, r.shellBoundarySpans(text)...)
+	case redactx.ProvLogShellRaw:
+		return r.shellBoundarySpans(text)
+	case redactx.ProvDiagnostic, redactx.ProvLogShellLiteral, redactx.ProvANSIPayload,
+		redactx.ProvURIQueryPair, redactx.ProvURIComponent:
+		return r.sensitiveBaseTextSpans(text)
+	case redactx.ProvGeneric, redactx.ProvConfigScalar, redactx.ProvConfigShellLiteral:
+		return r.genericBaseTextSpans(text)
+	case redactx.ProvConfigShell:
+		return append(r.genericBaseTextSpans(text), r.shellBoundarySpans(text)...)
+	case redactx.ProvURIPathSensitive:
+		return r.sensitiveURIPathTextSpans(text)
+	case redactx.ProvURIPathGeneric:
+		return r.genericURIPathTextSpans(text)
 	default:
 		return nil
 	}
 }
 
-func (context textTransformContext) admitsANSI() bool {
-	return context == transformLogRecord ||
-		context == transformLogValue ||
-		context == transformLogShellValue ||
-		context == transformDiagnosticValue
-}
-
-func (context textTransformContext) decodedGoQuoteContext() textTransformContext {
-	if context == transformLogRecord || context == transformLogShellValue {
-		return transformLogValue
+// shellBoundarySpans matches the registered path roots and worktree titles a
+// proven shell command can name. Boundary recognition needs the command's own
+// parse context — a registered path may end where an expansion begins — so the
+// producer re-derives it from the command text. When the shell literal
+// transform already failed the parse, this returns nil: the transform's
+// fail-closed range covers the whole command, and degraded boundary checks on
+// it cannot leak anything it did not already take.
+func (r *redactor) shellBoundarySpans(command string) []redactionSpan {
+	context, ok := redactx.ParseShell(command)
+	if !ok {
+		return nil
 	}
-	return context
+	endsAt := func(s string, start, end int) bool {
+		return pathEndsAt(s, start, end) || shellExpansionEndsAt(context, s, start, end)
+	}
+	worktreeBoundary := func(s string, start, end int) bool {
+		return derivedWorktreePathBoundaryWithEnd(s, start, end, endsAt)
+	}
+	rootBoundary := func(s string, start, end int) bool {
+		return knownRootTextBoundaryWithEnd(s, start, end, endsAt)
+	}
+	spans := r.appendWorktreePathTitleSpansWithBoundary(nil, command, worktreeBoundary)
+	spans = r.appendWorktreeSubdirectoryTitleSpansWithBoundary(spans, command, worktreeBoundary)
+	return r.appendKnownRootSpansWithBoundary(spans, command, rootBoundary)
 }
 
-func (r *redactor) sensitiveTextSpans(s string) []redactionSpan {
-	spans := r.sensitiveBaseTextSpans(s)
-	return r.appendURIPathSpans(spans, s, r.sensitiveURIPathTextSpans)
+// shellExpansionEndsAt reports whether a candidate path may end at end because
+// a shell expansion materializes there — or, after word-owned line
+// continuations, a path delimiter does.
+func shellExpansionEndsAt(c redactx.ShellContext, s string, start, end int) bool {
+	if c.DirectExpansionStartsAt(start, end) {
+		return true
+	}
+	next, ok := c.AfterLineContinuations(start, end)
+	if !ok {
+		return false
+	}
+	return pathEndsAt(s, start, next) || c.DirectExpansionStartsAt(start, next)
+}
+
+// toSharedSpans adapts the package-local span type to the shared stage's
+// span. The local type survives because every matcher below was written
+// against it; the boundary converts once per view.
+func toSharedSpans(spans []redactionSpan) []redactspan.Span {
+	out := make([]redactspan.Span, 0, len(spans))
+	for _, span := range spans {
+		out = append(out, redactspan.Span{
+			Start: span.start, End: span.end,
+			Replacement: span.replacement, Priority: span.priority,
+		})
+	}
+	return out
 }
 
 func (r *redactor) sensitiveBaseTextSpans(s string) []redactionSpan {
 	spans := r.knownBaseTextSpans(s)
 	spans = appendCredentialSpans(spans, s)
 	return r.appendUsernameSpans(spans, s)
-}
-
-func (r *redactor) genericTextSpans(s string) []redactionSpan {
-	spans := r.genericBaseTextSpans(s)
-	return r.appendURIPathSpans(spans, s, r.genericURIPathTextSpans)
 }
 
 func (r *redactor) genericBaseTextSpans(s string) []redactionSpan {
@@ -213,83 +216,6 @@ func appendCredentialSpans(spans []redactionSpan, s string) []redactionSpan {
 		})
 	}
 	return spans
-}
-
-const maxGoQuotedTransformDepth = 64
-
-func (r *redactor) appendTransformedGoQuotedSpans(
-	spans []redactionSpan,
-	s string,
-	context textTransformContext,
-	depth int,
-) []redactionSpan {
-	if depth >= maxGoQuotedTransformDepth {
-		// Each accepted quote removes at least its two delimiter bytes, but an
-		// attacker-controlled log can still manufacture excessive nesting. At
-		// the depth budget, redact any further valid quoted value as one unknown
-		// logical unit rather than leaking it or recursing without a bound.
-		return appendGoQuotedSpans(spans, s, func(string) string {
-			return redactedMarker
-		})
-	}
-	decodedContext := context.decodedGoQuoteContext()
-	return appendGoQuotedSpans(spans, s, func(value string) string {
-		inner := r.transformedTextSpans(value, decodedContext, depth+1)
-		return applyRedactionSpans(value, inner)
-	})
-}
-
-func appendGoQuotedSpans(spans []redactionSpan, s string, scrub func(string) string) []redactionSpan {
-	for scan := 0; scan < len(s); {
-		rel := strings.IndexByte(s[scan:], '"')
-		if rel < 0 {
-			break
-		}
-		start := scan + rel
-		end := goQuotedEnd(s, start)
-		if end < 0 {
-			scan = start + 1
-			continue
-		}
-		quoted := s[start:end]
-		value, err := strconv.Unquote(quoted)
-		if err != nil {
-			// This opener did not establish a Go-quoted value. Resume one byte past
-			// it: the quote we tentatively treated as its closer may instead be the
-			// next real %q opener, and malformed text must not consume that evidence.
-			scan = start + 1
-			continue
-		}
-		if redacted := scrub(value); redacted != value {
-			spans = append(spans, redactionSpan{
-				start: start, end: end, replacement: strconv.Quote(redacted), priority: spanQuotedValue,
-			})
-		}
-		scan = end
-	}
-	return spans
-}
-
-func goQuotedEnd(s string, start int) int {
-	escaped := false
-	for i := start + 1; i < len(s); i++ {
-		if escaped {
-			escaped = false
-			continue
-		}
-		switch s[i] {
-		case '\\':
-			escaped = true
-		case '"':
-			return i + 1
-		case '\r', '\n':
-			// Go double-quoted literals cannot contain a physical newline. Log
-			// framing therefore terminates this malformed candidate before a quote
-			// on the next daemon line can be mistaken for its closer.
-			return -1
-		}
-	}
-	return -1
 }
 
 func (r *redactor) appendTmuxNameSpans(spans []redactionSpan, s string) []redactionSpan {
