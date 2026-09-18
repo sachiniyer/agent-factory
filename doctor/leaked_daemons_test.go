@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"os"
@@ -285,6 +286,95 @@ func TestFixStopsALeakedTempBinaryDaemon(t *testing.T) {
 	require.True(t, findings[0].Fixed, "fix error: %v", findings[0].FixErr)
 	require.Eventually(t, func() bool { return !proctree.AliveSame(proc) },
 		5*time.Second, 20*time.Millisecond, "the leaked daemon should be gone")
+}
+
+// TestFixOnAMixedLeakedDaemonGroupLeavesAdvisoryWARNRow is the end-to-end
+// reproduction of the presentation defect: after `af doctor --fix` stops the one
+// proven debris daemon in a leaked-daemons group that ALSO holds an advisory
+// (upgraded) daemon, the collapsed row must read WARN — the only severity still
+// outstanding — and stay actionable:false, while UnresolvedCount stays 0. Pre-fix,
+// strongestDeclaredSeverity read the FIXED finding's StatusFail and returned FAIL,
+// so the human row read "FAIL  leaked-daemons" beside its own
+// "no issues require action" summary.
+//
+// The two spawned processes are real; the debris one is killed by --fix (Fixed
+// stays true with Severity=StatusFail left in place, exactly as Run does), and the
+// advisory upgrade is reported, not stopped.
+func TestFixOnAMixedLeakedDaemonGroupLeavesAdvisoryWARNRow(t *testing.T) {
+	debris := spawnWithEnv(t, "leaky-daemon-to-kill", nil, nil)
+	advisory := spawnWithEnv(t, "upgraded-daemon", nil, nil)
+	opts := testOptions(t, true, debris.PID, advisory.PID) // Fix: true
+	stubDaemonProcessArgv(t, func(int) []string { return []string{"/tmp/whatever/af", "--daemon"} })
+	stubProcessHomes(t, map[int]string{debris.PID: t.TempDir(), advisory.PID: t.TempDir()})
+	opts.minLeakedDaemonAge = time.Nanosecond
+	stubDaemonExe(t, map[int]daemonBinary{
+		debris.PID:   tempBinaryDaemon(opts.TempDir),
+		advisory.PID: {path: "/usr/local/bin/af", deleted: true, known: true},
+	})
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	findings := findByCheck(report, checkLeakedDaemon)
+	require.Len(t, findings, 2, "both daemons surface as findings in one collapsed group")
+	var fixedDebris, advisoryFinding *Finding
+	for i := range findings {
+		if findings[i].Actionable {
+			fixedDebris = &findings[i]
+		} else {
+			advisoryFinding = &findings[i]
+		}
+	}
+	require.NotNil(t, fixedDebris, "the proven debris daemon is an actionable finding")
+	require.NotNil(t, advisoryFinding, "the replaced-binary daemon is an advisory finding")
+	require.True(t, fixedDebris.Fixed, "the debris daemon must have been stopped by --fix: %v", fixedDebris.FixErr)
+	require.Equal(t, StatusFail, fixedDebris.Severity,
+		"--fix sets Fixed but leaves the declared Severity, which is the input to the bug")
+	require.False(t, advisoryFinding.Fixed, "the advisory upgrade is never fixed")
+	require.Equal(t, StatusWarn, advisoryFinding.Severity)
+
+	// The authoritative signals all stay correct regardless of the rendering bug.
+	require.Zero(t, report.UnresolvedCount(),
+		"the run is healthy on every axis a conformant consumer gates on")
+	require.Eventually(t, func() bool { return !proctree.AliveSame(debris) },
+		5*time.Second, 20*time.Millisecond, "the leaked debris daemon should be gone")
+	require.True(t, proctree.AliveSame(advisory), "the advisory upgrade must survive --fix")
+
+	// The presentation must now match the authoritative signals: the collapsed
+	// row reads the outstanding WARN, not the resolved FAIL.
+	var leakRow *renderRow
+	rows := renderRows(report, true, false)
+	for i := range rows {
+		if rows[i].name == "leaked-daemons" {
+			leakRow = &rows[i]
+		}
+	}
+	require.NotNil(t, leakRow, "the leaked-daemons collapsed row must be present")
+	require.Equal(t, StatusWarn, leakRow.status,
+		"a fixed FAIL must not harden the row; only the advisory WARN is outstanding")
+	require.False(t, leakRow.actionable, "the one actionable finding is fixed, so the row is not actionable")
+
+	var buf bytes.Buffer
+	Render(&buf, report, true, false)
+	require.Contains(t, buf.String(), "WARN  leaked-daemons:",
+		"the human row label must read the outstanding WARN")
+	require.NotContains(t, buf.String(), "FAIL  leaked-daemons:",
+		"a row contradicting its own healthy summary is the defect this fixes")
+	require.Contains(t, buf.String(), "no issues require action",
+		"the summary the row sits under must stay internally consistent with it")
+
+	payload := BuildJSONReport(report, true, false)
+	var jsonRow *JSONCheck
+	for i := range payload.Checks {
+		if payload.Checks[i].Name == "leaked-daemons" {
+			jsonRow = &payload.Checks[i]
+		}
+	}
+	require.NotNil(t, jsonRow)
+	require.Equal(t, "WARN", jsonRow.Status,
+		"the JSON row reuses renderRows, so it must agree with the human row")
+	require.False(t, jsonRow.Actionable)
+	require.Zero(t, payload.Summary.Unresolved, "unresolved excludes fixed findings")
 }
 
 // ---- dead-socket homes ----
