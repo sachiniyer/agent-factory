@@ -22,6 +22,16 @@ const ALLOWED_AUTHORS = new Set(["sachiniyer", "detail-app"]);
 function isAllowedAuthor(login) {
   return ALLOWED_AUTHORS.has(normalizeAuthorLogin(login));
 }
+// The allowed authors whose `## Review — approve` marker counts on a pull
+// request they opened themselves (#4554). Named, not detected: the marker's
+// whole purpose is that the maintainer opens most PRs here and GitHub will not
+// let that account approve them, so a maintainer's self-approval is the
+// documented intent. An automated author's is not, and "is this author a bot"
+// has no reliable answer across surfaces — normalizeAuthorLogin strips the very
+// `app/` and `[bot]` spellings that would say so, and GraphQL reports bots bare.
+// Listing the humans instead means a future allowlisted app is refused
+// self-approval by default rather than by someone remembering to add it.
+const SELF_APPROVING_AUTHORS = new Set(["sachiniyer"]);
 // The merge queue's own app authors its synthetic test PRs. Its login gets the
 // same normalization: `app/trunk-io` is what the author field reports. A batch
 // PR is recognized by this author AND the branch prefix together — either alone
@@ -833,6 +843,22 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   const touchesTui = files.some(isGatedTuiPath);
   const labels = new Set(pr.labels.map((label) => label.toLowerCase()));
 
+  // The branch a head with no PR Validation run may have one dispatched on
+  // (#4581). It is null wherever GitHub would not have created a pull_request
+  // run either, because there the absence is expected: a fork head, whose
+  // branch is not in this repository; a conflicting or still-computing merge,
+  // which gets no pull_request run until it merges cleanly; a PR that is not an
+  // open master PR; and a merge-queue batch, which merge_group validates.
+  const validationRef =
+    pr.state === "OPEN" &&
+    !pr.merged &&
+    pr.baseRefName === "master" &&
+    pr.headRepository === baseRepository &&
+    pr.mergeable === "MERGEABLE" &&
+    pr.mergeStateStatus !== "DIRTY" &&
+    !batchConstituents
+      ? pr.headRefName || null
+      : null;
   const requiredChecks = await evaluateRequiredChecks({
     github,
     context,
@@ -840,6 +866,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     sha: pr.headRefOid,
     core,
     subject,
+    validationRef,
   });
   if (!requiredChecks.ok) {
     reasons.push(...requiredChecks.reasons);
@@ -916,6 +943,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     headForcePushes: pr.headForcePushes,
     contentHead,
     subject,
+    prAuthor: pr.author,
   });
   if (!codex.ok) {
     reasons.push(...codex.reasons);
@@ -2863,6 +2891,121 @@ async function ensureValidationRun({
     );
     return { dispatched: false };
   }
+}
+
+// The same gap for a head the gate did not create (#4581). #4430's b63f9752 was
+// an ordinary lane push, and GitHub created an Auto Gate run for it and no PR
+// Validation run at all — not queued, not cancelled, never created. Build could
+// not report, and the decision said "missing" until someone ran `gh workflow run
+// pr.yml` by hand.
+//
+// "Missing" covers two states, and only one of them earns a dispatch. If any PR
+// Validation run exists for the head (queued, running, finished, or dispatched
+// by an earlier evaluation), this returns without writing and the decision reads
+// as it always has. If none exists, PR Validation is dispatched on the branch.
+//
+// - Once per head. The existence read is the marker. It lists PR Validation runs
+//   for this sha under every event, and the run a dispatch starts carries the sha
+//   it ran at, so every later evaluation of the head finds that run and stops.
+//   GitHub stores the marker, and the gate writes no state of its own. Two
+//   evaluations that both read before either dispatch is visible can both send
+//   one. A dispatched run's concurrency group in pr.yml is its branch ref, with
+//   cancel-in-progress, so that race costs one cancelled run, not two builds.
+// - Toward waiting. A failed or malformed read dispatches nothing. A missed
+//   dispatch costs the delay the decision already reports. A dispatch loop costs
+//   the runner pool.
+// - Not while the push is landing. GitHub creates a push's runs a few seconds
+//   after the head moves (#3814), so an evaluation that races the push must not
+//   read their absence as final. Absence is confirmed over the same bounded wait
+//   ensureValidationRun uses.
+// - At this head only. A dispatch takes a REF (#3752), and the tip is read last:
+//   a branch that has moved on would validate some other commit, and the newer
+//   head gets its own evaluation.
+async function dispatchMissingValidationRun({
+  github,
+  context,
+  core,
+  headSha,
+  headRefName,
+  attempts = 3,
+  delayMs = Number(process.env.AUTO_GATE_VALIDATION_POLL_MS ?? 5000),
+  sleep = delay,
+}) {
+  const { owner, repo } = context.repo;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    let runs;
+    try {
+      const listed = await retryRead(`could not list PR Validation runs for ${headSha}`, () =>
+        github.rest.actions.listWorkflowRuns({
+          owner,
+          repo,
+          workflow_id: VALIDATION_WORKFLOW,
+          // No event filter: a run this function dispatched is a workflow_dispatch
+          // run, and it has to count, or it is not a marker.
+          head_sha: headSha,
+          exclude_pull_requests: true,
+          per_page: 1,
+        }),
+      );
+      runs = listed?.data?.workflow_runs;
+      if (!Array.isArray(runs)) {
+        throw new Error("the workflow-run listing had no runs array");
+      }
+    } catch (error) {
+      core.warning(
+        `Could not tell whether PR Validation has a run for ${headSha}, so it was not dispatched: ` +
+          formatError(error),
+      );
+      return { dispatched: false, reason: "unknown-run" };
+    }
+    if (runs.length > 0) {
+      return { dispatched: false, reason: "run-exists", runId: runs[0]?.id };
+    }
+    if (attempt < attempts - 1) {
+      await sleep(delayMs);
+    }
+  }
+
+  let tip;
+  try {
+    const ref = await retryRead(`could not read heads/${headRefName}`, () =>
+      github.rest.git.getRef({ owner, repo, ref: `heads/${headRefName}` }),
+    );
+    tip = String(ref?.data?.object?.sha || "").toLowerCase();
+  } catch (error) {
+    core.warning(
+      `PR Validation has no run for ${headSha}, but ${headRefName} could not be read, so it was ` +
+        `not dispatched: ${formatError(error)}`,
+    );
+    return { dispatched: false, reason: "unknown-tip" };
+  }
+  if (tip !== String(headSha).toLowerCase()) {
+    core.info(
+      `PR Validation has no run for ${headSha}, but ${headRefName} now points at ` +
+        `${tip || "an unreadable commit"}; a dispatch there would validate that commit instead.`,
+    );
+    return { dispatched: false, reason: "moved", tip };
+  }
+
+  // A dispatch is not idempotent, so it gets one attempt. It passes no inputs,
+  // so pr.yml's probe input stays false: a full run in the pr-<ref> group, never
+  // a #4563 probe.
+  try {
+    await github.rest.actions.createWorkflowDispatch({
+      owner,
+      repo,
+      workflow_id: VALIDATION_WORKFLOW,
+      ref: headRefName,
+    });
+  } catch (error) {
+    core.warning(
+      `PR Validation has no run for ${headSha}, and dispatching it on ${headRefName} failed: ` +
+        formatError(error),
+    );
+    return { dispatched: false, reason: "dispatch-failed" };
+  }
+  core.notice(`PR Validation had no run for ${headSha}; dispatched it on ${headRefName}.`);
+  return { dispatched: true };
 }
 
 async function approveParkedRuns({ github, context, headSha, core }) {
@@ -4903,7 +5046,18 @@ async function listPullRequestFiles({ github, context, number, subject = null })
   );
 }
 
-async function evaluateRequiredChecks({ github, context, branch, sha, core, subject = null }) {
+// A required check PR Validation reports: Build or Lint, from GitHub Actions or
+// without a source app.
+function isPRValidationSpec(spec) {
+  return (
+    PR_VALIDATION_REQUIRED_CHECK_NAMES.includes(spec.context) &&
+    (spec.sourceAppId === GITHUB_ACTIONS_APP_ID || spec.sourceAppId == null)
+  );
+}
+
+async function evaluateRequiredChecks({
+  github, context, branch, sha, core, subject = null, validationRef = null,
+}) {
   const required = await getRequiredCheckSpecs({ github, context, branch, core, subject });
   const syntheticDecisionSpecs = required.specs.filter(
     (spec) =>
@@ -4973,12 +5127,27 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
     await approveParkedRuns({ github, context, headSha: sha, core });
   }
 
-  for (const spec of specs) {
-    const state = latestRequiredState(spec, checkRuns, statuses);
-    if (
-      PR_VALIDATION_REQUIRED_CHECK_NAMES.includes(spec.context) &&
-      (spec.sourceAppId === GITHUB_ACTIONS_APP_ID || spec.sourceAppId == null)
-    ) {
+  const states = specs.map((spec) => latestRequiredState(spec, checkRuns, statuses));
+  // Nothing parked and a PR Validation check absent: tell "its run has not
+  // reported yet" from "it has no run and none is coming" (#4581). One call per
+  // head, whichever of Build and Lint is absent. A caller that passes no
+  // validationRef has a head GitHub would not have validated either.
+  const validationDispatch =
+    validationRef &&
+    parkedRuns.length === 0 &&
+    specs.some((spec, index) => !states[index] && isPRValidationSpec(spec))
+      ? await dispatchMissingValidationRun({
+          github,
+          context,
+          core,
+          headSha: sha,
+          headRefName: validationRef,
+        })
+      : null;
+
+  for (const [index, spec] of specs.entries()) {
+    const state = states[index];
+    if (isPRValidationSpec(spec)) {
       observations.push({
         name: spec.context,
         appId: spec.sourceAppId,
@@ -5000,7 +5169,14 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
         );
         continue;
       }
-      reasons.push(`required check ${formatCheckSpec(spec)} is missing on ${sha}`);
+      // The dispatch is named where the reader looks for the absent check. The
+      // prefix is unchanged, so blockedPRValidationSpec still reads this reason
+      // as a Build or Lint blocker.
+      const dispatched =
+        validationDispatch?.dispatched && isPRValidationSpec(spec)
+          ? ` — PR Validation had no run for this head, so Auto Gate dispatched it on ${validationRef}`
+          : "";
+      reasons.push(`required check ${formatCheckSpec(spec)} is missing on ${sha}${dispatched}`);
       continue;
     }
 
@@ -5356,6 +5532,13 @@ function headCurrentSinceTime({
 // and on this repository the maintainer opens most of them — so a hand review of
 // record is a comment, and it already uses this exact heading.
 //
+// Only the marker is checked for self-approval (markerApprovalCounts), and that
+// asymmetry is deliberate. GitHub refuses an APPROVED review from a pull
+// request's own author server-side, for every account, so the review form cannot
+// be a self-approval. A comment carries none of those checks: working around the
+// restriction for the maintainer removed it for every allowed author, including
+// one that opens PRs at volume and posted the marker on its own #4281 (#4554).
+//
 // Bound to the head the same way a Codex artifact is (#3702): an approval is
 // about the code it was written against, so `headCurrentSince` decides. A push
 // after the sign-off returns the PR to the manual pass rather than carrying a
@@ -5363,7 +5546,7 @@ function headCurrentSinceTime({
 // head.
 //
 // Fails closed on an unknown order, like every other timestamp comparison here.
-function maintainerApproval({ comments, reviews, headCurrentSince }) {
+function maintainerApproval({ comments, reviews, headCurrentSince, prAuthor }) {
   if (headCurrentSince == null) {
     return null;
   }
@@ -5373,7 +5556,8 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
       (comment) =>
         // The first line, whole and exact — see the marker's own comment for why
         // a prefix test is the wrong shape here.
-        String(comment.body || "").split("\n", 1)[0].trim() === MAINTAINER_APPROVAL_MARKER,
+        String(comment.body || "").split("\n", 1)[0].trim() === MAINTAINER_APPROVAL_MARKER &&
+        markerApprovalCounts(comment.user?.login, prAuthor),
     ),
   ].filter(
     (artifact) =>
@@ -5381,6 +5565,24 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
       reviewArtifactTime(artifact) > headCurrentSince,
   );
   return approvals.sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a))[0] || null;
+}
+
+// Whether a marker comment from `approverLogin` may stand as the approval on a
+// pull request opened by `prAuthor` (#4554): always for a self-approving
+// maintainer, otherwise only when the PR's author is KNOWN to be someone else.
+//
+// Fails closed on an unknown author — an empty or unreadable login cannot prove
+// the marker is not a self-approval — but only for accounts that could not
+// self-approve anyway, so the maintainer's route stays open in exactly the
+// outage the degraded path exists for. Identity is compared without case, as
+// GitHub compares logins; a case-only difference must not read as a second party.
+function markerApprovalCounts(approverLogin, prAuthor) {
+  const approver = normalizeAuthorLogin(approverLogin);
+  if (SELF_APPROVING_AUTHORS.has(approver)) {
+    return true;
+  }
+  const author = normalizeAuthorLogin(prAuthor);
+  return author !== "" && author.toLowerCase() !== approver.toLowerCase();
 }
 
 // The commit whose CONTENT this head carries, when the head is a merge that only
@@ -5632,6 +5834,26 @@ async function updateBranchContentHead({
   };
 }
 
+// Every sha a Codex artifact may name and still count as evidence about this
+// head. A recognised chain of update-branch merges has one valid evidence name
+// per tree-proven link: the current merge and every first parent walked on the
+// way to the terminal content head (#4238, #4239). A review or unavailability
+// reply may have landed on any of them between gate updates. No other ancestor
+// is admitted; updateBranchContentHead's fail-closed proof authorizes every
+// added name.
+//
+// codex-outage.js reconstructs degraded merges against this same set (#4241),
+// so the outage record and the gate cannot disagree about which heads a
+// covering verdict may name.
+function evidenceHeadShasFor(headSha, contentHead) {
+  const evidenceHeadOids = Array.isArray(contentHead?.evidenceHeadOids)
+    ? contentHead.evidenceHeadOids
+    : [contentHead?.oid];
+  return [...new Set(
+    [headSha, ...evidenceHeadOids].map(normalizeHeadSha).filter(Boolean),
+  )];
+}
+
 // The Codex finding artifacts a gate must not merge past: those carrying a
 // P0-P3 that bind to NO head, and that no acknowledgement has answered.
 //
@@ -5728,6 +5950,8 @@ async function evaluateCodex({
   headForcePushes = [],
   contentHead = null,
   subject = null,
+  // The PR's author, so a marker cannot be its author's own approval (#4554).
+  prAuthor = "",
 }) {
   const notes = [];
   const reasons = [];
@@ -5767,12 +5991,7 @@ async function evaluateCodex({
   // to the terminal content head. A review or unavailability reply may have
   // landed on any of them between gate updates. No other ancestor is admitted;
   // updateBranchContentHead's fail-closed proof authorizes every added name.
-  const evidenceHeadOids = Array.isArray(contentHead?.evidenceHeadOids)
-    ? contentHead.evidenceHeadOids
-    : [contentHead?.oid];
-  const evidenceHeadShas = [...new Set(
-    [sha, ...evidenceHeadOids].map(normalizeHeadSha).filter(Boolean),
-  )];
+  const evidenceHeadShas = evidenceHeadShasFor(sha, contentHead);
   // Body links are location prose, not a claim about what Codex reviewed. Keep
   // their pre-#4239 scope — current and terminal content head — while accepting
   // every verified intermediate only where GitHub's commit_id authenticates the
@@ -6276,7 +6495,7 @@ async function evaluateCodex({
     // Read here because this is where the comments and reviews already are; the
     // caller decides what it means.
     comments,
-    maintainerApproval: maintainerApproval({ comments, reviews, headCurrentSince }),
+    maintainerApproval: maintainerApproval({ comments, reviews, headCurrentSince, prAuthor }),
   };
 }
 
@@ -6733,7 +6952,8 @@ function formatError(error) {
 
 module.exports = {
   codexEvidence: { CODEX_REVIEWER, codexReportsReviewUsageLimit, isCodexUsageLimitArtifact, classifyCodexUnavailableArtifact,
-    parseReviewedCommit, parseVerdictArtifact, completedCodexSummaryRows, corroboratedCodexSummaryRows },
+    parseReviewedCommit, parseVerdictArtifact, completedCodexSummaryRows, corroboratedCodexSummaryRows,
+    updateBranchContentHead, evidenceHeadShasFor },
   beginAggregateDecision,
   evaluate,
   evaluateAggregateDecision,
@@ -6788,6 +7008,7 @@ module.exports = {
     decisionSummaryBody,
     DECISION_STAMP_PREFIX,
     maintainerApproval,
+    markerApprovalCounts,
     MAINTAINER_APPROVAL_MARKER,
     isAllowedAuthor,
     normalizeAuthorLogin,
