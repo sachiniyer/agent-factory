@@ -3,6 +3,8 @@ package credscrub
 import (
 	"strings"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/internal/redactspan"
 )
 
 const sentinel = "S3NT1NELVALUEDONOTLOG"
@@ -215,6 +217,28 @@ func TestScrubAuthSchemeStillRedactsSameLineWithinMultiLine(t *testing.T) {
 // every line it emits.
 func BenchmarkScrubTypicalLogLine(b *testing.B) {
 	line := "ERROR:2026/08/05 11:15:52 worktree_ops.go:529: failed to remove worktree /home/u/.agent-factory/worktrees/af_0f8fc14c_fix-login: exit status 128"
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = Scrub(line)
+	}
+}
+
+// BenchmarkScrubTypicalLogLineFlat is the pre-#4149 implementation — the flat
+// matcher alone, no normalization stage — kept alongside the benchmark above
+// so the stage's cost on a line carrying no encoding is measured, not assumed.
+func BenchmarkScrubTypicalLogLineFlat(b *testing.B) {
+	line := "ERROR:2026/08/05 11:15:52 worktree_ops.go:529: failed to remove worktree /home/u/.agent-factory/worktrees/af_0f8fc14c_fix-login: exit status 128"
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = redactspan.Apply(line, Redactions(line), SecretMarker)
+	}
+}
+
+// BenchmarkScrubEncodedLogLine measures the stage on a line that does carry
+// encodings — a %q field and a URI — where the trigger gates open and the
+// decoders actually run.
+func BenchmarkScrubEncodedLogLine(b *testing.B) {
+	line := `ERROR:2026/08/05 11:15:52 hooks.go:88: post-worktree hook "fetch https://user@example.com/path?q=1" exited 1`
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_ = Scrub(line)
