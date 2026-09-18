@@ -606,14 +606,20 @@ func (b *ptyBroker) readLoop(r io.Reader, done chan struct{}) {
 		// `capturing` still true here means nothing asked us to stop: the socket
 		// dropped on its own, and this is the #2450 case where nobody else will
 		// ever notice.
+		//
+		// A capture that ran a long time is a fresh incident, not a rung on the
+		// current ladder — reset before any hand-off OR teardown reads the
+		// position. Runs for BOTH exits: a spontaneous upstream death (which then
+		// hands off to redialLoop) AND a client-side teardown (maybeStopCapture
+		// clears `capturing` before stop()), so a span-surviving capture torn down
+		// by the last subscriber leaving does not leave a stale ladder for the
+		// next incident on a broker that persists across the idle gap (#2461).
+		if !b.captureStarted.IsZero() && time.Since(b.captureStarted) >= redialHealthySpan {
+			b.redialAttempts = 0
+		}
 		spontaneous := b.capturing && !b.closed
 		var start bool
 		if spontaneous {
-			// A capture that ran a long time is a fresh incident, not a rung on the
-			// current ladder — reset before the hand-off reads the position.
-			if !b.captureStarted.IsZero() && time.Since(b.captureStarted) >= redialHealthySpan {
-				b.redialAttempts = 0
-			}
 			if !b.redialing {
 				b.redialing = true
 				start = true
