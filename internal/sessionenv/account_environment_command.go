@@ -672,6 +672,17 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 			if mode == "keyword" {
 				keywordMode = value == "-o"
 			}
+			if !knownBashSetOptionName(mode) {
+				// bash aborts its option scan at an unrecognized -o/+o name
+				// (it prints an error and returns non-zero): any earlier -k
+				// stays ON and any later +k is never applied. The running
+				// keywordMode state the scanner tracks is therefore not bash's
+				// final state, so fail closed instead of consuming the invalid
+				// name and continuing — `set -k -o nonsense +k` cannot use an
+				// invalid name to flip keywordMode back off across a +k that
+				// bash never applies.
+				return true
+			}
 			idx++
 			continue
 		}
@@ -701,6 +712,16 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 					if mode == "keyword" {
 						keywordMode = prefix == '-'
 					}
+					if !knownBashSetOptionName(mode) {
+						// bash aborts its option scan at an unrecognized -o/+o
+						// name embedded in a cluster exactly as it does for a
+						// standalone -o: an earlier -k (in this cluster or a
+						// prior word) persists and a later +k is never applied,
+						// so the running keywordMode state is not bash's final
+						// state. Fail closed rather than consume the invalid
+						// name and keep scanning.
+						return true
+					}
 					idx++
 					// Fall through to the `k` check: the cluster may contain `k`
 					// in addition to `o` (e.g. `-ko pipefail`), and bash applies
@@ -717,6 +738,63 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 		}
 	}
 	return keywordMode
+}
+
+// knownBashSetOptionName reports whether name is one of the long-form option
+// names accepted by `set -o`/`set +o` in bash. The list is the exact long-name
+// column of `set -o` in GNU bash (identical in non-POSIX and `bash --posix`
+// modes), which is the shell this keyword-mode guard models: keyword mode is a
+// bash extension, so the runtime the guard protects on bash-as-`/bin/sh`
+// deployments (macOS, some RHEL/CentOS) is bash. dash has no `keyword` entry
+// and rejects `set -k` outright, so this recognizer is unreachable there — the
+// keyword-mode arm of the guard is moot on dash.
+//
+// bash aborts its option scan at an unrecognized -o/+o name (it prints an
+// error and returns non-zero), freezing any earlier -k ON and skipping any
+// later +k. setMutatesAccountEnvironment models that abort by failing closed
+// on an unrecognized name rather than consuming it and continuing, so a
+// payload like `set -k -o nonsense +k` cannot use an invalid name to flip the
+// scanner's running keywordMode state back off across a `+k` that bash never
+// applies.
+//
+// An invented `no`-prefixed "negation" (nopipefail, noerrexit, …) is excluded:
+// bash itself rejects those with `set: <name>: invalid option name`, so
+// admitting them would re-introduce this exact class of false-safe. Long
+// names use dashes, not underscores (`interactive-comments`, not
+// `interactive_comments`).
+func knownBashSetOptionName(name string) bool {
+	_, ok := bashSetOptionNames[name]
+	return ok
+}
+
+var bashSetOptionNames = map[string]struct{}{
+	"allexport":            {},
+	"braceexpand":          {},
+	"emacs":                {},
+	"errexit":              {},
+	"errtrace":             {},
+	"functrace":            {},
+	"hashall":              {},
+	"histexpand":           {},
+	"history":              {},
+	"ignoreeof":            {},
+	"interactive-comments": {},
+	"keyword":              {},
+	"monitor":              {},
+	"noclobber":            {},
+	"noexec":               {},
+	"noglob":               {},
+	"nolog":                {},
+	"notify":               {},
+	"nounset":              {},
+	"onecmd":               {},
+	"physical":             {},
+	"pipefail":             {},
+	"posix":                {},
+	"privileged":           {},
+	"verbose":              {},
+	"vi":                   {},
+	"xtrace":               {},
 }
 
 // hashMutatesAccountEnvironment reports whether a `hash` call remaps a command
