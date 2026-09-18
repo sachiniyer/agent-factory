@@ -13,10 +13,12 @@ on:
   # an easy way to silently stop the checks from running.
   merge_group:
 
-  # Auto Gate dispatches this when its own update-branch produced no
-  # pull_request run at all for the new head, so the update-and-merge loop cannot
-  # stall waiting for a run that will never exist (#3807). A dispatch takes a
-  # REF, never a sha, so it runs at the branch tip — which is the new head.
+  # Auto Gate dispatches this when a head has no PR Validation run at all, so a
+  # decision cannot stall waiting for a run that will never exist: the head its
+  # own update-branch created (#3807), and any other head GitHub created no run
+  # for (#4581). A dispatch takes a REF, never a sha, so it runs at the branch
+  # tip. For #3807 that tip is the new head. For #4581 Auto Gate re-reads the tip
+  # first and skips the dispatch when it is no longer the head it evaluated.
   workflow_dispatch:
 
 concurrency:
@@ -27,7 +29,9 @@ concurrency:
   # merge queue. Fall back to github.ref, which is the unique gh-readonly-queue/…
   # ref per merge_group entry (and refs/pull/N/merge for PRs, so PR runs never
   # collide with queue runs either). Mirrors how auto-gate.yml keys off a fallback
-  # chain when the pull_request payload is null.
+  # chain when the pull_request payload is null. A workflow_dispatch run falls
+  # back to its branch ref too, so two Auto Gate dispatches that race on one
+  # branch cancel down to one run (#4581).
   group: pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
