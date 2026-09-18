@@ -319,52 +319,101 @@ func TestRootAgentProgramInspectionBoundsCommandConfigLoads(t *testing.T) {
 	require.Contains(t, report.Incomplete, "root agent program")
 }
 
+// TestRootAgentProgramInspectionBudgetsEachRootIndependently pins that a root
+// which spends its whole probe budget does not spend the NEXT root's too: each
+// root must get a fresh deadline of its own (#4431).
+//
+// It asserts that property on the deadlines themselves rather than on whether
+// the healthy root finished in time. The healthy root's budget also covers its
+// real repository resolution — two git subprocesses — and an earlier version
+// failed whenever those outlasted 100ms on a loaded runner, while every
+// deadline was already independent. The subtests run with git both at its real
+// speed and slower than the whole budget, and the invariant must hold in both.
+//
+// Why the invariant is exact rather than approximate: the first root blocks
+// until its own context is done, and a context timer never fires before its
+// deadline, so the second root's context is created no earlier than the first
+// root's deadline. A fresh budget therefore ends at least one full budget later.
+// A deadline shared across roots — the regression this test exists for — ends
+// at the same instant, so the gap is zero.
 func TestRootAgentProgramInspectionBudgetsEachRootIndependently(t *testing.T) {
-	opts := testOptions(t, false)
-	firstRepo := filepath.Join(t.TempDir(), "first")
-	secondRepo := filepath.Join(t.TempDir(), "second")
-	require.NoError(t, exec.Command("git", "init", firstRepo).Run())
-	require.NoError(t, exec.Command("git", "init", secondRepo).Run())
-	cfg := config.DefaultConfig()
-	opts.sessionInventory = func() ([]session.InstanceData, error) {
-		return []session.InstanceData{
-			{Title: session.RootSessionTitle, RuntimeProgram: "/first", Liveness: session.LiveReady,
-				Path: firstRepo, Worktree: session.GitWorktreeData{RepoPath: firstRepo, WorktreePath: firstRepo}},
-			{Title: session.RootSessionTitle, RuntimeProgram: "/second", Liveness: session.LiveReady,
-				Path: secondRepo, Worktree: session.GitWorktreeData{RepoPath: secondRepo, WorktreePath: secondRepo}},
-		}, nil
-	}
+	for _, tc := range []struct {
+		name    string
+		slowGit bool
+	}{
+		{name: "real git"},
+		{name: "git slower than the whole budget", slowGit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := testOptions(t, false)
+			firstRepo := filepath.Join(t.TempDir(), "first")
+			secondRepo := filepath.Join(t.TempDir(), "second")
+			require.NoError(t, exec.Command("git", "init", firstRepo).Run())
+			require.NoError(t, exec.Command("git", "init", secondRepo).Run())
+			if tc.slowGit {
+				// Every later git call outlasts the budget. The sleep's output goes
+				// to /dev/null so it cannot hold the probe's pipe open after the
+				// deadline kills the shell.
+				realGit, err := exec.LookPath("git")
+				require.NoError(t, err)
+				shimDir := t.TempDir()
+				script := fmt.Sprintf("#!/bin/sh\nsleep 0.3 >/dev/null 2>&1 </dev/null\nexec %q \"$@\"\n", realGit)
+				require.NoError(t, os.WriteFile(filepath.Join(shimDir, "git"), []byte(script), 0o755))
+				t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			}
+			cfg := config.DefaultConfig()
+			opts.sessionInventory = func() ([]session.InstanceData, error) {
+				return []session.InstanceData{
+					{Title: session.RootSessionTitle, RuntimeProgram: "/first", Liveness: session.LiveReady,
+						Path: firstRepo, Worktree: session.GitWorktreeData{RepoPath: firstRepo, WorktreePath: firstRepo}},
+					{Title: session.RootSessionTitle, RuntimeProgram: "/second", Liveness: session.LiveReady,
+						Path: secondRepo, Worktree: session.GitWorktreeData{RepoPath: secondRepo, WorktreePath: secondRepo}},
+				}, nil
+			}
 
-	previousTimeout := rootAgentProgramProbeTimeout
-	previousResolve := resolveRootAgentForInspection
-	previousInspect := inspectRootAgentProgram
-	rootAgentProgramProbeTimeout = 100 * time.Millisecond
-	resolveRootAgentForInspection = func(_ context.Context, _ *config.Config, path string, _ bool) (rootAgentProgramInspection, error) {
-		return rootAgentProgramInspection{
-			resolveProfile: func(context.Context, *config.RepoContext) (config.ResolvedValue, error) {
-				return config.ResolvedValue{Value: config.RootAgent{Enabled: true, Program: "/" + filepath.Base(path)}}, nil
-			},
-		}, nil
-	}
-	secondInspected := false
-	inspectRootAgentProgram = func(ctx context.Context, _ *config.RepoContext, profile config.RootAgent, _ rootAgentProgramInspection) (string, error) {
-		if profile.Program == "/first" {
-			<-ctx.Done()
-			return "", ctx.Err()
-		}
-		if err := ctx.Err(); err != nil {
-			return "", fmt.Errorf("second root inherited the first root's deadline: %w", err)
-		}
-		secondInspected = true
-		return "/second", nil
-	}
-	t.Cleanup(func() { rootAgentProgramProbeTimeout = previousTimeout })
-	t.Cleanup(func() { resolveRootAgentForInspection = previousResolve })
-	t.Cleanup(func() { inspectRootAgentProgram = previousInspect })
+			const budget = 100 * time.Millisecond
+			previousTimeout := rootAgentProgramProbeTimeout
+			previousResolve := resolveRootAgentForInspection
+			previousInspect := inspectRootAgentProgram
+			rootAgentProgramProbeTimeout = budget
+			t.Cleanup(func() { rootAgentProgramProbeTimeout = previousTimeout })
+			t.Cleanup(func() { resolveRootAgentForInspection = previousResolve })
+			t.Cleanup(func() { inspectRootAgentProgram = previousInspect })
 
-	report := runRootAgentProgramCheck(t, opts, cfg)
-	require.True(t, secondInspected, "the healthy second root must receive its own probe budget")
-	require.Contains(t, report.Incomplete, "root agent program")
+			// The check runs these on the test goroutine, so plain variables are safe.
+			deadlines := map[string]time.Time{}
+			resolveRootAgentForInspection = func(ctx context.Context, _ *config.Config, path string, _ bool) (rootAgentProgramInspection, error) {
+				root := filepath.Base(path)
+				if deadline, ok := ctx.Deadline(); ok {
+					deadlines[root] = deadline
+				}
+				if root == "first" {
+					// Spend the first root's whole budget here, before any repository
+					// work, so how long git takes cannot change how much it spends.
+					<-ctx.Done()
+					return rootAgentProgramInspection{}, ctx.Err()
+				}
+				return rootAgentProgramInspection{
+					resolveProfile: func(context.Context, *config.RepoContext) (config.ResolvedValue, error) {
+						return config.ResolvedValue{Value: config.RootAgent{Enabled: true, Program: "/second"}}, nil
+					},
+				}, nil
+			}
+			inspectRootAgentProgram = func(context.Context, *config.RepoContext, config.RootAgent, rootAgentProgramInspection) (string, error) {
+				return "/second", nil
+			}
+
+			report := runRootAgentProgramCheck(t, opts, cfg)
+			first, ok := deadlines["first"]
+			require.True(t, ok, "the first root's probe context carries no deadline")
+			second, ok := deadlines["second"]
+			require.True(t, ok, "the second root was never probed, or its context carries no deadline")
+			require.GreaterOrEqual(t, second.Sub(first), budget,
+				"the second root's deadline is only %v after the first root's, so it did not get a budget of its own",
+				second.Sub(first))
+			require.Contains(t, report.Incomplete, "root agent program")
+		})
+	}
 }
 
 func TestRootAgentUnreadablePersonalConfigIsIncomplete(t *testing.T) {
