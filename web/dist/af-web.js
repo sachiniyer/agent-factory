@@ -7626,9 +7626,11 @@ function canCommit(shown, current) {
 }
 function saveNotice(resp) {
   const parts = [];
-  if (resp.result.requires_restart && resp.restart_notice !== "") {
+  const warnings = resp.warnings ?? [];
+  if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }
+  parts.push(...warnings);
   const addr = resp.listener_addr ?? "";
   if (addr !== "") {
     parts.push(`Daemon now listening at ${addr}`);
@@ -18201,9 +18203,11 @@ function openDeleteProject(root2, label) {
         }
         const m = modal;
         m.setBusy(true);
-        void deleteProject(root2, tok).then(closeModal).catch((e) => {
+        void deleteProject(root2, tok).then(() => {
+          if (modal === m) closeModal();
+        }).catch((e) => {
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             requestResync();
             refreshRegisteredProjects();
             surfaceTabError(e);
@@ -18239,7 +18243,9 @@ function openAddProject() {
         }
         const m = modal;
         m.setBusy(true);
-        void registerProject(path, tok).then(closeModal).catch((e) => {
+        void registerProject(path, tok).then(() => {
+          if (modal === m) closeModal();
+        }).catch((e) => {
           m.setBusy(false);
           m.setError(errorText(e));
         });
@@ -18502,11 +18508,17 @@ function doRegisterAccount(agent, name) {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   void registerAccount(agent, name, tok).then((resp) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) {
+      refreshAccounts();
+      return;
+    }
     const notices = resp.notices?.length ? ` \xB7 ${resp.notices.join(" \xB7 ")}` : "";
     setAccountStatus(agent, "", `Registered ${agent} account "${resp.entry.name}"${notices}`, false);
     refreshAccounts();
   }).catch((err) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     setAccountStatus(agent, "", errorText(err), true);
   });
 }
@@ -18515,8 +18527,10 @@ function doOpenAccountLogin(agent, name) {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   setAccountStatus(agent, name, `Starting the ${agent} login\u2026`, false);
   void startAccountLogin(agent, name, tok).then((login) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     if (login.finished || login.session_name === "") {
       const copy = loginWithoutPaneCopy(login);
       setAccountStatus(agent, name, `${copy.status} \xB7 ${copy.detail}`, !login.logged_in);
@@ -18535,6 +18549,7 @@ function doOpenAccountLogin(agent, name) {
       }
     }));
   }).catch((err) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     setAccountStatus(agent, name, errorText(err), true);
   });
 }
@@ -18547,7 +18562,12 @@ function applyConfigValue(key, value) {
   queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 function applyConfigValueNow(key, value, tok) {
+  const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok).then((resp) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) {
+      refreshConfig();
+      return;
+    }
     store.set({
       configStatus: {
         key: resp.result.key,
@@ -18559,6 +18579,7 @@ function applyConfigValueNow(key, value, tok) {
     });
     refreshConfig();
   }).catch((err) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
   });
 }
@@ -18638,11 +18659,11 @@ function openAddTask() {
         const m = modal;
         m.setBusy(true);
         void addTask(buildTask(input), tok).then(() => {
-          closeModal();
+          if (modal === m) closeModal();
           refreshTasks();
         }).catch((e) => {
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             refreshTasks();
             surfaceTabError(e);
             return;
@@ -18683,11 +18704,11 @@ function openEditTask(task) {
           },
           tok
         ).then(() => {
-          closeModal();
+          if (modal === m) closeModal();
           refreshTasks();
         }).catch((e) => {
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             refreshTasks();
             surfaceTabError(e);
             return;
@@ -18752,7 +18773,9 @@ function doHandoff() {
         }
         const m = modal;
         m.setBusy(true);
-        void handoffSession(target.id, target.title, to, tok, account).then(closeModal).catch((e) => {
+        void handoffSession(target.id, target.title, to, tok, account).then(() => {
+          if (modal === m) closeModal();
+        }).catch((e) => {
           if (isMutationCommittedError(e)) {
             if (modal === m) closeModal();
             requestResync();
@@ -18777,7 +18800,7 @@ function doRemoveTask(task) {
     const handle = modal;
     handle.setBusy(true);
     void removeTask(task, tok).then(() => {
-      closeModal();
+      if (modal === handle) closeModal();
       return refreshTasks();
     }).catch((error) => {
       handle.setBusy(false);
