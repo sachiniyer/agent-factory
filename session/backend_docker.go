@@ -297,6 +297,20 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		}
 		p.accountMount, p.accountEnv = mount, env
 	} else if cfg.DockerMountAgentCredentials {
+		// Validate repo-controlled run_args before the mount is installed.
+		// docker.run_args is repository-controlled and checked in (the docker
+		// table is sourceRepoOnly) and appended AFTER the credential mount with
+		// no later env af emits to dominate it, so an entry setting the agent's
+		// credential-root env var (CODEX_HOME / CLAUDE_CONFIG_DIR / GEMINI_CLI_HOME
+		// — all built-in per-agent names) would redirect the agent's credential
+		// lookup away from af's mounted file and start the session
+		// unauthenticated while the provisioning log reports the mount as
+		// installed. The account path's lexical guard (validateAccountDockerRunArgs)
+		// defends the same redirect on its path; this is the symmetric guard for
+		// the credential-mount path, refused BEFORE docker run rather than after.
+		if err := validateCredentialDockerRunArgs(runArgs, p.agentName()); err != nil {
+			return ProvisionResult{}, err
+		}
 		p.credentialMounts = resolveAgentCredentialMounts(p.agentName(), p.bindMountRelabel())
 	}
 	res, err := p.provision()
@@ -469,7 +483,14 @@ func (p *dockerProvisioner) runContainer() error {
 		args = append(args, "-e", name)
 	}
 	// Read-only agent credential mounts (docker.mount_agent_credentials, #2194) go
-	// before run_args so an operator's own run_args can still be appended after.
+	// before run_args. docker.run_args is repository-controlled and checked in,
+	// and for a non-account session nothing af emits later dominates it, so the
+	// credential-mount path validates it (validateCredentialDockerRunArgs) before
+	// the mount is installed — a repo entry setting the agent's credential-root
+	// env var (e.g. CODEX_HOME) would otherwise redirect credential lookup away
+	// from this read-only file and start the session unauthenticated while af's
+	// log reported the mount. Ordering the mount before run_args keeps the two
+	// sources distinct; validation, not precedence, is what closes the gap.
 	args = append(args, p.credentialMounts...)
 	// The account's mount and its config var. Placed before run_args like the
 	// credential mounts, so an operator's own run_args still come last.
@@ -488,6 +509,29 @@ func (p *dockerProvisioner) runContainer() error {
 		// agent's config root is explicit, but the non-root agent-server still needs
 		// its writable runtime home, so make this execution invariant win last.
 		args = append(args, "-e", "HOME="+p.sessionHome())
+	} else if len(p.credentialMounts) > 0 {
+		// For credential-mount sessions, credential files are mounted at paths
+		// relative to dockerContainerHome (/root). docker.run_args is repo-controlled
+		// and is appended above with no later af env to dominate it, so a repo entry
+		// setting HOME, XDG_DATA_HOME, or XDG_CONFIG_HOME would redirect agents
+		// whose credential lookup is HOME- or XDG-relative away from the mounted
+		// file. Re-asserting all three last closes the same gap the account path
+		// closes with its own HOME re-assertion:
+		//   - opencode reads $XDG_DATA_HOME/opencode/auth.json when XDG_DATA_HOME is
+		//     set, falling back to $HOME/.local/share/opencode/auth.json.
+		//   - amp reads $XDG_CONFIG_HOME/amp/settings.json when XDG_CONFIG_HOME is
+		//     set, falling back to $HOME/.config/amp/settings.json.
+		//   - codex and claude fall back to os.UserHomeDir() ($HOME) when their
+		//     specific config-root variable is absent, so HOME is the load-bearing
+		//     anchor for all four agents.
+		// Docker gives the LAST -e for a name precedence, so appending these after
+		// run_args makes them dominate any repo-supplied redirect.
+		home := p.sessionHome()
+		args = append(args,
+			"-e", "HOME="+home,
+			"-e", "XDG_DATA_HOME="+home+"/.local/share",
+			"-e", "XDG_CONFIG_HOME="+home+"/.config",
+		)
 	}
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
 
