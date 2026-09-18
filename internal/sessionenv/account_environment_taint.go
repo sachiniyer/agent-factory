@@ -432,5 +432,3 @@ func isWrappedLetCall(call *syntax.CallExpr) bool {
 	}
 	return false
 }
-
-
