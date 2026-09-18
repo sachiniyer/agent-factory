@@ -339,6 +339,14 @@ type scanContext struct {
 	fixTmuxScanned bool
 	fixCwds        map[int]string
 	fixCwdsScanned bool
+	// The test-residue check's reading of what holds a harness directory open
+	// or names it (#4170): once for detection, once for the fix pass, for the
+	// reasons liveWorkingDirs and fixTimeTmuxHomes give.
+	residueRefs        residueRefs
+	residueRefsScanned bool
+	fixResidueRefs     residueRefs
+	fixResidueErr      error
+	fixResidueScanned  bool
 	// autostart scope memo (see autostartScope): whether the installed unit is
 	// this home's at all.
 	autostartServes    bool
@@ -491,6 +499,10 @@ func Run(opts Options) (*Report, error) {
 	checkLeakedDaemonBinaries(ctx, report)
 	checkStrandedPlaytestSandboxes(report)
 	checkDeadSocketHomes(ctx, report)
+	// Reads the same memoized sweep, but its ROOT listing rather than the
+	// budgeted candidates: the directories af's own test harness leaves behind
+	// sit directly under the temp dir by construction (#4170).
+	checkTestResidue(ctx, report)
 	checkTaskSchedules(ctx, report)
 	checkRemoteSetup(ctx, report)
 	checkOrphanedHookHosts(ctx, report)
