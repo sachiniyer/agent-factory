@@ -21,11 +21,13 @@ import (
 // and the absence of a third.
 
 // startTeardownForTest dispatches the teardown exactly as
-// applyTaskSessionLifecycleOnRunEnd does — the same arguments, including the
-// adoption baseline the completion transition pinned, and the real
-// archive/kill underneath. Only the `go` statement and the hook channel are the
-// test's: an instance built by the fixtures has no hook run in flight, so there
-// is no production seam for holding the wait open.
+// applyTaskSessionLifecycleOnRunEnd does — files the durable obligation first
+// (#4162: the guard refuses a teardown whose marker is absent), then launches
+// with the same arguments, including the adoption baseline the completion
+// transition pinned, and the real archive/kill underneath. Only the `go`
+// statement and the hook channel are the test's: an instance built by the
+// fixtures has no hook run in flight, so there is no production seam for
+// holding the wait open.
 func startTeardownForTest(
 	t *testing.T,
 	m *Manager,
@@ -37,6 +39,7 @@ func startTeardownForTest(
 	t.Helper()
 	done := make(chan struct{})
 	adoptedAt := inst.AdoptionDeliveriesAtRunEnd()
+	m.fileOwedTaskLifecycle(repoID, inst)
 	go func() {
 		defer close(done)
 		m.runTaskSessionLifecycle(repoID, inst.ID, inst.Title, taskID, verb, hooks, adoptedAt)

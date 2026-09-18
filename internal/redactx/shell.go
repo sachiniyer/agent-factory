@@ -245,12 +245,6 @@ type ShellContext struct {
 	source            string
 }
 
-// Source returns the command text the context was parsed from.
-func (c ShellContext) Source() string { return c.source }
-
-// LiteralRuns returns the decoded literal runs as source-mapped views.
-func (c ShellContext) LiteralRuns() []View { return c.literalRuns }
-
 // ParseShell parses command under the POSIX grammar and models the
 // transformations the shell applies to source bytes before a word can name a
 // path. It reports false when the parser cannot establish the command's
