@@ -753,12 +753,18 @@ func caughtUpReconnectAfterDiscard(t *testing.T, recovered string) (*fakeClientl
 	t.Helper()
 	ch := &fakeClientlessChannel{snapshot: []byte("SCREEN-BEFORE-DEATH")}
 	br := newPTYBroker(ch)
+	// Tear the broker down with close(), registered before anything can t.Fatal, so no
+	// capture readLoop outlives the test on any exit path. close() joins the readLoop
+	// synchronously; closing the subscribers instead would not. The last one leaving
+	// stops the capture on a goroutine (remove, #4319), so the readLoop would exit after
+	// the test returned. Its exit reads redialHealthySpan, which a later test's
+	// setRedialTimingForTest writes, and -race reports that as a data race.
+	t.Cleanup(br.close)
 
 	a, err := br.subscribe(0)
 	if err != nil {
 		t.Fatalf("subscribe A: %v", err)
 	}
-	t.Cleanup(func() { _ = a.Close() })
 	mustRepaintContains(t, a, "SCREEN-BEFORE-DEATH")
 	// A real (non-zero) cursor, so the reconnect is not the since == 0 fresh sentinel.
 	ch.emit(t, []byte("pre-death"))
@@ -844,7 +850,6 @@ func TestPTYBrokerCaughtUpReconnectReplaysRingWhenRepaintUnavailable(t *testing.
 			if err != nil {
 				t.Fatalf("reconnect subscribe: %v", err)
 			}
-			t.Cleanup(func() { _ = b.Close() })
 			// The published cursor is the replay start, not the tail: nothing was repainted,
 			// so nothing above base may be skipped.
 			if got := b.Seq(); got != since {
@@ -888,7 +893,6 @@ func TestPTYBrokerCaughtUpReconnectRepaintDoesNotReplayRing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconnect subscribe: %v", err)
 	}
-	t.Cleanup(func() { _ = b.Close() })
 	head := since + Seq(len(recovered))
 	if got := b.Seq(); got != head {
 		t.Fatalf("published cursor = %d, want %d (the tail): the repaint already shows "+
@@ -942,7 +946,6 @@ func TestPTYBrokerCaughtUpReconnectIdleRingWithoutRepaint(t *testing.T) {
 	if b.err != nil {
 		t.Fatalf("reconnect subscribe: %v", b.err)
 	}
-	t.Cleanup(func() { _ = b.sub.Close() })
 	if got := b.sub.Seq(); got != since {
 		t.Fatalf("published cursor = %d, want %d (base == head)", got, since)
 	}
