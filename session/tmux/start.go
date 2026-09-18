@@ -124,6 +124,7 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("%w: error starting tmux session: %w", ErrSessionNotStarted, err)
 	}
 
+	t.observeStart(StartBeforeExistencePoll)
 	// Poll for session existence with exponential backoff. Break only on a probe
 	// that ANSWERED "exists" (known && exists): reading the lossy bool here let a
 	// mid-poll wedge exit the loop as if the session had come up, so Start reported
@@ -250,6 +251,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// and confirmedFresh because the existence poll above already answered for
 	// the session THIS Start created — an unanswered rebind probe here is a
 	// wedged server, not the retired generation coming back (Codex on #4473).
+	t.observeStart(StartBeforeAttachProbe)
 	_, err = t.restoreWithResult("", true)
 	if err != nil {
 		// Probe BEFORE Close (which kills the session): the existence poll

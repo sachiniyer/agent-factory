@@ -18,6 +18,7 @@ import (
 	"regexp"
 
 	"github.com/sachiniyer/agent-factory/internal/redactspan"
+	"github.com/sachiniyer/agent-factory/internal/redactx"
 )
 
 // Markers replacing redacted content. SecretMarker replaces a substring a
@@ -139,8 +140,43 @@ var privateKeyBlock = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY--
 // idempotent: re-scrubbing text this package already scrubbed returns it
 // unchanged, which matters because the bug report scrubs the same text more than
 // once by design, and now also scrubs a log that was scrubbed on the way to disk.
+//
+// Scrub is the log path's share of the shared normalization stage
+// (internal/redactx): the shape matchers run on the line AND on every logical
+// view the stage decodes out of it — a %q field's contents, ANSI-stripped hook
+// output, a URI's percent-decoded components, a proven shell command's literal
+// runs — so a credential no longer survives by sitting under an encoding this
+// file does not know about (#4149). Each transform is gated on a byte that
+// could begin its encoding, so a line carrying none of them pays only the
+// flat matcher — see the benchmarks.
 func Scrub(s string) string {
-	return redactspan.Apply(s, Redactions(s), SecretMarker)
+	return logStage.Scrub(s, redactx.ProvLogRecord)
+}
+
+// logStage is the credential-shape match policy plugged into the shared
+// normalization stage. Every provenance the log family can decode into gets
+// the same shape matchers; the stage owns which decodings are legal, this
+// switch owns what is looked for in the result — the one place a new
+// credential shape must be taught remains Redactions below.
+var logStage = &redactx.Engine{
+	Produce: func(text string, prov redactx.Provenance) []redactspan.Span {
+		switch prov {
+		case redactx.ProvLogRecord, redactx.ProvLogValue, redactx.ProvLogShell,
+			redactx.ProvLogShellLiteral, redactx.ProvDiagnostic,
+			redactx.ProvURIPathSensitive, redactx.ProvURIPathGeneric,
+			redactx.ProvURIQueryPair, redactx.ProvURIComponent,
+			redactx.ProvANSIPayload:
+			return Redactions(text)
+		default:
+			return nil
+		}
+	},
+	// A range the stage proved belongs to an encoding but could not decode is
+	// an unknown logical value: redacted, not best-effort matched. This is
+	// what makes the %q emitter's unparseable shell command or a malformed
+	// opaque URI body lose its bytes rather than leak them.
+	FailClosed: redactspan.Span{Replacement: RedactedMarker, Priority: 2},
+	Fallback:   SecretMarker,
 }
 
 // Redactions returns every credential interval recognized in the untouched

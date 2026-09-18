@@ -225,6 +225,12 @@ func (c *tmuxClientlessChannel) Snapshot() (PaneSnapshot, error) {
 	if state, stateErr := c.ts.ReadTerminalState(); stateErr == nil {
 		snap.CursorRow, snap.CursorCol, snap.HasCursor = state.CursorRow, state.CursorCol, true
 		snap.Modes, snap.HasModes = state.Modes, true
+		// The pane's measured dimensions — the only size a never-driven pane ever
+		// reports (#4480). Guard the uint16 narrowing so a pathological format
+		// answer degrades to "unmeasured" rather than wrapping.
+		if state.PaneWidth > 0 && state.PaneWidth <= 0xFFFF && state.PaneHeight > 0 && state.PaneHeight <= 0xFFFF {
+			snap.Cols, snap.Rows, snap.HasSize = uint16(state.PaneWidth), uint16(state.PaneHeight), true
+		}
 	} else if row, col, curErr := c.ts.CursorPosition(); curErr == nil {
 		// Preserve the cursor-only fallback for tmux versions/sources that cannot
 		// expose the mode formats.

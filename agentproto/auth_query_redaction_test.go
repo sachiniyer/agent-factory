@@ -102,21 +102,8 @@ func TestRedactAccessTokenURLKeepsDecodedTextTerminatorsInsideURIValue(t *testin
 	}
 }
 
-func TestFullyPercentDecodedViewHandlesDeepNesting(t *testing.T) {
-	const depth = 4096
-	raw := "%" + strings.Repeat("25", depth-1) + "61ccess_token"
-	view, malformed := fullyPercentDecodedView(raw, false)
-	if malformed {
-		t.Fatal("fullyPercentDecodedView(deep key) reported a malformed raw escape")
-	}
-	if got, want := percentDecodedText(view), AccessTokenQueryParam; got != want {
-		t.Fatalf("fullyPercentDecodedView(deep key) = %q, want %q", got, want)
-	}
-	if got := view[0]; got.sourceStart != 0 || got.sourceEnd != 1+2*depth {
-		t.Fatalf("deeply decoded byte source = [%d,%d), want [0,%d)",
-			got.sourceStart, got.sourceEnd, 1+2*depth)
-	}
-}
+// The deep-nesting property test for the decoder itself moved to
+// internal/redactx with the decoder (TestPercentDecodeHandlesDeepNesting).
 
 // Percent bytes have no encoding semantics in arbitrary prose. URL callers
 // must use RedactAccessTokenURL, whose parser establishes that provenance.
