@@ -64,7 +64,7 @@ export interface ConfigStatus {
   /** The echo — the canonical value the daemon actually wrote, which may differ
    *  from what was typed. Empty when `error` is set. */
   value: string;
-  /** The daemon's own restart notice, shown verbatim. */
+  /** The daemon's save outcome and warnings, shown verbatim. */
   notice: string;
   /** The validator's message, verbatim, when the value was refused. */
   error: string;
@@ -145,17 +145,24 @@ export function canCommit(shown: string, current: string): boolean {
  * says so, and a form that echoed what it typed would name an address nothing
  * answers precisely when the user most needs the real one.
  *
- * The restart notice keeps its existing gate — shown only for a key that
- * requires a restart, since "Applied" under every field is noise. The address
- * does not: a listener that moved is worth saying whether or not a restart is
+ * The restart notice is normally shown only for a key that requires a restart,
+ * since "Applied" under every field is noise. A warning overrides that gate:
+ * it is actionable for an ordinarily-live key, and both the warning and the
+ * outcome sentence must reach the operator. The address is also independent of
+ * the gate: a listener that moved is worth saying whether or not a restart is
  * owed, and for this form it is the address the browser must be re-pointed at.
  * Exported so config.test.ts locks the real rule rather than a copy.
  */
 export function saveNotice(resp: ConfigSetResponse): string {
   const parts: string[] = [];
-  if (resp.result.requires_restart && resp.restart_notice !== "") {
+  const warnings = resp.warnings ?? [];
+  // A warning makes the apply outcome actionable even for an ordinarily-live
+  // key. In that case the restart notice must not be hidden by the key's static
+  // requires-restart classification: it describes what happened to this save.
+  if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }
+  parts.push(...warnings);
   const addr = resp.listener_addr ?? "";
   if (addr !== "") {
     parts.push(`Daemon now listening at ${addr}`);

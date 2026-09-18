@@ -19,6 +19,10 @@ type Instance struct {
 	// gitWorktree, diffStats.
 	mu               sync.RWMutex
 	agentObservation *agentObservationRuntime
+	// agentObservationSettlementMu extends the runtime's transport lock through
+	// daemon interpretation, so an automated send cannot overtake a completed
+	// pane snapshot whose usage-limit conclusion has not been published yet.
+	agentObservationSettlementMu sync.Mutex
 	// agentObservationGeneration is atomic because daemon-owned side effects
 	// validate an observation while holding Manager.mu, not Instance.mu. Runtime
 	// replacement invalidates it before later manager bookkeeping, which orders a
@@ -274,6 +278,17 @@ type Instance struct {
 	// that second half every restore after a daemon restart would silently skip it.
 	// nil for a local session and for any instance with no daemon behind it.
 	sandboxCreds SandboxCredentials
+	// onSandboxRetired is called by reprovisionRemote after
+	// reapRemoteRuntimeForReplacement returns without error — the moment the old
+	// sandbox is provably gone and the new episode genuinely begins. The daemon
+	// sets this before each Recover attempt to reset the failure-budget at the
+	// right point: not before Recover is attempted (too early: reprovisionRemote
+	// can fail before reaching the reap), and not only on success (too late:
+	// a post-reap failure against the new sandbox earns attempt 1, not
+	// maxAttempts+1). The hook fires at most once per Recover attempt; it is
+	// cleared after firing or when reprovisionRemote returns early without firing.
+	// Guarded by mu.
+	onSandboxRetired func()
 
 	// The below fields are initialized upon calling Start().
 

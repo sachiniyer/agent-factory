@@ -101,10 +101,10 @@ type Manager struct {
 	// config swap alone would not reach it. Read lock-free by the poll loop via
 	// Load().
 	limitDetector atomic.Pointer[task.LimitDetector]
-	// accountLimitMu serializes publication of live named-account limits with
-	// the final evidence read, runtime teardown, and durable identity commit of
-	// automatic account replacement. Manager.mu protects roster shape; it cannot
-	// cover per-instance liveness writes without inverting existing lock order.
+	// accountLimitMu serializes limit publication with automated delivery
+	// admission, account-swap evidence, runtime teardown, and identity commit.
+	// Manager.mu protects roster shape; it cannot cover
+	// per-instance liveness writes without inverting existing lock order.
 	accountLimitMu sync.Mutex
 
 	// ready is closed once restored state is safe for state-dependent RPCs. For
@@ -397,10 +397,6 @@ type Manager struct {
 	// after restart; this map prevents a second worker in the same daemon process.
 	// Values are stable IDs so title reuse cannot inherit an old fence.
 	ghostCleanupStalls map[string]string
-	// lateGhostCleanupWG joins detached finalizers before tests restore their
-	// seams. Launchers must return before waiting so every Add precedes Wait;
-	// the production kill path never waits for these retrying workers.
-	lateGhostCleanupWG sync.WaitGroup
 	// backgroundMutationWG owns detached writers spawned by otherwise-synchronous
 	// control/poll paths: conversation capture, task on-complete teardown, and
 	// late ghost cleanup. backgroundMutationMu makes launch-vs-shutdown admission
