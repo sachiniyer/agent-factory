@@ -25,7 +25,7 @@ import (
 //     limit_auto_resume is on, or the manual `c` retry) re-delivers it once the
 //     window resets. Return nil so CreateSession registers+persists it as a
 //     parked row, not a failed one, firing no failure side-effects. The stored
-//     prompt is the only input resumeFromLimit re-delivers, so it is set here so
+//     prompt is the only input resumeFromLimitOutcome re-delivers, so it is set here so
 //     a parked task run resumes its OWN work rather than a bare "continue". A
 //     later handoff brief may replace this durable goal; both paths use Instance's
 //     prompt accessors so the resume scheduler cannot race the handoff writer.
@@ -277,7 +277,7 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 }
 
 // This file is the daemon side of the usage-limit manual-retry action (#1146
-// PR2): the ResumeFromLimit RPC and the reusable resumeFromLimit Manager method
+// PR2): the ResumeFromLimit RPC and the reusable resumeFromLimitOutcome Manager method
 // behind it. Detection itself lives in refreshInstanceStatus (control.go), which
 // runs the PR1 detector over captured pane content and sets the LiveLimitReached
 // liveness. Split out of control.go to keep that (grandfathered, #1145) file
