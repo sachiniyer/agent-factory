@@ -20,18 +20,12 @@ import (
 // config_unset.go; the outcome rules both halves share are in
 // config_save_outcome.go.
 
-// RequestApplyConfig asks a RUNNING daemon to apply the on-disk global config to
-// itself in place (#2480). It deliberately never STARTS a daemon: a config write
-// with no daemon running has nothing to apply live and takes effect on the next
-// start, so this uses the no-ensure path and returns the dial error when none is
-// reachable (the caller treats that as "saved, nothing running to apply").
-func RequestApplyConfig() (ApplyConfigResponse, error) {
-	resp, attempt := requestApplyConfigAttempt()
-	return resp, attempt.err
-}
-
-// requestApplyConfigAttempt preserves whether the RPC started so save callers
-// can distinguish an unreachable daemon from a failed apply.
+// requestApplyConfigAttempt asks a RUNNING daemon to apply the on-disk global
+// config to itself in place (#2480). It deliberately never STARTS a daemon: a
+// config write with no daemon running has nothing to apply live and takes
+// effect on the next start, so this uses the no-ensure path and reports the
+// dial failure when none is reachable. Preserving whether the RPC started lets
+// save callers distinguish an unreachable daemon from a failed apply.
 func requestApplyConfigAttempt() (ApplyConfigResponse, daemonCallAttempt) {
 	var resp ApplyConfigResponse
 	attempt := callDaemonNoEnsureAttemptBefore("ApplyConfig", ApplyConfigRequest{}, &resp, time.Time{}, false)
@@ -51,8 +45,8 @@ func requestApplyConfigAttempt() (ApplyConfigResponse, daemonCallAttempt) {
 // working with the daemon stopped. The fallback is decided by the DIAL, never
 // by the daemon's answer: once a daemon has answered, an error (validation or
 // admission refusal) is final, because writing locally after a refusal would
-// reopen exactly the split #3231 closes. It never STARTS a daemon, like
-// RequestApplyConfig.
+// reopen exactly the split #3231 closes. It never STARTS a daemon, like the
+// apply poke.
 func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 	if err := config.RetiredThemeKeyError(key); err != nil {
 		return SetConfigValueResponse{}, err
