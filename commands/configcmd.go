@@ -580,6 +580,14 @@ owns.`, tmux.SupportedProgramsString()),
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s for project %s in %s\n",
 				res.Key, echoValue(res.Value), configSetProjectFlag, prettyPath(res.Path))
+			// Writer warnings (validation) before the effect notice, matching the
+			// global branch: what the value MEANS matters more than when it takes
+			// effect, and the last line is read first. Same SetResult.Warnings the
+			// --json branch already serializes; without this loop the project
+			// human/text surface silently dropped what the writer produced.
+			for _, w := range res.Warnings {
+				fmt.Fprintln(cmd.ErrOrStderr(), w)
+			}
 			if res.RequiresRestart {
 				if config.KeyEffectClass(res.Key) == config.EffectNextDaemonStart {
 					fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
