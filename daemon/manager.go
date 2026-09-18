@@ -822,6 +822,10 @@ func (m *Manager) restoreInstances() error {
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
 	m.registerLoadRuntimeSettlementsLocked(owed)
+	// Re-park every on_complete obligation the previous generation left durable
+	// on its rows (#4162): the completion edge cannot re-fire, so without this a
+	// marked session would sit forever with nothing scheduled to reap it.
+	m.armOwedTaskLifecyclesLocked()
 	m.mu.Unlock()
 	return nil
 }
@@ -935,23 +939,6 @@ func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 		data = append(data, projected)
 	}
 	return data
-}
-
-func (m *Manager) refreshLocked() error {
-	refreshed, ghosts, err := refreshDaemonInstances(m.instances)
-	if err != nil {
-		return err
-	}
-	owed := persistLoadRuntimeReplacements(refreshed)
-	m.attachCredentialsToAll(refreshed)
-	m.instances = refreshed
-	// Replaced wholesale, never merged: the ghost set is a projection of what is on
-	// disk RIGHT NOW (#1892). A row that starts loading again must stop being a
-	// ghost, or its slot would be held twice — once by the ghost and once by the
-	// instance it became.
-	m.ghostTaskRuns = ghosts
-	m.registerLoadRuntimeSettlementsLocked(owed)
-	return nil
 }
 
 // startLockForRepo returns the per-repo lock serializing session/tab creation
