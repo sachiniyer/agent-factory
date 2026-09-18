@@ -503,3 +503,40 @@ func TestArchiveSandbox_StillRefusesALocalSession(t *testing.T) {
 	assert.Contains(t, err.Error(), "is not a sandbox session",
 		"a local-worktree session archives by relocating its worktree, not through this path")
 }
+
+// TestReprovisionRemote_PreReapFailureClearsHook pins that a hook registered via
+// SetOnSandboxRetired does NOT survive a pre-reap failure in reprovisionRemote into
+// a subsequent retirement. Without the defer at the top of reprovisionRemote, a
+// pre-reap return (e.g. nil backend, unresolvable account, bad runtime config)
+// would leave onSandboxRetired set; the next reprovisionRemote or FireOnSandboxRetired
+// call would fire it in the wrong context — resetting a budget belonging to a
+// different episode.
+func TestReprovisionRemote_PreReapFailureClearsHook(t *testing.T) {
+	var fired int
+
+	// An instance with NO backend — reprovisionRemote returns before the reap on
+	// the "no backend on record" path, which is one of the six pre-reap exits.
+	i := &Instance{Title: "s"}
+
+	// Register a hook that should never fire: it belongs to a force-reap episode
+	// that has not yet retired the old sandbox.
+	i.SetOnSandboxRetired(func() { fired++ })
+
+	// The pre-reap failure must NOT fire the hook.
+	err := i.reprovisionRemote()
+	require.Error(t, err, "nil backend must return an error")
+	assert.Contains(t, err.Error(), "no backend on record")
+	assert.Equal(t, 0, fired, "pre-reap failure must NOT fire the hook")
+
+	// After the call, the hook must be nil: it must not have survived to be fired
+	// by a subsequent retirement belonging to a different episode.
+	i.mu.Lock()
+	hookAfter := i.onSandboxRetired
+	i.mu.Unlock()
+	assert.Nil(t, hookAfter, "hook must be cleared by the defer on every pre-reap exit")
+
+	// Confirm that a subsequent FireOnSandboxRetired (the next episode's retirement)
+	// does NOT fire the leftover hook — because there is none.
+	i.FireOnSandboxRetired()
+	assert.Equal(t, 0, fired, "a subsequent retirement must not fire a hook left by a pre-reap failure")
+}

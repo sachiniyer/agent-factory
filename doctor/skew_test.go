@@ -62,12 +62,41 @@ func hasCheck(r *Report, name string) bool {
 // name plus "daemon-http.sock" overflows it and bind fails with "invalid
 // argument". Linux's short /tmp hides the limit entirely, which is why this only
 // surfaced on the macOS runner. /tmp is short on both.
+//
+// It returns the CANONICAL path, resolved once here while the directory
+// certainly exists. Doctor reports resolved paths (/private/tmp/… on macOS), so
+// every path a test builds under this root has to be spelled that way to be
+// compared at all — and resolving later, at assert time, is not a substitute:
+// filepath.EvalSymlinks only works on a path that exists, a --fix run has
+// usually just removed it, and normalizeHome then falls back to the unresolved
+// spelling. That mismatch is invisible on Linux and failed three test-residue
+// tests on the macOS runner (#4496); three dead-socket tests passed there only
+// because "/tmp/x" happens to be a substring of "/private/tmp/x".
+//
+// testguard.SocketTempDir does the same for the homes testOptions mints.
 func socketTempHome(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "afdoc")
+	_, canonical := aliasedSocketTempHome(t)
+	return canonical
+}
+
+// aliasedSocketTempHome is socketTempHome plus the unresolved spelling of the
+// same directory. The root is ALWAYS reached through a symlink, on every
+// platform, so Linux — whose /tmp is a real directory — resolves exactly as
+// macOS does: a helper that stops resolving fails here, not only on the macOS
+// runner. Tests that mean to hand doctor an unresolved temp dir use the alias.
+func aliasedSocketTempHome(t *testing.T) (alias, canonical string) {
+	t.Helper()
+	base, err := os.MkdirTemp("/tmp", "afdoc")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	real := filepath.Join(base, "r")
+	require.NoError(t, os.Mkdir(real, 0o755))
+	alias = filepath.Join(base, "a")
+	require.NoError(t, os.Symlink(real, alias))
+	canonical, err = filepath.EvalSymlinks(alias)
+	require.NoError(t, err)
+	return alias, canonical
 }
 
 // abandonedSocket leaves a real Unix socket at path with nothing listening —

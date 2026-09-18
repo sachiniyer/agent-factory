@@ -22,6 +22,16 @@ const ALLOWED_AUTHORS = new Set(["sachiniyer", "detail-app"]);
 function isAllowedAuthor(login) {
   return ALLOWED_AUTHORS.has(normalizeAuthorLogin(login));
 }
+// The allowed authors whose `## Review — approve` marker counts on a pull
+// request they opened themselves (#4554). Named, not detected: the marker's
+// whole purpose is that the maintainer opens most PRs here and GitHub will not
+// let that account approve them, so a maintainer's self-approval is the
+// documented intent. An automated author's is not, and "is this author a bot"
+// has no reliable answer across surfaces — normalizeAuthorLogin strips the very
+// `app/` and `[bot]` spellings that would say so, and GraphQL reports bots bare.
+// Listing the humans instead means a future allowlisted app is refused
+// self-approval by default rather than by someone remembering to add it.
+const SELF_APPROVING_AUTHORS = new Set(["sachiniyer"]);
 // The merge queue's own app authors its synthetic test PRs. Its login gets the
 // same normalization: `app/trunk-io` is what the author field reports. A batch
 // PR is recognized by this author AND the branch prefix together — either alone
@@ -916,6 +926,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     headForcePushes: pr.headForcePushes,
     contentHead,
     subject,
+    prAuthor: pr.author,
   });
   if (!codex.ok) {
     reasons.push(...codex.reasons);
@@ -2739,12 +2750,19 @@ async function listParkedRuns({ github, context, headSha, subject = null }) {
 // Named, so a test can assert the file it points at actually accepts a dispatch.
 const VALIDATION_WORKFLOW = "pr.yml";
 const GATE_WORKFLOW = "auto-gate.yml";
-// A schedule is the backstop for terminal workflow_run events GitHub does not
-// deliver. It never fans one workflow's matrix out into one gate run per check:
-// completed Build/Lint checks select only decisions that name them as blockers,
-// each PR/head appears once, and one sweep starts at most this many evaluations.
+// A reconciliation pass is the backstop for terminal workflow_run events GitHub
+// does not deliver. It never fans one workflow's matrix out into one gate run per
+// check: completed Build/Lint checks select only decisions that name them as
+// blockers, each PR/head appears once, and one pass starts at most this many
+// evaluations.
 const REQUIRED_CHECK_REEVALUATION_LIMIT = 10;
 const REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE = 100;
+// A pass runs on the schedule, or as the one repository_dispatch type
+// auto-gate.yml subscribes to. GitHub delivers the */5 schedule every two to
+// five hours (#4571), so ordinary runs request the dispatch, at most once per
+// this window.
+const REQUIRED_CHECK_RECONCILIATION_DISPATCH = "auto-gate-reconcile";
+const REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
 const PR_VALIDATION_REQUIRED_CHECK_NAMES = ["Build", "Lint"];
 
 // Reruns the successor of an accepted update, whichever lane failed to finish
@@ -4304,6 +4322,102 @@ async function listRequiredCheckReevaluationTargets({ github, context, core }) {
   return targets;
 }
 
+function isRequiredCheckReconciliationDispatch(context) {
+  return (
+    context.eventName === "repository_dispatch" &&
+    context.payload?.action === REQUIRED_CHECK_RECONCILIATION_DISPATCH
+  );
+}
+
+// Called by every Auto Gate run that is not itself a pass (#4571). The request
+// is one repository_dispatch; the run it starts is a full scheduled pass, with
+// the same ten-evaluation cap and the same PR Validation blocker filter, and it
+// serializes with scheduled passes in one concurrency group.
+//
+// Two guards keep this from fanning out:
+//
+// - A pass never requests a pass. Schedule and repository_dispatch runs return
+//   before any read. The runs a pass causes can request one, but only through
+//   the rate window below, so the total stays bounded however many there are.
+// - The rate window. The marker is the creation time of this workflow's newest
+//   repository_dispatch run. Every requested pass is such a run, so a pass that
+//   selected nothing is recorded too, and GitHub stores the marker: there is no
+//   variable, ref, or check run to write or leave stale. It costs one REST read
+//   of one result, and filtering on the event keeps the dozens of ordinary runs
+//   an hour out of that result. Two runs that read before either dispatch is
+//   visible can both request. The shared group then holds one running pass and
+//   one pending pass, and a newer pending pass replaces the older one, so the
+//   race costs at most one extra scan.
+//
+// Every failure falls back to not dispatching, which leaves the schedule as the
+// backstop. That is the safe direction. A missed request delays a green PR, but
+// an unbounded one could load the queue the reconciliation is meant to drain.
+async function requestRequiredCheckReconciliation({ github, context, core, now = Date.now() }) {
+  if (context.eventName === "schedule" || context.eventName === "repository_dispatch") {
+    core.info(`A ${context.eventName} run does not request required-check reconciliation.`);
+    return { requested: false, reason: "pass" };
+  }
+  const { owner, repo } = context.repo;
+  // Whole seconds: GitHub stores whole-second creation times, and rounding the
+  // cutoff down only widens the window.
+  const cutoff = Math.floor((now - REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS) / 1000) * 1000;
+  let runs;
+  try {
+    const listed = await retryRead("could not list recent required-check reconciliation runs", () =>
+      github.rest.actions.listWorkflowRuns({
+        owner,
+        repo,
+        workflow_id: GATE_WORKFLOW,
+        event: "repository_dispatch",
+        created: `>=${new Date(cutoff).toISOString().replace(/\.\d{3}Z$/, "Z")}`,
+        exclude_pull_requests: true,
+        per_page: 1,
+      }),
+    );
+    runs = listed?.data?.workflow_runs;
+    if (!Array.isArray(runs)) {
+      throw new Error("the workflow-run listing had no runs array");
+    }
+  } catch (error) {
+    core.warning(
+      `Skipped the required-check reconciliation request: ${formatError(error)}. ` +
+        "The scheduled pass remains the backstop.",
+    );
+    return { requested: false, reason: "unknown-marker" };
+  }
+  // The server applies the created filter, and the listing is newest first.
+  // Checking the time again here keeps the window correct if the filter is ever
+  // ignored. An unreadable time counts as recent, so it cannot cause a dispatch.
+  const recent = runs.find((run) => !(Date.parse(run?.created_at) < cutoff));
+  if (recent) {
+    core.info(
+      `Required-check reconciliation run ${recent.id} was created at ${recent.created_at}; ` +
+        `ordinary runs request at most one pass per ${REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS / 60000} minutes.`,
+    );
+    return { requested: false, reason: "rate-limited", runId: recent.id };
+  }
+  // A dispatch is not idempotent, so it gets one attempt.
+  try {
+    await github.rest.repos.createDispatchEvent({
+      owner,
+      repo,
+      event_type: REQUIRED_CHECK_RECONCILIATION_DISPATCH,
+      client_payload: {
+        source_run_id: String(context.runId || ""),
+        source_event: String(context.eventName || ""),
+      },
+    });
+  } catch (error) {
+    core.warning(
+      `Could not request required-check reconciliation: ${formatError(error)}. ` +
+        "The scheduled pass remains the backstop.",
+    );
+    return { requested: false, reason: "dispatch-failed" };
+  }
+  core.notice("Requested a required-check reconciliation pass for stale decisions.");
+  return { requested: true };
+}
+
 async function resolveTargets({
   github, context, core, prNumber,
   headPollAttempts = 6,
@@ -4311,6 +4425,16 @@ async function resolveTargets({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   if (context.eventName === "schedule") {
+    return listRequiredCheckReevaluationTargets({ github, context, core });
+  }
+  if (isRequiredCheckReconciliationDispatch(context)) {
+    const source = context.payload?.client_payload || {};
+    // Logged only when it is the shape requestRequiredCheckReconciliation
+    // sends: anyone with write access can send this event, and an arbitrary
+    // string on stdout can be read as a workflow command.
+    if (/^[1-9][0-9]*$/.test(String(source.source_run_id)) && /^[a-z_]+$/.test(String(source.source_event))) {
+      core.info(`Required-check reconciliation requested by ${source.source_event} run ${source.source_run_id}.`);
+    }
     return listRequiredCheckReevaluationTargets({ github, context, core });
   }
   const numbers = [];
@@ -5299,6 +5423,13 @@ function headCurrentSinceTime({
 // and on this repository the maintainer opens most of them — so a hand review of
 // record is a comment, and it already uses this exact heading.
 //
+// Only the marker is checked for self-approval (markerApprovalCounts), and that
+// asymmetry is deliberate. GitHub refuses an APPROVED review from a pull
+// request's own author server-side, for every account, so the review form cannot
+// be a self-approval. A comment carries none of those checks: working around the
+// restriction for the maintainer removed it for every allowed author, including
+// one that opens PRs at volume and posted the marker on its own #4281 (#4554).
+//
 // Bound to the head the same way a Codex artifact is (#3702): an approval is
 // about the code it was written against, so `headCurrentSince` decides. A push
 // after the sign-off returns the PR to the manual pass rather than carrying a
@@ -5306,7 +5437,7 @@ function headCurrentSinceTime({
 // head.
 //
 // Fails closed on an unknown order, like every other timestamp comparison here.
-function maintainerApproval({ comments, reviews, headCurrentSince }) {
+function maintainerApproval({ comments, reviews, headCurrentSince, prAuthor }) {
   if (headCurrentSince == null) {
     return null;
   }
@@ -5316,7 +5447,8 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
       (comment) =>
         // The first line, whole and exact — see the marker's own comment for why
         // a prefix test is the wrong shape here.
-        String(comment.body || "").split("\n", 1)[0].trim() === MAINTAINER_APPROVAL_MARKER,
+        String(comment.body || "").split("\n", 1)[0].trim() === MAINTAINER_APPROVAL_MARKER &&
+        markerApprovalCounts(comment.user?.login, prAuthor),
     ),
   ].filter(
     (artifact) =>
@@ -5324,6 +5456,24 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
       reviewArtifactTime(artifact) > headCurrentSince,
   );
   return approvals.sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a))[0] || null;
+}
+
+// Whether a marker comment from `approverLogin` may stand as the approval on a
+// pull request opened by `prAuthor` (#4554): always for a self-approving
+// maintainer, otherwise only when the PR's author is KNOWN to be someone else.
+//
+// Fails closed on an unknown author — an empty or unreadable login cannot prove
+// the marker is not a self-approval — but only for accounts that could not
+// self-approve anyway, so the maintainer's route stays open in exactly the
+// outage the degraded path exists for. Identity is compared without case, as
+// GitHub compares logins; a case-only difference must not read as a second party.
+function markerApprovalCounts(approverLogin, prAuthor) {
+  const approver = normalizeAuthorLogin(approverLogin);
+  if (SELF_APPROVING_AUTHORS.has(approver)) {
+    return true;
+  }
+  const author = normalizeAuthorLogin(prAuthor);
+  return author !== "" && author.toLowerCase() !== approver.toLowerCase();
 }
 
 // The commit whose CONTENT this head carries, when the head is a merge that only
@@ -5575,6 +5725,26 @@ async function updateBranchContentHead({
   };
 }
 
+// Every sha a Codex artifact may name and still count as evidence about this
+// head. A recognised chain of update-branch merges has one valid evidence name
+// per tree-proven link: the current merge and every first parent walked on the
+// way to the terminal content head (#4238, #4239). A review or unavailability
+// reply may have landed on any of them between gate updates. No other ancestor
+// is admitted; updateBranchContentHead's fail-closed proof authorizes every
+// added name.
+//
+// codex-outage.js reconstructs degraded merges against this same set (#4241),
+// so the outage record and the gate cannot disagree about which heads a
+// covering verdict may name.
+function evidenceHeadShasFor(headSha, contentHead) {
+  const evidenceHeadOids = Array.isArray(contentHead?.evidenceHeadOids)
+    ? contentHead.evidenceHeadOids
+    : [contentHead?.oid];
+  return [...new Set(
+    [headSha, ...evidenceHeadOids].map(normalizeHeadSha).filter(Boolean),
+  )];
+}
+
 // The Codex finding artifacts a gate must not merge past: those carrying a
 // P0-P3 that bind to NO head, and that no acknowledgement has answered.
 //
@@ -5671,6 +5841,8 @@ async function evaluateCodex({
   headForcePushes = [],
   contentHead = null,
   subject = null,
+  // The PR's author, so a marker cannot be its author's own approval (#4554).
+  prAuthor = "",
 }) {
   const notes = [];
   const reasons = [];
@@ -5710,12 +5882,7 @@ async function evaluateCodex({
   // to the terminal content head. A review or unavailability reply may have
   // landed on any of them between gate updates. No other ancestor is admitted;
   // updateBranchContentHead's fail-closed proof authorizes every added name.
-  const evidenceHeadOids = Array.isArray(contentHead?.evidenceHeadOids)
-    ? contentHead.evidenceHeadOids
-    : [contentHead?.oid];
-  const evidenceHeadShas = [...new Set(
-    [sha, ...evidenceHeadOids].map(normalizeHeadSha).filter(Boolean),
-  )];
+  const evidenceHeadShas = evidenceHeadShasFor(sha, contentHead);
   // Body links are location prose, not a claim about what Codex reviewed. Keep
   // their pre-#4239 scope — current and terminal content head — while accepting
   // every verified intermediate only where GitHub's commit_id authenticates the
@@ -6219,7 +6386,7 @@ async function evaluateCodex({
     // Read here because this is where the comments and reviews already are; the
     // caller decides what it means.
     comments,
-    maintainerApproval: maintainerApproval({ comments, reviews, headCurrentSince }),
+    maintainerApproval: maintainerApproval({ comments, reviews, headCurrentSince, prAuthor }),
   };
 }
 
@@ -6676,7 +6843,8 @@ function formatError(error) {
 
 module.exports = {
   codexEvidence: { CODEX_REVIEWER, codexReportsReviewUsageLimit, isCodexUsageLimitArtifact, classifyCodexUnavailableArtifact,
-    parseReviewedCommit, parseVerdictArtifact, completedCodexSummaryRows, corroboratedCodexSummaryRows },
+    parseReviewedCommit, parseVerdictArtifact, completedCodexSummaryRows, corroboratedCodexSummaryRows,
+    updateBranchContentHead, evidenceHeadShasFor },
   beginAggregateDecision,
   evaluate,
   evaluateAggregateDecision,
@@ -6689,6 +6857,7 @@ module.exports = {
   reportDecision,
   resolveAggregateHeads,
   resolveMergeRefusal,
+  requestRequiredCheckReconciliation,
   resolveTargets,
   sweepMergedHeadRefs,
   __test: {
@@ -6730,6 +6899,7 @@ module.exports = {
     decisionSummaryBody,
     DECISION_STAMP_PREFIX,
     maintainerApproval,
+    markerApprovalCounts,
     MAINTAINER_APPROVAL_MARKER,
     isAllowedAuthor,
     normalizeAuthorLogin,
