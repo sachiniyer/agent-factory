@@ -375,6 +375,12 @@ it comes from an **allowed author** and carries a whole-word `RESOLVED` or
 `ACCEPTED` — note `UNRESOLVED` contains `RESOLVED` as a substring, so match on
 word boundaries.
 
+**The `$allowed` list in both jq snippets below must match `ALLOWED_AUTHORS` in
+`.github/scripts/auto-gate.js` exactly.** There is no mechanical derivation —
+the two copies are maintained by hand. Whenever `ALLOWED_AUTHORS` changes in the
+script, update both occurrences here in lockstep; a copy that disagrees with the
+real predicate produces confident wrong answers and is worse than no copy.
+
 **A thread's location is not part of the test (#3689).** GitHub nulls `line`
 once a push moves the code a thread points at, and a rebase, a re-indent, or a
 fix to the *neighbouring* line does that exactly as readily as the fix itself —
@@ -391,11 +397,11 @@ jq -s -e 'length > 0 and all(type == "array")' "$G/inline.json" >/dev/null \
 
 jq -s '
   add as $all
-  | ["sachiniyer","app-detail-app","app-detail-app[bot]"] as $allowed
+  | ["sachiniyer","detail-app"] as $allowed
   | ($all
      | map(select(
          .in_reply_to_id != null
-         and (.user.login | IN($allowed[]))
+         and (((.user.login // "") | sub("^app/";"") | sub("\\[bot\\]$";"")) | IN($allowed[]))
          and ((((.body // "") | test("\\b(RESOLVED|ACCEPTED)\\b"))
                or ((.body // "") | contains("[gate-ack]"))))))
      | map(.in_reply_to_id)) as $resolved
@@ -422,11 +428,11 @@ HD=$(cat "$G/head-date.txt")
 
 jq -s -r --arg hd "$HD" '
   add as $all
-  | ["sachiniyer","app-detail-app","app-detail-app[bot]"] as $allowed
+  | ["sachiniyer","detail-app"] as $allowed
   | ($all
      | map(select(
          .in_reply_to_id != null
-         and (.user.login | IN($allowed[]))
+         and (((.user.login // "") | sub("^app/";"") | sub("\\[bot\\]$";"")) | IN($allowed[]))
          and ((.body // "") | test("\\bRESOLVED\\b"))))
      | map(.in_reply_to_id)) as $claimed
   | $all
@@ -541,7 +547,7 @@ writing files the commit does not contain. Tear it down with `git worktree
 remove --force "$WT"` when you are done — not with `rm -rf`, which leaves the
 worktree registered and blocks the next run's `git worktree add`.
 
-- **Cheap checks locally, the matrix in CI.** Run `gofmt -l .`, `go build ./...`, `golangci-lint run --timeout=3m --fast`, `scripts/lint-file-length.sh`, and `go test` on **only the package you changed**. Leave `deadcode` to CI — it is whole-program reachability analysis rather than a lint, and the fleet running it concurrently took this box to a load average of 36; the Lint job runs it on every push. Do **not** run `make test-container`, `make remote-roundtrip-container`, or `make playtest-container` as a routine gate — CI runs `go test -race ./...` on every push, so a local container run duplicates it while rebuilding the whole Go tree; ~20 sessions doing that concurrently took the shared box to a load average of 160. Push, then fix what CI reports on your PR head. One targeted container run is fine to reproduce a CI failure you cannot diagnose from the logs — then stop.
+- **Cheap checks locally, the matrix in CI.** Run `gofmt -l .`, `go build ./...`, `golangci-lint run --timeout=3m --fast`, `scripts/lint-file-length.sh`, and `go test` on **only the package you changed**. When the diff touched a generated-docs input — a Cobra def in `commands/` or `api/`, `daemon/httproutes.go`, the `session/` usage text, `design/`, the `web/src` shells, recovery goldens, or a generator — also run `scripts/gen-docs.sh` and require a clean `git status --porcelain` on the generated paths (the full list is in CLAUDE.md's Lint section and mirrors `docs.yml`). Leave `deadcode` to CI — it is whole-program reachability analysis rather than a lint, and the fleet running it concurrently took this box to a load average of 36; the Lint job runs it on every push. Do **not** run `make test-container`, `make remote-roundtrip-container`, or `make playtest-container` as a routine gate — CI runs `go test -race ./...` on every push, so a local container run duplicates it while rebuilding the whole Go tree; ~20 sessions doing that concurrently took the shared box to a load average of 160. Push, then fix what CI reports on your PR head. One targeted container run is fine to reproduce a CI failure you cannot diagnose from the logs — then stop.
 - **Never bare `go test ./...` on the host. If your change is in `daemon/` or `app/`, run no tests for it locally at all — push and let CI test it.** Not `go test ./daemon/`, not a `-run`-scoped subset, not `-race`. This is a safety rule rather than a performance one: those tests spawn real `af` daemons and drive real tmux on a box where the maintainer's own daemon and ~15 live sessions are running, so a local run risks killing production sessions, not just burning CPU. `go test $(go list ./... | grep -vE '/(daemon|app)')` if you need breadth elsewhere.
 - **Watch every new test FAIL first**, against the unmodified tree. Quote the failure in the PR. A test never observed red is not evidence.
 - **TUI changes: drive the real TUI.** `app/` tests swap the backend factory and cannot see real provisioning — a green unit suite proves nothing about them. The scenario subcommand needs a script path:
