@@ -4969,9 +4969,18 @@ test("#4576: an allowed bot lifts a hold on another author's PR, under every log
     // Asserted on the NOTE, not only on the pass: a gate with no hold concept at
     // all also merges this fixture, so `shouldMerge` alone would be green for
     // the wrong reason and could never fail first.
-    assert.match(
-      result.notes.join("\n"),
-      new RegExp(`\`hold\` label lifted by @${login.replace(/[[\]]/g, "\\$&")}`),
+    //
+    // A fixed-substring check rather than a pattern. The expected text is
+    // literal, and a RegExp built from a login has to escape every metacharacter
+    // the login might contain — `detail-app[bot]` alone forces that. The escape
+    // written here covered `[` and `]` and not the backslash, which CodeQL
+    // flagged (alert 51). Extending the class would have been the smaller fix
+    // and the worse one: a substring check leaves nothing to escape at all.
+    const expected = `\`hold\` label lifted by @${login} on ${HOLD_REMOVED_AT}`;
+    const notes = result.notes.join("\n");
+    assert.ok(
+      notes.includes(expected),
+      `${login}: expected a note containing ${JSON.stringify(expected)}, got ${JSON.stringify(notes)}`,
     );
   }
 });
