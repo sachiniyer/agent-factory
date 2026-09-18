@@ -95,6 +95,8 @@ Working style:
   production sessions rather than merely burning CPU. `app/` is the same deal —
   its tests drive real tmux. Never bare `go test ./...`; use
   `go test $(go list ./... | grep -vE '/(daemon|app)')` if you need breadth.
+  To prove such a test fails without its fix, dispatch a probe run
+  (`-f probe=true`, docs/dev/probe-runs.md), not a full PR Validation run.
 - Captain Claude is fully autonomous: ship without waiting for greenlight,
   merge own PRs once the `gate-pr` gates pass, close issues that aren't worth
   doing. Green CI is the floor, not the bar — the Codex review lands after it.

@@ -14,6 +14,7 @@ at the repository root. Read it first.
 
 1. Start here · read the repository operating contract linked above.
 2. Read [Container testing](container-testing.md) · learn the isolation boundary,
+   then [Fail-first probe runs](probe-runs.md) for the tests that must run in CI,
    then [File-length lint](file-length-lint.md) for the structural gate.
 3. Choose your surface · [Surface parity](surface-parity.md), then
    [Web client selftest](web-selftest.md) or [Manual TUI testing](tui-manual-testing.md).
@@ -61,6 +62,7 @@ the docs build — on every push.
 | Page | What it covers |
 | --- | --- |
 | [Container testing](container-testing.md) | Running the suite and play-tests inside docker, so real tmux servers and real daemons cannot escape. |
+| [Fail-first probe runs](probe-runs.md) | Proving a new `daemon/`, `app/` or `integration/` test fails without its fix, with one Linux `Test` job instead of a full CI run. |
 | [Demo assets](demo-assets.md) | Regenerating the web demo and theme-specific stills. |
 | [Lifecycle testing](lifecycle-testing.md) | Clean install and install → upgrade on a real machine: the bugs that need two versions to exist. |
 | [Web client selftest](web-selftest.md) | The Playwright acceptance proof for the embedded web client. |
