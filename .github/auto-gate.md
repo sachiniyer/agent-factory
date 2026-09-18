@@ -510,7 +510,9 @@ The scan costs `ceil(N / 100)` GraphQL requests per pass. The rate window holds
 dispatched passes to about 12 an hour, and scheduled passes add a few more.
 That is one request per pass (about 12/hour) through the 83-head REST-quota
 threshold, or two (about 24/hour) for 120 PRs, before bounded retries. The scan
-does no per-head REST reads. Each other run pays one REST read for the marker,
+does no per-head REST reads except when a queued check run faces a dated
+rival; it then re-reads just that head via `listForRef` to order the run
+(#4427). Each other run pays one REST read for the marker,
 plus at most one dispatch per window. Passes skip unrelated branch-sweep
 housekeeping. This avoids both the frozen-decision failure and one gate
 evaluation per completed matrix job (#4242).
