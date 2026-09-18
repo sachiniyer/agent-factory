@@ -87,6 +87,31 @@ var (
 // credentials.
 const hookNoAgentEnvironmentProgram = "__af_no_agent_environment__"
 
+// The three seams below are how a test arranges os/exec's exit-vs-deadline
+// splice deterministically rather than on a wall-clock race; production always
+// leaves them nil. They mirror the archive hook's set (#4284), which guards the
+// same defect the guard in runHookScriptWithResolvedEnvironment fixes (#4411).
+
+// hookScriptMakeContext, if non-nil, supplies the run context for one hook
+// script. Tests inject a deadline that fires on demand — after the script's
+// own exit is kernel-observed — so the error watchCtx splices is
+// context.DeadlineExceeded rather than whatever a wall clock produced.
+var hookScriptMakeContext func(timeout time.Duration) (context.Context, context.CancelFunc)
+
+// hookScriptBeforeStart, if non-nil, is called with the fully configured hook
+// command immediately before cmd.Start(). Tests use it to attach an
+// exit-observation pipe through cmd.ExtraFiles: the hook shell inherits the
+// write end and the kernel closes it only when the process image is destroyed,
+// so an EOF on the read side proves the shell terminated rather than guessing
+// it has had time to.
+var hookScriptBeforeStart func(cmd *exec.Cmd)
+
+// hookScriptAfterStart, if non-nil, is called after cmd.Start() succeeds and
+// before cmd.Wait() is called. Tests use it to observe the script's exit, to
+// wrap cmd.Cancel — whose run is what proves os/exec's watchCtx took its
+// ctx.Done() arm — and to fire the injected deadline between the two.
+var hookScriptAfterStart func(cmd *exec.Cmd, cancel context.CancelFunc)
+
 // hookRuntime provisions a session on user-provided infrastructure via the
 // remote_hooks scripts (#1592 Phase 4 PR7). Declared in runtime.go's registry;
 // its Provision lives here (it replaces the pre-Phase-4 ForceRemote HookBackend
@@ -254,7 +279,13 @@ func (o hookScriptOutput) Combined() []byte {
 // about — still no pipe, still nothing a surviving tunnel can hold open — while
 // letting launch read the stream the docs actually promise.
 func runHookScriptWithResolvedEnvironment(timeout time.Duration, name, agent string, authSelectors, passthrough []string, args ...string) (hookScriptOutput, *exec.Cmd, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	makeContext := hookScriptMakeContext
+	if makeContext == nil {
+		makeContext = func(timeout time.Duration) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), timeout)
+		}
+	}
+	ctx, cancel := makeContext(timeout)
 	defer cancel()
 
 	// Regular files, not pipes: see the doc comment. Unlinked immediately on
@@ -279,14 +310,49 @@ func runHookScriptWithResolvedEnvironment(timeout time.Duration, name, agent str
 	// group signals nothing by itself: a successful launch_cmd's tunnel is never
 	// killed, so the guarantee above is untouched.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	runErr := cmd.Run()
-	if runErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		// The context deadline killed the script mid-run, so whatever it was doing
-		// to the remote workspace is UNKNOWN. exec surfaces this as a bare
-		// "signal: killed" that does NOT wrap context.DeadlineExceeded, so wrap it
-		// here — that is the only place the ctx is in scope — letting callers (reap
-		// in particular) tell a timeout from a script that answered, and retain the
-		// record instead of trusting a success that never happened (#2529).
+	if hookScriptBeforeStart != nil {
+		hookScriptBeforeStart(cmd)
+	}
+	// Start and Wait stay separate only so the afterStart seam can sit between
+	// them — cmd.Run() is exactly this pair with no seam.
+	runErr := cmd.Start()
+	if runErr == nil {
+		if hookScriptAfterStart != nil {
+			hookScriptAfterStart(cmd, cancel)
+		}
+		runErr = cmd.Wait()
+	}
+	// A process that exited 0 exited 0, whatever the context did afterwards.
+	// os/exec's watchCtx can splice ctx.Err() over a nil exit-0 result when the
+	// deadline fires in the same instant the script exits on its own — the
+	// <-ctx.Done() arm runs Cancel (Process.Kill answers nil on a zombie),
+	// records watch.err, and Wait returns it in place of the nil result
+	// (#4411 — the same splice #4284 fixed for the archive hook). Each clause
+	// of the guard is load-bearing: runErr must BE the context error, so an
+	// unrelated non-nil error beside a clean exit still surfaces; and
+	// Exited()+ExitCode()==0 is the kernel's proof the script terminated on its
+	// own terms — a SIGKILL'd script reports "signal: killed" with Exited()
+	// false and still takes the timeout wrap below. A real nonzero *ExitError
+	// does NOT take it: the script answered, so the wrap is gated on
+	// !Exited() below and the failure surfaces as itself (#4411 review).
+	if runErr != nil && cmd.ProcessState != nil && cmd.ProcessState.Exited() &&
+		cmd.ProcessState.ExitCode() == 0 &&
+		(errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, context.Canceled)) {
+		runErr = nil
+	}
+	// The context deadline killing a STILL-RUNNING script is a timeout:
+	// whatever it was doing to the remote workspace is UNKNOWN. exec surfaces
+	// this as a bare "signal: killed" that does NOT wrap context.DeadlineExceeded,
+	// so wrap it here — that is the only place the ctx is in scope — letting
+	// callers (reap in particular) tell a timeout from a script that answered,
+	// and retain the record instead of trusting a success that never happened
+	// (#2529). ProcessState gates the wrap: a script that reached its own exit
+	// ANSWERED, deadline or no — a clean exit was cleared above, and a nonzero
+	// one is a real failure to report, not an unproven timeout (#4411: an
+	// exit-23 wrapped here would route a clean answered reap into
+	// ErrWorkspaceStateUnknown, retaining the record and re-running delete_cmd).
+	if runErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) &&
+		(cmd.ProcessState == nil || !cmd.ProcessState.Exited()) {
 		runErr = fmt.Errorf("%w: %w", context.DeadlineExceeded, runErr)
 	}
 

@@ -782,8 +782,11 @@ override file it clears is this machine's.`,
 		fmt.Fprintf(cmd.OutOrStdout(), "cleared %s override for project %s in %s\n",
 			res.Key, configUnsetProjectFlag, prettyPath(res.Path))
 		if res.RequiresRestart {
-			if rootAgentConfigKey(res.Key) {
+			if config.KeyEffectClass(res.Key) == config.EffectNextDaemonStart {
 				fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
+			} else if res.Key == "on_archive_command" {
+				fmt.Fprintln(cmd.OutOrStdout(),
+					"saved. It applies to archive operations in this project from now on.")
 			} else {
 				fmt.Fprintln(cmd.OutOrStdout(),
 					"saved. It applies to sessions created in this project from now on.")
@@ -791,10 +794,6 @@ override file it clears is this machine's.`,
 		}
 		return nil
 	},
-}
-
-func rootAgentConfigKey(key string) bool {
-	return key == "root_agent" || strings.HasPrefix(key, "root_agent.")
 }
 
 func projectConfigRestartNotice(key string) string {
