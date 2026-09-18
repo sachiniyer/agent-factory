@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
+	"github.com/sachiniyer/agent-factory/internal/testresidue"
 )
 
 // ambientConfigPaths resolves the config files the test process could touch
@@ -288,7 +289,7 @@ func SandboxHome() func() {
 	if stats, ran := sweepOrphanTempDirsOnce(); ran && stats.noteworthy() {
 		fmt.Fprintf(os.Stderr, "testguard: %s\n", stats)
 	}
-	dir, err := os.MkdirTemp("", "af-test-home-")
+	dir, err := os.MkdirTemp("", testresidue.SandboxHomePrefix)
 	if err != nil {
 		panic("testguard: cannot create sandbox AGENT_FACTORY_HOME: " + err.Error())
 	}
@@ -370,7 +371,7 @@ func SandboxTmux() func() {
 	if stats, ran := sweepOrphanTempDirsOnce(); ran && stats.noteworthy() {
 		fmt.Fprintf(os.Stderr, "testguard: %s\n", stats)
 	}
-	dir, err := os.MkdirTemp("", "af-tmux-pkg-")
+	dir, err := os.MkdirTemp("", testresidue.PackageTmuxPrefix)
 	if err != nil {
 		panic("testguard: cannot create package tmux socket dir: " + err.Error())
 	}
@@ -476,7 +477,7 @@ func IsolateTmux(t testing.TB) {
 	if stats, ran := sweepOrphanTempDirsOnce(); ran && stats.noteworthy() {
 		t.Logf("testguard: %s", stats)
 	}
-	dir, err := os.MkdirTemp("", "af-tmux-")
+	dir, err := os.MkdirTemp("", testresidue.TestTmuxPrefix)
 	if err != nil {
 		t.Fatalf("testguard: cannot create private tmux socket dir: %v", err)
 	}

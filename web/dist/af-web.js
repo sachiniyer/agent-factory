@@ -6391,7 +6391,7 @@ function handleClipboardKeydown(ev, deps) {
       return false;
     }
     ev.preventDefault();
-    deps.sendInput(ETX);
+    deps.sendUserInput(ETX);
     return false;
   }
   return true;
@@ -8283,7 +8283,7 @@ var TerminalSoftInput = class {
   };
   /** Queue custom input after xterm's already-scheduled composition finalizer. */
   deferAfterPendingComposition(action) {
-    if (!this.pending.length) return false;
+    if (!this.pending.length && !this.postCompositionTimers.size) return false;
     const release = setTimeout(() => {
       this.postCompositionTimers.delete(release);
       action();
@@ -8432,6 +8432,22 @@ var TerminalSoftInput = class {
       this.forwardingComposition = void 0;
     }
   }
+  /**
+   * Drop composition state on focus loss — including custom input queued behind
+   * the composition, because the blur discards the commit it was waiting for.
+   *
+   * In the pinned xterm 5.5.0, Terminal._handleTextAreaBlur empties the textarea
+   * synchronously (Terminal.ts:289-292) and nothing flushes the composition
+   * first, while CompositionHelper's finalizer only reads the textarea later, in
+   * its setTimeout(0) (CompositionHelper.ts:152-171), and sends nothing when the
+   * read is empty. A blur in the window therefore loses the committed text. A key
+   * queued behind that text must go with it: sent alone, a Shift+Enter would land
+   * as an orphaned LF, detached from the word it was ordered after.
+   *
+   * Cancelling here is safe because nothing that must arrive is ever queued: a
+   * terminal signal byte, the Ctrl+C interrupt included, bypasses the queue
+   * (TerminalKeybar's SIGNAL_BYTES), which is what #4151 needed.
+   */
   reset() {
     for (const range of this.pending) if (range.release !== void 0) clearTimeout(range.release);
     for (const flush of this.trailingFlushes) if (flush.release !== void 0) clearTimeout(flush.release);
@@ -8471,6 +8487,7 @@ function keyBytes(key, ctrl = false, alt = false, applicationCursor = false) {
   return (alt ? "\x1B" : "") + text;
 }
 var KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "\u2190", "\u2191", "\u2193", "\u2192"]];
+var SIGNAL_BYTES = /* @__PURE__ */ new Set(["", "", ""]);
 function userSequence(text) {
   if (text.length < 3 || text.charCodeAt(0) !== 27) return void 0;
   const csi = /^\x1b\[([0-9;]*)([A-Za-z~])$/.exec(text);
@@ -8770,10 +8787,11 @@ var TerminalKeybar = class {
     return true;
   }
   sendUserInput(data, options = {}) {
-    if (options.afterComposition && this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
+    if (options.afterComposition && !SIGNAL_BYTES.has(data) && this.softInput.deferAfterPendingComposition(() => this.emitUserInput(data, options))) return;
     this.emitUserInput(data, options);
   }
-  /** Send an xterm-suppressed physical key after any commit that it could not flush. */
+  /** Send an xterm-suppressed physical key after any commit that it could not
+   *  flush. A terminal signal byte is sent at once instead (SIGNAL_BYTES). */
   sendCustomUserInput(data, physical) {
     this.sendUserInput(data, { physical, afterComposition: true });
   }
@@ -9352,9 +9370,10 @@ var AttachTerminal = class {
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
-        sendInput: (text) => this.keybar.sendCustomUserInput(text, ev),
         // Public Terminal.input(..., true) is xterm's genuine-user-input path:
         // it scrolls to bottom and clears selection, then fires onData above.
+        // The keybar holds ordinary bytes behind a pending IME commit and sends
+        // signal bytes such as the interrupt at once (#4151).
         sendUserInput: (text) => this.keybar.sendCustomUserInput(text, ev)
       });
       if (!accepted) this.keybar.markKeydownSuppressed(ev);
@@ -12859,6 +12878,16 @@ var SplitView = class {
   // Debounces the "focus left every pane" report so a click that moves focus A→B
   // (blur A, then focus B) doesn't flap the nav mode through rail and back.
   blurTimer = null;
+  // Whether one of this view's panes currently holds the keyboard in its xterm
+  // textarea — the DOM-focus half of the #1693 nav/terminal model, mirrored here so
+  // reconcile() can tell whether a focused-pane rebuild happened while the operator
+  // was keyboard-attached (store.focus="terminal"). Maintained alongside the
+  // onFocusChange echoes in onPaneFocus: set true when any pane's textarea gains
+  // focus, false when the debounced-blur corrector finds focus left every pane.
+  // Teardown resets it: a disposed terminal suppresses its own blur (terminal.ts
+  // sets stopped before xterm tears the textarea down), so the callback alone would
+  // leave it stale-true across a session switch and arm a spurious refocus.
+  termHoldsFocus = false;
   // Last values reported via onLayout, so a no-op reconcile never re-fires it (which
   // would re-enter the store→rerender→setSession loop).
   lastFocusedTab = -1;
@@ -13130,6 +13159,7 @@ var SplitView = class {
     this.host.replaceChildren();
     this.host.classList.remove("af-split-multi");
     this.focusedId = null;
+    this.termHoldsFocus = false;
     this.builtTree = null;
   }
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
@@ -13165,6 +13195,7 @@ var SplitView = class {
     }
     const multi = desired.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
+    let focusedRebuilt = false;
     for (const leaf of desired) {
       const pane = this.panes.get(leaf.id);
       if (!pane) {
@@ -13177,6 +13208,9 @@ var SplitView = class {
       const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(spec ? spec.target : null, realId);
       if (spec !== null) {
         if (pane.term || pane.webUrl !== iframeIdentity(spec) || pane.iframeProxied !== ((this.tabRealIds[leaf.tab] ?? "") !== "" && iframeIsProxied(spec)) || staleAddress || pane.webArchived !== this.archived) {
+          if (this.focusedId === leaf.id) {
+            focusedRebuilt = true;
+          }
           pane.term?.dispose();
           pane.term = null;
           pane.webDispose?.();
@@ -13190,6 +13224,9 @@ var SplitView = class {
           pane.tab = leaf.tab;
         }
       } else if (!pane.term || staleAddress) {
+        if (this.focusedId === leaf.id) {
+          focusedRebuilt = true;
+        }
         pane.term?.dispose();
         pane.webDispose?.();
         pane.webUrl = null;
@@ -13222,6 +13259,45 @@ var SplitView = class {
       pane.label.textContent = tabLabel(named);
     }
     this.applyFocusClass();
+    this.reEngageFocusAfterRebuild(focusedRebuilt);
+  }
+  /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, correcting
+   *  the desync where `store.focus` stays "terminal" while DOM focus fell back to
+   *  `document.body` (the disposed terminal's blur is suppressed, so nothing else
+   *  reports the loss).
+   *
+   *  Gated on BOTH a focused-pane rebuild AND `termHoldsFocus` so it only fires when
+   *  the operator was keyboard-attached at the moment of the rebuild: a passive
+   *  repaint (rename, archive flip on a sibling, proxy change) that reaches a user
+   *  who DELIBERATELY detached to rail via Ctrl+] does not rebuild the focused pane
+   *  (so `focusedRebuilt` is false anyway), and a same-session rebuild that happens
+   *  to reach a rail-mode user is skipped by `termHoldsFocus` — neither yanks a
+   *  detached operator back into "terminal" without intent.
+   *
+   *  Two rebuild outcomes land differently, and both are the correct one:
+   *
+   *    - Rebuilt as a TERMINAL: refocus() → focus() focuses the new textarea, whose
+   *      focus listener echoes onPaneFocus(_, true), re-confirming store.focus=
+   *      "terminal" against the new DOM-focal textarea. The desync is undone.
+   *    - Rebuilt as a WEB/VS Code pane (no terminal to hand the keyboard to): DOM
+   *      focus is on document.body and no textarea blur can arm onPaneFocus's
+   *      corrector, so report the loss ourselves — store.focus lands on "rail",
+   *      which is the right mode when the focused pane ceases to be a terminal.
+   *
+   *  Split out from reconcile() so the boolean contract is unit-testable without a
+   *  DOM/xterm/WS (split_focus.test.ts stages the pane map directly); the end-to-end
+   *  behavior is pinned by the Playwright selftest. */
+  reEngageFocusAfterRebuild(focusedRebuilt) {
+    if (!focusedRebuilt || !this.termHoldsFocus) {
+      return;
+    }
+    const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
+    if (focused?.term) {
+      this.refocus();
+    } else {
+      this.cb.onFocusChange(false);
+      this.termHoldsFocus = false;
+    }
   }
   createPane(leaf) {
     const container = el("div", "af-pane");
@@ -13733,6 +13809,7 @@ var SplitView = class {
       if (this.focusedId !== leafId) {
         this.focusPane(leafId);
       }
+      this.termHoldsFocus = true;
       this.cb.onFocusChange(true);
       return;
     }
@@ -13744,6 +13821,7 @@ var SplitView = class {
       const active = document.activeElement;
       const stillInPane = active ? [...this.panes.values()].some((p) => p.host.contains(active)) : false;
       if (!stillInPane) {
+        this.termHoldsFocus = false;
         this.cb.onFocusChange(false);
       }
     }, 0);

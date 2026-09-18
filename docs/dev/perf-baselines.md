@@ -235,6 +235,13 @@ make perf-container
 ```
 
 Commit the reviewed PNGs with the design change. Update mode writes candidates
-to the artifact mount, never to the read-only checkout. `CI` forbids both golden
+to the artifact mount, never to the read-only checkout. It rewrites only the
+goldens the gate rejects, using the gate's own comparator and threshold. Every
+other candidate keeps its committed bytes, so `git status` after the copy lists
+exactly the images your change moved. Update mode never rewrites an image on a
+byte difference alone: the capture is not byte-reproducible below the
+threshold. Two captures of one tree differed in 13 of 122 goldens, and every one
+of them passed the gate (#4557). An image that passes the gate is already
+correct, so a new copy of it is noise, not a change. `CI` forbids both golden
 updates and baseline recording. `make demo-assets` remains the paced documentation
 video recorder; it does not silently overwrite the regression goldens.
