@@ -23,4 +23,11 @@ if [ $# -eq 0 ]; then
 fi
 # -buildvcs=false: /work has no .git, but disabling the VCS stamp keeps the
 # build off git entirely and consistent with the play-test build (#1167).
-exec go test -count=1 -buildvcs=false "$@"
+#
+# -timeout replaces Go's 10m-per-package default, which the daemon package has
+# crossed on a slow CI runner (600.014s in run 35205849014, against ~400s on
+# its siblings). This container has no CPU cap and shares the dev box's load,
+# so the budget matches the release lanes' 30m rather than CI's 20m. It comes
+# BEFORE "$@" on purpose: go test keeps the last -timeout it is given, so a
+# caller's own `GOTESTARGS="-timeout=… ./daemon/..."` still wins.
+exec go test -count=1 -buildvcs=false -timeout=30m "$@"
