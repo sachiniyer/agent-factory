@@ -152,6 +152,48 @@ func TestScrubAndScrubLogDoNotCrossNewlineOnSchemeWord(t *testing.T) {
 	}
 }
 
+// TestScrubAndScrubLogRedactIndentedContinuation is the other half of the
+// credentialKeyPattern cross-line lock at the two vulnerable surfaces. A key
+// followed by a value on the NEXT line, INDENTED, is a continuation of the key
+// — the YAML/config-shaped text collectConfig and the daemon log tail can
+// carry — and must still redact. Mirrors
+// TestScrubAndScrubLogDoNotCrossNewlineOnCredentialKey at the same two
+// surfaces; the indent gate recovers this shape without re-opening the
+// left-margin cross-line failure locked in that companion.
+func TestScrubAndScrubLogRedactIndentedContinuation(t *testing.T) {
+	r := &redactor{}
+
+	// collectConfig path: a config-shaped key with its value on an indented
+	// next line redacts the value and preserves the key, so triage sees that
+	// a credential was configured there without leaking it.
+	cfg := "password:\n  hunter2secret\n"
+	got := r.scrub(cfg)
+	if strings.Contains(got, "hunter2secret") {
+		t.Fatalf("indented config.toml value survived scrub:\n in: %q\nout: %q", cfg, got)
+	}
+	if !strings.Contains(got, "password:") {
+		t.Fatalf("key half absorbed by scrub:\n in: %q\nout: %q", cfg, got)
+	}
+	if !strings.Contains(got, secretMarker) {
+		t.Fatalf("expected the indented value redacted:\n in: %q\nout: %q", cfg, got)
+	}
+
+	// collectLog path: the same shape in the daemon log tail. A key ending
+	// one line whose value is pasted on an indented next line redacts the
+	// value and leaves the following unrelated line intact.
+	log := "2026-01-01 set token:\n  abcdefghijkl1234\n2026-01-01 daemon started\n"
+	gotLog := r.scrubLog(log)
+	if strings.Contains(gotLog, "abcdefghijkl1234") {
+		t.Fatalf("indented log-tail value survived scrubLog:\n in: %q\nout: %q", log, gotLog)
+	}
+	if !strings.Contains(gotLog, "2026-01-01 daemon started") {
+		t.Fatalf("unrelated following line absorbed by scrubLog:\n in: %q\nout: %q", log, gotLog)
+	}
+	if !strings.Contains(gotLog, "set token:") {
+		t.Fatalf("key half absorbed by scrubLog:\n in: %q\nout: %q", log, gotLog)
+	}
+}
+
 // TestScrubAndScrubLogDoNotCrossNewlineOnCredentialKey is the end-to-end lock at
 // the two vulnerable surfaces, for the credentialKeyPattern class of cross-
 // newline defect. collectConfig hands the whole config.toml to r.scrub

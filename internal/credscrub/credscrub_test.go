@@ -221,10 +221,13 @@ func TestScrubAuthSchemeStillRedactsSameLineWithinMultiLine(t *testing.T) {
 // and redacted the leading run of the next, unrelated line. `keyValueSecret`
 // alone redacted a bare ≥6-char next-line token; `keyedSchemeSecret` extended the
 // redaction further along that next line (a 40-char git SHA and following commit
-// subject, the shape `git log --format='%H %s'` produces). The separator is now
-// `[ \t]*`, which a line boundary is not, so none of these inputs cross it.
+// subject, the shape `git log --format='%H %s'` produces). The separator now
+// crosses the line boundary ONLY into an indented continuation
+// (`\r?\n[ \t]+`); all of these inputs have the next line at the LEFT MARGIN with
+// no leading whitespace, so it is not a continuation and none of them cross.
 // Mirrors the precedent the file already set for authScheme and
-// strandedAfterMarker so the three patterns cannot drift apart again.
+// strandedAfterMarker so the three patterns cannot drift apart again. The
+// indented-continuation half is pinned in TestScrubCredentialKeyRedactsIndentedContinuation.
 func TestScrubCredentialKeyDoesNotCrossNewline(t *testing.T) {
 	// Inputs with a credential keyword ending one line and no same-line
 	// credential, so the whole blob is a fixed point: the keyword stays
@@ -292,6 +295,62 @@ func TestScrubCredentialKeyStillRedactsSameLineWithinMultiLine(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestScrubCredentialKeyRedactsIndentedContinuation locks the other half of
+// the cross-line fix: a credential whose value sits on the NEXT line, INDENTED
+// (`password:\n  hunter2secret`, the YAML/config shape a log tail can paste),
+// is a continuation of the key and must still redact. A straight `[ \t]*` stop
+// redacts nothing across a line boundary and so dropped this shape — trading
+// over-redaction for under-redaction, which is the leaking side for a
+// scrubber. The over-redaction cases the guard exists for — a credential
+// keyword ending one line and a LEFT-MARGIN next line — are none of them
+// indented, so the indent gate `\r?\n[ \t]+` recovers this shape without
+// re-opening the cross-line failure (the left-margin half is pinned in
+// TestScrubCredentialKeyDoesNotCrossNewline).
+func TestScrubCredentialKeyRedactsIndentedContinuation(t *testing.T) {
+	cases := []struct{ name, key, in, leak string }{
+		// A bare value on an indented next line — the shape the straight
+		// newline stop dropped (most passwords reach the scrubber this way,
+		// their secrecy established solely by the neighbouring key).
+		{"password: + indented bare", "password:", "password:\n  hunter2secret", "hunter2secret"},
+		// A quoted value on an indented next line (the JSON/YAML shape).
+		{`"auth": + indented quoted`, `"auth":`, "\"auth\":\n  \"abcdef123456\"", "abcdef123456"},
+		// A value whose own shape is a known PAT — now also caught by key
+		// proximity, not left to the PAT matcher alone.
+		{"token: + indented PAT", "token:", "token:\n  ghp_AAAA0123456789BCDEFG", "ghp_AAAA0123456789BCDEFG"},
+		// CRLF line ending between the key and the indented value.
+		{"password: + indented bare (CRLF)", "password:", "password:\r\n  hunter2secret", "hunter2secret"},
+		// Tabs indent the continuation just as spaces do.
+		{"api_key= + indented bare (tabs)", "api_key=", "api_key=\n\t\thunter2secret", "hunter2secret"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Scrub(tc.in)
+			if strings.Contains(got, tc.leak) {
+				t.Fatalf("indented-continuation credential survived:\n in: %q\nout: %q", tc.in, got)
+			}
+			if !strings.Contains(got, SecretMarker) {
+				t.Fatalf("expected a redaction marker for the indented-continuation credential:\n in: %q\nout: %q", tc.in, got)
+			}
+			// The key and its separator survive — only the value is replaced
+			// — so triage still sees WHERE the redaction was.
+			if !strings.Contains(got, tc.key) {
+				t.Fatalf("key half was absorbed:\n in: %q\nout: %q", tc.in, got)
+			}
+		})
+	}
+
+	// Boundary lock: a column-0 next line is NOT an indented continuation. It
+	// is an unrelated line and survives, which is the half the cross-line
+	// guard exists for — the indent gate must not reach it. (The full set of
+	// left-margin cases lives in TestScrubCredentialKeyDoesNotCrossNewline.)
+	t.Run("left-margin next line is not a continuation", func(t *testing.T) {
+		in := "token:\nabcdefGHIJKL"
+		if got := Scrub(in); got != in {
+			t.Fatalf("indent gate reached a left-margin next line:\n in: %q\nout: %q", in, got)
+		}
+	})
 }
 
 // BenchmarkScrubTypicalLogLine measures the cost added to every log write. The
