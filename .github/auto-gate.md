@@ -10,6 +10,56 @@ Auto Gate publishes two kinds of check run:
   app. It passes only when every open pull request to `master` at the commit has
   a passing composite decision.
 
+## Maintainer hold
+
+The `hold` label stops Auto Gate on one pull request. While it is present the
+decision is BLOCKED whatever else passes, and the summary names who applied it
+and when.
+
+It sits with the structural refusals — open, master base, not a draft, mergeable
+— above every read that produces an approval, a verdict or a play-test
+attestation. That placement is the mechanism: the degraded
+reviewer-unavailable path waives its one requirement only when nothing else is
+unmet, so a hold recorded before it makes that degradation unreachable. A hold
+evaluated later would be cleared by the same branch that clears the review
+requirement.
+
+**Anyone who can label may apply it. Only an allowed author who did not open the
+pull request may lift it** — plus `sachiniyer`, who may lift a hold on his own,
+since he opens most pull requests here. Removing it any other way does not
+clear the hold: Auto Gate puts the label back and keeps blocking, naming who
+removed it. This asymmetry is the point. GitHub already restricts *applying* a
+label to accounts with triage or write access, and leaves *removing* one just as
+open — which is what made converting a pull request to a draft useless as a stop
+lever, since GitHub lets the pull request's own author undo that (#4383, #4576).
+
+Who applied or removed it is read from the pull request's `LABELED_EVENT` /
+`UNLABELED_EVENT` timeline, in the same GraphQL request as the label list
+itself. The two therefore cannot disagree: either both arrive, or the pull
+request read fails and the decision is BLOCKED.
+
+Every reading that is not a clean answer resolves to a hold:
+
+| The gate sees | Decision |
+| --- | --- |
+| The label on the pull request | Held |
+| Its newest removal is by someone who may not lift it | Held; the label is re-applied |
+| No label-event history at all | Held — a history that did not arrive cannot show what removed the label |
+| A label event whose timestamp cannot be ordered | Held — "which happened last" is the only question asked |
+| No `hold` event, and older label events exist outside the newest-100 window | Held — an incomplete window cannot show the label was never removed |
+| The newest `hold` event *adds* the label but the pull request does not carry it | Held — something removed it out of view |
+| Its newest removal is by an allowed author who may lift it | Clear |
+| No `hold` event, and the window is complete | Clear |
+
+A false hold costs a maintainer one label removal. A false clear merges a pull
+request a maintainer stopped, which is why the direction is never reversed.
+
+Re-applying the label is best effort and the block does not depend on it: the
+hold stands on the removal record whether or not the write lands, and a labels
+API that refuses produces a warning rather than a red run. The re-application
+raises a `labeled` event this workflow subscribes to; the run it starts reads
+the label as present and writes nothing, so it does not loop.
+
 ## Play-test evidence
 
 A PR touching production files under `app/`, `ui/`, or `session/tmux/`
@@ -500,7 +550,9 @@ The scan costs `ceil(N / 100)` GraphQL requests per pass. The rate window holds
 dispatched passes to about 12 an hour, and scheduled passes add a few more.
 That is one request per pass (about 12/hour) through the 83-head REST-quota
 threshold, or two (about 24/hour) for 120 PRs, before bounded retries. The scan
-does no per-head REST reads. Each other run pays one REST read for the marker,
+does no per-head REST reads except when a queued check run faces a dated
+rival; it then re-reads just that head via `listForRef` to order the run
+(#4427). Each other run pays one REST read for the marker,
 plus at most one dispatch per window. Passes skip unrelated branch-sweep
 housekeeping. This avoids both the frozen-decision failure and one gate
 evaluation per completed matrix job (#4242).
