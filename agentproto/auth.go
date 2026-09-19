@@ -80,6 +80,10 @@ func redactAccessTokenComponents(u *url.URL) {
 	} else if redacted, found := redactPercentEncodedAccessTokenText(u.Opaque, false); found {
 		// Source mapping keeps every non-sensitive escape in its original form.
 		u.Opaque = redacted
+	} else if rawRedacted, found := redactRawAccessTokenValue(u.Opaque, "/;?#"); found {
+		// Opaque carries no Raw* twin: url.URL.String prints it verbatim, so the
+		// redacted raw is the field's new serialization, no unescape needed.
+		u.Opaque = rawRedacted
 	}
 	u.Host = RedactAccessTokenText(u.Host)
 	if path, found := redactPercentEncodedAccessTokenText(u.Path, false); found {
@@ -87,9 +91,43 @@ func redactAccessTokenComponents(u *url.URL) {
 		// Path leaves it stale. Drop it so String re-escapes from the redacted
 		// value rather than reprinting the credential it was holding.
 		u.Path, u.RawPath = path, ""
+	} else {
+		// The decoded sweep did not fire — most likely because a valid %HH
+		// escape (e.g. %ac) overlapped the leading characters of an otherwise
+		// literal access_token<...> substring, collapsing access_token= out of
+		// the decoded u.Path while the bytes String() will emit still carry a
+		// literal access_token=<value>. Scan those bytes for the overlap the
+		// decoded view cannot see.
+		//
+		// EscapedPath is the authoritative view of what String() will print:
+		// when url.Parse found the raw path was already a canonical encoding
+		// of Path it drops RawPath (sets it to "") and EscapedPath re-encodes
+		// from Path; when RawPath is set EscapedPath honours it. Either way the
+		// redacted scan sees the bytes the unredacted URL would carry. After a
+		// redaction, set both RawPath (the new verbatim form) and Path (its
+		// unescape) so EscapedPath's validity check keeps honouring RawPath.
+		if rawRedacted, found := redactRawAccessTokenValue(u.EscapedPath(), "/;?#"); found {
+			u.RawPath = rawRedacted
+			if unescaped, err := url.PathUnescape(rawRedacted); err == nil {
+				u.Path = unescaped
+			}
+		}
 	}
 	if fragment, found := redactPercentEncodedAccessTokenText(u.Fragment, false); found {
 		u.Fragment, u.RawFragment = fragment, ""
+	} else {
+		// Mirrors the Path branch above. EscapedFragment is the authoritative
+		// view of what String() will print: url.Parse clears RawFragment when
+		// the raw was already canonical, in which case EscapedFragment re-
+		// encodes from Fragment; otherwise it honours RawFragment. PathUnescape
+		// matches the encodeFragment unescape: + survives as + in either mode,
+		// and only %HH escapes are folded.
+		if rawRedacted, found := redactRawAccessTokenValue(u.EscapedFragment(), "/;?#"); found {
+			u.RawFragment = rawRedacted
+			if unescaped, err := url.PathUnescape(rawRedacted); err == nil {
+				u.Fragment = unescaped
+			}
+		}
 	}
 	if u.User != nil {
 		u.User = redactAccessTokenUserinfo(u.User)
