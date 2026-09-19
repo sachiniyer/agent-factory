@@ -567,3 +567,52 @@ func TestDynamicCompositionBypassIsRefused(t *testing.T) {
 	require.Error(t, err,
 		"dynamic-composition bypass must be refused: $((x)) has a variable operand")
 }
+
+// TestValidateAccountEnvironmentCommand_ArithmeticNonConstantHasSpecificMessage
+// verifies that the inverted arithmetic guard's refusal names its real cause
+// instead of the generic "sets an identity or shell-startup variable itself"
+// message. The generic message is false for this class — `(( x = 1 )); codex`,
+// `let 'total += 1'`, and `x=42; [[ x -eq 0 ]]; codex` set no variable at all —
+// and misdescribing why a fail-closed refusal fired is worse than a vague
+// message because it sends the reader to look for a variable they never wrote.
+//
+// A direct identity or shell-startup assignment, with no arithmetic context,
+// keeps the generic refusal, which is accurate for it by contract.
+func TestValidateAccountEnvironmentCommand_ArithmeticNonConstantHasSpecificMessage(t *testing.T) {
+	for _, command := range []string{
+		// Pure arithmetic over a variable operand — none of these sets any
+		// variable. The maintainer's three named false positives are here.
+		"(( x = 1 )); codex",
+		"let 'total += 1'",
+		"x=42; [[ x -eq 0 ]]; codex",
+		// Other arithmetic-with-variable forms the inverted guard refuses.
+		"x=42; : $((x)); codex",
+		"let 'x = $((1+1))'; codex",
+		"echo $(( arr[i] )); codex",
+		// The delayed-re-eval bypass class the inverted guard exists to close.
+		// The command never writes CODEX_HOME directly: it stores a string in
+		// x via CmdSubst, then `: $((x))` re-evaluates x as arithmetic — but
+		// the node walk cannot see CODEX_HOME as a denied name, so the
+		// specific arithmetic message names the real cause.
+		"x=$(printf CODEX_HOME=1); : $((x)); codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q must be refused", command)
+		require.Contains(t, err.Error(), "arithmetic whose operand is not a numeric constant",
+			"command %q: refusal must name the inverted-arithmetic cause", command)
+		require.Contains(t, err.Error(), "cannot prove what the expression evaluates to",
+			"command %q: refusal must say af cannot prove what the arithmetic evaluates to", command)
+		require.Contains(t, err.Error(), "Use a literal numeric operand or move the arithmetic out of the agent invocation string",
+			"command %q: refusal must tell the user how to work around it", command)
+		require.NotContains(t, err.Error(), "sets an identity or shell-startup variable itself",
+			"command %q: refusal must not reuse the generic identity-variable message", command)
+	}
+	// A direct identity assignment, with no arithmetic context, keeps the
+	// generic refusal — accurate for it by contract.
+	identityErr := ValidateAccountEnvironmentCommand("CODEX_HOME=/other codex", scopedProcessTabAccount())
+	require.Error(t, identityErr)
+	require.Contains(t, identityErr.Error(), "sets an identity or shell-startup variable itself",
+		"a direct identity assignment keeps the generic refusal")
+	require.NotContains(t, identityErr.Error(), "arithmetic whose operand is not a numeric constant",
+		"a direct identity assignment does not take the arithmetic-specific refusal")
+}
