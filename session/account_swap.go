@@ -455,6 +455,98 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto boo
 	return nil
 }
 
+// RefuseIfCredentialSiblingsExist refuses an ambient handoff when a
+// credential-bearing sibling tab (shell, process, or VS Code editor) is still
+// running under the current automatic account. SwapAgent stops only the agent
+// tab; those siblings would keep the cleared account's credentials alive after
+// the swap, leaving the row claiming an ambient identity while a runtime still
+// exposes the previous one. Call this BEFORE ClearAutoSelectedAccount and
+// PrepareAgentSwap.
+//
+// Tabs removed from Tabs whose tmux teardown has not been confirmed are also
+// refused: a pending cleanup handle means the process may still be alive with
+// the old account's credentials, matching the posture validateAccountSwap takes.
+//
+// A VS Code tab owns no tmux pane, but its daemon-managed editor is
+// account-scoped — vscodeAccountScopeForInstance bakes the selected account
+// into the child's environ at exec (#3876) — so it is refused on tab presence,
+// the same posture admitAccountSwap and the manual account handoff take. A web
+// tab is a pure URL projection with no process and stays skipped.
+func (i *Instance) RefuseIfCredentialSiblingsExist() error {
+	i.mu.RLock()
+	tabs := append([]*Tab(nil), i.Tabs...)
+	pendingCleanup := len(i.pendingTabCleanup)
+	i.mu.RUnlock()
+	// A tab removed from Tabs whose tmux teardown has not yet been confirmed
+	// is retained in pendingTabCleanup. Its process may still be alive under
+	// the outgoing account's credentials, for the same reason the normal
+	// account-swap validator (validateAccountSwap) refuses non-empty cleanup.
+	if pendingCleanup > 0 {
+		return fmt.Errorf(
+			"cannot hand session %q off to an ambient agent while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the handoff",
+			i.Title, pendingCleanup)
+	}
+	for idx, tab := range tabs {
+		if idx == 0 {
+			// Agent tab — SwapAgent handles this one.
+			continue
+		}
+		if tab == nil {
+			continue
+		}
+		if tab.Kind == TabKindVSCode {
+			return fmt.Errorf(
+				"cannot hand session %q off to an ambient agent while a VS Code tab is still open under the current account: its daemon-managed editor keeps the account-scoped credentials it was spawned with; close that tab first",
+				i.Title)
+		}
+		if !tab.Kind.HasTmux() || tab.tmux == nil {
+			continue
+		}
+		if tab.tmux.ProvenNoPane() {
+			continue
+		}
+		return fmt.Errorf(
+			"cannot hand session %q off to an ambient agent while credential-bearing tab %q is still running under the current account; close that tab first",
+			i.Title, tab.Name)
+	}
+	return nil
+}
+
+// RestoreAutoSelectedAccount rolls back ClearAutoSelectedAccount when the
+// ambient handoff it enabled fails before the incoming runtime is confirmed.
+// The session's pane can still be running under the cleared account's
+// credentials, so the model must return to the identity that pane was launched
+// with rather than claim ambient while a live process exposes the old one.
+func (i *Instance) RestoreAutoSelectedAccount(account string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.Account = account
+	i.accountAutoSelected = true
+	i.touchLocked()
+}
+
+// ClearAutoSelectedAccount removes a scheduler-selected account so an
+// ambient (agent-only) handoff can proceed through SwapAgent, which rejects
+// any non-empty i.Account regardless of how the account was chosen. This is
+// safe only for automatic accounts: the scheduler picked the account, not the
+// user, and the new agent cannot inherit an account that belongs to a
+// different agent's identity space. Returns false and is a no-op if the
+// account is a manual pin.
+func (i *Instance) ClearAutoSelectedAccount() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.accountAutoSelected {
+		return false
+	}
+	if i.Account != "" {
+		i.Account = ""
+		i.touchLocked()
+	}
+	i.accountAutoSelected = false
+	i.touchLocked()
+	return true
+}
+
 // ClearPendingAccountSwap retires exactly the delivery obligation the caller
 // completed, without allowing a stale attempt to erase a later swap.
 func (i *Instance) ClearPendingAccountSwap(from, to string) bool {

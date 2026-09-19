@@ -299,6 +299,12 @@ func (i *Instance) recordHandoffSwapLocked(target, reason, headSHA string, autom
 		HeadSHA:   strings.TrimSpace(headSHA),
 		Reason:    strings.TrimSpace(reason),
 		Automatic: automatic,
+		// The account still in force at record time is the identity the
+		// outgoing runtime was scoped to; the ledger must name it so an ambient
+		// handoff from an auto-accounted session does not read as ambient work.
+		// Callers that clear the selection for the swap (the daemon's ambient
+		// path) must do so AFTER this record exists.
+		FromAccount: i.Account,
 	}
 	swap := HandoffSwap{AgentHandoff: entry, previousProgram: i.Program}
 	sameAgent := i.currentAgentNameLocked() == target

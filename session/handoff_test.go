@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -445,4 +447,158 @@ func TestMissionBrief_ReadsAsEnglishForEveryReason(t *testing.T) {
 			t.Fatalf("reason %q: brief still contains the malformed clause %q\n%s", tc.reason, tc.bannedIn, rendered)
 		}
 	}
+}
+
+// TestClearAutoSelectedAccount_AllowsSwapAgentAccountCheck is the regression
+// lock for the P1 finding: LocalBackend.SwapAgent unconditionally rejects any
+// non-empty i.Account (session/backend_local.go) to prevent silent cross-agent
+// identity collisions. An auto-selected account occupies the same field and
+// triggers the same refusal — breaking every ambient handoff for a
+// scheduler-scoped session.
+//
+// ClearAutoSelectedAccount must zero the account BEFORE SwapAgent is called so
+// the ambient handoff can proceed. The test verifies both halves by calling
+// SwapAgent before and after clearing against a minimal instance that has no
+// tmux binding (so the first post-clear failure is the tmux-absent error, not
+// the account error — proving the account check was passed).
+func TestClearAutoSelectedAccount_AllowsSwapAgentAccountCheck(t *testing.T) {
+	backend := &LocalBackend{}
+	inst := &Instance{
+		Title:               "clear-auto-account",
+		Program:             tmux.ProgramClaude,
+		Account:             "work",
+		accountAutoSelected: true,
+		backend:             backend,
+		liveness:            LiveRunning,
+	}
+	plan := AgentSwapPlan{target: tmux.ProgramCodex, program: tmux.ProgramCodex}
+
+	// Before clearing: SwapAgent must refuse with the account-scoped error.
+	err := backend.SwapAgent(inst, plan)
+	require.Error(t, err, "SwapAgent must reject a non-empty account before ClearAutoSelectedAccount")
+	require.Contains(t, err.Error(), "scoped to the",
+		"the pre-clear error must be the account-scope refusal, not a missing-runtime error")
+
+	// Clear the auto account.
+	cleared := inst.ClearAutoSelectedAccount()
+	require.True(t, cleared, "ClearAutoSelectedAccount must report true for an automatic account")
+	acct, auto := inst.AccountSelection()
+	require.Empty(t, acct, "Account must be cleared")
+	require.False(t, auto, "accountAutoSelected must be cleared")
+
+	// After clearing: SwapAgent must NOT fail with the account error. It will
+	// fail for the next reason in the function (no tmux binding), which proves
+	// the account check was passed — exactly what the daemon needs before calling
+	// SwapAgent for an ambient auto-account handoff.
+	err = backend.SwapAgent(inst, plan)
+	require.Error(t, err, "SwapAgent still fails (no tmux binding), but not for the account reason")
+	require.NotContains(t, err.Error(), "scoped to the",
+		"the post-clear error must not be the account-scope refusal")
+}
+
+// TestRefuseIfCredentialSiblingsExist is the regression lock for the P1 finding
+// that an ambient handoff from an auto-accounted session must be refused while
+// credential-bearing sibling tabs (shell/process) are still running. SwapAgent
+// stops only the agent tab; those siblings keep the old account's credentials
+// alive after the swap, leaving the row claiming ambient identity while a real
+// runtime still exposes the previous account.
+func TestRefuseIfCredentialSiblingsExist(t *testing.T) {
+	agentTs := tmux.NewTmuxSession("agent-session", tmux.ProgramClaude)
+	shellTs := tmux.NewTmuxSession("shell-session", "/bin/bash")
+
+	inst := &Instance{
+		Title:               "auto-account-sibling",
+		Program:             tmux.ProgramClaude,
+		Account:             "work",
+		accountAutoSelected: true,
+		Tabs: []*Tab{
+			{ID: "tab-agent", Name: "agent", Kind: TabKindAgent, tmux: agentTs},
+			{ID: "tab-shell", Name: "shell", Kind: TabKindShell, tmux: shellTs},
+		},
+	}
+
+	// A live sibling shell tab must cause refusal.
+	err := inst.RefuseIfCredentialSiblingsExist()
+	require.Error(t, err, "RefuseIfCredentialSiblingsExist must refuse when a credential-bearing sibling tab exists")
+	require.Contains(t, err.Error(), "shell", "refusal must name the tab")
+
+	// A VS Code tab owns no tmux pane, but its daemon-managed editor is
+	// account-scoped (#3876): the account-swap gates refuse it outright, and an
+	// ambient handoff must take the same posture rather than leave the editor
+	// running under the cleared account.
+	inst.Tabs = append(inst.Tabs[:1], &Tab{ID: "tab-vscode", Name: "vscode", Kind: TabKindVSCode})
+	err = inst.RefuseIfCredentialSiblingsExist()
+	require.Error(t, err, "RefuseIfCredentialSiblingsExist must refuse while a VS Code tab is open")
+	require.Contains(t, err.Error(), "VS Code", "refusal must name the editor kind")
+
+	// A web tab is a pure URL projection with no process — not credential-bearing.
+	inst.Tabs = append(inst.Tabs[:1], &Tab{ID: "tab-web", Name: "web", Kind: TabKindWeb, URL: "http://localhost:8080"})
+	err = inst.RefuseIfCredentialSiblingsExist()
+	require.NoError(t, err, "RefuseIfCredentialSiblingsExist must not refuse a web tab")
+
+	// With only the agent tab, there is nothing to refuse.
+	inst.Tabs = inst.Tabs[:1]
+	err = inst.RefuseIfCredentialSiblingsExist()
+	require.NoError(t, err, "RefuseIfCredentialSiblingsExist must pass with only the agent tab")
+
+	// A tab removed from Tabs whose tmux teardown is still pending means the
+	// process may still be alive under the old account's credentials. Refuse
+	// to match the account-swap validator's posture.
+	inst.SetPendingTabCleanupForTest([]TabCleanupData{{TabID: "tab-closed", TmuxName: "closed-session"}})
+	err = inst.RefuseIfCredentialSiblingsExist()
+	require.Error(t, err, "RefuseIfCredentialSiblingsExist must refuse when tab cleanup is pending")
+	require.Contains(t, err.Error(), "teardown", "refusal must name the cleanup condition")
+	inst.SetPendingTabCleanupForTest(nil)
+}
+
+// TestRecordHandoffSwap_RecordsFromAccount pins the audit-trail half of the P2
+// finding: for an ambient handoff out of an auto-accounted session, the ledger
+// entry must retain the outgoing account as FromAccount. The daemon clears the
+// selection only AFTER this record exists, so the account in force at record
+// time is the honest source identity.
+func TestRecordHandoffSwap_RecordsFromAccount(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.Account = "work"
+	inst.accountAutoSelected = true
+
+	require.NoError(t, inst.Transition(BeginHandoff()))
+	entry, err := inst.RecordHandoffSwap(tmux.ProgramGemini, HandoffReasonManual, "", false)
+	require.NoError(t, err)
+	require.Equal(t, "work", entry.FromAccount,
+		"the ledger entry must name the account the outgoing runtime was scoped to")
+	require.Empty(t, entry.ToAccount, "an ambient target carries no account")
+	require.Equal(t, "work", inst.Handoffs()[0].FromAccount,
+		"the persisted ledger, not only the returned token, must carry FromAccount")
+}
+
+// TestRestoreAutoSelectedAccount pins the rollback half of the P1 ordering
+// finding: when a swap fails after ClearAutoSelectedAccount ran, the selection
+// is restored so the session model returns to the identity the still-running
+// pane was launched under.
+func TestRestoreAutoSelectedAccount_RestoresSelection(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.Account = "work"
+	inst.accountAutoSelected = true
+
+	require.True(t, inst.ClearAutoSelectedAccount())
+	inst.RestoreAutoSelectedAccount("work")
+	account, automatic := inst.AccountSelection()
+	require.Equal(t, "work", account)
+	require.True(t, automatic)
+}
+
+// TestClearAutoSelectedAccount_NoOpForManualPin verifies the safety predicate:
+// ClearAutoSelectedAccount is inert for a manually-pinned account, so the
+// daemon cannot accidentally admit a hand-fixed identity as a side effect.
+func TestClearAutoSelectedAccount_NoOpForManualPin(t *testing.T) {
+	inst := &Instance{
+		Title:   "manual-pin",
+		Account: "work",
+		// accountAutoSelected is false (zero value) — this is a manual pin.
+	}
+	cleared := inst.ClearAutoSelectedAccount()
+	require.False(t, cleared, "ClearAutoSelectedAccount must be a no-op for a manual pin")
+	acct, auto := inst.AccountSelection()
+	require.Equal(t, "work", acct, "manual pin must not be cleared")
+	require.False(t, auto)
 }
