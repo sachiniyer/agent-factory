@@ -189,17 +189,21 @@ func sourceMappedURIComponents(outer View, prov Provenance) ([]viewOut, []Range)
 		// does not cover component provenance simply see no spans.
 		if hasQuery {
 			for _, pair := range splitQueryPairs(s, query[0], query[1]) {
-				if view, malformed := PercentDecode(s[pair.Start:pair.End], true); !malformed {
-					views = append(views, viewOut{view: offsetView(view, pair.Start), prov: ProvURIQueryPair})
-				}
+				// A malformed escape is ordinary data in the stable view
+				// (percent.go), so the view is admitted rather than dropped —
+				// dropping it would leave the bytes invisible to both the
+				// producer and the fail-closed path.
+				view, _ := PercentDecode(s[pair.Start:pair.End], true)
+				views = append(views, viewOut{view: offsetView(view, pair.Start), prov: ProvURIQueryPair})
 			}
 		}
 		if fragment := strings.IndexByte(rawURI[pathEnd:], '#'); fragment >= 0 {
 			fragStart := uriStart + pathEnd + fragment + 1
 			if fragStart < uriStart+len(rawURI) {
-				if view, malformed := PercentDecode(s[fragStart:uriStart+len(rawURI)], false); !malformed {
-					views = append(views, viewOut{view: offsetView(view, fragStart), prov: ProvURIComponent})
-				}
+				// Same contract as the query pair: a malformed escape ships as
+				// ordinary data in the stable view, which is admitted.
+				view, _ := PercentDecode(s[fragStart:uriStart+len(rawURI)], false)
+				views = append(views, viewOut{view: offsetView(view, fragStart), prov: ProvURIComponent})
 			}
 		}
 	}
