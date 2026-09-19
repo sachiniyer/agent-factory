@@ -96,7 +96,7 @@ func (s *controlServer) HandoffSessionV2(req HandoffSessionRequest, resp *Handof
 // recovery proceeds only from mission-scoped proof that delivery did not occur;
 // neither failure is flattened into a false Running state.
 //
-// Locking mirrors resumeFromLimit exactly: per-(repo,title) target lock FIRST,
+// Locking mirrors resumeFromLimitOutcome exactly: per-(repo,title) target lock FIRST,
 // then the per-session op lock (#2006's canonical target-before-op order), with
 // a re-verification under both. The target lock is what serializes this swap's
 // prompt delivery against a concurrent DeliverPrompt to the same pane.
