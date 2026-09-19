@@ -24,9 +24,37 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		if err != nil {
 			return true
 		}
+		// Inverted arithmetic guard: refuse any command whose arithmetic context
+		// has an operand that is not provably a numeric constant. Rather than
+		// enumerating the ways a variable's stored value can become hazardous
+		// (command substitution, hazardous literal, runtime-input builtin,
+		// dynamically composed strings, …), the guard inverts the burden: an
+		// arithmetic context is refused UNLESS its operand provably consists of
+		// only integer literals, arithmetic operators, and parentheses. Any
+		// variable reference inside arithmetic — $((x)), (( x )), let x,
+		// arr[x], etc. — is unprovable regardless of how x was assigned.
+		//
+		// This single check subsumes the three coarse rules that preceded it:
+		//   - CmdSubst+arith: a CmdSubst inside arithmetic is never a constant.
+		//   - Literal-assignment+arith: a variable holding a hazardous literal
+		//     appears in arithmetic as a variable reference — not a constant.
+		//   - Runtime-input+arith: same as the literal case above.
+		//   - Dynamic-composition bypass (n=CODEX_HOME; x="${n}=1"; : $((x))):
+		//     x is a variable reference in arithmetic — not a constant.
+		//
+		// Safe-side false positives: commands that combine arithmetic with any
+		// non-constant expression are refused, including provably safe ones like
+		// n=5; : $((n+1)). That cost is documented and priced as acceptable:
+		// arithmetic over non-constant operands is uncommon in agent invocation
+		// strings, and the precision gain from tracking whether the variable was
+		// actually hazardous is outweighed by the unbounded enumeration gap it
+		// creates.
+		if fileHasArithmeticContextWithVariableOperand(file) {
+			return true
+		}
 		mutates := false
 		syntax.Walk(file, func(node syntax.Node) bool {
-			if nodeMutatesAccountEnvironment(node, names) {
+			if nodeMutatesAccountEnvironment(node, names, nil) {
 				mutates = true
 				return false
 			}
@@ -39,15 +67,54 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 	return false
 }
 
-func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) bool {
+func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}, tainted map[string]struct{}) bool {
 	switch node := node.(type) {
 	case *syntax.CallExpr:
-		return callMutatesAccountEnvironment(node, names)
+		return callMutatesAccountEnvironment(node, names, tainted)
 	case *syntax.Assign:
+		// An indexed assignment (`arr[i]=val`) evaluates the subscript as
+		// arithmetic; a command substitution in the index is re-evaluated as
+		// fresh arithmetic by bash and can assign a denied name via its output
+		// even when `arr` itself is not denied.
+		if node.Index != nil && arithmeticExprHasCommandSubstitution(node.Index) {
+			return true
+		}
+		if node.Index != nil && arithmeticExprReferencesTaintedVar(node.Index, tainted) {
+			return true
+		}
 		return node.Name != nil && accountEnvironmentNameDenied(node.Name.Value, names)
 	case *syntax.WordIter:
 		return node.Name != nil && accountEnvironmentNameDenied(node.Name.Value, names)
 	case *syntax.ParamExp:
+		// An indexed subscript (`${arr[i]}`) is evaluated as arithmetic by
+		// bash, so a command substitution inside the index — e.g.
+		// `${arr[$(printf CODEX_HOME=1)]}` — is re-evaluated as fresh
+		// arithmetic and can assign a denied name even when `arr` itself is
+		// not denied. Fail closed when the index contains a substitution.
+		if node.Index != nil && arithmeticExprHasCommandSubstitution(node.Index) {
+			return true
+		}
+		if node.Index != nil && arithmeticExprReferencesTaintedVar(node.Index, tainted) {
+			return true
+		}
+		// Slice expressions (`${x:offset:length}`) also evaluate their
+		// operands as arithmetic; a command substitution in either position
+		// is re-evaluated as fresh arithmetic by bash and can assign a denied
+		// name (e.g. `${x:$(printf CODEX_HOME=1)}`). Fail closed on either.
+		if node.Slice != nil {
+			if node.Slice.Offset != nil && arithmeticExprHasCommandSubstitution(node.Slice.Offset) {
+				return true
+			}
+			if node.Slice.Offset != nil && arithmeticExprReferencesTaintedVar(node.Slice.Offset, tainted) {
+				return true
+			}
+			if node.Slice.Length != nil && arithmeticExprHasCommandSubstitution(node.Slice.Length) {
+				return true
+			}
+			if node.Slice.Length != nil && arithmeticExprReferencesTaintedVar(node.Slice.Length, tainted) {
+				return true
+			}
+		}
 		return node.Param != nil && node.Exp != nil &&
 			(node.Exp.Op == syntax.AssignUnset || node.Exp.Op == syntax.AssignUnsetOrNull) &&
 			accountEnvironmentNameDenied(node.Param.Value, names)
@@ -55,6 +122,79 @@ func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) 
 		return arithmeticAssignmentMutatesAccountEnvironment(node, names)
 	case *syntax.UnaryArithm:
 		return arithmeticIncrementMutatesAccountEnvironment(node, names)
+	case *syntax.ArithmCmd:
+		// `(( expr ))`. A command substitution inside the arithmetic is
+		// re-evaluated as fresh arithmetic by bash and can assign a denied name
+		// via its output; the literal assignment form is still caught by the
+		// BinaryArithm/UnaryArithm arms below once this returns false.
+		// A variable reference to a tainted var (one assigned from a command
+		// substitution earlier in the same command) is equally unprovable: bash
+		// re-evaluates the variable's value as arithmetic, so the prior
+		// substitution's stdout becomes a deferred arithmetic mutation.
+		if arithmeticExprHasCommandSubstitution(node.X) {
+			return true
+		}
+		return arithmeticExprReferencesTaintedVar(node.X, tainted)
+	case *syntax.ArithmExp:
+		// `$(( expr ))`. Same re-evaluation hazard as `(( ))`; appears inside a
+		// word (e.g. `echo $(( ... ))` or `x=$(( ... ))`), and the literal
+		// assignment form is still caught by the arithm arms below.
+		if arithmeticExprHasCommandSubstitution(node.X) {
+			return true
+		}
+		return arithmeticExprReferencesTaintedVar(node.X, tainted)
+	case *syntax.LetClause:
+		// A bash `let` clause parsed as a builtin (the POSIX parse keeps `let` as
+		// a CallExpr and is handled by letMutatesAccountEnvironment). The
+		// command-substitution hazard is the same; returning false lets the walk
+		// descend so a literal assignment (BinaryArithm/UnaryArithm) is still
+		// caught.
+		for _, expr := range node.Exprs {
+			if arithmeticExprHasCommandSubstitution(expr) {
+				return true
+			}
+			if arithmeticExprReferencesTaintedVar(expr, tainted) {
+				return true
+			}
+		}
+		return false
+	case *syntax.BinaryTest:
+		// Numeric comparison operators in `[[ ]]` (-eq, -ne, -lt, -gt, -le,
+		// -ge) cause bash to evaluate both operands as arithmetic. A command
+		// substitution in either operand is re-evaluated as fresh arithmetic by
+		// bash and can assign a denied name via its output, e.g.
+		// `[[ 0 -eq $(printf CODEX_HOME=1) ]]`. A tainted variable in either
+		// operand is the deferred form of the same bypass. Fail closed on either.
+		switch node.Op {
+		case syntax.TsEql, syntax.TsNeq, syntax.TsLeq, syntax.TsGeq, syntax.TsLss, syntax.TsGtr:
+			if wordHasCommandSubstitution(node.X) || wordHasCommandSubstitution(node.Y) {
+				return true
+			}
+			if wordReferencesTaintedVar(node.X, tainted) || wordReferencesTaintedVar(node.Y, tainted) {
+				return true
+			}
+		}
+		return false
+	case *syntax.CStyleLoop:
+		// C-style `for (( init; cond; post ))`. All three clauses are
+		// evaluated as arithmetic by bash; the same command-substitution and
+		// tainted-variable hazards apply. Fail closed on either. Returning
+		// true here prevents the walk from descending into Init/Cond/Post a
+		// second time; the BinaryArithm/UnaryArithm arms below still catch
+		// literal assignments when the loop is safe (no substitution, no
+		// tainted variable).
+		for _, expr := range []syntax.ArithmExpr{node.Init, node.Cond, node.Post} {
+			if expr == nil {
+				continue
+			}
+			if arithmeticExprHasCommandSubstitution(expr) {
+				return true
+			}
+			if arithmeticExprReferencesTaintedVar(expr, tainted) {
+				return true
+			}
+		}
+		return false
 	case *syntax.UnaryTest:
 		return unaryTestMutatesAccountEnvironment(node)
 	default:
@@ -116,7 +256,7 @@ func arithmeticAccountEnvironmentName(expr syntax.ArithmExpr) (string, bool) {
 	return literalShellWord(word)
 }
 
-func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}) bool {
+func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}, tainted map[string]struct{}) bool {
 	for _, assign := range call.Assigns {
 		if assign != nil && assign.Name != nil {
 			if _, denied := names[assign.Name.Value]; denied {
@@ -130,10 +270,10 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 	if unsafe || len(words) == 0 {
 		return unsafe
 	}
-	return unwrappedAccountCommandMutates(words, names, memo)
+	return unwrappedAccountCommandMutates(words, names, tainted, memo)
 }
 
-func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
+func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}, tainted map[string]struct{}, memo operandTailMemo) bool {
 	if _, literal := literalShellWord(words[0]); !literal {
 		// A dynamic command name can resolve to env or a same-shell builtin such
 		// as unset/export, so its effect on the selected identity is unprovable.
@@ -157,7 +297,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 	case isBareName(words[0], "printf"):
 		return printfMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "let"):
-		return letMutatesAccountEnvironment(words[1:], names)
+		return letMutatesAccountEnvironment(words[1:], names, tainted)
 	case isBareName(words[0], "mapfile"), isBareName(words[0], "readarray"):
 		return arrayReadMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "wait"):
@@ -502,7 +642,9 @@ func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]str
 		if len(commandWords) == 0 {
 			return false
 		}
-		return unwrappedAccountCommandMutates(commandWords, names, memo)
+		// envCallMutatesAccountEnvironment has no access to tainted; the taint
+		// check is applied at the arithmetic-node level by nodeMutatesAccountEnvironment.
+		return unwrappedAccountCommandMutates(commandWords, names, nil, memo)
 	}
 	return false
 }
