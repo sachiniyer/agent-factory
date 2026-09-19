@@ -323,6 +323,12 @@ func TestScrubCredentialKeyRedactsIndentedContinuation(t *testing.T) {
 		{"password: + indented bare (CRLF)", "password:", "password:\r\n  hunter2secret", "hunter2secret"},
 		// Tabs indent the continuation just as spaces do.
 		{"api_key= + indented bare (tabs)", "api_key=", "api_key=\n\t\thunter2secret", "hunter2secret"},
+		// Trailing horizontal whitespace after the separator before the
+		// line break — `password: \n  hunter2secret`. The leading `[ \t]*`
+		// in the continuation alternative consumes it so the credential is
+		// not left intact; without it neither alternative would match.
+		{"password: + space then indented bare", "password:", "password: \n  hunter2secret", "hunter2secret"},
+		{"password= + tab then indented bare", "password=", "password=\t\n  hunter2secret", "hunter2secret"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

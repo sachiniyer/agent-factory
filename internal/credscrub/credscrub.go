@@ -77,17 +77,23 @@ var shapePatterns = []*regexp.Regexp{
 //
 // The first alternative `[ \t]*` keeps every real same-line
 // `<key> = <value>` / `<key>: <value>` (spaces, tabs, no whitespace) and
-// nothing across a line boundary. The second alternative `\r?\n[ \t]+`
-// narrows the cross-line case to an INDENTED continuation: a value that
-// begins on the next line indented (`password:\n  hunter2secret`, the
-// YAML/config shape a log tail can paste) is a continuation of the key and
-// is redacted; a value at the left margin (`token:\n4f2a9c…`) is an
-// unrelated line and survives. None of the over-redaction cases reach the
+// nothing across a line boundary. The second alternative
+// `[ \t]*\r?\n[ \t]+` narrows the cross-line case to an INDENTED
+// continuation: a value that begins on the next line indented
+// (`password:\n  hunter2secret`, the YAML/config shape a log tail can
+// paste) is a continuation of the key and is redacted; a value at the left
+// margin (`token:\n4f2a9c…`) is an unrelated line and survives. The leading
+// `[ \t]*` in this alternative is the trailing-whitespace half of the
+// separator: a config blob keeps spaces/tabs after the `:`/`=` before the
+// line break (`password: \n  hunter2secret`), and without it neither
+// alternative matches — `[ \t]*` consumes the space but cannot cross the
+// newline, and `\r?\n` cannot follow the `:` through that space — so the
+// credential ships in the clear. None of the over-redaction cases reach the
 // next line through an indent, so this recovers the indented-continuation
 // credential without re-opening the cross-line failure. `\r?\n` keeps the
 // LF and CRLF shapes, and `[ \t]+` (one or more) is the gate: a left-margin
 // next line has no leading whitespace and so is never seen.
-const credentialKeyPattern = `["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?[ \t]*[:=](?:[ \t]*|\r?\n[ \t]+)`
+const credentialKeyPattern = `["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?[ \t]*[:=](?:[ \t]*|[ \t]*\r?\n[ \t]+)`
 
 var keyValueSecret = regexp.MustCompile(
 	`(?i)(` + credentialKeyPattern + `)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"',}]{6,})`)
