@@ -32,6 +32,9 @@ func TestRedactInstanceDataRedactsAccountSwapLabels(t *testing.T) {
 			From:                  "acme-prod",
 			To:                    "acme-staging",
 			ConversationID:        "8f466d20-784b-4b02-a916-c80a0f6983e3",
+			CarriedConversationID: "5b1d2c3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
+			CarrySourceAccount:    "acme-legacy",
+			CarryFallback:         `the previous account "acme-legacy" is no longer registered for claude`,
 			MissionDeliveryStatus: session.PromptCouldNotConfirm,
 		},
 		AccountLimitObservations: []session.AccountLimitObservationData{
@@ -42,11 +45,13 @@ func TestRedactInstanceDataRedactsAccountSwapLabels(t *testing.T) {
 	redactOneInstanceData(&d)
 
 	for name, got := range map[string]string{
-		"Account":                             d.Account,
-		"LimitAccount":                        d.LimitAccount,
-		"PendingAccountSwap.From":             d.PendingAccountSwap.From,
-		"PendingAccountSwap.To":               d.PendingAccountSwap.To,
-		"AccountLimitObservations[0].Account": d.AccountLimitObservations[0].Account,
+		"Account":                               d.Account,
+		"LimitAccount":                          d.LimitAccount,
+		"PendingAccountSwap.From":               d.PendingAccountSwap.From,
+		"PendingAccountSwap.To":                 d.PendingAccountSwap.To,
+		"PendingAccountSwap.CarrySourceAccount": d.PendingAccountSwap.CarrySourceAccount,
+		"PendingAccountSwap.CarryFallback":      d.PendingAccountSwap.CarryFallback,
+		"AccountLimitObservations[0].Account":   d.AccountLimitObservations[0].Account,
 	} {
 		if got != redactedMarker {
 			t.Errorf("%s not redacted: %q", name, got)
@@ -56,6 +61,9 @@ func TestRedactInstanceDataRedactsAccountSwapLabels(t *testing.T) {
 	// VALUE is the sensitive part, and its presence is not worth reporting.
 	if d.PendingAccountSwap.ConversationID != "" {
 		t.Errorf("replacement conversation id not cleared: %q", d.PendingAccountSwap.ConversationID)
+	}
+	if d.PendingAccountSwap.CarriedConversationID != "" {
+		t.Errorf("carried conversation id not cleared: %q", d.PendingAccountSwap.CarriedConversationID)
 	}
 	// The structural fields triage actually reads survive, including the agent
 	// enum beside the redacted label — without it the observation list is two
