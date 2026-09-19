@@ -13,7 +13,7 @@ import (
 // elapsed. It is the automated sibling of the PR2 manual `c` retry and the
 // Lost-session restore loop (lostrestore.go) — same poll-goroutine discipline
 // (TryLock the per-session op lock, re-verify under it, back off on repeat) —
-// and it reuses the exact resumeFromLimit action the manual retry uses, so the
+// and it reuses the exact resumeFromLimitOutcome action the manual retry uses, so the
 // resume mechanics (re-spawn if the agent exited, re-deliver the stored prompt,
 // clear the limit) live in one place.
 //
@@ -35,7 +35,7 @@ import (
 const limitResumeGrace = 2 * time.Minute
 
 // Backoff between repeat auto-resume attempts for one session — a resume that
-// re-hits the wall, or a resumeFromLimit that errors. Package vars so tests can
+// re-hits the wall, or a resumeFromLimitOutcome that errors. Package vars so tests can
 // shorten them (same pattern as lostRestoreBackoff*). Mirrors the lostrestore
 // discipline: exponential from base, settling at max, never a permanent
 // give-up. The no-parseable-reset-time fallback uses the fixed configured
@@ -62,7 +62,7 @@ var (
 // parkedAt anchors the
 // no-parseable-reset-time fallback interval (the first tick the session was seen
 // parked); nextAttempt is the backoff gate that ALSO survives the brief non-limit
-// window between resumeFromLimit clearing the limit and the next poll re-detecting
+// window between resumeFromLimitOutcome clearing the limit and the next poll re-detecting
 // the banner, so an immediate re-limit continues the backoff instead of hammering.
 // ordinaryAttemptedFor records which independently computed ordinary deadline
 // has actually fired; a candidate-only retry gate may be capped by an unfired
@@ -120,7 +120,7 @@ func (m *Manager) ResumeLimitedSessions() {
 	// healthy pending manual swap still owns an unfinished recovery episode.
 	// State is deliberately KEPT for a row that is momentarily
 	// non-limit within its backoff window: that window is the gap between
-	// resumeFromLimit clearing the limit and the next poll re-detecting the
+	// resumeFromLimitOutcome clearing the limit and the next poll re-detecting the
 	// banner, and keeping the state there is what throttles an immediate
 	// re-limit instead of restarting it at attempt zero.
 	//
@@ -254,7 +254,7 @@ func (m *Manager) resumeLimitedSession(
 		return
 	}
 
-	// Canonical lock order is target-before-op (#2006); see resumeFromLimit. This
+	// Canonical lock order is target-before-op (#2006); see resumeFromLimitOutcome. This
 	// runs on the poll goroutine, so it can briefly block here on a DeliverPrompt
 	// in flight to the same session — bounded and correct, exactly where taking the
 	// op lock first used to deadlock the whole daemon. The op lock is still only
@@ -299,7 +299,7 @@ func (m *Manager) resumeLimitedSession(
 	}
 
 	// Whether this episode carried a parseable reset time, captured BEFORE the
-	// resume: resumeFromLimit clears the limit (and the reset time) on success,
+	// resume: resumeFromLimitOutcome clears the limit (and the reset time) on success,
 	// so it cannot be read back afterwards. It selects the re-schedule cadence.
 	_, hadReset := inst.LimitResetAt()
 

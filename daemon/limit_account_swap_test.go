@@ -578,7 +578,7 @@ func TestResumeFromLimitPromotesPendingClaudeConversationBeforeClear(t *testing.
 	backend.mu.Lock()
 	backend.sendPromptErr = nil
 	backend.mu.Unlock()
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
 		t.Fatal(err)
 	}
 	if conv := inst.AgentConversation(); conv.Agent != tmux.ProgramClaude || conv.ID != want {
@@ -804,7 +804,7 @@ func TestResumeFromLimit_LiveCommittedCodexSwapRecapturesBeforeClearingMarker(t 
 			"rollout-2026-08-10T12-00-00-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", worktree)
 	}
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
 		t.Fatal(err)
 	}
 	_, respawns, _ := backend.snapshot()
@@ -866,7 +866,7 @@ func TestResumeFromLimit_CommittedSwapStillDeliversNoticeAfterOptOut(t *testing.
 	backend.mu.Lock()
 	backend.sendPromptErr = nil
 	backend.mu.Unlock()
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
 		t.Fatalf("manual retry of committed replacement: %v", err)
 	}
 
@@ -945,7 +945,7 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 	inst.EndLimitResume()
 	requirePendingSwap()
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err == nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err == nil {
 		t.Fatal("live agent with a missing expected sibling completed the pending account swap")
 	}
 	requirePendingSwap()

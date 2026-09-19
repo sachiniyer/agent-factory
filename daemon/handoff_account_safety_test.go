@@ -163,7 +163,8 @@ func TestHandoffAccountHealthyDeliveryFailureDoesNotInventQuota(t *testing.T) {
 			m.ResumeLimitedSessions()
 			require.NotNil(t, inst.ToInstanceData().PendingAccountSwap,
 				"an unconfirmed delivery must wait for an explicit operator retry")
-			require.NoError(t, m.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}))
+			_, err = m.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo})
+			require.NoError(t, err)
 			require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 		})
 	}
