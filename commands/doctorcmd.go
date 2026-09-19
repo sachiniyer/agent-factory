@@ -16,6 +16,12 @@ var doctorVerboseFlag bool
 // {data,error} envelope, matching `af config`/`af token`'s --json.
 var doctorJSONFlag bool
 
+// doctorRun is the seam over doctor.Run so a test can drive doctorCmd.RunE
+// with a canned report instead of the real tmux/daemon/process sweep doctor.Run
+// performs (which is not hermetic from the commands package). Mirrors the
+// runLaunchApp seam in root.go.
+var doctorRun = doctor.Run
+
 // doctorCmd is `af doctor` (#1044, #1104): detect orphaned session
 // processes, runaway CPU children, leaked af_ tmux sessions, stale temp
 // agent-factory homes, daemons running a binary no install owns, directories
@@ -127,13 +133,13 @@ non-empty. Exits 0 when no actionable issues remain and no checks are incomplete
 		log.Initialize(false)
 		defer log.Close()
 
-		report, err := doctor.Run(doctor.Options{Fix: doctorFixFlag, Setup: doctorSetupFlag, Version: version})
+		report, err := doctorRun(doctor.Options{Fix: doctorFixFlag, Setup: doctorSetupFlag, Version: version})
 		if err != nil {
 			return jsonWrapError(cmd, doctorJSONFlag, err)
 		}
 		if doctorJSONFlag {
 			if err := doctor.RenderJSON(cmd.OutOrStdout(), report, doctorFixFlag, doctorVerboseFlag); err != nil {
-				return err
+				return jsonWrapError(cmd, doctorJSONFlag, err)
 			}
 		} else {
 			doctor.Render(os.Stdout, report, doctorFixFlag, doctorVerboseFlag)
