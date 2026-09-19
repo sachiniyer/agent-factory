@@ -363,6 +363,21 @@ type SetResult struct {
 // the change the user just made, and warning on every unrelated `config set`
 // would train them to ignore it.
 //
+// network.preview_listen_addr is the parallel surface for the web-tab preview
+// listener (#1856). It has NO "other half" pairing: the preview origin never
+// serves the control plane, and its own credential is the per-tab hostname, so
+// the notice depends on preview_listen_addr ALONE and does NOT gate on
+// network.require_token (see PreviewListenerExposureNotice). That notice replaces
+// the control-plane text and the ListenerServesUnauthenticatedNetwork gate for
+// this case, and warns whenever the resulting preview bind is network-reachable
+// — matching this emitter's "warn on every exposed write of the changed key"
+// discipline, so an operator moving an ALREADY network-bound preview between
+// two non-loopback addresses is still warned (the apply-time transition emitter
+// in daemon/config_apply.go handles the once-per-transition INTO exposure, and
+// is not transition-gated for "still exposed, just moving"). The flat alias
+// spelling "preview_listen_addr" canonicalizes to "network.preview_listen_addr"
+// before the switch, so both CLI spellings warn.
+//
 // The exposure test is ListenerServesUnauthenticatedNetwork — the SAME predicate
 // the daemon's refusal uses, itself built on the IsLoopbackListenAddr the token
 // gate derives from. Two definitions of "is this exposed" drifting apart is
@@ -372,18 +387,27 @@ func exposureWarning(cfg *Config, key string) string {
 		return ""
 	}
 	key = canonicalConfigKey(key)
-	if key != "network.listen_addr" && key != "network.require_token" {
+	switch key {
+	case "network.listen_addr", "network.require_token":
+		addr := cfg.ListenAddr
+		if !ListenerServesUnauthenticatedNetwork(addr, cfg.RequireToken) {
+			return ""
+		}
+		return fmt.Sprintf("network.listen_addr %q is reachable from the network and network.require_token is false, which puts a "+
+			"plain-HTTP control plane with no authentication in front of anyone who can reach it — including "+
+			"DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. "+
+			"Run `af config set network.require_token true` to require a token (`af token show` prints it), or set network.listen_addr "+
+			"back to a loopback address such as 127.0.0.1:8443, or \"\" to turn the web server off.", addr)
+	case "network.preview_listen_addr":
+		// PreviewListenerExposureNotice is itself non-transition-gated: it returns
+		// a notice whenever cfg.PreviewListenAddr is non-empty and non-loopback,
+		// so a write that moves an already-exposed preview between two non-loopback
+		// addresses still warns — parity with the control-plane case above, which
+		// warns on every exposed write of the changed key.
+		return PreviewListenerExposureNotice(cfg)
+	default:
 		return ""
 	}
-	addr := cfg.ListenAddr
-	if !ListenerServesUnauthenticatedNetwork(addr, cfg.RequireToken) {
-		return ""
-	}
-	return fmt.Sprintf("network.listen_addr %q is reachable from the network and network.require_token is false, which puts a "+
-		"plain-HTTP control plane with no authentication in front of anyone who can reach it — including "+
-		"DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. "+
-		"Run `af config set network.require_token true` to require a token (`af token show` prints it), or set network.listen_addr "+
-		"back to a loopback address such as 127.0.0.1:8443, or \"\" to turn the web server off.", addr)
 }
 
 // resolveSettable maps a user key ("default_program" or "program_overrides.claude")
