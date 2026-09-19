@@ -24,7 +24,7 @@ import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
 import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, actionsDisclosure } from "./components.js";
-import { type DragPayload, resolveDragTab, TAB_DND_MIME } from "./layout.js";
+import { type DragPayload, type TabDropResult, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
   filterLabel,
@@ -307,8 +307,10 @@ export interface Actions {
   clearPaneDropHint(): void;
   /** Lands a touch-dragged tab on whichever pane is under the point, splitting or
    *  replacing exactly as a mouse drop does — the same body, not a copy of it
-   *  (split.ts applyTabDrop). False means no pane was under the release. */
-  dropTabOnPaneAt(clientX: number, clientY: number, drag: DragPayload): boolean;
+   *  (split.ts applyTabDrop). `landed` false means no pane was under the release;
+   *  `changed` false means the pane rejected the drop and the layout is untouched
+   *  (#4434 — one boolean cannot answer both questions). */
+  dropTabOnPaneAt(clientX: number, clientY: number, drag: DragPayload): TabDropResult;
   /** Sets one global config key. index.ts POSTs SetConfigValue (the same validated,
    *  locked, atomic writer `af config set` uses), then re-reads the manifest so the
    *  form shows what the file actually holds. Validation is deliberately NOT done
@@ -1974,8 +1976,15 @@ export class AppShell {
     // Hit-test before dismissal so a release outside both the bar and every pane
     // remains a cancel. The drop itself can synchronously recompose the active kind.
     if (!this.actions.paneDropHintAt(clientX, clientY)) return false;
-    this.dismissCarriedActions();
-    return this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    const drop = this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    // Dismiss only when the drop committed: a landed-but-rejected drop (stale
+    // payload, sole tab on its own edge) changed nothing, so retiring a
+    // user-opened disclosure would imply a transition that did not happen
+    // (#4434). The gesture is still consumed either way — landed means landed.
+    if (drop.changed) {
+      this.dismissCarriedActions();
+    }
+    return drop.landed;
   }
 
   /** Keyboard twin of the New tab button, including its per-kind availability. */
