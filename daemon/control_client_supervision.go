@@ -43,8 +43,15 @@ func ResolveSupervisionOwner(configDir string) (SupervisionOwner, error) {
 // The unit gets a bounded share of EnsureDaemon's existing five-second ready
 // budget. A wedged manager must leave time for the compatibility fallback to
 // bind and answer rather than consuming the whole launch window itself.
+//
+// ensureUnitStartTimeout is a var so tests can shrink the window a hung fake
+// manager burns (#4464); production never assigns it. Same seam as
+// upgradeGateTimeout and autostartProbeTimeout.
+var (
+	ensureUnitStartTimeout = 2 * time.Second
+)
+
 const (
-	ensureUnitStartTimeout   = 2 * time.Second
 	ensureUnitStartWaitDelay = 250 * time.Millisecond
 )
 
