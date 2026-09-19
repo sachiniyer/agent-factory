@@ -3028,6 +3028,27 @@ async function approveParkedRuns({ github, context, headSha, core }) {
   return { parked, approved };
 }
 
+// A PR the gate does not own can end while a transaction on it is in flight
+// (#4462): the evaluation resolved it open, and a hand or queue merge — or a
+// plain close — lands before the follow-up write executes. `merged` and
+// `state` are the REST read's two answers to that; a read that failed is
+// "unknown" here, and unknown is never "ended" (#3551's rule: no proof, no
+// concession).
+function pullRequestEnded(pull) {
+  return Boolean(pull && (pull.merged === true || pull.state === "closed"));
+}
+
+// The losing race's refusal. The `Refusing to merge PR #N;` shape is
+// load-bearing: processAggregateHead recognizes it as ordinary waiting rather
+// than an evaluation error — which is exactly what a proven lost race is.
+function pullRequestEndedRefusal(prNumber, pull, phase) {
+  const verb = pull.merged === true ? "was merged" : "was closed";
+  return new Error(
+    `Refusing to merge PR #${prNumber}; the PR ${verb} while its update-branch ${phase} — ` +
+      `nothing remains for this run to merge`,
+  );
+}
+
 // Bring the PR branch up to date with its base, the way the "Update branch"
 // button does. Single-shot, like every other write in this file: an update that
 // was accepted but reported a failure would be replayed against a head it had
@@ -3125,6 +3146,20 @@ async function merge({
     let updateAccepted = false;
     let recoveryError = null;
     let observedUpdatedHead = null;
+    // The gate does not own this PR, and the evaluation that saw it open is
+    // minutes old by now — #4462's race is exactly the gap between that read
+    // and the write below: a hand or queue merge lands inside it, and the
+    // update becomes a write onto a dead PR's head. One fresh read narrows the
+    // window to a round trip; the post-update read closes what remains. A read
+    // that fails is "unknown", never "ended" — it must not fabricate a lost
+    // race.
+    const liveBefore = await readOrNull(() =>
+      github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
+    );
+    if (pullRequestEnded(liveBefore?.data)) {
+      throw pullRequestEndedRefusal(prNumber, liveBefore.data, "was pending");
+    }
+    let endedDuringUpdate = null;
     try {
       await updateBranchToBase({ github, context, prNumber, headSha: gate.headSha });
       updateAccepted = true;
@@ -3133,33 +3168,54 @@ async function merge({
       const updated = await retryRead(`could not re-read PR #${prNumber} after update-branch`, () =>
         github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
       );
-      const newHead = normalizeHeadSha(updated?.data?.head?.sha);
-      if (newHead && newHead !== normalizeHeadSha(gate.headSha)) {
-        observedUpdatedHead = newHead;
-        const { approved } = await approveParkedRuns({ github, context, headSha: newHead, core });
-        if (approved.length > 0) {
-          core.notice(
-            `Approved ${approved.length} workflow run(s) parked on ${newHead} after update-branch: ` +
-              approved.map((run) => `${run.name} (${run.id})`).join(", "),
-          );
+      // The residual the pre-write read cannot close: the PUT was accepted on
+      // a PR GitHub had already merged. The lane refuses as the lost race it
+      // is, below the catch — the head branch it may have moved is branch
+      // cleanup's concern, not this transaction's.
+      if (pullRequestEnded(updated?.data)) {
+        endedDuringUpdate = updated.data;
+      } else {
+        const newHead = normalizeHeadSha(updated?.data?.head?.sha);
+        if (newHead && newHead !== normalizeHeadSha(gate.headSha)) {
+          observedUpdatedHead = newHead;
+          const { approved } = await approveParkedRuns({ github, context, headSha: newHead, core });
+          if (approved.length > 0) {
+            core.notice(
+              `Approved ${approved.length} workflow run(s) parked on ${newHead} after update-branch: ` +
+                approved.map((run) => `${run.name} (${run.id})`).join(", "),
+            );
+          }
+          await ensureValidationRun({
+            github,
+            context,
+            core,
+            headSha: newHead,
+            headRefName: updated?.data?.head?.ref || gate.headRefName,
+          });
         }
-        await ensureValidationRun({
-          github,
-          context,
-          core,
-          headSha: newHead,
-          headRefName: updated?.data?.head?.ref || gate.headRefName,
-        });
       }
     } catch (error) {
       // An update rejection creates no successor to recover. Once accepted,
       // though, even a failed head/run read must not bypass its scheduling.
       if (!updateAccepted) {
+        // A rejection on a PR that ended under it is the race's losing
+        // outcome, not an update failure: the merge this run was fetching
+        // freshness for already happened. The re-read proves it — the status
+        // alone cannot, and a read that fails is "unknown" (#3551).
+        const liveAfter = await readOrNull(() =>
+          github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
+        );
+        if (pullRequestEnded(liveAfter?.data)) {
+          throw pullRequestEndedRefusal(prNumber, liveAfter.data, "was in flight");
+        }
         throw new Error(
           `Refusing to merge PR #${prNumber}; ${reason} — the update failed: ${formatError(error)}`,
         );
       }
       recoveryError = error;
+    }
+    if (endedDuringUpdate) {
+      throw pullRequestEndedRefusal(prNumber, endedDuringUpdate, "was in flight");
     }
 
     // The update endpoint can acknowledge before GET /pulls exposes its SHA.

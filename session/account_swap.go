@@ -27,6 +27,14 @@ type accountSwapLaunchPlan struct {
 	proof               sessionenv.AccountLaunchProof
 	conversation        AgentConversationData
 	conversationCapture ConversationCaptureSnapshot
+	// agent and manual are the admission's own arguments, kept so a failed
+	// conversation carry can rebuild this plan as a fresh one.
+	agent  string
+	manual bool
+	// carry is the same-agent conversation copy this plan resumes (#4367);
+	// carryFallback says why a carry that applied launches fresh instead.
+	carry         *conversationCarry
+	carryFallback string
 }
 
 func cloneAccountSwapLaunchPlan(plan *accountSwapLaunchPlan) *accountSwapLaunchPlan {
@@ -36,6 +44,7 @@ func cloneAccountSwapLaunchPlan(plan *accountSwapLaunchPlan) *accountSwapLaunchP
 	copy := *plan
 	copy.proof.GeneratedArgs = append([]string(nil), plan.proof.GeneratedArgs...)
 	copy.conversationCapture = cloneConversationCaptureSnapshot(plan.conversationCapture)
+	copy.carry = plan.carry.clone()
 	return &copy
 }
 
@@ -115,6 +124,13 @@ func (i *Instance) CheckManualAccountSwap(name, agent string) error {
 }
 
 func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch bool) error {
+	return i.validateAccountSwapPlan(name, agent, manual, recordLaunch, "")
+}
+
+// validateAccountSwapPlan is validateAccountSwap with a carry failure this
+// attempt already hit: a non-empty carryFailure plans a fresh conversation
+// whose notice repeats it.
+func (i *Instance) validateAccountSwapPlan(name, agent string, manual, recordLaunch bool, carryFailure string) error {
 	backend := i.currentBackend()
 	i.mu.RLock()
 	program := i.Program
@@ -125,6 +141,10 @@ func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch 
 	op := i.inFlightOp
 	pendingCleanup := len(i.pendingTabCleanup)
 	tabs := append([]*Tab(nil), i.Tabs...)
+	var outgoing AgentConversationData
+	if len(i.Tabs) > 0 {
+		outgoing = i.Tabs[0].Conversation
+	}
 	i.mu.RUnlock()
 	if op != OpRespawning {
 		return fmt.Errorf("account swap for %q requires the limit-resume fence", i.Title)
@@ -152,19 +172,40 @@ func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch 
 	}
 	resolvedProgram := resolution.command
 	if args := tmux.ConversationSelectorArgs(resolvedProgram); len(args) > 0 {
-		return fmt.Errorf("cannot switch session %q to account %q because its resolved program pins an existing conversation with arguments %s; an account swap requires a fresh conversation, so remove those arguments and retry", i.Title, name, strings.Join(args, " "))
+		return fmt.Errorf("cannot switch session %q to account %q because its resolved program pins an existing conversation with arguments %s; an account swap must choose which conversation the replacement opens (the carried one or a fresh one), so remove those arguments and retry", i.Title, name, strings.Join(args, " "))
 	}
-	conversationID := newSessionID()
-	if pending != nil && pending.To == name && pending.ConversationID != "" {
-		conversationID = pending.ConversationID
+	workDir := i.GetWorktreePath()
+	carry, carryFallback := planAccountSwapCarry(accountSwapCarryRequest{
+		agent:      tmux.DetectAgentFromCommand(resolvedProgram),
+		crossAgent: crossAgent,
+		outgoing:   outgoing,
+		current:    current,
+		target:     name,
+		pending:    pending,
+		program:    resolvedProgram,
+		workDir:    workDir,
+		fallback:   carryFailure,
+	})
+	var launchProgram string
+	var conversation AgentConversationData
+	if carry != nil {
+		var ok bool
+		if launchProgram, conversation, ok = carry.launch(resolvedProgram); !ok {
+			carry, carryFallback = nil, "the resolved program cannot resume a specific conversation"
+		}
 	}
-	launchProgram, conversation := planLaunchConversation(conversationID, resolvedProgram)
+	if carry == nil {
+		conversationID := newSessionID()
+		if pending != nil && pending.To == name && pending.ConversationID != "" {
+			conversationID = pending.ConversationID
+		}
+		launchProgram, conversation = planLaunchConversation(conversationID, resolvedProgram)
+	}
 	// The CANDIDATE account and program, not the still-recorded fields: validation
 	// must leave the outgoing identity intact, while the af skill has to land in
 	// the root the replacement pane will actually read.
 	launchProgram = injectSystemPrompt(launchProgram,
 		resolveSkillTargetForAccount(launchProgram, program, name))
-	workDir := i.GetWorktreePath()
 	// Same-agent manual swaps with a worktree always preflight, including an
 	// unchanged command whose binary disappeared after the current process
 	// started. Worktree-less projections cannot launch, so they retain the
@@ -188,6 +229,10 @@ func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch 
 	}
 	if err := refuseAccountAgentDrift(name, accountScope.Agent, launchProgram); err != nil {
 		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
+	}
+	if !carry.sameCarryHome(accountScope.Dir) {
+		return fmt.Errorf("cannot switch session %q to account %q: its conversation carry resolved %s but the launch resolved %s",
+			i.Title, name, carry.dstHome, accountScope.Dir)
 	}
 	accountScope.TrustedExecutable = proof.TrustedExecutable
 	accountScope.GeneratedArgs = proof.GeneratedArgs
@@ -246,6 +291,9 @@ func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch 
 		}
 		conversationCapture = beginConversationCaptureAtCodexHomeAndWorkingDir(
 			accountScope.Dir, captureWorkingDir)
+		if path := carry.carriedCodexRolloutPath(); path != "" {
+			conversationCapture.expectCarriedCodexRollout(conversation, path)
+		}
 	}
 	if !recordLaunch {
 		return nil
@@ -258,6 +306,7 @@ func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch 
 	i.accountSwapLaunch = &accountSwapLaunchPlan{
 		account: name, base: resolvedProgram, program: launchProgram,
 		proof: proof, conversation: conversation, conversationCapture: conversationCapture,
+		agent: agent, manual: manual, carry: carry, carryFallback: carryFallback,
 	}
 	return nil
 }
@@ -358,8 +407,15 @@ func (i *Instance) selectAccountLocked(from, name string, automatic bool) (Agent
 		i.touchLocked()
 	}
 	pending := &AccountSwapData{From: from, To: name}
-	if plan := i.accountSwapLaunch; plan != nil && plan.account == name && plan.conversation.HasID() {
-		pending.ConversationID = plan.conversation.ID
+	if plan := i.accountSwapLaunch; plan != nil && plan.account == name {
+		switch {
+		case plan.carry != nil:
+			pending.CarriedConversationID = plan.carry.id
+			pending.CarrySourceAccount = plan.carry.sourceAccount
+		case plan.conversation.HasID():
+			pending.ConversationID = plan.conversation.ID
+		}
+		pending.CarryFallback = plan.carryFallback
 	}
 	i.pendingAccountSwap = pending
 	i.touchLocked()
@@ -451,6 +507,15 @@ func (b *LocalBackend) respawnFresh(i *Instance) error {
 	if err != nil {
 		return err
 	}
+	// Idempotent, and the only copy a restarted daemon performs. A carry that
+	// can no longer complete — at this copy or already at validation — leaves
+	// this launch and the pending record as a stated fresh start.
+	if plan, err = i.ensureAccountSwapConversationCarried(plan); err != nil {
+		return err
+	}
+	if plan.carry != nil {
+		i.markCarriedLaunchStarted(plan.account)
+	}
 	if err := b.respawnWithConversation(i, false, plan); err != nil {
 		stopErr := b.stopForAccountSwap(i, false)
 		return fmt.Errorf("account swap: replacement pane set for %q is incomplete: %w",
@@ -494,7 +559,7 @@ func (i *Instance) ValidateAccountSwapReplacementPanes() error {
 // SynchronizeAccountSwapRuntimeMetadata repairs the process-local launch state
 // after a daemon restart. The running panes already have the selected account;
 // this restores tmux's launch metadata and promotes a durable injected Claude
-// id before the pending marker can be cleared.
+// id, or a carried conversation, before the pending marker can be cleared.
 func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
 	i.mu.Lock()
 	account := i.Account
@@ -504,7 +569,12 @@ func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
 		return fmt.Errorf("account swap for %q has no committed replacement to synchronize", i.Title)
 	}
 	agent := i.currentAgentNameLocked()
-	if pending.ConversationID != "" {
+	if pending.CarriedConversationID != "" {
+		if err := i.synchronizeCarriedConversationLocked(agent, pending.CarriedConversationID); err != nil {
+			i.mu.Unlock()
+			return err
+		}
+	} else if pending.ConversationID != "" {
 		if agent != tmux.ProgramClaude {
 			i.mu.Unlock()
 			return fmt.Errorf("account swap for %q has a Claude conversation id but its replacement agent is %q", i.Title, agent)
