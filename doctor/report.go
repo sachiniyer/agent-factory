@@ -326,6 +326,9 @@ func collapsedProcessRow(check string, findings []Finding, fixMode bool) renderR
 func strongestDeclaredSeverity(findings []Finding) CheckStatus {
 	strongest := CheckStatus("")
 	for _, f := range findings {
+		if f.Fixed {
+			continue
+		}
 		switch f.Severity {
 		case StatusFail:
 			return StatusFail
