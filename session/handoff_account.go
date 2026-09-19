@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // ValidateHandoffRuntimeAction evaluates RuntimeActionHandoff for a request
@@ -14,12 +16,41 @@ import (
 // account or agent remains a new transaction the pending swap still owns.
 func (i *Instance) ValidateHandoffRuntimeAction(agent, account string) error {
 	i.mu.RLock()
+	defer i.mu.RUnlock()
 	view := i.lifecycleViewLocked()
 	if view.PendingAccountSwap && i.pendingAccountSwapRetryTargetLocked(agent, account) {
 		view.PendingAccountSwap = false
 	}
-	i.mu.RUnlock()
-	return view.ValidateRuntimeAction(RuntimeActionHandoff)
+	err := view.ValidateRuntimeAction(RuntimeActionHandoff)
+	if err == nil || !view.PendingAccountSwap {
+		return err
+	}
+	// ValidateRuntimeAction checks UserKilled and StartupStateUnknown before the
+	// pending-swap axis, so an error that leaves the swap axis set may be one of
+	// those higher-priority universal vetoes rather than the swap refusal. They
+	// make the retry this section advertises impossible, so specializing them
+	// would hide the actual remediation behind a request the refusal itself
+	// forbids (#4393). Only specialize once the pending-swap check itself
+	// produced the error — i.e. no higher-priority veto is set.
+	if view.UserKilled || view.StartupStateUnknown {
+		return err
+	}
+	// The pending-swap axis refused because the request named a different agent
+	// or account than the committed swap recorded. When an explicit --to <agent>
+	// does not name the agent this swap will run, put that agent in the message:
+	// in the pre-relaunch window this PR targets the bound pane still reports the
+	// outgoing agent, so the visible agent is exactly the wrong answer, and the
+	// bare "retry that account swap" remedy is the very request the refusal just
+	// denied. Naming the agent is what makes the retry self-explanatory.
+	pending := i.pendingAccountSwap
+	if pending == nil || strings.TrimSpace(account) != pending.To {
+		return err
+	}
+	committed := i.committedAgentNameLocked()
+	if got := strings.TrimSpace(agent); committed != "" && got != "" && got != committed {
+		return fmt.Errorf("session %q has a committed account swap awaiting its replacement notice and task; retry that account swap with --to %s (the agent this swap will run), not %q", i.Title, committed, got)
+	}
+	return err
 }
 
 // pendingAccountSwapRetryTargetLocked reports whether agent and account name
@@ -32,9 +63,34 @@ func (i *Instance) pendingAccountSwapRetryTargetLocked(agent, account string) bo
 		return false
 	}
 	if agent = strings.TrimSpace(agent); agent != "" {
-		return agent == i.currentAgentNameLocked()
+		return agent == i.committedAgentNameLocked()
 	}
 	return true
+}
+
+// committedAgentNameLocked names the agent the committed manual account swap
+// recorded, the same way committedAccountSwap's manual branch does — through
+// sessionenv.AgentForCommand(i.Program). A committed cross-agent manual swap
+// rewrites i.Program to the incoming agent at the identity checkpoint, but the
+// bound tmux pane keeps reporting the outgoing agent until setLaunchProgram
+// relaunches it. The live pane is therefore the wrong source for matching a
+// retry's --to <target> in the pre-relaunch window: the committed record names
+// the target the recovery path will actually run, and committedAccountSwap
+// already re-derives its agent from that record rather than the live pane.
+//
+// Automatic swaps do not rewrite i.Program or append a ledger entry, so the
+// live pane remains the correct source for them; fall back to
+// currentAgentNameLocked() when the pending swap is not manual, or when the
+// committed record is a wrapper the literal classifier cannot resolve (a
+// same-agent swap whose configured command af cannot identify as a single
+// agent invocation). Callers hold i.mu.
+func (i *Instance) committedAgentNameLocked() string {
+	if i.pendingAccountSwap != nil && i.pendingAccountSwap.Manual {
+		if agent := sessionenv.AgentForCommand(i.Program); agent != "" {
+			return agent
+		}
+	}
+	return i.currentAgentNameLocked()
 }
 
 // BeginManualAccountSwap raises the existing account-replacement fence after

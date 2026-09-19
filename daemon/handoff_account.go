@@ -6,6 +6,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -62,8 +63,13 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 	}
 	outgoing := instance.CurrentAgentName()
 	from, _ := instance.AccountSelection()
+	committedAgent := ""
+	if manual, _ := instance.PendingManualAccountSwap(); manual {
+		committedAgent = sessionenv.AgentForCommand(instance.AgentProgram())
+	}
 	var swap *autoAccountSwap
-	if from == strings.TrimSpace(req.Account) && target == outgoing {
+	if from == strings.TrimSpace(req.Account) && (target == outgoing ||
+		(committedAgent != "" && target == committedAgent)) {
 		// The request names the identity a committed swap already recorded —
 		// the retry the pending-swap refusal advertises (#4393), not a no-op.
 		// Finish the recorded transaction, whose stored mission and durable
