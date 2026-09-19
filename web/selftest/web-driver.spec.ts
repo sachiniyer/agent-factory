@@ -4365,6 +4365,97 @@ test("web tab (#1856): a per-tab preview origin loads absolute-path assets and s
   }
 });
 
+test("per-tab preview origin (#1856): ↻ recovers from a STICKY reachability success when the browser path to the preview port drops", REAL_FIXTURE, async () => {
+  // Bug: `previewOriginReachable` cached a successful probe in the module-scope
+  // `previewReachable` map for the whole SPA lifetime (only a failure evicted). If a
+  // per-tab origin became browser-UNREACHABLE later (same port, daemon still bound,
+  // but the browser-to-port path broken — e.g. the preview-port ssh forward dropped
+  // while the main forward stayed up) it kept returning the stale `true`, so the
+  // iframe was navigated to the dead origin with no fallback. ↻/Retry nulls the
+  // per-mount origin memo but did NOT clear the reachability cache — until the fix
+  // threaded `fresh` into `previewOriginReachable` so an explicit re-probe bypasses
+  // the cache the same way it bypasses `previewSrcOnce`.
+  //
+  // The "browser path broken while daemon bound" condition is reproduced at the
+  // browser boundary exactly where the bug lives: Playwright route interception
+  // aborts navigations to the per-tab origin's port (the probe frame AND the pane
+  // frame). The daemon keeps vending the same origin (its listener stays bound), so
+  // `previewOriginReachable` is the only signal that can notice.
+  //
+  // Ordering note: this reuses probe-web's "preview" tab, which the #1810 test
+  // below closes. This test must stay BEFORE it, exactly as the #1856 test above
+  // stays before it.
+  const afBin = process.env.AF_BIN;
+  const previewPort = process.env.AF_WEB_PREVIEW_PORT;
+  test.skip(!afBin || !previewPort, "AF_BIN/AF_WEB_PREVIEW_PORT are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const setPreview = (value: string): void => {
+    execFileSync(afBin as string, ["config", "set", "preview_listen_addr", value], { stdio: "pipe" });
+  };
+
+  // The probe frame hostname the daemon answers from on the preview port.
+  const PREVIEW_PROBE_HOST = "afprobe.localhost";
+  const originRe = new RegExp(`^http://af[a-z2-7]{32}\\.localhost:${previewPort}`);
+
+  setPreview(`127.0.0.1:${previewPort}`);
+  let previewOrigin = "";
+  try {
+    // Now that preview_listen_addr is bound, the live config has changed; reload so
+    // the SPA re-reads /v1/preview-auth and the per-tab origin path is eligible.
+    await page.reload();
+
+    await row(page, SESSION_WEB).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible({ timeout: 15_000 });
+    const tabbar = page.locator(".af-tabbar");
+    const previewTab = tabbar.locator(".af-tab", { hasText: "preview" });
+    await expect(previewTab).toHaveCount(1, { timeout: 15_000 });
+    await previewTab.click();
+    const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe").first();
+
+    // PHASE 1 — prime the reachability cache with a SUCCESS. The probe frame hits
+    // the real preview listener (NOT intercepted yet), the daemon answers, and the
+    // pane moves onto the per-tab origin. This is the cached-true state.
+    await expect(frame).toHaveAttribute("src", originRe, { timeout: 15_000 });
+    previewOrigin = new URL((await frame.getAttribute("src")) ?? "").origin;
+    expect(previewOrigin, "the pane landed on the per-tab preview origin").toMatch(originRe);
+    // Wait until the frame has actually loaded against the live listener, so the
+    // later fallback assertion is a real transition rather than the initial load.
+    await expect.poll(async () => {
+      const f = page.frames().find((x) => x.url().startsWith(previewOrigin));
+      return f !== undefined && f.url() !== "about:blank";
+    }, { timeout: 15_000 }).toBe(true);
+
+    // PHASE 2 — drop the browser's path to the preview port, modeling the ssh
+    // forward being removed while the daemon stays bound. Block EVERY navigation
+    // to the preview port (the probe frame's afprobe.localhost:<port> AND the pane's
+    // af<label>.localhost:<port>). The daemon's own listener stays up and keeps
+    // vending the same brand: exactly the surviving trigger in the report.
+    await page.route(`http://${PREVIEW_PROBE_HOST}:${previewPort}/**`, (route) => route.abort("connectionrefused"));
+    await page.route(`${previewOrigin}/**`, (route) => route.abort("connectionrefused"));
+
+    // PHASE 3 — click ↻ / Retry. BEFORE the fix `previewOriginReachable` returned
+    // the cached `true` WITHOUT re-probing and the frame was set to the dead origin
+    // (no fallback, no recovery). AFTER the fix the `fresh` flag deletes the cached
+    // entry; the re-probe's frame is aborted (connectionrefused) → times out →
+    // `false` → `resolvePreviewSrc` returns "" → the pane falls back to the
+    // same-origin mirror, which is served from the main control port (still up).
+    const reload = page.locator(".af-term-host .af-pane-host").locator("button.af-webpane-reload").first();
+    await expect(reload).toBeVisible({ timeout: 15_000 });
+    await reload.click();
+
+    // The mirror fallback: the frame's src is the same-origin /v1/webtab/ mirror,
+    // NOT the dead per-tab origin.
+    await expect.poll(async () => (await frame.getAttribute("src")) ?? "", { timeout: 15_000 }).toMatch(/\/v1\/webtab\//);
+    const afterSrc = (await frame.getAttribute("src")) ?? "";
+    expect(afterSrc, "↻ must not re-navigate to the dead per-tab origin").not.toMatch(originRe);
+  } finally {
+    await page.unroute(`http://${PREVIEW_PROBE_HOST}:${previewPort}/**`).catch(() => {});
+    await page.unroute(`${previewOrigin}/**`).catch(() => {});
+    setPreview("");
+    await page.reload();
+  }
+});
+
 test("web tab (#1810): closing a LOWER tab leaves an open preview on its OWN dev server", REAL_FIXTURE, async () => {
   // The #1810 misroute, end to end. This session's tabs are [agent, lower, mis,
   // after]; a pane opens on "mis" (index 2, the vite-shaped server). Closing "lower"
