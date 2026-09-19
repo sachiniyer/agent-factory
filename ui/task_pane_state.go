@@ -1,6 +1,10 @@
 package ui
 
-import "github.com/sachiniyer/agent-factory/task"
+import (
+	"sort"
+
+	"github.com/sachiniyer/agent-factory/task"
+)
 
 // This file holds the TaskPane's task-list, selection, dirty-tracking, and
 // focus/mode state accessors — the non-rendering, non-key-handling surface the
@@ -21,6 +25,7 @@ func (s *TaskPane) SetTasks(tasks []task.Task) {
 		s.originals[t.ID] = t
 	}
 	s.deleted = nil
+	s.deletedPositions = nil
 	s.editing = false
 	// A reload replaces the create-form buffers a pending create was captured
 	// against, so a create left un-consumed by a failed save must be dropped —
@@ -60,12 +65,25 @@ func (s *TaskPane) SelectTask(idx int) {
 // markTaskDirty records that the task with the given ID was edited so a later
 // save persists it. It also sets the pane-wide dirty flag that gates whether
 // saveContentPaneState runs at all (#1213).
+//
+// If the task was previously restored to s.tasks by RestoreFailedDelete (and
+// so still has a pending entry in s.deleted), editing or toggling it cancels
+// the deletion retry: the user's intent is now to keep and modify the row, not
+// to remove it. saveContentPaneState processes edits before deletions, so
+// without this removal the edit would persist and the retained deletion would
+// immediately undo it.
 func (s *TaskPane) markTaskDirty(id string) {
 	if s.dirtyIDs == nil {
 		s.dirtyIDs = make(map[string]bool)
 	}
 	s.dirtyIDs[id] = true
 	s.dirty = true
+	// Cancel any pending deletion retry for this task.
+	for i := len(s.deleted) - 1; i >= 0; i-- {
+		if s.deleted[i].ID == id {
+			s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
+		}
+	}
 }
 
 // ConsumeDirty returns a field-level patch for each task the user actually
@@ -131,6 +149,134 @@ func (s *TaskPane) AcknowledgeSavedEdit(id string) {
 // so retry cannot discard the only copy of the user's changes.
 func (s *TaskPane) RestoreFailedEdit(id string) {
 	s.markTaskDirty(id)
+}
+
+// RestoreFailedDelete makes a consumed deletion retryable and visible when its
+// daemon removal fails with a non-committed error. The task was already removed
+// from s.tasks at delete time, so without this restore it would vanish from the
+// pane while the disk reload that would re-show it (SetTasks) is gated on
+// !failedEdit — and a concurrent failed edit leaves failedEdit true, skipping
+// that reload. Re-inserting at the task's original position keeps the row visible
+// and the pane order consistent with the sidebar's disk-order reload; re-queueing
+// in s.deleted retries the removal on the next save. The record still exists on
+// disk (the removal did not commit), so retrying RemoveTask is not the
+// already-deleted re-run ConsumeDeleted drains to avoid (fixes #763).
+func (s *TaskPane) RestoreFailedDelete(tsk task.Task) {
+	// Re-insert at the position the task held in the original load order so the
+	// pane order matches the sidebar's disk-order view. showTasksOverlay
+	// transfers the sidebar's selected index directly into the TaskPane, so a
+	// position mismatch would cause subsequent actions to target the wrong task.
+	//
+	// deletedPositions stores each task's ORIGINAL rank (its index in the slice
+	// at load time, adjusted at delete time to account for all prior deletions).
+	// To convert that rank into a current s.tasks insertion index we subtract
+	// the count of still-absent tasks whose original ranks precede this one —
+	// each such gap lowers the effective current index by one.
+	insertAt := len(s.tasks) // default: append when no entry or second retry
+	if originalRank, ok := s.deletedPositions[tsk.ID]; ok {
+		// Always remove the entry so a second retry falls back to append rather
+		// than trying to re-insert at a stale position.
+		delete(s.deletedPositions, tsk.ID)
+
+		// Count still-absent peers with a lower original rank. Each one
+		// occupies a slot before originalRank in the original order but is
+		// absent from s.tasks, so the effective insertion index is reduced by
+		// one for each.
+		absentBefore := 0
+		priorRanks := make([]int, 0, len(s.deletedPositions))
+		for _, r := range s.deletedPositions {
+			priorRanks = append(priorRanks, r)
+		}
+		sort.Ints(priorRanks)
+		for _, r := range priorRanks {
+			if r < originalRank {
+				absentBefore++
+			}
+		}
+		insertAt = originalRank - absentBefore
+		if insertAt < 0 {
+			insertAt = 0
+		}
+		if insertAt > len(s.tasks) {
+			insertAt = len(s.tasks)
+		}
+	}
+	prevLen := len(s.tasks)
+	s.tasks = append(s.tasks[:insertAt], append([]task.Task{tsk}, s.tasks[insertAt:]...)...)
+	// If the restored row was inserted at or before the current selection,
+	// shift the index forward so the cursor stays on the same surviving task
+	// the user was looking at before the restore. Without this, the user's
+	// next edit, run, or delete targets the task one row above the one they
+	// selected.
+	// Only shift when there was a surviving selected row before the insertion;
+	// when the pane was empty (prevLen == 0), selectedIdx is 0 but points at
+	// nothing, and incrementing it leaves the cursor out of bounds on the
+	// newly single-element slice.
+	if prevLen > 0 && insertAt <= s.selectedIdx {
+		s.selectedIdx++
+	}
+	s.deleted = append(s.deleted, tsk)
+	s.dirty = true
+}
+
+// AcknowledgeDeletedRestored removes every task with the given ID from s.tasks
+// when a previously restored deletion finally succeeds. Without this, tasks
+// re-inserted by RestoreFailedDelete stay visible after their retry RemoveTask
+// calls commit — the failedEdit gate that suppresses SetTasks also suppresses
+// the reload that would otherwise remove them.
+//
+// When tasks.json contains duplicate IDs, task.RemoveTask deletes ALL matching
+// rows from disk. AcknowledgeDeletedRestored therefore sweeps the entire slice
+// rather than returning after the first match, so the pane and disk stay in
+// sync even when multiple rows shared the acknowledged ID.
+func (s *TaskPane) AcknowledgeDeletedRestored(id string) {
+	// Walk backwards so removing an element does not invalidate the remaining
+	// indices, matching the pattern used by PruneRestoredAbsent and
+	// cancelQueuedDeletion.
+	for i := len(s.tasks) - 1; i >= 0; i-- {
+		if s.tasks[i].ID != id {
+			continue
+		}
+		s.tasks = append(s.tasks[:i], s.tasks[i+1:]...)
+		// If the removed row was before the cursor, shift the cursor back so
+		// it still points at the same surviving task. Without this, the cursor
+		// silently advances to the following task and the next edit, run, or
+		// delete targets the wrong row.
+		if i < s.selectedIdx {
+			s.selectedIdx--
+		}
+	}
+	// Clamp to a valid range after all removals (covers the case where the
+	// cursor was on or after the last row).
+	if s.selectedIdx >= len(s.tasks) && s.selectedIdx > 0 {
+		s.selectedIdx--
+	}
+}
+
+// PruneRestoredAbsent removes tasks from s.tasks that were re-queued by
+// RestoreFailedDelete (and so appear in s.deleted) but are absent from the
+// authoritative reload. This prevents ghost rows when a task was deleted by
+// another client between the pane load and our RemoveTask call: the daemon
+// returns a non-committed "not found" so RestoreFailedDelete fires, but the
+// subsequent LoadTasksForCurrentRepo confirms the record is gone from disk.
+// When failedEdit suppresses SetTasks, calling this method prunes those rows
+// so the pane does not persist entries the disk no longer holds.
+func (s *TaskPane) PruneRestoredAbsent(loaded []task.Task) {
+	present := make(map[string]bool, len(loaded))
+	for _, t := range loaded {
+		present[t.ID] = true
+	}
+	// Walk backwards so index removals don't invalidate the remaining positions.
+	for i := len(s.deleted) - 1; i >= 0; i-- {
+		queued := s.deleted[i]
+		if !present[queued.ID] {
+			s.AcknowledgeDeletedRestored(queued.ID)
+			// Also remove from the retry queue so the impossible deletion is
+			// not re-submitted on the next save (the authoritative reload
+			// confirmed the record is gone from disk).
+			s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
+		}
+	}
 }
 
 // ConsumeDeleted returns the tasks pending deletion and clears the pane's

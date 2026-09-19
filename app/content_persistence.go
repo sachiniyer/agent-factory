@@ -130,11 +130,30 @@ func (m *home) saveContentPaneState() error {
 				log.WarningLog.Printf("task removal committed but schedule refresh failed: %v", err)
 				saveErr = errors.Join(saveErr, fmt.Errorf(
 					"task %q was removed, but the daemon could not refresh its schedules: %w", tsk.Name, err))
+				// The removal committed: if this task was previously restored to
+				// s.tasks by RestoreFailedDelete, remove it now so the ghost row
+				// does not persist when failedEdit suppresses SetTasks below.
+				sp.AcknowledgeDeletedRestored(tsk.ID)
 				continue
 			}
 			log.ErrorLog.Printf("failed to remove task: %v", err)
+			// The removal did not commit: the record still exists on disk and in
+			// the sidebar (which reloads unconditionally below). Keep the row
+			// visible in the TaskPane and re-queue the delete for retry — the
+			// disk reload that would otherwise re-show it (sp.SetTasks below) is
+			// gated on !failedEdit, and a concurrent failed edit leaves that gate
+			// closed, so without this restore the pane would lose the row until a
+			// later successful edit save re-opened the reload.
+			sp.RestoreFailedDelete(tsk)
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to remove task %q: %w", tsk.Name, err))
+			continue
 		}
+		// The removal committed. If this task was previously restored to
+		// s.tasks by RestoreFailedDelete (a prior save attempt re-inserted it),
+		// remove it now: failedEdit may suppress SetTasks below, so without
+		// this explicit removal the row stays visible even though the daemon
+		// confirmed deletion.
+		sp.AcknowledgeDeletedRestored(tsk.ID)
 	}
 	// Reload BOTH panes from disk so the TaskPane and sidebar can never diverge
 	// (#934): whatever actually committed, both panes now show it.
@@ -143,6 +162,13 @@ func (m *home) saveContentPaneState() error {
 		m.store.SetTasks(tasks)
 		if !failedEdit {
 			sp.SetTasks(tasks)
+		} else {
+			// SetTasks is suppressed to preserve the in-flight edit draft.
+			// Remove any restored rows that the authoritative reload confirms
+			// are gone from disk (another client deleted them between the pane
+			// load and our RemoveTask call, which returned a non-committed
+			// "not found" and triggered RestoreFailedDelete).
+			sp.PruneRestoredAbsent(tasks)
 		}
 		// The task count feeds the rail's automations-section height (#1126);
 		// reflow so an add/delete grows or shrinks the section immediately.

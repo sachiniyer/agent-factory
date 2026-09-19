@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -129,7 +130,12 @@ type TaskPane struct {
 	// another writer changed out-of-band while the editor was open (#1700).
 	originals map[string]task.Task
 	deleted   []task.Task
-	hasFocus  bool
+	// deletedPositions records the s.tasks index at which each deleted task
+	// sat when deleteSelectedTask removed it, keyed by task ID. RestoreFailedDelete
+	// uses it to re-insert the row at its original position so the TaskPane
+	// order stays consistent with the sidebar's disk-order reload.
+	deletedPositions map[string]int
+	hasFocus         bool
 
 	// now is inherited from the owning AutomationsPane and passed to each
 	// schedule picker for its custom-cron next-run preview.
@@ -565,6 +571,27 @@ func (s *TaskPane) deleteSelectedTask() {
 	if original, ok := s.originals[deleted.ID]; ok {
 		deleted = original
 	}
+	if s.deletedPositions == nil {
+		s.deletedPositions = make(map[string]int)
+	}
+	// Compute the stable original-list position of the task being deleted.
+	// s.selectedIdx is its index in the already-shortened slice (prior
+	// deletions have been removed). Adding the count of prior deletions whose
+	// original positions are at or before the candidate recovers the position
+	// in the original load order. The prior positions must be iterated in
+	// ascending order so each adjustment is applied before the next is tested.
+	originalPos := s.selectedIdx
+	priorPositions := make([]int, 0, len(s.deletedPositions))
+	for _, p := range s.deletedPositions {
+		priorPositions = append(priorPositions, p)
+	}
+	sort.Ints(priorPositions)
+	for _, p := range priorPositions {
+		if p <= originalPos {
+			originalPos++
+		}
+	}
+	s.deletedPositions[deleted.ID] = originalPos
 	s.deleted = append(s.deleted, deleted)
 	s.tasks = append(s.tasks[:s.selectedIdx], s.tasks[s.selectedIdx+1:]...)
 	// A task queued for deletion must not also be in the update set:
@@ -598,8 +625,20 @@ func (s *TaskPane) runSelectedTask() {
 		s.listNotice = watchRunNowRefusal
 		return
 	}
+	// Cancel any pending deletion retry for this task. saveContentPaneState
+	// calls saveContentPaneState before handleTaskTrigger, so a queued
+	// RemoveTask could commit — deleting the task and reloading it out of the
+	// pane — before ConsumePendingTrigger resolves the queued ID, leaving
+	// run-now with no selected task while unexpectedly committing the deletion.
+	// markTaskDirty already does the same cancellation for edits and toggles.
+	id := s.tasks[s.selectedIdx].ID
+	for i := len(s.deleted) - 1; i >= 0; i-- {
+		if s.deleted[i].ID == id {
+			s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
+		}
+	}
 	s.pendingTrigger = true
-	s.pendingTriggerID = s.tasks[s.selectedIdx].ID
+	s.pendingTriggerID = id
 }
 
 func (s *TaskPane) enterEditMode() {

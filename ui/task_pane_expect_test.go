@@ -112,3 +112,58 @@ func TestTaskPaneConsumeDirtyExpectBaselineAdvancesAfterSave(t *testing.T) {
 	assert.Equal(t, "/repo/one", second[0].Expect.ProjectPath,
 		"the post-save baseline still pins the stored binding")
 }
+
+// TestAcknowledgeDeletedRestoredSweepsAllMatchingRows pins the fix for the
+// three-or-more-duplicate-ID scenario: when tasks.json contains duplicate IDs
+// and the user deletes one, task.RemoveTask removes every disk row sharing that
+// ID. AcknowledgeDeletedRestored must therefore remove ALL pane rows with the
+// acknowledged ID so the pane stays in sync with disk.
+//
+// Pre-fix, the function returned after the first match, leaving extra ghost rows
+// for any duplicate that was not the first element found.
+func TestAcknowledgeDeletedRestoredSweepsAllMatchingRows(t *testing.T) {
+	tp := NewTaskPane()
+	// Three rows share "dup", one unique row follows.
+	tp.SetTasks([]task.Task{
+		{ID: "dup", Name: "dup-1", ProjectPath: "/repo", Enabled: true},
+		{ID: "dup", Name: "dup-2", ProjectPath: "/repo", Enabled: true},
+		{ID: "dup", Name: "dup-3", ProjectPath: "/repo", Enabled: true},
+		{ID: "other", Name: "other", ProjectPath: "/repo", Enabled: true},
+	})
+	// Simulate the cursor sitting on the last "dup" row (index 2) before the
+	// acknowledgement; all three must be removed regardless.
+	tp.SelectTask(2)
+
+	tp.AcknowledgeDeletedRestored("dup")
+
+	tasks := tp.GetTasks()
+	require.Len(t, tasks, 1, "all three duplicate rows must be removed by a single AcknowledgeDeletedRestored call")
+	assert.Equal(t, "other", tasks[0].ID, "the surviving row must be the non-duplicate")
+	// Cursor must land on the only surviving row (index 0).
+	tp.SelectTask(tp.selectedIdx)
+	require.Equal(t, 0, tp.selectedIdx,
+		"cursor must be clamped to a valid index after all duplicates are removed")
+}
+
+// TestAcknowledgeDeletedRestoredPreservesCursorOnSurvivor: when rows with the
+// acknowledged ID precede the cursor, each removal shifts the index back so the
+// cursor still points at the same surviving task.
+func TestAcknowledgeDeletedRestoredPreservesCursorOnSurvivor(t *testing.T) {
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{
+		{ID: "dup", Name: "dup-1", ProjectPath: "/repo", Enabled: true},
+		{ID: "dup", Name: "dup-2", ProjectPath: "/repo", Enabled: true},
+		{ID: "keep", Name: "keep", ProjectPath: "/repo", Enabled: true},
+	})
+	// Cursor on "keep" (index 2); removing the two "dup" rows before it must
+	// shift the cursor to index 0.
+	tp.SelectTask(2)
+
+	tp.AcknowledgeDeletedRestored("dup")
+
+	tasks := tp.GetTasks()
+	require.Len(t, tasks, 1, "both dup rows must be removed")
+	assert.Equal(t, "keep", tasks[0].ID)
+	assert.Equal(t, 0, tp.selectedIdx,
+		"cursor must follow the surviving task after two preceding rows are removed")
+}
