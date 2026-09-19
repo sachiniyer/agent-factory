@@ -1135,8 +1135,8 @@
       "id": "session.tab.rename",
       "title": "Rename a tab",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "keys/keys.go KeyRenameTab (R) -> app/handle_tabs.go showRenameTabPrompt/handleStateRenameTab -> app/session_control.go renameTabThroughDaemon -> apiclient/control.go Client.RenameTab -> POST /v1/RenameTab"
       },
       "web": {
         "status": "yes",
@@ -1146,8 +1146,8 @@
         "status": "yes",
         "pointer": "api/sessions_tabs.go:192 tab-rename (+ tabs rename)"
       },
-      "verdict": "unclear",
-      "notes": "#1904 added tab rename to the CLI (tab-rename --new-name) and web (RenameTab). The TUI shows tab names as pane labels (#1813) but has no rename affordance — no app/ code calls RenameTab and no keybinding. Whether the TUI should rename tabs is an owner call (the #1904/tab-ux author). Not filed."
+      "verdict": "parity",
+      "notes": "#1904 added tab rename to the CLI (tab-rename --new-name) and web (RenameTab). TUI half CLOSED: `R` opens a prompt seeded with the current name of the tab the user is looking at — the focused pane's effective binding, else the tree's active tab, the same target `w` closes — and submits daemon.Manager.RenameTab over the same /v1/RenameTab route the web calls. The request carries stable ids (session ID + TabID) captured at prompt-open, matching the #2358 rule every retained TUI action follows; a pre-#1738 id-less tab is protected by the captured roster generation, the same rule delete consent applies. The daemon's own guards hold on every surface: only kinds that DISPLAY their name are renameable (session.TabKindRenameable — web, process, VS Code), so the agent tab and shell tabs refuse before the prompt opens with the same reason the RPC would give. The resolved (sanitized, collision-suffixed) name is reflected on the local projection and reported in the status bar."
     },
     {
       "id": "session.tab.reorder",
@@ -1669,6 +1669,7 @@
       "pane_prev": "tui.panes",
       "prev_section": "tui.navigation",
       "quit": "tui.navigation",
+      "rename_tab": "session.tab.rename",
       "restore": "session.restore",
       "scroll_down": "tui.navigation",
       "scroll_up": "tui.navigation",
@@ -2264,6 +2265,11 @@
           },
           "tab_index": {
             "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon consults only when TabName is empty (daemon/manager_tabs_arrange.go resolveTabTarget)."
+          }
+        },
+        "tui": {
+          "tab_index": {
+            "ok": "The TUI passes the stable TabID captured when the prompt opened (with the captured TabName as the pre-#1738 id-less fallback, gated on an unchanged roster generation); it never needs the shifting ordinal fallback. Same shape as its CloseTabRequest coverage."
           }
         }
       },
