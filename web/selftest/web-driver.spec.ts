@@ -3386,6 +3386,195 @@ test("config: a refresh landing mid-edit preserves focus, caret, and later typin
   }
 });
 
+test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXTURE, async ({ browser }) => {
+  // The sibling of #4244. #4244 pins the UNRELATED-rebuild case: a different key's
+  // save landing while a field is mid-edit. This pins the SAME-key case: the user
+  // commits the field they are editing with Enter. Enter does not blur (config.ts
+  // preventDefault()s it), so the input genuinely holds focus through the whole
+  // save round-trip, and rerenderKeepingUserState's `wasEditing` is true coming in.
+  // But update()'s close-on-save clears `this.editing` BEFORE the rerender, so the
+  // `if (this.editing === e.key)` gate in renderControl no longer re-points
+  // `editingInput` at the rebuilt input — `editingInput` stays null, the
+  // `if (wasEditing && this.editingInput)` restoration branch no-ops, and focus
+  // falls to <body>. The user's next keystrokes then become document shortcuts
+  // (`[`/`]` cycle the view) or, for any other printable key, are silently
+  // swallowed (decideKey returns {kind:"none"} without preventDefault for a
+  // body-focused key in config view). The fix re-points editingInput for the
+  // just-saved row so the existing restoration branch keeps focus on the rebuilt
+  // input — without re-opening the edit.
+  //
+  // The route is intercepted, so the daemon is NOT mutated: network.listen_addr
+  // applies live and would otherwise rebind this very daemon's listener. Only the
+  // canned reply drives configStatus + ConfigPane.update/render.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // network.listen_addr — a text row. Mark it dirty with a nonce the daemon does
+    // not hold, set the caret at offset 3, then commit with Enter so the save is
+    // for the SAME key the field is editing.
+    const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    await field.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "abcdef";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "abcdef", inputType: "insertText" }));
+      input.setSelectionRange(3, 3);
+    });
+    await field.press("Enter");
+    await saveStarted;
+    releaseSave!();
+
+    // The echo proves configStatus drove ConfigPane.update (the close-on-save
+    // clear + the rebuild ran), which is the exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="network.listen_addr"] .af-config-echo')).toBeVisible();
+    // RED without the fix: focus fell to <body> when the rebuilt input replaced the
+    // focused one and the restoration gate no-oped on `this.editingInput === null`.
+    await expect(field).toBeFocused();
+    // The caret survived the rebuild — direct evidence the restoration branch
+    // (the only site that re-applies setSelectionRange) drove the rebuilt input.
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.selectionStart)).toBe(3);
+
+    // Typing reaches the rebuilt input at the restored caret instead of falling
+    // onto <body> (where it would be discarded or interpreted as a view shortcut).
+    // The rebuilt input's value is the daemon's freshly re-read value, not the
+    // nonce: the intercepted save did not mutate the daemon, so refreshConfig
+    // repopulates the field from e.value and Z is inserted at the restored caret.
+    await p.keyboard.type("Z");
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.value)).toContain("Z");
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a later save's status does not pull focus out of the field the user is in", REAL_FIXTURE, async ({ browser }) => {
+  // The third case in this family, and the only one that moves focus to the WRONG
+  // ROW rather than to <body>. Saves are serialized PER KEY (createKeyedQueue), and
+  // config.test.ts pins that two keys have no ordering relationship — so key A's
+  // response can land after key B's. By then the user is in B: B's own save closed
+  // its field and handed focus back to the rebuilt input. A's status then drives
+  // another ConfigPane.update/render, and a restoration that picked its row from
+  // `status.key` would re-point `editingInput` at A and move focus — plus the caret
+  // captured from B — into a field the user never opened, so the next keystroke
+  // edits the wrong setting silently. Restoration reads the key that actually HELD
+  // focus instead, so A's late status rebuilds the list without moving the user.
+  //
+  // Every SetConfigValue is intercepted, so the daemon is NOT mutated:
+  // network.listen_addr applies live and would otherwise rebind this very daemon's
+  // listener. Only the canned replies drive configStatus + ConfigPane.update.
+  const ctx = await browser.newContext();
+  const startResolvers = new Map<string, () => void>();
+  const releaseResolvers = new Map<string, () => void>();
+  const started = (key: string) => new Promise<void>((resolve) => startResolvers.set(key, resolve));
+  const held = (key: string) => new Promise<void>((resolve) => releaseResolvers.set(key, resolve));
+  const addrStarted = started("network.listen_addr");
+  const prefixStarted = started("branch_prefix");
+  const holds: Record<string, Promise<void>> = {
+    "network.listen_addr": held("network.listen_addr"),
+    branch_prefix: held("branch_prefix"),
+  };
+  const releaseAll = () => { for (const resolve of releaseResolvers.values()) resolve(); };
+  try {
+    const p = await ctx.newPage();
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      startResolvers.get(body.key)?.();
+      await holds[body.key];
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+    // branch_prefix is the only other text row without an enum, and it is advanced:
+    // network.listen_addr is the single core-tier free-text key.
+    await pane.locator(".af-config-toggle").click();
+    const addr = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    const prefix = pane.locator('.af-config-row[data-key="branch_prefix"] input');
+    await expect(prefix).toBeVisible();
+
+    // A is committed first and its response is held, so it is still in flight when
+    // B is committed — the overlap the per-key queue permits by design.
+    await addr.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "127.0.0.1:9443";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "3", inputType: "insertText" }));
+    });
+    await addr.press("Enter");
+    await addrStarted;
+
+    await prefix.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "af-web-selftest/";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "/", inputType: "insertText" }));
+    });
+    await prefix.press("Enter");
+    await prefixStarted;
+
+    // B answers first: its save closes its own field and focus comes back to the
+    // rebuilt input — the same-key behavior the sibling test above pins.
+    releaseResolvers.get("branch_prefix")!();
+    await expect(pane.locator('.af-config-row[data-key="branch_prefix"] .af-config-echo')).toBeVisible();
+    await expect(prefix).toBeFocused();
+
+    // A answers second. RED without the fix: `status.key` now names
+    // network.listen_addr, so the restoration re-pointed editingInput at THAT row
+    // and focus left branch_prefix for a field the user never opened.
+    releaseResolvers.get("network.listen_addr")!();
+    await expect(pane.locator('.af-config-row[data-key="network.listen_addr"] .af-config-echo')).toBeVisible();
+    await expect(prefix).toBeFocused();
+    await expect(addr).not.toBeFocused();
+
+    // The user-visible contract behind the focus assertion: the next keystroke
+    // edits the field they are in, and leaves the other one alone.
+    const addrBefore = await addr.inputValue();
+    await p.keyboard.type("x");
+    await expect.poll(() => prefix.inputValue()).toMatch(/x$/);
+    await expect(addr).toHaveValue(addrBefore);
+  } finally {
+    releaseAll();
+    await ctx.close().catch(() => {});
+  }
+});
+
 // typeIntoAssistantAndExpectEcho is the config assistant's live-output proof. The
 // assistant runs the fake agent (`cat`), so a keystroke makes the full round trip —
 // OpInput → daemon → tmux PTY → `cat` echo → /v1/config-assistant/stream → xterm — and
@@ -7779,6 +7968,162 @@ test("#1815 review: a retained layout follows its tab when the roster changes wh
   await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
 });
 
+// The focus-desync regression that #1815 made reachable: an out-of-band roster close
+// of the identity bound to the FOCUSED pane rebuilds that pane's AttachTerminal while
+// the keyboard is attached to it. reconcile() disposes the DOM-focused terminal and
+// constructs a new one, but the disposed terminal's blur is suppressed (terminal.ts
+// sets stopped before xterm tears the textarea down), so no onFocusChange(false)
+// corrects store.focus — it stays "terminal" while DOM focus falls back to
+// document.body, and rail-mode keys (j/k, digits, t, w, Enter, Escape-as-interrupt)
+// are silently swallowed by decideKey's `ctx.focus === "terminal"` → kind:"none"
+// branch. The three #1815 review tests above cover the UNAFFECTED paths (the focused
+// leaf's identity survives); this one stages the affected one — the closed identity
+// IS the focused pane's — and asserts the keyboard model stays in sync with the DOM.
+test("#1815 focus: an out-of-band close of the focused pane's bound identity keeps the keyboard attached (no desync)", REAL_FIXTURE, async () => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, "sessions", ...args], { stdio: "pipe" });
+  };
+
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  const active = page.locator(".af-tab.af-tab-active .af-tab-label");
+
+  // Reset SESSION_A to its single unclosable Agent tab first. The suite is serial and
+  // earlier flows leave their own tabs on this session, so the pane clamps onto an
+  // UNPREDICTABLE surviving tab when f1 closes — and with it the focus outcome
+  // (terminal if the survivor is a PTY tab, rail if it is a web tab). Starting from
+  // just Agent makes arithmetic deterministic: create f1 → [Agent, f1]; close f1 and
+  // the leaf clamps onto Agent (a terminal), which is the case this test pins.
+  await resetToAgentTab(page);
+  const baseline = 1;
+
+  // A PROCESS tab so the focused pane can bind a closable terminal identity. (A web
+  // tab's pane is an iframe that swallows the mousedown the pane focus handler listens
+  // for, so it cannot be the attach target that establishes the terminal-mode precondition.)
+  af("tab-create", SESSION_A, "--command", "sleep 300", "--name", "f1");
+  await expect(tabbar.locator(".af-tab", { hasText: "f1" })).toHaveCount(1, { timeout: 30_000 });
+
+  // Rebind the FOCUSED pane to f1 by selecting its tab, then attach the keyboard to
+  // f1's terminal by clicking into the pane. Clicking the tab blurs the prior terminal
+  // (→ rail); the pane click re-focuses f1's textarea (→ terminal), which is exactly
+  // the keyboard-attached state the bug bites in.
+  await tabbar.locator(".af-tab", { hasText: "f1" }).locator(".af-tab-label").click();
+  await expect(active).toHaveText("f1");
+  const pane = page.locator(".af-term-host .af-pane");
+  await pane.locator(".af-pane-host").click();
+  await expect(page.locator(".af-app.af-kb-terminal"), "the keyboard must be attached to f1's terminal").toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.className ?? ""), {
+      message: "f1's xterm textarea must hold DOM focus going into the out-of-band close",
+      timeout: 10_000,
+    })
+    .toContain("xterm-helper-textarea");
+
+  // Another client closes f1 out-of-band. #1815 delivers the roster change LIVE, so
+  // reconcile rebuilds the focused pane (f1 → Agent, the only remaining tab) while the
+  // keyboard is attached — the exact silent window the bug report describes.
+  af("tab-delete", SESSION_A, "--name", "f1");
+  await expect(tabbar.locator(".af-tab", { hasText: "f1" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(active, "the focused pane follows the roster onto Agent").toHaveText("Agent");
+
+  // THE FIX: the rebuilt terminal re-takes DOM focus, so store.focus="terminal" is
+  // TRUE against the new textarea rather than pinned against document.body. Pre-fix
+  // this was the desync — af-kb-terminal visible while document.activeElement was BODY
+  // — and every rail key was swallowed. The active element must be the focused pane's
+  // xterm textarea (the keyboard model matches reality).
+  await expect(page.locator(".af-app.af-kb-terminal"), "terminal mode is real, not stale").toBeVisible();
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const el = document.activeElement;
+          // The focused pane's textarea, not body: the rebuilt terminal holds the keyboard.
+          return el && el.classList.contains("xterm-helper-textarea")
+            ? "xterm"
+            : el?.tagName ?? "";
+        }),
+      {
+        message:
+          "the rebuilt terminal's textarea must hold DOM focus — pre-fix this was BODY (store.focus=\"terminal\" with no focused terminal)",
+        timeout: 15_000,
+      },
+    )
+    .toBe("xterm");
+
+  // The bar is back to its baseline (f1 was the only tab this test created).
+  await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
+});
+
+// The symmetric web-pane outcome: when the focused pane rebuilds onto a WEB tab (no
+// terminal to hand the keyboard to), the fix reports the focus loss itself so
+// store.focus lands on "rail" — the right mode when the focused pane ceases to be a
+// terminal — rather than staying pinned on a dead "terminal" that swallows rail keys.
+test("#1815 focus: an out-of-band close that turns the focused pane into a web tab corrects to rail mode", REAL_FIXTURE, async () => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, "sessions", ...args], { stdio: "pipe" });
+  };
+
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  const active = page.locator(".af-tab.af-tab-active .af-tab-label");
+
+  // Reset SESSION_A to just Agent so the ordinal arithmetic is deterministic (serial
+  // suite; earlier flows leave their own tabs). [Agent, w1, p1]: focus lands on p1
+  // (a process terminal the keyboard can attach to). Closing p1 out-of-band leaves
+  // [Agent, w1]; the focused leaf's ordinal 2 clamps to 1, which is w1 — a WEB tab —
+  // so reconcile rebuilds the focused pane from a terminal into an iframe.
+  await resetToAgentTab(page);
+  const baseline = 1;
+  af("tab-create", SESSION_A, "--kind", "web", "--url", WEBTAB_EXTERNAL_URL, "--name", "w1");
+  await expect(tabbar.locator(".af-tab", { hasText: "w1" })).toHaveCount(1, { timeout: 15_000 });
+  af("tab-create", SESSION_A, "--command", "sleep 300", "--name", "p1");
+  await expect(tabbar.locator(".af-tab", { hasText: "p1" })).toHaveCount(1, { timeout: 30_000 });
+
+  await tabbar.locator(".af-tab", { hasText: "p1" }).locator(".af-tab-label").click();
+  await expect(active).toHaveText("p1");
+  const pane = page.locator(".af-term-host .af-pane");
+  await pane.locator(".af-pane-host").click();
+  await expect(page.locator(".af-app.af-kb-terminal"), "the keyboard must be attached to p1's terminal").toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.className ?? ""), {
+      message: "p1's xterm textarea must hold DOM focus going into the out-of-band close",
+      timeout: 10_000,
+    })
+    .toContain("xterm-helper-textarea");
+
+  // Close p1 out-of-band; the focused pane's ordinal clamps onto w1 (a web tab).
+  af("tab-delete", SESSION_A, "--name", "p1");
+  await expect(tabbar.locator(".af-tab", { hasText: "p1" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(active, "the focused pane follows the roster onto w1").toHaveText("w1");
+
+  // THE FIX: the focused pane is now a web pane (no terminal), so the fix reports the
+  // focus loss and store.focus lands on "rail". DOM focus fell back to document.body
+  // (the disposed terminal's blur was suppressed), and rail mode is the correct match —
+  // rail keys now work, instead of being swallowed by a stale "terminal" claim.
+  await expect(page.locator(".af-app.af-kb-rail"), "a focused web pane must land in rail mode, not a stale terminal").toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.tagName ?? ""), {
+      message: "DOM focus fell back to body, and rail mode is the honest match for it",
+      timeout: 15_000,
+    })
+    .toBe("BODY");
+
+  // Restore the bar to its baseline.
+  af("tab-delete", SESSION_A, "--name", "w1");
+  await expect(tabbar.locator(".af-tab", { hasText: "w1" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
+});
+
 // --- PWA: favicon, theme-color, manifest, service worker, install (feat) --------
 //
 // These run in their OWN context rather than on the shared serial `page`, because a
@@ -9805,34 +10150,47 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
   const ctx = await browser.newContext();
   const win = await ctx.newPage();
   try {
-    // A handle on the SPA's event socket, so the test can drop it. Recording only — the
-    // constructor is not otherwise altered, so the app connects exactly as it always
-    // does. Needed because closing the LIVE socket is the one thing network emulation
-    // will not do for us: going offline blocks new traffic but leaves an established
-    // WebSocket open, so the client never notices, never reconnects, and never
-    // re-Snapshots (measured — the first cut of this test timed out waiting for it).
+    // The SPA's event socket, held by its CONSTRUCTOR: a handle on each one so the test
+    // can drop it, and a switch that refuses every new one for as long as the gap is
+    // held. Together they reproduce a real outage: the socket drops, retries fail, and
+    // the events published meanwhile are dropped by the daemon's hub rather than queued
+    // (events.ts) — which is exactly why the reconnect must re-Snapshot, and why that
+    // one Snapshot carries a close and a recreate FUSED into a single roster change.
+    //
+    // The constructor is the only layer that does both. Going offline leaves an
+    // established WebSocket open, so the client never notices, never reconnects, and
+    // never re-Snapshots (measured — the first cut of this test timed out waiting for
+    // it). And CDP's Network.setBlockedURLs, which held the retries off before #4584,
+    // refuses matching HTTP requests but NOT WebSocket handshakes (measured: 20 of 20
+    // handshakes opened under the block). That made the "outage" one 500 ms reconnect
+    // backoff long (events.ts), and the spec raced it — whenever the two CLI mutations
+    // below outran the backoff, the recreate arrived as a LIVE event and rebound the
+    // pane before the offline assertion read it.
+    //
+    // A refused attempt is closed while still CONNECTING, which fails it without ever
+    // firing `open`. The close is a microtask so the app has attached its handlers, and
+    // it lands before any task could deliver an open. To the client that is a refused
+    // connection — error, close, schedule the next retry — so it keeps reporting
+    // "reconnecting". An allowed attempt is not altered, so the app connects exactly as
+    // it always does.
     await win.addInitScript(() => {
-      const w = window as unknown as { __afEventSockets: WebSocket[] };
+      const w = window as unknown as { __afEventSockets: WebSocket[]; __afRefuseEvents: boolean };
       w.__afEventSockets = [];
+      w.__afRefuseEvents = false;
       const Native = WebSocket;
       window.WebSocket = new Proxy(Native, {
         construct(target, args: [string, (string | string[])?]) {
           const ws = new target(...args);
           if (String(args[0]).includes("/v1/events")) {
             w.__afEventSockets.push(ws);
+            if (w.__afRefuseEvents) {
+              queueMicrotask(() => ws.close());
+            }
           }
           return ws;
         },
       });
     });
-    // Block the events endpoint at the NETWORK layer, so every reconnect ATTEMPT fails
-    // for as long as the flag is set. Together with the close below this reproduces a
-    // real outage: the socket drops, retries fail, and the events published meanwhile
-    // are dropped by the daemon's hub rather than queued (events.ts) — which is exactly
-    // why the reconnect must re-Snapshot, and why that one Snapshot carries a close and
-    // a recreate FUSED into a single roster change.
-    const cdp = await ctx.newCDPSession(win);
-    await cdp.send("Network.enable");
 
     // Wait for the startup resync CHAIN to be accepted before manufacturing the
     // outage. openTokenless proves the seed Snapshot rendered the rail, but the event
@@ -9874,10 +10232,11 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     // The gap: retries are refused, then the live socket is dropped. Neither the close
     // nor the recreate below is delivered as an event — delivered live they would each
     // repaint the bar and settle the edit early, which is the (already-covered) path
-    // above, not this one.
-    await cdp.send("Network.setBlockedURLs", { urls: ["*/v1/events*"] });
+    // above, not this one. Refused BEFORE the drop, in the same evaluate: the drop's
+    // reconnect is scheduled by its close handler, which cannot run first.
     const eventSocketClose = await win.evaluate(async () => {
-      const w = window as unknown as { __afEventSockets: WebSocket[] };
+      const w = window as unknown as { __afEventSockets: WebSocket[]; __afRefuseEvents: boolean };
+      w.__afRefuseEvents = true;
       await Promise.all(
         w.__afEventSockets.map(
           (ws) =>
@@ -9909,6 +10268,15 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     ).toHaveAttribute("data-live", "reconnecting");
     af("sessions", "tab-delete", SESSION_ORDER, "--name", VICTIM);
     af("sessions", "tab-create", SESSION_ORDER, "--command", "sleep 300", "--name", VICTIM);
+    // Still in the gap once both mutations have landed — asserted, because a reconnect
+    // that got through is exactly how this spec used to flake (#4584): the client read
+    // "open" here and had the recreate as a live event before the binding below was
+    // read. Checked first so a leak in the staging fails under its own name, not as a
+    // lost binding.
+    await expect(
+      win.locator(".af-app"),
+      "no events socket may open while the gap is held — it would deliver the mutations live",
+    ).toHaveAttribute("data-live", "reconnecting");
     await expect(editedPane, "the offline fixture must retain the old binding until reconnect")
       .toHaveAttribute("data-tab-id", editedPaneID!);
 
@@ -9920,7 +10288,9 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     const resync = win.waitForResponse((r) => r.url().includes("/v1/Snapshot") && r.status() === 200, {
       timeout: 30_000,
     });
-    await cdp.send("Network.setBlockedURLs", { urls: [] });
+    await win.evaluate(() => {
+      (window as unknown as { __afRefuseEvents: boolean }).__afRefuseEvents = false;
+    });
     const resyncResponse = await resync;
     const resyncEnvelope = (await resyncResponse.json()) as {
       data?: {

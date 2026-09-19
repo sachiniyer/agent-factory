@@ -379,14 +379,20 @@ func TestWaitForReadyNonAgentBecomesReadyOnAnyOutput(t *testing.T) {
 // waitForReadyPollInterval (500ms), so an agent that renders its prompt during the
 // final poll gap is first observed by the timeout branch. Pinning poll > timeout
 // makes that ordering deterministic instead of racing the boundary: the ticker can
-// never fire, so the timeout branch is the only branch that ever sees the pane —
-// and it sees a pane that is unambiguously ready.
+// never fire, so after the look before the first tick (#4464) the timeout branch is
+// the only branch that ever sees the pane — and it sees a pane that is
+// unambiguously ready. That first look must find the agent still booting, or it
+// would answer READY itself and the timeout branch would go untested.
 func TestWaitForReadyReadyAtTimeoutBoundaryIsReady(t *testing.T) {
 	defer setWaitForReadyTimingForTest(50*time.Millisecond, time.Hour)()
 	defer setWaitLimitForTest(NewLimitDetector(nil), time.Now)()
 
+	var captures atomic.Int32
 	inst := newPreviewInstance(t, func() (string, error) {
-		return "claude ready\n❯ ", nil // claude's ready glyph is already on the pane
+		if captures.Add(1) == 1 {
+			return "booting…\n", nil // the look before the first tick
+		}
+		return "claude ready\n❯ ", nil // on the pane when the deadline fires
 	})
 
 	done := make(chan error, 1)
@@ -399,6 +405,9 @@ func TestWaitForReadyReadyAtTimeoutBoundaryIsReady(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("WaitForReady never returned")
+	}
+	if got := captures.Load(); got != 2 {
+		t.Fatalf("pane captures = %d, want the first look plus the timeout branch's", got)
 	}
 }
 
@@ -463,6 +472,10 @@ func TestWaitForReadySlowHookDoesNotTimeOutHealthyAgent(t *testing.T) {
 		t.Fatalf("timer while hooks run = %s, want hook grace %s", graceTimer.duration, waitForReadyHookGrace)
 	}
 	receiveReadinessEvent(t, clock.tickerStarted, "readiness ticker")
+	// The look before the first tick (#4464) is the first not-ready poll. Take it
+	// before sending any tick, so no tick is left buffered to race the hook
+	// completion below.
+	receiveReadinessEvent(t, polls, "first-look pane capture")
 	select {
 	case timer := <-clock.timers:
 		t.Fatalf("readiness timeout %s was armed while hooks were still running", timer.duration)
@@ -498,8 +511,8 @@ func TestWaitForReadySlowHookDoesNotTimeOutHealthyAgent(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("WaitForReady did not return after the post-hook poll observed a healthy agent")
 	}
-	if got := captures.Load(); got != 4 {
-		t.Fatalf("pane captures = %d, want three in-hook polls plus one ready poll", got)
+	if got := captures.Load(); got != 5 {
+		t.Fatalf("pane captures = %d, want the first look, three in-hook polls, and one ready poll", got)
 	}
 }
 
@@ -574,12 +587,23 @@ func TestWaitForReadyFailsFastWhenSessionGone(t *testing.T) {
 // timeout case observes ErrSessionGone, WaitForReady must surface the same
 // actionable "session died" error (wrapping the sentinel) as the ticker case —
 // not a misleading generic timeout. Timing is set so the timeout (50ms) fires
-// before the first ticker tick (100ms), forcing the timeout branch.
+// before the first ticker tick (1h), forcing the timeout branch. The look before
+// the first tick (#4464) must see a live pane, or it would report the death
+// itself and the timeout branch would go untested.
 func TestWaitForReadyTimeoutCaseChecksErrSessionGone(t *testing.T) {
-	defer setWaitForReadyTimingForTest(50*time.Millisecond, 100*time.Millisecond)()
+	defer setWaitForReadyTimingForTest(50*time.Millisecond, time.Hour)()
 
+	var captures atomic.Int32
 	inst := newPreviewInstance(t, func() (string, error) {
+		if captures.Add(1) == 1 {
+			return "booting…\n", nil
+		}
 		return "", tmux.ErrSessionGone
+	})
+	t.Cleanup(func() {
+		if got := captures.Load(); got != 2 {
+			t.Errorf("pane captures = %d, want the first look plus the timeout branch's", got)
+		}
 	})
 
 	done := make(chan error, 1)

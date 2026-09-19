@@ -125,14 +125,15 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 		}
 	}
 
-	words, unsafe := unwrapAccountCommand(call.Args, names)
+	memo := operandTailMemo{}
+	words, unsafe := unwrapAccountCommand(call.Args, names, memo)
 	if unsafe || len(words) == 0 {
 		return unsafe
 	}
-	return unwrappedAccountCommandMutates(words, names)
+	return unwrappedAccountCommandMutates(words, names, memo)
 }
 
-func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}) bool {
+func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	if _, literal := literalShellWord(words[0]); !literal {
 		// A dynamic command name can resolve to env or a same-shell builtin such
 		// as unset/export, so its effect on the selected identity is unprovable.
@@ -140,7 +141,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 	}
 	switch {
 	case isAccountCommandName(words[0], "env"):
-		return envCallMutatesAccountEnvironment(words[1:], names, false)
+		return envCallMutatesAccountEnvironment(words[1:], names, false, memo)
 	case isBareName(words[0], "unset"):
 		return unsetMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "set"):
@@ -182,7 +183,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 // unwrapAccountCommand removes shell wrappers that still execute the remaining
 // words in the current environment. Dynamic or unsupported wrapper forms are
 // unsafe because they could resolve to env or an environment-mutating builtin.
-func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*syntax.Word, bool) {
+func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		switch {
 		case isBareName(words[0], "exec"):
@@ -235,48 +236,48 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 			}
 		case isAccountCommandName(words[0], "nice"):
 			var unsafe bool
-			words, unsafe = unwrapNice(words[1:])
+			words, unsafe = unwrapNice(words[1:], names, memo)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "timeout"):
 			var unsafe bool
-			words, unsafe = unwrapTimeout(words[1:])
+			words, unsafe = unwrapTimeout(words[1:], names, memo)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "setsid"):
 			var unsafe bool
-			words, unsafe = unwrapSetsid(words[1:])
+			words, unsafe = unwrapSetsid(words[1:], names, memo)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "stdbuf"):
 			var unsafe bool
-			words, unsafe = unwrapStdbuf(words[1:])
+			words, unsafe = unwrapStdbuf(words[1:], names, memo)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "ionice"):
 			var unsafe bool
-			words, unsafe = unwrapIonice(words[1:])
+			words, unsafe = unwrapIonice(words[1:], names, memo)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "taskset"):
 			var unsafe bool
-			words, unsafe = unwrapTaskset(words[1:])
+			words, unsafe = unwrapTaskset(words[1:], names, memo)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "xargs"):
 			var unsafe bool
-			words, unsafe = unwrapXargs(words[1:], names)
+			words, unsafe = unwrapXargs(words[1:], names, memo)
 			if unsafe {
 				return nil, true
 			}
 		default:
-			if unrecognizedWrapperHidesAccountAssignment(words, names) {
+			if unrecognizedWrapperHidesAccountAssignment(words, names, memo) {
 				return nil, true
 			}
 			return words, false
@@ -314,7 +315,7 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 // denied name or assignment (xargs --process-slot-var=NAME, strace -E var=val
 // and --env=var=val) is refused — a wrapper's own options can place the
 // mutation without any env word.
-func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}) bool {
+func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	strace := isAccountCommandName(words[0], "strace")
 	for i := 1; i < len(words); i++ {
 		word := words[i]
@@ -322,7 +323,7 @@ func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[s
 			// A nested env only mutates the child it execs; requireCommand
 			// keeps an `env CODEX_HOME=/tmp` whose argv ends there — env's
 			// print mode, which overrides nothing — allowed.
-			if envCallMutatesAccountEnvironment(words[i+1:], names, true) {
+			if envCallMutatesAccountEnvironment(words[i+1:], names, true, memo) {
 				return true
 			}
 			continue
@@ -332,7 +333,7 @@ func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[s
 			// An unprovable tail word can itself expand to `env` (or to a
 			// multiword `env NAME=value` after word splitting); judge the
 			// words after it as that invocation's argv.
-			if envCallMutatesAccountEnvironment(words[i+1:], names, true) {
+			if envCallMutatesAccountEnvironment(words[i+1:], names, true, memo) {
 				return true
 			}
 			continue
@@ -480,7 +481,7 @@ func envCallArgvParse(words []*syntax.Word) (envcommand.Invocation, error) {
 // sit in an unrecognized wrapper's tail rather than forming the command itself —
 // an `env CODEX_HOME=/tmp` with nothing after it runs env's print path, not an
 // override of a running agent.
-func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}, requireCommand bool) bool {
+func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}, requireCommand bool, memo operandTailMemo) bool {
 	invocation, err := envCallArgvParse(words)
 	if err != nil || invocation.ClearEnvironment {
 		return true
@@ -494,14 +495,14 @@ func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]str
 		}
 	}
 	if invocation.CommandIndex >= 0 {
-		commandWords, unsafe := unwrapAccountCommand(words[invocation.CommandIndex:], names)
+		commandWords, unsafe := unwrapAccountCommand(words[invocation.CommandIndex:], names, memo)
 		if unsafe {
 			return true
 		}
 		if len(commandWords) == 0 {
 			return false
 		}
-		return unwrappedAccountCommandMutates(commandWords, names)
+		return unwrappedAccountCommandMutates(commandWords, names, memo)
 	}
 	return false
 }

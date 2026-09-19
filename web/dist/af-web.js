@@ -7624,11 +7624,16 @@ function controlKind(e) {
 function canCommit(shown, current) {
   return shown !== current;
 }
+function shouldCloseSavedField(status, editing, statusIsNew) {
+  return statusIsNew && status !== null && !status.error && status.key === editing;
+}
 function saveNotice(resp) {
   const parts = [];
-  if (resp.result.requires_restart && resp.restart_notice !== "") {
+  const warnings = resp.warnings ?? [];
+  if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }
+  parts.push(...warnings);
   const addr = resp.listener_addr ?? "";
   if (addr !== "") {
     parts.push(`Daemon now listening at ${addr}`);
@@ -7673,6 +7678,11 @@ var ConfigPane = class {
   // The live controls a rebuild replaces, so focus can be handed back to whichever of
   // them had it (#2933). Null whenever that control is not currently rendered.
   editingInput = null;
+  /** The config key whose input held DOM focus when the in-progress rebuild started,
+   *  so render() can re-point `editingInput` at that row's replacement even when the
+   *  row is no longer the open edit. Live only for the duration of one render (set
+   *  and cleared around the single `this.render()` call). */
+  restoreKey = null;
   advancedToggle = null;
   lastEntries = null;
   lastStatus = null;
@@ -7683,6 +7693,7 @@ var ConfigPane = class {
     if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
       return;
     }
+    const statusIsNew = status !== this.lastStatus;
     const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status && accounts.status.name === "" && !accounts.status.error;
     if (registrationSucceeded) {
       const submitted = this.accountInput(accounts.status.agent);
@@ -7695,7 +7706,7 @@ var ConfigPane = class {
     this.path = path;
     this.status = status;
     this.accounts = accounts;
-    if (status && !status.error && status.key === this.editing) {
+    if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
     }
@@ -7728,7 +7739,9 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
+    this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
+    this.restoreKey = null;
     this.restoreAccountDrafts(accountDrafts);
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
@@ -7895,6 +7908,9 @@ var ConfigPane = class {
     const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
     input.value = this.editing === e.key ? this.draft : e.value;
     if (this.editing === e.key) {
+      this.editingInput = input;
+    }
+    if (this.restoreKey === e.key && this.editingInput === null) {
       this.editingInput = input;
     }
     input.setAttribute("aria-label", e.key);
@@ -12878,6 +12894,16 @@ var SplitView = class {
   // Debounces the "focus left every pane" report so a click that moves focus A→B
   // (blur A, then focus B) doesn't flap the nav mode through rail and back.
   blurTimer = null;
+  // Whether one of this view's panes currently holds the keyboard in its xterm
+  // textarea — the DOM-focus half of the #1693 nav/terminal model, mirrored here so
+  // reconcile() can tell whether a focused-pane rebuild happened while the operator
+  // was keyboard-attached (store.focus="terminal"). Maintained alongside the
+  // onFocusChange echoes in onPaneFocus: set true when any pane's textarea gains
+  // focus, false when the debounced-blur corrector finds focus left every pane.
+  // Teardown resets it: a disposed terminal suppresses its own blur (terminal.ts
+  // sets stopped before xterm tears the textarea down), so the callback alone would
+  // leave it stale-true across a session switch and arm a spurious refocus.
+  termHoldsFocus = false;
   // Last values reported via onLayout, so a no-op reconcile never re-fires it (which
   // would re-enter the store→rerender→setSession loop).
   lastFocusedTab = -1;
@@ -13149,6 +13175,7 @@ var SplitView = class {
     this.host.replaceChildren();
     this.host.classList.remove("af-split-multi");
     this.focusedId = null;
+    this.termHoldsFocus = false;
     this.builtTree = null;
   }
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
@@ -13184,6 +13211,7 @@ var SplitView = class {
     }
     const multi = desired.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
+    let focusedRebuilt = false;
     for (const leaf of desired) {
       const pane = this.panes.get(leaf.id);
       if (!pane) {
@@ -13196,6 +13224,9 @@ var SplitView = class {
       const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(spec ? spec.target : null, realId);
       if (spec !== null) {
         if (pane.term || pane.webUrl !== iframeIdentity(spec) || pane.iframeProxied !== ((this.tabRealIds[leaf.tab] ?? "") !== "" && iframeIsProxied(spec)) || staleAddress || pane.webArchived !== this.archived) {
+          if (this.focusedId === leaf.id) {
+            focusedRebuilt = true;
+          }
           pane.term?.dispose();
           pane.term = null;
           pane.webDispose?.();
@@ -13209,6 +13240,9 @@ var SplitView = class {
           pane.tab = leaf.tab;
         }
       } else if (!pane.term || staleAddress) {
+        if (this.focusedId === leaf.id) {
+          focusedRebuilt = true;
+        }
         pane.term?.dispose();
         pane.webDispose?.();
         pane.webUrl = null;
@@ -13241,6 +13275,45 @@ var SplitView = class {
       pane.label.textContent = tabLabel(named);
     }
     this.applyFocusClass();
+    this.reEngageFocusAfterRebuild(focusedRebuilt);
+  }
+  /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, correcting
+   *  the desync where `store.focus` stays "terminal" while DOM focus fell back to
+   *  `document.body` (the disposed terminal's blur is suppressed, so nothing else
+   *  reports the loss).
+   *
+   *  Gated on BOTH a focused-pane rebuild AND `termHoldsFocus` so it only fires when
+   *  the operator was keyboard-attached at the moment of the rebuild: a passive
+   *  repaint (rename, archive flip on a sibling, proxy change) that reaches a user
+   *  who DELIBERATELY detached to rail via Ctrl+] does not rebuild the focused pane
+   *  (so `focusedRebuilt` is false anyway), and a same-session rebuild that happens
+   *  to reach a rail-mode user is skipped by `termHoldsFocus` — neither yanks a
+   *  detached operator back into "terminal" without intent.
+   *
+   *  Two rebuild outcomes land differently, and both are the correct one:
+   *
+   *    - Rebuilt as a TERMINAL: refocus() → focus() focuses the new textarea, whose
+   *      focus listener echoes onPaneFocus(_, true), re-confirming store.focus=
+   *      "terminal" against the new DOM-focal textarea. The desync is undone.
+   *    - Rebuilt as a WEB/VS Code pane (no terminal to hand the keyboard to): DOM
+   *      focus is on document.body and no textarea blur can arm onPaneFocus's
+   *      corrector, so report the loss ourselves — store.focus lands on "rail",
+   *      which is the right mode when the focused pane ceases to be a terminal.
+   *
+   *  Split out from reconcile() so the boolean contract is unit-testable without a
+   *  DOM/xterm/WS (split_focus.test.ts stages the pane map directly); the end-to-end
+   *  behavior is pinned by the Playwright selftest. */
+  reEngageFocusAfterRebuild(focusedRebuilt) {
+    if (!focusedRebuilt || !this.termHoldsFocus) {
+      return;
+    }
+    const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
+    if (focused?.term) {
+      this.refocus();
+    } else {
+      this.cb.onFocusChange(false);
+      this.termHoldsFocus = false;
+    }
   }
   createPane(leaf) {
     const container = el("div", "af-pane");
@@ -13752,6 +13825,7 @@ var SplitView = class {
       if (this.focusedId !== leafId) {
         this.focusPane(leafId);
       }
+      this.termHoldsFocus = true;
       this.cb.onFocusChange(true);
       return;
     }
@@ -13763,6 +13837,7 @@ var SplitView = class {
       const active = document.activeElement;
       const stillInPane = active ? [...this.panes.values()].some((p) => p.host.contains(active)) : false;
       if (!stillInPane) {
+        this.termHoldsFocus = false;
         this.cb.onFocusChange(false);
       }
     }, 0);
@@ -18142,9 +18217,11 @@ function openDeleteProject(root2, label) {
         }
         const m = modal;
         m.setBusy(true);
-        void deleteProject(root2, tok).then(closeModal).catch((e) => {
+        void deleteProject(root2, tok).then(() => {
+          if (modal === m) closeModal();
+        }).catch((e) => {
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             requestResync();
             refreshRegisteredProjects();
             surfaceTabError(e);
@@ -18180,7 +18257,9 @@ function openAddProject() {
         }
         const m = modal;
         m.setBusy(true);
-        void registerProject(path, tok).then(closeModal).catch((e) => {
+        void registerProject(path, tok).then(() => {
+          if (modal === m) closeModal();
+        }).catch((e) => {
           m.setBusy(false);
           m.setError(errorText(e));
         });
@@ -18443,11 +18522,17 @@ function doRegisterAccount(agent, name) {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   void registerAccount(agent, name, tok).then((resp) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) {
+      refreshAccounts();
+      return;
+    }
     const notices = resp.notices?.length ? ` \xB7 ${resp.notices.join(" \xB7 ")}` : "";
     setAccountStatus(agent, "", `Registered ${agent} account "${resp.entry.name}"${notices}`, false);
     refreshAccounts();
   }).catch((err) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     setAccountStatus(agent, "", errorText(err), true);
   });
 }
@@ -18456,8 +18541,10 @@ function doOpenAccountLogin(agent, name) {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   setAccountStatus(agent, name, `Starting the ${agent} login\u2026`, false);
   void startAccountLogin(agent, name, tok).then((login) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     if (login.finished || login.session_name === "") {
       const copy = loginWithoutPaneCopy(login);
       setAccountStatus(agent, name, `${copy.status} \xB7 ${copy.detail}`, !login.logged_in);
@@ -18476,6 +18563,7 @@ function doOpenAccountLogin(agent, name) {
       }
     }));
   }).catch((err) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     setAccountStatus(agent, name, errorText(err), true);
   });
 }
@@ -18488,7 +18576,12 @@ function applyConfigValue(key, value) {
   queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 function applyConfigValueNow(key, value, tok) {
+  const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok).then((resp) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) {
+      refreshConfig();
+      return;
+    }
     store.set({
       configStatus: {
         key: resp.result.key,
@@ -18500,6 +18593,7 @@ function applyConfigValueNow(key, value, tok) {
     });
     refreshConfig();
   }).catch((err) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
   });
 }
@@ -18579,11 +18673,11 @@ function openAddTask() {
         const m = modal;
         m.setBusy(true);
         void addTask(buildTask(input), tok).then(() => {
-          closeModal();
+          if (modal === m) closeModal();
           refreshTasks();
         }).catch((e) => {
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             refreshTasks();
             surfaceTabError(e);
             return;
@@ -18624,11 +18718,11 @@ function openEditTask(task) {
           },
           tok
         ).then(() => {
-          closeModal();
+          if (modal === m) closeModal();
           refreshTasks();
         }).catch((e) => {
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             refreshTasks();
             surfaceTabError(e);
             return;
@@ -18693,7 +18787,9 @@ function doHandoff() {
         }
         const m = modal;
         m.setBusy(true);
-        void handoffSession(target.id, target.title, to, tok, account).then(closeModal).catch((e) => {
+        void handoffSession(target.id, target.title, to, tok, account).then(() => {
+          if (modal === m) closeModal();
+        }).catch((e) => {
           if (isMutationCommittedError(e)) {
             if (modal === m) closeModal();
             requestResync();
@@ -18718,7 +18814,7 @@ function doRemoveTask(task) {
     const handle = modal;
     handle.setBusy(true);
     void removeTask(task, tok).then(() => {
-      closeModal();
+      if (modal === handle) closeModal();
       return refreshTasks();
     }).catch((error) => {
       handle.setBusy(false);

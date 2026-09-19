@@ -26,7 +26,7 @@ func newRateSlotWatcher(t *testing.T, taskID string, deliver func(string, string
 	t.Helper()
 	s := newWatcherSupervisor()
 	s.eventsPerMinute = 10
-	s.deliver = deliver
+	s.deliver = adaptWatchDelivery(deliver)
 	return &taskWatcher{
 		sup:      s,
 		taskID:   taskID,
@@ -128,9 +128,9 @@ func TestWatcherHandleEvent_RefundsAcrossTheRPCHop(t *testing.T) {
 	// The manager's pre-flight error, flattened by net/rpc to a bare string — the
 	// type is gone; only the marker text remains.
 	origDeliver := deliverPromptForTask
-	deliverPromptForTask = func(DeliverPromptRequest) (string, error) {
+	deliverPromptForTask = func(DeliverPromptRequest) (taskPromptDeliveryResult, error) {
 		wire := notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", "captain")).Error()
-		return "", fmt.Errorf("%s", wire)
+		return taskPromptDeliveryResult{}, fmt.Errorf("%s", wire)
 	}
 	t.Cleanup(func() { deliverPromptForTask = origDeliver })
 
@@ -287,13 +287,13 @@ func TestWatcherHandleEvent_RefundsWhenRootAgentRefusesPreFlight(t *testing.T) {
 			// text and destroys *notAttemptedError on the way.
 			var wire string
 			origDeliver := deliverPromptForTask
-			deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
-				status, err := manager.DeliverPrompt(req)
+			deliverPromptForTask = func(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
+				status, deliveryStatus, promptRetained, err := manager.deliverPromptWithOutcome(req)
 				if err == nil {
-					return status, nil
+					return taskPromptDeliveryResult{status: status, deliveryStatus: deliveryStatus, promptRetained: promptRetained}, nil
 				}
 				wire = err.Error()
-				return "", fmt.Errorf("%s", wire)
+				return taskPromptDeliveryResult{}, fmt.Errorf("%s", wire)
 			}
 			t.Cleanup(func() { deliverPromptForTask = origDeliver })
 

@@ -878,7 +878,7 @@ func TestWatcherDrainExpiresAgedEvents(t *testing.T) {
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab130005", `sleep 60`, dir)))
 	fd := &flakyDeliver{}
 	fd.healed.Store(true)
-	s.deliver = fd.deliver
+	s.deliver = adaptWatchDelivery(fd.deliver)
 	// A generous bound: the "fresh" event has the whole window to be delivered,
 	// which no CI stall approaches — while the stale events are backdated an
 	// hour, an enormous margin past it. The seam replaces the old
@@ -932,10 +932,10 @@ func TestWatcherDrainLogsExpiryCountWhenStoppedMidBackoff(t *testing.T) {
 	// fails forever, so the drainer sits in the stop-aware backoff sleep — the
 	// exact window the stop has to land in.
 	var attempts atomic.Int64
-	s.deliver = func(taskID, line string) error {
+	s.deliver = adaptWatchDelivery(func(taskID, line string) error {
 		attempts.Add(1)
 		return errors.New("target unreachable (outage)")
-	}
+	})
 	s.queueMaxAge = 5 * time.Second
 	queueDir, _ := s.queueDir()
 
@@ -1077,7 +1077,7 @@ func TestWatcherQueuesFailedDeliveriesAndReplaysInOrder(t *testing.T) {
 	script := `echo e1; echo e2; echo e3; sleep 60`
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab130001", script, dir)))
 	fd := &flakyDeliver{}
-	s.deliver = fd.deliver
+	s.deliver = adaptWatchDelivery(fd.deliver)
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -1115,7 +1115,7 @@ func TestWatcherBacklogSurvivesRestart(t *testing.T) {
 	// First daemon lifetime: deliveries fail, three events queue, then stop.
 	s1, _ := newTestSupervisor(t, staticTasks(watchTask("ab130002", `echo e1; echo e2; echo e3; sleep 60`, dir)))
 	fd1 := &flakyDeliver{}
-	s1.deliver = fd1.deliver
+	s1.deliver = adaptWatchDelivery(fd1.deliver)
 	queueDir, _ := s1.queueDir()
 	if err := s1.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -1131,7 +1131,7 @@ func TestWatcherBacklogSurvivesRestart(t *testing.T) {
 	s2, _ := newTestSupervisor(t, staticTasks(watchTask("ab130002", `sleep 60`, dir)))
 	fd2 := &flakyDeliver{}
 	fd2.healed.Store(true)
-	s2.deliver = fd2.deliver
+	s2.deliver = adaptWatchDelivery(fd2.deliver)
 	s2.queueDir = func() (string, error) { return queueDir, nil }
 	if err := s2.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -1149,7 +1149,7 @@ func TestWatcherStopJoinsDrainer(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := newTestSupervisor(t, staticTasks(watchTask("ab130003", `echo e1; sleep 60`, dir)))
 	fd := &flakyDeliver{} // never healed: the drainer is stuck retrying
-	s.deliver = fd.deliver
+	s.deliver = adaptWatchDelivery(fd.deliver)
 	s.drainBaseBackoff = time.Hour // park the drainer deep in a backoff wait
 	s.drainMaxBackoff = time.Hour
 	queueDir, _ := s.queueDir()
@@ -1198,5 +1198,128 @@ func TestWatcherReloadRemovesDeletedTaskQueue(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(queueDir, "deadbeef.jsonl")); !os.IsNotExist(err) {
 		t.Fatal("deleted task's backlog must be removed on reload")
+	}
+}
+
+// TestEventQueue_ParkedEnqueueRollbackWhenAppendFails is the regression for
+// the stale usage-limit marker: the first limit-held event on an empty queue
+// persists .limit-parked BEFORE the record append runs. If the append fails,
+// the event is not retained and the marker must not survive — an ordinary stop
+// would trust it and route prefetched and kernel-buffered lines through
+// protected persistence instead of ordinary-stop discard.
+func TestEventQueue_ParkedEnqueueRollbackWhenAppendFails(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "parked-append-fail")
+	q.appendRecord = func(string, []byte) (int, error) {
+		return 0, errors.New("simulated append failure")
+	}
+
+	retained, err := q.enqueueWithParkedStatus("held-for-limit", true, true)
+	if err == nil {
+		t.Fatal("enqueue with a failing append returned nil error")
+	}
+	if retained {
+		t.Fatal("a failed append reported the event retained")
+	}
+	if q.retainLimitParked() {
+		t.Fatal("a dropped parked event left its usage-limit marker behind")
+	}
+	if _, statErr := os.Lstat(q.limitPath); !os.IsNotExist(statErr) {
+		t.Fatalf("usage-limit marker sidecar survived the dropped event: %v", statErr)
+	}
+	if got := q.pendingCount(); got != 0 {
+		t.Fatalf("dropped event counted as pending: %d", got)
+	}
+
+	// A subsequent healthy parked enqueue still marks retention normally.
+	q.appendRecord = appendRecordToFile
+	retained, err = q.enqueueWithParkedStatus("held-for-limit", true, true)
+	if err != nil || !retained {
+		t.Fatalf("healthy enqueue after rollback: retained=%v err=%v", retained, err)
+	}
+	if !q.retainLimitParked() {
+		t.Fatal("healthy parked enqueue did not mark retention")
+	}
+	if got := q.pendingCount(); got != 1 {
+		t.Fatalf("healthy enqueue after rollback: pending=%d", got)
+	}
+}
+
+// The rollback removes only a marker the failed call created: a marker that
+// already protects an earlier parked event must survive a later dropped
+// enqueue.
+func TestEventQueue_ParkedEnqueueRollbackKeepsPreexistingMarker(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "parked-keep-marker")
+	if err := q.enqueue("held-one", true); err != nil {
+		t.Fatalf("seed parked event: %v", err)
+	}
+	q.appendRecord = func(string, []byte) (int, error) {
+		return 0, errors.New("simulated append failure")
+	}
+	defer func() { q.appendRecord = appendRecordToFile }()
+
+	retained, err := q.enqueueWithParkedStatus("held-two", true, true)
+	if err == nil {
+		t.Fatal("enqueue with a failing append returned nil error")
+	}
+	if retained {
+		t.Fatal("a failed append reported the event retained")
+	}
+	if !q.retainLimitParked() {
+		t.Fatal("rollback removed a marker that protects an earlier parked event")
+	}
+	if got := q.pendingCount(); got != 1 {
+		t.Fatalf("dropped event changed the backlog: pending=%d", got)
+	}
+}
+
+// TestEventQueue_ParkedEnqueueRetainsAndBlocksWhenMarkerWriteFails reproduces
+// the failure where .limit-parked cannot be written while the JSONL stays
+// appendable — e.g., the events directory loses write permission after the
+// backlog file already exists: O_APPEND on an existing file needs no
+// directory write, but the atomic marker write creates a temp file in the
+// same directory and fails. Before the fix, every subsequent parked enqueue
+// retried that same write and dropped its event while the reader kept
+// consuming; now the event is retained and the reader blocks fail-closed
+// until the marker write recovers or the backlog drains (#4226 review).
+func TestEventQueue_ParkedEnqueueRetainsAndBlocksWhenMarkerWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	q := newEventQueue(dir, "marker-write-fail")
+	if err := q.enqueue("seed-ordinary"); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	// The backlog file exists and stays appendable; a directory at the marker
+	// path refuses the atomic rename for any user, root included — a read-only
+	// events directory does not block a UID-0 suite (#4226 review).
+	failLimitMarkerWrites(t, q)
+
+	retained, err := q.enqueueWithParkedStatus("held-for-limit", true, true)
+	if err == nil {
+		t.Fatal("a failed marker write must still surface an error")
+	}
+	if !retained {
+		t.Fatal("a parked event was dropped although the backlog stayed appendable")
+	}
+	if got := q.pendingCount(); got != 2 {
+		t.Fatalf("retained event did not count as pending: %d", got)
+	}
+	if blocked, unknown := q.limitBackpressureState(); !blocked || !unknown {
+		t.Fatalf("marker write failure must block the reader fail-closed: blocked=%v unknown=%v", blocked, unknown)
+	}
+
+	// Recovery: once the marker path is clear the next mark lands the marker
+	// durably and the block releases with protection intact.
+	if err := os.Remove(q.limitPath); err != nil {
+		t.Fatalf("unblock marker path: %v", err)
+	}
+	if err := q.markLimitParked(); err != nil {
+		t.Fatalf("marker persist after recovery: %v", err)
+	}
+	if blocked, _ := q.limitBackpressureState(); blocked {
+		t.Fatal("reader stayed blocked after the marker landed durably")
+	}
+	if !q.retainLimitParked() {
+		t.Fatal("recovered marker did not restore limit retention")
 	}
 }
