@@ -42,6 +42,16 @@ func (s *TaskPane) validateForm() (string, int) {
 		}
 	}
 
+	// The cap field is editable only while the shape can carry one, so an
+	// inapplicable buffer never reaches this check — and an applicable one is
+	// parsed by the same rule the web form uses (task.ParseCapInput, pinned by
+	// the shared vectors in task/testdata/cap_vectors.json).
+	if s.capApplies() {
+		if _, ok := task.ParseCapInput(s.editMaxRuns.Value()); !ok {
+			return "max runs must be a non-negative integer", taskFocusMaxRuns
+		}
+	}
+
 	// Expand a leading ~ (filepath.Abs does not), resolve to absolute, and
 	// require a real git repo — the same check RunTask/the watcher apply at
 	// fire time (git.IsGitRepo). Persist the normalized value back into the
@@ -150,6 +160,7 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.tasks[s.selectedIdx].WatchCmd = watch
 			s.tasks[s.selectedIdx].TargetSession = s.editTarget.Value()
 			s.tasks[s.selectedIdx].OnComplete = s.onCompleteValue()
+			s.tasks[s.selectedIdx].MaxConcurrentRuns = s.capValue()
 			s.tasks[s.selectedIdx].ProjectPath = absPath
 			s.tasks[s.selectedIdx].Program = s.programValue()
 			s.markTaskDirty(s.tasks[s.selectedIdx].ID)
@@ -174,6 +185,13 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.editTarget, _ = s.editTarget.Update(msg)
 		case taskFocusOnComplete:
 			s.handleOnCompleteKey(msg)
+		case taskFocusMaxRuns:
+			// Same refusal as the lifecycle selector's: a shape that cannot
+			// carry a cap must not accept digits for one either — its row
+			// renders the reason instead of the input.
+			if s.capApplies() {
+				s.editMaxRuns, _ = s.editMaxRuns.Update(msg)
+			}
 		case taskFocusPath:
 			s.editPath, _ = s.editPath.Update(msg)
 		case taskFocusProgram:
@@ -246,6 +264,7 @@ func (s *TaskPane) updateEditFocus() {
 	s.editPrompt.Blur()
 	s.editWatch.Blur()
 	s.editTarget.Blur()
+	s.editMaxRuns.Blur()
 	s.editPath.Blur()
 	// The schedule picker is active only while it is the focused trigger value
 	// on a cron task; blur it otherwise so its raw-cron cursor stays hidden.
@@ -262,6 +281,8 @@ func (s *TaskPane) updateEditFocus() {
 		s.editPrompt.Focus()
 	case taskFocusTarget:
 		s.editTarget.Focus()
+	case taskFocusMaxRuns:
+		s.editMaxRuns.Focus()
 	case taskFocusPath:
 		s.editPath.Focus()
 	}
@@ -299,6 +320,7 @@ func (s *TaskPane) renderEditMode() string {
 	s.schedule.setWidth(s.width)
 	s.editWatch.Width = inputWidth
 	s.editTarget.Width = inputWidth
+	s.editMaxRuns.Width = inputWidth
 	s.editPath.Width = inputWidth
 
 	// The prompt's role depends on the trigger: cron tasks require it, watch
@@ -402,6 +424,12 @@ func (s *TaskPane) renderEditMode() string {
 	b.WriteString(s.renderOnCompleteSelector())
 	b.WriteString("\n")
 	markEnd(taskFocusOnComplete)
+	markStart(taskFocusMaxRuns)
+	b.WriteString(label("Max runs:"))
+	b.WriteString(s.renderCapField())
+	b.WriteString("\n")
+	b.WriteString(fieldErr(taskFocusMaxRuns))
+	markEnd(taskFocusMaxRuns)
 	markStart(taskFocusPath)
 	b.WriteString(label("Path:"))
 	b.WriteString(s.editPath.View())
@@ -584,7 +612,7 @@ func (s *TaskPane) renderOnCompleteSelector() string {
 	t := CurrentTheme()
 	hintStyle := DialogHintStyle()
 	if !s.onCompleteApplies() {
-		return hintStyle.Render(s.wrapOnCompleteText("Target session is kept."))
+		return hintStyle.Render(s.wrapFieldText("Target session is kept."))
 	}
 
 	focused := s.focusIndex == taskFocusOnComplete
@@ -599,18 +627,31 @@ func (s *TaskPane) renderOnCompleteSelector() string {
 		picker := SelectionMarker("◂ ") + selectedStyle.Render(value) + SelectionMarker(" ▸")
 		hint := "←/→ " + onCompleteHint(value)
 		if s.width > 0 && 9+lipgloss.Width(picker)+3+lipgloss.Width(hint) > s.width {
-			return picker + "\n         " + hintStyle.Render(s.wrapOnCompleteText(hint))
+			return picker + "\n         " + hintStyle.Render(s.wrapFieldText(hint))
 		}
 		return picker + hintStyle.Render("   "+hint)
 	}
 	return dimSelectedStyle.Render(value)
 }
 
+// renderCapField renders the watch-task concurrency-cap input, or the reason
+// the current shape cannot carry one — the same inapplicable-row pattern as
+// renderOnCompleteSelector: showing an editable field there would offer a cap
+// ValidateTrigger refuses, so the row says why instead. The reason text is
+// task.CapUnavailableReason — the same words the daemon's validator gives and
+// the web modal shows (#4180).
+func (s *TaskPane) renderCapField() string {
+	if reason := task.CapUnavailableReason(s.editTriggerIsWatch, s.editTarget.Value()); reason != "" {
+		return DialogHintStyle().Render(s.wrapFieldText(reason))
+	}
+	return s.editMaxRuns.View()
+}
+
 // Keep consequences readable in the actual modal content width, which is
 // narrower than the terminal. Continuations align with the value after the
 // nine-cell label; the form's focus range includes these lines so scrolling
 // keeps the whole explanation visible when this field is selected.
-func (s *TaskPane) wrapOnCompleteText(text string) string {
+func (s *TaskPane) wrapFieldText(text string) string {
 	if s.width <= 0 {
 		return text
 	}
