@@ -146,6 +146,15 @@ func ValidateAccountEnvironmentCommand(command string, account Account) error {
 		overrideNames[name] = struct{}{}
 	}
 	if commandMutatesAccountEnvironment(command, overrideNames) {
+		if accountEnvironmentArithmeticNonConstant(command, overrideNames) {
+			return accountCommandValidationErrorf(
+				"account %q cannot scope sibling environment for agent %q: its command contains shell arithmetic "+
+					"whose operand is not a numeric constant — `(( x ))`, `let x`, `[[ x -eq 0 ]]`, `${arr[x]}`, "+
+					"and similar forms all re-evaluate a stored variable's value as fresh arithmetic, so af cannot "+
+					"prove what the expression evaluates to or whether it rewrites an identity or shell-startup "+
+					"variable. Use a literal numeric operand or move the arithmetic out of the agent invocation string",
+				account.Name, account.Agent)
+		}
 		return accountCommandValidationErrorf(
 			"account %q cannot scope sibling environment for agent %q: its command sets an identity or shell-startup variable itself, which can override the account directory",
 			account.Name, account.Agent)
@@ -207,4 +216,70 @@ func quoteArguments(args []string) string {
 		quoted[idx] = strconv.Quote(arg)
 	}
 	return strings.Join(quoted, " ")
+}
+
+// accountEnvironmentArithmeticNonConstant reports whether a sibling refusal
+// fired SOLELY because of the inverted arithmetic guard in
+// commandMutatesAccountEnvironment — that is, whether the command contains an
+// arithmetic context whose operand is not provably a numeric constant (a
+// variable reference, parameter expansion, or command substitution inside
+// `(( ))`, `$(( ))`, `let`, a numeric `[[ ]]` operator, an `${arr[i]}`
+// subscript or `${x:offset:length}` slice, an `arr[i]=v` indexed assignment, or
+// a C-style for loop), AND no node-level identity or shell-startup mutation is
+// independently reachable by the walk in EITHER parse variant. It reuses the
+// same arithmetic scan and the same node walk, so the cause detected here
+// matches the cause that fired the refusal.
+//
+// C is checked across BOTH variants rather than only in the variant where the
+// arithmetic guard fires: bash may parse a form whose inverted-guard arm runs
+// while POSIX parses the same form so the letMutates/Assignment arms re-derive
+// the identity mutation, e.g. `let 'CODEX_HOME[0]=42'; codex` (the bash
+// LetClause's arithmetic arm fires; the POSIX bare-`let` CallExpr is caught by
+// letMutatesAccountEnvironment). The refusal-message decision needs "did the
+// walk find an identity mutation at all", so both variants are inspected.
+//
+// Used to render a refusal that names the real cause instead of the generic
+// "sets an identity or shell-startup variable itself" message, which is false
+// for this class: `(( x = 1 )); codex`, `let 'total += 1'`, and
+// `x=42; [[ x -eq 0 ]]; codex` set no variable at all. When the walk does
+// independently catch an identity or shell-startup mutation (`let
+// CODEX_HOME=42; codex`, `let 'CODEX_HOME[0]=42'; codex`, …) the generic
+// message is accurate, so this helper returns false and the caller keeps the
+// generic refusal.
+func accountEnvironmentArithmeticNonConstant(command string, names map[string]struct{}) bool {
+	bFires, cFires := false, false
+	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
+		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
+		if err != nil {
+			continue
+		}
+		if fileHasArithmeticContextWithVariableOperand(file) {
+			bFires = true
+		}
+		if fileMutatesAccountIdentities(file, names) {
+			cFires = true
+		}
+		if bFires && cFires {
+			break
+		}
+	}
+	return bFires && !cFires
+}
+
+// fileMutatesAccountIdentities reports whether the node walk in
+// commandMutatesAccountEnvironment — the walk that runs AFTER the inverted
+// arithmetic guard — independently catches an identity or shell-startup
+// mutation in this parsed file. It is the same walk; factored here so the
+// refusal-message decision can ask "was the inverted guard the SOLE reason?"
+// without touching commandMutatesAccountEnvironment's signature.
+func fileMutatesAccountIdentities(file syntax.Node, names map[string]struct{}) bool {
+	mutates := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if nodeMutatesAccountEnvironment(node, names, nil) {
+			mutates = true
+			return false
+		}
+		return true
+	})
+	return mutates
 }
