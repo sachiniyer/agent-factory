@@ -3386,6 +3386,195 @@ test("config: a refresh landing mid-edit preserves focus, caret, and later typin
   }
 });
 
+test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXTURE, async ({ browser }) => {
+  // The sibling of #4244. #4244 pins the UNRELATED-rebuild case: a different key's
+  // save landing while a field is mid-edit. This pins the SAME-key case: the user
+  // commits the field they are editing with Enter. Enter does not blur (config.ts
+  // preventDefault()s it), so the input genuinely holds focus through the whole
+  // save round-trip, and rerenderKeepingUserState's `wasEditing` is true coming in.
+  // But update()'s close-on-save clears `this.editing` BEFORE the rerender, so the
+  // `if (this.editing === e.key)` gate in renderControl no longer re-points
+  // `editingInput` at the rebuilt input — `editingInput` stays null, the
+  // `if (wasEditing && this.editingInput)` restoration branch no-ops, and focus
+  // falls to <body>. The user's next keystrokes then become document shortcuts
+  // (`[`/`]` cycle the view) or, for any other printable key, are silently
+  // swallowed (decideKey returns {kind:"none"} without preventDefault for a
+  // body-focused key in config view). The fix re-points editingInput for the
+  // just-saved row so the existing restoration branch keeps focus on the rebuilt
+  // input — without re-opening the edit.
+  //
+  // The route is intercepted, so the daemon is NOT mutated: network.listen_addr
+  // applies live and would otherwise rebind this very daemon's listener. Only the
+  // canned reply drives configStatus + ConfigPane.update/render.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // network.listen_addr — a text row. Mark it dirty with a nonce the daemon does
+    // not hold, set the caret at offset 3, then commit with Enter so the save is
+    // for the SAME key the field is editing.
+    const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    await field.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "abcdef";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "abcdef", inputType: "insertText" }));
+      input.setSelectionRange(3, 3);
+    });
+    await field.press("Enter");
+    await saveStarted;
+    releaseSave!();
+
+    // The echo proves configStatus drove ConfigPane.update (the close-on-save
+    // clear + the rebuild ran), which is the exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="network.listen_addr"] .af-config-echo')).toBeVisible();
+    // RED without the fix: focus fell to <body> when the rebuilt input replaced the
+    // focused one and the restoration gate no-oped on `this.editingInput === null`.
+    await expect(field).toBeFocused();
+    // The caret survived the rebuild — direct evidence the restoration branch
+    // (the only site that re-applies setSelectionRange) drove the rebuilt input.
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.selectionStart)).toBe(3);
+
+    // Typing reaches the rebuilt input at the restored caret instead of falling
+    // onto <body> (where it would be discarded or interpreted as a view shortcut).
+    // The rebuilt input's value is the daemon's freshly re-read value, not the
+    // nonce: the intercepted save did not mutate the daemon, so refreshConfig
+    // repopulates the field from e.value and Z is inserted at the restored caret.
+    await p.keyboard.type("Z");
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.value)).toContain("Z");
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a later save's status does not pull focus out of the field the user is in", REAL_FIXTURE, async ({ browser }) => {
+  // The third case in this family, and the only one that moves focus to the WRONG
+  // ROW rather than to <body>. Saves are serialized PER KEY (createKeyedQueue), and
+  // config.test.ts pins that two keys have no ordering relationship — so key A's
+  // response can land after key B's. By then the user is in B: B's own save closed
+  // its field and handed focus back to the rebuilt input. A's status then drives
+  // another ConfigPane.update/render, and a restoration that picked its row from
+  // `status.key` would re-point `editingInput` at A and move focus — plus the caret
+  // captured from B — into a field the user never opened, so the next keystroke
+  // edits the wrong setting silently. Restoration reads the key that actually HELD
+  // focus instead, so A's late status rebuilds the list without moving the user.
+  //
+  // Every SetConfigValue is intercepted, so the daemon is NOT mutated:
+  // network.listen_addr applies live and would otherwise rebind this very daemon's
+  // listener. Only the canned replies drive configStatus + ConfigPane.update.
+  const ctx = await browser.newContext();
+  const startResolvers = new Map<string, () => void>();
+  const releaseResolvers = new Map<string, () => void>();
+  const started = (key: string) => new Promise<void>((resolve) => startResolvers.set(key, resolve));
+  const held = (key: string) => new Promise<void>((resolve) => releaseResolvers.set(key, resolve));
+  const addrStarted = started("network.listen_addr");
+  const prefixStarted = started("branch_prefix");
+  const holds: Record<string, Promise<void>> = {
+    "network.listen_addr": held("network.listen_addr"),
+    branch_prefix: held("branch_prefix"),
+  };
+  const releaseAll = () => { for (const resolve of releaseResolvers.values()) resolve(); };
+  try {
+    const p = await ctx.newPage();
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      startResolvers.get(body.key)?.();
+      await holds[body.key];
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+    // branch_prefix is the only other text row without an enum, and it is advanced:
+    // network.listen_addr is the single core-tier free-text key.
+    await pane.locator(".af-config-toggle").click();
+    const addr = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    const prefix = pane.locator('.af-config-row[data-key="branch_prefix"] input');
+    await expect(prefix).toBeVisible();
+
+    // A is committed first and its response is held, so it is still in flight when
+    // B is committed — the overlap the per-key queue permits by design.
+    await addr.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "127.0.0.1:9443";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "3", inputType: "insertText" }));
+    });
+    await addr.press("Enter");
+    await addrStarted;
+
+    await prefix.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "af-web-selftest/";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "/", inputType: "insertText" }));
+    });
+    await prefix.press("Enter");
+    await prefixStarted;
+
+    // B answers first: its save closes its own field and focus comes back to the
+    // rebuilt input — the same-key behavior the sibling test above pins.
+    releaseResolvers.get("branch_prefix")!();
+    await expect(pane.locator('.af-config-row[data-key="branch_prefix"] .af-config-echo')).toBeVisible();
+    await expect(prefix).toBeFocused();
+
+    // A answers second. RED without the fix: `status.key` now names
+    // network.listen_addr, so the restoration re-pointed editingInput at THAT row
+    // and focus left branch_prefix for a field the user never opened.
+    releaseResolvers.get("network.listen_addr")!();
+    await expect(pane.locator('.af-config-row[data-key="network.listen_addr"] .af-config-echo')).toBeVisible();
+    await expect(prefix).toBeFocused();
+    await expect(addr).not.toBeFocused();
+
+    // The user-visible contract behind the focus assertion: the next keystroke
+    // edits the field they are in, and leaves the other one alone.
+    const addrBefore = await addr.inputValue();
+    await p.keyboard.type("x");
+    await expect.poll(() => prefix.inputValue()).toMatch(/x$/);
+    await expect(addr).toHaveValue(addrBefore);
+  } finally {
+    releaseAll();
+    await ctx.close().catch(() => {});
+  }
+});
+
 // typeIntoAssistantAndExpectEcho is the config assistant's live-output proof. The
 // assistant runs the fake agent (`cat`), so a keystroke makes the full round trip —
 // OpInput → daemon → tmux PTY → `cat` echo → /v1/config-assistant/stream → xterm — and
