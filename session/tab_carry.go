@@ -25,11 +25,12 @@ import (
 //     a tab strip of strangers and drop any pane binding pointed at one. The
 //     replacement record does get a new SESSION id, so nothing keeps an open
 //     stream alive across the heal either way; that is the record swap, not this.
-//   - Process tabs RE-RUN their command, because tmux does it: setupTabs restores
-//     each tab by name, and TmuxSession.Restore re-spawns a definitively-absent
-//     session in the worktree (#386). That is exactly what a Lost restore already
-//     does to every other session's process tabs, and a root whose heal alone
-//     produced dead rows would be the surprising one.
+//   - Tabs come back the way a Lost restore brings them back. A shell tab gets
+//     a fresh session, because TmuxSession.Restore re-spawns a definitively-absent
+//     one in the worktree (#386). A process tab does NOT re-run its command
+//     (#4479): setupTabs routes it through restoreProcessTab, the reap just
+//     killed its session, so it comes back inert, carrying whatever exit
+//     evidence the record held.
 //   - Tmux names are REUSED verbatim. The replacement root has the same title in
 //     the same repo, so it derives the same agent session name and the carried
 //     "<agent>__<token>" names still belong to it — and the sessions they name
@@ -102,7 +103,11 @@ func (i *Instance) restoreCarriedTabs() {
 		}
 		tab := &Tab{
 			ID: id, Name: name, Kind: kind, Command: td.Command, URL: td.URL,
-			accountScopeProvenanceUnknown: account != "" && kind.HasTmux(),
+			// The recorded finish is part of the logical tab (#4506 review): the
+			// session it could be re-read from is the one the reap just killed.
+			Exit:                          tabExitFromData(td.Exit),
+			accountScope:                  td.AccountScope,
+			accountScopeProvenanceUnknown: kind.HasTmux() && siblingScopeUnknown(account, td.AccountScope),
 		}
 		if kind.HasTmux() {
 			token := ""
@@ -114,6 +119,9 @@ func (i *Instance) restoreCarriedTabs() {
 			}
 			usedTokens[token] = true
 			tab.tmux = agentTmux.NewSiblingSession(prefix+token, tabProgram(kind, td.Command, ""))
+			if kind == TabKindProcess {
+				tab.tmux.SetRemainOnExit()
+			}
 		}
 		rebuilt = append(rebuilt, tab)
 	}
