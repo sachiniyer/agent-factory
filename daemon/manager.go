@@ -273,6 +273,24 @@ type Manager struct {
 	// value is that repo's workspace path, so the shutdown wait can name the
 	// checkout holding it rather than a repo-ID hash.
 	rootCreatesInFlight map[string]string
+	// reapedRootCarries parks what a reaped root record handed a replacement
+	// that has not been published yet (#4400 review). Keyed by REPO ID for the
+	// same reason rootCreatesInFlight is: two root_agents spellings of one
+	// repository share the carry (#4400 review round 2). The in-memory park is
+	// the same-process half; the durable half is the carry file reapDeadRoot
+	// writes beside instances.json before deleting the record, so a daemon
+	// restart inside the reap→publish window cannot drop the pin either
+	// (#4400 review round 3). Set under mu by the reaping create, consumed by
+	// the next create for that repo that finds no record — hydrated from disk
+	// when the map is empty — and cleared by retireReapedRootCarry once a pass
+	// leaves a healthy root in the checkout the carry is bound to (or a
+	// disable/delete outcome makes it moot). rootEnsureFailed deliberately
+	// leaves it: the pin must survive transient create failure.
+	reapedRootCarries map[string]reapedRootState
+	// reapedRootCarryNotices is the last carry warning logged per repo ID, so a
+	// condition a healthy root re-checks every tick is logged once. Guarded by
+	// mu; allocated on first use.
+	reapedRootCarryNotices map[string]string
 	// rootCreateWG counts those goroutines, so shutdown can JOIN them instead of
 	// abandoning a half-provisioned session (waitRootAgentCreates). A WaitGroup is
 	// internally synchronized and needs no lock of its own; the Add nonetheless
@@ -562,58 +580,6 @@ type Manager struct {
 	errorLog *stdlog.Logger
 }
 
-// warn returns the logger this Manager's warnings go to. Nil-safe on both the
-// receiver and the field, so a Manager built by any path — including the shells
-// that predate managerOptions — logs to the process-global sink exactly as
-// before.
-func (m *Manager) warn() *stdlog.Logger {
-	if m == nil {
-		return log.WarningLog
-	}
-	return warnLoggerOr(m.warnLog)
-}
-
-// info returns the logger this Manager's INFO lines go to (#3797), nil-safe on
-// both the receiver and the field.
-func (m *Manager) info() *stdlog.Logger {
-	if m == nil {
-		return log.InfoLog
-	}
-	return infoLoggerOr(m.infoLog)
-}
-
-// err returns the logger this Manager's ERROR lines go to (#3797), nil-safe on
-// both the receiver and the field.
-func (m *Manager) err() *stdlog.Logger {
-	if m == nil {
-		return log.ErrorLog
-	}
-	return errorLoggerOr(m.errorLog)
-}
-
-// The three resolvers below exist separately from the accessors for the callers
-// that need them before a Manager exists: the root-agent snapshot is built
-// inside the constructor, and its diagnostics are the ones #3787's race report
-// actually names. loggerOr carries the nil rule once so the three cannot drift.
-func loggerOr(logger, fallback *stdlog.Logger) *stdlog.Logger {
-	if logger == nil {
-		return fallback
-	}
-	return logger
-}
-
-func warnLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
-	return loggerOr(logger, log.WarningLog)
-}
-
-func infoLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
-	return loggerOr(logger, log.InfoLog)
-}
-
-func errorLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
-	return loggerOr(logger, log.ErrorLog)
-}
-
 // managerOptions carries construction-time seams. Everything here has a
 // production default, and production passes the zero value: these exist so a
 // test can scope to one Manager what the daemon keeps process-global.
@@ -738,6 +704,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		rootProgramDriftInFlight:  make(map[string]int),
 		rootCreateRefusals:        make(map[string]rootCreateRefusal),
 		rootCreatesInFlight:       make(map[string]string),
+		reapedRootCarries:         make(map[string]reapedRootState),
 		rootKilledAt:              make(map[string]time.Time),
 		deletedRootRepos:          make(map[string]string),
 		killsInFlight:             make(map[string]struct{}),

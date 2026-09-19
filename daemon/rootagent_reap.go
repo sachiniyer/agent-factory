@@ -85,7 +85,8 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 	// and a roster that never coexisted; there is no reason to leave that open
 	// when the whole record is available atomically.
 	snapshot := inst.ToInstanceData()
-	carried := reapedRootState{tabs: snapshot.Tabs, notice: snapshot.RootRecreateContext}
+	carried := reapedRootState{workspace: snapshot.Path, tabs: snapshot.Tabs, notice: snapshot.RootRecreateContext, account: snapshot.Account, agent: snapshot.CurrentAgent,
+		pendingSwap: snapshot.PendingAccountSwap, pendingHandoffMission: snapshot.PendingHandoffMission}
 	if snapshot.AgentConversation != nil {
 		carried.conversation = *snapshot.AgentConversation
 	}
@@ -159,6 +160,48 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 	if err := m.stopVSCodeForInstance(key, inst.ID); err != nil {
 		return reapedRootState{}, false, fmt.Errorf("reaping dead root for repo %s: VS Code editor teardown is not confirmed after runtime teardown, retaining its record for a retry: %w", repoID, err)
 	}
+	// Persist the carry immediately BEFORE the record it was read from is
+	// deleted (#4400 review round 3): from deleteSessionRecord on, this file is
+	// the only place the account pin, conversation, tabs, and notice survive a
+	// daemon restart — the in-memory park in runRootCreate covers only the
+	// same-process window. Written inside the reap rather than at the park so a
+	// crash between delete and park cannot lose it, and written HERE rather
+	// than beside the snapshot so a retained record (the early-error returns
+	// above) never leaves a stale file a later no-record pass could consume.
+	// A failure retains the record for the next tick rather than healing over
+	// a carry a restart could still drop — and a store that cannot take this
+	// file would fail deleteSessionRecord's write moments later anyway. The
+	// retain paths below put back whatever the write replaced, for the same
+	// staleness reason.
+	//
+	// The file holds one carry per repository, so a carry still parked here —
+	// one a create in another checkout left for its own root_agents entry
+	// (retireReapedRootCarry) — is superseded by this write. That is a
+	// retirement of another checkout's account pin and pending swap, so it is
+	// named before it happens (#4400 review round 7).
+	prior, hadPrior, priorErr := m.parkedReapedRootCarry(repoID)
+	if hadPrior && !prior.forWorkspace(carried.workspace) {
+		m.warn().Printf("reaping the dead root in %s supersedes the root agent carry parked for %s (account %q, pending account swap: %t); that checkout's state is lost",
+			carried.workspace, prior.workspace, prior.account, prior.pendingSwap != nil)
+	}
+	if err := m.writeReapedRootCarry(repoID, carried); err != nil {
+		return reapedRootState{}, false, fmt.Errorf("reaping dead root for repo %s: could not persist the carry its replacement needs: %w", repoID, err)
+	}
+	if priorErr != nil {
+		// Only once the write has landed: a link or directory at the path
+		// refuses the write, and then nothing was superseded.
+		m.warn().Printf("reaping dead root for repo %s superseded a parked root agent carry that could not be read: %v", repoID, priorErr)
+	}
+	restorePrior := func() {
+		if !hadPrior {
+			m.removeReapedRootCarry(repoID)
+			return
+		}
+		if err := m.writeReapedRootCarry(repoID, prior); err != nil {
+			m.warn().Printf("reaping dead root for repo %s was retained, but the carry parked for %s could not be restored: %v", repoID, prior.workspace, err)
+		}
+	}
+
 	// Through the one choke point (#1917): it refuses while the teardown's outcome
 	// is unknown. This site was still log-and-delete after two audits I called
 	// exhaustive — which is the argument for there being exactly one place to call.
@@ -166,6 +209,7 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 	// evidence is retained from the exact record being deleted.
 	deleted, err := m.deleteSessionRecord(repoID, session.RootSessionTitle, inst.ID, teardownErr, snapshot)
 	if err != nil {
+		restorePrior()
 		// Return the ERROR, not (false, nil) (#1917 round 8). "No, but fine" is
 		// absence-of-error wearing a different hat: the caller reads it as "nothing to
 		// reap" and skips rootEnsureFailed, so a persistent tmux/file-lock timeout
@@ -175,6 +219,7 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 		return reapedRootState{}, false, fmt.Errorf("reaping dead root for repo %s: %w", repoID, err)
 	}
 	if !deleted {
+		restorePrior()
 		m.info().Printf("dead root reap for repo %s skipped storage delete: current root record has a different instance identity", repoID)
 		return reapedRootState{}, false, nil
 	}

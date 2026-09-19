@@ -187,6 +187,56 @@ func (m *Manager) resolvedRootAgentFor(repoID string, legacy *config.RootAgentCo
 	return m.rootAgentLayers.Load().resolve(repoID, legacy)
 }
 
+// repoHasEnabledRootCandidate reports whether any candidate OTHER than the one
+// at excludeKey still opts this repo into an ensured root — the question a
+// disabled pass asks before retiring the parked reaped carry, which exists
+// for exactly one consumer: the next enabled spelling of this repo (#4400
+// review).
+//
+// The sibling set mirrors the sweep's own. A projectRoots binding counts only
+// while the legacy map does not cover the repo — the singleton sweep applies
+// the same gate before visiting it. A legacy path counts when the dedup set
+// ties it to this repo (byPath is the proven answer) or while its probe has
+// never answered (unknownPaths): an unproven path may name this repo — a
+// linked worktree's provisional guess hashes to nothing real — and "unknown"
+// must never read as "absent" here any more than it does in the dedup set
+// itself. Each sibling is judged by resolve on ONE loaded snapshot — its own
+// pass would reach the same layers through resolvedRootAgentFor, whose pending-
+// probe gate this helper already applies once for the whole repo below.
+func (m *Manager) repoHasEnabledRootCandidate(repoID, excludeKey string) bool {
+	layers := m.rootAgentLayers.Load()
+	// An UNKNOWABLE decision is not a disabled one: a pending re-attribution
+	// probe or an unreadable personal layer resolves every candidate disabled
+	// fail-closed, but retiring the carry on that evidence would destroy it in
+	// exactly the transient it exists to survive. Park until a source answers.
+	if m.rootAttributionPendingFor(repoID) || layers.decisionUnknown(repoID) {
+		return true
+	}
+	if binding, ok := layers.projectRoots[repoID]; ok && binding.root != excludeKey &&
+		!layers.legacy.covers(repoID) && layers.resolve(repoID, nil).Enabled {
+		return true
+	}
+	for path, rc := range m.cfg.RootAgents {
+		if path == excludeKey {
+			continue
+		}
+		// Skip only a path the dedup set PROVES belongs to another repository.
+		// byPath may carry a stale resolution beside an unanswered probe
+		// (unknownPaths), and a determinately-free or unenumerated path can
+		// still resolve here later — both stay candidates, because retiring
+		// the carry while one might ensure this repo is the defect this check
+		// exists to prevent.
+		if owner := layers.legacy.byPath[path]; owner != "" && owner != repoID &&
+			!layers.legacy.unknownPaths[path] {
+			continue
+		}
+		if layers.resolve(repoID, &rc).Enabled {
+			return true
+		}
+	}
+	return false
+}
+
 // resolve applies the daemon's fail-closed policy (#3241, #3247) before
 // layering: a repo whose decision decisionUnknown reports unknowable resolves
 // to disabled without consulting lower layers — absence of proof is not
@@ -496,7 +546,28 @@ func (m *Manager) rootEnsureStateForLocked(key string) *rootEnsureState {
 // boundary (#3366), and nil for a legacy root_agents path.
 func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo *config.RepoContext, resolution config.RootAgentResolution, identity *resolvedProjectRoot) {
 	if !resolution.Enabled {
-		m.rootEnsureSucceeded(st)
+		// A disabled candidate ran and adopted nothing, so it cannot be the
+		// pass that retires this repo's parked reaped carry WHILE a second
+		// still-enabled spelling of this same repo sits in backoff — doing so
+		// would cost the replacement its account pin, conversation, and tab
+		// roster (Codex on #4400). But when no enabled spelling remains at
+		// all, the carry has no consumer left: parking it indefinitely would
+		// resurrect an obsolete account, conversation, and roster the next
+		// time anything re-enables this repo's root (#4400 review).
+		key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
+		m.mu.Lock()
+		inst := m.instances[key]
+		m.mu.Unlock()
+		if inst != nil {
+			if status := inst.GetStatus(); status != session.Dead && status != session.Lost && status != session.Archived {
+				m.rootEnsureSucceeded(repo.ID, inst.Path, st)
+				return
+			}
+		}
+		if !m.repoHasEnabledRootCandidate(repo.ID, stateKey) {
+			m.discardReapedRootCarry(repo.ID, "no enabled root_agents entry for its repository remains to restore it")
+		}
+		m.rootEnsureBackoffReset(st)
 		return
 	}
 	workspace := repo.WorkspacePath()
@@ -518,7 +589,13 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	deleted := m.rootDeletionTombstoneApplies(sweepLayers, repo.ID)
 	m.mu.Unlock()
 	if deleted {
-		m.rootEnsureSucceeded(st)
+		// The deleted project's root is suppressed for good, so its parked
+		// carry has no consumer left — unless a create that started before the
+		// delete still owns it and retires it itself.
+		m.rootEnsureBackoffReset(st)
+		if !m.rootCreateInFlight(repo.ID) {
+			m.discardReapedRootCarry(repo.ID, "its project was deleted")
+		}
 		return
 	}
 
@@ -561,7 +638,10 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			// evidence, so a later outage does not carry a rotated-away id (#3306).
 			m.checkAdoptedRootProgramDrift(repo, key, workspace, st, resolution.RootAgent, inst, identity)
 			m.refreshRootClaudeConversation(repo.ID, key, workspace, inst, st)
-			m.rootEnsureSucceeded(st)
+			// The ADOPTED root's checkout, not this candidate's: a sibling
+			// spelling of the repository adopting it must not retire a carry
+			// parked for its own checkout, which only a root there can consume.
+			m.rootEnsureSucceeded(repo.ID, inst.Path, st)
 			return
 		}
 	}
@@ -736,8 +816,30 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 // growing return list so a future field cannot be added to the snapshot and
 // forgotten at the create — the shape of both #2616 and #2628.
 type reapedRootState struct {
+	// workspace is the checkout the reaped record ran in (#4400 review). Two
+	// spellings of one repository — a linked worktree of a bare repo shares the
+	// repo ID — park and consume the same repo-keyed carry, but the carried
+	// conversation and tab roster belong to the workspace that produced them:
+	// transcript lookup is scoped by project path, and carried tabs describe
+	// processes that ran in that tree. A create under a different workspace
+	// must leave the carry for its own spelling rather than restore another
+	// worktree's state.
+	workspace string
 	// conversation is the provider conversation the vanished root was in (#2616).
 	conversation session.AgentConversationData
+	// account is the credential account the vanished root ran as (#4395). A
+	// root's account is only ever an explicit pin — applyDefaultAccount exempts
+	// reserved creates and the scheduler never reaches this title — so whatever
+	// the record held is the operator's choice, and a replacement create that
+	// dropped it would silently resume work on the ambient identity.
+	account string
+	// agent is the namespace that account pin was selected under — the agent
+	// the REAPED record resolved to, not the one the replacement will. An
+	// account name means nothing across registries (claude's "work" and
+	// codex's "work" are different credentials), so the recreate may keep the
+	// pin only while the replacement program resolves to this same agent
+	// (#4400 review).
+	agent string
 	// tabs is its full persisted roster, agent tab included (#2628). The create
 	// ignores index 0 and rebuilds the rest; keeping the roster whole means the
 	// snapshot is exactly what the record held, not a pre-filtered view of it.
@@ -747,118 +849,16 @@ type reapedRootState struct {
 	// the replacement'"'"'s own verdict so the older, unseen loss is not erased by a
 	// cleaner second heal.
 	notice session.RootRecreateContext
-}
-
-// rootEnsureSucceeded resets a repo's retry state after a pass that left a
-// healthy root in place (freshly created or adopted).
-func (m *Manager) rootEnsureSucceeded(st *rootEnsureState) {
-	m.mu.Lock()
-	st.consecutiveFailures = 0
-	st.unansweredFailures = 0
-	st.escalated = false
-	st.escalatedPersistent = false
-	st.nextAttempt = time.Time{}
-	st.suppressLogged = false
-	m.mu.Unlock()
-}
-
-// rootEnsureFailed records a failed ensure attempt: exponential backoff up to
-// rootEnsureBackoffMax, where the retry cadence stays for as long as the
-// failures do. Retrying forever (instead of giving up until restart) is what
-// guarantees a root heals after a tmux-server outage of any length — an
-// outage is indistinguishable from a broken config while it lasts, and only
-// a later retry can tell the difference (#1122). The cost for a genuinely
-// broken config is one cheap failed attempt per cadence interval, each
-// logged. Crossing rootEnsureEscalationThreshold logs an ERROR so a
-// persistent cause is visible without waiting for a user to notice the
-// missing root — worded for what the attempts actually established, and
-// re-logged if that changes (#3500).
-func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	st.consecutiveFailures++
-	if errors.Is(err, config.ErrRepoProbeUnanswered) {
-		st.unansweredFailures++
-	}
-	backoff := rootEnsureBackoffFor(st.consecutiveFailures)
-	st.nextAttempt = time.Now().Add(backoff)
-	if rootEnsureShouldEscalate(st) {
-		st.escalated = true
-		st.escalatedPersistent = rootEnsureCauseIsEstablished(st)
-		m.err().Printf("root agent ensure for %q failed %d consecutive times; %s — will keep retrying every %s: %v", path, st.consecutiveFailures, rootEnsureEscalationCause(st), rootEnsureBackoffMax, err)
-		return
-	}
-	m.warn().Printf("root agent ensure for %q failed (attempt %d), retrying in %s: %v", path, st.consecutiveFailures, backoff, err)
-}
-
-// rootEnsureAnsweredFailures counts the failures in the current streak that
-// produced a real error rather than ending before git could answer. Caller
-// holds m.mu.
-func rootEnsureAnsweredFailures(st *rootEnsureState) int {
-	return st.consecutiveFailures - st.unansweredFailures
-}
-
-// rootEnsureCauseIsEstablished reports whether the streak has the evidence a
-// persistence claim needs: a full threshold of failures that actually reported
-// something. It is the one predicate both the escalation decision and its
-// wording read, so the two cannot drift apart. Caller holds m.mu.
-func rootEnsureCauseIsEstablished(st *rootEnsureState) bool {
-	return rootEnsureAnsweredFailures(st) >= rootEnsureEscalationThreshold
-}
-
-// rootEnsureShouldEscalate decides whether a streak gets an escalation ERROR
-// now. Once when it crosses the threshold, plus at most once more for the one
-// transition that changes what the ERROR may claim: a streak escalated as
-// "cause unknown" whose failures LATER start answering has established a real
-// persistent cause, and the old strict equality on the threshold could never
-// report it — the count is already past the threshold, so the genuine cause
-// would be logged as warnings forever while the root stayed down (#3500
-// review).
-//
-// The trigger and the CLAIM are deliberately separate. Visibility is owed after
-// a threshold of consecutive failures whatever they were — the root has been
-// down that long either way — but "the cause looks persistent" is owed only
-// once a threshold of failures has actually reported something. So the first
-// ERROR always fires on the count, worded for the evidence, and the upgrade
-// fires once that evidence arrives.
-//
-// The bar is a full threshold rather than a single answered failure because
-// this path does not see only repo probes: rootEnsureFailed also records a
-// failed session create and a failed dead-root reap, neither of which carries
-// the unanswered sentinel. One transient tmux failure must not turn "cause
-// unknown" into "looks persistent" (#3500 review round 2) — and a MIXED first
-// streak must not either, nor lock itself out of the upgrade by having claimed
-// persistence on that one failure (round 3).
-//
-// Bounded at two ERRORs per streak: escalatedPersistent only ever goes false to
-// true, since an answered failure is never un-answered later in the same
-// streak. Caller holds m.mu.
-func rootEnsureShouldEscalate(st *rootEnsureState) bool {
-	if !st.escalated {
-		return st.consecutiveFailures >= rootEnsureEscalationThreshold
-	}
-	return !st.escalatedPersistent && rootEnsureCauseIsEstablished(st)
-}
-
-// rootEnsureEscalationCause words what the escalation ERROR is entitled to
-// claim about the cause. Attempts whose repo probe went unanswered (#3500)
-// still count toward the backoff — they must, since the retry cadence is what
-// keeps a loaded box from forking git every tick, and #1122's retry-forever
-// contract is unchanged — but they are not evidence of anything: an attempt
-// that never got an answer out of git has established nothing about the
-// repository or the configuration. Caller holds m.mu.
-func rootEnsureEscalationCause(st *rootEnsureState) string {
-	answered := rootEnsureAnsweredFailures(st)
-	switch {
-	case answered == 0:
-		return "no attempt got an answer out of git, so the cause is unknown; a repo probe that keeps dying says nothing about the repository or its configuration"
-	case !rootEnsureCauseIsEstablished(st):
-		return fmt.Sprintf("only %d of those attempts reported a real error and the rest ended before git could answer, so the cause is not established", answered)
-	case st.unansweredFailures > 0:
-		return fmt.Sprintf("the cause looks persistent, though %d of those attempts ended before git could answer", st.unansweredFailures)
-	default:
-		return "the cause looks persistent"
-	}
+	// pendingSwap is a committed account-swap transaction the reaped record
+	// still owed delivery on (#4400 review round 4). The checkpoint already
+	// mutated the durable identity, so deleting the record without it would
+	// silently cancel an obligation the scheduler was created to finish; the
+	// replacement carries it instead and the settlement path resumes on a live
+	// instance that can actually complete it.
+	pendingSwap *session.AccountSwapData
+	// pendingHandoffMission is the rendered takeover brief riding the same
+	// delivery obligation — durable for exactly the reason the swap is.
+	pendingHandoffMission string
 }
 
 // rootAgentProgramForProfile resolves the command the root agent runs from a

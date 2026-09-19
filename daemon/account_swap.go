@@ -142,6 +142,18 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 	}
 }
 
+// committedManualAccountSwap reports whether inst carries the committed manual
+// account transaction the scheduler is designated to finish — the one
+// transaction whose completion a reserved-title refusal must not block (#4395),
+// because the manual handoff path checkpointed the identity and left its
+// durable mission to this pass. Mirrors the manual check inside
+// resumeFromLimitLockedOutcome: exempting a committed NON-manual swap here
+// would only reach that same refusal one lock later.
+func committedManualAccountSwap(inst *session.Instance) bool {
+	swap := committedAccountSwap(inst)
+	return swap != nil && swap.manual
+}
+
 // accountSwapAgent names the account NAMESPACE a swap decision belongs to.
 //
 // It is the RESOLVED, live agent — not sessionenv.AgentForCommand(i.Program) —

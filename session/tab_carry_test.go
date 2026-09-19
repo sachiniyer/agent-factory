@@ -148,6 +148,70 @@ func TestRestoreCarriedTabsIsOneShot(t *testing.T) {
 	require.Len(t, inst.GetTabs(), 5, "a second pass must not rebuild a roster that was already consumed")
 }
 
+// TestRestoreCarriedTabsSeedsHandoffLedger: a reaped root's account-swap
+// history lives on Tabs[0].Handoffs, a row restoreCarriedTabs skips rather
+// than rebuilds. The replacement's fresh agent tab must inherit it or the
+// history dies with the record — and a still-unsettled committed swap loses
+// the fromAgent/HeadSHA committedAccountSwap recovers from it (Codex on
+// #4400).
+func TestRestoreCarriedTabsSeedsHandoffLedger(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	const agentName = "af_4400_ledger"
+	cmdExec := nameKeyedExec(map[string]bool{})
+	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+	roster := carriedRoster(agentName)
+	roster[0].Handoffs = []AgentHandoff{
+		{From: AgentConversationData{Agent: tmux.ProgramClaude, ID: "conv-old"}, To: tmux.ProgramClaude, FromAccount: "work", ToAccount: "personal", HeadSHA: "abc123", Reason: HandoffReasonManual},
+	}
+	inst := &Instance{
+		Title:       "ledger-4400",
+		Path:        t.TempDir(),
+		Program:     "bash",
+		backend:     &LocalBackend{},
+		carriedTabs: roster,
+	}
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "bash", pty, cmdExec))
+
+	inst.restoreCarriedTabs()
+	tabs := inst.GetTabs()
+	require.Len(t, tabs, 5)
+	last, ok := inst.LastHandoff()
+	require.True(t, ok, "the carried agent row's ledger must land on the fresh agent tab")
+	assert.Equal(t, "abc123", last.HeadSHA)
+	assert.Equal(t, "work", last.FromAccount)
+	assert.Equal(t, "conv-old", last.From.ID)
+}
+
+// TestRestoreCarriedTabsKeepsLiveLedger: a fresh agent tab that already
+// recorded a handoff keeps its own ledger — the carried one is history, not
+// an overwrite.
+func TestRestoreCarriedTabsKeepsLiveLedger(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	const agentName = "af_4400_ledger_live"
+	cmdExec := nameKeyedExec(map[string]bool{})
+	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+	roster := carriedRoster(agentName)
+	roster[0].Handoffs = []AgentHandoff{{To: tmux.ProgramClaude, HeadSHA: "carried"}}
+	inst := &Instance{
+		Title:       "ledger-live-4400",
+		Path:        t.TempDir(),
+		Program:     "bash",
+		backend:     &LocalBackend{},
+		carriedTabs: roster,
+	}
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "bash", pty, cmdExec))
+	inst.Tabs[0].Handoffs = []AgentHandoff{{To: tmux.ProgramClaude, HeadSHA: "live"}}
+
+	inst.restoreCarriedTabs()
+	last, ok := inst.LastHandoff()
+	require.True(t, ok)
+	assert.Equal(t, "live", last.HeadSHA, "a live ledger is never overwritten by the carried one")
+}
+
 // TestRestoreCarriedTabsRepairsCollidingRecords: the roster is data read off
 // disk, so it can name the same tmux session twice (a hand-edited or truncated
 // record). Reusing a name is what makes the carry free — the reap just killed
