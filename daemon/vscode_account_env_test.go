@@ -471,3 +471,81 @@ func TestVSCodeEditor_RespawnsWhenTheSessionAccountChanges(t *testing.T) {
 		editorEnvironment(t, manager, key, fakeVSCodeEnvironPath),
 		"the editor respawned after the account changed", replacementDir)
 }
+
+// TestVSCodeEditor_ResolvesPathQualifiedEnvAccountOnRestore is the regression test
+// for the #4356 narrowing this file's bug is about. A session created before #4356
+// with a path-qualified env wrapper (for instance /usr/local/bin/env CODEX_HOME=/x
+// codex) and a selected account was persisted with that exact Program plus Account,
+// and on a post-#4356 restore vscodeAccountScopeForInstance must still classify the
+// agent so the editor launches under the account's credential directory.
+//
+// Program is stored from opts.Program verbatim (instance.AgentProgram returns
+// i.Program, the raw operator input), and tmux.DetectAgentExecutable still accepts
+// any path whose basename is env, so the program survived the create gate. After
+// #4356, AgentForCommand returned "" for it and the editor refused with
+// ErrUnsupportedAgent. AgentNamespaceForCommand keeps the basename rule the gate
+// uses, so the namespace lookup agrees with the gate and the editor resolves.
+//
+// This drives vscodeAccountScopeForInstance directly — the exact entry the webtab
+// proxy calls at webtab_proxy.go:229 — over a session whose Program carries the
+// path-qualified env form. It does NOT need a running editor: the scope's environ
+// closure is the credential-resolution step, and that is what #4356 broke.
+func TestVSCodeEditor_ResolvesPathQualifiedEnvAccountOnRestore(t *testing.T) {
+	home := shortAFHome(t)
+	accountDir, err := agentaccount.Register(home, sessiontmux.ProgramClaude, "work")
+	if err != nil {
+		t.Fatalf("registering the fixture account: %v", err)
+	}
+
+	// Create the instance with a bare agent form so the account validation
+	// (refuseUnsupportedAccountAgent, which calls the strict AgentForCommand)
+	// clears, then install the path-qualified Program the way a pre-#4356
+	// instances.json restore loads it verbatim: Program and Account are exported
+	// Instance fields that FromInstanceData copies from disk without
+	// re-validating, and AgentProgram/AccountSelection read them back directly.
+	repoPath := setupControlRepo(t)
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   accountVSCodeTitle,
+		Path:    repoPath,
+		Program: sessiontmux.ProgramClaude,
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	const pathQualifiedEnv = "/usr/local/bin/env CLAUDE_CONFIG_DIR=/custom claude"
+	inst.Program = pathQualifiedEnv
+	inst.Account = "work"
+
+	// The bug: the strict classifier the editor scope used to call returns "" for
+	// the path-qualified env form, so vscodeAccountEnvironment("", "work")
+	// would refuse with ErrUnsupportedAgent. Pin that the strict classifier still
+	// does — this is the #4356 security boundary, not something to relax — while
+	// the namespace classifier the scope now uses resolves the agent.
+	if got := sessionenv.AgentForCommand(pathQualifiedEnv); got != "" {
+		t.Fatalf("AgentForCommand(%q) = %q, want \"\": the strict env set from #4356 must keep rejecting path-qualified env",
+			pathQualifiedEnv, got)
+	}
+	if got := sessionenv.AgentNamespaceForCommand(pathQualifiedEnv); got != sessiontmux.ProgramClaude {
+		t.Fatalf("AgentNamespaceForCommand(%q) = %q, want %q: the scope must classify a path-qualified env program the create gate accepted",
+			pathQualifiedEnv, got, sessiontmux.ProgramClaude)
+	}
+
+	// The fix: vscodeAccountScopeForInstance resolves the account directory and
+	// the editor environment carries the account's credential root, not the
+	// ambient identity. A pre-fix build would fail at scope.environment() with
+	// errVSCodeAccountScope wrapping ErrUnsupportedAgent.
+	scope := vscodeAccountScopeForInstance(inst)
+	env, err := scope.environment()
+	if err != nil {
+		t.Fatalf("vscodeAccountScopeForInstance.environment() = %v; a restored session with a path-qualified env "+
+			"wrapper and a selected account must resolve its editor scope, not refuse with ErrUnsupportedAgent", err)
+	}
+	got, ok := envValue(env, "CLAUDE_CONFIG_DIR")
+	if !ok {
+		t.Fatalf("the editor scope for a path-qualified env session carries no CLAUDE_CONFIG_DIR; " +
+			"the account's credential root must be injected")
+	}
+	if got != accountDir {
+		t.Fatalf("CLAUDE_CONFIG_DIR = %q, want the account's credential root %q", got, accountDir)
+	}
+}
