@@ -39,6 +39,7 @@ import { replaceProjectMenuChildren } from "./project-menu-focus.js";
 import {
   archiveWarningText,
   canHandoff,
+  canHandoffAccount,
   compareSessionsForRail,
   isArchived,
   isCreating,
@@ -2264,7 +2265,10 @@ export class AppShell {
     this.retryKind = retryAction?.kind ?? null;
     patchRetryButton(chrome.retry, retryAction);
     this.handoffBtn = chrome.handoff;
-    this.handoffVisible = canHandoff(selected);
+    // canHandoffAccount adds the one row can_handoff refuses — the reserved
+    // root's account-only move (#4433). Read separately so an older daemon that
+    // omits can_handoff_account loses only that, not handoff everywhere.
+    this.handoffVisible = canHandoff(selected) || canHandoffAccount(selected);
     chrome.handoff.hidden = !this.handoffVisible;
     this.headActions = chrome.actions;
     this.headActionSig = "";
@@ -2873,7 +2877,7 @@ export class AppShell {
     // handoff-capable without a selection change (#2013): a fresh session finishing
     // startup, or one archived/killed from another client, flips can_handoff while it
     // stays selected — the same in-place path Retry above uses, for the same reason.
-    const nowHandoff = canHandoff(selected);
+    const nowHandoff = canHandoff(selected) || canHandoffAccount(selected);
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
       this.handoffVisible = nowHandoff;
       this.handoffBtn.hidden = !nowHandoff;

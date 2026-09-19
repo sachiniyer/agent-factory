@@ -28,6 +28,7 @@ test("a committed account handoff closes the stale modal and surfaces a confirme
       worktree: { repo_path: "/work/repo" },
     }),
     canHandoff: () => true,
+    canHandoffAccount: () => true,
     handoffModal: (_title: string, _agent: string, callbacks: { onSubmit(to: string, account?: string): void }) => {
       submit = callbacks.onSubmit;
       return modalHandle;
@@ -55,4 +56,66 @@ test("a committed account handoff closes the stale modal and surfaces a confirme
   await new Promise(resolve => setImmediate(resolve));
 
   assert.deepEqual(events, ["busy:true", "close", "resync", "surface:confirmed"]);
+});
+
+// The reserved root's account move is the one handoff a session can take when
+// the agent axis is closed (#4433): the modal must run account-only exactly
+// when can_handoff is absent but can_handoff_account answers yes — and offer
+// nothing at all when both are absent, on an older daemon or an ineligible row.
+test("doHandoff runs the modal account-only when only the account gate passes", () => {
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const handler = topLevelFunction(source, "doHandoff");
+
+  for (const [agent, account, modalOpts] of [
+    // Ordinary row: both gates pass → full agent picker.
+    [true, true, false],
+    // Reserved root: agent axis refused, account axis open → account-only.
+    [false, true, true],
+  ] as const) {
+    let seenAccountOnly: boolean | undefined;
+    const context = {
+      selectedSessionData: () => ({
+        id: "id", title: "root", current_agent: "codex", account: "work",
+        worktree: { repo_path: "/work/repo" },
+      }),
+      canHandoff: () => agent,
+      canHandoffAccount: () => account,
+      handoffModal: (_t: string, _a: string, callbacks: { accountOnly?: boolean }) => {
+        seenAccountOnly = callbacks.accountOnly;
+        return { close() {}, setBusy() {}, setError() {} };
+      },
+      loadPrograms: () => Promise.resolve({}),
+      loadCreateAccounts: () => Promise.resolve({}),
+    };
+    const code = ts.transpileModule(`
+      let token = "token", modal = null;
+      function openModal(next) { modal = next; }
+      function closeModal() { if (modal) modal.close(); modal = null; }
+      ${handler}
+    `, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
+    runInNewContext(code, context);
+    (context as typeof context & { doHandoff(): void }).doHandoff();
+    assert.equal(seenAccountOnly, modalOpts,
+      `can_handoff=${agent} can_handoff_account=${account} → accountOnly must be ${modalOpts}`);
+  }
+
+  // Neither gate → the modal is never built.
+  let built = false;
+  const context = {
+    selectedSessionData: () => ({ id: "id", title: "s", current_agent: "codex", worktree: { repo_path: "/r" } }),
+    canHandoff: () => false,
+    canHandoffAccount: () => false,
+    handoffModal: () => { built = true; return { close() {}, setBusy() {}, setError() {} }; },
+    loadPrograms: () => Promise.resolve({}),
+    loadCreateAccounts: () => Promise.resolve({}),
+  };
+  const code = ts.transpileModule(`
+    let token = "token", modal = null;
+    function openModal(next) { modal = next; }
+    function closeModal() { if (modal) modal.close(); modal = null; }
+    ${topLevelFunction(source, "doHandoff")}
+  `, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
+  runInNewContext(code, context);
+  (context as typeof context & { doHandoff(): void }).doHandoff();
+  assert.equal(built, false, "a session with neither capability must not open the modal");
 });

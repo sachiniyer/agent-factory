@@ -341,7 +341,7 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 			{helpKey(keys.KeySwitchProject), "Switch projects"},
 			{helpKey(keys.KeyTaskList), "Manage tasks · n create · r run"},
 			{helpKey(keys.KeyKill), "Delete session · its af-owned worktree and branch are removed"},
-			{helpKey(keys.KeyHandoff), "Hand off to another agent"},
+			{helpKey(keys.KeyHandoff), "Hand off to another agent or account"},
 			{helpKey(keys.KeySearch), "Search sessions"},
 			{helpKey(keys.KeyArchive), "Archive locally · sandboxes publish work first"},
 			{helpKey(keys.KeyRestore), "Restore · reconnect or recover; absent sandboxes use last push"},

@@ -11349,16 +11349,17 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   return handle;
 }
 function handoffModal(sessionTitle, currentAgent, callbacks) {
+  const accountOnly = callbacks.accountOnly === true;
   const { handle, body, confirmBtn } = modalChrome({
-    title: `Hand off ${sessionTitle}`,
-    confirmLabel: "Hand off",
+    title: accountOnly ? `Switch account \u2014 ${sessionTitle}` : `Hand off ${sessionTitle}`,
+    confirmLabel: accountOnly ? "Switch account" : "Hand off",
     confirmClass: "af-primary",
     onCancel: callbacks.onCancel
   });
   let accounts = { entries: [], agents: [] };
   let accountsLoaded = !callbacks.loadAccounts;
   let accountsFailed = false;
-  const requiresAccount = (agent) => agent === currentAgent || !!callbacks.currentAccount;
+  const requiresAccount = (agent) => accountOnly || agent === currentAgent || !!callbacks.currentAccount;
   let accountRows = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
@@ -11383,6 +11384,10 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   };
   const agentSelect = h("select", { class: "af-input" });
   agentSelect.setAttribute("aria-label", "New agent");
+  if (accountOnly) {
+    agentSelect.append(h("option", { value: currentAgent }, currentAgent));
+    agentSelect.value = currentAgent;
+  }
   confirmBtn.disabled = true;
   let catalogChoices = null;
   const renderChoices = (choices) => {
@@ -11409,35 +11414,59 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     refreshAccounts2();
     if (accountsLoaded) handle.setError(choices.length === 0 ? callbacks.currentAccount ? "No registered target account is available to hand off to." : "No other agent is available to hand off to." : null);
   };
-  body.append(
-    field("New agent", agentSelect),
-    field("New account", accountSelect),
-    accountHint,
-    h(
-      "p",
-      { class: "af-modal-text" },
-      "Start a new agent with a summary. Keep the worktree and branch."
-    )
-  );
-  void callbacks.loadPrograms().then((catalog) => {
-    catalogChoices = handoffAgentChoices(catalog, currentAgent);
-    refreshAgentChoices();
-  }).catch(() => {
-    renderChoices([]);
-    handle.setError("Could not load the agent list. Try again.");
-  });
+  if (accountOnly) {
+    body.append(
+      h(
+        "p",
+        { class: "af-modal-text" },
+        `${currentAgent} stays the agent \u2014 it restarts on the new account with a fresh conversation and a summary of the work so far. The worktree and branch are kept.`
+      ),
+      field("New account", accountSelect),
+      accountHint
+    );
+  } else {
+    body.append(
+      field("New agent", agentSelect),
+      field("New account", accountSelect),
+      accountHint,
+      h(
+        "p",
+        { class: "af-modal-text" },
+        "Start a new agent with a summary. Keep the worktree and branch."
+      )
+    );
+  }
+  if (!accountOnly) {
+    void callbacks.loadPrograms().then((catalog) => {
+      catalogChoices = handoffAgentChoices(catalog, currentAgent);
+      refreshAgentChoices();
+    }).catch(() => {
+      renderChoices([]);
+      handle.setError("Could not load the agent list. Try again.");
+    });
+  }
   agentSelect.addEventListener("change", refreshAccounts2);
   accountSelect.addEventListener("change", syncAccountSelection);
   if (callbacks.loadAccounts) {
     void callbacks.loadAccounts().then((result) => {
       accounts = result;
       accountsLoaded = true;
-      refreshAgentChoices();
+      if (accountOnly) {
+        refreshAccounts2();
+        handle.setError(accountRows.length === 0 ? `No other ${currentAgent} account is registered \u2014 register one in the Config view.` : null);
+      } else {
+        refreshAgentChoices();
+      }
     }).catch(() => {
       accountsLoaded = true;
       accountsFailed = true;
-      refreshAgentChoices();
-      handle.setError(callbacks.currentAccount ? "Could not load accounts. Try again to choose a registered target account." : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
+      if (accountOnly) {
+        refreshAccounts2();
+        handle.setError("Could not load accounts. Try again.");
+      } else {
+        refreshAgentChoices();
+        handle.setError(callbacks.currentAccount ? "Could not load accounts. Try again to choose a registered target account." : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
+      }
     });
   }
   const card = handle.el.firstElementChild;
@@ -11454,7 +11483,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     }
     callbacks.onSubmit(target, accountSelect.value);
   });
-  queueMicrotask(() => agentSelect.focus());
+  queueMicrotask(() => (accountOnly ? accountSelect : agentSelect).focus());
   return handle;
 }
 function deletionConfirmationBody(opts) {
@@ -11989,6 +12018,9 @@ function isPendingAgentHandoffDeliveryUnconfirmed(s) {
 }
 function canHandoff(s) {
   return s.can_handoff === true;
+}
+function canHandoffAccount(s) {
+  return s.can_handoff_account === true;
 }
 function isRootSession(s) {
   return s.is_root === true;
@@ -16834,7 +16866,7 @@ var AppShell = class {
     this.retryKind = retryAction?.kind ?? null;
     patchRetryButton(chrome.retry, retryAction);
     this.handoffBtn = chrome.handoff;
-    this.handoffVisible = canHandoff(selected);
+    this.handoffVisible = canHandoff(selected) || canHandoffAccount(selected);
     chrome.handoff.hidden = !this.handoffVisible;
     this.headActions = chrome.actions;
     this.headActionSig = "";
@@ -17287,7 +17319,7 @@ var AppShell = class {
       this.retryKind = retryKind;
       patchRetryButton(this.retryBtn, retryAction);
     }
-    const nowHandoff = canHandoff(selected);
+    const nowHandoff = canHandoff(selected) || canHandoffAccount(selected);
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
       this.handoffVisible = nowHandoff;
       this.handoffBtn.hidden = !nowHandoff;
@@ -18770,7 +18802,7 @@ function doRetryLimit() {
 }
 function doHandoff() {
   const sel = selectedSessionData();
-  if (!sel || !sel.id || !canHandoff(sel)) {
+  if (!sel || !sel.id || !(canHandoff(sel) || canHandoffAccount(sel))) {
     return;
   }
   const target = { id: sel.id, title: sel.title };
@@ -18780,6 +18812,9 @@ function doHandoff() {
       loadPrograms: () => loadPrograms(""),
       loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
       currentAccount: sel.account,
+      // The agent axis is only offered when the session may change agent at all:
+      // on the reserved root that is never true, so the modal runs account-only.
+      accountOnly: !canHandoff(sel),
       onSubmit: (to, account) => {
         const tok = token;
         if (tok === null || !modal) {

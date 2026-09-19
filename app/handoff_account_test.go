@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
@@ -110,4 +111,47 @@ func TestHandoffCredentialWarning(t *testing.T) {
 	h.selectionOverlay.SetSelectedIndex(0)
 	h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
 	require.Contains(t, h.confirmationOverlay.Render(), "no claude credential yet")
+}
+
+// TestHandoffReservedRootOffersAccountOnlyRows pins #4433's picker mode: the
+// reserved root can never change agent, so `F` on it opens the account-only
+// form — the running agent's other accounts, named plainly, with no agent rows
+// to refuse at submit and no ambient row. The confirmation names the operation
+// as an account switch and says the conversation does not carry.
+func TestHandoffReservedRootOffersAccountOnlyRows(t *testing.T) {
+	h := newTestHome(t)
+	inst := handoffActionInstance(t, session.RootSessionTitle, "codex")
+	inst.Account = "work"
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+	restore := SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
+		return daemon.ListAccountsResponse{Entries: []daemon.AccountEntry{
+			{Agent: "codex", Name: "work", LoggedIn: true},
+			{Agent: "codex", Name: "personal", LoggedIn: true},
+			{Agent: "claude", Name: "other-agent-account", LoggedIn: true},
+		}, Defaults: map[string]string{"codex": "personal"}}, nil
+	})
+	defer restore()
+
+	_, cmd := h.handleHandoff()
+	require.NotNil(t, cmd, "the reserved root must reach the account-only picker, not the agent refusal")
+	require.Equal(t, stateSelectHandoffAgent, h.state)
+	require.True(t, h.handoffAccountOnly)
+	require.Empty(t, h.handoffChoices, "account-only mode never submits agent rows while loading")
+	h.Update(cmd())
+
+	rendered := h.selectionOverlay.Render()
+	require.Contains(t, rendered, "Switch account to")
+	require.Contains(t, rendered, "personal")
+	require.NotContains(t, rendered, "other-agent-account", "another agent's account is not a same-agent move")
+	require.NotContains(t, rendered, "work", "the account root already runs as is not a move")
+	require.NotContains(t, rendered, "ambient", "descoping root is not an operation this surface offers")
+	require.Equal(t, []string{"codex"}, h.handoffChoices, "every row resolves to the running agent")
+	require.Equal(t, []string{"personal"}, h.handoffAccounts)
+
+	h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+	confirm := h.confirmationOverlay.Render()
+	require.Contains(t, confirm, `Switch "root" to codex account "personal"?`)
+	require.Contains(t, confirm, "codex stays the agent")
+	require.Contains(t, confirm, "fresh conversation")
 }
