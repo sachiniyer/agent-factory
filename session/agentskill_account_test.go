@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // registerAccount puts a real account in this test's af home and returns its
@@ -23,9 +24,30 @@ func registerAccount(t *testing.T, agent, name string) string {
 	return dir
 }
 
+// skillTestInstance is a session with a launch directory. An unscoped launch
+// resolves its config root from its command in that directory, exactly as
+// conversation capture does, so a session without one places nothing.
+func skillTestInstance(t *testing.T, program, account string) *Instance {
+	t.Helper()
+	work := t.TempDir()
+	gw, err := git.NewGitWorktreeFromStorage(work, work, "skill-test", "main", "", true, false)
+	require.NoError(t, err)
+	return &Instance{Program: program, Account: account, gitWorktree: gw}
+}
+
+// ambientSkillTarget is the target of a bare, unscoped launch of agent — the
+// daemon's own config root — resolved by the production resolver. Call it after
+// the test has set HOME and the agent's variable.
+func ambientSkillTarget(t *testing.T, agent string) skillTarget {
+	t.Helper()
+	target := resolveSkillTarget(skillTestInstance(t, agent, ""), agent)
+	require.NotEmpty(t, target.root, "a bare launch must resolve: %v", target.why)
+	return target
+}
+
 // skillPathUnder is where af writes its guidance for each agent, given that
 // agent's CONFIG ROOT — the value the account boundary installs for a scoped
-// session, and the daemon's own for an unscoped one.
+// session, and the one the launch command resolves to for an unscoped one.
 func geminiSkillPathUnder(root string) string {
 	return filepath.Join(root, ".gemini", "skills", afSkillDirName, "SKILL.md")
 }
@@ -34,42 +56,55 @@ func codexSkillPathUnder(root string) string {
 	return filepath.Join(root, "skills", afSkillDirName, "SKILL.md")
 }
 
-// resolveSkillTarget answers three different questions, and the third one is the
-// reason the type is not a bool (#3645).
+// resolveSkillTarget answers several different questions, and only a resolved
+// root places anything (#3645, #4501).
 func TestResolveSkillTarget_DistinguishesUnscopedFromUnresolvable(t *testing.T) {
-	agentHome(t)
+	home := agentHome(t)
+	t.Setenv("GEMINI_CLI_HOME", "")
 	grantGlobalAgentSkills(t)
 	dir := registerAccount(t, "gemini", "work")
 
-	unscoped := resolveSkillTarget(&Instance{Program: "gemini"}, "gemini")
-	require.Equal(t, skillTarget{}, unscoped,
-		"a session with no account reads the daemon's own config root, exactly as before")
+	unscoped := resolveSkillTarget(skillTestInstance(t, "gemini", ""), "gemini")
+	require.Equal(t, skillTarget{root: home}, unscoped,
+		"a session with no account reads the root its command resolves to — for a bare command, the daemon's")
 
-	scoped := resolveSkillTarget(&Instance{Program: "gemini", Account: "work"}, "gemini")
-	require.Equal(t, skillTarget{root: dir}, scoped,
-		"a scoped session's skill belongs under the directory the boundary will install")
+	scoped := resolveSkillTarget(skillTestInstance(t, "gemini", "work"), "gemini")
+	require.Equal(t, skillTarget{root: dir, legacy: home}, scoped,
+		"a scoped session's skill belongs under the directory the boundary will install, and the daemon's "+
+			"root is only a place an older af may have left one")
 
 	// UNRESOLVABLE, not unscoped. Falling back to the daemon's root here is the
 	// defect: it writes into a directory the operator did not select, for a session
 	// that reads somewhere else.
-	missing := resolveSkillTarget(&Instance{Program: "gemini", Account: "no-such-account"}, "gemini")
-	require.True(t, missing.unresolved, "an account af cannot resolve must not fall back to the daemon's root")
-	require.Empty(t, missing.root)
+	missing := resolveSkillTarget(skillTestInstance(t, "gemini", "no-such-account"), "gemini")
+	require.Empty(t, missing.root, "an account af cannot resolve must not fall back to the daemon's root")
+	require.Empty(t, missing.legacy, "nor clean anything on its behalf")
+	require.ErrorIs(t, missing.unplaceable(), errUnresolvedSkillRoot)
 
 	// An account named for an agent that cannot be scoped at all. The launch
 	// refuses this; until it does, af must not guess a directory.
-	unsupported := resolveSkillTarget(&Instance{Program: "amp", Account: "work"}, "amp")
-	require.True(t, unsupported.unresolved)
+	unsupported := resolveSkillTarget(skillTestInstance(t, "amp", "work"), "amp")
+	require.Empty(t, unsupported.root)
+	require.ErrorIs(t, unsupported.unplaceable(), errUnresolvedSkillRoot)
 
 	// A FOREIGN NAMESPACE. The name was validated against the session's own agent,
 	// and account namespaces are separate — "work" means a different identity for
 	// each agent. Resolving it against the resolved command's registry would write
 	// into a gemini account the operator never selected, moments before the launch
 	// refuses for exactly that reason (#3082/#3108, #3645 review).
-	foreign := resolveSkillTarget(&Instance{Program: "claude", Account: "work"}, "gemini")
-	require.True(t, foreign.unresolved,
-		"a claude account name must not be resolved against gemini's registry")
-	require.Empty(t, foreign.root)
+	foreign := resolveSkillTarget(skillTestInstance(t, "claude", "work"), "gemini")
+	require.Empty(t, foreign.root, "a claude account name must not be resolved against gemini's registry")
+	require.ErrorIs(t, foreign.unplaceable(), errUnresolvedSkillRoot)
+
+	// NO LAUNCH DIRECTORY. An unscoped command's root can depend on the directory
+	// it starts in, so a session without one cannot say where it reads (#4501).
+	rootless := resolveSkillTarget(&Instance{Program: "gemini"}, "gemini")
+	require.Empty(t, rootless.root, "an unscoped session with no launch directory must not guess one")
+	require.ErrorIs(t, rootless.unplaceable(), errUnresolvedSkillRoot)
+
+	// THE ZERO VALUE places nothing. There is no target meaning "use the daemon's
+	// root", so a caller that skips resolution fails closed.
+	require.ErrorIs(t, skillTarget{}.unplaceable(), errUnresolvedSkillRoot)
 }
 
 // A handoff is the path that reaches the foreign-namespace case in production.
@@ -87,9 +122,9 @@ func TestPrepareAgentSwap_DoesNotWriteIntoTheTargetAgentsAccount(t *testing.T) {
 	geminiDir := registerAccount(t, "gemini", "work")
 	registerAccount(t, "claude", "work")
 
-	scoped := &Instance{Program: "claude", Account: "work"}
+	scoped := skillTestInstance(t, "claude", "work")
 	target := resolveSkillTarget(scoped, "gemini")
-	require.True(t, target.unresolved, "the handoff target's account namespace is not this session's")
+	require.Empty(t, target.root, "the handoff target's account namespace is not this session's")
 
 	injectSystemPrompt("gemini", target)
 	require.NoFileExists(t, geminiSkillPathUnder(geminiDir),
@@ -117,17 +152,35 @@ func TestResolveSkillTarget_RefusesAMountedAccountRoot(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("GEMINI_CLI_HOME", root)
-			target := resolveSkillTarget(&Instance{Program: "gemini"}, "gemini")
-			require.True(t, target.unresolved,
+			target := resolveSkillTarget(skillTestInstance(t, "gemini", ""), "gemini")
+			require.Empty(t, target.root,
 				"the container cannot know whether the host opted in, so it must neither write nor clean")
+			require.Empty(t, target.legacy)
+			require.ErrorIs(t, target.unplaceable(), errMountedAccountRoot)
 		})
 	}
 
 	// A SIBLING with the same prefix is not the mount. Compared as path segments,
 	// never as a string prefix.
 	t.Setenv("GEMINI_CLI_HOME", dockerAccountHome+"-backup")
-	require.Equal(t, skillTarget{}, resolveSkillTarget(&Instance{Program: "gemini"}, "gemini"),
+	require.Equal(t, skillTarget{root: dockerAccountHome + "-backup"},
+		resolveSkillTarget(skillTestInstance(t, "gemini", ""), "gemini"),
 		"a sibling directory that merely shares the prefix is an ordinary ambient root")
+
+	// The COMMAND can name the mount too, and the resolved root is what the launch
+	// reads, so the same refusal applies to it (#4501).
+	t.Setenv("GEMINI_CLI_HOME", "")
+	named := resolveSkillTarget(skillTestInstance(t, "gemini", ""), "GEMINI_CLI_HOME="+dockerAccountHome+" gemini")
+	require.Empty(t, named.root, "a command pointed at the mount must neither write nor clean there")
+	require.ErrorIs(t, named.unplaceable(), errMountedAccountRoot)
+
+	// And a daemon root inside the mount is never cleaned on behalf of a launch
+	// that reads elsewhere: that directory is still the host's.
+	t.Setenv("HOME", dockerAccountHome+"/home")
+	elsewhere := t.TempDir()
+	require.Equal(t, skillTarget{root: elsewhere},
+		resolveSkillTarget(skillTestInstance(t, "gemini", ""), "GEMINI_CLI_HOME="+elsewhere+" gemini"),
+		"the daemon's root is under the mount, so it must not become a cleanup target")
 }
 
 // #1977's promise: af's edits to the user's global config must not outlive the
@@ -140,11 +193,12 @@ func TestEnsureSkillDir_DeclinedCleansTheLegacyAmbientLocationToo(t *testing.T) 
 	ambient := t.TempDir()
 	t.Setenv("GEMINI_CLI_HOME", ambient)
 	dir := registerAccount(t, "gemini", "work")
-	scoped := skillTarget{root: dir}
+	scoped := resolveSkillTarget(skillTestInstance(t, "gemini", "work"), "gemini")
+	require.Equal(t, skillTarget{root: dir, legacy: ambient}, scoped)
 
 	// A prior af version wrote into the ambient root; this one writes into the
 	// account root. Both af-marked, both af's to clean.
-	_, err := ensureGeminiSkillDir(skillTarget{})
+	_, err := ensureGeminiSkillDir(ambientSkillTarget(t, "gemini"))
 	require.NoError(t, err)
 	_, err = ensureGeminiSkillDir(scoped)
 	require.NoError(t, err)
@@ -165,35 +219,44 @@ func TestEnsureSkillDir_DeclinedCleansTheLegacyAmbientLocationToo(t *testing.T) 
 // session changes that value. One rule, two shapes: CODEX_HOME names the config
 // directory itself, GEMINI_CLI_HOME is a HOME-like root the CLI appends .gemini/
 // to (#3387).
-func TestSkillsBaseDir_SubstitutesTheAccountRootForTheDaemonEnvironment(t *testing.T) {
+func TestSkillsBase_IsAFunctionOfTheConfigRootValue(t *testing.T) {
+	const account = "/afhome/accounts/x/work"
+	require.Equal(t, filepath.Join(account, ".gemini", "skills"), geminiSkillsBase(account),
+		"GEMINI_CLI_HOME is a HOME-like root, so the account directory gains the .gemini/ level")
+	require.Equal(t, filepath.Join(account, "skills"), codexSkillsBase(account),
+		"CODEX_HOME names the config directory itself, so the account directory takes its place directly")
+
 	ambient := t.TempDir()
 	t.Setenv("GEMINI_CLI_HOME", ambient)
 	t.Setenv("CODEX_HOME", ambient)
-	const account = "/afhome/accounts/x/work"
+	require.Equal(t, skillTarget{root: ambient}, ambientSkillTarget(t, "gemini"),
+		"a bare unscoped launch reads the daemon's environment")
+	require.Equal(t, skillTarget{root: ambient}, ambientSkillTarget(t, "codex"))
+}
 
-	gemini, err := geminiSkillsBaseDir(skillTarget{root: account})
-	require.NoError(t, err)
-	require.Equal(t, filepath.Join(account, ".gemini", "skills"), gemini,
-		"GEMINI_CLI_HOME is a HOME-like root, so the account directory gains the .gemini/ level")
+// A target with no root writes nothing and cleans nothing, whatever the consent.
+func TestEnsureSkillDir_UnresolvedTargetTouchesNothing(t *testing.T) {
+	for name, granted := range map[string]bool{"granted": true, "declined": false} {
+		t.Run(name, func(t *testing.T) {
+			home := agentHome(t)
+			t.Setenv("GEMINI_CLI_HOME", "")
+			t.Setenv("CODEX_HOME", "")
+			writeAfConfig(t, granted)
+			seeded := []string{geminiSkillPathUnder(home), codexSkillPathUnder(filepath.Join(home, ".codex"))}
+			for _, path := range seeded {
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				require.NoError(t, os.WriteFile(path, []byte(afSkillDoc), 0o644))
+			}
 
-	geminiAmbient, err := geminiSkillsBaseDir(skillTarget{})
-	require.NoError(t, err)
-	require.Equal(t, filepath.Join(ambient, ".gemini", "skills"), geminiAmbient,
-		"an unscoped session keeps reading the daemon's environment")
-
-	codex, err := codexSkillsBaseDir(skillTarget{root: account})
-	require.NoError(t, err)
-	require.Equal(t, filepath.Join(account, "skills"), codex,
-		"CODEX_HOME names the config directory itself, so the account directory takes its place directly")
-
-	codexAmbient, err := codexSkillsBaseDir(skillTarget{})
-	require.NoError(t, err)
-	require.Equal(t, filepath.Join(ambient, "skills"), codexAmbient)
-
-	for _, base := range []func(skillTarget) (string, error){geminiSkillsBaseDir, codexSkillsBaseDir} {
-		path, err := base(skillTarget{unresolved: true})
-		require.ErrorIs(t, err, errUnresolvedAccountSkillRoot)
-		require.Empty(t, path, "an unresolved account must yield no path to write into")
+			for _, ensure := range []func(skillTarget) (string, error){ensureGeminiSkillDir, ensureCodexSkillDir} {
+				dir, err := ensure(skillTarget{})
+				require.ErrorIs(t, err, errUnresolvedSkillRoot)
+				require.Empty(t, dir, "an unresolved target must yield no skill directory")
+			}
+			for _, path := range seeded {
+				require.FileExists(t, path, "an unresolved target must clean nothing either")
+			}
+		})
 	}
 }
 
@@ -235,7 +298,7 @@ func TestInjectSystemPrompt_WritesTheGuidanceWhereAScopedSessionReads(t *testing
 
 			// The unscoped control still writes where it always did, so the fix is a
 			// redirection for scoped sessions rather than a change of default.
-			injectSystemPrompt(tc.agent, skillTarget{})
+			injectSystemPrompt(tc.agent, ambientSkillTarget(t, tc.agent))
 			require.FileExists(t, tc.skillAt(ambient),
 				"an unscoped session's guidance still belongs in the daemon's config root")
 		})

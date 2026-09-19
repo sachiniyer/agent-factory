@@ -209,14 +209,43 @@ func firstCommandTokenStrict(tokens []string) (int, error) {
 	return idx, nil
 }
 
-// CodexHomeFromCommand resolves the rollout store the launched command will
-// actually use. CODEX_HOME and HOME are interpreted in the same environment +
-// cwd model as GNU env itself, so receipt/capture callers never silently watch
-// the daemon's store while a wrapped Codex writes somewhere else.
-func CodexHomeFromCommand(command, workingDir string) (string, error) {
+// agentConfigRoot says where one agent reads its config root: the variable that
+// relocates it, and the directory under HOME it defaults to.
+type agentConfigRoot struct {
+	label      string
+	variable   string
+	homeSubdir string
+}
+
+// agentConfigRoots lists the agents whose config root af follows through a
+// launch command. CODEX_HOME names the config directory itself, so its default is
+// HOME/.codex. GEMINI_CLI_HOME is a HOME-like root that the CLI appends .gemini/
+// to (`process.env.GEMINI_CLI_HOME || os.homedir()`, #3387), so its default is
+// HOME itself. Both treat an empty value as unset.
+var agentConfigRoots = map[string]agentConfigRoot{
+	ProgramCodex:  {label: "Codex", variable: "CODEX_HOME", homeSubdir: ".codex"},
+	ProgramGemini: {label: "Gemini", variable: "GEMINI_CLI_HOME"},
+}
+
+// ConfigRootFromCommand resolves the config root that agent reads when command
+// is launched from workingDir. It is the one answer to "where does this launch
+// read its config" for every caller: Codex conversation capture reads its rollout
+// store under it, and af places its skill under it (#4501).
+//
+// The agent's variable and HOME are interpreted in the same environment and cwd
+// model as GNU env itself. A variable the command does not touch is read from
+// this process's environment, which the launch inherits. A value af cannot read
+// statically, such as a shell expansion, is an error and never a guess, so a
+// caller cannot quietly fall back to the daemon's root while the agent reads
+// somewhere else.
+func ConfigRootFromCommand(agent, command, workingDir string) (string, error) {
+	spec, ok := agentConfigRoots[agent]
+	if !ok {
+		return "", fmt.Errorf("af does not follow a config root for %q", agent)
+	}
 	launch, err := CommandEnvironmentFromCommand(command, workingDir)
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve Codex environment: %w", err)
+		return "", fmt.Errorf("cannot resolve %s environment: %w", spec.label, err)
 	}
 	effective := func(name string) (string, bool, error) {
 		override := launch.Override(name)
@@ -225,7 +254,7 @@ func CodexHomeFromCommand(command, workingDir string) (string, error) {
 			return value, set, nil
 		}
 		if !override.Literal {
-			return "", false, fmt.Errorf("%s uses shell expansion; use a literal path so Codex storage can be followed", name)
+			return "", false, fmt.Errorf("%s uses shell expansion; use a literal path so af can follow where %s reads its config", name, spec.label)
 		}
 		return override.Value, override.Set, nil
 	}
@@ -236,19 +265,26 @@ func CodexHomeFromCommand(command, workingDir string) (string, error) {
 		return filepath.Clean(filepath.Join(launch.WorkingDir, path))
 	}
 
-	if codexHome, set, err := effective("CODEX_HOME"); err != nil {
+	if root, set, err := effective(spec.variable); err != nil {
 		return "", err
-	} else if set && strings.TrimSpace(codexHome) != "" {
-		return resolve(codexHome), nil
+	} else if set && strings.TrimSpace(root) != "" {
+		return resolve(root), nil
 	}
 	home, set, err := effective("HOME")
 	if err != nil {
 		return "", err
 	}
 	if !set || strings.TrimSpace(home) == "" {
-		return "", fmt.Errorf("CODEX_HOME is unset and the launched command has no literal HOME fallback")
+		return "", fmt.Errorf("%s is unset and the launched command has no literal HOME fallback", spec.variable)
 	}
-	return filepath.Join(resolve(home), ".codex"), nil
+	return filepath.Join(resolve(home), spec.homeSubdir), nil
+}
+
+// CodexHomeFromCommand resolves the rollout store the launched command will
+// actually use, so receipt/capture callers never silently watch the daemon's
+// store while a wrapped Codex writes somewhere else. See ConfigRootFromCommand.
+func CodexHomeFromCommand(command, workingDir string) (string, error) {
+	return ConfigRootFromCommand(ProgramCodex, command, workingDir)
 }
 
 func resolveCommandDir(current, requested string) (string, error) {
