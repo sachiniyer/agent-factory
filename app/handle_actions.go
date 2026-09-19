@@ -497,11 +497,33 @@ func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 	if selected.IsTearingDown() {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is being deleted", selected.Title))
 	}
-	if !selected.LimitReached() && !selected.CanRetryPendingManualAccountSwapDelivery() &&
-		!selected.CanRetryPendingHandoffMissionDelivery() {
+	canRetry := selected.CanRetryPendingManualAccountSwapDelivery() ||
+		selected.CanRetryPendingHandoffMissionDelivery()
+	canConfirm := selected.CanConfirmPendingHandoffDelivery() ||
+		selected.CanConfirmPendingManualAccountSwapDelivery()
+	if !selected.LimitReached() && !canRetry && !canConfirm {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is not blocked on a usage limit", selected.Title))
 	}
 	target := captureSessionActionTarget(selected, m.repoID)
+	// A confirmable pending delivery gives `c` two real verbs — resend the
+	// mission, or attest it already landed and retire it (#4429). The picker
+	// makes that the operator's explicit choice; without it a confirmable row
+	// would have `c` silently mean resend and the no-resend exit would exist
+	// on the CLI and web but not here.
+	if canConfirm {
+		// The picker's first row is whichever resume `c` would run. On a row that
+		// is only usage-limited that is the plain limit resume, which un-stalls
+		// the agent and does not resend the pending mission, so it must not be
+		// labelled as a resend.
+		resend := handoffResolveNoResend
+		switch {
+		case canRetry:
+			resend = handoffResolveResendMission
+		case selected.LimitReached():
+			resend = handoffResolveResumeLimit
+		}
+		return m.openHandoffResolvePicker(selected, target, resend)
+	}
 	return m, m.resumeFromLimitCmd(target)
 }
 

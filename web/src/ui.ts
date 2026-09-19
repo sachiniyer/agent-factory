@@ -45,7 +45,9 @@ import {
   idleReasonDetail,
   isLimitReached,
   isPendingAgentHandoffDeliveryUnconfirmed,
+  isPendingAgentHandoffDeliveryConfirmable,
   isPendingManualHandoffDeliveryUnconfirmed,
+  isPendingManualSwapDeliveryConfirmable,
   OPERATOR_KIND_LABELS,
   type OperatorKind,
   operatorKind,
@@ -131,6 +133,25 @@ function patchRetryButton(button: HTMLElement, action: RetryActionPresentation |
     button.textContent = action.label;
     button.title = action.title;
   }
+}
+
+/** The selected row's no-resend delivery exit (#4429). Distinct from
+ *  retryActionForSession: a confirmable row may ALSO be retryable, in which case
+ *  the head offers both verbs side by side and the operator's pane inspection
+ *  decides between them. Kept off Retry itself so a resend never silently wears
+ *  a "delivered" meaning. */
+export function markDeliveredActionForSession(s: SessionData): RetryActionPresentation | null {
+  if (
+    isPendingAgentHandoffDeliveryConfirmable(s) ||
+    isPendingManualSwapDeliveryConfirmable(s)
+  ) {
+    return {
+      kind: "handoff",
+      label: "Mark delivered",
+      title: "The pane already shows the mission landed — retire it without resending",
+    };
+  }
+  return null;
 }
 
 /** Fail-closed narrowing for the daemon's independent teardown capability. */
@@ -268,6 +289,11 @@ export interface Actions {
    *  TUI: it is not destructive (it re-delivers the prompt the session was already
    *  going to run) and it is the obvious next step for a session that is stuck. */
   retryLimit(): void;
+  /** Retires the selection's pending handoff mission WITHOUT resending it
+   *  (#4429) — the web half of the TUI resolve picker's "Mark delivered" row.
+   *  Opens a confirm modal: the attestation is the operator's, so the click must
+   *  be deliberate, unlike the no-confirm Retry. */
+  markDelivered(): void;
   /** Hands the current selection off to a different agent (#2013) — the web's
    *  analogue of the TUI's `F`. Opens the agent picker; on confirm it swaps the
    *  agent in place, keeping the worktree and branch. Offered only for a
@@ -941,6 +967,11 @@ export class AppShell {
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
   private retryBtn: HTMLElement | null = null;
   private retryKind: RetryActionPresentation["kind"] | null = null;
+  // The "Mark delivered" button and whether it is currently shown (#4429). Same
+  // in-place treatment as retryBtn: a verdict becomes confirmable — or settles —
+  // on a session.updated event with no selection change to rebuild the header.
+  private deliverBtn: HTMLElement | null = null;
+  private deliverVisible = false;
   // The Handoff button and whether it is currently shown (#2013). Same in-place
   // treatment as retryBtn: a session becomes (or stops being) handoff-capable —
   // e.g. it goes Ready, or is archived from another client — WITHOUT a selection
@@ -2228,6 +2259,8 @@ export class AppShell {
       this.headActionSig = "";
       this.retryBtn = null;
       this.retryKind = null;
+      this.deliverBtn = null;
+      this.deliverVisible = false;
       this.tabBar = null;
       // Detaches the terminal host if it was mounted; index.ts disposes the terminal.
       this.main.className = "af-main af-main-empty";
@@ -2255,6 +2288,7 @@ export class AppShell {
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
       retry: () => this.actions.retryLimit(),
+      markDelivered: () => this.actions.markDelivered(),
       closePane: () => this.actions.closePane?.(),
     });
     this.terminalChrome = chrome;
@@ -2263,6 +2297,9 @@ export class AppShell {
     const retryAction = retryActionForSession(selected);
     this.retryKind = retryAction?.kind ?? null;
     patchRetryButton(chrome.retry, retryAction);
+    this.deliverBtn = chrome.deliver;
+    this.deliverVisible = markDeliveredActionForSession(selected) !== null;
+    chrome.deliver.hidden = !this.deliverVisible;
     this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
     chrome.handoff.hidden = !this.handoffVisible;
@@ -2867,6 +2904,15 @@ export class AppShell {
     if (this.retryBtn && retryKind !== this.retryKind) {
       this.retryKind = retryKind;
       patchRetryButton(this.retryBtn, retryAction);
+    }
+
+    // Show/hide Mark delivered as the selected session's pending mission becomes
+    // (or stops being) confirmable without a selection change (#4429) — the same
+    // in-place path Retry above uses, for the same reason.
+    const nowDeliver = markDeliveredActionForSession(selected) !== null;
+    if (this.deliverBtn && nowDeliver !== this.deliverVisible) {
+      this.deliverVisible = nowDeliver;
+      this.deliverBtn.hidden = !nowDeliver;
     }
 
     // Show/hide Handoff as the selected session becomes (or stops being)

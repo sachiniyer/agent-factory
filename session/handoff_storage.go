@@ -37,6 +37,18 @@ func (d InstanceData) restoreMissingHandoffMissionEvidence() InstanceData {
 	return d
 }
 
+// ambiguousHandoffDelivery reports whether a mission verdict leaves it unknown
+// whether the mission landed. It is the one list of those verdicts: the retry,
+// confirm, and rollback-projection gates all read it rather than keeping their
+// own copy.
 func ambiguousHandoffDelivery(status PromptDeliveryStatus) bool {
 	return status == PromptCouldNotConfirm || status == PromptSentUnverified
+}
+
+// confirmableHandoffDelivery reports whether an operator may retire a pending
+// mission on the attestation that it already landed (#4429): any ambiguous
+// verdict, plus a recorded delivery whose settle a crash interrupted.
+// Positive non-delivery is excluded — automatic recovery owns that resend.
+func confirmableHandoffDelivery(status PromptDeliveryStatus) bool {
+	return ambiguousHandoffDelivery(status) || status == PromptDelivered
 }

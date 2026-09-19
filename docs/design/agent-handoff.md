@@ -403,6 +403,69 @@ The worktree is never cleaned up on failure, unlike the first-launch path this
 otherwise mirrors: on a create, a failed start means the workspace holds nothing
 worth keeping; here it holds everything the outgoing agent did.
 
+### 4.6 Mission delivery is a verdict, not a bool (#4429)
+
+The §4.5 failure paragraph says a failed delivery leaves the swap standing — but
+"failed" was doing too much work. Prompt submission has **three** honest
+outcomes, and `daemon/handoff_delivery.go` records the attempt's verdict
+durably as `pending_handoff_delivery_status`. Before the composer is touched,
+and only once readiness has proved the incoming runtime, it writes
+`could-not-confirm` as an attempt marker, so a crash mid-submit can never
+reload permission to send again. A crash inside the readiness wait reloads
+the verdict that admitted the attempt instead:
+
+| Verdict | Meaning | Who resolves it |
+|---|---|---|
+| `PromptDelivered` | submission confirmed | settles itself |
+| `PromptNotDelivered` | positive, mission-scoped evidence the prompt never landed (e.g. composer still held it) | **automatic** retry — the only verdict the recovery loop may resend |
+| `PromptSentUnverified` / `PromptCouldNotConfirm` | the paste may have landed; submit could not be confirmed | **the operator**, explicitly |
+
+`sent-unverified` is not an error to retry or a failure to tear down — it is an
+ambiguity, and the two branches of the ambiguity need opposite responses:
+resend if the mission is sitting in the composer, stand down if it is already
+executing. Collapsing it into failure double-delivers; collapsing it into
+success strands a mission that never landed. So the exact rendered mission
+stays pinned in `pending_handoff_mission` until a positive verdict or an
+operator decision retires it. The same treatment covers the manual
+account-swap mission, which has the identical wedge shape.
+
+**The replacement fence settles on liveness, not on the send.** `OpReplacing`
+exists to stop a half-completed swap being treated as complete. Once the
+incoming runtime is proven live and answering, the swap *is* complete — the
+unresolved question is whether its first prompt landed, which is a property of
+the mission record, not of the swap. So an ambiguous verdict commits the fence
+while the mission stays pending, and a crash-restart no longer reconstructs it:
+`session/instance_data.go` rebuilds `OpReplacing` only for
+`PromptNotDelivered` (automatic retry owns the row) and `PromptDelivered` (the
+recovery loop retires the mission without a resend). That recovery settle
+keeps a Lost or Dead row's liveness: it drops the fence without claiming a
+runtime that restore still owns. `startup_state_unknown` clears the same way: through an operation
+that actually confirmed the runtime, not through the passage of time. This is
+what un-wedges the #4429 state: the row stops being inert the moment the
+runtime answers, with the pending mission still advertised and resolvable.
+
+**The exit is a verb, and it has two halves.** After inspecting the pane:
+
+- **Resend** — `af sessions retry-limit <title>`, the TUI `c` key, the web
+  Retry action. Retries the pending mission in place, with the send path's
+  readiness wait as the gate. A positive observation after submit can upgrade
+  the ambiguous verdict to delivered. On a `startup_state_unknown` row the
+  daemon probes the pane first: the flag lowered the row's `started` bit, and
+  the local backend neither captures nor sends without it. A pane that answers
+  gets its binding back before readiness runs; one that does not answer
+  refuses the retry and leaves the row untouched.
+- **Mark delivered** — `af sessions retry-limit <title> --delivered`, the
+  picker's second choice under `c`, the web **Mark delivered** action. The
+  operator attests the mission already landed; the daemon probes that a
+  runtime answers at the binding (a dead or lost row is refused — restore owns
+  those), then clears the mission and settles the leftover state **without
+  sending anything**.
+
+The attest-without-resend half is a separate RPC (`ConfirmHandoffDelivery`)
+rather than a flag on `ResumeFromLimit` on purpose: a daemon that predates the
+verb must refuse loudly, where a flag it ignored would silently resend the very
+prompt that may already be executing.
+
 ## 5. Agent matrix
 
 ### 5.1 Who can trigger a handoff

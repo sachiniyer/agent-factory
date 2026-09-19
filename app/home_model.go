@@ -390,6 +390,8 @@ type home struct {
 	// row while the modal owns the keyboard; submit must never re-read that
 	// mutable selection and retarget a destructive runtime swap (#2322).
 	handoffTarget handoffPickerTarget
+	// handoffResolve is the resolve-delivery picker's retained state (#4429).
+	handoffResolve handoffResolveState
 	// pendingProgram tracks the program selected during new instance naming
 	pendingProgram string
 	// promptOverlay handles initial-prompt entry during new-instance naming

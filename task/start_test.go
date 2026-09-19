@@ -218,3 +218,84 @@ func TestWaitForReadyAndSendPromptWithStatusPreservesNonDeliveryVerdict(t *testi
 		t.Fatalf("delivery status = %q, want %q", status, session.PromptCouldNotConfirm)
 	}
 }
+
+// The pre-submission boundary is where a durable attempt marker belongs
+// (#4429): after readiness and the trust dialog have proved the runtime, and
+// before the composer is touched. Run any earlier, a crash inside the readiness
+// wait would reload an ambiguous verdict for a mission that was never sent.
+func TestWaitForReadyAndSubmitPromptRunsBoundaryBetweenReadinessAndSend(t *testing.T) {
+	backend := &startBackend{}
+	inst := newStartTestInstance(t, backend)
+	calls := 0
+
+	status, err := WaitForReadyAndSubmitPrompt(context.Background(), inst, "do work", func() error {
+		calls++
+		if backend.trustChecks == 0 {
+			t.Error("beforeSubmit ran before readiness and the trust dialog had proved the runtime")
+		}
+		if backend.sentPrompt != "" {
+			t.Errorf("beforeSubmit ran after the composer was touched (sent %q)", backend.sentPrompt)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("beforeSubmit ran %d times, want exactly once", calls)
+	}
+	if backend.sentPrompt != "do work" {
+		t.Fatalf("sent prompt = %q, want the prompt submitted after the boundary", backend.sentPrompt)
+	}
+	if status != session.PromptCouldNotConfirm {
+		t.Fatalf("delivery status = %q, want the backend's own verdict %q", status, session.PromptCouldNotConfirm)
+	}
+}
+
+// A runtime that never reached readiness never reaches the boundary either, so
+// the caller's recorded verdict is still the one that admitted the attempt.
+func TestWaitForReadyAndSubmitPromptSkipsBoundaryWhenReadinessFails(t *testing.T) {
+	oldPoll := waitForReadyPollInterval
+	waitForReadyPollInterval = time.Nanosecond
+	t.Cleanup(func() { waitForReadyPollInterval = oldPoll })
+
+	backend := &startBackend{previewErr: tmux.ErrSessionGone}
+	called := false
+	_, err := WaitForReadyAndSubmitPrompt(context.Background(), newStartTestInstance(t, backend), "do work", func() error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, ErrAgentReadiness) {
+		t.Fatalf("error = %v, want ErrAgentReadiness", err)
+	}
+	if called {
+		t.Fatal("beforeSubmit ran although readiness never proved the runtime")
+	}
+	if backend.sentPrompt != "" {
+		t.Fatalf("sent prompt = %q after a readiness failure, want nothing", backend.sentPrompt)
+	}
+}
+
+// A refused boundary sends nothing, and its error reaches the caller unwrapped
+// by either stage sentinel, so the caller can tell "the marker was not written"
+// from a failed wait or a failed send.
+func TestWaitForReadyAndSubmitPromptRefusedBoundarySendsNothing(t *testing.T) {
+	backend := &startBackend{}
+	boundaryErr := errors.New("attempt marker was not made durable")
+
+	status, err := WaitForReadyAndSubmitPrompt(context.Background(), newStartTestInstance(t, backend), "do work", func() error {
+		return boundaryErr
+	})
+	if !errors.Is(err, boundaryErr) {
+		t.Fatalf("error = %v, want the boundary's own error", err)
+	}
+	if errors.Is(err, ErrAgentReadiness) || errors.Is(err, ErrPromptDelivery) {
+		t.Fatalf("boundary refusal was classified as a readiness or delivery failure: %v", err)
+	}
+	if backend.sentPrompt != "" {
+		t.Fatalf("sent prompt = %q after a refused boundary, want nothing", backend.sentPrompt)
+	}
+	if status != session.PromptNotDelivered {
+		t.Fatalf("delivery status = %q, want %q: nothing was submitted", status, session.PromptNotDelivered)
+	}
+}
