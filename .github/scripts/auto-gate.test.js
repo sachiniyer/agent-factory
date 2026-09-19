@@ -4,6 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 const os = require("node:os");
 const { spawnSync } = require("node:child_process");
+const { createHash } = require("node:crypto");
 const autoGate = require("./auto-gate.js");
 const { __test } = autoGate;
 
@@ -4902,6 +4903,678 @@ test("reviewer silence with no usage-limit evidence keeps blocking exactly as be
   assert.equal(github.createdChecks[0].conclusion, "failure");
 });
 
+// ---------------------------------------------------------------------------
+// #4576: the maintainer hold label.
+//
+// Before this, a maintainer's only lever to stop a pull request was converting
+// it to a draft — and GitHub lets the PR's own author undo that. On #4383 the
+// maintainer drafted the PR at 20:32:45 and `detail-app[bot]` marked it ready
+// again at 20:41:38, nine minutes later, on the PR it had just approved.
+//
+// The hold has to survive two things a draft does not: the degraded
+// reviewer-unavailable path, which waives the one requirement it is about, and
+// someone other than a maintainer simply taking the label back off.
+// ---------------------------------------------------------------------------
+
+const HOLD_APPLIED_AT = "2026-07-09T00:30:00Z";
+const HOLD_REMOVED_AT = "2026-07-09T00:40:00Z";
+
+// The fixture that WOULD merge: an approving maintainer marker on the degraded
+// path, which is the state the gate is most willing to pass. Every hold test
+// below starts from it, so a green result means the hold failed, not that the
+// fixture was blocked for some unrelated reason.
+function degradedPassOptions(extra = {}) {
+  return {
+    issueComments: [
+      codexRateLimit(),
+      prComment("sachiniyer", "## Review — approve\n\nRead the diff.", "2026-07-09T01:30:00Z"),
+    ],
+    ...extra,
+  };
+}
+
+test("#4576: the baseline fixture the hold tests start from really does merge", async () => {
+  const result = await evaluateGate(degradedPassOptions());
+
+  assert.equal(result.shouldMerge, true, `control must pass: ${result.reasons.join("; ")}`);
+});
+
+// (1) A labelled PR cannot reach PASS — including on the degraded path, which is
+// the one that waives a requirement. The waiver is gated on `otherBlockers`
+// being empty, and the hold is pushed into that list before any of this runs.
+test("#4576: the hold label blocks the degraded reviewer-unavailable pass", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      labels: ["hold"],
+      labelEvents: [labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT)],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, false, "a held PR must not merge on the degraded path");
+  assert.equal(
+    result.degradedForUnavailableReviewer,
+    false,
+    "the degradation must not even activate — it is what would clear `reasons`",
+  );
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.summary, /`hold` label is on this pull request/);
+  // The summary says WHO and WHEN, so the hold is legible where merges are
+  // decided rather than only in whatever comment accompanied it.
+  assert.match(result.summary, /applied by @sachiniyer on 2026-07-09T00:30:00Z/);
+  assert.doesNotMatch(
+    result.notes.join("\n"),
+    /Maintainer approval from/,
+    "the approval branch that empties `reasons` must never be entered",
+  );
+});
+
+// The ordinary path too: nothing about the hold depends on Codex being down.
+test("#4576: the hold label blocks an otherwise perfectly green PR", async () => {
+  const result = await evaluateGate({
+    labels: ["hold"],
+    labelEvents: [labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT)],
+  });
+
+  assert.equal(result.shouldMerge, false, "a green head under a hold must not merge");
+  assert.match(result.summary, /`hold` label is on this pull request/);
+});
+
+// Structural, so it outranks the approval and verdict logic in the SUMMARY as
+// well as in the arithmetic: the maintainer reading the check sees the hold, not
+// a list of review items that cannot be acted on while it stands.
+test("#4576: a held PR on the manual path names the hold as its first blocker", async () => {
+  const result = await evaluateGate({
+    author: "outside-contributor",
+    labels: ["hold"],
+    labelEvents: [labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT)],
+  });
+
+  assert.equal(result.manualMergeRequired, true);
+  assert.match(result.manualMergeBlockers[0].reason, /`hold` label is on this pull request/);
+  assert.match(result.summary, /^BLOCKED:/, "the manual decision must be blocked, not a PASS");
+  assert.match(result.manualMergeBlockers[0].remedy, /allowed author \(sachiniyer, detail-app\)/);
+});
+
+// GitHub compares label names without regard to case when it creates them, so
+// `Hold` and `hold` are one label and both have to reach the same decision.
+//
+// Asserted on WHICH blocker, not just on `shouldMerge`: a case-sensitive `present`
+// test sends a `Hold`-labelled PR down the unresolved branch instead — blocked,
+// but for the wrong reason, and with a remedy that tells the maintainer to
+// re-apply a label already sitting on the pull request.
+test("#4576: the hold label is recognized whatever its case", async () => {
+  for (const [label, applied] of [
+    ["Hold", "Hold"],
+    ["HOLD", "hold"],
+    ["hold", "HOLD"],
+  ]) {
+    const result = await evaluateGate(
+      degradedPassOptions({
+        labels: [label],
+        labelEvents: [labeledEvent("sachiniyer", applied, HOLD_APPLIED_AT)],
+      }),
+    );
+
+    assert.equal(result.shouldMerge, false, `${label}/${applied}`);
+    assert.match(
+      result.summary,
+      /`hold` label is on this pull request — applied by @sachiniyer on 2026-07-09T00:30:00Z/,
+      `${label}/${applied}: must block on the label itself, not on an unresolved history`,
+    );
+  }
+});
+
+// (2) Someone who may not lift the hold removing the label does not clear it.
+//
+// This is the #4383 shape exactly, and it is the case that decides whether this
+// change fixes its own issue: the account that undid the maintainer's draft
+// there was `detail-app[bot]`, on a pull request `detail-app` had opened AND
+// approved. detail-app is in ALLOWED_AUTHORS, so the issue's literal rule —
+// "only members of ALLOWED_AUTHORS may lift it" — would have let that same
+// account lift this hold too, rebuilding the hole with a label instead of a
+// draft. Lifting therefore also takes a SECOND PARTY (see mayLiftHold).
+test("#4576: the PR's own author removing the hold label does not clear the hold", async () => {
+  const github = fakeGateGithub(
+    degradedPassOptions({
+      author: "app/detail-app",
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false, "stripping the label must not lift the hold");
+  assert.match(result.summary, /^BLOCKED:/);
+  // Names who removed it…
+  assert.match(
+    result.summary,
+    /`hold` label was removed by @detail-app\[bot\] on 2026-07-09T00:40:00Z, who may not lift a hold on a pull request they opened/,
+  );
+  // …and still names who placed it, which is the record the removal tried to erase.
+  assert.match(result.summary, /the hold @sachiniyer placed on 2026-07-09T00:30:00Z stands/);
+  // …and the label goes back on, so the hold is visible to whoever stripped it.
+  assert.deepEqual(
+    github.addedLabels.map((call) => call.labels),
+    [["hold"]],
+    "the gate re-applies the label it may not let a non-maintainer lift",
+  );
+  assert.equal(github.addedLabels[0].issue_number, 1465);
+});
+
+// The block stands on the removal RECORD, not on the write succeeding. A labels
+// API that refuses must not turn a hold into a pass — and must not red the run
+// either, the way an unverifiable play-test attestation used to (#4484).
+test("#4576: a failed label restore still blocks, and does not red the run", async () => {
+  const restoreFailed = new Error("Resource not accessible by integration");
+  restoreFailed.status = 403;
+  const github = fakeGateGithub(
+    degradedPassOptions({
+      author: "app/detail-app",
+      labels: [],
+      addLabelsError: restoreFailed,
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /who may not lift a hold/);
+  assert.doesNotMatch(
+    result.reasons.join("\n"),
+    /auto-gate evaluation error/,
+    "a labels-API failure must not become an evaluation error",
+  );
+  assert.match(result.notes.join("\n"), /could not restore the `hold` label/);
+});
+
+// A closed pull request is not written to. The decision is already blocked, and
+// reportDecision leaves a closed PR's decision alone — so the label restore
+// would be a write to every stale PR the aggregate walks, for no effect.
+test("#4576: a closed PR whose hold was stripped is not written to", async () => {
+  const github = fakeGateGithub(
+    degradedPassOptions({
+      author: "app/detail-app",
+      state: "CLOSED",
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /who may not lift a hold/, "the hold is still recorded");
+  assert.deepEqual(github.addedLabels, [], "but nothing is written to a closed PR");
+});
+
+// Applied and stripped inside the same second — one GitHub timestamp, two
+// events. The hold still stands, and the applier is still named: filtering the
+// provenance search on a strictly-earlier timestamp would drop the only addition
+// there is and report "unknown" on a hold that plainly has an author.
+test("#4576: a hold stripped in the same second it was applied still names its author", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      author: "app/detail-app",
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_APPLIED_AT),
+      ],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /the hold @sachiniyer placed on 2026-07-09T00:30:00Z stands/);
+  assert.match(
+    result.summary,
+    /removed by @detail-app\[bot\]/,
+    "the same-second removal must be recognized as the later event, not sorted under its own addition",
+  );
+
+  // The mirror image: the label is PRESENT after a same-second apply/strip/apply,
+  // so the tie resolves the other way and the hold is read off the label.
+  const reapplied = await evaluateGate(
+    degradedPassOptions({
+      author: "app/detail-app",
+      labels: ["hold"],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_APPLIED_AT),
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+      ],
+    }),
+  );
+  assert.equal(reapplied.shouldMerge, false);
+  assert.match(reapplied.summary, /`hold` label is on this pull request — applied by @sachiniyer/);
+});
+
+// Anyone at all who is not on the allowlist, not just the PR's own author.
+test("#4576: an unrelated account removing the hold label does not clear it either", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("outside-contributor", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /removed by @outside-contributor/);
+  assert.match(result.summary, /may not lift a hold on this repository/);
+});
+
+// A deleted or unreadable actor is not an allowed author. Naming it "unknown" is
+// the honest rendering; letting it through would be the unsafe one.
+test("#4576: a removal by an unreadable actor does not clear the hold", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /removed by @unknown/);
+});
+
+// (3) A maintainer removes it and the PR proceeds. Without this the hold would
+// be a one-way door, which is a stop with no way out — the thing this gate's
+// degradation design refuses everywhere else. The fixture's author is the
+// maintainer, so this is also the self-lift the named exemption exists for: he
+// opens most pull requests here, and a rule he could not satisfy on his own PR
+// would leave those holds unliftable.
+test("#4576: an allowed author removing the hold label lets the PR proceed", async () => {
+  const github = fakeGateGithub(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("sachiniyer", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, true, `a lifted hold must not block: ${result.reasons.join("; ")}`);
+  assert.match(result.notes.join("\n"), /`hold` label lifted by @sachiniyer on 2026-07-09T00:40:00Z/);
+  assert.deepEqual(github.addedLabels, [], "a lift by an allowed author is not re-applied");
+});
+
+// The allowlist's other member lifting a hold on SOMEONE ELSE's pull request —
+// the second-party case, which stays allowed. Run under every login GitHub
+// reports for that app: `normalizeAuthorLogin` is what makes `app/detail-app`,
+// `detail-app` and `detail-app[bot]` one actor, and the lift check has to go
+// through it or it fails closed intermittently by spelling (#4425).
+test("#4576: an allowed bot lifts a hold on another author's PR, under every login spelling", async () => {
+  for (const login of ["detail-app", "app/detail-app", "detail-app[bot]"]) {
+    const result = await evaluateGate(
+      degradedPassOptions({
+        labels: [],
+        labelEvents: [
+          labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+          unlabeledEvent(login, "hold", HOLD_REMOVED_AT),
+        ],
+      }),
+    );
+
+    assert.equal(result.shouldMerge, true, `${login}: ${result.reasons.join("; ")}`);
+    // Asserted on the NOTE, not only on the pass: a gate with no hold concept at
+    // all also merges this fixture, so `shouldMerge` alone would be green for
+    // the wrong reason and could never fail first.
+    //
+    // A fixed-substring check rather than a pattern. The expected text is
+    // literal, and a RegExp built from a login has to escape every metacharacter
+    // the login might contain — `detail-app[bot]` alone forces that. The escape
+    // written here covered `[` and `]` and not the backslash, which CodeQL
+    // flagged (alert 51). Extending the class would have been the smaller fix
+    // and the worse one: a substring check leaves nothing to escape at all.
+    const expected = `\`hold\` label lifted by @${login} on ${HOLD_REMOVED_AT}`;
+    const notes = result.notes.join("\n");
+    assert.ok(
+      notes.includes(expected),
+      `${login}: expected a note containing ${JSON.stringify(expected)}, got ${JSON.stringify(notes)}`,
+    );
+  }
+});
+
+// An unreadable pull-request author cannot show the lifter was a second party,
+// so an allowed author who is not a named self-lifter does not lift there. The
+// maintainer's route stays open in the same state, which is what keeps this
+// fail-closed rule from ever producing a hold nobody can lift.
+test("#4576: with the PR author unknown, only a named self-lifter lifts the hold", async () => {
+  const stripped = [
+    labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+    unlabeledEvent("detail-app[bot]", "hold", HOLD_REMOVED_AT),
+  ];
+  const bot = await evaluateGate(
+    degradedPassOptions({ author: "", labels: [], labelEvents: stripped }),
+  );
+  assert.equal(bot.shouldMerge, false, "an unknown author cannot prove a second-party lift");
+  assert.match(bot.summary, /may not lift a hold/);
+
+  // An unknown author is also not an ALLOWED one, so this is the manual path and
+  // `shouldMerge` is false whatever the hold says. The summary is where the
+  // decision shows: the maintainer's lift leaves no hold blocker on it.
+  const maintainer = await evaluateGate(
+    degradedPassOptions({
+      author: "",
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("sachiniyer", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+  assert.deepEqual(
+    maintainer.manualMergeBlockers.filter((blocker) => /hold/.test(blocker.reason)),
+    [],
+    "the maintainer's route must stay open even when the PR author cannot be read",
+  );
+  assert.match(maintainer.notes.join("\n"), /`hold` label lifted by @sachiniyer/);
+  assert.equal(
+    bot.manualMergeBlockers.some((blocker) => /may not lift a hold/.test(blocker.reason)),
+    true,
+    "…and the bot's does not",
+  );
+});
+
+test("#4576: mayLiftHold", () => {
+  const { mayLiftHold } = autoGate.__test;
+
+  // Not on the allowlist at all: never, whoever opened the PR.
+  assert.equal(mayLiftHold("outside-contributor", "sachiniyer"), false);
+  assert.equal(mayLiftHold("outside-contributor", ""), false);
+  assert.equal(mayLiftHold("", "sachiniyer"), false);
+
+  // A named self-lifter, on their own pull request and on anyone's.
+  assert.equal(mayLiftHold("sachiniyer", "sachiniyer"), true);
+  assert.equal(mayLiftHold("sachiniyer", "app/detail-app"), true);
+  assert.equal(mayLiftHold("sachiniyer", ""), true);
+
+  // An allowed author who is not: second party only. Every login spelling of the
+  // same app is the same actor, and case is not a second party either.
+  assert.equal(mayLiftHold("detail-app[bot]", "sachiniyer"), true);
+  assert.equal(mayLiftHold("detail-app[bot]", "app/detail-app"), false);
+  assert.equal(mayLiftHold("app/detail-app", "detail-app"), false);
+  assert.equal(mayLiftHold("detail-app", "Detail-App"), false);
+  assert.equal(mayLiftHold("detail-app[bot]", ""), false);
+});
+
+// A stranger strips it, the gate puts it back, then a maintainer lifts it for
+// real. The gate's own restoration must not make the hold permanent, and the
+// maintainer must still be named as the applier rather than the bot that
+// restored the label.
+test("#4576: a hold survives a strip, and a maintainer can still lift it afterwards", async () => {
+  const restored = await evaluateGate(
+    degradedPassOptions({
+      labels: ["hold"],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_REMOVED_AT),
+        labeledEvent("github-actions[bot]", "hold", "2026-07-09T00:41:00Z"),
+      ],
+    }),
+  );
+  assert.equal(restored.shouldMerge, false);
+  assert.match(
+    restored.summary,
+    /applied by @sachiniyer on 2026-07-09T00:30:00Z/,
+    "the gate's restoration must not be reported as the origin of the hold",
+  );
+
+  const lifted = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_REMOVED_AT),
+        labeledEvent("github-actions[bot]", "hold", "2026-07-09T00:41:00Z"),
+        unlabeledEvent("sachiniyer", "hold", "2026-07-09T00:42:00Z"),
+      ],
+    }),
+  );
+  assert.equal(lifted.shouldMerge, true, lifted.reasons.join("; "));
+});
+
+// Other labels are not holds, and the play-tested label in particular must keep
+// behaving exactly as it did.
+test("#4576: label churn that never touches `hold` leaves the gate alone", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      labels: ["play-tested", "bug"],
+      labelEvents: [
+        labeledEvent("sachiniyer", "play-tested", HOLD_APPLIED_AT),
+        unlabeledEvent("outside-contributor", "bug", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("; "));
+  assert.doesNotMatch(result.summary, /hold/);
+});
+
+// ---- The read failing. Every one of these fails TOWARD holding. ----
+
+// The connection did not come back at all. An unreadable history cannot show the
+// removal that took the label off, so it is not evidence that nothing did.
+test("#4576: an unreadable label history holds rather than clears", async () => {
+  const result = await evaluateGate(degradedPassOptions({ labels: [], labelEventsMissing: true }));
+
+  assert.equal(result.shouldMerge, false, "a history that did not arrive must not read as no hold");
+  assert.match(result.summary, /could not be resolved/);
+  assert.match(result.summary, /did not arrive with the pull request/);
+  assert.match(result.summary, /treated as held/);
+});
+
+// …but a PR that is already labelled needs no history to be held, so the same
+// unreadable read does not degrade its decision into a vaguer one.
+test("#4576: a labelled PR with an unreadable history is held on the label alone", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({ labels: ["hold"], labelEventsMissing: true }),
+  );
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /`hold` label is on this pull request/);
+  assert.match(result.summary, /applied by an actor Auto Gate could not read/);
+});
+
+// An event the gate cannot place in time cannot decide "which happened last",
+// which is the only question this resolver asks.
+test("#4576: an unorderable label-event timestamp holds", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("sachiniyer", "hold", "not a timestamp"),
+      ],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, false, "an unorderable removal must not lift the hold");
+  assert.match(result.summary, /timestamp Auto Gate cannot order/);
+});
+
+// The window is the newest 100 LABEL events, filtered server-side. If the hold
+// is older than that, "no hold event visible" is not "never held".
+test("#4576: no hold event in a truncated window holds; in a complete one it clears", async () => {
+  const truncated = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [labeledEvent("sachiniyer", "play-tested", HOLD_APPLIED_AT)],
+      labelEventsTruncated: true,
+    }),
+  );
+  assert.equal(truncated.shouldMerge, false, "an incomplete window cannot prove a hold was never set");
+  assert.match(truncated.summary, /older label events exist outside that window/);
+
+  const complete = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [labeledEvent("sachiniyer", "play-tested", HOLD_APPLIED_AT)],
+    }),
+  );
+  assert.equal(complete.shouldMerge, true, complete.reasons.join("; "));
+});
+
+// The label is gone and the newest event the gate can see ADDS it. Something
+// removed it out of view; the gate cannot say who, so it does not guess.
+test("#4576: a label absent while the newest visible event adds it holds", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT)],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /no removal is visible/);
+});
+
+// The GraphQL read itself failing is not a special case for the hold at all: the
+// label list and its provenance come from ONE request, so a failure takes both
+// and the whole evaluation is already BLOCKED. This pins that they cannot
+// disagree — there is no window where the labels are readable and the history is
+// not.
+test("#4576: the hold evidence and the labels come from one read, so they fail together", () => {
+  const source = fs.readFileSync(AUTO_GATE_SCRIPT, "utf8");
+  const query = source.match(/query\(\$owner: String!, \$repo: String!, \$number: Int!\)[\s\S]*?\n  `/);
+  assert.ok(query, "the pull-request query is missing from auto-gate.js");
+  assert.match(query[0], /labels\(first: 100\)/);
+  assert.match(
+    query[0],
+    /labelEvents: timelineItems\(last: \$\{HOLD_LABEL_EVENT_WINDOW\}, itemTypes: \[LABELED_EVENT, UNLABELED_EVENT\]\)/,
+  );
+  assert.equal(autoGate.__test.HOLD_LABEL_EVENT_WINDOW, 100);
+  assert.match(query[0], /hasPreviousPage/);
+  // The force-push window is a SEPARATE connection: sharing one would let label
+  // churn push the events that bind the review evidence out of it.
+  assert.match(query[0], /timelineItems\(last: 100, itemTypes: \[HEAD_REF_FORCE_PUSHED_EVENT\]\)/);
+});
+
+// The hold sits among the structural refusals, above every read that produces an
+// approval, a verdict or an attestation. Reading it later would put it below the
+// branch that empties `reasons`, and "whatever else passes" would stop being
+// true. A behavioural test cannot see an ordering that has not broken yet.
+test("#4576: the hold is evaluated before the approval and verdict logic", () => {
+  const source = fs.readFileSync(AUTO_GATE_SCRIPT, "utf8");
+  const hold = source.indexOf("const hold = holdState({");
+  const codex = source.indexOf("const codex = await evaluateCodex({");
+  const clears = source.indexOf("reasons.length = 0;");
+  assert.ok(hold > 0 && codex > 0 && clears > 0);
+  assert.ok(hold < codex, "the hold must be resolved before the Codex evidence is read");
+  assert.ok(hold < clears, "the hold must be pushed before the branch that empties `reasons`");
+});
+
+// ---- holdState on its own, where the states are reachable directly. ----
+
+test("#4576: holdState resolves each state", () => {
+  const { holdState } = autoGate.__test;
+  const applied = [labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT)];
+
+  assert.equal(
+    holdState({ labels: [], labelEvents: { truncated: false, events: [] } }).state,
+    "clear",
+  );
+  assert.equal(
+    holdState({ labels: ["hold"], labelEvents: { truncated: false, events: applied } }).state,
+    "held",
+  );
+  assert.equal(
+    holdState({
+      labels: [],
+      labelEvents: {
+        truncated: false,
+        events: [...applied, unlabeledEvent("someone", "hold", HOLD_REMOVED_AT)],
+      },
+    }).state,
+    "stripped",
+  );
+  assert.equal(
+    holdState({
+      labels: [],
+      labelEvents: {
+        truncated: false,
+        events: [...applied, unlabeledEvent("sachiniyer", "hold", HOLD_REMOVED_AT)],
+      },
+    }).state,
+    "clear",
+  );
+  assert.equal(holdState({ labels: [], labelEvents: null }).state, "unresolved");
+  assert.equal(
+    holdState({ labels: [], labelEvents: { truncated: false, events: undefined } }).state,
+    "unresolved",
+  );
+
+  // Only `stripped` writes. A plain hold is already visible, and an unresolved
+  // one has no removal to answer.
+  assert.equal(
+    holdState({ labels: ["hold"], labelEvents: { truncated: false, events: applied } }).restore,
+    false,
+  );
+  assert.equal(
+    holdState({
+      labels: [],
+      labelEvents: {
+        truncated: false,
+        events: [...applied, unlabeledEvent("someone", "hold", HOLD_REMOVED_AT)],
+      },
+    }).restore,
+    true,
+  );
+  assert.equal(holdState({ labels: [], labelEvents: null }).restore, false);
+});
+
+// The server returns `last:` windows oldest-first, but the resolver orders them
+// itself rather than trusting the order it was handed — so a shuffled window
+// reaches the same answer.
+test("#4576: holdState orders the events itself", () => {
+  const { holdState } = autoGate.__test;
+  const events = [
+    unlabeledEvent("someone", "hold", HOLD_REMOVED_AT),
+    labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+  ];
+
+  assert.equal(holdState({ labels: [], labelEvents: { truncated: false, events } }).state, "stripped");
+});
+
 // A usage-limit message proves the reviewer was out of quota when it answered,
 // which says nothing about a head pushed after it: the reviewer may be back in
 // quota and simply not there yet, which is the silence case. Without this the
@@ -6298,6 +6971,265 @@ test("renaming one test file to another stays outside the TUI gate", async () =>
   assert.doesNotMatch(result.reasons.join("\n"), /play-tested/);
   assert.equal(result.shouldMerge, true);
   assert.match(result.summary, /^PASS:/);
+});
+
+// #4477: a production file whose change is provably comment-only is subtracted
+// the same way. The patch only nominates a file; the proof reads both complete
+// blobs, because a hunk cannot see a raw string opened above its context.
+function gitBlobSha(text) {
+  const bytes = Buffer.from(text);
+  return createHash("sha1").update(`blob ${bytes.length}\x00`).update(bytes).digest("hex");
+}
+
+// A single-hunk unified diff over the whole file — the same line tags GitHub's
+// `patch` carries, without needing a diff implementation in the test.
+function wholeFilePatch(before, after) {
+  const a = before.replace(/\n$/, "").split("\n");
+  const b = after.replace(/\n$/, "").split("\n");
+  let prefix = 0;
+  while (prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < a.length - prefix && suffix < b.length - prefix &&
+      a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix += 1;
+  return [
+    `@@ -1,${a.length} +1,${b.length} @@`,
+    ...a.slice(0, prefix).map((line) => ` ${line}`),
+    ...a.slice(prefix, a.length - suffix).map((line) => `-${line}`),
+    ...b.slice(prefix, b.length - suffix).map((line) => `+${line}`),
+    ...a.slice(a.length - suffix).map((line) => ` ${line}`),
+  ].join("\n");
+}
+
+const TUI_MERGE_BASE = "ba5eba5e00000000000000000000000000000000";
+// #4231's gated file, reduced: every changed line is package prose.
+const PROSE_BEFORE =
+  "package app\n\n// The TUI drives every daemon control + read call over the HTTP API client.\n" +
+  "func control() {}\n";
+const PROSE_AFTER =
+  "package app\n\n// The session, task, project, tab, preview, and snapshot seams in this file use\n" +
+  "// the HTTP API client (#1592 Phase 2 PR3).\nfunc control() {}\n";
+const HELP_ROWS = Array.from({ length: 6 }, (_, i) => `row ${i}`).join("\n");
+
+function commentOnlyFixture({
+  path = "app/session_control.go",
+  before = PROSE_BEFORE,
+  after = PROSE_AFTER,
+  patch = wholeFilePatch(before, after),
+  status = "modified",
+  previousFilename = undefined,
+  headBlob = gitBlobSha(after),
+  baseMode = "100644",
+  extraFiles = [],
+  ...overrides
+} = {}) {
+  return {
+    files: [
+      { filename: path, previous_filename: previousFilename, status, sha: headBlob, patch },
+      ...extraFiles,
+    ],
+    mergeBaseSha: TUI_MERGE_BASE,
+    treeEntriesByCommit: {
+      [TUI_MERGE_BASE]: { [path]: { sha: gitBlobSha(before), mode: baseMode, type: "blob" } },
+      [HEAD_SHA]: { [path]: gitBlobSha(after) },
+    },
+    blobsBySha: { [gitBlobSha(before)]: before, [gitBlobSha(after)]: after },
+    ...overrides,
+  };
+}
+
+async function evaluateCommentOnly(options) {
+  const github = fakeGateGithub(commentOnlyFixture(options));
+  const result = await autoGate.evaluate({
+    github, context: fakeContext(), core: fakeCore(), prNumber: 1465, setOutputs: false,
+  });
+  return { github, result };
+}
+
+test("#4477: a comment-only change to a gated file does not demand the play-tested label", async () => {
+  const { github, result } = await evaluateCommentOnly();
+
+  assert.doesNotMatch(result.reasons.join("\n"), /play-tested/);
+  assert.equal(result.shouldMerge, true, result.summary);
+  assert.match(result.notes.join("\n"), /app\/session_control\.go changed only in comments/);
+  // The subtraction is a proof over both blobs, not a reading of the patch.
+  assert.deepEqual(new Set(github.blobReads), new Set([gitBlobSha(PROSE_BEFORE), gitBlobSha(PROSE_AFTER)]));
+  assert.ok(
+    github.compareRequests.some((request) => request.basehead === `master...${HEAD_SHA}`),
+    "the proof reads the merge base the patch was taken against",
+  );
+});
+
+// Canaries: each LOOKS like a comment edit and changes what the toolchain builds.
+// The first two pass the patch filter, so only the whole-file proof catches them.
+for (const [name, before, after] of [
+  [
+    "a // line inside a raw string, far from its backticks",
+    `package ui\n\nconst help = \`\n${HELP_ROWS}\n// shown to the user\n${HELP_ROWS}\n\`\n`,
+    `package ui\n\nconst help = \`\n${HELP_ROWS}\n// SHOWN to the user\n${HELP_ROWS}\n\`\n`,
+  ],
+  [
+    "a cgo preamble comment",
+    'package ui\n\n// #include "a.h"\nimport "C"\n',
+    'package ui\n\n// #include "b.h"\nimport "C"\n',
+  ],
+  [
+    "a //go:embed pattern",
+    'package ui\n\nimport _ "embed"\n\n//go:embed help.txt\nvar help string\n',
+    'package ui\n\nimport _ "embed"\n\n//go:embed usage.txt\nvar help string\n',
+  ],
+  [
+    "a struct tag",
+    'package ui\n\ntype row struct {\n\tA int `json:"a"`\n}\n',
+    'package ui\n\ntype row struct {\n\tA int `json:"b"`\n}\n',
+  ],
+  [
+    "commented-out code",
+    "package ui\n\nfunc draw() {\n\tpaint()\n}\n",
+    "package ui\n\nfunc draw() {\n\t// paint()\n}\n",
+  ],
+]) {
+  test(`#4477 canary: ${name} still demands the play-tested label`, async () => {
+    const { result } = await evaluateCommentOnly({ path: "ui/help.go", before, after });
+
+    assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+    assert.equal(result.shouldMerge, false);
+    assert.doesNotMatch(result.notes.join("\n"), /changed only in comments/);
+  });
+}
+
+// The patch is a hint, never evidence: a patch that claims prose while the blobs
+// hold a code change is gated on the blobs.
+test("#4477: a patch that disagrees with the blobs keeps the gate", async () => {
+  const { result } = await evaluateCommentOnly({
+    after: PROSE_AFTER.replace("func control() {}", "func control() { panic(1) }"),
+    patch: wholeFilePatch(PROSE_BEFORE, PROSE_AFTER),
+  });
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+});
+
+// Shapes the proof never attempts: each keeps the gate without reading a blob.
+for (const [name, options] of Object.entries({
+  "an added file": { status: "added" },
+  "a removed file": { status: "removed" },
+  // A rename moves a file between packages or out of the binary; its content
+  // proves nothing about that.
+  "a renamed file": { status: "renamed", previousFilename: "app/session_control_old.go" },
+  "a missing patch": { patch: null },
+  "a non-Go file under a gated prefix": { path: "app/testdata/banner.ansi" },
+  "an edited trailing comment (the patch filter is stricter than the proof)": {
+    before: "package app\n\nvar x = 1 // old\n",
+    after: "package app\n\nvar x = 1 // new\n",
+  },
+  "a comment-only file beside a real change": {
+    extraFiles: [{ filename: "ui/pane.go", status: "modified", sha: "2".repeat(40), patch: "@@ -1 +1 @@\n-a()\n+b()" }],
+  },
+  "more candidates than the proof will read": {
+    extraFiles: Array.from({ length: 20 }, (_, i) => ({
+      filename: `ui/prose_${i}.go`, status: "modified", sha: "3".repeat(40), patch: "@@ -1 +1 @@\n-// a\n+// b",
+    })),
+  },
+})) {
+  test(`#4477: ${name} keeps the play-tested label without reading blobs`, async () => {
+    const { github, result } = await evaluateCommentOnly(options);
+
+    assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+    assert.equal(result.shouldMerge, false);
+    assert.deepEqual(github.blobReads, []);
+  });
+}
+
+// Every way the proof can fail to finish keeps the gate, and none of them turns
+// into an evaluation error that would take the gate down (#4484).
+for (const [name, options] of Object.entries({
+  "a blob read that fails": { blobsBySha: { [gitBlobSha(PROSE_BEFORE)]: PROSE_BEFORE, [gitBlobSha(PROSE_AFTER)]: new Error("blob unavailable") } },
+  "a blob whose content is not the blob asked for": {
+    blobsBySha: { [gitBlobSha(PROSE_BEFORE)]: PROSE_BEFORE, [gitBlobSha(PROSE_AFTER)]: PROSE_BEFORE },
+  },
+  "a blob that is not valid UTF-8": {
+    blobsBySha: {
+      [gitBlobSha(PROSE_BEFORE)]: PROSE_BEFORE,
+      [gitBlobSha(PROSE_AFTER)]: { encoding: "base64", content: Buffer.from([0xff, 0xfe]).toString("base64") },
+    },
+  },
+  "a head blob other than the one listFiles described": { headBlob: "4".repeat(40) },
+  "a mode change": { baseMode: "100755" },
+  "a truncated head tree": { truncatedTreeCommits: [HEAD_SHA] },
+  "an unreadable merge base": { compareError: new Error("compare unavailable") },
+})) {
+  test(`#4477: ${name} keeps the gate without an evaluation error`, async () => {
+    const { result } = await evaluateCommentOnly(options);
+
+    assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+    assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
+    assert.doesNotMatch(result.notes.join("\n"), /changed only in comments/);
+  });
+}
+
+// #4477, at the other seam: a follow-up push after the play-test that only
+// rewords comments leaves the tested program intact, so the attestation holds.
+// The same proof decides, so the same canaries still make it stale.
+const ENVMARKER = "session/tmux/envmarker.go";
+function attestedFollowUp(before, after, { path = ENVMARKER, extraHeadEntries = {}, blobsBySha, ...overrides } = {}) {
+  return playTestFixture({
+    files: [path],
+    treesByOid: {
+      [OTHER_SHA]: tuiTree({ [path]: gitBlobSha(before) }),
+      [HEAD_SHA]: tuiTree({ [path]: gitBlobSha(after), ...extraHeadEntries }),
+    },
+    blobsBySha: blobsBySha || { [gitBlobSha(before)]: before, [gitBlobSha(after)]: after },
+    ...overrides,
+  });
+}
+
+test("#4477: a comment-only follow-up keeps the play-test attestation", async () => {
+  const result = await evaluateGate(attestedFollowUp(PROSE_BEFORE, PROSE_AFTER));
+
+  assert.equal(result.shouldMerge, true, result.summary);
+  assert.match(
+    result.notes.join("\n"),
+    new RegExp(`play-tested commit ${OTHER_SHA} covers head ${HEAD_SHA} \\(gated paths changed only in comments: session/tmux/envmarker\\.go\\)`),
+  );
+});
+
+for (const [name, before, after, extra = {}] of [
+  [
+    "a // line inside a raw string",
+    `package tmux\n\nconst help = \`\n${HELP_ROWS}\n// shown to the user\n${HELP_ROWS}\n\`\n`,
+    `package tmux\n\nconst help = \`\n${HELP_ROWS}\n// SHOWN to the user\n${HELP_ROWS}\n\`\n`,
+  ],
+  [
+    "a //go:build constraint",
+    "//go:build linux\n\npackage tmux\n",
+    "//go:build !linux\n\npackage tmux\n",
+  ],
+  ["a comment edit beside an added gated file", PROSE_BEFORE, PROSE_AFTER, { extraHeadEntries: { "ui/pane.go": "2".repeat(40) } }],
+  // Only Go reads `//` as a comment. A golden or asset under a gated prefix is
+  // content, whatever its lines start with.
+  ["a //-led line in a non-Go file", "// row one\n", "// row two\n", { path: "ui/testdata/help.golden" }],
+]) {
+  test(`#4477 canary: ${name} after the play-test makes the attestation stale`, async () => {
+    const github = fakeGateGithub(attestedFollowUp(before, after, extra));
+    const result = await autoGate.evaluate({
+      github, context: fakeContext(), core: fakeCore(), prNumber: 1465, setOutputs: false,
+    });
+
+    assert.equal(result.shouldMerge, false);
+    assert.match(result.reasons.join("\n"), /attestation.*is stale: gated paths changed/);
+    if (extra.extraHeadEntries || extra.path) {
+      // Structurally ineligible: decided before any blob is read.
+      assert.deepEqual(github.blobReads, []);
+    }
+  });
+}
+
+test("#4477: an unreadable follow-up blob makes the attestation stale, not the evaluation fail", async () => {
+  const result = await evaluateGate(attestedFollowUp(PROSE_BEFORE, PROSE_AFTER, {
+    blobsBySha: { [gitBlobSha(PROSE_BEFORE)]: PROSE_BEFORE, [gitBlobSha(PROSE_AFTER)]: new Error("blob unavailable") },
+  }));
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /is stale: gated paths changed/);
+  assert.doesNotMatch(result.reasons.join("\n"), /auto-gate evaluation error/);
 });
 
 test("a usage-limited reviewer does not waive unresolved inline findings", async () => {
@@ -8818,6 +9750,101 @@ test("#4209: a failed follow-up dispatch names the manual recovery instead of cl
   });
   assert.equal(github.workflowDispatchAttempts, 1, "an ambiguous dispatch write is not retried");
   assert.deepEqual(github.dispatchedWorkflows, []);
+});
+
+// ---------------------------------------------------------------------------
+// The update-branch merge race (#4462). evaluate() resolves a PR open and
+// behind; a hand or queue merge then closes it in the seconds before the
+// gate's own `PUT update-branch` executes — two writers on one PR with no
+// ordering between them. The loser's update is either rejected by a PR that no
+// longer exists to update, or accepted onto a dead branch whose tip it just
+// moved out from under delete-on-merge. Both are the race's losing outcome —
+// the merge the run wanted already happened — and neither is an update failure.
+// ---------------------------------------------------------------------------
+
+test("#4462: an update-branch refused because the PR already merged is a lost race, not an update failure", async () => {
+  // #4398's first shape: the PUT is rejected (422, the documented
+  // "unprocessable" for a merged or head-less PR) and the confirming read
+  // proves the merge landed. The update is a no-op — not a red gate.
+  const gone = new Error("Unprocessable Entity");
+  gone.status = 422;
+  const github = fakeGateGithub({
+    behindBy: 1,
+    updateBranchError: gone,
+    pullGetSnapshots: [
+      { merged: false },
+      { merged: true, state: "closed", merge_commit_sha: OTHER_SHA },
+    ],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was in flight/,
+  );
+  assert.equal(github.mergedWith, null, "the loser does not merge what already merged");
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.deepEqual(github.dispatchedWorkflows, [], "there is no successor work to schedule");
+});
+
+test("#4462: a PR already merged before the update is never written to", async () => {
+  // The merge landed in the wider window — between the evaluation and this
+  // lane reaching the update. The live read sees it and the PUT never fires:
+  // no write lands on a dead PR's branch at all.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    pullGetSnapshots: [{ merged: true, state: "closed", merge_commit_sha: OTHER_SHA }],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was pending/,
+  );
+  assert.equal(github.updateBranchCalls.length, 0, "the write is skipped entirely");
+  assert.equal(github.mergedWith, null);
+});
+
+test("#4462: an update-branch accepted onto a just-merged PR refuses and schedules nothing", async () => {
+  // #4398's observed shape, exactly: the PUT was ACCEPTED and its merge commit
+  // (688928a) landed on the head branch inside the merge's own second —
+  // delete-on-merge saw a tip it did not recognize and left the branch. The
+  // post-update read sees the PR merged, and the lane refuses as the lost race
+  // it is rather than scheduling successor work onto a dead PR. Reclaiming the
+  // orphaned branch is the sweep's concern, not this transaction's.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    headAfterUpdate: OTHER_SHA,
+    remoteRefSha: OTHER_SHA,
+    pullGetSnapshots: [
+      { merged: false },
+      { merged: true, state: "closed", merge_commit_sha: "f".repeat(40) },
+    ],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was in flight/,
+  );
+  assert.equal(github.mergedWith, null);
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.deepEqual(github.dispatchedWorkflows, [], "no successor: the merge already produced the outcome");
+  assert.deepEqual(github.approvedRuns, [], "no runs are approved for a head the merge made moot");
+});
+
+test("#4462: an update failure whose PR state cannot be re-read stays an update failure", async () => {
+  // The concession needs PROOF the race was lost — a read whose failure means
+  // "no evidence", never "a new error" (#3551's rule). An unreachable PR is
+  // not a merged PR.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    updateBranchError: new Error("update rejected"),
+    pullGetErrors: [null, new Error("PR read unavailable")],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /the update failed: error update rejected/,
+  );
+  assert.equal(github.mergedWith, null);
 });
 
 // #3807. The merge commit `PUT update-branch` writes is authored by the workflow
@@ -12894,7 +13921,23 @@ function fakeGateGithub({
   reviewComments = [],
   files = [],
   labels = [],
+  // The PR's labelled/unlabelled timeline, as GraphQL returns it: oldest first,
+  // `__typename` distinguishing the two, and `label.name` unfiltered — the hold
+  // resolver is what picks its own label out (#4576). Build entries with
+  // labeledEvent()/unlabeledEvent().
+  labelEvents = [],
+  // Older label events exist outside the `last:` window, which is the only thing
+  // that separates "never held" from "the hold scrolled out of sight".
+  labelEventsTruncated = false,
+  // The connection itself does not come back — an unreadable history rather than
+  // an empty one.
+  labelEventsMissing = false,
+  addLabelsError = null,
   treesByOid = {},
+  // Blob contents by blob SHA, for the TUI gate's comment-only proof (#4477): a
+  // string is served base64-encoded the way the API sends it, an object is served
+  // as the raw response body, and an Error is thrown. An unlisted SHA is a 404.
+  blobsBySha = {},
   associatedPullRequests = [
     { number: 1465, state: "open", base: { ref: "master" }, head: { sha: headSha } },
   ],
@@ -13088,6 +14131,8 @@ function fakeGateGithub({
     operations: [],
     mergedWith: null,
     refReads: [],
+    addedLabels: [],
+    addLabelAttempts: 0,
     pullListQueries: [],
     pullListBranches: [],
     branchSweepReads: 0,
@@ -13097,6 +14142,7 @@ function fakeGateGithub({
     reviewCommentReadsByNumber: {},
     createdChecks: [],
     compareRequests: [],
+    blobReads: [],
     updateBranchCalls: [],
     graphqlReadsByNumber: {},
     updatedChecks: [],
@@ -13190,6 +14236,19 @@ function fakeGateGithub({
             },
           };
         },
+        getBlob: async ({ file_sha }) => {
+          github.blobReads.push(file_sha);
+          const blob = blobsBySha[file_sha];
+          if (blob instanceof Error) throw blob;
+          if (blob === undefined) {
+            throw Object.assign(new Error("Not Found"), { status: 404 });
+          }
+          return {
+            data: typeof blob === "string"
+              ? { sha: file_sha, encoding: "base64", content: Buffer.from(blob).toString("base64") }
+              : blob,
+          };
+        },
         getRef: async ({ ref }) => {
           github.refReads.push(ref);
           if (refReadError) {
@@ -13223,10 +14282,21 @@ function fakeGateGithub({
           github.branchRefs = github.branchRefs.filter((branch) => branch.name !== name);
         },
       },
-      issues: { listComments, createComment: async (options) => {
-        github.recoveryComments.push(options);
-        return { data: { id: 1 } };
-      } },
+      issues: {
+        listComments,
+        createComment: async (options) => {
+          github.recoveryComments.push(options);
+          return { data: { id: 1 } };
+        },
+        addLabels: async (options) => {
+          github.addLabelAttempts += 1;
+          if (addLabelsError) {
+            throw addLabelsError;
+          }
+          github.addedLabels.push(options);
+          return { data: [] };
+        },
+      },
       repos: {
         listCommitStatusesForRef,
         listPullRequestsAssociatedWithCommit,
@@ -13282,6 +14352,9 @@ function fakeGateGithub({
               behind_by: behindByRaw === undefined ? behindBy : behindByRaw,
               ahead_by: 1,
               status: behindBy > 0 ? "diverged" : "ahead",
+              // Only for the PR head itself — the one comparison whose merge base
+              // the TUI gate's comment-only proof reads (#4477).
+              ...(target === headSha ? { merge_base_commit: { sha: mergeBaseSha } } : {}),
             },
           };
         },
@@ -13453,6 +14526,12 @@ function fakeGateGithub({
             timelineItems: {
               nodes: pullRequestOverride.headForcePushes ?? headForcePushes,
             },
+            labelEvents: labelEventsMissing
+              ? null
+              : {
+                  pageInfo: { hasPreviousPage: labelEventsTruncated },
+                  nodes: pullRequestOverride.labelEvents ?? labelEvents,
+                },
           },
         },
       };
@@ -14528,6 +15607,26 @@ function codexIssueCommentFinding(
     ].join("\n"),
     created_at: timestamp,
     updated_at: timestamp,
+  };
+}
+
+// One LabeledEvent / UnlabeledEvent node, shaped the way the PR query asks for
+// them. `actor: null` is what GitHub sends for a deleted account, so a fixture
+// can express it by passing an empty login.
+function labeledEvent(actor, name, createdAt) {
+  return labelTimelineEvent("LabeledEvent", actor, name, createdAt);
+}
+
+function unlabeledEvent(actor, name, createdAt) {
+  return labelTimelineEvent("UnlabeledEvent", actor, name, createdAt);
+}
+
+function labelTimelineEvent(typename, actor, name, createdAt) {
+  return {
+    __typename: typename,
+    createdAt,
+    actor: actor ? { login: actor } : null,
+    label: { name },
   };
 }
 

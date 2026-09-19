@@ -62,7 +62,7 @@ func TestValidateAccountSwapRefusesConversationSelectors(t *testing.T) {
 	} {
 		t.Run(tc.program, func(t *testing.T) {
 			err := accountSwapTestInstance(tc.program).ValidateAccountSwap("work")
-			require.ErrorContains(t, err, "fresh conversation")
+			require.ErrorContains(t, err, "must choose which conversation the replacement opens")
 			require.ErrorContains(t, err, tc.arg, "the refusal must name the user-pinned selector")
 		})
 	}
@@ -93,30 +93,24 @@ func TestSelectAccountAutomaticallyClearsPriorConversationAndCapture(t *testing.
 		"an asynchronous capture from the stopped runtime must not restore its conversation")
 }
 
-func TestValidateAccountSwapRefusesSiblingIdentityOverride(t *testing.T) {
-	inst := registeredAccountSwapTestInstance(t, tmux.ProgramCodex, "codex")
-	inst.Tabs = append(inst.Tabs, &Tab{
-		ID: "build", Name: "build", Kind: TabKindProcess,
-		tmux: tmux.NewTmuxSession("build", "CODEX_HOME=/other make"),
-	})
+// A process tab's command is not a replacement command: the swap stops the tab
+// and never relaunches it (#4479), so an identity assignment in that command —
+// direct or wrapped — can no longer run after the account boundary, and must not
+// refuse the swap (#4506 review). A relaunched sibling is a shell, whose
+// replacement is af's own startup-free command.
+func TestValidateAccountSwapAdmitsAProcessTabThatSetsAnIdentity(t *testing.T) {
+	for _, command := range []string{"CLAUDE_CONFIG_DIR=/other make", `sh -c 'CLAUDE_CONFIG_DIR=/other claude'`} {
+		t.Run(command, func(t *testing.T) {
+			inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+			inst.Tabs = append(inst.Tabs, &Tab{
+				ID: "build", Name: "build", Kind: TabKindProcess,
+				tmux: tmux.NewTmuxSession("build", command),
+			})
 
-	err := inst.ValidateAccountSwap("work")
-	require.ErrorContains(t, err, `tab "build"`)
-	require.ErrorContains(t, err, "sets an identity or shell-startup variable itself",
-		"a command-local assignment runs AFTER the account boundary installed the selected root")
-}
-
-func TestValidateAccountSwapRefusesUnprovableSiblingIdentityOverride(t *testing.T) {
-	inst := registeredAccountSwapTestInstance(t, tmux.ProgramCodex, "codex")
-	inst.Tabs = append(inst.Tabs, &Tab{
-		ID: "wrapped", Name: "wrapped", Kind: TabKindProcess,
-		tmux: tmux.NewTmuxSession("wrapped", `sh -c 'CODEX_HOME=/other codex'`),
-	})
-
-	err := inst.ValidateAccountSwap("work")
-	require.ErrorContains(t, err, `tab "wrapped"`)
-	require.ErrorContains(t, err, "sets an identity or shell-startup variable itself",
-		"an interpreter wrapper must not hide an identity assignment from the swap boundary")
+			require.NoError(t, inst.ValidateAccountSwap("work"),
+				"the swap stops this command; nothing relaunches it under the selected account")
+		})
+	}
 }
 
 func TestValidateAccountSwapPreflightsStartupFreeShellReplacement(t *testing.T) {
@@ -184,7 +178,9 @@ func TestValidateManualAccountSwapPreflightsMissingUnchangedBinary(t *testing.T)
 	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 }
 
-func TestValidateManualAccountSwapPreflightsMissingSiblingBinary(t *testing.T) {
+// A process tab whose binary has since disappeared cannot block a manual swap:
+// the swap only stops its pane (#4506 review).
+func TestValidateManualAccountSwapAdmitsAProcessTabWhoseBinaryIsGone(t *testing.T) {
 	bin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bin, tmux.ProgramClaude), []byte("#!/bin/sh\nexit 0\n"), 0700))
 	t.Setenv("PATH", bin+":/usr/bin:/bin")
@@ -199,10 +195,8 @@ func TestValidateManualAccountSwapPreflightsMissingSiblingBinary(t *testing.T) {
 		tmux: tmux.NewTmuxSession("worker", missing),
 	})
 
-	err = inst.ValidateManualAccountSwap("work", tmux.ProgramClaude)
-	require.ErrorContains(t, err, `tab "worker"`)
-	require.ErrorContains(t, err, "launch preflight")
-	require.ErrorContains(t, err, "not installed or not on PATH")
+	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramClaude),
+		"a command the swap never relaunches needs no launch preflight")
 	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram())
 	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 }
@@ -287,16 +281,15 @@ func TestValidateAccountSwapPreflightsCloudAuthenticationMode(t *testing.T) {
 	require.ErrorContains(t, err, "CLAUDE_CODE_USE_BEDROCK")
 }
 
-func TestValidateAccountSwapRefusesSiblingConversationSelector(t *testing.T) {
+func TestValidateAccountSwapAdmitsAProcessTabWithAConversationSelector(t *testing.T) {
 	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
 	inst.Tabs = append(inst.Tabs, &Tab{
 		ID: "worker", Name: "worker", Kind: TabKindProcess,
 		tmux: tmux.NewTmuxSession("worker", "claude --resume sibling-chat"),
 	})
 
-	err := inst.ValidateAccountSwap("work")
-	require.ErrorContains(t, err, `tab "worker"`)
-	require.ErrorContains(t, err, "--resume sibling-chat")
+	require.NoError(t, inst.ValidateAccountSwap("work"),
+		"the swap stops this tab and never relaunches it, so its conversation pins nothing (#4506 review)")
 }
 
 func TestValidateAccountSwapRefusesRestoredTmuxTabWithoutBinding(t *testing.T) {
@@ -408,8 +401,8 @@ func TestRespawnForAccountSwapPropagatesSiblingRestartFailure(t *testing.T) {
 	inst.Tabs[1].Command = "git status --short"
 	inst.Tabs[1].tmux.SetProgram("git status --short")
 	inst.Tabs = append(inst.Tabs, &Tab{
-		ID: "build", Name: "build", Kind: TabKindProcess, Command: "git status --short",
-		tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(processName, "git status --short",
+		ID: "build", Name: "build", Kind: TabKindShell, Command: "/bin/sh",
+		tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(processName, "/bin/sh",
 			failAccountSwapProcessPty{t: t, cmdExec: executor, name: processName}, executor),
 	})
 	inst.mu.Unlock()
