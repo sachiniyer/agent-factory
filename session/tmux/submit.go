@@ -37,6 +37,16 @@ var (
 	// mid-render (#1982), so a millisecond-scale retry re-enters the very render
 	// that just stranded the first paste. A package var so tests can tighten it.
 	redeliverAfterAbsentDelay = 5 * time.Second
+	// strandedSubmitGrace is the beat the submit path waits after Enter before
+	// checking whether the draft is still staged at the composer cursor — the
+	// #4200 case, where Enter is absorbed into an undrained paste or held
+	// behind queued input and the prompt sits in the composer unsubmitted. Long
+	// enough for a healthy submit to clear the composer on a busy render;
+	// short enough that a create's startup path barely notices it.
+	strandedSubmitGrace = 800 * time.Millisecond
+	// strandedSubmitSettle is the shorter beat after the one remedy Enter, before
+	// the path decides whether that keystroke dispatched the staged draft.
+	strandedSubmitSettle = 350 * time.Millisecond
 )
 
 // minDistinctiveFragment is the shortest payload fragment treated as
@@ -342,6 +352,21 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, bo
 		t.seedDeliveryBaseline(boundary)
 	} else {
 		t.deferDeliveryBaseline()
+	}
+
+	// Enter is fire-and-forget: a composer still rendering the paste can absorb
+	// it as a literal newline or hold it behind queued input, leaving the whole
+	// prompt staged but unsubmitted while the transport above already reported
+	// its outcome (#4200). The pre-Enter observation cannot see that — its
+	// evidence ends at the submit — so look once more after a short grace. A
+	// draft still staged AT the live cursor is provably undispatched, and one
+	// more Enter is then the submit the first one never became. The remedy is
+	// not a retry: nothing is re-pasted, and it fires only on positive staged
+	// evidence, so a prompt that did submit (whose text left the cursor row)
+	// can never receive a duplicate keystroke. Observed-absent is excluded: its
+	// partial draft must never be dispatched — the redelivery path owns it.
+	if observation.outcome != deliveryObservedAbsent {
+		observation = t.remedyStrandedSubmit(probe, observation)
 	}
 
 	retryAuthorized := false

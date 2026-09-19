@@ -59,8 +59,10 @@ func failSettlementWrite(t *testing.T, title string, failure error, armed bool) 
 //
 // A real load runs session.FromInstanceData, which carries the durable
 // PendingHandoffMission across and reconstructs the OpReplacing fence from it
-// (pinned by session.TestPendingHandoffMissionReconstructsDurableFence) — that
-// reconstruction is precisely what authorizes the recovery pass to deliver. The
+// ONLY for positive non-delivery evidence (#4429, pinned by
+// session.TestPendingHandoffMissionReconstructsDurableFence) — that
+// reconstruction is precisely what authorizes the recovery pass to deliver. An
+// ambiguous verdict reloads settled so the poll observes the live runtime. The
 // loader itself cannot run here: for a local session it ends in Instance.Start
 // against real tmux. So this rebuilds the same two durable facts and hands the
 // row to the unmodified production recovery pass, which is where the duplicate
@@ -87,8 +89,10 @@ func reloadedHandoffRow(t *testing.T, m *Manager, repoID, repoPath string, rec *
 				t.Fatalf("restore pending mission evidence: %v", err)
 			}
 		}
-		if err := inst.Transition(session.BeginHandoff()); err != nil {
-			t.Fatalf("reconstruct replacement fence: %v", err)
+		if rec.HandoffDeliveryStatus == session.PromptNotDelivered {
+			if err := inst.Transition(session.BeginHandoff()); err != nil {
+				t.Fatalf("reconstruct replacement fence: %v", err)
+			}
 		}
 	}
 	m.mu.Lock()

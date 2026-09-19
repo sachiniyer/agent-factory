@@ -11,6 +11,10 @@ func TestPendingHandoffMissionReconstructsDurableFence(t *testing.T) {
 		Liveness:              LiveRunning,
 		BackendType:           "docker",
 		PendingHandoffMission: "continue the inherited work",
+		// The durable checkpoint records positive non-delivery before the first
+		// send is ever attempted: this is the "never reached the composer"
+		// evidence that alone may reconstruct the fence.
+		HandoffDeliveryStatus: PromptNotDelivered,
 		TaskRunActive:         true,
 	}
 
@@ -31,6 +35,29 @@ func TestPendingHandoffMissionReconstructsDurableFence(t *testing.T) {
 	}
 	if got := restored.PendingHandoffMission(); got != data.PendingHandoffMission {
 		t.Fatalf("restored pending mission = %q, want %q", got, data.PendingHandoffMission)
+	}
+
+	// An ambiguous verdict must NOT reconstruct the fence (#4429): the send ran
+	// against a runtime readiness had already proven live, so fencing on reload
+	// would freeze a possibly-working agent at its checkpoint state and hide
+	// every lifecycle action. The pending mission alone stays the durable
+	// obligation for explicit retry.
+	for _, ambiguous := range []PromptDeliveryStatus{PromptSentUnverified, PromptCouldNotConfirm} {
+		ambiguousData := data
+		ambiguousData.HandoffDeliveryStatus = ambiguous
+		restoredAmbiguous, err := FromInstanceData(ambiguousData.ForStorage())
+		if err != nil {
+			t.Fatalf("FromInstanceData(%s): %v", ambiguous, err)
+		}
+		if got := restoredAmbiguous.GetInFlightOp(); got != OpNone {
+			t.Fatalf("ambiguous pending-handoff record (%s) restored op %v, want OpNone", ambiguous, got)
+		}
+		if got := restoredAmbiguous.PendingHandoffMission(); got != data.PendingHandoffMission {
+			t.Fatalf("ambiguous record lost its pending mission: got %q", got)
+		}
+		if restoredAmbiguous.PendingHandoffMissionAutoRetryable() {
+			t.Fatalf("ambiguous record (%s) authorized automatic replay", ambiguous)
+		}
 	}
 
 	// A readiness failure deliberately converts the same pending record into the
@@ -81,6 +108,9 @@ func TestPendingHandoffMissionWithoutEvidenceFailsClosed(t *testing.T) {
 	if restored.PendingHandoffMissionAutoRetryable() {
 		t.Fatal("a legacy pending mission without durable delivery evidence authorized automatic replay")
 	}
+	if got := restored.GetInFlightOp(); got != OpNone {
+		t.Fatalf("missing-evidence pending mission restored op %v, want OpNone — ambiguous evidence does not reconstruct the fence (#4429)", got)
+	}
 }
 
 func TestAmbiguousPendingHandoffProjectsRollbackFence(t *testing.T) {
@@ -106,6 +136,9 @@ func TestAmbiguousPendingHandoffProjectsRollbackFence(t *testing.T) {
 	}
 	if restored.StartupStateUnknown() {
 		t.Fatal("a current reader must restore the real known startup state")
+	}
+	if got := restored.GetInFlightOp(); got != OpNone {
+		t.Fatalf("ambiguous pending handoff restored op %v, want OpNone — the fence is reserved for positive non-delivery (#4429)", got)
 	}
 	if got := restored.ToInstanceData().HandoffDeliveryStatus; got != PromptCouldNotConfirm {
 		t.Fatalf("current reader lost mission-scoped evidence: got %q", got)

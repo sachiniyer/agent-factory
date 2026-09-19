@@ -207,7 +207,7 @@ can inspect per-session results.`,
 				}
 			}
 
-			_, status, err := deliverPromptViaDaemon(daemon.DeliverPromptRequest{
+			taskStatus, status, err := deliverPromptViaDaemon(daemon.DeliverPromptRequest{
 				Title:    title,
 				RepoPath: workspace,
 				Program:  program,
@@ -216,7 +216,50 @@ can inspect per-session results.`,
 			if err != nil {
 				return jsonError(err)
 			}
-			return jsonOut(sendPromptResult{OK: true, Status: status})
+			result := sendPromptResult{OK: true, Status: status}
+			switch taskStatus {
+			case daemon.TaskStatusLimitParked:
+				// The session was created but parked at a usage limit before the
+				// prompt could be sent; the prompt stays saved for resume. That
+				// is a parked create, not an unconfirmed send, so say so instead
+				// of letting the bare could-not-confirm verdict mislead (#4200).
+				result.Created = true
+				result.Warning = fmt.Sprintf(
+					"Session %q was created, but hit a usage limit before the prompt could be sent; "+
+						"the prompt is saved and will be sent when the limit resets.", title)
+			case "sent", daemon.StatusDeferredAttached:
+				// The target already existed (or a concurrent create claimed it);
+				// status is the live send's observed verdict and needs no
+				// creation framing.
+			default:
+				// "started": a new session was created and its startup send ran.
+				result.Created = true
+			}
+			if result.Warning == "" && status != session.PromptDelivered {
+				switch {
+				case result.Created && status == session.PromptNotDelivered:
+					result.Warning = fmt.Sprintf(
+						"Session %q was created, but its initial prompt was observed not fully delivered. "+
+							"Inspect its pane before retrying; Enter was sent best-effort. Do not recreate the session.", title)
+				case result.Created:
+					result.Warning = fmt.Sprintf(
+						"Session %q was created, but initial prompt submission is unconfirmed (delivery status: %s). "+
+							"Inspect its pane before retrying; the prompt may already have run or may still be in the composer. "+
+							"Do not recreate the session.", title, status)
+				case status == session.PromptNotDelivered:
+					result.Warning = fmt.Sprintf(
+						"The prompt sent to existing session %q was observed not fully delivered. "+
+							"Inspect its pane before retrying.", title)
+				default:
+					result.Warning = fmt.Sprintf(
+						"Prompt submission to existing session %q is unconfirmed (delivery status: %s). "+
+							"Inspect its pane before retrying; the prompt may already have run.", title, status)
+				}
+			}
+			if result.Warning != "" && !envelopeOutput {
+				fmt.Fprintln(warnWriter, "Warning: "+result.Warning)
+			}
+			return jsonOut(result)
 		}
 
 		exists, err := instanceTitleExistsInScope(repoID, title)
@@ -236,8 +279,14 @@ can inspect per-session results.`,
 }
 
 type sendPromptResult struct {
-	OK     bool                         `json:"ok"`
-	Status session.PromptDeliveryStatus `json:"status"`
+	OK      bool                         `json:"ok"`
+	Created bool                         `json:"created"`
+	Status  session.PromptDeliveryStatus `json:"status"`
+	// Warning keeps an unconfirmed outcome visibly unconfirmed (#4200): a bare
+	// ok:true beside a sent-unverified status reads like success to a caller
+	// that does not check status, so the field spells out what happened and
+	// what to do next. Empty when delivery was confirmed.
+	Warning string `json:"warning,omitempty"`
 }
 
 // broadcastResult is the JSON summary `send-prompt --all` prints: aggregate

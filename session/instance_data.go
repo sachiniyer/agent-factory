@@ -303,16 +303,24 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	inFlightOp := inFlightOpFromData(data)
 	// PendingHandoffMission is the one operation marker that IS durable: it says
 	// an irreversible runtime swap completed but its takeover brief did not. Disk
-	// still scrubs the generic op enum, then this specific proof reconstructs the
-	// replacement fence so status polling cannot call the idle incoming composer a
-	// completed task before recovery delivers its mission. A kill tombstone
-	// outranks every process-local op, including one carried by a live snapshot;
+	// still scrubs the generic op enum, then positive non-delivery evidence
+	// reconstructs the replacement fence so status polling cannot call the idle
+	// incoming composer a completed task before recovery delivers its mission.
+	// AMBIGUOUS verdicts do not re-raise the fence (#4429): the send ran against
+	// a runtime readiness had already proven live, and the mission may already
+	// be running — fencing it on reload would freeze a working agent at its
+	// checkpoint state and hide every lifecycle action. The pending mission
+	// alone remains the durable obligation, holding the row open for explicit
+	// retry after pane inspection. A kill tombstone outranks every
+	// process-local op, including one carried by a live snapshot;
 	// startup-unknown likewise prevents synthesizing a replacement fence. Both
-	// terminal markers must retain an explicit teardown handle rather than load as
-	// an in-flight replacement.
+	// terminal markers must retain an explicit teardown handle rather than load
+	// as an in-flight replacement.
 	if data.UserKilled {
 		inFlightOp = OpNone
-	} else if data.PendingHandoffMission != "" && !data.StartupStateUnknown && inFlightOp == OpNone {
+	} else if data.PendingHandoffMission != "" &&
+		data.HandoffDeliveryStatus == PromptNotDelivered &&
+		!data.StartupStateUnknown && inFlightOp == OpNone {
 		inFlightOp = OpReplacing
 	}
 	// Legacy records retain their last save time. Only truly missing timestamps

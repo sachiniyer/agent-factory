@@ -290,6 +290,82 @@ func TestSendPromptReportsClosedDeliveryOutcome(t *testing.T) {
 	}
 }
 
+// TestSendPromptCreateReportsCreatedAndUnconfirmed is the #4200 regression at
+// the send-prompt --create boundary: when the daemon auto-creates the target,
+// the caller must learn BOTH that a new session exists and what its startup
+// send actually observed — a bare ok:true next to an unconfirmed verdict is the
+// false-success shape the issue exists to eliminate.
+func TestSendPromptCreateReportsCreatedAndUnconfirmed(t *testing.T) {
+	tmp := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+	resetSendPromptState(t)
+
+	// A docker-backend repo skips the local binary preflight, keeping this
+	// test about the result mapping rather than the host's toolchain.
+	repoRoot := newBackendRepo(t, "docker")
+
+	prevDeliver := deliverPromptViaDaemon
+	t.Cleanup(func() { deliverPromptViaDaemon = prevDeliver })
+
+	var warningBuf strings.Builder
+	prevWarn := warnWriter
+	warnWriter = &warningBuf
+	t.Cleanup(func() { warnWriter = prevWarn })
+
+	for _, tc := range []struct {
+		name        string
+		taskStatus  string
+		status      session.PromptDeliveryStatus
+		wantCreated bool
+		wantWarning string // substring; "" asserts no warning
+	}{
+		{name: "created delivered", taskStatus: "started", status: session.PromptDelivered, wantCreated: true},
+		{name: "created sent-unverified", taskStatus: "started", status: session.PromptSentUnverified, wantCreated: true, wantWarning: "unconfirmed"},
+		{name: "created could-not-confirm", taskStatus: "started", status: session.PromptCouldNotConfirm, wantCreated: true, wantWarning: "unconfirmed"},
+		{name: "created not-delivered", taskStatus: "started", status: session.PromptNotDelivered, wantCreated: true, wantWarning: "not fully delivered"},
+		{name: "created parked at limit", taskStatus: daemon.TaskStatusLimitParked, status: session.PromptCouldNotConfirm, wantCreated: true, wantWarning: "usage limit"},
+		{name: "sent to existing unverified", taskStatus: "sent", status: session.PromptSentUnverified, wantWarning: "unconfirmed"},
+		{name: "sent to existing delivered", taskStatus: "sent", status: session.PromptDelivered},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			warningBuf.Reset()
+			deliverPromptViaDaemon = func(daemon.DeliverPromptRequest) (string, session.PromptDeliveryStatus, error) {
+				return tc.taskStatus, tc.status, nil
+			}
+			clearSendPromptFlags()
+			repoFlag = repoRoot
+			sendPromptCreateFlag = true
+
+			out, runErr := runCmdCaptureStdout(t, sessionsSendPromptCmd, []string{"worker", "triage the queue"})
+			if runErr != nil {
+				t.Fatalf("send-prompt --create returned error: %v", runErr)
+			}
+			var got sendPromptResult
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("output is not JSON (%q): %v", string(out), err)
+			}
+			if !got.OK {
+				t.Fatal("send-prompt --create dropped its ok acknowledgement")
+			}
+			if got.Status != tc.status {
+				t.Fatalf("status = %q, want %q", got.Status, tc.status)
+			}
+			if got.Created != tc.wantCreated {
+				t.Fatalf("created = %v, want %v", got.Created, tc.wantCreated)
+			}
+			if tc.wantWarning == "" && got.Warning != "" {
+				t.Fatalf("warning = %q, want none for a confirmed delivery", got.Warning)
+			}
+			if tc.wantWarning != "" && !strings.Contains(got.Warning, tc.wantWarning) {
+				t.Fatalf("warning = %q, want it to say %q — the caller must learn the prompt was not confirmed", got.Warning, tc.wantWarning)
+			}
+			if tc.wantWarning != "" && !strings.Contains(warningBuf.String(), tc.wantWarning) {
+				t.Fatalf("plain output never printed the warning; warnWriter = %q", warningBuf.String())
+			}
+		})
+	}
+}
+
 // silenceCLIOutput points stdout/stderr at /dev/null for the test: the command
 // prints its JSON result and jsonError prints the failure, neither of which
 // belongs in test output.

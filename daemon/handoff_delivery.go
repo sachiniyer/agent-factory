@@ -151,19 +151,48 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 				"the session was retained as startup-unknown with its mission pending for inspection",
 			delivery.title, delivery.target, serr)
 	}
-	// Readiness proved this is the incoming runtime, so conversation capture is
-	// safe even though its mission remains behind the durable retry fence. The
-	// later recovery pass no longer has the command-specific capture plan. The
-	// delivery constructor already cleared every predecessor-scoped limit, so the
-	// retry cannot be diverted into the outgoing provider's reset schedule.
-	m.captureAgentConversationAsync(delivery.repoID, delivery.key, delivery.instance, delivery.conversationCapture)
-	if evidenceErr := m.persistSettlement(delivery.repoID, delivery.key, delivery.instance); evidenceErr != nil {
-		serr = errors.Join(serr, evidenceErr)
+	if status == session.PromptNotDelivered {
+		// Positive non-delivery evidence keeps the replacement fence: the pane
+		// rendered this mission's prefix but never its completion tail, so the
+		// incoming agent's idle composer must not be read as a completed task
+		// run, and automatic recovery owns the redelivery. Readiness proved this
+		// is the incoming runtime, so conversation capture is safe even though
+		// its mission remains behind the fence; the later recovery pass no
+		// longer has the command-specific capture plan. The delivery constructor
+		// already cleared every predecessor-scoped limit, so the retry cannot be
+		// diverted into the outgoing provider's reset schedule.
+		m.captureAgentConversationAsync(delivery.repoID, delivery.key, delivery.instance, delivery.conversationCapture)
+		if evidenceErr := m.persistSettlement(delivery.repoID, delivery.key, delivery.instance); evidenceErr != nil {
+			serr = errors.Join(serr, evidenceErr)
+		}
+		return fmt.Errorf(
+			"handed %q off to %s, but its mission brief could not be delivered (%w); "+
+				"the exact mission remains pending behind the replacement fence; automatic redelivery requires "+
+				"positive evidence that this mission did not land "+
+				"(the outgoing provider's limit state was cleared at the runtime boundary)",
+			delivery.title, delivery.target, serr)
+	}
+
+	// An ambiguous verdict is different (#4429): the send RAN, which means
+	// readiness had already proven the incoming runtime live — and the mission
+	// may already be running. Keeping the fence here is the reported wedge: the
+	// status poll skips a fenced session, so a live agent mid-work freezes at
+	// its checkpoint state and every lifecycle action disappears. Settle the
+	// fence instead and let the poll observe the truth — a dead pane goes Lost,
+	// a working agent reports Running, and an idle one surfaces the retained
+	// verdict as its idle reason. The exact mission stays pending for explicit
+	// retry after the operator inspects the pane; automatic replay still
+	// requires the positive non-delivery evidence above.
+	if terr := settle(func() error {
+		return delivery.instance.Transition(session.CommitHandoff())
+	}, false); terr != nil {
+		return fmt.Errorf(
+			"handed %q off to %s with its mission delivery unconfirmed, but could not settle the replacement fence: %w",
+			delivery.title, delivery.target, errors.Join(serr, terr))
 	}
 	return fmt.Errorf(
-		"handed %q off to %s, but its mission brief could not be delivered (%w); "+
-			"the exact mission remains pending behind the replacement fence; automatic redelivery requires "+
-			"positive evidence that this mission did not land "+
-			"(the outgoing provider's limit state was cleared at the runtime boundary)",
+		"handed %q off to %s, but its mission brief delivery is unconfirmed (%w); "+
+			"the incoming runtime is live and the session is polling normally — inspect its pane; "+
+			"the exact mission remains pending, and `af sessions retry-limit` redelivers it if it never ran",
 		delivery.title, delivery.target, serr)
 }
