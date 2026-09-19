@@ -417,6 +417,37 @@ func TestSweep_KillsServersOnlyInTmuxSocketDirs(t *testing.T) {
 	}
 }
 
+// A sandboxed HOME (af-test-user-home-*) carries no owner stamp — sandboxUserHome
+// never writes one — so the sweep cannot attribute it and leaves it for `af doctor`
+// to clear on content (#4170 sandbox-HOME regression). It is counted as
+// unattributed so the leak stays visible, never reaped: only doctor's
+// content-based removal is licensed to delete it, since a removal here would key
+// on nothing but a name it does not own.
+func TestSweep_LeavesUnstampedSandboxUserHomeForDoctor(t *testing.T) {
+	base := sweepBase(t)
+	dir := filepath.Join(base, testresidue.SandboxUserHomePrefix+"600")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Seed the leaves the harness writes, to model a real leaked dir. The sweep
+	// does not inspect content — it keys only on the (absent) owner stamp — but a
+	// realistic fixture keeps this honest if that ever changes.
+	if err := os.WriteFile(filepath.Join(dir, testresidue.SandboxUserHomeMarker), []byte("testguard.SandboxHome (#4469)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".zshrc"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := fakeEnv("b", "n", nil, nil)
+	stats := env.sweep(base)
+	if stats.reaped != 0 || stats.unattributed != 1 {
+		t.Fatalf("unstamped sandbox HOME: stats %+v, want reaped=0 unattributed=1 (counted, not reaped)", stats)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("sandbox HOME was removed by the sweep: it carries no owner stamp and must be left for `af doctor`")
+	}
+}
+
 func TestSweepOnce_DisableEnvSkipsSweep(t *testing.T) {
 	// Both halves of the cache must reset: under -shuffle a prior test's real
 	// sweep can leave nonzero orphanSweepStats, and a disabled run must return
