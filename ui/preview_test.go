@@ -479,14 +479,6 @@ func TestPreviewTrailingNewlineAtExactHeight(t *testing.T) {
 		"no truncation marker expected at exact-fit boundary")
 }
 
-// Helper function for max
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // TestPreviewResetToNormalModeNilInstance is a regression test for issue #338.
 // When ResetToNormalMode is called with a nil instance (e.g., the user pressed
 // ESC while the sidebar header was selected), the pane previously returned
