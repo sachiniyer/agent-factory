@@ -336,13 +336,21 @@ func TestScrubCredentialKeyRedactsIndentedContinuation(t *testing.T) {
 		{"password: + CR + indented bare", "password:", "password:\r  hunter2secret", "hunter2secret"},
 		{"auth: + CR + indented bare", "auth:", "auth:\r  abcdefghijkl", "abcdefghijkl"},
 		// A BLANK line before the indented value — the run
-		// `(?:(?:\r\n?|\n)[ \t]*)*` consumes blank lines
+		// `(?:[ \t]*(?:\r\n?|\n)[ \t]*)*` consumes blank lines
 		// (`password:\n\n  hunter2secret`), which the pre-narrowing `\s*`
 		// covered but a single-linebreak alternative would drop.
 		{"password: + blank line + indented bare", "password:", "password:\n\n  hunter2secret", "hunter2secret"},
 		{"password: + blank line + indented bare (CRLF)", "password:", "password:\r\n\r\n  hunter2secret", "hunter2secret"},
 		{"password: + two blank lines + indented bare", "password:", "password:\n\n\n  hunter2secret", "hunter2secret"},
 		{"token: + blank line + indented PAT", "token:", "token:\n\n  ghp_AAAA0123456789BCDEFG", "ghp_AAAA0123456789BCDEFG"},
+		// A WHITESPACE-ONLY blank line before the indented value — the
+		// loose-form iter group accepts horizontal whitespace on BOTH sides
+		// of each intermediate line break (`[ \t]*(?:\r\n?|\n)[ \t]*)`), so the
+		// blank line's leading spaces do not block the value.
+		// (`password:\n  \n  hunter2secret`, the YAML/config shape a log tail
+		// can paste). LF and CRLF.
+		{"password: + ws-only blank line + indented bare (LF)", "password:", "password:\n  \n  hunter2secret", "hunter2secret"},
+		{"password: + ws-only blank line + indented bare (CRLF)", "password:", "password:\r\n  \r\n  hunter2secret", "hunter2secret"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -369,6 +377,20 @@ func TestScrubCredentialKeyRedactsIndentedContinuation(t *testing.T) {
 		in := "token:\nabcdefGHIJKL"
 		if got := Scrub(in); got != in {
 			t.Fatalf("indent gate reached a left-margin next line:\n in: %q\nout: %q", in, got)
+		}
+	})
+
+	// Boundary lock: a WHITESPACE-ONLY blank line between `password:` and a
+	// column-0 next line does not let the iter group's `[ \t]*` smuggle the
+	// left margin past the `[ \t]+` indent gate. The required `[ \t]+` runs
+	// out of spaces at the column-0 value, so an unrelated log line survives
+	// unchanged. (The cross-line guard for the WS-only-blank-line case; the
+	// redaction counterpart is the `password: + ws-only blank line + indented
+	// bare` cases above.)
+	t.Run("ws-only blank line + left-margin next line is not a continuation", func(t *testing.T) {
+		in := "token:\n  \n4f2a9c0123ab"
+		if got := Scrub(in); got != in {
+			t.Fatalf("ws-only blank line bypassed the indent gate:\n in: %q\nout: %q", in, got)
 		}
 	})
 }
@@ -652,6 +674,20 @@ func TestScrubCredentialKeyRedactsRepeatedJSONLineBreaks(t *testing.T) {
 			t.Fatalf("expected a redaction marker for the same-line quoted = assignment:\n in: %q\n out: %q", in, got)
 		}
 	})
+
+	// No-regression half: a MISMATCHED-QUOTE JSON-shaped log fragment does
+	// not enter the JSON form. JSON keys require matching double quotes, so
+	// `"password'` (mismatched) is not a valid JSON key, and the explicit
+	// narrowing to `"..."` keeps the JSON-form cross-line widening out of an
+	// unrelated log fragment whose quoted diagnostic occupies the next line.
+	// The loose form's `[ \t]*[:=]` cannot reach the cross-line colon either,
+	// so the diagnostic survives.
+	t.Run("mismatched JSON key quotes is not matched", func(t *testing.T) {
+		in := "\"password'\n:\n\"build failed: see log\""
+		if got := Scrub(in); got != in {
+			t.Fatalf("JSON-form widening reached a mismatched-quoted JSON-shaped log fragment:\n in: %q\n out: %q", in, got)
+		}
+	})
 }
 
 // TestScrubCredentialKeyRedactsYAMLFlowMapping locks the YAML flow-mapping
@@ -720,6 +756,96 @@ func TestScrubCredentialKeyRedactsYAMLFlowMapping(t *testing.T) {
 		in := "checking token:\n4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a fix-login"
 		if got := Scrub(in); got != in {
 			t.Fatalf("flow gate reached a bare key without a flow introducer:\n in: %q\n out: %q", in, got)
+		}
+	})
+
+	// No-regression half: a COMMA in ordinary log prose does NOT establish a
+	// flow-collection context, so the flow gate must not let a bare credential
+	// keyword after a comma cross a line and redact the next record's
+	// diagnostic. The flow form gates a `,` introducer on the enclosing `{`,
+	// so `request failed, token:\n2026-01-01 daemon started` survives.
+	t.Run("comma in log prose is not a flow mapping", func(t *testing.T) {
+		in := "request failed, token:\n2026-01-01 daemon started"
+		if got := Scrub(in); got != in {
+			t.Fatalf("flow gate reached a comma in log prose:\n in: %q\n out: %q", in, got)
+		}
+	})
+}
+
+// TestScrubCredentialKeyRedactsYAMLExplicitKey locks the YAML explicit-mapping
+// syntax the JSON, indented-continuation, and flow forms all miss. YAML's
+// explicit-key form places the colon on a LATER line and marks the key with a
+// leading `?` (`? password\n: hunter2secret`); the bare-key loose form's
+// `[ \t]*[:=]` cannot reach the cross-line colon, the JSON form requires a
+// double-quoted key, and the flow form requires a brace, so all three miss it
+// — but the pre-narrowing `\s*` covered it, so dropping it is a regression to
+// the leaking side. A fourth alternative in credentialKeyPattern gates the
+// pre-colon cross-line widening on the leading `?` (which means YAML
+// explicit-key only): a bare log line with no leading `?` keeps the loose
+// form's same-line guard, so the ambiguous bare-log-line shape the cross-
+// newline guard is for still cannot cross; only a `?-marked` YAML explicit pair
+// reaches its colon across a line. Same-line explicit-key syntax (the colon
+// on the same line as the key) already redacts through the loose form, which
+// is not gated on `?`, so this form additionally consumes the `?` and re-
+// anchors the indent gate across the cross-line colon; the span engine's
+// priority dedups the duplicate match.
+func TestScrubCredentialKeyRedactsYAMLExplicitKey(t *testing.T) {
+	cases := []struct{ name, key, in, leak string }{
+		// The shape the report names: a `?` marker, the credential key,
+		// then the colon on the NEXT line, then the value. LF and CRLF.
+		{"? password + cross-line bare", "? password", "? password\n: hunter2secret", "hunter2secret"},
+		{"? password + cross-line bare (CRLF)", "? password", "? password\r\n: hunter2secret", "hunter2secret"},
+		// A credential keyword other than `password`, cross-line colon.
+		{"? auth + cross-line bare", "? auth", "? auth\n: abcdef0123", "abcdef0123"},
+		// A blank line between the key and the cross-line colon — the
+		// `(?:(?:\r\n?|\n)[ \t]*)*` between the key and `:` consumes blank
+		// lines the same way the JSON form's separator does.
+		{"? password + blank line + cross-line bare", "? password", "? password\n\n: hunter2secret", "hunter2secret"},
+		// A standalone CR between the key and the cross-line colon, the
+		// same CR/CRLF/LF form the JSON form and the loose form accept.
+		{"? password + CR + bare", "? password", "? password\r: hunter2secret", "hunter2secret"},
+		// The colon on the same line as the key (same-line explicit-key
+		// syntax) — the `?` form and the loose form both redact this; the
+		// explicit-key form's case is included so a compiler that only
+		// emits explicit-key syntax does not slip past the gate.
+		{"? password + same-line bare", "? password", "? password: hunter2secret", "hunter2secret"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Scrub(tc.in)
+			if strings.Contains(got, tc.leak) {
+				t.Fatalf("YAML explicit-key credential survived:\n in: %q\n out: %q", tc.in, got)
+			}
+			if !strings.Contains(got, SecretMarker) {
+				t.Fatalf("expected a redaction marker for the YAML explicit-key credential:\n in: %q\n out: %q", tc.in, got)
+			}
+			// The `?` + key half survives so triage sees the explicit-key
+			// marker and where the redaction was — only the value replaced.
+			if !strings.Contains(got, tc.key) {
+				t.Fatalf("YAML explicit-key marker / key half absorbed:\n in: %q\n out: %q", tc.in, got)
+			}
+		})
+	}
+
+	// No-regression half: a bare log line whose colon is on the SAME line
+	// without a leading `?` is the ambiguous-log-line shape the cross-newline
+	// guard exists for, and the explicit-key form's `\?` gate must not reach
+	// it; the loose form's same-line `[:=]` may still redact the same-line
+	// value, but a cross-line value at the left margin survives.
+	t.Run("log line with no leading ? keeps the cross-newline guard", func(t *testing.T) {
+		in := "request failed, token:\n2026-01-01 daemon started"
+		if got := Scrub(in); got != in {
+			t.Fatalf("explicit-key gate reached a bare log line without a leading ?:\n in: %q\n out: %q", in, got)
+		}
+	})
+
+	// No-regression half: a `?` whose first follower is NOT a credential
+	// marker is not a YAML explicit-key pair, so the gate's marker
+	// requirement must reject it. The unrelated text survives.
+	t.Run("? + unrelated word is not an explicit-key pair", func(t *testing.T) {
+		in := "? foo\n: bar"
+		if got := Scrub(in); got != in {
+			t.Fatalf("explicit-key gate reached a ? + unrelated word:\n in: %q\n out: %q", in, got)
 		}
 	})
 }

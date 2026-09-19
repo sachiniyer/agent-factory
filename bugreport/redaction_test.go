@@ -433,3 +433,59 @@ func TestScrubAndScrubLogRedactYAMLFlowMapping(t *testing.T) {
 		t.Fatalf("flow gate reached a bare key without a flow introducer over the log tail:\n in: %q\n out: %q", logSHA, got)
 	}
 }
+
+// TestScrubAndScrubLogRecoversCrossNewlineEndToEnd pins the cross-newline
+// recoveries the latest credscrub round restores at the two real surfaces: the
+// config path (collectConfig's `r.scrub` over config.toml-shape text) and the
+// log path (scrubLog's tail). A whitespace-only blank line before an indented
+// continuation (`password:\n  \n  hunter2secret`), a JSON key with mismatched
+// quotes (`"password'` — must NOT over-redact the quoted diagnostic), a comma in
+// log prose (`request failed, token:\n2026-01-01` — must NOT over-redact the
+// next record), and YAML explicit-key syntax (`? password\n: hunter2secret`)
+// exercise the four codex findings end-to-end on the same paths users hit.
+func TestScrubAndScrubLogRecoversCrossNewlineEndToEnd(t *testing.T) {
+	r := &redactor{}
+
+	// Whitespace-only blank line before the indented continuation: the
+	// config path redacts the value and keeps the key half.
+	cfgBlank := "password:\n  \n  hunter2secret"
+	if got := r.scrub(cfgBlank); strings.Contains(got, "hunter2secret") {
+		t.Fatalf("ws-only blank-line continuation survived scrub:\n in: %q\n out: %q", cfgBlank, got)
+	} else if !strings.Contains(got, "password:") || !strings.Contains(got, secretMarker) {
+		t.Fatalf("ws-only blank-line continuation not redacted with prefix:\n in: %q\n out: %q", cfgBlank, got)
+	}
+
+	// Mismatched JSON quotes (the pre-narrowing `["']...["']` made the JSON
+	// form reach across the cross-newline colon and redact an unrelated
+	// quoted diagnostic; the narrower `"..."` does not). The diagnostic
+	// survives end-to-end.
+	cfgMismatched := "\"password'\n:\n\"build failed: see log\""
+	if got := r.scrub(cfgMismatched); strings.Contains(got, secretMarker) {
+		t.Fatalf("mismatched-quoted JSON-shaped log fragment over-redacted:\n in: %q\n out: %q", cfgMismatched, got)
+	} else if !strings.Contains(got, "build failed: see log") {
+		t.Fatalf("diagnostic under mismatched JSON quotes lost:\n in: %q\n out: %q", cfgMismatched, got)
+	}
+
+	// Comma in log prose (no enclosing `{`): the next record survives.
+	logProse := "request failed, token:\n2026-01-01 daemon started\n"
+	if got := r.scrubLog(logProse); strings.Contains(got, secretMarker) {
+		t.Fatalf("flow gate reached a comma in log prose over the log tail:\n in: %q\n out: %q", logProse, got)
+	}
+
+	// YAML explicit-key syntax: the colon on the next line is reached end-
+	// to-end and the `? password` key marker survives.
+	cfgExplicit := "? password\n: hunter2secret"
+	if got := r.scrub(cfgExplicit); strings.Contains(got, "hunter2secret") {
+		t.Fatalf("YAML explicit-key value survived scrub:\n in: %q\n out: %q", cfgExplicit, got)
+	} else if !strings.Contains(got, "? password") || !strings.Contains(got, secretMarker) {
+		t.Fatalf("YAML explicit-key not redacted with prefix:\n in: %q\n out: %q", cfgExplicit, got)
+	}
+
+	// No-regression half (the cross-newline guard the PR exists for): a
+	// column-0 next line after a credential-key-on-the-previous-line stays
+	// preserved end-to-end over the log tail. The comma-in-prose case
+	// reaches the log surface too; preserve the same example's record.
+	if got := r.scrubLog("checking token:\n4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a fix-login\n2026-01-01 daemon started\n"); !strings.Contains(got, "fix-login") {
+		t.Fatalf("left-margin bare token over-redacted over the log tail:\n in: %q\n out: %q", "checking token:\n4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a fix-login", got)
+	}
+}
