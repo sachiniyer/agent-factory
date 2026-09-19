@@ -748,7 +748,14 @@ test("Auto Gate can be recovered manually by PR number", () => {
   );
   assert.match(
     workflow,
-    /const knownEventHeads =[\s\S]*?payload\.pull_request\?\.head\?\.sha[\s\S]*?catch \(error\)[\s\S]*?const readFailure = autoGate\?\.isReadFailure\?\.\(error\) === true;[\s\S]*?core\.setOutput\("targets", "\[\]"\);[\s\S]*?JSON\.stringify\([\s\S]*?knownEventHeads\.map[\s\S]*?read_failure: readFailure \? summary : ""[\s\S]*?if \(readFailure\)[\s\S]*?core\.setFailed\(summary\);[\s\S]*?return;[\s\S]*?throw error;/,
+    /const knownEventHeads =[\s\S]*?payload\.pull_request\?\.head\?\.sha[\s\S]*?catch \(error\)[\s\S]*?const readFailure = autoGate\?\.isReadFailure\?\.\(error\) === true;[\s\S]*?core\.setOutput\("targets", "\[\]"\);[\s\S]*?JSON\.stringify\([\s\S]*?knownEventHeads\.map[\s\S]*?read_failure: readFailure \? summary : ""[\s\S]*?if \(readFailure\)[\s\S]*?core\.warning\(`Auto Gate could not evaluate: \$\{message\}`\)[\s\S]*?return;[\s\S]*?throw error;/,
+  );
+  // A could-not-evaluate exit warns instead of painting the run the same red as
+  // a real gate failure (#4461) — but only when downstream has a head to mark.
+  // With none, nothing is published and the red run is the only record.
+  assert.match(
+    workflow,
+    /if \(readFailure && knownEventHeads\.length === 0\) \{\s+core\.setFailed\(summary\);\s+return;\s+\}\s+if \(readFailure\) \{\s+core\.warning\(/,
   );
   assert.match(
     workflow,
@@ -1981,7 +1988,7 @@ test("an unreadable auto-merge state leaves the manual-only aggregate red", asyn
     mergeEnabled: true,
   });
 
-  // Retried, then reported as a read failure: a clean BLOCKED aggregate rather
+  // Retried, then reported as a read failure: a clean UNKNOWN aggregate rather
   // than an unhandled error, and no passing decision either way.
   assert.equal(transaction.state, "evaluation-error");
   assert.equal(github.autoMergeStateReads, 3);
@@ -2797,11 +2804,12 @@ test("a persistent association read failure ends with an explicit blocked aggreg
   assert.equal(github.createdChecks[0].conclusion, "failure");
   assert.equal(github.updatedChecks.length, 1);
   assert.equal(github.updatedChecks[0].conclusion, "failure");
+  assert.match(github.updatedChecks[0].output.title, /^UNKNOWN:/);
   assert.match(
     github.updatedChecks[0].output.summary,
     /could not enumerate PRs at commit .* after 3 attempts: fetch failed/,
   );
-  assert.match(notices.join("\n"), /BLOCKED:.*could not enumerate PRs/i);
+  assert.match(notices.join("\n"), /UNKNOWN:.*could not enumerate PRs/i);
   assert.equal(github.mergedWith, null);
   assert.equal(
     github.createdChecks.some((check) => check.name === decisionName(1465, HEAD_SHA)),
@@ -2859,6 +2867,331 @@ test("a resolver read failure is terminal instead of being reevaluated downstrea
   assert.equal(github.updatedChecks[0].conclusion, "failure");
   assert.match(github.updatedChecks[0].output.summary, /could not read PR #1465/);
   assert.equal(github.mergedWith, null);
+});
+
+// #4461. During the GitHub App quota outage, ~29 Auto Gate runs went red across
+// ~40 PRs for a reason that had nothing to do with any of them: the aggregate
+// invalidation exhausted its retries against "API rate limit exceeded for
+// installation", and the failure rendered exactly like a gate defect. The
+// contract below is the fix: could-not-evaluate is titled UNKNOWN, never the
+// BLOCKED verdict a real blocker writes and never a success it could not
+// compute, and a previously reached green decision is not consumed by a read
+// that failed. Its CONCLUSION stays failing: GitHub counts neutral and skipped
+// required checks as satisfied, so a neutral UNKNOWN would leave the commit
+// mergeable by the ruleset, a manual merge, or any merger that defers to it.
+
+// GitHub: "Successful check statuses are `success`, `skipped`, and `neutral`."
+const GITHUB_SATISFYING_CONCLUSIONS = ["success", "skipped", "neutral"];
+
+function assertNoAggregateWriteSatisfiesTheRuleset(github, message) {
+  const aggregateWrites = [
+    ...github.createdChecks.filter((check) => check.name === "Auto Gate decision"),
+    ...github.updatedChecks,
+  ];
+  assert.ok(aggregateWrites.length > 0, "the transaction wrote the fixed aggregate");
+  for (const check of aggregateWrites) {
+    assert.ok(
+      !GITHUB_SATISFYING_CONCLUSIONS.includes(check.conclusion),
+      `${message}: ${check.output?.title} concluded ${check.conclusion}`,
+    );
+  }
+}
+
+function rateLimitError({ withReset = true } = {}) {
+  const error = new Error("API rate limit exceeded for installation ID 12345.");
+  error.status = 403;
+  error.response = {
+    headers: {
+      "x-ratelimit-remaining": "0",
+      "x-ratelimit-reset": "1752000000",
+    },
+  };
+  if (!withReset) {
+    delete error.response;
+  }
+  return error;
+}
+
+test("a rate-limited association read ends in an UNKNOWN that still blocks the ruleset", async () => {
+  const github = fakeGateGithub({
+    associationError: rateLimitError(),
+    associationErrorEveryRead: true,
+    checkRuns: [
+      ...happyCheckRuns(),
+      // A previously reached good decision, on both surfaces: the per-PR
+      // (PR, head) decision and the fixed aggregate. Neither may be consumed
+      // by a read that never evaluated anything.
+      checkRun({
+        id: 321,
+        name: decisionName(1465, HEAD_SHA),
+        externalId: decisionExternalId(1465, HEAD_SHA),
+        conclusion: "success",
+      }),
+      checkRun({
+        id: 777,
+        name: "Auto Gate decision",
+        externalId: aggregateExternalId(HEAD_SHA),
+        conclusion: "success",
+      }),
+    ],
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "evaluation-error");
+  assert.equal(github.associationReads, 3, "the read is retried before it gives up");
+
+  // The invalidation itself is a refresh marker, titled as one.
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+  assert.match(github.createdChecks[0].output.title, /^WAITING: refreshing/);
+
+  // The verdict surface: UNKNOWN by title, naming the cause and the reset.
+  const verdict = github.updatedChecks.at(-1);
+  assert.equal(verdict.conclusion, "failure");
+  assert.match(verdict.output.title, /^UNKNOWN: Auto Gate could not evaluate/);
+  assert.match(verdict.output.summary, /did not evaluate this commit/);
+  assert.match(verdict.output.summary, /rate limit/i);
+  assert.ok(
+    verdict.output.summary.includes(new Date(1752000000 * 1000).toISOString()),
+    "the summary names the reset time GitHub reported",
+  );
+
+  // Neither prior decision was touched, and nothing went green or defect-red.
+  assert.ok(
+    !github.updatedChecks.some((check) => check.check_run_id === 321),
+    "the prior (PR, head) decision is not consumed by an evaluation that never ran",
+  );
+  assert.ok(
+    !github.updatedChecks.some((check) => check.check_run_id === 777),
+    "the prior aggregate generation is superseded by the new UNKNOWN, not edited",
+  );
+  assert.ok(
+    ![...github.createdChecks, ...github.updatedChecks].some(
+      (check) => check.conclusion === "success",
+    ),
+    "unknown must never round to green",
+  );
+  // Not a defect verdict by title, and not mergeable by conclusion.
+  assert.ok(
+    ![...github.createdChecks, ...github.updatedChecks].some((check) =>
+      /^BLOCKED/.test(check.output?.title || ""),
+    ),
+    "unknown must never be titled as a defect verdict",
+  );
+  assertNoAggregateWriteSatisfiesTheRuleset(github, "an UNKNOWN must not satisfy a required check");
+  assert.equal(github.mergedWith, null);
+});
+
+test("a rate-limited per-PR evaluation leaves the prior green decision untouched", async () => {
+  const github = fakeGateGithub({
+    graphqlErrorsByNumber: { 1465: rateLimitError({ withReset: false }) },
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({
+        id: 321,
+        name: decisionName(1465, HEAD_SHA),
+        externalId: decisionExternalId(1465, HEAD_SHA),
+        conclusion: "success",
+      }),
+    ],
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "evaluation-error");
+  assert.equal(github.graphqlReadsByNumber[1465], 3);
+
+  const verdict = github.updatedChecks.at(-1);
+  assert.equal(verdict.conclusion, "failure");
+  assert.match(verdict.output.title, /^UNKNOWN: Auto Gate could not evaluate/);
+  assertNoAggregateWriteSatisfiesTheRuleset(github, "an UNKNOWN must not satisfy a required check");
+  // The reset hint survives even when only the reason string crossed the
+  // evaluate() boundary.
+  assert.match(verdict.output.summary, /rate-limit window resets/);
+  assert.ok(
+    !github.updatedChecks.some((check) => check.check_run_id === 321),
+    "the correctly-green decision is not overwritten by quota exhaustion",
+  );
+  assert.equal(github.mergedWith, null);
+});
+
+test("isRateLimitFailure recognizes the wrapped exhaustion shape", () => {
+  // The failure the invalidate step actually saw (#4461): a retry-exhausted
+  // check-write error whose headers were stripped by the wrapper but whose
+  // message names the throttle.
+  const wrapped = new Error(
+    `could not invalidate aggregate ${HEAD_SHA} after 3 attempts: ` +
+      "API rate limit exceeded for installation ID 12345.",
+  );
+  wrapped.name = "AutoGateCheckWriteError";
+  wrapped.status = 403;
+  wrapped.cause = rateLimitError();
+  assert.equal(autoGate.isRateLimitFailure(wrapped), true);
+  assert.equal(autoGate.isReadFailure(wrapped), false);
+
+  const graphqlCause = new Error("could not read PR #1465 after 3 attempts: Something went wrong");
+  const rateLimited = new Error("RATE_LIMITED");
+  rateLimited.name = "GraphqlResponseError";
+  rateLimited.errors = [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }];
+  graphqlCause.cause = rateLimited;
+  graphqlCause.autoGateReadFailure = true;
+  assert.equal(autoGate.isRateLimitFailure(graphqlCause), true);
+
+  const ordinary500 = new Error("could not read check runs after 3 attempts: fetch failed");
+  ordinary500.status = 500;
+  ordinary500.autoGateReadFailure = true;
+  assert.equal(autoGate.isRateLimitFailure(ordinary500), false);
+
+  const forbidden = new Error("Resource not accessible by integration");
+  forbidden.status = 403;
+  assert.equal(autoGate.isRateLimitFailure(forbidden), false);
+});
+
+test("a rate-limited invalidation defers to the serialized lane without failing the job", async () => {
+  const exhaustion = new Error(
+    `could not invalidate aggregate ${HEAD_SHA} after 3 attempts: ` +
+      "API rate limit exceeded for installation ID 12345.",
+  );
+  exhaustion.name = "AutoGateCheckWriteError";
+  exhaustion.status = 403;
+  exhaustion.cause = rateLimitError();
+  const otherExhaustion = new Error(
+    `could not invalidate aggregate ${OTHER_SHA} after 3 attempts: ` +
+      "API rate limit exceeded for installation ID 12345.",
+  );
+  otherExhaustion.name = "AutoGateCheckWriteError";
+  otherExhaustion.status = 403;
+  otherExhaustion.cause = rateLimitError();
+
+  const run = await runInvalidateGateStep({
+    aggregateHeads: [{ head_sha: HEAD_SHA }, { head_sha: OTHER_SHA }],
+    invalidateResults: {
+      [HEAD_SHA]: [exhaustion, exhaustion],
+      [OTHER_SHA]: [otherExhaustion, otherExhaustion],
+    },
+  });
+
+  assert.deepEqual(run.attempts, [HEAD_SHA, HEAD_SHA, OTHER_SHA, OTHER_SHA]);
+  assert.equal(run.error, null, "quota exhaustion is not a defect-red job failure");
+  assert.deepEqual(
+    JSON.parse(run.outputs.invalidated_heads).map((head) => head.head_sha),
+    [HEAD_SHA, OTHER_SHA],
+    "deferred heads still enter the serialized lane, which retries the invalidation",
+  );
+  assert.match(run.warnings.join("\n"), /rate limit/i);
+});
+
+test("a non-transient invalidation failure still fails the invalidate step", async () => {
+  const defect = new Error(`Could not invalidate aggregate ${HEAD_SHA}.`);
+  const run = await runInvalidateGateStep({
+    aggregateHeads: [{ head_sha: HEAD_SHA }, { head_sha: OTHER_SHA }],
+    invalidateResults: {
+      [HEAD_SHA]: [defect, defect],
+      [OTHER_SHA]: [{ writeState: "created" }],
+    },
+  });
+
+  assert.ok(run.error, "a real invalidation defect still goes red");
+  assert.match(run.error.message, /1 aggregate invalidation\(s\) failed after the pre-lane retry/);
+  assert.deepEqual(
+    JSON.parse(run.outputs.invalidated_heads),
+    [{ head_sha: OTHER_SHA }],
+    "a defect-failed head stays out of the lane",
+  );
+});
+
+test("a rate-limited apply-gate transaction that published nothing still fails the run", async () => {
+  // Every check write — the invalidation create included — is rejected by the
+  // throttle, so no replacement generation exists and a prior PASS on this head
+  // is still the one the ruleset reads. A green run would be the only signal
+  // left, and it would say nothing happened; the step must stay loud.
+  const github = fakeGateGithub({
+    checkWriteError: rateLimitError(),
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({
+        id: 777,
+        name: "Auto Gate decision",
+        externalId: aggregateExternalId(HEAD_SHA),
+        conclusion: "success",
+      }),
+    ],
+  });
+
+  const { error } = await runApplyGateStep({ github });
+
+  assert.ok(error, "a stale PASS with a green run is a silent merge-through");
+  assert.equal(autoGate.isRateLimitFailure(error), true, "it is the throttle that surfaces");
+  assert.ok(github.checkCreateAttempts > 0, "the invalidation was attempted");
+  assert.deepEqual(github.createdChecks, [], "nothing replaced the prior PASS");
+  assert.equal(github.mergedWith, null);
+});
+
+test("a rate-limited apply-gate transaction that left the aggregate non-passing warns instead", async () => {
+  // The legitimate could-not-evaluate shape the guard above must not refuse:
+  // the invalidation landed, then the association read and the UNKNOWN write
+  // were both throttled. The commit is already unmergeable, so the run is
+  // infrastructure noise, not a defect (#4461).
+  const github = fakeGateGithub({
+    associationError: rateLimitError(),
+    associationErrorEveryRead: true,
+    checkUpdateErrors: Array.from({ length: 10 }, () => rateLimitError()),
+  });
+  const warnings = [];
+
+  const { error, notices } = await runApplyGateStep({
+    github,
+    core: { warning: (message) => warnings.push(String(message)) },
+  });
+
+  assert.equal(error, null, "a could-not-evaluate outcome with a non-passing aggregate is not a defect");
+  assert.equal(github.createdChecks.length, 1);
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+  assert.match(github.createdChecks[0].output.title, /^WAITING: refreshing/);
+  assert.ok(github.checkUpdateAttempts > 0, "the UNKNOWN write was attempted and refused");
+  assert.equal(github.updatedChecks.length, 0);
+  assert.match(warnings.join("\n"), /rate limit/i);
+  assert.match(notices.join("\n"), /left non-passing/);
+  assert.equal(github.mergedWith, null);
+});
+
+test("isNonPassingAggregate reads GitHub's required-check semantics, not success alone", () => {
+  assert.equal(autoGate.isNonPassingAggregate(null), false, "no write landed proves nothing");
+  assert.equal(autoGate.isNonPassingAggregate(undefined), false);
+  for (const conclusion of GITHUB_SATISFYING_CONCLUSIONS) {
+    assert.equal(
+      autoGate.isNonPassingAggregate({ status: "completed", conclusion }),
+      false,
+      `${conclusion} satisfies a required check`,
+    );
+  }
+  for (const conclusion of ["failure", "cancelled", "timed_out", "action_required", "stale"]) {
+    assert.equal(autoGate.isNonPassingAggregate({ status: "completed", conclusion }), true, conclusion);
+  }
+  assert.equal(autoGate.isNonPassingAggregate({ status: "in_progress", conclusion: null }), true);
+  assert.equal(autoGate.isNonPassingAggregate({ status: "completed", conclusion: "NEUTRAL" }), false);
+});
+
+test("a non-rate-limit apply-gate transaction error still fails the run", async () => {
+  const github = fakeGateGithub({ checkWriteError: new Error("validation failed") });
+
+  const { error } = await runApplyGateStep({ github });
+
+  assert.ok(error, "a real write defect must still be loud");
 });
 
 test("an older transaction cannot overwrite a newer invalidation generation", async () => {
@@ -9432,7 +9765,7 @@ for (const state of ["action_required", "queued", "in_progress"]) {
 
 // Execute the actual resolver workflow body so an empty successful result cannot
 // be turned into a failure by its consumer again.
-async function runRecoveryResolver(github, { core = fakeCore(), outputs = {} } = {}) {
+async function runRecoveryResolver(github, { core = fakeCore(), outputs = {}, context = recoveryContext() } = {}) {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
   const match = workflow.match(/- name: Evaluate gate[\s\S]*?script: \|\n([\s\S]*?)(?=\n      # A keep)/);
   assert.ok(match);
@@ -9444,7 +9777,7 @@ async function runRecoveryResolver(github, { core = fakeCore(), outputs = {} } =
   const requireStub = (id) => id === "fs" ? { existsSync: () => true }
     : id === "path" ? path : helper;
   await new AsyncFunction("github", "context", "core", "require", "process", script)(
-    github, recoveryContext(), { ...core, setOutput: (key, value) => { outputs[key] = value; } },
+    github, context, { ...core, setOutput: (key, value) => { outputs[key] = value; } },
     requireStub, { env: { GITHUB_WORKSPACE: "/workspace", PR_NUMBER: "1465" } },
   );
   return outputs;
@@ -9452,17 +9785,25 @@ async function runRecoveryResolver(github, { core = fakeCore(), outputs = {} } =
 
 // #4210 round six. Nothing but this successor revisits an accepted update, and it
 // runs under workflow_dispatch, whose payload names no event heads: the workflow
-// catch has no aggregate to turn red. Each of its exits — setFailed and return
-// for a retry-exhausted read, rethrow for anything else — therefore ended the
-// lane as a red run on master with nothing on the PR, and a parked successor
-// stayed parked. Drive the real workflow body to whichever exit each failure
-// reaches and require the rerun command on the PR and in the failure.
-async function runFailingRecoveryResolver(github) {
+// catch has no aggregate to mark UNKNOWN. Each of its exits — setFailed and
+// return for a retry-exhausted read, rethrow for anything else — therefore ends
+// the lane as a red run, and #4461's warn-and-return exit deliberately does not
+// apply here: with no head downstream publishes nothing, so a green run would be
+// the only record of a recovery that did nothing. Drive the real workflow body to
+// whichever exit each failure reaches and require the rerun command on the PR and
+// in the failure.
+async function runFailingRecoveryResolver(github, { context } = {}) {
   const outputs = {};
   const failures = [];
-  const core = { ...fakeCore(), setFailed: (message) => failures.push(String(message)) };
-  const thrown = await runRecoveryResolver(github, { core, outputs }).then(() => null, (error) => error);
-  return { outputs, failures, thrown };
+  const warnings = [];
+  const core = {
+    ...fakeCore(),
+    setFailed: (message) => failures.push(String(message)),
+    warning: (message) => warnings.push(String(message)),
+  };
+  const thrown = await runRecoveryResolver(github, { core, outputs, context })
+    .then(() => null, (error) => error);
+  return { outputs, failures, warnings, thrown };
 }
 
 const RECOVERY_RERUN = new RegExp("gh workflow run auto-gate\\.yml --repo sachiniyer/agent-factory --ref master " +
@@ -9516,7 +9857,7 @@ for (const [site, { pullRead, listing, stale }] of Object.entries(RECOVERY_READ_
       assert.equal(faults, attempts, `the fault must land on the ${site}`);
       if (kind === "exhausted") {
         assert.equal(thrown, null, "a read failure takes the setFailed-and-return exit");
-        assert.equal(failures.length, 1);
+        assert.equal(failures.length, 1, "no head was marked, so the run itself must stay red");
         assert.match(failures[0], RECOVERY_RERUN);
       } else {
         assert.ok(thrown, "anything else takes the rethrow exit");
@@ -9532,6 +9873,36 @@ for (const [site, { pullRead, listing, stale }] of Object.entries(RECOVERY_READ_
     });
   }
 }
+
+// The legitimate input the no-head guard above must not refuse (#4461): an
+// event that carries its head. Downstream marks that head UNKNOWN, so the
+// resolver warns and hands it over instead of reddening the run.
+test("#4461: an exhausted read on an event that names its head warns and hands the head downstream", async () => {
+  const github = fakeGateGithub();
+  let faults = 0;
+  const graphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    if (variables?.number === 1465) {
+      faults += 1;
+      throw Object.assign(new Error("fetch failed"), { status: 502 });
+    }
+    return graphql(query, variables);
+  };
+  const context = {
+    ...fakeContext({ pull_request: { number: 1465, head: { sha: HEAD_SHA } } }),
+    eventName: "pull_request_target",
+  };
+
+  const { outputs, failures, warnings, thrown } = await runFailingRecoveryResolver(github, { context });
+
+  assert.equal(faults, 3, "the read was retried to exhaustion");
+  assert.equal(thrown, null);
+  assert.deepEqual(failures, [], "a head downstream can mark is not a red run");
+  assert.match(warnings.join("\n"), /Auto Gate could not evaluate/);
+  const heads = JSON.parse(outputs.aggregate_heads);
+  assert.deepEqual(heads.map((head) => head.head_sha), [HEAD_SHA]);
+  assert.match(heads[0].read_failure, /auto-gate evaluation error/);
+});
 
 // The resolver's own refusals already carried the command, but only into a red
 // run on master; they reach the PR through the same exit as the reads above.
@@ -13707,6 +14078,10 @@ async function runInvalidateGateStep({ aggregateHeads, invalidateResults }) {
   const script = invalidateGateScript();
   const attempts = [];
   const helper = {
+    // The real classifiers: the step's transient-vs-fatal partition is the
+    // behavior under test, so a stub must not fake it.
+    isReadFailure: autoGate.isReadFailure,
+    isRateLimitFailure: autoGate.isRateLimitFailure,
     invalidateAggregateDecision: async ({ headSha }) => {
       attempts.push(headSha);
       const remaining = invalidateResults[headSha];
@@ -13714,7 +14089,11 @@ async function runInvalidateGateStep({ aggregateHeads, invalidateResults }) {
         remaining && remaining.length > 0,
         `unexpected extra invalidation attempt for ${headSha}`,
       );
-      return remaining.shift();
+      const next = remaining.shift();
+      if (next instanceof Error) {
+        throw next;
+      }
+      return next;
     },
   };
   const workspace = "/workspace";
@@ -13778,6 +14157,7 @@ async function runApplyGateStep({
   targets = [{ pr_number: 1465, head_sha: HEAD_SHA }],
   mergeEnabled = true,
   readFailure = "",
+  core: coreOverrides = {},
 }) {
   const script = applyGateScript();
   const workspace = "/workspace";
@@ -13792,7 +14172,7 @@ async function runApplyGateStep({
     throw new Error(`unexpected require(${JSON.stringify(id)}) in the apply-gate step`);
   };
   const notices = [];
-  const core = { ...fakeCore(), notice: (message) => notices.push(message) };
+  const core = { ...fakeCore(), notice: (message) => notices.push(message), ...coreOverrides };
   const env = {
     GITHUB_WORKSPACE: workspace,
     HEAD_SHA: headSha,
