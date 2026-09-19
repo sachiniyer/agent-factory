@@ -16,12 +16,31 @@ import (
 // account or agent remains a new transaction the pending swap still owns.
 func (i *Instance) ValidateHandoffRuntimeAction(agent, account string) error {
 	i.mu.RLock()
+	defer i.mu.RUnlock()
 	view := i.lifecycleViewLocked()
 	if view.PendingAccountSwap && i.pendingAccountSwapRetryTargetLocked(agent, account) {
 		view.PendingAccountSwap = false
 	}
-	i.mu.RUnlock()
-	return view.ValidateRuntimeAction(RuntimeActionHandoff)
+	err := view.ValidateRuntimeAction(RuntimeActionHandoff)
+	if err == nil || !view.PendingAccountSwap {
+		return err
+	}
+	// The pending-swap axis refused because the request named a different agent
+	// or account than the committed swap recorded. When an explicit --to <agent>
+	// does not name the agent this swap will run, put that agent in the message:
+	// in the pre-relaunch window this PR targets the bound pane still reports the
+	// outgoing agent, so the visible agent is exactly the wrong answer, and the
+	// bare "retry that account swap" remedy is the very request the refusal just
+	// denied. Naming the agent is what makes the retry self-explanatory.
+	pending := i.pendingAccountSwap
+	if pending == nil || strings.TrimSpace(account) != pending.To {
+		return err
+	}
+	committed := i.committedAgentNameLocked()
+	if got := strings.TrimSpace(agent); committed != "" && got != "" && got != committed {
+		return fmt.Errorf("session %q has a committed account swap awaiting its replacement notice and task; retry that account swap with --to %s (the agent this swap will run), not %q", i.Title, committed, got)
+	}
+	return err
 }
 
 // pendingAccountSwapRetryTargetLocked reports whether agent and account name

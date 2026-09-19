@@ -644,6 +644,8 @@ func TestPendingCrossAgentSwapRetryAdmitsCommittedTargetBeforeRelaunch(t *testin
 	// transaction the committed swap still owns.
 	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("codex", "personal"), "account swap",
 		"the outgoing live-pane agent is not the committed target")
+	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("codex", "personal"), "claude",
+		"the refusal names the committed target, since the visible (live-pane) agent is the wrong answer")
 	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("gemini", "personal"), "account swap")
 	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("claude", "work"), "account swap")
 	require.ErrorContains(t, newPending().ValidateHandoffRuntimeAction("", ""), "account swap")
