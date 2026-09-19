@@ -93,13 +93,26 @@ func (s vscodeAccountScope) environment() ([]string, error) {
 // created (resolveAccountForProvision), and a session resolved by
 // program_overrides into a different agent would send the lookup into a registry
 // that never held this account — turning a working editor into a refusal.
+//
+// The namespace is derived with AgentNamespaceForCommand rather than
+// AgentForCommand: this call names a directory to install into the editor's
+// child environ, it grants no credential, and the program is operator-controlled
+// (instance.AgentProgram returns the stored opts.Program verbatim, not a
+// program_overrides-resolved command). The create-time gate
+// tmux.DetectAgentExecutable accepts any path whose basename is env, so a
+// pre-#4356 session persisted with a path-qualified env wrapper (for instance
+// /usr/local/bin/env CODEX_HOME=/x codex) plus a selected account must stay
+// classifiable on restore. AgentForCommand's strict env set would return "" for
+// that program and refuse the editor with ErrUnsupportedAgent, breaking a tab
+// that worked before the narrowing — the namespace lookup and the credential
+// grant are different questions and use different rules.
 func vscodeAccountScopeForInstance(instance *session.Instance) vscodeAccountScope {
 	account, _ := instance.AccountSelection()
 	account = strings.TrimSpace(account)
 	if account == "" {
 		return ambientVSCodeScope()
 	}
-	agent := sessionenv.AgentForCommand(instance.AgentProgram())
+	agent := sessionenv.AgentNamespaceForCommand(instance.AgentProgram())
 	return vscodeAccountScope{
 		account: account,
 		environ: func() ([]string, error) {

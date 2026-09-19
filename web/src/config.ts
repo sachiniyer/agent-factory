@@ -64,7 +64,7 @@ export interface ConfigStatus {
   /** The echo — the canonical value the daemon actually wrote, which may differ
    *  from what was typed. Empty when `error` is set. */
   value: string;
-  /** The daemon's own restart notice, shown verbatim. */
+  /** The daemon's save outcome and warnings, shown verbatim. */
   notice: string;
   /** The validator's message, verbatim, when the value was refused. */
   error: string;
@@ -135,6 +135,37 @@ export function canCommit(shown: string, current: string): boolean {
 }
 
 /**
+ * Whether a freshly delivered status should CLOSE the field that is open.
+ *
+ * A save closes the field it came from: the value is committed, and leaving it open
+ * would invite a second write of the same thing. The subtlety is `statusIsNew`. A
+ * success status is a LEVEL that stays on the store, not an EDGE that fires once —
+ * `applyConfigValueNow` sets `configStatus` and then calls `refreshConfig()`, whose
+ * commit writes only `config`/`configPath`. The refetch therefore re-enters update()
+ * with fresh entries and the SAME status object, and a predicate that ignores the
+ * transition closes whatever edit is open when it lands.
+ *
+ * That window is not hypothetical: it is precisely the window this view's focus
+ * restoration exists to make usable, so the edit sitting in it is the user typing
+ * again in the field they just saved. Closing it clears `editing` and `draft`, and
+ * the rebuild then paints the re-read value over text that was on screen a frame
+ * earlier — a silent loss, with no error and nothing to undo.
+ *
+ * The failure direction is deliberate. Requiring the edge can only ever leave an
+ * edit OPEN that a re-delivery would have closed, and an edit that outlived its own
+ * save is by definition typing the user did afterwards — the thing to keep. A field
+ * left open costs a redundant Save at worst; a field closed early costs the user
+ * their input. Exported so config.test.ts locks the rule rather than a copy of it.
+ */
+export function shouldCloseSavedField(
+  status: ConfigStatus | null,
+  editing: string | null,
+  statusIsNew: boolean,
+): boolean {
+  return statusIsNew && status !== null && !status.error && status.key === editing;
+}
+
+/**
  * The one line the form shows under a saved field: the daemon's own account of
  * when the edit takes effect, plus — when the edit moved a listener — where the
  * daemon is accepting now (#3722).
@@ -145,17 +176,24 @@ export function canCommit(shown: string, current: string): boolean {
  * says so, and a form that echoed what it typed would name an address nothing
  * answers precisely when the user most needs the real one.
  *
- * The restart notice keeps its existing gate — shown only for a key that
- * requires a restart, since "Applied" under every field is noise. The address
- * does not: a listener that moved is worth saying whether or not a restart is
+ * The restart notice is normally shown only for a key that requires a restart,
+ * since "Applied" under every field is noise. A warning overrides that gate:
+ * it is actionable for an ordinarily-live key, and both the warning and the
+ * outcome sentence must reach the operator. The address is also independent of
+ * the gate: a listener that moved is worth saying whether or not a restart is
  * owed, and for this form it is the address the browser must be re-pointed at.
  * Exported so config.test.ts locks the real rule rather than a copy.
  */
 export function saveNotice(resp: ConfigSetResponse): string {
   const parts: string[] = [];
-  if (resp.result.requires_restart && resp.restart_notice !== "") {
+  const warnings = resp.warnings ?? [];
+  // A warning makes the apply outcome actionable even for an ordinarily-live
+  // key. In that case the restart notice must not be hidden by the key's static
+  // requires-restart classification: it describes what happened to this save.
+  if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }
+  parts.push(...warnings);
   const addr = resp.listener_addr ?? "";
   if (addr !== "") {
     parts.push(`Daemon now listening at ${addr}`);
@@ -228,6 +266,11 @@ export class ConfigPane {
   // The live controls a rebuild replaces, so focus can be handed back to whichever of
   // them had it (#2933). Null whenever that control is not currently rendered.
   private editingInput: HTMLInputElement | null = null;
+  /** The config key whose input held DOM focus when the in-progress rebuild started,
+   *  so render() can re-point `editingInput` at that row's replacement even when the
+   *  row is no longer the open edit. Live only for the duration of one render (set
+   *  and cleared around the single `this.render()` call). */
+  private restoreKey: string | null = null;
   private advancedToggle: HTMLElement | null = null;
 
   private lastEntries: ConfigEntry[] | null = null;
@@ -245,6 +288,9 @@ export class ConfigPane {
     if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
       return;
     }
+    // Captured before `lastStatus` is overwritten below: it is the EDGE that
+    // `shouldCloseSavedField` gates on, and by then the level would look unchanged.
+    const statusIsNew = status !== this.lastStatus;
     const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status
       && accounts.status.name === "" && !accounts.status.error;
     if (registrationSucceeded) {
@@ -259,9 +305,7 @@ export class ConfigPane {
     this.path = path;
     this.status = status;
     this.accounts = accounts;
-    // A save closes the field it came from: the value is committed, and leaving
-    // it open would invite a second write of the same thing.
-    if (status && !status.error && status.key === this.editing) {
+    if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
     }
@@ -308,7 +352,18 @@ export class ConfigPane {
     // The config list is always the same list — one global manifest — so a rebuild
     // never legitimately starts at the top. Keeping the place matters most right after
     // a save, which is exactly when this fires.
+    // Which ROW to hand focus back to is decided here, from the element that
+    // actually holds it, and never from `status.key`. Saves are serialized per key
+    // (`createKeyedQueue` in index.ts), so two keys in flight together can land out
+    // of order: save A, move to B, save B, B answers first. A's later status would
+    // name row A while the user is sitting in row B — and re-pointing by status key
+    // would then move focus and the captured caret into A, so the next keystroke
+    // edits the wrong setting. The key that held focus is the only thing that
+    // answers "where was the user", which is the question restoration is asking.
+    // aria-label carries it because render() sets it to `e.key` on every row input.
+    this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
+    this.restoreKey = null;
     // preventScroll on BOTH: focus() scrolls its target into view by default, which
     // would undo the offset rebuildKeepingScroll just restored. That is not a corner
     // case — a user who wheels the pane while a field still holds focus is exactly the
@@ -514,6 +569,27 @@ export class ConfigPane {
     const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
     input.value = this.editing === e.key ? this.draft : e.value;
     if (this.editing === e.key) {
+      this.editingInput = input;
+    }
+    // A same-key Enter-save closes this field (update() clears `editing` before the
+    // rerender), so the gate above does not re-point `editingInput` at the rebuilt
+    // input — and `rerenderKeepingUserState`'s `if (wasEditing && this.editingInput)`
+    // restoration then no-ops, dropping focus to <body>. The user's next keystrokes
+    // become document shortcuts (`[`/`]` cycle the view) or, for any other printable
+    // key, are silently swallowed (`decideKey` returns `{kind:"none"}` without
+    // preventDefault for a body-focused key in config view). #2955's gate covered
+    // only the unrelated-rebuild case; the same-key variation was never analyzed.
+    //
+    // Keep the handle live for the row that HELD FOCUS so the existing restoration
+    // branch hands focus (and the caret) back to its replacement. `restoreKey` is
+    // read rather than `status.key` because the two diverge exactly when it matters
+    // — see rerenderKeepingUserState. The `=== null` guard means an actively-edited
+    // row's capture above always wins. This re-points the handle on every rebuild
+    // that finds the row still focused, including the one the post-save refetch
+    // triggers, so focus survives both renders. It does not re-open the edit:
+    // `editing` stays null and the Save button stays disabled via `canCommit`
+    // against the refreshed `e.value`.
+    if (this.restoreKey === e.key && this.editingInput === null) {
       this.editingInput = input;
     }
     input.setAttribute("aria-label", e.key);

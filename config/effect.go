@@ -131,6 +131,60 @@ func KeyEffectClass(key string) EffectClass {
 	return keyEffectClasses[base]
 }
 
+// DaemonApply is the one mutually exclusive answer to "what did a running
+// daemon do with this save" — the fact #4482 pulled out of three bools, whose
+// two-bits-set combinations were representable in code and settled, where they
+// were settled at all, only by which rule happened to sit first.
+type DaemonApply int
+
+const (
+	// DaemonApplyUnset is the zero value: NO producer recorded an apply result.
+	// It is not an outcome and never means "no daemon" — a producer that
+	// genuinely reached no daemon records DaemonApplyNotReached instead. A save
+	// surface handed an unset outcome reports unknown rather than guessing, so
+	// a forgotten assignment cannot masquerade as a real answer.
+	DaemonApplyUnset DaemonApply = iota
+	// DaemonApplyNotReached means no daemon was reached to apply the save: the
+	// dial failed, or the in-daemon handler had no manager. The write is on
+	// disk and the next daemon start reads it.
+	DaemonApplyNotReached
+	// DaemonApplyApplied means a running daemon applied the on-disk config
+	// (daemon.Manager.ApplyConfig returned without error).
+	DaemonApplyApplied
+	// DaemonApplyFailed means the daemon returned a failure response instead of
+	// applying the saved config — ApplyConfig's one error return, the "reload
+	// config:" wrap of a file that did not load.
+	DaemonApplyFailed
+	// DaemonApplyUnconfirmed means this save cannot establish what the running
+	// daemon ended up serving. It has three causes, and they share one
+	// implication — the file was written, but the live value is unproven:
+	//
+	//   - a lost RPC response: the daemon may have applied the config before the
+	//     connection failed, so neither success nor failure may be claimed;
+	//   - an admission refusal (upgrade probation, quiescing), which says nothing
+	//     about whether the apply ran;
+	//   - a config DIGEST that does not match: the bytes the apply loaded are not
+	//     the bytes this save wrote, so a competing write — another client, or a
+	//     hand-edit — landed between the writer's file-lock release and the
+	//     apply's load, and the daemon may be serving that value instead. The
+	//     apply returned success here, and this state REPLACES DaemonApplyApplied
+	//     rather than sitting beside it.
+	//
+	// The digest cause DELIBERATELY over-reports, and that is not a defect to be
+	// fixed. It compares whole files, so it cannot tell "my key lost a race" from
+	// "an unrelated key changed in the same window", and it reports the second as
+	// unconfirmed too. That direction is the point: the error is always to
+	// WITHHOLD a claim, never to make a false one. Narrowing it to "my key moved"
+	// means reading the key's value back out of some store after the fact, which
+	// is exactly the mechanism this replaced (#4247) — it needed store selection,
+	// value normalisation, generation identity and file-readability handling, and
+	// produced nine review findings doing it. An unrelated concurrent write is
+	// rare; a save that falsely claims `applied` is not recoverable by the caller.
+	//
+	// So: do not "fix" an unrelated-key window into DaemonApplyApplied.
+	DaemonApplyUnconfirmed
+)
+
 // ApplyOutcome is what a running daemon actually DID with the write a save surface
 // is about to report — the WHOLE outcome, not the single "did the apply call
 // return nil" bit EffectNotice used to take.
@@ -146,13 +200,27 @@ func KeyEffectClass(key string) EffectClass {
 // new value now." over a warning saying the daemon was still serving the old
 // address. Carrying the outcome makes EffectNotice the one owner of the decision.
 //
-// The zero value is the honest "nothing applied it": no daemon was running, or its
-// apply returned an error. A caller with no apply result stays expressible.
+// The daemon's apply result is ONE mutually exclusive fact, so it is one
+// DaemonApply field rather than three bools (#4482). The bool form admitted
+// eight combinations for four answers. Of the ones with two bits set, only
+// applied+unconfirmed was reachable — the digest check set the unconfirmed bit
+// and left the applied one standing — and it read as unconfirmed only because
+// that row outranked the applied row; the rest were unreachable, yet code and
+// tests existed to settle them. The digest check now records
+// DaemonApplyUnconfirmed in place of DaemonApplyApplied, so the answer no
+// longer depends on row order.
+//
+// The zero value is DaemonApplyUnset: no producer recorded an apply result.
+// That is deliberately NOT an outcome — it is distinguishable from every real
+// answer, including DaemonApplyNotReached, and StatusForKey reports it as
+// unknown rather than letting "never set" pass for "no daemon". A zero value
+// standing for both an outcome and an absence is the shape that wrongly granted
+// #4224 and wrongly refused #4356.
 type ApplyOutcome struct {
-	// DaemonApplied reports that a running daemon applied the on-disk config
-	// (daemon.Manager.ApplyConfig returned without error). It does NOT report that
-	// every changed key took effect — FailedListenerKeys is the rest of the answer.
-	DaemonApplied bool
+	// DaemonApply is what the running daemon did with the saved config. It does
+	// NOT report that every changed key took effect — FailedListenerKeys is the
+	// rest of that answer.
+	DaemonApply DaemonApply
 	// FailedListenerKeys names the socket keys (network.listen_addr /
 	// network.preview_listen_addr) whose live rebind failed, so bind-new-before-close
 	// left the OLD listener serving. Both daemon.ApplyConfigResult and
@@ -161,8 +229,176 @@ type ApplyOutcome struct {
 	FailedListenerKeys []string
 }
 
-// listenerRebindFailed reports whether key is one of the socket keys whose live
-// rebind failed in this apply.
+// ApplyStatus is the machine-readable result for the key a save wrote. A
+// completed ApplyConfig can still be deferred for one listener key whose rebind
+// failed, so this is deliberately key-specific rather than merely the RPC's
+// success bit.
+type ApplyStatus string
+
+const (
+	// ApplyStatusUnknown is what a newer client reports when an older daemon's
+	// response predates the additive apply_outcome field.
+	ApplyStatusUnknown     ApplyStatus = "unknown"
+	ApplyStatusApplied     ApplyStatus = "applied"
+	ApplyStatusNoDaemon    ApplyStatus = "no_daemon"
+	ApplyStatusFailed      ApplyStatus = "failed"
+	ApplyStatusUnconfirmed ApplyStatus = "unconfirmed"
+	ApplyStatusDeferred    ApplyStatus = "deferred"
+)
+
+// saveRule is one row of the ordering that turns a save's facts into what the
+// save surfaces report. A row carries BOTH projections — the wire status and the
+// sentence — so for any save StatusForKey and EffectNotice read the same row and
+// cannot disagree.
+//
+// That is the point of the shape. The two used to be separate hand-written
+// orderings, kept in step by a test that asserted they agreed, and review found
+// them out of step four times (#4247). A disagreement is now unrepresentable
+// rather than tested for: there is one ordering and two columns.
+type saveRule struct {
+	// applies reports whether this row describes the save; key is canonical.
+	applies func(key string, o ApplyOutcome) bool
+	status  ApplyStatus
+	// notice renders the sentence for the canonical key.
+	notice func(key string) string
+}
+
+// saveRules is the one precedence for a save's reported answer: the FIRST row
+// that applies decides both the status and the sentence. The order is the
+// substance, so each row records why it sits where it does. Several rows share a
+// status and differ only in their sentence; that is a difference of projection,
+// not of ordering, and it is why the rows are per meaning rather than per status.
+var saveRules = []saveRule{
+	// An unset apply result outranks everything else in the struct: it means the
+	// producer never recorded what the daemon did, so no other field is
+	// trustworthy enough to report on. The honest status is unknown — never the
+	// no-daemon row, which would let a forgotten assignment pass for a real
+	// "no daemon reached" (#4482).
+	{
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyUnset },
+		status:  ApplyStatusUnknown,
+		notice:  staticNotice("Saved — the daemon's apply result was never recorded, which is an af bug; the file holds the new value."),
+	},
+	// Uncertainty about a LIVE key outranks every recorded answer below: once the
+	// apply's answer is lost, refused, or contradicted by the digest, nothing
+	// below may promise what the running daemon is serving.
+	//
+	// It deliberately does not reach a DEFERRED key. Every cause of this state
+	// leaves the file written — a lost reply and a refusal both do, and a digest
+	// mismatch says some file is there, just possibly not this one — so the next
+	// daemon start or af launch still reads a config.toml, and the class rows
+	// below stay true. A race at save time is also indistinguishable from a
+	// hand-edit a minute later, which no save could have reported either.
+	{
+		applies: func(key string, o ApplyOutcome) bool {
+			return o.DaemonApply == DaemonApplyUnconfirmed && !deferredEffectClass(key)
+		},
+		status: ApplyStatusUnconfirmed,
+		notice: staticNotice("Saved — the daemon’s live config apply could not be confirmed (see the warnings for the reason)."),
+	},
+	// A failed apply is evidence about the FILE: DaemonApplyFailed is recorded
+	// only for a "reload config" failure (Manager.ApplyConfig's one error
+	// return), so the file did not load — and the next start reads it. It
+	// therefore outranks the class rows, which would promise an effect that file
+	// cannot deliver.
+	{
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyFailed },
+		status:  ApplyStatusFailed,
+		notice:  staticNotice("Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value."),
+	},
+	// The key's class. No apply can make these keys live, so an apply result that
+	// says nothing about the file does not change when the stored value is used.
+	{
+		applies: classIs(EffectNextDaemonStart),
+		status:  ApplyStatusDeferred,
+		notice: func(key string) string {
+			return WithRootAgentAdoptionNotice(key, "Saved — this setting takes effect on the next daemon start.")
+		},
+	},
+	{
+		applies: classIs(EffectNextAfLaunch),
+		status:  ApplyStatusDeferred,
+		notice:  staticNotice("Saved — this setting takes effect the next time you launch af."),
+	},
+	{
+		applies: classIs(EffectUnknown),
+		status:  ApplyStatusUnknown,
+		notice:  staticNotice("Saved."),
+	},
+	// Only EffectAppliedLive reaches here. A failed rebind kept the old listener
+	// serving, so the value waits for the next daemon start.
+	{
+		applies: func(key string, o ApplyOutcome) bool { return o.ListenerRebindFailed(key) },
+		status:  ApplyStatusDeferred,
+		notice:  listenerRebindDeferredNotice,
+	},
+	{
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyApplied },
+		status:  ApplyStatusApplied,
+		notice:  staticNotice("Applied — the running daemon is using the new value now."),
+	},
+	// No daemon was reached — a recorded answer, distinct from the unset state
+	// the first row and the catch-all below report.
+	{
+		applies: func(_ string, o ApplyOutcome) bool { return o.DaemonApply == DaemonApplyNotReached },
+		status:  ApplyStatusNoDaemon,
+		notice:  staticNotice("Saved — no daemon is running to apply it, so it takes effect on the next daemon start."),
+	},
+	// The total row: a DaemonApply value this table does not enumerate is no
+	// recorded outcome either, so it reports unknown exactly as unset does. It
+	// always applies, so the table is total and every save gets exactly one row.
+	{
+		applies: func(string, ApplyOutcome) bool { return true },
+		status:  ApplyStatusUnknown,
+		notice:  staticNotice("Saved — the daemon's apply result was never recorded, which is an af bug; the file holds the new value."),
+	},
+}
+
+func staticNotice(sentence string) func(string) string {
+	return func(string) string { return sentence }
+}
+
+func classIs(class EffectClass) func(string, ApplyOutcome) bool {
+	return func(key string, _ ApplyOutcome) bool { return KeyEffectClass(key) == class }
+}
+
+// matchSaveRule returns the canonical key and the one row describing this save.
+func matchSaveRule(key string, o ApplyOutcome) (string, saveRule) {
+	key = canonicalConfigKey(key)
+	for _, rule := range saveRules {
+		if rule.applies(key, o) {
+			return key, rule
+		}
+	}
+	// Unreachable while the last row always applies; kept total rather than
+	// panicking on a save surface.
+	return key, saveRules[len(saveRules)-1]
+}
+
+// StatusForKey projects the whole apply onto one saved key's stable wire value.
+// It is a column of saveRules, never a separate decision.
+func (o ApplyOutcome) StatusForKey(key string) ApplyStatus {
+	_, rule := matchSaveRule(key, o)
+	return rule.status
+}
+
+// deferredEffectClass reports whether key's value is consumed at the next daemon
+// start or af launch rather than by the running daemon. It is what lets an
+// unconfirmed apply and a failed one rank differently against the class: an
+// unconfirmed apply still wrote the file that start will read, while a failed one
+// means that file did not load.
+func deferredEffectClass(key string) bool {
+	switch KeyEffectClass(key) {
+	case EffectNextDaemonStart, EffectNextAfLaunch:
+		return true
+	}
+	return false
+}
+
+// ListenerRebindFailed reports whether key is one of the socket keys whose live
+// rebind failed in this apply. A failed rebind defers the key dynamically: the
+// running daemon keeps the old listener and the value only reaches one at the
+// next start, which reads the file.
 //
 // Both sides are canonicalized, which today is belt and braces: every producer of
 // FailedListenerKeys is a hardcoded canonical literal in webListeners.reconcile,
@@ -173,7 +409,7 @@ type ApplyOutcome struct {
 // the invariant a raw comparison would fail silently — printing "Applied" over a
 // rebind warning, which is the bug this function exists to prevent. A map lookup is
 // cheaper than the standing risk.
-func (o ApplyOutcome) listenerRebindFailed(key string) bool {
+func (o ApplyOutcome) ListenerRebindFailed(key string) bool {
 	key = canonicalConfigKey(key)
 	for _, failed := range o.FailedListenerKeys {
 		if canonicalConfigKey(failed) == key {
@@ -194,30 +430,8 @@ func (o ApplyOutcome) listenerRebindFailed(key string) bool {
 // never claims a key is live when the rebind that would have made it live failed.
 // Sentence case, one clause set off with an em dash, per the copy conventions.
 func EffectNotice(key string, outcome ApplyOutcome) string {
-	key = canonicalConfigKey(key)
-	// Ahead of the class switch, mirroring exactly where the two already-correct
-	// save surfaces made this check before #3397 moved it in here, so those two come
-	// out behaviourally identical. The placement is not load-bearing either way: only
-	// the two socket keys ever appear in FailedListenerKeys and both are
-	// EffectAppliedLive, so testing it inside that case would decide every real input
-	// the same way.
-	if outcome.listenerRebindFailed(key) {
-		return listenerRebindDeferredNotice(key)
-	}
-	switch KeyEffectClass(key) {
-	case EffectAppliedLive:
-		if outcome.DaemonApplied {
-			return "Applied — the running daemon is using the new value now."
-		}
-		return "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
-	case EffectNextDaemonStart:
-		notice := "Saved — this setting takes effect on the next daemon start."
-		return WithRootAgentAdoptionNotice(key, notice)
-	case EffectNextAfLaunch:
-		return "Saved — this setting takes effect the next time you launch af."
-	default:
-		return "Saved."
-	}
+	key, rule := matchSaveRule(key, outcome)
+	return rule.notice(key)
 }
 
 // WithRootAgentAdoptionNotice appends the half of restart guidance unique to

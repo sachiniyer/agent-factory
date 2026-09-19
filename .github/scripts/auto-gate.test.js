@@ -405,27 +405,183 @@ test("the gate's own sources do not disqualify a review that quotes them", () =>
   }
 });
 
-test("reconciliation passes coalesce only fungible full-scan workflows", () => {
+// Mirrors the workflow-level `concurrency.group` ternary chain pinned below.
+// The fixtures exist to prove the coverage rule the comment above the stanza
+// states: a pending run may only be replaced by a run whose invalidation
+// covers every head the cancelled run would have covered.
+const workflowGroup = (eventName, event = {}, inputs = {}, runId = 100) => {
+  const format = (template, ...values) =>
+    template.replace(/\{(\d+)\}/g, (match, index) => String(values[Number(index)] ?? ""));
+  const first = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
+  return "auto-gate-" + (
+    ((eventName === "schedule" || eventName === "repository_dispatch") && "required-check-reconciliation") ||
+    (eventName === "workflow_dispatch" &&
+      format("recovery-{0}-{1}", inputs.pr_number, inputs.previous_head_sha)) ||
+    (eventName === "pull_request_target" && event.action === "synchronize" &&
+      format("synchronize-{0}-{1}", event.before, event.after)) ||
+    (eventName === "pull_request_target" &&
+      format("pr-{0}-{1}", event.pull_request?.number, event.pull_request?.head?.sha)) ||
+    (first(event.issue?.number, event.pull_request?.number) &&
+      format("pr-{0}", first(event.issue?.number, event.pull_request?.number))) ||
+    (first(event.check_suite?.head_sha, event.workflow_run?.head_sha, event.sha) &&
+      format("head-{0}", first(event.check_suite?.head_sha, event.workflow_run?.head_sha, event.sha))) ||
+    runId
+  );
+};
+
+test("workflow concurrency coalesces only runs with covered invalidation", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
   const beforeJobs = workflow.slice(0, workflow.indexOf("\njobs:"));
-  assert.match(
-    beforeJobs,
-    /concurrency:\n  group: auto-gate-\$\{\{ \(github\.event_name == 'schedule' \|\| github\.event_name == 'repository_dispatch'\) && 'required-check-reconciliation' \|\| github\.run_id \}\}\n  cancel-in-progress: false/,
-    "a second pass, scheduled or dispatched, must wait for the selected targets' whole transaction",
+  const stanza = beforeJobs.match(
+    /concurrency:\n  group: >-\n    auto-gate-\$\{\{\n([\s\S]*?)\n    \}\}\n  cancel-in-progress: false/,
   );
-  assert.doesNotMatch(
-    beforeJobs,
-    /github\.event_name != 'schedule'/,
-    "webhook and comment invalidations need unique run-id groups and must never coalesce",
+  assert.ok(
+    stanza,
+    "the workflow-level group must never cancel a run mid-transaction",
   );
+  const expression = stanza[1].replace(/\s+/g, " ").trim();
+  assert.equal(
+    expression,
+    "(github.event_name == 'schedule' || github.event_name == 'repository_dispatch') " +
+      "&& 'required-check-reconciliation' " +
+      "|| github.event_name == 'workflow_dispatch' && format('recovery-{0}-{1}', " +
+      "inputs.pr_number, inputs.previous_head_sha) " +
+      "|| github.event_name == 'pull_request_target' && github.event.action == 'synchronize' " +
+      "&& format('synchronize-{0}-{1}', github.event.before, github.event.after) " +
+      "|| github.event_name == 'pull_request_target' " +
+      "&& format('pr-{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) " +
+      "|| (github.event.issue.number || github.event.pull_request.number) " +
+      "&& format('pr-{0}', github.event.issue.number || github.event.pull_request.number) " +
+      "|| (github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) " +
+      "&& format('head-{0}', github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) " +
+      "|| github.run_id",
+  );
+  // The synchronize guard must precede both the generic pull_request_target
+  // clause and the issue/pull_request clause: its payload carries a number
+  // too, and matching it later would drop `before` from the key.
+  const syncGuard = expression.indexOf("github.event.action == 'synchronize'");
+  assert.ok(syncGuard > -1);
+  assert.ok(syncGuard < expression.indexOf("github.event.issue.number"));
+  assert.ok(
+    expression.indexOf("github.event.before") > syncGuard &&
+      expression.indexOf("github.event.before") < expression.indexOf("pull_request_target' && format"),
+    "before/after may key only the synchronize clause",
+  );
+  // run_id is the fallback and the only term that may still contain it.
+  assert.ok(expression.endsWith("|| github.run_id"));
+  assert.equal(expression.split("github.run_id").length - 1, 1);
+
+  const pr = (number, head = HEAD_SHA) => ({ number, head: { sha: head } });
+  // Every subscribed trigger resolves to a documented group.
+  assert.equal(workflowGroup("schedule"), "auto-gate-required-check-reconciliation");
+  // A dispatched reconciliation pass is the same full scan as a scheduled one —
+  // pending copies are fungible, so they share the group (#4571).
+  assert.equal(
+    workflowGroup("repository_dispatch", { action: "auto-gate-reconcile" }),
+    "auto-gate-required-check-reconciliation",
+  );
+  assert.equal(
+    workflowGroup("workflow_dispatch", {}, { pr_number: 4060, previous_head_sha: OTHER_SHA }),
+    `auto-gate-recovery-4060-${OTHER_SHA}`,
+  );
+  assert.equal(
+    workflowGroup("workflow_dispatch", {}, { pr_number: "4060" }),
+    "auto-gate-recovery-4060-",
+  );
+  // A comment burst on one PR collapses across all three comment event types,
+  // and a stale payload head does not change that: the transition away from it
+  // is carried by a synchronize run that never coalesces.
+  assert.equal(workflowGroup("issue_comment", { issue: { number: 4060 } }), "auto-gate-pr-4060");
+  assert.equal(
+    workflowGroup("pull_request_review", { pull_request: pr(4060, OTHER_SHA) }),
+    "auto-gate-pr-4060",
+  );
+  assert.equal(
+    workflowGroup("pull_request_review_comment", { pull_request: pr(4060) }),
+    "auto-gate-pr-4060",
+  );
+  assert.notEqual(
+    workflowGroup("issue_comment", { issue: { number: 4060 } }),
+    workflowGroup("issue_comment", { issue: { number: 4061 } }),
+  );
+  // Commit events coalesce across all three types on the same commit, and only
+  // on the same commit: coverage is exactly the named head.
+  assert.equal(
+    workflowGroup("check_suite", { check_suite: { head_sha: HEAD_SHA } }),
+    `auto-gate-head-${HEAD_SHA}`,
+  );
+  assert.equal(
+    workflowGroup("workflow_run", { workflow_run: { head_sha: HEAD_SHA } }),
+    `auto-gate-head-${HEAD_SHA}`,
+  );
+  assert.equal(workflowGroup("status", { sha: HEAD_SHA }), `auto-gate-head-${HEAD_SHA}`);
+  assert.notEqual(
+    workflowGroup("status", { sha: OTHER_SHA }),
+    workflowGroup("status", { sha: HEAD_SHA }),
+  );
+  // pull_request_target actions other than synchronize coalesce per (PR,
+  // payload head): a label burst on one head collapses, but closed on the old
+  // head is never replaced by reopened on the new one.
+  assert.equal(
+    workflowGroup("pull_request_target", { action: "labeled", pull_request: pr(4060) }),
+    `auto-gate-pr-4060-${HEAD_SHA}`,
+  );
+  assert.equal(
+    workflowGroup("pull_request_target", { action: "unlabeled", pull_request: pr(4060) }),
+    `auto-gate-pr-4060-${HEAD_SHA}`,
+  );
+  assert.notEqual(
+    workflowGroup("pull_request_target", { action: "closed", pull_request: pr(4060, OTHER_SHA) }),
+    workflowGroup("pull_request_target", { action: "reopened", pull_request: pr(4060) }),
+  );
+  // A synchronize run is replaceable only by the identical transition — never
+  // by a different push and never by a same-PR comment.
+  const syncEvent = {
+    action: "synchronize",
+    before: OTHER_SHA,
+    after: HEAD_SHA,
+    pull_request: pr(4060),
+  };
+  assert.equal(
+    workflowGroup("pull_request_target", syncEvent),
+    `auto-gate-synchronize-${OTHER_SHA}-${HEAD_SHA}`,
+  );
+  assert.notEqual(
+    workflowGroup("pull_request_target", syncEvent),
+    workflowGroup("pull_request_target", { ...syncEvent, before: HEAD_SHA, after: OTHER_SHA }),
+  );
+  assert.notEqual(
+    workflowGroup("pull_request_target", syncEvent),
+    workflowGroup("issue_comment", { issue: { number: 4060 } }),
+  );
+  // No event's group may contain the run id except the last-resort fallback:
+  // coalescing is decided by coverage, never by arrival order.
+  for (const [name, event] of Object.entries({
+    check_suite: { check_suite: { head_sha: HEAD_SHA } },
+    issue_comment: { issue: { number: 4060 } },
+    pull_request_review: { pull_request: pr(4060) },
+    pull_request_review_comment: { pull_request: pr(4060) },
+    pull_request_target: { action: "labeled", pull_request: pr(4060) },
+    status: { sha: HEAD_SHA },
+    workflow_run: { workflow_run: { head_sha: HEAD_SHA } },
+    schedule: { schedule: "*/5 * * * *" },
+    repository_dispatch: { action: "auto-gate-reconcile" },
+  })) {
+    assert.equal(
+      workflowGroup(name, event, {}, 200),
+      workflowGroup(name, event, {}, 100),
+      `${name} must ignore the run id`,
+    );
+  }
+  assert.equal(workflowGroup("unrecognized_event", {}, {}, 777), "auto-gate-777");
 });
 
 test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidation", async () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
   assert.match(
     workflow,
-    /^concurrency:\n  group: auto-gate-\$\{\{ \(github\.event_name == 'schedule' \|\| github\.event_name == 'repository_dispatch'\) && 'required-check-reconciliation' \|\| github\.run_id \}\}\n  cancel-in-progress: false$/m,
-    "only fungible reconciliation scans may share a workflow-level group",
+    /^concurrency:\n  group: >-\n    auto-gate-\$\{\{[\s\S]*?\}\}\n  cancel-in-progress: false$/m,
+    "the workflow-level group must never cancel a run mid-transaction",
   );
   const jobs = Object.fromEntries([...workflow.matchAll(
     /^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/gm,
@@ -2850,6 +3006,10 @@ test("a cancelled required check blocks the gate", async () => {
 test("an absent required check blocks the gate", async () => {
   const result = await evaluateGate({
     checkRuns: [checkRun({ name: "Build", conclusion: "success" })],
+    // Build reported, so PR Validation has a run for this head (#4581).
+    runsByHeadSha: {
+      [HEAD_SHA]: [{ id: 7, name: "PR Validation", event: "pull_request", status: "completed" }],
+    },
   });
 
   assert.equal(result.shouldMerge, false);
@@ -8660,6 +8820,101 @@ test("#4209: a failed follow-up dispatch names the manual recovery instead of cl
   assert.deepEqual(github.dispatchedWorkflows, []);
 });
 
+// ---------------------------------------------------------------------------
+// The update-branch merge race (#4462). evaluate() resolves a PR open and
+// behind; a hand or queue merge then closes it in the seconds before the
+// gate's own `PUT update-branch` executes — two writers on one PR with no
+// ordering between them. The loser's update is either rejected by a PR that no
+// longer exists to update, or accepted onto a dead branch whose tip it just
+// moved out from under delete-on-merge. Both are the race's losing outcome —
+// the merge the run wanted already happened — and neither is an update failure.
+// ---------------------------------------------------------------------------
+
+test("#4462: an update-branch refused because the PR already merged is a lost race, not an update failure", async () => {
+  // #4398's first shape: the PUT is rejected (422, the documented
+  // "unprocessable" for a merged or head-less PR) and the confirming read
+  // proves the merge landed. The update is a no-op — not a red gate.
+  const gone = new Error("Unprocessable Entity");
+  gone.status = 422;
+  const github = fakeGateGithub({
+    behindBy: 1,
+    updateBranchError: gone,
+    pullGetSnapshots: [
+      { merged: false },
+      { merged: true, state: "closed", merge_commit_sha: OTHER_SHA },
+    ],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was in flight/,
+  );
+  assert.equal(github.mergedWith, null, "the loser does not merge what already merged");
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.deepEqual(github.dispatchedWorkflows, [], "there is no successor work to schedule");
+});
+
+test("#4462: a PR already merged before the update is never written to", async () => {
+  // The merge landed in the wider window — between the evaluation and this
+  // lane reaching the update. The live read sees it and the PUT never fires:
+  // no write lands on a dead PR's branch at all.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    pullGetSnapshots: [{ merged: true, state: "closed", merge_commit_sha: OTHER_SHA }],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was pending/,
+  );
+  assert.equal(github.updateBranchCalls.length, 0, "the write is skipped entirely");
+  assert.equal(github.mergedWith, null);
+});
+
+test("#4462: an update-branch accepted onto a just-merged PR refuses and schedules nothing", async () => {
+  // #4398's observed shape, exactly: the PUT was ACCEPTED and its merge commit
+  // (688928a) landed on the head branch inside the merge's own second —
+  // delete-on-merge saw a tip it did not recognize and left the branch. The
+  // post-update read sees the PR merged, and the lane refuses as the lost race
+  // it is rather than scheduling successor work onto a dead PR. Reclaiming the
+  // orphaned branch is the sweep's concern, not this transaction's.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    headAfterUpdate: OTHER_SHA,
+    remoteRefSha: OTHER_SHA,
+    pullGetSnapshots: [
+      { merged: false },
+      { merged: true, state: "closed", merge_commit_sha: "f".repeat(40) },
+    ],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was in flight/,
+  );
+  assert.equal(github.mergedWith, null);
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.deepEqual(github.dispatchedWorkflows, [], "no successor: the merge already produced the outcome");
+  assert.deepEqual(github.approvedRuns, [], "no runs are approved for a head the merge made moot");
+});
+
+test("#4462: an update failure whose PR state cannot be re-read stays an update failure", async () => {
+  // The concession needs PROOF the race was lost — a read whose failure means
+  // "no evidence", never "a new error" (#3551's rule). An unreachable PR is
+  // not a merged PR.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    updateBranchError: new Error("update rejected"),
+    pullGetErrors: [null, new Error("PR read unavailable")],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /the update failed: error update rejected/,
+  );
+  assert.equal(github.mergedWith, null);
+});
+
 // #3807. The merge commit `PUT update-branch` writes is authored by the workflow
 // token, so every `pull_request` run it triggers is attributed to
 // `github-actions[bot]` and GitHub parks it in `action_required` behind "Approve
@@ -8814,6 +9069,245 @@ test("a required check whose run is parked says so instead of reporting it missi
     /required check Lint \(app 15368\) is missing/,
     "the misleading wording must be gone for this case",
   );
+});
+
+// #4581. #4430's head b63f9752 was an ordinary lane push. GitHub created an Auto
+// Gate run for it and no PR Validation run at all, so Build could never report
+// and the decision said "missing" until someone ran `gh workflow run pr.yml` by
+// hand (run 35291417069). "Missing" meant "not reported yet" and "never coming",
+// and only the second earns a dispatch.
+const RUNLESS_BRANCH = "siyer/fix-3603";
+const TODAYS_MISSING_REASONS = [
+  `required check Build (app 15368) is missing on ${HEAD_SHA}`,
+  `required check Lint (app 15368) is missing on ${HEAD_SHA}`,
+];
+
+// Build and Lint absent, which is how a head with no PR Validation run reads.
+// A dispatch the fake accepts starts a run at the branch tip, carrying the tip's
+// sha, which is what the real API does and what makes the next read see it.
+function runlessValidationGithub(options = {}) {
+  const runsByHeadSha = options.runsByHeadSha || {};
+  const github = fakeGateGithub({
+    headRefName: RUNLESS_BRANCH,
+    checkRuns: happyCheckRuns().filter((run) => run.name !== "Build" && run.name !== "Lint"),
+    ...options,
+    runsByHeadSha,
+  });
+  const accept = github.rest.actions.createWorkflowDispatch;
+  github.rest.actions.createWorkflowDispatch = async (params) => {
+    await accept(params);
+    const tip = options.remoteRefSha || HEAD_SHA;
+    (runsByHeadSha[tip] ||= []).push({
+      id: 35291417069,
+      name: "PR Validation",
+      event: "workflow_dispatch",
+      status: "queued",
+      conclusion: null,
+    });
+  };
+  return github;
+}
+
+// Production waits five seconds between existence reads. Here that would be ten
+// idle seconds per evaluation that finds nothing.
+async function evaluateRunless(github, core = fakeCore()) {
+  const previousPoll = process.env.AUTO_GATE_VALIDATION_POLL_MS;
+  process.env.AUTO_GATE_VALIDATION_POLL_MS = "0";
+  try {
+    return await autoGate.evaluate({
+      github,
+      context: fakeContext(),
+      core,
+      prNumber: 1465,
+      setOutputs: false,
+    });
+  } finally {
+    if (previousPoll === undefined) {
+      delete process.env.AUTO_GATE_VALIDATION_POLL_MS;
+    } else {
+      process.env.AUTO_GATE_VALIDATION_POLL_MS = previousPoll;
+    }
+  }
+}
+
+const validationDispatches = (github) =>
+  github.dispatchedWorkflows.filter((dispatch) => dispatch.workflow_id === "pr.yml");
+const validationExistenceReads = (github) =>
+  github.runListReads.filter((read) => read.workflow_id === "pr.yml");
+const requiredCheckReasons = (result) =>
+  result.reasons.filter((reason) => reason.startsWith("required check "));
+
+test("a head with no PR Validation run is dispatched once and the decision names it", async () => {
+  const github = runlessValidationGithub();
+  const first = await evaluateRunless(github);
+
+  assert.equal(validationDispatches(github).length, 1, "one dispatch for Build and Lint together");
+  assert.equal(validationDispatches(github)[0].ref, RUNLESS_BRANCH, "a dispatch takes a ref, never a sha");
+  assert.deepEqual(github.refReads, [`heads/${RUNLESS_BRANCH}`], "the tip is read before the dispatch");
+  assert.equal(first.shouldMerge, false, "a dispatched run is not a reported check");
+  for (const reason of TODAYS_MISSING_REASONS) {
+    assert.ok(
+      first.summary.includes(
+        `${reason} — PR Validation had no run for this head, so Auto Gate dispatched it on ${RUNLESS_BRANCH}`,
+      ),
+      `the summary names the dispatch: ${first.summary}`,
+    );
+  }
+  // Absence is confirmed over the bounded wait, not read once: an evaluation
+  // that races the push would otherwise dispatch a duplicate of a run GitHub was
+  // about to create.
+  const reads = validationExistenceReads(github);
+  assert.equal(reads.length, 3);
+  for (const read of reads) {
+    assert.equal(read.head_sha, HEAD_SHA);
+    assert.equal(read.event, undefined, "every event counts, including this function's own dispatch");
+    assert.equal(read.per_page, 1);
+  }
+  // The dispatched reason keeps the prefix the reconciliation pass matches, so
+  // when the dispatched run's Build completes, a frozen decision still wakes.
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          reconciliationDecision({
+            prNumber: 1465,
+            headSha: HEAD_SHA,
+            evaluatedAt: "2026-09-17T23:10:00Z",
+            reason: first.reasons.join("; "),
+          }),
+          reconciliationRequiredCheck("Build", "2026-09-17T23:30:00Z"),
+          reconciliationRequiredCheck("Lint", "2026-09-17T23:20:00Z"),
+        ],
+      },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+  assert.deepEqual(targets.map((target) => target.prNumber), [1465]);
+
+  // The next evaluation of the same head finds the run the dispatch started. The
+  // marker is that run, so the head is dispatched once, not once per evaluation.
+  const second = await evaluateRunless(github);
+  assert.equal(validationDispatches(github).length, 1, "a second evaluation must not dispatch again");
+  assert.deepEqual(requiredCheckReasons(second), TODAYS_MISSING_REASONS);
+
+  // Two evaluations that both read before either dispatch is visible can both
+  // send one. The dispatch passes no inputs, so pr.yml's probe input (#4563)
+  // stays false: a full run, grouped by its ref under pr-, cancel in progress.
+  // That race costs one cancelled run rather than two builds.
+  assert.equal(validationDispatches(github)[0].inputs, undefined, "a dispatch with inputs could be a probe");
+  const validation = fs.readFileSync(path.join(__dirname, "..", "workflows", "pr.yml"), "utf8");
+  assert.match(validation, /^ {2}workflow_dispatch:$/m);
+  assert.match(
+    validation,
+    /^ {2}group: \$\{\{ inputs\.probe && 'probe-' \|\| 'pr-' \}\}\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}$/m,
+  );
+  assert.match(validation, /^ {2}cancel-in-progress: true$/m);
+});
+
+test("a head whose PR Validation run is queued or running is left alone", async () => {
+  for (const run of [
+    { id: 1, name: "PR Validation", event: "pull_request", status: "queued", conclusion: null },
+    { id: 2, name: "PR Validation", event: "pull_request", status: "in_progress", conclusion: null },
+    // A hand dispatch is a run too; #4430 was unstuck with one.
+    { id: 35291417069, name: "PR Validation", event: "workflow_dispatch", status: "queued", conclusion: null },
+  ]) {
+    const label = `${run.event} ${run.status}`;
+    const github = runlessValidationGithub({ runsByHeadSha: { [HEAD_SHA]: [run] } });
+    const core = fakeCore();
+    const result = await evaluateRunless(github, core);
+
+    assert.equal(validationExistenceReads(github).length, 1, `${label}: the gate asked, and one answer sufficed`);
+    assert.deepEqual(validationDispatches(github), [], `${label}: a run exists, so nothing is dispatched`);
+    assert.deepEqual(github.refReads, [], `${label}: a head with a run never reaches the tip read`);
+    assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS, `${label}: the decision reads as before`);
+    assert.deepEqual(core.warnings, [], label);
+  }
+
+  // GitHub creates a push's runs a few seconds after the head moves (#3814). A
+  // run that becomes visible during the wait is a run that exists. Reads per
+  // head: the parked-run listing, then the first existence read, see nothing.
+  const late = runlessValidationGithub({
+    runsAppearAfterReads: 2,
+    runsByHeadSha: {
+      [HEAD_SHA]: [{ id: 3, name: "PR Validation", event: "pull_request", status: "queued", conclusion: null }],
+    },
+  });
+  const result = await evaluateRunless(late);
+  assert.equal(validationExistenceReads(late).length, 2);
+  assert.deepEqual(validationDispatches(late), [], "a run that appears during the wait is not duplicated");
+  assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS);
+});
+
+test("an unreadable PR Validation listing dispatches nothing and reports as before", async () => {
+  for (const [label, answer] of [
+    ["403", async () => {
+      throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
+    }],
+    ["no runs array", async () => ({ data: {} })],
+  ]) {
+    const github = runlessValidationGithub();
+    const reads = [];
+    github.rest.actions.listWorkflowRuns = async (params) => {
+      reads.push(params);
+      return answer(params);
+    };
+    const core = fakeCore();
+    const result = await evaluateRunless(github, core);
+
+    assert.equal(reads.length, 1, `${label}: an unknown answer ends the check, it does not retry into a dispatch`);
+    assert.deepEqual(validationDispatches(github), [], `${label}: an unknown answer is not "no run"`);
+    assert.deepEqual(github.refReads, [], label);
+    assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS, `${label}: the decision reads as before`);
+    assert.equal(result.readFailure, undefined, `${label}: the evaluation itself did not fail`);
+    assert.match(
+      core.warnings.join("\n"),
+      new RegExp(`Could not tell whether PR Validation has a run for ${HEAD_SHA}`),
+      label,
+    );
+  }
+});
+
+test("a branch that has moved off the head, or cannot be read, is not dispatched", async () => {
+  for (const [label, options, trace] of [
+    ["moved", { remoteRefSha: OTHER_SHA }, (core) => core.infos.join("\n").includes(`now points at ${OTHER_SHA}`)],
+    ["deleted", { remoteRefSha: null }, (core) => /could not be read/.test(core.warnings.join("\n"))],
+    [
+      "unreadable",
+      { refReadError: Object.assign(new Error("Forbidden"), { status: 403 }) },
+      (core) => /could not be read/.test(core.warnings.join("\n")),
+    ],
+  ]) {
+    const github = runlessValidationGithub(options);
+    const core = fakeCore();
+    const result = await evaluateRunless(github, core);
+
+    assert.deepEqual(github.refReads, [`heads/${RUNLESS_BRANCH}`], `${label}: the tip was read before any dispatch`);
+    assert.deepEqual(validationDispatches(github), [], `${label}: a ref dispatch would not validate this head`);
+    assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS, `${label}: the decision reads as before`);
+    assert.ok(trace(core), `${label}: the log says why nothing was dispatched`);
+  }
+});
+
+// Not a red-first test: master never dispatches, so these pass there by
+// construction. They pin the heads where GitHub would not have created a
+// pull_request run either, where absence is expected and a dispatch would spend
+// a runner on a head that cannot merge.
+test("a head GitHub would not validate is not dispatched or even checked", async () => {
+  for (const [label, options] of [
+    ["conflicting", { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }],
+    ["mergeability unknown", { mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }],
+    ["fork head", { pullRequestsByNumber: { 1465: { headRepository: "outside/fork" } } }],
+    ["closed", { state: "CLOSED" }],
+  ]) {
+    const github = runlessValidationGithub(options);
+    const result = await evaluateRunless(github);
+
+    assert.deepEqual(validationExistenceReads(github), [], label);
+    assert.deepEqual(validationDispatches(github), [], label);
+    assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS, label);
+  }
 });
 
 // #3814. #3812 approved parked runs immediately after its own update-branch and
