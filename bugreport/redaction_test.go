@@ -243,6 +243,54 @@ func TestScrubAndScrubLogRedactUnindentedQuotedJSON(t *testing.T) {
 	}
 }
 
+// TestScrubAndScrubLogRedactNewlineBeforeJSONColon is the end-to-end lock at the
+// two vulnerable surfaces for the JSON-key-with-newline-before-`:` shape the
+// credscrub pass recovers (the unit half is in internal/credscrub). JSON
+// permits insignificant whitespace — including a newline — between a property
+// name and `:`, so a machine-serialized `{"password"\n:\n"hunter2secret"}`
+// placed a newline before the colon and the credential leaked. An empty
+// redactor isolates the credscrub pass from path/username/title sweeps.
+func TestScrubAndScrubLogRedactNewlineBeforeJSONColon(t *testing.T) {
+	r := &redactor{}
+
+	// collectConfig path: config-shaped text a user pasted can carry a JSON key
+	// with a newline before `:` AND a newline before the quoted value. The value
+	// redacts with the JSON line structure preserved and the key survives.
+	cfg := "{\"password\"\n:\n\"hunter2secret\"}"
+	wantCfg := "{\"password\"\n:\n\"" + secretMarker + "\"}"
+	got := r.scrub(cfg)
+	if got != wantCfg {
+		t.Fatalf("newline-before-JSON-colon did not redact with structure preserved:\n in: %q\n want: %q\n out: %q", cfg, wantCfg, got)
+	}
+	if !strings.Contains(got, `"password"`) {
+		t.Fatalf("key half absorbed by scrub:\n in: %q\n out: %q", cfg, got)
+	}
+
+	// collectLog path: the same shape in the daemon log tail — a daemon line
+	// ending in a quoted credential key (`"token"`) with a newline before the
+	// colon and a quoted value on the next line — redacts with structure
+	// preserved, and an unrelated following line survives.
+	log := "2026-01-01 \"token\"\n:\n\"abcdefghijkl1234\"\n2026-01-01 daemon started\n"
+	wantLog := "2026-01-01 \"token\"\n:\n\"" + secretMarker + "\"\n2026-01-01 daemon started\n"
+	gotLog := r.scrubLog(log)
+	if gotLog != wantLog {
+		t.Fatalf("newline-before-JSON-colon did not redact with structure preserved over the log tail:\n in: %q\n want: %q\n out: %q", log, wantLog, gotLog)
+	}
+	if !strings.Contains(gotLog, "2026-01-01 daemon started") {
+		t.Fatalf("unrelated following line absorbed by scrubLog:\n in: %q\n out: %q", log, gotLog)
+	}
+
+	// No-regression half: a BARE key with a newline before the colon is the
+	// ambiguous-log-line shape the cross-newline guard exists for; only the
+	// symmetrically-quoted JSON-key widening reaches across it, so a bare key
+	// survives unchanged. (The bare `token:` followed by a 40-char SHA at the
+	// left margin is pinned verbatim in TestScrubAndScrubLogDoNotCrossNewline.)
+	bare := "password\n:hunter2secret"
+	if got := r.scrub(bare); got != bare {
+		t.Fatalf("quoted-key widening reached a bare-key newline before colon:\n in: %q\n out: %q", bare, got)
+	}
+}
+
 // TestScrubAndScrubLogDoNotCrossNewlineOnCredentialKey is the end-to-end lock at
 // the two vulnerable surfaces, for the credentialKeyPattern class of cross-
 // newline defect. collectConfig hands the whole config.toml to r.scrub

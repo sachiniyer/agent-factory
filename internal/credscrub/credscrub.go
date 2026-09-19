@@ -93,7 +93,22 @@ var shapePatterns = []*regexp.Regexp{
 // credential without re-opening the cross-line failure. `\r?\n` keeps the
 // LF and CRLF shapes, and `[ \t]+` (one or more) is the gate: a left-margin
 // next line has no leading whitespace and so is never seen.
-const credentialKeyPattern = `["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?[ \t]*[:=](?:[ \t]*|[ \t]*\r?\n[ \t]+)`
+//
+// The key half splits a SYMMETRICALLY QUOTED key (the JSON-key shape) from
+// the bare-or-loose one, because JSON permits insignificant whitespace —
+// including a newline — between a property name and `:`, so a machine-
+// serialized `{"password"\n:\n"hunter2secret"}` placed a newline before the
+// colon and `[ \t]*[:=]` alone failed to match — the credential reached logs
+// and bug-report bundles unchanged. The FIRST outer alternative recognizes a
+// symmetrically quoted key (`["']...["']`) and relaxes the pre-colon
+// whitespace to `[ \t]*(?:\r?\n[ \t]*)?` (any horizontal whitespace, then
+// optionally one bounded newline and more horizontal whitespace), so a JSON
+// key with a newline before its `:` matches. The SECOND outer alternative
+// keeps the original `[ \t]*[:=]` half (bare keys, or keys with at most one
+// optional surrounding quote position), so the ambiguous bare-log-line shape
+// the cross-newline guard exists for still cannot cross a newline before the
+// colon. The two alternatives share the separator-after half above.
+const credentialKeyPattern = `(?:(?:["'][a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["'](?:[ \t]*(?:\r?\n[ \t]*)?)|["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?[ \t]*)[:=](?:[ \t]*|[ \t]*\r?\n[ \t]+))`
 
 // The value half of keyValueSecret adds one alternative beyond the same-line
 // quoted/literal/bare classes: `\r?\n"(?:\\.|[^"\\\r\n])*"`, an UNINDENTED
@@ -113,8 +128,19 @@ const credentialKeyPattern = `["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|passwo
 // credential keyword — the safe direction for a scrubber, and a shape the
 // daemon log does not produce (its captured-output renderer indents every
 // line).
+//
+// The introducing `\r?\n` of that alternative is wrapped OUT of an inner
+// capture: the alternative is `\r?\n("(?:\\.|[^"\\\r\n])*")`, so the inner
+// group captures ONLY the quoted value and the newline that introduces it
+// stays in the prefix. appendKeyValueSpans bounds the span and replacement
+// on the inner group, so a key+separator like `{"password":\n` survives
+// unchanged and only the `"hunter2secret"` is replaced — the output stays
+// valid JSON `{"password":\n"[redacted-secret]"` rather than the
+// `{"password":[redacted-secret]}` the wrap-in-value shape produced, which
+// dropped both the introducing newline and the surrounding quotes and
+// collapsed the line structure.
 var keyValueSecret = regexp.MustCompile(
-	`(?i)(` + credentialKeyPattern + `)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"',}]{6,}|\r?\n"(?:\\.|[^"\\\r\n])*")`)
+	`(?i)(` + credentialKeyPattern + `)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"',}]{6,}|\r?\n("(?:\\.|[^"\\\r\n])*"))`)
 
 // keyedSchemeSecret recognizes the original form that the historical
 // keyValueSecret -> strandedAfterMarker sequence scrubbed in two mutations.
@@ -275,6 +301,16 @@ func appendKeyValueSpans(spans []redactspan.Span, s string) []redactspan.Span {
 			continue
 		}
 		start, end := loc[3], loc[1]
+		// keyValueSecret's last alternative wraps the column-0 JSON value in an
+		// inner capture group (`\r?\n("...")`) so the introducing newline stays
+		// in the prefix and only the quoted value is the span. Use the inner
+		// group (group 2) when it participates; otherwise (same-line quoted,
+		// single-quoted, or bare value, and the indented continuation) the value
+		// is contiguous with the end of group 1 and the loc[3]:loc[1] bounds
+		// are correct.
+		if len(loc) >= 6 && loc[4] >= 0 {
+			start, end = loc[4], loc[5]
+		}
 		value := s[start:end]
 		// A value an earlier pass already redacted must survive untouched. Scrub is
 		// applied more than once to the same text by design — per section, again over

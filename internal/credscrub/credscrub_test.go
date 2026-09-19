@@ -409,6 +409,106 @@ func TestScrubCredentialKeyRedactsUnindentedQuotedJSON(t *testing.T) {
 	})
 }
 
+// TestScrubCredentialKeyRedactsNewlineBeforeJSONColon locks the JSON-colon half
+// of the key pattern the bare `[ \t]*[:=]` half drops. JSON permits
+// insignificant whitespace — including a newline — between a property name
+// and `:`, so a machine-serialized `{"password"\n:\n"hunter2secret"}` placed a
+// newline before the colon and the credential reached logs and bug-report
+// bundles unchanged. The key half now allows `[ \t]*(?:\r?\n[ \t]*)?` before
+// `:` only when the key is SYMMETRICALLY QUOTED (the JSON-key shape); a bare
+// key keeps the narrow `[ \t]*[:=]` separator, so the ambiguous bare-log-line
+// shape the cross-newline guard exists for still cannot cross. Same-line
+// continuation TestScrubCredentialKeyRedactsUnindentedQuotedJSON already
+// covered stays the value half (`\r?\n"..."`); this is the key half.
+func TestScrubCredentialKeyRedactsNewlineBeforeJSONColon(t *testing.T) {
+	cases := []struct{ name, key, in, want, leak string }{
+		// The shape the report names: a newline between the quoted key and `:`
+		// AND between `:` and the next-line quoted JSON value. The line
+		// structure (both newlines, the surrounding braces) survives; only the
+		// quoted value is replaced.
+		{`{"password"\n:\n"value"}`, `"password"`,
+			"{\"password\"\n:\n\"hunter2secret\"}",
+			"{\"password\"\n:\n\"" + SecretMarker + "\"}",
+			"hunter2secret"},
+		{`{"password"\n:\n"value"} (CRLF)`, `"password"`,
+			"{\"password\"\r\n:\r\n\"hunter2secret\"}",
+			"{\"password\"\r\n:\r\n\"" + SecretMarker + "\"}",
+			"hunter2secret"},
+		// Newline before the colon, value on the SAME line as the colon.
+		{`{"password"\n: "value"}`, `"password"`,
+			"{\"password\"\n: \"hunter2secret\"}",
+			"{\"password\"\n: \"" + SecretMarker + "\"}",
+			"hunter2secret"},
+		// Horizontal whitespace before the newline that introduces the colon.
+		{`{"password" \n:\n"value"}`, `"password"`,
+			"{\"password\" \n:\n\"hunter2secret\"}",
+			"{\"password\" \n:\n\"" + SecretMarker + "\"}",
+			"hunter2secret"},
+		// An auth keyword, quoted key, newline before colon, next-line value.
+		{`{"auth"\n:\n"value"}`, `"auth"`,
+			"{\"auth\"\n:\n\"abcdef123456\"}",
+			"{\"auth\"\n:\n\"" + SecretMarker + "\"}",
+			"abcdef123456"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Scrub(tc.in)
+			if strings.Contains(got, tc.leak) {
+				t.Fatalf("newline-before-colon JSON value survived:\n in: %q\n want: %q\n out: %q", tc.in, tc.want, got)
+			}
+			if got != tc.want {
+				t.Fatalf("redaction did not preserve the JSON line structure:\n in: %q\n want: %q\n out: %q", tc.in, tc.want, got)
+			}
+			if !strings.Contains(got, tc.key) {
+				t.Fatalf("key half absorbed:\n in: %q\n out: %q", tc.in, got)
+			}
+		})
+	}
+
+	// No-regression half: a BARE key with a newline before the colon is the
+	// ambiguous-log-line shape the cross-newline guard exists for, and the
+	// quoted-key widening must not reach it — a bare key has no surrounding
+	// quotes, so the bare half of the separator stays narrow and does not cross.
+	t.Run("bare key with newline before colon is not matched", func(t *testing.T) {
+		in := "password\n:hunter2secret"
+		if got := Scrub(in); got != in {
+			t.Fatalf("quoted-key widening reached a bare-key newline before colon:\n in: %q\n out: %q", in, got)
+		}
+	})
+}
+
+// TestScrubCredentialKeyPreservesJSONQuotesAcrossNewline locks the line
+// structure of the `\r?\n"..."` value-half alternative (the comment on
+// keyValueSecret). The introducing `\r?\n` is wrapped OUT of the inner capture
+// so the newline and the surrounding `:` stay as the prefix and only the
+// quoted value is replaced — invalid `{"password":[redacted-secret]}` is not
+// produced; the output stays `{"password":\n"[redacted-secret]"`. Without the
+// wrap the newline was captured as part of the value and the quoted-value
+// branch in appendKeyValueSpans (which keys on `value[0] == '"'`) missed,
+// leaving a bare marker in place of the JSON structure.
+func TestScrubCredentialKeyPreservesJSONQuotesAcrossNewline(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		// The column-0 JSON shape `{"password":\n"hunter2secret"}` (LF): the
+		// introducing newline AND both surrounding quotes survive.
+		{"LF", "{\"password\":\n\"hunter2secret\"}",
+			"{\"password\":\n\"" + SecretMarker + "\"}"},
+		// CRLF form: the line ending between `:` and the value is preserved.
+		{"CRLF", "{\"password\":\r\n\"hunter2secret\"}",
+			"{\"password\":\r\n\"" + SecretMarker + "\"}"},
+		// Trailing JSON structure and following text survive verbatim.
+		{"LF with trailing brace", "{\"password\":\n\"hunter2secret\"} more",
+			"{\"password\":\n\"" + SecretMarker + "\"} more"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Scrub(tc.in)
+			if got != tc.want {
+				t.Fatalf("JSON quotes / line structure not preserved:\n in: %q\n want: %q\n out: %q", tc.in, tc.want, got)
+			}
+		})
+	}
+}
+
 // BenchmarkScrubTypicalLogLine measures the cost added to every log write. The
 // patterns run on the write path, so a regression here is paid by the daemon on
 // every line it emits.
