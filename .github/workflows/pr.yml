@@ -329,6 +329,32 @@ jobs:
         if: ${{ !inputs.probe }}
         run: go test -v -race -count=1 -timeout 30m ./...
 
+      # DIAGNOSTIC ONLY (#4678) — never merge. Dumps every firing of the
+      # socket-absent SIGUSR1 probe recorded by session/tmux/diag_4678.go.
+      - name: "Diagnostic #4678: SIGUSR1 census"
+        if: ${{ always() && !inputs.probe }}
+        run: |
+          f=/tmp/af-4678-sigusr1.log
+          if [ ! -f "$f" ]; then echo "no SIGUSR1 probe firing recorded"; exit 0; fi
+          echo "probe firings:          $(grep -c '^probe ' "$f")"
+          echo "firings with signals:   $(grep -c '^probe .*signaled=true' "$f")"
+          echo "signals sent (kill):    $(grep -c '^  kill ' "$f")"
+          echo "  of which kill_err nil: $(grep '^  kill ' "$f" | grep -c 'kill_err="<nil>"')"
+          echo "candidates skipped:     $(grep -c '^  skip ' "$f")"
+          echo "---- distinct target argv[1:] shapes signaled ----"
+          grep '^  kill ' "$f" | sed -E 's/.*argv=\[("[^"]*")(.*)\]$/\2/' | awk '{print $1, $2, $3}' | sort | uniq -c | sort -rn | head -40
+          echo "---- distinct callers ----"
+          grep '^  caller ' "$f" | cut -c10- | cut -d'<' -f1-6 | sort | uniq -c | sort -rn | head -40
+          echo "---- full log (first 4000 lines) ----"
+          head -n 4000 "$f"
+      - name: "Diagnostic #4678: upload census"
+        if: ${{ always() && !inputs.probe }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sigusr1-census-${{ runner.os }}
+          path: /tmp/af-4678-sigusr1.log
+          if-no-files-found: ignore
+
       # A probe's go test (#4563, docs/dev/probe-runs.md). It uses the same flags
       # as Run tests above, so a probe fails the way the real run would, and
       # pr-probe.test.js keeps the two in step — including the -timeout, which
@@ -812,6 +838,32 @@ jobs:
       # the runner kill this would otherwise become names nothing.
       - name: Run tests
         run: go test -v -race -count=1 -timeout 30m ./...
+
+      # DIAGNOSTIC ONLY (#4678) — never merge. Dumps every firing of the
+      # socket-absent SIGUSR1 probe recorded by session/tmux/diag_4678.go.
+      - name: "Diagnostic #4678: SIGUSR1 census"
+        if: ${{ always() && !inputs.probe }}
+        run: |
+          f=/tmp/af-4678-sigusr1.log
+          if [ ! -f "$f" ]; then echo "no SIGUSR1 probe firing recorded"; exit 0; fi
+          echo "probe firings:          $(grep -c '^probe ' "$f")"
+          echo "firings with signals:   $(grep -c '^probe .*signaled=true' "$f")"
+          echo "signals sent (kill):    $(grep -c '^  kill ' "$f")"
+          echo "  of which kill_err nil: $(grep '^  kill ' "$f" | grep -c 'kill_err="<nil>"')"
+          echo "candidates skipped:     $(grep -c '^  skip ' "$f")"
+          echo "---- distinct target argv[1:] shapes signaled ----"
+          grep '^  kill ' "$f" | sed -E 's/.*argv=\[("[^"]*")(.*)\]$/\2/' | awk '{print $1, $2, $3}' | sort | uniq -c | sort -rn | head -40
+          echo "---- distinct callers ----"
+          grep '^  caller ' "$f" | cut -c10- | cut -d'<' -f1-6 | sort | uniq -c | sort -rn | head -40
+          echo "---- full log (first 4000 lines) ----"
+          head -n 4000 "$f"
+      - name: "Diagnostic #4678: upload census"
+        if: ${{ always() && !inputs.probe }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sigusr1-census-${{ runner.os }}
+          path: /tmp/af-4678-sigusr1.log
+          if-no-files-found: ignore
 
   build:
     name: ${{ inputs.probe && 'Build (skipped by probe)' || 'Build' }}

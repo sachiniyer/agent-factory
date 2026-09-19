@@ -407,14 +407,25 @@ func absentTmuxSocketPath(diagnostic string) string {
 // was not disproved. An empty table answers "unclaimed" outright.
 func tmuxSocketClaimed(socketPath string, pids []int) bool {
 	signaled := false
+	var diagTargets []diag4678Target // DIAGNOSTIC ONLY (#4678)
 	for _, pid := range pids {
-		if pid <= 0 || !proctree.IsTmuxServer(pid) {
+		if pid <= 0 {
 			continue
 		}
-		if err := syscall.Kill(pid, syscall.SIGUSR1); err == nil {
+		d := diag4678Snapshot(pid)
+		d.isServer = proctree.IsTmuxServer(pid)
+		if !d.isServer {
+			d.skipped = true
+			diagTargets = append(diagTargets, d)
+			continue
+		}
+		d.killErr = syscall.Kill(pid, syscall.SIGUSR1)
+		if d.killErr == nil {
 			signaled = true
 		}
+		diagTargets = append(diagTargets, d)
 	}
+	diag4678Record(socketPath, pids, diagTargets, signaled)
 	if !signaled {
 		return len(pids) != 0
 	}
