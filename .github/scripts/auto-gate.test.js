@@ -406,27 +406,183 @@ test("the gate's own sources do not disqualify a review that quotes them", () =>
   }
 });
 
-test("scheduled reconciliation coalesces only fungible full-scan workflows", () => {
+// Mirrors the workflow-level `concurrency.group` ternary chain pinned below.
+// The fixtures exist to prove the coverage rule the comment above the stanza
+// states: a pending run may only be replaced by a run whose invalidation
+// covers every head the cancelled run would have covered.
+const workflowGroup = (eventName, event = {}, inputs = {}, runId = 100) => {
+  const format = (template, ...values) =>
+    template.replace(/\{(\d+)\}/g, (match, index) => String(values[Number(index)] ?? ""));
+  const first = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
+  return "auto-gate-" + (
+    ((eventName === "schedule" || eventName === "repository_dispatch") && "required-check-reconciliation") ||
+    (eventName === "workflow_dispatch" &&
+      format("recovery-{0}-{1}", inputs.pr_number, inputs.previous_head_sha)) ||
+    (eventName === "pull_request_target" && event.action === "synchronize" &&
+      format("synchronize-{0}-{1}", event.before, event.after)) ||
+    (eventName === "pull_request_target" &&
+      format("pr-{0}-{1}", event.pull_request?.number, event.pull_request?.head?.sha)) ||
+    (first(event.issue?.number, event.pull_request?.number) &&
+      format("pr-{0}", first(event.issue?.number, event.pull_request?.number))) ||
+    (first(event.check_suite?.head_sha, event.workflow_run?.head_sha, event.sha) &&
+      format("head-{0}", first(event.check_suite?.head_sha, event.workflow_run?.head_sha, event.sha))) ||
+    runId
+  );
+};
+
+test("workflow concurrency coalesces only runs with covered invalidation", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
   const beforeJobs = workflow.slice(0, workflow.indexOf("\njobs:"));
-  assert.match(
-    beforeJobs,
-    /concurrency:\n  group: auto-gate-\$\{\{ github\.event_name == 'schedule' && 'required-check-reconciliation' \|\| github\.run_id \}\}\n  cancel-in-progress: false/,
-    "a second schedule must wait for the selected targets' whole transaction",
+  const stanza = beforeJobs.match(
+    /concurrency:\n  group: >-\n    auto-gate-\$\{\{\n([\s\S]*?)\n    \}\}\n  cancel-in-progress: false/,
   );
-  assert.doesNotMatch(
-    beforeJobs,
-    /github\.event_name != 'schedule'/,
-    "webhook and comment invalidations need unique run-id groups and must never coalesce",
+  assert.ok(
+    stanza,
+    "the workflow-level group must never cancel a run mid-transaction",
   );
+  const expression = stanza[1].replace(/\s+/g, " ").trim();
+  assert.equal(
+    expression,
+    "(github.event_name == 'schedule' || github.event_name == 'repository_dispatch') " +
+      "&& 'required-check-reconciliation' " +
+      "|| github.event_name == 'workflow_dispatch' && format('recovery-{0}-{1}', " +
+      "inputs.pr_number, inputs.previous_head_sha) " +
+      "|| github.event_name == 'pull_request_target' && github.event.action == 'synchronize' " +
+      "&& format('synchronize-{0}-{1}', github.event.before, github.event.after) " +
+      "|| github.event_name == 'pull_request_target' " +
+      "&& format('pr-{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) " +
+      "|| (github.event.issue.number || github.event.pull_request.number) " +
+      "&& format('pr-{0}', github.event.issue.number || github.event.pull_request.number) " +
+      "|| (github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) " +
+      "&& format('head-{0}', github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) " +
+      "|| github.run_id",
+  );
+  // The synchronize guard must precede both the generic pull_request_target
+  // clause and the issue/pull_request clause: its payload carries a number
+  // too, and matching it later would drop `before` from the key.
+  const syncGuard = expression.indexOf("github.event.action == 'synchronize'");
+  assert.ok(syncGuard > -1);
+  assert.ok(syncGuard < expression.indexOf("github.event.issue.number"));
+  assert.ok(
+    expression.indexOf("github.event.before") > syncGuard &&
+      expression.indexOf("github.event.before") < expression.indexOf("pull_request_target' && format"),
+    "before/after may key only the synchronize clause",
+  );
+  // run_id is the fallback and the only term that may still contain it.
+  assert.ok(expression.endsWith("|| github.run_id"));
+  assert.equal(expression.split("github.run_id").length - 1, 1);
+
+  const pr = (number, head = HEAD_SHA) => ({ number, head: { sha: head } });
+  // Every subscribed trigger resolves to a documented group.
+  assert.equal(workflowGroup("schedule"), "auto-gate-required-check-reconciliation");
+  // A dispatched reconciliation pass is the same full scan as a scheduled one —
+  // pending copies are fungible, so they share the group (#4571).
+  assert.equal(
+    workflowGroup("repository_dispatch", { action: "auto-gate-reconcile" }),
+    "auto-gate-required-check-reconciliation",
+  );
+  assert.equal(
+    workflowGroup("workflow_dispatch", {}, { pr_number: 4060, previous_head_sha: OTHER_SHA }),
+    `auto-gate-recovery-4060-${OTHER_SHA}`,
+  );
+  assert.equal(
+    workflowGroup("workflow_dispatch", {}, { pr_number: "4060" }),
+    "auto-gate-recovery-4060-",
+  );
+  // A comment burst on one PR collapses across all three comment event types,
+  // and a stale payload head does not change that: the transition away from it
+  // is carried by a synchronize run that never coalesces.
+  assert.equal(workflowGroup("issue_comment", { issue: { number: 4060 } }), "auto-gate-pr-4060");
+  assert.equal(
+    workflowGroup("pull_request_review", { pull_request: pr(4060, OTHER_SHA) }),
+    "auto-gate-pr-4060",
+  );
+  assert.equal(
+    workflowGroup("pull_request_review_comment", { pull_request: pr(4060) }),
+    "auto-gate-pr-4060",
+  );
+  assert.notEqual(
+    workflowGroup("issue_comment", { issue: { number: 4060 } }),
+    workflowGroup("issue_comment", { issue: { number: 4061 } }),
+  );
+  // Commit events coalesce across all three types on the same commit, and only
+  // on the same commit: coverage is exactly the named head.
+  assert.equal(
+    workflowGroup("check_suite", { check_suite: { head_sha: HEAD_SHA } }),
+    `auto-gate-head-${HEAD_SHA}`,
+  );
+  assert.equal(
+    workflowGroup("workflow_run", { workflow_run: { head_sha: HEAD_SHA } }),
+    `auto-gate-head-${HEAD_SHA}`,
+  );
+  assert.equal(workflowGroup("status", { sha: HEAD_SHA }), `auto-gate-head-${HEAD_SHA}`);
+  assert.notEqual(
+    workflowGroup("status", { sha: OTHER_SHA }),
+    workflowGroup("status", { sha: HEAD_SHA }),
+  );
+  // pull_request_target actions other than synchronize coalesce per (PR,
+  // payload head): a label burst on one head collapses, but closed on the old
+  // head is never replaced by reopened on the new one.
+  assert.equal(
+    workflowGroup("pull_request_target", { action: "labeled", pull_request: pr(4060) }),
+    `auto-gate-pr-4060-${HEAD_SHA}`,
+  );
+  assert.equal(
+    workflowGroup("pull_request_target", { action: "unlabeled", pull_request: pr(4060) }),
+    `auto-gate-pr-4060-${HEAD_SHA}`,
+  );
+  assert.notEqual(
+    workflowGroup("pull_request_target", { action: "closed", pull_request: pr(4060, OTHER_SHA) }),
+    workflowGroup("pull_request_target", { action: "reopened", pull_request: pr(4060) }),
+  );
+  // A synchronize run is replaceable only by the identical transition — never
+  // by a different push and never by a same-PR comment.
+  const syncEvent = {
+    action: "synchronize",
+    before: OTHER_SHA,
+    after: HEAD_SHA,
+    pull_request: pr(4060),
+  };
+  assert.equal(
+    workflowGroup("pull_request_target", syncEvent),
+    `auto-gate-synchronize-${OTHER_SHA}-${HEAD_SHA}`,
+  );
+  assert.notEqual(
+    workflowGroup("pull_request_target", syncEvent),
+    workflowGroup("pull_request_target", { ...syncEvent, before: HEAD_SHA, after: OTHER_SHA }),
+  );
+  assert.notEqual(
+    workflowGroup("pull_request_target", syncEvent),
+    workflowGroup("issue_comment", { issue: { number: 4060 } }),
+  );
+  // No event's group may contain the run id except the last-resort fallback:
+  // coalescing is decided by coverage, never by arrival order.
+  for (const [name, event] of Object.entries({
+    check_suite: { check_suite: { head_sha: HEAD_SHA } },
+    issue_comment: { issue: { number: 4060 } },
+    pull_request_review: { pull_request: pr(4060) },
+    pull_request_review_comment: { pull_request: pr(4060) },
+    pull_request_target: { action: "labeled", pull_request: pr(4060) },
+    status: { sha: HEAD_SHA },
+    workflow_run: { workflow_run: { head_sha: HEAD_SHA } },
+    schedule: { schedule: "*/5 * * * *" },
+    repository_dispatch: { action: "auto-gate-reconcile" },
+  })) {
+    assert.equal(
+      workflowGroup(name, event, {}, 200),
+      workflowGroup(name, event, {}, 100),
+      `${name} must ignore the run id`,
+    );
+  }
+  assert.equal(workflowGroup("unrecognized_event", {}, {}, 777), "auto-gate-777");
 });
 
 test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidation", async () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
   assert.match(
     workflow,
-    /^concurrency:\n  group: auto-gate-\$\{\{ github\.event_name == 'schedule' && 'required-check-reconciliation' \|\| github\.run_id \}\}\n  cancel-in-progress: false$/m,
-    "only fungible scheduled scans may share a workflow-level group",
+    /^concurrency:\n  group: >-\n    auto-gate-\$\{\{[\s\S]*?\}\}\n  cancel-in-progress: false$/m,
+    "the workflow-level group must never cancel a run mid-transaction",
   );
   const jobs = Object.fromEntries([...workflow.matchAll(
     /^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/gm,
@@ -462,6 +618,7 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
     "github.event.check_suite.head_sha",
     "github.event.sha",
     "github.event.schedule",
+    "github.event.action",
     "github.run_id",
   ]);
   // Evaluate the actual expression's property/OR subset, including Actions'
@@ -482,6 +639,11 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
     status: [{ sha: HEAD_SHA }, {}, HEAD_SHA],
     workflow_run: [{ workflow_run: { head_sha: HEAD_SHA } }, {}, HEAD_SHA],
     schedule: [{ schedule: "*/5 * * * *" }, {}, "*/5 * * * *"],
+    repository_dispatch: [
+      { action: "auto-gate-reconcile", client_payload: { source_run_id: "501" } },
+      {},
+      "auto-gate-reconcile",
+    ],
     workflow_dispatch: [{}, { pr_number: 4060 }, 4060],
   };
   const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
@@ -2845,6 +3007,10 @@ test("a cancelled required check blocks the gate", async () => {
 test("an absent required check blocks the gate", async () => {
   const result = await evaluateGate({
     checkRuns: [checkRun({ name: "Build", conclusion: "success" })],
+    // Build reported, so PR Validation has a run for this head (#4581).
+    runsByHeadSha: {
+      [HEAD_SHA]: [{ id: 7, name: "PR Validation", event: "pull_request", status: "completed" }],
+    },
   });
 
   assert.equal(result.shouldMerge, false);
@@ -4588,6 +4754,134 @@ test("an approval marker from an unrelated author is not an approval", async () 
   assert.match(result.reasons.join("\n"), /post `## Review — approve` on this head/);
 });
 
+// #4554. The comment marker exists because GitHub will not let the maintainer
+// approve the maintainer's own PR — and a comment carries none of GitHub's
+// authorship checks, so the workaround opened self-approval to every allowed
+// author. detail-app writes a large share of this repo's PRs and posted the
+// marker on its own #4281. The decision these pin: a self-approval counts only
+// for an account named as a self-approving maintainer (sachiniyer); every other
+// allowed author needs a second party. Blanket exclusion was rejected because
+// the maintainer opens most PRs here and would have no merge route at all during
+// the Codex outage the degraded path exists for.
+for (const [prAuthor, approver] of [
+  ["app/detail-app", "detail-app[bot]"],
+  ["detail-app", "detail-app"],
+  ["app/detail-app", "detail-app"],
+  ["detail-app", "app/detail-app"],
+]) {
+  test(`#4554: a bot author's own approval marker is not an approval (${prAuthor} / ${approver})`, async () => {
+    const result = await evaluateGate({
+      author: prAuthor,
+      issueComments: [
+        codexRateLimit(),
+        prComment(approver, "## Review — approve\n\nAll findings answered.", "2026-07-09T01:30:00Z"),
+      ],
+    });
+
+    assert.equal(result.shouldMerge, false, "a bot's self-approval must not authorize its own merge");
+    assert.match(result.reasons.join("\n"), /post `## Review — approve` on this head/);
+    assert.doesNotMatch(result.notes.join("\n"), /Maintainer approval from/);
+  });
+}
+
+test("#4554: the maintainer's approval on a bot-authored PR still satisfies the degraded path", async () => {
+  const result = await evaluateGate({
+    author: "app/detail-app",
+    issueComments: [
+      codexRateLimit(),
+      prComment("detail-app[bot]", "## Review — approve\n\nSelf-approval, ignored.", "2026-07-09T01:29:00Z"),
+      prComment("sachiniyer", "## Review — approve\n\nRead the diff.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, `a second party's approval must land it: ${result.reasons.join("; ")}`);
+  assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
+});
+
+// The deliberate half of the decision: the maintainer may approve the
+// maintainer's own PR through the marker. That is the marker's documented
+// purpose, and without it maintainer PRs have no route to merge while Codex is
+// rate-limited. Changing this is a policy change, not a bug fix.
+test("#4554: the maintainer's approval on the maintainer's own PR still satisfies the degraded path", async () => {
+  const result = await evaluateGate({
+    author: "sachiniyer",
+    issueComments: [
+      codexRateLimit(),
+      prComment("sachiniyer", "## Review — approve\n\nRead the diff.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, `the maintainer's own route must stay open: ${result.reasons.join("; ")}`);
+  assert.match(result.notes.join("\n"), /Maintainer approval from sachiniyer/);
+});
+
+// Only SELF-approval is excluded: an allowed bot approving someone else's PR is
+// unchanged by #4554.
+test("#4554: an allowed bot's approval on another author's PR is unchanged", async () => {
+  const result = await evaluateGate({
+    author: "sachiniyer",
+    issueComments: [
+      codexRateLimit(),
+      prComment("detail-app[bot]", "## Review — approve\n\nRead the diff.", "2026-07-09T01:30:00Z"),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("; "));
+  assert.match(result.notes.join("\n"), /Maintainer approval from detail-app\[bot\]/);
+});
+
+// An unreadable PR author cannot prove an approval is NOT a self-approval, so
+// only an account allowed to self-approve still counts there. An unknown author
+// is also not an allowed one, so this is the manual path, where the approval is
+// what turns "awaiting maintainer review" into the manual PASS — the summary,
+// not shouldMerge, is where the decision shows.
+test("#4554: with the PR author unknown, only a self-approving maintainer's marker counts", async () => {
+  const bot = await evaluateGate({
+    author: "",
+    issueComments: [
+      codexRateLimit(),
+      prComment("detail-app[bot]", "## Review — approve", "2026-07-09T01:30:00Z"),
+    ],
+  });
+  assert.equal(bot.shouldMerge, false);
+  assert.match(
+    bot.summary,
+    /post `## Review — approve` on this head/,
+    "an unknown author must not let a bot approval answer the review requirement",
+  );
+
+  const maintainer = await evaluateGate({
+    author: "",
+    issueComments: [
+      codexRateLimit(),
+      prComment("sachiniyer", "## Review — approve", "2026-07-09T01:30:00Z"),
+    ],
+  });
+  assert.match(maintainer.summary, /^PASS: Auto Gate does not auto-merge PRs from this author/);
+  assert.doesNotMatch(
+    maintainer.summary,
+    /post `## Review — approve` on this head/,
+    "the maintainer's marker still answers the review requirement",
+  );
+});
+
+test("#4554: markerApprovalCounts names who may approve their own PR", () => {
+  const { markerApprovalCounts } = __test;
+  // Self-approval: only the named maintainer.
+  assert.equal(markerApprovalCounts("sachiniyer", "sachiniyer"), true);
+  assert.equal(markerApprovalCounts("detail-app[bot]", "app/detail-app"), false);
+  assert.equal(markerApprovalCounts("detail-app", "detail-app"), false);
+  // Case is not identity on GitHub; a case-only difference is still the same account.
+  assert.equal(markerApprovalCounts("detail-app[bot]", "Detail-App"), false);
+  // A second party.
+  assert.equal(markerApprovalCounts("sachiniyer", "app/detail-app"), true);
+  assert.equal(markerApprovalCounts("detail-app[bot]", "sachiniyer"), true);
+  // Unknown author: fail closed except for the self-approving maintainer.
+  assert.equal(markerApprovalCounts("detail-app[bot]", ""), false);
+  assert.equal(markerApprovalCounts("detail-app[bot]", null), false);
+  assert.equal(markerApprovalCounts("sachiniyer", undefined), true);
+});
+
 test("reviewer silence with no usage-limit evidence keeps blocking exactly as before", async () => {
   const result = await evaluateGate({ issueComments: [] });
 
@@ -4607,6 +4901,678 @@ test("reviewer silence with no usage-limit evidence keeps blocking exactly as be
   });
 
   assert.equal(github.createdChecks[0].conclusion, "failure");
+});
+
+// ---------------------------------------------------------------------------
+// #4576: the maintainer hold label.
+//
+// Before this, a maintainer's only lever to stop a pull request was converting
+// it to a draft — and GitHub lets the PR's own author undo that. On #4383 the
+// maintainer drafted the PR at 20:32:45 and `detail-app[bot]` marked it ready
+// again at 20:41:38, nine minutes later, on the PR it had just approved.
+//
+// The hold has to survive two things a draft does not: the degraded
+// reviewer-unavailable path, which waives the one requirement it is about, and
+// someone other than a maintainer simply taking the label back off.
+// ---------------------------------------------------------------------------
+
+const HOLD_APPLIED_AT = "2026-07-09T00:30:00Z";
+const HOLD_REMOVED_AT = "2026-07-09T00:40:00Z";
+
+// The fixture that WOULD merge: an approving maintainer marker on the degraded
+// path, which is the state the gate is most willing to pass. Every hold test
+// below starts from it, so a green result means the hold failed, not that the
+// fixture was blocked for some unrelated reason.
+function degradedPassOptions(extra = {}) {
+  return {
+    issueComments: [
+      codexRateLimit(),
+      prComment("sachiniyer", "## Review — approve\n\nRead the diff.", "2026-07-09T01:30:00Z"),
+    ],
+    ...extra,
+  };
+}
+
+test("#4576: the baseline fixture the hold tests start from really does merge", async () => {
+  const result = await evaluateGate(degradedPassOptions());
+
+  assert.equal(result.shouldMerge, true, `control must pass: ${result.reasons.join("; ")}`);
+});
+
+// (1) A labelled PR cannot reach PASS — including on the degraded path, which is
+// the one that waives a requirement. The waiver is gated on `otherBlockers`
+// being empty, and the hold is pushed into that list before any of this runs.
+test("#4576: the hold label blocks the degraded reviewer-unavailable pass", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      labels: ["hold"],
+      labelEvents: [labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT)],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, false, "a held PR must not merge on the degraded path");
+  assert.equal(
+    result.degradedForUnavailableReviewer,
+    false,
+    "the degradation must not even activate — it is what would clear `reasons`",
+  );
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.summary, /`hold` label is on this pull request/);
+  // The summary says WHO and WHEN, so the hold is legible where merges are
+  // decided rather than only in whatever comment accompanied it.
+  assert.match(result.summary, /applied by @sachiniyer on 2026-07-09T00:30:00Z/);
+  assert.doesNotMatch(
+    result.notes.join("\n"),
+    /Maintainer approval from/,
+    "the approval branch that empties `reasons` must never be entered",
+  );
+});
+
+// The ordinary path too: nothing about the hold depends on Codex being down.
+test("#4576: the hold label blocks an otherwise perfectly green PR", async () => {
+  const result = await evaluateGate({
+    labels: ["hold"],
+    labelEvents: [labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT)],
+  });
+
+  assert.equal(result.shouldMerge, false, "a green head under a hold must not merge");
+  assert.match(result.summary, /`hold` label is on this pull request/);
+});
+
+// Structural, so it outranks the approval and verdict logic in the SUMMARY as
+// well as in the arithmetic: the maintainer reading the check sees the hold, not
+// a list of review items that cannot be acted on while it stands.
+test("#4576: a held PR on the manual path names the hold as its first blocker", async () => {
+  const result = await evaluateGate({
+    author: "outside-contributor",
+    labels: ["hold"],
+    labelEvents: [labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT)],
+  });
+
+  assert.equal(result.manualMergeRequired, true);
+  assert.match(result.manualMergeBlockers[0].reason, /`hold` label is on this pull request/);
+  assert.match(result.summary, /^BLOCKED:/, "the manual decision must be blocked, not a PASS");
+  assert.match(result.manualMergeBlockers[0].remedy, /allowed author \(sachiniyer, detail-app\)/);
+});
+
+// GitHub compares label names without regard to case when it creates them, so
+// `Hold` and `hold` are one label and both have to reach the same decision.
+//
+// Asserted on WHICH blocker, not just on `shouldMerge`: a case-sensitive `present`
+// test sends a `Hold`-labelled PR down the unresolved branch instead — blocked,
+// but for the wrong reason, and with a remedy that tells the maintainer to
+// re-apply a label already sitting on the pull request.
+test("#4576: the hold label is recognized whatever its case", async () => {
+  for (const [label, applied] of [
+    ["Hold", "Hold"],
+    ["HOLD", "hold"],
+    ["hold", "HOLD"],
+  ]) {
+    const result = await evaluateGate(
+      degradedPassOptions({
+        labels: [label],
+        labelEvents: [labeledEvent("sachiniyer", applied, HOLD_APPLIED_AT)],
+      }),
+    );
+
+    assert.equal(result.shouldMerge, false, `${label}/${applied}`);
+    assert.match(
+      result.summary,
+      /`hold` label is on this pull request — applied by @sachiniyer on 2026-07-09T00:30:00Z/,
+      `${label}/${applied}: must block on the label itself, not on an unresolved history`,
+    );
+  }
+});
+
+// (2) Someone who may not lift the hold removing the label does not clear it.
+//
+// This is the #4383 shape exactly, and it is the case that decides whether this
+// change fixes its own issue: the account that undid the maintainer's draft
+// there was `detail-app[bot]`, on a pull request `detail-app` had opened AND
+// approved. detail-app is in ALLOWED_AUTHORS, so the issue's literal rule —
+// "only members of ALLOWED_AUTHORS may lift it" — would have let that same
+// account lift this hold too, rebuilding the hole with a label instead of a
+// draft. Lifting therefore also takes a SECOND PARTY (see mayLiftHold).
+test("#4576: the PR's own author removing the hold label does not clear the hold", async () => {
+  const github = fakeGateGithub(
+    degradedPassOptions({
+      author: "app/detail-app",
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false, "stripping the label must not lift the hold");
+  assert.match(result.summary, /^BLOCKED:/);
+  // Names who removed it…
+  assert.match(
+    result.summary,
+    /`hold` label was removed by @detail-app\[bot\] on 2026-07-09T00:40:00Z, who may not lift a hold on a pull request they opened/,
+  );
+  // …and still names who placed it, which is the record the removal tried to erase.
+  assert.match(result.summary, /the hold @sachiniyer placed on 2026-07-09T00:30:00Z stands/);
+  // …and the label goes back on, so the hold is visible to whoever stripped it.
+  assert.deepEqual(
+    github.addedLabels.map((call) => call.labels),
+    [["hold"]],
+    "the gate re-applies the label it may not let a non-maintainer lift",
+  );
+  assert.equal(github.addedLabels[0].issue_number, 1465);
+});
+
+// The block stands on the removal RECORD, not on the write succeeding. A labels
+// API that refuses must not turn a hold into a pass — and must not red the run
+// either, the way an unverifiable play-test attestation used to (#4484).
+test("#4576: a failed label restore still blocks, and does not red the run", async () => {
+  const restoreFailed = new Error("Resource not accessible by integration");
+  restoreFailed.status = 403;
+  const github = fakeGateGithub(
+    degradedPassOptions({
+      author: "app/detail-app",
+      labels: [],
+      addLabelsError: restoreFailed,
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /who may not lift a hold/);
+  assert.doesNotMatch(
+    result.reasons.join("\n"),
+    /auto-gate evaluation error/,
+    "a labels-API failure must not become an evaluation error",
+  );
+  assert.match(result.notes.join("\n"), /could not restore the `hold` label/);
+});
+
+// A closed pull request is not written to. The decision is already blocked, and
+// reportDecision leaves a closed PR's decision alone — so the label restore
+// would be a write to every stale PR the aggregate walks, for no effect.
+test("#4576: a closed PR whose hold was stripped is not written to", async () => {
+  const github = fakeGateGithub(
+    degradedPassOptions({
+      author: "app/detail-app",
+      state: "CLOSED",
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /who may not lift a hold/, "the hold is still recorded");
+  assert.deepEqual(github.addedLabels, [], "but nothing is written to a closed PR");
+});
+
+// Applied and stripped inside the same second — one GitHub timestamp, two
+// events. The hold still stands, and the applier is still named: filtering the
+// provenance search on a strictly-earlier timestamp would drop the only addition
+// there is and report "unknown" on a hold that plainly has an author.
+test("#4576: a hold stripped in the same second it was applied still names its author", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      author: "app/detail-app",
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_APPLIED_AT),
+      ],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /the hold @sachiniyer placed on 2026-07-09T00:30:00Z stands/);
+  assert.match(
+    result.summary,
+    /removed by @detail-app\[bot\]/,
+    "the same-second removal must be recognized as the later event, not sorted under its own addition",
+  );
+
+  // The mirror image: the label is PRESENT after a same-second apply/strip/apply,
+  // so the tie resolves the other way and the hold is read off the label.
+  const reapplied = await evaluateGate(
+    degradedPassOptions({
+      author: "app/detail-app",
+      labels: ["hold"],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_APPLIED_AT),
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+      ],
+    }),
+  );
+  assert.equal(reapplied.shouldMerge, false);
+  assert.match(reapplied.summary, /`hold` label is on this pull request — applied by @sachiniyer/);
+});
+
+// Anyone at all who is not on the allowlist, not just the PR's own author.
+test("#4576: an unrelated account removing the hold label does not clear it either", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("outside-contributor", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /removed by @outside-contributor/);
+  assert.match(result.summary, /may not lift a hold on this repository/);
+});
+
+// A deleted or unreadable actor is not an allowed author. Naming it "unknown" is
+// the honest rendering; letting it through would be the unsafe one.
+test("#4576: a removal by an unreadable actor does not clear the hold", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /removed by @unknown/);
+});
+
+// (3) A maintainer removes it and the PR proceeds. Without this the hold would
+// be a one-way door, which is a stop with no way out — the thing this gate's
+// degradation design refuses everywhere else. The fixture's author is the
+// maintainer, so this is also the self-lift the named exemption exists for: he
+// opens most pull requests here, and a rule he could not satisfy on his own PR
+// would leave those holds unliftable.
+test("#4576: an allowed author removing the hold label lets the PR proceed", async () => {
+  const github = fakeGateGithub(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("sachiniyer", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, true, `a lifted hold must not block: ${result.reasons.join("; ")}`);
+  assert.match(result.notes.join("\n"), /`hold` label lifted by @sachiniyer on 2026-07-09T00:40:00Z/);
+  assert.deepEqual(github.addedLabels, [], "a lift by an allowed author is not re-applied");
+});
+
+// The allowlist's other member lifting a hold on SOMEONE ELSE's pull request —
+// the second-party case, which stays allowed. Run under every login GitHub
+// reports for that app: `normalizeAuthorLogin` is what makes `app/detail-app`,
+// `detail-app` and `detail-app[bot]` one actor, and the lift check has to go
+// through it or it fails closed intermittently by spelling (#4425).
+test("#4576: an allowed bot lifts a hold on another author's PR, under every login spelling", async () => {
+  for (const login of ["detail-app", "app/detail-app", "detail-app[bot]"]) {
+    const result = await evaluateGate(
+      degradedPassOptions({
+        labels: [],
+        labelEvents: [
+          labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+          unlabeledEvent(login, "hold", HOLD_REMOVED_AT),
+        ],
+      }),
+    );
+
+    assert.equal(result.shouldMerge, true, `${login}: ${result.reasons.join("; ")}`);
+    // Asserted on the NOTE, not only on the pass: a gate with no hold concept at
+    // all also merges this fixture, so `shouldMerge` alone would be green for
+    // the wrong reason and could never fail first.
+    //
+    // A fixed-substring check rather than a pattern. The expected text is
+    // literal, and a RegExp built from a login has to escape every metacharacter
+    // the login might contain — `detail-app[bot]` alone forces that. The escape
+    // written here covered `[` and `]` and not the backslash, which CodeQL
+    // flagged (alert 51). Extending the class would have been the smaller fix
+    // and the worse one: a substring check leaves nothing to escape at all.
+    const expected = `\`hold\` label lifted by @${login} on ${HOLD_REMOVED_AT}`;
+    const notes = result.notes.join("\n");
+    assert.ok(
+      notes.includes(expected),
+      `${login}: expected a note containing ${JSON.stringify(expected)}, got ${JSON.stringify(notes)}`,
+    );
+  }
+});
+
+// An unreadable pull-request author cannot show the lifter was a second party,
+// so an allowed author who is not a named self-lifter does not lift there. The
+// maintainer's route stays open in the same state, which is what keeps this
+// fail-closed rule from ever producing a hold nobody can lift.
+test("#4576: with the PR author unknown, only a named self-lifter lifts the hold", async () => {
+  const stripped = [
+    labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+    unlabeledEvent("detail-app[bot]", "hold", HOLD_REMOVED_AT),
+  ];
+  const bot = await evaluateGate(
+    degradedPassOptions({ author: "", labels: [], labelEvents: stripped }),
+  );
+  assert.equal(bot.shouldMerge, false, "an unknown author cannot prove a second-party lift");
+  assert.match(bot.summary, /may not lift a hold/);
+
+  // An unknown author is also not an ALLOWED one, so this is the manual path and
+  // `shouldMerge` is false whatever the hold says. The summary is where the
+  // decision shows: the maintainer's lift leaves no hold blocker on it.
+  const maintainer = await evaluateGate(
+    degradedPassOptions({
+      author: "",
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("sachiniyer", "hold", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+  assert.deepEqual(
+    maintainer.manualMergeBlockers.filter((blocker) => /hold/.test(blocker.reason)),
+    [],
+    "the maintainer's route must stay open even when the PR author cannot be read",
+  );
+  assert.match(maintainer.notes.join("\n"), /`hold` label lifted by @sachiniyer/);
+  assert.equal(
+    bot.manualMergeBlockers.some((blocker) => /may not lift a hold/.test(blocker.reason)),
+    true,
+    "…and the bot's does not",
+  );
+});
+
+test("#4576: mayLiftHold", () => {
+  const { mayLiftHold } = autoGate.__test;
+
+  // Not on the allowlist at all: never, whoever opened the PR.
+  assert.equal(mayLiftHold("outside-contributor", "sachiniyer"), false);
+  assert.equal(mayLiftHold("outside-contributor", ""), false);
+  assert.equal(mayLiftHold("", "sachiniyer"), false);
+
+  // A named self-lifter, on their own pull request and on anyone's.
+  assert.equal(mayLiftHold("sachiniyer", "sachiniyer"), true);
+  assert.equal(mayLiftHold("sachiniyer", "app/detail-app"), true);
+  assert.equal(mayLiftHold("sachiniyer", ""), true);
+
+  // An allowed author who is not: second party only. Every login spelling of the
+  // same app is the same actor, and case is not a second party either.
+  assert.equal(mayLiftHold("detail-app[bot]", "sachiniyer"), true);
+  assert.equal(mayLiftHold("detail-app[bot]", "app/detail-app"), false);
+  assert.equal(mayLiftHold("app/detail-app", "detail-app"), false);
+  assert.equal(mayLiftHold("detail-app", "Detail-App"), false);
+  assert.equal(mayLiftHold("detail-app[bot]", ""), false);
+});
+
+// A stranger strips it, the gate puts it back, then a maintainer lifts it for
+// real. The gate's own restoration must not make the hold permanent, and the
+// maintainer must still be named as the applier rather than the bot that
+// restored the label.
+test("#4576: a hold survives a strip, and a maintainer can still lift it afterwards", async () => {
+  const restored = await evaluateGate(
+    degradedPassOptions({
+      labels: ["hold"],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_REMOVED_AT),
+        labeledEvent("github-actions[bot]", "hold", "2026-07-09T00:41:00Z"),
+      ],
+    }),
+  );
+  assert.equal(restored.shouldMerge, false);
+  assert.match(
+    restored.summary,
+    /applied by @sachiniyer on 2026-07-09T00:30:00Z/,
+    "the gate's restoration must not be reported as the origin of the hold",
+  );
+
+  const lifted = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("detail-app[bot]", "hold", HOLD_REMOVED_AT),
+        labeledEvent("github-actions[bot]", "hold", "2026-07-09T00:41:00Z"),
+        unlabeledEvent("sachiniyer", "hold", "2026-07-09T00:42:00Z"),
+      ],
+    }),
+  );
+  assert.equal(lifted.shouldMerge, true, lifted.reasons.join("; "));
+});
+
+// Other labels are not holds, and the play-tested label in particular must keep
+// behaving exactly as it did.
+test("#4576: label churn that never touches `hold` leaves the gate alone", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      labels: ["play-tested", "bug"],
+      labelEvents: [
+        labeledEvent("sachiniyer", "play-tested", HOLD_APPLIED_AT),
+        unlabeledEvent("outside-contributor", "bug", HOLD_REMOVED_AT),
+      ],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("; "));
+  assert.doesNotMatch(result.summary, /hold/);
+});
+
+// ---- The read failing. Every one of these fails TOWARD holding. ----
+
+// The connection did not come back at all. An unreadable history cannot show the
+// removal that took the label off, so it is not evidence that nothing did.
+test("#4576: an unreadable label history holds rather than clears", async () => {
+  const result = await evaluateGate(degradedPassOptions({ labels: [], labelEventsMissing: true }));
+
+  assert.equal(result.shouldMerge, false, "a history that did not arrive must not read as no hold");
+  assert.match(result.summary, /could not be resolved/);
+  assert.match(result.summary, /did not arrive with the pull request/);
+  assert.match(result.summary, /treated as held/);
+});
+
+// …but a PR that is already labelled needs no history to be held, so the same
+// unreadable read does not degrade its decision into a vaguer one.
+test("#4576: a labelled PR with an unreadable history is held on the label alone", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({ labels: ["hold"], labelEventsMissing: true }),
+  );
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /`hold` label is on this pull request/);
+  assert.match(result.summary, /applied by an actor Auto Gate could not read/);
+});
+
+// An event the gate cannot place in time cannot decide "which happened last",
+// which is the only question this resolver asks.
+test("#4576: an unorderable label-event timestamp holds", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [
+        labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+        unlabeledEvent("sachiniyer", "hold", "not a timestamp"),
+      ],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, false, "an unorderable removal must not lift the hold");
+  assert.match(result.summary, /timestamp Auto Gate cannot order/);
+});
+
+// The window is the newest 100 LABEL events, filtered server-side. If the hold
+// is older than that, "no hold event visible" is not "never held".
+test("#4576: no hold event in a truncated window holds; in a complete one it clears", async () => {
+  const truncated = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [labeledEvent("sachiniyer", "play-tested", HOLD_APPLIED_AT)],
+      labelEventsTruncated: true,
+    }),
+  );
+  assert.equal(truncated.shouldMerge, false, "an incomplete window cannot prove a hold was never set");
+  assert.match(truncated.summary, /older label events exist outside that window/);
+
+  const complete = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [labeledEvent("sachiniyer", "play-tested", HOLD_APPLIED_AT)],
+    }),
+  );
+  assert.equal(complete.shouldMerge, true, complete.reasons.join("; "));
+});
+
+// The label is gone and the newest event the gate can see ADDS it. Something
+// removed it out of view; the gate cannot say who, so it does not guess.
+test("#4576: a label absent while the newest visible event adds it holds", async () => {
+  const result = await evaluateGate(
+    degradedPassOptions({
+      labels: [],
+      labelEvents: [labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT)],
+    }),
+  );
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /no removal is visible/);
+});
+
+// The GraphQL read itself failing is not a special case for the hold at all: the
+// label list and its provenance come from ONE request, so a failure takes both
+// and the whole evaluation is already BLOCKED. This pins that they cannot
+// disagree — there is no window where the labels are readable and the history is
+// not.
+test("#4576: the hold evidence and the labels come from one read, so they fail together", () => {
+  const source = fs.readFileSync(AUTO_GATE_SCRIPT, "utf8");
+  const query = source.match(/query\(\$owner: String!, \$repo: String!, \$number: Int!\)[\s\S]*?\n  `/);
+  assert.ok(query, "the pull-request query is missing from auto-gate.js");
+  assert.match(query[0], /labels\(first: 100\)/);
+  assert.match(
+    query[0],
+    /labelEvents: timelineItems\(last: \$\{HOLD_LABEL_EVENT_WINDOW\}, itemTypes: \[LABELED_EVENT, UNLABELED_EVENT\]\)/,
+  );
+  assert.equal(autoGate.__test.HOLD_LABEL_EVENT_WINDOW, 100);
+  assert.match(query[0], /hasPreviousPage/);
+  // The force-push window is a SEPARATE connection: sharing one would let label
+  // churn push the events that bind the review evidence out of it.
+  assert.match(query[0], /timelineItems\(last: 100, itemTypes: \[HEAD_REF_FORCE_PUSHED_EVENT\]\)/);
+});
+
+// The hold sits among the structural refusals, above every read that produces an
+// approval, a verdict or an attestation. Reading it later would put it below the
+// branch that empties `reasons`, and "whatever else passes" would stop being
+// true. A behavioural test cannot see an ordering that has not broken yet.
+test("#4576: the hold is evaluated before the approval and verdict logic", () => {
+  const source = fs.readFileSync(AUTO_GATE_SCRIPT, "utf8");
+  const hold = source.indexOf("const hold = holdState({");
+  const codex = source.indexOf("const codex = await evaluateCodex({");
+  const clears = source.indexOf("reasons.length = 0;");
+  assert.ok(hold > 0 && codex > 0 && clears > 0);
+  assert.ok(hold < codex, "the hold must be resolved before the Codex evidence is read");
+  assert.ok(hold < clears, "the hold must be pushed before the branch that empties `reasons`");
+});
+
+// ---- holdState on its own, where the states are reachable directly. ----
+
+test("#4576: holdState resolves each state", () => {
+  const { holdState } = autoGate.__test;
+  const applied = [labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT)];
+
+  assert.equal(
+    holdState({ labels: [], labelEvents: { truncated: false, events: [] } }).state,
+    "clear",
+  );
+  assert.equal(
+    holdState({ labels: ["hold"], labelEvents: { truncated: false, events: applied } }).state,
+    "held",
+  );
+  assert.equal(
+    holdState({
+      labels: [],
+      labelEvents: {
+        truncated: false,
+        events: [...applied, unlabeledEvent("someone", "hold", HOLD_REMOVED_AT)],
+      },
+    }).state,
+    "stripped",
+  );
+  assert.equal(
+    holdState({
+      labels: [],
+      labelEvents: {
+        truncated: false,
+        events: [...applied, unlabeledEvent("sachiniyer", "hold", HOLD_REMOVED_AT)],
+      },
+    }).state,
+    "clear",
+  );
+  assert.equal(holdState({ labels: [], labelEvents: null }).state, "unresolved");
+  assert.equal(
+    holdState({ labels: [], labelEvents: { truncated: false, events: undefined } }).state,
+    "unresolved",
+  );
+
+  // Only `stripped` writes. A plain hold is already visible, and an unresolved
+  // one has no removal to answer.
+  assert.equal(
+    holdState({ labels: ["hold"], labelEvents: { truncated: false, events: applied } }).restore,
+    false,
+  );
+  assert.equal(
+    holdState({
+      labels: [],
+      labelEvents: {
+        truncated: false,
+        events: [...applied, unlabeledEvent("someone", "hold", HOLD_REMOVED_AT)],
+      },
+    }).restore,
+    true,
+  );
+  assert.equal(holdState({ labels: [], labelEvents: null }).restore, false);
+});
+
+// The server returns `last:` windows oldest-first, but the resolver orders them
+// itself rather than trusting the order it was handed — so a shuffled window
+// reaches the same answer.
+test("#4576: holdState orders the events itself", () => {
+  const { holdState } = autoGate.__test;
+  const events = [
+    unlabeledEvent("someone", "hold", HOLD_REMOVED_AT),
+    labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT),
+  ];
+
+  assert.equal(holdState({ labels: [], labelEvents: { truncated: false, events } }).state, "stripped");
 });
 
 // A usage-limit message proves the reviewer was out of quota when it answered,
@@ -7957,6 +8923,316 @@ test("scheduled reconciliation caps one sweep at ten PRs", async () => {
   assert.equal(new Set(targets.map((target) => target.prNumber)).size, targets.length);
 });
 
+// The schedule is a backstop, not a clock: GitHub delivered the */5 trigger
+// every two to five hours (#4571). Ordinary Auto Gate runs arrive many times an
+// hour, so each one may request the same bounded pass. These fakes stand in for
+// the two calls a request makes, and a dispatch they accept becomes a run the
+// next request's listing can see.
+const RECONCILIATION_DISPATCH = "auto-gate-reconcile";
+const RECONCILIATION_WINDOW_MS = 5 * 60 * 1000;
+
+function reconciliationRequestApi({
+  clock,
+  runs = [],
+  listReads = [],
+  dispatches = [],
+  listError = null,
+  listResponse = null,
+  dispatchError = null,
+  honorCreatedFilter = true,
+}) {
+  return {
+    listWorkflowRuns: async (params) => {
+      listReads.push(params);
+      if (listError) {
+        throw listError;
+      }
+      if (listResponse) {
+        return listResponse;
+      }
+      const since = /^>=(.+)$/.exec(params.created || "")?.[1];
+      const matching = runs
+        .filter(
+          (run) =>
+            run.workflow_id === params.workflow_id &&
+            (!params.event || run.event === params.event) &&
+            (!honorCreatedFilter || since === undefined ||
+              Date.parse(run.created_at) >= Date.parse(since)),
+        )
+        // The API lists newest first.
+        .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
+      return {
+        data: {
+          total_count: matching.length,
+          workflow_runs: matching.slice(0, params.per_page ?? 30),
+        },
+      };
+    },
+    createDispatchEvent: async (params) => {
+      dispatches.push(params);
+      if (dispatchError) {
+        throw dispatchError;
+      }
+      // auto-gate.yml subscribes exactly one repository_dispatch type, which the
+      // first reconciliation test pins; any other type starts no run of it.
+      if (params.event_type !== RECONCILIATION_DISPATCH) {
+        return { status: 204 };
+      }
+      runs.push({
+        id: 9_000_000 + runs.length,
+        workflow_id: "auto-gate.yml",
+        event: "repository_dispatch",
+        created_at: new Date(clock()).toISOString().replace(/\.\d{3}Z$/, "Z"),
+        payload: { action: params.event_type, client_payload: params.client_payload },
+      });
+      return { status: 204 };
+    },
+  };
+}
+
+function withReconciliationRequests(github, api) {
+  return {
+    ...github,
+    rest: {
+      ...github.rest,
+      actions: { ...github.rest?.actions, listWorkflowRuns: api.listWorkflowRuns },
+      repos: { ...github.rest?.repos, createDispatchEvent: api.createDispatchEvent },
+    },
+  };
+}
+
+async function requestReconciliation({ github, context, core = fakeCore(), now }) {
+  assert.equal(
+    typeof autoGate.requestRequiredCheckReconciliation,
+    "function",
+    "an ordinary Auto Gate run has no way to request stale-decision reconciliation",
+  );
+  return autoGate.requestRequiredCheckReconciliation({ github, context, core, now });
+}
+
+function autoGateResolverJob() {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  return workflow.slice(workflow.indexOf("  auto-gate:"), workflow.indexOf("  invalidate-gate:"));
+}
+
+test("a decision frozen before PR Validation concluded is re-evaluated by the next non-schedule run", async () => {
+  // #4224's shape in #4571: the decision froze on "Build is missing" at 14:57,
+  // Build went green at 15:37:10, the workflow_run wakeup resolved another PR's
+  // head, and the next scheduled run was hours away.
+  const frozen = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-09-17T14:57:00Z",
+  });
+  const clock = () => Date.parse("2026-09-17T15:40:00Z");
+  const runs = [];
+  const dispatches = [];
+  const github = withReconciliationRequests(
+    scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA), reconciliationPull(4060, OTHER_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          frozen,
+          reconciliationRequiredCheck("Build", "2026-09-17T15:37:10Z"),
+          reconciliationRequiredCheck("Lint", "2026-09-17T15:02:00Z"),
+        ],
+      },
+    }),
+    reconciliationRequestApi({ clock, runs, dispatches }),
+  );
+
+  // The next run is an ordinary one: a comment on an unrelated PR.
+  const comment = {
+    ...fakeContext({ issue: { number: 4060, pull_request: {} } }),
+    eventName: "issue_comment",
+    runId: 501,
+  };
+  const request = await requestReconciliation({ github, context: comment, now: clock() });
+  assert.equal(request.requested, true);
+  assert.equal(dispatches.length, 1);
+  assert.equal(dispatches[0].event_type, RECONCILIATION_DISPATCH);
+  assert.equal(runs.length, 1, "the request must start an Auto Gate run");
+
+  // That run is the scheduled pass under another trigger: it selects the frozen
+  // decision, and only it.
+  const [started] = runs;
+  const targets = await autoGate.resolveTargets({
+    github,
+    context: { ...fakeContext(started.payload), eventName: started.event, runId: started.id },
+    core: fakeCore(),
+  });
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+
+  // The workflow wires both halves: the dispatch is a subscribed trigger, and
+  // the resolver of every run hands the request to the helper.
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
+  assert.match(
+    triggers,
+    new RegExp(`^  repository_dispatch:\\n    types: \\[${RECONCILIATION_DISPATCH}\\]$`, "m"),
+  );
+  assert.match(triggers, /^  schedule:\n    - cron: "\*\/5 \* \* \* \*"$/m, "the schedule stays as a backstop");
+  assert.match(
+    autoGateResolverJob(),
+    /await autoGate\.requestRequiredCheckReconciliation\(\{ github, context, core \}\)/,
+  );
+});
+
+test("a reconciliation-dispatched run does not request another reconciliation", async () => {
+  const clock = () => Date.parse("2026-09-17T15:40:00Z");
+  const listReads = [];
+  const dispatches = [];
+  const github = withReconciliationRequests(
+    { rest: {} },
+    reconciliationRequestApi({ clock, listReads, dispatches }),
+  );
+  // Nothing sits in the rate window, so only the recursion guard can refuse.
+  for (const context of [
+    {
+      ...fakeContext({ action: RECONCILIATION_DISPATCH, client_payload: { source_run_id: "501" } }),
+      eventName: "repository_dispatch",
+    },
+    { ...fakeContext({ action: "another-type" }), eventName: "repository_dispatch" },
+    { ...fakeContext({ schedule: "*/5 * * * *" }), eventName: "schedule" },
+  ]) {
+    const request = await requestReconciliation({ github, context, now: clock() });
+    assert.equal(request.requested, false, `${context.eventName} is itself a pass`);
+  }
+  assert.deepEqual(listReads, [], "a pass does not even read the rate marker");
+  assert.deepEqual(dispatches, [], "a pass cannot start another pass");
+
+  // Control: in the same state, a dispatched run that is not a pass — a manual
+  // or update-branch recovery — does request one.
+  for (const context of [
+    { ...fakeContext({ inputs: { pr_number: "4060" } }), eventName: "workflow_dispatch" },
+    { ...fakeContext({ workflow_run: { head_sha: HEAD_SHA } }), eventName: "workflow_run" },
+  ]) {
+    const control = withReconciliationRequests(
+      { rest: {} },
+      reconciliationRequestApi({ clock, dispatches: [] }),
+    );
+    const request = await requestReconciliation({ github: control, context, now: clock() });
+    assert.equal(request.requested, true, context.eventName);
+  }
+
+  // The workflow skips the step for both pass events before the helper loads,
+  // and a pass keeps the schedule's single running-plus-pending group.
+  const step = autoGateResolverJob().match(
+    /      - name: Request stale-decision reconciliation\n([\s\S]*?)(?=\n      - name: |$(?![\s\S]))/,
+  );
+  assert.ok(step, "the resolver needs a reconciliation request step");
+  assert.match(
+    step[1],
+    /^        if: \$\{\{ !cancelled\(\) && github\.event_name != 'schedule' && github\.event_name != 'repository_dispatch' \}\}$/m,
+  );
+});
+
+test("two ordinary runs inside the rate window request one reconciliation", async () => {
+  for (const honorCreatedFilter of [true, false]) {
+    const label = honorCreatedFilter ? "server-filtered listing" : "unfiltered listing";
+    let now = Date.parse("2026-09-17T16:00:00Z");
+    const runs = [
+      // A pass just outside the window, and runs that are not passes.
+      { id: 1, workflow_id: "auto-gate.yml", event: "repository_dispatch", created_at: "2026-09-17T15:54:59Z" },
+      { id: 2, workflow_id: "auto-gate.yml", event: "issue_comment", created_at: "2026-09-17T15:59:00Z" },
+      { id: 3, workflow_id: "pr.yml", event: "repository_dispatch", created_at: "2026-09-17T15:59:30Z" },
+    ];
+    const listReads = [];
+    const dispatches = [];
+    const github = withReconciliationRequests(
+      { rest: {} },
+      reconciliationRequestApi({ clock: () => now, runs, listReads, dispatches, honorCreatedFilter }),
+    );
+    const comment = { ...fakeContext({ issue: { number: 4060 } }), eventName: "issue_comment" };
+    const status = { ...fakeContext({ sha: HEAD_SHA }), eventName: "status" };
+
+    const first = await requestReconciliation({ github, context: comment, now });
+    assert.equal(first.requested, true, label);
+    now += 2 * 60 * 1000;
+    const second = await requestReconciliation({ github, context: status, now });
+    assert.equal(second.requested, false, label);
+    assert.equal(dispatches.length, 1, `${label}: two runs inside the window reconcile once`);
+
+    // The window is inclusive: a pass exactly five minutes old still holds it.
+    now = Date.parse("2026-09-17T16:05:00Z");
+    assert.equal((await requestReconciliation({ github, context: comment, now })).requested, false, label);
+    now = Date.parse("2026-09-17T16:05:01Z");
+    assert.equal((await requestReconciliation({ github, context: status, now })).requested, true, label);
+    assert.equal(dispatches.length, 2, label);
+
+    // The marker is one cheap read: this workflow's newest repository_dispatch
+    // run, filtered to the window, one result.
+    assert.equal(listReads.length, 4, label);
+    for (const read of listReads) {
+      assert.equal(read.workflow_id, "auto-gate.yml");
+      assert.equal(read.event, "repository_dispatch");
+      assert.equal(read.per_page, 1);
+    }
+    assert.equal(listReads[3].created, ">=2026-09-17T16:00:01Z");
+  }
+
+  // Two runs that both read before either dispatch is visible can both
+  // request. The group bounds that race to one running and one pending pass.
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const beforeJobs = workflow.slice(0, workflow.indexOf("\njobs:")).replace(/\s+/g, " ");
+  assert.match(
+    beforeJobs,
+    /\(github\.event_name == 'schedule' \|\| github\.event_name == 'repository_dispatch'\) && 'required-check-reconciliation'/,
+  );
+});
+
+test("a failed reconciliation request fails toward no dispatch and never reds the run", async () => {
+  const clock = () => Date.parse("2026-09-17T16:00:00Z");
+  const comment = { ...fakeContext({ issue: { number: 4060 } }), eventName: "issue_comment" };
+  const unreadable = [
+    { listError: Object.assign(new Error("Forbidden"), { status: 403 }) },
+    { listResponse: { data: {} } },
+    {
+      listResponse: {
+        data: { workflow_runs: [{ id: 9, event: "repository_dispatch", created_at: "not a time" }] },
+      },
+    },
+  ];
+  for (const failure of unreadable) {
+    const dispatches = [];
+    const core = fakeCore();
+    const github = withReconciliationRequests(
+      { rest: {} },
+      reconciliationRequestApi({ clock, dispatches, ...failure }),
+    );
+    const request = await requestReconciliation({ github, context: comment, core, now: clock() });
+    assert.equal(request.requested, false);
+    assert.deepEqual(dispatches, [], "an unknown marker must not fan out");
+  }
+
+  // A dispatch is not idempotent: one attempt, then a warning.
+  const dispatches = [];
+  const core = fakeCore();
+  const github = withReconciliationRequests(
+    { rest: {} },
+    reconciliationRequestApi({
+      clock,
+      dispatches,
+      dispatchError: Object.assign(new Error("Server Error"), { status: 502 }),
+    }),
+  );
+  const request = await requestReconciliation({ github, context: comment, core, now: clock() });
+  assert.equal(request.requested, false);
+  assert.equal(dispatches.length, 1);
+  assert.match(core.warnings.join("\n"), /reconciliation/);
+
+  const step = autoGateResolverJob().match(
+    /      - name: Request stale-decision reconciliation\n([\s\S]*?)(?=\n      - name: |$(?![\s\S]))/,
+  );
+  assert.ok(step);
+  assert.match(step[1], /catch \(error\) \{[\s\S]{0,300}core\.warning\(/);
+  assert.doesNotMatch(step[1], /setFailed|throw /);
+});
+
 test("the happy path squash-merges the exact evaluated head", async () => {
   const github = fakeGateGithub({
     checkRuns: [
@@ -8476,6 +9752,101 @@ test("#4209: a failed follow-up dispatch names the manual recovery instead of cl
   assert.deepEqual(github.dispatchedWorkflows, []);
 });
 
+// ---------------------------------------------------------------------------
+// The update-branch merge race (#4462). evaluate() resolves a PR open and
+// behind; a hand or queue merge then closes it in the seconds before the
+// gate's own `PUT update-branch` executes — two writers on one PR with no
+// ordering between them. The loser's update is either rejected by a PR that no
+// longer exists to update, or accepted onto a dead branch whose tip it just
+// moved out from under delete-on-merge. Both are the race's losing outcome —
+// the merge the run wanted already happened — and neither is an update failure.
+// ---------------------------------------------------------------------------
+
+test("#4462: an update-branch refused because the PR already merged is a lost race, not an update failure", async () => {
+  // #4398's first shape: the PUT is rejected (422, the documented
+  // "unprocessable" for a merged or head-less PR) and the confirming read
+  // proves the merge landed. The update is a no-op — not a red gate.
+  const gone = new Error("Unprocessable Entity");
+  gone.status = 422;
+  const github = fakeGateGithub({
+    behindBy: 1,
+    updateBranchError: gone,
+    pullGetSnapshots: [
+      { merged: false },
+      { merged: true, state: "closed", merge_commit_sha: OTHER_SHA },
+    ],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was in flight/,
+  );
+  assert.equal(github.mergedWith, null, "the loser does not merge what already merged");
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.deepEqual(github.dispatchedWorkflows, [], "there is no successor work to schedule");
+});
+
+test("#4462: a PR already merged before the update is never written to", async () => {
+  // The merge landed in the wider window — between the evaluation and this
+  // lane reaching the update. The live read sees it and the PUT never fires:
+  // no write lands on a dead PR's branch at all.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    pullGetSnapshots: [{ merged: true, state: "closed", merge_commit_sha: OTHER_SHA }],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was pending/,
+  );
+  assert.equal(github.updateBranchCalls.length, 0, "the write is skipped entirely");
+  assert.equal(github.mergedWith, null);
+});
+
+test("#4462: an update-branch accepted onto a just-merged PR refuses and schedules nothing", async () => {
+  // #4398's observed shape, exactly: the PUT was ACCEPTED and its merge commit
+  // (688928a) landed on the head branch inside the merge's own second —
+  // delete-on-merge saw a tip it did not recognize and left the branch. The
+  // post-update read sees the PR merged, and the lane refuses as the lost race
+  // it is rather than scheduling successor work onto a dead PR. Reclaiming the
+  // orphaned branch is the sweep's concern, not this transaction's.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    headAfterUpdate: OTHER_SHA,
+    remoteRefSha: OTHER_SHA,
+    pullGetSnapshots: [
+      { merged: false },
+      { merged: true, state: "closed", merge_commit_sha: "f".repeat(40) },
+    ],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge PR #1465; the PR was merged while its update-branch was in flight/,
+  );
+  assert.equal(github.mergedWith, null);
+  assert.equal(github.updateBranchCalls.length, 1);
+  assert.deepEqual(github.dispatchedWorkflows, [], "no successor: the merge already produced the outcome");
+  assert.deepEqual(github.approvedRuns, [], "no runs are approved for a head the merge made moot");
+});
+
+test("#4462: an update failure whose PR state cannot be re-read stays an update failure", async () => {
+  // The concession needs PROOF the race was lost — a read whose failure means
+  // "no evidence", never "a new error" (#3551's rule). An unreachable PR is
+  // not a merged PR.
+  const github = fakeGateGithub({
+    behindBy: 1,
+    updateBranchError: new Error("update rejected"),
+    pullGetErrors: [null, new Error("PR read unavailable")],
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /the update failed: error update rejected/,
+  );
+  assert.equal(github.mergedWith, null);
+});
+
 // #3807. The merge commit `PUT update-branch` writes is authored by the workflow
 // token, so every `pull_request` run it triggers is attributed to
 // `github-actions[bot]` and GitHub parks it in `action_required` behind "Approve
@@ -8630,6 +10001,245 @@ test("a required check whose run is parked says so instead of reporting it missi
     /required check Lint \(app 15368\) is missing/,
     "the misleading wording must be gone for this case",
   );
+});
+
+// #4581. #4430's head b63f9752 was an ordinary lane push. GitHub created an Auto
+// Gate run for it and no PR Validation run at all, so Build could never report
+// and the decision said "missing" until someone ran `gh workflow run pr.yml` by
+// hand (run 35291417069). "Missing" meant "not reported yet" and "never coming",
+// and only the second earns a dispatch.
+const RUNLESS_BRANCH = "siyer/fix-3603";
+const TODAYS_MISSING_REASONS = [
+  `required check Build (app 15368) is missing on ${HEAD_SHA}`,
+  `required check Lint (app 15368) is missing on ${HEAD_SHA}`,
+];
+
+// Build and Lint absent, which is how a head with no PR Validation run reads.
+// A dispatch the fake accepts starts a run at the branch tip, carrying the tip's
+// sha, which is what the real API does and what makes the next read see it.
+function runlessValidationGithub(options = {}) {
+  const runsByHeadSha = options.runsByHeadSha || {};
+  const github = fakeGateGithub({
+    headRefName: RUNLESS_BRANCH,
+    checkRuns: happyCheckRuns().filter((run) => run.name !== "Build" && run.name !== "Lint"),
+    ...options,
+    runsByHeadSha,
+  });
+  const accept = github.rest.actions.createWorkflowDispatch;
+  github.rest.actions.createWorkflowDispatch = async (params) => {
+    await accept(params);
+    const tip = options.remoteRefSha || HEAD_SHA;
+    (runsByHeadSha[tip] ||= []).push({
+      id: 35291417069,
+      name: "PR Validation",
+      event: "workflow_dispatch",
+      status: "queued",
+      conclusion: null,
+    });
+  };
+  return github;
+}
+
+// Production waits five seconds between existence reads. Here that would be ten
+// idle seconds per evaluation that finds nothing.
+async function evaluateRunless(github, core = fakeCore()) {
+  const previousPoll = process.env.AUTO_GATE_VALIDATION_POLL_MS;
+  process.env.AUTO_GATE_VALIDATION_POLL_MS = "0";
+  try {
+    return await autoGate.evaluate({
+      github,
+      context: fakeContext(),
+      core,
+      prNumber: 1465,
+      setOutputs: false,
+    });
+  } finally {
+    if (previousPoll === undefined) {
+      delete process.env.AUTO_GATE_VALIDATION_POLL_MS;
+    } else {
+      process.env.AUTO_GATE_VALIDATION_POLL_MS = previousPoll;
+    }
+  }
+}
+
+const validationDispatches = (github) =>
+  github.dispatchedWorkflows.filter((dispatch) => dispatch.workflow_id === "pr.yml");
+const validationExistenceReads = (github) =>
+  github.runListReads.filter((read) => read.workflow_id === "pr.yml");
+const requiredCheckReasons = (result) =>
+  result.reasons.filter((reason) => reason.startsWith("required check "));
+
+test("a head with no PR Validation run is dispatched once and the decision names it", async () => {
+  const github = runlessValidationGithub();
+  const first = await evaluateRunless(github);
+
+  assert.equal(validationDispatches(github).length, 1, "one dispatch for Build and Lint together");
+  assert.equal(validationDispatches(github)[0].ref, RUNLESS_BRANCH, "a dispatch takes a ref, never a sha");
+  assert.deepEqual(github.refReads, [`heads/${RUNLESS_BRANCH}`], "the tip is read before the dispatch");
+  assert.equal(first.shouldMerge, false, "a dispatched run is not a reported check");
+  for (const reason of TODAYS_MISSING_REASONS) {
+    assert.ok(
+      first.summary.includes(
+        `${reason} — PR Validation had no run for this head, so Auto Gate dispatched it on ${RUNLESS_BRANCH}`,
+      ),
+      `the summary names the dispatch: ${first.summary}`,
+    );
+  }
+  // Absence is confirmed over the bounded wait, not read once: an evaluation
+  // that races the push would otherwise dispatch a duplicate of a run GitHub was
+  // about to create.
+  const reads = validationExistenceReads(github);
+  assert.equal(reads.length, 3);
+  for (const read of reads) {
+    assert.equal(read.head_sha, HEAD_SHA);
+    assert.equal(read.event, undefined, "every event counts, including this function's own dispatch");
+    assert.equal(read.per_page, 1);
+  }
+  // The dispatched reason keeps the prefix the reconciliation pass matches, so
+  // when the dispatched run's Build completes, a frozen decision still wakes.
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          reconciliationDecision({
+            prNumber: 1465,
+            headSha: HEAD_SHA,
+            evaluatedAt: "2026-09-17T23:10:00Z",
+            reason: first.reasons.join("; "),
+          }),
+          reconciliationRequiredCheck("Build", "2026-09-17T23:30:00Z"),
+          reconciliationRequiredCheck("Lint", "2026-09-17T23:20:00Z"),
+        ],
+      },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+  });
+  assert.deepEqual(targets.map((target) => target.prNumber), [1465]);
+
+  // The next evaluation of the same head finds the run the dispatch started. The
+  // marker is that run, so the head is dispatched once, not once per evaluation.
+  const second = await evaluateRunless(github);
+  assert.equal(validationDispatches(github).length, 1, "a second evaluation must not dispatch again");
+  assert.deepEqual(requiredCheckReasons(second), TODAYS_MISSING_REASONS);
+
+  // Two evaluations that both read before either dispatch is visible can both
+  // send one. The dispatch passes no inputs, so pr.yml's probe input (#4563)
+  // stays false: a full run, grouped by its ref under pr-, cancel in progress.
+  // That race costs one cancelled run rather than two builds.
+  assert.equal(validationDispatches(github)[0].inputs, undefined, "a dispatch with inputs could be a probe");
+  const validation = fs.readFileSync(path.join(__dirname, "..", "workflows", "pr.yml"), "utf8");
+  assert.match(validation, /^ {2}workflow_dispatch:$/m);
+  assert.match(
+    validation,
+    /^ {2}group: \$\{\{ inputs\.probe && 'probe-' \|\| 'pr-' \}\}\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}$/m,
+  );
+  assert.match(validation, /^ {2}cancel-in-progress: true$/m);
+});
+
+test("a head whose PR Validation run is queued or running is left alone", async () => {
+  for (const run of [
+    { id: 1, name: "PR Validation", event: "pull_request", status: "queued", conclusion: null },
+    { id: 2, name: "PR Validation", event: "pull_request", status: "in_progress", conclusion: null },
+    // A hand dispatch is a run too; #4430 was unstuck with one.
+    { id: 35291417069, name: "PR Validation", event: "workflow_dispatch", status: "queued", conclusion: null },
+  ]) {
+    const label = `${run.event} ${run.status}`;
+    const github = runlessValidationGithub({ runsByHeadSha: { [HEAD_SHA]: [run] } });
+    const core = fakeCore();
+    const result = await evaluateRunless(github, core);
+
+    assert.equal(validationExistenceReads(github).length, 1, `${label}: the gate asked, and one answer sufficed`);
+    assert.deepEqual(validationDispatches(github), [], `${label}: a run exists, so nothing is dispatched`);
+    assert.deepEqual(github.refReads, [], `${label}: a head with a run never reaches the tip read`);
+    assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS, `${label}: the decision reads as before`);
+    assert.deepEqual(core.warnings, [], label);
+  }
+
+  // GitHub creates a push's runs a few seconds after the head moves (#3814). A
+  // run that becomes visible during the wait is a run that exists. Reads per
+  // head: the parked-run listing, then the first existence read, see nothing.
+  const late = runlessValidationGithub({
+    runsAppearAfterReads: 2,
+    runsByHeadSha: {
+      [HEAD_SHA]: [{ id: 3, name: "PR Validation", event: "pull_request", status: "queued", conclusion: null }],
+    },
+  });
+  const result = await evaluateRunless(late);
+  assert.equal(validationExistenceReads(late).length, 2);
+  assert.deepEqual(validationDispatches(late), [], "a run that appears during the wait is not duplicated");
+  assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS);
+});
+
+test("an unreadable PR Validation listing dispatches nothing and reports as before", async () => {
+  for (const [label, answer] of [
+    ["403", async () => {
+      throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
+    }],
+    ["no runs array", async () => ({ data: {} })],
+  ]) {
+    const github = runlessValidationGithub();
+    const reads = [];
+    github.rest.actions.listWorkflowRuns = async (params) => {
+      reads.push(params);
+      return answer(params);
+    };
+    const core = fakeCore();
+    const result = await evaluateRunless(github, core);
+
+    assert.equal(reads.length, 1, `${label}: an unknown answer ends the check, it does not retry into a dispatch`);
+    assert.deepEqual(validationDispatches(github), [], `${label}: an unknown answer is not "no run"`);
+    assert.deepEqual(github.refReads, [], label);
+    assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS, `${label}: the decision reads as before`);
+    assert.equal(result.readFailure, undefined, `${label}: the evaluation itself did not fail`);
+    assert.match(
+      core.warnings.join("\n"),
+      new RegExp(`Could not tell whether PR Validation has a run for ${HEAD_SHA}`),
+      label,
+    );
+  }
+});
+
+test("a branch that has moved off the head, or cannot be read, is not dispatched", async () => {
+  for (const [label, options, trace] of [
+    ["moved", { remoteRefSha: OTHER_SHA }, (core) => core.infos.join("\n").includes(`now points at ${OTHER_SHA}`)],
+    ["deleted", { remoteRefSha: null }, (core) => /could not be read/.test(core.warnings.join("\n"))],
+    [
+      "unreadable",
+      { refReadError: Object.assign(new Error("Forbidden"), { status: 403 }) },
+      (core) => /could not be read/.test(core.warnings.join("\n")),
+    ],
+  ]) {
+    const github = runlessValidationGithub(options);
+    const core = fakeCore();
+    const result = await evaluateRunless(github, core);
+
+    assert.deepEqual(github.refReads, [`heads/${RUNLESS_BRANCH}`], `${label}: the tip was read before any dispatch`);
+    assert.deepEqual(validationDispatches(github), [], `${label}: a ref dispatch would not validate this head`);
+    assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS, `${label}: the decision reads as before`);
+    assert.ok(trace(core), `${label}: the log says why nothing was dispatched`);
+  }
+});
+
+// Not a red-first test: master never dispatches, so these pass there by
+// construction. They pin the heads where GitHub would not have created a
+// pull_request run either, where absence is expected and a dispatch would spend
+// a runner on a head that cannot merge.
+test("a head GitHub would not validate is not dispatched or even checked", async () => {
+  for (const [label, options] of [
+    ["conflicting", { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }],
+    ["mergeability unknown", { mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }],
+    ["fork head", { pullRequestsByNumber: { 1465: { headRepository: "outside/fork" } } }],
+    ["closed", { state: "CLOSED" }],
+  ]) {
+    const github = runlessValidationGithub(options);
+    const result = await evaluateRunless(github);
+
+    assert.deepEqual(validationExistenceReads(github), [], label);
+    assert.deepEqual(validationDispatches(github), [], label);
+    assert.deepEqual(requiredCheckReasons(result), TODAYS_MISSING_REASONS, label);
+  }
 });
 
 // #3814. #3812 approved parked runs immediately after its own update-branch and
@@ -11448,8 +13058,9 @@ test("the gate runs the sweep once per non-reconciliation run", () => {
 
   // The resolver job — NOT apply-gate, which is a per-aggregate-head matrix that
   // does not run at all when nothing was invalidated, and would sweep once per
-  // head when it does. The scheduled reconciliation is the one exception: its
-  // quota is reserved for repairing required-check decisions.
+  // head when it does. Reconciliation passes, scheduled or dispatched, are the
+  // one exception: their quota is reserved for repairing required-check
+  // decisions.
   const resolver = workflow.slice(
     workflow.indexOf("  auto-gate:"),
     workflow.indexOf("  invalidate-gate:"),
@@ -11465,7 +13076,7 @@ test("the gate runs the sweep once per non-reconciliation run", () => {
   // on its own, so the switch that turns that off has to reach it.
   assert.match(
     resolver,
-    /if: always\(\) && vars\.AUTO_GATE_ENABLED == 'true' && github\.event_name != 'schedule'\n\s+uses: actions\/github-script/,
+    /if: always\(\) && vars\.AUTO_GATE_ENABLED == 'true' && github\.event_name != 'schedule' && github\.event_name != 'repository_dispatch'\n\s+uses: actions\/github-script/,
   );
   assert.match(resolver, /catch \(error\) \{[\s\S]{0,300}core\.warning\(/);
 });
@@ -12310,6 +13921,18 @@ function fakeGateGithub({
   reviewComments = [],
   files = [],
   labels = [],
+  // The PR's labelled/unlabelled timeline, as GraphQL returns it: oldest first,
+  // `__typename` distinguishing the two, and `label.name` unfiltered — the hold
+  // resolver is what picks its own label out (#4576). Build entries with
+  // labeledEvent()/unlabeledEvent().
+  labelEvents = [],
+  // Older label events exist outside the `last:` window, which is the only thing
+  // that separates "never held" from "the hold scrolled out of sight".
+  labelEventsTruncated = false,
+  // The connection itself does not come back — an unreadable history rather than
+  // an empty one.
+  labelEventsMissing = false,
+  addLabelsError = null,
   treesByOid = {},
   // Blob contents by blob SHA, for the TUI gate's comment-only proof (#4477): a
   // string is served base64-encoded the way the API sends it, an object is served
@@ -12508,6 +14131,8 @@ function fakeGateGithub({
     operations: [],
     mergedWith: null,
     refReads: [],
+    addedLabels: [],
+    addLabelAttempts: 0,
     pullListQueries: [],
     pullListBranches: [],
     branchSweepReads: 0,
@@ -12657,10 +14282,21 @@ function fakeGateGithub({
           github.branchRefs = github.branchRefs.filter((branch) => branch.name !== name);
         },
       },
-      issues: { listComments, createComment: async (options) => {
-        github.recoveryComments.push(options);
-        return { data: { id: 1 } };
-      } },
+      issues: {
+        listComments,
+        createComment: async (options) => {
+          github.recoveryComments.push(options);
+          return { data: { id: 1 } };
+        },
+        addLabels: async (options) => {
+          github.addLabelAttempts += 1;
+          if (addLabelsError) {
+            throw addLabelsError;
+          }
+          github.addedLabels.push(options);
+          return { data: [] };
+        },
+      },
       repos: {
         listCommitStatusesForRef,
         listPullRequestsAssociatedWithCommit,
@@ -12890,6 +14526,12 @@ function fakeGateGithub({
             timelineItems: {
               nodes: pullRequestOverride.headForcePushes ?? headForcePushes,
             },
+            labelEvents: labelEventsMissing
+              ? null
+              : {
+                  pageInfo: { hasPreviousPage: labelEventsTruncated },
+                  nodes: pullRequestOverride.labelEvents ?? labelEvents,
+                },
           },
         },
       };
@@ -13965,6 +15607,26 @@ function codexIssueCommentFinding(
     ].join("\n"),
     created_at: timestamp,
     updated_at: timestamp,
+  };
+}
+
+// One LabeledEvent / UnlabeledEvent node, shaped the way the PR query asks for
+// them. `actor: null` is what GitHub sends for a deleted account, so a fixture
+// can express it by passing an empty login.
+function labeledEvent(actor, name, createdAt) {
+  return labelTimelineEvent("LabeledEvent", actor, name, createdAt);
+}
+
+function unlabeledEvent(actor, name, createdAt) {
+  return labelTimelineEvent("UnlabeledEvent", actor, name, createdAt);
+}
+
+function labelTimelineEvent(typename, actor, name, createdAt) {
+  return {
+    __typename: typename,
+    createdAt,
+    actor: actor ? { login: actor } : null,
+    label: { name },
   };
 }
 

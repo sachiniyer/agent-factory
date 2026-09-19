@@ -193,7 +193,7 @@ limit observation, says which identity changed in the session, and waits normall
 when none is usable. Docker account-scoped creates remain supported, but
 automatic Docker replacement is disabled until af can durably identify and reap a
 crash-surviving container and freeze its complete provision plan. An explicit
---account is a permanent pin and is never overridden.
+--account is a pin that automatic switching never overrides.
 
 ```
 af accounts
@@ -1263,6 +1263,13 @@ accumulate silently on a machine running agent-factory:
     residue an abandoned daemon's bind left behind. --fix removes one with
     os.Remove rather than a recursive delete, so a directory that has gained
     anything since the scan fails instead of being swept up with it
+  - directories af's own test harness left under the temp dir when a test run
+    ended before its cleanup (af-test-home-*, af-tmux-pkg-*, af-tmux-*). --fix
+    removes one only when it holds nothing but that run's log or tmux sockets
+    nobody answers on, has not changed for a week, and no live process has a
+    file open in it, names it, or works inside it — entry by entry with
+    os.Remove, never a recursive delete. Anything else in one is reported, and a
+    tmux server still answering in one is named rather than stopped
   - daemon health: control socket, autostart unit, pid file, binary freshness
   - client/daemon version skew, and the ways a stale daemon survives an
     upgrade: a second daemon on this home, an autostart unit launching a
@@ -1308,15 +1315,17 @@ unresolved == 0 means incomplete; unresolved > 0 means actionable issues remain
 (and summary.incomplete may also be non-empty).
 
 High-volume findings are summarized by default so the actionable problem is
-visible first — process findings, abandoned temp homes, and dead-socket
-directories, all of which run to hundreds or thousands on a busy machine. Use
---verbose to show each item behind those summaries.
+visible first — process findings, abandoned temp homes, dead-socket
+directories, and test-harness directories, all of which run to hundreds or
+thousands on a busy machine. Use --verbose to show each item behind those
+summaries. A summary from a check that did not finish reads "at least N … a
+lower bound" in its own row, so its count is never mistaken for the total.
 
 Read-only by default. With --fix, applies the safe remediations — killing
 orphans whose ancestry markers prove they came from a dead af session, removing
-stale temp homes, stopping daemons proven to be running a temp-dir binary, and
-removing directories holding nothing but a dead daemon socket — logging each
-action. Ambiguous cases are always reported rather than acted on, and remain
+stale temp homes, stopping daemons proven to be running a temp-dir binary,
+removing directories holding nothing but a dead daemon socket, and removing the
+test-harness directories described above — logging each action. Ambiguous cases are always reported rather than acted on, and remain
 advisory unless another check establishes a specific unhealthy condition.
 
 Exits 1 when unresolved actionable issues remain or summary.incomplete is
@@ -1830,19 +1839,25 @@ A manual handoff moves an explicit account pin; automatic rotation still
 respects it. Targets with current usage-limit evidence are refused.
 
 The session keeps its identity, its git worktree, and its branch — only the
-agent process changes. The incoming agent starts a fresh conversation and is
+agent process changes. A different agent starts a fresh conversation and is
 given a mission brief: the session's goal, and what is already on the branch.
+
+A same-agent account handoff (--account alone, or --to naming the current
+agent) keeps the conversation for claude and codex: af copies the transcript
+into the new account's home and resumes it. If that copy cannot be made, the
+new account starts a fresh conversation, and its brief says why.
 
 This is the answer to an agent that has stopped and cannot continue — most often
 one blocked at its provider's usage limit, where the alternative is waiting for
 the window to reset (see 'af sessions list' for a [limit] badge, and
 docs/usage-limits.md for the waiting path).
 
-Agent conversations are not portable between providers: the incoming agent
-cannot read what its predecessor was thinking, only the working tree and the git
-history. The brief points it at both. Because of that, a handoff is recorded —
-the swap and the branch tip at the moment it happened — so a reviewer reading
-the resulting diff can tell which agent wrote which part.
+Agent conversations are not portable between providers: after a cross-agent
+handoff the incoming agent cannot read what its predecessor was thinking, only
+the working tree and the git history. The brief points it at both. Because of
+that, a handoff is recorded — the swap and the branch tip at the moment it
+happened — so a reviewer reading the resulting diff can tell which agent wrote
+which part.
 
 Local-worktree sessions only: swapping the agent inside a remote/docker/ssh
 sandbox is a different lifecycle and is not supported yet.

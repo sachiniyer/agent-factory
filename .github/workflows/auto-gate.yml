@@ -29,8 +29,14 @@ on:
   # GitHub has intermittently omitted that terminal workflow_run event. Reconcile
   # only stale decisions that name a PR Validation blocker; one paginated query
   # batches PR heads/check rollups and at most ten reevaluations start (#4242).
+  # GitHub delivers this schedule every two to five hours, not every five minutes
+  # (#4571), so it is only the backstop. Every other run requests the same pass as
+  # the repository_dispatch below, at most once per five minutes. A pass never
+  # requests another.
   schedule:
     - cron: "*/5 * * * *"
+  repository_dispatch:
+    types: [auto-gate-reconcile]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -50,14 +56,45 @@ permissions:
   statuses: read
   issues: write
 
-# A scheduled run carries no unique event: each one scans every open master PR,
-# so a newer pending schedule may replace an older pending copy without losing an
-# invalidation. Keep the active run alive through its aggregate transaction so
-# the next scan cannot select the same per-PR decisions while they are queued.
-# Every webhook/comment run gets its own run-id group and still reaches the
-# ungrouped invalidation below; those events are not fungible and never coalesce.
+# A concurrency group holds one running and one pending run: a newer pending
+# run replaces the older one, and cancel-in-progress stays false so an active
+# transaction always finishes uninterrupted. Replacement is safe only when the
+# survivor's invalidation covers every head the cancelled pending run would
+# have covered — a run cancelled while pending never reaches the ungrouped
+# invalidation below, and an uncovered head keeps its stale verdict. Each group
+# is keyed so that guarantee holds:
+#
+# - schedule / repository_dispatch: every reconciliation pass scans every open
+#   master PR, so pending copies are fungible and the older one carries nothing
+#   the newer one misses. Keeping the active pass alive through its aggregate
+#   transaction also keeps the next scan from selecting the same per-PR
+#   decisions while they are queued (#4571).
+# - workflow_dispatch: keyed by (pr_number, previous_head_sha). Recovery polls
+#   for the head AFTER that one; only an identical request reproduces it.
+# - pull_request_target synchronize: keyed by (before, after). It alone carries
+#   the previous head, which no later event reproduces, so only a redelivery of
+#   the same transition may replace it — never a different push or a comment.
+# - pull_request_target other actions: keyed by (PR, payload head). A head can
+#   move while a PR is closed with no synchronize event bridging it, so closed
+#   on the old head must not be replaced by reopened on the new one.
+# - issue_comment / pull_request_review / pull_request_review_comment: one
+#   group per PR. They cover only the PR's current head, resolved at run time,
+#   and every transition away from an older head is carried by a synchronize
+#   run that never coalesces — so a burst of comments collapses to at most one
+#   pending run and loses no invalidation.
+# - check_suite / status / workflow_run: one group per named commit. Coverage
+#   is exactly that head, so same-commit copies are identical by construction.
 concurrency:
-  group: auto-gate-${{ github.event_name == 'schedule' && 'required-check-reconciliation' || github.run_id }}
+  group: >-
+    auto-gate-${{
+      (github.event_name == 'schedule' || github.event_name == 'repository_dispatch') && 'required-check-reconciliation' ||
+      github.event_name == 'workflow_dispatch' && format('recovery-{0}-{1}', inputs.pr_number, inputs.previous_head_sha) ||
+      github.event_name == 'pull_request_target' && github.event.action == 'synchronize' && format('synchronize-{0}-{1}', github.event.before, github.event.after) ||
+      github.event_name == 'pull_request_target' && format('pr-{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) ||
+      (github.event.issue.number || github.event.pull_request.number) && format('pr-{0}', github.event.issue.number || github.event.pull_request.number) ||
+      (github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) && format('head-{0}', github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) ||
+      github.run_id
+    }}
   cancel-in-progress: false
 
 jobs:
@@ -228,9 +265,10 @@ jobs:
         # AUTO_GATE_ENABLED, because deleting a ref is the gate writing to this
         # repository on its own, which is the thing that switch turns off. With
         # it off nothing merges, so nothing new leaks either.
-        # The schedule exists only to reconcile required checks. Do not spend its
-        # deliberately bounded API budget on unrelated branch housekeeping.
-        if: always() && vars.AUTO_GATE_ENABLED == 'true' && github.event_name != 'schedule'
+        # Reconciliation passes, scheduled or dispatched, exist only to reconcile
+        # required checks. Do not spend their deliberately bounded API budget on
+        # unrelated branch housekeeping.
+        if: always() && vars.AUTO_GATE_ENABLED == 'true' && github.event_name != 'schedule' && github.event_name != 'repository_dispatch'
         uses: actions/github-script@v8
         with:
           github-token: ${{ github.token }}
@@ -257,6 +295,41 @@ jobs:
               // notice and costs nothing until then.
               core.warning(
                 `Head-ref sweep failed: ${error && error.message ? error.message : error}`,
+              );
+            }
+
+      # Liveness for frozen decisions (#4571). The helper sends one
+      # repository_dispatch per five-minute window, and that run is a full
+      # scheduled pass. A pass never requests another: this condition skips both
+      # pass events, and the helper refuses them too. always() is not used
+      # because a cancelled run should not request a pass. A failed evaluation
+      # above should still request one, since the pass does not depend on it.
+      - name: Request stale-decision reconciliation
+        if: ${{ !cancelled() && github.event_name != 'schedule' && github.event_name != 'repository_dispatch' }}
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
+            if (!fs.existsSync(helperPath)) {
+              return;
+            }
+            const autoGate = require(helperPath);
+            // The workflow file takes effect before its default-branch helper on
+            // the landing run, exactly as the evaluate step above allows for.
+            if (typeof autoGate.requestRequiredCheckReconciliation !== "function") {
+              core.info("auto-gate helper on the default branch cannot request reconciliation yet.");
+              return;
+            }
+            try {
+              await autoGate.requestRequiredCheckReconciliation({ github, context, core });
+            } catch (error) {
+              // A missed request leaves the schedule as the backstop. Auto Gate
+              // red has to keep meaning "a merge decision went wrong".
+              core.warning(
+                `Reconciliation request failed: ${error && error.message ? error.message : error}`,
               );
             }
 
@@ -362,8 +435,10 @@ jobs:
         aggregate: ${{ fromJSON(needs.invalidate-gate.outputs.invalidated_heads) }}
     # Invalidation has already run for EVERY event, outside both lanes. Keep
     # each head separate so a comment cannot replace synchronize's previous head.
+    # github.event.action is reached only by a repository_dispatch pass. Every
+    # other subscribed event stops at an earlier field.
     concurrency:
-      group: auto-gate-target-${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number || github.event.workflow_run.head_sha || github.event.check_suite.head_sha || github.event.sha || github.event.schedule || github.run_id }}-head-${{ matrix.aggregate.head_sha }}
+      group: auto-gate-target-${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number || github.event.workflow_run.head_sha || github.event.check_suite.head_sha || github.event.sha || github.event.schedule || github.event.action || github.run_id }}-head-${{ matrix.aggregate.head_sha }}
       cancel-in-progress: false
     uses: ./.github/workflows/auto-gate-aggregate.yml
     with:

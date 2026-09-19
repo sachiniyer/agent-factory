@@ -426,25 +426,42 @@ func resolveSettable(key string) (section, leaf string, spec settableKeySpec, ok
 // guarantees the written file still loads. Returns an actionable error for an
 // unknown key, a wrong-typed or invalid value, or an I/O failure.
 func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
+	result, _, err := SetGlobalConfigValueWithDigest(key, rawValue)
+	return result, err
+}
+
+// SetGlobalConfigValueWithDigest is SetGlobalConfigValue plus the digest of the
+// config.toml bytes this save left on disk, for the callers that then ask a
+// running daemon to apply them: comparing this against the digest the apply's
+// own load reports is how a save decides whether it may claim the daemon is
+// serving THIS save's value (#4247).
+//
+// The digest is returned BESIDE SetResult rather than on it. SetResult crosses
+// the net/rpc control socket and is the `af config set --json` payload, and gob
+// encodes every exported field whatever its json tag says — so a digest hung on
+// SetResult would silently become part of two wire contracts to serve a
+// comparison that never leaves this process. config.ConfigDigest's own fields
+// are unexported for the same reason.
+func SetGlobalConfigValueWithDigest(key, rawValue string) (*SetResult, ConfigDigest, error) {
 	if err := RetiredThemeKeyError(key); err != nil {
-		return nil, err
+		return nil, ConfigDigest{}, err
 	}
 	if key == "auto_yes" {
-		return nil, RemovedAutoYesError()
+		return nil, ConfigDigest{}, RemovedAutoYesError()
 	}
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
-		return nil, unsettableConfigKeyError(key, "")
+		return nil, ConfigDigest{}, unsettableConfigKeyError(key, "")
 	}
 	key = canonicalConfigKey(key)
 	structured := spec.structured && section == ""
 	canonical, encoded, err := canonicalizeConfigValue(key, spec, structured, rawValue)
 	if err != nil {
-		return nil, fmt.Errorf("invalid value for %s: %w", key, err)
+		return nil, ConfigDigest{}, fmt.Errorf("invalid value for %s: %w", key, err)
 	}
 	if !structured && spec.validate != nil {
 		if err := spec.validate(leaf, canonical); err != nil {
-			return nil, err
+			return nil, ConfigDigest{}, err
 		}
 	}
 
@@ -454,11 +471,11 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	// PRECONDITION only — the loaded values are deliberately not carried into the
 	// write. See scalarWrite.apply for why (#2412).
 	if _, err := LoadConfig(); err != nil {
-		return nil, fmt.Errorf("refusing to write: the current config does not load: %w", err)
+		return nil, ConfigDigest{}, fmt.Errorf("refusing to write: the current config does not load: %w", err)
 	}
 	configDir, err := GetConfigDir()
 	if err != nil {
-		return nil, err
+		return nil, ConfigDigest{}, err
 	}
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	prettyPath := prettyHomePath(tomlPath)
@@ -467,18 +484,19 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 		rawStructured: rawValue, clear: spec.kind == cfgStringList && canonical == ""}
 
 	var result *SetResult
+	var digest ConfigDigest
 	writeErr := withFollowedFileLock(tomlPath, func(locked lockedTarget) error {
 		var err error
-		result, err = write.apply(locked, prettyPath)
+		result, digest, err = write.apply(locked, prettyPath)
 		return err
 	})
 	if writeErr != nil {
-		return nil, writeErr
+		return nil, ConfigDigest{}, writeErr
 	}
 	if warn := defaultAccountWriteWarning(key, leaf, canonical); warn != "" {
 		result.Warnings = append(result.Warnings, warn)
 	}
-	return result, nil
+	return result, digest, nil
 }
 
 // SetProjectConfigValue is the per-project counterpart of SetGlobalConfigValue
@@ -655,7 +673,13 @@ type scalarWrite struct {
 // into a snapshot of the other one, because parseConfigTOML has already
 // produced the exact config this write lands on. Whichever racer writes second
 // now sees the full pairing and warns.
-func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, error) {
+//
+// The second return is the digest of the bytes this write left on disk — the
+// evidence a save needs to tell whether a later apply loaded ITS file or one a
+// competing writer replaced (#4247). It is taken from `updated` at the moment
+// locked.write commits it, so nothing can have re-read or re-encoded it in
+// between.
+func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, ConfigDigest, error) {
 	// Every byte read and written here is the file the caller's lock covers,
 	// reached through the directory it holds open. Reading by path instead would
 	// let a retarget between acquisition and write compute the edit against one
@@ -663,7 +687,7 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	// user is shown.
 	current, err := locked.read()
 	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
+		return nil, ConfigDigest{}, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
 	current = stripUTF8BOM(current)
 	updated := string(current)
@@ -675,20 +699,20 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	guarded := !isEffectivelyEmptyToml(current)
 	if guarded {
 		if before, err = parseConfigTOML(current, prettyPath); err != nil {
-			return nil, fmt.Errorf("refusing to write: the current config does not load: %w", err)
+			return nil, ConfigDigest{}, fmt.Errorf("refusing to write: the current config does not load: %w", err)
 		}
 	}
 	if w.structured {
 		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, before, true)
 		if err != nil {
-			return nil, fmt.Errorf("invalid value for %s: %w", w.key, err)
+			return nil, ConfigDigest{}, fmt.Errorf("invalid value for %s: %w", w.key, err)
 		}
 	}
 	switch {
 	case w.structured:
 		updated, err = setTOMLStructured(updated, w.key, w.encoded)
 		if err != nil {
-			return nil, fmt.Errorf("failed to edit %s in %s: %w", w.key, prettyPath, err)
+			return nil, ConfigDigest{}, fmt.Errorf("failed to edit %s in %s: %w", w.key, prettyPath, err)
 		}
 	case w.clear:
 		updated, _ = deleteTOMLScalar(updated, w.section, w.leaf)
@@ -738,7 +762,7 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	// what the exposure judgment below is made against.
 	resulting, err := parseConfigTOML([]byte(updated), prettyPath)
 	if err != nil {
-		return nil, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+		return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
 	}
 	// Second gate, and the one the parse cannot give: the edit must have landed
 	// on the right line. A surgical edit that hit a decoy inside somebody's
@@ -747,12 +771,16 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	// written just above — is a refusal that names what would have moved.
 	if guarded {
 		if drift := configRewriteDrift(before, resulting, w.key, SchemaVersionField); drift != "" {
-			return nil, fmt.Errorf("internal error: setting %s in %s would change %s (no changes written)", w.key, prettyPath, drift)
+			return nil, ConfigDigest{}, fmt.Errorf("internal error: setting %s in %s would change %s (no changes written)", w.key, prettyPath, drift)
 		}
 	}
 	if err := locked.write([]byte(updated), 0644); err != nil {
-		return nil, err
+		return nil, ConfigDigest{}, err
 	}
+	// Hashed from the same bytes that were just committed, not from a re-read of
+	// the file: a re-read would be a readback, and could only report what some
+	// LATER writer left there.
+	digest := digestConfigBytes([]byte(updated))
 	value := w.canonical
 	if w.structured {
 		value, _ = CurrentValue(resulting, w.key)
@@ -761,7 +789,7 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	if warn := exposureWarning(resulting, w.key); warn != "" {
 		result.Warnings = append(result.Warnings, warn)
 	}
-	return result, nil
+	return result, digest, nil
 }
 
 // applyProject is the personal-project counterpart of apply. It reuses the same
