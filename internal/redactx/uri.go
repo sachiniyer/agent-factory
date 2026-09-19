@@ -144,6 +144,11 @@ func sourceMappedURIComponents(outer View, prov Provenance) ([]viewOut, []Range)
 		// grammar has already established.
 		parsed, err := url.Parse(rawURI[:pathEnd])
 		if err != nil || parsed.Scheme == "" {
+			if hasPath {
+				if _, malformed := PercentDecode(s[uriStart+pathStart:uriStart+pathEnd], false); malformed {
+					unknown = append(unknown, Range{Start: uriStart + pathStart, End: uriStart + pathEnd})
+				}
+			}
 			continue
 		}
 		// An established URI owns scheme-looking bytes inside its path, but not
@@ -191,6 +196,8 @@ func sourceMappedURIComponents(outer View, prov Provenance) ([]viewOut, []Range)
 			for _, pair := range splitQueryPairs(s, query[0], query[1]) {
 				if view, malformed := PercentDecode(s[pair.Start:pair.End], true); !malformed {
 					views = append(views, viewOut{view: offsetView(view, pair.Start), prov: ProvURIQueryPair})
+				} else {
+					unknown = append(unknown, Range{Start: pair.Start, End: pair.End})
 				}
 			}
 		}
@@ -199,6 +206,8 @@ func sourceMappedURIComponents(outer View, prov Provenance) ([]viewOut, []Range)
 			if fragStart < uriStart+len(rawURI) {
 				if view, malformed := PercentDecode(s[fragStart:uriStart+len(rawURI)], false); !malformed {
 					views = append(views, viewOut{view: offsetView(view, fragStart), prov: ProvURIComponent})
+				} else {
+					unknown = append(unknown, Range{Start: fragStart, End: uriStart + len(rawURI)})
 				}
 			}
 		}
