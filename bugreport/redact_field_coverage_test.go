@@ -129,6 +129,7 @@ var verbatimInstanceFields = map[string]string{
 	"Tabs[].Handoffs[].Reason":           "bounded HandoffReason* constant",
 	"Tabs[].Handoffs[].From.Agent":       "outgoing agent enum name; the resumable ID beside it is cleared (#3405)",
 	"Tabs[].Handoffs[].From.CaptureKind": "bounded capture-kind enum",
+	"Tabs[].Exit.StoppedBy":              "bounded TabStoppedBy* constant (#4506)",
 
 	"PendingTabs[].ID":                          "minted tab id (#1738)",
 	"PendingTabs[].Conversation.Agent":          "agent enum name; the resumable ID beside it is cleared",
@@ -138,6 +139,7 @@ var verbatimInstanceFields = map[string]string{
 	"PendingTabs[].Handoffs[].Reason":           "bounded HandoffReason* constant",
 	"PendingTabs[].Handoffs[].From.Agent":       "outgoing agent enum name; the resumable ID beside it is cleared (#3405)",
 	"PendingTabs[].Handoffs[].From.CaptureKind": "bounded capture-kind enum",
+	"PendingTabs[].Exit.StoppedBy":              "same bounded TabStoppedBy* constant under the staging roster",
 
 	"TabKinds[].Kind":   "bounded tab-kind enum",
 	"TabKinds[].Reason": "the daemon's OWN refusal text (#3060), not user input",
@@ -212,6 +214,10 @@ var unplantableInstanceFields = map[string]string{
 	"PendingTabs[].Kind":                 "same bounded TabKind enum under the staging roster",
 	"Tabs[].Handoffs[].Automatic":        "bool — whether the handoff was automatic rather than user-initiated",
 	"PendingTabs[].Handoffs[].Automatic": "same handoff bool under the staging roster",
+	"Tabs[].Exit.Status":                 "exit code tmux reported for a finished process tab (#4479); machine-minted int",
+	"PendingTabs[].Exit.Status":          "same machine-minted exit code under the staging roster",
+	"Tabs[].Exit.StatusKnown":            "bool — whether tmux reported an exit code at all",
+	"PendingTabs[].Exit.StatusKnown":     "same exit-code bool under the staging roster",
 	"TabKinds[].Allowed":                 "bool — whether this backend admits the kind (#3060)",
 }
 
