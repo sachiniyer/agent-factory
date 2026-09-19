@@ -129,7 +129,8 @@ func TestResumeFromLimitAbandonsACarryWhoseLaunchDidNotSurvive(t *testing.T) {
 		CarriedLaunchStarted:  true,
 	})
 
-	require.NoError(t, m.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}))
+	_, err := m.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo})
+	require.NoError(t, err)
 
 	_, respawns, prompts := backend.snapshot()
 	require.Equal(t, 1, respawns)
