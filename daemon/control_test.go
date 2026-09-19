@@ -29,8 +29,10 @@ import (
 // of paying four more git execs — ~400 call sites × ~60-120ms was a material
 // slice of the package's serial wall-clock under -race (#4464). A copy of .git
 // is indistinguishable from a fresh init to the code under test: same HEAD,
-// same objects, no remotes. Tests that mutate the repo only touch their own
-// copy. TestMain removes the template after the run.
+// same objects, no remotes — its config only adds the two auto-maintenance
+// keys below. Tests that mutate the repo only touch their own copy, and
+// nothing writes the template once the Once returns. TestMain removes the
+// template after the run.
 var (
 	controlRepoTemplateOnce sync.Once
 	controlRepoTemplateDir  string
@@ -49,6 +51,18 @@ func controlRepoTemplate(t *testing.T) string {
 			{"init", dir},
 			{"-C", dir, "config", "user.email", "test@example.com"},
 			{"-C", dir, "config", "user.name", "Test User"},
+			// Left on, the commit starts `git maintenance run --auto
+			// --detach`, and since git 2.55 the detached child owns
+			// .git/objects/maintenance.lock and unlinks it after the commit
+			// has returned — after the Once has released every waiter. A
+			// clone's CopyFS then lists the lock and fails to open it, or
+			// copies it stale (#4674). maintenance.auto=false stops the child
+			// starting. maintenance.autoDetach=false keeps any run that a
+			// GIT_CONFIG_* override re-enables in the foreground, done before
+			// the commit returns. Both precede the commit, the only step here
+			// that runs auto-maintenance.
+			{"-C", dir, "config", "maintenance.auto", "false"},
+			{"-C", dir, "config", "maintenance.autoDetach", "false"},
 			{"-C", dir, "commit", "--allow-empty", "-m", "init"},
 		} {
 			if err = exec.Command("git", args...).Run(); err != nil {
