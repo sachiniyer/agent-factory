@@ -506,6 +506,17 @@ func observeOrphanAncestry(captured []proctree.Process, sanitizedName string, wa
 		if err != nil {
 			observeErr = errors.Join(observeErr, err)
 		} else {
+			// A successful snapshot supersedes earlier transient read
+			// failures: the pass has just PROVEN, by evidence, the state
+			// of the captured set. Leaving a stale procfs read error alive
+			// here would make a later !live early return — one reached
+			// because every captured process is absent from THIS snapshot —
+			// report "process cleanup is incomplete" after the reaping
+			// already completed, aborting af reset for a failure that has
+			// since cleared. The captured identity list (returned in full
+			// on every path) is untouched, so a genuine survivor is still
+			// reported via the reaping terms, not via a stale read error.
+			observeErr = nil
 			captured = refreshed
 			live := false
 			for _, process := range captured {
@@ -530,8 +541,15 @@ func observeOrphanAncestry(captured []proctree.Process, sanitizedName string, wa
 	}
 }
 
+// proctreeSnapshot is the process-table read used by refreshCapturedAncestry.
+// It is a package var, not a const, so tests can inject a transient Snapshot
+// failure (then recovery) into the observe loop without touching the real
+// backend — the failure mode the sticky observeErr bug produces. Production
+// leaves it at proctree.Snapshot, so this costs one indirection per call.
+var proctreeSnapshot = proctree.Snapshot
+
 func refreshCapturedAncestry(captured []proctree.Process, sanitizedName string) ([]proctree.Process, map[int]proctree.Process, error) {
-	snap, err := proctree.Snapshot()
+	snap, err := proctreeSnapshot()
 	if err != nil {
 		return captured, nil, fmt.Errorf("cannot refresh processes after tmux session %s vanished: %w", sanitizedName, err)
 	}
