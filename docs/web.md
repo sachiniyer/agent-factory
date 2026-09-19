@@ -307,7 +307,8 @@ described in [Project accounts](usage-limits.md#scoping-an-account-to-a-project)
 The default `network.listen_addr` is `127.0.0.1:8443`: the browser client and JSON
 API share a plain-HTTP listener. An absent key inherits that default; explicitly
 setting `network.listen_addr = ""` disables the listener. Listener settings are
-global-only. Apply changes with `af daemon restart`.
+global-only. `af config set` applies them live — the listener rebinds in place,
+no restart; a raw hand-edit of `config.toml` still needs `af daemon restart`.
 
 For remote use, keep loopback and forward the port over SSH, or configure a
 network bind with authentication and transport protection. Follow

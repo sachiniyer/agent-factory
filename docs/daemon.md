@@ -59,8 +59,10 @@ paragraph because it's why `af` doesn't corrupt itself:
 
 ## Lifecycle
 
-The daemon starts **on demand**: whenever you run `af` and there is work to host
-(an enabled task or a root agent), `af` makes sure a daemon is running.
+The daemon starts **on demand**: running `af` brings one up — the TUI reads
+session state through the daemon and spawns it if none is running — and a
+command that talks to the daemon (`af sessions create`, `af tasks add`) ensures
+it first. Commands that never touch it, like `af config list`, leave it down.
 That means for interactive use you usually don't have to think about it at all.
 
 To keep tasks and sessions running across logouts and reboots, install the

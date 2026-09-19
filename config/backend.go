@@ -4,16 +4,17 @@ import "strings"
 
 // Backend selection (#1592 Phase 4 PR3). A repo declares which runtime its
 // sessions run on via the in-repo `backend` key, alongside the docker/ssh
-// sections that parameterize the two sandboxed runtimes. The canonical values
-// are the four registered runtimes; validation of the VALUE lives at
-// backend-resolution time in the session package (mirroring how RemoteHooks are
-// validated when a backend is resolved, not at config load), so the config
-// layer only carries the raw strings and structs.
+// sections that parameterize the sandboxed runtimes. The canonical values
+// are the registered runtimes in SupportedBackends below; validation of the
+// VALUE lives at backend-resolution time in the session package (mirroring how
+// RemoteHooks are validated when a backend is resolved, not at config load),
+// so the config layer only carries the raw strings and structs.
 //
-// The four canonical `backend` values. `local` (or empty) is the default —
-// today's in-process tmux+worktree runtime, unchanged. `hook` is the existing
-// remote-hook backend. `docker` and `ssh` are the first-class sandboxed
-// runtimes (implemented in Phase 4 PR4/PR5).
+// The canonical `backend` values. `local` (or empty) is the default —
+// today's in-process tmux+worktree runtime, unchanged. `docker` and `ssh` are
+// the first-class sandboxed runtimes (implemented in Phase 4 PR4/PR5);
+// `sandbox` reaches its host through the operator's global `sandbox.ssh`
+// command (#2995); `hook` is the remote-hook bring-your-own provisioner.
 const (
 	BackendLocal   = "local"
 	BackendDocker  = "docker"
