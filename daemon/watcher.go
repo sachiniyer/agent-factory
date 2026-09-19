@@ -633,7 +633,11 @@ func (w *taskWatcher) consumeLines(r io.Reader, tail *tailBuffer, stdoutWritersS
 		case errors.Is(err, bufio.ErrBufferFull):
 			// ReadSlice's buffer filled before a newline: keep the first
 			// maxWatchLineBytes as the event and discard the rest of the line.
-			line := string(chunk)
+			// The raw chunk can split a multi-byte UTF-8 rune at the byte cap;
+			// trim the trailing partial rune so the line is valid UTF-8 before
+			// it can route to json.Marshal via the durable event queue (#863
+			// class, exposed by #1129).
+			line := trimTrailingPartialRune(string(chunk))
 			discarded := 0
 			var tailErr error
 			for {
