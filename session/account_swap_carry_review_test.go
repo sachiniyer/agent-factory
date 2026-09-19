@@ -139,9 +139,12 @@ func TestAbandonCarriedConversationAfterAFailedCarriedLaunch(t *testing.T) {
 	restored := lostInstanceForRecover(t, agentName, agentName+tmuxTabSeparator+shellTabName, executor)
 	processSiblingForSwap(restored)
 	restored.mu.Lock()
+	// The failing sibling is a shell tab because the swap relaunches shells and
+	// its new-session is what the fixture refuses. A process tab would not work:
+	// the swap stops it and never relaunches it (#4479), so its refusal never fires.
 	restored.Tabs = append(restored.Tabs, &Tab{
-		ID: "build", Name: "build", Kind: TabKindProcess, Command: "git status --short",
-		tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(processName, "git status --short",
+		ID: "build", Name: "build", Kind: TabKindShell, Command: "/bin/sh",
+		tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(processName, "/bin/sh",
 			failAccountSwapProcessPty{t: t, cmdExec: executor, name: processName}, executor),
 	})
 	restored.mu.Unlock()
