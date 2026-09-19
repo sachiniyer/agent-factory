@@ -322,8 +322,9 @@ func TestEnsureDaemonUnreachableSupervisorRefusesAdHoc(t *testing.T) {
 		t.Fatalf("refusal must name the invocation failure, got: %v", err)
 	}
 	// adopt runs the same binary from the same PATH, so it is never named;
-	// the PATH repair leads.
-	assertRemedyOrder(t, renderedRemedies(t, err), remedyPathLead+"systemctl`", remedySessionLead, uninstallRemedy)
+	// the PATH repair leads, and the directory literal is pinned so the
+	// (usually …) hint stays /usr/bin (systemctl ships there).
+	assertRemedyOrder(t, renderedRemedies(t, err), remedyPathLead+"systemctl` (usually /usr/bin)", remedySessionLead, uninstallRemedy)
 	if adHocLaunched {
 		t.Fatal("unreachable supervisor spawned an unsupervised daemon")
 	}
@@ -1239,11 +1240,20 @@ func TestUnitRefusalRemediesOrderByClass(t *testing.T) {
 			}
 
 			// A manager that exists but cannot be invoked: PATH first when the
-			// binary is missing, never adopt (same binary, same PATH).
+			// binary is missing, never adopt (same binary, same PATH). The
+			// prefix is asserted through the per-platform directory literal so
+			// the (usually …) hint cannot silently regress to the wrong path
+			// (#4594: the directory literal was unasserted; launchctl ships in
+			// /bin on darwin and systemctl in /usr/bin on linux).
 			bin := map[string]string{"linux": "systemctl", "darwin": "launchctl"}[goos]
+			dir := map[string]string{"linux": "/usr/bin", "darwin": "/bin"}[goos]
 			pathMiss := fmt.Errorf("no binary: %w", &exec.Error{Name: bin, Err: exec.ErrNotFound})
+			pathLead := remedyPathLead + bin + "` (usually " + dir + ")"
 			assertRemedyOrder(t, unreachableSupervisorRemedies(goos, pathMiss),
-				remedyPathLead+bin+"`", remedySessionLead, uninstallRemedy)
+				pathLead, remedySessionLead, uninstallRemedy)
+			if got := unreachableSupervisorRemedies(goos, pathMiss)[0]; !strings.Contains(got, "(usually "+dir+")") {
+				t.Fatalf("PATH remedy %q must name (usually %s)", got, dir)
+			}
 			unreadable := fmt.Errorf("boot marker unreadable: %w", os.ErrPermission)
 			assertRemedyOrder(t, unreachableSupervisorRemedies(goos, unreadable),
 				remedySessionLead, uninstallRemedy)
