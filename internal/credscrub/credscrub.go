@@ -65,7 +65,18 @@ var shapePatterns = []*regexp.Regexp{
 // bare value is absorbed rather than left behind), which is the safe direction.
 // credentialKeyPattern is the key half shared by keyValueSecret and
 // strandedAfterMarker, so the two cannot recognize different key sets.
-const credentialKeyPattern = `["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?\s*[:=]\s*`
+//
+// The separator is `[ \t]*`, NOT `\s*`: this runs over multi-line log and
+// config blobs (the whole config.toml via bugreport.collectConfig and the
+// daemon log tail via bugreport.scrubLog — see authScheme below for the
+// same rule), and `\s` matches newlines, so a key ending one line in
+// `token:`/`auth:`/`secret:`/`password:` and the like would reach across the
+// newline and redact a value on the next, unrelated line — the exact cross-
+// newline failure mode authScheme's and strandedAfterMarker's separators
+// were both corrected away from. `[ \t]*` keeps every real same-line
+// `<key> = <value>` / `<key>: <value>` (spaces, tabs, no whitespace) and
+// nothing across a line boundary.
+const credentialKeyPattern = `["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?[ \t]*[:=][ \t]*`
 
 var keyValueSecret = regexp.MustCompile(
 	`(?i)(` + credentialKeyPattern + `)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"',}]{6,})`)

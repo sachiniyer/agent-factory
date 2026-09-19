@@ -212,6 +212,88 @@ func TestScrubAuthSchemeStillRedactsSameLineWithinMultiLine(t *testing.T) {
 	}
 }
 
+// TestScrubCredentialKeyDoesNotCrossNewline is the credentialKeyPattern analogue
+// of TestScrubAuthSchemeDoesNotCrossNewline. credentialKeyPattern's separator
+// used to be `\s*[:=]\s*`, and `\s` matches newlines. Scrub runs over genuine
+// multi-line text blobs from the bug-report bundle (the whole config.toml via
+// bugreport.collectConfig and the daemon log tail via bugreport.scrubLog), so a
+// line ending in a bare credential keyword + `:`/`=` reached across the newline
+// and redacted the leading run of the next, unrelated line. `keyValueSecret`
+// alone redacted a bare ≥6-char next-line token; `keyedSchemeSecret` extended the
+// redaction further along that next line (a 40-char git SHA and following commit
+// subject, the shape `git log --format='%H %s'` produces). The separator is now
+// `[ \t]*`, which a line boundary is not, so none of these inputs cross it.
+// Mirrors the precedent the file already set for authScheme and
+// strandedAfterMarker so the three patterns cannot drift apart again.
+func TestScrubCredentialKeyDoesNotCrossNewline(t *testing.T) {
+	// Inputs with a credential keyword ending one line and no same-line
+	// credential, so the whole blob is a fixed point: the keyword stays
+	// stranded at end of line and the next line's leading run survives
+	// verbatim. `label:` is a control that is NOT a credential keyword.
+	unchanged := []struct{ name, in string }{
+		{"token: + bare token", "token:\nabcdef123456"},
+		{"token= + bare token", "token=\nabcdef123456"},
+		{"control label:", "label:\nabcdef123456"},
+		// The composition the report called out: keyedSchemeSecret inherits
+		// credentialKeyPattern's cross-newline anchor and extends the redaction
+		// along the next line via its own scheme+token tail, so a 40-char git
+		// SHA and following commit subject (the `git log --format='%H %s'`
+		// shape) were both redacted off the next line before the fix.
+		{"sha + commit subject", "checking token:\n4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a fix-login"},
+		{"sha + commit subject (CRLF)", "checking token:\r\n4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a fix-login"},
+		{"log: token line + timestamp", "2026-01-01 set token:\n2026-01-01 daemon started\n"},
+		{"config: key ends line + next TOML key", "[network]\n# uses a token\nrequire_secret = true\n"},
+	}
+	for _, tc := range unchanged {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Scrub(tc.in); got != tc.in {
+				t.Fatalf("credentialKeyPattern crossed a newline and changed multi-line input:\n in: %q\nout: %q", tc.in, got)
+			}
+		})
+	}
+}
+
+// TestScrubCredentialKeyStillRedactsSameLineWithinMultiLine is the no-regression
+// half of the cross-line fix: a genuine `<key>: <value>` / `<key> = <value>` on
+// one line within a multi-line blob is still redacted (with the same whitespace
+// spellings — spaces, tabs, and no whitespace around `:`/`=` — the old `\s*`
+// matched on a single line), and the marker does not bleed into a following
+// unrelated line. Runs over the same multi-line text blobs the cross-line guard
+// above pins, so both halves of the invariant stay together.
+func TestScrubCredentialKeyStillRedactsSameLineWithinMultiLine(t *testing.T) {
+	cases := []struct{ name, in, leak string }{
+		{"token: value mid blob", "above line\ntoken: " + sentinel + "\n2026-01-01 below line\n", sentinel},
+		// No whitespace around `:`/`=` must still match on one line.
+		{"token=value no whitespace", "token=" + sentinel + "abcdef", sentinel},
+		// Tabs around the separator must still match — `[ \t]*` is what `\s*`
+		// narrowed to, so a TOML-style `api_key\t=\t<value>` is still redacted.
+		{"api_key = value (tabs)", "api_key\t=\t" + sentinel + "abcdef", sentinel},
+		// A quoted value on one line within a multi-line blob is still redacted
+		// and the marker does not bleed into the following unrelated line.
+		{"quoted value mid blob", "above line\nsecret: \"" + sentinel + "\"\n2026-01-01 below line\n", sentinel},
+		// Quoted key with a credential-word prefix (`"x-auth-token"`) on one line.
+		{"quoted key value", "\"x-auth-token\": \"" + sentinel + "\"", sentinel},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Scrub(tc.in)
+			if strings.Contains(got, tc.leak) {
+				t.Fatalf("same-line credential survived within multi-line input:\n in: %q\nout: %q", tc.in, got)
+			}
+			if !strings.Contains(got, SecretMarker) {
+				t.Fatalf("expected a redaction marker for the same-line credential:\n in: %q\nout: %q", tc.in, got)
+			}
+			// Surrounding unrelated lines survive a multi-line scrub.
+			if strings.Contains(tc.in, "above line") && !strings.Contains(got, "above line") {
+				t.Fatalf("unrelated leading line was absorbed:\n in: %q\nout: %q", tc.in, got)
+			}
+			if strings.Contains(tc.in, "2026-01-01 below line") && !strings.Contains(got, "2026-01-01 below line") {
+				t.Fatalf("unrelated following line was absorbed:\n in: %q\nout: %q", tc.in, got)
+			}
+		})
+	}
+}
+
 // BenchmarkScrubTypicalLogLine measures the cost added to every log write. The
 // patterns run on the write path, so a regression here is paid by the daemon on
 // every line it emits.

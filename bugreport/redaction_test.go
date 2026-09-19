@@ -151,3 +151,73 @@ func TestScrubAndScrubLogDoNotCrossNewlineOnSchemeWord(t *testing.T) {
 		t.Fatalf("unrelated following line absorbed by scrubLog:\n in: %q\nout: %q", logReal, gotLog)
 	}
 }
+
+// TestScrubAndScrubLogDoNotCrossNewlineOnCredentialKey is the end-to-end lock at
+// the two vulnerable surfaces, for the credentialKeyPattern class of cross-
+// newline defect. collectConfig hands the whole config.toml to r.scrub
+// (bugreport.go), and collectLog hands the daemon log tail to r.scrubLog
+// (redact.go), both as genuine multi-line text blobs in a single call.
+// credentialKeyPattern's separator used to be `\s*[:=]\s*`, and `\s` matches
+// newlines, so a line ending in a bare credential keyword (`token:`, `auth:`,
+// `secret:`, `password:`) + `:`/`=` reached across the newline and redacted the
+// leading run of the next, unrelated line. An empty redactor isolates the
+// credscrub pass from the path/username/title sweeps; this mirrors
+// TestScrubAndScrubLogDoNotCrossNewlineOnSchemeWord, the same two-surface lock
+// the file already keeps for the authScheme separator.
+func TestScrubAndScrubLogDoNotCrossNewlineOnCredentialKey(t *testing.T) {
+	r := &redactor{}
+
+	// collectConfig path: a comment ending in a bare credential keyword, then a
+	// TOML key on the next line, stays unchanged — the TOML key it documents
+	// survives, instead of being absorbed as a "value" across the newline.
+	cfg := "[network]\n# uses a token\nrequire_secret = true\n"
+	if got := r.scrub(cfg); got != cfg {
+		t.Fatalf("scrub crossed a newline over config.toml text with a credential keyword:\n in: %q\nout: %q", cfg, got)
+	}
+
+	// The same shape on `=`: a comment ending in a credential keyword followed
+	// by a TOML key whose own value redacts. The comment AND the next-line key
+	// name survive; only the same-line value is redacted, in place, by the
+	// intended same-line keyValueSecret pass.
+	cfgSecret := "# fall back to a secret\nhttp_token = \"x\"\n"
+	got := r.scrub(cfgSecret)
+	if !strings.Contains(got, "# fall back to a secret") {
+		t.Fatalf("comment ending in 'secret' absorbed across the newline:\n in: %q\nout: %q", cfgSecret, got)
+	}
+	if !strings.Contains(got, "http_token") {
+		t.Fatalf("TOML key name 'http_token' absorbed across the newline:\n in: %q\nout: %q", cfgSecret, got)
+	}
+	if !strings.Contains(got, `http_token = "`+secretMarker+`"`) {
+		t.Fatalf("expected the value redacted in place, leaving the key name:\n in: %q\nout: %q", cfgSecret, got)
+	}
+
+	// collectLog path: a daemon log line ending in bare `token:` followed by a
+	// normal timestamped line stays unchanged, so the next line's date prefix
+	// survives. The timestamp 2026-01-01 is 10 chars of [0-9-], in the bare
+	// value class, which is exactly what let `\s*` absorb it before.
+	log := "2026-01-01 set token:\n2026-01-01 daemon started\n"
+	if got := r.scrubLog(log); got != log {
+		t.Fatalf("scrubLog crossed a newline over the daemon log tail with a credential keyword:\n in: %q\nout: %q", log, got)
+	}
+
+	// The richer composition keyedSchemeSecret extends: a log line ending in
+	// `token:` whose next line is a 40-char git SHA + commit subject (the shape
+	// `git log --format='%H %s'` produces) had BOTH the SHA and the subject
+	// redacted off the next line before the fix. After the fix the entire
+	// next line survives verbatim, and an unrelated following line survives too.
+	logSHA := "checking token:\n4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a fix-login\n2026-01-01 daemon started\n"
+	if got := r.scrubLog(logSHA); got != logSHA {
+		t.Fatalf("scrubLog redacted triage context off the line after a credential keyword:\n in: %q\nout: %q", logSHA, got)
+	}
+
+	// No-regression half: a genuine same-line credential within the log tail is
+	// still redacted, and the following unrelated line is preserved.
+	logReal := "2026-01-01 token: abcdefghijkl1234\n2026-01-01 daemon started\n"
+	gotLog := r.scrubLog(logReal)
+	if strings.Contains(gotLog, "abcdefghijkl1234") {
+		t.Fatalf("same-line credential survived scrubLog:\n in: %q\nout: %q", logReal, gotLog)
+	}
+	if !strings.Contains(gotLog, "2026-01-01 daemon started") {
+		t.Fatalf("unrelated following line absorbed by scrubLog:\n in: %q\nout: %q", logReal, gotLog)
+	}
+}
