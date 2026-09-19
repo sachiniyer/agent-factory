@@ -30,7 +30,12 @@ type SidebarProject struct {
 	// archives (#1973). Carried so the delete confirmation can state the real
 	// split; the row label itself renders only the total.
 	InPlaceCount int
-	Active       bool
+	// UnrestorableCount is how many of SessionCount's live sessions, not
+	// in-place, carry a title claiming the reserved root name. Delete-project
+	// archives them to keep their work, but restore refuses them, so the
+	// confirmation must not count them as restorable.
+	UnrestorableCount int
+	Active            bool
 }
 
 // projectsTitleStyle / projectsTitleDimStyle paint the section header — the

@@ -28,6 +28,10 @@ type Project struct {
 	// confirmation must state the real archived-vs-torn-down split before the
 	// user consents. Derived from the same cross-repo snapshot as SessionCount.
 	InPlaceCount int
+	// UnrestorableCount is how many of SessionCount's live, non-in-place
+	// sessions delete-project archives but restore then refuses: their title
+	// claims the reserved root name (session.IsReservedRecordTitle).
+	UnrestorableCount int
 }
 
 // ProjectPickerOverlay is the project switcher (#1461). It navigates like the

@@ -57,6 +57,9 @@ func (s *controlServer) RestartTask(req RestartTaskRequest, resp *RestartTaskRes
 	target := task.CanonicalTargetSession(tsk.TargetSession)
 	if tsk.Enabled && target != "" && s.manager != nil {
 		validation := s.manager.prepareTaskTargetValidation(tsk.RepoID, target, true)
+		// A restart re-runs a binding that is already durable and armed; it
+		// commits nothing, so it asks the arming pass's question, not a write's.
+		validation.persistedBinding = true
 		if err := s.manager.validateEnabledTaskTarget(*tsk, validation); err != nil {
 			return fmt.Errorf("watch task %q was not restarted because its target relationship is unsafe: %w", tsk.ID, err)
 		}

@@ -196,15 +196,15 @@ func TestLateGhostCleanup_DeleteFailureIsRetriedFromDefinitiveSuccess(t *testing
 	retried := make(chan struct{}, 1)
 	stubLateGhostSeam(t, manager, &lateGhostCleanupRetryInterval, 5*time.Millisecond)
 	stubLateGhostSeam(t, manager, &lateGhostDeleteSessionRecord,
-		func(_ *Manager, _, _, _ string, _ error) (bool, error) {
+		func(_ *Manager, _, _, _ string, _ error) (bool, string, error) {
 			if attempts.Add(1) == 1 {
-				return false, errors.New("transient instances lock failure")
+				return false, "", errors.New("transient instances lock failure")
 			}
 			select {
 			case retried <- struct{}{}:
 			default:
 			}
-			return true, nil
+			return true, "", nil
 		})
 
 	lateResult := make(chan error, 1)
@@ -322,9 +322,9 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 
 	releaseFinalizer := make(chan struct{})
 	stubLateGhostSeam(t, manager, &lateGhostDeleteSessionRecord,
-		func(*Manager, string, string, string, error) (bool, error) {
+		func(*Manager, string, string, string, error) (bool, string, error) {
 			<-releaseFinalizer
-			return false, nil
+			return false, "", nil
 		})
 	stubLateGhostSeam(t, manager, &session.InstanceDeleteLockTimeout, 25*time.Millisecond)
 	// Registered after the seams, so it runs before their joins: the stub above
@@ -458,9 +458,9 @@ func TestLateGhostCleanup_SuccessCompletesRootKill(t *testing.T) {
 
 	deleted := make(chan struct{})
 	stubLateGhostSeam(t, manager, &lateGhostDeleteSessionRecord,
-		func(*Manager, string, string, string, error) (bool, error) {
+		func(*Manager, string, string, string, error) (bool, string, error) {
 			close(deleted)
-			return true, nil
+			return true, "", nil
 		})
 
 	subscriberID, events := manager.events.subscribe()

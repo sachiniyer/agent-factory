@@ -119,6 +119,10 @@ opt-in removed. In-place sessions (the root agent, 'af sessions create --here')
 are torn down instead of archived — their cleanup never touches your working
 tree or branch.
 
+A session whose title claims the root agent's reserved name (such as "ro ot",
+created before af reserved it) is archived too — its worktree and branch are
+kept — but it cannot be restored; the output counts it in unrestorable_count.
+
 The durable project registration, if any, is removed so the project leaves the
 project list. Restoring an archived session makes its repository active again,
 but does not restore the durable registration or root-agent opt-in.
@@ -129,7 +133,8 @@ archived session with 'af sessions restore <title>'.
 [repo] is a path inside the repository to delete (default: the current repo).
 Deleting an unknown project is a clean no-op; deleting a registered project
 with no live sessions still removes its registration. Prints how many sessions
-were archived.`,
+were archived (archived_count, all restorable), archived but not restorable
+(unrestorable_count), and torn down (killed_count).`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -149,12 +154,13 @@ were archived.`,
 		}
 
 		result := map[string]any{
-			"ok":             true,
-			"project":        name,
-			"repo_path":      req.RepoPath,
-			"archived_count": resp.ArchivedCount,
-			"killed_count":   resp.KilledCount,
-			"deregistered":   resp.Deregistered,
+			"ok":                 true,
+			"project":            name,
+			"repo_path":          req.RepoPath,
+			"archived_count":     resp.ArchivedCount,
+			"unrestorable_count": resp.UnrestorableCount,
+			"killed_count":       resp.KilledCount,
+			"deregistered":       resp.Deregistered,
 		}
 		if warning != "" {
 			result["warning"] = warning

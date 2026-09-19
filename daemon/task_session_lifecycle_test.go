@@ -42,7 +42,7 @@ func TestTaskSessionLifecycle_CommittedArchiveWarningIsSuccessfulReap(t *testing
 func registerTaskSpawnedSession(t *testing.T, m *Manager, repoID, repoPath, title, taskID string) *session.Instance {
 	t.Helper()
 	wtPath := filepath.Join(filepath.Dir(repoPath), "wt-"+sanitizeArchiveTitle(title))
-	branch := "af/" + sanitizeArchiveTitle(title)
+	branch := m.branchForTitle(title)
 	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput()
 	require.NoError(t, err, string(out))
 	require.NoError(t, os.WriteFile(filepath.Join(wtPath, "dirty.txt"), []byte("uncommitted"), 0644))

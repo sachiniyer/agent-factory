@@ -15,6 +15,8 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/task"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -372,6 +374,60 @@ func TestKillSession_GhostWorktreeTimeout_RetainsTheRecord(t *testing.T) {
 		"its worktree may be half-deleted and this record is the only handle anything has on the leftovers")
 }
 
+// TestKillSession_RefusesCollisionTitledRecordWithEnabledTasks pins the #4407
+// review finding: a record whose title merely COLLIDES with the reserved tmux
+// name — the local case variant "Ro ot" owns af_Root — is the one deletion that
+// permanently strands its bound tasks, because ReservedTitleCollision refuses
+// every later auto-create of that spelling. Kill must refuse like archive does,
+// while ordinary titles still kill unconditionally (delivery re-creates them).
+func TestKillSession_RefusesCollisionTitledRecordWithEnabledTasks(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, "Ro ot")
+	otherRepo := setupTaskRepo(t)
+
+	require.NoError(t, task.AddTask(archiveTargetTask("killb001", "Bound Watch", repoPath, "Ro ot", true)))
+	require.NoError(t, task.AddTask(archiveTargetTask("killb002", "Paused Watch", repoPath, "Ro ot", false)))
+	require.NoError(t, task.AddTask(archiveTargetTask("killb003", "Other Repo", otherRepo, "Ro ot", true)))
+
+	_, err := manager.KillSession(KillSessionRequest{Title: "Ro ot", RepoID: repoID})
+	require.Error(t, err, "killing a collision-titled record strands the bound task forever")
+	assert.Contains(t, err.Error(), "Bound Watch")
+	assert.Contains(t, err.Error(), "disable or retarget")
+	assert.NotContains(t, err.Error(), "Paused Watch")
+	assert.NotContains(t, err.Error(), "Other Repo")
+
+	// The refusal is pre-commit: the record and its row survive untouched.
+	manager.mu.Lock()
+	_, live := manager.instances[daemonInstanceKey(repoID, "Ro ot")]
+	manager.mu.Unlock()
+	assert.True(t, live, "a refused kill must leave the record registered")
+	require.NotNil(t, recordFor(t, repoID, "Ro ot"))
+
+	// Ordinary titles are out of scope: a task-bound "worker" kills cleanly —
+	// the next delivery auto-creates the title afresh.
+	registerArchivable(t, manager, repoID, repoPath, "worker")
+	require.NoError(t, task.AddTask(archiveTargetTask("killb004", "Ordinary Watch", repoPath, "worker", true)))
+	_, err = manager.KillSession(KillSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err, "the fence must not reach ordinary titles")
+	require.Nil(t, recordFor(t, repoID, "worker"))
+}
+
+// TestKillSession_ReservedIdentityRecordKillsWithoutTaskFence pins the other
+// half of the carve-out: the canonical "root" record is reserved-identity, and
+// tasks could only bind to it through the will-materialize verdict — its kill
+// keeps the honored-stop semantics (grace window, then self-heal) rather than
+// refusing on the task binding.
+func TestKillSession_ReservedIdentityRecordKillsWithoutTaskFence(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, session.RootSessionTitle)
+	_, err := manager.KillSession(KillSessionRequest{Title: session.RootSessionTitle, RepoID: repoID})
+	require.NoError(t, err)
+	manager.mu.Lock()
+	_, armed := manager.rootKilledAt[repoID]
+	manager.mu.Unlock()
+	assert.True(t, armed, "killing the canonical root still arms the ensure-loop grace")
+}
+
 func TestKillSession_GhostDeletionRetainsLegacyAccountLimitEvidence(t *testing.T) {
 	manager, repoID := newGhostKillManager(t, "legacy-limit", "af_legacy-limit")
 	resetAt := time.Now().Add(time.Hour).UTC().Round(0)
@@ -405,6 +461,28 @@ func TestKillSession_GhostDeletionRetainsLegacyAccountLimitEvidence(t *testing.T
 	if len(observations) != 1 || observations[0].Agent != tmux.ProgramClaude ||
 		observations[0].Account != "work" || !observations[0].ResetAt.Equal(resetAt) {
 		t.Fatalf("retained observations = %+v, want legacy claude/work limit through %v", observations, resetAt)
+	}
+}
+
+// A ghost record under the reserved title is still the repo's root: its kill
+// must arm the same ensure-loop grace a live kill does, or the loop
+// resurrects it on the next tick while the operator is mid-cleanup. This is
+// also the nil-instance regression pin — the reserved classification must
+// read the record (evidence), because a ghost has no instance to ask: the
+// last time it asked the instance, a nil dereference inside m.mu deadlocked
+// the deferred killsInFlight cleanup and wedged the manager.
+func TestKillSession_GhostRootDeletionArmsRootGrace(t *testing.T) {
+	manager, repoID := newGhostKillManager(t, session.RootSessionTitle, tmux.SanitizedNameForRepo(session.RootSessionTitle, ""))
+	stubGhostTmux(t, tmux.PaneStateKnown, nil)
+	stubGhostWorktree(t, git.CleanupSettled, nil)
+	if _, err := manager.KillSession(KillSessionRequest{Title: session.RootSessionTitle, RepoID: repoID}); err != nil {
+		t.Fatalf("KillSession: %v", err)
+	}
+	manager.mu.Lock()
+	_, armed := manager.rootKilledAt[repoID]
+	manager.mu.Unlock()
+	if !armed {
+		t.Fatal("kill of the reserved-title ghost must arm root grace — a ghost root is still the repo's root")
 	}
 }
 

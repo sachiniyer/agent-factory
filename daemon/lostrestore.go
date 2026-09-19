@@ -288,7 +288,10 @@ func lostSessionWantsRestore(v session.LifecycleView) bool {
 	if v.ValidateRuntimeAction(session.RuntimeActionRecoverLost) != nil {
 		return false
 	}
-	return !session.IsReservedTitle(v.Title) && !v.LostRestoreGaveUp
+	// Spelling, not record identity: a local derived-name record ("ro ot")
+	// claims the root's tmux name but not its recovery — the ensure loop can
+	// neither find it nor replace it (session.IsReservedTitleSpelling).
+	return !session.IsReservedTitleSpelling(v.Title) && !v.LostRestoreGaveUp
 }
 
 // canAutoRestoreLostSession reports whether RestoreLostSessions will keep trying

@@ -514,7 +514,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	if killing || current != instance || instance.IsTearingDown() {
 		return resumeNotPerformed, nil
 	}
-	if instance.UserKilled() || session.IsReservedTitle(instance.Title) {
+	if instance.UserKilled() || session.IsReservedRecordTitle(instance.Title, instance.BackendType()) {
 		return resumeNotPerformed, fmt.Errorf("session %q cannot be resumed", requestedTitle)
 	}
 

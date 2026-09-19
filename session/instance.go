@@ -695,3 +695,22 @@ func (i *Instance) DropClosedTab(idx int) error {
 	}
 	return nil
 }
+
+// BackendType is the bound runtime's Type() — the local kind while the backend
+// is unbound, matching capabilitiesLocked's default — so a record-identity
+// question (IsReservedRecordTitle) classifies the same record the runtime does.
+// Synchronized like Capabilities: a restore rebinds i.backend under i.mu.
+func (i *Instance) BackendType() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.backendTypeLocked()
+}
+
+// backendTypeLocked is BackendType's already-locked half, for callers that
+// already hold i.mu (lifecycleViewLocked, toInstanceDataLocked).
+func (i *Instance) backendTypeLocked() string {
+	if i.backend == nil {
+		return (&LocalBackend{}).Type()
+	}
+	return i.backend.Type()
+}

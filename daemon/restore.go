@@ -122,7 +122,9 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreLostOrDead); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
-	if session.IsReservedTitle(instance.Title) {
+	// The same spelling gate as lostSessionWantsRestore: the ensure loop owns
+	// the root's recovery, but cannot recover a local derived-name record.
+	if session.IsReservedTitleSpelling(instance.Title) {
 		return "", fmt.Errorf("cannot manually restore reserved session %q", title)
 	}
 	if !instance.Capabilities().Recover {

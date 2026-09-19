@@ -17,7 +17,8 @@ import (
 // or is documented below as running before the instance is reachable by another
 // goroutine.
 //
-//   - currentBackend / capabilitiesLocked — the synchronized accessors themselves.
+//   - currentBackend / capabilitiesLocked / backendTypeLocked — the synchronized
+//     accessors themselves.
 //   - SetBackend / bindProvisionResult / retainProvisionResultCleanup — the
 //     writers; all take i.mu.Lock.
 //   - AgentServer / agentServerLocked / reprovisionRemote / toInstanceDataLocked —
@@ -30,6 +31,7 @@ import (
 var backendReadersUnderLock = map[string]bool{
 	"currentBackend":               true,
 	"capabilitiesLocked":           true,
+	"backendTypeLocked":            true,
 	"SetBackend":                   true,
 	"bindProvisionResult":          true,
 	"retainProvisionResultCleanup": true,

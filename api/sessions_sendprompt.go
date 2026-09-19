@@ -358,7 +358,7 @@ func runBroadcast(prompt string) error {
 	for _, t := range targets {
 		// The reserved root session belongs to the maintainer agent (#1106):
 		// don't broadcast into it unless explicitly asked.
-		if session.IsReservedTitle(t.Title) && !sendPromptIncludeRootFlag {
+		if session.IsReservedRecordTitle(t.Title, t.BackendType) && !sendPromptIncludeRootFlag {
 			result.Skipped++
 			result.Results = append(result.Results, broadcastTarget{
 				Title:  t.Title,

@@ -86,7 +86,7 @@ func (m *Manager) archiveSessionGuarded(req ArchiveSessionRequest, guard session
 // and passes the project-wide target index it loaded once during preflight.
 // A nil taskTargets means the caller has not supplied a serialized snapshot.
 func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[string][]task.Task, guard sessionTeardownGuard) (string, session.InstanceData, error) {
-	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
+	instance, repoID, title, _, recData, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return "", session.InstanceData{}, err
 	}
@@ -94,7 +94,15 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// killsInFlight key, and the relocation key off the id-resolved identity,
 	// not the request's title. req is a value copy, so this is local.
 	req.Title = title
-	if session.IsReservedTitle(req.Title) {
+	// The record's backend scopes the reserved-title identity: a live instance
+	// answers for itself, a ghost disk record answers from its persisted row.
+	backendType := ""
+	if instance != nil {
+		backendType = instance.BackendType()
+	} else if recData != nil {
+		backendType = recData.BackendType
+	}
+	if !req.allowReserved && session.IsReservedRecordTitle(req.Title, backendType) {
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive the reserved %q session", req.Title)
 	}
 	if instance == nil {

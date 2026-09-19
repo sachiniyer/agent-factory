@@ -195,6 +195,10 @@ type LifecycleView struct {
 	// TaskRunActive is whether this session's task run is still in flight — the one
 	// fact the concurrency cap counts. See Instance.taskRunActive.
 	TaskRunActive bool
+	// BackendType is the bound runtime's Type() ("" while unbound is projected
+	// as the local kind, matching BackendType()), captured with the lifecycle
+	// axes so record-identity questions classify the same snapshot.
+	BackendType string
 	// Recoverable is the backend's Recover capability: whether a lost session can
 	// be revived in place at all.
 	Recoverable bool
@@ -236,6 +240,7 @@ func (i *Instance) lifecycleViewLocked() LifecycleView {
 		// same non-reentrant lock would deadlock against a queued restore writer
 		// (#2096). Resolving it here also keeps the capability in the SAME critical
 		// section as the liveness axes, so the two can never disagree.
+		BackendType:       i.backendTypeLocked(),
 		Recoverable:       i.capabilitiesLocked().Recover,
 		LostRestoreGaveUp: i.lostRestoreFailure.valid(),
 		TaskRunActive:     i.taskRunActive,

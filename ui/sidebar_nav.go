@@ -270,11 +270,11 @@ func (s *Sidebar) rebuildVisibleItems() {
 			// root-only or root-less list gets no dangling rule (#2513). Its own item
 			// (not a line welded into a row) keeps the window math and the mouse
 			// hit-zones correct.
-			rootPresent := len(live) > 0 && session.IsReservedTitle(instances[live[0]].Title)
+			rootPresent := len(live) > 0 && session.IsReservedRecordTitle(instances[live[0]].Title, instances[live[0]].BackendType())
 			sepDone := false
 			for _, r := range rows {
 				idx := live[r.InstanceIndex]
-				if rootPresent && !sepDone && !r.IsTab() && !session.IsReservedTitle(instances[idx].Title) {
+				if rootPresent && !sepDone && !r.IsTab() && !session.IsReservedRecordTitle(instances[idx].Title, instances[idx].BackendType()) {
 					items = append(items, SidebarItem{Kind: SectionInstances, IsRootSep: true, ItemIndex: -1})
 					sepDone = true
 				}
