@@ -73,12 +73,17 @@ var shapePatterns = []*regexp.Regexp{
 // the leading run of the next, unrelated line — the exact cross-newline
 // failure mode authScheme's and strandedAfterMarker's separators were both
 // corrected away from. The split below keeps that correction for the
-// bare-log-line shape and lets JSON cross the line boundary only in the
-// form JSON actually serializes: a symmetrically quoted key followed by `:`.
+// bare-log-line shape and lets the cross-line widening reach only the three
+// serializations that legitimately place a credential VALUE on a LATER line
+// after a credential KEY: JSON (a symmetrically quoted key followed by `:`),
+// an indented YAML continuation (the value's later line is indented), and a
+// YAML flow mapping (a `{`/`,` introducer immediately before the key, since
+// indentation is not significant inside the braces).
 //
-// The pattern is two complete alternatives, each carrying its OWN delimiter
-// and separator-after, because the cross-line widening is a property of the
-// JSON form and must not leak into the bare-key form.
+// The pattern is three complete alternatives, each carrying its OWN delimiter
+// and separator-after, because the cross-line widening is gated to the JSON,
+// indented-continuation, and YAML-flow shapes and must not leak into the
+// bare-log-line form.
 //
 //  1. JSON form — `["'][key]["']` + `(?:[ \t]*(?:(?:\r\n?|\n)[ \t]*)*)` + `:`
 //     + `(?:[ \t]*(?:(?:\r\n?|\n)[ \t]*)*)`. The delimiter is `:` ONLY: JSON's
@@ -99,36 +104,72 @@ var shapePatterns = []*regexp.Regexp{
 //     newline) stays in the preserved prefix.
 //
 //  2. Loose form — `["']?[key]["']?[ \t]*[:=]` +
-//     `(?:[ \t]*|[ \t]*\r?\n[ \t]+)`. Keys with optional surrounding quotes
-//     and either `:` or `=` (the TOML/INI/log shape) keep the NARROW separator
-//     the cross-newline guard exists for. Before the delimiter only `[ \t]*`
-//     (same-line horizontal whitespace) is accepted — a bare or singly-quoted
-//     key cannot put the colon on a later line, because that is the ambiguous
-//     bare-log-line shape `\s*` over-redacted. (This also excludes a quoted
-//     key with `=` across lines: JSON uses `:`, so a `"password"\n=\n"…"`
-//     log does not enter the JSON form, and the loose form's `[ \t]*[:=]`
-//     cannot cross the newline before the `=`; the unrelated quoted
-//     diagnostic on the next line survives.) After the delimiter the first
-//     alternative `[ \t]*` keeps every real same-line `<key> = <value>` /
-//     `<key>: <value>` (spaces, tabs, no whitespace) and nothing across a
-//     line boundary. The second alternative `[ \t]*\r?\n[ \t]+` narrows the
-//     cross-line case to an INDENTED continuation: a value that begins on
-//     the next line indented (`password:\n  hunter2secret`, the YAML/config
-//     shape a log tail can paste) is a continuation of the key and is
-//     redacted; a value at the left margin is an unrelated line and
-//     survives. The leading `[ \t]*` in that alternative is the
-//     trailing-whitespace half of the separator: a config blob keeps
-//     spaces/tabs after the `:`/`=` before the line break
+//     `(?:[ \t]*|[ \t]*(?:\r\n?|\n)(?:(?:\r\n?|\n)[ \t]*)*[ \t]+)`. Keys with
+//     optional surrounding quotes and either `:` or `=` (the TOML/INI/log
+//     shape) keep the NARROW separator the cross-newline guard exists for.
+//     Before the delimiter only `[ \t]*` (same-line horizontal whitespace) is
+//     accepted — a bare or singly-quoted key cannot put the colon on a later
+//     line, because that is the ambiguous bare-log-line shape `\s*`
+//     over-redacted. (This also excludes a quoted key with `=` across lines:
+//     JSON uses `:`, so a `"password"\n=\n"…"` log does not enter the JSON
+//     form, and the loose form's `[ \t]*[:=]` cannot cross the newline before
+//     the `=`; the unrelated quoted diagnostic on the next line survives.)
+//     After the delimiter the first alternative `[ \t]*` keeps every real
+//     same-line `<key> = <value>` / `<key>: <value>` (spaces, tabs, no
+//     whitespace) and nothing across a line boundary. The second alternative
+//     `[ \t]*(?:\r\n?|\n)(?:(?:\r\n?|\n)[ \t]*)*[ \t]+` narrows the cross-line
+//     case to an INDENTED continuation: a value that begins on the next line
+//     indented (`password:\n  hunter2secret`, the YAML/config shape a log
+//     tail can paste) is a continuation of the key and is redacted; a value at
+//     the left margin is an unrelated line and survives. The line break
+//     `(?:\r\n?|\n)` matches CR, CRLF, or a standalone `\r` — mirroring the
+//     JSON form — because YAML/config text can use any of these as its line
+//     break (`password:\r  hunter2secret`, which the pre-narrowing `\s*`
+//     covered but a straight `\r?\n` would drop, leaking the credential).
+//     The zero-or-more run `(?:(?:\r\n?|\n)[ \t]*)*` then consumes BLANK lines
+//     (`password:\n\n  hunter2secret`, also covered by `\s*`) and any
+//     horizontal whitespace on those intermediate blank lines. The REQUIRED
+//     `[ \t]+` BEFORE the eventual value is the indent gate: it admits only a
+//     value whose first line after the key/separator is indented, so a
+//     left-margin next line is still an unrelated record (the bare-key
+//     cross-line guard pinned in TestScrubCredentialKeyDoesNotCrossNewline).
+//     The leading `[ \t]*` is the trailing-whitespace half of the separator:
+//     a config blob keeps spaces/tabs after the `:`/`=` before the line break
 //     (`password: \n  hunter2secret`), and without it neither alternative
 //     matches — `[ \t]*` consumes the space but cannot cross the newline,
-//     and `\r?\n` cannot follow the `:` through that space — so the
-//     credential ships in the clear. The loose form has no column-0
-//     cross-line value separator at all — a value that begins at the left
-//     margin on a later line is matched only by keyValueSecret's single-
-//     linebreak value alternative (see keyValueSecret), which gates that
-//     case on a quoted value and a SINGLE linebreak so a blank line still
-//     breaks the association.
-const credentialKeyPattern = `(?:(?:["'][a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["'](?:[ \t]*(?:(?:\r\n?|\n)[ \t]*)*):(?:[ \t]*(?:(?:\r\n?|\n)[ \t]*)*)|["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?[ \t]*[:=](?:[ \t]*|[ \t]*\r?\n[ \t]+)))`
+//     and a line break cannot follow the `:` through that space — so the
+//     credential ships in the clear. The loose form has no column-0 cross-
+//     line value separator at all — a value that begins at the left margin
+//     on a later line is matched only by keyValueSecret's single-linebreak
+//     value alternative (see keyValueSecret), which gates that case on a
+//     quoted value and a SINGLE linebreak so a blank line still breaks the
+//     association.
+//
+//  3. Flow form — `(?:\{|,)[ \t]*["']?[key]["']?[ \t]*[:=]` +
+//     `(?:[ \t]*|[ \t]*(?:\r\n?|\n)(?:(?:\r\n?|\n)[ \t]*)*)`. Inside a YAML
+//     flow collection (`{...}`) or after the `,` separating flow items,
+//     indentation is not significant, so a value can legally begin at the
+//     left margin (`{password:\nhunter2secret}`, `{a: 1, password:\ns3cr3t}`)
+//     — a shape the bare-key loose form's `[ \t]*[:=]` cannot reach across
+//     the newline, the single-linebreak value alternative requires a `"`, and
+//     the JSON form requires a quoted key, so all three miss it; the
+//     pre-narrowing `\s*` redacted it, so dropping it is a regression to the
+//     leaking side. The flow form consumes the introducer `{` or `,`
+//     immediately before the key (preserved as part of group 1 so the span
+//     engine redacts only the value) and then accepts arbitrary whitespace —
+//     CR, CRLF, LF, blank lines, no indent, or indented — before the value,
+//     so a bare, single-quoted, or double-quoted YAML flow value redacts
+//     through keyValueSecret's same-line value alternatives (the line break
+//     lives in the separator, so the line structure survives). The bare-key
+//     cross-newline guard holds: a bare credential keyword ending a log line
+//     has no `{`/`,` introducer immediately before it, so the daemon-log SHA
+//     + commit-subject shape (`checking token:\n4f2a…` …) cannot enter the
+//     flow form and survives unchanged (pinned in
+//     TestScrubCredentialKeyDoesNotCrossNewline). Same-line flow values
+//     (`{password: hunter2secret}`) are already redacted by the loose form;
+//     the flow form additionally consumes the introducer prefix and yields
+//     the same value span, deduplicated by the span engine.
+const credentialKeyPattern = `(?:(?:["'][a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["'](?:[ \t]*(?:(?:\r\n?|\n)[ \t]*)*):(?:[ \t]*(?:(?:\r\n?|\n)[ \t]*)*)|["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?[ \t]*[:=](?:[ \t]*|[ \t]*(?:\r\n?|\n)(?:(?:\r\n?|\n)[ \t]*)*[ \t]+)|(?:\{|,)[ \t]*["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?[ \t]*[:=](?:[ \t]*|[ \t]*(?:\r\n?|\n)(?:(?:\r\n?|\n)[ \t]*)*)))`
 
 // Beyond the same-line quoted/literal/bare value classes, keyValueSecret has
 // one cross-line alternative: `(?:(?:\r\n?|\n)[ \t]*)("(?:\\.|[^"\\\r\n])*")` —

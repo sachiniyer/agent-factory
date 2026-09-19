@@ -329,6 +329,20 @@ func TestScrubCredentialKeyRedactsIndentedContinuation(t *testing.T) {
 		// not left intact; without it neither alternative would match.
 		{"password: + space then indented bare", "password:", "password: \n  hunter2secret", "hunter2secret"},
 		{"password= + tab then indented bare", "password=", "password=\t\n  hunter2secret", "hunter2secret"},
+		// Standalone carriage return as the line break before the indented
+		// value, mirroring JSON's `(?:\r\n?|\n)` form. The pre-narrowing
+		// `\s*` matched a bare CR; the straight `\r?\n` cross-line
+		// alternative dropped it, leaking the credential.
+		{"password: + CR + indented bare", "password:", "password:\r  hunter2secret", "hunter2secret"},
+		{"auth: + CR + indented bare", "auth:", "auth:\r  abcdefghijkl", "abcdefghijkl"},
+		// A BLANK line before the indented value — the run
+		// `(?:(?:\r\n?|\n)[ \t]*)*` consumes blank lines
+		// (`password:\n\n  hunter2secret`), which the pre-narrowing `\s*`
+		// covered but a single-linebreak alternative would drop.
+		{"password: + blank line + indented bare", "password:", "password:\n\n  hunter2secret", "hunter2secret"},
+		{"password: + blank line + indented bare (CRLF)", "password:", "password:\r\n\r\n  hunter2secret", "hunter2secret"},
+		{"password: + two blank lines + indented bare", "password:", "password:\n\n\n  hunter2secret", "hunter2secret"},
+		{"token: + blank line + indented PAT", "token:", "token:\n\n  ghp_AAAA0123456789BCDEFG", "ghp_AAAA0123456789BCDEFG"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -636,6 +650,76 @@ func TestScrubCredentialKeyRedactsRepeatedJSONLineBreaks(t *testing.T) {
 		}
 		if !strings.Contains(got, SecretMarker) {
 			t.Fatalf("expected a redaction marker for the same-line quoted = assignment:\n in: %q\n out: %q", in, got)
+		}
+	})
+}
+
+// TestScrubCredentialKeyRedactsYAMLFlowMapping locks the YAML flow-mapping
+// shape the loose form's indentation gate and the JSON path's quote gate
+// both miss. Inside `{...}`, indentation is not significant, so a value can
+// legally begin at the left margin — `{password:\n<hunter2secret>}`. The
+// bare-key loose form's `[ \t]*[:=]` separator stops at the newline, the
+// single-linebreak value alternative requires a `"`, and the JSON form
+// requires a quoted key, so all three miss it; the pre-narrowing `\s*`
+// redacted it, so dropping it is a regression to the leaking side. The third
+// alternative in credentialKeyPattern gates this case on the flow
+// introducers `{` or `,` consumed immediately before the key and then
+// accepts an unindented continuation, so a bare, single-quoted, or
+// double-quoted value redacts (the line break lives in the separator, so the
+// line structure survives). The bare-key cross-newline guard holds: a bare
+// credential keyword with NO flow introducer reaches only the loose form,
+// so a column-0 bare next line (the daemon-log SHA + commit-subject shape)
+// is still preserved (the no-regression half below).
+func TestScrubCredentialKeyRedactsYAMLFlowMapping(t *testing.T) {
+	cases := []struct{ name, key, in, leak string }{
+		// The shape the report names: a YAML flow mapping carrying a
+		// credential whose BARE value sits on the next line at the left
+		// margin (column zero) inside the braces, LF and CRLF.
+		{"{password: + next-line bare", "{password:", "{password:\nhunter2secret}", "hunter2secret"},
+		{"{password: + next-line bare (CRLF)", "{password:", "{password:\r\nhunter2secret}", "hunter2secret"},
+		// A single-quoted and a double-quoted YAML flow value at column
+		// zero — the JSON-form quoted-key requirement excludes these for a
+		// BARE key, so they need the flow gate; the same-line value
+		// alternatives consume the quotes once the gate reaches the value.
+		{"{password: + next-line single-quoted", "{password:", "{password:\n'hunter2secret'}", "hunter2secret"},
+		{"{password: + next-line double-quoted", "{password:", "{password:\n\"hunter2secret\"}", "hunter2secret"},
+		// A BLANK line before the unindented value inside the flow map —
+		// the separator's run `(?:(?:\r\n?|\n)[ \t]*)*` consumes blank lines
+		// too.
+		{"{password: + blank line + next-line bare", "{password:", "{password:\n\nhunter2secret}", "hunter2secret"},
+		// An embedded item introduced by `,`: a flow mapping with an
+		// earlier credential separated by a comma places the introducer
+		// immediately before the key, so the gate fires for the second
+		// item too.
+		{"{a: 1, password: + next-line bare", ", password:", "{a: 1, password:\nhunter2secret}", "hunter2secret"},
+		{"{a: 1, auth: + next-line bare", ", auth:", "{a: 1, auth:\nabcdef0123}", "abcdef0123"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Scrub(tc.in)
+			if strings.Contains(got, tc.leak) {
+				t.Fatalf("flow-mapping value survived:\n in: %q\n out: %q", tc.in, got)
+			}
+			if !strings.Contains(got, SecretMarker) {
+				t.Fatalf("expected a redaction marker for the flow-mapping value:\n in: %q\n out: %q", tc.in, got)
+			}
+			// The flow introducer / key half survives so triage sees where
+			// the redaction was — only the value is replaced.
+			if !strings.Contains(got, tc.key) {
+				t.Fatalf("flow introducer / key half absorbed:\n in: %q\n out: %q", tc.in, got)
+			}
+		})
+	}
+
+	// No-regression half: a BARE credential keyword ending a log line with
+	// NO flow introducer preceding it is the unrelated-line shape the
+	// bare-key cross-newline guard exists for; the flow gate must not reach
+	// it, so a column-0 bare next line (`checking token:\n4f2a…` …, the
+	// daemon-log SHA + commit-subject shape) survives unchanged.
+	t.Run("bare key + bare next line is not a flow mapping", func(t *testing.T) {
+		in := "checking token:\n4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a fix-login"
+		if got := Scrub(in); got != in {
+			t.Fatalf("flow gate reached a bare key without a flow introducer:\n in: %q\n out: %q", in, got)
 		}
 	})
 }

@@ -360,3 +360,76 @@ func TestScrubAndScrubLogDoNotCrossNewlineOnCredentialKey(t *testing.T) {
 		t.Fatalf("unrelated following line absorbed by scrubLog:\n in: %q\nout: %q", logReal, gotLog)
 	}
 }
+
+// TestScrubAndScrubLogRedactYAMLFlowMapping locks the YAML flow-mapping shape
+// at the collectConfig surface. Inside a `{...}` flow mapping, indentation is
+// not significant, so a value can legally begin at the left margin — the
+// pre-narrowing `\s*` redacted this, and the loose form's `[ \t]*[:=]`
+// separator stops at the newline, the single-linebreak value alt requires a
+// `"`, and the JSON path requires a quoted key, so none redacted the bare
+// value. The flow-collection-gated third alternative in credentialKeyPattern
+// recovers the bare / single-quoted value at this surface without re-opening
+// the bare-key cross-newline guard (a bare credential keyword without a flow
+// introducer is pinned in TestScrubAndScrubLogDoNotCrossNewlineOnCredentialKey).
+// The daemon log tail indents every captured output line two spaces, so a
+// column-0 flow value never reaches `scrubLog`; the config path is the leak
+// surface and is what this test pins.
+func TestScrubAndScrubLogRedactYAMLFlowMapping(t *testing.T) {
+	r := &redactor{}
+
+	// collectConfig path: a user's pasted YAML flow mapping carrying a
+	// credential whose value sits at the left margin inside the braces. The
+	// value redacts and the surrounding flow braces / key survive — only the
+	// value is replaced.
+	cfg := "{password:\nhunter2secret}"
+	got := r.scrub(cfg)
+	if strings.Contains(got, "hunter2secret") {
+		t.Fatalf("flow-mapping unindented value survived scrub:\n in: %q\n out: %q", cfg, got)
+	}
+	if !strings.Contains(got, "{password:") {
+		t.Fatalf("flow introducer / key half absorbed by scrub:\n in: %q\n out: %q", cfg, got)
+	}
+	if !strings.Contains(got, secretMarker) {
+		t.Fatalf("expected the flow-mapping value redacted:\n in: %q\n out: %q", cfg, got)
+	}
+
+	// collectConfig path: a single-quoted YAML flow value (the other
+	// unindented YAML shape the indent gate and JSON path miss) also redacts,
+	// preserving the surrounding quotes.
+	cfgSingle := "{password:\n'hunter2secret'}"
+	gotSingle := r.scrub(cfgSingle)
+	if strings.Contains(gotSingle, "hunter2secret") {
+		t.Fatalf("flow-mapping single-quoted value survived scrub:\n in: %q\n out: %q", cfgSingle, gotSingle)
+	}
+	if !strings.Contains(gotSingle, "{password:") {
+		t.Fatalf("flow introducer / key half absorbed by scrub:\n in: %q\n out: %q", cfgSingle, gotSingle)
+	}
+	if !strings.Contains(gotSingle, secretMarker) {
+		t.Fatalf("expected the flow-mapping single-quoted value redacted:\n in: %q\n out: %q", cfgSingle, gotSingle)
+	}
+
+	// collectConfig path: an embedded credential introduced by `,` — the
+	// flow mapping's item separator is also a flow introducer, so the gate
+	// fires for the second item too. The value redacts and the earlier
+	// `{a: 1, password:\n` prefix (including the comma) survives.
+	cfgComma := "{a: 1, password:\nhunter2secret}"
+	gotComma := r.scrub(cfgComma)
+	if strings.Contains(gotComma, "hunter2secret") {
+		t.Fatalf("embedded flow-mapping value survived scrub:\n in: %q\n out: %q", cfgComma, gotComma)
+	}
+	if !strings.Contains(gotComma, "{a: 1, password:") {
+		t.Fatalf("flow introducer / key half absorbed by scrub:\n in: %q\n out: %q", cfgComma, gotComma)
+	}
+	if !strings.Contains(gotComma, secretMarker) {
+		t.Fatalf("expected the embedded flow-mapping value redacted:\n in: %q\n out: %q", cfgComma, gotComma)
+	}
+
+	// No-regression half: a BARE credential keyword ending a log line
+	// without a flow introducer reaches only the loose form, so a column-0
+	// bare next line (the daemon-log SHA + commit-subject shape) is still
+	// preserved over the log tail. The flow gate must not reach it.
+	logSHA := "checking token:\n4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a fix-login\n2026-01-01 daemon started\n"
+	if got := r.scrubLog(logSHA); got != logSHA {
+		t.Fatalf("flow gate reached a bare key without a flow introducer over the log tail:\n in: %q\n out: %q", logSHA, got)
+	}
+}
