@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
+import { pressDistance, TAB_PRESS_LIMITS, tabDragFeedbackRegion, tabPressVerdict } from "./tabtouch.js";
 
 const limits = { holdMs: 500, slopPx: 10 };
 
@@ -47,3 +47,29 @@ test("the shipped limits are longer than a tap and than the browser's own long p
   assert.ok(TAB_PRESS_LIMITS.holdMs >= 400, "must not fire on a slow tap");
   assert.ok(TAB_PRESS_LIMITS.slopPx > 0 && TAB_PRESS_LIMITS.slopPx <= 16, "slop must tolerate a jitter, not a swipe");
 });
+
+// Pins the held-drag feedback region behind the tab bar's touch drag (#2899).
+//
+// The pointermove handler picks one of three cues — the bar's insertion gap, a pane's
+// split zone, or nothing — to mirror what the pointerup release would do at the same
+// point. The NEGATIVE property is the one the bug fixed: a finger over the header,
+// appbar controls, or empty space is over NEITHER the bar nor a pane, and a release
+// there is a CANCEL, so the indicator must not show. The previous code had only two
+// outcomes (pane vs "everything else → the bar's gap"), so it tracked the finger with
+// the insertion indicator right up to a release that does nothing. These cases pin all
+// three regions AND the precedence, so the collapse-to-two-outcomes regression cannot
+// come back.
+
+const regionCases = [
+  // [overBar, overPane, expected, note]
+  [true, false, "bar", "finger over the bar: show the insertion gap; release reorders"],
+  [true, true, "bar", "bar wins the impossible overlap, matching the original else-if branch"],
+  [false, true, "pane", "finger over a pane: that pane owns the cue; release splits"],
+  [false, false, "none", "finger over header/appbar/empty space: no cue; a release there cancels"],
+] as const;
+
+for (const [overBar, overPane, expected, note] of regionCases) {
+  test(`tabDragFeedbackRegion overBar=${overBar}, overPane=${overPane} → ${expected} (${note})`, () => {
+    assert.equal(tabDragFeedbackRegion(overBar, overPane), expected, note);
+  });
+}
