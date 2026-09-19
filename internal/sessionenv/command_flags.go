@@ -353,17 +353,17 @@ func shellWordAssignmentName(word *syntax.Word) (string, bool) {
 }
 
 func wordEquals(word *syntax.Word, want string) bool {
-	value, literal := literalShellWord(word)
+	value, literal := literalShellWordExpandableSafe(word)
 	return literal && value == want
 }
 
 func wordBaseEquals(word *syntax.Word, want string) bool {
-	value, literal := literalShellWord(word)
+	value, literal := literalShellWordExpandableSafe(word)
 	return literal && strings.EqualFold(filepath.Base(value), want)
 }
 
 func isTrustedEnvWord(word *syntax.Word) bool {
-	value, literal := literalShellWord(word)
+	value, literal := literalShellWordExpandableSafe(word)
 	return literal && isTrustedEnvExecutable(value)
 }
 
@@ -416,6 +416,392 @@ func literalShellWord(word *syntax.Word) (string, bool) {
 		}
 	}
 	return value.String(), true
+}
+
+// literalShellWordExpandableSafe is literalShellWord plus the guarantee that
+// /bin/sh -c cannot expand the word into different argv: unquoted literal parts
+// must carry no glob metacharacters (* ? and a bracket expression that closes),
+// no unquoted brace-expansion open ({ — {a,b} and {a..z} split one word into
+// several argv entries under bash, the /bin/sh of the supported macOS case),
+// and no leading ~ unless tildePrefixNamesAPath proves it a directory prefix —
+// the word then keeps its literal ~ spelling, which matches as a path by
+// basename and never as a builtin, option, or assignment, and
+// withTildeBindingNames makes the walk refuse any command that could rebind
+// that directory. Backslash escapes are resolved so an escaped \| still
+// reads as | to hazard checks that inspect the resolved string. Glob and brace
+// syntax are tracked across part boundaries because quote removal runs before
+// pathname expansion — `["|"]` is the bracket `[|]`, and `{-E,CODEX_HOME}`
+// spans Lits the same way — while quoted parts outside such an expression
+// cannot glob and keep their raw value, matching what strace would receive.
+func literalShellWordExpandableSafe(word *syntax.Word) (string, bool) {
+	if word == nil {
+		return "", false
+	}
+	var value strings.Builder
+	var braces braceExpansionState
+	var bracket bracketGlobState
+	first := true
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			if !appendUnexpandedLit(&value, part.Value, first, &braces, &bracket) {
+				return "", false
+			}
+		case *syntax.SglQuoted:
+			if part.Dollar {
+				return "", false
+			}
+			for i := 0; i < len(part.Value); i++ {
+				bracket.feedMember(part.Value[i])
+			}
+			value.WriteString(part.Value)
+		case *syntax.DblQuoted:
+			if part.Dollar {
+				return "", false
+			}
+			for _, nested := range part.Parts {
+				if bracket.open {
+					lit, isLit := nested.(*syntax.Lit)
+					if !isLit {
+						return "", false
+					}
+					for i := 0; i < len(lit.Value); i++ {
+						bracket.feedMember(lit.Value[i])
+					}
+					value.WriteString(lit.Value)
+					continue
+				}
+				if !appendLiteralShellPart(&value, nested) {
+					return "", false
+				}
+			}
+		default:
+			return "", false
+		}
+		first = false
+	}
+	bracket.finish(&value)
+	return value.String(), true
+}
+
+// provableCommandHead reports whether the word in command position resolves to
+// a fixed executable: literalShellWordExpandableSafe, which admits a leading ~
+// only as a directory prefix ending in a slash. Every other unprovable head
+// fails closed: an unquoted glob or brace can expand to a builtin name (u* to
+// unset, e{val,} to eval), and a bare tilde form is replaced by HOME, PWD, or
+// OLDPWD outright — `PWD=unset; ~+ CODEX_HOME` runs the unset builtin under
+// bash (Codex on #4466) — so judging the tail as env's argv cannot model it.
+func provableCommandHead(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) == 0 {
+		return false
+	}
+	_, ok := literalShellWordExpandableSafe(word)
+	return ok
+}
+
+// braceExpansionState tracks unquoted '{', '}', ',', and '..' across a word's
+// literal parts: an open brace region closed by '}' that contained a separator
+// is a brace expansion — bash splits it into several argv entries even in POSIX
+// mode. '{a}', '{}', and unclosed '{' stay literal, and quoted parts contribute
+// neither braces nor separators ('{a','b}' is literal to bash).
+type braceExpansionState struct {
+	depth int
+	sep   bool
+}
+
+// bracketGlobState tracks an unquoted '[' bracket expression across a word's
+// parts. Quote removal runs before pathname expansion, so the pattern can span
+// quoted and unquoted fragments — `["|"]` is the bracket `[|]` even though the
+// member sits in a quoted part a per-literal scan cannot see. Quoted bytes
+// therefore count as members while the expression is open, but only an
+// unquoted ']' closes it, and only after a real member: a ']' in first
+// position (or right after a leading '!'/'^' negation) is itself a member, and
+// an unquoted '\' escapes the next member byte. A '[' that never closes is a
+// literal character, not a glob.
+//
+// The state only TRACKS; it consumes no byte from the word's other readers.
+// Letting it consume them is the bug #4579 measured — see appendUnexpandedLit.
+type bracketGlobState struct {
+	open     bool
+	negation bool
+	members  int
+	escape   bool
+}
+
+// feedMember counts one byte of a quoted part inside a bracket expression. A
+// quoted byte can never close it, but a '!' or '^' in first position is still
+// the negation marker — quote removal happens before the pattern is read.
+func (b *bracketGlobState) feedMember(c byte) {
+	if b.escape {
+		// A '\' at the end of the preceding unquoted part quotes this byte.
+		b.consumeEscape()
+		return
+	}
+	if b.members == 0 && !b.negation && (c == '!' || c == '^') {
+		b.negation = true
+		return
+	}
+	b.members++
+}
+
+// feed applies one unescaped, unquoted byte to the bracket state and reports
+// whether the byte CLOSED a live expression — which makes the whole word a
+// pathname expansion. It writes nothing and swallows nothing: every reader of
+// the word (the brace-expansion state, the glob-metacharacter check, the value
+// builder) still sees the byte, because a '[' that never closes leaves all of
+// them live for the rest of the word.
+func (b *bracketGlobState) feed(c byte) (closed bool) {
+	if !b.open {
+		if c == '[' {
+			b.open = true
+			b.negation = false
+			b.members = 0
+		}
+		return false
+	}
+	switch c {
+	case ']':
+		if b.members > 0 {
+			return true
+		}
+		// First position (also right after the negation marker): a member.
+		b.members++
+		b.negation = false
+	case '!', '^':
+		if b.members == 0 && !b.negation {
+			b.negation = true
+		} else {
+			b.members++
+		}
+	default:
+		b.members++
+	}
+	return false
+}
+
+// beginEscape records an unquoted '\'. One escape rule serves the whole word:
+// the next byte is quoted, so it is neither brace syntax, nor a glob
+// metacharacter, nor bracket syntax — inside a live bracket expression it is an
+// ordinary member, and outside one it is ordinary literal text.
+func (b *bracketGlobState) beginEscape() {
+	b.escape = true
+}
+
+// escaped reports whether the previous byte was an unquoted '\'.
+func (b *bracketGlobState) escaped() bool {
+	return b.escape
+}
+
+// consumeEscape closes the escape beginEscape opened, counting the quoted byte
+// as a bracket member when an expression is open.
+func (b *bracketGlobState) consumeEscape() {
+	b.escape = false
+	if b.open {
+		b.members++
+	}
+}
+
+// finish flushes a dangling escape at the end of a word: a '\' with no byte
+// after it is literal, matching the word-level rule.
+func (b *bracketGlobState) finish(value *strings.Builder) {
+	if b.escape {
+		b.consumeEscape()
+		value.WriteByte('\\')
+	}
+}
+
+func (b *braceExpansionState) feed(c byte, next byte, hasNext bool) (expanded bool, skip bool) {
+	switch c {
+	case '{':
+		b.depth++
+	case '}':
+		if b.depth > 0 {
+			b.depth--
+			if b.depth == 0 {
+				return b.sep, false
+			}
+		}
+	case ',':
+		if b.depth > 0 {
+			b.sep = true
+		}
+	case '.':
+		if b.depth > 0 && hasNext && next == '.' {
+			b.sep = true
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// appendUnexpandedLit resolves one unquoted literal part of a word into value,
+// reporting whether the part still spells exactly the text it reads as.
+//
+// The order of the readers is the whole correctness argument, and #4579
+// measured what getting it wrong costs. Brace expansion is an EARLIER phase
+// than pathname expansion, so it runs whether or not a bracket expression is
+// open: bash splits `{unset,a[b}` into `unset` and `a[b` before anything reads
+// '[' as a pattern at all. The bracket state used to consume every byte after
+// an unclosed '[' — so the ',' and the '}' never reached the brace state, the
+// word read as one literal, and `{unset,a[b} CODEX_HOME` passed the account
+// guard while bash unset the identity variable.
+//
+// The glob metacharacters are unconditional for the mirror-image reason: an
+// unescaped '*' or '?' seen while a bracket is open refuses whichever way that
+// bracket goes. If it closes, the word is a bracket glob and refuses anyway; if
+// it never closes, the '[' is an ordinary character and the metacharacter is a
+// live wildcard. So the bracket state now only tracks, and every reader sees
+// every byte.
+func appendUnexpandedLit(
+	value *strings.Builder,
+	s string,
+	wordStart bool,
+	braces *braceExpansionState,
+	bracket *bracketGlobState,
+) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if bracket.escaped() {
+			// Quoted by the preceding '\': literal text and, inside a live
+			// bracket expression, an ordinary member. Nothing else reads it.
+			bracket.consumeEscape()
+			value.WriteByte(c)
+			continue
+		}
+		if c == '\\' {
+			bracket.beginEscape()
+			continue
+		}
+		hasNext := i+1 < len(s)
+		var next byte
+		if hasNext {
+			next = s[i+1]
+		}
+		expanded, skip := braces.feed(c, next, hasNext)
+		if expanded {
+			return false
+		}
+		if skip {
+			// The '..' of a sequence expression: the second '.' carries no
+			// further meaning to any reader, but the bracket state still
+			// counts it as a member.
+			i++
+			if bracket.feed('.') {
+				return false
+			}
+			value.WriteByte('.')
+		}
+		switch c {
+		case '*', '?':
+			return false
+		case '~':
+			if wordStart && i == 0 && !tildePrefixNamesAPath(s) {
+				return false
+			}
+		}
+		if bracket.feed(c) {
+			return false
+		}
+		value.WriteByte(c)
+	}
+	return true
+}
+
+// unprovableWordCausedRefusal names the first argv word whose unprovability is
+// WHY the command refused — so the diagnostic can point the user at the exact
+// word to pin. It returns empty when the refusal has a literal cause instead:
+// a denied name, a mutating builtin, or a mutating node no word-pinning can
+// clear. Naming a dynamic word that is unrelated to the verdict would send the
+// user to fix something that cannot make the command pass, so
+// `echo "$HOME"; unset CODEX_HOME` keeps the generic message (the cause is the
+// literal unset) while `env "$X" codex` names "$X" (pinning it clears the
+// refusal).
+//
+// The test is causal, not positional: a call whose mutation survives pinning
+// every unprovable word to an inert literal — or that has no unprovable word at
+// all — is a literal cause. An assignment-shaped word keeps its provable name
+// when pinned (the denial lives in the name, not the dynamic value), so
+// `env CODEX_HOME=$X codex` is likewise a literal-cause refusal.
+func unprovableWordCausedRefusal(
+	command string,
+	names map[string]struct{},
+	evaluation *evaluationBudget,
+) string {
+	// The diagnostic walk draws on the caller's meter, the same one the verdict
+	// walk spent: it re-walks the whole program, so giving it a fresh budget
+	// would let one validation pay for the advertised bound several times over.
+	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
+		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
+		if err != nil {
+			continue
+		}
+		var blamed *syntax.Word
+		literalCause := false
+		syntax.Walk(file, func(node syntax.Node) bool {
+			if literalCause {
+				return false
+			}
+			call, isCall := node.(*syntax.CallExpr)
+			if !isCall {
+				if nodeMutatesAccountEnvironment(node, names, evaluation) {
+					literalCause = true
+					return false
+				}
+				return true
+			}
+			if !callMutatesAccountEnvironment(call, names, evaluation) {
+				return true
+			}
+			pinned, first := pinnedCallArgs(call)
+			if first == nil {
+				literalCause = true
+				return false
+			}
+			substituted := &syntax.CallExpr{Assigns: call.Assigns, Args: pinned}
+			if callMutatesAccountEnvironment(substituted, names, evaluation) {
+				literalCause = true
+				return false
+			}
+			if blamed == nil {
+				blamed = first
+			}
+			return true
+		})
+		if literalCause {
+			return ""
+		}
+		if blamed != nil {
+			var sb strings.Builder
+			if err := syntax.NewPrinter().Print(&sb, blamed); err != nil {
+				return ""
+			}
+			return sb.String()
+		}
+	}
+	return ""
+}
+
+// pinnedCallArgs returns call.Args with every unprovable word replaced by an
+// inert literal placeholder, plus the first such word. An assignment-shaped
+// word keeps its provable NAME= prefix so a denied name still denies.
+func pinnedCallArgs(call *syntax.CallExpr) ([]*syntax.Word, *syntax.Word) {
+	var first *syntax.Word
+	args := make([]*syntax.Word, len(call.Args))
+	copy(args, call.Args)
+	for idx, arg := range call.Args {
+		if _, safe := literalShellWordExpandableSafe(arg); safe {
+			continue
+		}
+		if first == nil {
+			first = arg
+		}
+		replacement := "AF_UNPROVABLE_WORD"
+		if name, assignment := shellWordAssignmentName(arg); assignment {
+			replacement = name + "=AF_UNPROVABLE_WORD"
+		}
+		args[idx] = &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: replacement}}}
+	}
+	return args, first
 }
 
 func appendLiteralShellPart(value *strings.Builder, part syntax.WordPart) bool {

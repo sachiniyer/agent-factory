@@ -15,10 +15,35 @@ import (
 // path launches arbitrary user processes, so unrelated configuration such as
 // PORT=3000 remains allowed. Shell decorations do not hide calls from the walk,
 // and an unsupported form of a recognized environment mutator fails closed.
+//
+// A command that uses a tilde prefix is walked with HOME, PWD and OLDPWD denied
+// as well, because the walk reads `~/…` words as fixed paths and that reading
+// holds only while the command leaves those directories alone (see
+// account_environment_tilde.go).
 func commandMutatesAccountEnvironment(command string, names map[string]struct{}) bool {
+	return commandWalkMutatesAccountEnvironment(
+		command, withTildeBindingNames(command, names), &evaluationBudget{})
+}
+
+// commandWalkMutatesAccountEnvironment walks command under both parser variants
+// on the meter the CALLER owns. The meter is a parameter rather than a local
+// because one validation walks the same program more than once — the verdict,
+// the tilde-cause check, and the diagnostic blame — and a fresh budget per walk
+// bounds each walk while bounding nothing the caller pays for
+// (ValidateAccountEnvironmentCommand).
+func commandWalkMutatesAccountEnvironment(
+	command string,
+	names map[string]struct{},
+	evaluation *evaluationBudget,
+) bool {
 	if command == "" {
 		return false
 	}
+	// Both variants draw on the one meter as well: syntax.Walk invokes the
+	// callback once per CallExpr, so a budget allocated any further in let a
+	// program of many individually-admissible calls (50 × 900-word strace
+	// argv) spend the full quadratic suffix cost on each — ~8s on one
+	// validation (Codex on #4466).
 	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
 		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
 		if err != nil {
@@ -26,7 +51,7 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		}
 		mutates := false
 		syntax.Walk(file, func(node syntax.Node) bool {
-			if nodeMutatesAccountEnvironment(node, names) {
+			if nodeMutatesAccountEnvironment(node, names, evaluation) {
 				mutates = true
 				return false
 			}
@@ -39,10 +64,10 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 	return false
 }
 
-func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) bool {
+func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}, evaluation *evaluationBudget) bool {
 	switch node := node.(type) {
 	case *syntax.CallExpr:
-		return callMutatesAccountEnvironment(node, names)
+		return callMutatesAccountEnvironment(node, names, evaluation)
 	case *syntax.Assign:
 		return node.Name != nil && accountEnvironmentNameDenied(node.Name.Value, names)
 	case *syntax.WordIter:
@@ -113,10 +138,10 @@ func arithmeticAccountEnvironmentName(expr syntax.ArithmExpr) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return literalShellWord(word)
+	return literalShellWordExpandableSafe(word)
 }
 
-func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}) bool {
+func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}, evaluation *evaluationBudget) bool {
 	for _, assign := range call.Assigns {
 		if assign != nil && assign.Name != nil {
 			if _, denied := names[assign.Name.Value]; denied {
@@ -125,23 +150,38 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 		}
 	}
 
-	memo := operandTailMemo{}
-	words, unsafe := unwrapAccountCommand(call.Args, names, memo)
+	// The walk's single meter is shared with every nested wrapper and suffix
+	// judgment this call reaches, so the total cost stays bounded by the
+	// budget rather than by the number of calls in the program.
+	return accountCommandWordsMutateEnvironment(call.Args, names, evaluation)
+}
+
+func accountCommandWordsMutateEnvironment(
+	words []*syntax.Word,
+	names map[string]struct{},
+	evaluation *evaluationBudget,
+) bool {
+	words, unsafe := unwrapAccountCommand(words, names, evaluation)
 	if unsafe || len(words) == 0 {
 		return unsafe
 	}
-	return unwrappedAccountCommandMutates(words, names, memo)
+	return unwrappedAccountCommandMutates(words, names, evaluation)
 }
 
-func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
-	if _, literal := literalShellWord(words[0]); !literal {
-		// A dynamic command name can resolve to env or a same-shell builtin such
-		// as unset/export, so its effect on the selected identity is unprovable.
+func unwrappedAccountCommandMutates(
+	words []*syntax.Word,
+	names map[string]struct{},
+	evaluation *evaluationBudget,
+) bool {
+	if !provableCommandHead(words[0]) {
+		// A dynamic or expandable command name can resolve to env or a
+		// same-shell builtin such as unset/export, so its effect on the
+		// selected identity is unprovable.
 		return true
 	}
 	switch {
 	case isAccountCommandName(words[0], "env"):
-		return envCallMutatesAccountEnvironment(words[1:], names, false, memo)
+		return envCallMutatesAccountEnvironment(words[1:], names, false, evaluation)
 	case isBareName(words[0], "unset"):
 		return unsetMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "set"):
@@ -183,13 +223,17 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 // unwrapAccountCommand removes shell wrappers that still execute the remaining
 // words in the current environment. Dynamic or unsupported wrapper forms are
 // unsafe because they could resolve to env or an environment-mutating builtin.
-func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+func unwrapAccountCommand(
+	words []*syntax.Word,
+	names map[string]struct{},
+	evaluation *evaluationBudget,
+) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		switch {
 		case isBareName(words[0], "exec"):
 			words = words[1:]
 			if len(words) > 0 {
-				option, literal := literalShellWord(words[0])
+				option, literal := literalShellWordExpandableSafe(words[0])
 				if !literal {
 					return nil, true
 				}
@@ -224,7 +268,7 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}, memo 
 				words = words[1:]
 			}
 			if len(words) > 0 {
-				if _, literal := literalShellWord(words[0]); !literal {
+				if _, literal := literalShellWordExpandableSafe(words[0]); !literal {
 					return nil, true
 				}
 			}
@@ -236,13 +280,13 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}, memo 
 			}
 		case isAccountCommandName(words[0], "nice"):
 			var unsafe bool
-			words, unsafe = unwrapNice(words[1:], names, memo)
+			words, unsafe = unwrapNice(words[1:], names, evaluation)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "timeout"):
 			var unsafe bool
-			words, unsafe = unwrapTimeout(words[1:], names, memo)
+			words, unsafe = unwrapTimeout(words[1:], names, evaluation)
 			if unsafe {
 				return nil, true
 			}
@@ -254,32 +298,51 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}, memo 
 			}
 		case isAccountCommandName(words[0], "stdbuf"):
 			var unsafe bool
-			words, unsafe = unwrapStdbuf(words[1:], names, memo)
+			words, unsafe = unwrapStdbuf(words[1:], names, evaluation)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "ionice"):
 			var unsafe bool
-			words, unsafe = unwrapIonice(words[1:], names, memo)
+			words, unsafe = unwrapIonice(words[1:], names, evaluation)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "taskset"):
 			var unsafe bool
-			words, unsafe = unwrapTaskset(words[1:], names, memo)
+			words, unsafe = unwrapTaskset(words[1:], names, evaluation)
+			if unsafe {
+				return nil, true
+			}
+		case isAccountCommandName(words[0], "strace"):
+			var unsafe bool
+			words, unsafe = unwrapStrace(words[1:], names, evaluation)
 			if unsafe {
 				return nil, true
 			}
 		case isAccountCommandName(words[0], "xargs"):
 			var unsafe bool
-			words, unsafe = unwrapXargs(words[1:], names, memo)
+			words, unsafe = unwrapXargs(words[1:], names, evaluation)
 			if unsafe {
 				return nil, true
 			}
 		default:
-			if unrecognizedWrapperHidesAccountAssignment(words, names, memo) {
+			// An unmodeled argv-passthrough wrapper can still hide the modelled
+			// `env NAME=value <agent>` mutation one level down, so its literal tail
+			// is scanned before anything here is accepted (#4261).
+			if unrecognizedWrapperHidesAccountAssignment(words, names, evaluation) {
 				return nil, true
 			}
+			// Residual accepted set: a literal executable not classified above as a
+			// shell mutator or command-executing wrapper, whose tail the scan above
+			// cleared, with its remaining words treated as that executable's data.
+			// Process tabs intentionally run arbitrary programs, so assignment-shaped
+			// operands alone prove nothing: `echo CODEX_HOME=/tmp` and
+			// `rg OPENAI_API_KEY=x` mutate no child environment. A wrapper added above
+			// earns different treatment by naming which word is executable; its parser
+			// must fail closed on every unknown option, unreduced operand, and
+			// unreduced executable rather than returning here as though uncertainty
+			// meant safety.
 			return words, false
 		}
 	}
@@ -315,30 +378,50 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}, memo 
 // denied name or assignment (xargs --process-slot-var=NAME, strace -E var=val
 // and --env=var=val) is refused — a wrapper's own options can place the
 // mutation without any env word.
-func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
+func unrecognizedWrapperHidesAccountAssignment(
+	words []*syntax.Word,
+	names map[string]struct{},
+	evaluation *evaluationBudget,
+) bool {
 	strace := isAccountCommandName(words[0], "strace")
+	if !provableCommandHead(words[0]) {
+		// The command name itself cannot be resolved to a fixed literal —
+		// glob or brace expansion can produce `env` from a word like `e*`,
+		// or a same-shell mutator such as `unset` from `u*`, which no argv
+		// tail judgment can model.
+		return true
+	}
 	for i := 1; i < len(words); i++ {
 		word := words[i]
 		if isAccountCommandName(word, "env") {
 			// A nested env only mutates the child it execs; requireCommand
 			// keeps an `env CODEX_HOME=/tmp` whose argv ends there — env's
 			// print mode, which overrides nothing — allowed.
-			if envCallMutatesAccountEnvironment(words[i+1:], names, true, memo) {
+			if envCallMutatesAccountEnvironment(words[i+1:], names, true, evaluation) {
 				return true
 			}
 			continue
 		}
-		literal, ok := literalShellWord(word)
+		literal, ok := literalShellWordExpandableSafe(word)
 		if !ok {
 			// An unprovable tail word can itself expand to `env` (or to a
 			// multiword `env NAME=value` after word splitting); judge the
 			// words after it as that invocation's argv.
-			if envCallMutatesAccountEnvironment(words[i+1:], names, true, memo) {
+			if envCallMutatesAccountEnvironment(words[i+1:], names, true, evaluation) {
 				return true
 			}
 			continue
 		}
 		if !strings.HasPrefix(literal, "-") {
+			// A strace nested in another wrapper's tail gets the same verdict a
+			// top-level one gets: the hazard record plus every-suffix command
+			// judgment — a passthrough child such as `xargs -I{} env {} codex`
+			// refuses the same under any wrapper, not just bare.
+			if isAccountCommandName(word, "strace") {
+				if _, unsafe := unwrapStrace(words[i+1:], names, evaluation); unsafe {
+					return true
+				}
+			}
 			// A shell in the wrapper's tail gets the same verdict a bare
 			// shell command gets: `strace sh -c 'unset CODEX_HOME; codex'`
 			// execs the literal script the modeled path already refuses
@@ -363,7 +446,7 @@ func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[s
 				if i >= len(words) {
 					return true
 				}
-				value, ok := literalShellWord(words[i])
+				value, ok := literalShellWordExpandableSafe(words[i])
 				if !ok || accountEnvironmentOperandDenied(value, names) {
 					return true
 				}
@@ -392,7 +475,7 @@ func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[s
 
 func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {
 	for idx := 0; idx < len(words); idx++ {
-		option, literal := literalShellWord(words[idx])
+		option, literal := literalShellWordExpandableSafe(words[idx])
 		if !literal {
 			return true
 		}
@@ -402,7 +485,7 @@ func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {
 		if idx+1 >= len(words) {
 			return true
 		}
-		operand, literal := literalShellWord(words[idx+1])
+		operand, literal := literalShellWordExpandableSafe(words[idx+1])
 		if !literal || strings.Contains(operand, "[") {
 			return true
 		}
@@ -419,13 +502,13 @@ func unaryTestMutatesAccountEnvironment(test *syntax.UnaryTest) bool {
 	if !ok {
 		return true
 	}
-	operand, literal := literalShellWord(word)
+	operand, literal := literalShellWordExpandableSafe(word)
 	return !literal || strings.Contains(operand, "[")
 }
 
 func unwrapCommandBuiltin(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -448,7 +531,7 @@ func unwrapCommandBuiltin(words []*syntax.Word) ([]*syntax.Word, bool) {
 		words = words[1:]
 	}
 	if len(words) > 0 {
-		if _, literal := literalShellWord(words[0]); !literal {
+		if _, literal := literalShellWordExpandableSafe(words[0]); !literal {
 			return nil, true
 		}
 	}
@@ -461,7 +544,7 @@ func unwrapCommandBuiltin(words []*syntax.Word) ([]*syntax.Word, bool) {
 func envCallArgvParse(words []*syntax.Word) (envcommand.Invocation, error) {
 	literals := make([]string, 0, len(words))
 	for _, word := range words {
-		value, literal := literalShellWord(word)
+		value, literal := literalShellWordExpandableSafe(word)
 		if !literal {
 			name, assignment := shellWordAssignmentName(word)
 			if !assignment {
@@ -481,7 +564,26 @@ func envCallArgvParse(words []*syntax.Word) (envcommand.Invocation, error) {
 // sit in an unrecognized wrapper's tail rather than forming the command itself —
 // an `env CODEX_HOME=/tmp` with nothing after it runs env's print path, not an
 // override of a running agent.
-func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}, requireCommand bool, memo operandTailMemo) bool {
+func envCallMutatesAccountEnvironment(
+	words []*syntax.Word,
+	names map[string]struct{},
+	requireCommand bool,
+	evaluation *evaluationBudget,
+) bool {
+	if evaluation == nil {
+		evaluation = &evaluationBudget{}
+	}
+	if evaluation.work >= accountEnvironmentEvaluationBudget {
+		// Each nested env that re-enters the command walk is one recursive
+		// descent, and an attacker-sized chain of them overflows the stack or
+		// fans out exponentially rather than returning a verdict.
+		return true
+	}
+	// The argv parse below costs one unit per word, and an unrecognized
+	// wrapper tail can reach this once per env word it finds — charging the
+	// suffix length keeps both the deep-nesting and the fan-out shapes inside
+	// the same budget.
+	evaluation.work += len(words)
 	invocation, err := envCallArgvParse(words)
 	if err != nil || invocation.ClearEnvironment {
 		return true
@@ -495,14 +597,14 @@ func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]str
 		}
 	}
 	if invocation.CommandIndex >= 0 {
-		commandWords, unsafe := unwrapAccountCommand(words[invocation.CommandIndex:], names, memo)
+		commandWords, unsafe := unwrapAccountCommand(words[invocation.CommandIndex:], names, evaluation)
 		if unsafe {
 			return true
 		}
 		if len(commandWords) == 0 {
 			return false
 		}
-		return unwrappedAccountCommandMutates(commandWords, names, memo)
+		return unwrappedAccountCommandMutates(commandWords, names, evaluation)
 	}
 	return false
 }
@@ -511,7 +613,7 @@ func shellCommandIsUnproven(words []*syntax.Word) bool {
 	if len(words) == 0 {
 		return false
 	}
-	command, literal := literalShellWord(words[0])
+	command, literal := literalShellWordExpandableSafe(words[0])
 	if !literal || !knownShellName(filepath.Base(command)) {
 		return false
 	}
@@ -522,15 +624,22 @@ func accountShellCommandWordsProven(words []*syntax.Word) bool {
 	if len(words) == 0 {
 		return false
 	}
-	command, _ := literalShellWord(words[0])
+	command, _ := literalShellWordExpandableSafe(words[0])
 	// A sibling shell may read profiles, stdin, a script, or a command string.
 	// The only statically proven form is the same absolute, startup-free command
 	// AccountShellCommand generates for a dedicated shell tab. What stdin can
 	// carry is a property of the whole command, not of these words, so
 	// ValidateAccountEnvironmentCommand checks it separately
 	// (commandFeedsProvenShell).
-	args, literal := literalCommandArgs(words)
-	if !literal || !filepath.IsAbs(command) {
+	args := make([]string, len(words))
+	for idx, word := range words {
+		arg, literal := literalShellWordExpandableSafe(word)
+		if !literal {
+			return false
+		}
+		args[idx] = arg
+	}
+	if !filepath.IsAbs(command) {
 		return false
 	}
 	// zsh's startup-freedom is only half in its argv: the other half is the
@@ -556,7 +665,7 @@ func knownShellName(name string) bool {
 }
 
 func isAccountCommandName(word *syntax.Word, want string) bool {
-	value, literal := literalShellWord(word)
+	value, literal := literalShellWordExpandableSafe(word)
 	return literal && filepath.Base(value) == want
 }
 
@@ -564,7 +673,7 @@ func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struc
 	functionsOnly := false
 	options := true
 	for _, word := range words {
-		value, literal := literalShellWord(word)
+		value, literal := literalShellWordExpandableSafe(word)
 		if !literal {
 			return true
 		}
@@ -627,7 +736,7 @@ func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struc
 func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 	keywordMode := false
 	for idx := 0; idx < len(words); idx++ {
-		value, literal := literalShellWord(words[idx])
+		value, literal := literalShellWordExpandableSafe(words[idx])
 		if !literal {
 			// An operand this parser cannot evaluate could expand to -k.
 			return true
@@ -658,7 +767,7 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 				// A bare `set -o` prints the current settings.
 				continue
 			}
-			mode, ok := literalShellWord(words[idx+1])
+			mode, ok := literalShellWordExpandableSafe(words[idx+1])
 			if !ok {
 				return true
 			}
@@ -692,7 +801,7 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 			if idx+1 >= len(words) {
 				// No following word: bare cluster with `o`, prints settings.
 			} else {
-				mode, ok := literalShellWord(words[idx+1])
+				mode, ok := literalShellWordExpandableSafe(words[idx+1])
 				if !ok {
 					return true
 				}
@@ -732,7 +841,7 @@ func setMutatesAccountEnvironment(words []*syntax.Word) bool {
 // maintain the lookup cache and leave every name meaning what it meant.
 func hashMutatesAccountEnvironment(words []*syntax.Word) bool {
 	for _, word := range words {
-		value, literal := literalShellWord(word)
+		value, literal := literalShellWordExpandableSafe(word)
 		if !literal {
 			return true
 		}
@@ -765,7 +874,7 @@ func declarationMutatesAccountEnvironment(words []*syntax.Word, names map[string
 			options = false
 			continue
 		}
-		value, literal := literalShellWord(word)
+		value, literal := literalShellWordExpandableSafe(word)
 		if !literal {
 			return true
 		}
@@ -797,7 +906,7 @@ func readMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct
 		words = words[1:]
 	}
 	for _, word := range words {
-		value, literal := literalShellWord(word)
+		value, literal := literalShellWordExpandableSafe(word)
 		if !literal {
 			return true
 		}
@@ -815,7 +924,7 @@ func getoptsMutatesAccountEnvironment(words []*syntax.Word, names map[string]str
 	if len(words) < 2 {
 		return false
 	}
-	name, literal := literalShellWord(words[1])
+	name, literal := literalShellWordExpandableSafe(words[1])
 	if !literal {
 		return true
 	}
@@ -826,7 +935,7 @@ func printfMutatesAccountEnvironment(words []*syntax.Word, names map[string]stru
 	if len(words) == 0 {
 		return false
 	}
-	option, literal := literalShellWord(words[0])
+	option, literal := literalShellWordExpandableSafe(words[0])
 	if !literal {
 		return true
 	}
@@ -836,7 +945,7 @@ func printfMutatesAccountEnvironment(words []*syntax.Word, names map[string]stru
 	if option != "-v" || len(words) < 2 {
 		return false
 	}
-	name, literal := literalShellWord(words[1])
+	name, literal := literalShellWordExpandableSafe(words[1])
 	if !literal {
 		return true
 	}
