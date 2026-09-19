@@ -2071,9 +2071,16 @@ function toggleTask(task: TaskData): void {
   // Ship ONLY the flipped bit as a field-level patch (#1700): the toggle must
   // not carry the rest of this (possibly-stale) cached task, or it could revert a
   // concurrent edit another client made to the prompt/trigger/target.
+  const requestGeneration = connectionGeneration;
   void updateTask(task, { enabled: !task.enabled }, tok)
     .then(refreshTasks)
     .catch((e) => {
+      // Disconnect does not cancel the in-flight POST (no AbortController on af()),
+      // so a rejection landing after a disconnect+reconnect would otherwise write the
+      // dead connection's error onto the new connection's toast. Same generation+token
+      // gate as doOpenAccountLogin/applyConfigValueNow: a same-token reconnect still
+      // bumps connectionGeneration twice, so the stale rejection is dropped.
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
       if (isMutationCommittedError(e)) {
         refreshTasks();
       }
@@ -2089,9 +2096,15 @@ function doTriggerTask(task: TaskData): void {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   void triggerTask(task, tok)
     .then(refreshTasks)
-    .catch((e) => surfaceTabError(e));
+    .catch((e) => {
+      // See toggleTask: a stale rejection across a disconnect+reconnect must not
+      // surface the dead connection's error on the new connection's toast.
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
+      surfaceTabError(e);
+    });
 }
 
 /**
@@ -2120,7 +2133,15 @@ function doRetryLimit(): void {
   if (!sel || tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   void resumeFromLimit(sel.id, sel.title, tok).catch((e) => {
+    // The committed-error branch writes a mutationError banner that persists
+    // across navigation (cleared only by dismissNotice/disconnect/connect), so a
+    // stale rejection on a prior connection is the load-bearing leak: it would
+    // park a "Review the result before acting" notice from the dead connection on
+    // the new one. Same generation+token gate as toggleTask/doOpenAccountLogin;
+    // a same-token reconnect still bumps connectionGeneration twice.
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     if (isMutationCommittedError(e)) {
       surfaceMutationError(e, "confirmed");
       return;
