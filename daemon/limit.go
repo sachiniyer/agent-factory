@@ -744,7 +744,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	case probeAbsent:
 		if accountSwap != nil && !forceRespawn {
 			if accountSwap.alreadySet {
-				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
+				if err := revalidateGoneAccountSwap(instance, accountSwap.to); err != nil {
 					return resumeNotPerformed, err
 				}
 			}
@@ -884,7 +884,15 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 
 	prompt := strings.TrimSpace(instance.GetPrompt())
 	if accountSwap != nil {
-		prompt = accountSwapPrompt(accountSwap, prompt)
+		if accountSwap.manual {
+			// The replacement launch can demote a committed conversation carry
+			// to a fresh start and re-render the stored mission; deliver the
+			// record's version, never the one frozen before the launch (#4367).
+			if _, mission := instance.PendingManualAccountSwap(); mission != "" {
+				accountSwap.mission = mission
+			}
+		}
+		prompt = accountSwapPrompt(accountSwap, prompt, instance.PendingAccountSwapConversation())
 	} else if prompt == "" {
 		// Interactive session with no stored prompt: the best we can do is
 		// un-stall it. Loses the agent's prior context (documented caveat).

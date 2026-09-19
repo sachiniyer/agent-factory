@@ -898,7 +898,7 @@ type ApplyConfigResponse struct {
 	Applied []string `json:"applied"`
 	Pending []string `json:"pending"`
 	// Warnings carries the tokenless-network exposure notice and any listener rebind
-	// failure so a pre-#3231 `af config set` (which applies via RequestApplyConfig)
+	// failure so a pre-#3231 `af config set` (which applies via the ApplyConfig poke)
 	// can print them.
 	Warnings []string `json:"warnings,omitempty"`
 	// FailedListenerKeys names the socket keys (listen_addr / preview_listen_addr)
