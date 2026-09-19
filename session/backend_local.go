@@ -403,7 +403,7 @@ func (b *LocalBackend) Recover(i *Instance) error {
 // usage-limit manual-retry (#1146) can re-spawn an agent that exited while blocked
 // at a limit wall: that session is LiveLimitReached, which Recover's !Lost guard
 // would reject, but the re-spawn mechanics are identical. Callers own the
-// precondition (Recover enforces Lost/no-tombstone; resumeFromLimit enforces
+// precondition (Recover enforces Lost/no-tombstone; resumeFromLimitOutcome enforces
 // LimitReached/no-tombstone under the target lock).
 func (b *LocalBackend) Respawn(i *Instance) error {
 	return b.respawn(i)
