@@ -13,10 +13,14 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 func TestHookListResumesAfterRestart(t *testing.T) {
 	if os.Getenv("AF_TEST_LIST_HELPER") == "1" {
+		// Re-exec'd test binary owned by the spawning test — if that parent
+		// dies, nothing else will ever reap this process (#4412).
+		testguard.ExitWhenOrphaned(50 * time.Millisecond)
 		claimDaemonProcess(t)
 		t.Setenv("AGENT_FACTORY_HOME", os.Getenv("AF_TEST_LIST_HOME"))
 		g := &GitWorktree{repoPath: os.Getenv("AF_TEST_LIST_REPO"), worktreePath: os.Getenv("AF_TEST_LIST_TREE"), hooksCtx: context.Background()}
@@ -35,16 +39,15 @@ func TestHookListResumesAfterRestart(t *testing.T) {
 	gone := filepath.Join(dir, "gone")
 	repo, tree := linkedHookWorktree(t)
 	writeLegacyRepoConfig(t, config.RepoIDFromRoot(repo), &config.RepoConfig{PostWorktreeCommands: []string{
-		fmt.Sprintf("echo $$ > %q; while [ ! -f %q ]; do sleep 0.02; done; echo first >> %q; echo first-output", pid, release, order),
+		fmt.Sprintf("echo $$ > %q; %s; echo first >> %q; echo first-output", pid,
+			testguard.BoundedGateWait(release, 20*time.Millisecond, 5*time.Minute), order),
 		fmt.Sprintf("echo second >> %q; echo second-output; exit 23", order),
 	}})
 	home, _ := config.GetConfigDir()
 	runner := exec.Command(os.Args[0], "-test.run=^TestHookListResumesAfterRestart$")
-	runner.Env = append(os.Environ(), "AF_TEST_LIST_HELPER=1", "AF_TEST_LIST_REPO="+repo, "AF_TEST_LIST_TREE="+tree, "AF_TEST_LIST_HOME="+home)
-	if err := runner.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = runner.Process.Kill() })
+	runner.Env = append(append(os.Environ(), "AF_TEST_LIST_HELPER=1", "AF_TEST_LIST_REPO="+repo, "AF_TEST_LIST_TREE="+tree, "AF_TEST_LIST_HOME="+home),
+		testguard.ExpectedOwnerEnv()...)
+	testguard.StartGroupProcess(t, runner)
 	hookPID := waitForPidFile(t, pid, 10*time.Second)
 	t.Cleanup(func() { _ = killProcessGroup(hookPID) })
 	_ = runner.Process.Kill()
