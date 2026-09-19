@@ -12,13 +12,15 @@ import (
 	"unicode/utf8"
 )
 
-// TestTrimTrailingPartialRune pins trimTrailingPartialRune: it drops a trailing
-// partial UTF-8 rune so the result is always valid UTF-8 (no U+FFFD), leaves
-// already-valid input (including all-ASCII at exactly the byte cap) untouched,
-// and exercises every split position for 2/3/4-byte runes. This is the unit
-// guard for the fix; the end-to-end tests below prove the trimmed line reaches
-// the persisted .jsonl record without U+FFFD.
-func TestTrimTrailingPartialRune(t *testing.T) {
+// TestSanitizeUTF8 pins sanitizeUTF8: it drops invalid UTF-8 byte sequences —
+// including a trailing partial rune, and a lone invalid/continuation byte
+// anywhere in the string — so the result is always valid UTF-8 (no U+FFFD),
+// leaves already-valid input (including all-ASCII at exactly the byte cap)
+// untouched, and never drops a valid trailing character: a chunk whose tail is
+// already a whole rune keeps its full length. This is the unit guard for the
+// fix; the end-to-end tests below prove the sanitized line reaches the
+// persisted .jsonl record without U+FFFD.
+func TestSanitizeUTF8(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
@@ -36,8 +38,7 @@ func TestTrimTrailingPartialRune(t *testing.T) {
 		{"3-byte split at lead", "x\xe4", "x"},
 		{"3-byte split after 1 continuation", "x\xe4\xb8", "x"},
 		// 4-byte rune (\xf0\x9f\x9a\x80 = 🚀) split at every internal position;
-		// the after-2-continuations case exercises two loop iterations backing
-		// over continuation bytes before the lead.
+		// the after-2-continuations case is three invalid bytes, all dropped.
 		{"4-byte split at lead", "x\xf0", "x"},
 		{"4-byte split after 1 continuation", "x\xf0\x9f", "x"},
 		{"4-byte split after 2 continuations", "x\xf0\x9f\x9a", "x"},
@@ -50,12 +51,23 @@ func TestTrimTrailingPartialRune(t *testing.T) {
 		// A boundary that lands exactly after a complete rune leaves the input
 		// unchanged (valid UTF-8, nothing to trim).
 		{"boundary after complete rune", strings.Repeat("世", maxWatchLineBytes/3), strings.Repeat("世", maxWatchLineBytes/3)},
+
+		// Invalid bytes elsewhere in the chunk — not just a trailing partial
+		// rune — are stripped, and a tail that is already a whole rune is NOT
+		// shortened by one character. These are the cases the prior tail-only
+		// walk-back mishandled: it left the mid-string byte invalid and dropped
+		// a trailing valid char for nothing. Each result here is valid UTF-8.
+		{"lone invalid byte mid-string", "a\xffb", "ab"},
+		{"invalid mid-string keeps trailing chars", "a\xffhello", "ahello"},
+		{"lone continuation byte at start", "\x80abc", "abc"},
+		{"invalid bytes then partial rune", "a\xffb\xe2\x82", "ab"},
+		{"all invalid bytes", "\x80\x80\x80", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := trimTrailingPartialRune(tc.in)
+			got := sanitizeUTF8(tc.in)
 			if got != tc.want {
-				t.Fatalf("trim(%q) = %q (% x), want %q (% x)", tc.in, got, []byte(got), tc.want, []byte(tc.want))
+				t.Fatalf("sanitize(%q) = %q (% x), want %q (% x)", tc.in, got, []byte(got), tc.want, []byte(tc.want))
 			}
 			if !utf8.ValidString(got) {
 				t.Fatalf("result not valid UTF-8: % x", []byte(got))
@@ -70,15 +82,15 @@ func TestTrimTrailingPartialRune(t *testing.T) {
 	// non-regression case TestWatcherTruncatesLongLines pins — it must come
 	// back unchanged so the full 64KB cap is preserved for ASCII.
 	ascii := strings.Repeat("a", maxWatchLineBytes)
-	if got := trimTrailingPartialRune(ascii); len(got) != maxWatchLineBytes || got != ascii {
+	if got := sanitizeUTF8(ascii); len(got) != maxWatchLineBytes || got != ascii {
 		t.Fatalf("ASCII line at cap mutated: len=%d (want %d)", len(got), maxWatchLineBytes)
 	}
 
 	// A CJK line truncated at the cap such that the boundary is the lead byte of
-	// a 3-byte rune: the lead byte is dropped, so the result is exactly one byte
-	// shorter than the cap and remains valid UTF-8.
+	// a 3-byte rune: that lone lead byte is invalid and is dropped, so the
+	// result is exactly one byte shorter than the cap and remains valid UTF-8.
 	cjk := strings.Repeat("x", maxWatchLineBytes-1) + "\xe4"
-	got := trimTrailingPartialRune(cjk)
+	got := sanitizeUTF8(cjk)
 	if len(got) != maxWatchLineBytes-1 {
 		t.Fatalf("CJK lead-byte split: len=%d, want %d", len(got), maxWatchLineBytes-1)
 	}
@@ -86,11 +98,11 @@ func TestTrimTrailingPartialRune(t *testing.T) {
 		t.Fatalf("CJK lead-byte split: result not valid UTF-8: % x", []byte(got[len(got)-4:]))
 	}
 
-	// A 4-byte emoji split after two continuation bytes at the cap drops the
-	// lead plus both continuation bytes — three bytes total — exercising the
-	// loop backing over continuation bytes.
+	// A 4-byte emoji split after two continuation bytes at the cap is three
+	// invalid bytes, all dropped, so the result is three bytes shorter than the
+	// cap and remains valid UTF-8.
 	emoji := strings.Repeat("x", maxWatchLineBytes-3) + "\xf0\x9f\x9a"
-	got = trimTrailingPartialRune(emoji)
+	got = sanitizeUTF8(emoji)
 	if len(got) != maxWatchLineBytes-3 {
 		t.Fatalf("4-byte emoji 2-continuation split: len=%d, want %d", len(got), maxWatchLineBytes-3)
 	}

@@ -164,10 +164,11 @@ func (w *taskWatcher) persistRemainingLimitEvents(br *bufio.Reader, tail *tailBu
 			emit(strings.TrimRight(string(chunk), "\r\n"))
 		case errors.Is(err, bufio.ErrBufferFull):
 			// Same truncation shape as consumeLines: the raw chunk can split a
-			// multi-byte UTF-8 rune at the byte cap, and emit -> enqueueEvent ->
-			// json.Marshal would persist the half-rune as U+FFFD (#863 class,
-			// exposed by #1129). Trim the trailing partial rune first.
-			line := trimTrailingPartialRune(string(chunk))
+			// multi-byte UTF-8 rune at the byte cap or hold other invalid UTF-8,
+			// and emit -> enqueueEvent -> json.Marshal would persist it as
+			// U+FFFD (#863 class, exposed by #1129, #4655). Make the line valid
+			// UTF-8 first.
+			line := sanitizeUTF8(string(chunk))
 			discarded := 0
 			var tailErr error
 			for {
