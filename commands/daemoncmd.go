@@ -767,8 +767,10 @@ func respawnDaemonAfterUpgrade(execPath string) (respawnResult, error) {
 
 // ensureDaemonForTasks starts the daemon when any enabled task exists, so
 // cron schedules are evaluated even if the user never opens the TUI.
-// Failures are logged rather than surfaced: the TUI is fully usable without
-// the daemon, and the next af invocation retries.
+// Failures are logged rather than surfaced: this is a best-effort background
+// ensure, and the TUI reports a daemon it cannot reach through its no-daemon
+// recovery state, so a launch-time failure here is not silent. The next af
+// invocation retries.
 //
 // The enabled-task gate is correct here and only here: this is the cold-start
 // path (af launch), where no daemon was previously running. The post-upgrade

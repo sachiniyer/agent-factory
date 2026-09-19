@@ -1,18 +1,21 @@
 // Package apiclient is a typed Go client for the daemon-hosted HTTP/JSON API
 // (#1029) that the daemon serves on its `daemon-http.sock` Unix socket. It is
-// the read-side twin of the gob `net/rpc` control client in daemon/: it dials
-// the SAME daemon core over a DIFFERENT transport and, by decoding the shared
+// the twin of the gob `net/rpc` control client in daemon/: it dials the SAME
+// daemon core over a DIFFERENT transport and, by decoding the shared
 // `{data,error}` envelope back into the SAME request/response structs the RPC
-// client uses, it returns byte-identical results. This is the seam #1592 Phase 2
-// grows the client API on — HTTP today, WebSocket streaming later — without the
-// TUI or CLI ever touching the wire shape.
+// client uses, it returns byte-identical results. This is the seam the client
+// API grows on — HTTP plus WebSocket streaming (DialStream/AttachStream) —
+// without the TUI or CLI ever touching the wire shape.
 //
-// Phase 2 PR2 scope: this client exposes only the READ-ONLY Snapshot path and
-// its first consumer is the non-spawning `af sessions list`/`get` read
-// (api/sessions.go). Every write/control call stays on net/rpc; the disk
-// fallback is unchanged. The envelope is NOT redefined here — the client decodes
-// the exact bytes daemon/httpserver.go writes via apiproto.WriteEnvelope, which
-// is what guarantees parity.
+// The client is no longer read-only: alongside Snapshot it carries the
+// write/control calls the TUI and CLI issue — session lifecycle
+// (CreateSession/KillSession/ArchiveSession/RestoreSession/HandoffSession),
+// tabs, tasks, accounts, projects, and config writes (SetConfigValue/
+// UnsetConfigValue). The net/rpc control client still serves a few callers
+// (the local task mutations in api/tasks.go, daemon-internal calls). The
+// envelope is NOT redefined here — the client decodes the exact bytes
+// daemon/httpserver.go writes via apiproto.WriteEnvelope, which is what
+// guarantees parity.
 package apiclient
 
 import (
