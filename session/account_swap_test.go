@@ -62,7 +62,7 @@ func TestValidateAccountSwapRefusesConversationSelectors(t *testing.T) {
 	} {
 		t.Run(tc.program, func(t *testing.T) {
 			err := accountSwapTestInstance(tc.program).ValidateAccountSwap("work")
-			require.ErrorContains(t, err, "fresh conversation")
+			require.ErrorContains(t, err, "must choose which conversation the replacement opens")
 			require.ErrorContains(t, err, tc.arg, "the refusal must name the user-pinned selector")
 		})
 	}
