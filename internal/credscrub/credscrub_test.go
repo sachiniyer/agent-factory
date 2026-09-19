@@ -359,6 +359,56 @@ func TestScrubCredentialKeyRedactsIndentedContinuation(t *testing.T) {
 	})
 }
 
+// TestScrubCredentialKeyRedactsUnindentedQuotedJSON locks the JSON half the
+// indent gate alone misses. JSON permits insignificant whitespace around `:`,
+// so a machine-serialized `{"password":\n"hunter2secret"}` puts the value at the
+// left margin (column zero), where the indented-continuation alternative
+// `\r?\n[ \t]+` cannot reach it. The pre-narrowing `\s*` redacted that shape, so
+// losing it is a regression to the leaking side; keyValueSecret's value half
+// adds a `\r?\n"…"` alternative that recovers the unindented quoted value
+// WITHOUT re-opening the left-margin bare-token guard — it fires only when the
+// next line STARTS with `"`, so a column-0 bare token (the daemon-log SHA the
+// cross-line guard exists to preserve) still does not match. The indented
+// quoted-JSON shape stays covered by the indent gate; this is the
+// column-0-only half.
+func TestScrubCredentialKeyRedactsUnindentedQuotedJSON(t *testing.T) {
+	cases := []struct{ name, key, in, leak string }{
+		// The shape the report names: a JSON object with the value on the next
+		// line at column zero (no indent), LF and CRLF.
+		{`{"password": + next-line quoted`, `"password":`, `{"password":
+"hunter2secret"}`, "hunter2secret"},
+		{`{"password": + next-line quoted (CRLF)`, `"password":`, "{\"password\":\r\n\"hunter2secret\"}", "hunter2secret"},
+		// A quoted key with an auth keyword, unindented JSON value.
+		{`{"auth": + next-line quoted`, `"auth":`, `{"auth":
+"abcdef123456"}`, "abcdef123456"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Scrub(tc.in)
+			if strings.Contains(got, tc.leak) {
+				t.Fatalf("unindented quoted JSON value survived:\n in: %q\nout: %q", tc.in, got)
+			}
+			if !strings.Contains(got, SecretMarker) {
+				t.Fatalf("expected a redaction marker for the unindented JSON value:\n in: %q\nout: %q", tc.in, got)
+			}
+			// The key survives so triage sees where the redaction was.
+			if !strings.Contains(got, tc.key) {
+				t.Fatalf("key half was absorbed:\n in: %q\nout: %q", tc.in, got)
+			}
+		})
+	}
+
+	// No-regression half: a column-0 BARE next line is the unrelated-line
+	// shape the cross-line guard exists for, and the quote-gated alternative
+	// must not reach it — a bare token has no opening `"`.
+	t.Run("left-margin bare next line is not a JSON value", func(t *testing.T) {
+		in := "checking token:\n4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a fix-login"
+		if got := Scrub(in); got != in {
+			t.Fatalf("quote-gated alternative reached a left-margin bare line:\n in: %q\nout: %q", in, got)
+		}
+	})
+}
+
 // BenchmarkScrubTypicalLogLine measures the cost added to every log write. The
 // patterns run on the write path, so a regression here is paid by the daemon on
 // every line it emits.

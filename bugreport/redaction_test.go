@@ -194,6 +194,55 @@ func TestScrubAndScrubLogRedactIndentedContinuation(t *testing.T) {
 	}
 }
 
+// TestScrubAndScrubLogRedactUnindentedQuotedJSON locks the JSON shape the indent
+// gate alone misses, at the two vulnerable surfaces. JSON permits insignificant
+// whitespace around `:`, so a value can sit on the next line at column zero;
+// credentialKeyPattern's separator keeps the cross-line case indented
+// (`\r?\n[ \t]+`), so this shape is recovered by keyValueSecret's value half,
+// not the separator. The pre-narrowing `\s*` redacted it; losing it is the
+// leaking side for a scrubber. An empty redactor isolates the credscrub pass.
+func TestScrubAndScrubLogRedactUnindentedQuotedJSON(t *testing.T) {
+	r := &redactor{}
+
+	// collectConfig path: config-shaped text a user pasted can carry a JSON
+	// credential with its value on the next line, unindented. The value
+	// redacts and the key survives.
+	cfg := "{\"password\":\n\"hunter2secret\"}"
+	got := r.scrub(cfg)
+	if strings.Contains(got, "hunter2secret") {
+		t.Fatalf("unindented JSON value survived scrub:\n in: %q\nout: %q", cfg, got)
+	}
+	if !strings.Contains(got, secretMarker) {
+		t.Fatalf("expected the unindented JSON value redacted:\n in: %q\nout: %q", cfg, got)
+	}
+	if !strings.Contains(got, `"password":`) {
+		t.Fatalf("key half absorbed by scrub:\n in: %q\nout: %q", cfg, got)
+	}
+
+	// collectLog path: the same shape in the daemon log tail. A daemon log
+	// line ending in `token:` whose next line is an unindented quoted value
+	// redacts the value and leaves a following unrelated line intact.
+	log := "2026-01-01 set token:\n\"abcdefghijkl1234\"\n2026-01-01 daemon started\n"
+	gotLog := r.scrubLog(log)
+	if strings.Contains(gotLog, "abcdefghijkl1234") {
+		t.Fatalf("unindented quoted log-tail value survived scrubLog:\n in: %q\nout: %q", log, gotLog)
+	}
+	if !strings.Contains(gotLog, "2026-01-01 daemon started") {
+		t.Fatalf("unrelated following line absorbed by scrubLog:\n in: %q\nout: %q", log, gotLog)
+	}
+	if !strings.Contains(gotLog, "set token:") {
+		t.Fatalf("key half absorbed by scrubLog:\n in: %q\nout: %q", log, gotLog)
+	}
+
+	// No-regression half: a column-0 BARE next line is the unrelated-line
+	// shape the cross-line guard exists to keep, and the quote-gated value
+	// alternative must not reach it (a bare SHA has no opening `"`).
+	logSHA := "checking token:\n4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a fix-login\n2026-01-01 daemon started\n"
+	if got := r.scrubLog(logSHA); got != logSHA {
+		t.Fatalf("scrubLog redacted triage context off the bare line after a credential keyword:\n in: %q\nout: %q", logSHA, got)
+	}
+}
+
 // TestScrubAndScrubLogDoNotCrossNewlineOnCredentialKey is the end-to-end lock at
 // the two vulnerable surfaces, for the credentialKeyPattern class of cross-
 // newline defect. collectConfig hands the whole config.toml to r.scrub

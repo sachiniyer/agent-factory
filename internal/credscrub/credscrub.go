@@ -95,8 +95,26 @@ var shapePatterns = []*regexp.Regexp{
 // next line has no leading whitespace and so is never seen.
 const credentialKeyPattern = `["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?[ \t]*[:=](?:[ \t]*|[ \t]*\r?\n[ \t]+)`
 
+// The value half of keyValueSecret adds one alternative beyond the same-line
+// quoted/literal/bare classes: `\r?\n"(?:\\.|[^"\\\r\n])*"`, an UNINDENTED
+// JSON value on the next line. JSON permits insignificant whitespace —
+// including a newline — between `:` and a value, so a machine-serialized
+// `{"password":\n"hunter2secret"}` places the value at column zero, where the
+// indent gate in credentialKeyPattern's separator (`\r?\n[ \t]+`) cannot reach
+// it. The pre-narrowing `\s*` redacted that shape; the left-margin guard the
+// cross-line fix added is for an UNRELATED line, and a quoted value at the
+// left margin is not an unrelated line — its secrecy is established by the
+// neighbouring key, the same property the indented-continuation alternative
+// recovers. This alternative only fires when the next line STARTS with `"`,
+// so a left-margin BARE token (`token:\n4f2a9c…`, the daemon-log SHA the
+// cross-line guard exists to preserve) still does not match: the bare
+// alternative `[^\s"',}]{6,}` stops at the newline and this one needs the quote.
+// Over-redaction would require a `"`-opening, column-0 line to follow a
+// credential keyword — the safe direction for a scrubber, and a shape the
+// daemon log does not produce (its captured-output renderer indents every
+// line).
 var keyValueSecret = regexp.MustCompile(
-	`(?i)(` + credentialKeyPattern + `)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"',}]{6,})`)
+	`(?i)(` + credentialKeyPattern + `)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"',}]{6,}|\r?\n"(?:\\.|[^"\\\r\n])*")`)
 
 // keyedSchemeSecret recognizes the original form that the historical
 // keyValueSecret -> strandedAfterMarker sequence scrubbed in two mutations.
