@@ -25,6 +25,16 @@ func (i *Instance) ValidateHandoffRuntimeAction(agent, account string) error {
 	if err == nil || !view.PendingAccountSwap {
 		return err
 	}
+	// ValidateRuntimeAction checks UserKilled and StartupStateUnknown before the
+	// pending-swap axis, so an error that leaves the swap axis set may be one of
+	// those higher-priority universal vetoes rather than the swap refusal. They
+	// make the retry this section advertises impossible, so specializing them
+	// would hide the actual remediation behind a request the refusal itself
+	// forbids (#4393). Only specialize once the pending-swap check itself
+	// produced the error — i.e. no higher-priority veto is set.
+	if view.UserKilled || view.StartupStateUnknown {
+		return err
+	}
 	// The pending-swap axis refused because the request named a different agent
 	// or account than the committed swap recorded. When an explicit --to <agent>
 	// does not name the agent this swap will run, put that agent in the message:

@@ -682,6 +682,45 @@ func TestPendingAutoAccountSwapRetryAdmitsExplicitLiveAgent(t *testing.T) {
 	require.ErrorContains(t, auto.ValidateHandoffRuntimeAction("", "personal"), "account swap")
 }
 
+// TestPendingCrossAgentSwapRetryKeepsHigherPriorityVeto pins the case the
+// pending-swap specialization must not touch: a committed cross-agent manual
+// swap coexists with a higher-priority universal veto (UserKilled or
+// StartupStateUnknown), and the request names the pending account with the
+// wrong explicit agent — the live pane's outgoing agent. ValidateRuntimeAction
+// returns the veto's error, not the swap refusal, so the refusal message must
+// keep that remediation instead of being rewritten into a swap retry the veto
+// itself makes impossible.
+func TestPendingCrossAgentSwapRetryKeepsHigherPriorityVeto(t *testing.T) {
+	newPending := func() *Instance {
+		inst := accountSwapTestInstance("codex")
+		_, err := inst.SelectAccountForHandoff("ambient", "personal", "claude", HandoffReasonManual, "", "continue the mission")
+		require.NoError(t, err)
+		require.Equal(t, "claude", inst.AgentProgram(), "commit rewrites the durable record to the incoming agent")
+		require.Equal(t, "codex", inst.CurrentAgentName(), "the live pane still names the outgoing agent before relaunch")
+		inst.inFlightOp = OpNone
+		return inst
+	}
+
+	killed := newPending()
+	killed.userKilled = true
+	err := killed.ValidateHandoffRuntimeAction("codex", "personal")
+	require.ErrorContains(t, err, "pending kill",
+		"the pending-kill veto outranks the pending-swap axis and must stay the refusal")
+	require.NotContains(t, err.Error(), "retry that account swap with --to",
+		"a veto the retry cannot survive must not be specialized into a swap-retry message")
+	require.NotContains(t, err.Error(), "claude",
+		"the committed target must not surface when the swap axis did not produce the refusal")
+
+	unknown := newPending()
+	unknown.startupStateUnknown = true
+	err = unknown.ValidateHandoffRuntimeAction("codex", "personal")
+	require.ErrorContains(t, err, "unknown startup state",
+		"the unknown-startup veto outranks the pending-swap axis and must stay the refusal")
+	require.NotContains(t, err.Error(), "retry that account swap with --to",
+		"a veto the retry cannot survive must not be specialized into a swap-retry message")
+	require.NotContains(t, err.Error(), "claude")
+}
+
 type captureAccountSwapEnvironmentPty struct {
 	cmd *exec.Cmd
 }
