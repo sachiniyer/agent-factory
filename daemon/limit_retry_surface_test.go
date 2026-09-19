@@ -134,7 +134,7 @@ func TestResumeFromLimit_ResolvesByStableID(t *testing.T) {
 	instA.SetLimitReached(time.Now())
 	require.NotEmpty(t, instA.ID, "precondition: the target must carry a stable id")
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{ID: instA.ID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{ID: instA.ID}); err != nil {
 		t.Fatalf("resumeFromLimit by id returned %v, want nil — an id-only request must resolve without a title", err)
 	}
 
@@ -160,7 +160,7 @@ func TestResumeFromLimit_UnknownIDIsRefused(t *testing.T) {
 
 	// The title is CORRECT and would resolve on its own. The id is not. A
 	// fallback-on-miss implementation would resume `parked` here and pass.
-	err := manager.resumeFromLimit(ResumeFromLimitRequest{
+	_, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{
 		ID:     "id-that-no-longer-exists",
 		Title:  "parked",
 		RepoID: repoID,
@@ -184,7 +184,7 @@ func TestResumeFromLimit_TitleStillResolves(t *testing.T) {
 	inst.Prompt = ""
 	inst.SetLimitReached(time.Now())
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "by-title", RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "by-title", RepoID: repoID}); err != nil {
 		t.Fatalf("resumeFromLimit by title returned %v, want nil — the TUI/CLI path must be unchanged", err)
 	}
 

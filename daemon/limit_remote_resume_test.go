@@ -211,7 +211,7 @@ func TestResumeFromLimit_RemoteRespawnTargetsFreshSandbox(t *testing.T) {
 
 	manager, repoID, inst, backend := newRemoteLimitedSession(t, oldSandbox, freshSandbox, "finish the migration")
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
 		t.Fatalf("resumeFromLimit: %v", err)
 	}
 
@@ -240,7 +240,7 @@ func TestResumeFromLimit_RemoteLiveStallKeepsSandbox(t *testing.T) {
 
 	manager, repoID, inst, backend := newRemoteLimitedSession(t, liveSandbox, freshSandbox, "keep going")
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
 		t.Fatalf("resumeFromLimit: %v", err)
 	}
 

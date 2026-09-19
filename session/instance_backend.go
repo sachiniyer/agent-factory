@@ -251,7 +251,7 @@ func (i *Instance) runLiveBoundary() {
 
 // Respawn re-establishes the instance's backing session in place without a
 // liveness precondition — the guard-free core of Recover. The usage-limit
-// manual-retry (#1146, resumeFromLimit) uses it to re-spawn an agent that exited
+// manual-retry (#1146, resumeFromLimitOutcome) uses it to re-spawn an agent that exited
 // while blocked at a limit wall: that session is LiveLimitReached, which Recover's
 // !Lost guard rejects, but the re-spawn mechanics are identical. The caller owns
 // the precondition, enforced here before the guard-free backend core runs.
