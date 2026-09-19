@@ -331,6 +331,14 @@ func TestCommandMutatesAccountEnvironment_XargsModel(t *testing.T) {
 		{"xargs -I{} env PORT={} codex", false},
 		{"xargs --process-slot-var=PORT env codex", false},
 		{"xargs --version", false},
+		// A terminal option no longer drops the tail: --help/--version now
+		// inspect the words after them exactly as the default branch does.
+		{"xargs --help env CODEX_HOME=/other codex", true},
+		{"xargs --version env CODEX_HOME=/other codex", true},
+		{"xargs --version sh -c 'unset CODEX_HOME; codex'", true},
+		// Clean and childless tails after a terminal option stay admitted.
+		{"xargs --version echo hi", false},
+		{"xargs --help env codex", false},
 	} {
 		assert.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, codex),
 			"command %q", test.command)

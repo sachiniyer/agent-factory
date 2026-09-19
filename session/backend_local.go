@@ -403,7 +403,7 @@ func (b *LocalBackend) Recover(i *Instance) error {
 // usage-limit manual-retry (#1146) can re-spawn an agent that exited while blocked
 // at a limit wall: that session is LiveLimitReached, which Recover's !Lost guard
 // would reject, but the re-spawn mechanics are identical. Callers own the
-// precondition (Recover enforces Lost/no-tombstone; resumeFromLimit enforces
+// precondition (Recover enforces Lost/no-tombstone; resumeFromLimitOutcome enforces
 // LimitReached/no-tombstone under the target lock).
 func (b *LocalBackend) Respawn(i *Instance) error {
 	return b.respawn(i)
@@ -579,11 +579,25 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				if !known {
 					return &accountTabScopeUnknownError{title: i.Title, tab: tab.Name}
 				}
-				if exists {
+				if exists && tab.Kind == TabKindProcess {
+					// Stopped once and never re-run; a finished pane is kept
+					// (#4506 review).
+					if err := stopPreScopeProcessTab(i, tab); err != nil {
+						return err
+					}
+				} else if exists {
 					if _, err := tab.tmux.CloseAndWaitForPaneExit(); err != nil {
 						return fmt.Errorf("restore account-scoped tab %q for %q: stop the pre-scope process: %w", tab.Name, i.Title, err)
 					}
 				}
+			}
+			if tab.Kind == TabKindProcess {
+				// A process command runs once, at tab-create (#4479). The scope
+				// stop above still applies — a possibly-ambient pane is never
+				// left running — but restore only ever reattaches or records;
+				// it never re-executes the command, not even to re-scope it.
+				restoreProcessTab(i, tab, worktreePath)
+				continue
 			}
 			if err := refreshTabSessionEnvironment(i, tab); err != nil {
 				if account != "" {
@@ -598,6 +612,7 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				i.mu.Lock()
 				i.touchLocked()
 				i.mu.Unlock()
+				recordSiblingLaunch(i, tab.ID, tab.tmux)
 				i.markLoadRuntimeReplaced()
 				if account != "" {
 					respawnedAccountTabs = append(respawnedAccountTabs, tab.tmux)
@@ -613,17 +628,6 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 					return fmt.Errorf("restore account-scoped tab %q for %q reattached a pre-scope process and could not stop it: %w", tab.Name, i.Title, cleanupErr)
 				}
 				return fmt.Errorf("restore account-scoped tab %q for %q reattached a pre-scope process; stopped it before refusing restore", tab.Name, i.Title)
-			} else if refreshUnknownScope {
-				i.mu.Lock()
-				for currentIdx, current := range i.Tabs {
-					if current.ID == tab.ID {
-						i.replaceTabFieldLocked(currentIdx, func(copy *Tab) {
-							copy.accountScopeProvenanceUnknown = false
-						})
-						break
-					}
-				}
-				i.mu.Unlock()
 			}
 		}
 		if tab.Kind != TabKindShell {
@@ -703,6 +707,7 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 			continue
 		}
 		bindings = append(bindings, shellBinding{id: tab.ID, tmux: shellTmux})
+		recordSiblingLaunch(i, tab.ID, shellTmux)
 	}
 	if len(bindings) == 0 {
 		return nil

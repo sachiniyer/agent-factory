@@ -195,7 +195,7 @@ func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, evaluation *
 	return nil, false
 }
 
-func unwrapSetsid(words []*syntax.Word) ([]*syntax.Word, bool) {
+func unwrapSetsid(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
@@ -205,7 +205,10 @@ func unwrapSetsid(words []*syntax.Word) ([]*syntax.Word, bool) {
 		case "--":
 			return words[1:], false
 		case "-h", "--help", "-V", "--version":
-			return nil, false
+			if shadowedOperandTailMutates(words[1:], names, memo) {
+				return nil, true
+			}
+			return words[1:], false
 		case "-c", "--ctty", "-f", "--fork", "-w", "--wait":
 			words = words[1:]
 		default:
@@ -234,7 +237,10 @@ func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, evaluation *e
 		case option == "--":
 			return words[1:], false
 		case option == "--help" || option == "--version":
-			return nil, false
+			if shadowedOperandTailMutates(words[1:], names, memo) {
+				return nil, true
+			}
+			return words[1:], false
 		case option == "-i" || option == "--input" ||
 			option == "-o" || option == "--output" ||
 			option == "-e" || option == "--error":
@@ -680,7 +686,10 @@ options:
 			name, value, attached := strings.Cut(option[2:], "=")
 			switch name {
 			case "help", "version":
-				return nil, false
+				if shadowedOperandTailMutates(words[1:], names, memo) {
+					return nil, true
+				}
+				return words[1:], false
 			case "null", "interactive", "no-run-if-empty", "open-tty", "verbose", "exit", "show-limits":
 				if attached {
 					return nil, true
