@@ -218,12 +218,12 @@ func TestRespawnFreshRedundantStopSkipsAfterConclusiveInnerClose(t *testing.T) {
 			}
 			if strings.Contains(s, "list-panes") {
 				if alive {
-					// The live pane had no descendants, so captureSessionProcessTrees
+					// The live pane had no descendants, so CaptureSessionProcessTrees
 					// returns (nil, nil) and the close is conclusive and non-blind.
 					return []byte(""), nil
 				}
 				// The dead session is gone: list-panes answers exit 1 with the exact
-				// diagnostic, which captureSessionProcessTrees maps to
+				// diagnostic, which CaptureSessionProcessTrees maps to
 				// ErrSessionVanishedBeforeCapture.
 				return nil, missing
 			}

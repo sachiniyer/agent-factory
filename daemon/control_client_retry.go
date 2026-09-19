@@ -16,7 +16,12 @@ import (
 // daemonAdmissionRetryWait bounds the complete admission phase, including the
 // initial EnsureDaemon gate check. Every retry sleep, dial, and re-ensure
 // receives this same absolute deadline; an inner gate/readiness timeout may
-// shorten it but may never extend it. daemonAdmissionRetryPoll is the cadence.
+// shorten it but may never extend it. One documented exception: a SUCCESSFUL
+// ensure that outlived the window (a unit-path reclaim can legitimately —
+// RestartSec alone exceeds the budget) renews the follow-up dial by one dial
+// timeout via postEnsureDialDeadline, since the deadline bounds the wait FOR
+// a daemon, not the RPC that a now-reachable daemon is owed.
+// daemonAdmissionRetryPoll is the cadence.
 //
 // daemonAdmissionRetryWait is a var so tests proving the budget binds can
 // shrink the window instead of spending the real five seconds (#4464);
@@ -46,7 +51,7 @@ func callDaemon(method string, req any, resp any) error {
 		fallbackErr = ensureErr
 		attempt.err = ensureErr
 	} else {
-		attempt = callDaemonNoEnsureAttemptUntil(method, req, resp, deadline)
+		attempt = callDaemonNoEnsureAttemptUntil(method, req, resp, postEnsureDialDeadline(deadline))
 	}
 
 	for attempt.err != nil {
@@ -86,6 +91,13 @@ func callDaemon(method string, req any, resp any) error {
 				if !handoffSeen && !isDaemonAbsentErr(err) {
 					return err
 				}
+				// The re-ensure can itself outlive the admission window — the
+				// unit-path reclaim draws its own budgets. The daemon it just
+				// repaired is still owed this request, so dial on the renewed
+				// window rather than letting the stale deadline below discard
+				// the repair (Codex on #4475).
+				attempt = callDaemonNoEnsureAttemptUntil(method, req, resp, postEnsureDialDeadline(deadline))
+				continue
 			case isLiveUpgradeGateErr(ensureErr):
 				handoffSeen = true
 				fallbackErr = ensureErr
@@ -184,6 +196,23 @@ func admissionBoundedDeadline(outer time.Time, allowance time.Duration) time.Tim
 
 func admissionDeadlineExpired(deadline time.Time) bool {
 	return !deadline.IsZero() && !time.Now().Before(deadline)
+}
+
+// postEnsureDialDeadline renews an admission deadline that expired while a
+// SUCCESSFUL ensure was still doing legitimate work. The unit-path reclaim
+// draws its own bounded budgets (the readiness wait can spend the whole
+// admission window before is-active/restart/ready get their turn), so a
+// reclaim that repaired the daemon returns after the caller's deadline — and
+// handing that stale deadline to the dial would fail the request the repair
+// just made deliverable. The renewal is one dial timeout, not a fresh
+// admission window: retry sleeps and re-ensures still check the original
+// deadline, so only this first post-ensure attempt is unblocked (Codex on
+// #4475).
+func postEnsureDialDeadline(deadline time.Time) time.Time {
+	if deadline.IsZero() || time.Now().Before(deadline) {
+		return deadline
+	}
+	return time.Now().Add(daemonDialTimeout)
 }
 
 func daemonAdmissionDeadlineError() error {

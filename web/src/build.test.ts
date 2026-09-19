@@ -12,12 +12,24 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // build.mjs uses paths relative to the web/ root (its own directory), so run it there.
 const webRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+
+// #4116: the worker's cache name is stamped by the daemon when it serves the file
+// (web/embed.go), so the committed copy must be the source, placeholder and all. A
+// build that wrote the stamp back in would reintroduce a committed line whose right
+// value, after any merge of two shell changes, is one neither branch has.
+test("the build copies the service worker verbatim, leaving its cache name for the daemon to stamp", () => {
+  execFileSync("node", ["build.mjs"], { cwd: webRoot, stdio: "pipe" });
+  const source = readFileSync(join(webRoot, "src", "sw.js"), "utf8");
+  const built = readFileSync(join(webRoot, "dist", "sw.js"), "utf8");
+  assert.ok(source.includes("__AF_SHELL_VERSION__"), "src/sw.js must name its cache with the placeholder");
+  assert.ok(built === source, "dist/sw.js must be byte-identical to src/sw.js");
+});
 
 test("the build wipes stale dist artifacts so the embedded set is a pure function of src", () => {
   const stale = join(webRoot, "dist", "icons", "__stale_regression__.png");

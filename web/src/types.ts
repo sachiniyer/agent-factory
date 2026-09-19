@@ -489,6 +489,12 @@ export interface ConfigSetResult {
 export interface ConfigSetResponse {
   result: ConfigSetResult;
   restart_notice: string;
+  /** Save-time warnings, including a live-apply error whose details the
+   *  restart notice tells the operator to resolve. Optional for older daemons. */
+  warnings?: string[];
+  /** Machine-readable live-apply result. Optional for older daemons; the form
+   * renders the notice and warnings rather than re-deriving their policy. */
+  apply_outcome?: "applied" | "deferred" | "no_daemon" | "failed" | "unconfirmed" | "unknown";
   /** Where the daemon is ACCEPTING now, when the written key moved one of its
    *  listeners (#3722) — absent for every other key. Saving network.listen_addr
    *  from this form moves the very listener the form is talking over, so the

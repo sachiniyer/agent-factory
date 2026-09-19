@@ -472,6 +472,26 @@ func isASCIIAlpha(b byte) bool {
 	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
 }
 
+// The URI-path boundary pair: inside a percent-decoded URI path view, a
+// registered path starts only at the view's start and ends only at a path
+// separator or the view's end — the URI grammar's own delimiters, none of
+// which are general filesystem text boundaries.
+func uriWorktreePathBoundary(s string, start, end int) bool {
+	return derivedWorktreePathBoundaryWithContext(s, start, end, uriPathStartsAt, uriLogicalPathEndsAt)
+}
+
+func uriKnownRootBoundary(s string, start, end int) bool {
+	return knownRootTextBoundaryWithContext(s, start, end, uriPathStartsAt, uriLogicalPathEndsAt)
+}
+
+func uriPathStartsAt(_ string, start int) bool {
+	return start == 0
+}
+
+func uriLogicalPathEndsAt(s string, _, end int) bool {
+	return end == len(s) || end < len(s) && s[end] == '/'
+}
+
 // isPathTextDelimiter names punctuation and whitespace used by renderers around
 // a complete path. Shell control operators and backtick wrappers terminate paths
 // in command-bearing config values. Letters, numbers and filename punctuation

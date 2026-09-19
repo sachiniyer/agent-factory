@@ -80,10 +80,15 @@ func setupControlRepo(t *testing.T) string {
 	return repo
 }
 
-// readyFakeBackend is a FakeBackend whose Preview reports a ready prompt so
-// that the daemon's waitForReady loop returns immediately. The create path
-// now always waits for readiness — even for empty-prompt sessions (#698) — so
-// the backend must look ready rather than returning blank Preview output.
+// readyFakeBackend is a FakeBackend whose Preview reports a ready prompt, so the
+// readiness wait ends at its first look at the pane. The create path always
+// waits for readiness — even for empty-prompt sessions (#698) — so the backend
+// must look ready rather than returning blank Preview output.
+//
+// That first look happens before the poll ticker's first fire only since #4464.
+// Until then the loop looked only on a tick, so every create against this
+// backend waited a full 500ms poll while this comment said the loop "returns
+// immediately" — 129 tests at 0.55s and 51 at 1.08s in the daemon package.
 type readyFakeBackend struct {
 	*session.FakeBackend
 }
