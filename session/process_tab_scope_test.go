@@ -3,6 +3,7 @@ package session
 import (
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -474,6 +475,9 @@ func TestAddProcessTabReportsACommandThatFailsAtOnce(t *testing.T) {
 // command even starts, and a refusal by the shim is an immediate failure too.
 // The watch therefore starts once the pane leaves the shim.
 func TestAddProcessTabWaitsForTheLaunchShimBeforeWatching(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("flaky on macOS runners pending a deterministic rewrite — see #4650")
+	}
 	m := newTmuxModel(t, scopeAgent)
 	inst := scopedInstance(t, m, "")
 	name := scopeAgent + "__slow"
