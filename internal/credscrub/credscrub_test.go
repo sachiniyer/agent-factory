@@ -477,20 +477,24 @@ func TestScrubCredentialKeyRedactsNewlineBeforeJSONColon(t *testing.T) {
 	})
 }
 
-// TestScrubCredentialKeyRedactsRepeatedJSONLineBreaks locks the repeated-
-// line-break half of the JSON path. JSON permits insignificant whitespace around
-// `:` with no bound, so a machine-serialized object can place a BLANK line —
-// more than one newline — before the colon (`{"password"\n\n:`) or after it
-// (`{"password":\n\n`), and the single-bounded-newline forms the earlier
-// newline-before-colon / next-line-value alternatives accepted still leaked
-// (the credential reached logs and bug-report bundles unchanged). The
-// quote-gated key half now accepts `[ \t]*(?:\r?\n[ \t]*)*` before `:` (any
-// number of newline runs, not one), and the value half's unindented-quoted
-// alternative accepts `(?:\r?\n[ \t])*` before the quote — so arbitrary JSON
-// whitespace around the colon redacts. The bare-log-line guard the cross-
-// newline fix exists for is untouched: a bare key keeps the narrow
-// `[ \t]*[:=]` half and a left-margin BARE token still does not match the
-// quote-gated value alternative.
+// TestScrubCredentialKeyRedactsRepeatedJSONLineBreaks locks the arbitrary-
+// JSON-whitespace half of the JSON-form path. JSON permits insignificant
+// whitespace around `:` with no bound, so a machine-serialized object can
+// place a BLANK line — more than one newline — before the colon
+// (`{"password"\n\n:`) or after it (`{"password":\n\n`), and a standalone
+// carriage return (`{"password":\r`) is legal JSON whitespace too. The
+// JSON form of credentialKeyPattern accepts `(?:\r\n?|\n)` as a line break —
+// CR, CRLF, or LF, one or many, on BOTH sides of `:` — so all of these
+// redact while the introducing whitespace stays in the separator (the line
+// structure survives; only the quoted value is replaced). The bare-log-line
+// guard the cross-newline fix exists for is untouched: a bare key keeps the
+// loose form's narrow `[ \t]*[:=]` separator, and the JSON-form whitespace
+// widening applies only to a symmetrically quoted key followed by `:` — so
+// a quoted key with `=` across lines (`"password"\n=\n"…"`) and a bare key
+// followed across a BLANK line by a column-0 quoted value
+// (`token:\n\n"…"`) are both preserved, while the single-linebreak column-0
+// quote after any key (`token:\n"…"`) still redacts through keyValueSecret's
+// single-linebreak value alternative.
 func TestScrubCredentialKeyRedactsRepeatedJSONLineBreaks(t *testing.T) {
 	cases := []struct{ name, key, in, want, leak string }{
 		// The shape the report names: a BLANK line (two newlines) between the
@@ -525,6 +529,22 @@ func TestScrubCredentialKeyRedactsRepeatedJSONLineBreaks(t *testing.T) {
 			"{\"auth\"\n\n:\n\"abcdef123456\"}",
 			"{\"auth\"\n\n:\n\"" + SecretMarker + "\"}",
 			"abcdef123456"},
+		// Standalone carriage return as JSON whitespace AFTER the colon. Go's
+		// encoding/json accepts a bare `\r`; the JSON-form separator matches it.
+		{`{"password":\r"value"}`, `"password"`,
+			"{\"password\":\r\"hunter2secret\"}",
+			"{\"password\":\r\"" + SecretMarker + "\"}",
+			"hunter2secret"},
+		// Standalone carriage return as JSON whitespace BEFORE the colon.
+		{`{"password"\r:"value"}`, `"password"`,
+			"{\"password\"\r:\"hunter2secret\"}",
+			"{\"password\"\r:\"" + SecretMarker + "\"}",
+			"hunter2secret"},
+		// Mixed CR and LF whitespace around the colon (CRLF + standalone CR).
+		{`{"password"\r\n:\r"value"}`, `"password"`,
+			"{\"password\"\r\n:\r\"hunter2secret\"}",
+			"{\"password\"\r\n:\r\"" + SecretMarker + "\"}",
+			"hunter2secret"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -542,36 +562,93 @@ func TestScrubCredentialKeyRedactsRepeatedJSONLineBreaks(t *testing.T) {
 	}
 
 	// No-regression half: a BARE key with multiple newlines before the colon
-	// is still the ambiguous-log-line shape the cross-newline guard exists for;
-	// the quoted-key widening must not reach it, because a bare key has no
-	// surrounding quotes and the bare half stays `[ \t]*[:=]`.
+	// is still the ambiguous-log-line shape the cross-newline guard exists
+	// for; the JSON-form widening must not reach it, because a bare key has
+	// no surrounding quotes and the loose form's separator stays `[ \t]*[:=]`.
 	t.Run("bare key with blank line before colon is not matched", func(t *testing.T) {
 		in := "password\n\n:hunter2secret"
 		if got := Scrub(in); got != in {
-			t.Fatalf("quoted-key widening reached a bare-key blank line before colon:\n in: %q\n out: %q", in, got)
+			t.Fatalf("JSON-form widening reached a bare-key blank line before colon:\n in: %q\n out: %q", in, got)
 		}
 	})
 
-	// No-regression half: a column-0 BARE next line after the colon is the
-	// unrelated-line shape the cross-line guard exists for; the multi-newline
-	// value alternative must not reach it — a bare token has no opening `"`.
+	// No-regression half: a column-0 BARE next line after a bare key is the
+	// unrelated-line shape the cross-line guard exists for; the loose form
+	// cannot cross to the left margin, the bare value alternative stops at
+	// the newline, and the single-linebreak value alternative requires a `"` —
+	// so a bare SHA on the next line survives.
 	t.Run("left-margin bare next line is not a JSON value", func(t *testing.T) {
 		in := "token:\n\n4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a fix-login"
 		if got := Scrub(in); got != in {
-			t.Fatalf("multi-newline value alternative reached a left-margin bare line:\n in: %q\n out: %q", in, got)
+			t.Fatalf("value alternative reached a left-margin bare line:\n in: %q\n out: %q", in, got)
+		}
+	})
+
+	// No-regression half: a bare key followed across a BLANK line by a
+	// column-0 QUOTED string is NOT redacted. The single-linebreak value
+	// alternative crosses exactly one line break, so the blank line breaks
+	// the key/value association; the unrelated quoted message survives
+	// (the over-redaction across a blank line the narrowing is for).
+	t.Run("bare key + blank line + column-0 quoted survives", func(t *testing.T) {
+		in := "token:\n\n\"build failed: see log\""
+		if got := Scrub(in); got != in {
+			t.Fatalf("value alternative crossed a blank line to a column-0 quote:\n in: %q\n out: %q", in, got)
+		}
+	})
+
+	// Counterpart half: a bare key + a SINGLE line break + a column-0 quoted
+	// value IS redacted (the JSON/YAML/log shape a serializer or pasted config
+	// produces — locked end-to-end by bugreport's
+	// TestScrubAndScrubLogRedactUnindentedQuotedJSON). The single-linebreak
+	// alternative fires; the blank-line half above is what distinguishes a
+	// continuation from an unrelated record.
+	t.Run("bare key + single line break + column-0 quoted redacts", func(t *testing.T) {
+		in := "set token:\n\"abcdefghijkl1234\""
+		got := Scrub(in)
+		if strings.Contains(got, "abcdefghijkl1234") {
+			t.Fatalf("single-linebreak column-0 quoted value survived:\n in: %q\n out: %q", in, got)
+		}
+		if !strings.Contains(got, "set token:") {
+			t.Fatalf("key half absorbed:\n in: %q\n out: %q", in, got)
+		}
+	})
+
+	// No-regression half: a quoted key with `=` across lines is not JSON
+	// (JSON's only key/value delimiter is `:`), so the JSON-form whitespace
+	// widening does not apply and the unrelated quoted diagnostic on the next
+	// line survives. Same-line quoted `=` assignments still redact via the
+	// loose form's `[:=]`.
+	t.Run("quoted key with = across lines is not matched", func(t *testing.T) {
+		in := "\"password\"\n=\n\"build failed\""
+		if got := Scrub(in); got != in {
+			t.Fatalf("JSON-form widening reached a quoted-key = across lines:\n in: %q\n out: %q", in, got)
+		}
+	})
+
+	// No-regression half: a SAME-LINE quoted `=` assignment still redacts
+	// (the loose form keeps `[:=]`, so `=` is a valid same-line delimiter
+	// for an optional-quote key).
+	t.Run("same-line quoted = assignment still redacts", func(t *testing.T) {
+		in := `"api_key" = "hunter2secret"`
+		got := Scrub(in)
+		if strings.Contains(got, "hunter2secret") {
+			t.Fatalf("same-line quoted = assignment survived:\n in: %q\n out: %q", in, got)
+		}
+		if !strings.Contains(got, SecretMarker) {
+			t.Fatalf("expected a redaction marker for the same-line quoted = assignment:\n in: %q\n out: %q", in, got)
 		}
 	})
 }
 
 // TestScrubCredentialKeyPreservesJSONQuotesAcrossNewline locks the line
-// structure of the `\r?\n"..."` value-half alternative (the comment on
-// keyValueSecret). The introducing `\r?\n` is wrapped OUT of the inner capture
-// so the newline and the surrounding `:` stay as the prefix and only the
-// quoted value is replaced — invalid `{"password":[redacted-secret]}` is not
-// produced; the output stays `{"password":\n"[redacted-secret]"`. Without the
-// wrap the newline was captured as part of the value and the quoted-value
-// branch in appendKeyValueSpans (which keys on `value[0] == '"'`) missed,
-// leaving a bare marker in place of the JSON structure.
+// structure of the column-0 JSON value. The introducing line break stays in
+// the separator/prefix (the JSON form's separator consumes it, or the
+// single-linebreak value alternative wraps it out of the inner capture), so
+// only the quoted value is replaced — invalid `{"password":[redacted-secret]}`
+// is not produced; the output stays `{"password":\n"[redacted-secret]"`. If
+// the newline were captured as part of the value, the quoted-value branch in
+// appendKeyValueSpans (which keys on `value[0] == '"'`) would miss, leaving a
+// bare marker in place of the JSON structure.
 func TestScrubCredentialKeyPreservesJSONQuotesAcrossNewline(t *testing.T) {
 	cases := []struct{ name, in, want string }{
 		// The column-0 JSON shape `{"password":\n"hunter2secret"}` (LF): the
