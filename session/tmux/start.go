@@ -46,6 +46,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// boundary. SetProgram cannot do this: the live-session Restore path rewrites
 	// the command string without re-execing the existing pane.
 	t.resetCodexSafetyState()
+	t.resetCodexUpdateState()
 	// Same proven boundary: a key af sent to the PREVIOUS pane process cannot
 	// explain anything the new one does (#3579).
 	t.resetDialogKeystroke()
@@ -361,6 +362,9 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		t.claudeTrust.firstSeen = time.Time{}
 	case ProgramCodex:
 		if t.handleCodexSafetyBuffering(content) {
+			return true
+		}
+		if t.handleCodexUpdatePrompt(content) {
 			return true
 		}
 		if CodexTrustPromptPresent(content) {
