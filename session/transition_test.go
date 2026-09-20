@@ -176,6 +176,10 @@ func TestTransition_ParkHandoffStoresIncomingResetTime(t *testing.T) {
 
 func TestTransition_ParkHandoffAttributesIncomingAccountLimit(t *testing.T) {
 	resetAt := time.Date(2026, 8, 14, 19, 0, 0, 0, time.UTC)
+	observedAt := time.Date(2026, 8, 14, 18, 0, 0, 0, time.UTC)
+	oldClock := instanceNow
+	instanceNow = func() time.Time { return observedAt }
+	t.Cleanup(func() { instanceNow = oldClock })
 	i := &Instance{
 		Program: tmux.ProgramCodex, Account: "work",
 		liveness: LiveRunning, inFlightOp: OpReplacing,
@@ -186,7 +190,7 @@ func TestTransition_ParkHandoffAttributesIncomingAccountLimit(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "work", account)
 	want := []AccountLimitObservationData{{
-		Agent: tmux.ProgramCodex, Account: "work", ResetAt: resetAt,
+		Agent: tmux.ProgramCodex, Account: "work", ResetAt: resetAt, ObservedAt: observedAt,
 	}}
 	require.Equal(t, want, i.AccountLimitObservations(),
 		"the handoff fence must publish the incoming identity's quota wall atomically")

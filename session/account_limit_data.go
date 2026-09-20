@@ -48,4 +48,8 @@ type AccountLimitObservationData struct {
 	Agent   string    `json:"agent"`
 	Account string    `json:"account"`
 	ResetAt time.Time `json:"reset_at,omitempty"`
+	// ObservedAt is when af last recorded this wall (#4361). A record written
+	// before the field existed decodes to zero — unknown, never fresh — so a
+	// carried-over claim shows its age or admits it has none.
+	ObservedAt time.Time `json:"observed_at,omitempty"`
 }

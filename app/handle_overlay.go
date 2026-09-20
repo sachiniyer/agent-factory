@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -396,20 +397,28 @@ func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 // one key would write the rest of that state back.
 func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
 	m.accountGeneration++ // discard account results from an earlier opening
+	m.usageGeneration++   // and a usage report still in flight from one (#4361)
 	entries, location, err := ui.ReadConfigForEditor()
 	if err != nil {
 		return m, m.handleError(err)
 	}
 	m.configPane.SetEntries(entries, location)
-	// The Accounts section (#3385), read on every open for the same reason the
-	// config is: an account registered from the CLI, or logged in from the web,
-	// since this TUI started must show as it is now rather than as af remembers.
-	accountsCmd := m.loadAccountsIntoPane()
+	// The Usage section (#4361) and the Accounts section (#3385) are read on
+	// every open for the same reason the config is: a session parked at a wall,
+	// or an account registered or logged in on another surface, since this TUI
+	// started must show as it is now rather than as af remembers. A remote
+	// target loads both off the UI loop in one command; locally each read is
+	// in-process and inline.
+	m.loadUsageIntoPane()
+	m.loadAccountsIntoPane()
 	m.showAccountRegisterPending()
 	m.configPane.SetFocus(true)
 	m.layoutPaneOverlays()
 	m.state = stateConfigEditor
-	return m, accountsCmd
+	if apiclient.IsRemoteTarget() {
+		return m, m.remoteSectionsLoadCmd()
+	}
+	return m, nil
 }
 
 // handleStateConfigEditor routes key events to the config editor overlay. Esc

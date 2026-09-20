@@ -60,7 +60,7 @@ func TestPersistPollChange_PublishesUnderRepoLock(t *testing.T) {
 
 	// A liveness that differs from the instance's own makes the poll treat this tick
 	// as a real transition, which is what drives it to persist + publish at all.
-	manager.persistPollChange(repo.ID, instance, otherLiveness(instance.GetLiveness()), time.Time{}, false)
+	manager.persistPollChange(repo.ID, instance, otherLiveness(instance.GetLiveness()), time.Time{}, time.Time{}, instance.AccountLimitObservations(), false)
 
 	if !probed {
 		t.Fatal("the poll never reached its publish: persistPollChange returned without announcing a change")
@@ -104,7 +104,8 @@ func TestPersistPollChange_PublishesRosterAsOfItsLock(t *testing.T) {
 
 	_, ch := manager.events.subscribe()
 	beforeReset, _ := instance.LimitResetAt()
-	manager.persistPollChange(repo.ID, instance, instance.GetLiveness(), beforeReset, true)
+	beforeObserved, _ := instance.LimitObservedAt()
+	manager.persistPollChange(repo.ID, instance, instance.GetLiveness(), beforeReset, beforeObserved, instance.AccountLimitObservations(), true)
 
 	created := drainNextSessionEvent(t, ch, agentproto.EventSessionUpdated)
 	if !tabNamed(created, name) {

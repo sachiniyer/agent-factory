@@ -72,8 +72,12 @@ func (m *home) handleAccountRegistered(msg accountRegisteredMsg) tea.Cmd {
 		}
 		// The old command's snapshot may predate this opening. Fetch again, and
 		// invalidate even this opening's initial read if it is still in flight.
+		// usageGeneration advances too: the combined read below would otherwise
+		// share its generation with that in-flight usage request, and whichever
+		// answer landed last would win — including the older one (#4361 review).
 		m.accountGeneration++
-		return m.remoteAccountsLoadCmd()
+		m.usageGeneration++
+		return m.remoteSectionsLoadCmd()
 	}
 	if msg.err != nil {
 		m.configPane.SetAccountStatus(msg.err.Error(), true)

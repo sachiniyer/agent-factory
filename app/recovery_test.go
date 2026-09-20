@@ -59,10 +59,21 @@ func TestRecoveryDriverScenes(t *testing.T) {
 					t.Cleanup(SetAccountSeamsForTest(func(daemon.ListAccountsRequest) (daemon.ListAccountsResponse, error) {
 						return daemon.ListAccountsResponse{Entries: []daemon.AccountEntry{{Agent: "codex", Name: "remote-work"}}, Agents: []string{"codex"}}, nil
 					}, registerAccount, startAccountLogin))
-					load := h.loadAccountsIntoPane()
+					t.Cleanup(SetUsageSeamForTest(func(daemon.QuotaReportRequest) (daemon.QuotaReportResponse, error) {
+						return daemon.QuotaReportResponse{}, nil
+					}))
+					h.loadAccountsIntoPane()
+					load := h.remoteSectionsLoadCmd()
 					h.configPane.SetFocus(true)
 					require.NotNil(t, load)
-					_, _ = h.Update(load())
+					for _, loadMsg := range sectionsMsgs(t, load) {
+						_, _ = h.Update(loadMsg)
+					}
+					// The Usage section's note lines are selectable scroll
+					// anchors (#4361 review), so reaching the account row takes
+					// one Down past the entry row plus one per anchored note
+					// line above Accounts.
+					_, _ = h.Update(tea.KeyMsg{Type: tea.KeyDown})
 					_, _ = h.Update(tea.KeyMsg{Type: tea.KeyDown})
 					_, _ = h.Update(tea.KeyMsg{Type: tea.KeyEnter})
 					require.True(t, h.configPane.HasFocus(), "refused login keeps Accounts visible")

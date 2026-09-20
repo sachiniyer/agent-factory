@@ -539,6 +539,35 @@ export interface AccountsResponse {
   defaults?: Record<string, string>;
 }
 
+/** quota.Row — one rendered usage-limit row (#4361).
+ *
+ * The cells arrive already worded: the daemon renders them (quota.RenderRows),
+ * so the web, the TUI, and `af quota` show the SAME sentence about the same
+ * evidence rather than three private readings of one policy. `quota` is what
+ * the provider reports — "not reported" today, af declining to guess — and
+ * `observed` is what af has seen in its own sessions, which is never a claim
+ * that the account is healthy. `detail` carries the counts, the reset time,
+ * and WHEN the wall was recorded, so a stale observation reads as old. */
+export interface QuotaRow {
+  agent: string;
+  quota: string;
+  observed: string;
+  detail: string;
+}
+
+/** QuotaReportResponse (daemon/control_types.go).
+ *
+ * `note` is the standing QUOTA/OBSERVED framing, rendered under the section.
+ * `caveats` are under-read warnings — a repo whose records could not be parsed
+ * may hold parked sessions, so a caveat must never let a partial report look
+ * complete. Both are optional on the wire: a daemon that does not send them
+ * simply shows the rows. */
+export interface QuotaReportResponse {
+  rows?: QuotaRow[];
+  note?: string;
+  caveats?: string[];
+}
+
 /** RegisterAccountResponse (daemon/control_types_accounts.go). */
 export interface RegisterAccountResponse {
   entry: AccountEntry;

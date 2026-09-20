@@ -160,6 +160,11 @@ type InstanceData struct {
 	// drops it for every normal session; additive + rollforward, mirroring the
 	// Liveness precedent.
 	LimitResetAt time.Time `json:"limit_reset_at,omitempty"`
+	// LimitObservedAt is when af recorded the current wall (#4361), persisted
+	// under the same liveness gate as LimitResetAt. Zero on records written
+	// before the field existed — unknown, which the report must render as such
+	// rather than as fresh evidence.
+	LimitObservedAt time.Time `json:"limit_observed_at,omitempty"`
 	// LimitAgent is the provider namespace for LimitAccount. It is always a
 	// tmux.SupportedPrograms enum or empty; account labels are agent-scoped, so a
 	// pending cross-agent replacement must retain both values.

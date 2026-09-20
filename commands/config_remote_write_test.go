@@ -45,6 +45,8 @@ type stubDaemon struct {
 	setReqs    []daemon.SetConfigValueRequest
 	unsetReqs  []daemon.UnsetConfigValueRequest
 	healthHits int
+	quotaReqs  int
+	quotaResp  daemon.QuotaReportResponse
 
 	// configPath is the file this "daemon host" reports writing. It is
 	// deliberately NOT under the caller's home: the point of the success line is
@@ -161,6 +163,12 @@ func (d *stubDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			daemon.UnsetConfigValueResponse
 			ApplyOutcome string `json:"apply_outcome"`
 		}{resp, d.applyOutcome}))
+	case "/v1/QuotaReport":
+		d.mu.Lock()
+		d.quotaReqs++
+		resp := d.quotaResp
+		d.mu.Unlock()
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(resp))
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		_ = apiproto.WriteEnvelope(w, apiproto.Failure(fmt.Sprintf("unknown route %q", r.URL.Path)))
@@ -177,6 +185,12 @@ func (d *stubDaemon) unsets() []daemon.UnsetConfigValueRequest {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]daemon.UnsetConfigValueRequest(nil), d.unsetReqs...)
+}
+
+func (d *stubDaemon) quotaHits() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.quotaReqs
 }
 
 // remoteRoute is remoteTargetRoutes bound to a live stub's URL, which only

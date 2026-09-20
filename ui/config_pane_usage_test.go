@@ -1,0 +1,244 @@
+package ui
+
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/quota"
+)
+
+// The Usage section of the config overlay (#4361). What these pin is the part
+// the wire shape exists for: the pane renders the daemon's OWN wording —
+// quota.Row cells verbatim, note and caveats included — never a re-reading of
+// the policy, and a failed or in-flight read can never pass for an empty one.
+
+// usagePane builds a pane with one config key and a Usage section loaded from
+// the given response, sized so rendering is not degenerate.
+func usagePane(t *testing.T, resp daemon.QuotaReportResponse, err error) *ConfigPane {
+	t.Helper()
+	pane := NewConfigPane()
+	pane.SetSize(110, 50)
+	pane.SetEntries([]config.ConfigEntry{{
+		Key: "default_program", Value: "claude", Purpose: "the agent a new session runs", Tier: 1,
+	}}, "/tmp/config.toml")
+	pane.SetUsage(resp, err)
+	pane.SetFocus(true)
+	return pane
+}
+
+func stubUsageReport() daemon.QuotaReportResponse {
+	return daemon.QuotaReportResponse{
+		Rows: []quota.Row{
+			{Agent: "claude", Quota: "not reported", Observed: "no limit seen",
+				Detail: "3 session(s) running, none parked at a limit"},
+			{Agent: "codex", Quota: "not reported", Observed: "limit reached",
+				Detail: "1 of 2 session(s) parked at a usage limit; earliest reset 2026-09-20T00:00:00Z (in 6h); observed 2026-09-14T00:00:00Z (6d ago)"},
+		},
+		Note: quota.ReportNote,
+	}
+}
+
+// Every row the daemon rendered shows its own words — the agent, both verdict
+// cells, and the detail sentence naming when the wall was observed — because
+// the wire shape exists so the TUI cannot drift into its own reading.
+func TestUsageSectionRendersTheDaemonsRowsVerbatim(t *testing.T) {
+	pane := usagePane(t, stubUsageReport(), nil)
+	view := pane.String()
+	for _, fragment := range []string{
+		"Usage",
+		"claude", "not reported", "no limit seen", "none parked at a limit",
+		"codex", "limit reached", "6d ago", "observed", "2026-",
+		"QUOTA is what the provider reports",
+	} {
+		if !strings.Contains(view, fragment) {
+			t.Errorf("the Usage section must render %q, got:\n%s", fragment, view)
+		}
+	}
+}
+
+// The section sits above Accounts — the order the issue asked for, and the
+// order a reader hunting "is anything parked?" needs before the credentials.
+func TestUsageSectionRendersAboveAccounts(t *testing.T) {
+	pane := usagePane(t, stubUsageReport(), nil)
+	pane.SetAccounts([]AccountRow{{Agent: "claude", Name: "work", LoggedIn: true}}, []string{"claude"}, nil)
+	view := pane.String()
+	usageAt := strings.Index(view, "Usage")
+	accountsAt := strings.Index(view, "Accounts")
+	if usageAt < 0 || accountsAt < 0 {
+		t.Fatalf("both sections must render, got:\n%s", view)
+	}
+	if usageAt > accountsAt {
+		t.Errorf("Usage must render above Accounts, got:\n%s", view)
+	}
+}
+
+// A caveat is an under-read warning, not a footnote: it must reach the operator
+// verbatim, styled as a warning, or a partial report reads as a complete one.
+func TestUsageSectionCarriesTheDaemonsCaveats(t *testing.T) {
+	resp := stubUsageReport()
+	resp.Caveats = []string{"1 project record file(s) could not be parsed and were skipped, so this report is INCOMPLETE"}
+	pane := usagePane(t, resp, nil)
+	if !strings.Contains(pane.String(), "INCOMPLETE") {
+		t.Errorf("the caveat must reach the operator, got:\n%s", pane.String())
+	}
+}
+
+// Usage rows are evidence, not state: the cursor may LAND on one — that is how
+// the pane scrolls, and a Usage section taller than the window would otherwise
+// strand its middle lines off screen — but enter opens no editor over them.
+func TestUsageRowsNavigateForScrollButStayInert(t *testing.T) {
+	pane := usagePane(t, stubUsageReport(), nil)
+	firstUsage := -1
+	for i, row := range pane.rows {
+		if row.usage != nil {
+			firstUsage = i
+			break
+		}
+	}
+	if firstUsage < 0 {
+		t.Fatal("the stub report produced no usage rows")
+	}
+	// j walks the cursor from the last config entry onto the first usage row —
+	// the scroll that keeps a tall section reachable.
+	pane.selectedIdx = 0
+	for !pane.rows[pane.selectedIdx].isSelectable() {
+		pane.selectedIdx++
+	}
+	for pane.selectedIdx < firstUsage {
+		pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	}
+	if pane.rows[pane.selectedIdx].usage == nil {
+		t.Fatalf("j must land inside the Usage section, landed on %+v", pane.rows[pane.selectedIdx])
+	}
+	// Enter is inert on evidence: no editor opens, no request fires.
+	pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if pane.editing {
+		t.Fatal("enter on a usage row opened the value editor")
+	}
+}
+
+// The framing note is itself scrollable, one wrapped line per row (#4361
+// review): hung under the nonselectable heading, a note taller than the window
+// could never bring its middle lines on screen — the cursor is the only
+// scroll this pane has. Every note line must be individually reachable by j.
+func TestUsageNoteLinesAreScrollAnchors(t *testing.T) {
+	pane := NewConfigPane()
+	pane.SetSize(60, 12) // deliberately short: the wrapped note exceeds the window
+	pane.SetEntries([]config.ConfigEntry{{
+		Key: "default_program", Value: "claude", Purpose: "p", Tier: 1,
+	}}, "/tmp/config.toml")
+	pane.SetUsage(stubUsageReport(), nil)
+	pane.SetFocus(true)
+
+	noteRows := 0
+	for _, row := range pane.rows {
+		if row.usageNote != nil {
+			noteRows++
+		}
+	}
+	if noteRows == 0 {
+		t.Fatal("the section produced no anchored note lines")
+	}
+	landed := 0
+	pane.selectedIdx = 0
+	pane.clampSelection()
+	for {
+		if pane.rows[pane.selectedIdx].usageNote != nil {
+			landed++
+		}
+		before := pane.selectedIdx
+		pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		if pane.selectedIdx == before {
+			break
+		}
+	}
+	if landed != noteRows {
+		t.Fatalf("j reached %d of %d note lines — an unanchored line can never scroll on screen", landed, noteRows)
+	}
+}
+
+// A failed read is a failure line, not an empty section — "no rows" and
+// "cannot read" need different actions from the operator, and rendering one as
+// the other is how a dead daemon reads as a healthy host.
+func TestUsageSectionShowsAFailureInPlace(t *testing.T) {
+	pane := usagePane(t, daemon.QuotaReportResponse{}, errors.New("dial: no daemon"))
+	view := pane.String()
+	if !strings.Contains(view, "Cannot load usage") || !strings.Contains(view, "dial: no daemon") {
+		t.Errorf("a failed read must say so, got:\n%s", view)
+	}
+	if strings.Contains(view, "no limit seen") {
+		t.Errorf("a failed read must not render rows, got:\n%s", view)
+	}
+}
+
+// Before the first answer the section says it is loading — a blank section
+// under a remote target would read as "no limits anywhere" for as long as the
+// daemon takes to answer.
+func TestUsageSectionShowsLoading(t *testing.T) {
+	pane := NewConfigPane()
+	pane.SetSize(110, 50)
+	pane.SetEntries([]config.ConfigEntry{{
+		Key: "default_program", Value: "claude", Purpose: "p", Tier: 1,
+	}}, "/tmp/config.toml")
+	pane.SetUsageLoading()
+	pane.SetFocus(true)
+	if !strings.Contains(pane.String(), "Loading usage…") {
+		t.Errorf("a read in flight must say so, got:\n%s", pane.String())
+	}
+}
+
+// A usage row's DETAIL is scroll-anchored the same way the heading's note is
+// (#4361 review): a wrapped detail taller than the window must not pin to its
+// row's top — every wrapped line becomes its own row the cursor can reach, or
+// the tail of a long observation can never scroll on screen.
+func TestUsageDetailLinesAreScrollAnchors(t *testing.T) {
+	pane := NewConfigPane()
+	pane.SetSize(60, 12) // deliberately short: the wrapped detail exceeds the window
+	pane.SetEntries([]config.ConfigEntry{{
+		Key: "default_program", Value: "claude", Purpose: "p", Tier: 1,
+	}}, "/tmp/config.toml")
+	resp := stubUsageReport()
+	resp.Rows[1].Detail = strings.Repeat("observed far longer than one window line ", 6) + "detail-tail-marker"
+	pane.SetUsage(resp, nil)
+	pane.SetFocus(true)
+
+	// The detail's tail must be a baked row of its own — proof the wrapped
+	// lines flattened out of the usage row rather than rendering inside it.
+	tailAnchored := false
+	noteRows := 0
+	for _, row := range pane.rows {
+		if row.usageNote == nil {
+			continue
+		}
+		noteRows++
+		if strings.Contains(*row.usageNote, "detail-tail-marker") {
+			tailAnchored = true
+		}
+	}
+	if !tailAnchored {
+		t.Fatalf("the detail's tail never became a scroll-anchored row:\n%s", pane.String())
+	}
+
+	// And every anchored line — detail lines included — is reachable by j.
+	landed := 0
+	pane.selectedIdx = 0
+	pane.clampSelection()
+	for {
+		if pane.rows[pane.selectedIdx].usageNote != nil {
+			landed++
+		}
+		before := pane.selectedIdx
+		pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		if pane.selectedIdx == before {
+			break
+		}
+	}
+	if landed != noteRows {
+		t.Fatalf("j reached %d of %d anchored lines — a detail line can never scroll on screen", landed, noteRows)
+	}
+}

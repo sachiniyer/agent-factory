@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/quota"
 )
 
 // ConfigPane is the direct config editor: a form over the config manifest,
@@ -77,6 +78,13 @@ type ConfigPane struct {
 	// inventing a second writer.
 	save func(key, value string) (result *config.SetResult, notice string, err error)
 
+	// usage is the Usage section (#4361): the attached host's usage-limit
+	// evidence, rendered above Accounts and read-only. Its rows arrive already
+	// worded — quota.Row is the daemon's wire shape — so this pane, the CLI,
+	// and the web cannot drift into three readings of one policy. Its state
+	// lives in config_pane_usage.go.
+	usage usageSection
+
 	// accounts is the Accounts section (#3385): agent identities, rendered below
 	// the config tiers and visibly not config rows. It is a separate struct rather
 	// than more fields here because it is a separate domain — nothing in it goes
@@ -99,19 +107,36 @@ type configRow struct {
 	heading string
 	entry   *config.ConfigEntry
 	// account is set for a row of the Accounts section (#3385) — an agent
-	// identity, not a config key. Exactly one of heading, entry and account is
-	// meaningful on any row.
+	// identity, not a config key. Exactly one of heading, entry, usage and
+	// account is meaningful on any row.
 	account *AccountRow
+	// usage is set for a row of the Usage section (#4361) — one rendered
+	// quota.Row. Usage rows are evidence: the cursor may LAND on one because
+	// the cursor is this pane's only scroll, and a section taller than the
+	// window is otherwise unreachable — but it answers no key, so enter still
+	// opens nothing.
+	usage *quota.Row
+	// usageNote is one wrapped line of the Usage section's prose — the gloss,
+	// the report's note, a caveat, the loading/failure block, or one line of a
+	// usage row's detail — emitted as its own row for the same reason usage
+	// rows are (#4361 review): hung under the nonselectable heading or inside
+	// a taller-than-window row, a wrapped line could never scroll its middle
+	// into view. One line per row is what gives every line a scroll anchor.
+	usageNote *string
 }
 
 // isSelectable reports whether the cursor may land on this row. Every manifest
-// entry is editable since #3345; only tier headings are skipped. A pre-#3345
-// daemon may reject a newly supported structured save during version skew; that
-// rejection stays visible in this real field. Turning the row read-only would
-// restore the class #3345 explicitly removed, while a local-write fallback
-// would bypass the running daemon's lifecycle admission gate.
+// entry is editable since #3345; only tier headings are skipped. Usage rows —
+// and each note line under the section — are selectable for SCROLLING alone
+// (#4361 review): a Usage section taller than the window has no selectable row
+// inside it otherwise, so its middle lines could never be brought on screen. Landing on one still does nothing —
+// beginEdit no-ops without an entry. A pre-#3345 daemon may reject a newly
+// supported structured save during version skew; that rejection stays visible
+// in this real field. Turning the row read-only would restore the class #3345
+// explicitly removed, while a local-write fallback would bypass the running
+// daemon's lifecycle admission gate.
 func (r configRow) isSelectable() bool {
-	return r.entry != nil || r.account != nil
+	return r.entry != nil || r.account != nil || r.usage != nil || r.usageNote != nil
 }
 
 var (
@@ -163,6 +188,10 @@ func (c *ConfigPane) SetSize(width, height int) {
 	c.width = width
 	c.height = height
 	c.sizeEditField()
+	// The Usage section's note lines are baked into rows at rebuild time
+	// (#4361 review): a resize changes where each one wraps, so the row list
+	// must be re-flattened rather than re-rendered from a stale wrap.
+	c.rebuildRows()
 }
 
 func (c *ConfigPane) HasFocus() bool { return c.hasFocus }
@@ -231,6 +260,10 @@ func (c *ConfigPane) rebuildRows() {
 			c.rows = append(c.rows, configRow{entry: &entry})
 		}
 	}
+	// Usage sits between the tiers and Accounts (#4361): like Accounts it is
+	// daemon-reported state rather than config, and "is anything parked at a
+	// limit" is the answer an operator opening this overlay is looking for.
+	c.appendUsageRows()
 	// Accounts last: the config keys are what this overlay is for, and a
 	// credential section above them would push them off the first screen.
 	c.appendAccountRows()
@@ -538,6 +571,15 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 		case row.account != nil:
 			rendered := c.renderAccountRow(i, *row.account)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
+		case row.usage != nil:
+			rendered := c.renderUsageRow(*row.usage, i == c.selectedIdx)
+			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
+		case row.usageNote != nil:
+			cursor := "  "
+			if i == c.selectedIdx {
+				cursor = SelectionMarker("› ")
+			}
+			lines = append(lines, c.fitPaneLine(cursor+*row.usageNote))
 		case row.entry != nil:
 			rendered := c.renderEntryRow(i, row, *row.entry)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)

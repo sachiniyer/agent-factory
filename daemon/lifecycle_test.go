@@ -279,8 +279,13 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// write config.toml around the gate, and an apply is not inert — it swaps the
 	// live config, rebinds listeners, and changes auth posture, mutating the very
 	// daemon the supervisor is mid-validation on. Blocked, like the write itself.
-	"ApplyConfig":  blockedDuringProbation,
-	"GetConfig":    allowedDuringProbation,
+	"ApplyConfig": blockedDuringProbation,
+	"GetConfig":   allowedDuringProbation,
+	// QuotaReport is a read of the host's session records off disk (#4361):
+	// no manager state, nothing an upgrade window is protecting. It sits with
+	// GetConfig and ListAccounts for the same reason — a surface showing "af
+	// could not look" during probation is a worse answer than the true one.
+	"QuotaReport":  allowedDuringProbation,
 	"ListBackends": allowedDuringProbation,
 	// A read of the daemon host's directory names (#2788): no manager, no daemon
 	// state, nothing an upgrade window is protecting. It sits with ListProjects
