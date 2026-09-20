@@ -194,6 +194,28 @@ func TestIsRootIsSharedAcrossInstanceAndProjection(t *testing.T) {
 		"instances.json must not persist a UI decision derived from the live title")
 }
 
+// TestCanHandoffAccountIsProjectionOnly pins #4433's split of the projected
+// handoff capability: the reserved root can move between its agent's accounts
+// but can never change agent, so it projects can_handoff_account without
+// can_handoff, while an ordinary live row projects both. The web offers the
+// account move on the account field alone — never by weakening can_handoff.
+func TestCanHandoffAccountIsProjectionOnly(t *testing.T) {
+	root := (&Instance{ID: "root-id", Title: RootSessionTitle, liveness: LiveReady, started: true}).ToInstanceData()
+	require.False(t, root.CanHandoff, "the reserved root can never change agent")
+	require.True(t, root.CanHandoffAccount, "the reserved root can still move between accounts")
+
+	ordinary := (&Instance{ID: "work-id", Title: "worker", liveness: LiveReady, started: true}).ToInstanceData()
+	require.True(t, ordinary.CanHandoff)
+	require.True(t, ordinary.CanHandoffAccount, "the account gate adds only the reserved title to the handoff answer")
+
+	stored := root.ForStorage()
+	require.False(t, stored.CanHandoffAccount, "the capability is derived live, never persisted")
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "can_handoff_account",
+		"instances.json must not persist a UI capability derived from live state")
+}
+
 func TestKillAddressabilityIsSharedAcrossInstanceAndProjection(t *testing.T) {
 	for _, tc := range []struct {
 		name           string

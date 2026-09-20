@@ -63,7 +63,17 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	if selected == nil || selected.IsCreating() {
 		return m, nil
 	}
-	if err := selected.ValidateRuntimeAction(session.RuntimeActionHandoff); err != nil {
+	// The reserved root can never change agent — the daemon re-ensures it — but
+	// it CAN move between its agent's accounts: the account form of the shared
+	// gate is the one runtime replacement it admits (#4395). For it the picker
+	// opens in account-only mode rather than leading with agent rows that can
+	// only refuse at submit (#4433).
+	accountOnly := session.IsReservedTitle(selected.Title)
+	action := session.RuntimeActionHandoff
+	if accountOnly {
+		action = session.RuntimeActionHandoffAccount
+	}
+	if err := selected.ValidateRuntimeAction(action); err != nil {
 		return m, m.handleNotice(err)
 	}
 	if !selected.Capabilities().Handoff {
@@ -72,19 +82,24 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 
 	current := selected.CurrentAgentName()
 	choices := handoffAgentChoices(current)
-	if len(choices) == 0 {
+	if !accountOnly && len(choices) == 0 {
 		return m, m.handleNotice(fmt.Errorf("no other agent is available to hand '%s' off to", selected.Title))
 	}
 
 	m.handoffChoices = choices
 	m.handoffAccounts = nil
 	m.handoffWarnings = nil
-	if account, _ := selected.AccountSelection(); account != "" {
+	m.handoffAccountOnly = accountOnly
+	title := "Hand off to"
+	if accountOnly {
+		title = "Switch account to"
+	}
+	if account, _ := selected.AccountSelection(); account != "" || accountOnly {
 		m.handoffChoices = nil
 		choices = []string{"Loading accounts…"}
 	}
 	m.handoffTarget = captureSessionActionTarget(selected, m.repoID)
-	m.selectionOverlay = overlay.NewSelectionOverlay("Hand off to", choices)
+	m.selectionOverlay = overlay.NewSelectionOverlay(title, choices)
 	m.state = stateSelectHandoffAgent
 	return m, m.loadHandoffAccounts(current, selected.GetRepoPath())
 }
@@ -112,11 +127,13 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	accounts := m.handoffAccounts
 	warnings := m.handoffWarnings
 	pickerTarget := m.handoffTarget
+	accountOnly := m.handoffAccountOnly
 
 	m.selectionOverlay = nil
 	m.handoffChoices = nil
 	m.handoffAccounts = nil
 	m.handoffWarnings = nil
+	m.handoffAccountOnly = false
 	m.handoffTarget = handoffPickerTarget{}
 	m.state = stateDefault
 	m.menu.SetState(ui.StateDefault)
@@ -143,6 +160,17 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	}
 	detail := "The new agent starts fresh with a summary of the work so far. " +
 		"Same worktree and branch — nothing is discarded."
+	if accountOnly {
+		// An account move is not an agent change: the same program restarts on
+		// the new identity, and it starts a FRESH conversation — the account
+		// relocates the agent's whole home, so the old one is not carried
+		// (#4367 is the open question on changing that). The copy says so,
+		// because offering the move without saying what survives would read as
+		// a promise the swap does not keep.
+		message = fmt.Sprintf("Switch %q to %s account %q?", title, target, account)
+		detail = fmt.Sprintf("%s stays the agent — it restarts on the new account with a fresh "+
+			"conversation and a summary of the work so far. Same worktree and branch.", target)
+	}
 
 	if idx < len(warnings) {
 		detail = warnings[idx] + detail

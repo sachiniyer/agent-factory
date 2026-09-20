@@ -12,6 +12,7 @@ import type { IconName } from "./icon.js";
 import {
   archiveWarningText,
   canHandoff,
+  canHandoffAccount,
   type DotKind,
   idleReasonDetail,
   isArchived,
@@ -395,6 +396,17 @@ test("canHandoff fails closed when the projection omits the field", () => {
     false,
     "the web must not INFER handoff-capability from liveness — that is the daemon's decision to project",
   );
+});
+
+// canHandoffAccount is the account form of the gate (#4433): it is exactly
+// can_handoff plus the reserved root's account move, and the web consumes it
+// separately so an older daemon that omits the field loses only that move —
+// handoff on ordinary rows is untouched.
+test("canHandoffAccount reads the daemon's projected decision and fails closed", () => {
+  assert.equal(canHandoffAccount(sess({ can_handoff_account: true })), true);
+  assert.equal(canHandoffAccount(sess({ can_handoff_account: false })), false);
+  assert.equal(canHandoffAccount(sess()), false,
+    "no can_handoff_account field must offer no account move — never infer it from can_handoff");
 });
 
 /** Builds an RFC3339 timestamp for today at the given local hour/min so the

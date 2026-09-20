@@ -83,6 +83,14 @@ type InstanceData struct {
 	// renders the daemon's decision instead of re-deriving the rule. Scrubbed before
 	// disk persistence like LifecycleAction/CanKill.
 	CanHandoff bool `json:"can_handoff,omitempty"`
+	// CanHandoffAccount is the account-only form of CanHandoff (#4433): the same
+	// two predicates against RuntimeActionHandoffAccount, which shares the
+	// handoff contract minus the reserved-root refusal. It is exactly CanHandoff
+	// plus the one row that can never change agent — the daemon-managed root —
+	// so a browser gates the account move on this field rather than weakening
+	// can_handoff or re-deriving IsReservedTitle. Derived live and scrubbed
+	// before disk like its siblings.
+	CanHandoffAccount bool `json:"can_handoff_account,omitempty"`
 	// CurrentAgent is the agent enum this session is treated AS
 	// (session.CurrentAgentName). Projection-only, carried so a client's handoff
 	// picker can exclude the running agent exactly as the daemon's same-agent guard
@@ -444,6 +452,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.LifecycleAction = LifecycleActionNone
 	d.CanKill = false
 	d.CanHandoff = false
+	d.CanHandoffAccount = false
 	d.CurrentAgent = ""
 	d.IsRoot = false
 	d.ModelChange = nil

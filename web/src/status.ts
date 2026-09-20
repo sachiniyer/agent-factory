@@ -323,6 +323,18 @@ export function canHandoff(s: SessionData): boolean {
 }
 
 
+/** The account-only form of canHandoff (#4433): true when the session may move
+ *  between its CURRENT agent's registered accounts — the one runtime
+ *  replacement the reserved root admits, since an account move keeps the same
+ *  agent on the same worktree and branch (#4395). Equals can_handoff for every
+ *  non-root row; the two fields are consumed separately so an older daemon that
+ *  omits this one loses only root's account move, not handoff everywhere.
+ *  Fails closed — `=== true`. */
+export function canHandoffAccount(s: SessionData): boolean {
+  return s.can_handoff_account === true;
+}
+
+
 /**
  * Whether a session is the reserved root agent (#2513). The web CONSUMES the
  * daemon-projected `is_root` decision (InstanceData.IsRoot — the daemon's own
