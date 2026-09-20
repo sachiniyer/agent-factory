@@ -334,11 +334,12 @@ func (m *home) deleteConfirmedTab(inst *session.Instance, idx int) (tea.Model, t
 // 0 in both directions (reorderTabLocked's from/to <= 0 guard), and a move
 // past either end is a no-op with a notice rather than a silent swallow.
 //
-// Unlike `w`/`t` this is deliberately NOT gated on Capabilities().TabManagement:
-// a reorder spawns and kills nothing — it permutes roster metadata the daemon
-// owns, and off-box sessions' tab lists are fixed in CONTENT, not in order
-// (their two or three tabs can sit in either arrangement harmlessly). The
-// daemon is the authority; if it refuses, its error surfaces verbatim.
+// It shares `w`/`t`'s roster gates even though a reorder spawns and kills
+// nothing: the snapshot's ReconcileTabsFromData skips non-TabManagement
+// backends (app/sync.go), so a move on an off-box roster could diverge from a
+// second client's view with nothing to heal it, and the daemon refuses every
+// tab mutation on an archived session outright to keep the roster intact for
+// restore. Refusing here keeps the notice friendly and off the wire.
 //
 // On success the projection applies the daemon's RESOLVED index — by stable id
 // when the tab carries one, else by ordinal for the id-less legacy window —
@@ -358,6 +359,12 @@ func (m *home) handleMoveTab(delta int) (tea.Model, tea.Cmd) {
 	}
 	if inst == nil {
 		return m, nil
+	}
+	if !inst.Capabilities().TabManagement {
+		return m, m.handleNotice(fmt.Errorf("only local sessions support tab moves — this session's workspace runs off-box (docker/ssh/remote), so its tab order belongs to the runtime"))
+	}
+	if inst.IsArchived() {
+		return m, m.handleNotice(fmt.Errorf("cannot reorder tabs on archived session %q; restore it first (af sessions restore)", inst.Title))
 	}
 	if idx == 0 {
 		return m, m.handleNotice(fmt.Errorf("the agent tab is pinned to the first slot"))

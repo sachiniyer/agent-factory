@@ -496,13 +496,16 @@ func (m *Menu) addInstanceOptions() {
 	if m.instance != nil && !m.instance.Capabilities().TabManagement {
 		tabGroup = nil
 	}
-	// </> move the current tab within the roster (session.tab.reorder, #1813):
-	// it permutes metadata only — spawns nothing, kills nothing — so unlike
-	// `t`/`w` it survives the TabManagement collapse; an off-box session's tabs
-	// are fixed in CONTENT, not in order. The hint exists only when a move
-	// does: the agent tab is pinned to slot 0, so a second movable tab must be
-	// present before either direction can act.
-	if m.instance != nil && m.instance.TabCount() >= 3 {
+	// </> move the current tab within the roster (session.tab.reorder, #1813).
+	// It shares `t`/`w`'s gates: the TUI only mutates rosters it keeps current,
+	// and the snapshot's ReconcileTabsFromData skips non-TabManagement backends
+	// (app/sync.go), so an off-box or archived row would advertise a move whose
+	// result another client's reorder could silently diverge — or that the
+	// daemon refuses outright to keep the archived roster intact for restore.
+	// The hint exists only when a move does: the agent tab is pinned to slot 0,
+	// so a second movable tab must be present before either direction can act.
+	if m.instance != nil && m.instance.Capabilities().TabManagement &&
+		!m.instance.IsArchived() && m.instance.TabCount() >= 3 {
 		tabGroup = append(tabGroup, keys.KeyMoveTabLeft, keys.KeyMoveTabRight)
 	}
 	tabGroup = append(tabGroup, keys.KeyJumpTab)

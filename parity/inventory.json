@@ -1165,7 +1165,7 @@
         "pointer": "api/sessions_tabs.go:264 tab-reorder (+ tabs reorder)"
       },
       "verdict": "parity",
-      "notes": "#1904 added reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar); the TUI had no affordance and the owner call was deferred alongside session.tab.rename — resolved when #4570 grew the TUI's tab-mutation surface. The TUI now exposes it as the rebindable </> pair on the focused tab, routing through the SAME daemon ReorderTab RPC (agent tab pinned at slot 0 in both directions, identity carried by stable session id + tab id, no local persistence — the projection applies the daemon's resolved index and the shared slot resolver carries panes/selection across the permutation)."
+      "notes": "#1904 added reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar); the TUI had no affordance and the owner call was deferred alongside session.tab.rename — resolved when #4570 grew the TUI's tab-mutation surface. The TUI now exposes it as the rebindable </> pair on the focused tab, routing through the SAME daemon ReorderTab RPC (agent tab pinned at slot 0 in both directions, identity carried by stable session id + tab id, no local persistence — the projection applies the daemon's resolved index and the shared slot resolver carries panes/selection across the permutation). Like t/w it is offered only on live locally-managed rosters: off-box backends skip ReconcileTabsFromData (app/sync.go), and the daemon freezes archived rosters for restore)."
     },
     {
       "id": "session.watch",

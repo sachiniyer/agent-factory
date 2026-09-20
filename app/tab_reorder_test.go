@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -171,6 +174,69 @@ func TestMoveTab_DaemonErrorLeavesRoster(t *testing.T) {
 	require.Equal(t, 1, h.store.ActiveTab())
 	h.errBox.SetSize(200, 1)
 	assert.Contains(t, h.errBox.String(), "tab is gone")
+}
+
+// TestMoveTab_RemoteRefuses keeps `</>` behind the same TabManagement gate as
+// `t`/`w`: the snapshot's ReconcileTabsFromData skips off-box backends, so a
+// move there could diverge from a second client's roster with nothing to heal
+// it. The refusal is a local notice — the daemon itself would allow it.
+func TestMoveTab_RemoteRefuses(t *testing.T) {
+	h, alpha := multiTabHome(t)
+	alpha.SetBackend(remoteFakeBackend{session.NewFakeBackend()})
+	require.False(t, alpha.Capabilities().TabManagement, "precondition: remote backend has no tab management")
+	h.focusRegion(layout.RegionTree)
+	h.store.SetActiveTab(1)
+	reqs := recordReorderTab(t)
+
+	pressNav(t, h, ">")
+
+	require.Empty(t, *reqs, "an off-box roster never reaches the daemon")
+	require.Equal(t, []string{"agent", "shell", "shell-2", "shell-3"}, tabNames(alpha))
+	h.errBox.SetSize(200, 1)
+	assert.Contains(t, h.errBox.String(), "off-box")
+}
+
+// TestMoveTab_ArchivedRefuses pins the roster-freeze invariant: the daemon
+// rejects every tab mutation on an archived session to keep the roster intact
+// for restore, so the TUI refuses before the request can hit the wire.
+func TestMoveTab_ArchivedRefuses(t *testing.T) {
+	h, alpha := multiTabHome(t)
+	alpha.SetArchived()
+	h.focusRegion(layout.RegionTree)
+	h.store.SetActiveTab(1)
+	reqs := recordReorderTab(t)
+
+	pressNav(t, h, ">")
+
+	require.Empty(t, *reqs, "an archived session's roster is frozen")
+	require.Equal(t, []string{"agent", "shell", "shell-2", "shell-3"}, tabNames(alpha))
+	h.errBox.SetSize(200, 1)
+	assert.Contains(t, h.errBox.String(), "archived")
+}
+
+// TestMoveTab_AutomationsFocusInert is the captive-focus half: while the
+// Automations rail owns focus, </> must not fall through to the global
+// dispatcher and reorder a session the user is not looking at — the rail's
+// footer does not advertise the pair. Driven through handleKeyPress so the
+// assertion covers the real dispatch path, not just the swallow helper.
+func TestMoveTab_AutomationsFocusInert(t *testing.T) {
+	h, alpha := multiTabHome(t)
+	// The rail's Automations section exists only when a task populates it, and
+	// ring.Focus refuses a hidden region — so the relayout that un-hides it
+	// must run BEFORE focusRegion asks for it.
+	h.store.SetTasks([]task.Task{{ID: "t1", Name: "watch"}})
+	h.relayout()
+	h.store.SetActiveTab(1)
+	h.focusRegion(layout.RegionAutomations)
+	require.True(t, h.automations.Focused(), "precondition: automations rail holds focus")
+	reqs := recordReorderTab(t)
+
+	for _, k := range []string{">", "<"} {
+		_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+	}
+	require.Empty(t, *reqs, "no move may fire while the Automations rail owns focus")
+	require.Equal(t, []string{"agent", "shell", "shell-2", "shell-3"}, tabNames(alpha))
+	assert.Equal(t, layout.RegionAutomations, h.ring.Active(), "the key must not move focus either")
 }
 
 // TestMoveTab_OtherPanesFollowTheirTabs is the roster-wide identity check: a
