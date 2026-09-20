@@ -12790,7 +12790,7 @@ function previewOriginReachable(origin, fresh = false) {
       window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
       frame.remove();
-      if (!ok) {
+      if (!ok && previewReachable.get(port) === probe) {
         previewReachable.delete(port);
       }
       resolve(ok);
@@ -13518,6 +13518,9 @@ var SplitView = class {
       if (previewSrc !== "") {
         open.href = previewSrc;
         fbLink.href = previewSrc;
+      } else {
+        open.href = openHref;
+        fbLink.href = openHref;
       }
       showFrame();
       const next = bust && webProxied ? cacheBustedWebSrc(base, nextReloadNonce()) : base;

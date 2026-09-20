@@ -238,7 +238,7 @@ export function previewOriginReachable(origin: string, fresh = false): Promise<b
       window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
       frame.remove();
-      if (!ok) {
+      if (!ok && previewReachable.get(port) === probe) {
         previewReachable.delete(port);
       }
       resolve(ok);
@@ -1416,6 +1416,9 @@ export class SplitView {
       if (previewSrc !== "") {
         open.href = previewSrc;
         fbLink.href = previewSrc;
+      } else {
+        open.href = openHref;
+        fbLink.href = openHref;
       }
       showFrame();
       // A user-initiated reload of a PROXIED target is cache-busted (#1900): without
