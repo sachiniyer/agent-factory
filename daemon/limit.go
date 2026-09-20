@@ -677,9 +677,6 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			if paneErr := instance.ValidateAccountSwapReplacementPanes(); paneErr != nil {
 				repairErr = paneErr
 			}
-			if accountSwap.accountNamespace() == tmux.ProgramCodex && !instance.AgentConversation().HasID() {
-				repairErr = errors.Join(repairErr, errors.New("its Codex conversation id is not durable"))
-			}
 			if repairErr != nil {
 				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
 					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
@@ -731,6 +728,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		shouldRespawn = true
 	}
 	var accountConversationCapture session.ConversationCaptureSnapshot
+	captureAccountConversationAfterDelivery := false
 	if shouldRespawn {
 		// Capture the limit window BEFORE the re-spawn: Respawn ends in ConfirmLive,
 		// which drops both the LiveLimitReached liveness and its reset time, and
@@ -847,11 +845,24 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// The fresh runtime may be parked on Codex's directory-trust modal — alive
 		// but idle, writing no rollout. Run the shared readiness/dismissal
 		// contract before capture and the send (#4392).
-		if err := m.settleReplacementRuntime(repoID, key, requestedTitle, instance, accountSwap, shouldRespawn, accountConversationCapture); err != nil {
+		var err error
+		captureAccountConversationAfterDelivery, err = m.settleReplacementRuntime(
+			repoID, key, requestedTitle, instance, accountSwap, shouldRespawn, accountConversationCapture)
+		if err != nil {
 			if settleErr != nil {
 				return resumeNotPerformed, errors.Join(err, settleErr)
 			}
 			return resumeNotPerformed, err
+		}
+		if !shouldRespawn && instance.AgentRuntimeToken().Agent() == tmux.ProgramCodex &&
+			!instance.AgentConversation().HasID() {
+			// A daemon restart loses the pre-launch provider-store snapshot while
+			// preserving the live replacement pane. Baseline the shared account
+			// store now, after readiness and immediately before delivery, so the
+			// mission's rollout can be captured without mistaking an older or
+			// concurrently-created rollout from another session for this one (#4715).
+			accountConversationCapture, captureAccountConversationAfterDelivery =
+				m.prepareLiveAccountSwapConversationCapture(instance, accountSwap)
 		}
 	}
 
@@ -954,6 +965,14 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	}
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
+	if captureAccountConversationAfterDelivery {
+		// The first mission minted the fresh Codex rollout that did not exist at
+		// the synchronous pre-delivery capture. Start discovery only after delivery
+		// retired the pending swap and its completion checkpoint was attempted. The
+		// async capture serializes its whole-row write through this operation's lock,
+		// so it cannot persist the retired marker state until this recovery returns.
+		m.captureAgentConversationAsync(repoID, key, instance, accountConversationCapture)
+	}
 	if persistErr != nil {
 		m.warn().Printf("failed to persist instance %q: %v", instance.Title, persistErr)
 		if manual {
