@@ -13,12 +13,14 @@ on:
   # an easy way to silently stop the checks from running.
   merge_group:
 
-  # Auto Gate dispatches this when its own update-branch produced no
-  # pull_request run at all for the new head, so the update-and-merge loop cannot
-  # stall waiting for a run that will never exist (#3807). A dispatch takes a
-  # REF, never a sha, so it runs at the branch tip — which is the new head.
+  # Auto Gate dispatches this when a head has no PR Validation run at all, so a
+  # decision cannot stall waiting for a run that will never exist: the head its
+  # own update-branch created (#3807), and any other head GitHub created no run
+  # for (#4581). A dispatch takes a REF, never a sha, so it runs at the branch
+  # tip. For #3807 that tip is the new head. For #4581 Auto Gate re-reads the tip
+  # first and skips the dispatch when it is no longer the head it evaluated.
   #
-  # That dispatch passes no inputs, so it gets probe=false: the full run, exactly
+  # Both dispatches pass no inputs, so they get probe=false: the full run, exactly
   # as before. probe=true is the fail-first probe (#4563, docs/dev/probe-runs.md):
   # only the Linux Test job runs, on the packages and -run regex given, and every
   # other job is skipped.
@@ -65,6 +67,10 @@ concurrency:
   # dispatch on the same branch would share pr-refs/heads/<branch> and cancel
   # each other, and Build, which runs always(), fails on a cancelled need.
   # Every other event resolves to the same pr-… group as before.
+  #
+  # Auto Gate's dispatches, #3807's and #4581's, are not probes, so they land in
+  # pr-refs/heads/<branch>. Two #4581 dispatches that race on one branch
+  # therefore cancel down to one run, and a probe on that branch cancels neither.
   group: ${{ inputs.probe && 'probe-' || 'pr-' }}${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
@@ -217,7 +223,7 @@ jobs:
       # runner's preinstalled Node and the built-in node:test — no package.json,
       # no install step.
       - name: Test auto-gate helper
-        run: node --test .github/scripts/auto-gate.test.js .github/scripts/codex-outage.test.js
+        run: node --test .github/scripts/auto-gate.test.js .github/scripts/codex-outage.test.js .github/scripts/go-inert.test.js
 
       # Same rationale again, one layer up: this helper decides whether the web
       # selftest RUNS, and its tests also assert the wiring that gives a red run

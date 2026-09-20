@@ -145,9 +145,9 @@ af tasks add \
 
 ## Remote machines
 
-Remote hooks let a repo define scripts for launching, listing, attaching to,
-and deleting sessions on another backend. Remote sessions appear in the same
-TUI, with the same Agent tab and attach flow.
+Remote hooks let a repo define scripts for provisioning and deleting sessions
+on another backend. Remote sessions appear in the same TUI, with the same Agent
+tab and attach flow.
 
 This is useful when agents need a beefier machine, a specific network, or a
 remote development environment while you still want one local control surface.

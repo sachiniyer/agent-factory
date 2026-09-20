@@ -25,7 +25,7 @@ import (
 //     limit_auto_resume is on, or the manual `c` retry) re-delivers it once the
 //     window resets. Return nil so CreateSession registers+persists it as a
 //     parked row, not a failed one, firing no failure side-effects. The stored
-//     prompt is the only input resumeFromLimit re-delivers, so it is set here so
+//     prompt is the only input resumeFromLimitOutcome re-delivers, so it is set here so
 //     a parked task run resumes its OWN work rather than a bare "continue". A
 //     later handoff brief may replace this durable goal; both paths use Instance's
 //     prompt accessors so the resume scheduler cannot race the handoff writer.
@@ -277,7 +277,7 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 }
 
 // This file is the daemon side of the usage-limit manual-retry action (#1146
-// PR2): the ResumeFromLimit RPC and the reusable resumeFromLimit Manager method
+// PR2): the ResumeFromLimit RPC and the reusable resumeFromLimitOutcome Manager method
 // behind it. Detection itself lives in refreshInstanceStatus (control.go), which
 // runs the PR1 detector over captured pane content and sets the LiveLimitReached
 // liveness. Split out of control.go to keep that (grandfathered, #1145) file
@@ -344,42 +344,12 @@ func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *Resume
 	return nil
 }
 
-// resumeFromLimit clears a session's usage-limit block and nudges its agent back
-// to work (#1146). It is the reusable resume action shared by the TUI manual-
-// retry key (`c`) and PR3's auto-resume scheduler — factored as a Manager method
-// rather than inlined so the scheduler can call it directly. If the agent's tmux
-// session exited while blocked it is re-spawned (Recover → resumeProgram) before
-// the prompt is sent; a live stall needs no respawn. The pending prompt is then
-// re-delivered — the session's stored initial/task prompt when it carries one (a
-// task-driven session resumes its work), else a bare "continue" that un-stalls an
-// interactive session (which loses context per anthropics/claude-code#5977;
-// documented). The LimitReached liveness is cleared so the poll re-resolves the
-// real state on the next tick, and the transition is persisted.
-//
-// Delivering that prompt is the ONLY thing that lifts the block: a resume that
-// fails anywhere before the send lands leaves the session parked at the wall,
-// both in memory and on disk, so the manual retry and the auto-resume scheduler
-// (which both gate on the limit still being set) can pick it up again. The
-// respawn arm re-applies the block for that reason — Respawn ends in ConfirmLive,
-// which would otherwise report a session as resumed before its prompt existed.
-//
-// Takes the per-(repo, title) target lock and then the per-session op lock — the
-// same target-before-op order DeliverPrompt uses (#2006) — and re-verifies the
-// limit state under them, so it never races a self-recovery, a kill, a concurrent
-// resume, or an overlapping send-prompt. Rejects a tombstoned / reserved-root
-// session, mirroring the lostrestore guards.
-//
-// testHookResumeAfterFirstLock fires in resumeFromLimit immediately after the
-// FIRST of its two locks is acquired, before the second. No-op in production; the
-// #2006 ABBA regression test substitutes a barrier so it can pin one resume
+// testHookResumeAfterFirstLock fires in resumeFromLimitOutcome immediately after
+// the FIRST of its two locks is acquired, before the second. No-op in production;
+// the #2006 ABBA regression test substitutes a barrier so it can pin one resume
 // goroutine holding its first lock and force the cross-lock interleaving that the
 // inverted order deadlocked on.
 var testHookResumeAfterFirstLock = func() {}
-
-func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
-	_, err := m.resumeFromLimitOutcome(req)
-	return err
-}
 
 func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFromLimitOutcome, error) {
 	// resolveActionSession, not findSession: id-first with a {title, repoID}
@@ -456,9 +426,14 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 	return m.resumeFromLimitLockedOutcome(repoID, key, instance, title, committedAccountSwap(instance))
 }
 
-func (m *Manager) resumeFromLimitLockedWithAccount(repoID, key string, instance *session.Instance, requestedTitle string, swap *autoAccountSwap) error {
-	_, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, swap)
-	return err
+// resumeFromLimitLockedWithAccount is the auto-resume scheduler's entry to the
+// shared limit-resume body. It returns the outcome alongside the error so the
+// caller can distinguish a real resume (resumePerformed) from a no-op
+// (resumeNotPerformed): both return a nil error, and only the former is a
+// success worth logging. The manual-retry path exposes this same distinction
+// through ResumeFromLimitResponse.OK (outcome == resumePerformed).
+func (m *Manager) resumeFromLimitLockedWithAccount(repoID, key string, instance *session.Instance, requestedTitle string, swap *autoAccountSwap) (resumeFromLimitOutcome, error) {
+	return m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, swap)
 }
 
 // fallBackFromUncommittedAccountSwap applies one deadline rule to every refusal
@@ -742,7 +717,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	case probeAbsent:
 		if accountSwap != nil && !forceRespawn {
 			if accountSwap.alreadySet {
-				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
+				if err := revalidateGoneAccountSwap(instance, accountSwap.to); err != nil {
 					return resumeNotPerformed, err
 				}
 			}
@@ -882,7 +857,15 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 
 	prompt := strings.TrimSpace(instance.GetPrompt())
 	if accountSwap != nil {
-		prompt = accountSwapPrompt(accountSwap, prompt)
+		if accountSwap.manual {
+			// The replacement launch can demote a committed conversation carry
+			// to a fresh start and re-render the stored mission; deliver the
+			// record's version, never the one frozen before the launch (#4367).
+			if _, mission := instance.PendingManualAccountSwap(); mission != "" {
+				accountSwap.mission = mission
+			}
+		}
+		prompt = accountSwapPrompt(accountSwap, prompt, instance.PendingAccountSwapConversation())
 	} else if prompt == "" {
 		// Interactive session with no stored prompt: the best we can do is
 		// un-stall it. Loses the agent's prior context (documented caveat).
