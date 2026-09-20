@@ -638,7 +638,8 @@ func TestResumeLimitedSessionsCapturesReplacementCodexConversation(t *testing.T)
 // creating a rollout; the first submitted message creates it. The pre-delivery
 // capture must treat that absence as the committed fresh-conversation fallback,
 // deliver the mission, and retire the pending marker instead of respawning the
-// empty composer forever.
+// empty composer forever. Once delivery creates the rollout, post-delivery
+// capture must record its id so a later account handoff can carry this session.
 func TestResumeLimitedSessions_DeliversBeforeFreshCodexMintsRollout(t *testing.T) {
 	advance := withFrozenClock(t)
 	base := nowFunc()
@@ -680,6 +681,12 @@ func TestResumeLimitedSessions_DeliversBeforeFreshCodexMintsRollout(t *testing.T
 		"the committed record must retain why this same-agent swap starts fresh")
 	require.Nil(t, inst.ToInstanceData().PendingAccountSwap,
 		"successful delivery must retire the marker that fences lifecycle actions")
+	require.Eventually(t, func() bool {
+		conv := inst.AgentConversation()
+		return conv.Agent == tmux.ProgramCodex &&
+			conv.ID == "019f63f8-35a7-7ab1-b9b8-d420f6c0e51b"
+	}, 2*time.Second, 10*time.Millisecond,
+		"the rollout minted by mission delivery must be captured for the next account handoff")
 }
 
 // TestResumeFromLimit_LiveStartedCodexSwapWithoutRolloutDeliversMission covers

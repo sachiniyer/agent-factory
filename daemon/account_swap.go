@@ -474,11 +474,13 @@ var accountSwapTrustDismissInterval = 200 * time.Millisecond
 // status poll skips a pending-swap row, and delivery's own dismissal runs only
 // after this returns. Pump the existing guarded recognizer so the replacement
 // can reach its composer. Reaching it does not itself mint a rollout; the
-// no-rollout branch below handles that separate #4712 ordering constraint.
-func captureAccountSwapConversation(instance *session.Instance, snap session.ConversationCaptureSnapshot) error {
+// no-rollout branch below handles that separate #4712 ordering constraint. The
+// boolean result asks the caller to capture again after delivery creates the
+// rollout and retires the pending recovery marker.
+func captureAccountSwapConversation(instance *session.Instance, snap session.ConversationCaptureSnapshot) (bool, error) {
 	token := instance.AgentRuntimeToken()
 	if token.Agent() != tmux.ProgramCodex {
-		return nil
+		return false, nil
 	}
 	type captureResult struct {
 		conversation session.AgentConversationData
@@ -501,22 +503,22 @@ func captureAccountSwapConversation(instance *session.Instance, snap session.Con
 	}
 	ticker.Stop()
 	if res.err != nil {
-		return fmt.Errorf("capture replacement Codex conversation: %w", res.err)
+		return false, fmt.Errorf("capture replacement Codex conversation: %w", res.err)
 	}
 	if !res.conversation.HasID() {
 		// A fresh Codex runtime does not create a rollout merely by reaching its
 		// composer. The first submitted message creates it, and this capture runs
 		// before mission delivery so a capture failure can never turn a delivered
 		// mission into an ambiguous retry. No rollout is therefore the expected
-		// fresh-conversation fallback, not a failed replacement (#4712). The record
-		// intentionally remains without an id; recovery already treats missing
-		// additive conversation metadata as a provider-latest fallback.
-		return nil
+		// fresh-conversation fallback, not a failed replacement (#4712). Tell the
+		// caller to capture again only after the first mission has landed and the
+		// pending recovery marker has been retired.
+		return true, nil
 	}
 	if !instance.RecordAccountSwapConversationForRuntime(token, res.conversation) {
-		return errors.New("replacement Codex runtime changed before its conversation id could be recorded")
+		return false, errors.New("replacement Codex runtime changed before its conversation id could be recorded")
 	}
-	return nil
+	return false, nil
 }
 
 // settleReplacementRuntime brings an account replacement's fresh provider
@@ -547,7 +549,7 @@ func (m *Manager) settleReplacementRuntime(
 	swap *autoAccountSwap,
 	launched bool,
 	snap session.ConversationCaptureSnapshot,
-) error {
+) (bool, error) {
 	_, err := task.WaitForReadyAndSendPromptWithStatus(context.Background(), instance, "")
 	var limitErr *task.LimitReachedError
 	switch {
@@ -563,23 +565,25 @@ func (m *Manager) settleReplacementRuntime(
 		} else {
 			parkErr = m.reparkLimitUnderResumeFence(instance, limitErr.ResetAt)
 		}
-		return errors.Join(
+		return false, errors.Join(
 			fmt.Errorf("account replacement for %q reached a usage limit on the incoming identity before its runtime became usable: %w", requestedTitle, err),
 			parkErr, m.persistSettlement(repoID, key, instance))
 	case errors.Is(err, task.ErrAgentReadiness):
 		instance.MarkStartupStateUnknown()
-		return errors.Join(
+		return false, errors.Join(
 			fmt.Errorf("account replacement for %q never reached a usable runtime: %w", requestedTitle, err),
 			m.persistSettlement(repoID, key, instance))
 	default:
-		return fmt.Errorf("account replacement for %q did not become ready: %w", requestedTitle, err)
+		return false, fmt.Errorf("account replacement for %q did not become ready: %w", requestedTitle, err)
 	}
 	if launched {
-		if err := captureAccountSwapConversation(instance, snap); err != nil {
-			return fmt.Errorf("failed to preserve the replacement conversation for %q: %w", requestedTitle, err)
+		captureAfterDelivery, err := captureAccountSwapConversation(instance, snap)
+		if err != nil {
+			return false, fmt.Errorf("failed to preserve the replacement conversation for %q: %w", requestedTitle, err)
 		}
+		return captureAfterDelivery, nil
 	}
-	return nil
+	return false, nil
 }
 
 // prepareRuntimeForAccountSwap establishes that every old local pane is gone
