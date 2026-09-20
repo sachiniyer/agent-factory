@@ -138,6 +138,79 @@ func setTabCreateFlagsForTest(t *testing.T, command, name, kind, url string, por
 	tabCreateURLFlag, tabCreatePortFlag = url, port
 }
 
+func setTabCreateFlagSuppliedForTest(t *testing.T, name string) {
+	t.Helper()
+	flag := sessionsTabCreateCmd.Flags().Lookup(name)
+	if flag == nil {
+		t.Fatalf("tab-create flag --%s is not registered", name)
+	}
+	previous := flag.Changed
+	flag.Changed = true
+	t.Cleanup(func() { flag.Changed = previous })
+}
+
+// TestSessionsTabCreateTargetFlagPresence distinguishes a flag's presence from
+// its value. In particular, pflag records both --port 0 and --url "" as
+// supplied even though their bound values are the Go zero values. Kinds that
+// cannot consume targets must reject those spellings, while web must validate
+// the supplied zero/empty value instead of claiming the flag was absent. Each
+// arm also pins its ordinary accepted path.
+func TestSessionsTabCreateTargetFlagPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, kind, url, supplied, wantErr string
+		port                                        int
+	}{
+		{name: "shell/control", kind: "shell"},
+		{name: "shell/portZero", kind: "shell", supplied: "port", wantErr: "--url/--port are not valid for a shell tab"},
+		{name: "shell/urlEmpty", kind: "shell", supplied: "url", wantErr: "--url/--port are not valid for a shell tab"},
+		{name: "shell/urlWhitespace", kind: "shell", url: "   ", supplied: "url", wantErr: "--url/--port are not valid for a shell tab"},
+		{name: "vscode/control", kind: "vscode"},
+		{name: "vscode/portZero", kind: "vscode", supplied: "port", wantErr: "--url/--port are not valid for a vscode tab"},
+		{name: "vscode/urlEmpty", kind: "vscode", supplied: "url", wantErr: "--url/--port are not valid for a vscode tab"},
+		{name: "vscode/urlWhitespace", kind: "vscode", url: "   ", supplied: "url", wantErr: "--url/--port are not valid for a vscode tab"},
+		{name: "process/control", command: "npm run dev"},
+		{name: "process/portZero", command: "npm run dev", supplied: "port", wantErr: "--url/--port are not valid for a process tab"},
+		{name: "process/urlEmpty", command: "npm run dev", supplied: "url", wantErr: "--url/--port are not valid for a process tab"},
+		{name: "process/urlWhitespace", command: "npm run dev", url: "   ", supplied: "url", wantErr: "--url/--port are not valid for a process tab"},
+		{name: "web/control", kind: "web", port: 3000},
+		{name: "web/portZero", kind: "web", supplied: "port", wantErr: "web tab port must be between 1 and 65535, got 0"},
+		{name: "web/urlEmpty", kind: "web", supplied: "url", wantErr: "a web tab requires a target URL (--url or --port)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupRepoForCmd(t)
+			setTabCreateFlagsForTest(t, tc.command, "", tc.kind, tc.url, tc.port)
+			if tc.supplied != "" {
+				setTabCreateFlagSuppliedForTest(t, tc.supplied)
+			}
+
+			called := false
+			previousCreate := createTabViaDaemon
+			createTabViaDaemon = func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+				called = true
+				return daemon.CreateTabResponse{Name: "created"}, nil
+			}
+			t.Cleanup(func() { createTabViaDaemon = previousCreate })
+
+			_, err := runCmdCaptureStdout(t, sessionsTabCreateCmd, []string{"worker"})
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("accepted path returned error: %v", err)
+				}
+				if !called {
+					t.Fatal("accepted path did not reach the daemon")
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want one containing %q", err, tc.wantErr)
+			}
+			if called {
+				t.Fatal("invalid target flag reached the daemon")
+			}
+		})
+	}
+}
+
 // TestSessionsTabCreateShellUsesTheUIShellPath closes
 // session.tab.create.shell: --kind shell is the canonical CLI spelling, but the
 // request is normalized onto Shell=true — the same daemon path both UIs use —
