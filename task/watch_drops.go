@@ -2,6 +2,7 @@ package task
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -13,10 +14,29 @@ import (
 // falsely describe an event that never reached its target.
 const WatchRateDropStatus = "dropped: event rate limit exceeded"
 
+// isTerminalWatcherStatus reports whether status is a watcher terminal
+// outcome that a drop flush must not overwrite. It mirrors the live-overlay
+// terminal latch in daemon/watcher_drop_visibility.go (applyLiveDropState):
+// "stopped" (a clean script exit) and any "errored:" outcome (the crash-loop
+// breaker's failureSummary, or an arming refusal's "errored: not armed — …")
+// are both newer-than-the-drop terminal outcomes that deliberately record
+// without advancing LastRunAt, so a stop-time drop flush passing lastDroppedAt
+// would otherwise satisfy the LastRunAt guard and clobber them. Unlike the
+// live overlay this durable guard cannot rely on an in-memory terminalStatus
+// latch, so it inspects the on-disk LastRunStatus directly.
+func isTerminalWatcherStatus(status string) bool {
+	return status == "stopped" || strings.HasPrefix(status, "errored:")
+}
+
 // RecordWatchRateDrops advances a task's cumulative rate-drop count to total
-// without changing LastRunAt. It records the dropped outcome only when the drop
-// is not older than the latest successful delivery, so a shutdown flush cannot
-// overwrite newer "sent" evidence. total is absolute, so a delayed checkpoint
+// without changing LastRunAt. The cumulative count advances unconditionally. It
+// records the dropped outcome only when no newer terminal watcher status is
+// already on disk and the drop is not older than the latest successful
+// delivery, so a shutdown flush can neither overwrite newer "sent" evidence
+// nor replace a newer "stopped"/"errored:" terminal outcome (terminal writes
+// deliberately preserve LastRunAt, so a wall-clock droppedAt that predates the
+// terminal exit would otherwise satisfy the LastRunAt guard and clobber the
+// outcome the watcher persisted). total is absolute, so a delayed checkpoint
 // cannot double-count a burst; a stale lower checkpoint is ignored under the
 // task-file lock.
 func RecordWatchRateDrops(taskID string, total int, droppedAt time.Time) (Task, error) {
@@ -74,7 +94,8 @@ func recordWatchRateDrops(taskID, expectedGenerationID string, requireGeneration
 				return nil
 			}
 			tasks[i].DroppedEvents = total
-			if tasks[i].LastRunAt == nil || !droppedAt.Before(*tasks[i].LastRunAt) {
+			if !isTerminalWatcherStatus(tasks[i].LastRunStatus) &&
+				(tasks[i].LastRunAt == nil || !droppedAt.Before(*tasks[i].LastRunAt)) {
 				tasks[i].LastRunStatus = WatchRateDropStatus
 			}
 			applied = true

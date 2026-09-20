@@ -25,6 +25,14 @@ type watchRecorder struct {
 	statuses []string // "<taskID>:<status>"
 }
 
+// adaptWatchDelivery lifts a delivery stub that ignores queue-head options into
+// the supervisor hook's shape.
+func adaptWatchDelivery(deliver func(taskID, taskGenerationID, line string) error) func(string, string, string, watchDeliveryOptions) error {
+	return func(taskID, taskGenerationID, line string, _ watchDeliveryOptions) error {
+		return deliver(taskID, taskGenerationID, line)
+	}
+}
+
 func (r *watchRecorder) deliver(taskID, _ string, line string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -59,7 +67,7 @@ func newTestSupervisor(t *testing.T, tasks func() ([]task.Task, error)) (*watche
 	logDir := t.TempDir()
 	s := newWatcherSupervisor()
 	s.loadTasks = tasks
-	s.deliver = rec.deliver
+	s.deliver = adaptWatchDelivery(rec.deliver)
 	s.setStatus = rec.setStatus
 	s.recordDrops = func(string, string, int, time.Time) error { return nil }
 	s.resetDrops = func(string, string) error { return nil }
@@ -755,10 +763,10 @@ func TestWatcherTailCapturesNonDeliveredStdout(t *testing.T) {
 	dir := t.TempDir()
 	script := `echo "lock contention detected"; printf "death rattle"; exit 1`
 	s, rec := newTestSupervisor(t, staticTasks(watchTask("ab970002", script, dir)))
-	s.deliver = func(taskID, generationID, line string) error {
+	s.deliver = adaptWatchDelivery(func(taskID, generationID, line string) error {
 		_ = rec.deliver(taskID, generationID, line)
 		return errors.New("session spawn failed")
-	}
+	})
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)

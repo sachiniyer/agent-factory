@@ -578,7 +578,7 @@ func TestResumeFromLimitPromotesPendingClaudeConversationBeforeClear(t *testing.
 	backend.mu.Lock()
 	backend.sendPromptErr = nil
 	backend.mu.Unlock()
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
 		t.Fatal(err)
 	}
 	if conv := inst.AgentConversation(); conv.Agent != tmux.ProgramClaude || conv.ID != want {
@@ -804,7 +804,7 @@ func TestResumeFromLimit_LiveCommittedCodexSwapRecapturesBeforeClearingMarker(t 
 			"rollout-2026-08-10T12-00-00-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", worktree)
 	}
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
 		t.Fatal(err)
 	}
 	_, respawns, _ := backend.snapshot()
@@ -866,7 +866,7 @@ func TestResumeFromLimit_CommittedSwapStillDeliversNoticeAfterOptOut(t *testing.
 	backend.mu.Lock()
 	backend.sendPromptErr = nil
 	backend.mu.Unlock()
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
 		t.Fatalf("manual retry of committed replacement: %v", err)
 	}
 
@@ -899,7 +899,7 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 		RunFunc: func(cmd *exec.Cmd) error {
 			if blockedSibling != "" && strings.Contains(cmd.String(), "new-session") &&
 				strings.Contains(cmd.String(), blockedSibling) {
-				return errors.New("process restart refused")
+				return errors.New("shell restart refused")
 			}
 			return innerExecutor.Run(cmd)
 		},
@@ -910,7 +910,12 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 	inst.SetGitWorktreeForTest(gw)
 	inst.SetTmuxSession(agent)
 	inst.SetBackend(&session.LocalBackend{})
-	if _, err := inst.AddProcessTab("git status --short", "build"); err != nil {
+	// A SHELL sibling, not a process tab: a missing process tab restores inert
+	// by design and is never relaunched (#4479), so only a sibling the
+	// replacement must restart can leave the pane set incomplete. /bin/sh is a
+	// shell the account boundary can launch startup-free.
+	t.Setenv("SHELL", "/bin/sh")
+	if _, err := inst.AddShellTab(); err != nil {
 		t.Fatal(err)
 	}
 	data := inst.ToInstanceData()
@@ -920,8 +925,8 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 	siblingName := data.Tabs[1].TmuxName
 	blockedSibling = siblingName
 	if state, err := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
-		siblingName, "git status --short", pty, executor).Close(); state != tmux.PaneStateKnown || err != nil {
-		t.Fatalf("process sibling absent: state=%v err=%v", state, err)
+		siblingName, "/bin/sh", pty, executor).Close(); state != tmux.PaneStateKnown || err != nil {
+		t.Fatalf("shell sibling absent: state=%v err=%v", state, err)
 	}
 	if inst.TabAlive(1) {
 		t.Fatal("fixture sibling must be absent while the replacement agent answers live")
@@ -945,7 +950,7 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 	inst.EndLimitResume()
 	requirePendingSwap()
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err == nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err == nil {
 		t.Fatal("live agent with a missing expected sibling completed the pending account swap")
 	}
 	requirePendingSwap()
@@ -1050,7 +1055,7 @@ func TestResumeFromLimit_TeardownRefusalFallsBackWhenOrdinaryResumeIsDue(t *test
 	require.NotNil(t, swap)
 	swap.fallbackDue = true
 	key := daemonInstanceKey(repoID, inst.Title)
-	_ = manager.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, swap)
+	_, _ = manager.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, swap)
 
 	require.True(t, swap.fellBack,
 		"a pre-commit teardown refusal must not starve an already-due ordinary resume")

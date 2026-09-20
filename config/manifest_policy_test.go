@@ -301,9 +301,8 @@ func TestManifestResolutionPoliciesAreComplete(t *testing.T) {
 }
 
 // TestManifestDerivedInRepoPolicyViews compares the generated compatibility
-// views directly with both schemas. This is the lock that replaces the three
-// old literals: allowed/global-only is source policy, while TOML-only is format
-// compatibility.
+// views directly with both schemas. This is the lock that replaces the two
+// old literals for allowed and global-only keys (both source policy).
 func TestManifestDerivedInRepoPolicyViews(t *testing.T) {
 	schemas := currentManifestSchemas()
 	globalFields := manifestSchemaFields(t, schemas[0])
@@ -319,8 +318,7 @@ func TestManifestDerivedInRepoPolicyViews(t *testing.T) {
 	}
 
 	wantGlobalOnly := make(map[string]bool)
-	wantTOMLOnly := make(map[string]bool)
-	for key, field := range globalFields {
+	for key := range globalFields {
 		if _, skipped := manifestSkippedKeys[key]; skipped {
 			continue
 		}
@@ -328,18 +326,11 @@ func TestManifestDerivedInRepoPolicyViews(t *testing.T) {
 			wantGlobalOnly[key] = true
 			if alias, ok := configAliasForCanonical(key); ok {
 				wantGlobalOnly[alias.legacy] = true
-				wantTOMLOnly[key] = true
 			}
-		}
-		if structTagName(field.Tag.Get("json")) == "-" {
-			wantTOMLOnly[key] = true
 		}
 	}
 	if !reflect.DeepEqual(inRepoGlobalOnlyKeys, wantGlobalOnly) {
 		t.Errorf("inRepoGlobalOnlyKeys = %v, want schema-derived %v", inRepoGlobalOnlyKeys, wantGlobalOnly)
-	}
-	if !reflect.DeepEqual(tomlOnlyGlobalKeys, wantTOMLOnly) {
-		t.Errorf("tomlOnlyGlobalKeys = %v, want format-derived %v", tomlOnlyGlobalKeys, wantTOMLOnly)
 	}
 }
 

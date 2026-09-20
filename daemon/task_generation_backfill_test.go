@@ -215,7 +215,7 @@ func TestPreUpgradeWatchBacklogFollowsBackfilledGeneration(t *testing.T) {
 
 	s1, _ := newTestSupervisor(t, staticTasks(watchTask(id, `echo e1; echo e2; sleep 60`, dir)))
 	fd1 := &flakyDeliver{}
-	s1.deliver = fd1.deliver
+	s1.deliver = adaptWatchDelivery(fd1.deliver)
 	queueDir, _ := s1.queueDir()
 	require.NoError(t, s1.Reload())
 	waitUntil(t, 10*time.Second, "pre-upgrade backlog to persist", func() bool {
@@ -228,7 +228,7 @@ func TestPreUpgradeWatchBacklogFollowsBackfilledGeneration(t *testing.T) {
 	s2, _ := newTestSupervisor(t, staticTasks(upgraded))
 	fd2 := &flakyDeliver{}
 	fd2.healed.Store(true)
-	s2.deliver = fd2.deliver
+	s2.deliver = adaptWatchDelivery(fd2.deliver)
 	s2.queueDir = func() (string, error) { return queueDir, nil }
 	require.NoError(t, s2.Reload())
 	waitUntil(t, 10*time.Second, "the adopted backlog to replay in order", func() bool {
@@ -262,7 +262,7 @@ func TestDisabledBackfilledRowKeepsLegacyBacklogForReenable(t *testing.T) {
 	s, _ := newTestSupervisor(t, func() ([]task.Task, error) { return []task.Task{current}, nil })
 	fd := &flakyDeliver{}
 	fd.healed.Store(true)
-	s.deliver = fd.deliver
+	s.deliver = adaptWatchDelivery(fd.deliver)
 	s.queueDir = func() (string, error) { return queueDir, nil }
 	require.NoError(t, s.Reload())
 	_, err := os.Stat(filepath.Join(queueDir, id+".jsonl"))
@@ -290,7 +290,7 @@ func TestMintedGenerationDoesNotAdoptLegacyBacklog(t *testing.T) {
 	s, _ := newTestSupervisor(t, staticTasks(replacement))
 	fd := &flakyDeliver{}
 	fd.healed.Store(true)
-	s.deliver = fd.deliver
+	s.deliver = adaptWatchDelivery(fd.deliver)
 	s.queueDir = func() (string, error) { return queueDir, nil }
 	require.NoError(t, s.Reload())
 	waitUntil(t, 10*time.Second, "the legacy backlog to be swept", func() bool {

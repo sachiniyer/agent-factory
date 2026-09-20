@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -107,16 +106,7 @@ func TestRunTask_RefusesDisabledTask(t *testing.T) {
 func setupTaskRepo(t *testing.T) string {
 	t.Helper()
 	repo := filepath.Join(t.TempDir(), "repo")
-	for _, args := range [][]string{
-		{"init", repo},
-		{"-C", repo, "config", "user.email", "test@example.com"},
-		{"-C", repo, "config", "user.name", "Test User"},
-		{"-C", repo, "commit", "--allow-empty", "-m", "init"},
-	} {
-		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
+	cloneRepoTemplate(t, repo)
 	return repo
 }
 
@@ -147,20 +137,20 @@ func stubTaskDelivery(t *testing.T) (*[]CreateSessionRequest, *[]DeliverPromptRe
 			TaskGenerationID: req.TaskGenerationID, TaskRunSequence: 1,
 		}, nil
 	}
-	deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
+	deliverPromptForTask = func(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
 		delivers = append(delivers, req)
 		repo, err := config.RepoFromPath(req.RepoPath)
 		if err != nil {
-			return "", err
+			return taskPromptDeliveryResult{}, err
 		}
 		exists, err := repoHasSessionTitle(repo.ID, req.Title)
 		if err != nil {
-			return "", err
+			return taskPromptDeliveryResult{}, err
 		}
 		if exists {
-			return "sent", nil
+			return taskPromptDeliveryResult{status: "sent"}, nil
 		}
-		return "started", nil
+		return taskPromptDeliveryResult{status: "started"}, nil
 	}
 	t.Cleanup(func() {
 		createSessionForTask = origCreate

@@ -121,7 +121,7 @@ See the [TUI guide](tui.md#accounts) and [web guide](web.md#config-view).
 runs as the account you named or does not start — and by default never rotates
 accounts on its own. Rotating after a usage limit is opt-in and needs an
 explicit candidate list — see [Opt-in auto-resume](#opt-in-auto-resume). A
-session created with `--account` is pinned and is never rotated at all. The full
+session created with `--account` is pinned and automatic switching never rotates it. The full
 command surface is in [`af accounts`](reference/cli.md#af-accounts).
 
 ### Scoping an account to a project
@@ -370,14 +370,22 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
 - **Visible in the session.** The first prompt after replacement names the old
   and new identities before repeating the stored task prompt.
 - **One credential boundary.** A local swap stops every agent, shell, and process
-  pane before committing the new identity, then restores them with the selected
-  account environment; the agent starts a fresh provider conversation. New
+  pane before committing the new identity, then restores the agent and shell
+  panes with the selected account environment. A claude or codex agent keeps
+  its conversation: af copies the transcript into the new account's home before
+  committing the new identity, and the replacement resumes it. The copy stays in
+  the new account's home, and the provider replays that history under the new
+  account, so an automatic rotation moves the conversation's content to the
+  candidate account as well as the work. If the conversation cannot be carried,
+  the agent starts a fresh conversation, and the notice it receives says why.
+  Other agents start a fresh provider conversation. New
   account-scoped terminal tabs remain interactive but skip shell startup files,
   because an rc file can otherwise replace the selected identity after af has
   established it. A resolved command that explicitly pins `--continue`,
   `--resume`, `--session-id`,
-  or `codex resume` is not safe to carry across accounts, so af names those
-  arguments and keeps the existing wait instead.
+  or `codex resume` would take away af's choice of which conversation the
+  replacement opens, so af names those arguments and keeps the existing wait
+  instead.
 - **Operator-only.** `limit_auto_resume`, `limit_retry_interval`, and
   `limit_account_candidates` are rejected
   in in-repo configs. A save through `af config set` applies them to the running
@@ -403,10 +411,33 @@ To continue under another registered account of the same agent:
 af sessions handoff fix-auth --account personal
 ```
 
-The session keeps its identity, worktree, branch tip, and stored prompt. The
-new account starts a fresh conversation. Use `--brief` to replace the prompt,
-or combine `--to claude --account work` to change both agent and account.
-The recorded handoff includes the outgoing and incoming accounts and branch tip.
+The session keeps its identity, worktree, branch tip, and stored prompt. For
+claude and codex it also keeps the conversation. Each account has its own
+provider home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), so after stopping the
+outgoing agent af copies that conversation's file into the new account's home:
+the transcript for claude, the rollout for codex. The new account then resumes
+the same conversation id. The copy only ever adds to the new account's home;
+nothing in the previous account's home changes.
+
+The copied transcript is kept in the new account's home, and from then on the
+provider replays that history under the new account, whose credentials send
+it. Treat a handoff, manual or automatic, as moving the conversation's content
+to that account.
+
+The new account starts a fresh conversation instead, and its brief says af
+tried to carry the conversation and why it could not, when:
+
+- the file is missing, or reached through a symbolic link;
+- the new account already holds a different version of it;
+- the conversation af recorded is no longer the newest one in this worktree,
+  because a new one was started with `/clear` or `/new`;
+- a replacement already launched on the carried conversation stopped before it
+  was confirmed working.
+
+Other agents always start fresh with a brief. Use `--brief` to replace the prompt, or combine
+`--to claude --account work` to change both agent and account; changing the
+agent always starts a fresh conversation. The recorded handoff includes the
+outgoing and incoming accounts and branch tip.
 
 If an agent or account handoff starts its replacement but cannot confirm whether
 the mission was submitted, af suppresses automatic redelivery because the first
@@ -454,7 +485,7 @@ What a handoff does, and does not do:
   same task binding, same name. Only the agent process is replaced. Nothing is
   archived, nothing is re-cloned, and uncommitted work is untouched — it is
   simply still there, because the worktree never moved.
-- **The new agent starts fresh, with a brief.** Agent conversations are not
+- **A different agent starts fresh, with a brief.** Agent conversations are not
   portable between providers: claude cannot read codex's transcript and vice
   versa. So instead of a transcript, the incoming agent is told the session's
   goal, that it is continuing someone else's work, and where to look
@@ -494,18 +525,37 @@ branch, so it is always something you ask for.
 ## Task runs: park, don't fail
 
 A **task** (cron or watch) can fire while your plan is already exhausted. When a
-task-driven session hits a usage-limit wall as it starts up — before its prompt
-is even delivered — Agent Factory **parks** the run instead of failing it:
+task-driven session hits a usage-limit wall as it starts up, or a task targets a
+session already marked `[limit]`, Agent Factory **parks** the run instead of
+typing into the limited pane or reporting a false success:
 
 - The session is **kept**, not torn down, and marked `[limit]` (with its reset
   time) so the badge, the manual `c` retry, and auto-resume all apply to it.
 - The task's run status is recorded as **`parked: usage limit`** — *not* an
   errored/failed run. It shows in the task manager as waiting for the limit
   window, and no failure side-effects fire.
-- Once the window resets, the **same resume machinery** takes over: auto-resume
-  (if `limit_auto_resume` is on) or your manual `c` retry re-delivers the
-  session's stored task prompt, and the run proceeds to completion. A parked run
-  becomes a completed one — never a failed one.
+- For a newly created task session, once the window resets the **same resume
+  machinery** takes over: auto-resume (if `limit_auto_resume` is on) or your
+  manual `c` retry re-delivers the session's stored task prompt, and the run
+  proceeds to completion. A parked run becomes a completed one — never a failed
+  one.
+
+For a task with `target_session`, trigger kind determines what parking retains.
+A cron occurrence is skipped and recorded `parked: usage limit`; the first cron
+fire after reset runs normally, without replaying a burst of identical prompts.
+A watch event is distinct data, so it enters the durable FIFO and replays after
+the target leaves `[limit]`. Limit-held watch backlogs are not expired at the
+ordinary 72-hour outage boundary. Once the bounded queue reaches 500 events or
+256KB, Agent Factory stops reading the watch command's stdout and lets pipe
+backpressure hold the producer until replay makes room, rather than dropping an
+event or growing managed queue storage without limit.
+
+This automatic park is deliberately task-only. A manual `af sessions
+send-prompt` still delivers to a `[limit]` session, because typing may be needed
+to answer a credits or limit **picker**. Do not type into a timed auto-continue
+banner: Claude explicitly treats any typing as cancellation. In a Codex numbered
+picker, use the arrow keys to select the intended choice before sending Enter;
+digits are ignored and Enter accepts whichever choice is already highlighted.
 
 Before this behavior, such a run spun a readiness timeout and was recorded as a
 failure even though nothing was actually wrong — you'd just hit your plan limit.

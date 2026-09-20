@@ -47,6 +47,11 @@ func TestMain(m *testing.M) {
 	log.Initialize(false)
 	code := m.Run()
 	log.Close()
+	// The shared empty-commit repo template lives outside any test's TempDir;
+	// remove it once the run is over (#4464).
+	if controlRepoTemplateDir != "" {
+		_ = os.RemoveAll(controlRepoTemplateDir)
+	}
 	restoreTmux()
 	restoreHome()
 	if err := verifyRealConfig(); err != nil {

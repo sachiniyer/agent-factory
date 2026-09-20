@@ -700,6 +700,16 @@ func (i *Instance) SetGitWorktreeForTest(gw *git.GitWorktree) {
 	i.setGitWorktreeLocked(gw)
 }
 
+// GitWorktreeForTest returns the instance's git worktree. Test-only: daemon
+// tests need the restored worktree itself to install an adopted-hook surrogate
+// (GitWorktree.SetHooksDoneForTest) — the channel a real restart would rebuild
+// via AdoptRunningHookRuns (#4162).
+func (i *Instance) GitWorktreeForTest() *git.GitWorktree {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.gitWorktree
+}
+
 // AddTabForTest appends a tmux-less tab record. Test-only: UI tests (the
 // sidebar tree, tab labels) need instances with a populated tab LIST without
 // spinning up real tmux sessions; the tab is never attachable or previewable.

@@ -41,6 +41,9 @@ var fromInstanceDataForRefresh = func(repoID string, data session.InstanceData) 
 // confirmed, refresh must not materialize the legacy row under an ephemeral ID.
 var persistLegacyInstanceID = persistInstanceData
 
+// refreshLocked rebuilds the manager's instance map from disk under m.mu. A
+// marked on_complete row that re-materializes here re-arms its owed teardown,
+// the same as at restore (#4162).
 func (m *Manager) refreshLocked() error {
 	refreshed, ghosts, taskRunSequence, err := refreshDaemonInstances(m.instances)
 	if err != nil {
@@ -58,5 +61,6 @@ func (m *Manager) refreshLocked() error {
 		m.taskRunSequence = taskRunSequence
 	}
 	m.registerLoadRuntimeSettlementsLocked(owed)
+	m.armOwedTaskLifecyclesLocked()
 	return nil
 }

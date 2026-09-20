@@ -16,6 +16,12 @@ func (t *TmuxSession) Start(workDir string) error {
 	// established about this name, it is about to be re-established or replaced.
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
+	// The teardown mark is NOT a proof and is not superseded by the attempt: on a
+	// same-object restart (agent swap) it describes the session af just closed,
+	// which is still what the status monitor would report gone if this Start
+	// fails before a replacement exists. It clears below only on tmux's answer
+	// that a session is live behind the name (Codex on #4473).
+	//
 	// Check if the session already exists. This is a POSITIVE existence gate, so
 	// it must not read the lossy bool: a wedged/timed-out has-session is NOT proof
 	// the name is taken, and ExistsOrUnknown would launder it into "already
@@ -26,6 +32,13 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("%w: has-session probe for session %q did not answer", ErrTmuxTimeout, t.sanitizedName)
 	}
 	if exists {
+		// A live session af did not just create holds the name, so no teardown
+		// request describes it — but only when the live session IS the
+		// generation the current monitor polls. An old monitor bound to a
+		// prior generation keeps its mark while a replacement owns the name:
+		// its poll must still read af's own teardown of that generation as
+		// expected (Codex on #4473).
+		t.clearTeardownMarkForConfirmedGeneration()
 		return fmt.Errorf("%w: %w: %s", ErrSessionNotStarted, ErrSessionNameTaken, t.sanitizedName)
 	}
 	// The name is positively absent, so any Start from here creates a new pane
@@ -59,6 +72,14 @@ func (t *TmuxSession) Start(workDir string) error {
 	args = append(args, wrappedProgram)
 	if defaultCommand != "" {
 		args = append(args, ";", "set-option", "-t", exactTarget(t.sanitizedName), "default-command", defaultCommand)
+	}
+	t.programMu.RLock()
+	remainOnExit := t.remainOnExit
+	t.programMu.RUnlock()
+	if remainOnExit {
+		// Atomic with new-session so even a command that exits instantly is
+		// held as a dead pane rather than racing the option (#4479).
+		args = append(args, ";", "set-option", "-w", "-t", exactTarget(t.sanitizedName), "remain-on-exit", "on")
 	}
 	// Bootstrap before deciding whether new-session needs a temporary
 	// update-environment override. Otherwise the no-server probe below omits
@@ -111,6 +132,7 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("%w: error starting tmux session: %w", ErrSessionNotStarted, err)
 	}
 
+	t.observeStart(StartBeforeExistencePoll)
 	// Poll for session existence with exponential backoff. Break only on a probe
 	// that ANSWERED "exists" (known && exists): reading the lossy bool here let a
 	// mid-poll wedge exit the loop as if the session had come up, so Start reported
@@ -130,6 +152,12 @@ func (t *TmuxSession) Start(workDir string) error {
 	sleepDuration := 5 * time.Millisecond
 	for {
 		if exists, known := t.probeSessionWithin(time.Until(pollDeadline)); known && exists {
+			// The replacement is live: from here on a vanish is this session's,
+			// and af has not asked for it. There is no mark to clear here — the
+			// inner Restore installs a fresh monitor, which starts unmarked,
+			// while the OLD monitor keeps its mark so a poll in flight across
+			// this confirmation still attributes the old session's death to
+			// the teardown af asked for (Codex on #4473).
 			break
 		}
 		select {
@@ -227,8 +255,12 @@ func (t *TmuxSession) Start(workDir string) error {
 	cancel()
 
 	// Attach to the session we just created. Pass empty workDir so a missing
-	// session here surfaces as an error rather than recursively re-spawning.
-	err = t.Restore("")
+	// session here surfaces as an error rather than recursively re-spawning,
+	// and confirmedFresh because the existence poll above already answered for
+	// the session THIS Start created — an unanswered rebind probe here is a
+	// wedged server, not the retired generation coming back (Codex on #4473).
+	t.observeStart(StartBeforeAttachProbe)
+	_, err = t.restoreWithResult("", nil, true)
 	if err != nil {
 		// Probe BEFORE Close (which kills the session): the existence poll
 		// above saw the session, so if it is gone again by attach time the
@@ -566,7 +598,7 @@ func (t *TmuxSession) Restore(workDir string) error {
 // branch successfully created a replacement process. Callers that retain facts
 // about one concrete pane use this result to retire them only on replacement.
 func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
-	return t.restoreWithResult(workDir, nil)
+	return t.restoreWithResult(workDir, nil, false)
 }
 
 // RestoreWithResultBeforeRespawn is RestoreWithResult with a callback at the
@@ -576,20 +608,29 @@ func (t *TmuxSession) RestoreWithResultBeforeRespawn(
 	workDir string,
 	beforeRespawn func() error,
 ) (RestoreResult, error) {
-	return t.restoreWithResult(workDir, beforeRespawn)
+	return t.restoreWithResult(workDir, beforeRespawn, false)
 }
 
+// restoreWithResult is RestoreWithResult plus the two facts only a caller knows.
+// beforeRespawn runs at the definitive-absence boundary, before any replacement
+// process starts. confirmedFresh says the caller already proved THIS operation's
+// new-session answers the name (Start's inner attach), so an unanswered rebind
+// must not inherit the outgoing monitor's generation — that generation is
+// retired, and binding the live replacement to it latches the fresh monitor dead
+// the moment the server answers again (Codex on #4473).
 func (t *TmuxSession) restoreWithResult(
 	workDir string,
 	beforeRespawn func() error,
+	confirmedFresh bool,
 ) (RestoreResult, error) {
-	// !ExistsOrUnknown is the definitively-absent branch (#1962): only a session
+	// !existsOrUnknown is the definitively-absent branch (#1962): only a session
 	// tmux CONFIRMED gone triggers the re-spawn. A wedged→"exists" falls through
 	// to the pure rebind below, which is the safe direction — re-spawning against
 	// a server that is merely wedged around a still-live session would create a
 	// duplicate. The #386 respawn design has always fired only on definitive
 	// absence, and this preserves it.
-	if !t.ExistsOrUnknown() {
+	existsOrUnknown, answered := sessionExistsReportingAnswer(t.cmdExec, t.sanitizedName)
+	if !existsOrUnknown {
 		if workDir == "" {
 			return RestoreReattached, fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
 		}
@@ -624,15 +665,80 @@ func (t *TmuxSession) restoreWithResult(
 	// so any earlier absence proof is invalidated. Without this clear, a reattach
 	// through this branch inherits a stale flag and stopForAccountSwap skips its
 	// liveness check for a pane that is still running.
+	return RestoreReattached, t.reattach(workDir, answered, confirmedFresh)
+}
+
+// ReattachOnly performs only the live-session rebind half of
+// RestoreWithResult: it never takes the definitive-absence respawn branch, so
+// it is the restore primitive for a process tab, whose command must run
+// exactly once at creation and never be re-executed by af (#4479). Call it only
+// when the session exists or its state is unknown — a confirmed-absent session
+// gets no rebind and no respawn, because the pane it named is gone either way.
+//
+// answered is the caller's own existence probe's known (ProbeSession): true
+// only when tmux answered that the session exists, false when the probe did not
+// answer. It carries the same meaning as RestoreWithResult's has-session answer
+// and binds the fresh monitor the same way (#4473). The rebind does not probe
+// existence again, so a wedged server costs the caller one bounded has-session,
+// not two.
+//
+// On a pane held by remain-on-exit the rebind is equally correct: the session
+// still exists, the monitor simply never fires, and the pane's retained output
+// stays previewable.
+func (t *TmuxSession) ReattachOnly(workDir string, answered bool) error {
+	return t.reattach(workDir, answered, false)
+}
+
+// reattach is the live-session rebind shared by restoreWithResult and
+// ReattachOnly. answered is whether the existence probe that routed here
+// answered, and confirmedFresh is restoreWithResult's.
+func (t *TmuxSession) reattach(workDir string, answered, confirmedFresh bool) error {
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
 	monitor := newStatusMonitor()
 	if workDir != "" {
 		monitor = newReattachStatusMonitor()
 	}
-	if err := t.refreshRestoredAccountEnvironment(); err != nil {
-		return RestoreReattached, fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
+	// Bind the fresh monitor to the generation that just answered live: the
+	// resolved (id, server pid, created) tuple names exactly that tmux
+	// session, which neither the reused name nor the bare id can do — a poll
+	// holding the OLD monitor across this swap must not land a capture on
+	// the replacement and read the old mark against the new generation's
+	// death, and a replacement server reissuing the same $id must not
+	// impersonate it either (#4473 review). nil degrades to the name target.
+	// The probe runs only when the existence check answered: a wedged
+	// has-session already spent a full tmuxCommandTimeout, and a second
+	// command here would pay the same deadline for the same non-answer —
+	// once per persisted tab on the local restore path (Codex on #4473).
+	// resolvedAt is stamped BEFORE the probe runs, not after: it is the
+	// ordering evidence setMonitor uses to decide whether a settled teardown
+	// mark may retire, and only a resolution that BEGAN after the close
+	// returned proves the teardown did not take (#4473 review).
+	var resolved *tmuxGeneration
+	var resolvedAt time.Time
+	if answered {
+		resolvedAt = time.Now()
+		resolved, _ = t.confirmedGeneration()
 	}
-	t.setMonitor(monitor)
-	return RestoreReattached, nil
+	if err := t.refreshRestoredAccountEnvironment(); err != nil {
+		return fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
+	}
+	// Teardown attribution follows the GENERATION, not the monitor slot: a
+	// resolved id matching the outgoing monitor's generation shares its mark
+	// (retiring a settled one — the session just answered live), a resolved
+	// different generation starts unmarked, and only a fully unanswered
+	// rebind carries the old generation — a wedged probe is no evidence the
+	// request resolved, so carrying keeps af's own teardown at INFO once the
+	// server answers (Codex on #4473). The exception is confirmedFresh:
+	// Start's own existence poll already answered for a session THIS Start
+	// created, so an unanswered rebind cannot be the retired generation and
+	// the fresh monitor must not be bound to it. Either way the OLD monitor
+	// keeps its generation, so an in-flight poll still reads its own
+	// attribution.
+	t.setMonitor(monitor, generationResolution{
+		generation: resolved,
+		answered:   answered || confirmedFresh,
+		startedAt:  resolvedAt,
+	})
+	return nil
 }

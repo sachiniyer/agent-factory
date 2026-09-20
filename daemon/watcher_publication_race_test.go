@@ -1,0 +1,169 @@
+package daemon
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/task"
+)
+
+// An exited writer does NOT break the capacity wait: its finite pipe is the
+// staging buffer while the protected queue is full, so draining on exit would
+// append past the cap once per restart. The wait ends on stop — which drains
+// the finite pipe into protected storage once, at teardown — or when replay
+// makes room (TestExitedWriterPipeStagesUntilQueueHasRoom).
+func TestWatchWriterExitKeepsLimitCapacityWaitUntilStop(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "writer-exit-at-capacity")
+	for i := 0; i < watcherQueueMaxEvents; i++ {
+		if err := queue.enqueue(fmt.Sprintf("event-%03d", i), true); err != nil {
+			t.Fatalf("seed event %d: %v", i, err)
+		}
+	}
+	stopCh := make(chan struct{})
+	var stopOnce sync.Once
+	stop := func() { stopOnce.Do(func() { close(stopCh) }) }
+	t.Cleanup(stop)
+	writersStopped := make(chan struct{})
+	close(writersStopped)
+	w := &taskWatcher{
+		taskID: "writer-exit-at-capacity", sup: newWatcherSupervisor(),
+		queue: queue, stopCh: stopCh,
+	}
+	done := make(chan struct{})
+	go func() {
+		w.consumeLines(strings.NewReader("staged-one\nstaged-two\n"), &tailBuffer{}, writersStopped)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("stdout reader drained an exited writer's finite pipe past the queue cap")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := queue.pendingCount(); got != watcherQueueMaxEvents {
+		t.Fatalf("exited writer's pipe drained past the cap: pending=%d", got)
+	}
+
+	// Stop is what ends the wait: the staged finite input is drained into the
+	// protected queue once, and the reader returns.
+	stop()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not finish draining the finite pipe after stop")
+	}
+	if got := queue.pendingCount(); got != watcherQueueMaxEvents+2 {
+		t.Fatalf("stop did not retain the staged events: pending=%d", got)
+	}
+}
+
+func TestProtectedQueueStopBelowCapacityDrainsFiniteInput(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "stop-below-capacity")
+	if err := queue.enqueue("already-parked", true); err != nil {
+		t.Fatalf("seed parked event: %v", err)
+	}
+	stopCh := make(chan struct{})
+	close(stopCh)
+	writersStopped := make(chan struct{})
+	close(writersStopped)
+	w := &taskWatcher{
+		taskID: "stop-below-capacity", sup: newWatcherSupervisor(),
+		queue: queue, stopCh: stopCh,
+	}
+	w.consumeLines(strings.NewReader("accepted-one\naccepted-two\n"), &tailBuffer{}, writersStopped)
+
+	if got := queue.pendingCount(); got != 3 {
+		t.Fatalf("protected stop retained %d events, want parked event plus 2 accepted events", got)
+	}
+}
+
+func TestParkedStatusPublicationExcludesSupervisorStatus(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repoPath := setupTaskRepo(t)
+	const taskID = "a4226001"
+	if err := task.AddTask(task.Task{
+		ID: taskID, Name: "watch-park-publication", Prompt: "event: {{line}}",
+		WatchCmd: "watch.sh", TargetSession: "limited", ProjectPath: repoPath,
+		Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	originalDeliver := deliverPromptForTask
+	deliverPromptForTask = func(DeliverPromptRequest) (taskPromptDeliveryResult, error) {
+		return taskPromptDeliveryResult{status: TaskStatusLimitParked}, nil
+	}
+	t.Cleanup(func() { deliverPromptForTask = originalDeliver })
+
+	originalUpdate := updateWatchTaskStatus
+	parkCommitted := make(chan struct{})
+	releasePark := make(chan struct{})
+	var parkOnce sync.Once
+	updateWatchTaskStatus = func(id, generationID string, at *time.Time, status string) (task.Task, bool, error) {
+		stored, applied, err := originalUpdate(id, generationID, at, status)
+		if status == TaskStatusLimitParked {
+			parkOnce.Do(func() { close(parkCommitted) })
+			<-releasePark
+		}
+		return stored, applied, err
+	}
+	t.Cleanup(func() {
+		select {
+		case <-releasePark:
+		default:
+			close(releasePark)
+		}
+		updateWatchTaskStatus = originalUpdate
+	})
+
+	queue := newEventQueue(t.TempDir(), taskID)
+	if err := queue.enqueue("one occurrence"); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	ev, cursor, ok, err := queue.peek()
+	if err != nil || !ok {
+		t.Fatalf("peek seeded event: ok=%v err=%v", ok, err)
+	}
+	w := &taskWatcher{taskID: taskID, generationID: taskGenerationForTest(t, taskID), sup: newWatcherSupervisor(), queue: queue}
+	deliveryDone := make(chan error, 1)
+	go func() { deliveryDone <- w.deliverQueuedEvent(ev, cursor) }()
+	select {
+	case <-parkCommitted:
+	case <-time.After(time.Second):
+		t.Fatal("parked status did not reach the task store")
+	}
+
+	supervisorDone := make(chan struct{})
+	go func() {
+		w.persistSupervisorStatus("stopped")
+		close(supervisorDone)
+	}()
+	select {
+	case <-supervisorDone:
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releasePark)
+	if err := <-deliveryDone; !errors.Is(err, errTargetLimitReached) {
+		t.Fatalf("first park = %v, want replay request", err)
+	}
+	select {
+	case <-supervisorDone:
+	case <-time.After(time.Second):
+		t.Fatal("supervisor status remained blocked after parked publication")
+	}
+	if err := w.deliverQueuedEvent(ev, cursor); !errors.Is(err, errTargetLimitReached) {
+		t.Fatalf("parked retry = %v, want replay request", err)
+	}
+	stored, err := task.GetTask(taskID)
+	if err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if stored.LastRunStatus != TaskStatusLimitParked {
+		t.Fatalf("parked occurrence hidden after retry: status=%q, want %q", stored.LastRunStatus, TaskStatusLimitParked)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -223,8 +224,11 @@ func (s *watcherSupervisor) cleanOrphanQueues(
 	}
 	for _, e := range entries {
 		name := e.Name()
-		stem := strings.TrimSuffix(strings.TrimSuffix(name, ".jsonl"), ".cursor")
-		if stem == name { // neither suffix matched
+		stem := name
+		for _, suffix := range []string{".jsonl", ".cursor", ".limit-parked"} {
+			stem = strings.TrimSuffix(stem, suffix)
+		}
+		if stem == name { // no event-queue suffix matched
 			continue
 		}
 		id, _, _ := strings.Cut(stem, ".")
@@ -234,7 +238,11 @@ func (s *watcherSupervisor) cleanOrphanQueues(
 		if !scope.covers(id) {
 			continue
 		}
-		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
+		remove := os.Remove
+		if strings.HasSuffix(name, ".limit-parked") {
+			remove = config.RemoveFileRefusingLink
+		}
+		if err := remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
 			log.WarningLog.Printf("failed to remove orphan event-queue file %s: %v", name, err)
 		}
 	}

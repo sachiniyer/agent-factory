@@ -217,7 +217,7 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 		}
 		header = append(header, agent+"=missing")
 		detail := fmt.Sprintf("%q is not runnable: %v", command, err)
-		remediation := fmt.Sprintf("install %s or set program_overrides.%s", agent, agent)
+		remediation := preflight.ProgramError(agent, command, err).Error()
 		if configured {
 			report.Fail(sectionEnvironment, agent, detail, remediation)
 		} else {

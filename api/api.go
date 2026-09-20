@@ -489,16 +489,37 @@ func repoHasInstanceTitle(repoID, title string) (bool, error) {
 	return false, nil
 }
 
-// repoHasLiveInstanceTitle is like repoHasInstanceTitle but skips archived
-// rows. Used by the sessions-create pre-check: the daemon intentionally
-// reclaims an archived-only title by renaming the archived record to
-// "<title> (archived)" and proceeding (renameArchivedForReuseLocked), so
-// counting an archived row as "already exists" would abort a create the daemon
-// would allow, with the wrong error. RecordedLiveness resolves both the
-// explicit Liveness field and the legacy Status fallback so a row persisted
-// before the Liveness field existed is still detected as archived and skipped.
+// repoHasLiveInstanceTitle is like repoHasInstanceTitle but skips rows the
+// daemon treats as non-reservations. Used by the sessions-create pre-check so
+// a title the daemon would ALLOW reaches it instead of aborting client-side with
+// the wrong error. RecordedLiveness resolves both the explicit Liveness field
+// and the legacy Status fallback so a row persisted before the Liveness field
+// existed is still detected and skipped.
+//
+// The skip-set mirrors the daemon's authoritative title scan,
+// findTitleConflictLocked (plus its parallel scans in archive_names.go and
+// manager_create_titles.go), exactly:
+//
+//   - Archived rows (RecordedLiveness == LiveArchived): the daemon reclaims the
+//     title by renaming the archived record to "<title> (archived)" and
+//     proceeding (renameArchivedForReuseLocked), so counting an archived row as
+//     "already exists" would abort a create the daemon would allow.
+//   - Status == Loading "ghost" rows: a legacy TUI binary (#551) could persist
+//     a Loading-status row to disk on quit. The daemon treats such ghosts as
+//     overwritable — appendInstanceData overwrites a same-titled Loading ghost
+//     and findTitleConflictLocked skips them when deciding a title is free,
+//     specifically so they do not "block title reuse forever" — so counting one
+//     as a collision would block a create the daemon would allow. RecordedLiveness
+//     resolves a Loading row to LivenessUnset, not LiveArchived, so the archived
+//     skip above does NOT cover it; this carve-out is separate on purpose.
+//
+// Deleting is deliberately NOT skipped: a persisted Deleting row is a real
+// titleConflictDisk collision to the daemon, so letting it through here would
+// hand the daemon a create it would then refuse — aborting client-side is the
+// correct, fail-fast behavior for a genuine live collision.
+//
 // The authoritative race-safe check still happens inside the daemon under the
-// per-repo file lock, so letting archived rows through is safe.
+// per-repo file lock, so letting these rows through is safe.
 //
 // NOTE: do NOT use this for the send-prompt existence pre-check
 // (instanceTitleExistsInScope). Send-prompt to an archived session should fall
@@ -511,7 +532,9 @@ func repoHasLiveInstanceTitle(repoID, title string) (bool, error) {
 		return false, err
 	}
 	for i := range instances {
-		if instances[i].Title == title && session.RecordedLiveness(instances[i]) != session.LiveArchived {
+		skip := session.RecordedLiveness(instances[i]) == session.LiveArchived ||
+			instances[i].Status == session.Loading
+		if instances[i].Title == title && !skip {
 			return true, nil
 		}
 	}
@@ -647,7 +670,13 @@ func allScopedInstances() ([]scopedInstance, []string, error) {
 // wraps the payload in the shared success Envelope.
 func jsonOut(v any) error {
 	if envelopeOutput {
-		return apiproto.WriteEnvelope(os.Stdout, apiproto.Success(v))
+		// close quietly so a dirty --json success leaves stderr empty, matching jsonError (#3169);
+		// only close after the envelope is written so a write failure retains the dirty-log diagnostic
+		if err := apiproto.WriteEnvelope(os.Stdout, apiproto.Success(v)); err != nil {
+			return err
+		}
+		log.CloseQuiet()
+		return nil
 	}
 	data, err := apiproto.MarshalIndented(v)
 	if err != nil {

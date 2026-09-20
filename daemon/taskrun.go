@@ -16,13 +16,13 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
-// TaskStatusLimitParked is the run status recorded when a task-driven session
-// hits a usage-limit wall during startup and is PARKED instead of failed (#1146
-// PR4). It is deliberately NOT an "errored:"-prefixed value, so the TUI and task
-// history show the run waiting for the limit window to reset — not failed — and
-// no failure side-effects fire. The daemon auto-resume scheduler (opt-in) or the
-// manual `c` retry re-delivers the stored prompt once the window resets, after
-// which the run records its normal completion status.
+// TaskStatusLimitParked is recorded when a task-driven create hits a usage-limit
+// wall at startup (#1146 PR4), or when a targeted task finds its existing session
+// already limit-parked (#4223). It is deliberately NOT an "errored:"-prefixed
+// value, so the TUI and task history show the run waiting for the limit window to
+// reset — not failed — and no failure side-effects fire: create-per-run prompts
+// resume with their session, targeted cron occurrences skip, and targeted watch
+// events queue for replay.
 const (
 	TaskStatusLimitParked = task.RunStatusLimitParked
 	// TaskStatusInterrupted is recorded when a task-spawned session loses the
@@ -39,7 +39,7 @@ const (
 // own control socket when called from inside the daemon process.
 var (
 	createSessionForTask = CreateSession
-	deliverPromptForTask = DeliverPrompt
+	deliverPromptForTask = deliverPromptForTaskRPC
 )
 
 // cronDeferPollInterval is how often a held cron fire re-checks whether the
@@ -49,7 +49,8 @@ var cronDeferPollInterval = 1 * time.Second
 // deliverTaskPrompt delivers one rendered prompt for a task and returns the
 // status string to record on it. With TargetSession empty it creates a fresh
 // session per run (the historical task behavior, status "started"). With
-// TargetSession set it sends the prompt into that session (status "sent"),
+// TargetSession set it sends the prompt into that session (status "sent"), or
+// returns "parked: usage limit" without typing when the target is limit-reached,
 // auto-creating the session with the task's ProjectPath/Program when it does
 // not exist yet (Sachin-approved in #782, mirroring `af sessions send-prompt
 // --create`). The target session is looked up in the task's own repo so a
@@ -67,6 +68,9 @@ var cronDeferPollInterval = 1 * time.Second
 type taskDelivery struct {
 	status string
 	run    session.TaskRunIdentity
+	// promptRetained says a parked session already holds this exact prompt for
+	// its resume (#4223), so the watch path must not also queue it for replay.
+	promptRetained bool
 }
 
 func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (taskDelivery, error) {
@@ -132,6 +136,7 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (ta
 		if data.Liveness == session.LiveLimitReached {
 			log.InfoLog.Print(taskParkedLogMessage(t.ID, data.Title))
 			delivery.status = TaskStatusLimitParked
+			delivery.promptRetained = true
 			return delivery, nil
 		}
 		log.InfoLog.Print(taskStartedLogMessage(t.ID, data.Title))
@@ -143,7 +148,7 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (ta
 	// tasks fire at the same missing target_session, the daemon creates it once
 	// and delivers every prompt in order instead of dropping the losers of the
 	// creation race (#865). A Deleting target is surfaced, not silently dropped.
-	status, err := deliverPromptForTask(DeliverPromptRequest{
+	result, err := deliverPromptForTask(DeliverPromptRequest{
 		// The canonical target, which for a nonempty value IS the raw field
 		// byte-for-byte. Titles are not canonicalized globally and the daemon keys
 		// instances on exact bytes, so this lookup must never be trimmed: a task
@@ -174,6 +179,17 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (ta
 		}
 		return taskDelivery{}, wrapped
 	}
+	run := session.TaskRunIdentity{
+		TaskID: t.ID, TaskGenerationID: t.GenerationID, RunAt: time.Now(),
+	}
+	status := result.status
+	if status == TaskStatusLimitParked {
+		// Either the existing target was already parked (#4223), or one created for
+		// this delivery parked at startup holding this exact prompt. Nothing was
+		// sent either way, so this is not a "sent" occurrence.
+		log.InfoLog.Printf("task %s parked delivery to target session %q at a usage limit; prompt not sent", t.ID, target)
+		return taskDelivery{status: status, run: run, promptRetained: result.promptRetained}, nil
+	}
 	// A target-session task delivered its prompt whether the shared target already
 	// existed or was auto-created. Keep that provenance out of the session-per-run
 	// "started" vocabulary; an unidentified target row must never look claimable
@@ -182,9 +198,7 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (ta
 		status = "sent"
 	}
 	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, target, status)
-	return taskDelivery{status: status, run: session.TaskRunIdentity{
-		TaskID: t.ID, TaskGenerationID: t.GenerationID, RunAt: time.Now(),
-	}}, nil
+	return taskDelivery{status: status, run: run}, nil
 }
 
 // Keep task-created title logging on the same %q encoding as target-session
@@ -373,7 +387,10 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 
 func recordDeliveredTaskRun(taskID string, delivery taskDelivery) error {
 	if delivery.run.SessionID == "" {
-		_, _, err := task.UpdateTaskStatusForGeneration(
+		// Through the shared seam, not task.UpdateTaskStatusForGeneration directly:
+		// a target delivery's status is the one watch outcomes publish, and the
+		// queue's parked publication counts and orders its writes there (#4223).
+		_, _, err := updateWatchTaskStatus(
 			taskID, delivery.run.TaskGenerationID, &delivery.run.RunAt, delivery.status)
 		return err
 	}

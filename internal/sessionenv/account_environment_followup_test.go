@@ -524,7 +524,9 @@ func TestValidateAccountEnvironmentCommand_ChildlessTailIsBounded(t *testing.T) 
 // file needs no argv to unset the root, so refusing these would only add false
 // positives. The first command is the review's exact shape, admitted on
 // purpose. A token whose empty expansion would leave a SEPARATE-value option
-// (`-c"$CLASS"`) can swallow the child and stays refused.
+// (`-c"$CLASS"`) can swallow the next word. It is admitted only when that
+// swallow reading runs nothing, as it does before `npm` (#4460); the
+// IoniceDynamicClass tests pin the live-swallow refusals.
 func TestValidateAccountEnvironmentCommand_AttachedIoniceValuesAreSelfContained(t *testing.T) {
 	for _, command := range []string{
 		`CMD=env; ./ionice --classd="$CMD" -u CODEX_HOME codex`,
@@ -533,14 +535,99 @@ func TestValidateAccountEnvironmentCommand_AttachedIoniceValuesAreSelfContained(
 		`ionice --class="$CLASS" npm run dev`,
 		`ionice --classd="$N" -p 123`,
 		`ionice -c3 npm run dev`,
+		`ionice -c"$CLASS" npm run dev`,
+		`ionice -n"$N" npm run dev`,
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
 	}
 	for _, command := range []string{
-		`ionice -c"$CLASS" npm run dev`,
-		`ionice -n"$N" npm run dev`,
 		`ionice --classdata "$N" npm run dev`,
 	} {
 		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()), "command %q", command)
+	}
+}
+
+// The setsid/stdbuf/xargs terminal-option branches (--help/--version and the
+// setsid -h/-V short forms) returned nil,false, dropping every word after the
+// option without inspecting it. A spelled-out mutation that each function's
+// default branch refuses (setsid env CODEX_HOME=/other codex) was therefore
+// ADMITTED once a terminal option preceded it — the same mutation accepted or
+// rejected depending on whether the option came first. The hardened
+// ionice/taskset terminal branches already inspect that tail via
+// shadowedOperandTailMutates (the words after the option still get inspected as
+// a command, since the basename match cannot prove this IS the real util-linux
+// binary). These tests pin the three branches to that same behavior. Verified
+// against the installed bash before this test was written.
+func TestValidateAccountEnvironmentCommand_TerminalOptionsInspectMutatingTail(t *testing.T) {
+	for _, command := range []string{
+		// The three formerly-unhardened branches must now judge the same
+		// spelled-out mutation their default branch already refuses.
+		"setsid -h env CODEX_HOME=/other codex",
+		"setsid --help env CODEX_HOME=/other codex",
+		"setsid -V env CODEX_HOME=/other codex",
+		"setsid --version env CODEX_HOME=/other codex",
+		"setsid --version sh -c 'unset CODEX_HOME; codex'",
+		"./setsid -h env CODEX_HOME=/other codex",
+		"/usr/bin/setsid -V env CODEX_HOME=/other codex",
+		"setsid -h env OPENAI_API_KEY=sk codex",
+		"stdbuf --help env CODEX_HOME=/other codex",
+		"stdbuf --version env CODEX_HOME=/other codex",
+		"stdbuf --version sh -c 'unset CODEX_HOME; codex'",
+		"./stdbuf --help env CODEX_HOME=/other codex",
+		"stdbuf --help env OPENAI_API_KEY=sk codex",
+		"xargs --help env CODEX_HOME=/other codex",
+		"xargs --version env CODEX_HOME=/other codex",
+		"./xargs --version env CODEX_HOME=/other codex",
+		"xargs --version sh -c 'unset CODEX_HOME; codex'",
+		"xargs --help env OPENAI_API_KEY=sk codex",
+		// A shadowed wrapper may `shift N` past the option AND an operand, so
+		// every literal suffix is judged: the mutation at a non-zero offset
+		// is still refused.
+		"setsid -h 123 env CODEX_HOME=/other codex",
+		"stdbuf --help 123 sh -c 'unset CODEX_HOME; codex'",
+		"xargs --version 123 env CODEX_HOME=/other codex",
+		// Parity with the hardened siblings: their terminal branches already
+		// refuse this; assert the fix did not regress them.
+		"ionice --help env CODEX_HOME=/other codex",
+		"taskset --version env CODEX_HOME=/other codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q hides an identity mutation behind a terminal option", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+			"command %q must be refused by the account-environment guard", command)
+	}
+}
+
+// The fix above must not over-refuse. A terminal option with NO words after it
+// prints help/version and exits childless on the real binary; the empty tail
+// keeps the pinned no-child admission (e.g. {"setsid -h", false},
+// {"stdbuf --version", false}, {"xargs --version", false}). A tail that carries
+// no identity mutation must also stay allowed, since the only reading that runs
+// it is a shadowed wrapper executing an ordinary command.
+func TestValidateAccountEnvironmentCommand_TerminalOptionsAdmitChildlessAndCleanTail(t *testing.T) {
+	for _, command := range []string{
+		// No words after the option: real binary exits childless.
+		"setsid -h",
+		"setsid --help",
+		"setsid -V",
+		"setsid --version",
+		"stdbuf --help",
+		"stdbuf --version",
+		"xargs --help",
+		"xargs --version",
+		"./setsid -h",
+		"/usr/bin/setsid --version",
+		"./stdbuf --version",
+		"./xargs --help",
+		// A clean (non-mutating) tail after the option stays allowed.
+		"setsid -h make",
+		"setsid --version env codex",
+		"stdbuf --help make",
+		"stdbuf --version echo hi",
+		"xargs --version echo hi",
+		"xargs --help env codex",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"command %q has no identity mutation and must stay allowed", command)
 	}
 }

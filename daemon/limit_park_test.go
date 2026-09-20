@@ -280,7 +280,7 @@ func TestResumeFromLimit_ParkedTaskSessionReDeliversTaskPrompt(t *testing.T) {
 	inst.Prompt = "run the nightly report"
 	inst.SetLimitReached(time.Now())
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "nightly-task", RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "nightly-task", RepoID: repoID}); err != nil {
 		t.Fatalf("resume of a parked task session failed: %v", err)
 	}
 
@@ -325,7 +325,8 @@ func TestResumeFromLimitAdvancesParkedTaskStatus(t *testing.T) {
 	manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
 	manager.mu.Unlock()
 
-	require.NoError(t, manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}))
+	_, resumeErr := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID})
+	require.NoError(t, resumeErr)
 	got, err := task.GetTask(tsk.ID)
 	require.NoError(t, err)
 	assert.Equal(t, task.RunStatusStarted, got.LastRunStatus)

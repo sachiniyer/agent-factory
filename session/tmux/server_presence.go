@@ -220,8 +220,19 @@ func liveTmuxServerPIDs() []int {
 // A tripped deadline is an error, never an empty list: a server that did not
 // answer has told us nothing about what is running on it.
 func ListSessionNames(cmdExec cmd.Executor) ([]string, error) {
+	return listSessionField(cmdExec, "#{session_name}")
+}
+
+// listSessionIDs is the ListSessionNames contract for #{session_id}: the
+// generation probe's corroboration asks which IDS the server still knows,
+// and a name list cannot answer that.
+func listSessionIDs(cmdExec cmd.Executor) ([]string, error) {
+	return listSessionField(cmdExec, "#{session_id}")
+}
+
+func listSessionField(cmdExec cmd.Executor, format string) ([]string, error) {
 	ctx, cancel := tmuxTimeoutContext()
-	out, err := outputTmuxBoundedWith(ctx, cmdExec, "ls", "-F", "#{session_name}")
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, "ls", "-F", format)
 	timedOut := ctx.Err() != nil
 	cancel()
 	if err != nil {
@@ -357,6 +368,11 @@ func recreateSocketAdvice(pids []int) string {
 // The bare "tmux" fallback is for builds and platforms that do not retitle. It
 // is EXACT, never a prefix, for the reason above: a prefix is what swallowed
 // the client.
+//
+// That fallback also admits every CLIENT on darwin, where tmux cannot retitle
+// and every tmux process is named "tmux" (measured, #4678). This is only the
+// coarse prefilter for "could a server be alive"; proctree.IsTmuxServer decides
+// who is actually signalled.
 func isTmuxServerComm(comm string) bool {
 	return comm == "tmux: server" || comm == "tmux"
 }
@@ -387,9 +403,14 @@ func absentTmuxSocketPath(diagnostic string) string {
 //
 // pids comes from tmuxServerProcessPIDs — deliberately uid-wide, because which
 // server owns an unlinked socket is exactly what cannot be read back. A pid is
-// re-verified as a tmux server at signal time (IsTmuxServer, from its own
-// command line) so a pid reused since the snapshot cannot spray SIGUSR1 — whose
-// default disposition is TERMINATE — into an unrelated process.
+// re-verified as a tmux server at signal time, positively (proctree.IsTmuxServer:
+// the kernel task name tmux gives a server, or the daemon(3) shape a server is
+// left in). SIGUSR1's default disposition is TERMINATE, so anything that is not
+// positively a server must never receive it. That covers a pid reused since the
+// snapshot, and — the defect behind #4678 — a tmux CLIENT, which is killed by
+// SIGUSR1 if it arrives before the client has installed its handler. The
+// command line cannot make this distinction: a daemonised server carries its
+// launching client's argv.
 //
 // Ambiguity survives in one direction only: a table with live servers that
 // could not all be signaled answers "claimed" (unknown), because a live owner

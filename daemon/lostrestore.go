@@ -696,20 +696,41 @@ func (m *Manager) resetPreserveBudget(repoID string, inst *session.Instance) {
 }
 
 // resetRecoverBudget clears the Recover-flap episode counter for the session
-// identified by repoID and inst. Call this when the sandbox is replaced (force-
-// reap): the old sandbox is gone, so any prior Recover failures are stale and
-// the new sandbox earns a fresh budget. Do NOT call this on a plain successful
-// preserve push — that does not replace the sandbox, and zeroing
-// consecutiveFailures there would erase a legitimate Recover-flap count from a
-// running episode. The symmetric probeAlive paths that settle the session
-// (RestoreLostSessions) instead delete the whole lostRestoreStates entry, so
-// they do not use this helper either.
+// identified by repoID and inst. Call this after the old sandbox is provably
+// retired (i.e. after a successful force-replace): the old sandbox is gone, so
+// any prior Recover failures are stale and the new sandbox earns a fresh budget.
+// Do NOT call this on a plain successful preserve push — that does not replace
+// the sandbox, and zeroing consecutiveFailures there would erase a legitimate
+// Recover-flap count from a running episode. The symmetric probeAlive paths that
+// settle the session (RestoreLostSessions) instead delete the whole
+// lostRestoreStates entry, so they do not use this helper either.
+//
+// An entry is always created (or reset in place) so that a daemon restart before
+// the operator uses --force-reap does not leave lostRestoreStates empty: if the
+// entry were absent, recordLostRestoreFailure would seed consecutiveFailures from
+// the persisted terminal failure, causing the first new-sandbox failure to be
+// counted as attempt maxAttempts+1 and triggering immediate give-up. The zeroed
+// entry ensures the new sandbox starts from attempt 1.
+// Any stale awaitingConfirm from the predecessor episode is also cleared: the
+// old sandbox is gone, so its pending confirmation is irrelevant, and leaving it
+// set would cause the next automatic poll to double-charge a failure.
 func (m *Manager) resetRecoverBudget(repoID string, inst *session.Instance) {
 	stateKey := stableSessionKey(repoID, inst)
 	m.mu.Lock()
-	if st := m.lostRestoreStates[stateKey]; st != nil {
-		st.consecutiveFailures = 0
+	st := m.lostRestoreStates[stateKey]
+	if st == nil {
+		st = &lostRestoreState{}
+		m.lostRestoreStates[stateKey] = st
 	}
+	st.consecutiveFailures = 0
+	st.awaitingConfirm = false
+	// Clear per-episode diagnostic dedupe flags so that the replacement sandbox's
+	// failures log at their natural first occurrence rather than being suppressed
+	// by a flag left from the predecessor episode. armRestoreConfirmation
+	// deliberately retains these across the ConfirmLive edge for the confirmation
+	// window, so they are not cleared there — only at the episode boundary here.
+	st.remoteUnknownLogged = false
+	st.preserveFailureLogged = false
 	m.mu.Unlock()
 }
 

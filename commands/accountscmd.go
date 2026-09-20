@@ -133,7 +133,7 @@ limit observation, says which identity changed in the session, and waits normall
 when none is usable. Docker account-scoped creates remain supported, but
 automatic Docker replacement is disabled until af can durably identify and reap a
 crash-surviving container and freeze its complete provision plan. An explicit
---account is a permanent pin and is never overridden.` + accountsRegistrationOnlyHelp(),
+--account is a pin that automatic switching never overrides.` + accountsRegistrationOnlyHelp(),
 }
 
 // accountsGeminiCredentialHelp uses the login artifact list so the help follows

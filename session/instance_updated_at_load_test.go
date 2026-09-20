@@ -129,14 +129,19 @@ func TestUpdatedAtLoadSiblingRuntimeBoundary(t *testing.T) {
 				require.True(t, i.TaskRunActive(),
 					"replacing a sibling tab does not replace the agent runtime that received the task prompt")
 				replacement := i.ConsumeLoadRuntimeReplacement()
-				require.Equal(t, !existing, replacement.Replaced)
+				// A missing SHELL sibling is respawned — a runtime replacement the
+				// settlement boundary must enroll. A missing PROCESS tab is restored
+				// inert (#4479): its command is never re-executed, so nothing was
+				// replaced and nothing enrolls.
+				wantEnrolled := !existing && kind != TabKindProcess
+				require.Equal(t, wantEnrolled, replacement.Replaced)
 				require.False(t, replacement.Agent)
 				if replacement.Replaced {
 					require.NoError(t, storage.SaveInstances([]*Instance{i}))
 				}
 				require.False(t, i.ConsumeLoadRuntimeReplacement().Replaced, "settlement is consumed once")
 				want := before
-				if !existing {
+				if wantEnrolled {
 					want = now
 				}
 				require.Equal(t, want, i.ToInstanceData().UpdatedAt)

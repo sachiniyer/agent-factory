@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,7 +28,7 @@ func TestWatcherRateDropIsVisibleOnTaskAndListAPI(t *testing.T) {
 
 	s := newWatcherSupervisor()
 	s.eventsPerMinute = 1
-	s.deliver = func(_, _, _ string) error { return nil }
+	s.deliver = func(_, _, _ string, _ watchDeliveryOptions) error { return nil }
 	logDir := t.TempDir()
 	s.logPath = func(taskID string) (string, error) {
 		return filepath.Join(logDir, "task-"+taskID+".log"), nil
@@ -117,6 +119,407 @@ func TestLiveDropOverlayPreservesTerminalWatcherStatus(t *testing.T) {
 			require.Equal(t, 4, record.DroppedEvents)
 			require.Equal(t, terminal, record.LastRunStatus)
 			require.Equal(t, terminal, persisted)
+		})
+	}
+}
+
+// TestLifecycleStopFlushPreservesTerminalStatus drives the real run() lifecycle:
+// a watch script emits a burst exceeding the per-minute cap (the trailing lines
+// are drops) and then exits 0 ("stopped"). The first drop checkpoint persists
+// the dropped status once; later drops within the same window leave an
+// unpersisted delta that stop()'s flushDroppedEvents flushes using
+// lastDroppedAt (the last drop time, which post-dates the only delivery).
+// Without the terminal-status guard in RecordWatchRateDrops, that stale flush
+// overwrites the newer "stopped" outcome on disk. This regression test drives
+// the production recordDrops (persistWatcherDrops) and setStatus
+// (persistWatcherStatus) against the real task store.
+func TestLifecycleStopFlushPreservesTerminalStatus(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	dir := t.TempDir()
+	tsk := watchTask("d4357020", `printf 'e1\ne2\ne3\ne4\ne5\n'; exit 0`, dir)
+	require.NoError(t, task.AddTask(tsk))
+
+	s := newWatcherSupervisorWithEventsPerMinute(2)
+	s.loadTasks = task.LoadTasks
+	s.deliver = func(taskID, generationID, line string, _ watchDeliveryOptions) error {
+		now := time.Now()
+		_, _, err := task.UpdateTaskStatusForGeneration(taskID, generationID, &now, "sent")
+		return err
+	}
+	logDir := t.TempDir()
+	s.logPath = func(taskID string) (string, error) {
+		return filepath.Join(logDir, "task-"+taskID+".log"), nil
+	}
+	queueDir := t.TempDir()
+	s.queueDir = func() (string, error) { return queueDir, nil }
+	s.baseBackoff = 40 * time.Millisecond
+	s.maxBackoff = time.Second
+	s.stopGrace = 250 * time.Millisecond
+	s.shell = "sh"
+	t.Cleanup(s.Stop)
+
+	require.NoError(t, s.Reload(), "arm the watch task")
+
+	waitUntil(t, 10*time.Second, "stopped status on disk", func() bool {
+		stored, err := task.GetTask(tsk.ID)
+		return err == nil && stored.LastRunStatus == "stopped"
+	})
+	stored, _ := task.GetTask(tsk.ID)
+	require.Equal(t, "stopped", stored.LastRunStatus)
+	require.True(t, stored.DroppedEvents > 0, "drops must have occurred")
+
+	s.Stop()
+
+	stored, _ = task.GetTask(tsk.ID)
+	require.Equal(t, "stopped", stored.LastRunStatus,
+		"a stale drop flush must not overwrite the newer terminal watcher status")
+	require.True(t, stored.DroppedEvents > 0, "cumulative drop count must survive the flush")
+}
+
+// TestLifecycleErroredFlushPreservesTerminalStatus is the crash-loop variant:
+// the script emits a burst (drops) and exits 1 repeatedly until the breaker
+// persists an "errored:" terminal status. The flush of the unpersisted drop
+// delta must not clobber that errored outcome.
+func TestLifecycleErroredFlushPreservesTerminalStatus(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	dir := t.TempDir()
+	tsk := watchTask("d4357021", `printf 'e1\ne2\ne3\ne4\ne5\n'; exit 1`, dir)
+	require.NoError(t, task.AddTask(tsk))
+
+	s := newWatcherSupervisorWithEventsPerMinute(2)
+	s.loadTasks = task.LoadTasks
+	s.deliver = func(taskID, generationID, line string, _ watchDeliveryOptions) error {
+		now := time.Now()
+		_, _, err := task.UpdateTaskStatusForGeneration(taskID, generationID, &now, "sent")
+		return err
+	}
+	logDir := t.TempDir()
+	s.logPath = func(taskID string) (string, error) {
+		return filepath.Join(logDir, "task-"+taskID+".log"), nil
+	}
+	queueDir := t.TempDir()
+	s.queueDir = func() (string, error) { return queueDir, nil }
+	s.baseBackoff = 40 * time.Millisecond
+	s.maxBackoff = time.Second
+	s.stopGrace = 250 * time.Millisecond
+	s.crashMaxExits = 3
+	s.crashWindow = 10 * time.Minute
+	s.shell = "sh"
+	t.Cleanup(s.Stop)
+
+	require.NoError(t, s.Reload(), "arm the watch task")
+
+	waitUntil(t, 20*time.Second, "errored status on disk", func() bool {
+		stored, err := task.GetTask(tsk.ID)
+		return err == nil && strings.HasPrefix(stored.LastRunStatus, "errored:")
+	})
+	stored, _ := task.GetTask(tsk.ID)
+	require.True(t, strings.HasPrefix(stored.LastRunStatus, "errored:"),
+		"breaker must have persisted an errored status, got %q", stored.LastRunStatus)
+	require.True(t, stored.DroppedEvents > 0, "drops must have occurred")
+
+	s.Stop()
+
+	stored, _ = task.GetTask(tsk.ID)
+	require.True(t, strings.HasPrefix(stored.LastRunStatus, "errored:"),
+		"a stale drop flush must not overwrite the newer terminal watcher status, got %q", stored.LastRunStatus)
+	require.True(t, stored.DroppedEvents > 0, "cumulative drop count must survive the flush")
+}
+
+func TestLiveDropOverlayPreservesRecordedParkedHeadOverTerminalStatus(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "d4357005")
+	_, err := queue.enqueueWithParkedStatus("held occurrence", true, true)
+	require.NoError(t, err)
+	var persisted string
+	w := &taskWatcher{taskID: "d4357005", queue: queue}
+	s := &watcherSupervisor{
+		watchers:  map[string]*taskWatcher{w.taskID: w},
+		setStatus: func(_, _, status string) { persisted = status },
+	}
+	w.sup = s
+	w.persistTerminalStatus("stopped")
+	record := task.Task{ID: w.taskID, LastRunStatus: TaskStatusLimitParked}
+
+	s.applyLiveDropState(&record)
+
+	require.Equal(t, TaskStatusLimitParked, record.LastRunStatus)
+	require.Empty(t, persisted, "terminal persistence must not hide a recorded parked occurrence")
+	w.mu.Lock()
+	terminalStatus := w.terminalStatus
+	w.mu.Unlock()
+	require.Empty(t, terminalStatus, "live overlay must not latch a terminal status over a parked head")
+}
+
+// TestEnqueueAppendFailureCountsTheUnretainedEvent is the finding's core: a
+// queue that exists but cannot retain the record loses the event exactly as a
+// missing queue does, so the loss must reach the same drop accounting rather
+// than vanish behind a log line.
+func TestEnqueueAppendFailureCountsTheUnretainedEvent(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "d4357007")
+	require.NoError(t, queue.enqueue("seed backlog"))
+	persisted := -1
+	s := &watcherSupervisor{
+		recordDrops: func(_, _ string, total int, _ time.Time) error { persisted = total; return nil },
+	}
+	w := &taskWatcher{taskID: "d4357007", queue: queue, sup: s}
+	denyAccess(t, queue.path, queue.path, 0o644)
+
+	tail := &tailBuffer{}
+	w.enqueueEvent("limit-held occurrence", tail, true)
+
+	w.mu.Lock()
+	dropped := w.dropped
+	w.mu.Unlock()
+	require.Equal(t, 1, dropped, "an event the queue could not retain must be counted")
+	require.Equal(t, 1, persisted, "the loss must reach the durable drop checkpoint")
+}
+
+// TestTerminalStatusPublishesWithoutEvidenceOfRecordedParkedHead pins both
+// halves of the parked-head contract: an unverifiable queue is not evidence of
+// a parked head, so a real terminal outcome publishes rather than leaving an
+// ordinary backlog displaying stale status past a permanently stopped watcher;
+// and once storage heals the same check reads fresh state rather than
+// deferring to a stale cached outage.
+func TestTerminalStatusPublishesWithoutEvidenceOfRecordedParkedHead(t *testing.T) {
+	dir := t.TempDir()
+	seed := newEventQueue(dir, "d4357008")
+	require.NoError(t, seed.enqueue("ordinary backlog"))
+	denyAccess(t, seed.path, seed.path, 0o644)
+
+	queue := newEventQueue(dir, "d4357008")
+	var persisted string
+	s := &watcherSupervisor{setStatus: func(_, _, status string) { persisted = status }}
+	w := &taskWatcher{taskID: "d4357008", queue: queue, sup: s}
+
+	w.persistTerminalStatus("stopped")
+	require.Equal(t, "stopped", persisted,
+		"unverifiable queue state is not evidence of a parked head; the terminal outcome must publish")
+
+	persisted = ""
+	require.NoError(t, os.Chmod(seed.path, 0o644))
+	w.persistTerminalStatus("stopped")
+	require.Equal(t, "stopped", persisted,
+		"once queue state is readable and shows no parked head, the terminal outcome publishes")
+}
+
+func TestNewerParkRetiresEarlierLiveTerminalOverlay(t *testing.T) {
+	queue := newEventQueue(t.TempDir(), "d4357006")
+	require.NoError(t, queue.enqueue("held occurrence"))
+	_, cursor, ok, err := queue.peek()
+	require.NoError(t, err)
+	require.True(t, ok)
+	persisted := ""
+	w := &taskWatcher{taskID: "d4357006", queue: queue}
+	s := &watcherSupervisor{
+		watchers:  map[string]*taskWatcher{w.taskID: w},
+		setStatus: func(_, _, status string) { persisted = status },
+	}
+	w.sup = s
+	w.persistTerminalStatus("stopped")
+	recorded, err := w.commitParkedStatus(cursor, func() error {
+		persisted = TaskStatusLimitParked
+		return nil
+	})
+	require.NoError(t, err)
+	require.True(t, recorded)
+	record := task.Task{ID: w.taskID, LastRunStatus: persisted}
+
+	s.applyLiveDropState(&record)
+
+	require.Equal(t, TaskStatusLimitParked, record.LastRunStatus)
+	w.mu.Lock()
+	terminalStatus := w.terminalStatus
+	w.mu.Unlock()
+	require.Empty(t, terminalStatus, "newer parked publication must retire an older terminal overlay")
+}
+
+// TestRecordedParkedHeadResumeRetiresTerminalOverlay is the recovery half of
+// the unverifiable-exit contract: persistTerminalStatus legitimately latches
+// "stopped" — in memory AND on the durable row — while the queue cannot
+// confirm a recorded parked head, but once storage heals the retry skips
+// commitParkedStatus — the head's status is already durable — so resuming the
+// recorded head is what must republish the parked row and retire the latch.
+// Without it listings show the stale terminal status over the actionable park
+// and past the eventual replay outcome (#4226 review).
+func TestRecordedParkedHeadResumeRetiresTerminalOverlay(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	dir := t.TempDir()
+	tsk := watchTask("d4357010", `printf 'x\n'`, dir)
+	require.NoError(t, task.AddTask(tsk))
+	when := time.Now()
+	_, _, err := task.UpdateTaskStatusForGeneration(
+		tsk.ID, taskGenerationForTest(t, tsk.ID), &when, TaskStatusLimitParked)
+	require.NoError(t, err)
+
+	seed := newEventQueue(dir, "d4357010")
+	if _, err := seed.enqueueWithParkedStatus("held occurrence", true, true); err != nil {
+		t.Fatalf("seed recorded parked head: %v", err)
+	}
+	denyAccess(t, seed.path, seed.path, 0o644)
+
+	statusWrites := 0
+	originalUpdate := updateWatchTaskStatus
+	updateWatchTaskStatus = func(taskID, generationID string, at *time.Time, status string) (task.Task, bool, error) {
+		statusWrites++
+		return originalUpdate(taskID, generationID, at, status)
+	}
+	t.Cleanup(func() { updateWatchTaskStatus = originalUpdate })
+
+	queue := newEventQueue(dir, "d4357010")
+	s := &watcherSupervisor{
+		setStatus: func(taskID, generationID, status string) {
+			persistWatcherStatus(taskID, generationID, status)
+		},
+	}
+	delivered := ""
+	s.deliver = func(_, _, line string, _ watchDeliveryOptions) error {
+		delivered = line
+		return nil
+	}
+	w := &taskWatcher{taskID: "d4357010", generationID: taskGenerationForTest(t, "d4357010"), queue: queue, sup: s}
+	s.watchers = map[string]*taskWatcher{w.taskID: w}
+
+	w.persistTerminalStatus("stopped")
+	stored, err := task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	require.Equal(t, "stopped", stored.LastRunStatus,
+		"the terminal publication reaches the durable row, not just the overlay")
+	s.applyLiveDropState(stored)
+	require.Equal(t, "stopped", stored.LastRunStatus,
+		"the latched overlay wins while the parked head cannot be verified")
+
+	require.NoError(t, os.Chmod(seed.path, 0o644))
+	// Production resumes through the drainer's peek (watcher_drain.go), whose
+	// load retry is throttled to one disk attempt per
+	// eventQueueLoadRetryInterval. The outage above just consumed that attempt,
+	// so peek would answer with the latched error for up to five more seconds
+	// and the drainer would observe the heal on a later round. loadFailedFresh
+	// is only this test's shortcut to that same recovery without sleeping out
+	// the interval; production calls it solely at stop time.
+	require.False(t, queue.loadFailedFresh(),
+		"storage healed: the fresh check must observe the readable queue")
+	ev, cursor, ok, err := queue.peek()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, w.deliverQueuedEvent(ev, cursor))
+	require.Equal(t, "held occurrence", delivered)
+
+	w.mu.Lock()
+	latch := w.terminalStatus
+	w.mu.Unlock()
+	require.Empty(t, latch,
+		"a recorded parked head resuming must retire the stale terminal overlay")
+	stored, err = task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	require.Equal(t, TaskStatusLimitParked, stored.LastRunStatus,
+		"the reconcile must republish the durable parked status the terminal overwrote")
+	s.applyLiveDropState(stored)
+	require.Equal(t, TaskStatusLimitParked, stored.LastRunStatus,
+		"listings must show the actionable park again, not the terminal it replaced")
+
+	// The reconcile is bounded: retrying the still-recorded head must not
+	// rewrite the store every cadence.
+	writes := statusWrites
+	require.NoError(t, w.deliverQueuedEvent(ev, cursor))
+	require.Equal(t, writes, statusWrites,
+		"the recorded head's later retries must not rewrite the store")
+}
+
+// TestRecordedParkedHeadResumeKeepsDeliveredSentRow is the cursor-loss half of
+// the reconcile gate: a recorded parked head that delivered "sent" but whose
+// cursor-advance persist failed is still the durable queue head after a
+// restart, and redelivering it under at-least-once must not first republish
+// "parked: usage limit" over the real sent outcome — if that retry then
+// defers or fails, the false limit status would sit indefinitely (Codex on
+// #4226). Only terminal publications (stopped/errored) owe the reconcile.
+func TestRecordedParkedHeadResumeKeepsDeliveredSentRow(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	dir := t.TempDir()
+	tsk := watchTask("d4357012", `printf 'x\n'`, dir)
+	require.NoError(t, task.AddTask(tsk))
+	when := time.Now()
+	_, _, err := task.UpdateTaskStatusForGeneration(
+		tsk.ID, taskGenerationForTest(t, tsk.ID), &when, "sent")
+	require.NoError(t, err)
+
+	seed := newEventQueue(dir, "d4357012")
+	if _, err := seed.enqueueWithParkedStatus("held occurrence", true, true); err != nil {
+		t.Fatalf("seed recorded parked head: %v", err)
+	}
+
+	statusWrites := 0
+	originalUpdate := updateWatchTaskStatus
+	updateWatchTaskStatus = func(taskID, generationID string, at *time.Time, status string) (task.Task, bool, error) {
+		statusWrites++
+		require.NotEqual(t, TaskStatusLimitParked, status,
+			"a delivered head must never be republished as parked")
+		return originalUpdate(taskID, generationID, at, status)
+	}
+	t.Cleanup(func() { updateWatchTaskStatus = originalUpdate })
+
+	queue := newEventQueue(dir, "d4357012")
+	delivered := ""
+	s := &watcherSupervisor{
+		setStatus: func(taskID, generationID, status string) { persistWatcherStatus(taskID, generationID, status) },
+	}
+	s.deliver = func(_, _, line string, _ watchDeliveryOptions) error {
+		delivered = line
+		return nil
+	}
+	w := &taskWatcher{taskID: "d4357012", generationID: taskGenerationForTest(t, "d4357012"), queue: queue, sup: s}
+	s.watchers = map[string]*taskWatcher{w.taskID: w}
+
+	ev, cursor, ok, err := queue.peek()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, w.deliverQueuedEvent(ev, cursor))
+	require.Equal(t, "held occurrence", delivered)
+	require.Zero(t, statusWrites,
+		"a sent row is not a terminal overwrite — the reconcile owes nothing")
+
+	stored, err := task.GetTask(tsk.ID)
+	require.NoError(t, err)
+	require.Equal(t, "sent", stored.LastRunStatus,
+		"the real delivered outcome must survive the parked head's redelivery")
+}
+
+// TestRecordedParkedHeadResumeKeepsArmingRefusal pins the one "errored:" row
+// that is not a terminal publication. Arming writes its refusal before
+// watchers.reconcile stops the watcher, and a drainer retry in that window must
+// not republish the park over it, even with an earlier terminal overlay still
+// latched (#2929, #4226 review).
+func TestRecordedParkedHeadResumeKeepsArmingRefusal(t *testing.T) {
+	for name, overlay := range map[string]string{"row only": "", "overlay latched": "stopped"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			dir := t.TempDir()
+			tsk := watchTask("d4357013", `printf 'x\n'`, dir)
+			require.NoError(t, task.AddTask(tsk))
+			refusal := notArmedStatus(errors.New("target session is archived"))
+			_, _, err := task.UpdateTaskStatusForGeneration(
+				tsk.ID, taskGenerationForTest(t, tsk.ID), nil, refusal)
+			require.NoError(t, err)
+
+			seed := newEventQueue(dir, tsk.ID)
+			_, err = seed.enqueueWithParkedStatus("held occurrence", true, true)
+			require.NoError(t, err)
+
+			queue := newEventQueue(dir, tsk.ID)
+			s := &watcherSupervisor{deliver: func(string, string, string, watchDeliveryOptions) error { return nil }}
+			w := &taskWatcher{taskID: tsk.ID, generationID: taskGenerationForTest(t, tsk.ID), queue: queue, sup: s, terminalStatus: overlay}
+			s.watchers = map[string]*taskWatcher{w.taskID: w}
+
+			ev, cursor, ok, err := queue.peek()
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.True(t, queue.parkedStatusRecorded(cursor),
+				"precondition: the head must be recorded, or the reconcile is never reached")
+			require.NoError(t, w.deliverQueuedEvent(ev, cursor))
+
+			stored, err := task.GetTask(tsk.ID)
+			require.NoError(t, err)
+			require.Equal(t, refusal, stored.LastRunStatus,
+				"a drainer retry must not republish the park over the arming refusal")
 		})
 	}
 }

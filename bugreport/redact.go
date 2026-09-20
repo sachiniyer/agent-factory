@@ -12,6 +12,8 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/credscrub"
 	"github.com/sachiniyer/agent-factory/internal/programprivacy"
+	"github.com/sachiniyer/agent-factory/internal/redactspan"
+	"github.com/sachiniyer/agent-factory/internal/redactx"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -99,6 +101,29 @@ type redactor struct {
 	// only by legacy subdirectory restores with no persisted branch. They are
 	// scrubbed solely below the registered AF-home worktrees directory.
 	worktreeSubdirectoryTitles map[string]struct{}
+	// engine is this run's share of the shared normalization stage
+	// (internal/redactx): the transform registry plus this redactor's match
+	// policy. Built lazily because tests construct redactor literals directly.
+	engine *redactx.Engine
+}
+
+// stage returns the shared normalization engine carrying this redactor's
+// match policy. The producer is what counts as secret on each decoded view;
+// the engine owns which decodings are legal for that view's provenance.
+func (r *redactor) stage() *redactx.Engine {
+	if r.engine == nil {
+		r.engine = &redactx.Engine{
+			Produce: func(text string, prov redactx.Provenance) []redactspan.Span {
+				return toSharedSpans(r.produceSpans(text, prov))
+			},
+			// A range a transform proved belongs to an encoding but could not
+			// decode — a malformed opaque URI, an unparseable shell command — is
+			// an unknown logical value and takes the whole-field marker.
+			FailClosed: redactspan.Span{Replacement: redactedMarker, Priority: spanQuotedValue},
+			Fallback:   redactedMarker,
+		}
+	}
+	return r.engine
 }
 
 // newRedactor resolves the redaction context from the environment: the OS
@@ -655,6 +680,12 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 		if d.PendingAccountSwap.To != "" {
 			d.PendingAccountSwap.To = redactedMarker
 		}
+		// The account a carried conversation was copied from (#4367) is the
+		// same user-picked label as From. Empty means the ambient identity and
+		// stays empty, so redaction never invents an account.
+		if d.PendingAccountSwap.CarrySourceAccount != "" {
+			d.PendingAccountSwap.CarrySourceAccount = redactedMarker
+		}
 		// The same provider conversation id AgentConversation.ID is cleared for,
 		// and cleared the same way rather than marked: it is a resumable handle,
 		// so its VALUE is the sensitive part and its presence is not worth
@@ -814,6 +845,11 @@ func redactTabData(tab *session.TabData) {
 	}
 	if tab.TmuxName != "" {
 		tab.TmuxName = redactedMarker
+	}
+	// An account label, the same fact InstanceData.Account is redacted for
+	// (#4506 review).
+	if tab.AccountScope != "" {
+		tab.AccountScope = redactedMarker
 	}
 	// A web tab's URL is user-supplied (any http/https target passes
 	// NormalizeWebTabURL) and can name internal infrastructure or a private

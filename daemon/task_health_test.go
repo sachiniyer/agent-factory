@@ -262,7 +262,7 @@ func TestWatcherSupervisor_DuplicateIDsWatchTheFirst(t *testing.T) {
 	supervisor := newWatcherSupervisor()
 	supervisor.queueDir = func() (string, error) { return dir, nil }
 	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
-	supervisor.deliver = func(string, string, string) error { return nil }
+	supervisor.deliver = adaptWatchDelivery(func(string, string, string) error { return nil })
 	supervisor.setStatus = func(string, string, string) {}
 	t.Cleanup(supervisor.Stop)
 
@@ -289,9 +289,9 @@ func TestWatcherSupervisor_DuplicateCleanupKeepsSelectedWatcherQueue(t *testing.
 	// drainer for a non-empty queue — so the assertion below raced a goroutine
 	// instead of measuring the cleanup decision, and lost on CI at 467862e9
 	// ("stat …dupe0003.<hash>.jsonl: no such file or directory").
-	supervisor.deliver = func(string, string, string) error {
+	supervisor.deliver = adaptWatchDelivery(func(string, string, string) error {
 		return errors.New("target unreachable (outage)")
-	}
+	})
 	supervisor.setStatus = func(string, string, string) {}
 	t.Cleanup(supervisor.Stop)
 
@@ -510,7 +510,7 @@ func TestWatchArming_StaleWatcherAfterAFailedReloadIsNotArmed(t *testing.T) {
 	supervisor := newWatcherSupervisor()
 	supervisor.queueDir = func() (string, error) { return dir, nil }
 	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
-	supervisor.deliver = func(string, string, string) error { return nil }
+	supervisor.deliver = adaptWatchDelivery(func(string, string, string) error { return nil })
 	supervisor.setStatus = func(string, string, string) {}
 	t.Cleanup(supervisor.Stop)
 
@@ -556,7 +556,7 @@ func TestWatchArming_DuringShutdownIsUnknown(t *testing.T) {
 	supervisor := newWatcherSupervisor()
 	supervisor.queueDir = func() (string, error) { return dir, nil }
 	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
-	supervisor.deliver = func(string, string, string) error { return nil }
+	supervisor.deliver = adaptWatchDelivery(func(string, string, string) error { return nil })
 	supervisor.setStatus = func(string, string, string) {}
 
 	watch := watchTask("shutdown", "printf 'a\\n'; sleep 30", dir)

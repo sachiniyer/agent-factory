@@ -101,10 +101,10 @@ type Manager struct {
 	// config swap alone would not reach it. Read lock-free by the poll loop via
 	// Load().
 	limitDetector atomic.Pointer[task.LimitDetector]
-	// accountLimitMu serializes publication of live named-account limits with
-	// the final evidence read, runtime teardown, and durable identity commit of
-	// automatic account replacement. Manager.mu protects roster shape; it cannot
-	// cover per-instance liveness writes without inverting existing lock order.
+	// accountLimitMu serializes limit publication with automated delivery
+	// admission, account-swap evidence, runtime teardown, and identity commit.
+	// Manager.mu protects roster shape; it cannot cover
+	// per-instance liveness writes without inverting existing lock order.
 	accountLimitMu sync.Mutex
 
 	// ready is closed once restored state is safe for state-dependent RPCs. For
@@ -830,6 +830,10 @@ func (m *Manager) restoreInstances() error {
 	m.ghostTaskRuns = ghosts
 	m.taskRunSequence = taskRunSequence
 	m.registerLoadRuntimeSettlementsLocked(owed)
+	// Re-park every on_complete obligation the previous generation left durable
+	// on its rows (#4162): the completion edge cannot re-fire, so without this a
+	// marked session would sit forever with nothing scheduled to reap it.
+	m.armOwedTaskLifecyclesLocked()
 	m.mu.Unlock()
 	// Task outcome publication needs the authoritative restored map for legacy
 	// successor checks. Drain it immediately after installation; transient task or

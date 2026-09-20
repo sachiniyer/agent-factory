@@ -56,15 +56,45 @@ permissions:
   statuses: read
   issues: write
 
-# A reconciliation pass, scheduled or dispatched, carries no unique event: each
-# one scans every open master PR, so a newer pending pass may replace an older
-# pending copy without losing an invalidation. Keep the active run alive through
-# its aggregate transaction so the next scan cannot select the same per-PR
-# decisions while they are queued. Every webhook/comment run gets its own run-id
-# group and still reaches the ungrouped invalidation below; those events are not
-# fungible and never coalesce.
+# A concurrency group holds one running and one pending run: a newer pending
+# run replaces the older one, and cancel-in-progress stays false so an active
+# transaction always finishes uninterrupted. Replacement is safe only when the
+# survivor's invalidation covers every head the cancelled pending run would
+# have covered — a run cancelled while pending never reaches the ungrouped
+# invalidation below, and an uncovered head keeps its stale verdict. Each group
+# is keyed so that guarantee holds:
+#
+# - schedule / repository_dispatch: every reconciliation pass scans every open
+#   master PR, so pending copies are fungible and the older one carries nothing
+#   the newer one misses. Keeping the active pass alive through its aggregate
+#   transaction also keeps the next scan from selecting the same per-PR
+#   decisions while they are queued (#4571).
+# - workflow_dispatch: keyed by (pr_number, previous_head_sha). Recovery polls
+#   for the head AFTER that one; only an identical request reproduces it.
+# - pull_request_target synchronize: keyed by (before, after). It alone carries
+#   the previous head, which no later event reproduces, so only a redelivery of
+#   the same transition may replace it — never a different push or a comment.
+# - pull_request_target other actions: keyed by (PR, payload head). A head can
+#   move while a PR is closed with no synchronize event bridging it, so closed
+#   on the old head must not be replaced by reopened on the new one.
+# - issue_comment / pull_request_review / pull_request_review_comment: one
+#   group per PR. They cover only the PR's current head, resolved at run time,
+#   and every transition away from an older head is carried by a synchronize
+#   run that never coalesces — so a burst of comments collapses to at most one
+#   pending run and loses no invalidation.
+# - check_suite / status / workflow_run: one group per named commit. Coverage
+#   is exactly that head, so same-commit copies are identical by construction.
 concurrency:
-  group: auto-gate-${{ (github.event_name == 'schedule' || github.event_name == 'repository_dispatch') && 'required-check-reconciliation' || github.run_id }}
+  group: >-
+    auto-gate-${{
+      (github.event_name == 'schedule' || github.event_name == 'repository_dispatch') && 'required-check-reconciliation' ||
+      github.event_name == 'workflow_dispatch' && format('recovery-{0}-{1}', inputs.pr_number, inputs.previous_head_sha) ||
+      github.event_name == 'pull_request_target' && github.event.action == 'synchronize' && format('synchronize-{0}-{1}', github.event.before, github.event.after) ||
+      github.event_name == 'pull_request_target' && format('pr-{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) ||
+      (github.event.issue.number || github.event.pull_request.number) && format('pr-{0}', github.event.issue.number || github.event.pull_request.number) ||
+      (github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) && format('head-{0}', github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) ||
+      github.run_id
+    }}
   cancel-in-progress: false
 
 jobs:
@@ -210,11 +240,35 @@ jobs:
                   })),
                 ),
               );
-              // A retry-exhausted read is already represented by a BLOCKED
-              // verdict. Let invalidation/apply publish that red decision;
-              // rethrowing here discards the actionable terminal outcome.
-              if (readFailure) {
+              // A retry-exhausted read is a could-not-evaluate, not a defect:
+              // downstream marks each known head's fixed aggregate UNKNOWN, and
+              // fails its own job if it cannot (#4461). Failing this job too
+              // would paint the run the same red as a real gate failure, while
+              // rethrowing would discard the heads the lane still has to mark.
+              //
+              // That only holds when there IS a head to mark. A
+              // workflow_dispatch or schedule payload names none, so nothing
+              // downstream runs, nothing is published, and a green run here
+              // would be the only record of a recovery that did nothing. That
+              // exit stays red.
+              if (readFailure && knownEventHeads.length === 0) {
                 core.setFailed(summary);
+                return;
+              }
+              if (readFailure) {
+                core.warning(`Auto Gate could not evaluate: ${message}`);
+                try {
+                  await core.summary
+                    ?.addRaw(
+                      `## Auto Gate could not evaluate\n\n${summary}\n\n` +
+                        "No verdict was computed for the affected heads. Downstream jobs mark " +
+                        "each head's fixed aggregate UNKNOWN (a failing, non-mergeable " +
+                        "conclusion), and fail if they cannot leave it non-passing.",
+                    )
+                    .write();
+                } catch {
+                  // The job summary is best-effort; the warning above carries the cause.
+                }
                 return;
               }
               throw error;
@@ -356,6 +410,7 @@ jobs:
             };
             const invalidatedHeads = [];
             const failures = [];
+            const deferredHeads = [];
             for (const aggregate of aggregateHeads) {
               const headSha = String(aggregate.head_sha || "");
               try {
@@ -367,6 +422,27 @@ jobs:
                 try {
                   await invalidateAggregate(aggregate);
                 } catch (retryError) {
+                  const couldNotEvaluate =
+                    autoGate.isReadFailure?.(retryError) === true ||
+                    autoGate.isRateLimitFailure?.(retryError) === true;
+                  if (couldNotEvaluate) {
+                    // A rate-limited or exhausted-transport invalidation is
+                    // infrastructure, not a verdict: keep the head in the lane
+                    // so the serialized transaction retries the invalidation
+                    // itself — and publishes UNKNOWN if the quota is still
+                    // gone — instead of this job going the same red as a real
+                    // gate failure (#4461). If the lane cannot write either,
+                    // no replacement exists and the lane's job fails instead.
+                    deferredHeads.push({ headSha, error: retryError });
+                    invalidatedHeads.push(aggregate);
+                    core.warning(
+                      `Could not invalidate aggregate ${headSha} after the pre-lane retry ` +
+                        `(${retryError.message || String(retryError)}); the serialized lane ` +
+                        "will retry it, publish UNKNOWN if evaluation still cannot run, and fail " +
+                        "if it cannot write either.",
+                    );
+                    continue;
+                  }
                   failures.push(
                     new AggregateError(
                       [initialError, retryError],
@@ -382,6 +458,12 @@ jobs:
               invalidatedHeads.push(aggregate);
             }
             core.setOutput("invalidated_heads", JSON.stringify(invalidatedHeads));
+            if (deferredHeads.length > 0) {
+              core.notice(
+                `${deferredHeads.length} aggregate invalidation(s) deferred to the serialized lane ` +
+                  "because GitHub API calls were rate-limited or exhausted.",
+              );
+            }
             if (failures.length > 0) {
               throw new AggregateError(
                 failures,

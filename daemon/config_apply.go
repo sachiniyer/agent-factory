@@ -56,6 +56,18 @@ type ApplyConfigResult struct {
 	// deferred rather than falsely "applied". The auth/CORS keys never appear here —
 	// they are live-read and cannot fail to apply.
 	FailedListenerKeys []string
+	// Digest identifies the config.toml bytes THIS apply loaded (#4247). A save
+	// that then compares it against the digest of what it wrote learns whether
+	// the daemon adopted its file or one a competing writer — another client, or
+	// a hand-edit — left there in between. The file lock inside the writer is
+	// released before this load runs, so that gap is real.
+	//
+	// It is deliberately NOT on ApplyConfigResponse: this comparison happens
+	// inside one daemon process, in the SetConfigValue handler, so it needs no
+	// wire field — and config.ConfigDigest could not be one anyway, by
+	// construction. A load that did not reach the canonical config.toml read
+	// leaves this unknown, which confirms nothing.
+	Digest config.ConfigDigest
 }
 
 // keyDiff maps every config key the daemon reads to a predicate reporting whether
@@ -97,10 +109,20 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"network.require_token":          func(a, b *config.Config) bool { return a.RequireToken != b.RequireToken },
 	"network.require_loopback_token": func(a, b *config.Config) bool { return a.RequireLoopbackToken != b.RequireLoopbackToken },
 	"network.cors_allowed_origins":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.CORSAllowedOrigins, b.CORSAllowedOrigins) },
+	// Read at the moment an upgrade activates (update_driver.go), from the live
+	// config ApplyConfig swaps, so a save is in force for the next upgrade attempt
+	// with nothing to restart (config/effect.go classifies it EffectAppliedLive).
+	"upgrade_clear_unverifiable_artifacts": func(a, b *config.Config) bool {
+		return a.UpgradeClearUnverifiableArtifacts != b.UpgradeClearUnverifiableArtifacts
+	},
 	// EffectNextDaemonStart keys — read once at startup.
 	"root_agents":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgents, b.RootAgents) },
 	"root_agent":    func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgent, b.RootAgent) },
 	"branch_prefix": func(a, b *config.Config) bool { return a.BranchPrefix != b.BranchPrefix },
+	// The watcher supervisor snapshots this cap when the daemon constructs it
+	// (daemon.go) and is not rebuilt by ApplyConfig, so a change waits for the next
+	// daemon start (config/effect.go classifies it EffectNextDaemonStart).
+	"watcher_events_per_minute": func(a, b *config.Config) bool { return a.WatcherEventsPerMinute != b.WatcherEventsPerMinute },
 	// debug_pprof: the pprof mount is decided when startHTTPServer builds the unix
 	// listener's handler, so a change is reported pending rather than applied.
 	"debug_pprof": func(a, b *config.Config) bool { return a.DebugPprof != b.DebugPprof },
@@ -140,7 +162,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	m.configApplyMu.Lock()
 	defer m.configApplyMu.Unlock()
 
-	newCfg, err := config.LoadConfig()
+	newCfg, loadedDigest, err := config.LoadConfigWithDigest()
 	if err != nil {
 		return ApplyConfigResult{}, fmt.Errorf("reload config: %w", err)
 	}
@@ -149,7 +171,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// Bucket every changed key by its effect class (config.KeyEffectClass, the same
 	// source the save-surface notice reads). Sorted so the reported order is stable
 	// across map iterations.
-	var result ApplyConfigResult
+	result := ApplyConfigResult{Digest: loadedDigest}
 	for key, changed := range keyDiff {
 		if !changed(old, newCfg) {
 			continue
@@ -216,9 +238,16 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// restores the listener would then see wasExposed=true and suppress the
 	// exposure notice for the transition from no listener to an exposed one.
 	// Reserve the old.ListenAddr fallback for managers with no webListeners at all.
+	// The same pre-reconcile capture is needed for the preview listener's
+	// exposure transition (below): when a prior preview rebind failed,
+	// old.PreviewListenAddr carries the never-bound requested address while the
+	// socket still serves the previously bound one, so wasPreviewExposed must be
+	// computed from the kernel-resolved bound address, not the requested one.
 	preReconcileServingAddr := old.ListenAddr
+	preReconcilePreviewAddr := old.PreviewListenAddr
 	if m.webListeners != nil {
 		preReconcileServingAddr = m.ListenerAddress("network.listen_addr")
+		preReconcilePreviewAddr = m.ListenerAddress("network.preview_listen_addr")
 		if failed, rerr := m.webListeners.reconcile(newCfg); rerr != nil {
 			result.Warnings = append(result.Warnings, rerr.Error())
 			result.FailedListenerKeys = append(result.FailedListenerKeys, failed...)
@@ -320,6 +349,65 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 		serving := *newCfg
 		serving.ListenAddr = servingAddr
 		if notice := config.ListenerExposureNotice(&serving); notice != "" {
+			result.Warnings = append(result.Warnings, notice)
+		}
+	}
+
+	// The web-tab preview listener's exposure notice (#1856) — the preview analog
+	// of the control-plane block above, closing the asymmetry the live-rebind path
+	// introduced: ApplyConfigResult.Warnings is the channel every config-save surface
+	// (CLI / TUI / web toast) renders, and the control-plane block was the only one
+	// routed onto it. A live save that transitions network.preview_listen_addr from
+	// unset/loopback INTO a network-routable bind rebinds the preview listener (the
+	// one bind path above) but produced NO warning on the save surface — the parallel
+	// PreviewListenerExposureNotice reached only the daemon log via bindPreviewLocked,
+	// which no save-surface client reads. So the operator was told about one exposure
+	// and not the other.
+	//
+	// PreviewListenerExposureNotice does NOT gate on network.require_token — the
+	// preview origin never serves the daemon control plane, and each tab's own
+	// hostname is its credential, so the control listener's token posture says
+	// nothing about who may read a preview (see config/authposture.go). The one
+	// question is whether the SERVING preview bind is reachable from the network,
+	// i.e. non-empty and non-loopback. That is the SAME condition
+	// PreviewListenerExposureNotice gates on, inlined here as the predicate authority
+	// so the transition decision and the notice text cannot drift apart.
+	//
+	// The transition is gated the same way as the control plane
+	// (!wasPreviewExposed && servingPreviewExposed) so an ALREADY network-bound
+	// preview does not re-emit on every unrelated save (the warning-fatigue contract
+	// the control-plane "at most once per daemon start" discipline and the per-write
+	// exposureWarning emitter both enforce). The residual gap that gate opens — an
+	// operator on an already-preview-exposed daemon moving the bind between two
+	// non-loopback addresses — is closed by exposureWarning firing on every exposed
+	// network.preview_listen_addr WRITE (config/configset.go), matching the
+	// control-plane "warn on every exposed write of the changed key" semantic.
+	//
+	// The notice describes the SERVING posture (m.ListenerAddress, the
+	// kernel-resolved bound address), not the REQUESTED one, for the same reason as
+	// the control plane: a failed rebind leaves the old preview listener serving
+	// while config has already moved to the address that never bound. Keying on the
+	// requested posture would (1) fire a false-positive notice when the still-serving
+	// preview is loopback (not exposed), and (2) name an un-bound requested address on
+	// a genuine transition reached only by a successful bind. preReconcilePreviewAddr
+	// is captured before reconcile for the same reason preReconcileServingAddr is:
+	// old.PreviewListenAddr after a prior failed rebind carries the requested address
+	// that never bound, not the one still serving.
+	wasPreviewExposed := preReconcilePreviewAddr != "" && !config.IsLoopbackListenAddr(preReconcilePreviewAddr)
+	servingPreviewAddr := newCfg.PreviewListenAddr
+	if m.webListeners != nil {
+		servingPreviewAddr = m.ListenerAddress("network.preview_listen_addr")
+	}
+	servingPreviewExposed := servingPreviewAddr != "" && !config.IsLoopbackListenAddr(servingPreviewAddr)
+	if !wasPreviewExposed && servingPreviewExposed {
+		// PreviewListenerExposureNotice formats the address out of
+		// cfg.PreviewListenAddr, so build a throwaway config carrying the SERVING
+		// bound address — the notice must name the address the daemon is actually
+		// reachable on, not the one the operator merely asked for (and that may
+		// never have bound).
+		serving := *newCfg
+		serving.PreviewListenAddr = servingPreviewAddr
+		if notice := config.PreviewListenerExposureNotice(&serving); notice != "" {
 			result.Warnings = append(result.Warnings, notice)
 		}
 	}

@@ -189,6 +189,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 
 	scheduler := newTaskScheduler()
 	watchers := newWatcherSupervisorWithEventsPerMinute(cfg.WatcherEventsPerMinute)
+	watchers.observeTargetLimit = manager.observeTaskTargetLimit
 
 	shutdownCh := make(chan struct{})
 	closeControl, alreadyRunning, err := bindControlServerExclusive(manager, scheduler, watchers, shutdownCh)
@@ -524,6 +525,14 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			instance, err := fromInstanceDataForRefresh(repoID, item)
 			if err != nil {
 				log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
+				// A marked row that cannot materialize still owes its teardown
+				// (#4162) — the obligation is durable but nothing in memory can
+				// drain it. Name the session so the leak is a visible diagnosis,
+				// not the silent disappearance the marker exists to fix.
+				if item.PendingOnComplete != nil {
+					log.WarningLog.Printf("daemon: session %q is owed an on_complete teardown for task %s (filed %s) but its record failed to load; it stays on disk for repair or manual cleanup: %v",
+						item.Title, item.PendingOnComplete.TaskID, item.PendingOnComplete.FiledAt.Format(time.RFC3339), err)
+				}
 				// The row is invisible to everything that walks m.instances from here on
 				// — but its agent may still be running, and its task run is still in
 				// flight if the persisted marker says so. Keep it counted against the
