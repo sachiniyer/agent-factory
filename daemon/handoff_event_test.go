@@ -128,10 +128,14 @@ func TestHandoffSession_PublishesSwapThenSettlement(t *testing.T) {
 }
 
 // TestHandoffSession_UndeliveredMissionStillAnnouncesTheSwap is the case the
-// checkpoint publish exists for. A post-ready paste failure leaves the mission
-// pending behind the fence and NEVER settles inside this call — the recovery loop
-// owns it from here. The agent program has still changed, and the requester learns
-// that from the RPC error path; everyone else has only the events plane.
+// checkpoint publish exists for. A post-ready paste failure reports the
+// ambiguous could-not-confirm verdict: the mission stays pending for the
+// operator's `retry-limit`, and the replacement fence settles inside this call
+// because readiness already proved the incoming runtime live — fencing it would
+// wedge a working session behind a marker only automatic recovery clears, which
+// recovery does not own for ambiguous verdicts (#4429). The agent program has
+// still changed, and the requester learns that from the RPC error path;
+// everyone else has only the events plane.
 func TestHandoffSession_UndeliveredMissionStillAnnouncesTheSwap(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	sendErr := errors.New("paste transport failed")
@@ -148,8 +152,11 @@ func TestHandoffSession_UndeliveredMissionStillAnnouncesTheSwap(t *testing.T) {
 	if !errors.Is(err, task.ErrPromptDelivery) {
 		t.Fatalf("HandoffSession error = %v, want a post-ready prompt-delivery failure", err)
 	}
-	if got := inst.GetInFlightOp(); got != session.OpReplacing {
-		t.Fatalf("op = %v, want the fence still raised for the retry path", got)
+	if got := inst.GetInFlightOp(); got != session.OpNone {
+		t.Fatalf("op = %v, want the fence settled — readiness already proved the incoming runtime live (#4429)", got)
+	}
+	if inst.PendingHandoffMission() == "" {
+		t.Fatal("an unconfirmed mission must remain pending for the operator's retry-limit")
 	}
 
 	updates := drainSessionUpdates(t, ch)

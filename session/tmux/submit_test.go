@@ -1312,12 +1312,17 @@ const paneLivenessBound = 30 * time.Second
 // withPasteDeliveryTiming overrides the delivery-poll knobs for a test and
 // returns a restore func for defer. It also shrinks the #3293 redelivery delay
 // to the poll interval so an observed-absent fixture retries immediately
-// instead of sleeping the production seconds-scale wait.
+// instead of sleeping the production seconds-scale wait, and the #4200
+// post-Enter staged-draft windows to the same scale so a mock-composer fixture
+// does not pay the production settle delays.
 func withPasteDeliveryTiming(maxWait, poll time.Duration) func() {
 	savedMax, savedPoll, savedRedeliver := pasteDeliveryMaxWait, pasteDeliveryPollInterval, redeliverAfterAbsentDelay
+	savedGrace, savedSettle := strandedSubmitGrace, strandedSubmitSettle
 	pasteDeliveryMaxWait, pasteDeliveryPollInterval, redeliverAfterAbsentDelay = maxWait, poll, poll
+	strandedSubmitGrace, strandedSubmitSettle = poll, poll
 	return func() {
 		pasteDeliveryMaxWait, pasteDeliveryPollInterval, redeliverAfterAbsentDelay = savedMax, savedPoll, savedRedeliver
+		strandedSubmitGrace, strandedSubmitSettle = savedGrace, savedSettle
 	}
 }
 
@@ -1388,15 +1393,31 @@ func TestSubmitWaitsForPasteBeforeEnter(t *testing.T) {
 				enterSawConfirmedText = confirmedText
 				return []byte(deliveryBoundarySentinel + "\nsubmitted composer"), nil
 			}
+			joined := strings.Join(c.Args, " ")
+			// The #4200 post-Enter staged-draft snapshot is ONE command list —
+			// display-message then capture-pane — answered as the cursor line
+			// followed by the grid. Report the cursor on the composer's top
+			// border row — a row that can never hold the draft — so a
+			// dispatched submit is not mistaken for a staged one.
+			snapshot := strings.Contains(joined, "display-message") && strings.Contains(joined, "capture-pane")
+			if strings.Contains(joined, "display-message") && !snapshot {
+				return []byte("0 0 1"), nil
+			}
 			captureCalls++
 			// Withhold the pasted text for the first few polls (drain latency),
 			// then reveal it — inside a composer border box, to prove the tail is
 			// recognized through the framing.
+			var pane string
 			if captureCalls <= revealAfter || loaded == "" {
-				return []byte("╭─ composer ─╮\n│ >          │\n╰────────────╯"), nil
+				pane = "╭─ composer ─╮\n│ >          │\n╰────────────╯"
+			} else {
+				confirmedText = true
+				pane = "╭─ composer ────────────╮\n│ > " + loaded + " │\n╰───────────────────────╯"
 			}
-			confirmedText = true
-			return []byte("╭─ composer ────────────╮\n│ > " + loaded + " │\n╰───────────────────────╯"), nil
+			if snapshot {
+				return []byte("0 0 1\n" + pane), nil
+			}
+			return []byte(pane), nil
 		},
 	}
 
@@ -1407,7 +1428,10 @@ func TestSubmitWaitsForPasteBeforeEnter(t *testing.T) {
 	defer mu.Unlock()
 	require.Greater(t, captureCalls, revealAfter,
 		"submit must poll capture-pane until the paste lands, not send Enter blind (#1982); got %d captures", captureCalls)
-	require.Equal(t, revealAfter+1, captureCalls,
+	// revealAfter+1 is the poll loop stopping at the first revealing capture;
+	// +1 more is the #4200 post-Enter staged-draft check, which is a single
+	// inspection rather than a poll and is counted separately on purpose.
+	require.Equal(t, revealAfter+2, captureCalls,
 		"the virtual poll budget must stop at the first capture that reveals the paste, not spin past it")
 	require.True(t, enterSawConfirmedText,
 		"Enter must be sent only AFTER a capture confirmed the pasted text is present (#1982)")
