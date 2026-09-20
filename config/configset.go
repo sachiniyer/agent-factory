@@ -563,7 +563,8 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 		return nil, err
 	}
 	prettyPath := prettyHomePath(path)
-	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded, structured: structured}
+	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded, structured: structured,
+		rawStructured: rawValue}
 
 	var result *SetResult
 	writeErr := WithFileLock(path, func() error {
@@ -838,6 +839,10 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 		}
 	}
 	if w.structured {
+		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainstProject(w.key, w.rawStructured, before)
+		if err != nil {
+			return nil, fmt.Errorf("invalid value for %s: %w", w.key, err)
+		}
 		updated, err = setTOMLStructured(updated, w.key, w.encoded)
 		if err != nil {
 			return nil, fmt.Errorf("failed to edit %s in %s: %w", w.key, prettyPath, err)

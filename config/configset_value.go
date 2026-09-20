@@ -110,6 +110,82 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 	return canonical, encoded, nil
 }
 
+// canonicalizeStructuredValueAgainstProject is the personal-project writer's
+// locked variant. It mirrors canonicalizeStructuredValueAgainst but reads
+// tombstones from a *ProjectConfig (the personal layer's on-disk shape) and
+// does NOT reseed DefaultConfig().ProgramOverrides: that reseed keeps an
+// auto-detected GLOBAL default masked after the user removed it, so it is a
+// global-layer concern. The personal layer only needs to preserve the ""
+// tombstones that already exist on THIS layer — a project-scoped disablement
+// of an inherited override must survive a subsequent whole-map
+// program_overrides write that omits the agent.
+func canonicalizeStructuredValueAgainstProject(key, raw string, current *ProjectConfig) (canonical, encoded string, err error) {
+	if strings.TrimSpace(raw) == "null" {
+		return "", "", fmt.Errorf("expected compact JSON for %s, got null", key)
+	}
+	holder := &Config{}
+	field, ok := writableConfigFieldByTomlKey(holder, key)
+	if !ok {
+		return "", "", fmt.Errorf("%q does not name a writable global config field", key)
+	}
+	if key == "root_agent" {
+		var decoded rootAgentConfigJSON
+		if err := decodeCompactJSON(key, raw, &decoded); err != nil {
+			return "", "", err
+		}
+		if err := rejectStructuredNulls(key, raw); err != nil {
+			return "", "", err
+		}
+		value := reflect.ValueOf(decoded)
+		encoded, err := encodeStructuredTOML(key, value)
+		if err != nil {
+			return "", "", err
+		}
+		return editorValue(value), encoded, nil
+	}
+
+	target := field.Addr().Interface()
+	if err := decodeCompactJSON(key, raw, target); err != nil {
+		return "", "", err
+	}
+	if err := rejectStructuredNulls(key, raw); err != nil {
+		return "", "", err
+	}
+	if err := validateStructuredConfigValue(key, field); err != nil {
+		return "", "", err
+	}
+
+	canonical = editorValue(field)
+	encodedValue := field
+	// A whole-map program_overrides write replaces the entire [program_overrides]
+	// table. Preserve a pre-existing program_overrides.<agent> = "" tombstone
+	// from the personal layer that the user omitted from the new JSON, mirroring
+	// the global writer. Without this, setTOMLStructured's removal of the old
+	// table would delete the tombstone and the resolved config would fall back to
+	// the lower layer's override on the next resolve — silently undoing a
+	// deliberate per-project disablement.
+	if key == "program_overrides" && current != nil {
+		requested := field.Interface().(map[string]string)
+		onDisk := make(map[string]string, len(requested)+1)
+		for agent, command := range requested {
+			onDisk[agent] = command
+		}
+		for agent, command := range current.ProgramOverrides {
+			if command == "" {
+				if _, present := requested[agent]; !present {
+					onDisk[agent] = ""
+				}
+			}
+		}
+		encodedValue = reflect.ValueOf(onDisk)
+	}
+	encoded, err = encodeStructuredTOML(key, encodedValue)
+	if err != nil {
+		return "", "", err
+	}
+	return canonical, encoded, nil
+}
+
 // rootAgentConfigJSON preserves JSON field presence while a structured value is
 // encoded. RootAgent.Enabled deliberately lacks omitempty for full Config
 // serialization, but a personal override that omits enabled must keep inheriting
