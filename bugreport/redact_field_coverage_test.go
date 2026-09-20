@@ -83,8 +83,9 @@ const guardMinContainer = 2 * guardUnitLen
 const guardContainerLen = 9 * guardUnitLen
 
 var verbatimInstanceFields = map[string]string{
-	"ID":     "minted instance id, never derived from user text",
-	"TaskID": "minted task id (#1892), never derived from user text",
+	"ID":               "minted instance id, never derived from user text",
+	"TaskID":           "minted task id (#1892), never derived from user text",
+	"TaskGenerationID": "128-bit random task-incarnation id minted by AddTaskChecked, never derived from user text (#4222)",
 	// The durable on_complete obligation (#4162) records WHOSE teardown is
 	// owed — the same minted task id the TaskID row above already carries
 	// verbatim — and WHEN the obligation was filed; no user text reaches it.

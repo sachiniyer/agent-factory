@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,12 +26,14 @@ import (
 // attempt stays synchronous on the watcher's reader goroutine, preserving the
 // backpressure/ordering contract.
 //
-// Layout: <AF home>/events/<taskID>.jsonl holds one JSON event per line;
-// <taskID>.cursor holds the byte offset of the first undelivered event, so a
-// pop is a cursor advance, not a file rewrite. A <taskID>.limit-parked marker
-// protects a backlog held by a known usage-limit wall from ordinary outage
-// expiry. All three files are removed whenever the queue fully drains. The
-// cursor is written AFTER the delivery it
+// Layout: <AF home>/events/<taskID>.<generation-hash>.jsonl holds one JSON
+// event per line; the matching .cursor holds the byte offset of the first
+// undelivered event, so a pop is a cursor advance, not a file rewrite, and a
+// matching .limit-parked marker protects a backlog held by a known usage-limit
+// wall from ordinary outage expiry. The hash keeps even a hand-edited generation
+// path-safe while binding the backlog to the exact task incarnation. All three
+// files are removed whenever the queue fully drains. The cursor is written AFTER
+// the delivery it
 // acknowledges, so a daemon crash mid-replay redelivers at most one event —
 // at-least-once by design; exactly-once machinery is not worth building for a
 // prompt-delivery system.
@@ -96,9 +99,9 @@ type eventQueueCursor struct {
 // state: no files on disk, every field zero.
 type eventQueue struct {
 	taskID    string
-	path      string // <dir>/<taskID>.jsonl
-	curPath   string // <dir>/<taskID>.cursor
-	limitPath string // <dir>/<taskID>.limit-parked
+	path      string // <dir>/<taskID>.<generation-hash>.jsonl
+	curPath   string // <dir>/<taskID>.<generation-hash>.cursor
+	limitPath string // <dir>/<taskID>.<generation-hash>.limit-parked
 	remove    func(string) error
 
 	// appendRecord/appendBoundary/truncate are the write seams. Production wires
@@ -185,11 +188,20 @@ func eventQueueDir() (string, error) {
 // recovery still returns a queue, but one that knows its state is unknown
 // (loadFailed) and refuses to act until a retried load succeeds (#3242).
 func newEventQueue(dir, taskID string) *eventQueue {
+	return newEventQueueForGeneration(dir, taskID, "")
+}
+
+// newEventQueueForGeneration opens the queue owned by one task incarnation.
+// The empty generation retains the legacy filename for focused queue tests and
+// for pre-generation task rows; a newly added task always carries a generation
+// and therefore cannot reopen a removed namesake's legacy backlog.
+func newEventQueueForGeneration(dir, taskID, taskGenerationID string) *eventQueue {
+	stem := eventQueueStem(taskID, taskGenerationID)
 	q := &eventQueue{
 		taskID:         taskID,
-		path:           filepath.Join(dir, taskID+".jsonl"),
-		curPath:        filepath.Join(dir, taskID+".cursor"),
-		limitPath:      filepath.Join(dir, taskID+".limit-parked"),
+		path:           filepath.Join(dir, stem+".jsonl"),
+		curPath:        filepath.Join(dir, stem+".cursor"),
+		limitPath:      filepath.Join(dir, stem+".limit-parked"),
 		remove:         os.Remove,
 		appendRecord:   appendRecordToFile,
 		appendBoundary: appendRecordToFile,
@@ -200,6 +212,14 @@ func newEventQueue(dir, taskID string) *eventQueue {
 	}
 	q.load()
 	return q
+}
+
+func eventQueueStem(taskID, taskGenerationID string) string {
+	if taskGenerationID == "" {
+		return taskID
+	}
+	digest := sha256.Sum256([]byte(taskGenerationID))
+	return fmt.Sprintf("%s.%x", taskID, digest)
 }
 
 // errEventQueueLoadFailed marks every refusal caused by unknown on-disk state
@@ -896,86 +916,4 @@ func (q *eventQueue) compactLocked() error {
 		return fmt.Errorf("sync event-queue directory after compaction: %w", err)
 	}
 	return nil
-}
-
-func syncEventQueueDirectory(dir string) error {
-	handle, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", dir, err)
-	}
-	if err := handle.Sync(); err != nil {
-		_ = handle.Close()
-		return fmt.Errorf("fsync %s: %w", dir, err)
-	}
-	if err := handle.Close(); err != nil {
-		return fmt.Errorf("close %s after fsync: %w", dir, err)
-	}
-	return nil
-}
-
-// offsetIsRecordBoundaryLocked reports whether q.offset begins a record in the
-// open queue file f. Offset 0 and offset>=size are boundaries by definition;
-// any interior offset is a boundary iff the byte before it is the record
-// terminator '\n'. A ReadAt failure is an error, not "not a boundary" (#3242):
-// conflating them would reset a valid cursor over a transient read fault and
-// redeliver the whole delivered prefix. ReadAt leaves f's seek position
-// untouched. Callers hold q.mu.
-func (q *eventQueue) offsetIsRecordBoundaryLocked(f *os.File) (bool, error) {
-	if q.offset <= 0 || q.offset >= q.size {
-		return true, nil
-	}
-	var b [1]byte
-	if _, err := f.ReadAt(b[:], q.offset-1); err != nil {
-		return false, err
-	}
-	return b[0] == '\n', nil
-}
-
-// readEventAtLocked reads and parses one JSONL record at the given offset,
-// returning the record and its length including the newline. Callers hold q.mu.
-//
-// The returned length distinguishes the two failure modes so peek can self-heal
-// (#1634): a CORRUPT but newline-terminated record returns its byte length with
-// the error (there is a boundary to skip past), while a TRUNCATED record with no
-// terminating newline returns length 0 (no boundary — the drainer parks).
-func (q *eventQueue) readEventAtLocked(off int64) (queuedEvent, int64, error) {
-	f, err := os.Open(q.path)
-	if err != nil {
-		return queuedEvent{}, 0, err
-	}
-	defer func() { _ = f.Close() }()
-	if _, err := f.Seek(off, 0); err != nil {
-		return queuedEvent{}, 0, err
-	}
-	br := bufio.NewReaderSize(f, 64*1024)
-	raw, err := br.ReadBytes('\n')
-	if err != nil {
-		return queuedEvent{}, 0, fmt.Errorf("truncated event record at offset %d: %w", off, err)
-	}
-	var ev queuedEvent
-	if err := json.Unmarshal(raw, &ev); err != nil {
-		return queuedEvent{}, int64(len(raw)), fmt.Errorf("corrupt event record at offset %d: %w", off, err)
-	}
-	return ev, int64(len(raw)), nil
-}
-
-// persistCursorLocked writes the current cursor (q.offset). Atomic
-// (write+rename) so a torn write can never yield a cursor pointing mid-record.
-// Callers hold q.mu.
-func (q *eventQueue) persistCursorLocked() error {
-	return q.persistCursorValueLocked(q.offset)
-}
-
-// persistCursorValueLocked durably writes an explicit cursor value. Compaction
-// uses it to record the post-rewrite offset (0) BEFORE the rename that shrinks
-// the file (#1537). Callers hold q.mu.
-//
-// The cursor REFUSES a symlinked path (#3672). It is a byte offset into the
-// jsonl file beside it — a pair af creates, advances and deletes together — so
-// the two must stay in the same directory: following a link would leave the
-// queue's own compaction (which fsyncs the cursor's directory before renaming
-// the queue file) fencing the wrong directory, and replacing one would discard
-// an arrangement nobody has a reason to have made.
-func (q *eventQueue) persistCursorValueLocked(off int64) error {
-	return config.AtomicWriteFileRefusingLink(q.curPath, []byte(strconv.FormatInt(off, 10)), 0644)
 }

@@ -55,10 +55,8 @@ func TestRecordWatchRateDropsPreservesNewerTerminalStatus(t *testing.T) {
 			}))
 			// A prior delivery, then a terminal outcome recorded without advancing
 			// LastRunAt (the production persistWatcherStatus path passes nil).
-			_, err := UpdateTaskStatus("d4357100", &deliveredAt, "sent")
-			require.NoError(t, err)
-			_, err = UpdateTaskStatus("d4357100", nil, terminal)
-			require.NoError(t, err)
+			setRunStatus(t, "d4357100", &deliveredAt, "sent")
+			setRunStatus(t, "d4357100", nil, terminal)
 
 			updated, err := RecordWatchRateDrops("d4357100", 3, droppedAt)
 			require.NoError(t, err)
@@ -85,8 +83,7 @@ func TestRecordWatchRateDropsPreservesTerminalStatusWithNoPriorDelivery(t *testi
 		ID: "d4357101", Name: "watcher", WatchCmd: "watch.sh", Program: "claude",
 		Enabled: true, CreatedAt: created,
 	}))
-	_, err := UpdateTaskStatus("d4357101", nil, "stopped")
-	require.NoError(t, err)
+	setRunStatus(t, "d4357101", nil, "stopped")
 
 	updated, err := RecordWatchRateDrops("d4357101", 2, created.Add(time.Hour))
 	require.NoError(t, err)
@@ -108,8 +105,7 @@ func TestRecordWatchRateDropsStillOverwritesNonTerminalStatus(t *testing.T) {
 	}))
 	deliveredAt := created.Add(time.Hour)
 	droppedAt := deliveredAt.Add(time.Minute)
-	_, err := UpdateTaskStatus("d4357102", &deliveredAt, "sent")
-	require.NoError(t, err)
+	setRunStatus(t, "d4357102", &deliveredAt, "sent")
 
 	updated, err := RecordWatchRateDrops("d4357102", 4, droppedAt)
 	require.NoError(t, err)
@@ -132,8 +128,7 @@ func TestRecordWatchRateDropsOwnsCountAndPreservesNewerDelivery(t *testing.T) {
 	assert.Zero(t, loaded.DroppedEvents, "create must discard client-supplied daemon history")
 
 	deliveredAt := created.Add(time.Hour)
-	_, err = UpdateTaskStatus(loaded.ID, &deliveredAt, "sent")
-	require.NoError(t, err)
+	setRunStatus(t, loaded.ID, &deliveredAt, "sent")
 	droppedAt := deliveredAt.Add(time.Minute)
 	updated, err := RecordWatchRateDrops(loaded.ID, 3, droppedAt)
 	require.NoError(t, err)
@@ -142,8 +137,7 @@ func TestRecordWatchRateDropsOwnsCountAndPreservesNewerDelivery(t *testing.T) {
 	assert.Equal(t, deliveredAt, *updated.LastRunAt, "a discarded event is not a delivered run")
 
 	newerDelivery := droppedAt.Add(time.Minute)
-	_, err = UpdateTaskStatus(loaded.ID, &newerDelivery, "sent")
-	require.NoError(t, err)
+	setRunStatus(t, loaded.ID, &newerDelivery, "sent")
 	updated, err = RecordWatchRateDrops(loaded.ID, 5, droppedAt)
 	require.NoError(t, err)
 	assert.Equal(t, 5, updated.DroppedEvents, "a delayed checkpoint must still persist the exact count")
@@ -154,4 +148,101 @@ func TestRecordWatchRateDropsOwnsCountAndPreservesNewerDelivery(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 5, updated.DroppedEvents, "a stale absolute checkpoint must never reduce the count")
 	assert.Equal(t, "sent", updated.LastRunStatus)
+}
+
+func TestRecordWatchRateDropsForGenerationRefusesAReboundID(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	created := time.Date(2026, time.September, 11, 11, 0, 0, 0, time.UTC)
+	require.NoError(t, AddTask(Task{
+		ID: "d4357006", Name: "watcher", WatchCmd: "watch.sh", Program: "claude",
+		Enabled: true, CreatedAt: created,
+	}))
+	loaded, err := GetTask("d4357006")
+	require.NoError(t, err)
+	require.NotEmpty(t, loaded.GenerationID)
+	droppedAt := created.Add(time.Hour)
+
+	// A flush from a watcher that supervised a REMOVED incarnation must not
+	// stamp its count — or the dropped status — onto the namesake replacement.
+	updated, applied, err := RecordWatchRateDropsForGeneration(loaded.ID, "removed-generation", 7, droppedAt)
+	require.NoError(t, err, "a rebound ID is a clean refusal, not a storage fault")
+	assert.False(t, applied)
+	assert.Zero(t, updated)
+	stored, err := GetTask(loaded.ID)
+	require.NoError(t, err)
+	assert.Zero(t, stored.DroppedEvents)
+	assert.Empty(t, stored.LastRunStatus)
+
+	updated, applied, err = RecordWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID, 7, droppedAt)
+	require.NoError(t, err)
+	assert.True(t, applied)
+	assert.Equal(t, 7, updated.DroppedEvents)
+	assert.Equal(t, WatchRateDropStatus, updated.LastRunStatus)
+
+	_, applied, err = RecordWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID, 5, droppedAt)
+	require.NoError(t, err)
+	assert.False(t, applied, "a stale absolute checkpoint writes nothing for the right generation either")
+
+	require.NoError(t, RemoveTask(loaded.ID, ProjectExpectation{}))
+	_, _, err = RecordWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID, 9, droppedAt)
+	require.Error(t, err, "a flush for a fully removed task still surfaces as an error")
+}
+
+func TestResetWatchRateDropsForGenerationClearsReboundEvidence(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	created := time.Date(2026, time.September, 11, 11, 0, 0, 0, time.UTC)
+	require.NoError(t, AddTask(Task{
+		ID: "d4357009", Name: "watcher", WatchCmd: "watch.sh", Program: "claude",
+		Enabled: true, CreatedAt: created,
+	}))
+	loaded, err := GetTask("d4357009")
+	require.NoError(t, err)
+	droppedAt := created.Add(time.Hour)
+
+	// Stage the stale state a rebound can find on the row: a count and the
+	// status a drop record leaves behind.
+	_, applied, err := RecordWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID, 12, droppedAt)
+	require.NoError(t, err)
+	require.True(t, applied)
+
+	// A reset naming a different incarnation is the same clean refusal the
+	// checkpoint path gives — the row moved on and is not this caller's to
+	// edit.
+	updated, applied, err := ResetWatchRateDropsForGeneration(loaded.ID, "other-generation")
+	require.NoError(t, err)
+	assert.False(t, applied)
+	assert.Zero(t, updated)
+	stored, err := GetTask(loaded.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 12, stored.DroppedEvents)
+	assert.Equal(t, WatchRateDropStatus, stored.LastRunStatus)
+
+	updated, applied, err = ResetWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID)
+	require.NoError(t, err)
+	assert.True(t, applied)
+	assert.Zero(t, updated.DroppedEvents)
+	assert.Empty(t, updated.LastRunStatus)
+	stored, err = GetTask(loaded.ID)
+	require.NoError(t, err)
+	assert.Zero(t, stored.DroppedEvents)
+	assert.Empty(t, stored.LastRunStatus,
+		"the drop status is the predecessor's evidence and clears with its count")
+
+	// An already-clean row is a no-op, and a foreign status survives: the
+	// reset owns drop evidence, nothing else.
+	_, applied, err = ResetWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID)
+	require.NoError(t, err)
+	assert.False(t, applied)
+
+	deliveredAt := droppedAt.Add(time.Minute)
+	setRunStatus(t, loaded.ID, &deliveredAt, "sent")
+	_, applied, err = ResetWatchRateDropsForGeneration(loaded.ID, loaded.GenerationID)
+	require.NoError(t, err)
+	assert.False(t, applied)
+	stored, err = GetTask(loaded.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "sent", stored.LastRunStatus)
+
+	_, _, err = ResetWatchRateDropsForGeneration("d43570ff", "any")
+	require.Error(t, err, "a reset for a missing task still surfaces as an error")
 }

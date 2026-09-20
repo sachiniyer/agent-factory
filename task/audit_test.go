@@ -168,8 +168,7 @@ func TestAudit_StatusUpdatesAreNotAudited(t *testing.T) {
 
 	ran := time.Now()
 	for i := 0; i < 30; i++ {
-		_, err := UpdateTaskStatus(id, &ran, "started")
-		require.NoError(t, err)
+		setRunStatus(t, id, &ran, "started")
 	}
 
 	assert.Len(t, auditOf(t, id), 1)
@@ -319,16 +318,27 @@ func TestAddTask_DiscardsClientSuppliedRunHistory(t *testing.T) {
 	created, err := AddTaskChecked(Task{
 		ID: "history1", Name: "Forged history", Prompt: "p", CronExpr: "20 * * * *",
 		ProjectPath: dir, Program: "claude", Enabled: true,
-		LastRunAt: &forged, LastRunStatus: "started", DroppedEvents: 99,
+		GenerationID: "forged-generation", LastRunAt: &forged, LastRunStatus: "started",
+		LastRunSessionID: "forged-session", LastRunSequence: 99, LastRunRevision: 99,
+		DroppedEvents: 99,
 	}, ActorAPI, nil)
 	require.NoError(t, err)
 	assert.Nil(t, created.LastRunAt, "a task that has never run has no run time")
 	assert.Empty(t, created.LastRunStatus)
+	assert.Empty(t, created.LastRunSessionID)
+	assert.Zero(t, created.LastRunSequence)
+	assert.NotEmpty(t, created.GenerationID)
+	assert.NotEqual(t, "forged-generation", created.GenerationID)
+	assert.Zero(t, created.LastRunRevision)
 	assert.Zero(t, created.DroppedEvents)
 
 	stored, err := GetTask("history1")
 	require.NoError(t, err)
 	require.Nil(t, stored.LastRunAt)
+	assert.Empty(t, stored.LastRunSessionID)
+	assert.Zero(t, stored.LastRunSequence)
+	assert.Equal(t, created.GenerationID, stored.GenerationID)
+	assert.Zero(t, stored.LastRunRevision)
 	assert.True(t, DeriveScheduleHealth(*stored, stored.CreatedAt.Add(3*time.Hour)).Overdue,
 		"and the derivation reaches the task instead of waiting a year")
 }
@@ -345,10 +355,11 @@ func TestAddTask_ResetsEveryStoreOwnedField(t *testing.T) {
 	created, err := AddTaskChecked(Task{
 		ID: "kitchen1", Name: "Everything at once", Prompt: "p", CronExpr: "20 * * * *",
 		ProjectPath: dir, Program: "claude", Enabled: true,
-		CreatedAt: future, LastRunAt: &future, LastRunStatus: "started",
-		DroppedEvents: 99,
-		Audit:         []AuditEntry{{At: future, Actor: ActorCLI, Action: AuditEnabled}},
-		Overdue:       true, MissedOccurrences: 99, MissedOccurrencesCapped: true,
+		CreatedAt: future, GenerationID: "forged-generation", LastRunAt: &future,
+		LastRunStatus: "started", LastRunSessionID: "forged-session",
+		LastRunSequence: 99, LastRunRevision: 99, DroppedEvents: 99,
+		Audit:   []AuditEntry{{At: future, Actor: ActorCLI, Action: AuditEnabled}},
+		Overdue: true, MissedOccurrences: 99, MissedOccurrencesCapped: true,
 		Unschedulable: true, Arming: ArmingArmed, NextRunAt: &next,
 	}, ActorAPI, nil)
 	require.NoError(t, err)
@@ -356,6 +367,11 @@ func TestAddTask_ResetsEveryStoreOwnedField(t *testing.T) {
 	assert.False(t, created.CreatedAt.After(time.Now().Add(time.Minute)), "created_at clamped")
 	assert.Nil(t, created.LastRunAt)
 	assert.Empty(t, created.LastRunStatus)
+	assert.Empty(t, created.LastRunSessionID)
+	assert.Zero(t, created.LastRunSequence)
+	assert.NotEmpty(t, created.GenerationID)
+	assert.NotEqual(t, "forged-generation", created.GenerationID)
+	assert.Zero(t, created.LastRunRevision)
 	assert.Zero(t, created.DroppedEvents)
 	require.Len(t, created.Audit, 1, "only the store's own create entry")
 	assert.Equal(t, AuditCreated, created.Audit[0].Action)
@@ -365,6 +381,25 @@ func TestAddTask_ResetsEveryStoreOwnedField(t *testing.T) {
 	assert.False(t, created.Unschedulable)
 	assert.Empty(t, created.Arming)
 	assert.Nil(t, created.NextRunAt)
+}
+
+func TestAddTaskMintsNewGenerationWhenIDIsReused(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+	tsk := Task{
+		ID: "reuse001", Name: "first", Prompt: "p", CronExpr: "20 * * * *",
+		ProjectPath: dir, Program: "claude", Enabled: true,
+	}
+	first, err := AddTaskChecked(tsk, ActorAPI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, first.GenerationID)
+	require.NoError(t, RemoveTask(tsk.ID, ProjectExpectation{}))
+	tsk.Name = "replacement"
+	second, err := AddTaskChecked(tsk, ActorAPI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, second.GenerationID)
+	assert.NotEqual(t, first.GenerationID, second.GenerationID,
+		"reusing a user-facing task id must not reuse the removed row's identity")
 }
 
 // TestAudit_ValidatorBackfilledRepoIDIsRecorded: the daemon resolves a legacy

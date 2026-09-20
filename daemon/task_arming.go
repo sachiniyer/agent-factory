@@ -151,7 +151,7 @@ func notArmedStatus(cause error) string {
 // opens the TUI on, which is the case this daemon exists to serve, a nightly
 // task can stop running forever while every surface says it ran fine (#2929).
 //
-// LastRunAt is deliberately left alone (UpdateTaskStatus's nil mode): arming is
+// LastRunAt is deliberately left alone (UpdateTaskStatusForGeneration's nil mode): arming is
 // a supervision decision, not a run, so the timestamp of the last real delivery
 // must survive it.
 //
@@ -162,9 +162,12 @@ func (m *Manager) recordArmingStatus(t task.Task, status string) {
 	if t.LastRunStatus == status {
 		return
 	}
-	updated, err := task.UpdateTaskStatus(t.ID, nil, status)
+	updated, applied, err := task.UpdateTaskStatusForGeneration(t.ID, t.GenerationID, nil, status)
 	if err != nil {
 		m.warn().Printf("could not record the arming status for task %q: %v", t.ID, err)
+		return
+	}
+	if !applied {
 		return
 	}
 	// The record the WRITE produced, not the copy this walked in with. That copy

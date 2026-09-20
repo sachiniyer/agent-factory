@@ -20,10 +20,11 @@ import (
 // enable/disable toggle sends just Enabled) is structurally incapable of
 // clobbering a concurrent edit another client made to a different field.
 //
-// Only the user-editable fields are patchable. The daemon-owned LastRunAt,
-// LastRunStatus, and DroppedEvents fields and the immutable CreatedAt never
-// appear here — their dedicated writers remain canonical, and preserving them
-// is now inherent to the merge (the record starts from the on-disk copy).
+// Only the user-editable fields are patchable. The scheduler-owned LastRunAt,
+// LastRunStatus, LastRunSessionID, LastRunSequence, and LastRunRevision, the
+// daemon-owned DroppedEvents, and the immutable CreatedAt never appear here —
+// the status helpers stay their canonical writers (#731/#1215), and preserving
+// them is inherent to the merge (the record starts from the on-disk copy).
 //
 // The json tags define the HTTP JSON body shape for the daemon's /v1/UpdateTask
 // route; a nil pointer serializes as an absent key (omitempty), so the wire form
@@ -80,8 +81,9 @@ func (u TaskUpdate) IsEmpty() bool {
 }
 
 // apply merges the non-nil fields of u onto t and returns the result. It never
-// touches CreatedAt, LastRunAt, LastRunStatus, or DroppedEvents, so a merge onto
-// the freshly-loaded record preserves those daemon-owned values automatically.
+// touches CreatedAt, LastRunAt, LastRunStatus, LastRunSessionID,
+// LastRunSequence, LastRunRevision, or DroppedEvents, so a merge onto the
+// freshly-loaded record preserves those daemon-owned values automatically.
 func (u TaskUpdate) apply(t Task) Task {
 	if u.Name != nil {
 		t.Name = *u.Name
@@ -283,7 +285,7 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 				// Validate the program ONLY when the patch sets it: a toggle or
 				// an unrelated field edit must not fail on a pre-existing Program
 				// value that would no longer pass current enum validation (the
-				// same tolerance UpdateTaskStatus applies to legacy records).
+				// same tolerance UpdateTaskStatusForGeneration applies to legacy records).
 				if update.Program != nil && merged.Program != "" {
 					if err := config.ValidateProgramEnum("task program", "task program", merged.Program, ""); err != nil {
 						return err

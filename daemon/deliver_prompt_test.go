@@ -18,6 +18,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -123,6 +124,48 @@ func TestDeliverPrompt_TaskBindingSurvivesPathRebindBeforeAutoCreate(t *testing.
 	assert.Empty(t, rec.snapshot(), "binding refusal must precede agent startup and prompt delivery")
 }
 
+func TestControlServerDeliverPromptBindsTargetSendToTaskGeneration(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	recorder := &promptRecorder{}
+	registerStarted(t, manager, repoID, repoPath, "worker", recordingBackend{
+		readyFakeBackend: readyFakeBackend{FakeBackend: session.NewFakeBackend()},
+		rec:              recorder,
+	}, true, session.Ready)
+	server := archiveTaskControlServer(manager)
+	tsk := enabledCronTask("target-generation", repoPath)
+	tsk.TargetSession = "worker"
+	tsk = addStatusTestTask(t, tsk)
+
+	origHook := testHookDeliverAfterTargetLock
+	t.Cleanup(func() { testHookDeliverAfterTargetLock = origHook })
+	testHookDeliverAfterTargetLock = func() {
+		assertTaskDeliveryFenceHeldAndScoped(t, server.scheduler, tsk.ID)
+		require.True(t, server.scheduler.controlMu.TryLock(),
+			"target delivery must not need the watcher stop/join lock")
+		server.scheduler.controlMu.Unlock()
+	}
+	var resp DeliverPromptResponse
+	err := server.DeliverPrompt(DeliverPromptRequest{
+		Title: "worker", RepoPath: repoPath, Program: "claude", Prompt: "current run",
+		TaskID: tsk.ID, TaskGenerationID: tsk.GenerationID, TaskRepoID: tsk.RepoID, TaskOrigin: true,
+	}, &resp)
+	require.NoError(t, err)
+	require.Equal(t, []string{"current run"}, recorder.snapshot())
+
+	require.NoError(t, task.RemoveTask(tsk.ID, task.ProjectExpectation{}))
+	replacement := addStatusTestTask(t, tsk)
+	require.NotEqual(t, tsk.GenerationID, replacement.GenerationID)
+	testHookDeliverAfterTargetLock = origHook
+	err = server.DeliverPrompt(DeliverPromptRequest{
+		Title: "worker", RepoPath: repoPath, Program: "claude", Prompt: "stale run",
+		TaskID: tsk.ID, TaskGenerationID: tsk.GenerationID, TaskRepoID: tsk.RepoID, TaskOrigin: true,
+	}, &resp)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "was replaced")
+	require.Equal(t, []string{"current run"}, recorder.snapshot(),
+		"a watcher admitted by the removed generation must not send into its replacement")
+}
+
 func (r *promptRecorder) add(prompt string) {
 	r.mu.Lock()
 	r.prompts = append(r.prompts, prompt)
@@ -146,6 +189,63 @@ type recordingBackend struct {
 func (b recordingBackend) SendPromptCommand(_ *session.Instance, prompt string) error {
 	b.rec.add(prompt)
 	return nil
+}
+
+type observingPromptBackend struct {
+	readyFakeBackend
+	observe func()
+}
+
+func (b observingPromptBackend) SendPromptCommand(_ *session.Instance, _ string) error {
+	b.observe()
+	return nil
+}
+
+func TestControlServerCreateSessionBindsPromptSendToTaskGeneration(t *testing.T) {
+	manager, _, repoPath := newStatusTestManager(t)
+	server := archiveTaskControlServer(manager)
+	tsk := addStatusTestTask(t, enabledCronTask("create-generation", repoPath))
+
+	promptObserved := false
+	restore := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
+		fake := session.NewFakeBackend()
+		fake.CompleteStart()
+		return observingPromptBackend{
+			readyFakeBackend: readyFakeBackend{FakeBackend: fake},
+			observe: func() {
+				promptObserved = true
+				assertTaskDeliveryFenceHeldAndScoped(t, server.scheduler, tsk.ID)
+				require.True(t, server.scheduler.controlMu.TryLock(),
+					"task create must not need the watcher stop/join lock")
+				server.scheduler.controlMu.Unlock()
+			},
+		}, nil
+	})
+	t.Cleanup(restore)
+
+	var resp CreateSessionResponse
+	err := server.CreateSession(CreateSessionRequest{
+		Title: "create-generation-run", RepoPath: repoPath, Program: "claude", Prompt: "run it",
+		TaskID: tsk.ID, TaskGenerationID: tsk.GenerationID, TaskRepoID: tsk.RepoID, TaskOrigin: true,
+	}, &resp)
+	require.NoError(t, err)
+	require.True(t, promptObserved, "the witness must reach the irreversible prompt side effect")
+}
+
+func assertTaskDeliveryFenceHeldAndScoped(
+	t *testing.T, scheduler *taskScheduler, taskID string,
+) {
+	t.Helper()
+	if unlock, ok := scheduler.tryLockDelivery(taskID); ok {
+		unlock()
+		t.Fatal("task delivery released its generation fence before the irreversible prompt send")
+	}
+
+	otherUnlock, ok := scheduler.tryLockDelivery("unrelated-task")
+	if !ok {
+		t.Fatal("one task delivery blocked an unrelated task's generation fence")
+	}
+	otherUnlock()
 }
 
 type observedPromptBackend struct {

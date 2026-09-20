@@ -39,8 +39,11 @@ func TestProcessTabExitStampEnrollsTheLoadCheckpoint(t *testing.T) {
 
 	require.NoError(t, (&LocalBackend{}).setupTabs(inst))
 	require.NotNil(t, inst.Tabs[1].Exit)
-	assert.True(t, inst.ConsumeLoadRuntimeReplacement(),
+	replacement := inst.ConsumeLoadRuntimeReplacement()
+	assert.True(t, replacement.Replaced,
 		"the daemon's startup writer persists only enrolled rows")
+	assert.False(t, replacement.Agent,
+		"a process tab's exit is not a replacement of the task-owning agent runtime")
 }
 
 // An account-scoped sibling reconstructed from disk is stopped before restore

@@ -261,7 +261,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// the session THIS Start created — an unanswered rebind probe here is a
 	// wedged server, not the retired generation coming back (Codex on #4473).
 	t.observeStart(StartBeforeAttachProbe)
-	_, err = t.restoreWithResult("", true)
+	_, err = t.restoreWithResult("", nil, true)
 	if err != nil {
 		// Probe BEFORE Close (which kills the session): the existence poll
 		// above saw the session, so if it is gone again by attach time the
@@ -602,16 +602,31 @@ func (t *TmuxSession) Restore(workDir string) error {
 // branch successfully created a replacement process. Callers that retain facts
 // about one concrete pane use this result to retire them only on replacement.
 func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
-	return t.restoreWithResult(workDir, false)
+	return t.restoreWithResult(workDir, nil, false)
 }
 
-// restoreWithResult is RestoreWithResult plus confirmedFresh: the caller
-// already proved THIS operation's new-session answers the name (Start's inner
-// attach), so an unanswered rebind must not inherit the outgoing monitor's
-// generation — that generation is retired, and binding the live replacement
-// to it latches the fresh monitor dead the moment the server answers again
-// (Codex on #4473).
-func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (RestoreResult, error) {
+// RestoreWithResultBeforeRespawn is RestoreWithResult with a callback at the
+// definitive-absence boundary, before any replacement process is started. A
+// callback error leaves the name untouched and returns without spawning.
+func (t *TmuxSession) RestoreWithResultBeforeRespawn(
+	workDir string,
+	beforeRespawn func() error,
+) (RestoreResult, error) {
+	return t.restoreWithResult(workDir, beforeRespawn, false)
+}
+
+// restoreWithResult is RestoreWithResult plus the two facts only a caller knows.
+// beforeRespawn runs at the definitive-absence boundary, before any replacement
+// process starts. confirmedFresh says the caller already proved THIS operation's
+// new-session answers the name (Start's inner attach), so an unanswered rebind
+// must not inherit the outgoing monitor's generation — that generation is
+// retired, and binding the live replacement to it latches the fresh monitor dead
+// the moment the server answers again (Codex on #4473).
+func (t *TmuxSession) restoreWithResult(
+	workDir string,
+	beforeRespawn func() error,
+	confirmedFresh bool,
+) (RestoreResult, error) {
 	// !existsOrUnknown is the definitively-absent branch (#1962): only a session
 	// tmux CONFIRMED gone triggers the re-spawn. A wedged→"exists" falls through
 	// to the pure rebind below, which is the safe direction — re-spawning against
@@ -622,6 +637,11 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 	if !existsOrUnknown {
 		if workDir == "" {
 			return RestoreReattached, fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
+		}
+		if beforeRespawn != nil {
+			if err := beforeRespawn(); err != nil {
+				return RestoreReattached, fmt.Errorf("prepare replacement for tmux session %q: %w", t.sanitizedName, err)
+			}
 		}
 		log.InfoLog.Printf("tmux session %q missing on Restore; re-spawning in %s", t.sanitizedName, workDir)
 		// Program AND declaration together: the resume flags are af-authored, so a

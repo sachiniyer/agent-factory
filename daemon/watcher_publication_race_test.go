@@ -104,13 +104,13 @@ func TestParkedStatusPublicationExcludesSupervisorStatus(t *testing.T) {
 	parkCommitted := make(chan struct{})
 	releasePark := make(chan struct{})
 	var parkOnce sync.Once
-	updateWatchTaskStatus = func(id string, at *time.Time, status string) (task.Task, error) {
-		stored, err := originalUpdate(id, at, status)
+	updateWatchTaskStatus = func(id, generationID string, at *time.Time, status string) (task.Task, bool, error) {
+		stored, applied, err := originalUpdate(id, generationID, at, status)
 		if status == TaskStatusLimitParked {
 			parkOnce.Do(func() { close(parkCommitted) })
 			<-releasePark
 		}
-		return stored, err
+		return stored, applied, err
 	}
 	t.Cleanup(func() {
 		select {
@@ -129,7 +129,7 @@ func TestParkedStatusPublicationExcludesSupervisorStatus(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("peek seeded event: ok=%v err=%v", ok, err)
 	}
-	w := &taskWatcher{taskID: taskID, sup: newWatcherSupervisor(), queue: queue}
+	w := &taskWatcher{taskID: taskID, generationID: taskGenerationForTest(t, taskID), sup: newWatcherSupervisor(), queue: queue}
 	deliveryDone := make(chan error, 1)
 	go func() { deliveryDone <- w.deliverQueuedEvent(ev, cursor) }()
 	select {

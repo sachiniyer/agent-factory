@@ -126,12 +126,23 @@ func TestArchiveSession_PublishesBindingBackfillBeforeScopeRefusal(t *testing.T)
 		}
 	}
 drained:
-	require.Len(t, got, 1, "the durably committed binding must publish even though the load then refused")
-	require.Equal(t, agentproto.EventTaskUpdated, got[0].Type)
-	var bound task.Task
+	// Both rows were written before generation_id existed, so the same load also
+	// durably gave each one a generation. Every committed row publishes, including
+	// the one whose binding stayed unknown (#4224 review).
+	require.Len(t, got, 2, "every durably committed row must publish even though the load then refused")
+	for _, event := range got {
+		require.Equal(t, agentproto.EventTaskUpdated, event.Type)
+	}
+	var bound, generationOnly task.Task
 	require.NoError(t, json.Unmarshal(got[0].Data, &bound))
+	require.NoError(t, json.Unmarshal(got[1].Data, &generationOnly))
 	assert.Equal(t, resolvable.ID, bound.ID)
 	assert.Equal(t, repoID, bound.RepoID, "the published projection carries the committed identity")
+	assert.True(t, task.IsBackfilledGeneration(bound.GenerationID))
+	assert.Equal(t, unresolvable.ID, generationOnly.ID)
+	assert.Empty(t, generationOnly.RepoID, "an unresolvable binding is not guessed")
+	assert.True(t, task.IsBackfilledGeneration(generationOnly.GenerationID),
+		"the generation backfill committed for this row too, so it must publish")
 }
 
 // TestArchiveSession_TaskStoreReadFailureLeavesSessionIntact preserves the

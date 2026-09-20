@@ -109,7 +109,7 @@ func TestTaskSessionLifecycle_TeardownSurvivesRestartWithHooksInFlight(t *testin
 		var items []session.InstanceData
 		require.NoError(t, json.Unmarshal(rawRows, &items))
 		require.Len(t, items, 1)
-		_, merr := fromInstanceDataForRefresh(items[0])
+		_, merr := fromInstanceDataForRefresh(repo.ID, items[0])
 		t.Fatalf("the marked session must survive the restart (materialization error: %v)", merr)
 	}
 
@@ -190,7 +190,7 @@ func TestTaskSessionLifecycle_RestartAdoptionStillStandsDown(t *testing.T) {
 		var items []session.InstanceData
 		require.NoError(t, json.Unmarshal(rawRows, &items))
 		require.Len(t, items, 1)
-		_, merr := fromInstanceDataForRefresh(items[0])
+		_, merr := fromInstanceDataForRefresh(repo.ID, items[0])
 		t.Fatalf("the marked session must survive the restart (materialization error: %v)", merr)
 	}
 
@@ -355,7 +355,7 @@ func TestTaskSessionLifecycle_PreMarkerDeliveryRaceSurvivesAbortOnRestart(t *tes
 		var items []session.InstanceData
 		require.NoError(t, json.Unmarshal(rawRows, &items))
 		require.Len(t, items, 1)
-		_, merr := fromInstanceDataForRefresh(items[0])
+		_, merr := fromInstanceDataForRefresh(repo.ID, items[0])
 		t.Fatalf("the session must survive the restart (materialization error: %v)", merr)
 	}
 

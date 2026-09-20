@@ -24,12 +24,11 @@ func TestWatcherRateDropIsVisibleOnTaskAndListAPI(t *testing.T) {
 	tsk := watchTask("d4357001", `printf 'one\ntwo\nthree\n'; sleep 60`, dir)
 	require.NoError(t, task.AddTask(tsk))
 	when := time.Now()
-	_, err := task.UpdateTaskStatus(tsk.ID, &when, "sent")
-	require.NoError(t, err)
+	setTaskStatusForTest(t, tsk.ID, &when, "sent")
 
 	s := newWatcherSupervisor()
 	s.eventsPerMinute = 1
-	s.deliver = func(_, _ string, _ watchDeliveryOptions) error { return nil }
+	s.deliver = func(_, _, _ string, _ watchDeliveryOptions) error { return nil }
 	logDir := t.TempDir()
 	s.logPath = func(taskID string) (string, error) {
 		return filepath.Join(logDir, "task-"+taskID+".log"), nil
@@ -84,6 +83,23 @@ func TestLiveDropOverlayPreservesANewerSuccessfulDelivery(t *testing.T) {
 	require.Equal(t, "sent", record.LastRunStatus)
 }
 
+func TestLiveDropOverlayDoesNotCrossTaskGenerations(t *testing.T) {
+	droppedAt := time.Date(2026, time.September, 11, 12, 0, 0, 0, time.UTC)
+	w := &taskWatcher{
+		taskID: "d4357009", generationID: "removed-generation",
+		dropped: 4, lastDroppedAt: droppedAt, terminalStatus: "stopped",
+	}
+	s := &watcherSupervisor{watchers: map[string]*taskWatcher{w.taskID: w}}
+	record := task.Task{ID: "d4357009", GenerationID: "rebound-generation"}
+
+	s.applyLiveDropState(&record)
+
+	require.Zero(t, record.DroppedEvents,
+		"a predecessor watcher's drops must not overlay the rebound ID's listing")
+	require.Empty(t, record.LastRunStatus,
+		"its drop or terminal status must not overlay either")
+}
+
 func TestLiveDropOverlayPreservesTerminalWatcherStatus(t *testing.T) {
 	droppedAt := time.Date(2026, time.September, 11, 12, 0, 0, 0, time.UTC)
 	for _, terminal := range []string{"stopped", "errored: exit status 1"} {
@@ -92,7 +108,7 @@ func TestLiveDropOverlayPreservesTerminalWatcherStatus(t *testing.T) {
 			w := &taskWatcher{taskID: "d4357004", dropped: 4, lastDroppedAt: droppedAt}
 			s := &watcherSupervisor{
 				watchers:  map[string]*taskWatcher{w.taskID: w},
-				setStatus: func(_, status string) { persisted = status },
+				setStatus: func(_, _, status string) { persisted = status },
 			}
 			w.sup = s
 			w.persistTerminalStatus(terminal)
@@ -125,9 +141,9 @@ func TestLifecycleStopFlushPreservesTerminalStatus(t *testing.T) {
 
 	s := newWatcherSupervisorWithEventsPerMinute(2)
 	s.loadTasks = task.LoadTasks
-	s.deliver = func(taskID, line string, _ watchDeliveryOptions) error {
+	s.deliver = func(taskID, generationID, line string, _ watchDeliveryOptions) error {
 		now := time.Now()
-		_, err := task.UpdateTaskStatus(taskID, &now, "sent")
+		_, _, err := task.UpdateTaskStatusForGeneration(taskID, generationID, &now, "sent")
 		return err
 	}
 	logDir := t.TempDir()
@@ -172,9 +188,9 @@ func TestLifecycleErroredFlushPreservesTerminalStatus(t *testing.T) {
 
 	s := newWatcherSupervisorWithEventsPerMinute(2)
 	s.loadTasks = task.LoadTasks
-	s.deliver = func(taskID, line string, _ watchDeliveryOptions) error {
+	s.deliver = func(taskID, generationID, line string, _ watchDeliveryOptions) error {
 		now := time.Now()
-		_, err := task.UpdateTaskStatus(taskID, &now, "sent")
+		_, _, err := task.UpdateTaskStatusForGeneration(taskID, generationID, &now, "sent")
 		return err
 	}
 	logDir := t.TempDir()
@@ -218,7 +234,7 @@ func TestLiveDropOverlayPreservesRecordedParkedHeadOverTerminalStatus(t *testing
 	w := &taskWatcher{taskID: "d4357005", queue: queue}
 	s := &watcherSupervisor{
 		watchers:  map[string]*taskWatcher{w.taskID: w},
-		setStatus: func(_, status string) { persisted = status },
+		setStatus: func(_, _, status string) { persisted = status },
 	}
 	w.sup = s
 	w.persistTerminalStatus("stopped")
@@ -243,7 +259,7 @@ func TestEnqueueAppendFailureCountsTheUnretainedEvent(t *testing.T) {
 	require.NoError(t, queue.enqueue("seed backlog"))
 	persisted := -1
 	s := &watcherSupervisor{
-		recordDrops: func(_ string, total int, _ time.Time) error { persisted = total; return nil },
+		recordDrops: func(_, _ string, total int, _ time.Time) error { persisted = total; return nil },
 	}
 	w := &taskWatcher{taskID: "d4357007", queue: queue, sup: s}
 	denyAccess(t, queue.path, queue.path, 0o644)
@@ -272,7 +288,7 @@ func TestTerminalStatusPublishesWithoutEvidenceOfRecordedParkedHead(t *testing.T
 
 	queue := newEventQueue(dir, "d4357008")
 	var persisted string
-	s := &watcherSupervisor{setStatus: func(_, status string) { persisted = status }}
+	s := &watcherSupervisor{setStatus: func(_, _, status string) { persisted = status }}
 	w := &taskWatcher{taskID: "d4357008", queue: queue, sup: s}
 
 	w.persistTerminalStatus("stopped")
@@ -296,7 +312,7 @@ func TestNewerParkRetiresEarlierLiveTerminalOverlay(t *testing.T) {
 	w := &taskWatcher{taskID: "d4357006", queue: queue}
 	s := &watcherSupervisor{
 		watchers:  map[string]*taskWatcher{w.taskID: w},
-		setStatus: func(_, status string) { persisted = status },
+		setStatus: func(_, _, status string) { persisted = status },
 	}
 	w.sup = s
 	w.persistTerminalStatus("stopped")
@@ -331,7 +347,8 @@ func TestRecordedParkedHeadResumeRetiresTerminalOverlay(t *testing.T) {
 	tsk := watchTask("d4357010", `printf 'x\n'`, dir)
 	require.NoError(t, task.AddTask(tsk))
 	when := time.Now()
-	_, err := task.UpdateTaskStatus(tsk.ID, &when, TaskStatusLimitParked)
+	_, _, err := task.UpdateTaskStatusForGeneration(
+		tsk.ID, taskGenerationForTest(t, tsk.ID), &when, TaskStatusLimitParked)
 	require.NoError(t, err)
 
 	seed := newEventQueue(dir, "d4357010")
@@ -342,24 +359,24 @@ func TestRecordedParkedHeadResumeRetiresTerminalOverlay(t *testing.T) {
 
 	statusWrites := 0
 	originalUpdate := updateWatchTaskStatus
-	updateWatchTaskStatus = func(taskID string, at *time.Time, status string) (task.Task, error) {
+	updateWatchTaskStatus = func(taskID, generationID string, at *time.Time, status string) (task.Task, bool, error) {
 		statusWrites++
-		return originalUpdate(taskID, at, status)
+		return originalUpdate(taskID, generationID, at, status)
 	}
 	t.Cleanup(func() { updateWatchTaskStatus = originalUpdate })
 
 	queue := newEventQueue(dir, "d4357010")
 	s := &watcherSupervisor{
-		setStatus: func(taskID, status string) {
-			persistWatcherStatus(taskID, status)
+		setStatus: func(taskID, generationID, status string) {
+			persistWatcherStatus(taskID, generationID, status)
 		},
 	}
 	delivered := ""
-	s.deliver = func(_, line string, _ watchDeliveryOptions) error {
+	s.deliver = func(_, _, line string, _ watchDeliveryOptions) error {
 		delivered = line
 		return nil
 	}
-	w := &taskWatcher{taskID: "d4357010", queue: queue, sup: s}
+	w := &taskWatcher{taskID: "d4357010", generationID: taskGenerationForTest(t, "d4357010"), queue: queue, sup: s}
 	s.watchers = map[string]*taskWatcher{w.taskID: w}
 
 	w.persistTerminalStatus("stopped")
@@ -421,7 +438,8 @@ func TestRecordedParkedHeadResumeKeepsDeliveredSentRow(t *testing.T) {
 	tsk := watchTask("d4357012", `printf 'x\n'`, dir)
 	require.NoError(t, task.AddTask(tsk))
 	when := time.Now()
-	_, err := task.UpdateTaskStatus(tsk.ID, &when, "sent")
+	_, _, err := task.UpdateTaskStatusForGeneration(
+		tsk.ID, taskGenerationForTest(t, tsk.ID), &when, "sent")
 	require.NoError(t, err)
 
 	seed := newEventQueue(dir, "d4357012")
@@ -431,24 +449,24 @@ func TestRecordedParkedHeadResumeKeepsDeliveredSentRow(t *testing.T) {
 
 	statusWrites := 0
 	originalUpdate := updateWatchTaskStatus
-	updateWatchTaskStatus = func(taskID string, at *time.Time, status string) (task.Task, error) {
+	updateWatchTaskStatus = func(taskID, generationID string, at *time.Time, status string) (task.Task, bool, error) {
 		statusWrites++
 		require.NotEqual(t, TaskStatusLimitParked, status,
 			"a delivered head must never be republished as parked")
-		return originalUpdate(taskID, at, status)
+		return originalUpdate(taskID, generationID, at, status)
 	}
 	t.Cleanup(func() { updateWatchTaskStatus = originalUpdate })
 
 	queue := newEventQueue(dir, "d4357012")
 	delivered := ""
 	s := &watcherSupervisor{
-		setStatus: func(taskID, status string) { persistWatcherStatus(taskID, status) },
+		setStatus: func(taskID, generationID, status string) { persistWatcherStatus(taskID, generationID, status) },
 	}
-	s.deliver = func(_, line string, _ watchDeliveryOptions) error {
+	s.deliver = func(_, _, line string, _ watchDeliveryOptions) error {
 		delivered = line
 		return nil
 	}
-	w := &taskWatcher{taskID: "d4357012", queue: queue, sup: s}
+	w := &taskWatcher{taskID: "d4357012", generationID: taskGenerationForTest(t, "d4357012"), queue: queue, sup: s}
 	s.watchers = map[string]*taskWatcher{w.taskID: w}
 
 	ev, cursor, ok, err := queue.peek()
@@ -478,7 +496,8 @@ func TestRecordedParkedHeadResumeKeepsArmingRefusal(t *testing.T) {
 			tsk := watchTask("d4357013", `printf 'x\n'`, dir)
 			require.NoError(t, task.AddTask(tsk))
 			refusal := notArmedStatus(errors.New("target session is archived"))
-			_, err := task.UpdateTaskStatus(tsk.ID, nil, refusal)
+			_, _, err := task.UpdateTaskStatusForGeneration(
+				tsk.ID, taskGenerationForTest(t, tsk.ID), nil, refusal)
 			require.NoError(t, err)
 
 			seed := newEventQueue(dir, tsk.ID)
@@ -486,8 +505,8 @@ func TestRecordedParkedHeadResumeKeepsArmingRefusal(t *testing.T) {
 			require.NoError(t, err)
 
 			queue := newEventQueue(dir, tsk.ID)
-			s := &watcherSupervisor{deliver: func(string, string, watchDeliveryOptions) error { return nil }}
-			w := &taskWatcher{taskID: tsk.ID, queue: queue, sup: s, terminalStatus: overlay}
+			s := &watcherSupervisor{deliver: func(string, string, string, watchDeliveryOptions) error { return nil }}
+			w := &taskWatcher{taskID: tsk.ID, generationID: taskGenerationForTest(t, tsk.ID), queue: queue, sup: s, terminalStatus: overlay}
 			s.watchers = map[string]*taskWatcher{w.taskID: w}
 
 			ev, cursor, ok, err := queue.peek()

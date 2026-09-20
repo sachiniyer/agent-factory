@@ -29,13 +29,22 @@ func TestCreatePerRunWatchLimitParkDoesNotRequestQueueReplay(t *testing.T) {
 	}
 	original := createSessionForTask
 	creates := 0
-	createSessionForTask = func(CreateSessionRequest) (*session.InstanceData, error) {
+	createSessionForTask = func(req CreateSessionRequest) (*session.InstanceData, error) {
 		creates++
-		return &session.InstanceData{Title: "parked-run", Liveness: session.LiveLimitReached}, nil
+		// What a real create returns for a parked task session, not just a title:
+		// the run identity its status write is addressed by (#4222) — the admitted
+		// generation, the stable session id, and the admission sequence. Without
+		// them the write names no row and is refused, and the park goes unrecorded.
+		return &session.InstanceData{
+			ID: "parked-run-id", Title: "parked-run",
+			TaskID: req.TaskID, TaskGenerationID: req.TaskGenerationID,
+			TaskRunSequence: 1, CreatedAt: time.Now(),
+			Liveness: session.LiveLimitReached,
+		}, nil
 	}
 	t.Cleanup(func() { createSessionForTask = original })
 
-	if err := deliverWatchEvent("a4223101", "issue 4223"); err != nil {
+	if err := deliverWatchEvent("a4223101", taskGenerationForTest(t, "a4223101"), "issue 4223"); err != nil {
 		t.Fatalf("create-per-run park requested duplicate queue replay: %v", err)
 	}
 	if creates != 1 {
@@ -66,7 +75,7 @@ func TestTargetedAutoCreateLimitParkDoesNotRequestQueueReplay(t *testing.T) {
 	}
 	t.Cleanup(func() { deliverPromptForTask = original })
 
-	if err := deliverWatchEvent("a4223104", "issue 4223"); err != nil {
+	if err := deliverWatchEvent("a4223104", taskGenerationForTest(t, "a4223104"), "issue 4223"); err != nil {
 		t.Fatalf("targeted auto-create park requested duplicate queue replay: %v", err)
 	}
 	stored, err := task.GetTask("a4223104")
@@ -181,7 +190,7 @@ func TestWatchQueueAdmissionWaitsForInFlightLimitSnapshotSettlement(t *testing.T
 	s.observeTargetLimit = manager.observeTaskTargetLimit
 	stopCh := make(chan struct{})
 	close(stopCh)
-	w := &taskWatcher{taskID: "a4223107", sup: s, queue: queue, stopCh: stopCh}
+	w := &taskWatcher{taskID: "a4223107", generationID: taskGenerationForTest(t, "a4223107"), sup: s, queue: queue, stopCh: stopCh}
 
 	pollDone := make(chan struct{})
 	go func() {
@@ -516,7 +525,7 @@ func TestExistingBacklogIsProtectedBeforeLimitBurstCanEvict(t *testing.T) {
 	s.observeTargetLimit = manager.observeTaskTargetLimit
 	stopCh := make(chan struct{})
 	close(stopCh)
-	w := &taskWatcher{taskID: "a4223102", sup: s, queue: queue, stopCh: stopCh}
+	w := &taskWatcher{taskID: "a4223102", generationID: taskGenerationForTest(t, "a4223102"), sup: s, queue: queue, stopCh: stopCh}
 	w.handleEvent("new-after-limit", &tailBuffer{})
 
 	if got := queue.pendingCount(); got != watcherQueueMaxEvents+1 {
@@ -545,7 +554,7 @@ func TestLimitedTargetQueuesBeforeLiveRateDrop(t *testing.T) {
 	stopCh := make(chan struct{})
 	close(stopCh)
 	w := &taskWatcher{
-		taskID: "a4223110", sup: s, queue: newEventQueue(t.TempDir(), "a4223110"), stopCh: stopCh,
+		taskID: "a4223110", generationID: taskGenerationForTest(t, "a4223110"), sup: s, queue: newEventQueue(t.TempDir(), "a4223110"), stopCh: stopCh,
 	}
 	for i := 0; i < s.eventsPerMinute; i++ {
 		w.eventTimes = append(w.eventTimes, time.Now())
@@ -764,17 +773,17 @@ func TestAgedBacklogObservesTargetLimitBeforeExpiringHead(t *testing.T) {
 	}
 	s := newWatcherSupervisor()
 	s.observeTargetLimit = manager.observeTaskTargetLimit
-	s.deliver = adaptWatchDelivery(func(string, string) error { return errTargetLimitReached })
+	s.deliver = adaptWatchDelivery(func(string, string, string) error { return errTargetLimitReached })
 	s.queueMaxAge = 72 * time.Hour
 	s.drainBaseBackoff = time.Hour
 	stopCh := make(chan struct{})
-	w := &taskWatcher{taskID: "a4223106", sup: s, queue: queue, stopCh: stopCh, draining: true}
+	w := &taskWatcher{taskID: "a4223106", generationID: taskGenerationForTest(t, "a4223106"), sup: s, queue: queue, stopCh: stopCh, draining: true}
 	w.wg.Add(1)
 	delivered := make(chan struct{})
 	originalDeliver := s.deliver
-	s.deliver = func(taskID, line string, options watchDeliveryOptions) error {
+	s.deliver = func(taskID, generationID, line string, options watchDeliveryOptions) error {
 		close(delivered)
-		return originalDeliver(taskID, line, options)
+		return originalDeliver(taskID, generationID, line, options)
 	}
 	go w.drainLoop()
 	select {
@@ -812,9 +821,9 @@ func TestParkedQueueHeadDoesNotRewriteTaskStoreAfterWatcherStops(t *testing.T) {
 	t.Cleanup(func() { deliverPromptForTask = original })
 	originalUpdate := updateWatchTaskStatus
 	statusWrites := 0
-	updateWatchTaskStatus = func(taskID string, at *time.Time, status string) (task.Task, error) {
+	updateWatchTaskStatus = func(taskID, generationID string, at *time.Time, status string) (task.Task, bool, error) {
 		statusWrites++
-		return originalUpdate(taskID, at, status)
+		return originalUpdate(taskID, generationID, at, status)
 	}
 	t.Cleanup(func() { updateWatchTaskStatus = originalUpdate })
 
@@ -828,7 +837,7 @@ func TestParkedQueueHeadDoesNotRewriteTaskStoreAfterWatcherStops(t *testing.T) {
 		t.Fatalf("peek seeded event: ok=%v err=%v", ok, err)
 	}
 	s := newWatcherSupervisor()
-	w := &taskWatcher{taskID: "a4223109", sup: s, queue: queue}
+	w := &taskWatcher{taskID: "a4223109", generationID: taskGenerationForTest(t, "a4223109"), sup: s, queue: queue}
 	if err := w.deliverQueuedEvent(ev, cursor); !errors.Is(err, errTargetLimitReached) {
 		t.Fatalf("first park = %v, want replay request", err)
 	}
@@ -852,7 +861,7 @@ func TestParkedQueueHeadDoesNotRewriteTaskStoreAfterWatcherStops(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("peek reopened event: ok=%v err=%v", ok, err)
 	}
-	restarted := &taskWatcher{taskID: "a4223109", sup: s, queue: reopened}
+	restarted := &taskWatcher{taskID: "a4223109", generationID: taskGenerationForTest(t, "a4223109"), sup: s, queue: reopened}
 	restarted.persistSupervisorStatus("stopped")
 	if statusWrites != 1 {
 		t.Fatalf("parked watcher stop rewrote %d-byte task store: writes=%d, want 1", storeInfo.Size(), statusWrites)
@@ -882,7 +891,7 @@ func TestUnattemptedProtectedBacklogStillRecordsWatcherStop(t *testing.T) {
 	}
 	s := newWatcherSupervisor()
 	var got string
-	s.setStatus = func(_ string, status string) { got = status }
+	s.setStatus = func(_, _ string, status string) { got = status }
 	w := &taskWatcher{taskID: "a4223111", sup: s, queue: queue}
 	w.persistSupervisorStatus("stopped")
 	if got != "stopped" {
@@ -919,7 +928,7 @@ func TestWatchQueueAdmissionProtectsInFlightLimitResume(t *testing.T) {
 	}
 	s := newWatcherSupervisor()
 	s.observeTargetLimit = manager.observeTaskTargetLimit
-	w := &taskWatcher{taskID: "a4223110", sup: s}
+	w := &taskWatcher{taskID: "a4223110", generationID: taskGenerationForTest(t, "a4223110"), sup: s}
 	if !w.targetLimitRequiresRetention() {
 		t.Fatal("in-flight limit resume was treated as clean queue state")
 	}

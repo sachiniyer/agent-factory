@@ -23,9 +23,10 @@ func LoadTasksForRepoID(repoID string) ([]Task, error) {
 }
 
 // LoadTasksForRepoIDWithBindingUpdates also returns the authoritative task
-// projections whose legacy ProjectPath bindings this load durably backfilled.
-// Daemon callers publish those commits so push-only clients cannot retain a
-// different dynamic scope after the server has made RepoID authoritative.
+// projections whose legacy ProjectPath bindings or generations this load durably
+// backfilled. Daemon callers publish those commits so push-only clients cannot
+// retain a different dynamic scope or generation after the server has made the
+// stored value authoritative.
 //
 // The backfill commits before scope exclusion, so a scope error is a PARTIAL
 // success: updates are returned WITH that error and are already durable on
@@ -66,11 +67,16 @@ func LoadTasksForRepoIDWithBindingUpdates(repoID string) ([]Task, []Task, error)
 // LoadTasksWithStableRepoBindingUpdates is the all-project counterpart to
 // LoadTasksForRepoIDWithBindingUpdates. It returns the authoritative task list
 // after committing every legacy ProjectPath that currently resolves to a real
-// repository. Resolution runs before the tasks-file lock because it shells out
-// to git; the lock then re-reads the store and applies only path-keyed answers
-// from that snapshot. Rows added with a new path in the interval remain
-// unresolved, never guessed. Callers that depend on identity must treat their
-// empty RepoID as unknown.
+// repository, and a backfilled GenerationID on every row written before that
+// field existed (see IsBackfilledGeneration). Resolution runs before the
+// tasks-file lock because it shells out to git; the lock then re-reads the store
+// and applies only path-keyed answers from that snapshot. Rows added with a new
+// path in the interval remain unresolved, never guessed. Callers that depend on
+// identity must treat their empty RepoID as unknown.
+//
+// Daemon task arming reads through this load before it arms anything, so no
+// cron entry or watcher is ever armed with the empty generation of a row this
+// load would rewrite.
 func LoadTasksWithStableRepoBindingUpdates() ([]Task, []Task, error) {
 	tasks, _, updated, err := loadTasksWithStableRepoBindings()
 	return tasks, updated, err
@@ -113,35 +119,52 @@ func loadTasksWithStableRepoBindings() ([]Task, map[string]repoResolution, []Tas
 		}
 		changed := false
 		for i := range current {
-			if current[i].RepoID != "" || strings.TrimSpace(current[i].ProjectPath) == "" {
+			var backfilled []string
+			// A row written before generations existed gets one here, under the
+			// same lock as the write that records it (#4224 review). Without it,
+			// every session the row spawns is stamped with the empty generation,
+			// which the lifecycle cannot tell apart from a removed namesake's, so
+			// a declared on_complete would silently become keep for good. Sessions
+			// spawned before this write keep the empty generation and stay kept.
+			if current[i].GenerationID == "" {
+				generationID, err := generateBackfilledTaskGenerationID()
+				if err != nil {
+					return err
+				}
+				current[i].GenerationID = generationID
+				backfilled = append(backfilled, "generation_id")
+			}
+			if current[i].RepoID == "" && strings.TrimSpace(current[i].ProjectPath) != "" {
+				resolved, ok := resolvedPaths[current[i].ProjectPath]
+				switch {
+				case ok && resolved.known:
+					current[i].RepoID = resolved.id
+					backfilled = append(backfilled, "repo_id")
+				case ok:
+					unresolved[current[i].ProjectPath] = resolved
+				default:
+					unresolved[current[i].ProjectPath] = repoResolution{}
+				}
+			}
+			if len(backfilled) == 0 {
 				continue
 			}
-			resolved, ok := resolvedPaths[current[i].ProjectPath]
-			if ok && resolved.known {
-				current[i].RepoID = resolved.id
-				// The daemon rewrote a row nobody asked it to touch, which is
-				// exactly the class of change a user cannot otherwise tell apart
-				// from one they made themselves (#3623). It happens at most once
-				// per legacy row — the backfill is skipped once RepoID is set — so
-				// it cannot crowd the bounded trail. The field is named directly
-				// rather than through changedFields, which covers only the fields a
-				// surface can patch; repo_id is derived and patchable by no one.
-				appendAudit(&current[i], ActorDaemonUpgrade, AuditUpdated, []string{"repo_id"}, nowFn())
-				// The ROW is recorded, not the record. These are published as
-				// EventTaskUpdated, and a copy taken here would carry the identity
-				// loadTasksLocked stamped against the PRE-write bytes — a version of
-				// the store that stops existing the moment this backfill saves, and
-				// so pairs with no later read (#3684 review). They are materialized
-				// after the write, off the re-identified slice.
-				updatedRows = append(updatedRows, i)
-				changed = true
-				continue
-			}
-			if ok {
-				unresolved[current[i].ProjectPath] = resolved
-			} else {
-				unresolved[current[i].ProjectPath] = repoResolution{}
-			}
+			// The daemon rewrote a row nobody asked it to touch, which is exactly
+			// the class of change a user cannot otherwise tell apart from one they
+			// made themselves (#3623). It happens at most once per legacy row —
+			// each backfill is skipped once its field is set — so it cannot crowd
+			// the bounded trail. The fields are named directly rather than through
+			// changedFields, which covers only the fields a surface can patch;
+			// neither of these is patchable by anyone.
+			appendAudit(&current[i], ActorDaemonUpgrade, AuditUpdated, backfilled, nowFn())
+			// The ROW is recorded, not the record. These are published as
+			// EventTaskUpdated, and a copy taken here would carry the identity
+			// loadTasksLocked stamped against the PRE-write bytes — a version of
+			// the store that stops existing the moment this backfill saves, and so
+			// pairs with no later read (#3684 review). They are materialized after
+			// the write, off the re-identified slice.
+			updatedRows = append(updatedRows, i)
+			changed = true
 		}
 		if changed {
 			generation, err := writeTasks(current)

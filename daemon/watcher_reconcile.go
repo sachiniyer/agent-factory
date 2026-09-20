@@ -150,8 +150,19 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 		if _, running := s.watchers[id]; running {
 			continue
 		}
-		if dropped := flushedDrops[id]; dropped > t.DroppedEvents {
-			t.DroppedEvents = dropped
+		if flushed, ok := flushedDrops[id]; ok && flushed.generationID != t.GenerationID {
+			// The generation rebound under the reused ID, so the row's
+			// persisted total is the predecessor incarnation's evidence just
+			// as the flush is — the replacement starts clean rather than
+			// inheriting a count its generation never earned (#4224). Zeroing
+			// only this copy would leave tasks.json holding the stale total:
+			// ListTasks keeps reporting it, the replacement's own checkpoints
+			// read as stale lower totals, and the next restart reseeds from
+			// it — so the reset must reach the durable row too.
+			t.DroppedEvents = 0
+			s.clearReboundDropSeed(t)
+		} else if flushed.drops > t.DroppedEvents && flushed.generationID == t.GenerationID {
+			t.DroppedEvents = flushed.drops
 		}
 		w := s.newTaskWatcher(t)
 		s.watchers[id] = w
@@ -169,26 +180,43 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 	// deleted task's backlog must not replay into a recreated namesake. A
 	// merely-disabled task keeps its backlog for re-enable (#1129). Runs after
 	// stopWatchers so no stale drainer is mid-replay on a file being removed.
-	s.cleanOrphanQueues(allTasks, scope)
+	s.cleanOrphanQueues(allTasks, desired, scope)
 	return nil
 }
 
 // cleanOrphanQueues removes event-queue files whose task ID is absent from
-// tasks.json entirely.
+// tasks.json entirely and queues owned by an older generation of a reused ID.
+// A backfilled row's legacy backlog is not an older generation's: it is kept
+// until that row's watcher adopts it (ownsQueueStem).
 //
 // Scoped the same way the watchers are, and for the same reason: outside the
 // scope this reconcile did not stop anything, so a still-running watcher would
 // otherwise have the file its drainer is replaying deleted underneath it. The
-// removal a scoped write cares about — its own task's — is always in scope,
-// and the full re-arm still sweeps everything.
-func (s *watcherSupervisor) cleanOrphanQueues(tasks []task.Task, scope watchScope) {
+// removal or replacement a scoped write cares about — its own task's — is
+// always in scope, and the full re-arm still sweeps everything.
+func (s *watcherSupervisor) cleanOrphanQueues(
+	tasks []task.Task,
+	desired map[string]task.Task,
+	scope watchScope,
+) {
 	dir, err := s.queueDir()
 	if err != nil {
 		return
 	}
-	known := make(map[string]struct{}, len(tasks))
+	// Task ID → the generation whose queue files survive.
+	known := make(map[string]string, len(tasks))
 	for _, t := range tasks {
-		known[t.ID] = struct{}{}
+		if _, duplicate := known[t.ID]; !duplicate {
+			known[t.ID] = t.GenerationID
+		}
+	}
+	// A malformed duplicate-ID store can select a later enabled watch row after
+	// an earlier disabled/non-watch row was filtered out. That selected row owns
+	// the live drainer, so its generation-qualified queue outranks the inventory's
+	// first row for cleanup. Normal task arming de-duplicates before this boundary;
+	// keeping the rule here makes direct reloads and future callers safe too.
+	for id, selected := range desired {
+		known[id] = selected.GenerationID
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -196,14 +224,15 @@ func (s *watcherSupervisor) cleanOrphanQueues(tasks []task.Task, scope watchScop
 	}
 	for _, e := range entries {
 		name := e.Name()
-		id := name
+		stem := name
 		for _, suffix := range []string{".jsonl", ".cursor", ".limit-parked"} {
-			id = strings.TrimSuffix(id, suffix)
+			stem = strings.TrimSuffix(stem, suffix)
 		}
-		if id == name { // no event-queue suffix matched
+		if stem == name { // no event-queue suffix matched
 			continue
 		}
-		if _, ok := known[id]; ok {
+		id, _, _ := strings.Cut(stem, ".")
+		if generationID, ok := known[id]; ok && ownsQueueStem(stem, id, generationID) {
 			continue
 		}
 		if !scope.covers(id) {

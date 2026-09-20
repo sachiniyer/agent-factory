@@ -89,7 +89,7 @@ func stampProcessTabExit(i *Instance, tab *Tab) bool {
 		i.touchLocked()
 	})
 	if stamped {
-		i.markLoadRuntimeReplaced()
+		i.markLoadRuntimeReplaced(false)
 	}
 	return stamped
 }
@@ -108,7 +108,7 @@ func stampProcessTabStopped(i *Instance, tab *Tab, reason string) {
 		}
 	})
 	if stamped {
-		i.markLoadRuntimeReplaced()
+		i.markLoadRuntimeReplaced(false)
 	}
 }
 

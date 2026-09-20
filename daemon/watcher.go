@@ -127,9 +127,10 @@ type watcherSupervisor struct {
 	// lifecycle statuses without a task store, and queueDir redirects the
 	// durable event queues to a scratch directory.
 	loadTasks   func() ([]task.Task, error)
-	deliver     func(taskID, line string, options watchDeliveryOptions) error
-	setStatus   func(taskID, status string)
-	recordDrops func(taskID string, total int, droppedAt time.Time) error
+	deliver     func(taskID, taskGenerationID, line string, options watchDeliveryOptions) error
+	setStatus   func(taskID, taskGenerationID, status string)
+	recordDrops func(taskID, generationID string, total int, droppedAt time.Time) error
+	resetDrops  func(taskID, generationID string) error
 	logPath     func(taskID string) (string, error)
 	queueDir    func() (string, error)
 	// observeTargetLimit orders a backlog event's retention admission against
@@ -163,6 +164,7 @@ func newWatcherSupervisorWithEventsPerMinute(eventsPerMinute int) *watcherSuperv
 		deliver:     deliverWatchEventWithOptions,
 		setStatus:   persistWatcherStatus,
 		recordDrops: persistWatcherDrops,
+		resetDrops:  resetWatcherDrops,
 		logPath:     watcherLogPath,
 		queueDir:    eventQueueDir,
 		observeTargetLimit: func(string) (bool, error) {
@@ -202,6 +204,7 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 	}
 	w := &taskWatcher{
 		taskID:         t.ID,
+		generationID:   t.GenerationID,
 		name:           t.Name,
 		cmdStr:         t.WatchCmd,
 		dir:            t.ProjectPath,
@@ -223,19 +226,22 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 	} else {
 		w.repoID = repo.ID
 	}
-	// Recover any backlog a previous watcher/daemon left behind (#1129); the
-	// run loop starts the drainer if the queue is non-empty. A queue-dir
-	// failure disables durability, never the watcher itself.
+	// Recover any backlog a previous watcher/daemon left behind (#1129),
+	// including one written before the row had a generation; the run loop
+	// starts the drainer if the queue is non-empty. A queue-dir failure
+	// disables durability, never the watcher itself.
 	if dir, err := s.queueDir(); err != nil {
 		log.WarningLog.Printf("watch task %s: event queue unavailable (failed deliveries will be dropped): %v", t.ID, err)
 	} else {
-		w.queue = newEventQueue(dir, t.ID)
+		w.queue = openTaskEventQueue(dir, t)
 	}
 	return w
 }
 
-// watcherSignature captures the fields that define the watch process itself;
-// a change to any of them restarts the script on reload.
+// watcherSignature captures the task generation and fields that define the
+// watch process itself; a change to any restarts the script on reload. Generation
+// is ownership, not configuration: a same-shaped task re-added under a reused ID
+// must not inherit the removed generation's watcher or its later status writes.
 // tailBuffer and its failure-summary helpers live in tailbuffer.go (extracted
 // to keep watcher.go under its file-length ceiling, #1145).
 
@@ -245,11 +251,12 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 // delivers synchronously, so a slow delivery backpressures the script's
 // stdout pipe rather than reordering events.
 type taskWatcher struct {
-	taskID string
-	name   string
-	cmdStr string
-	dir    string
-	sig    string
+	taskID       string
+	generationID string
+	name         string
+	cmdStr       string
+	dir          string
+	sig          string
 	// repoID/targetSession are captured at construction to label a delivery
 	// alarm (#1238) without disk I/O on the snapshot hot path. repoID scopes
 	// the alarm to a repo's snapshot; targetSession names where events are
@@ -744,7 +751,7 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 		return
 	}
 
-	err := w.sup.deliver(w.taskID, line, watchDeliveryOptions{})
+	err := w.sup.deliver(w.taskID, w.generationID, line, watchDeliveryOptions{})
 	w.recordDeliveryResult(time.Now(), err)
 	if err != nil {
 		limitParked := false
@@ -851,15 +858,15 @@ func (w *taskWatcher) stopDraining() {
 
 // deliverWatchEvent is the queue-less entry used by focused delivery tests.
 // Production supplies its queue-head identity through the options-aware half.
-func deliverWatchEvent(taskID, line string) error {
-	return deliverWatchEventWithOptions(taskID, line, watchDeliveryOptions{})
+func deliverWatchEvent(taskID, taskGenerationID, line string) error {
+	return deliverWatchEventWithOptions(taskID, taskGenerationID, line, watchDeliveryOptions{})
 }
 
 // deliverWatchEventWithOptions is the production delivery hook: it re-loads the
 // task (so prompt/target_session edits apply without restarting the script),
 // renders {{line}}, routes through the same delivery path cron fires use, and
 // records the run status (#664 path).
-func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOptions) error {
+func deliverWatchEventWithOptions(taskID, taskGenerationID, line string, options watchDeliveryOptions) error {
 	// The three pre-flight checks below fail before anything is created or sent,
 	// so they are tagged notAttempted and the caller refunds their rate slot
 	// (#2102). Everything past them can fail with the delivery already in
@@ -868,6 +875,10 @@ func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOpti
 	if err != nil {
 		return notAttempted(fmt.Errorf("failed to load task: %w", err))
 	}
+	if t.GenerationID != taskGenerationID {
+		return notAttempted(fmt.Errorf(
+			"task %s was replaced before its watcher event could be delivered", taskID))
+	}
 	if !t.Enabled {
 		return notAttempted(fmt.Errorf("task %s is disabled", taskID))
 	}
@@ -875,11 +886,11 @@ func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOpti
 	if strings.TrimSpace(prompt) == "" {
 		return notAttempted(fmt.Errorf("event rendered an empty prompt (line %q)", line))
 	}
-	status, promptRetained, err := deliverTaskPromptOutcome(t, prompt, true)
+	delivery, err := deliverTaskPrompt(t, prompt, true)
 	if err != nil {
 		return err
 	}
-	if status == StatusDeferredAttached {
+	if delivery.status == StatusDeferredAttached {
 		// A TUI is attached full-screen to the target session; the delivery was
 		// held so it can't paste into and submit the user's in-progress input
 		// (#1586). Signal the caller (handleEvent / drainLoop) to re-queue and
@@ -896,26 +907,26 @@ func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOpti
 	// fails. Defer only that shape: the drainer immediately retries the queued
 	// head with a cursor and publishes through commitParkedStatus. Create-per-run
 	// parks retain their prompt on the created session and still write here.
-	statusRecorded := status == TaskStatusLimitParked && options.parkedStatusRecorded
-	deferParkedStatus := status == TaskStatusLimitParked && !promptRetained && options.commitParkedStatus == nil
-	if !deferParkedStatus && (status != TaskStatusLimitParked || !statusRecorded) {
-		now := time.Now()
-		writeStatus := func() error {
-			_, err := updateWatchTaskStatus(taskID, &now, status)
-			return err
-		}
+	statusRecorded := delivery.status == TaskStatusLimitParked && options.parkedStatusRecorded
+	deferParkedStatus := delivery.status == TaskStatusLimitParked &&
+		!delivery.promptRetained && options.commitParkedStatus == nil
+	if !deferParkedStatus && (delivery.status != TaskStatusLimitParked || !statusRecorded) {
+		// recordDeliveredTaskRun, not a bare status write: it addresses the row by
+		// this run's identity, so a delayed write cannot land on a later run or a
+		// replacement incarnation (#4222).
+		writeStatus := func() error { return recordDeliveredTaskRun(taskID, delivery) }
 		var err error
-		if status == TaskStatusLimitParked && options.commitParkedStatus != nil {
+		if delivery.status == TaskStatusLimitParked && options.commitParkedStatus != nil {
 			statusRecorded, err = options.commitParkedStatus(writeStatus)
 		} else {
 			err = writeStatus()
-			statusRecorded = status == TaskStatusLimitParked && err == nil
+			statusRecorded = delivery.status == TaskStatusLimitParked && err == nil
 		}
 		if err != nil {
 			log.ErrorLog.Printf("failed to update task status: %v", err)
 		}
 	}
-	if status == TaskStatusLimitParked && !promptRetained {
+	if delivery.status == TaskStatusLimitParked && !delivery.promptRetained {
 		// A targeted watch owns distinct external data, so its queue must replay.
 		// A create-per-run watch already stored this prompt on the one parked
 		// session; queueing it too would create duplicate sessions on every retry.

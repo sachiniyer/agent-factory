@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -98,8 +100,7 @@ func TestListTasks_CarriesTheOverdueDerivation(t *testing.T) {
 	// Through the scheduler-owned writer: a create supplies the task's
 	// definition and the store supplies its history (task.resetStoreOwnedFields).
 	last := time.Now().Add(-18 * 24 * time.Hour)
-	_, err := task.UpdateTaskStatus("aaaa1004", &last, "started")
-	require.NoError(t, err)
+	setTaskStatusForTest(t, "aaaa1004", &last, "started")
 
 	srv := &controlServer{scheduler: newTaskScheduler()}
 	var resp ListTasksResponse
@@ -261,8 +262,8 @@ func TestWatcherSupervisor_DuplicateIDsWatchTheFirst(t *testing.T) {
 	supervisor := newWatcherSupervisor()
 	supervisor.queueDir = func() (string, error) { return dir, nil }
 	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
-	supervisor.deliver = adaptWatchDelivery(func(string, string) error { return nil })
-	supervisor.setStatus = func(string, string) {}
+	supervisor.deliver = adaptWatchDelivery(func(string, string, string) error { return nil })
+	supervisor.setStatus = func(string, string, string) {}
 	t.Cleanup(supervisor.Stop)
 
 	first := watchTask("dupe0002", "printf 'first\\n'; sleep 30", dir)
@@ -275,6 +276,41 @@ func TestWatcherSupervisor_DuplicateIDsWatchTheFirst(t *testing.T) {
 	require.NotNil(t, w)
 	assert.Equal(t, watcherSignature(first), w.sig,
 		"the first occurrence is the one watched, matching the cron scheduler's rule")
+}
+
+func TestWatcherSupervisor_DuplicateCleanupKeepsSelectedWatcherQueue(t *testing.T) {
+	dir := t.TempDir()
+	supervisor := newWatcherSupervisor()
+	supervisor.queueDir = func() (string, error) { return dir, nil }
+	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
+	// Deliveries FAIL here, which is the only state a backlog exists in at all.
+	// With a stub that succeeded, the selected row's own watcher drained the queue
+	// and removed its files — reconcile starts that watcher, and run() starts its
+	// drainer for a non-empty queue — so the assertion below raced a goroutine
+	// instead of measuring the cleanup decision, and lost on CI at 467862e9
+	// ("stat …dupe0003.<hash>.jsonl: no such file or directory").
+	supervisor.deliver = adaptWatchDelivery(func(string, string, string) error {
+		return errors.New("target unreachable (outage)")
+	})
+	supervisor.setStatus = func(string, string, string) {}
+	t.Cleanup(supervisor.Stop)
+
+	first := watchTask("dupe0003", "sleep 30", dir)
+	first.Enabled = false
+	first.GenerationID = "disabled-generation"
+	selected := watchTask("dupe0003", "sleep 30", dir)
+	selected.GenerationID = "selected-generation"
+	queue := newEventQueueForGeneration(dir, selected.ID, selected.GenerationID)
+	require.NoError(t, queue.enqueue("pending"))
+
+	require.NoError(t, supervisor.reconcile(
+		[]task.Task{first, selected}, []task.Task{first, selected}, everyWatchTask(),
+	))
+	_, err := os.Stat(queue.path)
+	require.NoError(t, err,
+		"orphan cleanup must retain the queue owned by the duplicate row selected as the live watcher")
+	assert.Equal(t, 1, newEventQueueForGeneration(dir, selected.ID, selected.GenerationID).pendingCount(),
+		"the backlog is still pending, so the file's presence is the cleanup's decision and not a won race")
 }
 
 // TestFirstOccurrencePerID_ResolvesMixedTriggerDuplicates is the case the
@@ -474,8 +510,8 @@ func TestWatchArming_StaleWatcherAfterAFailedReloadIsNotArmed(t *testing.T) {
 	supervisor := newWatcherSupervisor()
 	supervisor.queueDir = func() (string, error) { return dir, nil }
 	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
-	supervisor.deliver = adaptWatchDelivery(func(string, string) error { return nil })
-	supervisor.setStatus = func(string, string) {}
+	supervisor.deliver = adaptWatchDelivery(func(string, string, string) error { return nil })
+	supervisor.setStatus = func(string, string, string) {}
 	t.Cleanup(supervisor.Stop)
 
 	before := watchTask("stalew01", "printf 'a\\n'; sleep 30", dir)
@@ -499,6 +535,16 @@ func TestWatchArming_StaleWatcherAfterAFailedReloadIsNotArmed(t *testing.T) {
 	assert.Equal(t, task.ArmingNotArmed, supervisor.armingFor(renamed))
 }
 
+func TestWatcherSignatureIncludesTaskGeneration(t *testing.T) {
+	before := watchTask("reused01", "sleep 30", t.TempDir())
+	before.GenerationID = "generation-before-remove"
+	after := before
+	after.GenerationID = "generation-after-readd"
+
+	assert.NotEqual(t, watcherSignature(before), watcherSignature(after),
+		"a watcher owned by a removed task generation must not supervise its re-added namesake")
+}
+
 // TestWatchArming_DuringShutdownIsUnknown is the twin of the scheduler resetting
 // its started latch in Stop. The supervisor's Stop EMPTIES the watcher map while
 // the control socket deliberately stays open to drain in-flight deliveries, so a
@@ -510,8 +556,8 @@ func TestWatchArming_DuringShutdownIsUnknown(t *testing.T) {
 	supervisor := newWatcherSupervisor()
 	supervisor.queueDir = func() (string, error) { return dir, nil }
 	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
-	supervisor.deliver = adaptWatchDelivery(func(string, string) error { return nil })
-	supervisor.setStatus = func(string, string) {}
+	supervisor.deliver = adaptWatchDelivery(func(string, string, string) error { return nil })
+	supervisor.setStatus = func(string, string, string) {}
 
 	watch := watchTask("shutdown", "printf 'a\\n'; sleep 30", dir)
 	require.NoError(t, supervisor.reconcile([]task.Task{watch}, []task.Task{watch}, everyWatchTask()))

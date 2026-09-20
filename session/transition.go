@@ -117,6 +117,10 @@ type TransitionEvent struct {
 	resetAt     time.Time
 	epoch       uint64
 	epochScoped bool
+	// runtimeReplaced is positive provenance from the backend that the agent
+	// process which owned the prior lifecycle was replaced. OpRestoring alone
+	// cannot prove that: local recovery can reattach the original tmux runtime.
+	runtimeReplaced bool
 }
 
 // AtEpoch scopes an event to the state epoch its decision was made at (#2135):
@@ -144,6 +148,15 @@ func BeginCreate() TransitionEvent { return TransitionEvent{kind: tkBeginCreate}
 // MarkLive). It YIELDS (no-op) when a kill/archive op is in flight, so a
 // completing spawn never resurrects a session a teardown owns.
 func ConfirmLive() TransitionEvent { return TransitionEvent{kind: tkConfirmLive} }
+
+// ConfirmRuntimeReplacementLive is ConfirmLive with backend-owned proof that
+// recovery spawned a different agent runtime. This is the only ConfirmLive form
+// that may run the predecessor-settlement boundary or apply the structural
+// interrupted-run fallback. A plain ConfirmLive includes successful reattach,
+// where the prompted runtime still exists and still owns its task run.
+func ConfirmRuntimeReplacementLive() TransitionEvent {
+	return TransitionEvent{kind: tkConfirmLive, runtimeReplaced: true}
+}
 
 // ObserveLiveness applies the daemon's authoritative liveness (was SetLiveness).
 // It is the unconditional daemon-truth edge: it sets liveness and preserves the
@@ -299,6 +312,18 @@ const (
 	// pending. That conflation is what let a finished run reclaim a slot through
 	// the archive door.
 	runEndsOnIdleEdge
+	// runEndsOnRestoredRuntime: a replacement runtime cannot finish the run whose
+	// prompt went to its predecessor. ConfirmLive applies this only when it enters
+	// from OpRestoring. Creating confirms the original prompted runtime; a limit
+	// resume stays fenced in OpRespawning until it re-delivers the prompt; and an
+	// archived restore already has no active run.
+	//
+	// Closing at the identity boundary, rather than waiting for the replacement's
+	// first idle observation, makes the invariant structural: an idle edge can end
+	// a run only on the runtime that received its prompt. The daemon records this
+	// distinct outcome as interrupted and deliberately does not replay a prompt
+	// whose predecessor may already have performed external side effects (#4222).
+	runEndsOnRestoredRuntime
 	// runEnds: this transition ends the run outright, whatever the agent was doing.
 	// CommitArchive only: a committed archive is the user deliberately shelving the
 	// session. Its slot is already released (an Archived session is not restorable
@@ -384,10 +409,11 @@ var transitionTable = map[transitionKind]edgeSpec{
 			return stateAxes{LiveRunning, OpNone}
 		},
 		yieldWhenBlocked: true,
-		// A spawn completing says the agent is up, not that its work is done. It
-		// cannot REOPEN a finished run either: the marker only ever goes true→false,
-		// so a restored archive (whose commit ended the run) stays ended here.
-		run: runKeep,
+		// A backend-proven lost-session replacement never received its predecessor's
+		// task prompt, so it cannot own or complete that run. End the marker at this
+		// identity boundary; the daemon records the interrupted outcome before
+		// ConfirmLive. A reattach uses plain ConfirmLive and keeps the marker.
+		run: runEndsOnRestoredRuntime,
 	},
 	tkObserveLiveness: {
 		allowedFrom: func(stateAxes) bool { return true },
@@ -557,11 +583,16 @@ func SetIllegalTransitionHook(fn func(msg string)) (restore func()) {
 // yielding edge (ObserveLiveness always, ConfirmLive under a teardown op) that
 // is out-of-set is a silent no-op. INERT until Phase 2d migrates the writers.
 func (i *Instance) Transition(ev TransitionEvent) error {
-	if ev.kind == tkConfirmLive {
-		i.runLiveBoundary()
+	if ev.kind == tkConfirmLive && ev.runtimeReplaced {
+		if err := i.runLiveBoundary(); err != nil {
+			return fmt.Errorf("retire predecessor runtime before confirming replacement: %w", err)
+		}
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if ev.kind == tkConfirmLive && i.runtimeReplacementSettlementBlocked && i.inFlightOp == OpRestoring {
+		return nil
+	}
 	return i.transitionLocked(ev)
 }
 
@@ -623,23 +654,26 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	if i.taskRunActive {
 		switch spec.run {
 		case runEnds:
-			i.taskRunActive = false
-			i.touchLocked()
+			i.closeTaskRunLocked()
 			// The completion transition IS the capture point for the adoption
 			// baseline (#3865): taken here, inside the same i.mu section that ends
 			// the run, nothing — not the rest of this transition, not the poll's
 			// later persistPollChange — can land a delivery that reads as though it
 			// had always been there. See session/adoption_fence.go.
-			i.captureAdoptionBaselineLocked()
 		case runEndsOnIdleEdge:
 			// The AGENT's own axis, and the EDGE into it. Not ClassifyActivity — that
 			// calls an in-flight archive "pending", which would miss an agent going
 			// idle mid-teardown. Not the resulting state alone — a session is born
 			// LiveReady before its agent ever runs, so that would end the run at birth.
 			if to.liveness == LiveReady && from.liveness != LiveReady {
-				i.taskRunActive = false
-				i.touchLocked()
-				i.captureAdoptionBaselineLocked()
+				i.closeTaskRunLocked()
+			}
+		case runEndsOnRestoredRuntime:
+			// The backend's event proves runtime identity. OpRestoring alone is
+			// insufficient: local recovery may have reattached the original tmux
+			// runtime, which still owns the prompt and must retain its run.
+			if ev.runtimeReplaced && from.op == OpRestoring {
+				i.closeTaskRunLocked()
 			}
 		}
 	}

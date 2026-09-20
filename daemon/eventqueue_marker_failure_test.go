@@ -289,14 +289,14 @@ func TestWatcherDrainDeliversAgedEventWhenMarkerWriteFailed(t *testing.T) {
 	}
 
 	s := newWatcherSupervisor()
-	s.setStatus = func(string, string) {}
-	s.recordDrops = func(string, int, time.Time) error { return nil }
+	s.setStatus = func(string, string, string) {}
+	s.recordDrops = func(string, string, int, time.Time) error { return nil }
 	s.observeTargetLimit = func(string) (bool, error) { return false, nil }
 	s.queueMaxAge = 72 * time.Hour
 	s.drainBaseBackoff = time.Millisecond
 	var mu sync.Mutex
 	var delivered []string
-	s.deliver = func(_, line string, _ watchDeliveryOptions) error {
+	s.deliver = func(_, _, line string, _ watchDeliveryOptions) error {
 		mu.Lock()
 		defer mu.Unlock()
 		delivered = append(delivered, line)

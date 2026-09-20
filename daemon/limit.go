@@ -737,10 +737,8 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// auto-resume scheduler schedules off it (reset + grace).
 		resetAt, _ := instance.LimitResetAt()
 		var rerr error
-		beforeLive := func() {
-			if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
-				m.warn().Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
-			}
+		beforeLive := func() error {
+			return m.prepareRuntimeReplacementLiveBoundary(repoID, key, instance, "limit resume")
 		}
 		if accountSwap != nil {
 			accountConversationCapture, rerr = instance.AccountSwapConversationCapture()
@@ -965,6 +963,8 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	}
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
+	// The parked run advances to started now that its queued prompt landed.
+	m.recordResumedTaskRun(instance)
 	if captureAccountConversationAfterDelivery {
 		// The first mission minted the fresh Codex rollout that did not exist at
 		// the synchronous pre-delivery capture. Start discovery only after delivery

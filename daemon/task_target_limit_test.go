@@ -171,7 +171,7 @@ func TestLiveWatchLimitParkRequiresDurableQueue(t *testing.T) {
 				queue = tc.queue()
 			}
 			w := &taskWatcher{
-				taskID: tc.taskID, sup: newWatcherSupervisor(), queue: queue,
+				taskID: tc.taskID, generationID: taskGenerationForTest(t, tc.taskID), sup: newWatcherSupervisor(), queue: queue,
 				stopCh: make(chan struct{}),
 			}
 			w.handleEvent("issue 4223", &tailBuffer{})
@@ -276,7 +276,7 @@ func TestCleanOrphanQueuesRemovesLimitMarker(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("parked\n"), 0644); err != nil {
 		t.Fatalf("write marker: %v", err)
 	}
-	s.cleanOrphanQueues(nil, everyWatchTask())
+	s.cleanOrphanQueues(nil, nil, everyWatchTask())
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("orphan usage-limit marker survived cleanup: %v", err)
 	}

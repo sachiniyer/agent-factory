@@ -8,10 +8,17 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
-// updateWatchTaskStatus is the one task-store write seam used by watch event
-// outcomes and watcher lifecycle status. Tests count calls here to prove a held
-// queue head causes no full-store rewrite on retry.
-var updateWatchTaskStatus = task.UpdateTaskStatus
+// updateWatchTaskStatus is the one task-store write seam for a task-wide run
+// status: watch event outcomes, target-session deliveries (recordDeliveredTaskRun)
+// and watcher lifecycle status. A session-per-run delivery does not pass through
+// it — that write names its own session through task.UpdateTaskRunStart. Tests
+// count calls here to prove a held queue head causes no full-store rewrite on
+// retry.
+//
+// It addresses the task incarnation the watcher was armed for: a supervisor that
+// outlives remove+re-add of its ID must not write onto the replacement row, and
+// a refusal is reported as applied=false rather than an error (#4224).
+var updateWatchTaskStatus = task.UpdateTaskStatusForGeneration
 
 // watchDeliveryOptions carries queue-owned occurrence state into the delivery
 // hook. Only replay has a cursor to identify; live delivery passes the zero
@@ -59,7 +66,7 @@ func (w *taskWatcher) deliverQueuedEvent(ev queuedEvent, cursor eventQueueCursor
 		// the actionable park and its later replay outcome (#4226 review).
 		w.reconcileRecordedParkedHead(cursor)
 	}
-	return w.sup.deliver(w.taskID, ev.Line, options)
+	return w.sup.deliver(w.taskID, w.generationID, ev.Line, options)
 }
 
 // reconcileRecordedParkedHead undoes the terminal publication a watcher exit
@@ -84,7 +91,7 @@ func (w *taskWatcher) reconcileRecordedParkedHead(cursor eventQueueCursor) {
 	if _, err := w.commitParkedStatus(cursor, func() error {
 		// nil preserves the occurrence's original LastRunAt — this is a
 		// republish of the parked outcome, not a new run.
-		_, err := updateWatchTaskStatus(w.taskID, nil, TaskStatusLimitParked)
+		_, _, err := updateWatchTaskStatus(w.taskID, w.generationID, nil, TaskStatusLimitParked)
 		return err
 	}); err != nil {
 		log.WarningLog.Printf("watch task %s: could not republish the recorded park over a stale terminal status: %v", w.taskID, err)

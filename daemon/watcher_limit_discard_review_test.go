@@ -25,7 +25,7 @@ func TestWatcherStopWaitsForInFlightLimitPublicationBeforeDiscardingPipe(t *test
 	release := func() { releaseOnce.Do(func() { close(releaseDelivery) }) }
 	t.Cleanup(release)
 	s := newWatcherSupervisor()
-	s.deliver = func(string, string, watchDeliveryOptions) error {
+	s.deliver = func(string, string, string, watchDeliveryOptions) error {
 		close(deliveryStarted)
 		<-releaseDelivery
 		return errTargetLimitReached
@@ -110,7 +110,7 @@ func TestTargetLimitObservationRejectsConcurrentTaskRebind(t *testing.T) {
 	stopCh := make(chan struct{})
 	close(stopCh)
 	w := &taskWatcher{
-		taskID: taskID, sup: s, queue: newEventQueue(t.TempDir(), taskID), stopCh: stopCh,
+		taskID: taskID, generationID: taskGenerationForTest(t, taskID), sup: s, queue: newEventQueue(t.TempDir(), taskID), stopCh: stopCh,
 	}
 	for i := 0; i < s.eventsPerMinute; i++ {
 		w.eventTimes = append(w.eventTimes, time.Now())
@@ -170,7 +170,7 @@ func TestUnreadableQueueBackpressuresAfterWriterExitUntilStateIsKnown(t *testing
 	t.Cleanup(func() { watcherLimitBackpressurePoll = oldPoll })
 	attemptedBeforeRecovery := make(chan struct{}, 1)
 	s := newWatcherSupervisor()
-	s.deliver = func(_ string, _ string, _ watchDeliveryOptions) error {
+	s.deliver = func(_, _, _ string, _ watchDeliveryOptions) error {
 		select {
 		case attemptedBeforeRecovery <- struct{}{}:
 		default:
@@ -264,7 +264,7 @@ func TestStopWithUnreadableQueueHoldsPipeUntilWritersStop(t *testing.T) {
 	close(stopCh)
 	s := newWatcherSupervisor()
 	recorded := 0
-	s.recordDrops = func(_ string, total int, _ time.Time) error {
+	s.recordDrops = func(_, _ string, total int, _ time.Time) error {
 		recorded = total
 		return nil
 	}
@@ -369,7 +369,7 @@ func TestRateFullProtectedEventWithoutQueueRecordsDrop(t *testing.T) {
 	s := newWatcherSupervisorWithEventsPerMinute(1)
 	s.observeTargetLimit = func(string) (bool, error) { return true, nil }
 	recorded := 0
-	s.recordDrops = func(_ string, total int, _ time.Time) error {
+	s.recordDrops = func(_, _ string, total int, _ time.Time) error {
 		recorded = total
 		return nil
 	}
@@ -396,11 +396,11 @@ func TestRateFullProtectedEventWithoutQueueRecordsDrop(t *testing.T) {
 // vanished from every counter. It must reach dropped_events instead.
 func TestLimitParkedEventWithoutQueueRecordsDrop(t *testing.T) {
 	s := newWatcherSupervisor()
-	s.deliver = func(string, string, watchDeliveryOptions) error {
+	s.deliver = func(string, string, string, watchDeliveryOptions) error {
 		return errTargetLimitReached
 	}
 	recorded := 0
-	s.recordDrops = func(_ string, total int, _ time.Time) error {
+	s.recordDrops = func(_, _ string, total int, _ time.Time) error {
 		recorded = total
 		return nil
 	}
@@ -438,9 +438,9 @@ func TestUndeliveredEventWithoutQueueRecordsDrop(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := newWatcherSupervisor()
-			s.deliver = func(string, string, watchDeliveryOptions) error { return deliverErr }
+			s.deliver = func(string, string, string, watchDeliveryOptions) error { return deliverErr }
 			recorded := 0
-			s.recordDrops = func(_ string, total int, _ time.Time) error {
+			s.recordDrops = func(_, _ string, total int, _ time.Time) error {
 				recorded = total
 				return nil
 			}

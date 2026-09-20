@@ -145,7 +145,7 @@ func TestWatcherTruncatesLongUTF8LineDurableCorruption(t *testing.T) {
 	// error arm (daemon/watcher.go) and calls enqueueEvent -> json.Marshal, the
 	// durable-queue path whose corruption is under test. The direct-delivery
 	// success arm does NOT marshal and is not a corruption vector.
-	s.deliver = adaptWatchDelivery(func(string, string) error { return errTargetBusy })
+	s.deliver = adaptWatchDelivery(func(string, string, string) error { return errTargetBusy })
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -211,7 +211,7 @@ func TestWatcherTruncatesLongASCIILineDurableQueueNoTrim(t *testing.T) {
 	const taskID = "utf80d03"
 	script := "cat " + payloadFile + "; exit 0"
 	s, rec := newTestSupervisor(t, staticTasks(watchTask(taskID, script, dir)))
-	s.deliver = adaptWatchDelivery(func(string, string) error { return errTargetBusy })
+	s.deliver = adaptWatchDelivery(func(string, string, string) error { return errTargetBusy })
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)

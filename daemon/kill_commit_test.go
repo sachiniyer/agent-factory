@@ -636,6 +636,19 @@ func TestDeleteSessionRecord_UnknownState_StillBlocks(t *testing.T) {
 	}
 }
 
+func TestDeleteSessionRecord_PendingTaskOutcomeKeepsDurableRetryHandle(t *testing.T) {
+	manager, repoID, _ := installRaceBackend(t, &raceBackend{}, "pending-task-outcome")
+	evidence := session.InstanceData{TaskRunInterruptionPending: true}
+
+	deleted, err := manager.deleteSessionRecord(
+		repoID, "pending-task-outcome", "", nil, evidence)
+
+	require.Error(t, err)
+	require.False(t, deleted)
+	require.NotNil(t, recordFor(t, repoID, "pending-task-outcome"),
+		"the session row is the only durable copy of the owed task outcome")
+}
+
 func TestDeleteSessionRecord_DiscardsUnkeyedLimitEvidence(t *testing.T) {
 	manager, repoID, _ := installRaceBackend(t, &raceBackend{}, "malformed-evidence")
 	evidence := session.InstanceData{AccountLimitObservations: []session.AccountLimitObservationData{
