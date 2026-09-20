@@ -97,9 +97,12 @@ var (
 	// never trusted whole-pane, where transcript prose could quote it.
 	escToInterruptHint = regexp.MustCompile(`esc +to +interrupt`)
 	// runningTimer matches the elapsed-seconds fragment claude and devin print on
-	// the SAME row as their interrupt hint ("(12s · esc to interrupt)"). Requiring
-	// the timer co-occurrence is what excludes transcript prose that merely names
-	// the chrome.
+	// the SAME row as their interrupt hint ("(12s · esc to interrupt)"). It is a
+	// shape test, NOT proof of a live turn: prose can hold both fragments on one
+	// row ("after 12s press esc to interrupt"), and this repository's own source
+	// quotes the chrome verbatim, so an agent printing that file would render a
+	// matching row. What separates chrome from text is that chrome TICKS — see
+	// submittedTurnVisible.
 	runningTimer = regexp.MustCompile(`\d+s`)
 	// postSubmitDeliveredBudget bounds the post-Enter observation that may
 	// upgrade a sent-unverified verdict to delivered (#4429), and
@@ -505,14 +508,47 @@ func submittedTurnVisible(ctx context.Context, target ReadinessTarget) bool {
 	if agent == "" {
 		return false
 	}
+	// Claude and devin print an elapsed timer on their in-turn row, and that is
+	// the only part of this pane a running turn is guaranteed to rewrite. Their
+	// row is unscopeable — it sits above the composer with the transcript above
+	// it — so presence alone would accept prose that merely holds the same two
+	// fragments, including a verbatim quote of the chrome or a stale line a
+	// failed paste scrolled into view. Requiring a row this window has not seen
+	// before asks the timer to advance: chrome ticks, text does not. The other
+	// agents' indicators are already scoped to their live frame, so for them the
+	// row's presence there is the proof.
+	timed := agent == tmux.ProgramClaude || agent == tmux.ProgramDevin
+	var seen map[string]bool
 	deadline := time.Now().Add(postSubmitDeliveredBudget)
 	for {
 		if ctx.Err() != nil {
 			return false
 		}
 		content, err := target.PreviewContent(ctx)
-		if err == nil && submittedTurnContent(content, agent) {
-			return true
+		switch {
+		case err != nil:
+		case !timed:
+			if submittedTurnContent(content, agent) {
+				return true
+			}
+		default:
+			rows := timedTurnRows(content)
+			if seen == nil {
+				// The opening capture only records what was already on screen —
+				// including nothing, which is the ordinary case for a pane that
+				// was idle at submit. Every row here is text until proven
+				// otherwise, however many of them there are.
+				seen = make(map[string]bool, len(rows))
+				for _, row := range rows {
+					seen[row] = true
+				}
+				break
+			}
+			for _, row := range rows {
+				if !seen[row] {
+					return true
+				}
+			}
 		}
 		if !time.Now().Before(deadline) {
 			return false
@@ -558,15 +594,33 @@ func submittedTurnContent(content, agent string) bool {
 	case tmux.ProgramClaude, tmux.ProgramDevin:
 		// Claude and devin embed the hint in a timed status row —
 		// "✻ … (12s · esc to interrupt)", "Thinking · 3s (esc to interrupt)".
-		// Requiring the running timer on the same row excludes transcript prose
-		// that merely names the chrome.
-		for _, line := range strings.Split(paneAnsiEscape.ReplaceAllString(content, ""), "\n") {
-			if escToInterruptHint.MatchString(line) && runningTimer.MatchString(line) {
-				return true
-			}
-		}
+		// The shape alone is not proof that a turn is running; submittedTurnVisible
+		// is what requires the row to tick.
+		return len(timedTurnRows(content)) > 0
 	}
 	return false
+}
+
+// timedTurnRows returns the rows shaped like claude's or devin's in-turn status
+// row: the interrupt hint and an elapsed timer on the SAME row.
+//
+// Shape only. Unlike codex, amp and opencode — whose indicators this file scopes
+// to a live frame or to the status bar below the composer — claude and devin draw
+// their row above the composer, with the transcript above that and no boundary
+// between the two that a capture can see. So a row of prose that happens to hold
+// both fragments matches, and one can arrive without the agent writing it: a
+// paste that fails to submit pushes the view up and can scroll an older line into
+// frame. The caller separates the two by watching the rows CHANGE.
+func timedTurnRows(content string) []string {
+	var rows []string
+	for _, line := range strings.Split(paneAnsiEscape.ReplaceAllString(content, ""), "\n") {
+		if escToInterruptHint.MatchString(line) && runningTimer.MatchString(line) {
+			// Trimmed: only the row's own repaint should read as a change, never
+			// the pane's right-hand padding moving under a resize.
+			rows = append(rows, strings.TrimSpace(line))
+		}
+	}
+	return rows
 }
 
 // isDocTrustPrompt reports whether content shows the documentation-link trust

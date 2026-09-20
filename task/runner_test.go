@@ -932,6 +932,87 @@ func TestSubmittedTurnVisible(t *testing.T) {
 		}
 	})
 
+	// #4528 (Codex): a timed row that never changes is text, not chrome. The
+	// claude/devin arm cannot scope its match to a live region — the row sits
+	// above the composer with the transcript above it — so prose holding both
+	// fragments matches, and this repository's own source quotes the chrome
+	// verbatim. Upgrading on it would retire a mission that never landed.
+	t.Run("static timed row in the transcript never upgrades", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			agent   string
+			content string
+		}{
+			{
+				name:    "prose quoting the chrome with a duration",
+				agent:   "claude",
+				content: "after 12s press esc to interrupt\n❯ ",
+			},
+			{
+				name:    "a verbatim quote of the status row",
+				agent:   "claude",
+				content: "src: \"✻ Whirring… (12s · esc to interrupt)\"\n╭──╮\n│ ❯ │\n╰──╯",
+			},
+			{
+				name:    "two quoted rows in the opening capture",
+				agent:   "claude",
+				content: "✻ Whirring… (12s · esc to interrupt)\n✻ Whirring… (30s · esc to interrupt)\n❯ ",
+			},
+			{
+				name:    "devin prose with a duration",
+				agent:   "devin",
+				content: "the doc says 3s (esc to interrupt)\n❭ ",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inst := newPreviewInstanceWithProgram(t, tc.agent, func() (string, error) {
+					return tc.content, nil
+				})
+				if submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
+					t.Fatal("a row that never ticks is transcript text, not a running turn")
+				}
+			})
+		}
+	})
+
+	// The mirror case: the same row with an advancing timer IS the agent working.
+	t.Run("a ticking timer upgrades", func(t *testing.T) {
+		var calls atomic.Int32
+		inst := newPreviewInstanceWithProgram(t, "claude", func() (string, error) {
+			return fmt.Sprintf("transcript\n✻ Whirring… (%ds · esc to interrupt)\n❯ ", calls.Add(1)), nil
+		})
+		if !submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
+			t.Fatal("an advancing timer is the agent's own proof that a turn is running")
+		}
+	})
+
+	// A turn already in flight at the opening capture still upgrades, on its
+	// next tick rather than on the first frame.
+	t.Run("a turn already running upgrades on its next tick", func(t *testing.T) {
+		var calls atomic.Int32
+		inst := newPreviewInstanceWithProgram(t, "devin", func() (string, error) {
+			n := calls.Add(1)
+			if n == 1 {
+				return "⠀⡆ Thinking · 3s (esc to interrupt)\n", nil
+			}
+			return "⠀⡆ Thinking · 4s (esc to interrupt)\n", nil
+		})
+		if !submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
+			t.Fatal("a running turn repaints its timer inside the window")
+		}
+	})
+
+	// codex/amp/opencode keep presence-in-a-scoped-region as their proof: their
+	// indicators carry no timer, so a change requirement would reject them.
+	t.Run("a static scoped indicator still upgrades for codex", func(t *testing.T) {
+		inst := newPreviewInstanceWithProgram(t, "codex", func() (string, error) {
+			return "\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n", nil
+		})
+		if !submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
+			t.Fatal("codex draws its hint below the composer, where prose cannot reach")
+		}
+	})
+
 	t.Run("non-agent pane never upgrades", func(t *testing.T) {
 		inst := newPreviewInstanceWithProgram(t, "bash", func() (string, error) {
 			return "✻ Whirring… (2s · esc to interrupt)", nil

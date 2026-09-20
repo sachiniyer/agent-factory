@@ -932,6 +932,43 @@ func TestMouse_SelectionOverlayRowClick(t *testing.T) {
 		"the clicked row's program is chosen")
 }
 
+// TestMouse_HandoffResolveOverlayRowClick (#4528, Codex): the delivery-resolve
+// picker is the same selection overlay as the program/tab/agent/backend/account
+// ones, so its rows must submit on a click. Without routing, `c` on a
+// confirmable row opened a picker that answered the keyboard and swallowed the
+// mouse — and "Mark delivered" is not a verb to leave mouse-only users unable
+// to reach.
+func TestMouse_HandoffResolveOverlayRowClick(t *testing.T) {
+	h, _, _ := mouseTestHome(t)
+	newFakeClock(h)
+	target := captureSessionActionTarget(h.store.GetInstances()[0], h.repoID)
+	var confirmed daemon.ConfirmHandoffDeliveryRequest
+	restore := SetHandoffDeliveryConfirmerForTest(func(req daemon.ConfirmHandoffDeliveryRequest) error {
+		confirmed = req
+		return nil
+	})
+	defer restore()
+	h.handoffResolve = handoffResolveState{
+		actions: []handoffResolveAction{handoffResolveResend, handoffResolveConfirm},
+		target:  target,
+	}
+	h.selectionOverlay = overlay.NewSelectionOverlay("Resolve delivery", []string{
+		"Retry send — submit the pending mission again",
+		"Mark delivered — retire the pending mission without resending",
+	})
+	h.selectionOverlay.SetWidth(60)
+	h.state = stateSelectHandoffResolve
+
+	cmd := clickZone(t, h, zones.OverlaySelectRow(1))
+	assert.Equal(t, stateDefault, h.state, "a row click submits the picker")
+	require.NotNil(t, cmd, "the clicked row dispatches its verb")
+	if msg, ok := cmd().(handoffDeliveryConfirmedMsg); ok {
+		assert.NoError(t, msg.err)
+	}
+	assert.Equal(t, target.title, confirmed.Title,
+		"the mark-delivered row confirms against the captured identity")
+}
+
 // TestMouse_SearchOverlayRowClick: clicking a search result selects it and
 // closes the overlay, like ↓ + enter.
 func TestMouse_SearchOverlayRowClick(t *testing.T) {

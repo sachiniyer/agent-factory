@@ -636,7 +636,19 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 			// calls an in-flight archive "pending", which would miss an agent going
 			// idle mid-teardown. Not the resulting state alone — a session is born
 			// LiveReady before its agent ever runs, so that would end the run at birth.
-			if to.liveness == LiveReady && from.liveness != LiveReady {
+			//
+			// An idle pane is not a finished run while a handoff mission is still
+			// owed (#4429). The incoming agent may be idle precisely BECAUSE its
+			// takeover brief never landed, and this edge is what hands a task
+			// session to its on_complete policy — so ending the run here is what
+			// would archive or kill a session whose mission is still waiting for
+			// the operator. The replacement fence used to hide the row from the
+			// poll and carry this; the fence now settles on the incoming runtime's
+			// liveness, so the obligation itself has to say so. The run ends on a
+			// later idle edge, once a resolved mission lets the agent work and
+			// fall idle again.
+			if to.liveness == LiveReady && from.liveness != LiveReady &&
+				!i.owesMissionDeliveryLocked() {
 				i.taskRunActive = false
 				i.touchLocked()
 				i.captureAdoptionBaselineLocked()

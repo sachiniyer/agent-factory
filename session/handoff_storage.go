@@ -49,6 +49,16 @@ func ambiguousHandoffDelivery(status PromptDeliveryStatus) bool {
 // mission on the attestation that it already landed (#4429): any ambiguous
 // verdict, plus a recorded delivery whose settle a crash interrupted.
 // Positive non-delivery is excluded — automatic recovery owns that resend.
+// owesMissionDeliveryLocked reports whether this session still owes a takeover
+// brief someone has to resolve: an agent handoff's pending mission, or a manual
+// account swap's mission whose delivery was never confirmed. Both settle their
+// fence on the incoming runtime (#4429), so neither shows on the op axis, and
+// both are resolved by the same operator verbs — retry-limit, or its
+// --delivered attestation. Caller holds i.mu.
+func (i *Instance) owesMissionDeliveryLocked() bool {
+	return i.pendingHandoffMission != "" || i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
+}
+
 func confirmableHandoffDelivery(status PromptDeliveryStatus) bool {
 	return ambiguousHandoffDelivery(status) || status == PromptDelivered
 }

@@ -425,6 +425,19 @@ runtime answers, with the pending mission still advertised and resolvable.
   those), then clears the mission and settles the leftover state **without
   sending anything**.
 
+**What the settled fence stopped carrying.** `OpReplacing` was doing two jobs
+beyond the swap itself, and settling it on liveness dropped both, so they are
+now carried by the obligation they are actually about (#4528):
+
+- An idle incoming pane is not a finished task run while its mission is owed.
+  That edge is what hands a task session to its `on_complete` policy, so the
+  run marker now stays set until the mission is resolved — otherwise an
+  unresolved handoff could be archived or killed by policy.
+- A second handoff may not start while the first one's mission is unresolved.
+  `SetPendingHandoffMission` would overwrite the mission and its verdict, and
+  nothing else records that obligation, so `ValidateRuntimeAction` refuses the
+  handoff and names the verbs that resolve it.
+
 The attest-without-resend half is a separate RPC (`ConfirmHandoffDelivery`)
 rather than a flag on `ResumeFromLimit` on purpose: a daemon that predates the
 verb must refuse loudly, where a flag it ignored would silently resend the very
