@@ -252,8 +252,11 @@ accepted PUT whose post-update re-read proves the PR ended approves no parked
 runs and schedules no successor: nothing remains for this run to merge. The
 proof is the read, never the update's error shape alone (a 422 is also a real
 tree conflict, a 404 could be a fork PR still owed an answer); a read that
-fails or shows the PR still open stays the update failure it always was
-(#3551).
+fails or shows the PR still open stays the update failure it always was only
+on a rejected PUT — an accepted PUT whose confirming re-read fails or still
+shows the old open head instead sets `recoveryError` or observes no new SHA,
+and dispatches the successor Auto Gate run anyway, returning the ordinary
+waiting above rather than an update failure (#3551).
 
 **Every accepted update-branch schedules another Auto Gate evaluation (#4209).**
 The update endpoint can acknowledge before a PR read exposes its new head. The
