@@ -398,17 +398,90 @@ func TestRedactInstancesFallbackDropsTheNewSensitiveKeys(t *testing.T) {
 		"program": "/opt/AcmeCorp/bin/inhouse-wrapper --client AcmeCorp",
 		"archive_warning": "archive completed with an incomplete archive: af skipped 1 unreadable file; complete original tree(s) were retained at \"/srv/ConfidentialClient/wt\"; skipped paths: \"customer-ssns.csv\" (permission denied)",
 		"lost_restore_failure": {"attempts": 5, "error": "restore of ProjectKingfisher failed"},
-		"tabs": [{"id": "tab-1", "name": "AcmeCorp migration"}],
+		"tabs": [{"id": "tab-1", "name": "AcmeCorp migration", "account_scope": "AcmeCorp-retired-acct"}],
 		"worktree": {"relocation_recovery": {"alternate_path": "/srv/ConfidentialClient/wt-relocating"}}
 	}]`)
 
 	out := string(r.redactInstancesJSON(raw))
 	for _, secret := range []string{
 		"AcmeCorp", "inhouse-wrapper", "customer-ssns.csv", "ConfidentialClient", "ProjectKingfisher",
+		// account_scope mirrors redactTabData's AccountScope blanking (#4506).
+		// The leak this entry pins only surfaces on the fallback arm, and only
+		// when the label is absent from r.accounts (see
+		// TestRedactInstancesFallbackRedactsAccountScope); here there is no
+		// registry, so the structural walk is the only defence.
+		"AcmeCorp-retired-acct",
 	} {
 		if strings.Contains(out, secret) {
 			t.Errorf("the generic fallback leaked %q:\n%s", secret, out)
 		}
+	}
+}
+
+// TestRedactInstancesFallbackRedactsAccountScope is the #4506 regression guard
+// for the generic fallback. redactTabData blanks TabData.AccountScope on the
+// typed path, so the fallback's structural walk must blank account_scope too:
+// a record the typed decode rejects must never be less private than one it
+// accepts.
+//
+// The closing text sweep (appendAccountLabelSpans) only matches labels STILL in
+// r.accounts, so a tab authored under an account that was later renamed,
+// retired, or deleted relies on the sensitiveJSONKeys entry exclusively. The two
+// subtests pin the junction the report called out: a label retired from the
+// registry (the leak, which the text sweep cannot rescue) and a label still in
+// the registry (the common case the text sweep masks, here asserted to be
+// blanked by the structural walk rather than left to the sweep alone).
+func TestRedactInstancesFallbackRedactsAccountScope(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		registered string // a label still in the registry ("" registers none)
+		scope      string // the account_scope value planted on the tab
+	}{
+		{
+			// The leak the bug shipped: a tab authored under "acme", which was
+			// later renamed/retired to "work". "acme" is no longer in r.accounts,
+			// so the text sweep cannot reach it — only the structural walk can.
+			name:       "label retired from the registry",
+			registered: "work",
+			scope:      "acme",
+		},
+		{
+			// The common case the text sweep masks: the label is still
+			// registered, so a missing sensitiveJSONKeys entry would be hidden
+			// by the sweep blanking the value in place. The structural walk
+			// must still own it, so the marker replaces the value regardless.
+			name:       "label still in the registry",
+			registered: "acme",
+			scope:      "acme",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &redactor{}
+			if tc.registered != "" {
+				r.noteAccount(tc.registered)
+			}
+			// A string status forces the typed decode to fail, routing the
+			// record to the generic fallback — the only path whose structural
+			// walk reads sensitiveJSONKeys.
+			raw := json.RawMessage(`[{
+				"status": "legacy-status",
+				"account": "work",
+				"tabs": [{"id": "tab-1", "account_scope": "` + tc.scope + `"}]
+			}]`)
+
+			out := string(r.redactInstancesJSON(raw))
+
+			if strings.Contains(out, tc.scope) {
+				t.Errorf("fallback leaked account_scope %q:\n%s", tc.scope, out)
+			}
+			if !strings.Contains(out, `"account_scope": "`+redactedMarker+`"`) {
+				t.Errorf("account_scope was not replaced by the redaction marker:\n%s", out)
+			}
+			// The structural triage field survives the fallback walk.
+			if !strings.Contains(out, "tab-1") {
+				t.Errorf("fallback dropped the safe tab id:\n%s", out)
+			}
+		})
 	}
 }
 
