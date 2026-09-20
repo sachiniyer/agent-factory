@@ -109,6 +109,15 @@ func TestIsLimitContent(t *testing.T) {
 			wantResetUTC: time.Date(2026, 7, 25, 17, 55, 0, 0, loc).UTC(), // 21:55 UTC
 		},
 		{
+			name:  "codex current banner: typographic apostrophe and wrapped purchase clause",
+			agent: tmux.ProgramCodex,
+			content: "■ You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to\n" +
+				"purchase more credits or try again at Sep 20th, 2026 9:16 AM.",
+			wantHit:      true,
+			wantReset:    true,
+			wantResetUTC: time.Date(2026, 9, 20, 9, 16, 0, 0, loc).UTC(),
+		},
+		{
 			name:  "codex weekly: purchase URL before wrapped reset clause",
 			agent: tmux.ProgramCodex,
 			content: "■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to\n" +
@@ -211,6 +220,18 @@ func TestIsLimitContent(t *testing.T) {
 			name:    "codex working pane, no banner -> no hit",
 			agent:   tmux.ProgramCodex,
 			content: "› thinking...\nRunning tests",
+			wantHit: false,
+		},
+		{
+			name:    "codex healthy /status: usage limit remaining is not exhaustion",
+			agent:   tmux.ProgramCodex,
+			content: "Usage limit:             [█████████████░░░░░░░] 65% left",
+			wantHit: false,
+		},
+		{
+			name:    "codex healthy /status: secondary usage limit is not exhaustion",
+			agent:   tmux.ProgramCodex,
+			content: "Secondary usage limit:   [██████████░░░░░░░░░░] 50% left",
 			wantHit: false,
 		},
 		{
