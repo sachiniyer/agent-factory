@@ -350,15 +350,28 @@ func (m *home) deleteConfirmedTab(inst *session.Instance, idx int) (tea.Model, t
 func (m *home) handleMoveTab(delta int) (tea.Model, tea.Cmd) {
 	inst := m.store.GetSelectedInstance()
 	idx := m.store.ActiveTab()
+	treeFocused := true
 	if p := m.focusedOpenPane(); p != nil {
 		b := m.effectivePaneBinding(p)
 		inst, idx = b.instance, b.tab
+		treeFocused = false
 		// A pane may be previewing the tab about to move; the transient binding
 		// must not keep pointing at whatever slides into the slot (#1884).
 		m.cancelPanePreview(false)
 	}
 	if inst == nil {
 		return m, nil
+	}
+	if treeFocused {
+		// On an archived row the sidebar cursor resolves to the ARCHIVED
+		// instance while the store's display selection stays sticky on a live
+		// one (#1884) — so an unguarded move here would silently reorder a
+		// session the user is not looking at, and whose row footer does not
+		// advertise the pair. Refuse on what the cursor actually names; the
+		// archived roster is frozen for restore regardless.
+		if cur := m.sidebar.GetSelectedInstance(); cur != nil && cur.IsArchived() {
+			return m, m.handleNotice(fmt.Errorf("cannot reorder tabs on archived session %q; restore it first (af sessions restore)", cur.Title))
+		}
 	}
 	if !inst.Capabilities().TabManagement {
 		return m, m.handleNotice(fmt.Errorf("only local sessions support tab moves — this session's workspace runs off-box (docker/ssh/remote), so its tab order belongs to the runtime"))

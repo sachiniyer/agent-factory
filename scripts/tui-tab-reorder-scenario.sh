@@ -55,6 +55,16 @@ _expect_order() {
     return 1
 }
 
+# _expect_active <regex> — poll until the WORKSPACE header confirms the tab a
+# jump landed on: process tabs paint a "tests · › <name> · preview" preview,
+# the agent row shows its already-open pane as "tests · Agent". A digit key is
+# queued to the tty with no round-trip; sending </> before the jump lands moves
+# the WRONG tab — a real daemon reorder — which is exactly the flake this
+# guards.
+_expect_active() {
+    af_wait_for "$1" "$AF_DRIVER_TIMEOUT" "landed on $1"
+}
+
 # _daemon_order — the roster the daemon persists, via `af sessions get` (the
 # read the CLI's tab-reorder prints). The cross-surface check: the TUI's
 # projection must not disagree with the single writer.
@@ -90,33 +100,42 @@ _expect_daemon 'agent,alpha,bravo'
 # advertises the pair.
 af_wait_for '</> move tab' "$AF_DRIVER_TIMEOUT" 'move-tab hint once a move exists'
 
-# `>` on the tree's active tab: select alpha (slot 2) and move it right.
+# `>` on the tree's active tab: select alpha (slot 2) and move it right. Each
+# jump waits for the workspace header to name the tab it landed on before the
+# move key goes out — a queued digit that has not been applied yet would send
+# the move to the wrong tab.
 af_send 2
+_expect_active 'alpha · preview'
 af_send '>'
 _expect_order 'Agent,bravo,alpha'
 _expect_daemon 'agent,bravo,alpha'
 
 # `<` moves it back; both directions land in the daemon's roster.
 af_send 3          # alpha is now slot 3
+_expect_active 'alpha · preview'
 af_send '<'
 _expect_order 'Agent,alpha,bravo'
 _expect_daemon 'agent,alpha,bravo'
 
 # The agent tab is pinned: `>` on slot 1 notices and changes nothing. Notices
-# are transient (a ~3s bar), so poll rather than single-shot assert.
+# are transient (a ~3s bar), so poll rather than single-shot assert. The agent
+# row has an open pane, not a preview — the header reads "tests · Agent".
 af_send 1
+_expect_active '· Agent'
 af_send '>'
 af_wait_for 'pinned to the first slot' "$AF_DRIVER_TIMEOUT" 'agent-tab pin notice'
 _expect_order 'Agent,alpha,bravo'
 
 # And nothing moves left past it either: `<` on the first movable tab.
 af_send 2
+_expect_active 'alpha · preview'
 af_send '<'
 af_wait_for 'pinned to the first slot' "$AF_DRIVER_TIMEOUT" 'left-boundary pin notice'
 _expect_order 'Agent,alpha,bravo'
 
 # `>` on the LAST tab is a notice, not a silent swallow.
 af_send 3
+_expect_active 'bravo · preview'
 af_send '>'
 af_wait_for 'already at the last position' "$AF_DRIVER_TIMEOUT" 'last-position notice'
 _expect_order 'Agent,alpha,bravo'
@@ -125,6 +144,7 @@ _expect_order 'Agent,alpha,bravo'
 # it, and `<` moves the PANE's tab — the header keeps reading bravo while the
 # sidebar shows the permutation.
 af_send 3
+_expect_active 'bravo · preview'
 af_open_pane
 af_wait_for 'tests · › bravo' "$AF_DRIVER_TIMEOUT" 'bravo pane'
 af_send '<'   # pane-focused move: bravo 3 -> 2

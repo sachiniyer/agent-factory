@@ -214,6 +214,42 @@ func TestMoveTab_ArchivedRefuses(t *testing.T) {
 	assert.Contains(t, h.errBox.String(), "archived")
 }
 
+// TestMoveTab_ArchivedRowCursorRefuses is the reorder half of
+// TestCloseTab_ArchivedRowCursorDoesNotRetarget: on an archived row the
+// sidebar cursor resolves to the ARCHIVED instance while the store's sticky
+// selection stays on a LIVE one — so an unguarded `>` would reorder a session
+// the user is not looking at. The footer advertises no </> there, and the
+// press must refuse on what the cursor names.
+func TestMoveTab_ArchivedRowCursorRefuses(t *testing.T) {
+	h, alpha := multiTabHome(t)
+	h.store.SetActiveTab(2)
+
+	archived := instanceWithFakeBackend(t, "old")
+	archived.AddTabForTest("agent", session.TabKindAgent)
+	archived.AddTabForTest("old-shell", session.TabKindShell)
+	archived.AddTabForTest("old-shell-2", session.TabKindShell)
+	archived.SetArchived()
+	h.store.AddInstance(archived)
+	_ = h.selectionChanged()
+
+	h.sidebar.SelectInstance(archived)
+	require.Equal(t, archived, h.sidebar.GetSelectedInstance(),
+		"precondition: the cursor resolves to the ARCHIVED instance")
+	require.Equal(t, alpha, h.store.GetSelectedInstance(),
+		"precondition: the store's display selection stays sticky on the LIVE instance")
+
+	h.focusRegion(layout.RegionTree)
+	reqs := recordReorderTab(t)
+
+	pressNav(t, h, ">")
+
+	require.Empty(t, *reqs, "a move must never reach the daemon from an archived row")
+	require.Equal(t, []string{"agent", "shell", "shell-2", "shell-3"}, tabNames(alpha),
+		"the hidden live session's roster must not permute")
+	h.errBox.SetSize(200, 1)
+	assert.Contains(t, h.errBox.String(), "archived")
+}
+
 // TestMoveTab_AutomationsFocusInert is the captive-focus half: while the
 // Automations rail owns focus, </> must not fall through to the global
 // dispatcher and reorder a session the user is not looking at — the rail's
