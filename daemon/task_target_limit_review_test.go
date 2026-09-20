@@ -29,9 +29,18 @@ func TestCreatePerRunWatchLimitParkDoesNotRequestQueueReplay(t *testing.T) {
 	}
 	original := createSessionForTask
 	creates := 0
-	createSessionForTask = func(CreateSessionRequest) (*session.InstanceData, error) {
+	createSessionForTask = func(req CreateSessionRequest) (*session.InstanceData, error) {
 		creates++
-		return &session.InstanceData{Title: "parked-run", Liveness: session.LiveLimitReached}, nil
+		// What a real create returns for a parked task session, not just a title:
+		// the run identity its status write is addressed by (#4222) — the admitted
+		// generation, the stable session id, and the admission sequence. Without
+		// them the write names no row and is refused, and the park goes unrecorded.
+		return &session.InstanceData{
+			ID: "parked-run-id", Title: "parked-run",
+			TaskID: req.TaskID, TaskGenerationID: req.TaskGenerationID,
+			TaskRunSequence: 1, CreatedAt: time.Now(),
+			Liveness: session.LiveLimitReached,
+		}, nil
 	}
 	t.Cleanup(func() { createSessionForTask = original })
 
