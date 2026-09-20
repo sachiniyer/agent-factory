@@ -308,12 +308,21 @@ func (m *Manager) resumeLimitedSession(
 	attempts, wait := m.limitResumeAttempted(
 		st, now, hadReset || accountSwap != nil, retryInterval, ordinaryDue, ordinaryAttempt)
 
-	resumeErr := m.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, accountSwap)
+	outcome, resumeErr := m.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, accountSwap)
 	if accountSwap != nil && accountSwap.fellBack && !hadReset && retryInterval > 0 {
 		wait = m.limitResumeFixedFallbackScheduled(st, now, retryInterval)
 	}
 	if resumeErr != nil {
 		m.warn().Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, resumeErr)
+		return
+	}
+	// resumeFromLimitLockedOutcome returns (resumeNotPerformed, nil) for several
+	// mid-pass aborts — above all a LimitAutoResume opt-out observed at the
+	// final-fence config recheck after the pass-start snapshot saw it enabled.
+	// Such a no-op performed no resume and committed no swap, so it must not log
+	// success. Gate the success log on the actual outcome, not on resumeErr ==
+	// nil (which is true for both resumePerformed and resumeNotPerformed).
+	if outcome != resumePerformed {
 		return
 	}
 	if accountSwap != nil && !accountSwap.fellBack {
