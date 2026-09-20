@@ -547,10 +547,14 @@ export function handoffModal(
     // resolved command IS the running agent — usually currentAgent's own
     // enum, but an override pointing its name elsewhere (the codex enum
     // resolving to aider while aider launches the codex pane) makes a
-    // different enum the same-agent target (#4430 review). Falls back to
-    // currentAgent when no catalog enum resolves to it, matching the
-    // pre-resolved-agents behavior against older daemons.
-    const currentTarget = catalogChoices.find(choice => isCurrentAgent(choice.value))?.value ?? currentAgent;
+    // different enum the same-agent target (#4430 review). handoffSameAgentTarget
+    // declines the row entirely when the daemon's resolved_agents proves no
+    // enum still resolves to the runtime — overrides moved after launch — so
+    // the label cannot promise an account-only swap the daemon would honor as
+    // a cross-agent handoff (#4430 review round 7).
+    const currentTarget = handoffSameAgentTarget(
+      catalogChoices.map(choice => choice.value), currentAgent, recordedProgram,
+      accounts.resolved_agents);
     // A scoped session keeps every target it can honestly reach: an agent with
     // a registered account to name, or one KNOWN to have no account support,
     // which drops the scope rather than needing it (#4428). A target whose
@@ -558,7 +562,7 @@ export function handoffModal(
     // refuses the drop on an unproven answer, so the row could only error
     // (#4430 review, D1).
     const choices = catalogChoices.filter(choice => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || (resolvedAgent(choice.value) !== "" && !scopableTarget(choice.value))));
-    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentTarget)) {
+    if (accountsLoaded && !accountsFailed && currentTarget && hasAccount(currentTarget)) {
       choices.unshift({ value: currentTarget, label: currentTarget + " (another account)" });
     }
     const previous = agentSelect.value;
@@ -649,6 +653,28 @@ export function handoffTargetIsCurrent(
     return currentAgent !== "" && resolved === currentAgent;
   }
   return recordedProgram !== "" && recordedProgram === target;
+}
+
+/**
+ * Which catalog enum spells this session's "same agent, another account"
+ * target — the enum whose resolved command IS the running agent. When
+ * resolvedAgents was reported and no enum resolves to the runtime, there is
+ * no honest spelling: configuration moved after launch (a live codex pane
+ * whose codex enum now resolves to gemini), and falling back to the bare
+ * currentAgent would send `to=<enum>` — a CROSS-agent handoff labeled
+ * "another account" (#4430 review round 7). The bare-name fallback serves
+ * only older daemons whose wire carried no resolved_agents at all.
+ */
+export function handoffSameAgentTarget(
+  catalogValues: string[],
+  currentAgent: string,
+  recordedProgram: string,
+  resolvedAgents: Record<string, string> | undefined,
+): string | undefined {
+  const matched = catalogValues.find((value) =>
+    handoffTargetIsCurrent(currentAgent, value, resolvedAgents?.[value] ?? value, recordedProgram));
+  if (matched !== undefined) return matched;
+  return resolvedAgents === undefined ? currentAgent : undefined;
 }
 
 export interface DeletionWorkspace {

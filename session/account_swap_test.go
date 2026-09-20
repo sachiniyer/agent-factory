@@ -181,6 +181,73 @@ func TestValidateAccountSwapCommittedRetryUsesRecordedNamespace(t *testing.T) {
 		"the drift refusal names the launch the pane evidence now produces")
 }
 
+// A committed CROSS-agent swap recovered between its identity checkpoint and
+// the replacement's first launch finds pane/runtime evidence describing the
+// OUTGOING agent. Freezing that command and checking it against the committed
+// AccountAgent namespace refuses every retry and strands the session (#4430
+// review round 7). The transaction records the frozen incoming command at
+// commit; a record written before that field existed instead re-resolves the
+// committed ledger target — but never the predecessor's runtime.
+func TestValidateAccountSwapCommittedCrossAgentRetryLaunchesRecordedProgram(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{
+		tmux.ProgramClaude: tmux.ProgramClaude,
+		tmux.ProgramCodex:  tmux.ProgramCodex,
+	}
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err := agentaccount.Register(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err)
+
+	newCommittedSession := func(t *testing.T, withFrozenPlan bool) *Instance {
+		inst := accountSwapTestInstance(tmux.ProgramClaude)
+		inst.Path = initTempGitRepo(t)
+		gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+		require.NoError(t, err)
+		inst.SetGitWorktreeForTest(gw)
+		if withFrozenPlan {
+			// The admission-time launch plan is what commit copies into the
+			// durable record: base is the resolved incoming command before
+			// conversation injection.
+			inst.accountSwapLaunch = &accountSwapLaunchPlan{
+				account: "work", base: tmux.ProgramCodex, program: tmux.ProgramCodex,
+			}
+		}
+		_, err = inst.SelectAccountForHandoff("", "work", tmux.ProgramCodex, tmux.ProgramCodex, true,
+			HandoffReasonManual, "head", "")
+		require.NoError(t, err)
+		require.Equal(t, tmux.ProgramCodex, inst.PendingAccountSwapAgent())
+		return inst
+	}
+
+	// The restart's view, identical for both record shapes: the identity
+	// checkpoint landed, the replacement never launched, so pane and runtime
+	// evidence still describe the outgoing claude.
+	t.Run("frozen program survives restart", func(t *testing.T) {
+		inst := newCommittedSession(t, true)
+		require.Equal(t, tmux.ProgramCodex, inst.ToInstanceData().PendingAccountSwap.Program,
+			"the committed incoming command must be durable beside the namespace")
+		inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramClaude))
+		require.NoError(t, inst.ValidateAccountSwap("work"),
+			"the retry must launch the committed codex command, not freeze the predecessor's claude")
+		require.NotNil(t, inst.accountSwapLaunch)
+		require.True(t, strings.HasPrefix(inst.accountSwapLaunch.program, tmux.ProgramCodex),
+			"the retry must relaunch codex, got %q", inst.accountSwapLaunch.program)
+	})
+
+	t.Run("legacy record re-resolves the committed target", func(t *testing.T) {
+		inst := newCommittedSession(t, false)
+		require.Empty(t, inst.ToInstanceData().PendingAccountSwap.Program)
+		inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramClaude))
+		require.NoError(t, inst.ValidateAccountSwap("work"),
+			"a pre-Program record must recover through the committed ledger target, not the predecessor's pane")
+		require.NotNil(t, inst.accountSwapLaunch)
+		require.True(t, strings.HasPrefix(inst.accountSwapLaunch.program, tmux.ProgramCodex),
+			"the retry must relaunch codex, got %q", inst.accountSwapLaunch.program)
+	})
+}
+
 func TestValidateAccountSwapPreflightsStartupFreeShellReplacement(t *testing.T) {
 	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
 	inst.Tabs = append(inst.Tabs, &Tab{

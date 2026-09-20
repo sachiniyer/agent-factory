@@ -198,3 +198,24 @@ test("handoffTargetIsCurrent: an opaque wrapper falls back to the recorded enum"
   assert.equal(handoffTargetIsCurrent("codex", "aider", "", "claude"), false);
   assert.equal(handoffTargetIsCurrent("claude", "claude", "", ""), false);
 });
+
+// The account-only row is only honest when a catalog enum still resolves to
+// the running agent (#4430 review round 7): a live codex pane whose
+// program_overrides.codex was repointed at gemini has no same-agent spelling
+// — sending to=codex there is a cross-agent gemini handoff, not the promised
+// account-only swap. The bare-name fallback survives only for older daemons
+// that never sent resolved_agents.
+test("handoffSameAgentTarget: no row when no enum resolves to the runtime", async () => {
+  const { handoffSameAgentTarget } = (await import("./modals.js")) as typeof import("./modals.js");
+  const catalog = ["claude", "codex", "aider", "gemini"];
+  // codex pane live, but codex's enum now resolves to gemini: no match.
+  assert.equal(
+    handoffSameAgentTarget(catalog, "codex", "codex", { claude: "claude", codex: "gemini", aider: "aider", gemini: "gemini" }),
+    undefined);
+  // A different enum CAN spell the same-agent target when it resolves to it.
+  assert.equal(
+    handoffSameAgentTarget(catalog, "codex", "codex", { claude: "claude", codex: "gemini", aider: "codex", gemini: "gemini" }),
+    "aider");
+  // No resolved_agents on the wire (older daemon): the enum-name fallback.
+  assert.equal(handoffSameAgentTarget(catalog, "codex", "codex", undefined), "codex");
+});

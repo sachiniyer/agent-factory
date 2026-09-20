@@ -237,10 +237,33 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		// committed transaction retrying post-restart may have no runtime
 		// record left, but its pane still runs the command the checkpoint
 		// launched — that evidence outranks a fresh resolution too.
-		if runtime := i.RuntimeProgram(); runtime != "" {
-			resolution = launchProgramResolution{command: runtime}
-		} else if pane := i.ResolvedPaneProgram(); pane != "" {
-			resolution = launchProgramResolution{command: pane}
+		established := i.RuntimeProgram()
+		if established == "" {
+			established = i.ResolvedPaneProgram()
+		}
+		switch {
+		case pending != nil && pending.To == name && pending.Program != "":
+			// The committed transaction froze the incoming command at commit.
+			// A restart can reach this retry while the pane still runs the
+			// OUTGOING agent — the checkpoint precedes the replacement — so
+			// the established evidence is the predecessor's and must not win
+			// (#4430 review round 7).
+			resolution = launchProgramResolution{command: pending.Program}
+		case pending != nil && pending.To == name && pending.AccountAgent != "" &&
+			tmux.DetectAgentFromCommand(established) != pending.AccountAgent:
+			// A pending record written before Program existed: the committed
+			// namespace disagrees with the surviving runtime evidence, so that
+			// evidence is the predecessor's. Re-resolve the enum the commit
+			// recorded in the handoff ledger; the drift check below still
+			// refuses if configuration has since moved it off the committed
+			// namespace.
+			if target := i.PendingAccountSwapTarget(); target != "" {
+				resolved := resolveResolvedConfigForInstance(i)
+				resolution.command = resolveProgramForAgent(i, target)
+				resolution.trustBase = builtInProgramOverride(resolved, target, resolution.command)
+			}
+		case established != "":
+			resolution = launchProgramResolution{command: established}
 		}
 	}
 	resolvedProgram := resolution.command
@@ -542,6 +565,12 @@ func (i *Instance) selectAccountLocked(from, name, accountAgent string, automati
 	}
 	pending := &AccountSwapData{From: from, To: name}
 	if plan := i.accountSwapLaunch; plan != nil && plan.account == name {
+		// The committed incoming command is a matter of record too: a restart
+		// between this checkpoint and the replacement's first launch leaves
+		// pane/runtime evidence describing the OUTGOING agent, and a retry
+		// that froze that command would fail the drift check against the
+		// committed namespace forever (#4430 review round 7).
+		pending.Program = plan.base
 		switch {
 		case plan.carry != nil:
 			pending.CarriedConversationID = plan.carry.id

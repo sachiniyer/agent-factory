@@ -11408,9 +11408,14 @@ function handoffModal(sessionTitle, currentAgent, recordedProgram, callbacks) {
       resolvedAgent(agent),
       isCurrentAgent(agent) ? callbacks.currentAccount : ""
     ).length > 0;
-    const currentTarget = catalogChoices.find((choice) => isCurrentAgent(choice.value))?.value ?? currentAgent;
+    const currentTarget = handoffSameAgentTarget(
+      catalogChoices.map((choice) => choice.value),
+      currentAgent,
+      recordedProgram,
+      accounts.resolved_agents
+    );
     const choices = catalogChoices.filter((choice) => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || resolvedAgent(choice.value) !== "" && !scopableTarget(choice.value)));
-    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentTarget)) {
+    if (accountsLoaded && !accountsFailed && currentTarget && hasAccount(currentTarget)) {
       choices.unshift({ value: currentTarget, label: currentTarget + " (another account)" });
     }
     const previous = agentSelect.value;
@@ -11472,6 +11477,11 @@ function handoffTargetIsCurrent(currentAgent, target, resolved, recordedProgram)
     return currentAgent !== "" && resolved === currentAgent;
   }
   return recordedProgram !== "" && recordedProgram === target;
+}
+function handoffSameAgentTarget(catalogValues, currentAgent, recordedProgram, resolvedAgents) {
+  const matched = catalogValues.find((value) => handoffTargetIsCurrent(currentAgent, value, resolvedAgents?.[value] ?? value, recordedProgram));
+  if (matched !== void 0) return matched;
+  return resolvedAgents === void 0 ? currentAgent : void 0;
 }
 function deletionConfirmationBody(opts) {
   if (opts.archived && opts.offBox) {
