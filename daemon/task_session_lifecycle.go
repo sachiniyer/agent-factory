@@ -567,16 +567,29 @@ func (m *Manager) runTaskSessionLifecycleUntil(stop <-chan struct{}, repoID, ses
 // otherwise drop. Refiling is a no-op: the earliest FiledAt stays the adoption
 // watermark, and a marker that is already set is already durable (filed this
 // generation or restored from disk).
+//
+// The filed-or-refuse decision is taken under i.mu by FileOwedOnCompleteIfNotDischarged
+// so a pre-filing adoption delivery in the paused-path window (#4162's race) is the
+// whole stand-down signal: it cannot clear a marker that does not exist yet, but it
+// does leave adoption.deliveries > adoption.atRunEnd, which the helper reads in the
+// same critical section the delivery mutates and refuses to file from. Filing a
+// marker whose FiledAt postdates that keystroke would, on a restart, leave only the
+// durable marker and the pre-keystroke pane-churn watermark — and the unpaused drain
+// would authorize the posting the user vetoed. The helper refuses; the unpaused drain
+// stands down on the in-memory deliveries check; a restart that wipes that in-memory
+// check wipes the (never-filed) marker too, leaving the pre-#4162 shape the churn
+// watermark is designed to cover.
 func (m *Manager) fileOwedTaskLifecycle(repoID string, instance *session.Instance) {
 	m.installOwedTaskLifecycleNotify(repoID, instance)
 	if instance.OwedOnComplete() != nil {
 		return
 	}
-	instance.SetOwedOnComplete(&session.PendingOnCompleteData{
+	if instance.FileOwedOnCompleteIfNotDischarged(&session.PendingOnCompleteData{
 		TaskID:  instance.TaskID,
 		FiledAt: nowFunc(),
-	})
-	m.persistOwedTaskLifecycle(repoID, instance)
+	}) {
+		m.persistOwedTaskLifecycle(repoID, instance)
+	}
 }
 
 // dischargeOwedTaskLifecycle settles the obligation durably. It re-resolves the
