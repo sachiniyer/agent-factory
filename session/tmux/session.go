@@ -208,6 +208,10 @@ type TmuxSession struct {
 	// safety-buffering intervention can prove it did not select the downgrade.
 	// Access only while inputMu is held.
 	codexSafety codexSafetyBufferingState
+	// codexUpdate prevents a delayed picker repaint from repeating navigation or
+	// confirmation while dismissing Codex's launch-time update prompt.
+	// Access only while inputMu is held.
+	codexUpdate codexUpdatePromptState
 	// claudeTrust remembers whether the folder-trust handler has already
 	// reported a dialog it refuses to answer, so the daemon's per-second poll
 	// logs that once rather than every tick. Access only while inputMu is held.
