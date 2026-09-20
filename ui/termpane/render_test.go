@@ -63,29 +63,32 @@ func TestRenderGridWideCharacters(t *testing.T) {
 }
 
 func TestRenderGridClipsAndPadsAroundResize(t *testing.T) {
-	// A grid larger than the requested rect (the transient state right
-	// before Resize catches up) clips; a smaller one pads. Both must hold
+	// A grid larger than the requested rect clips — since #4480 also the steady
+	// state of a viewer watching a wider pane — with the cut marked by an
+	// ellipsis so lost content is visible; a smaller one pads. Both must hold
 	// the exact width x height contract.
 	emu := vt.NewEmulator(12, 4)
 	_, err := emu.Write([]byte("abcdefghijkl\r\nsecond"))
 	require.NoError(t, err)
 
 	lines := gridLines(t, renderGridWindow(emu, 6, 2, 0, cursorNone), 6, 2)
-	assert.Equal(t, "abcdef", ansi.Strip(lines[0]))
-	assert.Equal(t, "second", ansi.Strip(lines[1]))
+	assert.Equal(t, "abcde…", ansi.Strip(lines[0]),
+		"a clip that drops content must mark the edge cell (#4175/#4480)")
+	assert.Equal(t, "second", ansi.Strip(lines[1]),
+		"a row whose tail is blank past the cut stays unmarked")
 
 	gridLines(t, renderGridWindow(emu, 20, 6, 0, cursorNone), 20, 6)
 }
 
-func TestRenderGridBlanksWideGlyphStraddlingClipBoundary(t *testing.T) {
+func TestRenderGridMarksWideGlyphStraddlingClipBoundary(t *testing.T) {
 	emu := vt.NewEmulator(10, 1)
 	_, err := emu.Write([]byte("日本語")) // cells 0-5, glyph starts at 4
 	require.NoError(t, err)
 
-	// Clipping at width 5 lands mid-glyph: the straddling glyph must blank,
-	// never overflow the row.
+	// Clipping at width 5 lands mid-glyph: the straddling glyph can never render
+	// half-drawn, and its clipped tail is content the edge marker reports.
 	lines := gridLines(t, renderGridWindow(emu, 5, 1, 0, cursorNone), 5, 1)
-	assert.Equal(t, "日本 ", ansi.Strip(lines[0]))
+	assert.Equal(t, "日本…", ansi.Strip(lines[0]))
 }
 
 func TestRenderGridDegenerateSizes(t *testing.T) {

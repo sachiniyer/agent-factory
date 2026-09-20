@@ -13,11 +13,45 @@ on:
   # an easy way to silently stop the checks from running.
   merge_group:
 
-  # Auto Gate dispatches this when its own update-branch produced no
-  # pull_request run at all for the new head, so the update-and-merge loop cannot
-  # stall waiting for a run that will never exist (#3807). A dispatch takes a
-  # REF, never a sha, so it runs at the branch tip — which is the new head.
+  # Auto Gate dispatches this when a head has no PR Validation run at all, so a
+  # decision cannot stall waiting for a run that will never exist: the head its
+  # own update-branch created (#3807), and any other head GitHub created no run
+  # for (#4581). A dispatch takes a REF, never a sha, so it runs at the branch
+  # tip. For #3807 that tip is the new head. For #4581 Auto Gate re-reads the tip
+  # first and skips the dispatch when it is no longer the head it evaluated.
+  #
+  # Both dispatches pass no inputs, so they get probe=false: the full run, exactly
+  # as before. probe=true is the fail-first probe (#4563, docs/dev/probe-runs.md):
+  # only the Linux Test job runs, on the packages and -run regex given, and every
+  # other job is skipped.
+  #
+  # A probe can be dispatched on a PR's head, and every job below still reports a
+  # check run there, skipped ones included. The gates read the required "Build"
+  # and "Lint" by exact name and take the newest (auto-gate.js
+  # latestRequiredState), and the ruleset counts a skipped check as passing. So a
+  # probe must never report under a name a PR run uses. That is why the
+  # always-running jobs carry a probe-aware `name:`. GitHub does not evaluate the
+  # name of a skipped job (github.com/orgs/community/discussions/13261), so a
+  # probe's skipped rows are named by the bare expression, such as
+  # `inputs.probe && 'Lint (skipped by probe)' || 'Lint'` (measured on #4565),
+  # and match no check. Were that ever fixed, they would read
+  # "… (skipped by probe)", which matches none either. test-systemd skips as one
+  # row, still named `Test (systemd, ${{ matrix.os }})`. web-selftest and perf keep plain names: they skip on ordinary PRs
+  # too, where an expression name would show raw, and no gate reads them.
   workflow_dispatch:
+    inputs:
+      probe:
+        description: "Fail-first probe: run only the Linux Test job (docs/dev/probe-runs.md)"
+        type: boolean
+        default: false
+      packages:
+        description: "Probe only: packages to test, space-separated, each starting with ./ (empty: the whole module)"
+        type: string
+        default: ""
+      run:
+        description: "Probe only: a -run regex (empty: every test in those packages)"
+        type: string
+        default: ""
 
 concurrency:
   # pull_request keys the group on the PR number so a new push cancels the stale
@@ -28,7 +62,16 @@ concurrency:
   # ref per merge_group entry (and refs/pull/N/merge for PRs, so PR runs never
   # collide with queue runs either). Mirrors how auto-gate.yml keys off a fallback
   # chain when the pull_request payload is null.
-  group: pr-${{ github.event.pull_request.number || github.ref }}
+  #
+  # A probe gets its own prefix. Otherwise a probe and Auto Gate's recovery
+  # dispatch on the same branch would share pr-refs/heads/<branch> and cancel
+  # each other, and Build, which runs always(), fails on a cancelled need.
+  # Every other event resolves to the same pr-… group as before.
+  #
+  # Auto Gate's dispatches, #3807's and #4581's, are not probes, so they land in
+  # pr-refs/heads/<branch>. Two #4581 dispatches that race on one branch
+  # therefore cancel down to one run, and a probe on that branch cancels neither.
+  group: ${{ inputs.probe && 'probe-' || 'pr-' }}${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 # Read-only: workflow only checks out source and runs lint/test/build; it never comments on or modifies the PR.
@@ -37,7 +80,8 @@ permissions:
 
 jobs:
   lint:
-    name: Lint
+    name: ${{ inputs.probe && 'Lint (skipped by probe)' || 'Lint' }}
+    if: ${{ !inputs.probe }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -179,7 +223,7 @@ jobs:
       # runner's preinstalled Node and the built-in node:test — no package.json,
       # no install step.
       - name: Test auto-gate helper
-        run: node --test .github/scripts/auto-gate.test.js .github/scripts/codex-outage.test.js
+        run: node --test .github/scripts/auto-gate.test.js .github/scripts/codex-outage.test.js .github/scripts/go-inert.test.js
 
       # Same rationale again, one layer up: this helper decides whether the web
       # selftest RUNS, and its tests also assert the wiring that gives a red run
@@ -189,6 +233,14 @@ jobs:
       # the teeth are asserted in the required job rather than assumed.
       - name: Test web-selftest scope helper and the gate wiring
         run: node --test .github/scripts/web-selftest-scope.test.js
+
+      # The probe mode above (#4563) is only safe while three things hold: a
+      # probe skips every job but Test, no probe row carries a name a PR run
+      # reports, and dispatch inputs reach a shell only through env. This pins
+      # all three, and runs the probe step against a stub go. A probe skips this
+      # job, so this step runs on every PR and never inside a probe.
+      - name: Test the probe-mode wiring
+        run: node --test .github/scripts/pr-probe.test.js
 
       # Same rationale as the auto-gate test above: the stale-external-pr helper
       # decides which fork PRs to auto-close, so its pure decision logic gates
@@ -221,8 +273,10 @@ jobs:
       - name: Lint daemon log capture
         run: go test ./scripts/ -run DaemonLogCapture -count=1
 
+  # The one job a probe runs. It runs, so its name is evaluated: a probe's
+  # verdict reads "Test (probe)" and cannot pass for a PR's "Test".
   test:
-    name: Test
+    name: ${{ inputs.probe && 'Test (probe)' || 'Test' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -272,7 +326,93 @@ jobs:
       # timeout-minutes (GitHub's 360m default), so the Go-side panic and its
       # goroutine dump always land first here regardless.
       - name: Run tests
+        if: ${{ !inputs.probe }}
         run: go test -v -race -count=1 -timeout 30m ./...
+
+      # A probe's go test (#4563, docs/dev/probe-runs.md). It uses the same flags
+      # as Run tests above, so a probe fails the way the real run would, and
+      # pr-probe.test.js keeps the two in step — including the -timeout, which
+      # #4556 has already moved once. Only the package list and -run come from
+      # the dispatch.
+      #
+      # The inputs reach the shell through env and are never spliced into this
+      # script. Each package must start with ./, so none can be read as a go flag
+      # such as -toolexec, and neither input may contain a line break.
+      #
+      # `go test -run` exits 0 when the regex matches nothing (#2916). A probe
+      # that ran nothing would then read as "the test did not catch the
+      # mutation", so a green result that ran no test is refused.
+      - name: Run probe tests
+        if: ${{ inputs.probe }}
+        env:
+          PROBE_PACKAGES: ${{ inputs.packages }}
+          PROBE_RUN: ${{ inputs.run }}
+        run: |
+          set -euo pipefail
+          case "$PROBE_PACKAGES$PROBE_RUN" in
+            *$'\n'* | *$'\r'*)
+              echo "::error::packages and run must each be one line; one of them contains a line break."
+              exit 1
+              ;;
+          esac
+
+          read -r -a packages <<< "$PROBE_PACKAGES"
+          if [ "${#packages[@]}" -eq 0 ]; then
+            packages=(./...)
+          fi
+          pkg_re='^\./[A-Za-z0-9._/-]*$'
+          for pkg in "${packages[@]}"; do
+            if [[ ! $pkg =~ $pkg_re ]] || [[ "/$pkg/" == */../* ]]; then
+              printf 'rejected package: %q\n' "$pkg"
+              echo "::error::each package must be a ./-relative pattern inside this module, such as ./daemon/ or ./session/..."
+              exit 1
+            fi
+          done
+          run_args=()
+          if [ -n "$PROBE_RUN" ]; then
+            run_args=(-run "$PROBE_RUN")
+          fi
+
+          log="$RUNNER_TEMP/probe-go-test.log"
+          status=0
+          go test -v -race -count=1 -timeout 30m "${run_args[@]}" "${packages[@]}" 2>&1 | tee "$log" || status=$?
+
+          # An unreadable log counts as zero tests run, which fails closed below.
+          ran=$(grep -c '^=== RUN' "$log" || true)
+          ran=${ran:-0}
+          skipped=$(grep -c -e '--- SKIP' "$log" || true)
+          skipped=${skipped:-0}
+          # A probe is read by the assertion line, not the test name. One run
+          # carries every mutation, so a red test is evidence only for the
+          # mutation whose assertion line failed. -v prints every t.Log too, so
+          # each file:line is filed under the test that go test last named
+          # (=== RUN/CONT/NAME), and it is printed only if that test fails.
+          failures=$(awk '
+            /^=== (RUN|CONT|NAME) / { cur = $3; next }
+            /^panic:/ { print; next }
+            /^[[:space:]]*--- FAIL: / { printf "%s", buf[$3]; print; next }
+            /^[[:space:]]+[^[:space:]]+_test\.go:[0-9]+:/ { buf[cur] = buf[cur] $0 "\n" }
+          ' "$log" || true)
+          {
+            echo "### Probe · go test exited $status · $ran run · $skipped skipped"
+            echo
+            echo "Packages: ${packages[*]}"
+            echo
+            echo 'Failures and the assertion lines that raised them:'
+            echo
+            echo '```'
+            sed -n '1,200p' <<< "${failures:-(none)}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$status" -eq 0 ] && [ "$ran" -eq 0 ]; then
+            echo "::error::the probe ran no tests: -run matched nothing in ${packages[*]}. go test exits 0 on that, so it is refused rather than read as green."
+            exit 1
+          fi
+          if [ "$skipped" -gt 0 ]; then
+            echo "::warning::$skipped test(s) skipped. A skipped test cannot fail, so read the log before taking green as 'not caught'."
+          fi
+          exit "$status"
 
   # The round-trip image builds must resolve NOTHING against a registry (#2521).
   #
@@ -289,7 +429,8 @@ jobs:
   # likely to reintroduce a registry fetch is a Dockerfile or workflow edit
   # nobody thought of as touching integration.
   registry-free:
-    name: Registry-free image build
+    name: ${{ inputs.probe && 'Registry-free image build (skipped by probe)' || 'Registry-free image build' }}
+    if: ${{ !inputs.probe }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -312,6 +453,7 @@ jobs:
   # while the exact tmux server and pane PIDs survive.
   test-systemd:
     name: Test (systemd, ${{ matrix.os }})
+    if: ${{ !inputs.probe }}
     strategy:
       fail-fast: false
       matrix:
@@ -434,7 +576,8 @@ jobs:
   # It uses the `make` targets rather than open-coding npm, so what CI runs is what
   # a developer runs. A CI-only copy of these steps is how the two quietly diverge.
   web:
-    name: Web
+    name: ${{ inputs.probe && 'Web (skipped by probe)' || 'Web' }}
+    if: ${{ !inputs.probe }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -504,7 +647,8 @@ jobs:
   # Every way of NOT knowing the diff answers "run it". A skipped expensive job is
   # a hole; a needlessly-run one is just slow.
   web-selftest-scope:
-    name: Web and performance scope
+    name: ${{ inputs.probe && 'Web and performance scope (skipped by probe)' || 'Web and performance scope' }}
+    if: ${{ !inputs.probe }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -607,7 +751,8 @@ jobs:
   # forbidden on the shared dev box but is exactly what we want exercised here on
   # a throwaway runner — the launchd paths live in that package and are the point.
   test-macos:
-    name: Test (macOS)
+    name: ${{ inputs.probe && 'Test (macOS) (skipped by probe)' || 'Test (macOS)' }}
+    if: ${{ !inputs.probe }}
     runs-on: macos-latest
     # macOS runner minutes bill at 10x Linux; a hung PTY/daemon test must not burn
     # a six-hour default. Sized from the go test budget below: see there.
@@ -669,7 +814,7 @@ jobs:
         run: go test -v -race -count=1 -timeout 30m ./...
 
   build:
-    name: Build
+    name: ${{ inputs.probe && 'Build (skipped by probe)' || 'Build' }}
     runs-on: ubuntu-latest
     # "Build" and "Lint" are this repo's only required checks (ruleset 14851503),
     # so Build is where Test and Test (macOS) get their teeth — a new standalone
@@ -686,10 +831,16 @@ jobs:
     #
     # `skipped` is deliberately NOT a failure here: web-selftest and perf skip
     # whenever the scope job says the PR is outside their watched paths, a normal
-    # answer on most PRs. A skipped *scope* job would be a different matter, but it
-    # has no `if:` and so only skips when the run itself is going away.
+    # answer on most PRs. A skipped *scope* job would be a different matter, but its
+    # only `if:` is the probe skip, and a probe skips Build too. Otherwise it skips
+    # only when the run itself is going away.
+    #
+    # `&& !inputs.probe` keeps always() in force on every other event: `inputs`
+    # is empty there, so the clause is true. A probe gates nothing, so Build has
+    # nothing to stand in for, and running it would only spend a runner on
+    # `go build` and repeat the probe's red Test as a second red row.
     needs: [lint, test, test-systemd, test-macos, web, registry-free, web-selftest-scope, web-selftest, perf]
-    if: always()
+    if: always() && !inputs.probe
     steps:
       - name: Gate on the jobs this check stands in for
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')

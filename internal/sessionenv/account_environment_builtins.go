@@ -200,7 +200,7 @@ func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, memo operand
 	return nil, false
 }
 
-func unwrapSetsid(words []*syntax.Word) ([]*syntax.Word, bool) {
+func unwrapSetsid(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
@@ -210,7 +210,10 @@ func unwrapSetsid(words []*syntax.Word) ([]*syntax.Word, bool) {
 		case "--":
 			return words[1:], false
 		case "-h", "--help", "-V", "--version":
-			return nil, false
+			if shadowedOperandTailMutates(words[1:], names, memo) {
+				return nil, true
+			}
+			return words[1:], false
 		case "-c", "--ctty", "-f", "--fork", "-w", "--wait":
 			words = words[1:]
 		default:
@@ -239,7 +242,10 @@ func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, memo operandT
 		case option == "--":
 			return words[1:], false
 		case option == "--help" || option == "--version":
-			return nil, false
+			if shadowedOperandTailMutates(words[1:], names, memo) {
+				return nil, true
+			}
+			return words[1:], false
 		case option == "-i" || option == "--input" ||
 			option == "-o" || option == "--output" ||
 			option == "-e" || option == "--error":
@@ -276,14 +282,15 @@ func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, memo operandT
 // `ionice -c 3 sh -c 'unset CODEX_HOME; codex'` reached the default-safe
 // return and the nested shell removed the selected root before launch.
 func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+	var scope ioniceProofScope
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
 			// An option token carrying a quoted value is still ONE argv word when
 			// a literal '=' or literal value text pins its boundary, so the value
-			// need not be literal for the token to be understood. Only tokens
-			// whose boundary is pinned are accepted here; see
-			// ioniceQuotedOptionBoundaryPinned for the case that is not.
+			// need not be literal for the token to be understood. Besides pinned
+			// tokens, only process selectors and the unpinned shape the #4460
+			// proof covers (ioniceQuotedOptionBoundaryPinned) are accepted here.
 			prefix, quoted := literalPrefixBeforeSimpleQuotedParameter(words[0])
 			if !quoted {
 				return nil, true
@@ -299,12 +306,24 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// `invalid PID argument` and prints nothing — so inspecting it as a
 			// command refuses only what a shadowed wrapper could actually run.
 			if ioniceProcessOnlyOption(prefix) {
-				if shadowedOperandTailMutates(words[1:], names, memo) {
+				if !scope.admitExtension() || shadowedOperandTailMutates(words[1:], names, memo) {
 					return nil, true
 				}
 				return words[1:], false
 			}
 			if !ioniceQuotedOptionBoundaryPinned(prefix) {
+				// `-c"$C"` / `-n"$N"` is admitted only when the empty-value reading
+				// cannot run a command. It then continues exactly as the non-empty
+				// reading `-c2` does, so the child is still judged (#4460). The
+				// scope keeps it out of commands that use #4465's options.
+				flag, ok := ioniceDynamicValueFlag(words[0])
+				if !ok || !scope.admitDynamicValue() || ioniceEmptyValueReadingLive(flag, words[1:]) {
+					return nil, true
+				}
+				words = words[1:]
+				continue
+			}
+			if !scope.admitExtension() {
 				return nil, true
 			}
 			// A pinned token is self-contained, so its value is never judged as
@@ -316,6 +335,9 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// close nothing (#4465 review, measured).
 			words = words[1:]
 			continue
+		}
+		if !scope.admitLiteralOption(option) {
+			return nil, true
 		}
 		switch {
 		case option == "--":
@@ -437,16 +459,14 @@ func shellParameterExpandsToOneWord(name string) bool {
 // text after a short flag, as in `-c2"$X"`, proves the attached value is
 // nonempty, so the flag cannot fall back to consuming the following word.
 //
-// A bare short flag with a wholly dynamic value, `-c"$C"`, is NOT pinned and is
-// refused here: when $C expands empty the word reduces to `-c`, and getopt then
-// takes the FOLLOWING argv word as the class instead, which moves the child.
-// Measured on util-linux 2.39.3 — with $C empty, `ionice -c"$C" /bin/echo X`
-// reports `unknown scheduling class: '/bin/echo'` and execs nothing, while with
-// $C=2 the same command prints X. Admitting that shape means evaluating both
-// readings, and doing so by forking the parse is the exponential shape a sibling
-// finding reported for nested strace wrappers, so it needs a bounded
-// candidate-boundary set rather than a fork. Tracked separately; it fails closed
-// meanwhile.
+// A bare short flag with a wholly dynamic value, `-c"$C"`, is NOT pinned: when
+// $C expands empty the word reduces to `-c`, and getopt then takes the
+// FOLLOWING argv word as the class instead, which moves the child. Measured on
+// util-linux 2.39.3 — with $C empty, `ionice -c"$C" /bin/echo X` reports
+// `unknown scheduling class: '/bin/echo'` and execs nothing, while with $C=2
+// the same command prints X. unwrapIonice admits that shape only through the
+// #4460 proof in account_environment_ionice.go, which refuses it whenever the
+// swallowed word could be a valid value.
 func ioniceQuotedOptionBoundaryPinned(prefix string) bool {
 	if strings.HasPrefix(prefix, "--") {
 		name, _, attached := strings.Cut(prefix, "=")
@@ -671,7 +691,10 @@ options:
 			name, value, attached := strings.Cut(option[2:], "=")
 			switch name {
 			case "help", "version":
-				return nil, false
+				if shadowedOperandTailMutates(words[1:], names, memo) {
+					return nil, true
+				}
+				return words[1:], false
 			case "null", "interactive", "no-run-if-empty", "open-tty", "verbose", "exit", "show-limits":
 				if attached {
 					return nil, true
