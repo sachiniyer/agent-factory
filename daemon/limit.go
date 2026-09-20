@@ -861,11 +861,8 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			// store now, after readiness and immediately before delivery, so the
 			// mission's rollout can be captured without mistaking an older or
 			// concurrently-created rollout from another session for this one (#4715).
-			accountConversationCapture, err = beginLiveAccountSwapConversationCapture(instance, accountSwap)
-			if err != nil {
-				return resumeNotPerformed, fmt.Errorf("cannot prepare post-delivery conversation capture for %q: %w", requestedTitle, err)
-			}
-			captureAccountConversationAfterDelivery = true
+			accountConversationCapture, captureAccountConversationAfterDelivery =
+				m.prepareLiveAccountSwapConversationCapture(instance, accountSwap)
 		}
 	}
 

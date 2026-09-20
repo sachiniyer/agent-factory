@@ -494,6 +494,19 @@ func beginLiveAccountSwapConversationCapture(instance *session.Instance, swap *a
 	return session.BeginConversationCaptureAtCodexHomeAndWorkingDir(account.Dir, launch.WorkingDir), nil
 }
 
+func (m *Manager) prepareLiveAccountSwapConversationCapture(instance *session.Instance, swap *autoAccountSwap) (session.ConversationCaptureSnapshot, bool) {
+	snap, err := beginLiveAccountSwapConversationCapture(instance, swap)
+	if err == nil {
+		return snap, true
+	}
+	// Conversation metadata is additive; completing the committed mission is
+	// mandatory. An uncorrelated account-home snapshot could record another
+	// session's rollout, so degrade to no capture rather than either guessing or
+	// rebuilding the stuck-swap loop (#4715).
+	m.warn().Printf("post-delivery conversation capture for %q disabled because no safe live-runtime baseline could be established; continuing account-swap recovery without conversation metadata: %v", instance.Title, err)
+	return session.ConversationCaptureSnapshot{}, false
+}
+
 // captureAccountSwapConversation binds Codex discovery to the replacement
 // runtime while the limit-resume operation still owns its fence. When Codex has
 // already minted a rollout, account swaps cannot use the ordinary asynchronous

@@ -739,6 +739,37 @@ func TestResumeFromLimit_LiveStartedCodexSwapWithoutRolloutDeliversMission(t *te
 		"a live recovered replacement must record the rollout minted by mission delivery")
 }
 
+func TestResumeFromLimit_LiveStartedCodexSwapWithUnprovableWorkingDirStillDeliversMission(t *testing.T) {
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", time.Time{})
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	_, err = agentaccount.Register(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err)
+	inst.Program = tmux.ProgramCodex
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "codex -C /tmp"))
+	worktree := filepath.Join(t.TempDir(), "unprovable-codex-worktree")
+	require.NoError(t, os.MkdirAll(worktree, 0o755))
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		inst.Path, worktree, inst.Title, "unprovable-codex-branch", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	inst.ReconcileAccountHandoffSnapshot("work", true, &session.AccountSwapData{
+		To:                      "work",
+		CarryFallback:           "af had no recorded codex conversation id for the previous session",
+		ReplacementPanesStarted: true,
+	})
+	warnings := captureWarnings(t)
+
+	_, err = manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID})
+	require.NoError(t, err, "optional conversation capture must not block committed mission recovery")
+	_, respawns, prompts := backend.snapshot()
+	require.Zero(t, respawns)
+	require.Len(t, prompts, 1, "the mandatory mission must be delivered without a safe capture baseline")
+	require.Nil(t, inst.ToInstanceData().PendingAccountSwap, "successful delivery must retire the pending marker")
+	require.False(t, inst.AgentConversation().HasID(), "an unprovable cwd must never fall back to uncorrelated capture")
+	require.Contains(t, warnings.String(), "continuing account-swap recovery without conversation metadata")
+}
+
 // codexReplacementTrustModal is the real Codex first-run directory-trust frame
 // (mirrors codexDirectoryTrustDialog in session/tmux/doc_trust_prompt_test.go):
 // the guarded detector requires the selected '› 1. Yes, continue' row and the
