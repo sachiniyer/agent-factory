@@ -131,7 +131,7 @@ always the same for a whole repository. `default_accounts` says it once — per
 agent, and most usefully per project:
 
 ```bash
-af projects register ~/work/monorepo                            # once
+af projects add ~/work/monorepo                                 # once
 af config set default_accounts.codex work --project ~/work/monorepo
 af config set default_accounts.codex personal --project ~/side/hobby
 ```
