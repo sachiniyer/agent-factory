@@ -108,10 +108,10 @@ func percentDecodedBoundary(view redactx.View, offset, rawLength int) int {
 
 // redactRawAccessTokenValue scans raw — a raw, pre-decode URI component or
 // query pair that net/url re-emits verbatim (RawQuery/RawPath/RawFragment,
-// Opaque) — for case-insensitive literal access_token= substrings and redacts
-// the value span following each one. The value ends at the first byte in
-// terminators, or at the end of raw when terminators is empty or none of its
-// bytes occurs after the '='.
+// Opaque) — for a case-insensitive access_token= key, tolerating %HH escapes
+// anywhere inside the needle, and redacts the value span following each one.
+// The value ends at the first byte in terminators, or at the end of raw when
+// terminators is empty or none of its bytes occurs after the '='.
 //
 // This is the raw-bytes mirror of accessTokenURIValueSpans. The decode-based
 // matcher in redactPercentEncodedAccessTokenText needs a literal access_token=
@@ -123,6 +123,21 @@ func percentDecodedBoundary(view redactx.View, offset, rawLength int) int {
 // matcher missed see this code path (callers run the decoded scan first), so
 // this never reprocesses a span the structured pass already redacted.
 //
+// The matcher additionally tolerates a valid %HH escape anywhere INSIDE the
+// needle — e.g. %access%5Ftoken=SECRET, where the leading %ac collapses the
+// 'a' (so the decoded sweep misses) and the in-needle %5F spells the '_' (so
+// the raw bytes carry "access%5Ftoken=", not the literal "access_token=").
+// At each needle position the matcher accepts the literal byte
+// case-insensitively OR a %HH whose decoded byte equals the needle character
+// (case-insensitively). On a malformed '%' (fewer than two hex digits
+// following) the candidate aborts, preserving the fail-open-on-reserved
+// behaviour the %ac family relies on: the leading '%' is left untouched and
+// the value is matched from the literal tail that survives the collapse.
+//
+// The matched key span is preserved verbatim: on %access_token=SECRET the
+// output keeps the leading '%', and on %access%5Ftoken=SECRET the %5F is kept
+// in the key — only the value is the redactor's business (#4161 fidelity).
+//
 // terminators is the component's structural separator set (/ ; ? # for path,
 // fragment, and opaque; empty for a query pair, whose separator was already
 // split out), so a value never claims a neighbouring field. The function is
@@ -131,12 +146,12 @@ func redactRawAccessTokenValue(raw, terminators string) (string, bool) {
 	needle := AccessTokenQueryParam + "="
 	found := false
 	for cursor := 0; cursor < len(raw); {
-		i := indexFoldASCII(raw[cursor:], needle)
-		if i < 0 {
-			return raw, found
+		keyEnd, ok := matchAccessTokenNeedleRaw(raw, cursor, needle)
+		if !ok {
+			cursor++
+			continue
 		}
-		i += cursor
-		valueStart := i + len(needle)
+		valueStart := keyEnd
 		valueEnd := len(raw)
 		if terminators != "" {
 			if pos := strings.IndexAny(raw[valueStart:], terminators); pos >= 0 {
@@ -148,6 +163,70 @@ func redactRawAccessTokenValue(raw, terminators string) (string, bool) {
 		cursor = valueStart + len(accessTokenRedaction)
 	}
 	return raw, found
+}
+
+// matchAccessTokenNeedleRaw attempts to match needle starting at raw[cursor],
+// accepting at each needle position either the literal byte
+// case-insensitively or a %HH escape whose decoded byte equals the expected
+// needle character (case-insensitively). It returns the raw byte position
+// immediately after the needle's final character (a literal byte or the
+// trailing hex digit of a %HH), so a caller can re-emit the matched key form
+// verbatim while rewriting only the value that follows. On a malformed '%'
+// the candidate aborts (returns ok=false): the byte is reserved data, not an
+// escape, so a %ac overlap's leading '%' stays a non-match while the literal
+// tail that survives the collapse still matches from the next cursor
+// position.
+func matchAccessTokenNeedleRaw(raw string, cursor int, needle string) (keyEnd int, ok bool) {
+	j := 0
+	pos := cursor
+	for j < len(needle) {
+		if pos >= len(raw) {
+			return 0, false
+		}
+		want := needle[j]
+		if equalFoldASCII(raw[pos], want) {
+			pos++
+			j++
+			continue
+		}
+		if raw[pos] == '%' && pos+2 < len(raw) {
+			hi, hiOK := hexValue(raw[pos+1])
+			lo, loOK := hexValue(raw[pos+2])
+			if hiOK && loOK && equalFoldASCII(hi<<4|lo, want) {
+				pos += 3
+				j++
+				continue
+			}
+		}
+		return 0, false
+	}
+	return pos, true
+}
+
+// equalFoldASCII reports whether got equals want under ASCII case folding
+// (uppercase A-Z folds to lowercase, mirroring indexFoldASCII). Non-ASCII
+// bytes fold to themselves, which is fine for the access_token= needle — it
+// is pure ASCII.
+func equalFoldASCII(got, want byte) bool {
+	if got >= 'A' && got <= 'Z' {
+		got += 'a' - 'A'
+	}
+	return got == want
+}
+
+// hexValue returns the decimal value of a single ASCII hex digit and ok=true,
+// or ok=false for a non-hex byte. Case-insensitive, mirroring redactx.isHex.
+func hexValue(char byte) (byte, bool) {
+	switch {
+	case char >= '0' && char <= '9':
+		return char - '0', true
+	case char >= 'a' && char <= 'f':
+		return char - 'a' + 10, true
+	case char >= 'A' && char <= 'F':
+		return char - 'A' + 10, true
+	default:
+		return 0, false
+	}
 }
 
 // accessTokenURIValueSpans consumes the rest of the parser-proven URI field.
