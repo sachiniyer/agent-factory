@@ -68,6 +68,16 @@ const codexClippedUpdatePickerSkipSelected = `  Update available · 0.0.0
   enter continue · esc
   skip`
 
+const codexPersistentUpdateBanner = `╭─────────────────────────────────────────────────╮
+│ ✨ Update available! 0.154.0 -> 0.155.1         │
+│ Run npm install -g @openai/codex to update.     │
+│                                                 │
+│ See full release notes:                         │
+│ https://github.com/openai/codex/releases/latest │
+╰─────────────────────────────────────────────────╯
+  …
+› Ask Codex to do anything`
+
 func TestCheckAndHandleTrustPrompt_CodexUpdatePickerSkipsWithoutRunningUpdate(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -129,6 +139,24 @@ func TestCheckAndHandleTrustPrompt_CodexUpdateTextWithVisibleCursorIsNotModal(t 
 	require.False(t, session.CheckAndHandleTrustPrompt(),
 		"quoted picker text in a live composer must not receive daemon input")
 	require.Empty(t, sentKeystrokes(*commands))
+}
+
+func TestCheckAndHandleTrustPrompt_CodexPersistentUpdateBannerIsNotModal(t *testing.T) {
+	for _, cursorVisible := range []bool{true, false} {
+		name := "hidden cursor"
+		if cursorVisible {
+			name = "visible cursor"
+		}
+		t.Run(name, func(t *testing.T) {
+			session, commands := runTrustPromptFrames(t, ProgramCodex,
+				trustPromptFrame{content: codexPersistentUpdateBanner, cursorVisible: cursorVisible},
+			)
+
+			require.False(t, session.CheckAndHandleTrustPrompt(),
+				"the persistent post-dismissal banner above a live composer is not a modal")
+			require.Empty(t, sentKeystrokes(*commands))
+		})
+	}
 }
 
 func TestCheckAndHandleTrustPrompt_CodexUpdateConfirmsOnlyPreselectedSkip(t *testing.T) {
