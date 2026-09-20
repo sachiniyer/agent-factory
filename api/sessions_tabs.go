@@ -122,16 +122,18 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 		if strings.TrimSpace(tabCreateCommandFlag) != "" {
 			return jsonError(fmt.Errorf("--command is not valid for a web tab (--kind web); use --url or --port"))
 		}
-		if strings.TrimSpace(tabCreateURLFlag) == "" {
-			switch {
-			case portSupplied:
-				if _, err := session.WebTabURLForPort(tabCreatePortFlag); err != nil {
-					return jsonError(err)
-				}
-			case urlSupplied:
-				if _, err := session.NormalizeWebTabURL(tabCreateURLFlag); err != nil {
-					return jsonError(err)
-				}
+		// Validate every supplied target independently so neither value can be
+		// silently ignored. URL validation runs first for deterministic errors
+		// when both are invalid. When both are valid, both remain on the request
+		// and the daemon's established URL-over-port target precedence applies.
+		if urlSupplied {
+			if _, err := session.NormalizeWebTabURL(tabCreateURLFlag); err != nil {
+				return jsonError(err)
+			}
+		}
+		if portSupplied {
+			if _, err := session.WebTabURLForPort(tabCreatePortFlag); err != nil {
+				return jsonError(err)
 			}
 		}
 	case explicitKind && kind == session.TabKindVSCode:

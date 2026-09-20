@@ -157,36 +157,47 @@ func setTabCreateFlagSuppliedForTest(t *testing.T, name string) {
 // arm also pins its ordinary accepted path.
 func TestSessionsTabCreateTargetFlagPresence(t *testing.T) {
 	for _, tc := range []struct {
-		name, command, kind, url, supplied, wantErr string
-		port                                        int
+		name, command, kind, url, wantErr string
+		port                              int
+		urlSupplied, portSupplied         bool
+		checkTargets                      bool
 	}{
 		{name: "shell/control", kind: "shell"},
-		{name: "shell/portZero", kind: "shell", supplied: "port", wantErr: "--url/--port are not valid for a shell tab"},
-		{name: "shell/urlEmpty", kind: "shell", supplied: "url", wantErr: "--url/--port are not valid for a shell tab"},
-		{name: "shell/urlWhitespace", kind: "shell", url: "   ", supplied: "url", wantErr: "--url/--port are not valid for a shell tab"},
+		{name: "shell/portZero", kind: "shell", portSupplied: true, wantErr: "--url/--port are not valid for a shell tab"},
+		{name: "shell/urlEmpty", kind: "shell", urlSupplied: true, wantErr: "--url/--port are not valid for a shell tab"},
+		{name: "shell/urlWhitespace", kind: "shell", url: "   ", urlSupplied: true, wantErr: "--url/--port are not valid for a shell tab"},
 		{name: "vscode/control", kind: "vscode"},
-		{name: "vscode/portZero", kind: "vscode", supplied: "port", wantErr: "--url/--port are not valid for a vscode tab"},
-		{name: "vscode/urlEmpty", kind: "vscode", supplied: "url", wantErr: "--url/--port are not valid for a vscode tab"},
-		{name: "vscode/urlWhitespace", kind: "vscode", url: "   ", supplied: "url", wantErr: "--url/--port are not valid for a vscode tab"},
+		{name: "vscode/portZero", kind: "vscode", portSupplied: true, wantErr: "--url/--port are not valid for a vscode tab"},
+		{name: "vscode/urlEmpty", kind: "vscode", urlSupplied: true, wantErr: "--url/--port are not valid for a vscode tab"},
+		{name: "vscode/urlWhitespace", kind: "vscode", url: "   ", urlSupplied: true, wantErr: "--url/--port are not valid for a vscode tab"},
 		{name: "process/control", command: "npm run dev"},
-		{name: "process/portZero", command: "npm run dev", supplied: "port", wantErr: "--url/--port are not valid for a process tab"},
-		{name: "process/urlEmpty", command: "npm run dev", supplied: "url", wantErr: "--url/--port are not valid for a process tab"},
-		{name: "process/urlWhitespace", command: "npm run dev", url: "   ", supplied: "url", wantErr: "--url/--port are not valid for a process tab"},
+		{name: "process/portZero", command: "npm run dev", portSupplied: true, wantErr: "--url/--port are not valid for a process tab"},
+		{name: "process/urlEmpty", command: "npm run dev", urlSupplied: true, wantErr: "--url/--port are not valid for a process tab"},
+		{name: "process/urlWhitespace", command: "npm run dev", url: "   ", urlSupplied: true, wantErr: "--url/--port are not valid for a process tab"},
 		{name: "web/control", kind: "web", port: 3000},
-		{name: "web/portZero", kind: "web", supplied: "port", wantErr: "web tab port must be between 1 and 65535, got 0"},
-		{name: "web/urlEmpty", kind: "web", supplied: "url", wantErr: "a web tab requires a target URL (--url or --port)"},
+		{name: "web/portZero", kind: "web", portSupplied: true, wantErr: "web tab port must be between 1 and 65535, got 0"},
+		{name: "web/urlEmpty", kind: "web", urlSupplied: true, wantErr: "a web tab requires a target URL (--url or --port)"},
+		{name: "web/bothValid", kind: "web", url: "https://example.com", port: 3000, urlSupplied: true, portSupplied: true, checkTargets: true},
+		{name: "web/validURLInvalidPort", kind: "web", url: "https://example.com", urlSupplied: true, portSupplied: true, wantErr: "web tab port must be between 1 and 65535, got 0"},
+		{name: "web/invalidURLValidPort", kind: "web", port: 3000, urlSupplied: true, portSupplied: true, wantErr: "a web tab requires a target URL (--url or --port)"},
+		{name: "web/bothInvalid", kind: "web", urlSupplied: true, portSupplied: true, wantErr: "a web tab requires a target URL (--url or --port)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setupRepoForCmd(t)
 			setTabCreateFlagsForTest(t, tc.command, "", tc.kind, tc.url, tc.port)
-			if tc.supplied != "" {
-				setTabCreateFlagSuppliedForTest(t, tc.supplied)
+			if tc.urlSupplied {
+				setTabCreateFlagSuppliedForTest(t, "url")
+			}
+			if tc.portSupplied {
+				setTabCreateFlagSuppliedForTest(t, "port")
 			}
 
+			var gotReq daemon.CreateTabRequest
 			called := false
 			previousCreate := createTabViaDaemon
-			createTabViaDaemon = func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+			createTabViaDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 				called = true
+				gotReq = req
 				return daemon.CreateTabResponse{Name: "created"}, nil
 			}
 			t.Cleanup(func() { createTabViaDaemon = previousCreate })
@@ -198,6 +209,10 @@ func TestSessionsTabCreateTargetFlagPresence(t *testing.T) {
 				}
 				if !called {
 					t.Fatal("accepted path did not reach the daemon")
+				}
+				if tc.checkTargets && (gotReq.URL != tc.url || gotReq.Port != tc.port) {
+					t.Fatalf("accepted request targets = URL %q, Port %d; want URL %q, Port %d",
+						gotReq.URL, gotReq.Port, tc.url, tc.port)
 				}
 				return
 			}
