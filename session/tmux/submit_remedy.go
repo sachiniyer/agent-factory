@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"fmt"
 	"strings"
 	"unicode"
 
@@ -23,40 +24,86 @@ const (
 	composerStagedTail
 )
 
-// promptStagedAtCursor reports whether this delivery's prompt is still visibly
-// staged in the composer at the live input cursor — the one position where
-// visible text is provably unsubmitted input. Anchoring on the cursor row is
-// what separates a stranded draft from a submitted one: a dispatched prompt's
-// echo may keep the same tail visible in the transcript, but the cursor row
-// itself then holds the fresh empty composer.
-//
-// Two sightings qualify: the payload's completion tail ending the cursor row
-// (or, for a pane narrow enough to wrap the draft, a cursor row that IS the
-// tail's end), and a collapsed-paste chip on the cursor row. Everything else —
-// an empty row, a hidden cursor, an unreadable cursor query — is not evidence,
-// so the remedy never fires on a pane that might have submitted already.
-func (t *TmuxSession) promptStagedAtCursor(pane string, probe deliveryProbe) composerStaged {
+// claudeComposerGlyph opens Claude Code's composer input row — the same glyph
+// it draws for picker selection (claudeTrustSelectionGlyph) and for the
+// transcript echo of a submitted prompt. Claude Code hides the terminal cursor
+// in its ordinary composer (cursor_flag=0 — measured in claude_trust.go), so a
+// cursor-anchored staged check can never fire for it; structure is the only
+// discriminator, exactly as it is for the trust dialogs.
+const claudeComposerGlyph = "❯"
+
+// capturePaneAndCursorState reads the cursor state and the pane grid in ONE
+// tmux command list. tmux runs a client's command list to completion before
+// servicing pane output again — the guarantee sendEnterAndCaptureBoundary
+// already relies on — so the cursor row and the grid describe one instant: a
+// queued Enter that dispatches mid-check can no longer leave a stale pane
+// paired with a fresh cursor and misread a submitted draft as staged.
+// display-message runs first so its single output line is unambiguously the
+// head of stdout. Any failure (including a tripped deadline) is "could not
+// look" — the callers treat that as no evidence, never a negative.
+func (t *TmuxSession) capturePaneAndCursorState() (string, paneCursorState, bool) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	target := exactTarget(t.sanitizedName)
+	out, err := t.outputTmuxBounded(ctx,
+		"display-message", "-p", "-t", target, paneCursorStateFormat, ";",
+		"capture-pane", "-p", "-t", target,
+	)
+	if err != nil {
+		return "", paneCursorState{}, false
+	}
+	s := string(out)
+	idx := strings.IndexByte(s, '\n')
+	if idx < 0 {
+		return "", paneCursorState{}, false
+	}
+	var cursor paneCursorState
+	var visible int
+	if _, err := fmt.Sscanf(strings.TrimSpace(s[:idx]), "%d %d %d",
+		&cursor.Row, &cursor.Col, &visible); err != nil {
+		return "", paneCursorState{}, false
+	}
+	cursor.Visible = visible != 0
+	return s[idx+1:], cursor, true
+}
+
+// stagedDraftInSnapshot reports whether this delivery's prompt is still visibly
+// staged in the composer in a pane+cursor snapshot taken atomically. With a
+// live cursor, the cursor row is the one position where visible text is
+// provably unsubmitted input: a dispatched prompt's echo may keep the same tail
+// visible in the transcript, but the cursor row itself then holds the fresh
+// empty composer. With a hidden cursor (Claude's ordinary composer sets
+// cursor_flag=0) the row anchor is unavailable, so the check falls back to
+// structure: the payload's tail must end a row inside the LAST composer-glyph
+// block, which a submitted prompt's echo cannot satisfy because a fresh
+// composer row repaints beneath it.
+func stagedDraftInSnapshot(pane string, cursor paneCursorState, probe deliveryProbe) composerStaged {
 	normalized := normalizeDelivery(pane)
 	tailVisible := probe.completion != "" && strings.Contains(normalized, probe.completion)
 	chipVisible := strings.Contains(normalized, "[Pasted")
 	if !tailVisible && !chipVisible {
 		return composerStagedNone
 	}
-	cursor, err := t.readPaneCursorState()
-	if err != nil || !cursor.Visible {
-		return composerStagedNone
+	if !cursor.Visible {
+		return stagedDraftHiddenCursor(pane, probe, tailVisible, chipVisible)
 	}
 	row, ok := paneRowAt(pane, cursor.Row)
 	if !ok {
 		return composerStagedNone
 	}
-	normRow := normalizeDelivery(row)
+	return classifyComposerRow(normalizeDelivery(row), probe, tailVisible, chipVisible)
+}
+
+// classifyComposerRow matches staged-draft evidence on ONE normalized composer
+// row: the payload's completion tail ending the row (or, for a pane narrow
+// enough to wrap the draft, a row that IS the tail's end), or a collapsed-paste
+// chip on the row. The row may carry a leading prompt glyph (>, ❯, ›) that is
+// not part of the payload; the suffix directions both tolerate it.
+func classifyComposerRow(normRow string, probe deliveryProbe, tailVisible, chipVisible bool) composerStaged {
 	if normRow == "" {
 		return composerStagedNone
 	}
 	if tailVisible {
-		// The row may carry a leading prompt glyph (>, ❯, ›) that is not part
-		// of the payload; the suffix directions below both tolerate it.
 		trimmed := strings.TrimLeftFunc(normRow, func(r rune) bool {
 			return !unicode.IsLetter(r) && !unicode.IsNumber(r)
 		})
@@ -71,35 +118,71 @@ func (t *TmuxSession) promptStagedAtCursor(pane string, probe deliveryProbe) com
 	return composerStagedNone
 }
 
+// stagedDraftHiddenCursor is the staged check for a pane whose application
+// hides the terminal cursor — Claude Code's ordinary composer among them.
+// Without a cursor row to anchor on, the check keys off composer STRUCTURE: a
+// live composer always repaints a fresh glyph row beneath a submitted prompt's
+// echo, so the payload's tail can only be staged input when it ends a row in
+// the LAST glyph-anchored block. The block runs while normalized rows stay
+// non-empty — a wrapped draft continues below the glyph row, and a box border
+// or blank ends the run (footer text below simply fails the row match). A modal
+// dialog also ends in glyph rows, but its labels cannot end with this payload's
+// tail, so the check stays silent instead of sending Enter into a picker.
+func stagedDraftHiddenCursor(pane string, probe deliveryProbe, tailVisible, chipVisible bool) composerStaged {
+	rows := strings.Split(strings.TrimSuffix(pane, "\n"), "\n")
+	last := -1
+	for i, r := range rows {
+		if strings.HasPrefix(normalizeDelivery(r), claudeComposerGlyph) {
+			last = i
+		}
+	}
+	if last < 0 {
+		return composerStagedNone
+	}
+	for j := last; j < len(rows); j++ {
+		normRow := normalizeDelivery(rows[j])
+		if normRow == "" {
+			break
+		}
+		if staged := classifyComposerRow(normRow, probe, tailVisible, chipVisible); staged != composerStagedNone {
+			return staged
+		}
+	}
+	return composerStagedNone
+}
+
 // remedyStrandedSubmit is the #4200 repair: when the prompt is provably still
-// staged at the composer cursor after Enter, send ONE more Enter to dispatch it.
-// The first keystroke demonstrably did not submit — a submitted draft leaves the
-// cursor row — so the second cannot double-submit this payload; worst case it
-// queues behind an input the composer is still draining and no-ops on the empty
-// composer that results.
+// staged in the composer after Enter, send ONE more Enter to dispatch it.
+// Staged evidence is positive only: the live cursor row ending in this
+// payload's tail, or the last composer-glyph block doing so on a hidden-cursor
+// pane. The first keystroke demonstrably did not submit — a submitted draft
+// leaves the composer input — so the second cannot double-submit this payload;
+// worst case it queues behind input the composer is still draining and no-ops
+// on the empty composer that results.
 //
 // The verdict after the remedy is honest about what was observed: a tail-staged
 // draft that dispatches was observed delivered (its text rendered AND left the
 // composer on our submit); a chip-staged draft that dispatches stays
-// sent-unverified, because a placeholder never proved WHICH text it held; and a
+// sent-unverified, because a placeholder never proved WHICH text it held; a
 // draft that survives the remedy Enter downgrades even a landed observation to
-// sent-unverified — the paste reached the pane, but the prompt never provably
-// reached the agent, and reporting delivered here is the false success #4200
-// exists to eliminate.
+// sent-unverified — and so does a remedy whose outcome cannot be re-observed at
+// all, because staged evidence was already seen and reporting delivered here is
+// the false success #4200 exists to eliminate.
 func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deliveryObservation) deliveryObservation {
 	if probe.completion == "" {
 		return observation
 	}
 	pasteDeliverySleep(strandedSubmitGrace)
-	pane, ok := t.capturePaneForDelivery()
+	pane, cursor, ok := t.capturePaneAndCursorState()
 	if !ok {
 		return observation
 	}
-	staged := t.promptStagedAtCursor(pane, probe)
+	staged := stagedDraftInSnapshot(pane, cursor, probe)
 	if staged == composerStagedNone {
 		return observation
 	}
-	log.WarningLog.Printf("submit: session %q still shows this prompt staged at the composer cursor after Enter; "+
+	stagedPane := pane
+	log.WarningLog.Printf("submit: session %q still shows this prompt staged in the composer after Enter; "+
 		"the keystroke was swallowed by the still-rendering composer, so sending one more Enter to dispatch the staged draft (#4200)",
 		t.sanitizedName)
 	boundary, boundaryOK, err := t.sendEnterAndCaptureBoundary()
@@ -113,11 +196,15 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 		t.deferDeliveryBaseline()
 	}
 	pasteDeliverySleep(strandedSubmitSettle)
-	pane, ok = t.capturePaneForDelivery()
+	pane, cursor, ok = t.capturePaneAndCursorState()
 	if !ok {
-		return observation
+		// Staged evidence WAS seen and the remedy Enter was sent; whether it
+		// dispatched is now unobservable. Returning the earlier observation
+		// could report delivered on a prompt last seen unsubmitted — downgrade
+		// to the unconfirmed floor instead.
+		return deliveryObservation{outcome: deliveryObservedUnverified, pane: stagedPane}
 	}
-	if t.promptStagedAtCursor(pane, probe) != composerStagedNone {
+	if stagedDraftInSnapshot(pane, cursor, probe) != composerStagedNone {
 		// The draft survived two Enters — a deeper wedge (frozen render, queued
 		// input backlog). The paste may have landed, but submission is
 		// unconfirmed at best: report unconfirmed, never delivered.

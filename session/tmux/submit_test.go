@@ -1393,22 +1393,31 @@ func TestSubmitWaitsForPasteBeforeEnter(t *testing.T) {
 				enterSawConfirmedText = confirmedText
 				return []byte(deliveryBoundarySentinel + "\nsubmitted composer"), nil
 			}
-			// The #4200 post-Enter staged-draft check reads the cursor via
-			// display-message. Report the cursor on the composer's top border
-			// row — a row that can never hold the draft — so a dispatched
-			// submit is not mistaken for a staged one.
-			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+			joined := strings.Join(c.Args, " ")
+			// The #4200 post-Enter staged-draft snapshot is ONE command list —
+			// display-message then capture-pane — answered as the cursor line
+			// followed by the grid. Report the cursor on the composer's top
+			// border row — a row that can never hold the draft — so a
+			// dispatched submit is not mistaken for a staged one.
+			snapshot := strings.Contains(joined, "display-message") && strings.Contains(joined, "capture-pane")
+			if strings.Contains(joined, "display-message") && !snapshot {
 				return []byte("0 0 1"), nil
 			}
 			captureCalls++
 			// Withhold the pasted text for the first few polls (drain latency),
 			// then reveal it — inside a composer border box, to prove the tail is
 			// recognized through the framing.
+			var pane string
 			if captureCalls <= revealAfter || loaded == "" {
-				return []byte("╭─ composer ─╮\n│ >          │\n╰────────────╯"), nil
+				pane = "╭─ composer ─╮\n│ >          │\n╰────────────╯"
+			} else {
+				confirmedText = true
+				pane = "╭─ composer ────────────╮\n│ > " + loaded + " │\n╰───────────────────────╯"
 			}
-			confirmedText = true
-			return []byte("╭─ composer ────────────╮\n│ > " + loaded + " │\n╰───────────────────────╯"), nil
+			if snapshot {
+				return []byte("0 0 1\n" + pane), nil
+			}
+			return []byte(pane), nil
 		},
 	}
 

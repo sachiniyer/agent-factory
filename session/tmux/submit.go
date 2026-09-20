@@ -359,12 +359,13 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, bo
 	// prompt staged but unsubmitted while the transport above already reported
 	// its outcome (#4200). The pre-Enter observation cannot see that — its
 	// evidence ends at the submit — so look once more after a short grace. A
-	// draft still staged AT the live cursor is provably undispatched, and one
+	// draft still staged in the composer is provably undispatched, and one
 	// more Enter is then the submit the first one never became. The remedy is
 	// not a retry: nothing is re-pasted, and it fires only on positive staged
-	// evidence, so a prompt that did submit (whose text left the cursor row)
-	// can never receive a duplicate keystroke. Observed-absent is excluded: its
-	// partial draft must never be dispatched — the redelivery path owns it.
+	// evidence, so a prompt that did submit (whose text left the composer
+	// input) can never receive a duplicate keystroke. Observed-absent is
+	// excluded: its partial draft must never be dispatched — the redelivery
+	// path owns it.
 	if observation.outcome != deliveryObservedAbsent {
 		observation = t.remedyStrandedSubmit(probe, observation)
 	}

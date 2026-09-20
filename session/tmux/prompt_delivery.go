@@ -138,9 +138,9 @@ func (t *TmuxSession) SendKeysCommandObserved(text string) (PromptDeliveryStatus
 // individually bounded tmux commands plus the delivery observation window and
 // the two post-Enter staged-draft windows (#4200); the command count is
 // deliberately GENEROUS (the longest success path issues 8 commands plus up to
-// 5 more on the remedy path: grace capture + cursor read, remedy Enter+boundary,
-// settle capture + cursor read) so a future added capture does not silently
-// outgrow the bound.
+// 3 more on the remedy path: the atomic grace snapshot, the remedy
+// Enter+boundary, and the atomic settle snapshot) so a future added capture
+// does not silently outgrow the bound.
 func SendPromptWorstCaseBound() time.Duration {
 	const boundedCommandsPerAttempt = 15
 	attempt := boundedCommandsPerAttempt*tmuxCommandTimeout + pasteDeliveryMaxWait +
