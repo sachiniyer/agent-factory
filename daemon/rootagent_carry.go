@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -228,6 +230,7 @@ func reconcilePendingSwapConversation(req *CreateSessionRequest) {
 		// re-injects it with --session-id, which would fork a conversation that
 		// already exists.
 		reconciled.ConversationID = ""
+		clearDeliveredMissionEvidence(&reconciled)
 		req.pendingAccountSwap = &reconciled
 		return
 	}
@@ -240,7 +243,134 @@ func reconcilePendingSwapConversation(req *CreateSessionRequest) {
 	} else {
 		reconciled.ConversationID = ""
 	}
+	if reconciled.ConversationID != swap.ConversationID {
+		clearDeliveredMissionEvidence(&reconciled)
+	}
 	req.pendingAccountSwap = &reconciled
+}
+
+// clearDeliveredMissionEvidence re-states the mission's delivery for a
+// replacement that is NOT continuing the conversation the evidence was written
+// about (Codex on #4400, round 8).
+//
+// MissionDeliveryStatus describes one pane's submission. "Delivered" and
+// "could not confirm" both suppress automatic redelivery, which is right while
+// the conversation that may already hold the brief is the one being resumed —
+// redelivering there would duplicate it. Once this heal launches a DIFFERENT
+// conversation, the brief provably is not in it, and carrying that suppression
+// over leaves the root fenced behind a swap the scheduler will not resume until
+// an operator retries by hand: accountSwapScheduledResumeEligible skips a
+// manual swap whose delivery is unconfirmed.
+//
+// PromptNotDelivered rather than "", and that is load-bearing:
+// restoreMissingAccountSwapMissionEvidence fails closed, rewriting an empty
+// status on a panes-started manual transaction back to PromptCouldNotConfirm on
+// the next load, which would restore the very fence this clears. Positive
+// non-delivery evidence is the same thing ParkManualAccountSwapAtLimit records
+// for the same reason.
+func clearDeliveredMissionEvidence(swap *session.AccountSwapData) {
+	swap.MissionDeliveryStatus = session.PromptNotDelivered
+}
+
+// rootCarrySweepInterval paces the orphaned-carry reconciliation. It reads a
+// directory instead of answering from the snapshot, and the state it corrects —
+// a carry whose last root_agents entry was deleted — changes only when a human
+// edits config, so a slow cadence costs nothing. Package var so tests can drive
+// it.
+var rootCarrySweepInterval = 5 * time.Minute
+
+// sweepOrphanedRootCarries retires a durable carry that no candidate can ever
+// consume (Codex on #4400, round 8).
+//
+// Every other retirement is driven by a candidate the sweep still enumerates:
+// a create consumes its own, a healthy pass retires the one bound to its
+// checkout, and the disabled arm retires one whose repo has no enabled
+// spelling left. A repository whose last root_agents entry was DELETED
+// enumerates no candidate at all, so none of those run, and the carry sits on
+// disk until someone re-adds the entry — whose first create then resumes an
+// obsolete account pin, conversation, pending swap and tab roster.
+//
+// Every guard here fails toward KEEPING the carry, because the cost of a wrong
+// retirement is the account pin this whole mechanism exists to preserve, while
+// the cost of a late one is a stale file nobody reads:
+//
+//   - an unreadable instances directory is not an empty one, so it aborts;
+//   - an unanswered legacy probe means some path may still resolve to this
+//     repository, so the whole sweep waits (the dedup set's own "unknown is
+//     never absent" rule);
+//   - repoHasEnabledRootCandidate with no exclusion answers "any candidate at
+//     all", and returns true for a pending re-attribution or an unreadable
+//     personal layer;
+//   - a create in flight owns the carry, and a live root means the repo is
+//     still ensured, whatever config says this tick.
+func (m *Manager) sweepOrphanedRootCarries(layers *rootAgentSnapshot) {
+	m.mu.Lock()
+	due := !nowFunc().Before(m.nextRootCarrySweep)
+	if due {
+		m.nextRootCarrySweep = nowFunc().Add(rootCarrySweepInterval)
+	}
+	m.mu.Unlock()
+	if !due {
+		return
+	}
+	if len(layers.legacy.unknownPaths) > 0 {
+		return
+	}
+	repoIDs, err := config.RepoIDsWithReapedRootCarry()
+	if err != nil {
+		m.warn().Printf("could not list parked root agent carries to reconcile them against the configured repositories: %v", err)
+		return
+	}
+	for _, repoID := range repoIDs {
+		if m.repoHasEnabledRootCandidate(repoID, "") || m.rootCreateInFlight(repoID) {
+			continue
+		}
+		m.mu.Lock()
+		inst := m.instances[daemonInstanceKey(repoID, session.RootSessionTitle)]
+		m.mu.Unlock()
+		if inst != nil {
+			continue
+		}
+		m.discardReapedRootCarry(repoID, "no root_agents entry or registered project enables a root agent for this repository any more")
+	}
+}
+
+// settleHealedRootAccountSwap finishes, on the published replacement, what a
+// create leaves undone for a committed account swap: the pane-start proof the
+// scheduler reads as a complete replacement boundary, and the manual mission's
+// conversation outcome, which the request-time demotion may have just changed
+// from "carried" to a stated fresh start (Codex on #4400, round 8).
+//
+// Best-effort and logged, never fatal: the root is up and healthy by here, and
+// failing the ensure over a settlement detail would trade a working root for a
+// backoff interval of downtime. The persist mirrors refreshRootClaudeConversation's
+// — under the repo's start lock, event published only when the write lands —
+// because an in-memory-only proof would be re-read as unproven after a restart.
+func (m *Manager) settleHealedRootAccountSwap(repoID, workspace string) {
+	key := daemonInstanceKey(repoID, session.RootSessionTitle)
+	m.mu.Lock()
+	inst := m.instances[key]
+	m.mu.Unlock()
+	if inst == nil {
+		return
+	}
+	if err := inst.MarkHealedAccountSwapPanesStarted(); err != nil {
+		m.warn().Printf("re-created root agent for %s could not record the replacement pane proof for its committed account swap: %v; the scheduler may rebuild the replacement boundary once", workspace, err)
+		return
+	}
+	inst.RefreshPendingManualAccountSwapMission()
+
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	data := inst.ToInstanceData()
+	err := persistInstanceData(repoID, data)
+	if err == nil {
+		m.publishEvent(agentproto.EventSessionUpdated, data)
+	}
+	repoStartLock.Unlock()
+	if err != nil {
+		m.warn().Printf("re-created root agent for %s could not persist its committed account swap's settled state: %v", workspace, err)
+	}
 }
 
 // retireReapedRootCarry drops the parked carry once a pass has made it moot —

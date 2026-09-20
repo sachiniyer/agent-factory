@@ -291,6 +291,9 @@ type Manager struct {
 	// condition a healthy root re-checks every tick is logged once. Guarded by
 	// mu; allocated on first use.
 	reapedRootCarryNotices map[string]string
+	// nextRootCarrySweep paces sweepOrphanedRootCarries, the one carry
+	// retirement that reads the directory rather than a candidate. Guarded by mu.
+	nextRootCarrySweep time.Time
 	// rootCreateWG counts those goroutines, so shutdown can JOIN them instead of
 	// abandoning a half-provisioned session (waitRootAgentCreates). A WaitGroup is
 	// internally synchronized and needs no lock of its own; the Add nonetheless

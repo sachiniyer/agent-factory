@@ -588,6 +588,11 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		return
 	}
 	m.info().Printf("ensured root agent for %s (in-place, program %q)", workspace, program)
+	// A committed swap that rode into this replacement needs the settlement the
+	// respawn path performs and a create does not (Codex on #4400, round 8).
+	if req.pendingAccountSwap != nil {
+		m.settleHealedRootAccountSwap(repo.ID, workspace)
+	}
 	if consumedCarry {
 		reportRootConversationCarry(workspace, carried.conversation, data.AgentConversation, data.CurrentAgent)
 		reportRootTabCarry(workspace, carried.tabs, data.Tabs)

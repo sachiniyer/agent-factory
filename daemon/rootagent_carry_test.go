@@ -93,8 +93,9 @@ func TestReconcilePendingSwapConversationFollowsLaunchedConversation(t *testing.
 func TestReconcilePendingSwapConversationDemotesAnUnresumedCarry(t *testing.T) {
 	newCarry := func() *session.AccountSwapData {
 		return &session.AccountSwapData{
-			To: "work", CarriedConversationID: "carried-conv",
+			Manual: true, To: "work", CarriedConversationID: "carried-conv",
 			CarrySourceAccount: "personal", CarriedLaunchStarted: true,
+			ReplacementPanesStarted: true, MissionDeliveryStatus: session.PromptCouldNotConfirm,
 		}
 	}
 
@@ -123,6 +124,38 @@ func TestReconcilePendingSwapConversationDemotesAnUnresumedCarry(t *testing.T) {
 	require.Equal(t, "carried-conv", parked.CarriedConversationID,
 		"the parked carry's pointer is shared — reconcile must clone, not mutate")
 	require.True(t, parked.CarriedLaunchStarted)
+	require.Equal(t, session.PromptNotDelivered, req.pendingAccountSwap.MissionDeliveryStatus,
+		"the mission was delivered to the OLD pane's conversation; this one has provably not received it, and carrying the old verdict fences the root behind a swap the scheduler will not resume")
+	require.Equal(t, session.PromptCouldNotConfirm, parked.MissionDeliveryStatus)
+
+	// A surviving carry keeps its delivery evidence: the brief is in the
+	// conversation being resumed, so redelivering it would duplicate it.
+	parked = newCarry()
+	req = CreateSessionRequest{
+		pendingAccountSwap: parked,
+		resumeConversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "carried-conv"},
+	}
+	reconcilePendingSwapConversation(&req)
+	require.Equal(t, session.PromptCouldNotConfirm, req.pendingAccountSwap.MissionDeliveryStatus)
+
+	// The injected shape has the same rule: a fresh start resets the evidence,
+	// and relaunching the same id keeps it.
+	injected := &session.AccountSwapData{
+		Manual: true, To: "work", ConversationID: "injected-conv",
+		ReplacementPanesStarted: true, MissionDeliveryStatus: session.PromptCouldNotConfirm,
+	}
+	req = CreateSessionRequest{pendingAccountSwap: injected}
+	reconcilePendingSwapConversation(&req)
+	require.Empty(t, req.pendingAccountSwap.ConversationID)
+	require.Equal(t, session.PromptNotDelivered, req.pendingAccountSwap.MissionDeliveryStatus)
+
+	req = CreateSessionRequest{
+		pendingAccountSwap: injected,
+		resumeConversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "injected-conv"},
+	}
+	reconcilePendingSwapConversation(&req)
+	require.Equal(t, session.PromptCouldNotConfirm, req.pendingAccountSwap.MissionDeliveryStatus,
+		"relaunching the same conversation keeps the evidence that describes it")
 
 	// Resuming some OTHER conversation demotes it the same way.
 	parked = newCarry()

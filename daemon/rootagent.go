@@ -397,6 +397,10 @@ func (m *Manager) EnsureRootAgents() {
 			m.ensureSingletonRootAgent(repoID, layers.projectRoots[repoID])
 		}
 	}
+
+	// Last, and on its own slow cadence: retire carries whose candidate is gone
+	// entirely rather than merely disabled.
+	m.sweepOrphanedRootCarries(layers)
 }
 
 // ensureLegacyRootAgent ensures the root for one root_agents path, resolving its

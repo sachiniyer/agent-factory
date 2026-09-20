@@ -368,3 +368,71 @@ func TestRetireReapedRootCarryDecisionTable(t *testing.T) {
 	m.discardReapedRootCarry(repoID, "its project was deleted")
 	assert.Empty(t, logs.String(), "nothing parked, nothing discarded")
 }
+
+// TestSweepOrphanedRootCarriesRetiresOnlyWhatNoCandidateCanConsume is the
+// round-8 finding: every other retirement is driven by a candidate the sweep
+// still enumerates, so a repository whose last root_agents entry was DELETED
+// keeps its carry forever — and re-adding the entry later resumes an obsolete
+// account pin, conversation and pending swap. Each guard below fails toward
+// KEEPING the carry, because a wrong retirement destroys exactly the pin this
+// mechanism exists to preserve.
+func TestSweepOrphanedRootCarriesRetiresOnlyWhatNoCandidateCanConsume(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	const repoID = "deadbeefcafe04"
+
+	newManager := func(rootAgents map[string]config.RootAgentConfig, snap rootAgentSnapshot) *Manager {
+		m := &Manager{
+			cfg:                 &config.Config{RootAgents: rootAgents},
+			instances:           map[string]*session.Instance{},
+			reapedRootCarries:   map[string]reapedRootState{},
+			rootCreatesInFlight: map[string]string{},
+		}
+		m.rootAgentLayers.Store(&snap)
+		require.NoError(t, m.writeReapedRootCarry(repoID, reapedRootState{workspace: "/repos/gone", account: "work"}))
+		return m
+	}
+	onDisk := func(m *Manager) bool {
+		_, present, err := m.loadReapedRootCarry(repoID)
+		require.NoError(t, err)
+		return present
+	}
+	enabled := rootAgentSnapshot{legacy: legacyRepoDedup{byPath: map[string]string{"/a": repoID}}}
+
+	// An enabled candidate still owns it.
+	m := newManager(map[string]config.RootAgentConfig{"/a": {}}, enabled)
+	m.sweepOrphanedRootCarries(m.rootAgentLayers.Load())
+	require.True(t, onDisk(m), "a carry its own entry can still consume must stay")
+
+	// The entry is gone from config entirely: nothing enumerates this repo.
+	m = newManager(map[string]config.RootAgentConfig{}, rootAgentSnapshot{})
+	m.sweepOrphanedRootCarries(m.rootAgentLayers.Load())
+	require.False(t, onDisk(m), "a carry no candidate can consume is retired")
+
+	// An unanswered legacy probe may still resolve to this repository.
+	m = newManager(map[string]config.RootAgentConfig{"/a": {}},
+		rootAgentSnapshot{legacy: legacyRepoDedup{unknownPaths: map[string]bool{"/a": true}}})
+	m.sweepOrphanedRootCarries(m.rootAgentLayers.Load())
+	require.True(t, onDisk(m), "unknown is never absent — the sweep waits for the probe")
+
+	// A create in flight owns the carry it is about to consume.
+	m = newManager(map[string]config.RootAgentConfig{}, rootAgentSnapshot{})
+	m.rootCreatesInFlight[repoID] = "/repos/gone"
+	m.sweepOrphanedRootCarries(m.rootAgentLayers.Load())
+	require.True(t, onDisk(m), "the in-flight create retires its own carry")
+
+	// A live root means the repository is ensured whatever this tick's config says.
+	m = newManager(map[string]config.RootAgentConfig{}, rootAgentSnapshot{})
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: session.RootSessionTitle, Path: t.TempDir(), Program: "claude",
+	})
+	require.NoError(t, err)
+	m.instances[daemonInstanceKey(repoID, session.RootSessionTitle)] = inst
+	m.sweepOrphanedRootCarries(m.rootAgentLayers.Load())
+	require.True(t, onDisk(m), "a live root's carry is not orphaned")
+
+	// The cadence holds: a second pass inside the interval does not re-read.
+	m = newManager(map[string]config.RootAgentConfig{}, rootAgentSnapshot{})
+	m.nextRootCarrySweep = time.Now().Add(time.Hour)
+	m.sweepOrphanedRootCarries(m.rootAgentLayers.Load())
+	require.True(t, onDisk(m), "a sweep that is not due does nothing")
+}

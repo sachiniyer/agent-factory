@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 // ReapedRootCarryFileName is the durable carry a reaped root-agent record hands
@@ -21,6 +23,51 @@ func RepoReapedRootCarryPath(repoID string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(filepath.Dir(instancesPath), ReapedRootCarryFileName), nil
+}
+
+// RepoIDsWithReapedRootCarry lists the repositories that currently have a
+// parked reaped root carry on disk, sorted.
+//
+// The carry outlives the record set it was reaped from BY DESIGN — that is what
+// makes it survive a daemon restart inside the reap-to-publish window — so it
+// also outlives the root_agents entry that would have consumed it. Nothing else
+// enumerates it: every other retirement is driven by a candidate the sweep
+// still enumerates, and a repository whose last entry was deleted enumerates
+// none (Codex on #4400, round 8). A caller reconciling these against the live
+// candidate set is the only thing that can retire that carry.
+//
+// A missing instances directory is no carries, not an error. An unreadable one
+// IS an error: a caller that retires what it cannot see would delete on an
+// absence it never established.
+func RepoIDsWithReapedRootCarry() ([]string, error) {
+	dir, err := instancesDirPath()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read instances directory: %w", err)
+	}
+	var withCarry []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		repoID := entry.Name()
+		path, err := RepoReapedRootCarryPath(repoID)
+		if err != nil {
+			// Not a legal repo ID, so af never wrote a carry there.
+			continue
+		}
+		if _, err := os.Lstat(path); err == nil {
+			withCarry = append(withCarry, repoID)
+		}
+	}
+	sort.Strings(withCarry)
+	return withCarry, nil
 }
 
 // DeleteRepoReapedRootCarry removes repoID's reaped root carry. The carry is
