@@ -247,7 +247,9 @@ type residueShape struct {
 	why string
 	// The removable entries, deepest first when removed: leaf files, stamps and
 	// sockets, then tmux-<uid> dirs. leaves are a SandboxHome's logs; stamps are
-	// testresidue's owner stamp files, which either kind can hold.
+	// testresidue's owner stamp files, which only the stamped kinds
+	// (SandboxHome, TmuxSocketDir) can hold — never a SandboxUserHome, whose
+	// harness writes no stamp.
 	leaves  []string
 	stamps  []string
 	sockets []string
@@ -321,7 +323,8 @@ func readResidueShape(dir string, kind testresidue.Kind) residueShape {
 		}
 		shape.newest = later(shape.newest, entry.ModTime())
 		switch {
-		case isOwnerStamp(e.Name()) && entry.Mode().IsRegular():
+		case (kind == testresidue.SandboxHome || kind == testresidue.TmuxSocketDir) &&
+			isOwnerStamp(e.Name()) && entry.Mode().IsRegular():
 			shape.stamps = append(shape.stamps, path)
 		case kind == testresidue.SandboxHome && sandboxLogName.MatchString(e.Name()) && entry.Mode().IsRegular():
 			shape.leaves = append(shape.leaves, path)
@@ -362,10 +365,13 @@ func readResidueShape(dir string, kind testresidue.Kind) residueShape {
 }
 
 // isOwnerStamp reports whether name is the owner stamp testguard writes into
-// every harness directory, or that stamp before its rename into place. What
-// testguard writes there is one line identifying the test binary that made the
-// directory — nothing a user could want back once the directory itself is
-// judged removable.
+// the harness directories it stamps (SandboxHome and TmuxSocketDir), or that
+// stamp before its rename into place. A SandboxUserHome is never stamped, so a
+// file named owner/owner.tmp inside one is foreign content, not a stamp — the
+// caller (readResidueShape) gates this on kind before filing a path under
+// shape.stamps. What testguard writes there is one line identifying the test
+// binary that made the directory — nothing a user could want back once the
+// directory itself is judged removable.
 func isOwnerStamp(name string) bool {
 	return name == testresidue.OwnerStampFile || name == testresidue.OwnerStampTempFile
 }
