@@ -3,16 +3,113 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
-	"github.com/sachiniyer/agent-factory/session"
-	sessiongit "github.com/sachiniyer/agent-factory/session/git"
-	"github.com/sachiniyer/agent-factory/session/tmux"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
+
+// newAutoResumeRootManager is newAutoResumeManager's fixture built on the
+// reserved root title: a local backend, a live claude agent tab, and a parked
+// usage limit — the #4395 scenario, where the root agent's account is exhausted
+// and the only documented recovery used to be a kill that discarded its
+// conversation.
+func newAutoResumeRootManager(t *testing.T, alive bool, prompt string, resetAt time.Time) (*Manager, string, *session.Instance, *limitResumeBackend) {
+	t.Helper()
+	shimDir := t.TempDir()
+	shim := filepath.Join(shimDir, tmux.ProgramClaude)
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	manager, repoID, repoPath := newStatusTestManager(t)
+	manager.cfg.LimitAutoResume = false
+	backend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: alive}
+	inst := registerStarted(t, manager, repoID, repoPath, session.RootSessionTitle, backend, true, session.Running)
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramClaude))
+	inst.Prompt = prompt
+	inst.SetLimitReached(resetAt)
+	return manager, repoID, inst, backend
+}
+
+// TestHandoffAccountMovesTheReservedRoot is the #4395 fix: `af sessions handoff
+// root --account <other>` succeeds because an account-only handoff moves which
+// identity the same agent authenticates as — root stays the reserved singleton
+// on the same worktree and branch, with its agent program untouched.
+func TestHandoffAccountMovesTheReservedRoot(t *testing.T) {
+	for _, to := range []string{"", "claude"} {
+		t.Run("to="+to, func(t *testing.T) {
+			m, repo, inst, backend := newAutoResumeRootManager(t, true, "keep the fleet healthy", time.Now().Add(5*24*time.Hour))
+			configureLimitAccountCandidate(t, m, "personal")
+			inst.Account = "work"
+			gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+			require.NoError(t, err)
+			inst.SetGitWorktreeForTest(gw)
+			head, err := exec.Command("git", "-C", inst.Path, "rev-parse", "HEAD").Output()
+			require.NoError(t, err)
+
+			resp, err := m.HandoffSession(HandoffSessionRequest{
+				Title: session.RootSessionTitle, RepoID: repo, To: to, Account: "personal",
+			})
+			require.NoError(t, err)
+			require.True(t, resp.OK)
+
+			account, automatic := inst.AccountSelection()
+			require.Equal(t, "personal", account)
+			require.False(t, automatic)
+			require.False(t, inst.LimitReached(), "the delivered account move clears the outgoing identity's wall")
+			require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(),
+				"an account move must not change which agent root runs")
+			require.Equal(t, inst.Path, inst.GetWorktreePath(),
+				"an account move must not relocate root's worktree")
+			_, respawns, prompts := backend.snapshot()
+			require.Equal(t, 1, respawns)
+			require.Len(t, prompts, 1)
+			require.Contains(t, prompts[0], `Handed off from claude account "work" to claude account "personal".`)
+			require.Equal(t, strings.TrimSpace(string(head)), resp.HeadSHA)
+			after, err := exec.Command("git", "-C", inst.Path, "rev-parse", "HEAD").Output()
+			require.NoError(t, err)
+			require.Equal(t, head, after, "the branch tip must not move")
+			saved := persistedInstanceByTitle(t, repo, inst.Title)
+			require.True(t, session.IsReservedTitle(saved.Title))
+			require.Len(t, saved.Tabs[0].Handoffs, 1)
+			require.Equal(t, "work", saved.Tabs[0].Handoffs[0].FromAccount)
+			require.Equal(t, "personal", saved.Tabs[0].Handoffs[0].ToAccount)
+		})
+	}
+}
+
+// TestHandoffAccountRefusesToMoveTheReservedRootToAnotherAgent is the boundary
+// #4395 does not relax: --to a different agent changes what root IS, so it is
+// refused even when --account accompanies it — the request must leave the
+// session, its account, and its ledger untouched.
+func TestHandoffAccountRefusesToMoveTheReservedRootToAnotherAgent(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeRootManager(t, true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.Account = "work"
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+
+	_, err = m.HandoffSession(HandoffSessionRequest{
+		Title: session.RootSessionTitle, RepoID: repo, To: tmux.ProgramCodex, Account: "personal",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "root agent")
+	require.Equal(t, "work", inst.Account)
+	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram())
+	require.Empty(t, inst.Handoffs())
+	_, respawns, prompts := backend.snapshot()
+	require.Zero(t, respawns)
+	require.Empty(t, prompts)
+}
 
 func TestHandoffAccountMovesPinnedIdentity(t *testing.T) {
 	for _, to := range []string{"", "claude"} {
@@ -145,6 +242,35 @@ func TestHandoffAccountRecoversPinnedDelivery(t *testing.T) {
 	require.Equal(t, "personal", name)
 	require.False(t, automatic)
 	require.Len(t, inst.ToInstanceData().Tabs[0].Handoffs, 1)
+}
+
+// TestResumeLimitedSessionsFinishesCommittedRootAccountSwap is the #4395
+// settlement guarantee on the reserved title: once the handoff path checkpoints
+// root's new identity, its durable mission belongs to the scheduler — the
+// reserved-title refusal protects root's lifecycle from the scheduler, not a
+// transaction the scheduler is designated to finish. A bare limit park on root
+// stays refused either way.
+func TestResumeLimitedSessionsFinishesCommittedRootAccountSwap(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeRootManager(t, true, "keep the fleet healthy", time.Now().Add(5*24*time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	m.cfg.LimitAutoResume = false
+	require.NoError(t, inst.BeginManualAccountSwap())
+	require.NoError(t, inst.ValidateManualAccountSwap("personal", "claude"))
+	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", session.HandoffReasonManual, "tip", "keep the fleet healthy")
+	require.NoError(t, err)
+	require.NoError(t, m.persistSettlement(repo, daemonInstanceKey(repo, inst.Title), inst))
+	inst.EndLimitResume()
+
+	m.ResumeLimitedSessions()
+
+	_, respawns, prompts := backend.snapshot()
+	require.Equal(t, 1, respawns)
+	require.Len(t, prompts, 1)
+	require.Contains(t, prompts[0], "keep the fleet healthy")
+	_, _, pending := inst.PendingAccountSwap()
+	require.False(t, pending, "the scheduler must settle the committed transaction, not leave it pending")
 }
 
 // TestHandoffAccountRetriesCommittedSwapToSameTarget is the #4393 escape

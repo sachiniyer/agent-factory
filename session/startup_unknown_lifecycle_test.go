@@ -192,6 +192,7 @@ func TestStartupUnknownVetoesEveryRuntimeAction(t *testing.T) {
 		RuntimeActionRecoverFenced:         {Title: "unknown", Liveness: LiveLost, Started: true, InFlightOp: OpRestoring},
 		RuntimeActionResumeLimit:           {Title: "unknown", Liveness: LiveLimitReached, Started: true},
 		RuntimeActionHandoff:               {Title: "unknown", Liveness: LiveRunning, Started: true},
+		RuntimeActionHandoffAccount:        {Title: "unknown", Liveness: LiveRunning, Started: true},
 	}
 	for action := RuntimeAction(0); action < numRuntimeActions; action++ {
 		view := valid[action]

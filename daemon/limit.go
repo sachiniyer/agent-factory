@@ -519,7 +519,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	if killing || current != instance || instance.IsTearingDown() {
 		return resumeNotPerformed, nil
 	}
-	if instance.UserKilled() || session.IsReservedTitle(instance.Title) {
+	// The reserved root refuses every resume but the manual account handoff —
+	// an identity move keeps it the same singleton on the same worktree (#4395).
+	if instance.UserKilled() || (session.IsReservedTitle(instance.Title) && !manual) {
 		return resumeNotPerformed, fmt.Errorf("session %q cannot be resumed", requestedTitle)
 	}
 

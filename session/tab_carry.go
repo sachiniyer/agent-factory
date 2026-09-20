@@ -68,6 +68,7 @@ func (i *Instance) restoreCarriedTabs() {
 	usedNames := map[string]bool{existing[0].Name: true}
 	usedTokens := map[string]bool{}
 	rebuilt := make([]*Tab, 0, len(carried))
+	var agentHandoffs []AgentHandoff
 
 	for idx, td := range carried {
 		kind := tabKindForData(td.Kind)
@@ -76,6 +77,14 @@ func (i *Instance) restoreCarriedTabs() {
 		// or forward-incompatible record listing a second one: an instance has
 		// exactly one agent tab, at Tabs[0].
 		if idx == 0 || kind == TabKindAgent {
+			// The agent row is not rebuilt, but its handoff ledger must not die
+			// with the reaped record: the recreated root's fresh agent tab keeps
+			// the account-swap history, and a still-unsettled committed swap
+			// recovers its fromAgent/HeadSHA from the newest entry (Codex on
+			// #4400).
+			if len(agentHandoffs) == 0 && len(td.Handoffs) > 0 {
+				agentHandoffs = td.Handoffs
+			}
 			continue
 		}
 
@@ -116,7 +125,7 @@ func (i *Instance) restoreCarriedTabs() {
 		}
 		rebuilt = append(rebuilt, tab)
 	}
-	if len(rebuilt) == 0 {
+	if len(rebuilt) == 0 && len(agentHandoffs) == 0 {
 		return
 	}
 
@@ -126,6 +135,12 @@ func (i *Instance) restoreCarriedTabs() {
 	// not registered with the daemon yet), and this keeps that an assertion
 	// instead of an assumption.
 	if len(i.Tabs) == 1 {
+		// Seed the ledger only onto an empty one — a live agent tab that already
+		// recorded a handoff keeps its own newest-first history.
+		if len(agentHandoffs) > 0 && len(i.Tabs[0].Handoffs) == 0 {
+			i.Tabs[0].Handoffs = append([]AgentHandoff(nil), agentHandoffs...)
+			i.touchLocked()
+		}
 		if len(rebuilt) > 0 {
 			i.Tabs = append(i.Tabs, rebuilt...)
 			i.touchLocked()

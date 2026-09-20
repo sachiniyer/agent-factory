@@ -16,6 +16,7 @@ import "fmt"
 //   - Instance.RecoverHeldFencedWithLiveBoundary: RuntimeActionRecoverFenced
 //   - Instance.Respawn: RuntimeActionResumeLimit
 //   - SwapAgentProgram / Instance.SwapAgent: RuntimeActionHandoff
+//   - Instance.BeginManualAccountSwap: RuntimeActionHandoffAccount
 //
 // The universal pending-kill veto lives in ValidateRuntimeAction, outside the
 // per-action switch, so adding a new action cannot accidentally omit it.
@@ -29,6 +30,11 @@ const (
 	RuntimeActionRecoverFenced
 	RuntimeActionResumeLimit
 	RuntimeActionHandoff
+	// RuntimeActionHandoffAccount is the account-only form of the handoff: it
+	// changes which identity the same agent authenticates as, never which agent
+	// the session runs, so it shares the handoff contract minus the
+	// reserved-root refusal (#4395).
+	RuntimeActionHandoffAccount
 	numRuntimeActions
 )
 
@@ -128,15 +134,21 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 		if v.InFlightOp != OpNone {
 			return runtimeActionBusyError(v)
 		}
-	case RuntimeActionHandoff:
+	case RuntimeActionHandoff, RuntimeActionHandoffAccount:
 		// The reserved root agent is the daemon's own singleton: it is re-ensured
-		// when it dies, so swapping its agent out from under the daemon is not a
-		// thing that can be committed to. This is checked FIRST, and here rather
-		// than at a caller, for two different reasons.
+		// when it dies, so swapping its AGENT out from under the daemon is not a
+		// thing that can be committed to. An account move is the different case
+		// #4395 opens — it changes which identity the same agent authenticates
+		// as, so root stays the same singleton on the same worktree and branch
+		// and is admitted here.
+		//
+		// The refusal is still checked FIRST, and here rather than at a caller,
+		// for two different reasons.
 		//
 		// First over the others because it is permanent. A busy row says "try again
-		// in a moment"; root will never become eligible, and sending the user back
-		// to retry a thing that cannot work is the worse of the two answers.
+		// in a moment"; an agent handoff on root will never become eligible, and
+		// sending the user back to retry a thing that cannot work is the worse of
+		// the two answers.
 		//
 		// Here rather than at a caller because the daemon used to hold this rule
 		// alone, next to its own call into this function. The TUI asks this
@@ -145,7 +157,7 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 		// had picked an agent and confirmed the swap (#2436). A rule each caller has
 		// to remember separately is one a caller will forget; this is the question
 		// they already share.
-		if IsReservedTitle(v.Title) {
+		if action == RuntimeActionHandoff && IsReservedTitle(v.Title) {
 			return fmt.Errorf("session %q is the daemon-managed root agent and cannot be handed off", v.Title)
 		}
 		if v.InFlightOp != OpNone {

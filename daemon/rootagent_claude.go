@@ -7,6 +7,9 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -16,7 +19,29 @@ import (
 // while that file exists, a newer project transcript may belong to another
 // Claude process and is not evidence about this root.
 func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, inst *session.Instance, st *rootEnsureState) {
-	recorded := inst.AgentConversation()
+	// A committed account swap owns the recorded conversation until its
+	// mission settles: PendingAccountSwap.ConversationID names the injected
+	// conversation, and SynchronizeAccountSwapRuntimeMetadata hard-rejects a
+	// live tab recording any other id. The injected transcript legitimately
+	// does not exist until the delivered agent writes it, so rotating here —
+	// on a restart, EnsureRootAgents reaches this refresh before
+	// ResumeLimitedSessions settles the transaction — would stamp a foreign
+	// id the pending swap can never match and fence the root on every
+	// recovery attempt (Codex on #4400).
+	if _, _, pending := inst.PendingAccountSwap(); pending {
+		return
+	}
+	// The recorded conversation and the account pin come off ONE locked
+	// projection: selectAccountLocked rewrites the account under i.mu during a
+	// handoff commit, so reading inst.Account bare is a data race — and even
+	// two locked reads could land on either side of that commit and pair one
+	// swap's conversation with the next account's transcript store (#4400
+	// review).
+	snapshot := inst.ToInstanceData()
+	var recorded session.AgentConversationData
+	if snapshot.AgentConversation != nil {
+		recorded = *snapshot.AgentConversation
+	}
 	if recorded.Agent != tmux.ProgramClaude || !recorded.HasID() {
 		return
 	}
@@ -28,6 +53,13 @@ func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, in
 		m.logRootClaudeTranscriptWarning(st,
 			"root agent for %s could not verify its recorded claude conversation %s against the project transcript store: live pane launch command is unavailable",
 			repoRoot, recorded.ID)
+		return
+	}
+	program, scopeErr := claudeAccountTranscriptProgram(program, snapshot.Account)
+	if scopeErr != nil {
+		m.logRootClaudeTranscriptWarning(st,
+			"root agent for %s could not verify its recorded claude conversation %s against the account-scoped transcript store: %v",
+			repoRoot, recorded.ID, scopeErr)
 		return
 	}
 	state, inspected, err := m.inspectRootClaudeTranscript(st, program, repoRoot, recorded)
@@ -63,6 +95,12 @@ func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, in
 	current := m.instances[key]
 	m.mu.Unlock()
 	if current != inst || inst.AgentConversation() != recorded {
+		return
+	}
+	// handoffAccount commits a swap under this same op lock, so a pending
+	// marker visible here was committed while the inspection ran: the
+	// transaction now owns the recorded id, as at the head of this function.
+	if _, _, pending := inst.PendingAccountSwap(); pending {
 		return
 	}
 	status := inst.GetStatus()
@@ -194,11 +232,13 @@ func (m *Manager) clearRootClaudeTranscriptWarning(st *rootEnsureState) {
 	m.mu.Unlock()
 }
 
-// rootAgentTranscriptProgram applies the same program_overrides lookup the
+// rootAgentResolvedProgram applies the same program_overrides lookup the
 // create path applies after the root profile selects its program. Transcript
 // verification must inspect the environment of the command that actually runs,
-// not the unresolved enum label stored in the profile.
-func rootAgentTranscriptProgram(repoRoot string, ra config.RootAgent) (string, error) {
+// not the unresolved enum label stored in the profile — and the account-pin
+// namespace check must derive the replacement's agent from the same resolved
+// command, because an override can cross registries entirely (#4400 review).
+func rootAgentResolvedProgram(repoRoot string, ra config.RootAgent) (string, error) {
 	program := rootAgentProgramForProfile(repoRoot, ra)
 	repo, err := config.RepoFromPath(repoRoot)
 	if err != nil {
@@ -209,4 +249,41 @@ func rootAgentTranscriptProgram(repoRoot string, ra config.RootAgent) (string, e
 		return "", err
 	}
 	return config.ResolveProgram(&resolved.Config, program), nil
+}
+
+// claudeAccountTranscriptProgram scopes a claude transcript inspection to the
+// account the root launches as. Registration relocates claude's ENTIRE config
+// root — transcripts included — so the ambient store a bare program inspects
+// never holds an account-scoped root's conversation: the recorded id reads
+// absent there and is substituted or dropped exactly while being carried
+// (#4400 review). The CLAUDE_CONFIG_DIR prefix lands where
+// CommandEnvironmentFromCommand models leading shell assignments — the same
+// position a program-local override would occupy — so it loses to a
+// command-string assignment exactly the way the launch's exported injection
+// does. Returns the program unchanged when the account is empty or the
+// resolved program is not claude.
+func claudeAccountTranscriptProgram(program, account string) (string, error) {
+	if strings.TrimSpace(account) == "" {
+		return program, nil
+	}
+	if agent := sessionenv.AgentForCommand(program); agent != tmux.ProgramClaude {
+		return program, nil
+	}
+	home, err := config.GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	// Selected, not Dir: this path is read once per inspection interval for the
+	// life of the root, and a registration can be invalidated between intervals —
+	// an `accounts/<agent>` ancestor swapped for a symlink redirects the entire
+	// transcript scan outside the registry, where it would persist a foreign
+	// store's newest conversation id over the recorded one. Selected re-proves
+	// the ancestors and the leaf on every call, so an invalidated registration
+	// surfaces here as an inspection warning instead of a durable write (#4400
+	// review round 2).
+	selected, err := agentaccount.Selected(home, tmux.ProgramClaude, account)
+	if err != nil {
+		return "", err
+	}
+	return "CLAUDE_CONFIG_DIR=" + shellquote.Quote(selected.Dir) + " " + program, nil
 }

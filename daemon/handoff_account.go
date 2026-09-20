@@ -51,6 +51,12 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 	// An account-only request follows the agent selected by the preceding
 	// operation, including a handoff that finished while we waited for the lock.
 	target := strings.TrimSpace(req.To)
+	if session.IsReservedTitle(instance.Title) && target != "" && target != instance.CurrentAgentName() {
+		// The account form is the one handoff the reserved root admits, and only
+		// while the agent axis stays put: --to a different agent changes what
+		// root IS, which no handoff may do (#4395).
+		return HandoffSessionResponse{}, fmt.Errorf("session %q is the daemon-managed root agent and cannot change agents; move it between accounts with --account alone", instance.Title)
+	}
 	if target == "" {
 		target = instance.CurrentAgentName()
 	}

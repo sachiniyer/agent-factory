@@ -4,8 +4,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
+
+// TestBeginManualAccountSwapAdmitsTheReservedRoot pins the #4395 split on the
+// session side: the daemon-managed root may move between ACCOUNTS — the swap
+// changes which identity the same agent authenticates as, never which agent it
+// is — while a handoff that would swap its AGENT stays refused outright.
+func TestBeginManualAccountSwapAdmitsTheReservedRoot(t *testing.T) {
+	inst := handoffTestInstance(t, "claude")
+	inst.Title = RootSessionTitle
+
+	_, err := inst.SwapAgentProgram(tmux.ProgramGemini, HandoffReasonManual, "", false)
+	require.ErrorContains(t, err, "root agent",
+		"the agent axis stays refused: a different agent changes what root IS")
+
+	require.NoError(t, inst.BeginManualAccountSwap(),
+		"the account axis is admitted: the same agent merely authenticates as another identity")
+	require.Equal(t, OpRespawning, inst.ToInstanceData().InFlightOp,
+		"an admitted account move still raises the replacement fence")
+}
 
 func TestHandoffAccountPreservesCustomProgram(t *testing.T) {
 	inst := handoffTestInstance(t, "claude")
