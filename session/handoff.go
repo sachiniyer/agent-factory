@@ -71,6 +71,11 @@ type HandoffSwap struct {
 	previousAccount      string
 	previousAccountAgent string
 	previousAuto         bool
+	// effectiveTo is the agent the target's resolved command actually launches,
+	// which program_overrides can set apart from the requested enum recorded in
+	// To. Mission briefs render sameness against it; the enum stays the ledger
+	// and retry identity (#4430 review round 5).
+	effectiveTo string
 }
 
 // From/To agent names for display, e.g. "codex → claude".
@@ -444,6 +449,7 @@ func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent string, crossA
 		previousAccount:      i.Account,
 		previousAccountAgent: i.accountAgent,
 		previousAuto:         i.accountAutoSelected,
+		effectiveTo:          effectiveAgent,
 	}
 	i.Tabs[0].Handoffs = append(i.Tabs[0].Handoffs, entry)
 	i.touchLocked()

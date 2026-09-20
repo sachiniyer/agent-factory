@@ -94,6 +94,16 @@ test("listAccounts: an older daemon that omits the lists yields empty ones, not 
   assert.deepEqual(resp.agents, []);
 });
 
+test("listAccounts: resolved_agents survives response normalization", async () => {
+  // The handoff pickers classify targets by the agent the resolved command
+  // launches; a normalization that dropped this map would silently return the
+  // web flow to enum semantics and the daemon would then reject the submitted
+  // account choice (#4430 review round 5).
+  stubFetch({ entries: [], agents: ["aider", "codex"], resolved_agents: { aider: "codex", codex: "aider" } });
+  const resp = await listAccounts("T");
+  assert.deepEqual(resp.resolved_agents, { aider: "codex", codex: "aider" });
+});
+
 test("registerAccount: sends only the agent and the name", async () => {
   const cap = stubFetch({ entry: { agent: "codex", name: "work", dir: "/d", registration_only: false, logged_in: false } });
   await registerAccount("codex", "work", "T");

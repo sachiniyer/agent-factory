@@ -188,7 +188,6 @@ func (i *Instance) validateAccountSwap(name, agent string, crossAgent, manual, r
 func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manual, recordLaunch bool, carryFailure string) error {
 	backend := i.currentBackend()
 	i.mu.RLock()
-	program := i.Program
 	current := i.Account
 	auto := i.accountAutoSelected
 	pending := cloneAccountSwapData(i.pendingAccountSwap)
@@ -224,7 +223,6 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	// whose agent is the running identity rather than an enum — is not (#4430
 	// review).
 	if crossAgent {
-		program = agent
 		resolved := resolveResolvedConfigForInstance(i)
 		resolution.command = resolveProgramForAgent(i, agent)
 		resolution.trustBase = builtInProgramOverride(resolved, agent, resolution.command)
@@ -260,11 +258,30 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		}
 		launchProgram, conversation = planLaunchConversation(conversationID, resolvedProgram)
 	}
+	// A swap selects the account in the namespace of the command it will
+	// actually launch, not the enum the session was created under: a session
+	// recorded as claude whose override resolves to codex is RUNNING codex,
+	// and the account must come from the registry the launch's agent reads
+	// (#4430 review). resolvedProgram is that frozen command — resolved above
+	// from the same config — so no second resolution can disagree with it.
+	// The committed manual transaction is the one caller whose account
+	// namespace is a matter of record rather than resolution: the swap
+	// already moved this session to name inside pending.AccountAgent's
+	// registry, so its retry must resolve there even when program_overrides
+	// have since moved the enum's resolution. The same namespace feeds the
+	// skill target below: a redirect that selects codex's registry must write
+	// the af skill under codex's account root, and the resolved-namespace
+	// answer is what resolveSkillTargetForAccount compares the launch's
+	// detected agent against (#4430 review round 5).
+	accountNamespace := sessionenv.AgentForCommand(resolvedProgram)
+	if pending != nil && pending.Manual && pending.To == name && pending.AccountAgent != "" {
+		accountNamespace = pending.AccountAgent
+	}
 	// The CANDIDATE account and program, not the still-recorded fields: validation
 	// must leave the outgoing identity intact, while the af skill has to land in
 	// the root the replacement pane will actually read.
 	launchProgram = injectSystemPrompt(launchProgram,
-		resolveSkillTargetForAccount(launchProgram, program, name))
+		resolveSkillTargetForAccount(launchProgram, accountNamespace, name))
 	// Same-agent manual swaps with a worktree always preflight, including an
 	// unchanged command whose binary disappeared after the current process
 	// started. Worktree-less projections cannot launch, so they retain the
@@ -282,24 +299,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	if err := tmux.ValidateAccountLaunchSupport(name); err != nil {
 		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
 	}
-	// A swap selects the account in the namespace of the command it will
-	// actually launch, not the enum the session was created under: a session
-	// recorded as claude whose override resolves to codex is RUNNING codex,
-	// and the account must come from the registry the launch's agent reads
-	// (#4430 review). resolvedProgram is that frozen command — resolved above
-	// from the same config — so no second resolution can disagree with it.
-	// The committed manual transaction is the one caller whose account
-	// namespace is a matter of record rather than resolution: the swap
-	// already moved this session to name inside pending.AccountAgent's
-	// registry, so its retry must resolve there even when program_overrides
-	// have since moved the enum's resolution.
-	var accountScope sessionenv.Account
-	var err error
-	if pending != nil && pending.Manual && pending.To == name && pending.AccountAgent != "" {
-		accountScope, err = selectAccountInNamespace(pending.AccountAgent, name)
-	} else {
-		accountScope, err = selectAccountInNamespace(sessionenv.AgentForCommand(resolvedProgram), name)
-	}
+	accountScope, err := selectAccountInNamespace(accountNamespace, name)
 	if err != nil {
 		return fmt.Errorf("cannot select account %q for session %q: %w", name, i.Title, err)
 	}

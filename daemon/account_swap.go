@@ -423,8 +423,14 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	previousPrompt := instance.GetPrompt()
 	if scheduled.manual {
 		// Admission and teardown are complete, and the outgoing identity is still
-		// installed. Freeze exactly the work the replacement will inherit.
-		brief := instance.BuildMissionBrief(scheduled.agent, scheduled.promptOverride, scheduled.reason)
+		// installed. Freeze exactly the work the replacement will inherit. The
+		// brief's To is the EFFECTIVE agent — the agent the frozen launch command
+		// runs — not the requested enum: with program_overrides.codex = "gemini"
+		// a `--to codex` swap launches Gemini, and Render's same-agent check must
+		// compare From (the resolved live identity) against that, or a cross-agent
+		// handoff would render as an account change and a redirected same-agent
+		// carry would claim its conversation was lost (#4430 review round 5).
+		brief := instance.BuildMissionBrief(scheduled.accountNamespace(), scheduled.promptOverride, scheduled.reason)
 		brief.Conversation = instance.PreparedAccountSwapConversation()
 		scheduled.headSHA = brief.Work.HeadSHA
 		scheduled.mission = brief.Render()
