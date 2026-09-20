@@ -172,6 +172,11 @@ func ambientSafeCarriedTabs(tabs []session.TabData) []session.TabData {
 	return kept
 }
 
+// rootHealAbandonedCarryReason is what a replacement is told when the heal
+// could not bring the carried conversation back. Worded like session's own
+// staleCarryReason and abandonedCarryReason, because the same notice repeats it.
+const rootHealAbandonedCarryReason = "the root agent's tmux vanished and its replacement could not resume the carried conversation"
+
 // reconcilePendingSwapConversation keeps the committed swap a replacement
 // record carries aligned with the conversation this create is actually
 // launching. The carried ConversationID named the committed replacement pane
@@ -183,7 +188,50 @@ func ambientSafeCarriedTabs(tabs []session.TabData) []session.TabData {
 // carry, and writing through it would corrupt the state a later retry reads.
 func reconcilePendingSwapConversation(req *CreateSessionRequest) {
 	swap := req.pendingAccountSwap
-	if swap == nil || swap.ConversationID == "" {
+	if swap == nil {
+		return
+	}
+	// A CARRIED conversation is the swap's other shape (#4367/#4504, merged
+	// into this branch from master): a same-agent swap copies the outgoing
+	// conversation into the incoming account's home and resumes it, recording
+	// CarriedConversationID instead of ConversationID — at most one of the two
+	// is ever set. A root account handoff is same-agent by construction, so
+	// this is now the SHAPE THIS PR'S FEATURE PRODUCES, not an edge case.
+	//
+	// It needs its own reconciliation because the settlement validates it
+	// harder than the injected id: synchronizeCarriedConversationLocked
+	// REJECTS a live agent recording any other conversation, and stamps the
+	// carried id onto an empty slot. So a replacement that could not resume
+	// the carried conversation — its copy is gone, or the resume failed and
+	// the create fell back to a fresh agent — would either be fenced behind a
+	// swap that can never settle, or have its record claim a conversation it
+	// is not running. session's own give-up path (demotePendingAccountSwapCarry)
+	// cannot reach this: it rebuilds an accountSwapLaunch plan, which a
+	// CreateSession replacement never has.
+	//
+	// So the heal applies that path's rule itself: keep the carry when this
+	// launch really is resuming it, and otherwise demote it to a fresh start
+	// that says why — which is also what planAccountSwapCarry reads on a later
+	// respawn (a committed swap with no carried id takes CarryFallback and does
+	// not try to carry again).
+	if swap.CarriedConversationID != "" {
+		if req.resumeConversation.HasID() && req.resumeConversation.ID == swap.CarriedConversationID {
+			return
+		}
+		reconciled := *swap
+		reconciled.CarriedConversationID = ""
+		reconciled.CarrySourceAccount = ""
+		reconciled.CarriedLaunchStarted = false
+		reconciled.CarryFallback = rootHealAbandonedCarryReason
+		// Left empty rather than pointed at whatever this create launched:
+		// ConversationID is documented as a freshly INJECTED id, and a respawn
+		// re-injects it with --session-id, which would fork a conversation that
+		// already exists.
+		reconciled.ConversationID = ""
+		req.pendingAccountSwap = &reconciled
+		return
+	}
+	if swap.ConversationID == "" {
 		return
 	}
 	reconciled := *swap

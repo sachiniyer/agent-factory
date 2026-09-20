@@ -81,6 +81,60 @@ func TestReconcilePendingSwapConversationFollowsLaunchedConversation(t *testing.
 	require.Nil(t, req.pendingAccountSwap)
 }
 
+// TestReconcilePendingSwapConversationDemotesAnUnresumedCarry covers the swap's
+// other shape (#4367/#4504), which a root account handoff now produces by
+// default: a same-agent swap copies the outgoing conversation into the new
+// account and records CarriedConversationID. The settlement REJECTS a live
+// agent recording any other conversation and stamps the carried id onto an
+// empty slot, and session's own give-up path needs an accountSwapLaunch plan a
+// CreateSession replacement never has — so a heal that did not resume the
+// carried conversation must demote it here, or the replacement is fenced
+// behind a swap that can never settle.
+func TestReconcilePendingSwapConversationDemotesAnUnresumedCarry(t *testing.T) {
+	newCarry := func() *session.AccountSwapData {
+		return &session.AccountSwapData{
+			To: "work", CarriedConversationID: "carried-conv",
+			CarrySourceAccount: "personal", CarriedLaunchStarted: true,
+		}
+	}
+
+	// The heal resumed exactly the carried conversation: the carry stands, so
+	// the record keeps claiming what the replacement is really running.
+	parked := newCarry()
+	req := CreateSessionRequest{
+		pendingAccountSwap: parked,
+		resumeConversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "carried-conv"},
+	}
+	reconcilePendingSwapConversation(&req)
+	require.Same(t, parked, req.pendingAccountSwap, "a surviving carry is left alone")
+	require.Equal(t, "carried-conv", req.pendingAccountSwap.CarriedConversationID)
+
+	// A fresh start demotes it, with a reason the replacement's notice repeats.
+	parked = newCarry()
+	req = CreateSessionRequest{pendingAccountSwap: parked}
+	reconcilePendingSwapConversation(&req)
+	require.Empty(t, req.pendingAccountSwap.CarriedConversationID,
+		"the settlement must not demand a conversation this root is not running")
+	require.Empty(t, req.pendingAccountSwap.CarrySourceAccount)
+	require.False(t, req.pendingAccountSwap.CarriedLaunchStarted)
+	require.Equal(t, rootHealAbandonedCarryReason, req.pendingAccountSwap.CarryFallback)
+	require.Empty(t, req.pendingAccountSwap.ConversationID,
+		"a demoted carry must not name an injected id a respawn would --session-id onto an existing conversation")
+	require.Equal(t, "carried-conv", parked.CarriedConversationID,
+		"the parked carry's pointer is shared — reconcile must clone, not mutate")
+	require.True(t, parked.CarriedLaunchStarted)
+
+	// Resuming some OTHER conversation demotes it the same way.
+	parked = newCarry()
+	req = CreateSessionRequest{
+		pendingAccountSwap: parked,
+		resumeConversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "another-conv"},
+	}
+	reconcilePendingSwapConversation(&req)
+	require.Empty(t, req.pendingAccountSwap.CarriedConversationID)
+	require.Equal(t, rootHealAbandonedCarryReason, req.pendingAccountSwap.CarryFallback)
+}
+
 // TestLoadReapedRootCarryRefusesSymlink pins the read half of the managed-file
 // contract (#4400 review): the write and remove ends already refuse links, and
 // a read that silently followed one would treat foreign content as the carry af

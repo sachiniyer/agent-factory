@@ -419,14 +419,15 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	// A committed account swap owns the carried conversation until its
 	// mission settles — the premise refreshRootClaudeConversation applies to a
 	// live root, applied here to the reaped one (#4400 review round 7). The
-	// swap's injected conversation has no transcript until the takeover brief
-	// is delivered, so "the recorded transcript is gone" is not evidence of a
-	// rotation, and the newest on-disk project conversation cannot be this
-	// root's: the commit cleared the recorded conversation and the only id
-	// recorded since is the swap's own. Substituting it would resume some
-	// other conversation under the new account and deliver the brief into it.
-	// Read before the release below — a released swap's conversation was never
-	// written either.
+	// commit cleared the recorded conversation, so the only id recorded since
+	// is the transaction's own: a freshly injected one that has no transcript
+	// until the takeover brief is delivered, or a conversation carried into
+	// the new account (#4367/#4504) whose copy may be gone. Either way a
+	// missing transcript is not evidence of a rotation, and the newest on-disk
+	// project conversation cannot be this root's — substituting it would
+	// resume some other conversation under the new account and deliver the
+	// brief into it. Read before the release below; a released swap's
+	// conversation was never written either.
 	pendingSwapOwnsConversation := carried.pendingSwap != nil
 	// A committed swap the replacement cannot honor must not ride the new
 	// record: pendingSwap.To names the identity the transaction committed to,
@@ -463,10 +464,11 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 				workspace, carried.conversation.ID, inspectErr)
 		case !state.RecordedExists && pendingSwapOwnsConversation:
 			// Start clean rather than launch the swap's id: the transcript is
-			// empty either way, and a fresh id cannot collide with a claude
+			// gone either way, and a fresh id cannot collide with a claude
 			// process from the reaped pane that still holds the swap's. The
-			// reconcile below clears the swap's recorded id to match, which
-			// the settlement sync accepts.
+			// reconcile below clears the swap's recorded id to match — and
+			// demotes a carried one to a stated fresh start — which the
+			// settlement sync accepts.
 			m.warn().Printf("root agent for %s recorded claude conversation %s belongs to a committed account swap and has no transcript yet; starting fresh rather than resuming an older project conversation",
 				workspace, carried.conversation.ID)
 			skipRecordedResume = true
