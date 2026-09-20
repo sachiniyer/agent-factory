@@ -181,6 +181,19 @@ const (
 	// outside this modal form.
 	KeySetAccount
 	KeyEditAccount
+
+	// KeyMoveTabLeft and KeyMoveTabRight move the current tab one slot in the
+	// roster (session.tab.reorder): the daemon's ReorderTab RPC the web reaches
+	// by dragging the tab bar and the CLI reaches via `af sessions tab-reorder`.
+	//
+	// "<" and ">", not shift+left/shift+right: a terminal that cannot encode a
+	// shifted arrow silently delivers plain left/right (pane focus), so the
+	// binding would exist and never arrive — a shipped capability nobody can
+	// press. The bare runes reach every terminal, the angle bracket names the
+	// direction the tab moves, and neither is claimed by tmux's prefix or af's
+	// reserved keys.
+	KeyMoveTabLeft
+	KeyMoveTabRight
 )
 
 // spec is one action's canonical binding definition: its default keys, help
@@ -262,6 +275,10 @@ var specs = []spec{
 	// hint its place.
 	{name: KeyJumpTab, keys: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}, helpLabel: "1-9/g", desc: "go"},
 	{name: KeyJumpTabPrompt, keys: []string{"g"}, helpLabel: "g", desc: "jump to tab (number or name)", dispatch: true},
+	// The move pair shares one description so hintPairs can collapse them into
+	// a single "</> move tab" chip, the same trick the scroll pair uses.
+	{name: KeyMoveTabLeft, configKey: "move_tab_left", keys: []string{"<"}, desc: "move tab", dispatch: true},
+	{name: KeyMoveTabRight, configKey: "move_tab_right", keys: []string{">"}, desc: "move tab", dispatch: true},
 	{name: KeyTaskList, configKey: "tasks", keys: []string{"m"}, desc: "tasks", dispatch: true},
 	{name: KeyManageAutomations, keys: []string{"enter"}, desc: "manage"},
 	{name: KeySwitchProjectRow, keys: []string{"enter"}, desc: "switch"},

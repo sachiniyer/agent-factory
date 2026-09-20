@@ -123,6 +123,12 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		return m.handleCloseTab()
 	case keys.KeyJumpTabPrompt: // unbounded jump; see handle_jump_tab.go (#3021)
 		return m.showJumpTabPrompt()
+	// </> permute the roster through the daemon's ReorderTab (#1813) — the same
+	// path the web's drag reorder and `af sessions tab-reorder` take.
+	case keys.KeyMoveTabLeft:
+		return m.handleMoveTab(-1)
+	case keys.KeyMoveTabRight:
+		return m.handleMoveTab(1)
 
 	// Instance actions
 	case keys.KeyKill:

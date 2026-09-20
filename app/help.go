@@ -375,6 +375,7 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 			{helpKey(keys.KeyJumpTabPrompt), "Jump to any tab by number or name"},
 			{helpKey(keys.KeyNewTab), "Choose a terminal or VS Code tab"},
 			{helpKey(keys.KeyCloseTab), "Delete tab · asks first; agent stays"},
+			{helpKey(keys.KeyMoveTabLeft) + "/" + helpKey(keys.KeyMoveTabRight), "Move tab left or right"},
 			{helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown), "Scroll preview in navigation mode"},
 		}},
 		{title: "Full-screen scrolling:", rows: []helpRow{

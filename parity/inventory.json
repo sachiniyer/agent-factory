@@ -1153,8 +1153,8 @@
       "id": "session.tab.reorder",
       "title": "Reorder a tab within a session",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "app/handle_tabs.go handleMoveTab (</>; move_tab_left/move_tab_right) → app/session_control.go reorderTabThroughDaemon → apiclient.Client.ReorderTab → POST /v1/ReorderTab"
       },
       "web": {
         "status": "yes",
@@ -1164,8 +1164,8 @@
         "status": "yes",
         "pointer": "api/sessions_tabs.go:264 tab-reorder (+ tabs reorder)"
       },
-      "verdict": "unclear",
-      "notes": "#1904 added tab reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar). No TUI affordance. Same owner call as session.tab.rename. Not filed."
+      "verdict": "parity",
+      "notes": "#1904 added reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar); the TUI had no affordance and the owner call was deferred alongside session.tab.rename — resolved when #4570 grew the TUI's tab-mutation surface. The TUI now exposes it as the rebindable </> pair on the focused tab, routing through the SAME daemon ReorderTab RPC (agent tab pinned at slot 0 in both directions, identity carried by stable session id + tab id, no local persistence — the projection applies the daemon's resolved index and the shared slot resolver carries panes/selection across the permutation)."
     },
     {
       "id": "session.watch",
@@ -1660,6 +1660,8 @@
       "hooks": "worktree.hooks.edit",
       "kill": "session.kill",
       "limit_retry": "session.limit-retry",
+      "move_tab_left": "session.tab.reorder",
+      "move_tab_right": "session.tab.reorder",
       "new": "session.create",
       "new_remote": "session.create.opt.remote",
       "new_tab": "session.tab.create",
@@ -2273,10 +2275,15 @@
             "gap": "wire.id-addressing"
           },
           "tab_id": {
-            "ok": "The TAB's stable id (#1971): the web addresses tabs by it so a reorder can't misroute another client's ordinal; the CLI/TUI address by --name/index and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
+            "ok": "The TAB's stable id (#1971): the web and TUI address tabs by it from their live projections so a reorder can't misroute another client's ordinal; the CLI addresses by --name and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
           },
           "tab_index": {
             "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon consults only when TabName is empty (daemon/manager_tabs_arrange.go resolveTabTarget)."
+          }
+        },
+        "tui": {
+          "tab_index": {
+            "ok": "The TUI addresses the tab by its stable TabID captured from the live projection (tab name rides along as the legacy fallback), so the ordinal source field is never needed — tab_index exists for callers like the CLI that address by --name without a projection to read ids from."
           }
         }
       },

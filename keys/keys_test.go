@@ -47,6 +47,8 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 		// tabs and nothing caps tab creation, so past nine the fastest path to a tab
 		// vanished — which is why the bar read as a nine-tab limit.
 		"g":      KeyJumpTabPrompt,
+		"<":      KeyMoveTabLeft,
+		">":      KeyMoveTabRight,
 		"?":      KeyHelp,
 		"s":      KeyOpenPane,
 		"S":      KeySplitPane,

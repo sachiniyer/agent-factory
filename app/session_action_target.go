@@ -156,3 +156,10 @@ func (target sessionActionTarget) closeTabRequest(tabID, tabName string) daemon.
 		TabID: tabID, TabName: tabName,
 	}
 }
+
+func (target sessionActionTarget) reorderTabRequest(tabID, tabName string, newIndex int) daemon.ReorderTabRequest {
+	return daemon.ReorderTabRequest{
+		ID: target.id, Title: target.title, RepoID: target.repoID,
+		TabID: tabID, TabName: tabName, NewIndex: newIndex,
+	}
+}

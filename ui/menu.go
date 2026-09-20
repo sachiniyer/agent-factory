@@ -492,10 +492,20 @@ func (m *Menu) addInstanceOptions() {
 	// `t` (new tab) and `w` (close tab) — those handlers reject them with an
 	// error — so only advertise the tab keys that actually work: number-jump
 	// (#988).
-	tabGroup := []keys.KeyName{keys.KeyNewTab, keys.KeyCloseTab, keys.KeyJumpTab}
+	tabGroup := []keys.KeyName{keys.KeyNewTab, keys.KeyCloseTab}
 	if m.instance != nil && !m.instance.Capabilities().TabManagement {
-		tabGroup = []keys.KeyName{keys.KeyJumpTab}
+		tabGroup = nil
 	}
+	// </> move the current tab within the roster (session.tab.reorder, #1813):
+	// it permutes metadata only — spawns nothing, kills nothing — so unlike
+	// `t`/`w` it survives the TabManagement collapse; an off-box session's tabs
+	// are fixed in CONTENT, not in order. The hint exists only when a move
+	// does: the agent tab is pinned to slot 0, so a second movable tab must be
+	// present before either direction can act.
+	if m.instance != nil && m.instance.TabCount() >= 3 {
+		tabGroup = append(tabGroup, keys.KeyMoveTabLeft, keys.KeyMoveTabRight)
+	}
+	tabGroup = append(tabGroup, keys.KeyJumpTab)
 
 	// Pane group (#1088/#1321): s opens the selected tab as a workspace pane
 	// (or focuses its pane when already open); S commits a preview alongside
@@ -639,6 +649,10 @@ var hintDropOrder = [][]keys.KeyName{
 	{keys.KeySetBackend, keys.KeyEditBackend},
 	{keys.KeySetPrompt, keys.KeyEditPrompt},
 	{keys.KeyShiftUp, keys.KeyShiftDown},
+	// The tab-move pair sheds second: it advertises a convenience the other
+	// surfaces also carry, so a narrow bar loses nothing the user cannot still
+	// reach — the roster keeps its order, and the drag/CLI paths remain.
+	{keys.KeyMoveTabLeft, keys.KeyMoveTabRight},
 	{keys.KeyAttach},
 	{keys.KeySearch},
 	{keys.KeyHooks},
@@ -736,7 +750,8 @@ type hintSpan struct {
 // helpLabel covers only the DEFAULT binding by design, so a [keys] rebind of
 // scroll_up would have shown a label naming a key that no longer scrolls.
 var hintPairs = map[keys.KeyName]keys.KeyName{
-	keys.KeyShiftUp: keys.KeyShiftDown,
+	keys.KeyShiftUp:     keys.KeyShiftDown,
+	keys.KeyMoveTabLeft: keys.KeyMoveTabRight,
 }
 
 // renderHints renders the option row, skipping dropped options, and reports
