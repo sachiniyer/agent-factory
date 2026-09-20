@@ -235,20 +235,25 @@ Because that loop brings a behind head up to date itself, the ruleset's strict
 required-status-checks policy can stay on: a hand merge no longer has to win a
 race against the fleet's merge rate.
 
-**A PR that ends during its own update-branch is a lost race, not a red gate
-(#4462).** The gate does not own this PR, and the open read its evaluation was
-acting on is minutes old by the time the PUT writes — leaving a window where a
-hand or queue merge plus GitHub's delete-on-merge can land before the write
-completes. A fresh pre-write `pulls.get` narrows it to a round trip; a
-confirming re-read after a rejection or an accepted PUT closes the rest. When a
-read proves the PR merged or closed, the lane refuses as ordinary waiting —
-`Refusing to merge PR #N; the PR was merged while its update-branch was in
-flight` — and an accepted PUT whose post-update read proves the same approves
-no parked runs and schedules no successor: nothing remains for this run to
-merge. The proof is the read, never the update's error shape alone (a 422 is
-also a real tree conflict, a 404 could be a fork PR still owed an answer); a
-read that fails or shows the PR still open stays the update failure it always
-was (#3551).
+**A PR that ends during its own update-branch is a lost race, not an evaluation
+failure (#4462).** The gate does not own this PR, and the open read its
+evaluation was acting on is minutes old by the time the PUT writes — leaving a
+window where a hand or queue merge plus GitHub's delete-on-merge can land
+before the write completes. A fresh pre-write `pulls.get` narrows it to a round
+trip; a confirming re-read after a rejection or an accepted PUT closes the
+rest. When a read proves the PR merged or closed, the lane refuses as ordinary
+waiting — `Refusing to merge PR #N; the PR was merged while its update-branch
+was pending` for the pre-write read, or the same refusal with `was in flight`
+after a rejection or an accepted PUT — so `processAggregateHead` invalidates
+the fixed aggregate and returns the ordinary `waiting` state: the workflow run
+does not fail, but the fixed aggregate stays red as that invalidation's
+enforcement record (the required `Auto Gate decision` check remains red). An
+accepted PUT whose post-update re-read proves the PR ended approves no parked
+runs and schedules no successor: nothing remains for this run to merge. The
+proof is the read, never the update's error shape alone (a 422 is also a real
+tree conflict, a 404 could be a fork PR still owed an answer); a read that
+fails or shows the PR still open stays the update failure it always was
+(#3551).
 
 **Every accepted update-branch schedules another Auto Gate evaluation (#4209).**
 The update endpoint can acknowledge before a PR read exposes its new head. The
