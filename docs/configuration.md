@@ -523,6 +523,8 @@ global_agent_skills = true
 
 With it on, af writes (and keeps up to date) a single `agent-factory/SKILL.md` under each of those agents' skills directories. With it off — the default — those four agents simply do not get af's guidance; everything else about the session is unchanged.
 
+For codex and gemini, that directory is the one each launch actually reads. A session with an account uses the account's directory. Otherwise a `CODEX_HOME`, `GEMINI_CLI_HOME` or `HOME` set in the launch command wins over af's own environment: with `program_overrides.codex = "CODEX_HOME=/srv/codex codex"` the skill goes to `/srv/codex/skills/agent-factory/`, the same store af watches for that session's conversation. If the command sets one of those variables to something af cannot read ahead of time, such as `$VAR`, af writes nothing for that launch.
+
 af only ever manages the file it wrote. Each one carries an af marker, and:
 
 - a file at that path **without** the marker is yours and is never overwritten or removed;

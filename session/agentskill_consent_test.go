@@ -76,17 +76,17 @@ func seedAfOwnedSkill(t *testing.T, home string) string {
 func TestGlobalAgentSkills_DefaultWritesNothingIntoTheUsersConfig(t *testing.T) {
 	cases := []struct {
 		agent string
-		run   func() (string, error)
+		run   func(t *testing.T) (string, error)
 		path  func(home string) string
 	}{
-		{"amp", ensureAmpSkillDir, ampSkillPath},
-		{"codex", func() (string, error) { return ensureCodexSkillDir(skillTarget{}) }, func(h string) string {
+		{"amp", func(*testing.T) (string, error) { return ensureAmpSkillDir() }, ampSkillPath},
+		{"codex", func(t *testing.T) (string, error) { return ensureCodexSkillDir(ambientSkillTarget(t, "codex")) }, func(h string) string {
 			return filepath.Join(h, ".codex", "skills", "agent-factory", "SKILL.md")
 		}},
-		{"gemini", func() (string, error) { return ensureGeminiSkillDir(skillTarget{}) }, func(h string) string {
+		{"gemini", func(t *testing.T) (string, error) { return ensureGeminiSkillDir(ambientSkillTarget(t, "gemini")) }, func(h string) string {
 			return filepath.Join(h, ".gemini", "skills", "agent-factory", "SKILL.md")
 		}},
-		{"devin", ensureDevinSkillDir, func(h string) string {
+		{"devin", func(*testing.T) (string, error) { return ensureDevinSkillDir() }, func(h string) string {
 			return filepath.Join(h, ".config", "devin", "skills", "agent-factory", "SKILL.md")
 		}},
 	}
@@ -95,7 +95,7 @@ func TestGlobalAgentSkills_DefaultWritesNothingIntoTheUsersConfig(t *testing.T) 
 			home := agentHome(t)
 			writeAfConfig(t, false) // the default; written explicitly so the intent is visible
 
-			dir, err := tc.run()
+			dir, err := tc.run(t)
 			if err != nil {
 				t.Fatalf("a declined write must not be an error: %v", err)
 			}

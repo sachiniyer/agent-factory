@@ -205,7 +205,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, manual, recordLau
 	// must leave the outgoing identity intact, while the af skill has to land in
 	// the root the replacement pane will actually read.
 	launchProgram = injectSystemPrompt(launchProgram,
-		resolveSkillTargetForAccount(launchProgram, program, name))
+		resolveSkillTargetForAccount(launchProgram, program, name, workDir))
 	// Same-agent manual swaps with a worktree always preflight, including an
 	// unchanged command whose binary disappeared after the current process
 	// started. Worktree-less projections cannot launch, so they retain the
