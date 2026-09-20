@@ -95,6 +95,6 @@ launchctl load ~/Library/LaunchAgents/dev.agent-factory.issue-listener.plist
 ## Caveats
 
 - **Cost.** Every new issue spawns a session, which runs your configured AI agent against your account. Set `LABEL` to opt in selectively rather than dispatching on every issue.
-- **Idempotence.** If a session named `issue-<n>` already exists, `af sessions create` fails and the script logs and continues. Re-running on a repo with existing matching session names will not double-spawn.
+- **Idempotence.** A *live* session named `issue-<n>` makes `af sessions create` fail (the script logs and continues), so re-running won't double-spawn across live sessions. An *archived* `issue-<n>` no longer blocks the create: the daemon reclaims the title by renaming the archived row to `issue-<n> (archived)` and creating a new live `issue-<n>` — so a re-run after the state cursor is reset (or lost) *will* re-spawn sessions for issues whose prior session was archived.
 - **Trust.** Anyone who can open an issue on the watched repo can effectively dispatch a session on your machine. Don't point this at repos with untrusted issue authors unless you're comfortable with that.
 - **Closed/triaged issues.** The script only reacts to *newly opened* issues — those whose `created_at` is after the cursor in the state file. Existing open issues are never picked up, even after a restart. Delete the state file to reset the cursor (this will pick up any issues opened after the new initial timestamp, not historical ones).
