@@ -28,8 +28,10 @@ func TestSetProjectConfigValueWholeProgramOverridesPreservesPersonalTombstone(t 
 	require.Equal(t, "claude", ResolveProgram(&resolved.Config, "claude"),
 		"setup invariant: the personal tombstone disables the global override")
 
-	_, err = SetProjectConfigValue(project.ID, "program_overrides", `{"codex":"codex --model gpt-5"}`)
+	res, err := SetProjectConfigValue(project.ID, "program_overrides", `{"codex":"codex --model gpt-5"}`)
 	require.NoError(t, err)
+	assert.Equal(t, `{"codex":"codex --model gpt-5"}`, res.Value,
+		"the read-back value hides the preserved claude=\"\" tombstone and reports only the map the user submitted")
 
 	resolved, err = ResolveConfig(repoRoot)
 	require.NoError(t, err)

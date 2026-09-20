@@ -573,6 +573,16 @@ func projectStructuredCurrentValue(cfg *ProjectConfig, key string) (string, bool
 		return "", false
 	}
 	if key != "root_agent" {
+		if key == "program_overrides" {
+			visible := make(map[string]string, field.Len())
+			iter := field.MapRange()
+			for iter.Next() {
+				if command := iter.Value().String(); command != "" {
+					visible[iter.Key().String()] = command
+				}
+			}
+			return editorValue(reflect.ValueOf(visible)), true
+		}
 		return editorValue(field), true
 	}
 	shapeValue, _ := cfg.source.topLevel(key)
