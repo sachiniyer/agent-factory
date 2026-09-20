@@ -14,25 +14,33 @@ import (
 
 // HandoffTargetIsCurrent is the one same-target predicate the guard, the
 // account-swap admission, and both pickers share. A provable resolution
-// decides; an opaque one (effective "") falls back to the enum, mirroring
-// CurrentAgentName's own precedence (#4430 review).
+// decides; an opaque one (effective "") compares the RECORDED enum to the
+// requested one — the token-scanned current identity can name a different
+// agent than the enum when a wrapper's arguments spoof one (#4430 review).
 func TestHandoffTargetIsCurrent(t *testing.T) {
 	for _, tc := range []struct {
-		name                       string
-		current, target, effective string
-		want                       bool
+		name                                 string
+		current, target, effective, recorded string
+		want                                 bool
 	}{
-		{"plain enum", tmux.ProgramClaude, tmux.ProgramClaude, tmux.ProgramClaude, true},
-		{"plain other agent", tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramCodex, false},
-		{"override onto the running agent", tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramCodex, true},
-		{"same name, override elsewhere", tmux.ProgramCodex, tmux.ProgramCodex, tmux.ProgramAider, false},
-		{"opaque wrapper of the running enum", tmux.ProgramClaude, tmux.ProgramClaude, "", true},
-		{"opaque wrapper of another enum", tmux.ProgramClaude, tmux.ProgramAider, "", false},
-		{"unknown current never matches", "", tmux.ProgramClaude, "", false},
-		{"unknown current never matches a resolution", "", tmux.ProgramClaude, tmux.ProgramClaude, false},
+		{"plain enum", tmux.ProgramClaude, tmux.ProgramClaude, tmux.ProgramClaude, tmux.ProgramClaude, true},
+		{"plain other agent", tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramCodex, tmux.ProgramClaude, false},
+		{"override onto the running agent", tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramCodex, tmux.ProgramClaude, true},
+		{"same name, override elsewhere", tmux.ProgramCodex, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramCodex, false},
+		{"opaque wrapper of the running enum", tmux.ProgramClaude, tmux.ProgramClaude, "", tmux.ProgramClaude, true},
+		{"opaque wrapper of another enum", tmux.ProgramClaude, tmux.ProgramAider, "", tmux.ProgramClaude, false},
+		// The round-6 case: an opaque wrapper whose ARGUMENTS name an agent
+		// makes current token-scan to codex while the recorded enum is aider.
+		// --to aider is that exact override again — a self-handoff the old
+		// current==target compare permitted (#4430 review).
+		{"opaque args spoof the current identity", tmux.ProgramCodex, tmux.ProgramAider, "", tmux.ProgramAider, true},
+		{"unknown current with same recorded enum", "", tmux.ProgramClaude, "", tmux.ProgramClaude, true},
+		{"unknown current, different recorded enum", "", tmux.ProgramClaude, "", tmux.ProgramAider, false},
+		{"unknown current never matches a resolution", "", tmux.ProgramClaude, tmux.ProgramClaude, tmux.ProgramClaude, false},
+		{"empty recorded enum cannot prove sameness", tmux.ProgramClaude, tmux.ProgramClaude, "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, HandoffTargetIsCurrent(tc.current, tc.target, tc.effective))
+			require.Equal(t, tc.want, HandoffTargetIsCurrent(tc.current, tc.target, tc.effective, tc.recorded))
 		})
 	}
 }
@@ -90,7 +98,7 @@ func TestValidateHandoffTarget_OpaqueOverrideKeepsTheSameTargetGuard(t *testing.
 // target, from the same inspection-scope resolution the picker reads.
 func handoffTargetOffered(inst *Instance, target string) bool {
 	resolved := HandoffEffectiveAgentsForPathInspection(inst.Path, []string{target})
-	return !HandoffTargetIsCurrent(inst.CurrentAgentName(), target, resolved[target])
+	return !HandoffTargetIsCurrent(inst.CurrentAgentName(), target, resolved[target], inst.AgentProgram())
 }
 
 // An account-only request (no --to) names the running agent's IDENTITY as its
@@ -146,10 +154,16 @@ func TestValidateManualAccountSwap_AccountOnlyLaunchesTheRecordedProgram(t *test
 
 	inst := accountSwapTestInstance(tmux.ProgramClaude)
 	inst.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSession("swap", tmux.ProgramCodex))}
+	inst.setRuntimeProgram(tmux.ProgramCodex)
 	inst.Path = initTempGitRepo(t)
 	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
+
+	// The runtime evidence is recorded at launch; moving the override
+	// afterwards must not re-route an account-only swap.
+	cfg.ProgramOverrides[tmux.ProgramClaude] = tmux.ProgramGemini
+	require.NoError(t, config.SaveConfig(cfg))
 
 	agent := inst.CurrentAgentName()
 	_, cross := inst.ManualAccountSwapProgram(agent, true)

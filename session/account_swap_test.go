@@ -133,6 +133,9 @@ func TestValidateAccountSwapCommittedRetryUsesRecordedNamespace(t *testing.T) {
 
 	inst := accountSwapTestInstance(tmux.ProgramAider)
 	inst.Path = initTempGitRepo(t)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
 	_, err = inst.SelectAccountForHandoff("", "work", tmux.ProgramAider, tmux.ProgramCodex, true,
 		HandoffReasonManual, "head", "")
 	require.NoError(t, err)
@@ -141,18 +144,41 @@ func TestValidateAccountSwapCommittedRetryUsesRecordedNamespace(t *testing.T) {
 	require.Equal(t, tmux.ProgramCodex, inst.ToInstanceData().PendingAccountSwap.AccountAgent,
 		"the namespace must survive a daemon restart — it is the only answer a config flip cannot move")
 
-	// The restart's view: the override moved, and a decoy registration now
-	// exists in the namespace current config would resolve.
+	// The restart's view: the pane runs the committed codex command (the commit
+	// replaced it before the checkpoint), the override moved, and a decoy
+	// registration now exists in the namespace current config would resolve.
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
 	cfg.ProgramOverrides = map[string]string{tmux.ProgramAider: tmux.ProgramGemini}
 	require.NoError(t, config.SaveConfig(cfg))
 	_, err = agentaccount.Register(home, tmux.ProgramGemini, "work")
 	require.NoError(t, err)
 
-	err = inst.ValidateAccountSwap("work")
+	// The retry consults the recorded codex registry AND the committed codex
+	// command: the pair is consistent, so the swap proceeds — and the decoy
+	// gemini/work the flipped resolution would have found is never consulted.
+	require.NoError(t, inst.ValidateAccountSwap("work"),
+		"the committed retry keeps the command the checkpoint launched, not the flipped override")
+	require.NotNil(t, inst.accountSwapLaunch)
+	require.True(t, strings.HasPrefix(inst.accountSwapLaunch.program, tmux.ProgramCodex),
+		"the retry must relaunch codex, got %q", inst.accountSwapLaunch.program)
+
+	// If the pane evidence itself has drifted — the checkpoint's replacement
+	// ran under the flipped override — the pinned namespace still refuses
+	// rather than binding a gemini-launched pane to a codex credential.
+	drifted := accountSwapTestInstance(tmux.ProgramAider)
+	drifted.Path = initTempGitRepo(t)
+	driftedGw, err := sessiongit.NewGitWorktreeFromStorage(drifted.Path, drifted.Path, drifted.Title, "main", "", false, true)
+	require.NoError(t, err)
+	drifted.SetGitWorktreeForTest(driftedGw)
+	_, err = drifted.SelectAccountForHandoff("", "work", tmux.ProgramAider, tmux.ProgramCodex, true,
+		HandoffReasonManual, "head", "")
+	require.NoError(t, err)
+	drifted.SetTmuxSession(tmux.NewTmuxSession(drifted.Title, tmux.ProgramGemini))
+	err = drifted.ValidateAccountSwap("work")
 	require.ErrorContains(t, err, "is a codex account",
 		"the retry must consult the recorded codex registry, not the flipped resolution's gemini")
 	require.ErrorContains(t, err, "runs gemini",
-		"the drift refusal names the launch the current override now produces")
+		"the drift refusal names the launch the pane evidence now produces")
 }
 
 func TestValidateAccountSwapPreflightsStartupFreeShellReplacement(t *testing.T) {
@@ -199,6 +225,9 @@ func TestValidateAccountSwapMintsAClaudeConversationForEachMove(t *testing.T) {
 
 func TestValidateAccountSwapPreflightsResolvedScopedLaunch(t *testing.T) {
 	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude --model sonnet")
+	// The pane runs the command the override resolved to — an account swap
+	// validates THAT command, not the bare enum.
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "claude --model sonnet"))
 
 	err := inst.ValidateAccountSwap("work")
 	require.Error(t, err, "the scoped command must be validated before any old pane is stopped")

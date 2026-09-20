@@ -6,6 +6,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -72,8 +73,12 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 	// transaction is still pending: once an override edit resolves that enum
 	// to another agent, the same request is a new cross-agent handoff, and the
 	// enum match must not swallow it into a committed-replay or a no-op
-	// refusal (#4430 review round 4).
-	if from == strings.TrimSpace(req.Account) && (target == outgoing || target == instance.AgentProgram()) {
+	// refusal (#4430 review round 4). A retry may also spell the committed
+	// target by the enum the transaction was requested under — a same-agent
+	// alias records To=aider while Program stays claude and the pane runs
+	// codex — so the committed ledger target is the third spelling (#4430
+	// review round 6).
+	if from == strings.TrimSpace(req.Account) && (target == outgoing || target == instance.AgentProgram() || target == instance.PendingAccountSwapTarget()) {
 		// The request names the identity a committed swap already recorded —
 		// the retry the pending-swap refusal advertises (#4393), not a no-op.
 		// Finish the recorded transaction, whose stored mission and durable
@@ -86,7 +91,7 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 				return HandoffSessionResponse{}, fmt.Errorf("session %q has a committed account swap to %s whose recorded mission is what the retry delivers; retry without --brief", instance.Title, accountSwapIdentity(target, swap.to))
 			}
 		} else if strings.TrimSpace(req.To) == "" ||
-			session.HandoffTargetIsCurrent(outgoing, target, session.HandoffEffectiveAgentForPath(instance.Path, target)) {
+			session.HandoffTargetIsCurrent(outgoing, target, session.HandoffEffectiveAgentForPath(instance.Path, target), instance.AgentProgram()) {
 			// No committed transaction: a no-op when the request named no
 			// target (an account-only re-request of the account already in
 			// use), or when the request's RESOLVED target is the running
@@ -172,7 +177,23 @@ func (m *Manager) evaluateManualAccountSwap(instance *session.Instance, swap *au
 	// beside codex→aider). ManualAccountSwapProgram documents the rule.
 	program, crossAgent := instance.ManualAccountSwapProgram(swap.agent, swap.accountOnly)
 	swap.crossAgent = crossAgent
-	swap.accountAgent = session.HandoffEffectiveAgentForPath(instance.Path, program)
+	if crossAgent {
+		swap.accountAgent = session.HandoffEffectiveAgentForPath(instance.Path, program)
+	} else {
+		// Same-agent and account-only swaps keep the RUNNING identity, so the
+		// namespace is the established runtime command's agent — a fresh enum
+		// resolution would answer what program_overrides says today, which a
+		// post-launch edit can set apart from the pane (#4430 review round 6).
+		// The credential-boundary parser answers "" for an unproven command;
+		// the refusal below is the honest outcome there, not an enum fallback.
+		swap.accountAgent = sessionenv.AgentForCommand(instance.RuntimeProgram())
+		if swap.accountAgent == "" {
+			swap.accountAgent = sessionenv.AgentForCommand(instance.ResolvedPaneProgram())
+		}
+		if swap.accountAgent == "" {
+			swap.accountAgent = session.HandoffEffectiveAgentForPath(instance.Path, program)
+		}
+	}
 	if swap.accountAgent == "" {
 		return nil, fmt.Errorf("cannot hand %q off to %s with account %q: the program it resolves to cannot carry an account scope",
 			instance.Title, swap.agent, swap.to)

@@ -178,3 +178,23 @@ test("emptyAccountsState: the shell's starting point renders as 'nothing yet', n
   assert.equal(state.error, "");
   assert.equal(state.status, null);
 });
+
+// The handoff modal's same-agent predicate mirrors the daemon's
+// HandoffTargetIsCurrent (#4430 review round 6): a provable resolution
+// decides, and an opaque one falls back to the RECORDED enum — a wrapper's
+// arguments can token-scan to a different agent than the enum that launches it.
+test("handoffTargetIsCurrent: a provable resolution decides sameness", async () => {
+  const { handoffTargetIsCurrent } = (await import("./modals.js")) as typeof import("./modals.js");
+  assert.equal(handoffTargetIsCurrent("codex", "aider", "codex", "claude"), true);
+  assert.equal(handoffTargetIsCurrent("codex", "codex", "aider", "codex"), false);
+  assert.equal(handoffTargetIsCurrent("", "claude", "claude", "claude"), false);
+});
+
+test("handoffTargetIsCurrent: an opaque wrapper falls back to the recorded enum", async () => {
+  const { handoffTargetIsCurrent } = (await import("./modals.js")) as typeof import("./modals.js");
+  // ./collect codex under aider's enum scans as codex — but --to aider
+  // relaunches that exact wrapper, so it is the self-handoff.
+  assert.equal(handoffTargetIsCurrent("codex", "aider", "", "aider"), true);
+  assert.equal(handoffTargetIsCurrent("codex", "aider", "", "claude"), false);
+  assert.equal(handoffTargetIsCurrent("claude", "claude", "", ""), false);
+});

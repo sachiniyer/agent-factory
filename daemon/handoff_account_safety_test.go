@@ -617,3 +617,61 @@ func TestHandoffAccountEnumMatchWithoutPendingSwapIsANewHandoff(t *testing.T) {
 	require.Equal(t, tmux.ProgramGemini, inst.AccountAgent(),
 		"the account must move to the namespace the resolved aider command belongs to")
 }
+
+// A committed same-agent ALIAS swap leaves three spellings that disagree: the
+// ledger records To=aider (the requested enum), Program keeps the established
+// claude label, and the pane runs codex. A retry spelling the request the way
+// it was first made — `--to aider` — matches neither the resolved outgoing nor
+// the recorded enum, so without the committed ledger target the fence would
+// refuse the very retry its error message advertises (#4430 review round 6).
+func TestHandoffAccountRetriesCommittedSwapByItsLedgerTarget(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "finish migration", time.Now().Add(time.Hour))
+	prepareHandoffTargetPreflight(t, inst)
+	bin := t.TempDir()
+	for _, name := range []string{tmux.ProgramCodex, tmux.ProgramAider} {
+		require.NoError(t, os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	_, err = agentaccount.Register(home, tmux.ProgramCodex, "personal")
+	require.NoError(t, err)
+	writeLimitAccountCandidates(t, "[program_overrides]\nclaude = \"codex\"\naider = \"codex\"\n")
+
+	inst.SetBackend(&handoffRealPlanBackend{backend})
+	inst.Program = tmux.ProgramClaude
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramCodex, false, nil)
+	inst.ClearLimitReached()
+	m.cfg.LimitAutoResume = false
+
+	// Commit the alias swap and strand it at delivery: `--to aider` resolves to
+	// the running codex, so the commit is same-agent — Program stays claude
+	// while the ledger records To=aider.
+	backend.sendPromptErr = errors.New("delivery interrupted")
+	_, err = m.HandoffSession(HandoffSessionRequest{
+		Title: inst.Title, RepoID: repo, To: tmux.ProgramAider, Account: "personal",
+	})
+	require.ErrorContains(t, err, "delivery interrupted")
+	_, _, pending := inst.PendingAccountSwap()
+	require.True(t, pending)
+	recorded, ok := inst.LastHandoff()
+	require.True(t, ok)
+	require.Equal(t, tmux.ProgramAider, recorded.To, "the ledger keeps the requested enum spelling")
+	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(),
+		"the same-agent commit keeps the established program label")
+
+	// The retry spells the target exactly as before: `aider` matches neither the
+	// running codex nor the recorded claude — only the committed ledger target.
+	backend.sendPromptErr = nil
+	resp, err := m.HandoffSession(HandoffSessionRequest{
+		Title: inst.Title, RepoID: repo, To: tmux.ProgramAider, Account: "personal",
+	})
+	require.NoError(t, err, "the retry must match the committed transaction's own target spelling")
+	require.True(t, resp.OK)
+	require.Equal(t, "personal", resp.ToAccount)
+	_, _, pending = inst.PendingAccountSwap()
+	require.False(t, pending, "the retried transaction must retire its durable marker")
+	require.Len(t, inst.ToInstanceData().Tabs[0].Handoffs, 1,
+		"the retry must finish the recorded transaction, not append a second handoff")
+}

@@ -11348,7 +11348,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   queueMicrotask(() => titleInput.focus());
   return handle;
 }
-function handoffModal(sessionTitle, currentAgent, callbacks) {
+function handoffModal(sessionTitle, currentAgent, recordedProgram, callbacks) {
   const { handle, body, confirmBtn } = modalChrome({
     title: `Hand off ${sessionTitle}`,
     confirmLabel: "Hand off",
@@ -11360,10 +11360,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   let accountsFailed = false;
   const resolvedAgent = (agent) => accounts.resolved_agents?.[agent] ?? agent;
   const scopableTarget = (agent) => accountsFailed || accountAgentSupported(accounts, resolvedAgent(agent));
-  const isCurrentAgent = (agent) => {
-    const resolved = resolvedAgent(agent);
-    return currentAgent !== "" && (resolved !== "" ? resolved : agent) === currentAgent;
-  };
+  const isCurrentAgent = (agent) => handoffTargetIsCurrent(currentAgent, agent, resolvedAgent(agent), recordedProgram);
   const requiresAccount = (agent) => isCurrentAgent(agent) || !!callbacks.currentAccount && scopableTarget(agent);
   let accountRows = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
@@ -11469,6 +11466,12 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   });
   queueMicrotask(() => agentSelect.focus());
   return handle;
+}
+function handoffTargetIsCurrent(currentAgent, target, resolved, recordedProgram) {
+  if (resolved !== "") {
+    return currentAgent !== "" && resolved === currentAgent;
+  }
+  return recordedProgram !== "" && recordedProgram === target;
 }
 function deletionConfirmationBody(opts) {
   if (opts.archived && opts.offBox) {
@@ -18788,7 +18791,7 @@ function doHandoff() {
   }
   const target = { id: sel.id, title: sel.title };
   openModal(
-    handoffModal(sel.title, sel.current_agent ?? "", {
+    handoffModal(sel.title, sel.current_agent ?? "", sel.program ?? "", {
       // The agent enum is global (#1970), so the picker asks with no repo scope.
       loadPrograms: () => loadPrograms(""),
       loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),

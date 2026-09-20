@@ -36,9 +36,43 @@ func (i *Instance) pendingAccountSwapRetryTargetLocked(agent, account string) bo
 		return false
 	}
 	if agent = strings.TrimSpace(agent); agent != "" {
-		return agent == i.Program || agent == i.currentAgentNameLocked()
+		if agent == i.Program || agent == i.currentAgentNameLocked() {
+			return true
+		}
+		// The committed transaction's own target spelling: a same-agent alias
+		// (`--to aider` where aider resolves to the running codex) keeps
+		// i.Program on the established label while the ledger records To=aider,
+		// so the retry matches neither identity above without this (#4430
+		// review round 6). The trailing ledger entry IS this transaction's —
+		// a pending manual swap exists only because its commit appended it.
+		if pending.Manual && len(i.Tabs) > 0 {
+			h := i.Tabs[0].Handoffs
+			return len(h) > 0 && h[len(h)-1].To == agent
+		}
+		return false
 	}
 	return true
+}
+
+// PendingAccountSwapTarget reports the agent enum the committed manual swap was
+// requested under — the trailing ledger entry's To — or "" when no committed
+// manual transaction is pending. A same-agent alias (`--to aider` whose
+// override resolves to the running codex) keeps Program on the established
+// label while the transaction's true target lives only here, so retry and
+// replay detection must consult it as well as the two identity spellings
+// (#4430 review round 6).
+func (i *Instance) PendingAccountSwapTarget() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	pending := i.pendingAccountSwap
+	if pending == nil || !pending.Manual || pending.To != i.Account || len(i.Tabs) == 0 {
+		return ""
+	}
+	h := i.Tabs[0].Handoffs
+	if len(h) == 0 {
+		return ""
+	}
+	return h[len(h)-1].To
 }
 
 // BeginManualAccountSwap raises the existing account-replacement fence after

@@ -161,7 +161,7 @@ func (i *Instance) validateHandoffTargetLocked(target, effective string) error {
 	if !tmux.IsSupportedProgram(target) {
 		return fmt.Errorf("unknown agent %q: handoff target must be one of %s", target, tmux.SupportedProgramsString())
 	}
-	if current := i.currentAgentNameLocked(); HandoffTargetIsCurrent(current, target, effective) {
+	if current := i.currentAgentNameLocked(); HandoffTargetIsCurrent(current, target, effective, i.Program) {
 		return fmt.Errorf("session is already running %s", current)
 	}
 	return nil
@@ -172,24 +172,23 @@ func (i *Instance) validateHandoffTargetLocked(target, effective string) error {
 // guard and every picker share, so a row a picker offers is a row the daemon
 // accepts.
 //
-// The target's identity follows CurrentAgentName's own precedence: the agent
-// its resolved command provably launches (effective) when there is one, and
-// otherwise the configured enum. The fallback is what keeps an opaque wrapper
-// honest — with program_overrides.claude = "./agent-wrapper", the current
-// agent is claude by that same enum rule, and treating the unresolvable
-// target as "never current" would admit a self-handoff that stops a working
-// agent and restarts the same wrapper with no conversation (#4430 review).
+// The target's identity is the agent its resolved command provably launches
+// (effective) when there is one. When the command is not provable — a wrapper
+// or an arbitrary tool — the only honest sameness evidence is the RECORDED
+// enum: a request naming the session's own program enum resolves the same
+// override the pane launched from. current cannot fill that role: it is
+// token-scanned from the running command and a wrapper's arguments can name
+// a different agent entirely (`./collect codex` under aider's enum), which
+// would admit a self-handoff that stops the working process and restarts the
+// same command with no conversation (#4430 review round 6).
 //
-// The fallback decides SAMENESS only. Whether the target can carry an account
-// is still judged on effective, where "" stays non-scopable.
-func HandoffTargetIsCurrent(current, target, effective string) bool {
-	if current == "" {
-		return false
-	}
+// The opaque branch decides SAMENESS only. Whether the target can carry an
+// account is still judged on effective, where "" stays non-scopable.
+func HandoffTargetIsCurrent(current, target, effective, recorded string) bool {
 	if effective != "" {
-		return current == effective
+		return current != "" && current == effective
 	}
-	return current == strings.TrimSpace(target)
+	return recorded != "" && recorded == strings.TrimSpace(target)
 }
 
 // CurrentAgentName reports which agent enum this session should be treated AS.

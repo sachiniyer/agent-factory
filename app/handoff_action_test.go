@@ -28,7 +28,7 @@ func handoffActionInstance(t *testing.T, title, program string) *session.Instanc
 // on the CONTENT rather than the length is what makes this catch an off-by-one,
 // since SupportedPrograms is positionally load-bearing.
 func TestHandoffAgentChoices_ExcludesTheRunningAgent(t *testing.T) {
-	choices := handoffAgentChoices(tmux.ProgramClaude, nil)
+	choices := handoffAgentChoices(tmux.ProgramClaude, tmux.ProgramClaude, nil)
 
 	require.NotEmpty(t, choices)
 	require.NotContains(t, choices, tmux.ProgramClaude, "the running agent must not be offered as a handoff target")
@@ -52,7 +52,7 @@ func TestHandoffAgentChoices_FiltersByResolvedIdentity(t *testing.T) {
 		tmux.ProgramOpencode: tmux.ProgramOpencode,
 		tmux.ProgramDevin:    tmux.ProgramDevin,
 	}
-	choices := handoffAgentChoices(tmux.ProgramCodex, resolved)
+	choices := handoffAgentChoices(tmux.ProgramCodex, tmux.ProgramCodex, resolved)
 
 	require.NotContains(t, choices, tmux.ProgramAider,
 		"the aider enum resolves to the running codex — it is the same-agent target")
@@ -66,7 +66,7 @@ func TestHandoffAgentChoices_FiltersByResolvedIdentity(t *testing.T) {
 // claude, so claude is not offered, while another enum's opaque override is
 // still a real target.
 func TestHandoffAgentChoices_OpaqueResolutionFallsBackToTheEnum(t *testing.T) {
-	choices := handoffAgentChoices(tmux.ProgramClaude, map[string]string{
+	choices := handoffAgentChoices(tmux.ProgramClaude, tmux.ProgramClaude, map[string]string{
 		tmux.ProgramClaude: "",
 		tmux.ProgramAider:  "",
 	})
@@ -75,6 +75,21 @@ func TestHandoffAgentChoices_OpaqueResolutionFallsBackToTheEnum(t *testing.T) {
 		"the wrapper-backed claude is the running agent — the daemon refuses the self-handoff")
 	require.Contains(t, choices, tmux.ProgramAider, "an opaque override of another enum is a real handoff")
 	require.Contains(t, choices, tmux.ProgramCodex)
+}
+
+// An opaque wrapper's ARGUMENTS can name a different agent than the recorded
+// enum (#4430 review): with program_overrides.aider = "wrap --backend codex",
+// the pane's token-scanned identity reports codex while the session stays
+// recorded aider. `--to aider` relaunches that exact override — a self-handoff
+// — and must drop off the list even though the scanned identity differs.
+func TestHandoffAgentChoices_OpaqueWrapperFallsBackToTheRecordedEnum(t *testing.T) {
+	choices := handoffAgentChoices(tmux.ProgramCodex, tmux.ProgramAider, map[string]string{
+		tmux.ProgramAider: "",
+	})
+
+	require.NotContains(t, choices, tmux.ProgramAider,
+		"the aider enum launches the same opaque wrapper the pane already runs")
+	require.Contains(t, choices, tmux.ProgramClaude)
 }
 
 // Opening the picker must not dispatch anything: the swap happens only after the
@@ -193,7 +208,7 @@ func TestHandleStateSelectHandoffAgent_ConfirmsThenSwapsTheChosenAgent(t *testin
 	// Index 2 of the filtered list (claude removed) is gemini; index 2 of the
 	// unfiltered SupportedPrograms is aider. A regression that indexes the wrong
 	// slice picks aider and fails here.
-	want := handoffAgentChoices(tmux.ProgramClaude, nil)[2]
+	want := handoffAgentChoices(tmux.ProgramClaude, tmux.ProgramClaude, nil)[2]
 	require.Equal(t, tmux.ProgramGemini, want, "fixture assumption: filtered[2] is gemini")
 
 	h.selectionOverlay.SetSelectedIndex(2)

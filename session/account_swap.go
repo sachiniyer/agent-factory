@@ -157,7 +157,7 @@ func (i *Instance) ManualAccountSwapProgram(agent string, accountOnly bool) (pro
 	program = i.AgentProgram()
 	agent = strings.TrimSpace(agent)
 	if accountOnly || agent == "" ||
-		HandoffTargetIsCurrent(i.CurrentAgentName(), agent, handoffEffectiveAgent(i, agent)) {
+		HandoffTargetIsCurrent(i.CurrentAgentName(), agent, handoffEffectiveAgent(i, agent), program) {
 		return program, false
 	}
 	return agent, true
@@ -226,6 +226,22 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		resolved := resolveResolvedConfigForInstance(i)
 		resolution.command = resolveProgramForAgent(i, agent)
 		resolution.trustBase = builtInProgramOverride(resolved, agent, resolution.command)
+	} else {
+		// A same-agent or account-only swap promises to keep the agent that is
+		// RUNNING — which is the command that positively established this pane,
+		// not the stored enum re-resolved under today's overrides. With
+		// program_overrides.claude = "codex" at launch and a later edit to
+		// "gemini", a fresh resolution would launch gemini while the swap still
+		// claims same-agent (#4430 review round 6). The recorded runtime is not
+		// a built-in declaration, so trustBase resets with the command. A
+		// committed transaction retrying post-restart may have no runtime
+		// record left, but its pane still runs the command the checkpoint
+		// launched — that evidence outranks a fresh resolution too.
+		if runtime := i.RuntimeProgram(); runtime != "" {
+			resolution = launchProgramResolution{command: runtime}
+		} else if pane := i.ResolvedPaneProgram(); pane != "" {
+			resolution = launchProgramResolution{command: pane}
+		}
 	}
 	resolvedProgram := resolution.command
 	if args := tmux.ConversationSelectorArgs(resolvedProgram); len(args) > 0 {
@@ -274,8 +290,23 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	// answer is what resolveSkillTargetForAccount compares the launch's
 	// detected agent against (#4430 review round 5).
 	accountNamespace := sessionenv.AgentForCommand(resolvedProgram)
-	if pending != nil && pending.Manual && pending.To == name && pending.AccountAgent != "" {
+	if pending != nil && pending.To == name {
+		// A committed transaction's namespace is a matter of record, never a
+		// fresh resolution: the commit already moved this session into name's
+		// registry, and program_overrides may have moved since — re-resolving
+		// could select a same-named account in another agent's registry that
+		// the drift check then accepts because command and account agree with
+		// each other instead of with the commit (#4430 review round 6). The
+		// manual transaction records its namespace on the pending data; the
+		// automatic one's record is the durable pin the commit itself
+		// installed on the instance.
 		accountNamespace = pending.AccountAgent
+		if accountNamespace == "" {
+			accountNamespace = i.AccountAgent()
+		}
+		if accountNamespace == "" {
+			accountNamespace = sessionenv.AgentForCommand(resolvedProgram)
+		}
 	}
 	// The CANDIDATE account and program, not the still-recorded fields: validation
 	// must leave the outgoing identity intact, while the af skill has to land in

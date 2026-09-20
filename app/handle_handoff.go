@@ -33,14 +33,14 @@ type handoffPickerTarget = sessionActionTarget
 // filters, so positions no longer line up — and SupportedPrograms is explicitly
 // documented as positionally load-bearing. Carrying the names alongside removes
 // the chance of an off-by-one silently handing off to the wrong agent.
-func handoffAgentChoices(current string, resolvedAgents map[string]string) []string {
+func handoffAgentChoices(current, recorded string, resolvedAgents map[string]string) []string {
 	choices := make([]string, 0, len(tmux.SupportedPrograms))
 	for _, agent := range tmux.SupportedPrograms {
 		resolved, known := resolvedAgents[agent]
 		if !known {
 			resolved = agent
 		}
-		if session.HandoffTargetIsCurrent(current, agent, resolved) {
+		if session.HandoffTargetIsCurrent(current, agent, resolved, recorded) {
 			continue
 		}
 		choices = append(choices, agent)
@@ -100,7 +100,7 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 		// daemon resolves against; the daemon's ResolvedAgents rebuild is
 		// still authoritative once the answer lands, and this frame is the
 		// fallback if that call fails (#4430 review).
-		choices = handoffAgentChoices(current,
+		choices = handoffAgentChoices(current, selected.AgentProgram(),
 			session.HandoffEffectiveAgentsForPathInspection(selected.GetRepoPath(), tmux.SupportedPrograms))
 		if len(choices) == 0 {
 			return m, m.handleNotice(fmt.Errorf("no other agent is available to hand '%s' off to", selected.Title))

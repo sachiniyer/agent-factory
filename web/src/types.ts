@@ -139,6 +139,11 @@ export interface SessionData {
    *  handoff picker excludes it, matching the daemon's same-agent guard. Absent
    *  when unknowable. */
   current_agent?: string;
+  /** The recorded program enum (session's Program): the handoff picker's
+   *  opaque-command sameness check compares it against the requested enum —
+   *  for an unprovable override the enum is the only evidence that the request
+   *  would relaunch the same command (#4430 review round 6). */
+  program?: string;
   /** The credential account this session's agent runs as (#3051), or absent for
    *  the ambient identity. It is a DIRECTORY NAME in the daemon host's account
    *  registry and never carries credential material.
