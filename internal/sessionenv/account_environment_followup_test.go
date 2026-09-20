@@ -763,3 +763,47 @@ func TestValidateAccountEnvironmentCommand_LongChildTailStaysAdmitted(t *testing
 			"command %q must be refused by the account-environment guard", command)
 	}
 }
+
+// The every-suffix walk in shadowedChildTailMutates stays linear in the tail's
+// length after the childless cap was dropped from the child tail (Codex on
+// #4708): judging every suffix through wrapperOperandTailMutates re-scans the
+// remainder through unrecognizedWrapperHidesAccountAssignment and is quadratic,
+// so a long benign child argv (`ionice echo a1 … aN` with N in the thousands)
+// stalls an apply/swap. The scan judges the full tail once (catching a buried
+// env word, shell, or `--opt=DENIED` from any prefix) and only the suffix
+// starting at a word whose own name begins a verdict (a wrapper, a direct
+// account-mutating builtin, strace, or a non-literal — see
+// accountChildTailSuffixStartsVerdict). A long benign argv has none of those
+// words, so it does not re-walk every suffix, and 8000 operand args do not
+// stall commandMutatesAccountEnvironment. The unrelated commandFeedsProvenShell
+// path is bypassed here so the timing reflects the walk this fix changed.
+func TestValidateAccountEnvironmentCommand_ChildTailScanStaysLinear(t *testing.T) {
+	names := map[string]struct{}{"CODEX_HOME": {}, "OPENAI_API_KEY": {}}
+	for _, n := range []int{4000, 8000} {
+		// A long benign child tail whose length is not a mutation: it scans
+		// linearly so it does not stall validation past a generous budget.
+		benign := "ionice echo " + strings.TrimSpace(strings.Repeat("arg ", n))
+		start := time.Now()
+		require.False(t, commandMutatesAccountEnvironment(benign, names),
+			"a long benign child tail of %d operand words is not an identity mutation", n)
+		require.Less(t, time.Since(start), 2*time.Second,
+			"a long benign child tail must not stall commandMutatesAccountEnvironment")
+
+		// A mutation buried past the long benign tail is still refused at linear
+		// cost: the only candidate position the per-suffix pass judges is the
+		// xargs itself.
+		buried := benign + " xargs --process-slot-var CODEX_HOME codex"
+		start = time.Now()
+		require.True(t, commandMutatesAccountEnvironment(buried, names),
+			"command buries an identity mutation past a long child tail")
+		require.Less(t, time.Since(start), 2*time.Second,
+			"a mutation buried past a long child tail must still be caught quickly")
+
+		// A direct account-mutating builtin buried past the long benign tail is
+		// also refused: it is a candidate suffix position, so it is judged.
+		buriedBuiltin := "ionice echo " + strings.TrimSpace(strings.Repeat("arg ", n)) +
+			" unset CODEX_HOME"
+		require.True(t, commandMutatesAccountEnvironment(buriedBuiltin, names),
+			"command buries a direct account-mutating builtin past a long child tail")
+	}
+}
