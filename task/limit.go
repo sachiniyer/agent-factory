@@ -58,17 +58,18 @@ var (
 	// "reset at <tail>" phrase, symmetric with the codex detect/parse split.
 	claudeLimitDetect = regexp.MustCompile(`Claude usage limit reached\.`)
 
-	// codexLimitDetect matches Codex's stall banner. Detection keys on the
-	// semantic clause rather than the leading "You've" contraction: Codex has
-	// rendered that apostrophe as both ASCII ' and typographic U+2019. The reset
-	// phrase ("try again at <ts>" / "try again in <duration>") is often on a
-	// later line, so reset extraction is a separate scan (parseCodexReset) over
-	// the whole capture. The trailing punctuation varies — "…usage limit."
-	// (weekly) vs "…usage limit, try again in…" (relative, openai/codex#3031) —
-	// so it is intentionally not anchored here. Healthy Codex status output that
-	// reports remaining quota or the reset schedule does not contain this clause;
-	// those non-matches are pinned in the tests.
-	codexLimitDetect = regexp.MustCompile(`\bhit your usage limit\b`)
+	// codexLimitDetect matches Codex's stall banner. Keep the full leading
+	// sentence: captured panes can contain ordinary prose using "hit your usage
+	// limit", and treating that fragment alone as a banner would park a healthy
+	// session. Codex has rendered the contraction's apostrophe as both ASCII '
+	// and typographic U+2019, so only that rune is flexible. The reset phrase
+	// ("try again at <ts>" / "try again in <duration>") is often on a later line,
+	// so reset extraction is a separate scan (parseCodexReset) over the whole
+	// capture. The trailing punctuation varies — "…usage limit." (weekly) vs
+	// "…usage limit, try again in…" (relative, openai/codex#3031) — so it is
+	// intentionally not anchored here. Healthy prose containing the shorter
+	// fragment is pinned as a non-match in the tests.
+	codexLimitDetect = regexp.MustCompile(`You['’]ve hit your usage limit`)
 
 	// devinLimitDetect matches devin's usage-quota exhaustion banner (#2411).
 	//

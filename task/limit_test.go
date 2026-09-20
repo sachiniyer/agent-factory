@@ -223,15 +223,15 @@ func TestIsLimitContent(t *testing.T) {
 			wantHit: false,
 		},
 		{
-			name:    "codex healthy /status: usage limit remaining is not exhaustion",
+			name:    "codex healthy prose: conditional usage-limit explanation is not exhaustion",
 			agent:   tmux.ProgramCodex,
-			content: "Usage limit:             [█████████████░░░░░░░] 65% left",
+			content: "If you hit your usage limit, af parks the session",
 			wantHit: false,
 		},
 		{
-			name:    "codex healthy /status: secondary usage limit is not exhaustion",
+			name:    "codex healthy prose: usage-limit badge documentation is not exhaustion",
 			agent:   tmux.ProgramCodex,
-			content: "Secondary usage limit:   [██████████░░░░░░░░░░] 50% left",
+			content: "Sessions that hit your usage limit are shown with a [limit] badge.",
 			wantHit: false,
 		},
 		{
