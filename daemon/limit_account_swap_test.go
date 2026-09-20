@@ -1127,7 +1127,7 @@ func TestResumeFromLimit_TeardownRefusalFallsBackWhenOrdinaryResumeIsDue(t *test
 	require.NotNil(t, swap)
 	swap.fallbackDue = true
 	key := daemonInstanceKey(repoID, inst.Title)
-	_ = manager.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, swap)
+	_, _ = manager.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, swap)
 
 	require.True(t, swap.fellBack,
 		"a pre-commit teardown refusal must not starve an already-due ordinary resume")
