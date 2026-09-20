@@ -130,7 +130,11 @@ func TestHandoffAccountHealthyPendingSwapRetainsResumeBackoff(t *testing.T) {
 	require.NoError(t, err)
 	inst.EndLimitResume()
 	// A replacement pane exists, but preflight cannot repair the incomplete pane set.
+	// The unproven command must ride BOTH records the retry consults: the stored
+	// enum and the pane evidence a same-agent retry now launches from (#4430
+	// review round 6).
 	inst.Program = "unrecognized-wrapper"
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "unrecognized-wrapper"))
 	key := stableSessionKey(repo, inst)
 	m.ResumeLimitedSessions()
 	require.Equal(t, session.LiveRunning, inst.GetLiveness())
