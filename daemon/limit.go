@@ -10,7 +10,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -671,9 +670,6 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			var repairErr error
 			if paneErr := instance.ValidateAccountSwapReplacementPanes(); paneErr != nil {
 				repairErr = paneErr
-			}
-			if accountSwap.agent == tmux.ProgramCodex && !instance.AgentConversation().HasID() {
-				repairErr = errors.Join(repairErr, errors.New("its Codex conversation id is not durable"))
 			}
 			if repairErr != nil {
 				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {

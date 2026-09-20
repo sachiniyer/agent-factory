@@ -462,20 +462,19 @@ func accountSwapPrompt(swap *autoAccountSwap, prompt string, conversation sessio
 var accountSwapTrustDismissInterval = 200 * time.Millisecond
 
 // captureAccountSwapConversation binds Codex discovery to the replacement
-// runtime while the limit-resume operation still owns its fence. Account swaps
-// cannot use the ordinary asynchronous capture: that goroutine serializes its
-// write through the same per-session operation lock held by the caller, so the
-// pending recovery marker could otherwise be cleared and checkpointed before
-// the conversation id became durable.
+// runtime while the limit-resume operation still owns its fence. When Codex has
+// already minted a rollout, account swaps cannot use the ordinary asynchronous
+// capture: that goroutine serializes its write through the same per-session
+// operation lock held by the caller, so the pending recovery marker could
+// otherwise be cleared and checkpointed before the conversation id became
+// durable.
 //
-// The wait is where the trap in #4393 sits: a fresh account home has not yet
-// trusted the worktree, so the replacement Codex can open its directory-trust
-// dialog and mint no rollout (#4392). The status poll skips a pending-swap row
-// entirely, and delivery's own dismissal runs only after this returns — so
-// nobody else ever answers it, no conversation id can appear, and every retry
-// re-mints the same wedged pane. Pump the existing guarded recognizer for the
-// whole capture window so the rollout that makes this session recoverable can
-// actually be written.
+// The capture window also owns the trap fixed in #4393: a fresh account home may
+// still paint its directory-trust dialog after the readiness check (#4392), the
+// status poll skips a pending-swap row, and delivery's own dismissal runs only
+// after this returns. Pump the existing guarded recognizer so the replacement
+// can reach its composer. Reaching it does not itself mint a rollout; the
+// no-rollout branch below handles that separate #4712 ordering constraint.
 func captureAccountSwapConversation(instance *session.Instance, snap session.ConversationCaptureSnapshot) error {
 	token := instance.AgentRuntimeToken()
 	if token.Agent() != tmux.ProgramCodex {
@@ -505,7 +504,14 @@ func captureAccountSwapConversation(instance *session.Instance, snap session.Con
 		return fmt.Errorf("capture replacement Codex conversation: %w", res.err)
 	}
 	if !res.conversation.HasID() {
-		return errors.New("replacement Codex runtime did not expose a conversation id")
+		// A fresh Codex runtime does not create a rollout merely by reaching its
+		// composer. The first submitted message creates it, and this capture runs
+		// before mission delivery so a capture failure can never turn a delivered
+		// mission into an ambiguous retry. No rollout is therefore the expected
+		// fresh-conversation fallback, not a failed replacement (#4712). The record
+		// intentionally remains without an id; recovery already treats missing
+		// additive conversation metadata as a provider-latest fallback.
+		return nil
 	}
 	if !instance.RecordAccountSwapConversationForRuntime(token, res.conversation) {
 		return errors.New("replacement Codex runtime changed before its conversation id could be recorded")

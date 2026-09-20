@@ -633,6 +633,78 @@ func TestResumeLimitedSessionsCapturesReplacementCodexConversation(t *testing.T)
 	t.Fatalf("replacement Codex conversation was never captured: %+v", inst.AgentConversation())
 }
 
+// TestResumeLimitedSessions_DeliversBeforeFreshCodexMintsRollout is the #4712
+// ordering regression. A fresh Codex process reaches its composer without
+// creating a rollout; the first submitted message creates it. The pre-delivery
+// capture must treat that absence as the committed fresh-conversation fallback,
+// deliver the mission, and retire the pending marker instead of respawning the
+// empty composer forever.
+func TestResumeLimitedSessions_DeliversBeforeFreshCodexMintsRollout(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	manager, _, inst, backend := newAutoResumeManager(t, "", false, "finish the migration", base.Add(time.Hour))
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	accountHome, err := agentaccount.Register(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err)
+	writeLimitAccountCandidates(t, "limit_account_candidates = [\"work\"]\n")
+	manager.Config().LimitAccountCandidates = []string{"work"}
+	inst.Program = tmux.ProgramCodex
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	worktree := filepath.Join(t.TempDir(), "codex-worktree")
+	require.NoError(t, os.MkdirAll(worktree, 0o755))
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		inst.Path, worktree, inst.Title, "codex-branch", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+
+	previousTimeout := conversationCaptureTimeout
+	conversationCaptureTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { conversationCaptureTimeout = previousTimeout })
+	var fallbackAtSubmission string
+	backend.onPrompt = func(i *session.Instance, _ string) {
+		pending := i.ToInstanceData().PendingAccountSwap
+		require.NotNil(t, pending, "delivery must remain fenced by the pending transaction")
+		fallbackAtSubmission = pending.CarryFallback
+		writeDaemonCodexRolloutFileWithCwd(t, accountHome,
+			"rollout-2026-09-19T12-00-00-019f63f8-35a7-7ab1-b9b8-d420f6c0e51b.jsonl", worktree)
+	}
+
+	advance(time.Second)
+	manager.ResumeLimitedSessions()
+
+	_, respawns, prompts := backend.snapshot()
+	require.Equal(t, 1, respawns, "the replacement pane must be launched only once")
+	require.Len(t, prompts, 1, "the mission is what causes Codex to mint its first rollout")
+	require.NotEmpty(t, fallbackAtSubmission,
+		"the committed record must retain why this same-agent swap starts fresh")
+	require.Nil(t, inst.ToInstanceData().PendingAccountSwap,
+		"successful delivery must retire the marker that fences lifecycle actions")
+}
+
+// TestResumeFromLimit_LiveStartedCodexSwapWithoutRolloutDeliversMission covers
+// the durable retry shape from #4712: replacement_panes_started is already true,
+// the pane is live at an empty composer, and no rollout exists yet. Missing
+// pre-message conversation metadata is not proof the pane set is incomplete and
+// must not authorize another destructive respawn.
+func TestResumeFromLimit_LiveStartedCodexSwapWithoutRolloutDeliversMission(t *testing.T) {
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", time.Time{})
+	inst.Program = tmux.ProgramCodex
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	inst.ReconcileAccountHandoffSnapshot("work", true, &session.AccountSwapData{
+		To:                      "work",
+		CarryFallback:           "af had no recorded codex conversation id for the previous session",
+		ReplacementPanesStarted: true,
+	})
+
+	_, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID})
+	require.NoError(t, err)
+	_, respawns, prompts := backend.snapshot()
+	require.Zero(t, respawns, "a proven live pane set must not be destroyed merely because Codex has no rollout yet")
+	require.Len(t, prompts, 1)
+	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
+}
+
 // codexReplacementTrustModal is the real Codex first-run directory-trust frame
 // (mirrors codexDirectoryTrustDialog in session/tmux/doc_trust_prompt_test.go):
 // the guarded detector requires the selected '› 1. Yes, continue' row and the
