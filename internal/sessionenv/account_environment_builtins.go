@@ -251,8 +251,11 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// words[1:]. The basename match cannot prove this IS real util-linux,
 			// so a shadowed `./ionice` with `shift N; exec "$@"` can discard the
 			// `--` and any prefix of the child and exec any literal suffix of it.
-			// Every suffix is judged, as the selector/terminal branches do.
-			if shadowedOperandTailMutates(words[1:], names, memo) {
+			// Every suffix is judged; because these words ARE the real child's
+			// argv, the child-tail scan drops the childless PID bound — their
+			// length is not a mutation (the selector and terminal branches keep
+			// the capped shadowedOperandTailMutates for their childless tails).
+			if shadowedChildTailMutates(words[1:], names, memo) {
 				return nil, true
 			}
 			return words[1:], false
@@ -331,13 +334,16 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// `shift N; exec "$@"` can discard any prefix of the child and exec
 			// any literal suffix of it. The head itself is judged by the outer
 			// unwrapAccountCommand loop that re-enters on this return; the tail
-			// after the head is judged here, every suffix, as the selector and
-			// terminal branches do for their childless tails. This covers the
-			// non-terminal option branches (-t/--ignore, -c/-n/--class/--classdata
-			// value, and the attached -c/-n forms) whose loops land here once the
-			// real child is reached, while staying clear of their future option
-			// words (#4460/#4532 dynamic `-c"$CLASS"`).
-			if shadowedOperandTailMutates(words[1:], names, memo) {
+			// after the head is judged here, every suffix. Because this tail is
+			// the real child's argv, it uses the child-tail scan that drops the
+			// childless PID bound (a command may take any number of operands, so
+			// length is not a mutation) — the selector and terminal branches keep
+			// the capped shadowedOperandTailMutates for their childless tails.
+			// This covers the non-terminal option branches (-t/--ignore, -c/-n/
+			// --class/--classdata value, and the attached -c/-n forms) whose loops
+			// land here once the real child is reached, while staying clear of
+			// their future option words (#4460/#4532 dynamic `-c"$CLASS"`).
+			if shadowedChildTailMutates(words[1:], names, memo) {
 				return nil, true
 			}
 			return words, false
@@ -608,8 +614,11 @@ func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}, me
 	// The mask is judged above as a head; the real binary's child starts at
 	// words[1:]. A shadowed `./taskset` can shift past the mask (and, after
 	// -c, the cpu list) and exec any literal suffix of that child tail, so
-	// every suffix is judged like the ionice selector/terminal branches.
-	if shadowedOperandTailMutates(words[1:], names, memo) {
+	// every suffix is judged. Because these words ARE the real child's argv,
+	// the child-tail scan drops the childless PID bound the selector and
+	// terminal branches keep — a command may take any number of operands, so
+	// the tail's length is not a mutation.
+	if shadowedChildTailMutates(words[1:], names, memo) {
 		return nil, true
 	}
 	return words[1:], false

@@ -724,3 +724,42 @@ func TestValidateAccountEnvironmentCommand_IoniceTasksetOptionValueBranchesAdmit
 			"command %q has no identity mutation and must stay allowed", command)
 	}
 }
+
+// The child-tail branches scanned by this fix (ionice `--` and `default`, and
+// tasksetCommandAfterMask) see the real util-linux binary's own argv, so they
+// use shadowedChildTailMutates, which drops the childless PID bound the
+// selector/terminal branches keep: a command may legitimately take any number
+// of operands, so the tail's length is not an environment mutation. The
+// childless scan had rejected `ionice echo a1 … a65` solely for having 65
+// arguments (Codex review on #4708). A long benign child stays admitted; a
+// mutation buried PAST the childless bound is still refused, because every
+// literal suffix is still judged.
+func TestValidateAccountEnvironmentCommand_LongChildTailStaysAdmitted(t *testing.T) {
+	args := func(n int) string { return strings.TrimSpace(strings.Repeat("arg ", n)) }
+	for _, command := range []string{
+		// Each scanned tail exceeds the childless bound (shadowedTailOperandLimit
+		// = 64) on the branch it exercises, where shadowedOperandTailMutates had
+		// rejected for length alone.
+		"ionice echo " + args(65),      // default branch: scans 65 operand words
+		"ionice -- echo " + args(64),   // `--` branch: scans echo + 64 args = 65
+		"taskset 0x1 echo " + args(65), // tasksetCommandAfterMask: scans 65 words
+		"taskset -c 0-3 echo " + args(65),
+		"./ionice echo " + args(65), // basename-matched shadowed form
+		"ionice echo " + args(100),  // comfortably past the bound
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"command %q is a benign long child tail whose length is not a mutation", command)
+	}
+	for _, command := range []string{
+		// A mutation buried past the childless bound is still refused: every
+		// literal suffix is still judged, so the walk reaches the xargs boundary.
+		"ionice echo " + args(65) + " xargs --process-slot-var CODEX_HOME codex",
+		"taskset 0x1 echo " + args(65) + " xargs --process-slot-var CODEX_HOME codex",
+		"ionice -- echo " + args(64) + " xargs --process-slot-var CODEX_HOME codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q buries an identity mutation past the childless bound", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+			"command %q must be refused by the account-environment guard", command)
+	}
+}

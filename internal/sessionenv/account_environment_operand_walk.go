@@ -83,11 +83,36 @@ const shadowedTailOperandLimit = 64
 //
 // Each suffix judgment re-walks the rest of the tail, so the scan is quadratic
 // in its length — 8000 literal PIDs took 8s against 6ms on master — and a tail
-// past shadowedTailOperandLimit fails closed instead.
+// past shadowedTailOperandLimit fails closed instead. That bound is a property
+// of CHILDESS tails: PIDs and permuted operands are meaningless past a handful
+// of words, so length there is a reasonable fail-closed signal.
 func shadowedOperandTailMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	if len(words) > shadowedTailOperandLimit {
 		return true
 	}
+	for i := range words {
+		if wrapperOperandTailMutates(words[i:], names, memo) {
+			return true
+		}
+	}
+	return false
+}
+
+// shadowedChildTailMutates is shadowedOperandTailMutates for a wrapper's
+// returned CHILD tail — the real util-linux binary's own command line, reached
+// by ionice's `--` and `default` arms and by tasksetCommandAfterMask after the
+// mask. It judges every literal suffix as a possible exec boundary, exactly as
+// shadowedOperandTailMutates does, but it does NOT fail closed on length.
+//
+// The childless bound does not apply here: this tail is an ordinary command's
+// argv, and a command may legitimately take any number of operands, so a long
+// child tail is not an environment mutation. Applying shadowedOperandTailMutates
+// instead rejected `ionice echo a1 … a65` solely for having 65 arguments (and
+// the `ionice --` branch for an even shorter list, since the child head lands in
+// the scanned tail). A buried mutation anywhere in the tail is still refused —
+// including past shadowedTailOperandLimit — because every suffix is still
+// judged; the scan just no longer treats the count itself as a refusal.
+func shadowedChildTailMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	for i := range words {
 		if wrapperOperandTailMutates(words[i:], names, memo) {
 			return true
