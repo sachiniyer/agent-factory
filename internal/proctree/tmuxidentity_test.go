@@ -145,7 +145,7 @@ func TestOccupantsOfDir_ExcludesATmuxDescendantOfAMatchingAncestor(t *testing.T)
 	fakeTmux := filepath.Join(t.TempDir(), "tmux")
 	require.NoError(t, os.WriteFile(fakeTmux, body, 0o755))
 
-	shell := exec.Command("sh", "-c", fakeTmux+" 300 & wait")
+	shell := exec.Command("sh", "-c", `"$1" 300 & wait`, "sh", fakeTmux)
 	shell.Dir = worktree
 	require.NoError(t, shell.Start())
 	t.Cleanup(func() {
@@ -179,6 +179,18 @@ func TestOccupantsOfDir_ExcludesATmuxDescendantOfAMatchingAncestor(t *testing.T)
 		time.Sleep(10 * time.Millisecond)
 	}
 	require.NotZero(t, childPID, "the tmux-named child of the shell must become readable")
+	// SIGKILL on the shell does not reach its backgrounded child: kill and reap
+	// the fake-tmux child explicitly so no `sleep 300` is left reparented to PID 1.
+	t.Cleanup(func() {
+		_ = syscall.Kill(childPID, syscall.SIGKILL)
+		reapDeadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(reapDeadline) {
+			if _, err := Lookup(childPID); err != nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
 
 	require.True(t, IsTmuxProcess(childPID), "the child is named tmux (excluded by contract)")
 	require.False(t, IsTmuxProcess(shellPID), "the shell is ordinary (the matching ancestor)")
