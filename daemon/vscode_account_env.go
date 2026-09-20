@@ -93,6 +93,16 @@ func (s vscodeAccountScope) environment() ([]string, error) {
 // re-resolving the enum covers a pane that can no longer report it. It
 // deliberately does not use CurrentAgentName, whose enum fallback would answer
 // the requested program — the enum is exactly what a redirect makes wrong.
+//
+// The LAST resort deliberately uses AgentNamespaceForCommand rather than
+// AgentForCommand: this call names a directory to install into the editor's
+// child environ, it grants no credential, and a pre-#4356 session persisted
+// with a path-qualified env wrapper (for instance /usr/local/bin/env
+// CODEX_HOME=/x codex) plus a selected account must stay classifiable on
+// restore. AgentForCommand's strict env set would return "" for that program
+// and refuse the editor with ErrUnsupportedAgent, breaking a tab that worked
+// before the narrowing — the namespace lookup and the credential grant are
+// different questions and use different rules.
 func vscodeAccountScopeForInstance(instance *session.Instance) vscodeAccountScope {
 	account, _ := instance.AccountSelection()
 	account = strings.TrimSpace(account)
@@ -102,6 +112,9 @@ func vscodeAccountScopeForInstance(instance *session.Instance) vscodeAccountScop
 	agent := sessionenv.AgentForCommand(instance.ResolvedPaneProgram())
 	if agent == "" {
 		agent = session.HandoffEffectiveAgentForPath(instance.Path, instance.AgentProgram())
+	}
+	if agent == "" {
+		agent = sessionenv.AgentNamespaceForCommand(instance.AgentProgram())
 	}
 	return vscodeAccountScope{
 		account: account,

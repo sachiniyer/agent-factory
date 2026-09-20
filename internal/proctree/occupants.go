@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
@@ -93,7 +92,7 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 		if !pathutil.IsAtOrInside(filepath.Clean(cwd), root) {
 			continue
 		}
-		if IsTmuxServer(pid) {
+		if IsTmuxProcess(pid) {
 			// The tmux SERVER is shared infrastructure, not a session's descendant:
 			// one server backs every session on the box and outlives all of them, and
 			// it inherits its cwd from whichever client first started it. If that was
@@ -101,6 +100,14 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 			// retry until the entire server exits — taking every other session with
 			// it. Same permanent-failure shape as the daemon self-match, one process
 			// over.
+			//
+			// A tmux CLIENT is excluded too, and must stay excluded (#4678). A client
+			// is not a writer, and af's own short-lived clients inherit the daemon's
+			// cwd — the self-match above, one process down — so counting them would
+			// refuse a teardown whenever the daemon happened to be mid-command.
+			// IsTmuxServer cannot be used here: a server forked from its client
+			// carries the client's argv, and it now answers only what it can
+			// positively identify.
 			//
 			// Excluding is the safe direction: at worst this misses an occupant and
 			// behaves as it did before this gate existed, where including it wedges
@@ -158,19 +165,4 @@ func DescribeOccupants(occupants []Occupant) string {
 		out += fmt.Sprintf("pid %d (cwd %s)", o.Process.PID, o.WorkingDir)
 	}
 	return out
-}
-
-// IsTmuxServer reports whether pid is a tmux server, POSITIVELY — from its own
-// command line, not from anything it lacks.
-//
-// A server is `tmux` invoked without a client subcommand; an unreadable command
-// line reports false, so an unknown process is treated as an ordinary candidate
-// rather than quietly excluded.
-func IsTmuxServer(pid int) bool {
-	argv := Argv(pid)
-	if len(argv) == 0 {
-		return false
-	}
-	base := filepath.Base(argv[0])
-	return base == "tmux" || strings.HasPrefix(base, "tmux:")
 }

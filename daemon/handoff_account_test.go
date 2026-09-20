@@ -137,7 +137,8 @@ func TestHandoffAccountRecoversPinnedDelivery(t *testing.T) {
 	require.True(t, saved.PendingAccountSwap.Manual)
 	require.Contains(t, saved.PendingAccountSwap.Mission, "finish migration")
 	backend.sendPromptErr = nil
-	require.NoError(t, m.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}))
+	_, err = m.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo})
+	require.NoError(t, err)
 	_, _, pending := inst.PendingAccountSwap()
 	require.False(t, pending)
 	name, automatic := inst.AccountSelection()

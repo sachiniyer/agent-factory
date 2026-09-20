@@ -895,7 +895,7 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 		// WARNING for doctor to reconcile, never a silently-swept process table.
 		return
 	}
-	procs := worktreeWriterProcessesMatching(snap, os.Getpid(), matches, proctree.IsTmuxServer)
+	procs := worktreeWriterProcessesMatching(snap, os.Getpid(), matches, proctree.IsTmuxProcess)
 	if len(procs) == 0 {
 		return
 	}
@@ -922,13 +922,13 @@ func worktreeWriterProcesses(
 	snap map[int]proctree.Process,
 	selfPID int,
 	workingDir func(int) (string, bool),
-	isTmuxServer func(int) bool,
+	isTmuxProcess func(int) bool,
 ) []proctree.Process {
 	matches := func(pid int) bool {
 		cwd, ok := workingDir(pid)
 		return ok && pathutil.IsAtOrInside(filepath.Clean(cwd), root)
 	}
-	return worktreeWriterProcessesMatching(snap, selfPID, matches, isTmuxServer)
+	return worktreeWriterProcessesMatching(snap, selfPID, matches, isTmuxProcess)
 }
 
 // worktreeWriterProcessesMatching applies the shared-infrastructure exclusions
@@ -939,15 +939,21 @@ func worktreeWriterProcessesMatching(
 	snap map[int]proctree.Process,
 	selfPID int,
 	matches func(int) bool,
-	isTmuxServer func(int) bool,
+	isTmuxProcess func(int) bool,
 ) []proctree.Process {
 	// The daemon can inherit a cwd inside a worktree when an af invocation
 	// auto-starts it there, and the shared tmux server inherits its cwd from the
 	// client that first started it. Neither may be a selected root or be reached
 	// through another matching ancestor. Prune each protected subtree during that
 	// walk; descendants remain eligible when their own cwd independently matches.
+	//
+	// Every tmux process is protected, clients included — proctree.IsTmuxProcess,
+	// not IsTmuxServer (#4678). A client writes nothing into the worktree, and
+	// af's own short-lived clients inherit the self-matching daemon's cwd, so
+	// selecting them would kill the daemon's in-flight tmux commands for
+	// unrelated sessions.
 	protectedInfrastructure := func(pid int) bool {
-		return pid == selfPID || isTmuxServer(pid)
+		return pid == selfPID || isTmuxProcess(pid)
 	}
 	seen := make(map[int]bool)
 	var procs []proctree.Process

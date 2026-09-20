@@ -7624,6 +7624,9 @@ function controlKind(e) {
 function canCommit(shown, current) {
   return shown !== current;
 }
+function shouldCloseSavedField(status, editing, statusIsNew) {
+  return statusIsNew && status !== null && !status.error && status.key === editing;
+}
 function saveNotice(resp) {
   const parts = [];
   const warnings = resp.warnings ?? [];
@@ -7675,6 +7678,11 @@ var ConfigPane = class {
   // The live controls a rebuild replaces, so focus can be handed back to whichever of
   // them had it (#2933). Null whenever that control is not currently rendered.
   editingInput = null;
+  /** The config key whose input held DOM focus when the in-progress rebuild started,
+   *  so render() can re-point `editingInput` at that row's replacement even when the
+   *  row is no longer the open edit. Live only for the duration of one render (set
+   *  and cleared around the single `this.render()` call). */
+  restoreKey = null;
   advancedToggle = null;
   lastEntries = null;
   lastStatus = null;
@@ -7685,6 +7693,7 @@ var ConfigPane = class {
     if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
       return;
     }
+    const statusIsNew = status !== this.lastStatus;
     const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status && accounts.status.name === "" && !accounts.status.error;
     if (registrationSucceeded) {
       const submitted = this.accountInput(accounts.status.agent);
@@ -7697,7 +7706,7 @@ var ConfigPane = class {
     this.path = path;
     this.status = status;
     this.accounts = accounts;
-    if (status && !status.error && status.key === this.editing) {
+    if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
     }
@@ -7730,7 +7739,9 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
+    this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
+    this.restoreKey = null;
     this.restoreAccountDrafts(accountDrafts);
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
@@ -7897,6 +7908,9 @@ var ConfigPane = class {
     const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
     input.value = this.editing === e.key ? this.draft : e.value;
     if (this.editing === e.key) {
+      this.editingInput = input;
+    }
+    if (this.restoreKey === e.key && this.editingInput === null) {
       this.editingInput = input;
     }
     input.setAttribute("aria-label", e.key);
@@ -18216,9 +18230,11 @@ function openDeleteProject(root2, label) {
         }
         const m = modal;
         m.setBusy(true);
-        void deleteProject(root2, tok).then(closeModal).catch((e) => {
+        void deleteProject(root2, tok).then(() => {
+          if (modal === m) closeModal();
+        }).catch((e) => {
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             requestResync();
             refreshRegisteredProjects();
             surfaceTabError(e);
@@ -18254,7 +18270,9 @@ function openAddProject() {
         }
         const m = modal;
         m.setBusy(true);
-        void registerProject(path, tok).then(closeModal).catch((e) => {
+        void registerProject(path, tok).then(() => {
+          if (modal === m) closeModal();
+        }).catch((e) => {
           m.setBusy(false);
           m.setError(errorText(e));
         });
@@ -18517,11 +18535,17 @@ function doRegisterAccount(agent, name) {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   void registerAccount(agent, name, tok).then((resp) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) {
+      refreshAccounts();
+      return;
+    }
     const notices = resp.notices?.length ? ` \xB7 ${resp.notices.join(" \xB7 ")}` : "";
     setAccountStatus(agent, "", `Registered ${agent} account "${resp.entry.name}"${notices}`, false);
     refreshAccounts();
   }).catch((err) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     setAccountStatus(agent, "", errorText(err), true);
   });
 }
@@ -18530,8 +18554,10 @@ function doOpenAccountLogin(agent, name) {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   setAccountStatus(agent, name, `Starting the ${agent} login\u2026`, false);
   void startAccountLogin(agent, name, tok).then((login) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     if (login.finished || login.session_name === "") {
       const copy = loginWithoutPaneCopy(login);
       setAccountStatus(agent, name, `${copy.status} \xB7 ${copy.detail}`, !login.logged_in);
@@ -18550,6 +18576,7 @@ function doOpenAccountLogin(agent, name) {
       }
     }));
   }).catch((err) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     setAccountStatus(agent, name, errorText(err), true);
   });
 }
@@ -18562,7 +18589,12 @@ function applyConfigValue(key, value) {
   queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 function applyConfigValueNow(key, value, tok) {
+  const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok).then((resp) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) {
+      refreshConfig();
+      return;
+    }
     store.set({
       configStatus: {
         key: resp.result.key,
@@ -18574,6 +18606,7 @@ function applyConfigValueNow(key, value, tok) {
     });
     refreshConfig();
   }).catch((err) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
   });
 }
@@ -18653,11 +18686,11 @@ function openAddTask() {
         const m = modal;
         m.setBusy(true);
         void addTask(buildTask(input), tok).then(() => {
-          closeModal();
+          if (modal === m) closeModal();
           refreshTasks();
         }).catch((e) => {
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             refreshTasks();
             surfaceTabError(e);
             return;
@@ -18698,11 +18731,11 @@ function openEditTask(task) {
           },
           tok
         ).then(() => {
-          closeModal();
+          if (modal === m) closeModal();
           refreshTasks();
         }).catch((e) => {
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             refreshTasks();
             surfaceTabError(e);
             return;
@@ -18767,7 +18800,9 @@ function doHandoff() {
         }
         const m = modal;
         m.setBusy(true);
-        void handoffSession(target.id, target.title, to, tok, account).then(closeModal).catch((e) => {
+        void handoffSession(target.id, target.title, to, tok, account).then(() => {
+          if (modal === m) closeModal();
+        }).catch((e) => {
           if (isMutationCommittedError(e)) {
             if (modal === m) closeModal();
             requestResync();
@@ -18792,7 +18827,7 @@ function doRemoveTask(task) {
     const handle = modal;
     handle.setBusy(true);
     void removeTask(task, tok).then(() => {
-      closeModal();
+      if (modal === handle) closeModal();
       return refreshTasks();
     }).catch((error) => {
       handle.setBusy(false);

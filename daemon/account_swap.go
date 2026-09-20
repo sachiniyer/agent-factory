@@ -379,7 +379,16 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	// completion log must name the identity actually selected.
 	*scheduled = *admitted
 
-	if err := m.prepareRuntimeForAccountSwap(key, instance); err != nil {
+	err = m.prepareRuntimeForAccountSwap(key, instance)
+	if err == nil {
+		// The outgoing runtime is conclusively stopped, so its append-only
+		// transcript is final: carry it into the incoming account now, before
+		// the checkpoint, so the pending record only ever claims a conversation
+		// the new account already holds (#4367). A failed copy re-plans a
+		// stated fresh start; only an unplannable fallback is an error here.
+		err = instance.CarryAccountSwapConversation()
+	}
+	if err != nil {
 		if errors.Is(err, session.ErrAccountSwapAgentTeardownBlind) {
 			// An absent binding does not prove the old writer stopped. Reuse the
 			// inert runtime state so neither status refresh nor Lost recovery can
@@ -407,6 +416,7 @@ func (m *Manager) commitNewAccountSwapIdentity(
 		// Admission and teardown are complete, and the outgoing identity is still
 		// installed. Freeze exactly the work the replacement will inherit.
 		brief := instance.BuildMissionBrief(scheduled.agent, scheduled.promptOverride, scheduled.reason)
+		brief.Conversation = instance.PreparedAccountSwapConversation()
 		scheduled.headSHA = brief.Work.HeadSHA
 		scheduled.mission = brief.Render()
 		handoff, err = instance.SelectAccountForHandoff(scheduled.from, scheduled.to, scheduled.agent, scheduled.accountNamespace(), scheduled.crossAgent, scheduled.reason, scheduled.headSHA, scheduled.mission)
@@ -443,6 +453,17 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	return false, nil
 }
 
+// revalidateGoneAccountSwap re-plans a committed replacement whose runtime is
+// gone. If it had already been launched on a carried conversation, the new
+// account may be unable to run that resume, so this launch starts fresh and
+// its notice says why (#4367).
+func revalidateGoneAccountSwap(instance *session.Instance, to string) error {
+	if err := instance.AbandonCarriedConversationAfterFailedLaunch(to); err != nil {
+		return err
+	}
+	return instance.ValidateAccountSwap(to)
+}
+
 func accountSwapIdentity(agent, account string) string {
 	if strings.TrimSpace(account) == "" {
 		return "the ambient " + agent + " identity"
@@ -450,7 +471,10 @@ func accountSwapIdentity(agent, account string) string {
 	return fmt.Sprintf("%s account %q", agent, account)
 }
 
-func accountSwapPrompt(swap *autoAccountSwap, prompt string) string {
+// accountSwapPrompt renders the notice delivered to a replacement. A manual
+// swap's mission already states its conversation outcome; an automatic swap
+// states it here, from the committed record (#4367).
+func accountSwapPrompt(swap *autoAccountSwap, prompt string, conversation session.HandoffConversation) string {
 	if swap.manual {
 		fromAgent := swap.fromAgent
 		if strings.TrimSpace(fromAgent) == "" {
@@ -464,6 +488,13 @@ func accountSwapPrompt(swap *autoAccountSwap, prompt string) string {
 			"The replacement was explicitly allowed by limit_account_candidates and had no current limit observation. "+
 			"Continue the same task under the new identity.",
 		accountSwapIdentity(swap.agent, swap.from), accountSwapIdentity(swap.accountNamespace(), swap.to))
+	switch failure := strings.TrimSpace(conversation.CarryFailure); {
+	case conversation.Carried:
+		notice += " Your conversation was carried over to the new identity, so everything above is still yours to use."
+	case failure != "":
+		notice += fmt.Sprintf(" af tried to carry the previous conversation over, but %s, so this is a fresh conversation: "+
+			"the earlier messages are not available to you — only the working tree and its git history are.", failure)
+	}
 	if strings.TrimSpace(prompt) == "" {
 		return notice + "\n\ncontinue"
 	}
@@ -523,7 +554,7 @@ func captureAccountSwapConversation(instance *session.Instance, snap session.Con
 	if !res.conversation.HasID() {
 		return errors.New("replacement Codex runtime did not expose a conversation id")
 	}
-	if !instance.SetAgentConversationForRuntime(token, res.conversation) {
+	if !instance.RecordAccountSwapConversationForRuntime(token, res.conversation) {
 		return errors.New("replacement Codex runtime changed before its conversation id could be recorded")
 	}
 	return nil
