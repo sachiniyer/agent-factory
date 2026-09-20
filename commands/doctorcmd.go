@@ -150,6 +150,21 @@ non-empty. Exits 0 when no actionable issues remain and no checks are incomplete
 			// printing a redundant error line.
 			cmd.SilenceUsage = true
 			cmd.SilenceErrors = true
+			// os.Exit does not run the deferred log.Close() above
+			// (https://pkg.go.dev/os#Exit), so the plain-mode "wrote logs
+			// to <path>" hint that log.Close prints when the run recorded a
+			// WARNING/ERROR (dirty=true, log/log.go:564) would be lost on
+			// this path — an operator who gets exit 1 and empty stderr has
+			// no in-band pointer to the log file the report did not
+			// surface. Close mode-aware before exiting: log.Close() surfaces
+			// the hint for a human reader; in --json stderr must stay
+			// machine-parseable, so log.CloseQuiet suppresses it (mirroring
+			// jsonWrapError). stdout and the exit code are unchanged.
+			if doctorJSONFlag {
+				log.CloseQuiet()
+			} else {
+				log.Close()
+			}
 			os.Exit(code)
 		}
 		return nil
