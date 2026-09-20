@@ -10,6 +10,21 @@ import (
 	"github.com/sachiniyer/agent-factory/session/git"
 )
 
+// PendingOnCompleteData is the durable record of a declared on_complete
+// teardown owed to a finished task run (#4162). It carries only WHAT is owed
+// and when the obligation was taken: the verb is deliberately absent — it is
+// re-resolved at drain time, so a deleted task still yields keep and an edited
+// policy applies to whichever decision the drain reaches.
+//
+// FiledAt doubles as the adoption watermark: pane churn recorded after it is
+// evidence that someone touched the session after the decision was owed, which
+// the delivery counter cannot see when the input arrived through an attached
+// tmux rather than an agent-server entry point.
+type PendingOnCompleteData struct {
+	TaskID  string    `json:"task_id"`
+	FiledAt time.Time `json:"filed_at"`
+}
+
 // InstanceData represents the serializable data of an Instance
 type InstanceData struct {
 	// ID is the instance's stable identity (#1195), minted at NewInstance and
@@ -125,6 +140,19 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// PendingOnComplete records an on_complete teardown owed to this session's
+	// finished task run (#4162). The daemon files it BEFORE waiting on
+	// post-worktree hooks, so a shutdown that drops the in-flight lifecycle
+	// goroutine cannot lose the obligation the way that goroutine's knowledge
+	// could: the completion edge spends task_run_active permanently, so nothing
+	// re-derives it, and a row without the marker simply owes nothing.
+	//
+	// The marker is discharged — cleared and persisted — only by a decision:
+	// the teardown committed, the session was adopted or replaced, the resolved
+	// verb was keep, or the daemon deliberately left the session in place. A
+	// teardown that merely FAILED keeps it; the next daemon generation retries.
+	// omitempty + additive + rollforward, mirroring the TaskRunActive precedent.
+	PendingOnComplete *PendingOnCompleteData `json:"pending_on_complete,omitempty"`
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a
 	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and
@@ -624,6 +652,31 @@ type TabData struct {
 	// indistinguishable from a session that was never handed off — and those two
 	// deserve the same treatment, so nothing has to be backfilled.
 	Handoffs []AgentHandoff `json:"handoffs,omitempty"`
+	// Exit records how a process tab's command ended (#4479): the pane was seen
+	// dead, not merely missing, or af stopped it and says why. nil for tabs af
+	// never saw finish — the load path maps that to "still in flight", never to
+	// "re-run me".
+	Exit *TabExitData `json:"exit,omitempty"`
+	// AccountScope is the account af launched this tab's pane under (#4506
+	// review). A sibling whose recorded scope is not the session's account is
+	// stopped once at load, because its pane may run on another identity. Empty
+	// for a pane launched on the ambient identity, and for rows written before
+	// this field existed.
+	AccountScope string `json:"account_scope,omitempty"`
+}
+
+// TabExitData is the wire form of Tab.Exit: only the fields a reader needs to
+// render or reason about a finished command.
+type TabExitData struct {
+	Status      int  `json:"status,omitempty"`
+	StatusKnown bool `json:"status_known,omitempty"`
+	// At is omitted, not zero-valued, when tmux reported no death time:
+	// omitempty never omits a struct, and "0001-01-01T00:00:00Z" would present
+	// an invented completion time to every reader (#4506 review).
+	At time.Time `json:"at,omitzero"`
+	// StoppedBy is set when af stopped the command rather than it exiting:
+	// "account-scope" or "account-swap" (#4506 review).
+	StoppedBy string `json:"stopped_by,omitempty"`
 }
 
 // TabCleanupData is one durable cleanup handle for a closed tab whose tmux
