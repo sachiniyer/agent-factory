@@ -175,6 +175,44 @@ func TestDeleteProjectConfirmStatesRealSplit(t *testing.T) {
 		assert.NotContains(t, dialog, "3 sessions archived",
 			"the total must never be reported as if it were all archived")
 	})
+
+	// #4407: project deletion archives a legacy row whose title claims the
+	// reserved root name ("ro ot" derives af_root) to keep its work, but restore
+	// refuses it. Counting it under "archived — restorable" is the bug.
+	t.Run("legacy reserved-title row is archived but not restorable", func(t *testing.T) {
+		legacy := deleteProjectSession("ro ot", false)
+		require.True(t, session.IsReservedRecordTitle(legacy.Title, legacy.BackendType),
+			"premise: a local %q row claims the reserved root name", legacy.Title)
+		_, dialog := armDeleteProjectDialog(t, []session.InstanceData{
+			deleteProjectSession("alpha", false),
+			legacy,
+			deleteProjectSession("root", true),
+		})
+
+		assert.Contains(t, dialog, "1 in-place session torn down — not restorable")
+		assert.Contains(t, dialog, "1 session archived — not restorable",
+			"the reserved-title row must be counted as not restorable")
+		assert.Contains(t, dialog, "1 session archived — restorable",
+			"only the ordinary session may be promised back")
+		assert.NotContains(t, dialog, "2 sessions archived",
+			"the reserved-title row must not be folded into the restorable count")
+		assert.Less(t, strings.Index(dialog, "1 session archived — not restorable"), strings.Index(dialog, "1 session archived — restorable"),
+			"the not-restorable line must lead the restorable one")
+	})
+
+	t.Run("only a legacy reserved-title row offers no restore", func(t *testing.T) {
+		_, dialog := armDeleteProjectDialog(t, []session.InstanceData{
+			deleteProjectSession("ro ot", false),
+		})
+
+		assert.Contains(t, dialog, "1 session archived — not restorable")
+		assert.Contains(t, dialog, "kept in the archive",
+			"the dialog must say the work is kept, not lost")
+		assert.NotContains(t, dialog, "archived — restorable",
+			"nothing here can be restored")
+		assert.NotContains(t, dialog, "Restore an archived session",
+			"restore refuses this row; do not offer it")
+	})
 }
 
 // TestDeleteProjectConfirmRendersConsequencesWhenCompact is the #1973 P1: the
@@ -252,12 +290,13 @@ func TestDeleteProjectConfirmRendersConsequencesWhenCompact(t *testing.T) {
 // projectDeletedMsg → handleProjectDeleted → the transient notice.
 func TestDeleteProjectResultReportsBothCounts(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		data        []session.InstanceData
-		archived    int
-		killed      int
-		wantContain []string
-		wantAbsent  []string
+		name         string
+		data         []session.InstanceData
+		archived     int
+		unrestorable int
+		killed       int
+		wantContain  []string
+		wantAbsent   []string
 		// killedLeads asserts the torn-down half comes FIRST. The notice is a
 		// single line that the error box clips to the pane width, so the tail is
 		// what gets dropped — the half the user must not lose has to lead.
@@ -291,6 +330,19 @@ func TestDeleteProjectResultReportsBothCounts(t *testing.T) {
 			wantAbsent:  []string{"archived 3"},
 			killedLeads: true,
 		},
+		{
+			// #4407: the daemon counts a preserved reserved-title row apart from
+			// the restorable archive, and the notice must keep that split.
+			name:         "legacy reserved-title row",
+			data:         []session.InstanceData{deleteProjectSession("alpha", false), deleteProjectSession("ro ot", false)},
+			archived:     1,
+			unrestorable: 1,
+			wantContain: []string{
+				"archived 1 session that cannot be restored (worktree and branch kept)",
+				"archived 1 session (restorable)",
+			},
+			wantAbsent: []string{"archived 2", "tore down"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _ := armDeleteProjectDialog(t, tc.data)
@@ -302,9 +354,10 @@ func TestDeleteProjectResultReportsBothCounts(t *testing.T) {
 			deleteProjectThroughDaemon = func(repoRoot, repoID string) (daemon.DeleteProjectResponse, error) {
 				gotRepoID = repoID
 				return daemon.DeleteProjectResponse{
-					OK:            true,
-					ArchivedCount: tc.archived,
-					KilledCount:   tc.killed,
+					OK:                true,
+					ArchivedCount:     tc.archived,
+					UnrestorableCount: tc.unrestorable,
+					KilledCount:       tc.killed,
 				}, nil
 			}
 			t.Cleanup(func() { deleteProjectThroughDaemon = prev })
@@ -322,6 +375,8 @@ func TestDeleteProjectResultReportsBothCounts(t *testing.T) {
 			require.True(t, ok, "deleteProjectCmd must emit projectDeletedMsg")
 			require.NotEmpty(t, gotRepoID, "the delete must reach the daemon seam")
 			assert.Equal(t, tc.archived, done.archived)
+			assert.Equal(t, tc.unrestorable, done.unrestorable,
+				"the unrestorable count must survive the daemon→message hop")
 			assert.Equal(t, tc.killed, done.killed,
 				"the killed count must survive the daemon→message hop; dropping it is bug #1973")
 
@@ -334,6 +389,10 @@ func TestDeleteProjectResultReportsBothCounts(t *testing.T) {
 			}
 			for _, absent := range tc.wantAbsent {
 				assert.NotContains(t, notice, absent, "the result must not overstate what is restorable")
+			}
+			if tc.unrestorable > 0 {
+				assert.Less(t, strings.Index(notice, "cannot be restored"), strings.Index(notice, "(restorable)"),
+					"the not-restorable half must lead the restorable one")
 			}
 			if tc.killedLeads {
 				assert.Less(t, strings.Index(notice, "tore down"), strings.Index(notice, "archived"),

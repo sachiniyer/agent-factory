@@ -90,10 +90,11 @@ type InstanceData struct {
 	// guard on a wrapper-script session. Derived live and scrubbed before disk.
 	CurrentAgent string `json:"current_agent,omitempty"`
 	// IsRoot is the projection-only reserved-root decision shared by the TUI and web
-	// (#2513): the daemon's own session.IsReservedTitle applied to the title. It is
+	// (#2513): the daemon's own session.IsReservedRecordTitle applied to the title
+	// and backend type. It is
 	// projected so the web pins root to the top of the rail (and draws the
 	// demarcation rule) by CONSUMING the daemon's decision rather than
-	// re-implementing IsReservedTitle in TypeScript against a duplicated title
+	// re-implementing IsReservedRecordTitle in TypeScript against a duplicated title
 	// constant — the exact one-concept-two-representations drift #2513 called out.
 	// Derived live by ToInstanceData and scrubbed before disk like CanKill/CanHandoff.
 	IsRoot bool `json:"is_root,omitempty"`

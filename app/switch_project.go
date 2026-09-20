@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -80,6 +81,7 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		rootPriority int
 		count        int
 		inPlace      int
+		unrestorable int
 	}
 	projectsByID := map[string]*projectAggregate{}
 
@@ -139,6 +141,11 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 	// gitWorktree.IsExternalWorktree(), and both read false when no worktree is
 	// attached). Deriving it here, from the snapshot that already yields the
 	// total, keeps the dialog's split as faithful as the count beside it.
+	//
+	// unrestorable counts the archived subset restore then refuses, with the
+	// predicate the daemon's restore refusal and DeleteProject's report both use
+	// (session.IsReservedRecordTitle on the record's title and backend): a
+	// pre-#3732 local "ro ot" is archived to keep its work, but cannot come back.
 	for _, d := range data {
 		// Only LIVE sessions define an "active project" (#1735): a repo whose
 		// sessions are all archived is not an active project — its archived rows
@@ -174,6 +181,8 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		aggregate.count++
 		if d.Worktree.ExternalWorktree {
 			aggregate.inPlace++
+		} else if session.IsReservedRecordTitle(d.Title, d.BackendType) {
+			aggregate.unrestorable++
 		}
 	}
 
@@ -290,11 +299,12 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 	projects := make([]overlay.Project, 0, len(projectsByID))
 	for repoID, aggregate := range projectsByID {
 		projects = append(projects, overlay.Project{
-			RepoID:       repoID,
-			Name:         filepath.Base(aggregate.root),
-			Root:         aggregate.root,
-			SessionCount: aggregate.count,
-			InPlaceCount: aggregate.inPlace,
+			RepoID:            repoID,
+			Name:              filepath.Base(aggregate.root),
+			Root:              aggregate.root,
+			SessionCount:      aggregate.count,
+			InPlaceCount:      aggregate.inPlace,
+			UnrestorableCount: aggregate.unrestorable,
 		})
 	}
 	sort.Slice(projects, func(i, j int) bool {
@@ -312,12 +322,13 @@ func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
 	rows := make([]ui.SidebarProject, 0, len(projects))
 	for _, p := range projects {
 		rows = append(rows, ui.SidebarProject{
-			RepoID:       p.RepoID,
-			Name:         p.Name,
-			Root:         p.Root,
-			SessionCount: p.SessionCount,
-			InPlaceCount: p.InPlaceCount,
-			Active:       p.Root == m.repoRoot,
+			RepoID:            p.RepoID,
+			Name:              p.Name,
+			Root:              p.Root,
+			SessionCount:      p.SessionCount,
+			InPlaceCount:      p.InPlaceCount,
+			UnrestorableCount: p.UnrestorableCount,
+			Active:            p.Root == m.repoRoot,
 		})
 	}
 	return rows
@@ -371,7 +382,10 @@ func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
 func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "D" {
 		if proj, ok := m.projectPickerOverlay.HighlightedProject(); ok {
-			model, cmd := m.handleDeleteProject(ui.SidebarProject{RepoID: proj.RepoID, Name: proj.Name, Root: proj.Root, SessionCount: proj.SessionCount, InPlaceCount: proj.InPlaceCount})
+			model, cmd := m.handleDeleteProject(ui.SidebarProject{
+				RepoID: proj.RepoID, Name: proj.Name, Root: proj.Root,
+				SessionCount: proj.SessionCount, InPlaceCount: proj.InPlaceCount, UnrestorableCount: proj.UnrestorableCount,
+			})
 			if m.state == stateConfirm && m.confirmationOverlay != nil {
 				m.confirmationOverlay.OnCancel = func() { m.state = stateSwitchProject }
 			}
@@ -495,8 +509,13 @@ func sessionWord(n int) string {
 // What does not survive is the session: af deletes its record, so `af sessions
 // restore` cannot bring it back. Saying "you lose your work" would be false;
 // saying "restorable" is the bug.
-func deleteProjectConfirmMessage(name string, total, inPlace int, restoreKey string) (critical, detail string) {
-	archived := total - inPlace
+//
+// The same holds for an unrestorable session (#4407): a record whose title
+// claims the reserved root name is archived, so its worktree and branch are
+// kept, but restore refuses it. It gets its own "not restorable" line, placed
+// after the torn-down line and before the restorable one.
+func deleteProjectConfirmMessage(name string, total, inPlace, unrestorable int, restoreKey string) (critical, detail string) {
+	archived := total - inPlace - unrestorable
 	title := fmt.Sprintf("[!] Delete project '%s'?", name)
 
 	killedLine := fmt.Sprintf("%d in-place %s torn down — not restorable.", inPlace, sessionWord(inPlace))
@@ -504,6 +523,22 @@ func deleteProjectConfirmMessage(name string, total, inPlace int, restoreKey str
 	gone := "Its worktree is yours — the branch and uncommitted changes stay exactly where they are, but the session and its agent are gone."
 	restore := fmt.Sprintf("Restore an archived session (%s) to bring the project back.", restoreKey)
 	repoSafe := "Your real git repository is untouched."
+
+	if total > 0 && unrestorable > 0 {
+		lines := []string{title}
+		var notes []string
+		if inPlace > 0 {
+			lines = append(lines, killedLine)
+			notes = append(notes, gone)
+		}
+		lines = append(lines, fmt.Sprintf("%d %s archived — not restorable.", unrestorable, sessionWord(unrestorable)))
+		notes = append(notes, reservedTitleKeptDetail(unrestorable))
+		if archived > 0 {
+			lines = append(lines, archivedLine)
+			notes = append(notes, restore)
+		}
+		return strings.Join(lines, "\n"), strings.Join(notes, "\n\n") + " " + repoSafe
+	}
 
 	switch {
 	case total == 0:
@@ -519,6 +554,15 @@ func deleteProjectConfirmMessage(name string, total, inPlace int, restoreKey str
 	}
 }
 
+// reservedTitleKeptDetail explains an unrestorable session in the delete
+// confirmation: what is kept, and why restore will not bring it back.
+func reservedTitleKeptDetail(n int) string {
+	if n == 1 {
+		return "The session that cannot be restored has a title that claims the reserved \"root\" session name. Its worktree and branch are kept in the archive."
+	}
+	return "The sessions that cannot be restored have titles that claim the reserved \"root\" session name. Their worktrees and branches are kept in the archive."
+}
+
 // deleteProjectResultMessage reports what delete-project ACTUALLY did, using the
 // daemon's own counts rather than the pre-confirm estimate (#1973), so the split
 // the user consented to is the split they are told about afterward.
@@ -529,7 +573,21 @@ func deleteProjectConfirmMessage(name string, total, inPlace int, restoreKey str
 // in-place se…", losing exactly the half the user needs. The clipped tail must
 // be the reassuring half (what survived), never the consequential one (what did
 // not). The full string stays reachable via the notice's details view.
-func deleteProjectResultMessage(name string, archived, killed int) string {
+//
+// Unrestorable sessions (#4407) follow the same rule: they come right after the
+// torn-down fragment and before the restorable one.
+func deleteProjectResultMessage(name string, archived, unrestorable, killed int) string {
+	if unrestorable > 0 {
+		var parts []string
+		if killed > 0 {
+			parts = append(parts, fmt.Sprintf("tore down %d in-place %s (not restorable, worktree and branch untouched)", killed, sessionWord(killed)))
+		}
+		parts = append(parts, fmt.Sprintf("archived %d %s that cannot be restored (worktree and branch kept)", unrestorable, sessionWord(unrestorable)))
+		if archived > 0 {
+			parts = append(parts, fmt.Sprintf("archived %d %s (restorable)", archived, sessionWord(archived)))
+		}
+		return fmt.Sprintf("Deleted project '%s' — %s", name, strings.Join(parts, " · "))
+	}
 	switch {
 	case archived == 0 && killed == 0:
 		return fmt.Sprintf("Deleted project '%s' — no live sessions to remove", name)
@@ -555,7 +613,7 @@ func (m *home) handleDeleteProject(proj ui.SidebarProject) (tea.Model, tea.Cmd) 
 		return m, m.handleError(fmt.Errorf("cannot delete project %q: repository identity is unavailable", proj.Name))
 	}
 	restoreKey := keys.GlobalKeyBindings[keys.KeyRestore].Help().Key
-	message, detail := deleteProjectConfirmMessage(proj.Name, proj.SessionCount, proj.InPlaceCount, restoreKey)
+	message, detail := deleteProjectConfirmMessage(proj.Name, proj.SessionCount, proj.InPlaceCount, proj.UnrestorableCount, restoreKey)
 	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
 		return startDeleteProjectMsg{root: proj.Root, repoID: proj.RepoID, name: proj.Name}
 	})
@@ -571,6 +629,9 @@ func (m *home) deleteProjectCmd(msg startDeleteProjectMsg) tea.Cmd {
 			repoID:   msg.repoID,
 			name:     msg.name,
 			archived: resp.ArchivedCount,
+			// UnrestorableCount is reported apart from ArchivedCount, which counts
+			// only sessions restore will accept (#4407).
+			unrestorable: resp.UnrestorableCount,
 			// KilledCount is the in-place sessions the daemon tore down. Carrying
 			// it is what lets the completion report the same archived-vs-torn-down
 			// split the confirmation promised (#1973); dropping it is how the TUI
@@ -599,7 +660,7 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 		}
 	}
 	m.refreshSidebarProjects()
-	success := m.showTransientMessage(deleteProjectResultMessage(msg.name, msg.archived, msg.killed))
+	success := m.showTransientMessage(deleteProjectResultMessage(msg.name, msg.archived, msg.unrestorable, msg.killed))
 	if committedWarning {
 		return m, tea.Batch(success, m.handleError(msg.err))
 	}

@@ -58,6 +58,11 @@ type projectDeletedMsg struct {
 	repoID   string
 	name     string
 	archived int
+	// unrestorable is how many sessions the daemon archived — worktree and
+	// branch preserved — that restore refuses, because their title claims the
+	// reserved root name. Kept apart from archived, which the completion reports
+	// as restorable.
+	unrestorable int
 	// killed is how many in-place/external-worktree sessions the daemon tore
 	// down because they cannot be archived (#1973). Reported alongside archived
 	// so the completion states the same split the confirmation promised — a

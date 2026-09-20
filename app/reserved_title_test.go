@@ -49,14 +49,16 @@ func TestHandleStateNewRejectsReservedRootTitle(t *testing.T) {
 }
 
 // TestHandleStateNewRejectsTitleDerivingTheReservedName is the #3756 red. The
-// overlay's pre-check asked IsReservedTitle — the IDENTITY question, which only
-// TRIMS whitespace — while the create gate the user is about to hit asks the
-// ADMISSION question, which since #3732 also refuses a title deriving the root
-// agent's tmux session name. "ro ot" therefore passed the overlay and was
+// overlay's pre-check asked IsReservedTitle — the IDENTITY question, which then
+// only TRIMMED whitespace — while the create gate the user is about to hit asks
+// the ADMISSION question, which since #3732 also refuses a title deriving the
+// root agent's tmux session name. "ro ot" therefore passed the overlay and was
 // refused a round trip later, with the naming flow already closed behind it:
-// exactly the post-submit error the #936 pre-check exists to prevent.
+// exactly the post-submit error the #936 pre-check exists to prevent. Since
+// #4396 the two predicates share one normalization — the fold also catches
+// "Ro ot", whose derived tmux name is case-distinct from the root's.
 func TestHandleStateNewRejectsTitleDerivingTheReservedName(t *testing.T) {
-	for _, title := range []string{"ro ot", "r o o t"} {
+	for _, title := range []string{"ro ot", "r o o t", "Ro ot"} {
 		t.Run(title, func(t *testing.T) {
 			h := &home{
 				ctx:       context.Background(),

@@ -28,7 +28,7 @@ import (
 // retarget it guards against is invisible if the only observable is that some
 // session went away. Production points it at the real RPC and never reassigns it.
 var killSessionForLifecycle = func(m *Manager, req KillSessionRequest, guard sessionTeardownGuard) error {
-	_, err := m.killSessionRequestedBy(req, "task on_complete teardown", guard)
+	_, err := m.killSessionRequestedBy(req, "task on_complete teardown", guard, false)
 	return err
 }
 

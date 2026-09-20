@@ -76,9 +76,15 @@ func (m *Manager) loadEnabledTaskTargets(repoID string) (map[string][]task.Task,
 // taskTargetMu but before entering the tasks-file lock; validators must not
 // shell out there. The verdict keeps the refusal's CAUSE (#3264), so the
 // validator's message can name the thing to fix instead of guessing.
+//
+// persistedBinding marks a re-check of a binding that is already durable — the
+// arming pass (persistedTasksForArming) and RestartTask. Both decide whether to
+// RUN that binding, not whether to COMMIT one. Only the collision clause reads
+// it — see validateEnabledTaskTarget.
 type taskTargetValidationContext struct {
-	rootRepoID  string
-	rootVerdict rootAgentMaterializeVerdict
+	rootRepoID       string
+	rootVerdict      rootAgentMaterializeVerdict
+	persistedBinding bool
 }
 
 func (m *Manager) prepareTaskTargetValidation(repoID, target string, enabled bool) taskTargetValidationContext {
@@ -112,6 +118,24 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 	if t.RepoID == "" {
 		return fmt.Errorf("cannot determine project identity for enabled task %q target %q; nothing was changed", t.ID, target)
 	}
+	m.mu.Lock()
+	instance := m.instances[daemonInstanceKey(t.RepoID, target)]
+	m.mu.Unlock()
+	loaded := instance != nil
+	recordExists := loaded
+	var state session.InstanceData
+	if loaded {
+		state = instance.ToInstanceData()
+	} else {
+		persisted, _, err := findInstanceDataByTitle(target, t.RepoID)
+		if err != nil && !errors.Is(err, errSessionNotFound) {
+			return fmt.Errorf("cannot enable task %q: could not determine target session %q state from storage; nothing was changed: %w", t.ID, target, err)
+		}
+		if persisted != nil {
+			state = *persisted
+			recordExists = true
+		}
+	}
 	// Reserved root delivery is safe only while the daemon owns its future, not
 	// merely because a process happens to exist now. A disabled root-agent policy
 	// deliberately leaves a surviving live root alone, but will not recreate it
@@ -121,9 +145,32 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 	// will ask: a target deriving the reserved tmux name ("ro ot") can no more
 	// materialize than a reserved spelling can (#3732). Refusing at the task
 	// write keeps a task that could only fail on every run from being committed
-	// at all — the arm below reports it, and does so without consulting ctx,
+	// at all — the arms below report it, and do so without consulting ctx,
 	// which prepareTaskTargetValidation only fills for the exact spelling.
-	if session.ReservedTitleCollision(target) != "" {
+	//
+	// An existing ORDINARY record under such a title — a case variant like
+	// "Ro ot", which owns the distinct af_Root, or a provisioned-backend "ro ot"
+	// with no local tmux name — splits on who is asking (#4407 review):
+	//
+	//   - A task write commits a NEW durable binding, and the record's lifetime
+	//     is not the binding's: once the record is gone, every later run lands
+	//     on the auto-create refusal. Existence does not lift the refusal; it
+	//     only chooses the message, so the operator is not told to use "root"
+	//     for a session that is not the root.
+	//   - The arming pass and RestartTask (ctx.persistedBinding) re-check a
+	//     binding that is ALREADY durable — one enabled before admission
+	//     widened, since the write above refuses new ones. Delivery sends to an
+	//     existing target without asking admission, so while the record exists
+	//     the task works; refusing it here would disarm working automation at
+	//     the first daemon start after upgrade. It falls through to the ordinary record checks
+	//     below instead, and KillSession refuses to delete such a record while
+	//     an enabled task targets it, so the record cannot disappear from under
+	//     an armed binding. Once the record is gone the clause applies again.
+	ordinaryRecord := recordExists && !session.IsReservedRecordTitle(state.Title, state.BackendType)
+	if session.ReservedTitleCollision(target) != "" && !(ctx.persistedBinding && ordinaryRecord) {
+		if ordinaryRecord {
+			return fmt.Errorf("cannot enable task %q: target session %q exists, but its title claims the reserved %q session name (reservation ignores case and whitespace), so af cannot re-create it and the task would fail on every run once that session is gone; choose a target whose title does not claim the reserved name; nothing was changed", t.ID, target, session.RootSessionTitle)
+		}
 		if target != session.RootSessionTitle {
 			return fmt.Errorf("cannot enable task %q: reserved target session %q cannot materialize under that spelling; use %q exactly; nothing was changed", t.ID, target, session.RootSessionTitle)
 		}
@@ -138,22 +185,8 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 			return fmt.Errorf("cannot enable task %q: target session %q is reserved for the daemon-managed root agent, and %s; or choose a different target; nothing was changed", t.ID, target, rootAgentUnavailableDetail(ctx.rootVerdict))
 		}
 	}
-	m.mu.Lock()
-	instance := m.instances[daemonInstanceKey(t.RepoID, target)]
-	m.mu.Unlock()
-	loaded := instance != nil
-	var state session.InstanceData
-	if loaded {
-		state = instance.ToInstanceData()
-	} else {
-		persisted, _, err := findInstanceDataByTitle(target, t.RepoID)
-		if errors.Is(err, errSessionNotFound) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("cannot enable task %q: could not determine target session %q state from storage; nothing was changed: %w", t.ID, target, err)
-		}
-		state = *persisted
+	if !recordExists {
+		return nil
 	}
 	switch {
 	case state.InFlightOp == session.OpArchiving:

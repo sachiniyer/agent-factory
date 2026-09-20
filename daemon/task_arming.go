@@ -41,6 +41,7 @@ func (m *Manager) persistedTasksForArming(scope watchScope) (taskArmingSnapshot,
 		target := task.CanonicalTargetSession(candidate.TargetSession)
 		if candidate.Enabled && target != "" {
 			validation := m.prepareTaskTargetValidation(candidate.RepoID, target, true)
+			validation.persistedBinding = true
 			if err := m.validateEnabledTaskTarget(candidate, validation); err != nil {
 				snapshot.refused = append(snapshot.refused, fmt.Errorf("persisted task %q was not armed because its target relationship is unsafe: %w", candidate.ID, err))
 				if recordsVerdict {

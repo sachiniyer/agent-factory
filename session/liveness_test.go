@@ -174,13 +174,14 @@ func TestLifecycleActionIsProjectionOnly(t *testing.T) {
 // TestIsRootIsSharedAcrossInstanceAndProjection pins #2513's cross-surface
 // contract: the reserved-root decision the web consumes (InstanceData.IsRoot) is
 // exactly the daemon's own session.IsReservedTitle, so the browser never
-// re-derives the reserved-title rule (and cannot drift from its case-insensitive,
-// trimmed spelling). It is projection-only — scrubbed before disk like CanKill.
+// re-derives the reserved-title rule (and cannot drift from its case-folded,
+// derived-name normalization). It is projection-only — scrubbed before disk
+// like CanKill.
 func TestIsRootIsSharedAcrossInstanceAndProjection(t *testing.T) {
 	for _, title := range []string{"root", "Root", "  root  ", "worker", ""} {
 		data := (&Instance{ID: "id", Title: title, liveness: LiveReady}).ToInstanceData()
-		require.Equal(t, IsReservedTitle(title), data.IsRoot,
-			"projected IsRoot must equal session.IsReservedTitle for %q", title)
+		require.Equal(t, IsReservedRecordTitle(title, data.BackendType), data.IsRoot,
+			"projected IsRoot must equal session.IsReservedRecordTitle for %q", title)
 	}
 
 	rootData := (&Instance{ID: "root-id", Title: "root", liveness: LiveReady}).ToInstanceData()

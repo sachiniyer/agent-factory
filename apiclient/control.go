@@ -70,8 +70,9 @@ func (c *Client) RestoreSession(req daemon.RestoreSessionRequest) (string, error
 }
 
 // DeleteProject asks the daemon to delete a project (#1735): archive its live
-// sessions (restorable), tear down in-place ones, and drop its root_agents
-// opt-in. Returns the daemon's response (archived/killed counts).
+// sessions (restorable, except reserved-title rows the response counts as
+// unrestorable), tear down in-place ones, and drop its root_agents opt-in.
+// Returns the daemon's response (archived/unrestorable/killed counts).
 func (c *Client) DeleteProject(req daemon.DeleteProjectRequest) (daemon.DeleteProjectResponse, error) {
 	var resp daemon.DeleteProjectResponse
 	err := c.call("DeleteProject", req, &resp)

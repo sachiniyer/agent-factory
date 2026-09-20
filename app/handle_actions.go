@@ -232,7 +232,7 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		}
 	}
 
-	reserved := session.IsReservedTitle(selectedTitle)
+	reserved := session.IsReservedRecordTitle(selectedTitle, selected.BackendType())
 
 	if severeLine != "" {
 		// The severe consequence and any dirty-worktree warning are the critical
