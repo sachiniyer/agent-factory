@@ -370,15 +370,15 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
 - **Visible in the session.** The first prompt after replacement names the old
   and new identities before repeating the stored task prompt.
 - **One credential boundary.** A local swap stops every agent, shell, and process
-  pane before committing the new identity, then restores them with the selected
-  account environment. A claude or codex agent keeps its conversation: af copies
-  the transcript into the new account's home before committing the new identity,
-  and the replacement resumes it. The copy stays in the new account's home, and
-  the provider replays that history under the new account, so an automatic
-  rotation moves the conversation's content to the candidate account as well as
-  the work. If the conversation cannot be carried, the agent starts a fresh
-  conversation, and the notice it receives says why. Other agents start a fresh
-  provider conversation. New
+  pane before committing the new identity, then restores the agent and shell
+  panes with the selected account environment. A claude or codex agent keeps
+  its conversation: af copies the transcript into the new account's home before
+  committing the new identity, and the replacement resumes it. The copy stays in
+  the new account's home, and the provider replays that history under the new
+  account, so an automatic rotation moves the conversation's content to the
+  candidate account as well as the work. If the conversation cannot be carried,
+  the agent starts a fresh conversation, and the notice it receives says why.
+  Other agents start a fresh provider conversation. New
   account-scoped terminal tabs remain interactive but skip shell startup files,
   because an rc file can otherwise replace the selected identity after af has
   established it. A resolved command that explicitly pins `--continue`,

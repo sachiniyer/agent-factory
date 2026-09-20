@@ -426,9 +426,14 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 	return m.resumeFromLimitLockedOutcome(repoID, key, instance, title, committedAccountSwap(instance))
 }
 
-func (m *Manager) resumeFromLimitLockedWithAccount(repoID, key string, instance *session.Instance, requestedTitle string, swap *autoAccountSwap) error {
-	_, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, swap)
-	return err
+// resumeFromLimitLockedWithAccount is the auto-resume scheduler's entry to the
+// shared limit-resume body. It returns the outcome alongside the error so the
+// caller can distinguish a real resume (resumePerformed) from a no-op
+// (resumeNotPerformed): both return a nil error, and only the former is a
+// success worth logging. The manual-retry path exposes this same distinction
+// through ResumeFromLimitResponse.OK (outcome == resumePerformed).
+func (m *Manager) resumeFromLimitLockedWithAccount(repoID, key string, instance *session.Instance, requestedTitle string, swap *autoAccountSwap) (resumeFromLimitOutcome, error) {
+	return m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, swap)
 }
 
 // fallBackFromUncommittedAccountSwap applies one deadline rule to every refusal
