@@ -753,7 +753,17 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 			// swap. A corrupt repo is not processed, so it keeps its carry along
 			// with the records this reset could not read.
 			if err := config.DeleteRepoReapedRootCarry(rid); err != nil {
-				errs = append(errs, fmt.Errorf("delete root agent carry for repo %s: %w", rid, err))
+				// KEEP THE RECORDS WITH IT (Codex on #4400). A carry that
+				// outlives the record set is exactly what the next root create
+				// consumes: no record means the create adopts the parked carry,
+				// resurrecting the account pin, conversation, tabs and pending
+				// swap this reset was clearing. Deleting the records anyway
+				// would manufacture that state. Retaining them keeps the repo
+				// at "this part of the reset did not happen", which is the rule
+				// the blocked-worktree and unverified-branch paths below
+				// already follow, and a re-run finishes the job.
+				errs = append(errs, fmt.Errorf("delete root agent carry for repo %s (its session records were kept, so the carry cannot be adopted by a later root create; re-run reset once the carry is removable): %w", rid, err))
+				continue
 			}
 			paths, worktreeBlocked := blockedWorktrees[rid]
 			branchNames, branchUnverified := unverifiedBranches[rid]
