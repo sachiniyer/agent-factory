@@ -577,6 +577,14 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		branchPrefix = *opts.BranchPrefix
 	}
 
+	accountAgent := ""
+	if strings.TrimSpace(opts.Account) != "" {
+		// refuseUnsupportedAccountAgent already refused a program whose
+		// resolution drifts to another agent, so the requested enum IS the
+		// namespace the account was selected in (#4430 review round 4).
+		accountAgent = sessionenv.AgentForCommand(opts.Program)
+	}
+
 	return &Instance{
 		ID:           id,
 		sandboxCreds: opts.SandboxCredentials,
@@ -590,6 +598,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		Path:                  absPath,
 		Program:               opts.Program,
 		Account:               opts.Account,
+		accountAgent:          accountAgent,
 		Height:                0,
 		Width:                 0,
 		CreatedAt:             t,

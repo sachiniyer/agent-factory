@@ -85,14 +85,16 @@ func (s vscodeAccountScope) environment() ([]string, error) {
 // vscodeAccountScopeForInstance gives the daemon-owned editor the same selected
 // credential boundary as the tmux panes whose integrated terminals it hosts.
 //
-// The agent NAMESPACE is the agent the session's account was selected under —
-// the RESOLVED command's, not the configured program's enum: a
-// program_overrides redirect commits Program=aider while the pane launches
-// codex and the account lives in codex's registry (#4430 review round 3). The
-// pane's frozen launch program is the authority for what was committed;
-// re-resolving the enum covers a pane that can no longer report it. It
-// deliberately does not use CurrentAgentName, whose enum fallback would answer
-// the requested program — the enum is exactly what a redirect makes wrong.
+// The agent NAMESPACE is the one the account was selected in — the durable
+// accountAgent record, which a program_overrides edit made after the pin
+// cannot move (#4430 review round 4). It deliberately does not use
+// CurrentAgentName, whose enum fallback would answer the requested program —
+// the enum is exactly what a redirect makes wrong.
+//
+// Only a record older than the field leaves it empty, and for that the chain
+// below remains the fallback: the pane's frozen launch program is the best
+// evidence of what was committed, re-resolving the enum covers a pane that can
+// no longer report it.
 //
 // The LAST resort deliberately uses AgentNamespaceForCommand rather than
 // AgentForCommand: this call names a directory to install into the editor's
@@ -109,7 +111,10 @@ func vscodeAccountScopeForInstance(instance *session.Instance) vscodeAccountScop
 	if account == "" {
 		return ambientVSCodeScope()
 	}
-	agent := sessionenv.AgentForCommand(instance.ResolvedPaneProgram())
+	agent := instance.AccountAgent()
+	if agent == "" {
+		agent = sessionenv.AgentForCommand(instance.ResolvedPaneProgram())
+	}
 	if agent == "" {
 		agent = session.HandoffEffectiveAgentForPath(instance.Path, instance.AgentProgram())
 	}

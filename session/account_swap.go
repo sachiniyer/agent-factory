@@ -76,6 +76,30 @@ func (i *Instance) AccountSelection() (account string, auto bool) {
 	return i.Account, i.accountAutoSelected
 }
 
+// AccountAgent reports the agent namespace the pinned account was selected in —
+// durable evidence that a program_overrides edit after the pin cannot move
+// (#4430 review round 4). "" when the session is ambient.
+func (i *Instance) AccountAgent() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.accountNamespaceLocked()
+}
+
+// accountNamespaceLocked answers which agent's registry Account was selected
+// under. The durable field wins; a record older than it falls back to the
+// requested program's enum — the only namespace its selection could have used,
+// since the redirected-account handoff that separates label from enum is newer
+// than the field. Caller holds i.mu.
+func (i *Instance) accountNamespaceLocked() string {
+	if i.Account == "" {
+		return ""
+	}
+	if i.accountAgent != "" {
+		return i.accountAgent
+	}
+	return sessionenv.AgentForCommand(i.Program)
+}
+
 func cloneAccountSwapData(data *AccountSwapData) *AccountSwapData {
 	if data == nil {
 		return nil
@@ -442,10 +466,10 @@ func (i *Instance) SelectAccountAutomatically(from, name string) (AgentConversat
 func (i *Instance) selectAccount(from, name string, automatic bool) (AgentConversationData, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	return i.selectAccountLocked(from, name, automatic)
+	return i.selectAccountLocked(from, name, "", automatic)
 }
 
-func (i *Instance) selectAccountLocked(from, name string, automatic bool) (AgentConversationData, error) {
+func (i *Instance) selectAccountLocked(from, name, accountAgent string, automatic bool) (AgentConversationData, error) {
 	if i.inFlightOp != OpRespawning {
 		return AgentConversationData{}, fmt.Errorf("selecting account for %q requires the limit-resume fence", i.Title)
 	}
@@ -458,6 +482,25 @@ func (i *Instance) selectAccountLocked(from, name string, automatic bool) (Agent
 	// can put that process's account-local conversation back into the live slot.
 	i.agentRuntimeGeneration++
 	i.clearAgentModelChangeLocked()
+	// The namespace the account was selected in is the agent of the frozen
+	// launch command — the same resolution the registry's Selected answered.
+	// Recording it keeps the pin stable when a program_overrides edit between
+	// commit and a later respawn resolves the recorded Program differently
+	// (#4430 review round 4). The caller-supplied value is the same answer the
+	// locked admission proved; the frozen plan wins when both exist because it
+	// is what will actually launch.
+	if plan := i.accountSwapLaunch; plan != nil && plan.account == name {
+		if agent := sessionenv.AgentForCommand(plan.base); agent != "" {
+			accountAgent = agent
+		}
+	}
+	if accountAgent == "" {
+		accountAgent = i.accountNamespaceLocked()
+	}
+	if i.accountAgent != accountAgent {
+		i.accountAgent = accountAgent
+		i.touchLocked()
+	}
 	if i.Account != name {
 		i.Account = name
 		i.touchLocked()
@@ -485,7 +528,9 @@ func (i *Instance) selectAccountLocked(from, name string, automatic bool) (Agent
 // RestoreAccountSelectionUnderResumeFence rolls back an in-memory selection
 // whose durable checkpoint failed. The stopped old runtime is not restarted;
 // the next scheduler pass retries from the still-durable previous identity.
-func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto bool, conversation AgentConversationData) error {
+// accountAgent is the previous selection's namespace — captured beside the
+// account name at admission, so the rollback restores the same pin (#4430).
+func (i *Instance) RestoreAccountSelectionUnderResumeFence(name, accountAgent string, auto bool, conversation AgentConversationData) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning {
@@ -493,6 +538,10 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto boo
 	}
 	if i.Account != name {
 		i.Account = name
+		i.touchLocked()
+	}
+	if i.accountAgent != accountAgent {
+		i.accountAgent = accountAgent
 		i.touchLocked()
 	}
 	if i.accountAutoSelected != auto {
@@ -642,19 +691,32 @@ func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
 	// the overridden command, and the live-pane answer a stopped swap lacks
 	// falls back to that enum (#4430 review round 3). Resolved before the
 	// instance lock — program resolution does config I/O. Inside the lock the
-	// pane's frozen launch program wins when it exists: it is the command the
-	// committed transaction actually froze, which re-resolution can only
-	// approximate once the configuration has moved.
+	// durable selection records win: they are the answers the committed
+	// transaction actually froze, which re-resolution can only approximate once
+	// the configuration has moved.
 	resolvedAgent := HandoffEffectiveAgentForPath(i.Path, i.AgentProgram())
 	i.mu.Lock()
+	account := i.Account
+	pending := cloneAccountSwapData(i.pendingAccountSwap)
+	// Namespace preference order, most durable first: the selection record
+	// (i.accountAgent) is the commit-time answer no config flip or restart can
+	// move; a committed manual swap's AccountAgent predates it on records
+	// written between the two fields; the pane's frozen program only survives
+	// until an attach rewrites its metadata from CURRENT config; and the
+	// pre-lock re-resolution is the legacy fallback for records older than all
+	// of them (#4430 review round 4).
 	agent := resolvedAgent
 	if ts := i.tmuxLocked(); ts != nil {
 		if frozen := sessionenv.AgentForCommand(ts.Program()); frozen != "" {
 			agent = frozen
 		}
 	}
-	account := i.Account
-	pending := cloneAccountSwapData(i.pendingAccountSwap)
+	if pending != nil && pending.AccountAgent != "" {
+		agent = pending.AccountAgent
+	}
+	if i.accountAgent != "" {
+		agent = i.accountAgent
+	}
 	if pending == nil || account != pending.To {
 		i.mu.Unlock()
 		return fmt.Errorf("account swap for %q has no committed replacement to synchronize", i.Title)

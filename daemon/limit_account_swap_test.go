@@ -710,7 +710,7 @@ func TestResumeFromLimit_LiveStartedCodexSwapWithoutRolloutDeliversMission(t *te
 		inst.Path, worktree, inst.Title, "live-codex-branch", "", false, true)
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
-	inst.ReconcileAccountHandoffSnapshot("work", true, &session.AccountSwapData{
+	inst.ReconcileAccountHandoffSnapshot("work", "codex", true, &session.AccountSwapData{
 		To:                      "work",
 		CarryFallback:           "af had no recorded codex conversation id for the previous session",
 		ReplacementPanesStarted: true,
@@ -753,7 +753,7 @@ func TestResumeFromLimit_LiveStartedCodexSwapWithUnprovableWorkingDirStillDelive
 		inst.Path, worktree, inst.Title, "unprovable-codex-branch", "", false, true)
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
-	inst.ReconcileAccountHandoffSnapshot("work", true, &session.AccountSwapData{
+	inst.ReconcileAccountHandoffSnapshot("work", "codex", true, &session.AccountSwapData{
 		To:                      "work",
 		CarryFallback:           "af had no recorded codex conversation id for the previous session",
 		ReplacementPanesStarted: true,

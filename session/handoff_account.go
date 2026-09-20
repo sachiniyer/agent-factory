@@ -77,7 +77,7 @@ func (i *Instance) SelectAccountForHandoff(from, name, target, effectiveAgent st
 	}
 	entry.FromAccount, entry.ToAccount = from, name
 	i.Tabs[0].Handoffs[len(i.Tabs[0].Handoffs)-1] = entry.AgentHandoff
-	if _, err := i.selectAccountLocked(from, name, false); err != nil {
+	if _, err := i.selectAccountLocked(from, name, effectiveAgent, false); err != nil {
 		return HandoffSwap{}, err
 	}
 	i.pendingAccountSwap.Manual = true
@@ -207,15 +207,17 @@ func (i *Instance) CanRetryPendingManualAccountSwapDelivery() bool {
 		i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
 }
 
-// ReconcileAccountHandoffSnapshot mirrors the daemon-owned account identity and
-// pending delivery transaction onto an existing client projection.
-func (i *Instance) ReconcileAccountHandoffSnapshot(account string, auto bool, pending *AccountSwapData) bool {
+// ReconcileAccountHandoffSnapshot mirrors the daemon-owned account identity —
+// name, the namespace it was selected in, auto flag — and pending delivery
+// transaction onto an existing client projection.
+func (i *Instance) ReconcileAccountHandoffSnapshot(account, accountAgent string, auto bool, pending *AccountSwapData) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.Account == account && i.accountAutoSelected == auto && accountSwapDataEqual(i.pendingAccountSwap, pending) {
+	if i.Account == account && i.accountAgent == accountAgent && i.accountAutoSelected == auto && accountSwapDataEqual(i.pendingAccountSwap, pending) {
 		return false
 	}
 	i.Account = account
+	i.accountAgent = accountAgent
 	i.accountAutoSelected = auto
 	i.pendingAccountSwap = cloneAccountSwapData(pending)
 	i.touchLocked()

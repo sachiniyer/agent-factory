@@ -659,6 +659,13 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.Account != "" {
 		d.Account = redactedMarker
 	}
+	// AccountAgent is the namespace Account was selected in (#4430 round 4).
+	// af only writes the credential-boundary agent enum there — the same value
+	// PendingAccountSwap.AccountAgent keeps — so it stays legible next to the
+	// marker; anything else did not come from af and is marked like a label.
+	if agent := d.AccountAgent; agent != "" && !tmux.IsSupportedProgram(agent) {
+		d.AccountAgent = redactedMarker
+	}
 	// Every other account LABEL in the row takes Account's trade, for Account's
 	// reason: they are the same user-picked strings, reached through the
 	// usage-limit swap (#3127) rather than through `--account`, and a bundle that

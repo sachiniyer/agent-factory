@@ -68,22 +68,35 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 	// covers the --account-only retry whose target defaulted to it, and
 	// i.Program covers a redirected swap whose recorded enum differs — a retry
 	// of `--to aider --account work` still says aider while the pane runs codex
-	// (#4430 review round 3).
+	// (#4430 review round 3). The raw-enum spelling is a retry ONLY while its
+	// transaction is still pending: once an override edit resolves that enum
+	// to another agent, the same request is a new cross-agent handoff, and the
+	// enum match must not swallow it into a committed-replay or a no-op
+	// refusal (#4430 review round 4).
 	if from == strings.TrimSpace(req.Account) && (target == outgoing || target == instance.AgentProgram()) {
 		// The request names the identity a committed swap already recorded —
 		// the retry the pending-swap refusal advertises (#4393), not a no-op.
 		// Finish the recorded transaction, whose stored mission and durable
 		// (from, to) pair a fresh admission would overwrite.
-		if swap = committedAccountSwap(instance); swap == nil {
+		if swap = committedAccountSwap(instance); swap != nil {
+			if strings.TrimSpace(req.Brief) != "" {
+				// The committed transaction already owns the mission it delivers; a
+				// replacement brief cannot amend it, and silently dropping one the
+				// operator typed is worse than refusing.
+				return HandoffSessionResponse{}, fmt.Errorf("session %q has a committed account swap to %s whose recorded mission is what the retry delivers; retry without --brief", instance.Title, accountSwapIdentity(target, swap.to))
+			}
+		} else if strings.TrimSpace(req.To) == "" ||
+			session.HandoffTargetIsCurrent(outgoing, target, session.HandoffEffectiveAgentForPath(instance.Path, target)) {
+			// No committed transaction: a no-op when the request named no
+			// target (an account-only re-request of the account already in
+			// use), or when the request's RESOLVED target is the running
+			// identity. An enum that still matches i.Program but resolves
+			// elsewhere after an override edit is a real cross-agent request
+			// and falls through to admission.
 			return HandoffSessionResponse{}, fmt.Errorf("session %q already uses %s account %q", instance.Title, target, from)
 		}
-		if strings.TrimSpace(req.Brief) != "" {
-			// The committed transaction already owns the mission it delivers; a
-			// replacement brief cannot amend it, and silently dropping one the
-			// operator typed is worse than refusing.
-			return HandoffSessionResponse{}, fmt.Errorf("session %q has a committed account swap to %s whose recorded mission is what the retry delivers; retry without --brief", instance.Title, accountSwapIdentity(target, swap.to))
-		}
-	} else {
+	}
+	if swap == nil {
 		reason := session.HandoffReasonManual
 		if instance.LimitReached() {
 			reason = session.HandoffReasonUsageLimit
@@ -188,6 +201,7 @@ func (m *Manager) evaluateManualAccountSwap(instance *session.Instance, swap *au
 	}
 	admitted := *swap
 	admitted.previousAccount, admitted.previousAuto = instance.AccountSelection()
+	admitted.previousAccountAgent = instance.AccountAgent()
 	return &admitted, nil
 }
 

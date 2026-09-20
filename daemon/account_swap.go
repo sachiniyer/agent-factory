@@ -25,6 +25,7 @@ type autoAccountSwap struct {
 	promptOverride           string
 	from                     string
 	previousAccount          string
+	previousAccountAgent     string
 	previousAuto             bool
 	previousConversation     session.AgentConversationData
 	to                       string
@@ -218,6 +219,13 @@ func accountSwapAgent(instance *session.Instance) string {
 	if configured != "" && live != configured {
 		return ""
 	}
+	// A pinned account names the registry it was selected in (#4430 round 4):
+	// when the live agent no longer matches that durable namespace — an
+	// override edit repointing the recorded program — rotating either registry
+	// would spend an account the pin never named, so no swap applies.
+	if pinned := instance.AccountAgent(); pinned != "" && pinned != live {
+		return ""
+	}
 	if _, supported := sessionenv.SupportsAccounts(live); !supported {
 		return ""
 	}
@@ -288,12 +296,13 @@ func (m *Manager) accountSwapOpportunityFromFactsWithEvidence(
 		return nil, nil
 	}
 	return &autoAccountSwap{
-		from:            limitedAccount,
-		previousAccount: current,
-		previousAuto:    currentAuto,
-		to:              candidates[0],
-		candidates:      candidates,
-		agent:           agent,
+		from:                 limitedAccount,
+		previousAccount:      current,
+		previousAccountAgent: instance.AccountAgent(),
+		previousAuto:         currentAuto,
+		to:                   candidates[0],
+		candidates:           candidates,
+		agent:                agent,
 	}, nil
 }
 
@@ -440,7 +449,8 @@ func (m *Manager) commitNewAccountSwapIdentity(
 			instance.SetPrompt(previousPrompt)
 		}
 		_ = instance.RestoreAccountSelectionUnderResumeFence(
-			scheduled.previousAccount, scheduled.previousAuto, scheduled.previousConversation)
+			scheduled.previousAccount, scheduled.previousAccountAgent,
+			scheduled.previousAuto, scheduled.previousConversation)
 		if scheduled.manual && !instance.LimitReached() {
 			// Teardown already succeeded, and the prepared launch belongs to the
 			// rejected target identity. Hand the restored old identity to ordinary

@@ -63,12 +63,14 @@ type AgentHandoff struct {
 // previousProgram is deliberately kept out of it because rollback is synchronous
 // and a successful ledger entry must not retain transaction-only state forever.
 // previousAccount/previousAuto are the same rollback-only state for the scope a
-// cross-agent record drops when the target cannot carry it (#4428).
+// cross-agent record drops when the target cannot carry it (#4428), and
+// previousAccountAgent is the dropped selection's namespace with it (#4430).
 type HandoffSwap struct {
 	AgentHandoff
-	previousProgram string
-	previousAccount string
-	previousAuto    bool
+	previousProgram      string
+	previousAccount      string
+	previousAccountAgent string
+	previousAuto         bool
 }
 
 // From/To agent names for display, e.g. "codex → claude".
@@ -437,10 +439,11 @@ func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent string, crossA
 		Automatic:   automatic,
 	}
 	swap := HandoffSwap{
-		AgentHandoff:    entry,
-		previousProgram: i.Program,
-		previousAccount: i.Account,
-		previousAuto:    i.accountAutoSelected,
+		AgentHandoff:         entry,
+		previousProgram:      i.Program,
+		previousAccount:      i.Account,
+		previousAccountAgent: i.accountAgent,
+		previousAuto:         i.accountAutoSelected,
 	}
 	i.Tabs[0].Handoffs = append(i.Tabs[0].Handoffs, entry)
 	i.touchLocked()
@@ -471,6 +474,7 @@ func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent string, crossA
 	if crossAgent && i.Account != "" {
 		if _, scopable := sessionenv.SupportsAccounts(effectiveAgent); !scopable {
 			i.Account = ""
+			i.accountAgent = ""
 			i.accountAutoSelected = false
 			i.touchLocked()
 		}
@@ -525,6 +529,10 @@ func (i *Instance) RevertHandoff(swap HandoffSwap) error {
 	// account.
 	if i.Account != swap.previousAccount {
 		i.Account = swap.previousAccount
+		i.touchLocked()
+	}
+	if i.accountAgent != swap.previousAccountAgent {
+		i.accountAgent = swap.previousAccountAgent
 		i.touchLocked()
 	}
 	if i.accountAutoSelected != swap.previousAuto {

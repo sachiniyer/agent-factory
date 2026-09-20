@@ -46,6 +46,7 @@ func TestSwapAgentProgram_DropsScopeForNonScopableTarget(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			inst := handoffTestInstance(t, tmux.ProgramClaude)
 			inst.Account = "work"
+			inst.accountAgent = tmux.ProgramClaude
 			inst.accountAutoSelected = tc.autoSelected
 
 			entry, err := inst.SwapAgentProgram(tmux.ProgramAider, HandoffReasonManual, "abc123", false)
@@ -54,6 +55,10 @@ func TestSwapAgentProgram_DropsScopeForNonScopableTarget(t *testing.T) {
 			if account, auto := inst.AccountSelection(); account != "" || auto {
 				t.Fatalf("AccountSelection = (%q, %v) after the swap, want the scope dropped — "+
 					"aider has no account namespace for %q to resolve in", account, auto, "work")
+			}
+			if got := inst.AccountAgent(); got != "" {
+				t.Fatalf("AccountAgent = %q after the scope drop, want empty — "+
+					"a dropped pin must not keep pointing at the old registry", got)
 			}
 			if got := inst.AgentProgram(); got != tmux.ProgramAider {
 				t.Fatalf("Program = %q, want %q", got, tmux.ProgramAider)
@@ -68,6 +73,10 @@ func TestSwapAgentProgram_DropsScopeForNonScopableTarget(t *testing.T) {
 				t.Fatalf("AccountSelection after revert = (%q, %v), want (%q, %v) — a swap that "+
 					"never completed must not descope the session it left running",
 					account, auto, "work", tc.autoSelected)
+			}
+			if got := inst.AccountAgent(); got != tmux.ProgramClaude {
+				t.Fatalf("AccountAgent after revert = %q, want %q — the pin's registry "+
+					"rolls back with the account", got, tmux.ProgramClaude)
 			}
 		})
 	}
@@ -337,32 +346,56 @@ func TestHandoffEffectiveAgentForPath_NeedsNoBinary(t *testing.T) {
 		"detection answers from the resolved command even when its binary cannot launch")
 }
 
-// refreshSessionEnvironment must pin the account's namespace to the command
-// the pane will RUN — the frozen launch program — never to i.Program's
-// recorded enum (#4430 review round 3). After `--to aider --account work`
-// resolves aider to a codex command, Program still records aider while the
-// pane launches codex; deriving the namespace from the enum declares "work" in
-// aider's, and prepareLaunchEnvironment refuses the launch for disagreeing
-// with the pane's own command. The sibling-tab refresh takes the same answer —
-// a credential-bearing shell inherits the agent pane's resolved namespace, not
-// its own program's (a shell is not the agent the account belongs to).
-func TestRefreshSessionEnvironment_PinsNamespaceToLaunchProgram(t *testing.T) {
+// refreshSessionEnvironment must pin the account's namespace to the durable
+// selection record — i.accountAgent — never to the command the pane will run
+// now (#4430 review round 4). A program_overrides edit between the pin and a
+// respawn can resolve the recorded Program to another agent's command;
+// deriving the namespace from that command would declare the same account
+// label in a different registry, and prepareLaunchEnvironment's matching
+// declaration would pass the drift check the old enum answer used to fail.
+// The sibling-tab refresh takes the same answer — a credential-bearing shell
+// inherits the account's selection namespace, not its own program's (a shell
+// is not the agent the account belongs to).
+func TestRefreshSessionEnvironment_PinsNamespaceToSelectionRecord(t *testing.T) {
 	inst := handoffTestInstance(t, tmux.ProgramAider)
 	inst.Account = "work"
+	inst.accountAgent = tmux.ProgramCodex
 
 	agent := tmux.NewTmuxSession("refresh-agent", "codex --model o4")
-	require.NoError(t, refreshSessionEnvironment(inst, agent, "codex --model o4"))
+	require.NoError(t, refreshSessionEnvironment(inst, agent))
 	require.Equal(t, tmux.ProgramCodex, agent.AccountAgentForTest(),
-		"the account lives in the launch command's namespace — codex — not the recorded aider enum")
+		"the account lives in the recorded selection namespace — codex — not the recorded aider enum")
+
+	// The durable record wins over the pane's own command: a codex-pinned
+	// session respawning under an override that now resolves to gemini must
+	// still declare codex/work — the launch-side namespace check is what
+	// refuses, rather than silently re-scoping to gemini/work.
+	drifted := tmux.NewTmuxSession("refresh-drifted", "gemini")
+	require.NoError(t, refreshSessionEnvironment(inst, drifted))
+	require.Equal(t, tmux.ProgramCodex, drifted.AccountAgentForTest(),
+		"a program_overrides edit cannot move the pin to another registry")
 
 	process := tmux.NewTmuxSession("refresh-process", "cat")
 	tab := &Tab{ID: newTabID(), Name: "build", Kind: TabKindProcess, Command: "cat", tmux: process}
-	require.NoError(t, refreshTabSessionEnvironment(inst, tab, "codex --model o4"))
+	require.NoError(t, refreshTabSessionEnvironment(inst, tab))
 	require.Equal(t, tmux.ProgramCodex, process.AccountAgentForTest(),
-		"a credential-bearing sibling inherits the agent pane's resolved namespace")
+		"a credential-bearing sibling inherits the account's selection namespace")
+}
 
-	unprovable := tmux.NewTmuxSession("refresh-unprovable", "./collect codex")
-	require.NoError(t, refreshSessionEnvironment(inst, unprovable, "./collect codex"))
-	require.Equal(t, "", unprovable.AccountAgentForTest(),
-		"an unprovable launch command carries no namespace — never the recorded enum's")
+// A record older than the accountAgent field has no durable namespace: the
+// only registry its account could have been selected in is the requested
+// program's enum — the redirected-account handoff that separates label from
+// enum is newer than the record.
+func TestRefreshSessionEnvironment_LegacyRecordFallsBackToEnum(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramCodex)
+	inst.Account = "work"
+	// accountAgent deliberately unset — a pre-#4430-round-4 record.
+
+	agent := tmux.NewTmuxSession("refresh-legacy", "codex")
+	require.NoError(t, refreshSessionEnvironment(inst, agent))
+	require.Equal(t, tmux.ProgramCodex, agent.AccountAgentForTest(),
+		"the enum is the only namespace a pre-field record could have selected in")
+
+	require.Equal(t, tmux.ProgramCodex, inst.AccountAgent(),
+		"the accessor reports the same fallback a reader sees")
 }

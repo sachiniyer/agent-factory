@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -250,22 +249,30 @@ func (i *Instance) reprovisionRemote() error {
 	// A refusal must cost nothing: the old runtime is still live and still
 	// recoverable, and reaping first would destroy it for a create that is
 	// about to be refused anyway.
+	// The namespace is the durable selection record, not a fresh parse of the
+	// recorded enum: a cross-agent handoff can pin an account whose registry
+	// differs from Program, and an override edit must not move it (#4430 review
+	// round 4).
+	scopedAgent := i.AccountAgent()
 	if strings.TrimSpace(accountName) != "" {
 		resolved, cfgErr := resolveRepoConfig(i.Path)
 		if cfgErr != nil {
 			return fmt.Errorf("cannot re-provision session %q: its account cannot be checked against the resolved program: %w", i.Title, cfgErr)
 		}
-		scopedAgent := sessionenv.AgentForCommand(i.Program)
 		if err := refuseAccountAgentDrift(accountName, scopedAgent, config.ResolveProgram(&resolved.Config, i.Program)); err != nil {
 			return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
 		}
 	}
 	// Resolve the persisted account before reaping the old sandbox. A missing or
 	// cross-agent account makes the replacement unusable, and that is not a reason
-	// to destroy the only runtime the session still has. The initial create uses
-	// this same resolver, so restore cannot drift onto ambient credentials.
+	// to destroy the only runtime the session still has. The drift check above
+	// already proved the resolved program's agent is the durable namespace, so
+	// selection runs inside it directly — re-deriving from spec.Program's enum
+	// would refuse a handoff-scoped pin whose registry is not the recorded
+	// enum's (#4430 review round 4), and restore cannot drift onto ambient
+	// credentials.
 	if kind.CarriesAccount() && strings.TrimSpace(accountName) != "" {
-		account, accountErr := resolveAccountForProvision(spec.RepoRoot, spec.Program, accountName)
+		account, accountErr := selectAccountInNamespace(scopedAgent, accountName)
 		if accountErr != nil {
 			return fmt.Errorf("cannot re-provision session %q with its persisted account: %w", i.Title, accountErr)
 		}

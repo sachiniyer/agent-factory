@@ -194,7 +194,7 @@ func TestHandoffSession_ScopeDecisionByTargetCapability(t *testing.T) {
 		m, repo, path := newStatusTestManager(t)
 		backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
 		inst := registerHandoffSubject(t, m, repo, path, "auto-scoped", backend)
-		require.True(t, inst.ReconcileAccountHandoffSnapshot("work", true, nil))
+		require.True(t, inst.ReconcileAccountHandoffSnapshot("work", "claude", true, nil))
 
 		_, err := m.HandoffSession(HandoffSessionRequest{
 			Title: inst.Title, RepoID: repo, To: tmux.ProgramGemini,
@@ -241,7 +241,7 @@ func TestHandoffSession_ScopeDecisionByTargetCapability(t *testing.T) {
 		m, repo, path := newStatusTestManager(t)
 		backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
 		inst := registerHandoffSubject(t, m, repo, path, "descoped-auto", backend)
-		require.True(t, inst.ReconcileAccountHandoffSnapshot("work", true, nil))
+		require.True(t, inst.ReconcileAccountHandoffSnapshot("work", "claude", true, nil))
 
 		resp, err := m.HandoffSession(HandoffSessionRequest{
 			Title: inst.Title, RepoID: repo, To: tmux.ProgramAider,

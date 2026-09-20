@@ -85,7 +85,7 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 		// namespace for linked worktrees, including bare clones (#3358).
 		tmuxSession = tmux.NewTmuxSessionForRepo(i.Title, repo.IdentityPath(), i.Program)
 	}
-	if err := refreshSessionEnvironment(i, tmuxSession, resolveLaunchProgramForInstance(i).command); err != nil {
+	if err := refreshSessionEnvironment(i, tmuxSession); err != nil {
 		return err
 	}
 
@@ -505,7 +505,7 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	}
 
 	ts.SetProgram(plan.program)
-	if err := refreshSessionEnvironment(i, ts, plan.program); err != nil {
+	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return fmt.Errorf("swap agent: %w", err)
 	}
 	if err := ts.Start(workDir); err != nil {
@@ -594,7 +594,7 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				restoreProcessTab(i, tab, worktreePath)
 				continue
 			}
-			if err := refreshTabSessionEnvironment(i, tab, agentTmux.Program()); err != nil {
+			if err := refreshTabSessionEnvironment(i, tab); err != nil {
 				if account != "" {
 					return fmt.Errorf("prepare account-scoped tab %q for %q: %w", tab.Name, i.Title, err)
 				}

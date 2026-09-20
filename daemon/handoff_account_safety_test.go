@@ -582,3 +582,38 @@ func prepareHandoffTargetPreflight(t *testing.T, inst *session.Instance) {
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\nexit 0\n"), 0700))
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 }
+
+// A recorded-enum match is a committed-swap retry only while its transaction
+// is pending. The pane runs codex under a recorded aider label; a later
+// program_overrides edit repoints aider at gemini. `--to aider --account work`
+// is then a NEW cross-agent handoff to the resolved gemini — but the raw
+// target == i.Program compare used to route it to "already uses aider account
+// work" before the target was ever resolved (#4430 review round 4).
+func TestHandoffAccountEnumMatchWithoutPendingSwapIsANewHandoff(t *testing.T) {
+	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	inst.SetBackend(&handoffRealPlanBackend{backend})
+	inst.Program = tmux.ProgramAider
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramCodex, false, nil)
+	inst.ClearLimitReached()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	_, err = agentaccount.Register(home, tmux.ProgramGemini, "work")
+	require.NoError(t, err)
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, tmux.ProgramGemini), []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	// The override edit after the pin: the aider label now launches gemini.
+	writeLimitAccountCandidates(t, "[program_overrides]\naider = \"gemini\"\n")
+
+	resp, err := m.HandoffSession(HandoffSessionRequest{
+		Title: inst.Title, RepoID: repo, To: tmux.ProgramAider, Account: "work",
+	})
+	require.NoError(t, err, "the enum match is not a no-op once the label resolves elsewhere")
+	require.True(t, resp.OK)
+	require.Equal(t, tmux.ProgramGemini, inst.AccountAgent(),
+		"the account must move to the namespace the resolved aider command belongs to")
+}
