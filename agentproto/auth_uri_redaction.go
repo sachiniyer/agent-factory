@@ -123,16 +123,22 @@ func percentDecodedBoundary(view redactx.View, offset, rawLength int) int {
 // matcher missed see this code path (callers run the decoded scan first), so
 // this never reprocesses a span the structured pass already redacted.
 //
-// The matcher additionally tolerates a valid %HH escape anywhere INSIDE the
-// needle — e.g. %access%5Ftoken=SECRET, where the leading %ac collapses the
+// The matcher additionally tolerates a valid percent escape anywhere INSIDE
+// the needle — single (%5F) or NESTED through an extra %25 (e.g. %255F for
+// '_', %253D for '=', the same reducing stack redactx.PercentDecode uses),
+// so doubly-encodings spell the same needle character and resolve the same
+// way — e.g. %access%5Ftoken=SECRET, where the leading %ac collapses the
 // 'a' (so the decoded sweep misses) and the in-needle %5F spells the '_' (so
-// the raw bytes carry "access%5Ftoken=", not the literal "access_token=").
+// the raw bytes carry "access%5Ftoken=", not the literal "access_token="),
+// and likewise %access%255Ftoken=SECRET, whose in-needle %255F a
+// single-level raw matcher would still see as the byte '%' rather than '_'.
 // At each needle position the matcher accepts the literal byte
-// case-insensitively OR a %HH whose decoded byte equals the needle character
-// (case-insensitively). On a malformed '%' (fewer than two hex digits
-// following) the candidate aborts, preserving the fail-open-on-reserved
-// behaviour the %ac family relies on: the leading '%' is left untouched and
-// the value is matched from the literal tail that survives the collapse.
+// case-insensitively OR a (possibly nested) percent escape whose final
+// decoded byte equals the needle character (case-insensitively). On a
+// malformed '%' (fewer than two hex digits following, at any nesting level)
+// the candidate aborts, preserving the fail-open-on-reserved behaviour the
+// %ac family relies on: the leading '%' is left untouched and the value is
+// matched from the literal tail that survives the collapse.
 //
 // The matched key span is preserved verbatim: on %access_token=SECRET the
 // output keeps the leading '%', and on %access%5Ftoken=SECRET the %5F is kept
@@ -167,15 +173,17 @@ func redactRawAccessTokenValue(raw, terminators string) (string, bool) {
 
 // matchAccessTokenNeedleRaw attempts to match needle starting at raw[cursor],
 // accepting at each needle position either the literal byte
-// case-insensitively or a %HH escape whose decoded byte equals the expected
-// needle character (case-insensitively). It returns the raw byte position
-// immediately after the needle's final character (a literal byte or the
-// trailing hex digit of a %HH), so a caller can re-emit the matched key form
-// verbatim while rewriting only the value that follows. On a malformed '%'
-// the candidate aborts (returns ok=false): the byte is reserved data, not an
-// escape, so a %ac overlap's leading '%' stays a non-match while the literal
-// tail that survives the collapse still matches from the next cursor
-// position.
+// case-insensitively or a percent escape (possibly NESTED through an extra
+// %25 — e.g. %255F resolves through %25 to '%' then %5F to '_', mirroring
+// redactx.PercentDecode's reducing stack) whose final decoded byte equals
+// the expected needle character (case-insensitively). It returns the raw
+// byte position immediately after the needle's final character (a literal
+// byte or the trailing hex digit of the deepest escape), so a caller can
+// re-emit the matched key form verbatim while rewriting only the value that
+// follows. On a malformed '%' the candidate aborts (returns ok=false): the
+// byte is reserved data, not an escape, so a %ac overlap's leading '%'
+// stays a non-match while the literal tail that survives the collapse still
+// matches from the next cursor position.
 func matchAccessTokenNeedleRaw(raw string, cursor int, needle string) (keyEnd int, ok bool) {
 	j := 0
 	pos := cursor
@@ -189,18 +197,59 @@ func matchAccessTokenNeedleRaw(raw string, cursor int, needle string) (keyEnd in
 			j++
 			continue
 		}
-		if raw[pos] == '%' && pos+2 < len(raw) {
-			hi, hiOK := hexValue(raw[pos+1])
-			lo, loOK := hexValue(raw[pos+2])
-			if hiOK && loOK && equalFoldASCII(hi<<4|lo, want) {
-				pos += 3
-				j++
-				continue
-			}
+		if next, ok := matchPercentEscapeRaw(raw, pos, want); ok {
+			pos = next
+			j++
+			continue
 		}
 		return 0, false
 	}
 	return pos, true
+}
+
+// matchPercentEscapeRaw reports whether raw[pos:] contains a percent escape
+// that decodes — through arbitrarily nested percent encoding, the same way
+// redactx.PercentDecode resolves %255F to '_' via %25→'%' then %5F→'_' — to a
+// single byte equal to want (case-insensitively in ASCII). It returns the raw
+// byte position after the escape, or ok=false when raw[pos] is not a percent
+// escape, the escape is malformed, or it decodes to a byte other than want.
+//
+// The outer level consumes a leading '%' plus two hex digits (3 bytes for
+// %HH); each deeper level consumes two more raw hex digits because the prior
+// level's decoded '%' is the next level's prefix, with no extra '%' in the
+// raw input — exactly the reducing-stack mechanism in
+// redactx.PercentDecode. A malformed '%' at any level (fewer than two hex
+// digits following, or a non-hex byte) aborts the candidate, preserving the
+// fail-open-on-reserved behaviour the #4663 %ac family relies on: the
+// leading '%' is left untouched and the value is matched from the literal
+// tail that survives the collapse.
+func matchPercentEscapeRaw(raw string, pos int, want byte) (newPos int, ok bool) {
+	if pos+3 > len(raw) || raw[pos] != '%' {
+		return 0, false
+	}
+	hi, hiOK := hexValue(raw[pos+1])
+	lo, loOK := hexValue(raw[pos+2])
+	if !hiOK || !loOK {
+		return 0, false
+	}
+	decoded := hi<<4 | lo
+	consumed := 3
+	for decoded == '%' {
+		if pos+consumed+2 > len(raw) {
+			return 0, false
+		}
+		deepHi, deepHiOK := hexValue(raw[pos+consumed])
+		deepLo, deepLoOK := hexValue(raw[pos+consumed+1])
+		if !deepHiOK || !deepLoOK {
+			return 0, false
+		}
+		decoded = deepHi<<4 | deepLo
+		consumed += 2
+	}
+	if equalFoldASCII(decoded, want) {
+		return pos + consumed, true
+	}
+	return 0, false
 }
 
 // equalFoldASCII reports whether got equals want under ASCII case folding

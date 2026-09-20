@@ -387,3 +387,53 @@ func TestRedactAccessTokenURLInNeedleMalformedEscapeAbort(t *testing.T) {
 		})
 	}
 }
+
+// TestRedactAccessTokenURLInNeedleNestedEscapes pins the percent-tolerant raw
+// matcher's extension to NESTED in-needle percent escapes — sequences whose
+// outer %HH decodes to '%' and the next two raw bytes are its deeper hex
+// pair, the same reducing-stack mechanism redactx.PercentDecode uses (e.g.
+// %255F → %25→'%' + 5F → '_', %253D → %25→'%' + 3D → '='). A single-level raw
+// matcher leaves these URLs verbatim: the decoded sweep still misses
+// (leading-overlap %ac collapses the 'a'), and the raw bytes carry the byte
+// '%' rather than the in-needle character, so the same credential leak this
+// change is meant to close would persist. The reviewer's exact example URL
+// `http://h/?%access%255Ftoken=SECRET` is the headline case; the rest pin the
+// analogous nested-equals shape, certainty that arbitrary-depth nesting is
+// handled in linear work, and a path/fragment/opaque component sweep. The
+// matched key form is preserved byte-for-byte — only the value is rewritten
+// (#4161 fidelity contract, mirroring the single-level in-needle family).
+func TestRedactAccessTokenURLInNeedleNestedEscapes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		raw       string
+		wantExact string
+	}{
+		// The reviewer's exact example URL (overlap + nested-encoded '_').
+		{"query nested underscore", "http://h/?%access%255Ftoken=af-sentinel-nested-underscore", "http://h/?%access%255Ftoken=REDACTED"},
+		// Nested-encoded '=' (the trailing separator encoded twice through %25).
+		{"query nested equals", "http://h/?%access%5Ftoken%253Daf-sentinel-nested-equals", "http://h/?%access%5Ftoken%253DREDACTED"},
+		// Both needle characters nested: %25 inside the underscore AND the separator.
+		{"query nested underscore and equals", "http://h/?%access%255Ftoken%253Daf-sentinel-nested-underscore-equals", "http://h/?%access%255Ftoken%253DREDACTED"},
+		// Triple-nested: %25255F → %255F → %5F → '_'. Confirms arbitrarily deep
+		// nesting resolves in one pass and the matcher does not short-circuit
+		// abort at an intermediate %25.
+		{"query triple-nested underscore", "http://h/?%access%25255Ftoken=af-sentinel-triple-nested", "http://h/?%access%25255Ftoken=REDACTED"},
+		// --- component sweep mirroring TestRedactAccessTokenURLRedactsInNeedleComponent
+		// path: terminator set /;?# so a neighbour segment is kept verbatim.
+		{"path nested underscore neighbour kept", "http://h/p/%access%255Ftoken=af-sentinel-nested-path/neighbour", "http://h/p/%access%255Ftoken=REDACTED/neighbour"},
+		{"path nested semicolon terminator", "http://h/p/%access%255Ftoken=af-sentinel-nested-path;x", "http://h/p/%access%255Ftoken=REDACTED;x"},
+		{"fragment nested underscore", "http://h/p#%access%255Ftoken=af-sentinel-nested-fragment", "http://h/p#%access%255Ftoken=REDACTED"},
+		// opaque: terminator set is /;?# too; a trailing ;base64 keeps its place.
+		{"opaque nested underscore", "data:%access%255Ftoken=af-sentinel-nested-opaque;base64", "data:%access%255Ftoken=REDACTED;base64"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactAccessTokenURL(tc.raw)
+			if strings.Contains(got, "af-sentinel") {
+				t.Errorf("RedactAccessTokenURL(%q) = %q; sentinel survived", tc.raw, got)
+			}
+			if got != tc.wantExact {
+				t.Errorf("RedactAccessTokenURL(%q)\n  got  %q\n  want %q", tc.raw, got, tc.wantExact)
+			}
+		})
+	}
+}
