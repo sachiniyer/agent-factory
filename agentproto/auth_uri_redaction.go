@@ -54,7 +54,24 @@ func redactAccessTokenQueryPair(pair string) (string, bool) {
 	// Remaining query text may itself carry a URL or access_token field. Match
 	// that decoded logical text too, but project only the sensitive span back
 	// onto this original pair so neighbouring syntax stays byte-for-byte.
-	return redactPercentEncodedAccessTokenText(pair, true)
+	if redacted, found := redactPercentEncodedAccessTokenText(pair, true); found {
+		return redacted, true
+	}
+
+	// A valid %HH escape can overlap the leading characters of an otherwise
+	// literal access_token<...> substring (e.g. %access_token=SECRET, where
+	// %ac is a valid hex pair that consumes the 'a'). The decode-based matcher
+	// above collapses %ac to a single byte, so the decoded view's text no
+	// longer contains the access_token= needle, while the raw pair bytes
+	// still carry a literal access_token=<value> that net/url re-emits
+	// verbatim from RawQuery. Scan the raw pair directly: redactAccessToken
+	// split the query on its field separators before this is called, so a
+	// pair contains no & or ; and the value cannot extend into a
+	// neighbouring field.
+	if redacted, found := redactRawAccessTokenValue(pair, ""); found {
+		return redacted, true
+	}
+	return pair, false
 }
 
 // redactPercentEncodedAccessTokenText fully decodes a parser-proven URI
@@ -87,6 +104,50 @@ func percentDecodedBoundary(view redactx.View, offset, rawLength int) int {
 		return rawLength
 	}
 	return view.Source[offset].Start
+}
+
+// redactRawAccessTokenValue scans raw — a raw, pre-decode URI component or
+// query pair that net/url re-emits verbatim (RawQuery/RawPath/RawFragment,
+// Opaque) — for case-insensitive literal access_token= substrings and redacts
+// the value span following each one. The value ends at the first byte in
+// terminators, or at the end of raw when terminators is empty or none of its
+// bytes occurs after the '='.
+//
+// This is the raw-bytes mirror of accessTokenURIValueSpans. The decode-based
+// matcher in redactPercentEncodedAccessTokenText needs a literal access_token=
+// needle in the decoded view, but a valid %HH escape (e.g. %ac) can borrow its
+// literal characters from the very word it overlaps: %ac decodes to a single
+// byte 0xAC, so the decoded text loses access_token= while the raw bytes still
+// carry a literal access_token=<value>. Scanning the raw bytes catches the
+// overlap that the decoded view cannot, and only the spans the decoded
+// matcher missed see this code path (callers run the decoded scan first), so
+// this never reprocesses a span the structured pass already redacted.
+//
+// terminators is the component's structural separator set (/ ; ? # for path,
+// fragment, and opaque; empty for a query pair, whose separator was already
+// split out), so a value never claims a neighbouring field. The function is
+// iterative so the same component can carry more than one access_token field.
+func redactRawAccessTokenValue(raw, terminators string) (string, bool) {
+	needle := AccessTokenQueryParam + "="
+	found := false
+	for cursor := 0; cursor < len(raw); {
+		i := indexFoldASCII(raw[cursor:], needle)
+		if i < 0 {
+			return raw, found
+		}
+		i += cursor
+		valueStart := i + len(needle)
+		valueEnd := len(raw)
+		if terminators != "" {
+			if pos := strings.IndexAny(raw[valueStart:], terminators); pos >= 0 {
+				valueEnd = valueStart + pos
+			}
+		}
+		raw = raw[:valueStart] + accessTokenRedaction + raw[valueEnd:]
+		found = true
+		cursor = valueStart + len(accessTokenRedaction)
+	}
+	return raw, found
 }
 
 // accessTokenURIValueSpans consumes the rest of the parser-proven URI field.

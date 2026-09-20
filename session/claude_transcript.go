@@ -32,18 +32,51 @@ func InspectClaudeProjectConversations(program, workingDir string, recorded Agen
 	if err != nil {
 		return ClaudeProjectConversationState{}, err
 	}
-	projectDir := filepath.Join(configDir, "projects", claudeProjectName(launchDir))
-	entries, err := os.ReadDir(projectDir)
-	if os.IsNotExist(err) {
-		return ClaudeProjectConversationState{}, nil
-	}
+	transcripts, err := claudeProjectTranscripts(filepath.Join(configDir, "projects", claudeProjectName(launchDir)))
 	if err != nil {
 		return ClaudeProjectConversationState{}, err
 	}
-
+	conversation := func(id string) AgentConversationData {
+		return AgentConversationData{
+			Agent:       tmux.ProgramClaude,
+			ID:          id,
+			CapturedAt:  time.Now(),
+			CaptureKind: ConversationCaptureClaudeTranscript,
+		}
+	}
+	if recorded.Agent == tmux.ProgramClaude {
+		for _, transcript := range transcripts {
+			if strings.EqualFold(transcript.id, strings.TrimSpace(recorded.ID)) {
+				return ClaudeProjectConversationState{Resume: conversation(transcript.id), RecordedExists: true}, nil
+			}
+		}
+	}
 	state := ClaudeProjectConversationState{}
-	var latestName string
-	var latestModTime time.Time
+	if newest, ok := newestClaudeTranscript(transcripts); ok {
+		state.Resume = conversation(newest.id)
+	}
+	return state, nil
+}
+
+// claudeTranscript is one direct conversation file in a Claude project
+// directory.
+type claudeTranscript struct {
+	id      string
+	name    string
+	modTime time.Time
+}
+
+// claudeProjectTranscripts lists projectDir's direct, regular conversation
+// files. A missing directory has none.
+func claudeProjectTranscripts(projectDir string) ([]claudeTranscript, error) {
+	entries, err := os.ReadDir(projectDir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var transcripts []claudeTranscript
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -54,33 +87,29 @@ func InspectClaudeProjectConversations(program, workingDir string, recorded Agen
 		}
 		info, err := entry.Info()
 		if err != nil {
-			return ClaudeProjectConversationState{}, err
+			return nil, err
 		}
 		if !info.Mode().IsRegular() {
 			continue
 		}
-		id := match[1]
-		conversation := AgentConversationData{
-			Agent:       tmux.ProgramClaude,
-			ID:          id,
-			CapturedAt:  time.Now(),
-			CaptureKind: ConversationCaptureClaudeTranscript,
-		}
-		if recorded.Agent == tmux.ProgramClaude && strings.EqualFold(id, strings.TrimSpace(recorded.ID)) {
-			return ClaudeProjectConversationState{
-				Resume:         conversation,
-				RecordedExists: true,
-			}, nil
-		}
-		if latestName != "" && (info.ModTime().Before(latestModTime) ||
-			(info.ModTime().Equal(latestModTime) && entry.Name() < latestName)) {
+		transcripts = append(transcripts, claudeTranscript{id: match[1], name: entry.Name(), modTime: info.ModTime()})
+	}
+	return transcripts, nil
+}
+
+// newestClaudeTranscript picks the most recently written transcript, breaking
+// an exact tie by the greater file name.
+func newestClaudeTranscript(transcripts []claudeTranscript) (claudeTranscript, bool) {
+	var newest claudeTranscript
+	found := false
+	for _, transcript := range transcripts {
+		if found && (transcript.modTime.Before(newest.modTime) ||
+			(transcript.modTime.Equal(newest.modTime) && transcript.name < newest.name)) {
 			continue
 		}
-		latestName = entry.Name()
-		latestModTime = info.ModTime()
-		state.Resume = conversation
+		newest, found = transcript, true
 	}
-	return state, nil
+	return newest, found
 }
 
 func claudeTranscriptLaunchContext(command, workingDir string) (string, string, error) {

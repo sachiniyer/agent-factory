@@ -1264,12 +1264,13 @@ accumulate silently on a machine running agent-factory:
     os.Remove rather than a recursive delete, so a directory that has gained
     anything since the scan fails instead of being swept up with it
   - directories af's own test harness left under the temp dir when a test run
-    ended before its cleanup (af-test-home-*, af-tmux-pkg-*, af-tmux-*). --fix
-    removes one only when it holds nothing but that run's log or tmux sockets
-    nobody answers on, has not changed for a week, and no live process has a
-    file open in it, names it, or works inside it — entry by entry with
-    os.Remove, never a recursive delete. Anything else in one is reported, and a
-    tmux server still answering in one is named rather than stopped
+    ended before its cleanup (af-test-home-*, af-test-user-home-*,
+    af-tmux-pkg-*, af-tmux-*, ...). --fix removes one only when it holds
+    nothing but that run's leftover harness content, has not changed for a
+    week, and no live process has a file open in it, names it, or works
+    inside it — entry by entry with os.Remove, never a recursive delete.
+    Anything else in one is reported, and a tmux server still answering in
+    one is named rather than stopped
   - daemon health: control socket, autostart unit, pid file, binary freshness
   - client/daemon version skew, and the ways a stale daemon survives an
     upgrade: a second daemon on this home, an autostart unit launching a
@@ -1839,19 +1840,25 @@ A manual handoff moves an explicit account pin; automatic rotation still
 respects it. Targets with current usage-limit evidence are refused.
 
 The session keeps its identity, its git worktree, and its branch — only the
-agent process changes. The incoming agent starts a fresh conversation and is
+agent process changes. A different agent starts a fresh conversation and is
 given a mission brief: the session's goal, and what is already on the branch.
+
+A same-agent account handoff (--account alone, or --to naming the current
+agent) keeps the conversation for claude and codex: af copies the transcript
+into the new account's home and resumes it. If that copy cannot be made, the
+new account starts a fresh conversation, and its brief says why.
 
 This is the answer to an agent that has stopped and cannot continue — most often
 one blocked at its provider's usage limit, where the alternative is waiting for
 the window to reset (see 'af sessions list' for a [limit] badge, and
 docs/usage-limits.md for the waiting path).
 
-Agent conversations are not portable between providers: the incoming agent
-cannot read what its predecessor was thinking, only the working tree and the git
-history. The brief points it at both. Because of that, a handoff is recorded —
-the swap and the branch tip at the moment it happened — so a reviewer reading
-the resulting diff can tell which agent wrote which part.
+Agent conversations are not portable between providers: after a cross-agent
+handoff the incoming agent cannot read what its predecessor was thinking, only
+the working tree and the git history. The brief points it at both. Because of
+that, a handoff is recorded — the swap and the branch tip at the moment it
+happened — so a reviewer reading the resulting diff can tell which agent wrote
+which part.
 
 Local-worktree sessions only: swapping the agent inside a remote/docker/ssh
 sandbox is a different lifecycle and is not supported yet.
@@ -2142,7 +2149,19 @@ canonical kind and name, while "Terminal" is only the label those UIs display.
 
 Process tab (default): runs --command in the session's git worktree (e.g. a data
 explorer TUI or a test watcher). If --name is omitted, a name is derived from the
-command's basename.
+command's basename. The command runs once, at creation, and af never runs it
+again. If it exits non-zero immediately (a mistyped command, for example),
+tab-create fails with the exit status and the command's last output, and no tab
+is added. Across a daemon/af restart, af reattaches to the pane: a running
+command keeps running, and a finished one keeps its output and records its exit
+status in the tab's "exit" field. A process tab whose tmux session is gone
+entirely restores inert.
+
+In an account-scoped session, af stops a running process tab it did not start
+under the session's account, once, at restart; an account swap stops every
+running process tab. Neither runs the command again, and the tab's exit.stopped_by
+says why ("account-scope" or "account-swap"). A finished process tab with nothing
+left running is kept as it is.
 
 Web tab (--kind web): a URL/iframe tab with NO process — an agent injects a live
 browser view into the user's screen. Point it at a local dev server with --port
@@ -2152,7 +2171,9 @@ preview works even when the web UI is viewed remotely (Tailscale/SSH); an extern
 URL is iframed directly (best-effort — many sites block embedding). The web tab
 renders as an iframe in the web UI and as a placeholder in the TUI.
 
-The tab persists and reconnects across a daemon/af restart like every other tab.
+The tab persists and reconnects across a daemon/af restart like every other
+tab — for a process tab "reconnect" means reattach-only, never re-running the
+command (see above).
 
 --name sets a process, web, or VS Code tab's name — the handle every other tab
 verb addresses it by. A shell tab does not accept --name: its canonical name is
