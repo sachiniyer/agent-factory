@@ -1131,10 +1131,10 @@ function openDeleteProject(root: string, label: string): void {
         const m = modal;
         m.setBusy(true);
         void deleteProject(root, tok)
-          .then(closeModal)
+          .then(() => { if (modal === m) closeModal(); })
           .catch((e) => {
             if (isMutationCommittedError(e)) {
-              closeModal();
+              if (modal === m) closeModal();
               requestResync();
               refreshRegisteredProjects();
               surfaceTabError(e);
@@ -1187,7 +1187,7 @@ function openAddProject(): void {
         const m = modal;
         m.setBusy(true);
         void registerProject(path, tok)
-          .then(closeModal)
+          .then(() => { if (modal === m) closeModal(); })
           .catch((e) => {
             m.setBusy(false);
             m.setError(errorText(e));
@@ -1733,13 +1733,23 @@ function doRegisterAccount(agent: string, name: string): void {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   void registerAccountRPC(agent, name, tok)
     .then((resp) => {
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        // Stale connection: suppress the row status, but still reconcile the
+        // current session's account view — the registration succeeded and the
+        // daemon's account list changed; an open config view would otherwise
+        // show the pre-registration state until the user leaves and re-enters.
+        refreshAccounts();
+        return;
+      }
       const notices = resp.notices?.length ? ` · ${resp.notices.join(" · ")}` : "";
       setAccountStatus(agent, "", `Registered ${agent} account "${resp.entry.name}"${notices}`, false);
       refreshAccounts();
     })
     .catch((err: unknown) => {
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
       setAccountStatus(agent, "", errorText(err), true);
     });
 }
@@ -1762,9 +1772,16 @@ function doOpenAccountLogin(agent: string, name: string): void {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   setAccountStatus(agent, name, `Starting the ${agent} login…`, false);
   void startAccountLogin(agent, name, tok)
     .then((login) => {
+      // A disconnect during AccountLogin's RPC leaves accountLogin null for the
+      // reaper; a stale response would mount an orphan overlay bound to tok into
+      // the detached modalHost (reused by the next AppShell), which reappears on
+      // reconnect. Commit only while the same connection generation and credential
+      // are still installed — the same gate openConfirm's restore branch uses.
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
       if (login.finished || login.session_name === "") {
         const copy = loginWithoutPaneCopy(login);
         setAccountStatus(agent, name, `${copy.status} · ${copy.detail}`, !login.logged_in);
@@ -1784,6 +1801,10 @@ function doOpenAccountLogin(agent: string, name: string): void {
       }));
     })
     .catch((err: unknown) => {
+      // The complementary await-exit takes the same gate: a rejection that
+      // lands across a disconnect must not write the dead connection's error
+      // onto the row.
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
       setAccountStatus(agent, name, errorText(err), true);
     });
 }
@@ -1813,8 +1834,17 @@ function applyConfigValue(key: string, value: string): void {
 }
 
 function applyConfigValueNow(key: string, value: string, tok: string): Promise<void> {
+  const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok)
     .then((resp) => {
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        // Stale connection: suppress the status write, but still reconcile the
+        // current session's config view — the write committed and the daemon
+        // holds the new value; an open config view would otherwise display the
+        // pre-write state until the user leaves and re-enters.
+        refreshConfig();
+        return;
+      }
       store.set({
         configStatus: {
           key: resp.result.key,
@@ -1827,6 +1857,7 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
       refreshConfig();
     })
     .catch((err: unknown) => {
+      if (requestGeneration !== connectionGeneration || token !== tok) return;
       store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
     });
 }
@@ -1990,12 +2021,14 @@ function openAddTask(): void {
         m.setBusy(true);
         void addTask(buildTask(input), tok)
           .then(() => {
-            closeModal();
+            // An RPC that resolves across a reconnect must not close whatever
+            // modal the NEW connection has open — only ours.
+            if (modal === m) closeModal();
             refreshTasks();
           })
           .catch((e) => {
             if (isMutationCommittedError(e)) {
-              closeModal();
+              if (modal === m) closeModal();
               refreshTasks();
               surfaceTabError(e);
               return;
@@ -2050,12 +2083,12 @@ function openEditTask(task: TaskData): void {
           tok,
         )
           .then(() => {
-            closeModal();
+            if (modal === m) closeModal();
             refreshTasks();
           })
           .catch((e) => {
             if (isMutationCommittedError(e)) {
-              closeModal();
+              if (modal === m) closeModal();
               refreshTasks();
               surfaceTabError(e);
               return;
@@ -2171,7 +2204,9 @@ function doHandoff(): void {
         const m = modal;
         m.setBusy(true);
         void handoffSession(target.id, target.title, to, tok, account)
-          .then(closeModal)
+          .then(() => {
+            if (modal === m) closeModal();
+          })
           .catch((e) => {
             if (isMutationCommittedError(e)) {
               if (modal === m) closeModal();
@@ -2198,7 +2233,7 @@ function doRemoveTask(task: TaskData): void {
     if (!modal || token !== tok) return;
     const handle = modal;
     handle.setBusy(true);
-    void removeTask(task, tok).then(() => { closeModal(); return refreshTasks(); })
+    void removeTask(task, tok).then(() => { if (modal === handle) closeModal(); return refreshTasks(); })
       .catch((error) => { handle.setBusy(false); handle.setError(errorText(error)); });
   }, closeModal));
 }

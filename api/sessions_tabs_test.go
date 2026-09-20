@@ -244,6 +244,105 @@ func TestSessionsTabCreateMissingCommandNamesShellAlternative(t *testing.T) {
 	}
 }
 
+// TestSessionsTabCreateProcessRejectsTargets makes the default (process) arm
+// fail closed the way the shell and vscode arms do: AddProcessTab takes only a
+// command and name, so --url/--port have no field to land in and the daemon
+// drops them silently. Before this guard, `af sessions tab-create s --command
+// 'npm run dev' --port 3000` succeeded with a process tab and the --port was
+// invisible on every post-hoc surface (CreateTabResponse and the persisted Tab
+// carry no Port field). The CLI now rejects --url/--port before success instead
+// of forwarding a request whose target half the dispatcher cannot honor.
+func TestSessionsTabCreateProcessRejectsTargets(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, url string
+		port               int
+		want               string
+	}{
+		{name: "url", command: "npm run dev", url: "http://localhost:3000", want: "--url/--port"},
+		{name: "port", command: "npm run dev", port: 3000, want: "--url/--port"},
+		{name: "urlAndPort", command: "npm run dev", url: "http://localhost:3000", port: 3000, want: "--url/--port"},
+		{name: "externalURL", command: "npm run dev", url: "https://example.com", want: "--url/--port"},
+		{name: "whitespaceURLWithPort", command: "npm run dev", url: "   ", port: 3000, want: "--url/--port"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setTabCreateFlagsForTest(t, tc.command, "", "", tc.url, tc.port)
+
+			called := false
+			previousCreate := createTabViaDaemon
+			createTabViaDaemon = func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+				called = true
+				return daemon.CreateTabResponse{}, nil
+			}
+			defer func() { createTabViaDaemon = previousCreate }()
+
+			err := sessionsTabCreateCmd.RunE(sessionsTabCreateCmd, []string{"worker"})
+			if err == nil {
+				t.Fatalf("process with %s returned nil, want an error", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("process with %s error = %v, want an error containing %q", tc.name, err, tc.want)
+			}
+			if called {
+				t.Fatalf("process with invalid %s reached the daemon", tc.name)
+			}
+		})
+	}
+}
+
+// TestSessionsTabCreateProcessCommandOnlyStillSucceeds guards the happy path the
+// new --url/--port guard wraps: a process tab created with --command alone (or
+// with only whitespace where --url would go, which trims to absent, as the
+// shell/vscode arms treat it) must still reach the daemon with the command
+// preserved and empty URL/Port, so the guard tightened the no-target rule
+// without breaking the command-only shape.
+func TestSessionsTabCreateProcessCommandOnlyStillSucceeds(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, url string
+	}{
+		{name: "commandOnly", command: "npm run dev", url: ""},
+		{name: "commandWithWhitespaceURL", command: "npm run dev", url: "   "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repoID := setupRepoForCmd(t)
+			setTabCreateFlagsForTest(t, tc.command, "", "", tc.url, 0)
+
+			var gotReq daemon.CreateTabRequest
+			prevCreate := createTabViaDaemon
+			createTabViaDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+				gotReq = req
+				return daemon.CreateTabResponse{Name: "npm"}, nil
+			}
+			defer func() { createTabViaDaemon = prevCreate }()
+
+			out, err := runCmdCaptureStdout(t, sessionsTabCreateCmd, []string{"worker"})
+			if err != nil {
+				t.Fatalf("tab-create --command returned error: %v", err)
+			}
+			if gotReq.Command != "npm run dev" || gotReq.Title != "worker" || gotReq.RepoID != repoID {
+				t.Fatalf("process request = %+v, want command=npm\\ run\\ dev title=worker repo_id=%q", gotReq, repoID)
+			}
+			if gotReq.Shell || gotReq.Kind != "" {
+				t.Fatalf("process request grew a kind/shell path: %+v", gotReq)
+			}
+			// The guard rejects a meaningful (--url/--port) target; a whitespace-only
+			// --url trims to absent and is forwarded raw (mirroring the shell/vscode
+			// arms), so assert no non-whitespace target is carried rather than an
+			// exactly-empty URL string.
+			if strings.TrimSpace(gotReq.URL) != "" || gotReq.Port != 0 {
+				t.Fatalf("process request carried a target: URL=%q Port=%d", gotReq.URL, gotReq.Port)
+			}
+
+			var parsed map[string]string
+			if err := json.Unmarshal(out, &parsed); err != nil {
+				t.Fatalf("output is not JSON (%q): %v", string(out), err)
+			}
+			if parsed["name"] != "npm" {
+				t.Fatalf("JSON name = %q, want npm", parsed["name"])
+			}
+		})
+	}
+}
+
 // CLI seam tests for tab-rename/tab-reorder (#1813). They pin the two things the
 // cobra layer owns and the daemon cannot check on its behalf: that --repo
 // scoping reaches the request (#891 class — otherwise a same-titled session in

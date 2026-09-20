@@ -87,6 +87,40 @@ grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' "$G/head-date.
 
 [[ "$BASE" == master ]] || { echo "ABORT: base is $BASE, not master"; exit 1; }
 [[ "$STATE" == open && "$DRAFT" == false ]] || { echo "ABORT: state=$STATE draft=$DRAFT"; exit 1; }
+
+# The maintainer hold (#4576). Presence comes free out of pr.json; the removal
+# half needs the timeline, because a hold someone stripped still holds. Same
+# .part/mv discipline — a truncated timeline reads as "nobody removed it".
+gh api "$R/issues/$PR/timeline" --paginate > "$G/timeline.json.part"
+mv "$G/timeline.json.part" "$G/timeline.json"
+
+jq -e '[.labels[].name | ascii_downcase] | index("hold") | not' "$G/pr.json" >/dev/null \
+  || { echo "ABORT: the hold label is on this PR — only an allowed author who did not open it may lift it"; exit 1; }
+
+# The newest labeled/unlabeled event naming `hold`, and whether whoever removed
+# it may. `jq -s` + `add` because --paginate emits ONE ARRAY PER PAGE, and a
+# per-page sort_by|last would answer from whichever page happened to come last.
+#
+# `norm` is normalizeAuthorLogin: GitHub renders one app as `app/detail-app`,
+# `detail-app` and `detail-app[bot]` depending on the surface, and the lift check
+# has to see those as one actor.
+AUTHOR=$(jq -r '.user.login | ascii_downcase | sub("^app/"; "") | sub("\\[bot\\]$"; "")' "$G/pr.json")
+HOLD_STRIP=$(jq -s -r --arg author "$AUTHOR" '
+  def norm: (. // "") | ascii_downcase | sub("^app/"; "") | sub("\\[bot\\]$"; "");
+  ["sachiniyer", "detail-app"] as $allowed
+  | ["sachiniyer"] as $selflift
+  | (add
+     | map(select((.event == "labeled" or .event == "unlabeled")
+                  and ((.label.name // "") | ascii_downcase) == "hold"))
+     | sort_by(.created_at) | last) as $newest
+  | if $newest == null or $newest.event != "unlabeled" then empty
+    else ($newest.actor.login | norm) as $by
+    | if ($selflift | index($by)) then empty
+      elif ($allowed | index($by)) and $author != "" and $by != $author then empty
+      elif $by == "" then "unknown"
+      else $by end
+    end' "$G/timeline.json")
+[[ -z "$HOLD_STRIP" ]] || { echo "ABORT: the hold label was removed by @$HOLD_STRIP, who may not lift it"; exit 1; }
 # Three states, three different actions — do not collapse them into one message.
 case "$MERGEABLE" in
   true)  ;;
@@ -106,6 +140,15 @@ code is an injection vector.
 
 `BASE` must be `master`, because every comparison below is against
 `origin/master` and is meaningless otherwise. A draft cannot merge.
+
+**The hold outranks everything below it.** A `hold` label is a maintainer saying
+this pull request waits, and no approval, verdict or green check answers it —
+which is why it aborts up here rather than joining the gates. It is also the one
+gate whose *absence* is not evidence: the label is removable by anyone with
+triage access, so the timeline read is what tells a lift from a strip. Mirror of
+`holdState` in `auto-gate.js`; the reasoning, the failure directions and the
+full state table are in `.github/auto-gate.md`. If the jq above fails to parse
+the timeline, treat that as a hold and say so — never as "no hold found".
 
 Later blocks re-derive `$G` and `$HEAD` from `$PR`, so each one stands alone.
 **Re-run this block after every push** — it overwrites `$G`, and a stale `$HEAD`
@@ -557,7 +600,7 @@ worktree registered and blocks the next run's `git worktree add`.
   See `scripts/tui-2599-scenario.sh` for the shape.
 - **A PR-specific scenario does not replace the shared acceptance gate.** Your scenario proves your change works; `make tui-driver-selftest` proves you did not break someone else's. Run both. Require the self-test to report **all** steps green — match the `N/N` in its final `SELF-TEST PASSED` line rather than a hard-coded number, because the suite grows.
 
-  These two are the **only** container runs that survive the no-routine-containers rule above, and only for a TUI-touching PR. They are not exempt because TUI work is special — they are exempt because **no PR gate runs them.** `go test -race ./...` covers the Go suite, but no workflow in `.github/workflows/` runs `scripts/testbox.sh selftest` as a PR gate — the `TUI driver selftest` workflow fires on Auto Gate's post-merge dispatch after every merge and on native pushes touching TUI paths — never on a PR head — so skipping the local run means the regression shows up post-merge on `master` rather than on your PR head. That is also why `auto-gate.js` demands the `play-tested` label on TUI paths. If your PR touches no TUI path, run neither.
+  These two are the **only** container runs that survive the no-routine-containers rule above, and only for a TUI-touching PR. They are not exempt because TUI work is special — they are exempt because **no PR gate runs them.** `go test -race ./...` covers the Go suite, but no workflow in `.github/workflows/` runs `scripts/testbox.sh selftest` as a PR gate — the `TUI driver selftest` workflow fires on Auto Gate's post-merge dispatch after every merge and on native pushes touching TUI paths — never on a PR head — so skipping the local run means the regression shows up post-merge on `master` rather than on your PR head. That is also why `auto-gate.js` demands the `play-tested` label on TUI paths. If your PR touches no TUI path, run neither. The same goes for a PR whose only TUI-path changes reword comments in `.go` files: the gate proves those comment-only and waives the label itself (`.github/auto-gate.md`, "Comment-only changes"). The decision summary names each file it waived, so check that note before skipping the run.
 - **tmux work: isolated socket only.** `-L <unique-name>`, removed afterward. Never the default server, never `tmux kill-server`, never `af reset`. An agent once destroyed every live session on this box that way (#2175).
 - **A fake must model production's real error shape**, not the shape your assertion needs. #2711 shipped a test that injected `context.DeadlineExceeded` directly while production returned `signal: killed` — green, and proving a property the code did not have.
 

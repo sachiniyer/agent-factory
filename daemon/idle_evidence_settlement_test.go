@@ -69,9 +69,10 @@ func TestSuccessfulLimitResumePersistFailureIsRetried(t *testing.T) {
 	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
 	failedWrites, seen, heal := fullDiskFor(t, inst.Title, errors.New("disk full"))
 
-	require.NoError(t, manager.resumeFromLimit(ResumeFromLimitRequest{
+	_, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{
 		Title: inst.Title, RepoID: repoID,
-	}))
+	})
+	require.NoError(t, err)
 	require.NotZero(t, failedWrites(), "test failed no write; saw %s", seen())
 	rec := recordFor(t, repoID, inst.Title)
 	require.True(t, rec.LastPromptAttemptAt.IsZero(),

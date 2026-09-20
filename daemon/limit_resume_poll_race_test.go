@@ -238,7 +238,7 @@ func TestResumeFromLimit_ConcurrentPollCannotRevertResume(t *testing.T) {
 
 	// The resume lands between the poll's capture and the poll's decision.
 	backend.setHook(func() {
-		if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "limited", RepoID: repoID}); err != nil {
+		if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "limited", RepoID: repoID}); err != nil {
 			t.Errorf("resumeFromLimit: %v", err)
 		}
 	})
@@ -283,7 +283,7 @@ func TestRefreshStatuses_GenuineLimitHitAfterResumeStillParks(t *testing.T) {
 	manager.persistInstance(repoID, inst)
 
 	backend.setHook(func() {
-		if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "limited", RepoID: repoID}); err != nil {
+		if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "limited", RepoID: repoID}); err != nil {
 			t.Errorf("resumeFromLimit: %v", err)
 		}
 	})
@@ -340,7 +340,7 @@ func TestPersistPollChange_ResumeDuringWriteWindowIsNotOverwritten(t *testing.T)
 			return
 		}
 		once = true
-		if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "limited", RepoID: repoID}); err != nil {
+		if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "limited", RepoID: repoID}); err != nil {
 			t.Errorf("resumeFromLimit: %v", err)
 		}
 	}

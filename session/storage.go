@@ -657,6 +657,31 @@ type TabData struct {
 	// indistinguishable from a session that was never handed off — and those two
 	// deserve the same treatment, so nothing has to be backfilled.
 	Handoffs []AgentHandoff `json:"handoffs,omitempty"`
+	// Exit records how a process tab's command ended (#4479): the pane was seen
+	// dead, not merely missing, or af stopped it and says why. nil for tabs af
+	// never saw finish — the load path maps that to "still in flight", never to
+	// "re-run me".
+	Exit *TabExitData `json:"exit,omitempty"`
+	// AccountScope is the account af launched this tab's pane under (#4506
+	// review). A sibling whose recorded scope is not the session's account is
+	// stopped once at load, because its pane may run on another identity. Empty
+	// for a pane launched on the ambient identity, and for rows written before
+	// this field existed.
+	AccountScope string `json:"account_scope,omitempty"`
+}
+
+// TabExitData is the wire form of Tab.Exit: only the fields a reader needs to
+// render or reason about a finished command.
+type TabExitData struct {
+	Status      int  `json:"status,omitempty"`
+	StatusKnown bool `json:"status_known,omitempty"`
+	// At is omitted, not zero-valued, when tmux reported no death time:
+	// omitempty never omits a struct, and "0001-01-01T00:00:00Z" would present
+	// an invented completion time to every reader (#4506 review).
+	At time.Time `json:"at,omitzero"`
+	// StoppedBy is set when af stopped the command rather than it exiting:
+	// "account-scope" or "account-swap" (#4506 review).
+	StoppedBy string `json:"stopped_by,omitempty"`
 }
 
 // TabCleanupData is one durable cleanup handle for a closed tab whose tmux
