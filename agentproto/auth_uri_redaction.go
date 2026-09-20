@@ -54,21 +54,37 @@ func redactAccessTokenQueryPair(pair string) (string, bool) {
 	// Remaining query text may itself carry a URL or access_token field. Match
 	// that decoded logical text too, but project only the sensitive span back
 	// onto this original pair so neighbouring syntax stays byte-for-byte.
-	if redacted, found := redactPercentEncodedAccessTokenText(pair, true); found {
-		return redacted, true
-	}
-
+	//
 	// A valid %HH escape can overlap the leading characters of an otherwise
 	// literal access_token<...> substring (e.g. %access_token=SECRET, where
 	// %ac is a valid hex pair that consumes the 'a'). The decode-based matcher
-	// above collapses %ac to a single byte, so the decoded view's text no
-	// longer contains the access_token= needle, while the raw pair bytes
-	// still carry a literal access_token=<value> that net/url re-emits
-	// verbatim from RawQuery. Scan the raw pair directly: redactAccessToken
-	// split the query on its field separators before this is called, so a
-	// pair contains no & or ; and the value cannot extend into a
-	// neighbouring field.
-	if redacted, found := redactRawAccessTokenValue(pair, ""); found {
+	// collapses %ac to a single byte, so the decoded view's text no longer
+	// contains the access_token= needle, while the raw pair bytes still carry
+	// a literal access_token=<value> that net/url re-emits verbatim from
+	// RawQuery. Scan the raw pair directly: redactAccessToken split the query
+	// on its field separators before this is called, so a pair contains no &
+	// or ; and the value cannot extend into a neighbouring field.
+	//
+	// The two scans are composed rather than treated as mutually exclusive
+	// fallback branches: a single pair can carry an earlier overlap-escape
+	// occurrence (only the raw scan sees it) plus a later literal
+	// access_token= (the decoded scan sees it first), and returning as soon as
+	// one pass matched would leave the earlier value in the bytes net/url
+	// re-emits. Each pass redacts a suffix following an access_token= key, and
+	// the sentinel is not itself an access_token= key, so running the raw scan
+	// over the decoded-redacted result only adds redactions or idempotently
+	// rewrites the sentinel — it never leaves a credential in place.
+	redacted := pair
+	found := false
+	if r, f := redactPercentEncodedAccessTokenText(pair, true); f {
+		redacted = r
+		found = true
+	}
+	if r, f := redactRawAccessTokenValue(redacted, ""); f {
+		redacted = r
+		found = true
+	}
+	if found {
 		return redacted, true
 	}
 	return pair, false
@@ -119,9 +135,11 @@ func percentDecodedBoundary(view redactx.View, offset, rawLength int) int {
 // literal characters from the very word it overlaps: %ac decodes to a single
 // byte 0xAC, so the decoded text loses access_token= while the raw bytes still
 // carry a literal access_token=<value>. Scanning the raw bytes catches the
-// overlap that the decoded view cannot, and only the spans the decoded
-// matcher missed see this code path (callers run the decoded scan first), so
-// this never reprocesses a span the structured pass already redacted.
+// overlap that the decoded view cannot. Callers run the decoded scan first;
+// a caller may run this scan over the decoded-redacted result so an earlier
+// overlap is not left in place when a later literal field was redacted
+// first. Reprocessing a redacted span is idempotent — the sentinel is not
+// itself an access_token= key, so the raw scan neither extends nor escapes it.
 //
 // The matcher additionally tolerates a valid percent escape anywhere INSIDE
 // the needle — single (%5F) or NESTED through an extra %25 (e.g. %255F for
@@ -209,45 +227,54 @@ func matchAccessTokenNeedleRaw(raw string, cursor int, needle string) (keyEnd in
 
 // matchPercentEscapeRaw reports whether raw[pos:] contains a percent escape
 // that decodes — through arbitrarily nested percent encoding, the same way
-// redactx.PercentDecode resolves %255F to '_' via %25→'%' then %5F→'_' — to a
-// single byte equal to want (case-insensitively in ASCII). It returns the raw
-// byte position after the escape, or ok=false when raw[pos] is not a percent
+// redactx.PercentDecode resolves %255F to '_' via %25→'%' then %5F→'_', and
+// %25%35%46 to '_' via %25→'%', %35→'5', %46→'F' then %5F→'_' — to a single
+// byte equal to want (case-insensitively in ASCII). It returns the raw byte
+// position after the escape, or ok=false when raw[pos] is not a percent
 // escape, the escape is malformed, or it decodes to a byte other than want.
 //
-// The outer level consumes a leading '%' plus two hex digits (3 bytes for
-// %HH); each deeper level consumes two more raw hex digits because the prior
-// level's decoded '%' is the next level's prefix, with no extra '%' in the
-// raw input — exactly the reducing-stack mechanism in
-// redactx.PercentDecode. A malformed '%' at any level (fewer than two hex
-// digits following, or a non-hex byte) aborts the candidate, preserving the
-// fail-open-on-reserved behaviour the #4663 %ac family relies on: the
-// leading '%' is left untouched and the value is matched from the literal
-// tail that survives the collapse.
+// The mechanism is a reducing stack modelled on redactx.PercentDecode: push
+// raw bytes (the outer application/x-www-form-urlencoded grammar is already
+// stripped by the caller, so '+' stays a literal) and collapse the trailing
+// %HH triple to its decoded byte whenever it appears. That resolves nested
+// escapes uniformly whether the deeper level's hex digits are contiguous raw
+// bytes (%255F, %25255F) or each themselves a %HH whose decoded byte is a hex
+// digit (%25%35%46), matching redactx.PercentDecode's reducing-stack
+// semantics so an in-needle character spelled either way is matched. A
+// malformed '%' (no reducible %HH emerging from the following bytes) leaves
+// the stack unable to collapse to a single non-'%' byte, so the candidate
+// aborts, preserving the fail-open-on-reserved behaviour the #4663 %ac
+// family relies on: the leading '%' is left untouched and the value is
+// matched from the literal tail that survives the collapse.
 func matchPercentEscapeRaw(raw string, pos int, want byte) (newPos int, ok bool) {
-	if pos+3 > len(raw) || raw[pos] != '%' {
+	if pos >= len(raw) || raw[pos] != '%' {
 		return 0, false
 	}
-	hi, hiOK := hexValue(raw[pos+1])
-	lo, loOK := hexValue(raw[pos+2])
-	if !hiOK || !loOK {
-		return 0, false
-	}
-	decoded := hi<<4 | lo
-	consumed := 3
-	for decoded == '%' {
-		if pos+consumed+2 > len(raw) {
+	stack := make([]byte, 0, 4)
+	for i := pos; i < len(raw); i++ {
+		stack = append(stack, raw[i])
+		for len(stack) >= 3 {
+			start := len(stack) - 3
+			if stack[start] != '%' {
+				break
+			}
+			hi, hiOK := hexValue(stack[start+1])
+			lo, loOK := hexValue(stack[start+2])
+			if !hiOK || !loOK {
+				break
+			}
+			stack = append(stack[:start], hi<<4|lo)
+		}
+		// The escape resolves to a single decoded byte once the stack
+		// collapses to one element that is not itself a pending '%'. A
+		// pending '%' may still combine with following bytes (deeper
+		// nesting), so it is not complete yet.
+		if len(stack) == 1 && stack[0] != '%' {
+			if equalFoldASCII(stack[0], want) {
+				return i + 1, true
+			}
 			return 0, false
 		}
-		deepHi, deepHiOK := hexValue(raw[pos+consumed])
-		deepLo, deepLoOK := hexValue(raw[pos+consumed+1])
-		if !deepHiOK || !deepLoOK {
-			return 0, false
-		}
-		decoded = deepHi<<4 | deepLo
-		consumed += 2
-	}
-	if equalFoldASCII(decoded, want) {
-		return pos + consumed, true
 	}
 	return 0, false
 }

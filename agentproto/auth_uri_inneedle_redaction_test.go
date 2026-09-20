@@ -437,3 +437,97 @@ func TestRedactAccessTokenURLInNeedleNestedEscapes(t *testing.T) {
 		})
 	}
 }
+
+// TestRedactAccessTokenURLInNeedleSeparatedNestedEscapes pins the
+// percent-tolerant raw matcher's handling of nested in-needle escapes whose
+// deeper hex digits are each themselves a %HH escape (e.g. %25%35%46, which
+// resolves through %25→'%', %35→'5', %46→'F' then %5F→'_'), the same
+// reducing-stack semantics redactx.PercentDecode uses. The contiguous form
+// (%255F) is covered by TestRedactAccessTokenURLInNeedleNestedEscapes; this
+// covers the separated form a single-level raw matcher (or the
+// two-raw-hex-digits-per-level loop) misses: the decoded sweep still misses
+// the leading-overlap %ac, and the raw bytes carry '%' rather than the
+// in-needle character, so without a reducing-stack matcher the credential
+// would leak. The matched key form is preserved byte-for-byte (e.g.
+// %access%25%35%46token= stays verbatim) — only the value is rewritten.
+func TestRedactAccessTokenURLInNeedleSeparatedNestedEscapes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		raw       string
+		wantExact string
+	}{
+		// Separately-encoded '_' (%25%35%46 → '_' through %25→'%', %35→'5',
+		// %46→'F', then %5F→'_').
+		{"query separated nested underscore", "http://h/?%access%25%35%46token=af-sentinel-separated-underscore", "http://h/?%access%25%35%46token=REDACTED"},
+		// Separately-encoded '=' (%25%33%44 → '=' through %25→'%', %33→'3',
+		// %44→'D', then %3D→'='), following a single-level %5F for '_'.
+		{"query separated nested equals", "http://h/?%access%5Ftoken%25%33%44af-sentinel-separated-equals", "http://h/?%access%5Ftoken%25%33%44REDACTED"},
+		// Both needle characters separately nested.
+		{"query separated nested underscore and equals", "http://h/?%access%25%35%46token%25%33%44af-sentinel-separated-both", "http://h/?%access%25%35%46token%25%33%44REDACTED"},
+		// Contiguous + separated nesting mixed: %25255F for '_' (contiguous
+		// two-level) and %25%33%44 for '=' (separated).
+		{"query mixed nested underscore and separated equals", "http://h/?%access%25255Ftoken%25%33%44af-sentinel-mixed-nesting", "http://h/?%access%25255Ftoken%25%33%44REDACTED"},
+		// --- component sweep mirroring TestRedactAccessTokenURLRedactsInNeedleComponent.
+		// path: terminator set /;?# keeps a neighbour segment verbatim; the
+		// raw scan runs because the decoded sweep misses the overlap.
+		{"path separated nested underscore neighbour kept", "http://h/p/%access%25%35%46token=af-sentinel-separated-path/neighbour", "http://h/p/%access%25%35%46token=REDACTED/neighbour"},
+		{"fragment separated nested underscore", "http://h/p#%access%25%35%46token=af-sentinel-separated-fragment", "http://h/p#%access%25%35%46token=REDACTED"},
+		{"opaque separated nested equals", "data:%access%5Ftoken%25%33%44af-sentinel-separated-opaque;base64", "data:%access%5Ftoken%25%33%44REDACTED;base64"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactAccessTokenURL(tc.raw)
+			if strings.Contains(got, "af-sentinel") {
+				t.Errorf("RedactAccessTokenURL(%q) = %q; sentinel survived", tc.raw, got)
+			}
+			if got != tc.wantExact {
+				t.Errorf("RedactAccessTokenURL(%q)\n  got  %q\n  want %q", tc.raw, got, tc.wantExact)
+			}
+		})
+	}
+}
+
+// TestRedactAccessTokenURLInNeedleOverlapComposedWithLiteral pins that the
+// decoded and raw scans are composed, not mutually exclusive. A single query
+// pair can carry an earlier overlap-plus-in-needle occurrence (only the raw
+// matcher sees it — the leading %ac collapses the 'a' out of the decoded
+// view) AND a later literal access_token= (the decoded matcher finds it
+// first). Returning as soon as the decoded pass matched would leave the
+// earlier occurrence's value in the bytes net/url re-emits from RawQuery.
+// The raw scan therefore runs over the decoded-redacted result too, catching
+// the earlier overlap. Both passes redact a suffix following an
+// access_token= key, so the raw scan only adds redactions (or idempotently
+// rewrites the sentinel) — never a credential.
+func TestRedactAccessTokenURLInNeedleOverlapComposedWithLiteral(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		raw       string
+		wantExact string
+	}{
+		// Single pair, no &/; : the overlap value and the later literal field
+		// both live in one pair's value span. The raw scan redacts from the
+		// overlap's '=' to the end of the pair, swallowing the literal field
+		// the decoded scan had redacted on its own.
+		{
+			name:      "query overlap before literal in one pair",
+			raw:       "http://h/?next=%access%5Ftoken=af-sentinel-comp/access_token=dummy",
+			wantExact: "http://h/?next=%access%5Ftoken=REDACTED",
+		},
+		// Same composition with a separated-nested in-needle escape, combining
+		// the reducing-stack matcher with the composed scans.
+		{
+			name:      "query separated-overlap before literal in one pair",
+			raw:       "http://h/?next=%access%25%35%46token=af-sentinel-comp/access_token=dummy",
+			wantExact: "http://h/?next=%access%25%35%46token=REDACTED",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactAccessTokenURL(tc.raw)
+			if strings.Contains(got, "af-sentinel") {
+				t.Errorf("RedactAccessTokenURL(%q) = %q; sentinel survived", tc.raw, got)
+			}
+			if got != tc.wantExact {
+				t.Errorf("RedactAccessTokenURL(%q)\n  got  %q\n  want %q", tc.raw, got, tc.wantExact)
+			}
+		})
+	}
+}
