@@ -139,6 +139,10 @@ func TestHandoffAccountRechecksChangedProgramOverrideUnderProjectLock(t *testing
 // which registry Selected consults. A namespace frozen at request time would
 // admit "personal" against claude's registry while the committed launch runs
 // codex — so the refusal must name codex, proving the locked pass re-resolved.
+// The request carries an explicit `--to claude`: an account-ONLY swap would
+// stay bound to the runtime's own claude namespace by design — the pane keeps
+// running the established command — while an explicit target is re-resolved
+// under the lock, and the flipped enum resolves to codex (#4430 review round 6).
 func TestHandoffAccountReresolvesAccountNamespaceUnderProjectLock(t *testing.T) {
 	m, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
 	configureLimitAccountCandidate(t, m, "personal") // registered under claude only
@@ -170,7 +174,7 @@ func TestHandoffAccountReresolvesAccountNamespaceUnderProjectLock(t *testing.T) 
 	handoffDone := make(chan error, 1)
 	go func() {
 		_, err := m.HandoffSession(HandoffSessionRequest{
-			Title: inst.Title, RepoID: repoID, Account: "personal",
+			Title: inst.Title, RepoID: repoID, To: tmux.ProgramClaude, Account: "personal",
 		})
 		handoffDone <- err
 	}()
