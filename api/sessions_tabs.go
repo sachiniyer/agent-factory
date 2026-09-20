@@ -138,6 +138,14 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 		if strings.TrimSpace(tabCreateCommandFlag) == "" {
 			return jsonError(fmt.Errorf("--command is required for a process tab (or pass --kind shell, --kind web with --url/--port, or --kind vscode)"))
 		}
+		// The process dispatcher (AddProcessTab) takes only a command and name,
+		// so --url/--port have no field to land in — the daemon drops them
+		// silently. Reject them here, as the shell/vscode arms do for their
+		// kinds, so the caller gets a flag-shaped error instead of a success
+		// with part of their input discarded.
+		if strings.TrimSpace(tabCreateURLFlag) != "" || tabCreatePortFlag != 0 {
+			return jsonError(fmt.Errorf("--url/--port are not valid for a process tab (default); use --kind web for a URL/iframe tab"))
+		}
 	}
 
 	// Honor --repo scoping (#891, same class as kill/send-prompt/attach). An
