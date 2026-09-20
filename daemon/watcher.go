@@ -629,7 +629,17 @@ func (w *taskWatcher) consumeLines(r io.Reader, tail *tailBuffer, stdoutWritersS
 		chunk, err := br.ReadSlice('\n')
 		switch {
 		case err == nil:
-			w.handleEvent(strings.TrimRight(string(chunk), "\r\n"), tail)
+			// The raw chunk can hold invalid UTF-8 (latin-1/binary noise) from a
+			// normal-sized newline-terminated line, the same corruption class the
+			// ErrBufferFull arm guards against above. The durable event queue
+			// persists the line via json.Marshal(queuedEvent{Line: line}), whose
+			// encoding/json rewrites invalid UTF-8 as U+FFFD in the replay .jsonl
+			// record (#863 class, exposed by #1129 when the durable queue wired
+			// raw stdout through JSON serialization, #4655). sanitizeUTF8 — a
+			// no-op on valid UTF-8, so ASCII/well-formed output is unchanged —
+			// drops the invalid bytes before they can route to json.Marshal via
+			// the delivery-failure or backlog-pending arm of handleEvent.
+			w.handleEvent(sanitizeUTF8(strings.TrimRight(string(chunk), "\r\n")), tail)
 		case errors.Is(err, bufio.ErrBufferFull):
 			// ReadSlice's buffer filled before a newline: keep the first
 			// maxWatchLineBytes as the event and discard the rest of the line.
