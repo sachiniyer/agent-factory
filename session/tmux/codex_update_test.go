@@ -45,6 +45,9 @@ const codexCurrentUpdatePickerSkipSelected = `  Update available · 0.0.0 → 9.
 
   enter continue · esc skip`
 
+const codexUpdatePickerHeaderAndURL = `  Update available · 0.0.0 → 9.9.9
+  Release notes: https://github.com/openai/codex/releases/latest`
+
 const codexClippedUpdatePicker = `  Update available · 0.0.0
   → 9.9.9
   Release notes:
@@ -129,6 +132,32 @@ func TestCheckAndHandleTrustPrompt_CodexUpdatePartialPickerHoldsWithoutInput(t *
 
 	require.True(t, handled, "a recognized picker without its footer is still a startup blocker")
 	require.Empty(t, sentKeystrokes(commands), "an incompletely rendered picker authorizes no input")
+}
+
+func TestCheckAndHandleTrustPrompt_CodexUpdateHeaderAndURLHoldWithoutInput(t *testing.T) {
+	handled, commands := runTrustPromptCheck(t, ProgramCodex, codexUpdatePickerHeaderAndURL)
+
+	require.True(t, handled, "picker-only evidence with a hidden cursor must block prompt delivery")
+	require.Empty(t, sentKeystrokes(commands), "a picker with no observable selected row authorizes no input")
+}
+
+func TestCheckAndHandleTrustPrompt_CodexUpdateWaitsForInitialPickerPaint(t *testing.T) {
+	session, commands := runTrustPromptSequence(t, ProgramCodex,
+		codexUpdatePickerHeaderAndURL,
+		codexUpdatePickerHeaderAndURL,
+		codexCurrentUpdatePicker,
+		codexCurrentUpdatePickerSkipSelected,
+	)
+
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Empty(t, sentKeystrokes(*commands), "the first partial frame authorizes no input")
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Empty(t, sentKeystrokes(*commands), "a persistent partial frame still authorizes no input")
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+		"tmux send-keys -t =af_trust: Enter",
+	}, sentKeystrokes(*commands), "navigation may proceed only after the selected row becomes observable")
 }
 
 func TestCheckAndHandleTrustPrompt_CodexUpdateTextWithVisibleCursorIsNotModal(t *testing.T) {

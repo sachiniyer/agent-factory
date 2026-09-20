@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -852,6 +853,19 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				return resumeNotPerformed, errors.Join(err, settleErr)
 			}
 			return resumeNotPerformed, err
+		}
+		if !shouldRespawn && instance.AgentRuntimeToken().Agent() == tmux.ProgramCodex &&
+			!instance.AgentConversation().HasID() {
+			// A daemon restart loses the pre-launch provider-store snapshot while
+			// preserving the live replacement pane. Baseline the shared account
+			// store now, after readiness and immediately before delivery, so the
+			// mission's rollout can be captured without mistaking an older or
+			// concurrently-created rollout from another session for this one (#4715).
+			accountConversationCapture, err = beginLiveAccountSwapConversationCapture(instance, accountSwap)
+			if err != nil {
+				return resumeNotPerformed, fmt.Errorf("cannot prepare post-delivery conversation capture for %q: %w", requestedTitle, err)
+			}
+			captureAccountConversationAfterDelivery = true
 		}
 	}
 

@@ -128,7 +128,7 @@ func (t *TmuxSession) inspectCodexUpdatePrompt(content string) (codexUpdateDialo
 	if cursor.Visible {
 		return codexUpdateDialog{}, false, false
 	}
-	return dialog, true, codexUpdateFooterEndsPane(content)
+	return dialog, true, dialog.selectedLabel != "" && codexUpdateFooterEndsPane(content)
 }
 
 // codexUpdatePromptCandidate recognizes both the original "Update available!"
@@ -163,7 +163,11 @@ func codexUpdatePromptCandidate(content string) (codexUpdateDialog, bool) {
 		}
 	}
 	if len(selectedLabels) != 1 {
-		return codexUpdateDialog{}, false
+		// Header plus the adjacent release-notes needle is picker-only evidence,
+		// but a partial repaint has no safe navigation target yet. Report the
+		// prompt as present so delivery remains blocked; inspectCodexUpdatePrompt
+		// makes it actionable only after exactly one selected row is visible.
+		return codexUpdateDialog{}, true
 	}
 	return codexUpdateDialog{selectedLabel: selectedLabels[0]}, true
 }

@@ -693,23 +693,50 @@ func TestResumeLimitedSessions_DeliversBeforeFreshCodexMintsRollout(t *testing.T
 // the durable retry shape from #4712: replacement_panes_started is already true,
 // the pane is live at an empty composer, and no rollout exists yet. Missing
 // pre-message conversation metadata is not proof the pane set is incomplete and
-// must not authorize another destructive respawn.
+// must not authorize another destructive respawn. The recovery attempt must
+// baseline the shared account store before delivery, then correlate the new
+// rollout by cwd and record its id for the next handoff (#4715).
 func TestResumeFromLimit_LiveStartedCodexSwapWithoutRolloutDeliversMission(t *testing.T) {
 	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", time.Time{})
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	accountHome, err := agentaccount.Register(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err)
 	inst.Program = tmux.ProgramCodex
 	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	worktree := filepath.Join(t.TempDir(), "live-codex-worktree")
+	require.NoError(t, os.MkdirAll(worktree, 0o755))
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		inst.Path, worktree, inst.Title, "live-codex-branch", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
 	inst.ReconcileAccountHandoffSnapshot("work", true, &session.AccountSwapData{
 		To:                      "work",
 		CarryFallback:           "af had no recorded codex conversation id for the previous session",
 		ReplacementPanesStarted: true,
 	})
+	writeDaemonCodexRolloutFileWithCwd(t, accountHome,
+		"rollout-2026-09-19T11-00-00-019f63f8-1111-7111-8111-111111111111.jsonl", worktree)
+	otherWorktree := filepath.Join(t.TempDir(), "other-codex-worktree")
+	backend.onPrompt = func(*session.Instance, string) {
+		writeDaemonCodexRolloutFileWithCwd(t, accountHome,
+			"rollout-2026-09-19T12-00-00-019f63f8-2222-7222-8222-222222222222.jsonl", otherWorktree)
+		writeDaemonCodexRolloutFileWithCwd(t, accountHome,
+			"rollout-2026-09-19T12-00-01-019f63f8-3333-7333-8333-333333333333.jsonl", worktree)
+	}
 
-	_, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID})
+	_, err = manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID})
 	require.NoError(t, err)
 	_, respawns, prompts := backend.snapshot()
 	require.Zero(t, respawns, "a proven live pane set must not be destroyed merely because Codex has no rollout yet")
 	require.Len(t, prompts, 1)
 	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
+	require.Eventually(t, func() bool {
+		conv := inst.AgentConversation()
+		return conv.Agent == tmux.ProgramCodex &&
+			conv.ID == "019f63f8-3333-7333-8333-333333333333"
+	}, 2*time.Second, 10*time.Millisecond,
+		"a live recovered replacement must record the rollout minted by mission delivery")
 }
 
 // codexReplacementTrustModal is the real Codex first-run directory-trust frame

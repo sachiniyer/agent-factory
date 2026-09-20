@@ -461,6 +461,39 @@ func accountSwapPrompt(swap *autoAccountSwap, prompt string, conversation sessio
 // the capture window.
 var accountSwapTrustDismissInterval = 200 * time.Millisecond
 
+// beginLiveAccountSwapConversationCapture establishes the missing before-image
+// when recovery inherited an already-running replacement pane. Its original
+// pre-launch snapshot existed only in the daemon that started the pane, so take
+// a new baseline immediately before mission delivery. The account home excludes
+// other identities; the resolved pane cwd distinguishes concurrent rollouts
+// from other sessions sharing this account (#4715).
+func beginLiveAccountSwapConversationCapture(instance *session.Instance, swap *autoAccountSwap) (session.ConversationCaptureSnapshot, error) {
+	home, err := config.GetConfigDir()
+	if err != nil {
+		return session.ConversationCaptureSnapshot{}, fmt.Errorf("locate account registry: %w", err)
+	}
+	account, err := agentaccount.Selected(home, tmux.ProgramCodex, swap.to)
+	if err != nil {
+		return session.ConversationCaptureSnapshot{}, fmt.Errorf("locate Codex account %q: %w", swap.to, err)
+	}
+	if strings.TrimSpace(account.Dir) == "" {
+		return session.ConversationCaptureSnapshot{}, fmt.Errorf("Codex account %q has no conversation store", swap.to)
+	}
+	workDir := instance.GetWorktreePath()
+	if strings.TrimSpace(workDir) == "" {
+		return session.ConversationCaptureSnapshot{}, errors.New("live Codex replacement has no worktree path for conversation correlation")
+	}
+	program := instance.ResolvedPaneProgram()
+	launch, err := tmux.CommandEnvironmentFromCommand(program, workDir)
+	if err != nil {
+		return session.ConversationCaptureSnapshot{}, fmt.Errorf("resolve live Codex replacement working directory: %w", err)
+	}
+	if !launch.WorkingDirKnown() {
+		return session.ConversationCaptureSnapshot{}, errors.New("live Codex replacement working directory is not provable")
+	}
+	return session.BeginConversationCaptureAtCodexHomeAndWorkingDir(account.Dir, launch.WorkingDir), nil
+}
+
 // captureAccountSwapConversation binds Codex discovery to the replacement
 // runtime while the limit-resume operation still owns its fence. When Codex has
 // already minted a rollout, account swaps cannot use the ordinary asynchronous
