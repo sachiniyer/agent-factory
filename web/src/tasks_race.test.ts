@@ -212,10 +212,13 @@ test("toggleTask: stale non-committed rejection after same-token reconnect is dr
   assert.equal(s.refreshTasksCalls(), 0, "the stale rejected .then(refreshTasks) leg did not run");
 });
 
-// toggleTask: a COMMITTED stale rejection is dropped too, and crucially the in-.catch
-// refreshTasks() (the committed branch) does NOT fire — the gate sits ABOVE the
-// committed branch, so a stale committed outcome neither surfaces a toast nor refetches.
-test("toggleTask: stale committed rejection after same-token reconnect is dropped (gate is above the committed branch)", async () => {
+// toggleTask: a COMMITTED stale rejection still reconciles the current connection.
+// refreshTasks is fenced by readToken(), so it fetches for the CURRENT connection (not
+// the dead one), and a stale committed update whose task.updated event the replacement
+// missed (between its initial ListTasks and its WebSocket subscribe) would otherwise
+// stay visibly stale until the minute poll. The gate drops only the stale toast, not
+// the committed-branch refreshTasks().
+test("toggleTask: stale committed rejection after same-token reconnect still refetches the current connection (toast suppressed)", async () => {
   const s = stage();
   s.app.toggleTask(TASK);
   s.app.disconnect();
@@ -225,7 +228,11 @@ test("toggleTask: stale committed rejection after same-token reconnect is droppe
   await settle();
 
   assert.equal(s.tabError(), null, "the stale committed rejection did not leak a tabError");
-  assert.equal(s.refreshTasksCalls(), 0, "the gate returned before the committed-branch refreshTasks() ran");
+  assert.equal(
+    s.refreshTasksCalls(),
+    1,
+    "the committed-branch refreshTasks() ran to reconcile the current connection (gate drops only the toast)",
+  );
 });
 
 // doRetryLimit: the load-bearing case. A committed stale rejection raises a mutationError

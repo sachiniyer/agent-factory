@@ -18742,10 +18742,11 @@ function toggleTask(task) {
   }
   const requestGeneration = connectionGeneration;
   void updateTask(task, { enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => {
-    if (requestGeneration !== connectionGeneration || token !== tok) return;
+    const stale = requestGeneration !== connectionGeneration || token !== tok;
     if (isMutationCommittedError(e)) {
       refreshTasks();
     }
+    if (stale) return;
     surfaceTabError(e);
   });
 }

@@ -2079,11 +2079,18 @@ function toggleTask(task: TaskData): void {
       // so a rejection landing after a disconnect+reconnect would otherwise write the
       // dead connection's error onto the new connection's toast. Same generation+token
       // gate as doOpenAccountLogin/applyConfigValueNow: a same-token reconnect still
-      // bumps connectionGeneration twice, so the stale rejection is dropped.
-      if (requestGeneration !== connectionGeneration || token !== tok) return;
+      // bumps connectionGeneration twice, so the stale rejection's toast is dropped.
+      // A committed UpdateTask still carried forward on the daemon, and refreshTasks is
+      // fenced by readToken() so it fetches for the CURRENT connection: a stale committed
+      // update whose task.updated event the replacement missed (between its initial
+      // ListTasks and its WebSocket subscribe) would otherwise stay visibly stale until
+      // the minute poll, so refresh on committed regardless of staleness; the gate drops
+      // only the stale toast, not the reconciliation.
+      const stale = requestGeneration !== connectionGeneration || token !== tok;
       if (isMutationCommittedError(e)) {
         refreshTasks();
       }
+      if (stale) return;
       surfaceTabError(e);
     });
 }
