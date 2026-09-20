@@ -34,6 +34,7 @@ type limitResumeBackend struct {
 	respawnCalls  int
 	sentPrompts   []string
 	onRespawn     func(*session.Instance)
+	onPrompt      func(*session.Instance, string)
 	sendPromptErr error
 }
 
@@ -73,13 +74,18 @@ func (b *limitResumeBackend) Respawn(i *session.Instance) error {
 	return nil
 }
 
-func (b *limitResumeBackend) SendPromptCommand(_ *session.Instance, prompt string) error {
+func (b *limitResumeBackend) SendPromptCommand(i *session.Instance, prompt string) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.sendPromptErr != nil {
+		b.mu.Unlock()
 		return b.sendPromptErr
 	}
 	b.sentPrompts = append(b.sentPrompts, prompt)
+	onPrompt := b.onPrompt
+	b.mu.Unlock()
+	if onPrompt != nil {
+		onPrompt(i, prompt)
+	}
 	return nil
 }
 
@@ -113,7 +119,7 @@ func TestResumeFromLimit_ExitedAgent_RespawnsNotRecover(t *testing.T) {
 	inst.Prompt = "finish the migration"
 	inst.SetLimitReached(time.Time{})
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "limited", RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "limited", RepoID: repoID}); err != nil {
 		// Before the fix this returned `recover: session "limited" is Ready, not
 		// Lost` — the P1. It must now succeed.
 		t.Fatalf("resumeFromLimit returned %v; a LimitReached retry must not fail the Recover !Lost guard (#1204 P1)", err)
@@ -174,7 +180,7 @@ func TestResumeFromLimit_PersistsRespawnMutationsWhenSendPromptFails(t *testing.
 	inst.Prompt = "finish the migration"
 	inst.SetLimitReached(time.Time{})
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "persist-1854", RepoID: repoID}); err == nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "persist-1854", RepoID: repoID}); err == nil {
 		t.Fatal("resumeFromLimit returned nil; a failed SendPrompt must still surface to the caller")
 	}
 
@@ -228,7 +234,7 @@ func TestResumeFromLimit_KeepsLimitBlockedWhenSendPromptFails(t *testing.T) {
 	inst.Prompt = "finish the migration"
 	inst.SetLimitReached(resetAt)
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "parked-1857", RepoID: repoID}); err == nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "parked-1857", RepoID: repoID}); err == nil {
 		t.Fatal("resumeFromLimit returned nil; a failed SendPrompt must still surface to the caller")
 	}
 	if _, respawnCalls, _ := backend.snapshot(); respawnCalls != 1 {
@@ -275,7 +281,7 @@ func TestResumeFromLimit_RespawnArm_ClearsLimitDurablyOnSuccess(t *testing.T) {
 	inst.Prompt = "finish the migration"
 	inst.SetLimitReached(time.Now().Add(30 * time.Minute).UTC())
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "resumed-1857", RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "resumed-1857", RepoID: repoID}); err != nil {
 		t.Fatalf("resumeFromLimit returned %v, want nil", err)
 	}
 	if _, respawnCalls, prompts := backend.snapshot(); respawnCalls != 1 || len(prompts) != 1 || prompts[0] != "finish the migration" {
@@ -310,7 +316,7 @@ func TestResumeFromLimit_PublishesRunningTransition(t *testing.T) {
 	inst.SetLimitReached(time.Now().Add(30 * time.Minute).UTC())
 
 	_, events := manager.events.subscribe()
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "resume-event", RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "resume-event", RepoID: repoID}); err != nil {
 		t.Fatalf("resumeFromLimit returned %v, want nil", err)
 	}
 
@@ -361,7 +367,7 @@ func TestResumeFromLimit_LiveStall_SendsContinueNoRespawn(t *testing.T) {
 	inst.Prompt = "" // interactive session: no stored prompt
 	inst.SetLimitReached(time.Now())
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "stalled", RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "stalled", RepoID: repoID}); err != nil {
 		t.Fatalf("resumeFromLimit returned %v, want nil", err)
 	}
 
@@ -422,7 +428,7 @@ func TestResumeFromLimit_TeardownInFlightNoops(t *testing.T) {
 			inst.SetLimitReached(time.Now())
 			tt.setup(t, manager, repoID, inst)
 
-			if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+			if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
 				t.Fatalf("resumeFromLimit returned %v, want nil no-op", err)
 			}
 
@@ -446,7 +452,7 @@ func TestResumeFromLimit_NotLimited_Errors(t *testing.T) {
 	backend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
 	inst := registerStarted(t, manager, repoID, repoPath, "ready", backend, true, session.Ready)
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "ready", RepoID: repoID}); err == nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "ready", RepoID: repoID}); err == nil {
 		t.Fatal("resumeFromLimit on a non-limit session must return an error")
 	}
 	recoverCalls, respawnCalls, prompts := backend.snapshot()

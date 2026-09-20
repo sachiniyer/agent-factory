@@ -209,13 +209,59 @@ func (i *Instance) OwedOnComplete() *PendingOnCompleteData {
 }
 
 // SetOwedOnComplete files or clears the obligation in memory. The daemon owns
-// making that change durable: filing persists the marked row BEFORE the
-// teardown wait begins, and clearing persists the discharge once a decision is
-// reached. This call only moves memory.
+// making that change durable: filing persists the marked row BEFORE the teardown
+// wait begins, and clearing persists the discharge once a decision is reached. This
+// call only moves memory.
 func (i *Instance) SetOwedOnComplete(marker *PendingOnCompleteData) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.owedOnComplete = marker
+}
+
+// FileOwedOnCompleteIfNotDischarged files the durable on_complete marker atomically
+// under i.mu, but ONLY if no adoption delivery has landed since the run-end baseline
+// was pinned. It is the paused-poll path's race fix (#4162's missing half):
+//
+//	deferTaskSessionLifecycleWhilePaused parks the in-memory intent under m.mu and
+//	releases m.mu BEFORE calling fileOwedTaskLifecycle. The marker is filed here,
+//	outside m.mu, so a TUI/browser keystroke that arrives in that window reaches
+//	NoteAdoptionDelivery — which takes i.mu ALONE, not m.mu — between the unlock
+//	and SetOwedOnComplete. NoteAdoptionDelivery sees owedOnComplete == nil and so
+//	discharges nothing durably: it only bumps the in-memory delivery count.
+//
+// Without this helper, fileOwedTaskLifecycle then files a marker whose FiledAt
+// postdates the keystroke. A restart before the next backstop poll wipes the
+// in-memory count (the only evidence of that pre-filing delivery) while leaving
+// the post-keystroke marker durable, so the unpaused drain finds no adoption
+// evidence and authorizes a declared kill/archive against a session the user has
+// just typed into — exactly the wrong-reap the durable marker exists to prevent.
+//
+// The helper closes that window by taking i.mu ONCE and refusing to file when
+// adoption.deliveries has already advanced past adoption.atRunEnd. A delivery
+// that arrives first leaves deliveries > atRunEnd, so the helper refuses and the
+// unpaused drain stands down on the in-memory deliveries != atRunEnd check it
+// already re-reads at drain time; if a restart wipes that in-memory check before
+// the drain runs it ALSO wipes the (never-filed) marker, which is the pre-#4162
+// shape the durable churn watermark exists to cover. A delivery that arrives
+// after the helper has filed finds a real marker to clear, takes the existing
+// NoteAdoptionDelivery path unchanged, and discharges durably.
+//
+// filed is true when the marker was set (and the caller must persist it) and
+// false when the obligation is already discharged by a pre-filing delivery (and
+// the caller must persist nothing).
+func (i *Instance) FileOwedOnCompleteIfNotDischarged(marker *PendingOnCompleteData) (filed bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.adoption.deliveries > i.adoption.atRunEnd {
+		// A delivery landed in the pre-filing window: the in-memory count is
+		// already the stand-down signal, and filing a marker whose FiledAt
+		// postdates the keystroke is the very bug this method exists to close.
+		// The marker stays nil; the caller persists nothing.
+		i.owedOnComplete = nil
+		return false
+	}
+	i.owedOnComplete = marker
+	return true
 }
 
 // SetOwedOnCompleteNotify installs the callback invoked (outside i.mu) when a

@@ -1,4 +1,5 @@
-const { randomUUID } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
+const { goSourcesEquivalent, patchTouchesOnlyCommentLines } = require("./go-inert.js");
 
 // GitHub renders one GitHub App actor under several logins depending on the
 // surface being read: the detail app has been observed as `app/detail-app` on a
@@ -40,6 +41,72 @@ const SELF_APPROVING_AUTHORS = new Set(["sachiniyer"]);
 const TRUNK_MERGE_AUTHOR = "trunk-io";
 const TRUNK_MERGE_BRANCH_PREFIX = "trunk-merge/";
 const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
+// The most gated files one evaluation will read blobs for to prove them
+// comment-only (#4477). The proof costs two reads per file on every
+// evaluation, so past this the files simply stay gated.
+const COMMENT_ONLY_PROOF_FILE_LIMIT = 20;
+// The label a maintainer applies to stop this gate on one pull request (#4576).
+//
+// Before #4576 a maintainer's only stop lever was converting the PR to a draft,
+// and GitHub lets the PR's OWN AUTHOR undo that: on #4383 the maintainer drafted
+// the PR at 20:32:45 and its author marked it ready again nine minutes later.
+// Draft state is not maintainer-owned, so it is not a hold.
+//
+// Applying is deliberately NOT restricted here, because GitHub already restricts
+// it — labelling a pull request needs triage or write access — and because the
+// fail-closed direction on the apply side is "anyone who can label can stop the
+// gate". LIFTING is restricted — see mayLiftHold — because that is the side
+// GitHub leaves open: anyone who can label can also unlabel, which would rebuild
+// exactly the hole the draft lever had.
+const HOLD_LABEL = "hold";
+// How many label events the PR read keeps (see getPullRequest). It is the newest
+// window, and it is filtered SERVER-SIDE to labelled/unlabelled events, so a PR
+// has to churn a hundred labels after the hold before the hold's provenance
+// falls out of it. If it ever does, holdState reports `unresolved`, not `clear`.
+const HOLD_LABEL_EVENT_WINDOW = 100;
+// The login GITHUB_TOKEN acts under, so the gate's own label restoration is not
+// mistaken for the person who asked for the hold. Used for the summary's wording
+// only — if this spelling is ever wrong the summary names `github-actions` as
+// the applier and the decision is unchanged.
+const GATE_LABEL_ACTOR = "github-actions";
+// Who may lift a hold on a pull request THEY OPENED (#4576).
+//
+// The issue asks for ALLOWED_AUTHORS, and that alone does not close the case the
+// issue is about. `detail-app` is an allowed author and it is the account that
+// undid the maintainer's draft on #4383 nine minutes after approving that PR
+// itself; a rule it satisfies rebuilds the hole with a label instead of a draft.
+// So lifting takes an allowed author who is a SECOND PARTY to the pull request,
+// with the named humans exempt — the maintainer opens most pull requests here
+// and must be able to lift a hold on his own.
+//
+// Membership and reasoning are identical to #4555's SELF_APPROVING_AUTHORS, in
+// flight on the approval-marker path: humans are NAMED rather than bots
+// detected, because normalizeAuthorLogin deliberately erases the `app/` and
+// `[bot]` spellings that would identify one, so a future allowlisted app is
+// refused by default instead of by someone remembering. It is a separate
+// constant only so the two changes do not collide textually; folding them into
+// one set once both have landed is a one-line follow-up that changes nothing.
+const SELF_LIFTING_AUTHORS = new Set(["sachiniyer"]);
+
+// Whether `actor` removing the hold label off a pull request `prAuthor` opened
+// actually lifts it (#4576).
+//
+// Fails closed on an unknown pull-request author, exactly as the marker path
+// does: an author that cannot be read cannot show the lifter is a second party.
+// The maintainer's own route stays open regardless, so an unreadable author
+// never leaves a hold with nobody able to lift it. Logins compare without case,
+// as GitHub compares them — a case-only difference must not read as two people.
+function mayLiftHold(actor, prAuthor) {
+  if (!isAllowedAuthor(actor)) {
+    return false;
+  }
+  const lifter = normalizeAuthorLogin(actor);
+  if (SELF_LIFTING_AUTHORS.has(lifter)) {
+    return true;
+  }
+  const author = normalizeAuthorLogin(prAuthor);
+  return author !== "" && author.toLowerCase() !== lifter.toLowerCase();
+}
 // Every workflow whose master-side run is triggered by `push: branches:
 // [master]`. A push made with GITHUB_TOKEN does not trigger further workflow
 // runs — documented Actions behavior that exists to prevent recursion — so an
@@ -684,6 +751,46 @@ function isDefinitiveRateLimitResponse(error) {
   return Boolean(error?.response) && isRateLimitError(error);
 }
 
+// The rate-limit answer for a WRAPPED error. retryFailure preserves the
+// transport error on `cause` but strips its headers and GraphQL name, so
+// isRateLimitError alone can miss the failure it wraps; the retry-exhausted
+// message ("could not invalidate aggregate …: API rate limit exceeded for
+// installation") is itself the record. Walking the chain covers both (#4461).
+function isRateLimitFailure(error) {
+  for (let current = error; current; current = current.cause) {
+    if (isRateLimitError(current)) {
+      return true;
+    }
+    if (/(?:API|secondary) rate limit|rate limit exceeded|abuse detection/i.test(current?.message || "")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A sentence naming the throttle window when the failure carries it, so an
+// UNKNOWN verdict can say when evaluation is worth retrying (#4461).
+function rateLimitResetSentence(error) {
+  for (let current = error; current; current = current.cause) {
+    if (!isRateLimitFailure(current)) {
+      continue;
+    }
+    const headers = githubErrorHeaders(current);
+    const resetSeconds = Number(headers["x-ratelimit-reset"]);
+    if (Number.isFinite(resetSeconds) && resetSeconds > 0) {
+      return ` GitHub reports the rate limit resets at ${new Date(resetSeconds * 1000).toISOString()}.`;
+    }
+    const retryAfter = Number(headers["retry-after"]);
+    if (Number.isFinite(retryAfter) && retryAfter >= 0) {
+      return ` GitHub asks for a retry in ${retryAfter}s.`;
+    }
+  }
+  if (isRateLimitFailure(error)) {
+    return " Retry once the GitHub API rate-limit window resets.";
+  }
+  return "";
+}
+
 function retryDelayMilliseconds(error, fallback) {
   if (!isRateLimitError(error)) {
     return fallback;
@@ -823,6 +930,36 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     reasons.push(`mergeability is still ${pr.mergeable}`);
   }
 
+  // The maintainer hold, HERE — among the structural refusals, above every read
+  // that produces an approval, a verdict or a play-test attestation (#4576).
+  //
+  // Placement is the mechanism, not housekeeping. The degraded
+  // reviewer-unavailable path below waives its one requirement only when
+  // `otherBlockers` is empty, and `otherBlockers` is computed from this same
+  // `reasons` list — so a hold pushed before it is arithmetically unwaivable:
+  // the degradation never activates, the approval branch is never entered, and
+  // the `reasons.length = 0` inside it is never reached. A hold evaluated after
+  // that branch would be cleared by it, which is precisely what "whatever else
+  // passes" rules out.
+  const hold = holdState({ labels: pr.labels, labelEvents: pr.labelEvents, prAuthor: pr.author });
+  if (hold.held) {
+    reasons.push(hold.reason);
+  }
+  if (hold.note) {
+    notes.push(hold.note);
+  }
+  // Only on a live pull request. Putting a label back on a closed or merged one
+  // changes no decision — this evaluation is already BLOCKED and reportDecision
+  // leaves a closed PR's decision untouched — and would write to every stale PR
+  // the aggregate walks.
+  if (hold.restore && pr.state === "OPEN" && !pr.merged) {
+    notes.push(await restoreHoldLabel({ github, context, core, number: pr.number }));
+  }
+  // Rendered first on the manual path, where blockers are listed in order and
+  // the check-run title quotes the first: a hold outranks every other unmet
+  // item, because none of them can be answered while it stands.
+  const holdBlockers = hold.held ? [{ reason: hold.reason, remedy: hold.remedy }] : [];
+
   // Everything below reads about a PR this run has now resolved, so each read
   // carries that identity and can tell a self-contradictory NOT_FOUND from a
   // real one (#3396).
@@ -832,15 +969,9 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // a merge that CHANGES workflow definitions may be re-raising a stale set —
   // most sharply when it adds a push-gated workflow, which cannot be in the list
   // the running copy holds.
-  const workflowsChanged = files.some((path) => path.startsWith(".github/workflows/"));
-  // A `_test.go` file is not compiled into the shipped binary, so it cannot
-  // change what a user sees — and the label this gate demands is a claim that
-  // someone drove the TUI and looked. #3601's only file under these prefixes was
-  // `ui/config_pane_test.go`, and the lane had to run a play-test to satisfy a
-  // gate for a diff with nothing to look at. The subtraction is per FILE, not
-  // per PR: a production file under any prefix still requires the label, and so
-  // does a diff that changes a test and a production file together.
-  const touchesTui = files.some(isGatedTuiPath);
+  const workflowsChanged = files
+    .flatMap(pullRequestFilePaths)
+    .some((path) => path.startsWith(".github/workflows/"));
   const labels = new Set(pr.labels.map((label) => label.toLowerCase()));
 
   // The branch a head with no PR Validation run may have one dispatched on
@@ -900,7 +1031,10 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
       shouldMerge: false,
       manualMergeRequired: true,
       manualMergeReasons: [MERGE_QUEUE_BATCH_REASON],
-      manualMergeBlockers: batch.blockers,
+      // A batch head never merges itself, but its PASSING manual decision is
+      // what the queue merges on — so the hold has to reach this list too, or a
+      // held batch head would be certified for the queue (#4576).
+      manualMergeBlockers: [...holdBlockers, ...batch.blockers],
       mergeQueueBatch: true,
       isOpen: pr.state === "OPEN" && !pr.merged,
       baseRefName: pr.baseRefName,
@@ -950,6 +1084,25 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   }
   notes.push(...codex.notes);
 
+  // A `_test.go` file is not compiled into the shipped binary, so it cannot
+  // change what a user sees — and the label this gate demands is a claim that
+  // someone drove the TUI and looked. #3601's only file under these prefixes was
+  // `ui/config_pane_test.go`, and the lane had to run a play-test to satisfy a
+  // gate for a diff with nothing to look at. A production file whose change is
+  // provably comment-only is the same category by the same argument (#4477).
+  // The subtraction is per FILE, not per PR: a production file with a real
+  // change under any prefix still requires the label, and so does a diff that
+  // changes a test and a production file together.
+  const tui = await gatedTuiChanges({ github, context, pr, files, subject });
+  const touchesTui = tui.gated.length > 0;
+  if (tui.commentOnly.length > 0) {
+    notes.push(
+      `TUI path gate: ${tui.commentOnly.join(", ")} changed only in comments, which no play-test can see`,
+    );
+  }
+  if (tui.proofError) {
+    notes.push(`TUI path gate: comment-only proof failed, so those files stay gated: ${tui.proofError}`);
+  }
   if (touchesTui && !labels.has("play-tested")) {
     reasons.push("PR touches visible TUI/pane paths and is missing the play-tested label");
   } else if (touchesTui) {
@@ -1100,6 +1253,10 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // blocker; each item keeps its own maintainer-only exit.
   const manualMergeBlockers = manualMergeRequired
     ? [
+        // The manual path's conclusion is computed from THIS list, not from
+        // `reasons`, so a hold that only reached `reasons` would leave an
+        // external PR's decision green for a hand merge (#3825's shape, #4576).
+        ...holdBlockers,
         ...(codex.findingBlockers ?? []),
         ...(!codex.reviewerUnavailable && codex.verdictBlocker
           ? [codex.verdictBlocker]
@@ -1134,6 +1291,257 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     reasons,
     notes,
   });
+}
+
+// Where a pull request stands with respect to the maintainer hold (#4576).
+//
+// Two inputs, and they arrive in ONE server snapshot (see getPullRequest):
+// whether the `hold` label is on the PR right now, and the labelled/unlabelled
+// events that put it there or took it off. The list alone is not enough — it
+// cannot tell "never held" apart from "held, and stripped by whoever wanted it
+// merged", which is the entire difference between a hold and the draft lever
+// this replaces.
+//
+// Every history that is unreadable, self-contradictory, or older than the window
+// resolves to a HOLD, never to a clear. That asymmetry is deliberate and it is
+// the whole safety argument: a false hold costs a maintainer one comment, and a
+// false clear merges a pull request a maintainer stopped.
+//
+// Returns `{ state, held, reason, remedy, note, restore, appliedBy, appliedAt }`.
+// `state` is one of:
+//   clear       — no hold, or one an allowed author lifted
+//   held        — the label is on the pull request
+//   stripped    — the label was removed by someone who may not lift it
+//   unresolved  — the history could not be read, ordered, or reconciled
+function holdState({ labels, labelEvents, prAuthor }) {
+  const present = (labels || []).some(
+    (name) => String(name || "").trim().toLowerCase() === HOLD_LABEL,
+  );
+
+  // A missing connection is an UNREADABLE history, not an empty one. If the
+  // label is on the PR the answer is already held; if it is not, a history that
+  // did not arrive cannot show the removal that took it off, so this holds too.
+  if (!labelEvents || !Array.isArray(labelEvents.events)) {
+    return present
+      ? heldResult({ appliedBy: "", appliedAt: "" })
+      : unresolvedResult(
+          "the pull request's label-event history did not arrive with the pull request",
+          "re-run Auto Gate on this head once the read succeeds; if it keeps failing, apply the " +
+            `\`${HOLD_LABEL}\` label and have an allowed author remove it, which writes a fresh record`,
+        );
+  }
+
+  const events = [];
+  for (const event of labelEvents.events) {
+    if (String(event?.label?.name || "").trim().toLowerCase() !== HOLD_LABEL) {
+      continue;
+    }
+    const at = parseTimestamp(event?.createdAt);
+    // Fails closed on an unorderable timestamp, like every other time
+    // comparison in this file: "which happened last" is the whole question here,
+    // and an event that cannot be placed can neither prove nor refute a removal.
+    if (at === null) {
+      return unresolvedResult(
+        `a \`${HOLD_LABEL}\` label event carries a timestamp Auto Gate cannot order ` +
+          `(${JSON.stringify(String(event?.createdAt ?? ""))})`,
+        `an allowed author removes and re-applies the \`${HOLD_LABEL}\` label, which writes an ` +
+          "orderable event",
+      );
+    }
+    events.push({
+      added: event.__typename === "LabeledEvent",
+      at,
+      createdAt: String(event.createdAt),
+      actor: String(event?.actor?.login || ""),
+    });
+  }
+  // Newest first. `last:` already returns them oldest-first, but the ordering
+  // this reads is the one it asserts, not the one the server happens to send.
+  //
+  // Ties are broken by the LABEL LIST, which is the authority on the final state
+  // — the events only supply provenance. GitHub stamps label events to the
+  // second, so applying a label and stripping it inside one second gives two
+  // events the timestamps cannot order; whichever of them agrees with what the
+  // pull request actually carries now is the one that happened last. Without
+  // this, a same-second strip sorts under its own addition and reports
+  // "something removed it out of view" about a removal sitting right there.
+  events.sort((left, right) => {
+    if (right.at !== left.at) {
+      return right.at - left.at;
+    }
+    return (left.added === present ? 0 : 1) - (right.added === present ? 0 : 1);
+  });
+  const newest = events[0] || null;
+
+  if (present) {
+    // Already held — the provenance read below only decides what the summary
+    // says, never whether this blocks.
+    const applied = appliedEvent(events);
+    return heldResult({ appliedBy: applied?.actor || "", appliedAt: applied?.createdAt || "" });
+  }
+
+  if (!newest) {
+    // No hold event in the window. Ordinarily that means this pull request has
+    // simply never been held, which is almost every pull request. It means that
+    // only if the window holds the whole history: with older events outside it,
+    // a hold and its removal could both be out of sight.
+    return labelEvents.truncated
+      ? unresolvedResult(
+          `the newest ${HOLD_LABEL_EVENT_WINDOW} label events on this pull request contain no ` +
+            `\`${HOLD_LABEL}\` event and older label events exist outside that window, so Auto ` +
+            "Gate cannot show the label was never removed",
+          `an allowed author applies the \`${HOLD_LABEL}\` label and then removes it, which puts a ` +
+            "readable hold record back inside the window",
+        )
+      : clearResult(null);
+  }
+
+  if (newest.added) {
+    // The newest event the window holds ADDS a label the pull request does not
+    // carry. Something removed it and that removal is not visible, so the gate
+    // cannot say who lifted the hold.
+    return unresolvedResult(
+      `the newest \`${HOLD_LABEL}\` label event Auto Gate can see adds the label ` +
+        `(@${newest.actor || "unknown"}, ${newest.createdAt}), but the pull request does not ` +
+        "carry it and no removal is visible",
+      `an allowed author applies the \`${HOLD_LABEL}\` label and then removes it, which writes a ` +
+        "removal Auto Gate can attribute",
+    );
+  }
+
+  // The newest event REMOVES the label. Who did it decides everything.
+  if (mayLiftHold(newest.actor, prAuthor)) {
+    return clearResult(
+      `\`${HOLD_LABEL}\` label lifted by @${newest.actor} on ${newest.createdAt}`,
+    );
+  }
+  // Everything but the removal itself. `<= `, not `<`: a label applied and
+  // stripped inside the same second shares a timestamp, and dropping the
+  // addition there would report an applier of "unknown" on a hold that plainly
+  // has one.
+  const applied = appliedEvent(
+    events.filter((event) => event !== newest && event.at <= newest.at),
+  );
+  const by = applied?.actor ? `@${applied.actor}` : "an actor Auto Gate could not read";
+  const when = applied?.createdAt ? ` on ${applied.createdAt}` : "";
+  return {
+    state: "stripped",
+    held: true,
+    // An empty actor login reaches here too — a ghosted or unreadable actor can
+    // lift nothing, and naming it "unknown" is the honest rendering.
+    reason:
+      `the \`${HOLD_LABEL}\` label was removed by @${newest.actor || "unknown"} on ` +
+      `${newest.createdAt}, who may not lift a hold ` +
+      `${isAllowedAuthor(newest.actor) ? "on a pull request they opened" : "on this repository"}` +
+      `, so the hold ${by} placed${when} stands`,
+    remedy: holdRemedy(),
+    note: null,
+    // The block above does not depend on this write: the hold stands on the
+    // removal record whether or not the label goes back on. Restoring it is what
+    // makes the hold VISIBLE on the pull request, where the person who stripped
+    // it is looking.
+    restore: true,
+    appliedBy: applied?.actor || "",
+    appliedAt: applied?.createdAt || "",
+  };
+}
+
+// The event that says who asked for the hold, newest first, skipping the gate's
+// own restorations — those record that the label came back, not who wanted it
+// there. Falling back to the newest addition if every one of them is the gate's
+// is cosmetic only: it changes the name in the summary, never the decision.
+function appliedEvent(events) {
+  const additions = events.filter((event) => event.added);
+  return (
+    additions.find((event) => normalizeAuthorLogin(event.actor) !== GATE_LABEL_ACTOR) ||
+    additions[0] ||
+    null
+  );
+}
+
+function holdRemedy() {
+  return (
+    `an allowed author (${[...ALLOWED_AUTHORS].join(", ")}) who did not open this pull request ` +
+    `removes the \`${HOLD_LABEL}\` label — or ${[...SELF_LIFTING_AUTHORS].join(", ")}, who may ` +
+    "lift a hold on their own. Nobody else can: Auto Gate re-applies a label anyone else removes " +
+    "and keeps blocking on the removal record even if that write fails"
+  );
+}
+
+function heldResult({ appliedBy, appliedAt }) {
+  const by = appliedBy ? `@${appliedBy}` : "an actor Auto Gate could not read";
+  const when = appliedAt ? ` on ${appliedAt}` : " at a time Auto Gate could not read";
+  return {
+    state: "held",
+    held: true,
+    reason:
+      `the \`${HOLD_LABEL}\` label is on this pull request — applied by ${by}${when} — and Auto ` +
+      "Gate is blocked while it is there, whatever else passes",
+    remedy: holdRemedy(),
+    note: null,
+    restore: false,
+    appliedBy,
+    appliedAt,
+  };
+}
+
+function unresolvedResult(why, remedy) {
+  return {
+    state: "unresolved",
+    held: true,
+    reason:
+      `the \`${HOLD_LABEL}\` label state on this pull request could not be resolved — ${why} — ` +
+      "and an unresolvable hold is treated as held",
+    remedy,
+    note: null,
+    restore: false,
+    appliedBy: "",
+    appliedAt: "",
+  };
+}
+
+function clearResult(note) {
+  return {
+    state: "clear",
+    held: false,
+    reason: null,
+    remedy: null,
+    note,
+    restore: false,
+    appliedBy: "",
+    appliedAt: "",
+  };
+}
+
+// Put back a `hold` label someone who may not lift it removed (#4576).
+//
+// Best effort on purpose. The decision is already BLOCKED on the removal record
+// by the time this runs, so a failed write cannot turn a hold into a pass — it
+// only leaves the hold invisible on the pull request until the next run tries
+// again. That is why this warns instead of throwing: an unreachable labels API
+// must not red the run or take the aggregate down with it (#4484's lesson).
+//
+// No loop: the restore raises `labeled`, which this workflow subscribes to, and
+// the run that event starts reads the label as PRESENT and writes nothing.
+async function restoreHoldLabel({ github, context, core, number }) {
+  const { owner, repo } = context.repo;
+  try {
+    await github.rest.issues.addLabels({
+      owner,
+      repo,
+      issue_number: number,
+      labels: [HOLD_LABEL],
+    });
+    return `restored the \`${HOLD_LABEL}\` label that only an allowed author may remove`;
+  } catch (error) {
+    core.warning(
+      `could not restore the \`${HOLD_LABEL}\` label on PR #${number}: ${formatError(error)}`,
+    );
+    return (
+      `could not restore the \`${HOLD_LABEL}\` label (${formatError(error)}); the hold still ` +
+      "blocks this decision, it is just not visible on the pull request"
+    );
+  }
 }
 
 // The pull-request numbers a merge-queue batch PR names as its constituents,
@@ -1628,17 +2036,46 @@ function resolveAggregateHeads({ context, targets = [] }) {
   return [...new Set(candidates.map(normalizeHeadSha).filter(Boolean))];
 }
 
+// The conclusion every non-passing fixed-aggregate write carries: the WAITING
+// invalidation marker and the UNKNOWN could-not-evaluate verdict alike.
+//
+// It is `failure` because the aggregate is a REQUIRED check, and GitHub documents
+// "Successful check statuses are `success`, `skipped`, and `neutral`"
+// (troubleshooting-required-status-checks). A neutral UNKNOWN therefore does not
+// block the ruleset, a manual `gh pr merge`, or any merger that defers to it —
+// it would turn "Auto Gate could not look" into a merge nobody evaluated (#4461).
+// What distinguishes UNKNOWN from a defect verdict is its title and summary.
+const AGGREGATE_NOT_PASSING = "failure";
+const REQUIRED_CHECK_SATISFYING_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
+
+// Whether a fixed-aggregate check run, as a write returned it, leaves its commit
+// unmergeable: anything but a completed run whose conclusion GitHub counts as
+// satisfying a required check. Null — no write landed — is not non-passing: it
+// proves nothing about what the newest generation says.
+function isNonPassingAggregate(check) {
+  if (!check) {
+    return false;
+  }
+  if (check.status !== "completed") {
+    return true;
+  }
+  return !REQUIRED_CHECK_SATISFYING_CONCLUSIONS.has(String(check.conclusion || "").toLowerCase());
+}
+
 async function invalidateAggregateDecision({ github, context, core, headSha }) {
   const sha = normalizeHeadSha(headSha);
   if (!sha) {
     throw new Error(`Invalid head SHA for Auto Gate aggregate invalidation: ${headSha}`);
   }
   const decision = {
-    // Create a new failure before any API-dependent reads. If target resolution,
-    // association lookup, or evaluation fails, the newest fixed check is already
-    // non-green and the prior PASS cannot remain authoritative.
+    // Make the newest fixed check non-green before any API-dependent reads. If
+    // target resolution, association lookup, or evaluation fails, the prior
+    // PASS cannot remain authoritative. The conclusion is AGGREGATE_NOT_PASSING,
+    // never neutral: GitHub counts a neutral required check as satisfied, so a
+    // neutral marker would leave the commit mergeable (#4461). The title is
+    // what says "waiting", not a verdict about the code.
     status: "completed",
-    conclusion: "failure",
+    conclusion: AGGREGATE_NOT_PASSING,
     output: {
       title: AGGREGATE_WAITING_TITLE,
       summary:
@@ -1676,20 +2113,36 @@ async function blockAggregateEvaluation({
   headSha,
   checkRunId,
   reason,
+  cause,
 }) {
   const sha = normalizeHeadSha(headSha);
   if (!sha) {
     throw new Error(`Invalid head SHA for blocked Auto Gate aggregate: ${headSha}`);
   }
   const detail = String(reason || "required GitHub read failed").replace(/^BLOCKED:\s*/i, "");
+  // The reset detail rides the error where one exists; where only the reason
+  // string survives (a cross-job env, an evaluate() summary) the message itself
+  // is the record that the throttle was the cause.
+  const resetClause =
+    rateLimitResetSentence(cause) ||
+    (/(?:API|secondary) rate limit|rate limit exceeded|abuse detection/i.test(detail)
+      ? " Retry once the GitHub API rate-limit window resets."
+      : "");
   const summary =
-    `${detail}. Auto Gate did not infer an empty PR set or any PR state from the failed read; ` +
-    "this commit remains blocked until a complete evaluation succeeds.";
+    `${detail}. Auto Gate did not evaluate this commit and published no verdict about it: ` +
+    "it did not infer an empty PR set or any PR state from the failed read, and no " +
+    "previously reached decision for an exact (PR, head) pair was consumed. This commit " +
+    `remains blocked until a complete evaluation succeeds.${resetClause}`;
   const decision = {
+    // A could-not-evaluate state is not a defect verdict, and the UNKNOWN title
+    // and summary are what say so (#4461). The conclusion cannot: GitHub counts
+    // neutral and skipped required checks as satisfied, so the only completed
+    // conclusions that keep an unevaluated commit unmergeable in every consumer
+    // are the failing ones. See AGGREGATE_NOT_PASSING.
     status: "completed",
-    conclusion: "failure",
+    conclusion: AGGREGATE_NOT_PASSING,
     output: {
-      title: "BLOCKED: Auto Gate could not complete a required GitHub read",
+      title: "UNKNOWN: Auto Gate could not evaluate this commit",
       summary,
     },
   };
@@ -1702,7 +2155,7 @@ async function blockAggregateEvaluation({
     decision,
     checkRunId,
   });
-  core.notice(`BLOCKED: ${detail}`);
+  core.notice(`UNKNOWN: ${detail}`);
   return {
     ok: false,
     headSha: sha,
@@ -1741,6 +2194,7 @@ async function beginAggregateDecision({ github, context, core, headSha }) {
       headSha: sha,
       checkRunId: invalidated.checkRunId,
       reason: formatError(error),
+      cause: error,
     });
   }
   return {
@@ -1893,6 +2347,7 @@ async function reportAggregateDecision({
       headSha,
       checkRunId,
       reason: formatError(error),
+      cause: error,
     });
   }
   if (checkRunId) {
@@ -2142,6 +2597,7 @@ async function processAggregateHead({
         headSha: pending.headSha,
         checkRunId: pending.checkRunId,
         reason: formatError(error),
+        cause: error,
       });
       return { state: "evaluation-error", pending, aggregate };
     }
@@ -2213,6 +2669,7 @@ async function processAggregateHead({
       headSha: pending.headSha,
       checkRunId: pending.checkRunId,
       reason: formatError(error),
+      cause: error,
     });
     return { state: "evaluation-error", pending, aggregate: blocked };
   }
@@ -2345,6 +2802,7 @@ async function processAggregateHead({
           headSha: pending.headSha,
           checkRunId: invalidated.checkRunId,
           reason: formatError(error),
+          cause: error,
         });
         return { state: "evaluation-error", pending, aggregate: blocked, invalidated };
       }
@@ -4791,6 +5249,48 @@ async function getPullRequest({ github, context, number }) {
               }
             }
           }
+          # Who put each label on and who took it off, for the hold (#4576).
+          #
+          # A SECOND aliased connection rather than more itemTypes on the one
+          # above: last: is a window, and label churn on a busy PR would push the
+          # force-push events that bind the review evidence out of a shared one.
+          # Asking twice costs nothing extra — it is the same request.
+          #
+          # And it is the same request as the labels field above, which is the
+          # property the hold rests on: the label list and the provenance of that
+          # list come from ONE server snapshot, so there is no window in which the
+          # gate can read "no hold label" and fail to read the removal that took
+          # it off. Either both arrive or the PR read fails, and a failed PR read
+          # is a BLOCKED decision (see evaluate's catch).
+          labelEvents: timelineItems(last: ${HOLD_LABEL_EVENT_WINDOW}, itemTypes: [LABELED_EVENT, UNLABELED_EVENT]) {
+            pageInfo {
+              # True when older label events exist outside the window. Only
+              # consulted when no hold event is visible, where it separates
+              # "never held" from "the hold scrolled out of view" (#4576).
+              hasPreviousPage
+            }
+            nodes {
+              __typename
+              ... on LabeledEvent {
+                createdAt
+                actor {
+                  login
+                }
+                label {
+                  name
+                }
+              }
+              ... on UnlabeledEvent {
+                createdAt
+                actor {
+                  login
+                }
+                label {
+                  name
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -4828,6 +5328,15 @@ async function getPullRequest({ github, context, number }) {
     // them. `last: 100` keeps the newest window rather than the oldest, which is
     // the half that can carry the event that made the CURRENT head current.
     headForcePushes: (pr.timelineItems?.nodes || []).filter(Boolean),
+    // The hold's provenance, or null when the connection did not arrive at all.
+    // Null is NOT "no label events": holdState treats it as an unreadable
+    // history and holds, because a missing history cannot show a removal (#4576).
+    labelEvents: Array.isArray(pr.labelEvents?.nodes)
+      ? {
+          truncated: Boolean(pr.labelEvents.pageInfo?.hasPreviousPage),
+          events: pr.labelEvents.nodes.filter(Boolean),
+        }
+      : null,
   };
 }
 
@@ -5003,6 +5512,153 @@ function isGatedTuiPath(path) {
   return !path.endsWith("_test.go") && TUI_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
 }
 
+// The gated entries of one commit's complete tree, keyed by path. A truncated or
+// malformed listing throws: a snapshot that may be missing entries proves nothing.
+async function readGatedTuiTree({ github, context, sha, role, subject }) {
+  const { owner, repo } = context.repo;
+  const commit = await retryRead(`could not read ${role} commit ${sha}`, () =>
+    github.rest.repos.getCommit({ owner, repo, ref: sha }), subject);
+  const treeSha = normalizeHeadSha(commit?.data?.commit?.tree?.sha);
+  if (!treeSha) throw new Error(`${role} commit ${sha} has no tree SHA`);
+  const response = await retryRead(`could not read ${role} tree for ${sha}`, () =>
+    github.rest.git.getTree({ owner, repo, tree_sha: treeSha, recursive: "1" }), subject);
+  const data = response?.data;
+  if (data?.truncated !== false || !Array.isArray(data.tree)) {
+    throw new Error(`${role} tree for ${sha} is incomplete`);
+  }
+  const entries = new Map();
+  for (const entry of data.tree) {
+    const entrySha = normalizeHeadSha(entry.sha);
+    if (typeof entry.path !== "string" || !entrySha ||
+        !["tree", "blob", "commit"].includes(entry.type) || !entry.mode) {
+      throw new Error(`${role} tree for ${sha} has an invalid entry`);
+    }
+    if (entry.type !== "tree" && isGatedTuiPath(entry.path)) {
+      entries.set(entry.path, { type: entry.type, mode: entry.mode, sha: entrySha });
+    }
+  }
+  return entries;
+}
+
+function sameTreeEntry(left, right) {
+  return left?.type === right?.type && left?.mode === right?.mode && left?.sha === right?.sha;
+}
+
+// A blob's text, or null. The response is trusted only as far as it hashes to
+// the blob that was asked for, and only as valid UTF-8 — which is what Go
+// requires of a source file anyway. Every failure is null rather than a throw:
+// the only caller turns null into "keep the gate", which is the safe way to be
+// wrong, and an unreadable blob must not take the whole evaluation down (#4484).
+async function readGoSource({ github, context, sha, subject }) {
+  const { owner, repo } = context.repo;
+  try {
+    const response = await retryRead(`could not read blob ${sha}`, () =>
+      github.rest.git.getBlob({ owner, repo, file_sha: sha }), subject);
+    const data = response?.data;
+    if (data?.encoding !== "base64" || typeof data.content !== "string") return null;
+    const bytes = Buffer.from(data.content, "base64");
+    const actual = createHash("sha1").update(`blob ${bytes.length}\x00`).update(bytes).digest("hex");
+    if (actual !== sha) return null;
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+// Whether every change provably leaves the Go toolchain's input unchanged — see
+// go-inert.js for what that proof does and does not accept. Only a regular `.go`
+// blob present on both sides with the same mode can qualify; an add, a delete, a
+// symlink or a mode change never does. Those are checked for every file before
+// any blob is read, and the reads are sequential and stop at the first failure,
+// so a real code change costs at most one pair of them.
+async function everyGoChangeIsInert({ github, context, changes, subject }) {
+  if (changes.length === 0 || changes.length > COMMENT_ONLY_PROOF_FILE_LIMIT) return false;
+  const eligible = ({ path, before, after }) =>
+    path.endsWith(".go") && before?.type === "blob" && after?.type === "blob" &&
+    before.mode === after.mode && ["100644", "100755"].includes(before.mode) &&
+    before.sha !== after.sha;
+  if (!changes.every(eligible)) return false;
+  for (const { before, after } of changes) {
+    const [beforeSource, afterSource] = await Promise.all([
+      readGoSource({ github, context, sha: before.sha, subject }),
+      readGoSource({ github, context, sha: after.sha, subject }),
+    ]);
+    if (!goSourcesEquivalent(beforeSource, afterSource)) return false;
+  }
+  return true;
+}
+
+// Which paths keep this PR under the TUI path gate, and which gated files were
+// subtracted because their change is provably comment-only (#4477).
+//
+// A file is a candidate only when it is a modified `.go` file (not an add,
+// delete or rename) whose patch touches nothing but whole-line comments. That
+// filter is free — listFiles already carries the patch — and it is only a filter:
+// a hunk cannot prove inertness, because it cannot see whether its lines sit
+// inside a raw string whose backtick is further up the file. The proof reads
+// both complete files, at the merge base and at the head, which is the pair the
+// patch describes. The ruleset requires a PR to be up to date before it merges,
+// so at merge time that merge base IS master, and the head tree is what lands.
+//
+// Every doubt keeps the gate: a patch GitHub did not send, too many candidates,
+// a head blob that is not the one listFiles described, or any read that fails.
+// And once one file is gated for a real change, nothing is read at all — the
+// label is required either way.
+async function gatedTuiChanges({ github, context, pr, files, subject }) {
+  const gated = [];
+  const candidates = [];
+  for (const file of files) {
+    const paths = pullRequestFilePaths(file).filter(isGatedTuiPath);
+    if (paths.length === 0) continue;
+    if (file.status === "modified" && paths.length === 1 && paths[0] === file.filename &&
+        file.filename.endsWith(".go") && normalizeHeadSha(file.sha) &&
+        patchTouchesOnlyCommentLines(file.patch)) {
+      candidates.push(file);
+    } else {
+      gated.push(...paths);
+    }
+  }
+  const result = { gated, commentOnly: [], proofError: null };
+  if (candidates.length === 0) return result;
+  let proven = false;
+  if (gated.length === 0 && candidates.length <= COMMENT_ONLY_PROOF_FILE_LIMIT) {
+    try {
+      const { owner, repo } = context.repo;
+      const comparison = await retryRead(`could not find the merge base of PR #${pr.number}`, () =>
+        github.rest.repos.compareCommitsWithBasehead({
+          owner,
+          repo,
+          basehead: `${pr.baseRefName}...${pr.headRefOid}`,
+          per_page: 1,
+        }), subject);
+      const mergeBase = normalizeHeadSha(comparison?.data?.merge_base_commit?.sha);
+      if (!mergeBase) throw new Error(`no merge base for ${pr.baseRefName}...${pr.headRefOid}`);
+      const base = await readGatedTuiTree({ github, context, sha: mergeBase, role: "merge-base", subject });
+      const head = await readGatedTuiTree({ github, context, sha: pr.headRefOid, role: "head", subject });
+      proven =
+        candidates.every((file) => head.get(file.filename)?.sha === normalizeHeadSha(file.sha)) &&
+        (await everyGoChangeIsInert({
+          github,
+          context,
+          subject,
+          changes: candidates.map((file) => ({
+            path: file.filename,
+            before: base.get(file.filename),
+            after: head.get(file.filename),
+          })),
+        }));
+    } catch (error) {
+      result.proofError = error.message || String(error);
+    }
+  }
+  if (proven) {
+    result.commentOnly = candidates.map((file) => file.filename);
+  } else {
+    gated.push(...candidates.map((file) => file.filename));
+  }
+  return result;
+}
+
 // Like a prose review verdict, the attestation names its commit explicitly.
 // The latest recognized attestation wins; a label alone cannot identify tested code.
 async function evaluatePlayTest({ github, context, pr, comments, subject }) {
@@ -5029,33 +5685,9 @@ async function evaluatePlayTest({ github, context, pr, comments, subject }) {
     // Compare snapshots, not GitHub's three-dot/merge-base diff. Rebases can
     // diverge and compare's file list can truncate. Tree equality covers adds,
     // deletes, renames, modes and merge conflict resolutions as well as edits.
-    const snapshot = async (sha) => {
-      const { owner, repo } = context.repo;
-      const commit = await retryRead(`could not read play-tested commit ${sha}`, () =>
-        github.rest.repos.getCommit({ owner, repo, ref: sha }), subject);
-      const treeSha = normalizeHeadSha(commit?.data?.commit?.tree?.sha);
-      if (!treeSha) throw new Error(`play-tested commit ${sha} has no tree SHA`);
-      const response = await retryRead(`could not read play-tested tree for ${sha}`, () =>
-        github.rest.git.getTree({ owner, repo, tree_sha: treeSha, recursive: "1" }), subject);
-      const data = response?.data;
-      if (data?.truncated !== false || !Array.isArray(data.tree)) {
-        throw new Error(`play-tested tree for ${sha} is incomplete`);
-      }
-      const entries = [];
-      for (const entry of data.tree) {
-        if (typeof entry.path !== "string" || !normalizeHeadSha(entry.sha) ||
-            !["tree", "blob", "commit"].includes(entry.type) || !entry.mode) {
-          throw new Error(`play-tested tree for ${sha} has an invalid entry`);
-        }
-        if (entry.type !== "tree" && isGatedTuiPath(entry.path)) {
-          entries.push(JSON.stringify([entry.path, entry.type, entry.mode, entry.sha]));
-        }
-      }
-      return JSON.stringify(entries.sort());
-    };
     let tested;
     try {
-      tested = await snapshot(testedSha);
+      tested = await readGatedTuiTree({ github, context, sha: testedSha, role: "play-tested", subject });
     } catch (error) {
       // A well-formed SHA naming no commit is a bad attestation — user input
       // with its own blocking reason, not a gate-read failure (#4484).
@@ -5068,17 +5700,38 @@ async function evaluatePlayTest({ github, context, pr, comments, subject }) {
       }
       throw error;
     }
-    const current = await snapshot(pr.headRefOid);
-    if (tested !== current) {
-      return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
+    const current = await readGatedTuiTree({ github, context, sha: pr.headRefOid, role: "play-tested", subject });
+    const changed = [...new Set([...tested.keys(), ...current.keys()])]
+      .filter((path) => !sameTreeEntry(tested.get(path), current.get(path)))
+      .sort();
+    if (changed.length > 0) {
+      // A follow-up that only rewords comments leaves the tested program intact,
+      // so it keeps the evidence (#4477). Any path that is added, removed, or
+      // not provably comment-only still makes the attestation stale.
+      const commentOnly = await everyGoChangeIsInert({
+        github,
+        context,
+        subject,
+        changes: changed.map((path) => ({ path, before: tested.get(path), after: current.get(path) })),
+      });
+      if (!commentOnly) {
+        return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
+      }
+      return {
+        ok: true,
+        message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} ` +
+          `(gated paths changed only in comments: ${changed.join(", ")})`,
+      };
     }
   }
   return { ok: true, message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} (gated paths unchanged)` };
 }
 
+// The raw pulls.listFiles entries: the TUI path gate needs each file's status,
+// blob and patch, not just its name.
 async function listPullRequestFiles({ github, context, number, subject = null }) {
   const { owner, repo } = context.repo;
-  const files = await retryRead(
+  return retryRead(
     `could not list files for PR #${number}`,
     () =>
       github.paginate(github.rest.pulls.listFiles, {
@@ -5089,17 +5742,18 @@ async function listPullRequestFiles({ github, context, number, subject = null })
       }),
     subject,
   );
-  // A rename touches BOTH paths, and the API reports the old one only as
-  // `previous_filename`. Keeping just `filename` loses the fact that a file was
-  // REMOVED from where it used to be, which every path predicate below reads as
-  // "nothing there changed" — sharpest for the TUI gate, where renaming
-  // `ui/pane.go` to `ui/pane_test.go` takes a production file out of the shipped
-  // binary while leaving one path that ends in `_test.go`.
-  return files.flatMap((file) =>
-    file.previous_filename && file.previous_filename !== file.filename
-      ? [file.filename, file.previous_filename]
-      : [file.filename],
-  );
+}
+
+// A rename touches BOTH paths, and the API reports the old one only as
+// `previous_filename`. Keeping just `filename` loses the fact that a file was
+// REMOVED from where it used to be, which every path predicate reads as
+// "nothing there changed" — sharpest for the TUI gate, where renaming
+// `ui/pane.go` to `ui/pane_test.go` takes a production file out of the shipped
+// binary while leaving one path that ends in `_test.go`.
+function pullRequestFilePaths(file) {
+  return file.previous_filename && file.previous_filename !== file.filename
+    ? [file.filename, file.previous_filename]
+    : [file.filename];
 }
 
 // A required check PR Validation reports: Build or Lint, from GitHub Actions or
@@ -7015,6 +7669,8 @@ module.exports = {
   evaluateAggregateDecision,
   evaluateAggregateFresh,
   invalidateAggregateDecision,
+  isNonPassingAggregate,
+  isRateLimitFailure,
   isReadFailure,
   merge,
   processAggregateHead,
@@ -7071,8 +7727,13 @@ module.exports = {
     mergeQueueBatchConstituents,
     evaluateMergeQueueBatch,
     unansweredFindingArtifacts,
+    holdState,
+    mayLiftHold,
+    HOLD_LABEL,
+    HOLD_LABEL_EVENT_WINDOW,
     codexArtifactStatesItsCommit,
     isCodexSummaryArtifact,
     reviewedCommitMatchesHead,
+    gatedTuiChanges,
   },
 };
