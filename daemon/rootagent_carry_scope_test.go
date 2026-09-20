@@ -420,15 +420,46 @@ func TestSweepOrphanedRootCarriesRetiresOnlyWhatNoCandidateCanConsume(t *testing
 	m.sweepOrphanedRootCarries(m.rootAgentLayers.Load())
 	require.True(t, onDisk(m), "the in-flight create retires its own carry")
 
-	// A live root means the repository is ensured whatever this tick's config says.
-	m = newManager(map[string]config.RootAgentConfig{}, rootAgentSnapshot{})
-	inst, err := session.NewInstance(session.InstanceOptions{
-		Title: session.RootSessionTitle, Path: t.TempDir(), Program: "claude",
+	// A registered project whose recorded root did not resolve is filed under a
+	// DERIVED id, so a carry parked under its real one is invisible to the
+	// candidate check while the path is away.
+	m = newManager(map[string]config.RootAgentConfig{}, rootAgentSnapshot{
+		unresolvedRoots: map[string]unresolvedProjectRecord{"d-0123456789ab": {root: "/repos/away"}},
 	})
-	require.NoError(t, err)
-	m.instances[daemonInstanceKey(repoID, session.RootSessionTitle)] = inst
+	m.sweepOrphanedRootCarries(m.rootAgentLayers.Load())
+	require.True(t, onDisk(m), "an unresolved registered root may still be this repository")
+
+	// A registry record that could not be read is unattributable entirely.
+	m = newManager(map[string]config.RootAgentConfig{}, rootAgentSnapshot{recordFailureIDs: []string{"proj-1"}})
+	m.sweepOrphanedRootCarries(m.rootAgentLayers.Load())
+	require.True(t, onDisk(m), "an unreadable project record hides which repository it names")
+
+	// A live root means the repository is ensured whatever this tick's config says.
+	newRoot := func(t *testing.T) *session.Instance {
+		t.Helper()
+		inst, err := session.NewInstance(session.InstanceOptions{
+			Title: session.RootSessionTitle, Path: t.TempDir(), Program: "claude",
+		})
+		require.NoError(t, err)
+		return inst
+	}
+	m = newManager(map[string]config.RootAgentConfig{}, rootAgentSnapshot{})
+	live := newRoot(t)
+	live.SetStatusForTest(session.Running)
+	m.instances[daemonInstanceKey(repoID, session.RootSessionTitle)] = live
 	m.sweepOrphanedRootCarries(m.rootAgentLayers.Load())
 	require.True(t, onDisk(m), "a live root's carry is not orphaned")
+
+	// An INERT row is not a root: a crash between the carry write and the
+	// record delete leaves one, and nothing re-creates the reserved title.
+	for _, status := range []session.Status{session.Dead, session.Lost, session.Archived} {
+		m = newManager(map[string]config.RootAgentConfig{}, rootAgentSnapshot{})
+		inert := newRoot(t)
+		inert.SetStatusForTest(status)
+		m.instances[daemonInstanceKey(repoID, session.RootSessionTitle)] = inert
+		m.sweepOrphanedRootCarries(m.rootAgentLayers.Load())
+		require.False(t, onDisk(m), "an inert %v row must not pin the carry forever", status)
+	}
 
 	// The cadence holds: a second pass inside the interval does not re-read.
 	m = newManager(map[string]config.RootAgentConfig{}, rootAgentSnapshot{})

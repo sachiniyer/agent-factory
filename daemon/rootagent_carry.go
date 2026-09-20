@@ -313,7 +313,17 @@ func (m *Manager) sweepOrphanedRootCarries(layers *rootAgentSnapshot) {
 	if !due {
 		return
 	}
-	if len(layers.legacy.unknownPaths) > 0 {
+	// Every shape of "the daemon does not yet know which repository this is"
+	// stops the whole sweep, not just the legacy one (Codex on #4400, round 9).
+	// unresolvedRoots is keyed by the DERIVED id of a registered project whose
+	// recorded root did not resolve, so a carry parked under that project's
+	// REAL id is invisible to repoHasEnabledRootCandidate while the path is
+	// away — and recordFailureIDs cannot be attributed to a repository at all,
+	// because the root path lives inside the record that could not be read.
+	// Either way the answer "no candidate" was never established, and this
+	// sweep is a slow cleanup that loses nothing by waiting for a complete
+	// picture.
+	if len(layers.legacy.unknownPaths) > 0 || len(layers.unresolvedRoots) > 0 || len(layers.recordFailureIDs) > 0 {
 		return
 	}
 	repoIDs, err := config.RepoIDsWithReapedRootCarry()
@@ -325,11 +335,18 @@ func (m *Manager) sweepOrphanedRootCarries(layers *rootAgentSnapshot) {
 		if m.repoHasEnabledRootCandidate(repoID, "") || m.rootCreateInFlight(repoID) {
 			continue
 		}
+		// A root ROW is not a root: the disabled arm already distinguishes them,
+		// and so must this one. A crash between writeReapedRootCarry and
+		// deleteSessionRecord leaves both the carry and a Dead/Lost row, and
+		// general Lost recovery excludes the reserved title — so an inert row
+		// would otherwise pin the carry forever (Codex on #4400, round 9).
 		m.mu.Lock()
 		inst := m.instances[daemonInstanceKey(repoID, session.RootSessionTitle)]
 		m.mu.Unlock()
 		if inst != nil {
-			continue
+			if status := inst.GetStatus(); status != session.Dead && status != session.Lost && status != session.Archived {
+				continue
+			}
 		}
 		m.discardReapedRootCarry(repoID, "no root_agents entry or registered project enables a root agent for this repository any more")
 	}
