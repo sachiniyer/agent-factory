@@ -631,3 +631,96 @@ func TestValidateAccountEnvironmentCommand_TerminalOptionsAdmitChildlessAndClean
 			"command %q has no identity mutation and must stay allowed", command)
 	}
 }
+
+// The `shadowedOperandTailMutates` walk (Codex on #4465) re-checks every literal
+// suffix of a returned tail as a possible exec boundary, so a shadowed
+// `./ionice` or `./taskset` that does `shift N; exec "$@"` cannot bury a
+// mutating command behind an opaque leaf. #4465 applied that walk to the
+// process-selector and terminal-option branches but stopped short of three
+// sibling branches: ionice `-t`/`--ignore`, ionice `-c`/`-n`/`--class`/
+// `--classdata` value options, and `tasksetCommandAfterMask` (reached from
+// bare `taskset <mask>`, `taskset -c <list>`, and `taskset --cpu-list <list>`).
+// A buried two-word `xargs --process-slot-var <DENIED>` behind an opaque leaf
+// (`echo`) was therefore admitted, though the attached form
+// `--process-slot-var=<DENIED>` was already refused by
+// `unrecognizedWrapperHidesAccountAssignment`'s `--opt=DENIED` scan. The fix
+// gives those three branches the same every-suffix walk their siblings
+// already perform; this test pins it.
+func TestValidateAccountEnvironmentCommand_IoniceTasksetOptionValueBranchesInspectBuriedXargs(t *testing.T) {
+	for _, command := range []string{
+		// ionice -t/--ignore: the option takes no value, so the child starts at
+		// the next word on the real binary; a shadowed `./ionice` with `shift
+		// 2; exec "$@"` lands on the xargs boundary.
+		"ionice -t echo xargs --process-slot-var CODEX_HOME codex",
+		"ionice --ignore echo xargs --process-slot-var CODEX_HOME codex",
+		"./ionice -t echo xargs --process-slot-var CODEX_HOME codex",
+		// ionice -c/-n/--class/--classdata value: the option's value word is
+		// consumed before the child; `shift 3; exec "$@"` lands on the xargs
+		// boundary.
+		"ionice -c 3 echo xargs --process-slot-var CODEX_HOME codex",
+		"ionice -n 5 echo xargs --process-slot-var CODEX_HOME codex",
+		"ionice --class best-effort echo xargs --process-slot-var CODEX_HOME codex",
+		"ionice --classdata 4 echo xargs --process-slot-var CODEX_HOME codex",
+		// `--` ends option parsing, so the child is words[1:] and a shadowed
+		// wrapper can shift past it to the xargs boundary.
+		"ionice -- echo xargs --process-slot-var CODEX_HOME codex",
+		// taskset mask: bare `taskset <mask>` reaches tasksetCommandAfterMask
+		// via the default arm; `shift 2; exec "$@"` lands on the xargs boundary.
+		"taskset 0xff echo xargs --process-slot-var CODEX_HOME codex",
+		"./taskset 0xff echo xargs --process-slot-var CODEX_HOME codex",
+		// taskset -c/--cpu-list: consumes the option, then the list word falls
+		// to default → tasksetCommandAfterMask.
+		"taskset -c 0xff echo xargs --process-slot-var CODEX_HOME codex",
+		"taskset --cpu-list 0xff echo xargs --process-slot-var CODEX_HOME codex",
+		// The mutation lands at a non-zero offset behind the opaque leaf: a
+		// shadowed wrapper may shift more than one operand, so every literal
+		// suffix is judged.
+		"ionice -t echo true xargs --process-slot-var CODEX_HOME codex",
+		// Parity with the already-hardened selector branch: the sibling
+		// `ionice -p 123` walk must refuse the identical buried tail.
+		"ionice -p 123 echo xargs --process-slot-var CODEX_HOME codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q buries an identity mutation behind an opaque leaf inside an ionice/taskset option branch", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+			"command %q must be refused by the account-environment guard", command)
+	}
+}
+
+// The every-suffix walk added to the ionice `-t`/`--ignore`, ionice class-value,
+// and taskset mask branches must not over-refuse: a clean child tail still
+// runs under the real binary, and the dynamic-value admission (#4460/#4532)
+// for `-c"$CLASS"` keeps its reviewed shape — including combinations of a
+// fixed option branch with a later dynamic token that the "obvious" in-branch
+// walk would have broken.
+func TestValidateAccountEnvironmentCommand_IoniceTasksetOptionValueBranchesAdmitCleanTail(t *testing.T) {
+	for _, command := range []string{
+		// No identity mutation in the tail: the real binary runs the ordinary
+		// child and a shadowed wrapper execs an ordinary command.
+		"ionice -t echo codex",
+		"ionice -c 3 echo codex",
+		"ionice -n 5 echo codex",
+		"ionice --class best-effort echo codex",
+		"ionice --classdata 4 echo codex",
+		"taskset 0xff echo codex",
+		"taskset -c 0xff echo codex",
+		"taskset --cpu-list 0xff echo codex",
+		// A multi-word benign child is still fine: the walk judges every
+		// suffix and finds no mutation.
+		"ionice -c 3 npm run dev",
+		// Option composition still works after a value-taking option.
+		"ionice -c 3 -n 7 npm run dev",
+		// The #4460/#4532 dynamic-value admission for `-c"$CLASS"` is
+		// untouched by this fix (it flows through the non-literal branch).
+		`ionice -c"$CLASS" npm run dev`,
+		// A fixed option branch followed by a dynamic `-c"$CLASS"` token
+		// stays admitted: the walk runs at the child-return branches, after
+		// the dynamic token is consumed, not inside the option branch where
+		// it would fail closed on the non-literal option word.
+		`ionice --ignore -c"$CLASS" npm run dev`,
+		`ionice --classdata 4 -c"$CLASS" npm run dev`,
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"command %q has no identity mutation and must stay allowed", command)
+	}
+}
