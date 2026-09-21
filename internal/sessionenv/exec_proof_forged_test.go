@@ -91,14 +91,17 @@ func TestExecProofBypass_ForgedProofWithoutResolverFallsThroughForCompatibility(
 	require.True(t, execed, "the compat path must still reach exec when the resolver is absent")
 }
 
-// A resolver that returns an error keeps the historical standalone-env
-// behaviour for production paths where re-derivation cannot decide (e.g. the
-// pane runs from a context no config exists for). The fallback is the env
-// proof alone, so the regression is silent rather than a broad refusal: the
-// resolver result is a SECONDARY gate, not a replacement for the env channel.
-func TestExecProofBypass_ResolverErrorFallsBackToEnvProof(t *testing.T) {
+// A resolver that returns an error REFUSES an account-scoped launch rather
+// than falling back to the env proof alone. A repository-controlled parent
+// that can re-invoke af under this marker can also deliberately make
+// re-derivation fail (e.g. by chdir'ing into a directory a sibling shell
+// removes before the spawn), and a forged env var is then the only "proof"
+// left — bypassing the cross-check on a resolver error re-opens the
+// forgeable-env channel this gate closed (#4731 review, Codex P1 on f903b934).
+func TestExecProofBypass_ResolverErrorRefusesLaunch(t *testing.T) {
 	accountDir := t.TempDir()
 	installForgedAccountLookup(t, accountDir)
+	gotEnviron, execed := installCapturingProcessExec(t)
 
 	previousResolver := AccountLaunchProofResolver
 	AccountLaunchProofResolver = func(string, string, string) (AccountLaunchProof, error) {
@@ -106,18 +109,15 @@ func TestExecProofBypass_ResolverErrorFallsBackToEnvProof(t *testing.T) {
 	}
 	t.Cleanup(func() { AccountLaunchProofResolver = previousResolver })
 
+	// The launcher-shaped env proof by itself is not sufficient once
+	// re-derivation cannot decide: the shim must REFUSE rather than grant the
+	// account scope on the env var alone.
 	installAccountLaunchProof(t, AccountLaunchProof{TrustedExecutable: "/opt/claude"})
 
-	sentinel := errors.New("stop before exec")
-	var execed bool
-	prev := processExec
-	processExec = func(string, []string, []string) error {
-		execed = true
-		return sentinel
-	}
-	t.Cleanup(func() { processExec = prev })
-
 	err := execInvocation([]string{"claude", "0", "work", "/opt/claude"}, true)
-	require.ErrorIs(t, err, sentinel, "an unresolvable derivation must fall back to the env proof the launcher installed")
-	require.True(t, execed, "the resolver-error fallback must still reach exec")
+	require.Error(t, err, "a resolver error must refuse the account scope, not fall back to the env proof")
+	require.False(t, *execed, "processExec must not run a launch whose re-derivation errored")
+	if dir, present := envValue(*gotEnviron, "CLAUDE_CONFIG_DIR"); present {
+		t.Fatalf("CLAUDE_CONFIG_DIR = %q leaked into a launch whose re-derivation errored; the account directory must not reach an unproven invocation", dir)
+	}
 }

@@ -71,10 +71,15 @@ func setLaunchProgram(ts *tmux.TmuxSession, final string, proof sessionenv.Accou
 // derivation reproduces the launcher's inputs verbatim and the two match on a
 // legitimate launch.
 //
-// A resolution failure returns (zero, err): the shim treats that as "no
-// derivation available" and falls back to the env proof alone, so a pane that
-// cannot reach its config does not broaden the refusal — the resolver is a
-// SECONDARY gate, not a replacement for the env channel.
+// A resolution failure returns (zero, err): the shim treats that as a
+// REFUSAL rather than falling back to the env proof alone — a
+// repository-controlled parent can deliberately make os.Getwd fail (e.g. by
+// removing the pane's CWD from a sibling shell), and a forged env var would
+// then be the only "proof" left, so the cross-check must not be bypassed on
+// a derivation error (#4731 review, Codex P1 on f903b934). A derivation that
+// succeeds with a zero proof (no reachable operator config) is fed to the
+// matcher unchanged; the resolver remains a SECONDARY gate, not a
+// replacement for the env channel.
 func ResolveAccountLaunchProof(agent, account, command string) (sessionenv.AccountLaunchProof, error) {
 	cwd, err := os.Getwd()
 	if err != nil {

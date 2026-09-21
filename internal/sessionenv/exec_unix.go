@@ -181,7 +181,18 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 			// proof-channel regression witnesses still hold.
 			if AccountLaunchProofResolver != nil {
 				expected, resolveErr := AccountLaunchProofResolver(agent, account, args[len(args)-1])
-				if resolveErr == nil && !accountLaunchProofsMatch(proof, expected) {
+				if resolveErr != nil {
+					// A resolver error must REFUSE, not fall back to the env proof
+					// alone: a repository-controlled parent that can re-invoke af
+					// under this marker can also deliberately make re-derivation
+					// fail (e.g. by chdir'ing into a directory a sibling shell
+					// removes before the spawn), and a forged env var is then the
+					// only "proof" left. Bypassing the cross-check on a resolver
+					// error re-opens the forgeable-env channel this gate closed
+					// (#4731 review, Codex P1 on f903b934).
+					return fmt.Errorf("account-scoped launch refused: %w", resolveErr)
+				}
+				if !accountLaunchProofsMatch(proof, expected) {
 					return fmt.Errorf("account-scoped launch refused: %w", errAccountLaunchProofMismatch)
 				}
 			}
