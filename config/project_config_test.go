@@ -1016,6 +1016,165 @@ func TestResolveProjectSelectorRejectsMissingMarkerSharedCommonDir(t *testing.T)
 	assert.Equal(t, barBefore, barAfter, "the refused write must not touch bar's personal file")
 }
 
+// TestResolveProjectSelectorRejectsMissingMarkerSharedCommonDirOwnerUnresolvable
+// pins the fail-closed half of the absent-marker scan. Like the resolvable
+// shared-owner case (TestResolveProjectSelectorRejectsMissingMarkerSharedCommonDir),
+// /foo's registered root has been replaced by another linked worktree of the
+// same bare bar shares, and the shared marker on the bare is removed — but
+// here bar's registered root has also been removed, so resolveProjectBinding
+// fails. The prior code used projectRootUsesGitCommonDir, which suppresses
+// resolution errors, so this read as a definite non-match and the
+// absent-marker scan fell through to the rebind advice — recommending a
+// rebind that would steal bar's still-shared marker and reattribute every
+// surviving worktree to foo while leaving bar's registration stale. With the
+// fix the write path refuses the rebind advice and names the unresolvable
+// owner.
+func TestResolveProjectSelectorRejectsMissingMarkerSharedCommonDirOwnerUnresolvable(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	seed := initProjectRegistryRepo(t, filepath.Join(base, "seed"))
+	runProjectRegistryGit(t, seed, "config", "user.email", "test@example.com")
+	runProjectRegistryGit(t, seed, "config", "user.name", "Test")
+	runProjectRegistryGit(t, seed, "commit", "--quiet", "--allow-empty", "-m", "initial")
+	bare := filepath.Join(base, "backing.git")
+	runProjectRegistryGit(t, base, "clone", "--quiet", "--bare", seed, bare)
+	// Register bar at a linked worktree of the bare: a worktree of a bare
+	// repo shares the bare git common directory, and the bare's checkout
+	// marker is bar's own registry marker.
+	barRoot := filepath.Join(base, "bar")
+	runProjectRegistryGit(t, base, "--git-dir", bare, "worktree", "add", "--quiet", "--detach", barRoot)
+	bar, err := RegisterProject(barRoot)
+	require.NoError(t, err)
+	fooRoot := initProjectRegistryRepo(t, filepath.Join(base, "foo"))
+	foo, err := RegisterProject(fooRoot)
+	require.NoError(t, err)
+	require.NotEqual(t, foo.ID, bar.ID)
+	require.NotEqual(t, foo.CheckoutID, bar.CheckoutID)
+
+	// Replace foo's registered root with another linked worktree of the
+	// same bare so /foo's binding.root stays /foo and binding.gitCommonDir
+	// becomes the bare bar shares.
+	require.NoError(t, os.RemoveAll(fooRoot))
+	runProjectRegistryGit(t, base, "--git-dir", bare, "worktree", "add", "--quiet", "--detach", fooRoot)
+	binding, err := resolveProjectBinding(fooRoot)
+	require.NoError(t, err)
+	require.True(t, projectRootUsesGitCommonDir(bar.Root, binding.gitCommonDir),
+		"left intact for now, /bar must share the bare git common directory /foo now resolves to")
+
+	// Remove the shared marker on the bare so foo's binding reads an
+	// absent marker (the !markerExists branch).
+	require.NoError(t, os.Remove(binding.checkoutMarkerPath))
+
+	// Remove bar's registered root so the shared owner is unresolvable:
+	// projectRootUsesGitCommonDir(bar.Root, ...) would suppress the
+	// resolution error and read as a definitive non-match, which is the
+	// hole this test pins.
+	require.NoError(t, os.RemoveAll(barRoot))
+	_, ownerUnresolvableErr := resolveProjectBinding(bar.Root)
+	require.Error(t, ownerUnresolvableErr,
+		"bar's root should no longer resolve after removal")
+
+	// The CLI write path must refuse rather than recommend a rebind that
+	// would steal the shared marker, naming the unresolvable owner.
+	_, err = ResolveProjectSelector(fooRoot)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is already the last-known root of project "+foo.ID)
+	assert.Contains(t, err.Error(), "has no checkout marker")
+	assert.Contains(t, err.Error(), "could not be resolved")
+	assert.Contains(t, err.Error(), bar.ID)
+	assert.NotContains(t, err.Error(), "af projects rebind",
+		"the unresolvable shared owner must not allow the rebind advice that steals bar's checkout")
+}
+
+// TestSharedWorktreeCommonDirRejectsSeparateGitDir pins the metadata-based
+// fix to the linked-worktree predicate. Directory containment alone reads a
+// `git init --separate-git-dir` checkout (and a submodule alike) as a linked
+// worktree because its git common directory sits outside the worktree root;
+// that misclass would refuse the safe deletion/rebind recovery in the
+// retained-marker case. sharedWorktreeCommonDir now reads git's worktree
+// metadata instead: a separate-git-dir repo's `<root>/.git` is a regular
+// file pointing at the common dir itself (not into its `worktrees` subdir),
+// so the predicate returns false for it — same as for a regular main
+// checkout whose `.git` is a directory — and the deletion remedy stays
+// reachable. A real linked worktree of a bare must still read true.
+func TestSharedWorktreeCommonDirRejectsSeparateGitDir(t *testing.T) {
+	base := t.TempDir()
+	// A separate-git-dir checkout: <root>/.git is a gitdir file pointing
+	// at the common dir directly (not into its worktrees subdir), so the
+	// predicate must read false despite the common dir living outside the
+	// root.
+	root := filepath.Join(base, "root")
+	separateDir := filepath.Join(base, "separate.git")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	runProjectRegistryGit(t, base, "init", "--quiet", "--separate-git-dir", separateDir, root)
+	separateBinding, err := resolveProjectBinding(root)
+	require.NoError(t, err, "a separate-git-dir checkout must resolve like any other")
+	require.False(t, sameProjectPath(separateBinding.root, separateBinding.gitCommonDir),
+		"--separate-git-dir must keep the common dir outside the root for this test to mean anything")
+	require.FileExists(t, filepath.Join(separateBinding.root, ".git"),
+		"a separate-git-dir checkout keeps a .git file (not a directory) at the root")
+	require.False(t, sharedWorktreeCommonDir(separateBinding.root, separateBinding.gitCommonDir),
+		"a --separate-git-dir checkout is not a linked worktree even though its common dir lives outside the root")
+
+	// Sanity: a real linked worktree of a bare must still read true with
+	// the metadata-based predicate, since its <root>/.git points into
+	// <commonDir>/worktrees/<name>.
+	seed := initProjectRegistryRepo(t, filepath.Join(base, "seed"))
+	runProjectRegistryGit(t, seed, "config", "user.email", "test@example.com")
+	runProjectRegistryGit(t, seed, "config", "user.name", "Test")
+	runProjectRegistryGit(t, seed, "commit", "--quiet", "--allow-empty", "-m", "initial")
+	bare := filepath.Join(base, "backing.git")
+	runProjectRegistryGit(t, base, "clone", "--quiet", "--bare", seed, bare)
+	linked := filepath.Join(base, "linked")
+	runProjectRegistryGit(t, base, "--git-dir", bare, "worktree", "add", "--quiet", "--detach", linked)
+	linkedBinding, err := resolveProjectBinding(linked)
+	require.NoError(t, err)
+	require.True(t, sharedWorktreeCommonDir(linkedBinding.root, linkedBinding.gitCommonDir),
+		"a real linked worktree of a bare must still read true with the metadata-based predicate")
+
+	// Sanity: a plain main checkout whose .git is a directory must still
+	// read false.
+	mainRoot := initProjectRegistryRepo(t, filepath.Join(base, "main"))
+	mainBinding, err := resolveProjectBinding(mainRoot)
+	require.NoError(t, err)
+	require.False(t, sharedWorktreeCommonDir(mainBinding.root, mainBinding.gitCommonDir),
+		"a main checkout whose .git is a directory is not a linked worktree")
+}
+
+// TestMainCheckoutHasLinkedWorktreesFailsClosedOnUnreadable pins the
+// fail-closed fix to the metadata read. When <commonDir>/worktrees exists
+// but cannot be read (permissions, transient I/O), the prior code treated
+// the unknown result as "no linked worktrees" and fell through to the
+// copied-marker remedy, recommending the user delete a marker that could
+// still be shared with active worktrees. The fix returns true on
+// indeterminate errors so the caller refuses the deletion advice instead.
+// Only a determinate not-exist still reads false — that case is PROOF the
+// main has no linked worktrees and the deletion remedy stays reachable.
+func TestMainCheckoutHasLinkedWorktreesFailsClosedOnUnreadable(t *testing.T) {
+	// A common dir without a worktrees subdir determinately has none.
+	emptyCommonDir := t.TempDir()
+	require.False(t, mainCheckoutHasLinkedWorktrees(emptyCommonDir),
+		"no <commonDir>/worktrees directory proves there are no linked worktrees")
+
+	// A common dir whose worktrees subdir has a directory entry proves it has.
+	sharedCommonDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(sharedCommonDir, "worktrees", "linked-1"), 0o755))
+	require.True(t, mainCheckoutHasLinkedWorktrees(sharedCommonDir),
+		"a directory entry under <commonDir>/worktrees proves linked worktrees exist")
+
+	// A common dir whose worktrees subdir cannot be read for any reason
+	// other than not-exist is indeterminate: fail closed and return true.
+	if os.Geteuid() == 0 {
+		t.Skip("permission-based fail-closed test is unreliable when the test runs as root")
+	}
+	unreadableCommonDir := t.TempDir()
+	unreadableWorktreesDir := filepath.Join(unreadableCommonDir, "worktrees")
+	require.NoError(t, os.MkdirAll(unreadableWorktreesDir, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(unreadableWorktreesDir, 0o755) })
+	require.True(t, mainCheckoutHasLinkedWorktrees(unreadableCommonDir),
+		"an unreadable <commonDir>/worktrees must fail closed as 'worktrees may exist'")
+}
+
 func TestResolveProjectSelectorUnknownID(t *testing.T) {
 	registeredTestProject(t)
 	_, err := ResolveProjectSelector("prj_ffffffffffffffffffffffffffffffff")
