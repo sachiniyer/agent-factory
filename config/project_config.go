@@ -602,20 +602,30 @@ func ResolveProjectSelector(selector string) (Project, error) {
 			// a <commonDir>/worktrees subdir), yet another registered
 			// checkout whose <root>/.git points at the same target shares
 			// the marker — classify the symlinked-<root>/.git case as
-			// possibly-shared so the scan still runs. The remaining
-			// shared-checkout scan is per-root git resolution, so bound
-			// each probe the way the daemon's scan does
-			// (projectForWorkspaceContext): the same
+			// possibly-shared so the scan still runs. A <root>/.git that
+			// is a REGULAR "gitdir: <path>" file pointing DIRECTLY at
+			// binding.gitCommonDir is the same shape without a symlink:
+			// two checkouts both using `git init --separate-git-dir` (or
+			// two .git files written by hand to point at the same external
+			// directory) share the marker the same way, and the linked and
+			// main-worktrees predicates both miss it because the gitdir
+			// target IS commonDir (so sharedWorktreeCommonDir rejects it)
+			// and there need not be a <commonDir>/worktrees subdir.
+			// Classify the direct-gitdir-file case as possibly-shared too,
+			// so the scan still runs. The remaining shared-checkout scan
+			// is per-root git resolution, so bound each probe the way the
+			// daemon's scan does (projectForWorkspaceContext): the same
 			// registeredProjectScanTimeout bounds the probe of each other
 			// root, so a wedged unrelated registration no longer hangs af
 			// even when the scan is reachable. Otherwise probe each other
 			// registered root and fail closed when one that could share
 			// this directory cannot be resolved — the same two predicates
 			// the retained-marker branch uses, plus the
-			// symlinked-<root>/.git case above.
+			// symlinked-<root>/.git and direct-gitdir-file cases above.
 			checkoutMarkerCouldBeShared := sharedWorktreeCommonDir(binding.root, binding.gitCommonDir) ||
 				mainCheckoutHasLinkedWorktrees(binding.gitCommonDir) ||
-				gitDirAtRootIsSymlink(binding.root)
+				gitDirAtRootIsSymlink(binding.root) ||
+				gitDirAtRootPointsAtCommonDir(binding.root, binding.gitCommonDir)
 			scanCtx, scanCancel := context.WithTimeout(context.Background(), registeredProjectScanTimeout)
 			defer scanCancel()
 			for _, other := range projects {
@@ -841,6 +851,17 @@ func ResolveProjectSelector(selector string) (Project, error) {
 					// the deletion advice via the symlink guard rather than
 					// fall through to the copied-marker remedy.
 					if err := symlinkedRootMarkerRefusal(binding, p, checkoutID, owner); err != nil {
+						return Project{}, err
+					}
+					// <root>/.git may instead be a regular "gitdir: <path>"
+					// file pointing DIRECTLY at binding.gitCommonDir — the
+					// separate-git-dir layout two checkouts may share. The
+					// same two main predicates miss this shape (target == commonDir
+					// gives the rel ".." the linked-worktree predicate rejects,
+					// and the common dir need not have a worktrees subdir), so
+					// refuse the deletion advice the same way as the symlink
+					// guard rather than fall through to the copied-marker remedy.
+					if err := directGitDirFileMarkerRefusal(binding, p, checkoutID, owner); err != nil {
 						return Project{}, err
 					}
 					// The owner's recorded root still carries its marker and this
